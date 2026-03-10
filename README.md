@@ -1119,20 +1119,27 @@ The only difference is how you receive props. The client store API (`on`, `crud`
 uWebSockets.js is a native C++ addon, so your Docker image needs to match the platform it was compiled for. Build inside the container to be safe.
 
 ```dockerfile
-FROM node:20-slim
+FROM node:22-trixie-slim AS build
+
+# git is required - uWebSockets.js is installed from GitHub, not npm
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy package files and install dependencies
 COPY package*.json ./
 RUN npm ci
 
-# Copy source and build
 COPY . .
 RUN npm run build
 
-# Only the build output is needed at runtime
-# (but node_modules must stay for uWebSockets.js native addon)
+# Runtime stage - no git needed
+FROM node:22-trixie-slim
+
+WORKDIR /app
+COPY --from=build /app/build build/
+COPY --from=build /app/node_modules node_modules/
+COPY package.json .
+
 EXPOSE 3000
 CMD ["node", "build"]
 ```
@@ -1150,7 +1157,7 @@ docker run -p 3000:3000 \
   my-app
 ```
 
-> **Tip:** Don't use Alpine (`node:20-alpine`) - uWebSockets.js prebuilt binaries are compiled against glibc, not musl. If you must use Alpine, you'll need to compile from source.
+> **Important:** Use Debian Trixie or Ubuntu 24.04+ based images (glibc >= 2.38). Bookworm-based images (`node:*-slim`, `node:*-bookworm`) ship glibc 2.36 which is too old for uWebSockets.js. Don't use Alpine either - uWebSockets.js binaries are compiled against glibc, not musl.
 
 ---
 
@@ -1395,9 +1402,10 @@ npm install uNetworking/uWebSockets.js#v20.60.0
 sudo apt install build-essential
 ```
 
-**On Docker:** Use a Node.js image that includes build tools:
+**On Docker:** Use a Trixie-based image with git:
 ```dockerfile
-FROM node:20
+FROM node:22-trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 ```
 
 ### "I can't see what's happening with WebSocket messages"
