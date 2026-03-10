@@ -497,11 +497,13 @@ async function handleSSR(res, method, url, headers, remoteAddress, state, abortS
 			return;
 		}
 		console.error('SSR error:', err);
-		res.cork(() => {
-			res.writeStatus('500 Internal Server Error');
-			res.writeHeader('content-type', 'text/plain');
-			res.end('Internal Server Error');
-		});
+		if (!state.aborted) {
+			res.cork(() => {
+				res.writeStatus('500 Internal Server Error');
+				res.writeHeader('content-type', 'text/plain');
+				res.end('Internal Server Error');
+			});
+		}
 	}
 }
 
@@ -531,6 +533,7 @@ function writeHeaders(res, response) {
 async function writeResponse(res, response, state) {
 	// No body - write headers + end in a single cork (one syscall)
 	if (!response.body) {
+		if (state.aborted) return;
 		res.cork(() => {
 			writeHeaders(res, response);
 			res.end();
@@ -539,6 +542,7 @@ async function writeResponse(res, response, state) {
 	}
 
 	if (response.body.locked) {
+		if (state.aborted) return;
 		res.cork(() => {
 			res.writeStatus('500 Internal Server Error');
 			res.writeHeader('content-type', 'text/plain');
@@ -572,6 +576,7 @@ async function writeResponse(res, response, state) {
 		}
 
 		// Multi-chunk streaming response - write headers + first two chunks in one cork
+		if (state.aborted) return;
 		res.cork(() => {
 			writeHeaders(res, response);
 			res.write(first.value);
