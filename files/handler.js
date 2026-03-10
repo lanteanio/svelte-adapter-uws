@@ -10,7 +10,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies } from './cookies.js';
-import { mimeLookup, splitCookiesString, parse_as_bytes, parse_origin } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -515,15 +515,11 @@ async function handleSSR(res, method, url, headers, remoteAddress, state, abortS
 function writeHeaders(res, response) {
 	res.writeStatus(String(response.status));
 	for (const [key, value] of response.headers) {
-		if (key === 'set-cookie') {
-			for (const cookie of splitCookiesString(
-				/** @type {string} */ (response.headers.get(key))
-			)) {
-				res.writeHeader(key, cookie);
-			}
-		} else {
-			res.writeHeader(key, value);
-		}
+		if (key === 'set-cookie') continue;
+		res.writeHeader(key, value);
+	}
+	for (const cookie of response.headers.getSetCookie()) {
+		res.writeHeader('set-cookie', cookie);
 	}
 }
 
