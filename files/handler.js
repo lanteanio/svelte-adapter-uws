@@ -555,6 +555,7 @@ async function writeResponse(res, response, state) {
 	}
 
 	const reader = response.body.getReader();
+	let streaming = false;
 	try {
 		// Read first chunk - if it's also the last, write headers + body in one cork
 		const first = await reader.read();
@@ -577,6 +578,7 @@ async function writeResponse(res, response, state) {
 
 		// Multi-chunk streaming response - write headers + first two chunks in one cork
 		if (state.aborted) return;
+		streaming = true;
 		res.cork(() => {
 			writeHeaders(res, response);
 			res.write(first.value);
@@ -597,7 +599,7 @@ async function writeResponse(res, response, state) {
 			}
 		}
 	} finally {
-		if (!state.aborted) res.cork(() => res.end());
+		if (streaming && !state.aborted) res.cork(() => res.end());
 		reader.cancel().catch(() => {});
 	}
 }
