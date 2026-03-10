@@ -6,11 +6,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kevinradziszewski/svelte-adapter-uws.git"
+    "url": "git+https://github.com/lanteanio/svelte-adapter-uws.git"
   },
-  "homepage": "https://github.com/kevinradziszewski/svelte-adapter-uws#readme",
+  "homepage": "https://github.com/lanteanio/svelte-adapter-uws#readme",
   "bugs": {
-    "url": "https://github.com/kevinradziszewski/svelte-adapter-uws/issues"
+    "url": "https://github.com/lanteanio/svelte-adapter-uws/issues"
   },
   "type": "module",
   "exports": {
