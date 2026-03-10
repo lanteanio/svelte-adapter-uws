@@ -1,5 +1,6 @@
 import { WebSocketServer } from 'ws';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parseCookies } from './files/cookies.js';
 
 /**
@@ -164,7 +165,7 @@ export default function uwsDev(options = {}) {
 				: null;
 
 			if (handlerPath) {
-				handlerReady = import(handlerPath).then((mod) => {
+				handlerReady = import(pathToFileURL(handlerPath).href).then((mod) => {
 					userHandlers = {
 						upgrade: mod.upgrade,
 						open: mod.open,
@@ -182,7 +183,7 @@ export default function uwsDev(options = {}) {
 				handlerReady = (async () => {
 					for (const candidate of candidates) {
 						try {
-							const mod = await import(path.resolve(root, candidate));
+							const mod = await import(pathToFileURL(path.resolve(root, candidate)).href);
 							userHandlers = {
 								upgrade: mod.upgrade,
 								open: mod.open,

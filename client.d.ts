@@ -101,7 +101,7 @@ export interface TopicStore<T> extends Readable<T | null> {
  * {/if}
  * ```
  *
- * @example Event-level (filtered, data-only):
+ * @example Event-level (filtered, wrapped in `{ data }`):
  * ```svelte
  * <script>
  *   import { on } from 'svelte-adapter-uws/client';
@@ -109,7 +109,7 @@ export interface TopicStore<T> extends Readable<T | null> {
  * </script>
  *
  * {#if $newTodo}
- *   <p>New: {$newTodo.text}</p>
+ *   <p>New: {$newTodo.data.text}</p>
  * {/if}
  * ```
  *
@@ -126,7 +126,7 @@ export interface TopicStore<T> extends Readable<T | null> {
  * ```
  */
 export function on<T = unknown>(topic: string): TopicStore<WSEvent<T>>;
-export function on<T = unknown>(topic: string, event: string): TopicStore<T>;
+export function on<T = unknown>(topic: string, event: string): TopicStore<{ data: T }>;
 
 /**
  * Readable store - connection status: `'connecting'` | `'open'` | `'closed'`.
@@ -279,7 +279,7 @@ export function count(topic: string, initial?: number): Readable<number>;
  * ```
  */
 export function once<T = unknown>(topic: string, options?: { timeout?: number }): Promise<WSEvent<T>>;
-export function once<T = unknown>(topic: string, event: string, options?: { timeout?: number }): Promise<T>;
+export function once<T = unknown>(topic: string, event: string, options?: { timeout?: number }): Promise<{ data: T }>;
 
 /**
  * Returns a promise that resolves when the WebSocket connection is open.

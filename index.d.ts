@@ -134,6 +134,14 @@ export interface WebSocketOptions {
 	sendPingsAutomatically?: boolean;
 
 	/**
+	 * Timeout in seconds for async `upgrade` handlers.
+	 * If the upgrade hook doesn't resolve within this time, the connection
+	 * is rejected with 504 Gateway Timeout.
+	 * @default 10
+	 */
+	upgradeTimeout?: number;
+
+	/**
 	 * Allowed origins for WebSocket connections.
 	 *
 	 * - `'same-origin'` - only accept connections where Origin matches Host *(default)*

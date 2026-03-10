@@ -345,6 +345,9 @@ adapter({
     // Automatically send pings to keep the connection alive
     sendPingsAutomatically: true, // default: true
 
+    // Seconds before an async upgrade handler is rejected with 504
+    upgradeTimeout: 10, // default: 10
+
     // Allowed origins for WebSocket connections
     // 'same-origin' - only accept where Origin matches Host (default)
     // '*' - accept from any origin
@@ -836,18 +839,18 @@ The main function most users need. Returns a Svelte readable store that updates 
 
 ### `on(topic, event)` - subscribe to a specific event
 
-Filters to a single event name and returns just the `data` payload (no envelope):
+Filters to a single event name and wraps the payload in `{ data }`:
 
 ```svelte
 <script>
   import { on } from 'svelte-adapter-uws/client';
 
-  // Only 'created' events, gives you just the data
+  // Only 'created' events, wrapped in { data }
   const newTodo = on('todos', 'created');
 </script>
 
 {#if $newTodo}
-  <p>New todo: {$newTodo.text}</p>
+  <p>New todo: {$newTodo.data.text}</p>
 {/if}
 ```
 
@@ -1463,9 +1466,9 @@ The client store parses this automatically. When you use `on('todos')`, the stor
 { topic: 'todos', event: 'created', data: { id: 1, text: 'Buy milk', done: false } }
 ```
 
-When you use `on('todos', 'created')`, you get just the `data`:
+When you use `on('todos', 'created')`, you get the payload wrapped in `{ data }`:
 ```js
-{ id: 1, text: 'Buy milk', done: false }
+{ data: { id: 1, text: 'Buy milk', done: false } }
 ```
 
 ### "WebSocket works locally but not behind nginx/Caddy"

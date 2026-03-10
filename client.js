@@ -309,9 +309,9 @@ function createConnection(options) {
 					const tStore = topicStores.get(msg.topic);
 					if (tStore) tStore.set(wsEvent);
 
-					// Update topic+event filtered stores (data only)
+					// Update topic+event filtered stores (wrapped for unique reference)
 					const eStore = eventStores.get(`${msg.topic}\0${msg.event}`);
-					if (eStore) eStore.set(msg.data);
+					if (eStore) eStore.set({ data: msg.data });
 				}
 			} catch {
 				// Not a valid envelope - ignore

@@ -158,7 +158,8 @@ export default function (opts = {}) {
 				maxBackpressure: websocket?.maxBackpressure ?? 1024 * 1024,
 				sendPingsAutomatically: websocket?.sendPingsAutomatically ?? true,
 				compression: websocket?.compression ?? false,
-				allowedOrigins: websocket?.allowedOrigins ?? 'same-origin'
+				allowedOrigins: websocket?.allowedOrigins ?? 'same-origin',
+				upgradeTimeout: websocket?.upgradeTimeout ?? 10
 			};
 
 			builder.copy(files, out, {

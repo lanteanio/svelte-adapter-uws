@@ -326,8 +326,9 @@ function readBody(res, limit, signal) {
  * @param {StaticEntry} entry
  * @param {string} acceptEncoding
  * @param {string} ifNoneMatch
+ * @param {boolean} headOnly
  */
-function serveStatic(res, entry, acceptEncoding, ifNoneMatch) {
+function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = false) {
 	if (entry.etag && ifNoneMatch === entry.etag) {
 		res.cork(() => {
 			res.writeStatus('304 Not Modified').end();
@@ -356,7 +357,11 @@ function serveStatic(res, entry, acceptEncoding, ifNoneMatch) {
 		for (let i = 0; i < entry.headers.length; i++) {
 			res.writeHeader(entry.headers[i][0], entry.headers[i][1]);
 		}
-		res.end(body);
+		if (headOnly) {
+			res.endWithoutBody();
+		} else {
+			res.end(body);
+		}
 	});
 }
 
@@ -626,7 +631,8 @@ function handleRequest(res, req) {
 		return serveStatic(
 			res, staticFile,
 			req.getHeader('accept-encoding'),
-			req.getHeader('if-none-match')
+			req.getHeader('if-none-match'),
+			method === 'head'
 		);
 	}
 
@@ -746,9 +752,23 @@ if (WS_ENABLED) {
 
 			const cookies = parseCookies(headers['cookie']);
 
+			const upgradeTimeoutMs = (wsOptions.upgradeTimeout || 10) * 1000;
+			let timedOut = false;
+			const timer = setTimeout(() => {
+				timedOut = true;
+				if (!aborted) {
+					res.cork(() => {
+						res.writeStatus('504 Gateway Timeout');
+						res.writeHeader('content-type', 'text/plain');
+						res.end('Upgrade timed out');
+					});
+				}
+			}, upgradeTimeoutMs);
+
 			Promise.resolve(wsModule.upgrade({ headers, cookies, url, remoteAddress }))
 				.then((userData) => {
-					if (aborted) return;
+					clearTimeout(timer);
+					if (aborted || timedOut) return;
 					if (userData === false) {
 						res.cork(() => {
 							res.writeStatus('401 Unauthorized');
@@ -768,8 +788,9 @@ if (WS_ENABLED) {
 					});
 				})
 				.catch((err) => {
+					clearTimeout(timer);
 					console.error('WebSocket upgrade error:', err);
-					if (!aborted) {
+					if (!aborted && !timedOut) {
 						res.cork(() => {
 							res.writeStatus('500 Internal Server Error');
 							res.writeHeader('content-type', 'text/plain');
