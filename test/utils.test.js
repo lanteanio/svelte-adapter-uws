@@ -7,7 +7,7 @@ import {
 	parse_origin
 } from '../files/utils.js';
 
-// ── parse_as_bytes ─────────────────────────────────────────────────────────
+// -- parse_as_bytes ---------------------------------------------------------
 
 describe('parse_as_bytes', () => {
 	it('parses plain numbers', () => {
@@ -55,7 +55,7 @@ describe('parse_as_bytes', () => {
 	});
 });
 
-// ── parse_origin ───────────────────────────────────────────────────────────
+// -- parse_origin -----------------------------------------------------------
 
 describe('parse_origin', () => {
 	it('returns undefined for undefined', () => {
@@ -87,7 +87,7 @@ describe('parse_origin', () => {
 	});
 });
 
-// ── splitCookiesString ─────────────────────────────────────────────────────
+// -- splitCookiesString -----------------------------------------------------
 
 describe('splitCookiesString', () => {
 	it('returns array as-is', () => {
@@ -121,7 +121,7 @@ describe('splitCookiesString', () => {
 	});
 });
 
-// ── Cookie parsing (imported from files/cookies.js) ────────────────────────
+// -- Cookie parsing (imported from files/cookies.js) ------------------------
 
 describe('parseCookies', () => {
 	it('returns empty object for falsy input', () => {
@@ -154,7 +154,7 @@ describe('parseCookies', () => {
 	});
 });
 
-// ── MIME lookup ────────────────────────────────────────────────────────────
+// -- MIME lookup ------------------------------------------------------------
 
 describe('mimeLookup', () => {
 	it('returns correct MIME types', () => {
@@ -187,7 +187,7 @@ describe('mimeLookup', () => {
 	});
 });
 
-// ── get_origin (PORT_HEADER double-port fix) ───────────────────────────────
+// -- get_origin (PORT_HEADER double-port fix) -------------------------------
 // This function uses module-level env state in handler.js so we test
 // a parameterized version here.
 

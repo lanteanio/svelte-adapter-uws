@@ -19,8 +19,22 @@ import type { WebSocket } from 'uWebSockets.js';
  * | `XFF_DEPTH` | `1` | Position from right in `X-Forwarded-For` |
  * | `BODY_SIZE_LIMIT` | `512K` | Max request body size (`K`, `M`, `G` suffixes) |
  * | `SHUTDOWN_TIMEOUT` | `30` | Seconds to wait during graceful shutdown |
+ * | `CLUSTER_WORKERS` | - | Number of worker threads (`'auto'` for CPU count) |
  *
  * All variables respect the `envPrefix` option (e.g. `MY_APP_PORT` if `envPrefix: 'MY_APP_'`).
+ *
+ * ### Multi-core clustering
+ *
+ * ```sh
+ * CLUSTER_WORKERS=auto node build    # one worker per CPU core
+ * CLUSTER_WORKERS=4 node build       # fixed 4 workers
+ * ```
+ *
+ * Uses uWebSockets.js worker thread distribution (acceptor app + child app descriptors).
+ * Works on **all platforms** (Linux, macOS, Windows). Workers auto-restart on crash.
+ *
+ * **WebSocket + clustering:** `publish()` is automatically relayed across all workers.
+ * `sendTo()`, `connections`, and `subscribers()` operate on the local worker only.
  *
  * ### Native TLS (no proxy needed)
  *
@@ -114,7 +128,10 @@ export interface WebSocketOptions {
 	idleTimeout?: number;
 
 	/**
-	 * Max bytes of backpressure before messages are dropped.
+	 * Max bytes of backpressure per connection before messages are dropped.
+	 * The uWebSockets.js default is 64 KB; this adapter defaults to 1 MB to
+	 * accommodate pub/sub broadcast spikes. Lower this if you expect many
+	 * concurrent connections with slow consumers.
 	 * @default 1048576 (1 MB)
 	 */
 	maxBackpressure?: number;
@@ -144,7 +161,7 @@ export interface WebSocketOptions {
 	/**
 	 * Allowed origins for WebSocket connections.
 	 *
-	 * - `'same-origin'` - only accept connections where Origin matches Host *(default)*
+	 * - `'same-origin'` - only accept connections where Origin matches Host and scheme *(default)*
 	 * - `'*'` - accept connections from any origin
 	 * - `string[]` - whitelist of allowed origin URLs (e.g. `['https://example.com']`)
 	 *
@@ -155,7 +172,7 @@ export interface WebSocketOptions {
 	allowedOrigins?: 'same-origin' | '*' | string[];
 }
 
-// ── User's WebSocket handler module exports ─────────────────────────────────
+// -- User's WebSocket handler module exports ---------------------------------
 
 /**
  * Context passed to the `upgrade` handler.
@@ -246,7 +263,7 @@ export interface WebSocketHandler<UserData = unknown> {
 	close?: (ws: WebSocket<UserData>, code: number, message: ArrayBuffer) => void;
 }
 
-// ── Platform type for event.platform ────────────────────────────────────────
+// -- Platform type for event.platform ----------------------------------------
 
 /**
  * Available on `event.platform` in server hooks, load functions, and actions.

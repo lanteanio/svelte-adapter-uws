@@ -1,4 +1,4 @@
-// ── MIME types ──────────────────────────────────────────────────────────────────
+// -- MIME types ------------------------------------------------------------------
 
 export const mimes = {
 	"3g2": "video/3gpp2", "3gp": "video/3gpp", "3gpp": "video/3gpp", "3mf": "model/3mf",
@@ -38,10 +38,10 @@ export function mimeLookup(name) {
 	return mimes[idx !== -1 ? name.substring(idx + 1).toLowerCase() : ''] || 'application/octet-stream';
 }
 
-// ── splitCookiesString ───────────────────────────────────────────────────────
+// -- splitCookiesString -------------------------------------------------------
 // Adapted from set-cookie-parser (https://github.com/nfriedly/set-cookie-parser)
 // Copyright (c) Nathan Friedly - MIT License
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 export function splitCookiesString(cookiesString) {
 	if (Array.isArray(cookiesString)) return cookiesString;
@@ -94,7 +94,7 @@ export function splitCookiesString(cookiesString) {
 	return cookiesStrings;
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// -- Helpers -----------------------------------------------------------------
 
 /**
  * @param {string} value
@@ -103,7 +103,7 @@ export function splitCookiesString(cookiesString) {
 export function parse_as_bytes(value) {
 	const str = value.trim();
 	const last = str[str.length - 1]?.toUpperCase();
-	// Strip trailing 'B' (e.g. "512KB" → "512K")
+	// Strip trailing 'B' (e.g. "512KB" -> "512K")
 	const normalized = last === 'B' ? str.slice(0, -1) : str;
 	const suffix = normalized[normalized.length - 1]?.toUpperCase();
 	const multiplier =

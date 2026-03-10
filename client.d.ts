@@ -46,7 +46,7 @@ export interface WSEvent<T = unknown> {
 	data: T;
 }
 
-// ── Scannable store ──────────────────────────────────────────────────────────
+// -- Scannable store ----------------------------------------------------------
 
 /**
  * A readable store with an additional `.scan()` method for accumulating state.
@@ -82,7 +82,7 @@ export interface TopicStore<T> extends Readable<T | null> {
 	scan<A>(initial: A, reducer: (acc: A, value: T) => A): Readable<A>;
 }
 
-// ── Direct exports (recommended) ────────────────────────────────────────────
+// -- Direct exports (recommended) --------------------------------------------
 
 /**
  * Get a reactive Svelte store for a topic. Auto-connects and auto-subscribes.
@@ -294,7 +294,7 @@ export function once<T = unknown>(topic: string, event: string, options?: { time
  */
 export function ready(): Promise<void>;
 
-// ── Power-user API ──────────────────────────────────────────────────────────
+// -- Power-user API ----------------------------------------------------------
 
 export interface WSConnection {
 	/** Readable store - the latest event from any subscribed topic. */

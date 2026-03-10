@@ -1,6 +1,6 @@
 import { WebSocketServer } from 'ws';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { existsSync } from 'node:fs';
 import { parseCookies } from './files/cookies.js';
 
 /**
@@ -27,7 +27,7 @@ export default function uwsDev(options = {}) {
 	/** @type {Map<import('ws').WebSocket, object>} */
 	const wsWrappers = new Map();
 
-	/** @type {{ upgrade?: Function, open?: Function, message?: Function, close?: Function, drain?: Function }} */
+	/** @type {{ upgrade?: Function, open?: Function, message?: Function, close?: Function, drain?: Function, subscribe?: Function }} */
 	let userHandlers = {};
 
 	/**
@@ -153,28 +153,34 @@ export default function uwsDev(options = {}) {
 	/** @type {Promise<void>} */
 	let handlerReady;
 
+	/**
+	 * Extract handler functions from a loaded module.
+	 * @param {Record<string, any>} mod
+	 */
+	function applyHandlers(mod) {
+		userHandlers = {
+			upgrade: mod.upgrade,
+			open: mod.open,
+			message: mod.message,
+			close: mod.close,
+			drain: mod.drain,
+			subscribe: mod.subscribe
+		};
+	}
+
 	return {
 		name: 'svelte-adapter-uws',
 		configureServer(server) {
 			wss = new WebSocketServer({ noServer: true });
 			const root = server.config.root;
 
-			// Load user's WebSocket handler - all exports, not just message
+			// Load user's WebSocket handler via Vite's ssrLoadModule (handles TS/aliases/etc.)
 			const handlerPath = options.handler
 				? path.resolve(root, options.handler)
 				: null;
 
 			if (handlerPath) {
-				handlerReady = import(pathToFileURL(handlerPath).href).then((mod) => {
-					userHandlers = {
-						upgrade: mod.upgrade,
-						open: mod.open,
-						message: mod.message,
-						close: mod.close,
-						drain: mod.drain,
-						subscribe: mod.subscribe
-					};
-				}).catch((err) => {
+				handlerReady = server.ssrLoadModule(handlerPath).then(applyHandlers).catch((err) => {
 					console.error(`[adapter-uws] Failed to load WebSocket handler '${options.handler}':`, err);
 				});
 			} else {
@@ -182,21 +188,13 @@ export default function uwsDev(options = {}) {
 				const candidates = ['src/hooks.ws.js', 'src/hooks.ws.ts', 'src/hooks.ws.mjs'];
 				handlerReady = (async () => {
 					for (const candidate of candidates) {
+						const fullPath = path.resolve(root, candidate);
+						if (!existsSync(fullPath)) continue;
 						try {
-							const mod = await import(pathToFileURL(path.resolve(root, candidate)).href);
-							userHandlers = {
-								upgrade: mod.upgrade,
-								open: mod.open,
-								message: mod.message,
-								close: mod.close,
-								drain: mod.drain,
-								subscribe: mod.subscribe
-							};
+							const mod = await server.ssrLoadModule(fullPath);
+							applyHandlers(mod);
 							break;
 						} catch (err) {
-							// File genuinely doesn't exist - try next candidate
-							if (err.code === 'ERR_MODULE_NOT_FOUND' || err.code === 'ENOENT') continue;
-							// File exists but has errors - report and stop searching
 							console.error(`[adapter-uws] Error loading '${candidate}':`, err.message);
 							break;
 						}

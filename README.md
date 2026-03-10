@@ -139,6 +139,8 @@ Or if you want flexible header-based detection:
 PROTOCOL_HEADER=x-forwarded-proto HOST_HEADER=x-forwarded-host node build
 ```
 
+> **Important:** `PROTOCOL_HEADER`, `HOST_HEADER`, `PORT_HEADER`, and `ADDRESS_HEADER` are trusted verbatim. Only set these when running behind a reverse proxy that overwrites the corresponding headers on every request. If the server is directly internet-facing, clients can spoof these values. When in doubt, use a fixed `ORIGIN` instead.
+
 ---
 
 ## Quick start: WebSocket
@@ -308,7 +310,7 @@ adapter({
   // Precompress static assets with brotli and gzip
   precompress: true, // default: true
 
-  // Prefix for environment variables (e.g. 'MY_APP_' → MY_APP_PORT)
+  // Prefix for environment variables (e.g. 'MY_APP_' -> MY_APP_PORT)
   envPrefix: '', // default: ''
 
   // Health check endpoint (set to false to disable)
@@ -336,7 +338,9 @@ adapter({
     // Seconds of inactivity before the connection is closed
     idleTimeout: 120, // default: 120
 
-    // Max bytes of backpressure before messages are dropped
+    // Max bytes of backpressure per connection before messages are dropped.
+    // uWS defaults to 64 KB; this adapter uses 1 MB to handle pub/sub spikes.
+    // Lower this if you expect many slow consumers.
     maxBackpressure: 1024 * 1024, // default: 1 MB
 
     // Enable per-message deflate compression
@@ -349,7 +353,7 @@ adapter({
     upgradeTimeout: 10, // default: 10
 
     // Allowed origins for WebSocket connections
-    // 'same-origin' - only accept where Origin matches Host (default)
+    // 'same-origin' - only accept where Origin matches Host and scheme (default)
     // '*' - accept from any origin
     // ['https://example.com'] - whitelist specific origins
     allowedOrigins: 'same-origin' // default: 'same-origin'
@@ -435,7 +439,7 @@ Create `src/hooks.ws.js` (or `.ts`, `.mjs`) and it will be automatically discove
 
 **src/hooks.ws.js**
 ```js
-// Called during the HTTP → WebSocket upgrade handshake.
+// Called during the HTTP -> WebSocket upgrade handshake.
 // Return an object to accept (becomes ws.getUserData()).
 // Return false to reject with 401.
 // Omit this export to accept all connections.
@@ -570,10 +574,10 @@ import { getSession } from '$lib/server/auth.js';
 export async function upgrade({ cookies }) {
   // Same cookie that SvelteKit set during login
   const sessionId = cookies.session;
-  if (!sessionId) return false; // → 401, connection rejected
+  if (!sessionId) return false; // -> 401, connection rejected
 
   const user = await getSession(sessionId);
-  if (!user) return false; // → 401, expired or invalid session
+  if (!user) return false; // -> 401, expired or invalid session
 
   // Attach user data to the socket - available via ws.getUserData()
   return { userId: user.id, name: user.name, role: user.role };
@@ -802,10 +806,10 @@ The topic helper also has counter methods:
 
 ```js
 const online = platform.topic('online-users');
-online.set(42);         // → { event: 'set', data: 42 }
-online.increment();     // → { event: 'increment', data: 1 }
-online.increment(5);    // → { event: 'increment', data: 5 }
-online.decrement();     // → { event: 'decrement', data: 1 }
+online.set(42);         // -> { event: 'set', data: 42 }
+online.increment();     // -> { event: 'increment', data: 1 }
+online.increment(5);    // -> { event: 'increment', data: 5 }
+online.decrement();     // -> { event: 'decrement', data: 1 }
 ```
 
 ---
@@ -1374,7 +1378,7 @@ import { connect } from 'svelte-adapter-uws/client';
 connect({ debug: true });
 ```
 
-Then check the browser's Network tab → WS tab. You'll see the upgrade request and its 401 response.
+Then check the browser's Network tab -> WS tab. You'll see the upgrade request and its 401 response.
 
 **Common causes:**
 - The session cookie isn't being set (check your login action)

@@ -188,6 +188,7 @@ export function once(topic, event, options) {
 	return new Promise((resolve, reject) => {
 		const store = event !== undefined ? conn._onEvent(topic, event) : conn.on(topic);
 		let settled = false;
+		let first = true;
 		let timer;
 
 		function cleanup() {
@@ -198,6 +199,9 @@ export function once(topic, event, options) {
 		}
 
 		const unsub = store.subscribe((data) => {
+			// Skip the synchronous initial emission - stores fire immediately
+			// with their current value, which may be stale from a previous event
+			if (first) { first = false; return; }
 			if (data !== null) {
 				cleanup();
 				resolve(data);

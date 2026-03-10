@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { parentPort } from 'node:worker_threads';
 import uWS from 'uWebSockets.js';
 import { Server } from 'SERVER';
 import { manifest, prerendered, base } from 'MANIFEST';
@@ -23,7 +24,7 @@ class PayloadTooLargeError extends Error {
 	constructor() { super('Payload too large'); }
 }
 
-// ── In-memory static file cache ─────────────────────────────────────────────
+// -- In-memory static file cache ---------------------------------------------
 
 /**
  * @typedef {{
@@ -105,7 +106,7 @@ const prerenderedDir = path.join(__dirname, 'prerendered');
 cacheDir(path.join(clientDir, base), base, true);
 cacheDir(path.join(prerenderedDir, base), base, false);
 
-// ── TLS config (must be before origin warning) ──────────────────────────────
+// -- TLS config (must be before origin warning) ------------------------------
 
 const ssl_cert = env('SSL_CERT', '');
 const ssl_key = env('SSL_KEY', '');
@@ -119,7 +120,7 @@ if ((ssl_cert || ssl_key) && !is_tls) {
 	);
 }
 
-// ── SvelteKit Server ────────────────────────────────────────────────────────
+// -- SvelteKit Server --------------------------------------------------------
 
 const origin = parse_origin(env('ORIGIN', undefined));
 const xff_depth = parseInt(env('XFF_DEPTH', '1'), 10);
@@ -154,13 +155,13 @@ await server.init({
 	read: (file) => /** @type {ReadableStream} */ (Readable.toWeb(fs.createReadStream(`${asset_dir}/${file}`)))
 });
 
-// ── uWS App ─────────────────────────────────────────────────────────────────
+// -- uWS App -----------------------------------------------------------------
 
 const app = is_tls
 	? uWS.SSLApp({ cert_file_name: ssl_cert, key_file_name: ssl_key })
 	: uWS.App();
 
-// ── Platform (exposed to SvelteKit via event.platform) ──────────────────────
+// -- Platform (exposed to SvelteKit via event.platform) ----------------------
 
 /** @type {Set<import('uWebSockets.js').WebSocket<any>>} */
 const wsConnections = new Set();
@@ -173,7 +174,13 @@ const platform = {
 	 * No-op if no clients are subscribed - safe to call unconditionally.
 	 */
 	publish(topic, event, data) {
-		return app.publish(topic, JSON.stringify({ topic, event, data }), false, false);
+		const envelope = JSON.stringify({ topic, event, data });
+		const result = app.publish(topic, envelope, false, false);
+		// Relay to other workers via main thread (no-op in single-process mode)
+		if (parentPort) {
+			parentPort.postMessage({ type: 'publish', topic, envelope });
+		}
+		return result;
 	},
 
 	/**
@@ -234,7 +241,7 @@ const platform = {
 	}
 };
 
-// ── Origin construction ─────────────────────────────────────────────────────
+// -- Origin construction -----------------------------------------------------
 
 /**
  * Construct the origin from request headers.
@@ -278,7 +285,7 @@ function get_origin(headers) {
 	return port ? `${protocol}://${hostWithoutPort}:${port}` : `${protocol}://${host}`;
 }
 
-// ── Body reading ────────────────────────────────────────────────────────────
+// -- Body reading ------------------------------------------------------------
 
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
@@ -319,7 +326,7 @@ function readBody(res, limit, signal) {
 	});
 }
 
-// ── Static file serving ─────────────────────────────────────────────────────
+// -- Static file serving -----------------------------------------------------
 
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
@@ -365,7 +372,7 @@ function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = false) 
 	});
 }
 
-// ── Prerendered page check ──────────────────────────────────────────────────
+// -- Prerendered page check --------------------------------------------------
 
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
@@ -416,7 +423,7 @@ function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch) {
 	return false;
 }
 
-// ── SSR handler ─────────────────────────────────────────────────────────────
+// -- SSR handler -------------------------------------------------------------
 
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
@@ -512,7 +519,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state, abortS
 	}
 }
 
-// ── Response writer (with backpressure) ─────────────────────────────────────
+// -- Response writer (with backpressure) -------------------------------------
 
 /**
  * Write response headers inside a cork.
@@ -609,21 +616,21 @@ async function writeResponse(res, response, state) {
 	}
 }
 
-// ── Main request handler ────────────────────────────────────────────────────
+// -- Main request handler ----------------------------------------------------
 
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {import('uWebSockets.js').HttpRequest} req
  */
 function handleRequest(res, req) {
-	// ═══ SYNCHRONOUS PHASE ═══
+	// === SYNCHRONOUS PHASE ===
 	// uWS HttpRequest is stack-allocated - MUST read everything before any await.
 	// uWS returns lowercase method; we use lowercase comparisons on the fast path
 	// and only toUpperCase() for SSR where the Request constructor expects it.
 	const method = req.getMethod();
 	const pathname = req.getUrl();
 
-	// ═══ STATIC FILE FAST PATH ═══
+	// === STATIC FILE FAST PATH ===
 	// Minimum work: 1 Map lookup + 2 header reads. No header collection,
 	// no query string handling, no remoteAddress decode, no toUpperCase().
 	const staticFile = staticCache.get(pathname);
@@ -640,9 +647,9 @@ function handleRequest(res, req) {
 	const query = req.getQuery();
 	const METHOD = method.toUpperCase();
 
-	// ═══ PRERENDERED CHECK ═══
+	// === PRERENDERED CHECK ===
 	// Lightweight: only 2 header reads, no full collection, no remoteAddress decode
-	if (METHOD === 'GET') {
+	if (METHOD === 'GET' || METHOD === 'HEAD') {
 		if (tryPrerendered(res, pathname, query ? `?${query}` : '',
 			req.getHeader('accept-encoding'), req.getHeader('if-none-match'))) {
 			return;
@@ -669,13 +676,13 @@ function handleRequest(res, req) {
 		abortController.abort();
 	});
 
-	// ═══ ASYNC PHASE: SSR ═══
+	// === ASYNC PHASE: SSR ===
 	inFlightCount++;
 	handleSSR(res, METHOD, url, headers, remoteAddress, state, abortController.signal)
 		.finally(requestDone);
 }
 
-// ── WebSocket support ───────────────────────────────────────────────────────
+// -- WebSocket support -------------------------------------------------------
 
 // WS_ENABLED is set by the adapter at build time - no inference from exports needed
 if (WS_ENABLED) {
@@ -694,7 +701,7 @@ if (WS_ENABLED) {
 	const allowedOrigins = wsOptions.allowedOrigins || 'same-origin';
 
 	app.ws(WS_PATH, {
-		// Handle HTTP → WebSocket upgrade with user-provided auth
+		// Handle HTTP -> WebSocket upgrade with user-provided auth
 		upgrade: (res, req, context) => {
 			// Read everything synchronously - uWS req is stack-allocated
 			/** @type {Record<string, string>} */
@@ -713,9 +720,16 @@ if (WS_ENABLED) {
 				let allowed = false;
 				if (allowedOrigins === 'same-origin') {
 					try {
-						const originHost = new URL(reqOrigin).host;
+						const parsed = new URL(reqOrigin);
 						const requestHost = (host_header && headers[host_header]) || headers['host'];
-						allowed = !requestHost || originHost === requestHost;
+						if (!requestHost) {
+							allowed = true;
+						} else {
+							const requestScheme = protocol_header
+								? (headers[protocol_header] || (is_tls ? 'https' : 'http'))
+								: (is_tls ? 'https' : 'http');
+							allowed = parsed.host === requestHost && parsed.protocol === requestScheme + ':';
+						}
 					} catch {
 						allowed = false;
 					}
@@ -741,7 +755,7 @@ if (WS_ENABLED) {
 				return;
 			}
 
-			// ── User upgrade handler path (may be async) ──
+			// -- User upgrade handler path (may be async) --
 			const url = req.getUrl();
 			const remoteAddress = textDecoder.decode(res.getRemoteAddressAsText());
 
@@ -867,7 +881,7 @@ if (HEALTH_CHECK_PATH) {
 // Register HTTP handler (after WS so the WS route takes priority)
 app.any('/*', handleRequest);
 
-// ── In-flight request tracking ───────────────────────────────────────────
+// -- In-flight request tracking -------------------------------------------
 
 let inFlightCount = 0;
 /** @type {Array<() => void>} */
@@ -890,7 +904,7 @@ export function drain() {
 	return new Promise((resolve) => { drainResolvers.push(resolve); });
 }
 
-// ── Exports ─────────────────────────────────────────────────────────────────
+// -- Exports -----------------------------------------------------------------
 
 let listenSocket = null;
 
@@ -919,4 +933,23 @@ export function shutdown() {
 		uWS.us_listen_socket_close(listenSocket);
 		listenSocket = null;
 	}
+}
+
+/**
+ * Get the app descriptor for worker thread distribution.
+ * The main thread's acceptor app uses this to route connections to this worker.
+ * @returns {any}
+ */
+export function getDescriptor() {
+	return app.getDescriptor();
+}
+
+/**
+ * Publish a relayed message from another worker thread.
+ * Called by the main thread's relay when another worker publishes.
+ * @param {string} topic
+ * @param {string} envelope - Pre-serialized JSON envelope
+ */
+export function relayPublish(topic, envelope) {
+	app.publish(topic, envelope, false, false);
 }

@@ -16,7 +16,7 @@ const DEFAULT_WS_HANDLER = '// Built-in: subscribe/unsubscribe handled by the ru
 export default function (opts = {}) {
 	const { out = 'build', precompress = true, envPrefix = '', healthCheckPath = '/healthz' } = opts;
 
-	// Normalize websocket config: true → {}, false/undefined → null
+	// Normalize websocket config: true -> {}, false/undefined -> null
 	const websocket =
 		opts.websocket === true
 			? {}
@@ -87,11 +87,24 @@ export default function (opts = {}) {
 				}
 
 				if (handlerFile) {
-					const handlerPath = path.resolve(handlerFile).replace(/\\/g, '/');
-					writeFileSync(
-						`${tmp}/ws-handler.js`,
-						`export * from '${handlerPath}';\n`
-					);
+					if (handlerFile.endsWith('.ts')) {
+						// TypeScript needs transpilation - Rollup can't handle .ts natively.
+						// esbuild is always available (transitive dep via vite -> @sveltejs/kit).
+						const { transform } = await import('esbuild');
+						const tsSource = readFileSync(handlerFile, 'utf8');
+						const { code } = await transform(tsSource, {
+							loader: 'ts',
+							format: 'esm',
+							sourcefile: handlerFile
+						});
+						writeFileSync(`${tmp}/ws-handler.js`, code);
+					} else {
+						const handlerPath = path.resolve(handlerFile).replace(/\\/g, '/');
+						writeFileSync(
+							`${tmp}/ws-handler.js`,
+							`export * from '${handlerPath}';\n`
+						);
+					}
 					builder.log.minor(`WebSocket handler: ${handlerFile}`);
 				} else {
 					// No handler found - use built-in default (subscribe/unsubscribe only)
