@@ -60,6 +60,8 @@ npm install uNetworking/uWebSockets.js#v20.60.0
 ```
 
 > **Note:** uWebSockets.js is a native C++ addon installed directly from GitHub, not from npm. It may not compile on all platforms. Check the [uWebSockets.js README](https://github.com/uNetworking/uWebSockets.js) if you have issues.
+>
+> **Docker:** Use `node:22-trixie-slim` or another glibc >= 2.38 image. Bookworm-based images and Alpine won't work. See [Deploying with Docker](#deploying-with-docker).
 
 If you plan to use WebSockets during development, also install `ws`:
 
