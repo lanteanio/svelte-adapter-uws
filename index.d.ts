@@ -15,6 +15,7 @@ import type { WebSocket } from 'uWebSockets.js';
  * | `SSL_KEY` | - | Path to TLS private key file |
  * | `PROTOCOL_HEADER` | - | Header for protocol detection (e.g. `x-forwarded-proto`) |
  * | `HOST_HEADER` | - | Header for host detection (e.g. `x-forwarded-host`) |
+ * | `PORT_HEADER` | - | Header for port override (e.g. `x-forwarded-port`) |
  * | `ADDRESS_HEADER` | - | Header for client IP (e.g. `x-forwarded-for`) |
  * | `XFF_DEPTH` | `1` | Position from right in `X-Forwarded-For` |
  * | `BODY_SIZE_LIMIT` | `512K` | Max request body size (`K`, `M`, `G` suffixes) |

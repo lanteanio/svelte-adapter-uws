@@ -4,6 +4,25 @@ import { existsSync } from 'node:fs';
 import { parseCookies } from './files/cookies.js';
 
 /**
+ * Safely quote a string for JSON embedding. Throws on invalid characters
+ * (quotes, backslashes, control chars) — these are always bugs in topic/event names.
+ * @param {string} s
+ * @returns {string}
+ */
+function esc(s) {
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charCodeAt(i);
+		if (c < 32 || c === 34 || c === 92) {
+			throw new Error(
+				`Topic/event name contains invalid character at index ${i}: '${s}'. ` +
+				'Names must not contain quotes, backslashes, or control characters.'
+			);
+		}
+	}
+	return '"' + s + '"';
+}
+
+/**
  * Vite plugin that provides WebSocket support during development.
  *
  * Uses the same subscribe/unsubscribe/publish protocol as the production
@@ -78,7 +97,7 @@ export default function uwsDev(options = {}) {
 	 * @returns {boolean}
 	 */
 	function publish(topic, event, data) {
-		const envelope = JSON.stringify({ topic, event, data });
+		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}';
 		let sent = false;
 		for (const [ws, topics] of subscriptions) {
 			if (topics.has(topic) && ws.readyState === 1) {
@@ -98,7 +117,7 @@ export default function uwsDev(options = {}) {
 	 * @returns {number}
 	 */
 	function send(ws, topic, event, data) {
-		return ws.send(JSON.stringify({ topic, event, data }), false, false) ?? 1;
+		return ws.send('{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}', false, false) ?? 1;
 	}
 
 	/**
@@ -110,7 +129,7 @@ export default function uwsDev(options = {}) {
 	 * @returns {number}
 	 */
 	function sendTo(filter, topic, event, data) {
-		const envelope = JSON.stringify({ topic, event, data });
+		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}';
 		let count = 0;
 		for (const [, wrapped] of wsWrappers) {
 			if (filter(wrapped.getUserData())) {
@@ -264,7 +283,9 @@ export default function uwsDev(options = {}) {
 					const arrayBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 
 					// Handle subscribe/unsubscribe from client store
-					if (!isBinary && buf.byteLength < 512) {
+				// Byte-prefix check: {"type" has byte[3]='y' (0x79), user envelopes
+				// {"topic" have byte[3]='o' - skip JSON.parse for non-control messages.
+					if (!isBinary && buf.byteLength < 512 && buf[3] === 0x79) {
 						try {
 							const msg = JSON.parse(buf.toString());
 							if (msg.type === 'subscribe' && typeof msg.topic === 'string') {

@@ -41,6 +41,12 @@ if (is_primary) {
 	let shutting_down = false;
 	let listen_socket = null;
 
+	// Exponential backoff for crash-looping workers
+	let restart_delay = 0;
+	const RESTART_DELAY_MAX = 5000;
+	/** @type {ReturnType<typeof setTimeout> | null} */
+	let backoff_reset_timer = null;
+
 	function spawn_worker() {
 		const worker = new Worker(fileURLToPath(import.meta.url));
 		workers.set(worker, null);
@@ -50,6 +56,9 @@ if (is_primary) {
 				workers.set(worker, msg.descriptor);
 				acceptorApp.addChildAppDescriptor(msg.descriptor);
 				console.log(`Worker thread ${worker.threadId} registered`);
+				// Worker started successfully — reset backoff
+				restart_delay = 0;
+				if (backoff_reset_timer) { clearTimeout(backoff_reset_timer); backoff_reset_timer = null; }
 			} else if (msg.type === 'publish') {
 				// Relay pub/sub to all OTHER workers
 				for (const [w] of workers) {
@@ -65,8 +74,13 @@ if (is_primary) {
 			}
 			workers.delete(worker);
 			if (!shutting_down) {
-				console.log(`Worker thread ${worker.threadId} exited with code ${code}, restarting...`);
-				spawn_worker();
+				restart_delay = restart_delay ? Math.min(restart_delay * 2, RESTART_DELAY_MAX) : 100;
+				console.log(`Worker thread ${worker.threadId} exited with code ${code}, restarting in ${restart_delay}ms...`);
+				backoff_reset_timer = setTimeout(() => { spawn_worker(); }, restart_delay);
+			}
+			// If shutting down and all workers have exited, exit immediately
+			if (shutting_down && workers.size === 0) {
+				process.exit(0);
 			}
 		});
 

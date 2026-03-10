@@ -24,6 +24,26 @@ class PayloadTooLargeError extends Error {
 	constructor() { super('Payload too large'); }
 }
 
+/**
+ * Safely quote a string for JSON embedding. Topics and events are
+ * developer-defined identifiers — a quote, backslash, or control character
+ * is always a bug, so we throw instead of silently escaping.
+ * @param {string} s
+ * @returns {string} JSON-quoted string, e.g. '"todos"'
+ */
+function esc(s) {
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charCodeAt(i);
+		if (c < 32 || c === 34 || c === 92) {
+			throw new Error(
+				`Topic/event name contains invalid character at index ${i}: '${s}'. ` +
+				'Names must not contain quotes, backslashes, or control characters.'
+			);
+		}
+	}
+	return '"' + s + '"';
+}
+
 // -- In-memory static file cache ---------------------------------------------
 
 /**
@@ -174,7 +194,7 @@ const platform = {
 	 * No-op if no clients are subscribed - safe to call unconditionally.
 	 */
 	publish(topic, event, data) {
-		const envelope = JSON.stringify({ topic, event, data });
+		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}';
 		const result = app.publish(topic, envelope, false, false);
 		// Relay to other workers via main thread (no-op in single-process mode)
 		if (parentPort) {
@@ -188,7 +208,7 @@ const platform = {
 	 * Wraps in the same { topic, event, data } envelope as publish().
 	 */
 	send(ws, topic, event, data) {
-		return ws.send(JSON.stringify({ topic, event, data }), false, false);
+		return ws.send('{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}', false, false);
 	},
 
 	/**
@@ -197,7 +217,7 @@ const platform = {
 	 * Returns the number of connections the message was sent to.
 	 */
 	sendTo(filter, topic, event, data) {
-		const envelope = JSON.stringify({ topic, event, data });
+		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}';
 		let count = 0;
 		for (const ws of wsConnections) {
 			if (filter(ws.getUserData())) {
@@ -382,7 +402,7 @@ function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = false) 
  * @param {string} ifNoneMatch
  * @returns {boolean}
  */
-function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch) {
+function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, headOnly = false) {
 	// Fast path: skip decodeURIComponent when there are no encoded characters
 	const needsDecode = pathname.includes('%');
 	let decoded;
@@ -404,7 +424,7 @@ function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch) {
 	if (prerendered.has(decoded)) {
 		const entry = staticCache.get(decoded);
 		if (entry) {
-			serveStatic(res, entry, acceptEncoding, ifNoneMatch);
+			serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly);
 			return true;
 		}
 	}
@@ -651,7 +671,7 @@ function handleRequest(res, req) {
 	// Lightweight: only 2 header reads, no full collection, no remoteAddress decode
 	if (METHOD === 'GET' || METHOD === 'HEAD') {
 		if (tryPrerendered(res, pathname, query ? `?${query}` : '',
-			req.getHeader('accept-encoding'), req.getHeader('if-none-match'))) {
+			req.getHeader('accept-encoding'), req.getHeader('if-none-match'), METHOD === 'HEAD')) {
 			return;
 		}
 	}
@@ -821,8 +841,12 @@ if (WS_ENABLED) {
 
 		message: (ws, message, isBinary) => {
 			// Built-in: handle subscribe/unsubscribe from the client store.
-			// Only parse small text messages - sub/unsub envelopes are always < 512 bytes.
-			if (!isBinary && message.byteLength < 512) {
+			// Control messages are JSON text: {"type":"subscribe","topic":"..."}
+			// Byte-prefix check: {"type" has byte[3]='y' (0x79), while user
+			// envelopes {"topic" have byte[3]='o' (0x6F). Only JSON.parse when
+			// the prefix matches - skips parsing for 99%+ of messages.
+			if (!isBinary && message.byteLength < 512 &&
+				(new Uint8Array(message))[3] === 0x79 /* 'y' in {"type" */) {
 				try {
 					const msg = JSON.parse(Buffer.from(message).toString());
 					if (msg.type === 'subscribe' && typeof msg.topic === 'string') {

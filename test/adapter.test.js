@@ -205,13 +205,21 @@ describe('adapter options', () => {
 });
 
 describe('origin validation (WebSocket)', () => {
-	function checkOrigin(reqOrigin, allowedOrigins, hostHeader) {
+	/**
+	 * Mirrors the production origin check in handler.js (scheme + host).
+	 * @param {string | undefined} reqOrigin
+	 * @param {'same-origin' | '*' | string[]} allowedOrigins
+	 * @param {string} hostHeader - The Host (or HOST_HEADER) value
+	 * @param {string} [scheme='http'] - The request scheme (from PROTOCOL_HEADER or TLS detection)
+	 */
+	function checkOrigin(reqOrigin, allowedOrigins, hostHeader, scheme = 'http') {
 		if (!reqOrigin) return true; // non-browser
 		if (allowedOrigins === '*') return true;
 		if (allowedOrigins === 'same-origin') {
 			try {
-				const originHost = new URL(reqOrigin).host;
-				return !hostHeader || originHost === hostHeader;
+				const parsed = new URL(reqOrigin);
+				if (!hostHeader) return true;
+				return parsed.host === hostHeader && parsed.protocol === scheme + ':';
 			} catch {
 				return false;
 			}
@@ -230,12 +238,24 @@ describe('origin validation (WebSocket)', () => {
 		expect(checkOrigin('https://evil.com', '*', 'localhost:3000')).toBe(true);
 	});
 
-	it('allows same-origin requests', () => {
-		expect(checkOrigin('http://localhost:3000', 'same-origin', 'localhost:3000')).toBe(true);
+	it('allows same-origin requests (host + scheme match)', () => {
+		expect(checkOrigin('http://localhost:3000', 'same-origin', 'localhost:3000', 'http')).toBe(true);
 	});
 
 	it('rejects cross-origin requests with same-origin policy', () => {
-		expect(checkOrigin('https://evil.com', 'same-origin', 'localhost:3000')).toBe(false);
+		expect(checkOrigin('https://evil.com', 'same-origin', 'localhost:3000', 'http')).toBe(false);
+	});
+
+	it('rejects scheme mismatch (https origin vs http server)', () => {
+		expect(checkOrigin('https://localhost:3000', 'same-origin', 'localhost:3000', 'http')).toBe(false);
+	});
+
+	it('allows same-origin with https scheme', () => {
+		expect(checkOrigin('https://example.com', 'same-origin', 'example.com', 'https')).toBe(true);
+	});
+
+	it('allows when no host header is present', () => {
+		expect(checkOrigin('http://anything.com', 'same-origin', '')).toBe(true);
 	});
 
 	it('allows whitelisted origins', () => {

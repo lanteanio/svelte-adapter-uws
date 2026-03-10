@@ -33,7 +33,7 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 - [TypeScript setup](#typescript-setup)
 - [Svelte 4 support](#svelte-4-support)
 - [Deploying with Docker](#deploying-with-docker)
-- [Clustering (Linux)](#clustering-linux)
+- [Clustering](#clustering)
 - [Performance](#performance)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
@@ -383,7 +383,7 @@ If you set `envPrefix: 'MY_APP_'` in the adapter config, all variables are prefi
 | `XFF_DEPTH` | `1` | Position from right in `X-Forwarded-For` |
 | `BODY_SIZE_LIMIT` | `512K` | Max request body size (supports `K`, `M`, `G` suffixes) |
 | `SHUTDOWN_TIMEOUT` | `30` | Seconds to wait during graceful shutdown |
-| `CLUSTER_WORKERS` | - | Number of worker processes (or `auto` for CPU count). Linux only, HTTP only |
+| `CLUSTER_WORKERS` | - | Number of worker threads (or `auto` for CPU count) |
 
 ### Graceful shutdown
 
@@ -1170,9 +1170,9 @@ docker run -p 3000:3000 \
 
 ---
 
-## Clustering (Linux)
+## Clustering
 
-On Linux, multiple processes can share the same port via `SO_REUSEPORT` - the kernel load-balances incoming connections across workers. This gives you near-linear scaling for HTTP/SSR workloads with zero coordination overhead.
+The adapter supports multi-core scaling via uWebSockets.js worker thread distribution. A primary thread creates an acceptor app that distributes incoming connections across worker threads, each running their own uWS instance. This works on **all platforms** (Linux, macOS, Windows).
 
 Set the `CLUSTER_WORKERS` environment variable to enable it:
 
@@ -1187,12 +1187,16 @@ CLUSTER_WORKERS=4 node build
 CLUSTER_WORKERS=auto PORT=8080 ORIGIN=https://example.com node build
 ```
 
-The primary process forks N workers, each running their own uWS server on the same port. If a worker crashes, it is automatically restarted. On `SIGTERM`/`SIGINT`, the primary forwards the signal to all workers for graceful shutdown.
+If a worker crashes, it is automatically restarted with exponential backoff. On `SIGTERM`/`SIGINT`, the primary tells all workers to drain in-flight requests and shut down gracefully.
 
-### Limitations
+### WebSocket + clustering
 
-- **Linux only** - `SO_REUSEPORT` is a Linux kernel feature. On other platforms, the variable is ignored with a warning.
-- **HTTP/SSR only** - clustering is automatically disabled when WebSocket is enabled (`websocket: true` or `websocket: { ... }`). uWS pub/sub is per-process, so messages published in one worker would not reach clients connected to another worker. If you need clustered WebSocket, bring an external pub/sub backend (Redis, NATS, etc.) and manage multi-process coordination yourself.
+`platform.publish()` is automatically relayed across all workers via the primary thread, so subscribers on any worker receive the message. This is built in — no external pub/sub needed.
+
+Per-worker limitations (acceptable for most apps):
+- `platform.connections` — returns the count for the local worker only
+- `platform.subscribers(topic)` — returns the count for the local worker only
+- `platform.sendTo(filter, ...)` — only reaches connections on the local worker
 
 ---
 
@@ -1200,31 +1204,75 @@ The primary process forks N workers, each running their own uWS server on the sa
 
 ### Why uWebSockets.js?
 
-uWebSockets.js is a C++ HTTP and WebSocket server compiled to a native V8 addon. In benchmarks it consistently outperforms Node.js' built-in `http` module, Express, Fastify, and every other JavaScript HTTP server by a significant margin - often 5-10x more requests per second.
+uWebSockets.js is a C++ HTTP and WebSocket server compiled to a native V8 addon. It consistently outperforms Node.js' built-in `http` module, Express, Fastify, and every other JavaScript HTTP server by a significant margin.
 
-### Our overhead vs barebones uWS
+We ran a comprehensive benchmark suite isolating every layer of overhead - from barebones uWS through the full adapter pipeline - and compared against `@sveltejs/adapter-node` (Node http + Polka + sirv) and the most popular WebSocket libraries (`socket.io`, `ws`). The benchmark code is in the [`bench/`](bench/) directory so you can reproduce it yourself.
 
-A barebones uWebSockets.js "hello world" can handle 500k+ requests per second on a single core. This adapter adds overhead that is unavoidable for what it does:
+### HTTP: adapter-uws vs adapter-node
 
-1. **SvelteKit SSR** - every non-static request goes through SvelteKit's `server.respond()`, which runs your load functions, renders components, and produces HTML. This is the biggest cost and it's the whole point of using SvelteKit.
+Tested with a trivial SvelteKit handler (isolates adapter overhead from your app code):
 
-2. **Static file cache** - on startup we walk the build output and load every static file into memory with its precompressed variants. This is a one-time cost. Serving static files is then a single `Map.get()` plus a `res.cork()` + `res.end()` - about as fast as it gets without sendfile.
+| | adapter-uws | adapter-node | Multiplier |
+|---|---|---|---|
+| **Static files** | 135,300 req/s | 20,100 req/s | **6.7x faster** |
+| **SSR** | 125,100 req/s | 53,900 req/s | **2.3x faster** |
 
-3. **Request construction** - we build a standard `Request` object from uWS' stack-allocated `HttpRequest`. This means reading all headers synchronously (uWS requirement) and constructing a URL string. We read headers lazily for static files (only `accept-encoding` and `if-none-match`), but SSR requires the full set.
+<sup>100 connections, 10 pipelining, 10s, 2 runs averaged. Node v24, Windows 11.</sup>
 
-4. **Response streaming** - we read from the `Response.body` ReadableStream and write chunks through uWS with backpressure support (`onWritable`). Single-chunk responses (most SSR pages) are optimized into a single `res.cork()` + `res.end()` call.
+The static file gap is the largest because `adapter-node` uses sirv which calls `fs.createReadStream().pipe(res)` per request, while we serve from an in-memory `Map` with a single `res.cork()` + `res.end()`. The SSR gap comes from uWS's C++ HTTP parsing and batched writes vs Node's async drain event cycle.
 
-5. **WebSocket envelope** - every pub/sub message is wrapped in `JSON.stringify({ topic, event, data })`. This is a few microseconds per message. The tradeoff is a clean, standardized format that the client store understands without configuration.
+### WebSocket: uWS vs socket.io vs ws
+
+50 connected clients, 10 senders, burst mode, 8 seconds:
+
+| Server | Messages delivered/s | vs adapter-uws |
+|---|---|---|
+| **uWS native** (barebones) | 3,625,000 | 1.0x |
+| **adapter-uws** (full handler) | 3,642,000 | baseline |
+| **socket.io** | 177,200 | **20.5x slower** |
+| **ws** library | 164,500 | **22.1x slower** |
+
+uWS native pub/sub delivered 3.6M messages/s with perfect 50x fan-out. After optimization, the adapter matches it -- the byte-prefix check and string template envelope add near-zero overhead to the hot path. `socket.io` and `ws` both collapsed under the same load, delivering less than 1x fan-out (massive message loss/queueing).
+
+### Where the overhead goes
+
+**HTTP (SSR path) - 23% total overhead vs barebones uWS:**
+
+| Layer | Cost | Notes |
+|---|---|---|
+| `res.cork()` + status + headers | 11.4% | Writing a proper HTTP response - unavoidable |
+| `new Request()` construction | 9.7% | Required by SvelteKit's `server.respond()` contract |
+| Response body reader loop | ~2% | `getReader()` + `read()` + async scheduling |
+| Header collection, AbortController | ~0% | Measured at 0.08us and 0.004us per request |
+
+**WebSocket - optimized down from 27% to ~4% overhead vs barebones uWS pub/sub:**
+
+The two largest WebSocket costs were `JSON.parse()` on every message for the subscribe/unsubscribe check (15%) and `JSON.stringify()` for envelope wrapping (8%). Both have been optimized:
+
+| Layer | Before | After | How |
+|---|---|---|---|
+| Subscribe/unsubscribe check | ~15% | ~0% | Byte-prefix discriminator: control messages start with `{"ty` (byte[3]=`y`), user envelopes start with `{"to` (byte[3]=`o`). A single byte comparison skips `JSON.parse` for all regular messages -- from 0.39us to 0.001us per message. |
+| Envelope wrapping | ~8% | ~4.5% | String template with `esc()` validation instead of `JSON.stringify` on a wrapper object. Topic and event names are validated with a fast char scan (~10ns) that throws on quotes, backslashes, or control characters — only `data` is stringified. From 0.135us to ~0.085us per publish. |
+| Connection tracking | ~2% | ~2% | Unchanged |
+| Origin validation, upgrade headers | ~2% | ~2% | Unchanged |
 
 **What we don't add:**
-- No middleware chain
-- No routing layer (uWS' native routing + SvelteKit's router)
-- No per-request allocations beyond what's needed
+- No middleware chain (no Polka, no Express)
+- No routing layer (uWS native routing + SvelteKit's router)
+- No per-request stream allocation for static files (in-memory Buffer, not `fs.createReadStream`)
 - No Node.js `http.IncomingMessage` shim (we construct `Request` directly from uWS)
 
 ### The bottom line
 
-For static files, performance is very close to barebones uWS. For SSR, the bottleneck is your Svelte components and load functions, not the adapter. The adapter's job is to get out of the way as fast as possible - and it does.
+The adapter retains 77% of raw uWS HTTP throughput and ~96% of raw uWS WebSocket throughput. The HTTP overhead is dominated by things SvelteKit requires (`new Request()`, proper HTTP headers). The WebSocket overhead is now almost entirely the `JSON.stringify` of your `data` payload -- the adapter's own machinery costs near zero. In a real app, your load functions and component rendering will dwarf all of this -- the adapter's job is to get out of the way, and it does.
+
+To run the benchmarks yourself:
+
+```bash
+npm install  # installs uWebSockets.js, autocannon, etc.
+node bench/run.mjs          # adapter overhead breakdown
+node bench/run-compare.mjs  # full comparison vs adapter-node + socket.io
+```
 
 ---
 
