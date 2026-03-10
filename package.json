@@ -1,0 +1,81 @@
+{
+  "name": "svelte-adapter-uws",
+  "version": "0.1.0",
+  "description": "SvelteKit adapter for uWebSockets.js - high-performance C++ HTTP server with built-in WebSocket support",
+  "author": "Kevin Radziszewski",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kevinradziszewski/svelte-adapter-uws.git"
+  },
+  "homepage": "https://github.com/kevinradziszewski/svelte-adapter-uws#readme",
+  "bugs": {
+    "url": "https://github.com/kevinradziszewski/svelte-adapter-uws/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./client": {
+      "types": "./client.d.ts",
+      "default": "./client.js"
+    },
+    "./vite": {
+      "types": "./vite.d.ts",
+      "default": "./vite.js"
+    }
+  },
+  "types": "./index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "client.js",
+    "client.d.ts",
+    "vite.js",
+    "vite.d.ts",
+    "files",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "peerDependencies": {
+    "@sveltejs/kit": "^2.0.0",
+    "svelte": "^4.0.0 || ^5.0.0",
+    "uWebSockets.js": "uNetworking/uWebSockets.js#v20.60.0",
+    "ws": "^8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "uWebSockets.js": {
+      "optional": true
+    },
+    "ws": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@rollup/plugin-commonjs": "^28.0.0",
+    "@rollup/plugin-json": "^6.0.0",
+    "@rollup/plugin-node-resolve": "^16.0.0",
+    "rollup": "^4.0.0"
+  },
+  "keywords": [
+    "svelte",
+    "sveltekit",
+    "adapter",
+    "uwebsockets",
+    "uws",
+    "performance",
+    "websocket"
+  ],
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

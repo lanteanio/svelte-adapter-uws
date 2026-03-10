@@ -1,0 +1,396 @@
+import type { Adapter } from '@sveltejs/kit';
+import type { WebSocket } from 'uWebSockets.js';
+
+/**
+ * ## Environment variables (runtime)
+ *
+ * These are set at runtime, not in the adapter config:
+ *
+ * | Variable | Default | Description |
+ * |---|---|---|
+ * | `HOST` | `0.0.0.0` | Bind address |
+ * | `PORT` | `3000` | Listen port |
+ * | `ORIGIN` | *(derived)* | Fixed origin (e.g. `https://example.com`) |
+ * | `SSL_CERT` | - | Path to TLS certificate file (enables HTTPS/WSS natively) |
+ * | `SSL_KEY` | - | Path to TLS private key file |
+ * | `PROTOCOL_HEADER` | - | Header for protocol detection (e.g. `x-forwarded-proto`) |
+ * | `HOST_HEADER` | - | Header for host detection (e.g. `x-forwarded-host`) |
+ * | `ADDRESS_HEADER` | - | Header for client IP (e.g. `x-forwarded-for`) |
+ * | `XFF_DEPTH` | `1` | Position from right in `X-Forwarded-For` |
+ * | `BODY_SIZE_LIMIT` | `512K` | Max request body size (`K`, `M`, `G` suffixes) |
+ * | `SHUTDOWN_TIMEOUT` | `30` | Seconds to wait during graceful shutdown |
+ *
+ * All variables respect the `envPrefix` option (e.g. `MY_APP_PORT` if `envPrefix: 'MY_APP_'`).
+ *
+ * ### Native TLS (no proxy needed)
+ *
+ * ```sh
+ * SSL_CERT=/path/to/cert.pem SSL_KEY=/path/to/key.pem node build
+ * ```
+ *
+ * This uses uWebSockets.js `SSLApp` - HTTPS and WSS with zero proxy overhead.
+ */
+export interface AdapterOptions {
+	/**
+	 * Output directory for the build.
+	 * @default 'build'
+	 */
+	out?: string;
+
+	/**
+	 * Precompress static assets with gzip and brotli.
+	 * @default true
+	 */
+	precompress?: boolean;
+
+	/**
+	 * Prefix for environment variables.
+	 * @default ''
+	 */
+	envPrefix?: string;
+
+	/**
+	 * Health check endpoint path. Set to `false` to disable.
+	 * @default '/healthz'
+	 */
+	healthCheckPath?: string | false;
+
+	/**
+	 * Enable WebSocket support.
+	 *
+	 * - `true` - enable with built-in pub/sub handler (**no auth, no per-topic
+	 *   authorization** - any connected client can subscribe to any topic.
+	 *   Use a custom handler with `upgrade` for auth gating)
+	 * - `WebSocketOptions` - enable with custom config and/or auth handler
+	 *
+	 * @example
+	 * ```js
+	 * // Simplest - just turn it on:
+	 * adapter({ websocket: true })
+	 *
+	 * // With auth:
+	 * adapter({
+	 *   websocket: {
+	 *     handler: './src/lib/server/websocket.js'
+	 *   }
+	 * })
+	 * ```
+	 */
+	websocket?: boolean | WebSocketOptions;
+}
+
+export interface WebSocketOptions {
+	/**
+	 * Path to a JS module that exports WebSocket handler functions
+	 * (`upgrade`, `open`, `message`, `close`).
+	 *
+	 * **Optional.** The adapter auto-discovers `src/hooks.ws.js` (or `.ts`, `.mjs`)
+	 * if it exists - no config needed. If neither a handler path nor a hooks file
+	 * is found, a built-in handler is used that accepts all connections and handles
+	 * subscribe/unsubscribe messages from the client store.
+	 *
+	 * Only specify this if your handler lives at a non-standard path.
+	 *
+	 * @example './src/lib/server/websocket.js'
+	 */
+	handler?: string;
+
+	/**
+	 * URL path to serve WebSocket connections on.
+	 * @default '/ws'
+	 */
+	path?: string;
+
+	/**
+	 * Max message size in bytes. Connections sending larger messages are closed.
+	 * @default 16384 (16 KB)
+	 */
+	maxPayloadLength?: number;
+
+	/**
+	 * Seconds of inactivity before the connection is closed.
+	 * @default 120
+	 */
+	idleTimeout?: number;
+
+	/**
+	 * Max bytes of backpressure before messages are dropped.
+	 * @default 1048576 (1 MB)
+	 */
+	maxBackpressure?: number;
+
+	/**
+	 * Enable per-message deflate compression.
+	 * Pass `true` for `SHARED_COMPRESSOR`, or a uWS compression constant
+	 * (e.g. `uWS.DEDICATED_COMPRESSOR_4KB`) for finer control.
+	 * @default false
+	 */
+	compression?: boolean | number;
+
+	/**
+	 * Automatically send pings to keep the connection alive.
+	 * @default true
+	 */
+	sendPingsAutomatically?: boolean;
+
+	/**
+	 * Allowed origins for WebSocket connections.
+	 *
+	 * - `'same-origin'` - only accept connections where Origin matches Host *(default)*
+	 * - `'*'` - accept connections from any origin
+	 * - `string[]` - whitelist of allowed origin URLs (e.g. `['https://example.com']`)
+	 *
+	 * Non-browser clients (no Origin header) are always allowed.
+	 *
+	 * @default 'same-origin'
+	 */
+	allowedOrigins?: 'same-origin' | '*' | string[];
+}
+
+// ── User's WebSocket handler module exports ─────────────────────────────────
+
+/**
+ * Context passed to the `upgrade` handler.
+ */
+export interface UpgradeContext {
+	/** Request headers (all lowercase keys). */
+	headers: Record<string, string>;
+	/** Parsed cookies from the Cookie header. */
+	cookies: Record<string, string>;
+	/** The request URL path. */
+	url: string;
+	/** Remote IP address. */
+	remoteAddress: string;
+}
+
+/**
+ * Shape of the user's WebSocket handler module.
+ *
+ * Create a file (e.g. `src/lib/server/websocket.js`) and export any
+ * of these functions. All are optional - the built-in handler already
+ * handles subscribe/unsubscribe for the client store.
+ *
+ * @example
+ * ```js
+ * // src/hooks.ws.js - auto-discovered, no config needed
+ *
+ * export function upgrade({ cookies }) {
+ *   if (!cookies.session_id) return false; // reject with 401
+ *   const user = await validateSession(cookies.session_id);
+ *   if (!user) return false;
+ *   return { userId: user.id }; // attach data to socket
+ * }
+ *
+ * export function open(ws) {
+ *   ws.subscribe(`user:${ws.getUserData().userId}`);
+ * }
+ * ```
+ */
+export interface WebSocketHandler<UserData = unknown> {
+	/**
+	 * Called during the HTTP upgrade handshake.
+	 *
+	 * - Return an object to accept - it becomes `ws.getUserData()`.
+	 * - Return `false` to reject with 401.
+	 * - Omit this export to accept all connections with `{}` as user data.
+	 *
+	 * May be async.
+	 */
+	upgrade?: (ctx: UpgradeContext) => UserData | false | Promise<UserData | false>;
+
+	/** Called when a WebSocket connection is established. */
+	open?: (ws: WebSocket<UserData>) => void;
+
+	/**
+	 * Called when a message is received.
+	 *
+	 * **Note:** subscribe/unsubscribe messages from the client store are
+	 * handled automatically before this is called. You only need this for
+	 * custom application-level messages.
+	 */
+	message?: (ws: WebSocket<UserData>, data: ArrayBuffer, isBinary: boolean) => void;
+
+	/**
+	 * Called when a client tries to subscribe to a topic.
+	 *
+	 * - Return `false` to deny the subscription (silently ignored on the client).
+	 * - Return anything else (or omit this export) to allow.
+	 *
+	 * Use this for per-topic authorization - e.g. only let admins subscribe to `'admin'`.
+	 *
+	 * @example
+	 * ```js
+	 * export function subscribe(ws, topic) {
+	 *   const { role } = ws.getUserData();
+	 *   if (topic.startsWith('admin') && role !== 'admin') return false;
+	 * }
+	 * ```
+	 */
+	subscribe?: (ws: WebSocket<UserData>, topic: string) => boolean | void;
+
+	/**
+	 * Called when backpressure has drained (buffered data was sent).
+	 * Use this for flow control when sending large or frequent messages.
+	 */
+	drain?: (ws: WebSocket<UserData>) => void;
+
+	/** Called when the connection closes. */
+	close?: (ws: WebSocket<UserData>, code: number, message: ArrayBuffer) => void;
+}
+
+// ── Platform type for event.platform ────────────────────────────────────────
+
+/**
+ * Available on `event.platform` in server hooks, load functions, and actions.
+ *
+ * To get type-checking, add this to your `src/app.d.ts`:
+ *
+ * ```ts
+ * import type { Platform as AdapterPlatform } from 'svelte-adapter-uws';
+ *
+ * declare global {
+ *   namespace App {
+ *     interface Platform extends AdapterPlatform {}
+ *   }
+ * }
+ * ```
+ */
+export interface Platform {
+	/**
+	 * Publish a message to all WebSocket clients subscribed to a topic.
+	 *
+	 * The message is automatically wrapped in a `{ topic, event, data }` envelope
+	 * that the client store (`svelte-adapter-uws/client`) understands.
+	 *
+	 * @param topic - Topic string (e.g. `'todos'`, `'user:123'`, `'org:456'`)
+	 * @param event - Event name (e.g. `'created'`, `'updated'`, `'deleted'`)
+	 * @param data - Payload (will be JSON-serialized)
+	 *
+	 * @example
+	 * ```js
+	 * // In a form action or API route:
+	 * export async function POST({ platform }) {
+	 *   const todo = await db.save(data);
+	 *   platform.publish('todos', 'created', todo);
+	 * }
+	 * ```
+	 */
+	publish(topic: string, event: string, data?: unknown): boolean;
+
+	/**
+	 * Send a message to a single WebSocket connection.
+	 * Wraps in the same `{ topic, event, data }` envelope as `publish()`.
+	 *
+	 * @example
+	 * ```js
+	 * // In hooks.ws.js - reply to sender:
+	 * export function message(ws, rawData) {
+	 *   const msg = JSON.parse(Buffer.from(rawData).toString());
+	 *   ws.send(JSON.stringify({ topic: 'echo', event: 'reply', data: { got: msg } }));
+	 * }
+	 * ```
+	 */
+	send(ws: WebSocket<any>, topic: string, event: string, data?: unknown): number;
+
+	/**
+	 * Send a message to all connections whose userData matches a filter.
+	 * Returns the number of connections the message was sent to.
+	 *
+	 * The filter receives each connection's userData (whatever `upgrade()` returned).
+	 *
+	 * @example
+	 * ```js
+	 * // Send to a specific user (no need to maintain your own Map):
+	 * export async function POST({ platform, request }) {
+	 *   const { targetUserId, message } = await request.json();
+	 *   platform.sendTo(
+	 *     (userData) => userData.userId === targetUserId,
+	 *     'dm', 'new-message', { message }
+	 *   );
+	 * }
+	 *
+	 * // Send to all admins:
+	 * platform.sendTo(
+	 *   (userData) => userData.role === 'admin',
+	 *   'alerts', 'warning', { message: 'Server load high' }
+	 * );
+	 * ```
+	 */
+	sendTo(filter: (userData: any) => boolean, topic: string, event: string, data?: unknown): number;
+
+	/**
+	 * Number of active WebSocket connections.
+	 *
+	 * @example
+	 * ```js
+	 * export async function GET({ platform }) {
+	 *   return json({ online: platform.connections });
+	 * }
+	 * ```
+	 */
+	readonly connections: number;
+
+	/**
+	 * Number of clients subscribed to a specific topic.
+	 *
+	 * @example
+	 * ```js
+	 * export async function GET({ platform, params }) {
+	 *   return json({ viewers: platform.subscribers(`page:${params.id}`) });
+	 * }
+	 * ```
+	 */
+	subscribers(topic: string): number;
+
+	/**
+	 * Get a scoped helper for a topic. Reduces repetition when publishing
+	 * multiple events to the same topic, and provides CRUD shorthand methods
+	 * that pair with the client's `crud()` helper.
+	 *
+	 * @param topic - Topic string (e.g. `'todos'`, `'user:123'`)
+	 *
+	 * @example
+	 * ```js
+	 * // In a form action:
+	 * export async function POST({ platform, request }) {
+	 *   const todos = platform.topic('todos');
+	 *   const todo = await db.create(await request.formData());
+	 *   todos.created(todo);   // clients see 'created' event
+	 * }
+	 *
+	 * export const actions = {
+	 *   update: async ({ platform, request }) => {
+	 *     const todos = platform.topic('todos');
+	 *     const todo = await db.update(await request.formData());
+	 *     todos.updated(todo); // clients see 'updated' event
+	 *   },
+	 *   delete: async ({ platform, request }) => {
+	 *     const todos = platform.topic('todos');
+	 *     const id = (await request.formData()).get('id');
+	 *     await db.delete(id);
+	 *     todos.deleted({ id }); // clients see 'deleted' event
+	 *   }
+	 * };
+	 * ```
+	 */
+	topic(topic: string): TopicHelper;
+}
+
+export interface TopicHelper {
+	/** Publish a custom event to this topic. */
+	publish(event: string, data?: unknown): void;
+	/** Shorthand for `.publish('created', data)`. Pairs with `crud()` / `lookup()`. */
+	created(data?: unknown): void;
+	/** Shorthand for `.publish('updated', data)`. Pairs with `crud()` / `lookup()`. */
+	updated(data?: unknown): void;
+	/** Shorthand for `.publish('deleted', data)`. Pairs with `crud()` / `lookup()`. */
+	deleted(data?: unknown): void;
+	/** Shorthand for `.publish('set', value)`. Pairs with `count()`. */
+	set(value: number): void;
+	/** Shorthand for `.publish('increment', amount)`. Pairs with `count()`. */
+	increment(amount?: number): void;
+	/** Shorthand for `.publish('decrement', amount)`. Pairs with `count()`. */
+	decrement(amount?: number): void;
+}
+
+export default function adapter(options?: AdapterOptions): Adapter;
