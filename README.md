@@ -657,7 +657,9 @@ Available in server hooks, load functions, form actions, and API routes.
 
 ### `platform.publish(topic, event, data)`
 
-Send a message to all WebSocket clients subscribed to a topic:
+Send a message to all WebSocket clients subscribed to a topic.
+
+Topic and event names are validated before being written into the JSON envelope -- quotes, backslashes, and control characters will throw. This prevents JSON injection when names are built from dynamic values like user IDs (`platform.publish(\`user:\${id}\`, ...)`). The validation is a single-pass char scan and adds no measurable overhead.
 
 ```js
 // src/routes/todos/+page.server.js
@@ -1503,7 +1505,7 @@ const todos = on('todo');      // 'todo'  - WRONG, singular vs plural
 
 ### "How do I see what the message envelope looks like?"
 
-Every message sent through `platform.publish()` or `platform.topic().created()` arrives as JSON with this shape:
+Every message sent through `platform.publish()` or `platform.topic().created()` arrives as JSON with this shape. The envelope is constructed with string concatenation for speed, but `topic` and `event` are validated first -- if either contains a quote, backslash, or control character, the call throws instead of producing malformed JSON:
 
 ```json
 {
