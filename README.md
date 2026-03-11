@@ -390,8 +390,8 @@ If you set `envPrefix: 'MY_APP_'` in the adapter config, all variables are prefi
 
 On `SIGTERM` or `SIGINT`, the server:
 1. Stops accepting new connections
-2. Emits a `sveltekit:shutdown` event on `process` (for cleanup hooks like closing database connections)
-3. Waits for in-flight SSR requests to complete (up to `SHUTDOWN_TIMEOUT` seconds)
+2. Waits for in-flight SSR requests to complete (up to `SHUTDOWN_TIMEOUT` seconds)
+3. Emits a `sveltekit:shutdown` event on `process` (for cleanup hooks like closing database connections)
 4. Exits
 
 ```js
@@ -1313,10 +1313,10 @@ The static file gap is the largest because `adapter-node` uses sirv which calls 
 
 | Server | Messages delivered/s | vs adapter-uws |
 |---|---|---|
-| **uWS native** (barebones) | 3,625,000 | 1.0x |
-| **adapter-uws** (full handler) | 3,642,000 | baseline |
-| **socket.io** | 177,200 | **20.5x slower** |
-| **ws** library | 164,500 | **22.1x slower** |
+| **uWS native** (barebones) | 3,642,000 | baseline |
+| **adapter-uws** (full handler) | 3,625,000 | 1.0x |
+| **ws** library | 177,200 | **20.5x slower** |
+| **socket.io** | 164,500 | **22.1x slower** |
 
 uWS native pub/sub delivered 3.6M messages/s with perfect 50x fan-out. After optimization, the adapter matches it -- the byte-prefix check and string template envelope add near-zero overhead to the hot path. `socket.io` and `ws` both collapsed under the same load, delivering less than 1x fan-out (massive message loss/queueing).
 
