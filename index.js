@@ -119,7 +119,8 @@ export default function (opts = {}) {
 									const isPublic = args.path.includes('/public');
 									const isStatic = args.path.includes('/static');
 									const entries = Object.entries(allEnv).filter(([k]) =>
-										isPublic ? k.startsWith(publicPrefix) : !k.startsWith(publicPrefix)
+										(isPublic ? k.startsWith(publicPrefix) : !k.startsWith(publicPrefix))
+										&& /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(k)
 									);
 									if (isStatic) {
 										return { contents: entries.map(([k, v]) => `export const ${k} = ${JSON.stringify(v)};`).join('\n') || 'export {};' };
