@@ -125,8 +125,8 @@ export default function (opts = {}) {
 									if (isStatic) {
 										return { contents: entries.map(([k, v]) => `export const ${k} = ${JSON.stringify(v)};`).join('\n') || 'export {};' };
 									}
-									// dynamic: read from process.env at runtime
-									return { contents: entries.map(([k]) => `export const ${k} = process.env[${JSON.stringify(k)}];`).join('\n') || 'export {};' };
+									// dynamic: re-export process.env directly
+									return { contents: 'export const env = process.env;' };
 								});
 							}
 						}]
