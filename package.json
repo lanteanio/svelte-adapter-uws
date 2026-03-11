@@ -1,6 +1,6 @@
 {
   "name": "svelte-adapter-uws",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "description": "SvelteKit adapter for uWebSockets.js - high-performance C++ HTTP server with built-in WebSocket support",
   "author": "Kevin Radziszewski",
   "license": "MIT",
@@ -75,6 +75,7 @@
     "websocket"
   ],
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.18",
     "autocannon": "^8.0.0",
     "polka": "^0.5.2",
     "socket.io": "^4.8.3",
