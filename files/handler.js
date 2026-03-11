@@ -117,6 +117,19 @@ function cacheDir(dir, urlPrefix, immutable) {
 		}
 
 		staticCache.set(urlPath, entry);
+
+		// Prerendered pages are written as index.html or about/index.html, but
+		// SvelteKit's builder.prerendered.paths lists them as "/" and "/about".
+		// Register the clean pathname alias so tryPrerendered() can find them.
+		if (!immutable) {
+			if (relPath === 'index.html') {
+				staticCache.set(urlPrefix || '/', entry);
+			} else if (relPath.endsWith('/index.html')) {
+				staticCache.set(`${urlPrefix}/${relPath.slice(0, -'/index.html'.length)}`, entry);
+			} else if (relPath.endsWith('.html')) {
+				staticCache.set(`${urlPrefix}/${relPath.slice(0, -'.html'.length)}`, entry);
+			}
+		}
 	});
 }
 
@@ -608,7 +621,11 @@ async function writeResponse(res, response, state) {
 			return;
 		}
 
-		// Multi-chunk streaming response - write headers + first two chunks in one cork
+		// Multi-chunk streaming response - write headers + first two chunks in one cork.
+		// cork() batches these writes into a single syscall, so backpressure from
+		// individual res.write() calls inside cork is not actionable — the data is
+		// buffered and flushed together when cork returns. The backpressure loop
+		// below handles all subsequent chunks.
 		if (state.aborted) return;
 		streaming = true;
 		res.cork(() => {
@@ -748,7 +765,14 @@ if (WS_ENABLED) {
 							const requestScheme = protocol_header
 								? (headers[protocol_header] || (is_tls ? 'https' : 'http'))
 								: (is_tls ? 'https' : 'http');
-							allowed = parsed.host === requestHost && parsed.protocol === requestScheme + ':';
+							// Merge PORT_HEADER into the host the same way get_origin() does,
+							// so proxies that split host/port across headers still match.
+							const requestPort = port_header ? headers[port_header] : undefined;
+							let expectedHost = requestHost;
+							if (requestPort) {
+								expectedHost = requestHost.replace(/:\d+$/, '') + ':' + requestPort;
+							}
+							allowed = parsed.host === expectedHost && parsed.protocol === requestScheme + ':';
 						}
 					} catch {
 						allowed = false;

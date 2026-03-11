@@ -80,7 +80,13 @@ export default function uws(options = {}) {
 			getUserData() { return userData; },
 			getBufferedAmount() { return rawWs.bufferedAmount || 0; },
 			getRemoteAddress() {
-				return new TextEncoder().encode(rawWs._socket?.remoteAddress || '127.0.0.1').buffer;
+				// uWS returns raw binary bytes (4 for IPv4, 16 for IPv6).
+				// Dev only handles IPv4; exotic addresses fall back to text encoding.
+				const ip = rawWs._socket?.remoteAddress || '127.0.0.1';
+				const v4 = ip.replace(/^::ffff:/, '');
+				const parts = v4.split('.');
+				if (parts.length === 4) return new Uint8Array(parts.map(Number)).buffer;
+				return new TextEncoder().encode(ip).buffer;
 			},
 			getRemoteAddressAsText() {
 				return new TextEncoder().encode(rawWs._socket?.remoteAddress || '127.0.0.1').buffer;
@@ -172,6 +178,12 @@ export default function uws(options = {}) {
 	/** @type {Promise<void>} */
 	let handlerReady;
 
+	/** @type {import('vite').ViteDevServer | null} */
+	let viteServer = null;
+
+	/** @type {string | null} Resolved absolute path of the WS handler file */
+	let resolvedHandlerPath = null;
+
 	/**
 	 * Extract handler functions from a loaded module.
 	 * @param {Record<string, any>} mod
@@ -226,6 +238,7 @@ export default function uws(options = {}) {
 		},
 		configureServer(server) {
 			wss = new WebSocketServer({ noServer: true });
+			viteServer = server;
 			const root = server.config.root;
 
 			// Load user's WebSocket handler via Vite's ssrLoadModule (handles TS/aliases/etc.)
@@ -234,6 +247,7 @@ export default function uws(options = {}) {
 				: null;
 
 			if (handlerPath) {
+				resolvedHandlerPath = handlerPath;
 				handlerReady = server.ssrLoadModule(handlerPath).then(applyHandlers).catch((err) => {
 					console.error(`[adapter-uws] Failed to load WebSocket handler '${options.handler}':`, err);
 				});
@@ -244,6 +258,7 @@ export default function uws(options = {}) {
 					for (const candidate of candidates) {
 						const fullPath = path.resolve(root, candidate);
 						if (!existsSync(fullPath)) continue;
+						resolvedHandlerPath = fullPath;
 						try {
 							const mod = await server.ssrLoadModule(fullPath);
 							applyHandlers(mod);
@@ -359,6 +374,16 @@ export default function uws(options = {}) {
 			console.log(`[adapter-uws] Dev WebSocket endpoint at ${wsPath}`);
 			if (wsPath !== '/ws') {
 				console.log(`[adapter-uws] Client must match: connect({ path: '${wsPath}' })`);
+			}
+		},
+		handleHotUpdate({ file, server }) {
+			if (resolvedHandlerPath && path.resolve(file) === resolvedHandlerPath) {
+				handlerReady = server.ssrLoadModule(resolvedHandlerPath).then((mod) => {
+					applyHandlers(mod);
+					console.log('[adapter-uws] WebSocket handler reloaded');
+				}).catch((err) => {
+					console.error('[adapter-uws] Failed to reload WebSocket handler:', err.message);
+				});
 			}
 		}
 	};

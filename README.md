@@ -264,6 +264,8 @@ The client store automatically uses `wss://` when the page is served over HTTPS 
 
 The Vite plugin is required for WebSocket support in both dev and production (see [Step 2](#step-2-add-the-vite-plugin-required)). It spins up a `ws` WebSocket server alongside Vite's dev server, so your client store and `event.platform` work identically to production.
 
+Changes to your `hooks.ws` file are picked up automatically — the plugin reloads the handler on save, no dev server restart needed.
+
 **vite.config.js**
 ```js
 import { sveltekit } from '@sveltejs/kit/vite';
