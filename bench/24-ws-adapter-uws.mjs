@@ -8,7 +8,7 @@ const PORT = parseInt(process.env.PORT || '9002');
 const app = uWS.App();
 const wsConnections = new Set();
 
-// esc() — same as handler.js (validate + JSON-quote topic/event names)
+// esc()  - same as handler.js (validate + JSON-quote topic/event names)
 function esc(s) {
 	for (let i = 0; i < s.length; i++) {
 		const c = s.charCodeAt(i);

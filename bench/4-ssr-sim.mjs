@@ -1,5 +1,5 @@
 // Simulates the adapter's SSR hot path: full header collection, Request
-// construction, async response, writeResponse — but with a trivial handler
+// construction, async response, writeResponse  - but with a trivial handler
 // instead of SvelteKit, so we isolate the adapter overhead only.
 import uWS from 'uWebSockets.js';
 
@@ -7,7 +7,7 @@ const PORT = parseInt(process.env.PORT || '9001');
 const textDecoder = new TextDecoder();
 const origin = 'http://localhost:9001';
 
-// Simulated SvelteKit server.respond — returns a trivial Response
+// Simulated SvelteKit server.respond  - returns a trivial Response
 async function respond(request) {
 	return new Response('Hello World', {
 		status: 200,
@@ -74,7 +74,7 @@ async function writeResponse(res, response, state) {
 }
 
 uWS.App().any('/*', (res, req) => {
-	// Synchronous phase — mirror exactly what the adapter does
+	// Synchronous phase  - mirror exactly what the adapter does
 	const method = req.getMethod();
 	const pathname = req.getUrl();
 	const query = req.getQuery();
@@ -91,7 +91,7 @@ uWS.App().any('/*', (res, req) => {
 	const state = { aborted: false };
 	res.onAborted(() => { state.aborted = true; abortController.abort(); });
 
-	// Async phase — Request construction + respond + writeResponse
+	// Async phase  - Request construction + respond + writeResponse
 	(async () => {
 		try {
 			const request = new Request(origin + url, {

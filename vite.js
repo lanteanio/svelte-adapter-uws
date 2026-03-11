@@ -5,7 +5,7 @@ import { parseCookies } from './files/cookies.js';
 
 /**
  * Safely quote a string for JSON embedding. Throws on invalid characters
- * (quotes, backslashes, control chars) — these are always bugs in topic/event names.
+ * (quotes, backslashes, control chars)  - these are always bugs in topic/event names.
  * @param {string} s
  * @returns {string}
  */
@@ -187,8 +187,43 @@ export default function uwsDev(options = {}) {
 		};
 	}
 
+	/**
+	 * Discover the WS handler file path.
+	 * @param {string} root
+	 * @returns {string | null}
+	 */
+	function discoverHandler(root) {
+		if (options.handler) return path.resolve(root, options.handler);
+		const candidates = ['src/hooks.ws.js', 'src/hooks.ws.ts', 'src/hooks.ws.mjs'];
+		for (const candidate of candidates) {
+			const full = path.resolve(root, candidate);
+			if (existsSync(full)) return full;
+		}
+		return null;
+	}
+
 	return {
 		name: 'svelte-adapter-uws',
+		config(config, env) {
+			// During SSR build, inject ws-handler as an additional entry so it
+			// goes through the same Vite pipeline as hooks.server.ts - resolving
+			// $lib, $env, $app aliases and sharing modules with the server bundle.
+			if (env.isSsrBuild) {
+				const root = config.root || process.cwd();
+				const handlerPath = discoverHandler(root);
+				if (handlerPath) {
+					return {
+						build: {
+							rollupOptions: {
+								input: {
+									'ws-handler': handlerPath
+								}
+							}
+						}
+					};
+				}
+			}
+		},
 		configureServer(server) {
 			wss = new WebSocketServer({ noServer: true });
 			const root = server.config.root;

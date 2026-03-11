@@ -170,7 +170,10 @@ That's it. This gives you a pub/sub WebSocket server at `/ws` with no authentica
 
 ### Step 2: Add the Vite plugin
 
-This makes WebSockets work during `npm run dev`. Without this, `event.platform` won't have WebSocket methods in dev mode.
+The Vite plugin does two things:
+
+1. **Dev mode** - spins up a WebSocket server so `event.platform` works during `npm run dev`
+2. **Production builds** - runs your `hooks.ws` file through the same Vite pipeline as the rest of your server code, so `$lib`, `$env`, and `$app` imports work correctly
 
 **vite.config.js**
 ```js
@@ -258,6 +261,8 @@ The client store automatically uses `wss://` when the page is served over HTTPS 
 
 Development works as expected. The Vite plugin (`svelte-adapter-uws/vite`) spins up a `ws` WebSocket server alongside Vite's dev server, so your client store and `event.platform` work identically to production.
 
+The same plugin also handles production builds - it runs your `hooks.ws` file through the Vite pipeline so that `$lib`, `$env`, and `$app` imports are resolved correctly and shared with the rest of your server code.
+
 **vite.config.js**
 ```js
 import { sveltekit } from '@sveltejs/kit/vite';
@@ -270,8 +275,9 @@ export default {
 
 Without the Vite plugin:
 - HTTP routes work fine
-- `event.platform` is `undefined` - any code calling `platform.publish()` will throw
-- The client store will try to connect to `/ws` and fail silently (auto-reconnect will keep trying)
+- `event.platform` is `undefined` in dev - any code calling `platform.publish()` will throw
+- The client store will try to connect to `/ws` in dev and fail silently (auto-reconnect will keep trying)
+- Production builds will fall back to a limited bundler that only resolves `$lib` (not `$env` or `$app`)
 
 ### `npm run preview` - WebSockets don't work
 
@@ -1193,12 +1199,12 @@ If a worker crashes, it is automatically restarted with exponential backoff. On 
 
 ### WebSocket + clustering
 
-`platform.publish()` is automatically relayed across all workers via the primary thread, so subscribers on any worker receive the message. This is built in — no external pub/sub needed.
+`platform.publish()` is automatically relayed across all workers via the primary thread, so subscribers on any worker receive the message. This is built in  - no external pub/sub needed.
 
 Per-worker limitations (acceptable for most apps):
-- `platform.connections` — returns the count for the local worker only
-- `platform.subscribers(topic)` — returns the count for the local worker only
-- `platform.sendTo(filter, ...)` — only reaches connections on the local worker
+- `platform.connections`  - returns the count for the local worker only
+- `platform.subscribers(topic)`  - returns the count for the local worker only
+- `platform.sendTo(filter, ...)`  - only reaches connections on the local worker
 
 ---
 
@@ -1254,7 +1260,7 @@ The two largest WebSocket costs were `JSON.parse()` on every message for the sub
 | Layer | Before | After | How |
 |---|---|---|---|
 | Subscribe/unsubscribe check | ~15% | ~0% | Byte-prefix discriminator: control messages start with `{"ty` (byte[3]=`y`), user envelopes start with `{"to` (byte[3]=`o`). A single byte comparison skips `JSON.parse` for all regular messages -- from 0.39us to 0.001us per message. |
-| Envelope wrapping | ~8% | ~4.5% | String template with `esc()` validation instead of `JSON.stringify` on a wrapper object. Topic and event names are validated with a fast char scan (~10ns) that throws on quotes, backslashes, or control characters — only `data` is stringified. From 0.135us to ~0.085us per publish. |
+| Envelope wrapping | ~8% | ~4.5% | String template with `esc()` validation instead of `JSON.stringify` on a wrapper object. Topic and event names are validated with a fast char scan (~10ns) that throws on quotes, backslashes, or control characters  - only `data` is stringified. From 0.135us to ~0.085us per publish. |
 | Connection tracking | ~2% | ~2% | Unchanged |
 | Origin validation, upgrade headers | ~2% | ~2% | Unchanged |
 

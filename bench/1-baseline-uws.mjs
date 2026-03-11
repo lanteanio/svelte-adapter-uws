@@ -1,4 +1,4 @@
-// Barebones uWS — absolute minimum: just respond with a fixed string.
+// Barebones uWS  - absolute minimum: just respond with a fixed string.
 // This is the theoretical ceiling for uWS performance.
 import uWS from 'uWebSockets.js';
 

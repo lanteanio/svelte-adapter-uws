@@ -8,7 +8,7 @@ const textDecoder = new TextDecoder();
 const origin = 'http://localhost:9001';
 
 uWS.App().any('/*', (res, req) => {
-	// Synchronous phase — exactly like the adapter
+	// Synchronous phase  - exactly like the adapter
 	const method = req.getMethod();
 	const pathname = req.getUrl();
 	const query = req.getQuery();
@@ -27,7 +27,7 @@ uWS.App().any('/*', (res, req) => {
 		duplex: 'half'
 	});
 
-	// Respond immediately — isolates construction cost from async overhead
+	// Respond immediately  - isolates construction cost from async overhead
 	res.cork(() => {
 		res.writeStatus('200 OK');
 		res.writeHeader('content-type', 'text/plain');

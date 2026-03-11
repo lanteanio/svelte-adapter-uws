@@ -72,70 +72,53 @@ export default function (opts = {}) {
 
 			// Write the WebSocket handler module
 			if (websocket) {
-				// Resolve the handler: explicit path > auto-discovered > built-in default
-				let handlerFile = websocket.handler;
+				// If the Vite plugin was used, ws-handler.js is already in the
+				// writeServer output - built through the same Vite pipeline as
+				// hooks.server.ts, with $lib/$env/$app resolved and shared modules.
+				if (existsSync(`${tmp}/ws-handler.js`)) {
+					builder.log.minor('WebSocket handler: built by Vite plugin');
+				} else {
+					// Vite plugin not installed - resolve handler ourselves
+					let handlerFile = websocket.handler;
 
-				if (!handlerFile) {
-					// Auto-discover src/hooks.ws.{js,ts,mjs}
-					const candidates = ['src/hooks.ws.js', 'src/hooks.ws.ts', 'src/hooks.ws.mjs'];
-					for (const candidate of candidates) {
-						if (existsSync(candidate)) {
-							handlerFile = candidate;
-							break;
+					if (!handlerFile) {
+						const candidates = ['src/hooks.ws.js', 'src/hooks.ws.ts', 'src/hooks.ws.mjs'];
+						for (const candidate of candidates) {
+							if (existsSync(candidate)) {
+								handlerFile = candidate;
+								break;
+							}
 						}
 					}
-				}
 
-				if (handlerFile) {
-					// Bundle through esbuild to resolve SvelteKit aliases ($lib, $env, $app)
-					// and handle TypeScript. Without this, these imports survive into
-					// the Rollup step which doesn't know about SvelteKit virtual modules.
-					const esbuild = await import('esbuild');
-					const { loadEnv } = await import('vite');
-					const libDir = path.resolve(builder.config.kit.files?.lib || 'src/lib');
-					const publicPrefix = builder.config.kit.env?.publicPrefix ?? 'PUBLIC_';
-					const allEnv = loadEnv('production', process.cwd(), '');
-					const version = builder.config.kit.version?.name ?? '';
+					if (handlerFile) {
+						// Bundle through esbuild to resolve $lib and handle TypeScript.
+						// This is the fallback path - the Vite plugin approach is preferred
+						// because it shares modules with the server bundle and resolves
+						// all SvelteKit aliases ($env, $app) natively.
+						const esbuild = await import('esbuild');
+						const libDir = path.resolve(builder.config.kit.files?.lib || 'src/lib');
 
-					await esbuild.build({
-						entryPoints: [path.resolve(handlerFile)],
-						bundle: true,
-						format: 'esm',
-						platform: 'node',
-						outfile: `${tmp}/ws-handler.js`,
-						alias: { '$lib': libDir },
-						packages: 'external',
-						plugins: [{
-							name: 'sveltekit-virtual-modules',
-							setup(build) {
-								build.onResolve({ filter: /^\$(env|app)\// }, (args) => ({
-									path: args.path,
-									namespace: 'sveltekit'
-								}));
-								build.onLoad({ filter: /.*/, namespace: 'sveltekit' }, (args) => {
-									if (args.path === '$app/environment') {
-										return { contents: `export const dev = false;\nexport const building = false;\nexport const version = ${JSON.stringify(version)};` };
-									}
-									const isPublic = args.path.includes('/public');
-									const isStatic = args.path.includes('/static');
-									const entries = Object.entries(allEnv).filter(([k]) =>
-										(isPublic ? k.startsWith(publicPrefix) : !k.startsWith(publicPrefix))
-										&& /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(k)
-									);
-									if (isStatic) {
-										return { contents: entries.map(([k, v]) => `export const ${k} = ${JSON.stringify(v)};`).join('\n') || 'export {};' };
-									}
-									// dynamic: re-export process.env directly
-									return { contents: 'export const env = process.env;' };
-								});
-							}
-						}]
-					});
-					builder.log.minor(`WebSocket handler: ${handlerFile}`);
-				} else {
-					// No handler found - use built-in default (subscribe/unsubscribe only)
-					writeFileSync(`${tmp}/ws-handler.js`, DEFAULT_WS_HANDLER);
-					builder.log.minor('WebSocket enabled (built-in handler)');
+						await esbuild.build({
+							entryPoints: [path.resolve(handlerFile)],
+							bundle: true,
+							format: 'esm',
+							platform: 'node',
+							outfile: `${tmp}/ws-handler.js`,
+							alias: { '$lib': libDir },
+							packages: 'external'
+						});
+						builder.log.minor(`WebSocket handler: ${handlerFile} (esbuild fallback)`);
+						builder.log.warn(
+							'Add the Vite plugin for full SvelteKit alias support in hooks.ws:\n' +
+							"  import uwsDev from 'svelte-adapter-uws/vite';\n" +
+							'  export default { plugins: [sveltekit(), uwsDev()] };'
+						);
+					} else {
+						// No handler found - use built-in default (subscribe/unsubscribe only)
+						writeFileSync(`${tmp}/ws-handler.js`, DEFAULT_WS_HANDLER);
+						builder.log.minor('WebSocket enabled (built-in handler)');
+					}
 				}
 			} else {
 				// No WebSocket - empty module

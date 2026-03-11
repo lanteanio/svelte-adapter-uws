@@ -1,4 +1,4 @@
-// Barebones uWS with cork + headers — simulates writing a real response.
+// Barebones uWS with cork + headers  - simulates writing a real response.
 import uWS from 'uWebSockets.js';
 
 const PORT = parseInt(process.env.PORT || '9001');

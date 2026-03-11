@@ -26,7 +26,7 @@ class PayloadTooLargeError extends Error {
 
 /**
  * Safely quote a string for JSON embedding. Topics and events are
- * developer-defined identifiers — a quote, backslash, or control character
+ * developer-defined identifiers  - a quote, backslash, or control character
  * is always a bug, so we throw instead of silently escaping.
  * @param {string} s
  * @returns {string} JSON-quoted string, e.g. '"todos"'

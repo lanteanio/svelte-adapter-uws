@@ -56,7 +56,7 @@ if (is_primary) {
 				workers.set(worker, msg.descriptor);
 				acceptorApp.addChildAppDescriptor(msg.descriptor);
 				console.log(`Worker thread ${worker.threadId} registered`);
-				// Worker started successfully — reset backoff
+				// Worker started successfully  - reset backoff
 				restart_delay = 0;
 				if (backoff_reset_timer) { clearTimeout(backoff_reset_timer); backoff_reset_timer = null; }
 			} else if (msg.type === 'publish') {
@@ -137,7 +137,7 @@ if (is_primary) {
 		// Single-process mode (no clustering)
 		start(host, parseInt(port, 10));
 	} else {
-		// Worker thread — register with acceptor, don't listen
+		// Worker thread  - register with acceptor, don't listen
 		parentPort.postMessage({ type: 'descriptor', descriptor: getDescriptor() });
 
 		parentPort.on('message', (msg) => {
