@@ -31,7 +31,7 @@ function esc(s) {
  * @param {{ path?: string, handler?: string }} [options]
  * @returns {import('vite').Plugin}
  */
-export default function uwsDev(options = {}) {
+export default function uws(options = {}) {
 	const wsPath = options.path || '/ws';
 
 	/** @type {WebSocketServer} */
@@ -363,3 +363,6 @@ export default function uwsDev(options = {}) {
 		}
 	};
 }
+
+/** @deprecated Use `uws()` instead. */
+export const uwsDev = uws;

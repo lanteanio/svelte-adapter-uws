@@ -1,6 +1,6 @@
 import type { Plugin } from 'vite';
 
-export interface UWSDevOptions {
+export interface UWSPluginOptions {
 	/**
 	 * WebSocket endpoint path. Must match the adapter config.
 	 * @default '/ws'
@@ -15,32 +15,28 @@ export interface UWSDevOptions {
 }
 
 /**
- * Vite plugin for dev mode WebSocket support.
+ * Vite plugin for svelte-adapter-uws.
  *
- * Add this to your `vite.config.js` so the client store and
- * `event.platform` work during development:
+ * Required when using WebSockets. Handles two things:
+ * - Dev: spins up a WebSocket server so `event.platform` works during `npm run dev`
+ * - Build: injects `hooks.ws` into Vite's SSR pipeline so `$lib`, `$env`, and `$app` resolve correctly
  *
  * ```js
  * import { sveltekit } from '@sveltejs/kit/vite';
- * import uwsDev from 'svelte-adapter-uws/vite';
+ * import uws from 'svelte-adapter-uws/vite';
  *
  * export default {
- *   plugins: [sveltekit(), uwsDev()]
+ *   plugins: [sveltekit(), uws()]
  * };
  * ```
- *
- * That's it - `event.platform` works identically in dev and production:
- *
- * ```js
- * export async function POST({ platform }) {
- *   platform.publish('todos', 'created', todo);
- * }
- * ```
- *
- * The adapter's `emulate()` hook provides `event.platform` in dev
- * using the platform object created by this Vite plugin.
  */
-export default function uwsDev(options?: UWSDevOptions): Plugin;
+export default function uws(options?: UWSPluginOptions): Plugin;
+
+/** @deprecated Use `uws()` instead. */
+export { uws as uwsDev };
+
+/** @deprecated Use `UWSPluginOptions` instead. */
+export type UWSDevOptions = UWSPluginOptions;
 
 declare global {
 	/** Dev-mode platform object - set by the Vite plugin. Same API as production `event.platform`. */

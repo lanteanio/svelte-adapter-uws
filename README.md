@@ -168,20 +168,22 @@ export default {
 
 That's it. This gives you a pub/sub WebSocket server at `/ws` with no authentication. Any client can connect, subscribe to topics, and receive messages.
 
-### Step 2: Add the Vite plugin
+### Step 2: Add the Vite plugin (required)
 
-The Vite plugin does two things:
+The Vite plugin is **required** when using WebSockets. It does two things:
 
 1. **Dev mode** - spins up a WebSocket server so `event.platform` works during `npm run dev`
-2. **Production builds** - runs your `hooks.ws` file through the same Vite pipeline as the rest of your server code, so `$lib`, `$env`, and `$app` imports work correctly
+2. **Production builds** - runs your `hooks.ws` file through Vite's pipeline so `$lib`, `$env`, and `$app` imports resolve correctly
+
+Without it, your `hooks.ws` file won't be able to import from `$lib` or use `$env` variables, and `event.platform` won't work in dev.
 
 **vite.config.js**
 ```js
 import { sveltekit } from '@sveltejs/kit/vite';
-import uwsDev from 'svelte-adapter-uws/vite';
+import uws from 'svelte-adapter-uws/vite';
 
 export default {
-  plugins: [sveltekit(), uwsDev()]
+  plugins: [sveltekit(), uws()]
 };
 ```
 
@@ -259,25 +261,17 @@ The client store automatically uses `wss://` when the page is served over HTTPS 
 
 ### `npm run dev` - works (with the Vite plugin)
 
-Development works as expected. The Vite plugin (`svelte-adapter-uws/vite`) spins up a `ws` WebSocket server alongside Vite's dev server, so your client store and `event.platform` work identically to production.
-
-The same plugin also handles production builds - it runs your `hooks.ws` file through the Vite pipeline so that `$lib`, `$env`, and `$app` imports are resolved correctly and shared with the rest of your server code.
+The Vite plugin is required for WebSocket support in both dev and production (see [Step 2](#step-2-add-the-vite-plugin-required)). It spins up a `ws` WebSocket server alongside Vite's dev server, so your client store and `event.platform` work identically to production.
 
 **vite.config.js**
 ```js
 import { sveltekit } from '@sveltejs/kit/vite';
-import uwsDev from 'svelte-adapter-uws/vite';
+import uws from 'svelte-adapter-uws/vite';
 
 export default {
-  plugins: [sveltekit(), uwsDev()]
+  plugins: [sveltekit(), uws()]
 };
 ```
-
-Without the Vite plugin:
-- HTTP routes work fine
-- `event.platform` is `undefined` in dev - any code calling `platform.publish()` will throw
-- The client store will try to connect to `/ws` in dev and fail silently (auto-reconnect will keep trying)
-- Production builds will fall back to a limited bundler that only resolves `$lib` (not `$env` or `$app`)
 
 ### `npm run preview` - WebSockets don't work
 
@@ -1304,10 +1298,10 @@ export default {
 **vite.config.js**
 ```js
 import { sveltekit } from '@sveltejs/kit/vite';
-import uwsDev from 'svelte-adapter-uws/vite';
+import uws from 'svelte-adapter-uws/vite';
 
 export default {
-  plugins: [sveltekit(), uwsDev()]
+  plugins: [sveltekit(), uws()]
 };
 ```
 
@@ -1388,10 +1382,10 @@ You need the Vite plugin. Without it, there's no WebSocket server running during
 **vite.config.js**
 ```js
 import { sveltekit } from '@sveltejs/kit/vite';
-import uwsDev from 'svelte-adapter-uws/vite';
+import uws from 'svelte-adapter-uws/vite';
 
 export default {
-  plugins: [sveltekit(), uwsDev()]
+  plugins: [sveltekit(), uws()]
 };
 ```
 
@@ -1406,7 +1400,7 @@ This means `event.platform` is `undefined`. Two possible causes:
 
 **Cause 1: Missing Vite plugin in dev mode**
 
-Same fix as above - add `uwsDev()` to your `vite.config.js`.
+Same fix as above - add `uws()` to your `vite.config.js`.
 
 **Cause 2: Calling `platform` on the client side**
 

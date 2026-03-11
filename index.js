@@ -92,12 +92,15 @@ export default function (opts = {}) {
 					}
 
 					if (handlerFile) {
-						// Bundle through esbuild to resolve $lib and handle TypeScript.
-						// This is the fallback path - the Vite plugin approach is preferred
-						// because it shares modules with the server bundle and resolves
-						// all SvelteKit aliases ($env, $app) natively.
+						// Bundle through esbuild to resolve SvelteKit aliases and handle TS.
+						// This is the fallback path - the Vite plugin is preferred because
+						// it shares modules with the server bundle (no duplication).
 						const esbuild = await import('esbuild');
+						const { loadEnv } = await import('vite');
 						const libDir = path.resolve(builder.config.kit.files?.lib || 'src/lib');
+						const publicPrefix = builder.config.kit.env?.publicPrefix ?? 'PUBLIC_';
+						const allEnv = loadEnv('production', process.cwd(), '');
+						const version = builder.config.kit.version?.name ?? '';
 
 						await esbuild.build({
 							entryPoints: [path.resolve(handlerFile)],
@@ -106,13 +109,37 @@ export default function (opts = {}) {
 							platform: 'node',
 							outfile: `${tmp}/ws-handler.js`,
 							alias: { '$lib': libDir },
-							packages: 'external'
+							packages: 'external',
+							plugins: [{
+								name: 'sveltekit-virtual-modules',
+								setup(build) {
+									build.onResolve({ filter: /^\$(env|app)\// }, (args) => ({
+										path: args.path,
+										namespace: 'sveltekit'
+									}));
+									build.onLoad({ filter: /.*/, namespace: 'sveltekit' }, (args) => {
+										if (args.path === '$app/environment') {
+											return { contents: `export const dev = false;\nexport const building = false;\nexport const version = ${JSON.stringify(version)};` };
+										}
+										const isPublic = args.path.includes('/public');
+										const isStatic = args.path.includes('/static');
+										if (!isStatic) {
+											return { contents: 'export const env = process.env;' };
+										}
+										const entries = Object.entries(allEnv).filter(([k]) =>
+											(isPublic ? k.startsWith(publicPrefix) : !k.startsWith(publicPrefix))
+											&& /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(k)
+										);
+										return { contents: entries.map(([k, v]) => `export const ${k} = ${JSON.stringify(v)};`).join('\n') || 'export {};' };
+									});
+								}
+							}]
 						});
 						builder.log.minor(`WebSocket handler: ${handlerFile} (esbuild fallback)`);
 						builder.log.warn(
-							'Add the Vite plugin for full SvelteKit alias support in hooks.ws:\n' +
-							"  import uwsDev from 'svelte-adapter-uws/vite';\n" +
-							'  export default { plugins: [sveltekit(), uwsDev()] };'
+							'Add the Vite plugin to share modules between hooks.ws and the server bundle:\n' +
+							"  import uws from 'svelte-adapter-uws/vite';\n" +
+							'  export default { plugins: [sveltekit(), uws()] };'
 						);
 					} else {
 						// No handler found - use built-in default (subscribe/unsubscribe only)
@@ -232,8 +259,8 @@ export default function (opts = {}) {
 					// helpful proxy that throws only when actually used
 					const msg =
 						'WebSocket platform not available in dev. Add the Vite plugin to your vite.config.js:\n\n' +
-						"  import uwsDev from 'svelte-adapter-uws/vite';\n" +
-						'  export default { plugins: [sveltekit(), uwsDev()] };';
+						"  import uws from 'svelte-adapter-uws/vite';\n" +
+						'  export default { plugins: [sveltekit(), uws()] };';
 					return new Proxy(/** @type {any} */ ({}), {
 						get(_, prop) {
 							if (typeof prop === 'symbol' || prop === 'then') return undefined;
