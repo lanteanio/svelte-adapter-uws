@@ -87,24 +87,21 @@ export default function (opts = {}) {
 				}
 
 				if (handlerFile) {
-					if (handlerFile.endsWith('.ts')) {
-						// TypeScript needs transpilation - Rollup can't handle .ts natively.
-						// esbuild is always available (transitive dep via vite -> @sveltejs/kit).
-						const { transform } = await import('esbuild');
-						const tsSource = readFileSync(handlerFile, 'utf8');
-						const { code } = await transform(tsSource, {
-							loader: 'ts',
-							format: 'esm',
-							sourcefile: handlerFile
-						});
-						writeFileSync(`${tmp}/ws-handler.js`, code);
-					} else {
-						const handlerPath = path.resolve(handlerFile).replace(/\\/g, '/');
-						writeFileSync(
-							`${tmp}/ws-handler.js`,
-							`export * from '${handlerPath}';\n`
-						);
-					}
+					// Bundle through esbuild to resolve SvelteKit aliases ($lib etc.)
+					// and handle TypeScript. Without this, $lib imports survive into
+					// the Rollup step which doesn't know about SvelteKit aliases.
+					const esbuild = await import('esbuild');
+					const libDir = path.resolve(builder.config.kit.files?.lib || 'src/lib');
+
+					await esbuild.build({
+						entryPoints: [path.resolve(handlerFile)],
+						bundle: true,
+						format: 'esm',
+						platform: 'node',
+						outfile: `${tmp}/ws-handler.js`,
+						alias: { '$lib': libDir },
+						packages: 'external'
+					});
 					builder.log.minor(`WebSocket handler: ${handlerFile}`);
 				} else {
 					// No handler found - use built-in default (subscribe/unsubscribe only)
