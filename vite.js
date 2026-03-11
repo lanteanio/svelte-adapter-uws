@@ -310,7 +310,7 @@ export default function uws(options = {}) {
 				wsWrappers.set(ws, wrapped);
 
 				// Call user open handler
-				userHandlers.open?.(wrapped);
+				userHandlers.open?.(wrapped, { platform });
 
 				ws.on('message', async (raw, isBinary) => {
 					// Convert to ArrayBuffer (matching uWS interface)
@@ -324,7 +324,7 @@ export default function uws(options = {}) {
 						try {
 							const msg = JSON.parse(buf.toString());
 							if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
-								if (userHandlers.subscribe && userHandlers.subscribe(wrapped, msg.topic) === false) {
+								if (userHandlers.subscribe && userHandlers.subscribe(wrapped, msg.topic, { platform }) === false) {
 									return;
 								}
 								subscriptions.get(ws)?.add(msg.topic);
@@ -342,14 +342,14 @@ export default function uws(options = {}) {
 					// Delegate to user handler
 					await handlerReady;
 					if (userHandlers.message) {
-						userHandlers.message(wrapped, arrayBuffer, !!isBinary);
+						userHandlers.message(wrapped, { data: arrayBuffer, isBinary: !!isBinary, platform });
 					}
 				});
 
 				ws.on('close', (code, reason) => {
 					const reasonBuf = reason || Buffer.alloc(0);
 					const reasonAB = reasonBuf.buffer.slice(reasonBuf.byteOffset, reasonBuf.byteOffset + reasonBuf.byteLength);
-					userHandlers.close?.(wrapped, code, reasonAB);
+					userHandlers.close?.(wrapped, { code, message: reasonAB, platform });
 					connections.delete(ws);
 					subscriptions.delete(ws);
 					wsWrappers.delete(ws);

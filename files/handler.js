@@ -836,7 +836,7 @@ if (WS_ENABLED) {
 
 		open: (ws) => {
 			wsConnections.add(ws);
-			wsModule.open?.(ws);
+			wsModule.open?.(ws, { platform });
 		},
 
 		message: (ws, message, isBinary) => {
@@ -851,7 +851,7 @@ if (WS_ENABLED) {
 					const msg = JSON.parse(Buffer.from(message).toString());
 					if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
 						// If a subscribe hook exists, let it gate access
-						if (wsModule.subscribe && wsModule.subscribe(ws, msg.topic) === false) {
+						if (wsModule.subscribe && wsModule.subscribe(ws, msg.topic, { platform }) === false) {
 							return;
 						}
 						ws.subscribe(msg.topic);
@@ -866,14 +866,14 @@ if (WS_ENABLED) {
 				}
 			}
 			// Delegate everything else to the user's handler (if provided)
-			wsModule.message?.(ws, message, isBinary);
+			wsModule.message?.(ws, { data: message, isBinary, platform });
 		},
 
-		drain: wsModule.drain || undefined,
+		drain: wsModule.drain ? (ws) => wsModule.drain(ws, { platform }) : undefined,
 
 		close: (ws, code, message) => {
 			wsConnections.delete(ws);
-			wsModule.close?.(ws, code, message);
+			wsModule.close?.(ws, { code, message, platform });
 		},
 
 		maxPayloadLength: wsOptions.maxPayloadLength,

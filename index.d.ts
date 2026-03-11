@@ -190,11 +190,55 @@ export interface UpgradeContext {
 }
 
 /**
+ * Context passed to `open` and `drain` handlers.
+ */
+export interface OpenContext {
+	/** The platform API - publish, send, topic helpers, etc. */
+	platform: Platform;
+}
+
+/**
+ * Context passed to the `message` handler.
+ */
+export interface MessageContext {
+	/** The raw message data. */
+	data: ArrayBuffer;
+	/** Whether the message is binary. */
+	isBinary: boolean;
+	/** The platform API - publish, send, topic helpers, etc. */
+	platform: Platform;
+}
+
+/**
+ * Context passed to the `close` handler.
+ */
+export interface CloseContext {
+	/** The WebSocket close code. */
+	code: number;
+	/** The close reason (as ArrayBuffer). */
+	message: ArrayBuffer;
+	/** The platform API - publish, send, topic helpers, etc. */
+	platform: Platform;
+}
+
+/**
+ * Context passed to the `subscribe` handler.
+ */
+export interface SubscribeContext {
+	/** The platform API - publish, send, topic helpers, etc. */
+	platform: Platform;
+}
+
+/**
  * Shape of the user's WebSocket handler module.
  *
  * Create a file (e.g. `src/lib/server/websocket.js`) and export any
  * of these functions. All are optional - the built-in handler already
  * handles subscribe/unsubscribe for the client store.
+ *
+ * Every hook receives `(ws, context)` where context always includes `platform`
+ * plus any hook-specific fields. This gives you full access to publish, send,
+ * and topic helpers directly in your WebSocket hooks.
  *
  * @example
  * ```js
@@ -207,8 +251,13 @@ export interface UpgradeContext {
  *   return { userId: user.id }; // attach data to socket
  * }
  *
- * export function open(ws) {
+ * export function open(ws, { platform }) {
  *   ws.subscribe(`user:${ws.getUserData().userId}`);
+ *   platform.topic('users').increment();
+ * }
+ *
+ * export function close(ws, { platform }) {
+ *   platform.topic('users').decrement();
  * }
  * ```
  */
@@ -225,7 +274,7 @@ export interface WebSocketHandler<UserData = unknown> {
 	upgrade?: (ctx: UpgradeContext) => UserData | false | Promise<UserData | false>;
 
 	/** Called when a WebSocket connection is established. */
-	open?: (ws: WebSocket<UserData>) => void;
+	open?: (ws: WebSocket<UserData>, ctx: OpenContext) => void;
 
 	/**
 	 * Called when a message is received.
@@ -234,7 +283,7 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * handled automatically before this is called. You only need this for
 	 * custom application-level messages.
 	 */
-	message?: (ws: WebSocket<UserData>, data: ArrayBuffer, isBinary: boolean) => void;
+	message?: (ws: WebSocket<UserData>, ctx: MessageContext) => void;
 
 	/**
 	 * Called when a client tries to subscribe to a topic.
@@ -246,22 +295,22 @@ export interface WebSocketHandler<UserData = unknown> {
 	 *
 	 * @example
 	 * ```js
-	 * export function subscribe(ws, topic) {
+	 * export function subscribe(ws, topic, { platform }) {
 	 *   const { role } = ws.getUserData();
 	 *   if (topic.startsWith('admin') && role !== 'admin') return false;
 	 * }
 	 * ```
 	 */
-	subscribe?: (ws: WebSocket<UserData>, topic: string) => boolean | void;
+	subscribe?: (ws: WebSocket<UserData>, topic: string, ctx: SubscribeContext) => boolean | void;
 
 	/**
 	 * Called when backpressure has drained (buffered data was sent).
 	 * Use this for flow control when sending large or frequent messages.
 	 */
-	drain?: (ws: WebSocket<UserData>) => void;
+	drain?: (ws: WebSocket<UserData>, ctx: OpenContext) => void;
 
 	/** Called when the connection closes. */
-	close?: (ws: WebSocket<UserData>, code: number, message: ArrayBuffer) => void;
+	close?: (ws: WebSocket<UserData>, ctx: CloseContext) => void;
 }
 
 // -- Platform type for event.platform ----------------------------------------
@@ -310,8 +359,8 @@ export interface Platform {
 	 * @example
 	 * ```js
 	 * // In hooks.ws.js - reply to sender:
-	 * export function message(ws, rawData) {
-	 *   const msg = JSON.parse(Buffer.from(rawData).toString());
+	 * export function message(ws, { data }) {
+	 *   const msg = JSON.parse(Buffer.from(data).toString());
 	 *   ws.send(JSON.stringify({ topic: 'echo', event: 'reply', data: { got: msg } }));
 	 * }
 	 * ```

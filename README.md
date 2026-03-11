@@ -455,7 +455,7 @@ export async function upgrade({ headers, cookies, url, remoteAddress }) {
 }
 
 // Called when a connection is established
-export function open(ws) {
+export function open(ws, { platform }) {
   const { userId } = ws.getUserData();
   console.log(`User ${userId} connected`);
 
@@ -466,27 +466,27 @@ export function open(ws) {
 // Called when a message is received
 // Note: subscribe/unsubscribe messages from the client store are
 // handled automatically BEFORE this function is called
-export function message(ws, data, isBinary) {
+export function message(ws, { data, isBinary }) {
   const msg = JSON.parse(Buffer.from(data).toString());
   console.log('Got message:', msg);
 }
 
 // Called when a client tries to subscribe to a topic (optional)
 // Return false to deny the subscription
-export function subscribe(ws, topic) {
+export function subscribe(ws, topic, { platform }) {
   const { role } = ws.getUserData();
   // Only admins can subscribe to admin topics
   if (topic.startsWith('admin') && role !== 'admin') return false;
 }
 
 // Called when the connection closes
-export function close(ws, code, message) {
+export function close(ws, { code, message, platform }) {
   const { userId } = ws.getUserData();
   console.log(`User ${userId} disconnected`);
 }
 
 // Called when backpressure has drained (optional, for flow control)
-export function drain(ws) {
+export function drain(ws, { platform }) {
   // You can resume sending large messages here
 }
 ```
@@ -583,7 +583,7 @@ export async function upgrade({ cookies }) {
   return { userId: user.id, name: user.name, role: user.role };
 }
 
-export function open(ws) {
+export function open(ws, { platform }) {
   const { userId, role } = ws.getUserData();
   console.log(`${userId} connected (${role})`);
 
@@ -592,7 +592,7 @@ export function open(ws) {
   if (role === 'admin') ws.subscribe('admin');
 }
 
-export function close(ws) {
+export function close(ws, { platform }) {
   const { userId } = ws.getUserData();
   console.log(`${userId} disconnected`);
 }
@@ -653,7 +653,7 @@ The WebSocket upgrade is an HTTP request. The browser treats it like any other r
 
 ## Platform API (`event.platform`)
 
-Available in server hooks, load functions, form actions, and API routes.
+Available in server hooks, load functions, form actions, API routes, and WebSocket hooks (`hooks.ws`).
 
 ### `platform.publish(topic, event, data)`
 
@@ -686,12 +686,12 @@ This is useful when you store WebSocket references (e.g. in a `Map`) and need to
 // src/hooks.ws.js - store connections by user ID
 const userSockets = new Map();
 
-export function open(ws) {
+export function open(ws, { platform }) {
   const { userId } = ws.getUserData();
   userSockets.set(userId, ws);
 }
 
-export function close(ws) {
+export function close(ws, { platform }) {
   const { userId } = ws.getUserData();
   userSockets.delete(userId);
 }
@@ -714,13 +714,15 @@ export async function POST({ request, platform }) {
 }
 ```
 
-To reply directly from inside `hooks.ws.js` (where `platform` isn't available), use `ws.send()` with the envelope format:
+You can also reply directly from inside `hooks.ws.js` using `platform.send()` or `ws.send()` with the envelope format:
 
 ```js
 // src/hooks.ws.js
-export function message(ws, rawData) {
-  const msg = JSON.parse(Buffer.from(rawData).toString());
-  // Reply to sender using the same envelope format the client store expects
+export function message(ws, { data, platform }) {
+  const msg = JSON.parse(Buffer.from(data).toString());
+  // Using platform.send (recommended):
+  platform.send(ws, 'echo', 'reply', { got: msg });
+  // Or using ws.send with manual envelope:
   ws.send(JSON.stringify({ topic: 'echo', event: 'reply', data: { got: msg } }));
 }
 ```
@@ -980,10 +982,17 @@ Handles `set`, `increment`, and `decrement` events:
 <p>{$online} users online</p>
 ```
 
-Server:
+Server (from any hook or handler that has `platform`):
 ```js
-platform.topic('online-users').increment();
-platform.topic('online-users').decrement();
+// In hooks.ws.js - track connected users:
+export function open(ws, { platform }) {
+  platform.topic('online-users').increment();
+}
+export function close(ws, { platform }) {
+  platform.topic('online-users').decrement();
+}
+
+// Or from a SvelteKit handler:
 platform.topic('online-users').set(42);
 ```
 
