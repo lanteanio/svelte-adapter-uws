@@ -30,6 +30,7 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 - [Authentication](#authentication)
 - [Platform API (`event.platform`)](#platform-api-eventplatform)
 - [Client store API](#client-store-api)
+- [Seeding initial state](#seeding-initial-state)
 - [TypeScript setup](#typescript-setup)
 - [Svelte 4 support](#svelte-4-support)
 - [Deploying with Docker](#deploying-with-docker)
@@ -996,6 +997,8 @@ export function close(ws, { platform }) {
 platform.topic('online-users').set(42);
 ```
 
+> **Heads up:** The increment/decrement pattern above has a subtle race condition - a newly connected client won't see the current count because its `subscribe` message hasn't been processed yet when `open` fires. See [Seeding initial state](#seeding-initial-state) for the fix.
+
 ### `once(topic, event?, options?)` - wait for one event
 
 Returns a promise that resolves with the first matching event and then unsubscribes:
@@ -1082,6 +1085,78 @@ ws.sendQueued({ type: 'important', data: '...' });
 
 // Permanent disconnect (won't auto-reconnect)
 ws.close();
+```
+
+---
+
+## Seeding initial state
+
+When a client connects, there's a window between the WebSocket opening and the client's topic subscriptions being processed. Any `platform.publish()` calls that happen during `open` will be missed by the connecting client, because it hasn't subscribed to those topics yet.
+
+This matters most with `count()`. If your `open` hook does `platform.topic('online').set(total)`, the connecting client won't see it - the `set` event is broadcast before the client's `subscribe` message arrives.
+
+The fix is to use the `subscribe` hook instead of (or alongside) `open` to send the current value directly to the subscribing client:
+
+```js
+// src/hooks.ws.js
+let online = 0;
+
+export function open(ws, { platform }) {
+  online++;
+  platform.topic('online').set(online); // broadcasts to already-subscribed clients
+}
+
+export function subscribe(ws, topic, { platform }) {
+  // When a client subscribes to 'online', send it the current count
+  if (topic === 'online') {
+    platform.send(ws, 'online', 'set', online);
+  }
+}
+
+export function close(ws, { platform }) {
+  online--;
+  platform.topic('online').set(online);
+}
+```
+
+```svelte
+<!-- src/routes/+page.svelte -->
+<script>
+  import { count } from 'svelte-adapter-uws/client';
+
+  const online = count('online');
+</script>
+
+<p>{$online} online</p>
+```
+
+The `subscribe` hook fires at the right moment - after the client is actually subscribed to the topic. `platform.send()` sends only to that one client, so it gets the current value without waiting for the next broadcast.
+
+This same pattern works for any topic where new subscribers need to see the current state. For a CRUD list, you could send the full dataset in `subscribe`:
+
+```js
+// src/hooks.ws.js
+export async function subscribe(ws, topic, { platform }) {
+  if (topic === 'todos') {
+    const todos = await db.getTodos();
+    for (const todo of todos) {
+      platform.send(ws, 'todos', 'created', todo);
+    }
+  }
+}
+```
+
+```svelte
+<script>
+  import { crud } from 'svelte-adapter-uws/client';
+
+  // No need for load() data - the subscribe hook seeds the list
+  const todos = crud('todos');
+</script>
+
+{#each $todos as todo (todo.id)}
+  <p>{todo.text}</p>
+{/each}
 ```
 
 ---
