@@ -60,7 +60,7 @@ if (is_primary) {
 				// Worker started successfully  - reset backoff
 				restart_delay = 0;
 				if (backoff_reset_timer) { clearTimeout(backoff_reset_timer); backoff_reset_timer = null; }
-				// Start listening once the first worker is ready to handle requests
+				// Start (or resume) listening once a worker is ready to handle requests
 				if (!listening) {
 					listening = true;
 					const portNum = parseInt(port, 10);
@@ -89,6 +89,15 @@ if (is_primary) {
 			}
 			workers.delete(worker);
 			if (!shutting_down) {
+				// If no workers have descriptors, stop accepting connections so
+				// clients get a clean connection-refused instead of an empty app.
+				const has_live_worker = [...workers.values()].some(d => d !== null);
+				if (!has_live_worker && listen_socket) {
+					uWS.us_listen_socket_close(listen_socket);
+					listen_socket = null;
+					listening = false;
+					console.log('All workers down, acceptor paused until a replacement is ready');
+				}
 				restart_delay = restart_delay ? Math.min(restart_delay * 2, RESTART_DELAY_MAX) : 100;
 				console.log(`Worker thread ${worker.threadId} exited with code ${code}, restarting in ${restart_delay}ms...`);
 				backoff_reset_timer = setTimeout(() => { spawn_worker(); }, restart_delay);

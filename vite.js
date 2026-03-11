@@ -184,6 +184,9 @@ export default function uws(options = {}) {
 	/** @type {string | null} Resolved absolute path of the WS handler file */
 	let resolvedHandlerPath = null;
 
+	/** True when a handler file was found but failed to load - reject upgrades */
+	let handlerFailed = false;
+
 	/**
 	 * Extract handler functions from a loaded module.
 	 * @param {Record<string, any>} mod
@@ -248,7 +251,11 @@ export default function uws(options = {}) {
 
 			if (handlerPath) {
 				resolvedHandlerPath = handlerPath;
-				handlerReady = server.ssrLoadModule(handlerPath).then(applyHandlers).catch((err) => {
+				handlerReady = server.ssrLoadModule(handlerPath).then((mod) => {
+					handlerFailed = false;
+					applyHandlers(mod);
+				}).catch((err) => {
+					handlerFailed = true;
 					console.error(`[adapter-uws] Failed to load WebSocket handler '${options.handler}':`, err);
 				});
 			} else {
@@ -261,9 +268,11 @@ export default function uws(options = {}) {
 						resolvedHandlerPath = fullPath;
 						try {
 							const mod = await server.ssrLoadModule(fullPath);
+							handlerFailed = false;
 							applyHandlers(mod);
 							break;
 						} catch (err) {
+							handlerFailed = true;
 							console.error(`[adapter-uws] Error loading '${candidate}':`, err.message);
 							break;
 						}
@@ -278,6 +287,19 @@ export default function uws(options = {}) {
 				// If user has an upgrade handler, run it for auth
 				let userData = {};
 				await handlerReady;
+
+				// If the handler file exists but failed to load, reject the
+				// upgrade so a broken auth handler does not silently degrade
+				// to open access.
+				if (handlerFailed) {
+					socket.write(
+						'HTTP/1.1 500 Internal Server Error\r\n' +
+						'Content-Type: text/plain\r\n\r\n' +
+						'WebSocket handler failed to load - check the server console'
+					);
+					socket.destroy();
+					return;
+				}
 
 				if (userHandlers.upgrade) {
 					/** @type {Record<string, string>} */
@@ -383,6 +405,7 @@ export default function uws(options = {}) {
 			// cached module instantly when nothing was invalidated, so this is cheap.
 			// We compare function references to detect actual changes.
 			handlerReady = server.ssrLoadModule(resolvedHandlerPath).then((mod) => {
+				handlerFailed = false;
 				if (mod.upgrade !== userHandlers.upgrade ||
 					mod.open !== userHandlers.open ||
 					mod.message !== userHandlers.message ||
@@ -393,6 +416,7 @@ export default function uws(options = {}) {
 					console.log('[adapter-uws] WebSocket handler reloaded');
 				}
 			}).catch((err) => {
+				handlerFailed = true;
 				console.error('[adapter-uws] Failed to reload WebSocket handler:', err.message);
 			});
 		}

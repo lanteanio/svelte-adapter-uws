@@ -190,6 +190,12 @@ const host_header = env('HOST_HEADER', '').toLowerCase();
 const port_header = env('PORT_HEADER', '').toLowerCase();
 const body_size_limit = parse_as_bytes(env('BODY_SIZE_LIMIT', '512K'));
 
+if (isNaN(xff_depth) || xff_depth < 1) {
+	throw new Error(
+		`Invalid XFF_DEPTH: '${env('XFF_DEPTH', '1')}'. Must be a positive integer.`
+	);
+}
+
 if (isNaN(body_size_limit)) {
 	throw new Error(
 		`Invalid BODY_SIZE_LIMIT: '${env('BODY_SIZE_LIMIT')}'. Please provide a numeric value.`
@@ -354,6 +360,7 @@ function get_origin(headers) {
  * @returns {ReadableStream<Uint8Array>}
  */
 function readBody(res, limit, signal) {
+	let initialized = false;
 	return new ReadableStream({
 		start(controller) {
 			if (signal.aborted) {
@@ -363,6 +370,13 @@ function readBody(res, limit, signal) {
 			signal.addEventListener('abort', () => {
 				try { controller.error(new Error('Request aborted')); } catch { /* already closed */ }
 			}, { once: true });
+		},
+		pull(controller) {
+			// Lazy: only register res.onData() when SvelteKit actually reads
+			// the body. For redirects / actions that ignore the body, this
+			// avoids the onData registration + per-chunk copy entirely.
+			if (initialized) return;
+			initialized = true;
 
 			let size = 0;
 			let done = false;
@@ -539,7 +553,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state, abortS
 
 		const request = new Request(base_origin + url, {
 			method,
-			headers: Object.entries(headers),
+			headers,
 			body,
 			// @ts-expect-error
 			duplex: 'half'
@@ -560,9 +574,6 @@ async function handleSSR(res, method, url, headers, remoteAddress, state, abortS
 					if (address_header === 'x-forwarded-for') {
 						const addresses = value.split(',');
 
-						if (xff_depth < 1) {
-							throw new Error(`${ENV_PREFIX + 'XFF_DEPTH'} must be a positive integer`);
-						}
 						if (xff_depth > addresses.length) {
 							throw new Error(
 								`${ENV_PREFIX + 'XFF_DEPTH'} is ${xff_depth}, but only found ${addresses.length} addresses`
@@ -920,7 +931,7 @@ if (WS_ENABLED) {
 			if (!isBinary && message.byteLength < 512 &&
 				(new Uint8Array(message))[3] === 0x79 /* 'y' in {"type" */) {
 				try {
-					const msg = JSON.parse(Buffer.from(message).toString());
+					const msg = JSON.parse(textDecoder.decode(message));
 					if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
 						// If a subscribe hook exists, let it gate access
 						if (wsModule.subscribe && wsModule.subscribe(ws, msg.topic, { platform }) === false) {

@@ -2,6 +2,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
 	test: {
-		pool: 'vmForks'
+		pool: 'vmForks',
+		include: ['test/**/*.test.js']
 	}
 });
