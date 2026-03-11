@@ -154,7 +154,7 @@ export interface WebSocketOptions {
 	/**
 	 * Timeout in seconds for async `upgrade` handlers.
 	 * If the upgrade hook doesn't resolve within this time, the connection
-	 * is rejected with 504 Gateway Timeout.
+	 * is rejected with 504 Gateway Timeout. Set to `0` to disable.
 	 * @default 10
 	 */
 	upgradeTimeout?: number;

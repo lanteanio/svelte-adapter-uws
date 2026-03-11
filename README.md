@@ -352,7 +352,7 @@ adapter({
     // Automatically send pings to keep the connection alive
     sendPingsAutomatically: true, // default: true
 
-    // Seconds before an async upgrade handler is rejected with 504
+    // Seconds before an async upgrade handler is rejected with 504 (0 to disable)
     upgradeTimeout: 10, // default: 10
 
     // Allowed origins for WebSocket connections

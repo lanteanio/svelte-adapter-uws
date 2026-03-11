@@ -58,7 +58,8 @@ describe('adapter options', () => {
 				maxBackpressure: websocket?.maxBackpressure ?? 1024 * 1024,
 				sendPingsAutomatically: websocket?.sendPingsAutomatically ?? true,
 				compression: websocket?.compression ?? false,
-				allowedOrigins: websocket?.allowedOrigins ?? 'same-origin'
+				allowedOrigins: websocket?.allowedOrigins ?? 'same-origin',
+				upgradeTimeout: websocket?.upgradeTimeout ?? 10
 			};
 
 			expect(wsPath).toBe('/ws');
@@ -68,6 +69,19 @@ describe('adapter options', () => {
 			expect(wsOpts.sendPingsAutomatically).toBe(true);
 			expect(wsOpts.compression).toBe(false);
 			expect(wsOpts.allowedOrigins).toBe('same-origin');
+			expect(wsOpts.upgradeTimeout).toBe(10);
+		});
+
+		it('preserves upgradeTimeout: 0 through build-time defaults', () => {
+			// Build-time uses ?? so explicit 0 is preserved
+			const websocket = { upgradeTimeout: 0 };
+			const wsOpts = {
+				upgradeTimeout: websocket?.upgradeTimeout ?? 10
+			};
+			expect(wsOpts.upgradeTimeout).toBe(0);
+
+			// Runtime guard: timer should only be created for positive values
+			expect(wsOpts.upgradeTimeout > 0).toBe(false);
 		});
 
 		it('respects custom values', () => {

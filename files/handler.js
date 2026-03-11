@@ -869,18 +869,20 @@ if (WS_ENABLED) {
 
 			const cookies = parseCookies(headers['cookie']);
 
-			const upgradeTimeoutMs = (wsOptions.upgradeTimeout || 10) * 1000;
 			let timedOut = false;
-			const timer = setTimeout(() => {
-				timedOut = true;
-				if (!aborted) {
-					res.cork(() => {
-						res.writeStatus('504 Gateway Timeout');
-						res.writeHeader('content-type', 'text/plain');
-						res.end('Upgrade timed out');
-					});
-				}
-			}, upgradeTimeoutMs);
+			let timer;
+			if (wsOptions.upgradeTimeout > 0) {
+				timer = setTimeout(() => {
+					timedOut = true;
+					if (!aborted) {
+						res.cork(() => {
+							res.writeStatus('504 Gateway Timeout');
+							res.writeHeader('content-type', 'text/plain');
+							res.end('Upgrade timed out');
+						});
+					}
+				}, wsOptions.upgradeTimeout * 1000);
+			}
 
 			Promise.resolve(wsModule.upgrade({ headers, cookies, url, remoteAddress }))
 				.then((userData) => {
