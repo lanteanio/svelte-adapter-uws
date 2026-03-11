@@ -60,6 +60,14 @@ function esc(s) {
 /** @type {Map<string, StaticEntry>} */
 const staticCache = new Map();
 
+/**
+ * Prerendered paths whose canonical URL has a trailing slash.
+ * Detected from the filesystem: about/index.html means trailingSlash: 'always',
+ * so /about should redirect to /about/ and /about/ is served directly.
+ * @type {Set<string>}
+ */
+const prerenderedDirStyle = new Set();
+
 const textDecoder = new TextDecoder();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -118,15 +126,34 @@ function cacheDir(dir, urlPrefix, immutable) {
 
 		staticCache.set(urlPath, entry);
 
-		// Prerendered pages are written as index.html or about/index.html, but
-		// SvelteKit's builder.prerendered.paths lists them as "/" and "/about".
-		// Register the clean pathname alias so tryPrerendered() can find them.
+		// Prerendered pages: register clean pathname aliases for the static fast
+		// path and tryPrerendered().
+		//
+		// SvelteKit writes directory-style output (about/index.html) when
+		// trailingSlash is 'always', and file-style (about.html) otherwise.
+		// builder.prerendered.paths always lists "/about" (no trailing slash).
+		//
+		// For directory-style pages we register the trailing-slash form in
+		// staticCache (served on the fast path) and track the bare path in
+		// prerenderedDirStyle so tryPrerendered() can redirect /about -> /about/.
+		// For file-style pages we register the bare path (no trailing slash).
 		if (!immutable) {
 			if (relPath === 'index.html') {
-				staticCache.set(urlPrefix || '/', entry);
+				if (urlPrefix) {
+					// Base root with non-empty base: /base/ is canonical
+					staticCache.set(urlPrefix + '/', entry);
+					prerenderedDirStyle.add(urlPrefix);
+				} else {
+					// Site root: / is already canonical
+					staticCache.set('/', entry);
+				}
 			} else if (relPath.endsWith('/index.html')) {
-				staticCache.set(`${urlPrefix}/${relPath.slice(0, -'/index.html'.length)}`, entry);
+				// Directory-style: trailing slash is canonical
+				const cleanPath = `${urlPrefix}/${relPath.slice(0, -'/index.html'.length)}`;
+				staticCache.set(cleanPath + '/', entry);
+				prerenderedDirStyle.add(cleanPath);
 			} else if (relPath.endsWith('.html')) {
+				// File-style: bare path is canonical
 				staticCache.set(`${urlPrefix}/${relPath.slice(0, -'.html'.length)}`, entry);
 			}
 		}
@@ -435,6 +462,16 @@ function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, head
 	}
 
 	if (prerendered.has(decoded)) {
+		// Directory-style page: bare path is not canonical, redirect to trailing slash
+		if (prerenderedDirStyle.has(decoded)) {
+			const location = decoded + '/' + search;
+			res.cork(() => {
+				res.writeStatus('308 Permanent Redirect');
+				res.writeHeader('location', location);
+				res.end();
+			});
+			return true;
+		}
 		const entry = staticCache.get(decoded);
 		if (entry) {
 			serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly);
@@ -442,8 +479,19 @@ function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, head
 		}
 	}
 
+	// Check the alternate trailing-slash form
 	const alt = decoded.endsWith('/') ? decoded.slice(0, -1) : decoded + '/';
 	if (prerendered.has(alt)) {
+		// Request has trailing slash, prerendered path doesn't - if the prerendered
+		// path is directory-style, the trailing-slash form is canonical: serve it
+		if (prerenderedDirStyle.has(alt) && decoded.endsWith('/')) {
+			const entry = staticCache.get(decoded);
+			if (entry) {
+				serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly);
+				return true;
+			}
+		}
+		// Otherwise redirect to the prerendered path (the canonical form)
 		const location = alt + search;
 		res.cork(() => {
 			res.writeStatus('308 Permanent Redirect');

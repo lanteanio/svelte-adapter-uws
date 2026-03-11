@@ -3,13 +3,20 @@ import { writable } from 'svelte/store';
 /** @type {ReturnType<typeof createConnection> | null} */
 let singleton = null;
 
+/** @type {'explicit' | 'implicit' | ''} */
+let singletonCreatedBy = '';
+
 /**
  * Ensure the singleton connection exists.
  * @param {import('./client.js').ConnectOptions} [options]
+ * @param {boolean} [explicit]
  * @returns {ReturnType<typeof createConnection>}
  */
-function ensureConnection(options) {
-	if (!singleton) singleton = createConnection(options || {});
+function ensureConnection(options, explicit = false) {
+	if (!singleton) {
+		singletonCreatedBy = explicit ? 'explicit' : 'implicit';
+		singleton = createConnection(options || {});
+	}
 	return singleton;
 }
 
@@ -25,7 +32,14 @@ function ensureConnection(options) {
  * @returns {import('./client.js').WSConnection}
  */
 export function connect(options = {}) {
-	return ensureConnection(options);
+	if (singleton && singletonCreatedBy === 'implicit' && Object.keys(options).length > 0) {
+		console.warn(
+			'[ws] connect() was called with options, but the connection already exists ' +
+			'(created automatically by on(), status, or ready()). ' +
+			'Your options are ignored. Call connect() before using other client functions.'
+		);
+	}
+	return ensureConnection(options, true);
 }
 
 /**
@@ -554,6 +568,7 @@ function createConnection(options) {
 		ws?.close();
 		ws = null;
 		singleton = null;
+		singletonCreatedBy = '';
 		statusStore.set('closed');
 	}
 

@@ -39,6 +39,7 @@ if (is_primary) {
 	/** @type {Map<import('node:worker_threads').Worker, any>} */
 	const workers = new Map();
 	let shutting_down = false;
+	let listening = false;
 	let listen_socket = null;
 
 	// Exponential backoff for crash-looping workers
@@ -59,6 +60,20 @@ if (is_primary) {
 				// Worker started successfully  - reset backoff
 				restart_delay = 0;
 				if (backoff_reset_timer) { clearTimeout(backoff_reset_timer); backoff_reset_timer = null; }
+				// Start listening once the first worker is ready to handle requests
+				if (!listening) {
+					listening = true;
+					const portNum = parseInt(port, 10);
+					acceptorApp.listen(host, portNum, (socket) => {
+						if (socket) {
+							listen_socket = socket;
+							console.log(`Acceptor listening on ${is_tls ? 'https' : 'http'}://${host}:${portNum}`);
+						} else {
+							console.error(`Failed to listen on ${host}:${portNum}`);
+							process.exit(1);
+						}
+					});
+				}
 			} else if (msg.type === 'publish') {
 				// Relay pub/sub to all OTHER workers
 				for (const [w] of workers) {
@@ -91,22 +106,17 @@ if (is_primary) {
 
 	for (let i = 0; i < num; i++) spawn_worker();
 
-	const portNum = parseInt(port, 10);
-	acceptorApp.listen(host, portNum, (socket) => {
-		if (socket) {
-			listen_socket = socket;
-			console.log(`Acceptor listening on ${is_tls ? 'https' : 'http'}://${host}:${portNum}`);
-		} else {
-			console.error(`Failed to listen on ${host}:${portNum}`);
-			process.exit(1);
-		}
-	});
-
 	/** @param {'SIGINT' | 'SIGTERM'} reason */
 	function graceful_shutdown(reason) {
 		if (shutting_down) return;
 		shutting_down = true;
 		console.log(`Primary received ${reason}, shutting down ${workers.size} workers...`);
+
+		// Cancel any pending worker restart so we don't spawn during shutdown
+		if (backoff_reset_timer) {
+			clearTimeout(backoff_reset_timer);
+			backoff_reset_timer = null;
+		}
 
 		// Stop accepting new connections
 		if (listen_socket) {

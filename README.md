@@ -1052,7 +1052,9 @@ await ready();
 
 ### `connect(options?)` - power-user API
 
-Most users don't need this - `on()` and `status` auto-connect. Use `connect()` when you need `close()`, `send()`, or custom options:
+Most users don't need this - `on()` and `status` auto-connect. Use `connect()` when you need `close()`, `send()`, or custom options.
+
+**If you pass custom options** (like a non-default `path`), call `connect()` before any `on()`, `status`, `ready()`, or `once()` calls. Those functions auto-connect with defaults, and the connection is locked once created. A console warning will fire if your options are ignored due to ordering:
 
 ```js
 import { connect } from 'svelte-adapter-uws/client';

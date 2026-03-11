@@ -376,15 +376,25 @@ export default function uws(options = {}) {
 				console.log(`[adapter-uws] Client must match: connect({ path: '${wsPath}' })`);
 			}
 		},
-		handleHotUpdate({ file, server }) {
-			if (resolvedHandlerPath && path.resolve(file) === resolvedHandlerPath) {
-				handlerReady = server.ssrLoadModule(resolvedHandlerPath).then((mod) => {
+		handleHotUpdate({ server }) {
+			if (!resolvedHandlerPath) return;
+			// Vite invalidates a module and all its importers when a file changes.
+			// Re-load the handler on every HMR update - ssrLoadModule returns the
+			// cached module instantly when nothing was invalidated, so this is cheap.
+			// We compare function references to detect actual changes.
+			handlerReady = server.ssrLoadModule(resolvedHandlerPath).then((mod) => {
+				if (mod.upgrade !== userHandlers.upgrade ||
+					mod.open !== userHandlers.open ||
+					mod.message !== userHandlers.message ||
+					mod.close !== userHandlers.close ||
+					mod.drain !== userHandlers.drain ||
+					mod.subscribe !== userHandlers.subscribe) {
 					applyHandlers(mod);
 					console.log('[adapter-uws] WebSocket handler reloaded');
-				}).catch((err) => {
-					console.error('[adapter-uws] Failed to reload WebSocket handler:', err.message);
-				});
-			}
+				}
+			}).catch((err) => {
+				console.error('[adapter-uws] Failed to reload WebSocket handler:', err.message);
+			});
 		}
 	};
 }
