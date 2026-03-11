@@ -87,11 +87,15 @@ export default function (opts = {}) {
 				}
 
 				if (handlerFile) {
-					// Bundle through esbuild to resolve SvelteKit aliases ($lib etc.)
-					// and handle TypeScript. Without this, $lib imports survive into
-					// the Rollup step which doesn't know about SvelteKit aliases.
+					// Bundle through esbuild to resolve SvelteKit aliases ($lib, $env, $app)
+					// and handle TypeScript. Without this, these imports survive into
+					// the Rollup step which doesn't know about SvelteKit virtual modules.
 					const esbuild = await import('esbuild');
+					const { loadEnv } = await import('vite');
 					const libDir = path.resolve(builder.config.kit.files?.lib || 'src/lib');
+					const publicPrefix = builder.config.kit.env?.publicPrefix ?? 'PUBLIC_';
+					const allEnv = loadEnv('production', process.cwd(), '');
+					const version = builder.config.kit.version?.name ?? '';
 
 					await esbuild.build({
 						entryPoints: [path.resolve(handlerFile)],
@@ -100,7 +104,31 @@ export default function (opts = {}) {
 						platform: 'node',
 						outfile: `${tmp}/ws-handler.js`,
 						alias: { '$lib': libDir },
-						packages: 'external'
+						packages: 'external',
+						plugins: [{
+							name: 'sveltekit-virtual-modules',
+							setup(build) {
+								build.onResolve({ filter: /^\$(env|app)\// }, (args) => ({
+									path: args.path,
+									namespace: 'sveltekit'
+								}));
+								build.onLoad({ filter: /.*/, namespace: 'sveltekit' }, (args) => {
+									if (args.path === '$app/environment') {
+										return { contents: `export const dev = false;\nexport const building = false;\nexport const version = ${JSON.stringify(version)};` };
+									}
+									const isPublic = args.path.includes('/public');
+									const isStatic = args.path.includes('/static');
+									const entries = Object.entries(allEnv).filter(([k]) =>
+										isPublic ? k.startsWith(publicPrefix) : !k.startsWith(publicPrefix)
+									);
+									if (isStatic) {
+										return { contents: entries.map(([k, v]) => `export const ${k} = ${JSON.stringify(v)};`).join('\n') || 'export {};' };
+									}
+									// dynamic: read from process.env at runtime
+									return { contents: entries.map(([k]) => `export const ${k} = process.env[${JSON.stringify(k)}];`).join('\n') || 'export {};' };
+								});
+							}
+						}]
 					});
 					builder.log.minor(`WebSocket handler: ${handlerFile}`);
 				} else {
