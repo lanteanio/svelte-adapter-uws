@@ -40,21 +40,26 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 - [Seeding initial state](#seeding-initial-state)
 
 **Plugins**
-- [Replay (SSR gap)](#replay-plugin-ssr-gap)
-- [Presence](#presence-plugin)
-- [Typed channels](#typed-channels-plugin)
-- [Throttle/debounce](#throttledebounce-plugin)
+- [Replay (SSR gap)](#replay-ssr-gap)
+- [Presence](#presence)
+- [Typed channels](#typed-channels)
+- [Throttle/debounce](#throttledebounce)
 
 **Deployment & scaling**
 - [Deploying with Docker](#deploying-with-docker)
 - [Clustering](#clustering)
 - [Performance](#performance)
 
+**Examples**
+- [Full example: real-time todo list](#full-example-real-time-todo-list)
+
 **Help**
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 
 ---
+
+**Getting started**
 
 ## Installation
 
@@ -318,6 +323,8 @@ SSL_CERT=./cert.pem SSL_KEY=./key.pem PORT=443 node build
 
 ---
 
+**Configuration**
+
 ## Adapter options
 
 ```js
@@ -442,6 +449,56 @@ SSL_CERT=./cert.pem SSL_KEY=./key.pem PORT=443 HOST=0.0.0.0 BODY_SIZE_LIMIT=10M 
 ```
 
 ---
+
+## TypeScript setup
+
+Add the platform type to your `src/app.d.ts`:
+
+```ts
+import type { Platform as AdapterPlatform } from 'svelte-adapter-uws';
+
+declare global {
+  namespace App {
+    interface Platform extends AdapterPlatform {}
+  }
+}
+
+export {};
+```
+
+Now `event.platform.publish()`, `event.platform.topic()`, etc. are fully typed.
+
+---
+
+## Svelte 4 support
+
+This adapter supports both Svelte 4 and Svelte 5. All examples in this README use Svelte 5 syntax (`$props()`, runes). If you're on Svelte 4, here's how to translate:
+
+**Svelte 5 (used in examples)**
+```svelte
+<script>
+  import { crud } from 'svelte-adapter-uws/client';
+
+  let { data } = $props();
+  const todos = crud('todos', data.todos);
+</script>
+```
+
+**Svelte 4 equivalent**
+```svelte
+<script>
+  import { crud } from 'svelte-adapter-uws/client';
+
+  export let data;
+  const todos = crud('todos', data.todos);
+</script>
+```
+
+The only difference is how you receive props. The client store API (`on`, `crud`, `lookup`, `latest`, `count`, `once`, `status`, `connect`) works identically in both versions - it uses `svelte/store` which hasn't changed.
+
+---
+
+**WebSocket deep dive**
 
 ## WebSocket handler (`hooks.ws`)
 
@@ -1184,7 +1241,7 @@ export async function subscribe(ws, topic, { platform }) {
 
 Opt-in modules that build on top of the adapter's public API. They don't change any core behavior -- if you don't import them, they don't exist. Each plugin ships in its own subdirectory under `plugins/` with separate server and client entry points.
 
-### Replay plugin (SSR gap)
+### Replay (SSR gap)
 
 When you combine SSR with WebSocket live updates, there's a gap between server-side data loading and the moment the client's WebSocket connects. Messages published during that window are lost.
 
@@ -1302,11 +1359,9 @@ const messages = onReplay('chat', { since: data.seq }).scan([], reducer);
 
 ---
 
-### Presence plugin
+### Presence
 
 Track who's connected to a topic in real time. Handles multi-tab dedup (same user with two tabs open = one presence entry), broadcasts join/leave events, and provides a live store on the client.
-
-Like the replay plugin, this is opt-in and has zero impact on the adapter core.
 
 #### Setup
 
@@ -1413,7 +1468,7 @@ If no `key` field is found in the selected data (e.g. no auth), each connection 
 - **Single-worker only.** Each worker tracks its own presence. In clustered mode, the list reflects only the local worker's connections.
 - **Requires subscription.** The client must subscribe to the topic (via `on()`, `crud()`, etc.) for the server's `subscribe` hook to fire. `presence('room')` alone shows you the list but doesn't register you as present unless you're also subscribed to `room`.
 
-### Typed channels plugin
+### Typed channels
 
 Define message schemas per topic so event names and data shapes are validated at publish time. Catches typos and shape mismatches before they reach the wire -- instead of silently sending garbage that the client ignores.
 
@@ -1497,7 +1552,7 @@ You can still use `crud()`, `lookup()`, `latest()`, etc. directly with the topic
 - **Runtime only.** The validation happens at publish/send time, not at compile time. TypeScript generics give you autocomplete for event names, but data shape checking is runtime.
 - **No dependency on Zod.** The plugin accepts any validator function or any object with a `.parse()` method. You bring your own validation library (or use plain functions).
 
-### Throttle/debounce plugin
+### Throttle/debounce
 
 Per-topic publish rate limiting. Wraps `platform.publish()` to coalesce rapid-fire updates (mouse position, typing indicators, live metrics). Sends the latest value at most once per interval. No timers to manage yourself.
 
@@ -1583,53 +1638,7 @@ t=260  [timer fires, 100ms]  --> sends {q:"hel"}
 
 ---
 
-## TypeScript setup
-
-Add the platform type to your `src/app.d.ts`:
-
-```ts
-import type { Platform as AdapterPlatform } from 'svelte-adapter-uws';
-
-declare global {
-  namespace App {
-    interface Platform extends AdapterPlatform {}
-  }
-}
-
-export {};
-```
-
-Now `event.platform.publish()`, `event.platform.topic()`, etc. are fully typed.
-
----
-
-## Svelte 4 support
-
-This adapter supports both Svelte 4 and Svelte 5. All examples in this README use Svelte 5 syntax (`$props()`, runes). If you're on Svelte 4, here's how to translate:
-
-**Svelte 5 (used in examples)**
-```svelte
-<script>
-  import { crud } from 'svelte-adapter-uws/client';
-
-  let { data } = $props();
-  const todos = crud('todos', data.todos);
-</script>
-```
-
-**Svelte 4 equivalent**
-```svelte
-<script>
-  import { crud } from 'svelte-adapter-uws/client';
-
-  export let data;
-  const todos = crud('todos', data.todos);
-</script>
-```
-
-The only difference is how you receive props. The client store API (`on`, `crud`, `lookup`, `latest`, `count`, `once`, `status`, `connect`) works identically in both versions - it uses `svelte/store` which hasn't changed.
-
----
+**Deployment & scaling**
 
 ## Deploying with Docker
 
@@ -1784,6 +1793,8 @@ node bench/run-compare.mjs  # full comparison vs adapter-node + socket.io
 
 ---
 
+**Examples**
+
 ## Full example: real-time todo list
 
 Here's a complete example tying everything together.
@@ -1878,6 +1889,8 @@ export const actions = {
 Open the page in two browser tabs. Create, toggle, or delete a todo in one tab - it appears in the other tab instantly.
 
 ---
+
+**Help**
 
 ## Troubleshooting
 
