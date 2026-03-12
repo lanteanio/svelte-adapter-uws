@@ -1,6 +1,6 @@
 {
   "name": "svelte-adapter-uws",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "description": "SvelteKit adapter for uWebSockets.js - high-performance C++ HTTP server with built-in WebSocket support",
   "author": "Kevin Radziszewski",
   "license": "MIT",
@@ -25,6 +25,34 @@
     "./vite": {
       "types": "./vite.d.ts",
       "default": "./vite.js"
+    },
+    "./plugins/replay": {
+      "types": "./plugins/replay/server.d.ts",
+      "default": "./plugins/replay/server.js"
+    },
+    "./plugins/replay/client": {
+      "types": "./plugins/replay/client.d.ts",
+      "default": "./plugins/replay/client.js"
+    },
+    "./plugins/presence": {
+      "types": "./plugins/presence/server.d.ts",
+      "default": "./plugins/presence/server.js"
+    },
+    "./plugins/presence/client": {
+      "types": "./plugins/presence/client.d.ts",
+      "default": "./plugins/presence/client.js"
+    },
+    "./plugins/channels": {
+      "types": "./plugins/channels/server.d.ts",
+      "default": "./plugins/channels/server.js"
+    },
+    "./plugins/channels/client": {
+      "types": "./plugins/channels/client.d.ts",
+      "default": "./plugins/channels/client.js"
+    },
+    "./plugins/throttle": {
+      "types": "./plugins/throttle/server.d.ts",
+      "default": "./plugins/throttle/server.js"
     }
   },
   "types": "./index.d.ts",
@@ -36,6 +64,7 @@
     "vite.js",
     "vite.d.ts",
     "files",
+    "plugins",
     "LICENSE",
     "README.md"
   ],

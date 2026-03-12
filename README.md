@@ -18,24 +18,39 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 
 ## Table of contents
 
+**Getting started**
 - [Installation](#installation)
 - [Quick start: HTTP](#quick-start-http)
 - [Quick start: HTTPS](#quick-start-https)
 - [Quick start: WebSocket](#quick-start-websocket)
 - [Quick start: WSS (secure WebSocket)](#quick-start-wss-secure-websocket)
 - [Development, Preview & Production](#development-preview--production)
+
+**Configuration**
 - [Adapter options](#adapter-options)
 - [Environment variables](#environment-variables)
+- [TypeScript setup](#typescript-setup)
+- [Svelte 4 support](#svelte-4-support)
+
+**WebSocket deep dive**
 - [WebSocket handler (`hooks.ws`)](#websocket-handler-hooksws)
 - [Authentication](#authentication)
 - [Platform API (`event.platform`)](#platform-api-eventplatform)
 - [Client store API](#client-store-api)
 - [Seeding initial state](#seeding-initial-state)
-- [TypeScript setup](#typescript-setup)
-- [Svelte 4 support](#svelte-4-support)
+
+**Plugins**
+- [Replay (SSR gap)](#replay-plugin-ssr-gap)
+- [Presence](#presence-plugin)
+- [Typed channels](#typed-channels-plugin)
+- [Throttle/debounce](#throttledebounce-plugin)
+
+**Deployment & scaling**
 - [Deploying with Docker](#deploying-with-docker)
 - [Clustering](#clustering)
 - [Performance](#performance)
+
+**Help**
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 
@@ -1162,6 +1177,409 @@ export async function subscribe(ws, topic, { platform }) {
   <p>{todo.text}</p>
 {/each}
 ```
+
+---
+
+## Plugins
+
+Opt-in modules that build on top of the adapter's public API. They don't change any core behavior -- if you don't import them, they don't exist. Each plugin ships in its own subdirectory under `plugins/` with separate server and client entry points.
+
+### Replay plugin (SSR gap)
+
+When you combine SSR with WebSocket live updates, there's a gap between server-side data loading and the moment the client's WebSocket connects. Messages published during that window are lost.
+
+The replay plugin solves this without touching the adapter core. It's opt-in -- if you don't import it, it doesn't exist.
+
+#### How it works
+
+1. **Server:** publish through a replay buffer instead of `platform.publish()` directly -- messages get a sequence number and are stored in a ring buffer
+2. **SSR:** pass the current sequence number to the client via your `load()` function
+3. **Client:** `onReplay()` connects, requests missed messages, and switches to live mode once caught up
+
+#### Setup
+
+Create a shared replay instance:
+
+```js
+// src/lib/server/replay.js
+import { createReplay } from 'svelte-adapter-uws/plugins/replay';
+
+export const replay = createReplay({ size: 500 });
+```
+
+Use it when publishing:
+
+```js
+// src/routes/chat/+page.server.js
+import { replay } from '$lib/server/replay';
+
+export async function load() {
+  const messages = await db.getRecentMessages();
+  return { messages, seq: replay.seq('chat') };
+}
+
+export const actions = {
+  send: async ({ request, platform }) => {
+    const form = await request.formData();
+    const msg = await db.createMessage(Object.fromEntries(form));
+    replay.publish(platform, 'chat', 'created', msg);
+  }
+};
+```
+
+Handle replay requests in your WebSocket handler:
+
+```js
+// src/hooks.ws.js
+import { replay } from '$lib/server/replay';
+
+export function message(ws, { data, platform }) {
+  const msg = JSON.parse(Buffer.from(data).toString());
+  if (msg.type === 'replay') {
+    replay.replay(ws, msg.topic, msg.since, platform);
+    return;
+  }
+}
+```
+
+Subscribe on the client with gap-free delivery:
+
+```svelte
+<!-- src/routes/chat/+page.svelte -->
+<script>
+  import { onReplay } from 'svelte-adapter-uws/plugins/replay/client';
+  let { data } = $props();
+
+  const messages = onReplay('chat', { since: data.seq }).scan(
+    data.messages,
+    (list, { event, data }) => {
+      if (event === 'created') return [...list, data];
+      return list;
+    }
+  );
+</script>
+
+{#each $messages as msg}
+  <p>{msg.text}</p>
+{/each}
+```
+
+#### Server API
+
+```js
+import { createReplay } from 'svelte-adapter-uws/plugins/replay';
+
+const replay = createReplay({
+  size: 1000,      // max messages per topic (default: 1000)
+  maxTopics: 100   // max tracked topics, oldest evicted (default: 100)
+});
+
+replay.publish(platform, topic, event, data)  // publish + buffer
+replay.seq(topic)                              // current sequence number
+replay.since(topic, seq)                       // buffered messages after seq
+replay.replay(ws, topic, sinceSeq, platform)   // send missed messages to one client
+replay.clear()                                 // reset everything
+replay.clearTopic(topic)                       // reset one topic
+```
+
+#### Client API
+
+```js
+import { onReplay } from 'svelte-adapter-uws/plugins/replay/client';
+
+// Works exactly like on() but bridges the SSR gap
+const store = onReplay('chat', { since: data.seq });
+
+// .scan() works the same as on().scan()
+const messages = onReplay('chat', { since: data.seq }).scan([], reducer);
+```
+
+#### Limitations
+
+- **In-memory only.** The ring buffer lives in the server process. A restart loses the buffer. For most apps this is fine -- the gap is typically under a second, and a page reload after a server restart gives fresh SSR data anyway.
+- **Single-worker only.** In clustered mode, each worker has its own buffer. If the SSR load runs on worker A and the WebSocket connects to worker B, the replay won't have the right messages. If you need replay with clustering, stick to a single worker or use an external store.
+- **Buffer overflow.** If more than `size` messages are published to a topic before a client requests replay, the oldest are gone. Size the buffer for your expected throughput during the SSR-to-connect window (usually well under 100 messages).
+
+---
+
+### Presence plugin
+
+Track who's connected to a topic in real time. Handles multi-tab dedup (same user with two tabs open = one presence entry), broadcasts join/leave events, and provides a live store on the client.
+
+Like the replay plugin, this is opt-in and has zero impact on the adapter core.
+
+#### Setup
+
+Create a shared presence instance:
+
+```js
+// src/lib/server/presence.js
+import { createPresence } from 'svelte-adapter-uws/plugins/presence';
+
+export const presence = createPresence({
+  key: 'id',
+  select: (userData) => ({ id: userData.id, name: userData.name })
+});
+```
+
+Wire it into your WebSocket hooks:
+
+```js
+// src/hooks.ws.js
+import { presence } from '$lib/server/presence';
+
+export function upgrade({ cookies }) {
+  const user = validateSession(cookies.session_id);
+  if (!user) return false;
+  return { id: user.id, name: user.name };
+}
+
+export function subscribe(ws, topic, { platform }) {
+  presence.join(ws, topic, platform);
+}
+
+export function close(ws, { platform }) {
+  presence.leave(ws, platform);
+}
+```
+
+Use it on the client:
+
+```svelte
+<!-- src/routes/room/+page.svelte -->
+<script>
+  import { on } from 'svelte-adapter-uws/client';
+  import { presence } from 'svelte-adapter-uws/plugins/presence/client';
+
+  const messages = on('room');
+  const users = presence('room');
+</script>
+
+<aside>
+  <h3>{$users.length} online</h3>
+  {#each $users as user (user.id)}
+    <span>{user.name}</span>
+  {/each}
+</aside>
+```
+
+Use `presence.list()` in load functions for SSR:
+
+```js
+// +page.server.js
+import { presence } from '$lib/server/presence';
+
+export async function load() {
+  return { users: presence.list('room'), online: presence.count('room') };
+}
+```
+
+#### Server API
+
+```js
+import { createPresence } from 'svelte-adapter-uws/plugins/presence';
+
+const presence = createPresence({
+  key: 'id',             // field for multi-tab dedup (default: 'id')
+  select: (userData) => userData  // extract public fields (default: full userData)
+});
+
+presence.join(ws, topic, platform)   // add user to topic (call from subscribe hook)
+presence.leave(ws, platform)         // remove from all topics (call from close hook)
+presence.sync(ws, topic, platform)   // send list without joining (for observers)
+presence.list(topic)                 // current user data array
+presence.count(topic)                // unique user count
+presence.clear()                     // reset everything
+```
+
+#### Client API
+
+```js
+import { presence } from 'svelte-adapter-uws/plugins/presence/client';
+
+const users = presence('room');
+// $users = [{ id: '1', name: 'Alice' }, { id: '2', name: 'Bob' }]
+```
+
+#### How multi-tab dedup works
+
+If user "Alice" (key `id: '1'`) has three browser tabs open, `presence.join()` is called three times with the same key. The plugin ref-counts connections per key: Alice appears once in the list. When she closes two tabs, she stays present. Only when the last tab closes does the plugin broadcast a `leave` event.
+
+If no `key` field is found in the selected data (e.g. no auth), each connection is tracked separately.
+
+#### Limitations
+
+- **In-memory only.** Same as replay -- server restart clears presence. On restart, clients reconnect and re-subscribe, so the list rebuilds within seconds.
+- **Single-worker only.** Each worker tracks its own presence. In clustered mode, the list reflects only the local worker's connections.
+- **Requires subscription.** The client must subscribe to the topic (via `on()`, `crud()`, etc.) for the server's `subscribe` hook to fire. `presence('room')` alone shows you the list but doesn't register you as present unless you're also subscribed to `room`.
+
+### Typed channels plugin
+
+Define message schemas per topic so event names and data shapes are validated at publish time. Catches typos and shape mismatches before they reach the wire -- instead of silently sending garbage that the client ignores.
+
+#### Setup
+
+```js
+// src/lib/server/channels.js
+import { createChannel } from 'svelte-adapter-uws/plugins/channels';
+
+export const todos = createChannel('todos', {
+  created: (d) => ({ id: d.id, text: d.text, done: d.done }),
+  updated: (d) => ({ id: d.id, text: d.text, done: d.done }),
+  deleted: (d) => ({ id: d.id })
+});
+```
+
+Each event maps to a validator function. The function receives the raw data and returns the validated (and optionally transformed) output. Throw to reject.
+
+With Zod (or any library that exposes `.parse()`):
+
+```js
+import { z } from 'zod';
+import { createChannel } from 'svelte-adapter-uws/plugins/channels';
+
+const Todo = z.object({ id: z.string(), text: z.string(), done: z.boolean() });
+
+export const todos = createChannel('todos', {
+  created: Todo,
+  updated: Todo,
+  deleted: z.object({ id: z.string() })
+});
+```
+
+#### Server API
+
+```js
+import { todos } from '$lib/server/channels';
+
+// In a form action or API route:
+export async function POST({ request, platform }) {
+  const data = await request.json();
+  const todo = await db.save(data);
+
+  todos.publish(platform, 'created', todo);  // validates, then publishes
+  todos.publish(platform, 'typo', todo);     // throws: unknown event "typo"
+  todos.publish(platform, 'created', {});    // throws: validation failed (if validator rejects)
+}
+```
+
+| Method | Description |
+|---|---|
+| `channel.publish(platform, event, data)` | Validate and broadcast to all subscribers |
+| `channel.send(platform, ws, event, data)` | Validate and send to a single connection |
+| `channel.topic` | The topic string |
+| `channel.events` | Array of valid event names |
+
+Validators can strip private fields before publishing. If your validator returns `{ id, text }` but the input had `{ id, text, secret }`, only `id` and `text` reach clients.
+
+#### Client API
+
+The client wrapper is optional -- it catches event name typos on the receiving side too.
+
+```svelte
+<script>
+  import { channel } from 'svelte-adapter-uws/plugins/channels/client';
+
+  const todos = channel('todos', ['created', 'updated', 'deleted']);
+
+  const all     = todos.on();          // all events (same as on('todos'))
+  const created = todos.on('created'); // filtered  (same as on('todos', 'created'))
+  const typo    = todos.on('craeted'); // throws Error immediately
+</script>
+```
+
+The `events` array is optional. Without it, `.on()` works exactly like the regular `on()` with the topic pre-filled -- no validation, just convenience.
+
+You can still use `crud()`, `lookup()`, `latest()`, etc. directly with the topic string. The client channel is purely additive.
+
+#### Limitations
+
+- **Runtime only.** The validation happens at publish/send time, not at compile time. TypeScript generics give you autocomplete for event names, but data shape checking is runtime.
+- **No dependency on Zod.** The plugin accepts any validator function or any object with a `.parse()` method. You bring your own validation library (or use plain functions).
+
+### Throttle/debounce plugin
+
+Per-topic publish rate limiting. Wraps `platform.publish()` to coalesce rapid-fire updates (mouse position, typing indicators, live metrics). Sends the latest value at most once per interval. No timers to manage yourself.
+
+Two modes:
+
+- **`throttle(ms)`** -- sends immediately on first call (leading edge), then at most once per interval (trailing edge). Latest value wins within each interval.
+- **`debounce(ms)`** -- waits until no calls for the full interval, then sends the latest value. Each new call resets the timer.
+
+#### Setup
+
+```js
+import { throttle, debounce } from 'svelte-adapter-uws/plugins/throttle';
+
+const mouse  = throttle(50);   // at most once per 50ms per topic
+const search = debounce(300);  // wait for 300ms of silence
+```
+
+#### Usage
+
+```js
+// In hooks.ws.js
+import { mouse, search } from '$lib/server/rate-limiters';
+
+export function message(ws, { data, platform }) {
+  const msg = JSON.parse(Buffer.from(data).toString());
+
+  if (msg.type === 'cursor') {
+    // 60 mouse moves/sec from 20 users = 1200 publishes/sec
+    // With throttle(50), each topic publishes at most 20/sec
+    mouse.publish(platform, 'cursors', 'move', {
+      userId: ws.getUserData().id,
+      x: msg.x, y: msg.y
+    });
+  }
+
+  if (msg.type === 'search') {
+    // User types fast -- only publish when they pause
+    search.publish(platform, 'search-results', 'query', { q: msg.q });
+  }
+}
+```
+
+Rate limiting is per-topic. If you call `mouse.publish()` for topics `'room-a'` and `'room-b'`, each topic has its own independent timer.
+
+#### API
+
+| Method | Description |
+|---|---|
+| `limiter.publish(platform, topic, event, data)` | Publish with rate limiting |
+| `limiter.flush()` | Send all pending immediately, clear all timers |
+| `limiter.flush(topic)` | Send pending for one topic |
+| `limiter.cancel()` | Discard all pending, clear all timers |
+| `limiter.cancel(topic)` | Discard pending for one topic |
+| `limiter.interval` | The configured interval in ms |
+
+#### How throttle works
+
+```
+t=0    publish({x:0})  --> sends immediately (leading edge)
+t=10   publish({x:1})  --> stored (latest)
+t=30   publish({x:2})  --> stored (overwrites x:1)
+t=50   [timer fires]   --> sends {x:2} (trailing edge)
+t=60   publish({x:3})  --> stored
+t=100  [timer fires]   --> sends {x:3}
+t=150  [timer fires]   --> nothing pending, goes idle
+t=200  publish({x:4})  --> sends immediately (new leading edge)
+```
+
+#### How debounce works
+
+```
+t=0    publish({q:"h"})      --> stored, timer starts
+t=80   publish({q:"he"})     --> stored, timer resets
+t=160  publish({q:"hel"})    --> stored, timer resets
+t=260  [timer fires, 100ms]  --> sends {q:"hel"}
+```
+
+#### Limitations
+
+- **Server-side only.** No client component -- the client receives messages at the throttled rate naturally.
+- **Latest value only.** Intermediate values within an interval are discarded, not queued. If you need every message delivered, don't throttle.
+- **Timer-based.** Uses `setTimeout` internally. Precision depends on Node.js event loop load (typically < 1ms drift).
 
 ---
 
