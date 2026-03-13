@@ -40,10 +40,15 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 - [Seeding initial state](#seeding-initial-state)
 
 **Plugins**
+- [Middleware](#middleware)
 - [Replay (SSR gap)](#replay-ssr-gap)
 - [Presence](#presence)
 - [Typed channels](#typed-channels)
 - [Throttle/debounce](#throttledebounce)
+- [Rate limiting](#rate-limiting)
+- [Cursor (ephemeral state)](#cursor-ephemeral-state)
+- [Queue (ordered delivery)](#queue-ordered-delivery)
+- [Broadcast groups](#broadcast-groups)
 
 **Deployment & scaling**
 - [Deploying with Docker](#deploying-with-docker)
