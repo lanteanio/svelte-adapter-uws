@@ -737,11 +737,20 @@ The WebSocket upgrade is an HTTP request. The browser treats it like any other r
 
 Available in server hooks, load functions, form actions, API routes, and WebSocket hooks (`hooks.ws`).
 
-### `platform.publish(topic, event, data)`
+### `platform.publish(topic, event, data, options?)`
 
 Send a message to all WebSocket clients subscribed to a topic.
 
 Topic and event names are validated before being written into the JSON envelope -- quotes, backslashes, and control characters will throw. This prevents JSON injection when names are built from dynamic values like user IDs (`platform.publish(\`user:\${id}\`, ...)`). The validation is a single-pass char scan and adds no measurable overhead.
+
+In cluster mode, the message is automatically relayed to all other workers. Pass `{ relay: false }` to skip the relay when the message originates from an external pub/sub source (Redis, Postgres LISTEN/NOTIFY, etc.) that already delivers to every process:
+
+```js
+// Redis subscriber running on every worker -- relay would cause duplicates
+sub.on('message', (channel, payload) => {
+  platform.publish(channel, 'update', JSON.parse(payload), { relay: false });
+});
+```
 
 ```js
 // src/routes/todos/+page.server.js
@@ -2085,7 +2094,9 @@ If a worker crashes, it is automatically restarted with exponential backoff. On 
 
 ### WebSocket + clustering
 
-`platform.publish()` is automatically relayed across all workers via the primary thread, so subscribers on any worker receive the message. This is built in  - no external pub/sub needed.
+`platform.publish()` is automatically relayed across all workers via the primary thread, so subscribers on any worker receive the message. This is built in -- no external pub/sub needed.
+
+If you add your own cross-process messaging (Redis, Postgres LISTEN/NOTIFY, etc.), pass `{ relay: false }` to prevent duplicate delivery -- your external source already fans out to every worker, so the built-in relay would double it.
 
 Per-worker limitations (acceptable for most apps):
 - `platform.connections`  - returns the count for the local worker only

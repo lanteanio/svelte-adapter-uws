@@ -340,6 +340,9 @@ export interface Platform {
 	 * @param topic - Topic string (e.g. `'todos'`, `'user:123'`, `'org:456'`)
 	 * @param event - Event name (e.g. `'created'`, `'updated'`, `'deleted'`)
 	 * @param data - Payload (will be JSON-serialized)
+	 * @param options - Optional. Pass `{ relay: false }` to skip cross-worker relay
+	 *   (use this when the message comes from an external pub/sub source like Redis
+	 *   or Postgres that already delivers to every process).
 	 *
 	 * @example
 	 * ```js
@@ -350,7 +353,7 @@ export interface Platform {
 	 * }
 	 * ```
 	 */
-	publish(topic: string, event: string, data?: unknown): boolean;
+	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean }): boolean;
 
 	/**
 	 * Send a message to a single WebSocket connection.

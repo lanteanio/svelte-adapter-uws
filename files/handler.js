@@ -239,11 +239,14 @@ const platform = {
 	 * Auto-wraps in a { topic, event, data } envelope that the client store understands.
 	 * No-op if no clients are subscribed - safe to call unconditionally.
 	 */
-	publish(topic, event, data) {
+	publish(topic, event, data, options) {
 		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}';
 		const result = app.publish(topic, envelope, false, false);
-		// Relay to other workers via main thread (no-op in single-process mode)
-		if (parentPort) {
+		// Relay to other workers via main thread (no-op in single-process mode).
+		// Pass { relay: false } when the message originates from an external
+		// pub/sub source (Redis, Postgres, etc.) that already fans out to
+		// every process -- relaying would cause duplicate delivery.
+		if (parentPort && (!options || options.relay !== false)) {
 			parentPort.postMessage({ type: 'publish', topic, envelope });
 		}
 		return result;

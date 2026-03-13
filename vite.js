@@ -100,9 +100,10 @@ export default function uws(options = {}) {
 	 * @param {string} topic
 	 * @param {string} event
 	 * @param {unknown} [data]
+	 * @param {{ relay?: boolean }} [_options] - Accepted for API parity with production; ignored in dev (single-process).
 	 * @returns {boolean}
 	 */
-	function publish(topic, event, data) {
+	function publish(topic, event, data, _options) {
 		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}';
 		let sent = false;
 		for (const [ws, topics] of subscriptions) {
