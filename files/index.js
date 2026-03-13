@@ -45,8 +45,8 @@ if (is_primary) {
 	// Exponential backoff for crash-looping workers
 	let restart_delay = 0;
 	const RESTART_DELAY_MAX = 5000;
-	/** @type {ReturnType<typeof setTimeout> | null} */
-	let backoff_reset_timer = null;
+	/** @type {Set<ReturnType<typeof setTimeout>>} */
+	const restart_timers = new Set();
 
 	function spawn_worker() {
 		const worker = new Worker(fileURLToPath(import.meta.url));
@@ -59,7 +59,8 @@ if (is_primary) {
 				console.log(`Worker thread ${worker.threadId} registered`);
 				// Worker started successfully  - reset backoff
 				restart_delay = 0;
-				if (backoff_reset_timer) { clearTimeout(backoff_reset_timer); backoff_reset_timer = null; }
+				for (const t of restart_timers) clearTimeout(t);
+				restart_timers.clear();
 				// Start (or resume) listening once a worker is ready to handle requests
 				if (!listening) {
 					listening = true;
@@ -100,7 +101,12 @@ if (is_primary) {
 				}
 				restart_delay = restart_delay ? Math.min(restart_delay * 2, RESTART_DELAY_MAX) : 100;
 				console.log(`Worker thread ${worker.threadId} exited with code ${code}, restarting in ${restart_delay}ms...`);
-				backoff_reset_timer = setTimeout(() => { spawn_worker(); }, restart_delay);
+				const timer = setTimeout(() => {
+				restart_timers.delete(timer);
+				if (shutting_down) return;
+				spawn_worker();
+			}, restart_delay);
+			restart_timers.add(timer);
 			}
 			// If shutting down and all workers have exited, exit immediately
 			if (shutting_down && workers.size === 0) {
@@ -121,11 +127,9 @@ if (is_primary) {
 		shutting_down = true;
 		console.log(`Primary received ${reason}, shutting down ${workers.size} workers...`);
 
-		// Cancel any pending worker restart so we don't spawn during shutdown
-		if (backoff_reset_timer) {
-			clearTimeout(backoff_reset_timer);
-			backoff_reset_timer = null;
-		}
+		// Cancel all pending worker restarts so we don't spawn during shutdown
+		for (const t of restart_timers) clearTimeout(t);
+		restart_timers.clear();
 
 		// Stop accepting new connections
 		if (listen_socket) {

@@ -831,6 +831,10 @@ if (WS_ENABLED) {
 							if (requestPort) {
 								expectedHost = requestHost.replace(/:\d+$/, '') + ':' + requestPort;
 							}
+							// Strip default ports so "example.com" matches "example.com:443"
+							// (URL.host omits the port when it is the default for the scheme)
+							const defaultPort = requestScheme === 'https' ? '443' : '80';
+							expectedHost = expectedHost.replace(':' + defaultPort, '');
 							allowed = parsed.host === expectedHost && parsed.protocol === requestScheme + ':';
 						}
 					} catch {

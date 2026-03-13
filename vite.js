@@ -240,6 +240,8 @@ export default function uws(options = {}) {
 			}
 		},
 		configureServer(server) {
+			console.warn('[adapter-uws] Dev mode does not enforce allowedOrigins. ' +
+				'WebSocket origin checks only run in production.');
 			wss = new WebSocketServer({ noServer: true });
 			viteServer = server;
 			const root = server.config.root;

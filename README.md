@@ -286,6 +286,8 @@ The Vite plugin is required for WebSocket support in both dev and production (se
 
 Changes to your `hooks.ws` file are picked up automatically — the plugin reloads the handler on save, no dev server restart needed.
 
+**Note:** The dev server does not enforce `allowedOrigins`. Origin checks only run in production. A warning is logged at startup as a reminder.
+
 **vite.config.js**
 ```js
 import { sveltekit } from '@sveltejs/kit/vite';
@@ -1241,6 +1243,78 @@ export async function subscribe(ws, topic, { platform }) {
 
 Opt-in modules that build on top of the adapter's public API. They don't change any core behavior -- if you don't import them, they don't exist. Each plugin ships in its own subdirectory under `plugins/` with separate server and client entry points.
 
+### Middleware
+
+Composable message processing pipeline. Chain functions that run on inbound messages before your handler logic. Each middleware receives a context and a `next` function -- call `next()` to continue, skip it to stop the chain.
+
+#### Setup
+
+```js
+// src/lib/server/pipeline.js
+import { createMiddleware } from 'svelte-adapter-uws/plugins/middleware';
+
+export const pipeline = createMiddleware(
+  // logging
+  async (ctx, next) => {
+    console.log(`[${ctx.topic}] ${ctx.event}`);
+    await next();
+  },
+  // auth check
+  async (ctx, next) => {
+    const userId = ctx.ws.getUserData()?.userId;
+    if (!userId) return; // stop chain -- unauthenticated
+    ctx.locals.userId = userId;
+    await next();
+  },
+  // data enrichment
+  async (ctx, next) => {
+    ctx.data = { ...ctx.data, processedAt: Date.now() };
+    await next();
+  }
+);
+```
+
+#### Usage
+
+```js
+// src/hooks.ws.js
+import { pipeline } from '$lib/server/pipeline';
+
+export async function message(ws, data, { platform }) {
+  const msg = JSON.parse(Buffer.from(data).toString());
+  const ctx = await pipeline.run(ws, msg, platform);
+  if (!ctx) return; // chain was stopped (e.g. auth failed)
+
+  // ctx.locals.userId is available here
+  // ctx.data has the enriched data
+}
+```
+
+#### API
+
+| Method | Description |
+|---|---|
+| `pipeline.run(ws, message, platform)` | Execute the chain. Returns context or `null` if stopped |
+| `pipeline.use(fn)` | Append a middleware at runtime |
+
+The context object:
+
+| Field | Description |
+|---|---|
+| `ctx.ws` | The WebSocket connection |
+| `ctx.message` | Original parsed message |
+| `ctx.topic` | Message topic (mutable) |
+| `ctx.event` | Message event (mutable) |
+| `ctx.data` | Message data (mutable) |
+| `ctx.platform` | Platform reference |
+| `ctx.locals` | Scratch space for middleware to share data |
+
+#### Limitations
+
+- **Server-side only.** No client component.
+- **No state.** The middleware itself is stateless -- it's a pure pipeline. Use `ctx.locals` to pass data between middlewares within a single message.
+- **Double `next()` guard.** Calling `next()` twice in the same middleware is a no-op (the second call does nothing).
+
 ### Replay (SSR gap)
 
 When you combine SSR with WebSocket live updates, there's a gap between server-side data loading and the moment the client's WebSocket connects. Messages published during that window are lost.
@@ -1635,6 +1709,304 @@ t=260  [timer fires, 100ms]  --> sends {q:"hel"}
 - **Server-side only.** No client component -- the client receives messages at the throttled rate naturally.
 - **Latest value only.** Intermediate values within an interval are discarded, not queued. If you need every message delivered, don't throttle.
 - **Timer-based.** Uses `setTimeout` internally. Precision depends on Node.js event loop load (typically < 1ms drift).
+
+### Rate limiting
+
+Token-bucket rate limiter for inbound WebSocket messages. Protects against spam, abuse, and runaway clients. Supports per-IP, per-connection, or custom key extraction, with optional auto-ban when a bucket is exhausted.
+
+Different from throttle -- throttle shapes **outbound** publish rate, rate limiting protects **inbound** against abuse.
+
+#### Setup
+
+```js
+// src/lib/server/ratelimit.js
+import { createRateLimit } from 'svelte-adapter-uws/plugins/ratelimit';
+
+export const limiter = createRateLimit({
+  points: 10,         // 10 messages
+  interval: 1000,     // per second
+  blockDuration: 30000 // auto-ban for 30s when exhausted
+});
+```
+
+#### Usage
+
+```js
+// src/hooks.ws.js
+import { limiter } from '$lib/server/ratelimit';
+
+export function message(ws, data, { platform }) {
+  const { allowed, remaining, resetMs } = limiter.consume(ws);
+  if (!allowed) return; // drop the message
+
+  // ... handle message normally
+}
+```
+
+#### API
+
+| Method | Description |
+|---|---|
+| `limiter.consume(ws, cost?)` | Deduct tokens (cost must be >= 0, defaults to 1), returns `{ allowed, remaining, resetMs }` |
+| `limiter.reset(key)` | Clear the bucket for a key |
+| `limiter.ban(key, duration?)` | Manually ban a key |
+| `limiter.unban(key)` | Remove a ban |
+| `limiter.clear()` | Reset all state |
+
+#### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `points` | *required* | Tokens per interval (positive integer) |
+| `interval` | *required* | Refill interval in ms |
+| `blockDuration` | `0` | Auto-ban duration in ms when exhausted (0 = no auto-ban) |
+| `keyBy` | `'ip'` | `'ip'`, `'connection'`, or `(ws) => string` |
+
+With `keyBy: 'ip'` (default), the limiter reads `userData.remoteAddress`, `.ip`, or `.address`. With `keyBy: 'connection'`, each WebSocket gets its own bucket. Pass a function for custom grouping (e.g. by user ID or room).
+
+#### Limitations
+
+- **Server-side only.** No client component needed.
+- **In-memory.** Buckets live in the process. In cluster mode, each worker has independent rate limits (acceptable for most apps -- abusers hit the same worker via the acceptor).
+- **Lazy cleanup.** Expired buckets are swept when the internal map exceeds 1000 entries.
+
+### Cursor (ephemeral state)
+
+Lightweight fire-and-forget broadcasting for transient state -- mouse cursors, text selections, drag positions, drawing strokes. Built-in throttle with trailing edge ensures the final position always arrives. Auto-cleanup on disconnect.
+
+#### Setup
+
+```js
+// src/lib/server/cursors.js
+import { createCursor } from 'svelte-adapter-uws/plugins/cursor';
+
+export const cursors = createCursor({
+  throttle: 50, // at most one broadcast per 50ms per user per topic
+  select: (userData) => ({ id: userData.id, name: userData.name, color: userData.color })
+});
+```
+
+#### Server usage
+
+```js
+// src/hooks.ws.js
+import { cursors } from '$lib/server/cursors';
+
+export function message(ws, data, { platform }) {
+  const msg = JSON.parse(Buffer.from(data).toString());
+  if (msg.type === 'cursor') {
+    cursors.update(ws, msg.topic, { x: msg.x, y: msg.y }, platform);
+  }
+}
+
+export function close(ws, { platform }) {
+  cursors.remove(ws, platform);
+}
+```
+
+#### Client usage
+
+```svelte
+<script>
+  import { cursor } from 'svelte-adapter-uws/plugins/cursor/client';
+
+  const positions = cursor('canvas');
+</script>
+
+{#each [...$positions] as [key, { user, data }] (key)}
+  <div
+    class="cursor-dot"
+    style="left: {data.x}px; top: {data.y}px; background: {user.color}"
+  >
+    {user.name}
+  </div>
+{/each}
+```
+
+The client store is a `Readable<Map<string, { user, data }>>`. The Map updates when cursors move or disconnect.
+
+#### Server API
+
+| Method | Description |
+|---|---|
+| `cursors.update(ws, topic, data, platform)` | Broadcast position (throttled) |
+| `cursors.remove(ws, platform)` | Remove from all topics, broadcast removal |
+| `cursors.list(topic)` | Current positions (for SSR) |
+| `cursors.clear()` | Reset all state and timers |
+
+#### How throttle works
+
+The cursor plugin uses leading edge + trailing edge throttle internally:
+
+```
+t=0    update({x:0})  --> broadcasts immediately (leading edge)
+t=20   update({x:5})  --> stored (within 50ms window)
+t=40   update({x:9})  --> stored (overwrites x:5)
+t=50   [timer fires]  --> broadcasts {x:9} (trailing edge)
+```
+
+The trailing edge ensures you always see where the cursor stopped, even if the user stops moving mid-window.
+
+#### Limitations
+
+- **In-memory.** Cursor positions live in the process. In cluster mode, each worker tracks its own connections.
+- **No persistence.** Positions are lost on restart. This is intentional -- cursors are ephemeral.
+
+### Queue (ordered delivery)
+
+Per-key async task queue with configurable concurrency and backpressure. Guarantees in-order processing per key -- useful for sequential operations like collaborative editing, turn-based games, or transaction sequences.
+
+#### Setup
+
+```js
+// src/lib/server/queue.js
+import { createQueue } from 'svelte-adapter-uws/plugins/queue';
+
+// Sequential processing per key (default concurrency: 1)
+export const queue = createQueue({ maxSize: 100 });
+```
+
+#### Usage
+
+```js
+// src/hooks.ws.js
+import { queue } from '$lib/server/queue';
+
+export async function message(ws, data, { platform }) {
+  const msg = JSON.parse(Buffer.from(data).toString());
+
+  // Messages for the same topic are processed one at a time
+  const result = await queue.push(msg.topic, async () => {
+    const record = await db.update(msg.data);
+    platform.publish(msg.topic, 'updated', record);
+    return record;
+  });
+}
+```
+
+#### API
+
+| Method | Description |
+|---|---|
+| `queue.push(key, task)` | Enqueue a task, returns promise with the task's return value |
+| `queue.size(key?)` | Waiting + running count for a key, or total |
+| `queue.clear(key?)` | Cancel waiting tasks (running tasks continue) |
+| `queue.drain(key?)` | Wait for all tasks to complete |
+
+#### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `concurrency` | `1` | Max concurrent tasks per key |
+| `maxSize` | `Infinity` | Max waiting tasks per key (rejects when exceeded) |
+| `onDrop` | `null` | Called with `{ key, task }` when a task is rejected |
+
+Different keys are independent -- `push('room-a', ...)` and `push('room-b', ...)` run concurrently. Only tasks with the same key are queued.
+
+#### Limitations
+
+- **Server-side only.** No client component.
+- **In-memory.** Queue state lives in the process. Not durable across restarts.
+- **No cancellation.** Running tasks cannot be aborted. `clear()` only rejects waiting tasks.
+
+### Broadcast groups
+
+Named groups with explicit membership, roles, metadata, and lifecycle hooks. Like topics but with access control -- you decide who can join, what role they have, and what happens when the group fills up or closes.
+
+#### Setup
+
+```js
+// src/lib/server/lobby.js
+import { createGroup } from 'svelte-adapter-uws/plugins/groups';
+
+export const lobby = createGroup('lobby', {
+  maxMembers: 50,
+  meta: { game: 'chess' },
+  onJoin: (ws, role) => console.log('joined as', role),
+  onFull: (ws, role) => {
+    // optionally notify the rejected client
+  }
+});
+```
+
+#### Server usage
+
+```js
+// src/hooks.ws.js
+import { lobby } from '$lib/server/lobby';
+
+export function subscribe(ws, topic, { platform }) {
+  if (topic === 'lobby') {
+    const joined = lobby.join(ws, platform, 'member');
+    if (!joined) {
+      platform.send(ws, 'system', 'error', 'Lobby is full');
+    }
+  }
+}
+
+export function close(ws, { platform }) {
+  lobby.leave(ws, platform);
+}
+```
+
+Publish to group members:
+
+```js
+// Broadcast to everyone
+lobby.publish(platform, 'chat', { text: 'hello' });
+
+// Broadcast only to admins
+lobby.publish(platform, 'admin-alert', { msg: 'new report' }, 'admin');
+```
+
+#### Client usage
+
+```svelte
+<script>
+  import { group } from 'svelte-adapter-uws/plugins/groups/client';
+
+  const lobby = group('lobby');
+  const members = lobby.members;
+</script>
+
+<p>{$members.length} members</p>
+```
+
+The client store exposes two reactive values: the main store for events (`$lobby` -- latest message) and `.members` for the live member list. The member list updates automatically on join, leave, and close events -- no polling needed.
+
+#### Server API
+
+| Method | Description |
+|---|---|
+| `group.join(ws, platform, role?)` | Add member. Returns `true` or `false` if full/closed |
+| `group.leave(ws, platform)` | Remove member |
+| `group.publish(platform, event, data, role?)` | Broadcast (optionally filtered by role) |
+| `group.send(platform, ws, event, data)` | Send to one member (throws if not a member) |
+| `group.members()` | Array of `{ ws, role }` |
+| `group.count()` | Member count |
+| `group.has(ws)` | Check membership |
+| `group.close(platform)` | Dissolve group, notify everyone |
+| `group.name` | Group name (read-only) |
+| `group.meta` | Metadata (get/set) |
+
+Roles: `'member'` (default), `'admin'`, `'viewer'`.
+
+#### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `maxMembers` | `Infinity` | Maximum members |
+| `meta` | `{}` | Initial metadata (shallow-copied) |
+| `onJoin` | -- | `(ws, role) => void` |
+| `onLeave` | -- | `(ws, role) => void` |
+| `onFull` | -- | `(ws, role) => void` |
+| `onClose` | -- | `() => void` |
+
+#### Limitations
+
+- **In-memory.** Group state lives in the process. In cluster mode, each worker manages its own groups independently.
+- **No persistence.** Groups are lost on restart. If you need durable rooms, store membership in a database and rebuild on start.
+- **Role-filtered publish uses `send()`.** When filtering by role, the plugin iterates members and sends individually instead of using the topic broadcast. Fine for typical group sizes, but O(n) with member count.
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "svelte-adapter-uws",
-  "version": "0.2.17",
+  "version": "0.2.18",
   "description": "SvelteKit adapter for uWebSockets.js - high-performance C++ HTTP server with built-in WebSocket support",
   "author": "Kevin Radziszewski",
   "license": "MIT",
@@ -53,6 +53,34 @@
     "./plugins/throttle": {
       "types": "./plugins/throttle/server.d.ts",
       "default": "./plugins/throttle/server.js"
+    },
+    "./plugins/ratelimit": {
+      "types": "./plugins/ratelimit/server.d.ts",
+      "default": "./plugins/ratelimit/server.js"
+    },
+    "./plugins/cursor": {
+      "types": "./plugins/cursor/server.d.ts",
+      "default": "./plugins/cursor/server.js"
+    },
+    "./plugins/cursor/client": {
+      "types": "./plugins/cursor/client.d.ts",
+      "default": "./plugins/cursor/client.js"
+    },
+    "./plugins/middleware": {
+      "types": "./plugins/middleware/server.d.ts",
+      "default": "./plugins/middleware/server.js"
+    },
+    "./plugins/queue": {
+      "types": "./plugins/queue/server.d.ts",
+      "default": "./plugins/queue/server.js"
+    },
+    "./plugins/groups": {
+      "types": "./plugins/groups/server.d.ts",
+      "default": "./plugins/groups/server.js"
+    },
+    "./plugins/groups/client": {
+      "types": "./plugins/groups/client.d.ts",
+      "default": "./plugins/groups/client.js"
     }
   },
   "types": "./index.d.ts",
