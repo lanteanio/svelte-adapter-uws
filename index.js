@@ -168,9 +168,13 @@ export default function (opts = {}) {
 			// Include extra entry files written by Vite plugins (e.g. __live-registry.js).
 			// Only picks up __-prefixed files to avoid bundling SvelteKit internals.
 			const knownEntries = new Set(Object.values(input).map(f => path.basename(f)));
+			/** @type {string[]} */
+			const extraEntries = [];
 			for (const file of readdirSync(tmp)) {
 				if (file.startsWith('__') && file.endsWith('.js') && !knownEntries.has(file)) {
-					input[file.replace(/\.js$/, '')] = `${tmp}/${file}`;
+					const name = file.replace(/\.js$/, '');
+					input[name] = `${tmp}/${file}`;
+					extraEntries.push(name);
 				}
 			}
 
@@ -236,6 +240,17 @@ export default function (opts = {}) {
 					HEALTH_CHECK_PATH: JSON.stringify(healthCheckPath)
 				}
 			});
+
+			// Import discovered __-prefixed entries so they execute at startup
+			if (extraEntries.length > 0) {
+				const entryImports = extraEntries
+					.map(name => `import './server/${name}.js';`)
+					.join('\n');
+				const indexPath = `${out}/index.js`;
+				const indexContent = readFileSync(indexPath, 'utf8');
+				writeFileSync(indexPath, entryImports + '\n' + indexContent);
+				builder.log.minor(`Extra entries: ${extraEntries.join(', ')}`);
+			}
 
 			if (builder.hasServerInstrumentationFile?.()) {
 				builder.instrument?.({
