@@ -244,17 +244,8 @@ export function createPresence(options = {}) {
 			subscribe(ws, topic, { platform }) {
 				if (topic.startsWith('__presence:')) {
 					// Observer subscribing to presence channel directly --
-					// send current list so the client isn't left empty
-					const realTopic = topic.slice('__presence:'.length);
-					const users = topicPresence.get(realTopic);
-					const list = [];
-					if (users) {
-						for (const [k, entry] of users) {
-							list.push({ key: k, data: entry.data });
-						}
-					}
-					ws.subscribe(topic);
-					platform.send(ws, topic, 'list', list);
+					// sync() subscribes + sends the current list
+					tracker.sync(ws, topic.slice(11), platform);
 					return;
 				}
 				// Regular topic -- join presence
