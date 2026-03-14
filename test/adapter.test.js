@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import path from 'node:path';
 
 // We can't run the full adapter (it needs SvelteKit's builder),
 // but we can test the validation logic and option handling.
@@ -285,5 +286,84 @@ describe('origin validation (WebSocket)', () => {
 
 	it('handles invalid origin URLs gracefully', () => {
 		expect(checkOrigin('not-a-url', 'same-origin', 'localhost')).toBe(false);
+	});
+});
+
+describe('extra entry file discovery', () => {
+	// Mirrors the logic in index.js that scans tmp/ for __-prefixed .js files
+	function discoverEntries(dir, existingInput) {
+		const { readdirSync } = require('node:fs');
+		const knownEntries = new Set(Object.values(existingInput).map(f => path.basename(f)));
+		const extra = {};
+		for (const file of readdirSync(dir)) {
+			if (file.startsWith('__') && file.endsWith('.js') && !knownEntries.has(file)) {
+				extra[file.replace(/\.js$/, '')] = `${dir}/${file}`;
+			}
+		}
+		return extra;
+	}
+
+	const tmpDir = path.resolve('test/.tmp-entry-test');
+
+	function setup(files) {
+		rmSync(tmpDir, { recursive: true, force: true });
+		mkdirSync(tmpDir, { recursive: true });
+		for (const f of files) {
+			writeFileSync(path.join(tmpDir, f), '// test');
+		}
+	}
+
+	function cleanup() {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+
+	it('picks up __-prefixed .js files', () => {
+		setup(['__live-registry.js', '__analytics.js', 'index.js', 'manifest.js']);
+		const input = { index: `${tmpDir}/index.js`, manifest: `${tmpDir}/manifest.js` };
+		const extra = discoverEntries(tmpDir, input);
+
+		expect(extra).toEqual({
+			'__live-registry': `${tmpDir}/__live-registry.js`,
+			'__analytics': `${tmpDir}/__analytics.js`
+		});
+		cleanup();
+	});
+
+	it('ignores non-__-prefixed files', () => {
+		setup(['server.js', 'utils.js', 'chunks-abc.js']);
+		const extra = discoverEntries(tmpDir, {});
+
+		expect(extra).toEqual({});
+		cleanup();
+	});
+
+	it('ignores non-.js files', () => {
+		setup(['__config.json', '__readme.md', '__handler.ts']);
+		const extra = discoverEntries(tmpDir, {});
+
+		expect(extra).toEqual({});
+		cleanup();
+	});
+
+	it('skips files already in input', () => {
+		setup(['__live-registry.js']);
+		const input = { 'live': `${tmpDir}/__live-registry.js` };
+		const extra = discoverEntries(tmpDir, input);
+
+		expect(extra).toEqual({});
+		cleanup();
+	});
+
+	it('returns empty object when no extra entries exist', () => {
+		setup(['index.js', 'manifest.js', 'ws-handler.js']);
+		const input = {
+			index: `${tmpDir}/index.js`,
+			manifest: `${tmpDir}/manifest.js`,
+			'ws-handler': `${tmpDir}/ws-handler.js`
+		};
+		const extra = discoverEntries(tmpDir, input);
+
+		expect(extra).toEqual({});
+		cleanup();
 	});
 });

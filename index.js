@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { rollup } from 'rollup';
@@ -163,6 +163,15 @@ export default function (opts = {}) {
 
 			if (builder.hasServerInstrumentationFile?.()) {
 				input['instrumentation.server'] = `${tmp}/instrumentation.server.js`;
+			}
+
+			// Include extra entry files written by Vite plugins (e.g. __live-registry.js).
+			// Only picks up __-prefixed files to avoid bundling SvelteKit internals.
+			const knownEntries = new Set(Object.values(input).map(f => path.basename(f)));
+			for (const file of readdirSync(tmp)) {
+				if (file.startsWith('__') && file.endsWith('.js') && !knownEntries.has(file)) {
+					input[file.replace(/\.js$/, '')] = `${tmp}/${file}`;
+				}
 			}
 
 			// Bundle the Vite output so that deployments only need
