@@ -275,6 +275,79 @@ describe('client store patterns', () => {
 		});
 	});
 
+	describe('presence memoization pattern', () => {
+		it('returns the same store for the same topic', () => {
+			const cache = new Map();
+
+			function presence(topic) {
+				const cached = cache.get(topic);
+				if (cached) return cached;
+
+				const output = writable([]);
+				let refCount = 0;
+				const store = {
+					subscribe(fn) {
+						refCount++;
+						const unsub = output.subscribe(fn);
+						return () => { unsub(); refCount--; };
+					},
+					_refCount: () => refCount
+				};
+				cache.set(topic, store);
+				return store;
+			}
+
+			const a1 = presence('room');
+			const a2 = presence('room');
+			const b = presence('other');
+
+			expect(a1).toBe(a2);
+			expect(a1).not.toBe(b);
+		});
+
+		it('survives full unsubscribe/resubscribe cycle without losing identity', () => {
+			const cache = new Map();
+			const output = writable([]);
+			let refCount = 0;
+			let listenCount = 0;
+
+			function presence(topic) {
+				const cached = cache.get(topic);
+				if (cached) return cached;
+
+				const store = {
+					subscribe(fn) {
+						if (refCount++ === 0) listenCount++;
+						const unsub = output.subscribe(fn);
+						return () => {
+							unsub();
+							if (--refCount === 0) output.set([]);
+						};
+					}
+				};
+				cache.set(topic, store);
+				return store;
+			}
+
+			const store = presence('room');
+
+			// First subscriber
+			const unsub1 = store.subscribe(() => {});
+			expect(listenCount).toBe(1);
+
+			// Full unsub
+			unsub1();
+
+			// Re-subscribe to the SAME cached store
+			const store2 = presence('room');
+			expect(store2).toBe(store);
+
+			const unsub2 = store2.subscribe(() => {});
+			expect(listenCount).toBe(2);
+			unsub2();
+		});
+	});
+
 	describe('queue management', () => {
 		it('drops oldest when full', () => {
 			const MAX_QUEUE_SIZE = 5;

@@ -11,11 +11,17 @@
 import { on } from '../../client.js';
 import { writable } from 'svelte/store';
 
+/** @type {Map<string, { subscribe: (fn: Function) => (() => void) }>} */
+const presenceStores = new Map();
+
 /**
  * Get a reactive store of users present on a topic.
  *
  * Returns a readable Svelte store containing an array of user data objects.
  * The array updates automatically when users join or leave.
+ *
+ * Memoized by topic: calling `presence('room')` multiple times (e.g. from
+ * `$derived`) returns the same store instance, preventing flickering.
  *
  * You must also subscribe to the topic itself (via `on()`, `crud()`, etc.)
  * for the server's `subscribe` hook to fire and register your presence.
@@ -45,8 +51,10 @@ import { writable } from 'svelte/store';
  * ```
  */
 export function presence(topic) {
+	const cached = presenceStores.get(topic);
+	if (cached) return cached;
+
 	const presenceTopic = '__presence:' + topic;
-	const source = on(presenceTopic);
 
 	/** @type {Map<string, any>} */
 	let userMap = new Map();
@@ -56,6 +64,10 @@ export function presence(topic) {
 	let refCount = 0;
 
 	function startListening() {
+		// Fresh on() call each time -- the underlying writable in client.js
+		// is cleaned up on full unsubscribe, so a stale reference would
+		// silently stop receiving events.
+		const source = on(presenceTopic);
 		sourceUnsub = source.subscribe((event) => {
 			if (event === null) return;
 
@@ -92,9 +104,10 @@ export function presence(topic) {
 			sourceUnsub = null;
 		}
 		userMap = new Map();
+		output.set([]);
 	}
 
-	return {
+	const store = {
 		subscribe(fn) {
 			if (refCount++ === 0) startListening();
 			const unsub = output.subscribe(fn);
@@ -104,4 +117,7 @@ export function presence(topic) {
 			};
 		}
 	};
+
+	presenceStores.set(topic, store);
+	return store;
 }
