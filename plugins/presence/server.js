@@ -39,6 +39,10 @@
  *   Get the number of unique users present on a topic.
  * @property {() => void} clear -
  *   Clear all presence tracking state.
+ * @property {{ subscribe: (ws: any, topic: string, ctx: { platform: import('../../index.js').Platform }) => void, close: (ws: any, ctx: { platform: import('../../index.js').Platform }) => void }} hooks -
+ *   Ready-made WebSocket hooks. Handles join for regular topics, sync for
+ *   __presence:* topics, and leave on close. Spread into hooks.ws.js for
+ *   zero-config presence.
  */
 
 /**
@@ -60,16 +64,23 @@
  *
  * @example
  * ```js
- * // src/hooks.ws.js
+ * // src/hooks.ws.js - zero-config (just spread hooks)
  * import { presence } from '$lib/server/presence';
  *
- * export function subscribe(ws, topic, { platform }) {
- *   presence.join(ws, topic, platform);
+ * export const { subscribe, close } = presence.hooks;
+ * ```
+ *
+ * @example
+ * ```js
+ * // src/hooks.ws.js - with custom logic
+ * import { presence } from '$lib/server/presence';
+ *
+ * export function subscribe(ws, topic, ctx) {
+ *   if (topic === 'vip' && !ws.getUserData().isVip) return false;
+ *   presence.hooks.subscribe(ws, topic, ctx);
  * }
  *
- * export function close(ws, { platform }) {
- *   presence.leave(ws, platform);
- * }
+ * export const close = presence.hooks.close;
  * ```
  *
  * @example
@@ -115,7 +126,8 @@ export function createPresence(options = {}) {
 		return '__conn:' + (++connCounter);
 	}
 
-	return {
+	/** @type {PresenceTracker} */
+	const tracker = {
 		join(ws, topic, platform) {
 			// Skip internal topics to prevent recursion when the subscribe
 			// hook fires for __presence:* subscriptions
@@ -226,6 +238,33 @@ export function createPresence(options = {}) {
 			wsTopics.clear();
 			topicPresence.clear();
 			connCounter = 0;
+		},
+
+		hooks: {
+			subscribe(ws, topic, { platform }) {
+				if (topic.startsWith('__presence:')) {
+					// Observer subscribing to presence channel directly --
+					// send current list so the client isn't left empty
+					const realTopic = topic.slice('__presence:'.length);
+					const users = topicPresence.get(realTopic);
+					const list = [];
+					if (users) {
+						for (const [k, entry] of users) {
+							list.push({ key: k, data: entry.data });
+						}
+					}
+					ws.subscribe(topic);
+					platform.send(ws, topic, 'list', list);
+					return;
+				}
+				// Regular topic -- join presence
+				tracker.join(ws, topic, platform);
+			},
+			close(ws, { platform }) {
+				tracker.leave(ws, platform);
+			}
 		}
 	};
+
+	return tracker;
 }

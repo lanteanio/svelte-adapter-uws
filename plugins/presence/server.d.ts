@@ -115,6 +115,25 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 
 	/** Clear all presence tracking state. */
 	clear(): void;
+
+	/**
+	 * Ready-made WebSocket hooks for zero-config presence.
+	 *
+	 * `subscribe` handles both regular topics (calls `join`) and `__presence:*`
+	 * topics (calls `sync` so the client gets the current list immediately).
+	 * `close` calls `leave`.
+	 *
+	 * @example
+	 * ```js
+	 * // src/hooks.ws.js
+	 * import { presence } from '$lib/server/presence';
+	 * export const { subscribe, close } = presence.hooks;
+	 * ```
+	 */
+	hooks: {
+		subscribe(ws: WebSocket<any>, topic: string, ctx: { platform: Platform }): void;
+		close(ws: WebSocket<any>, ctx: { platform: Platform }): void;
+	};
 }
 
 /**

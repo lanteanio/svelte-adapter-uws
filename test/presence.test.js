@@ -59,6 +59,8 @@ describe('presence plugin - server', () => {
 			expect(typeof presence.list).toBe('function');
 			expect(typeof presence.count).toBe('function');
 			expect(typeof presence.clear).toBe('function');
+			expect(typeof presence.hooks.subscribe).toBe('function');
+			expect(typeof presence.hooks.close).toBe('function');
 		});
 
 		it('works with default options', () => {
@@ -321,6 +323,87 @@ describe('presence plugin - server', () => {
 
 			expect(presence.count('room')).toBe(0);
 			expect(presence.list('room')).toEqual([]);
+		});
+	});
+
+	describe('hooks', () => {
+		it('exposes subscribe and close functions', () => {
+			expect(typeof presence.hooks.subscribe).toBe('function');
+			expect(typeof presence.hooks.close).toBe('function');
+		});
+
+		it('hooks.subscribe calls join for regular topics', () => {
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			presence.hooks.subscribe(ws, 'room', { platform });
+
+			expect(presence.count('room')).toBe(1);
+			expect(platform.sent).toHaveLength(1);
+			expect(platform.sent[0].event).toBe('list');
+		});
+
+		it('hooks.subscribe sends current list for __presence: topics', () => {
+			const ws1 = mockWs({ id: '1', name: 'Alice' });
+			presence.join(ws1, 'room', platform);
+			platform.reset();
+
+			const wsObserver = mockWs({ id: 'obs', name: 'Observer' });
+			presence.hooks.subscribe(wsObserver, '__presence:room', { platform });
+
+			// Should send the list
+			expect(platform.sent).toHaveLength(1);
+			expect(platform.sent[0].topic).toBe('__presence:room');
+			expect(platform.sent[0].event).toBe('list');
+			expect(platform.sent[0].data).toEqual([
+				{ key: '1', data: { id: '1', name: 'Alice' } }
+			]);
+
+			// Should subscribe to the topic
+			expect(wsObserver.isSubscribed('__presence:room')).toBe(true);
+
+			// Observer should NOT be in the presence list
+			expect(presence.count('room')).toBe(1);
+		});
+
+		it('hooks.subscribe sends empty list for __presence: with no users', () => {
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			presence.hooks.subscribe(ws, '__presence:empty', { platform });
+
+			expect(platform.sent).toHaveLength(1);
+			expect(platform.sent[0].data).toEqual([]);
+		});
+
+		it('hooks.subscribe ignores other __-prefixed topics', () => {
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			presence.hooks.subscribe(ws, '__replay:room', { platform });
+
+			// Should still call join (which skips __ topics internally)
+			expect(presence.count('__replay:room')).toBe(0);
+			expect(platform.sent).toHaveLength(0);
+		});
+
+		it('hooks.close calls leave', () => {
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			presence.join(ws, 'room', platform);
+			platform.reset();
+
+			presence.hooks.close(ws, { platform });
+
+			expect(presence.count('room')).toBe(0);
+			expect(platform.published).toHaveLength(1);
+			expect(platform.published[0].event).toBe('leave');
+		});
+
+		it('destructured hooks work correctly', () => {
+			const { subscribe, close } = presence.hooks;
+
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			subscribe(ws, 'room', { platform });
+
+			expect(presence.count('room')).toBe(1);
+
+			close(ws, { platform });
+
+			expect(presence.count('room')).toBe(0);
 		});
 	});
 

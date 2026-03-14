@@ -1477,13 +1477,18 @@ export function upgrade({ cookies }) {
   return { id: user.id, name: user.name };
 }
 
-export function subscribe(ws, topic, { platform }) {
-  presence.join(ws, topic, platform);
+export const { subscribe, close } = presence.hooks;
+```
+
+The `hooks` object handles everything: `subscribe` calls `join()` for regular topics and sends the current presence list for `__presence:*` topics, `close` calls `leave()`. If you need custom logic (auth gating, topic filtering), wrap the hook:
+
+```js
+export function subscribe(ws, topic, ctx) {
+  if (topic === 'vip' && !ws.getUserData().isVip) return false;
+  presence.hooks.subscribe(ws, topic, ctx);
 }
 
-export function close(ws, { platform }) {
-  presence.leave(ws, platform);
-}
+export const close = presence.hooks.close;
 ```
 
 Use it on the client:
@@ -1527,6 +1532,7 @@ const presence = createPresence({
   select: (userData) => userData  // extract public fields (default: full userData)
 });
 
+presence.hooks                       // ready-made { subscribe, close } hooks
 presence.join(ws, topic, platform)   // add user to topic (call from subscribe hook)
 presence.leave(ws, platform)         // remove from all topics (call from close hook)
 presence.sync(ws, topic, platform)   // send list without joining (for observers)
