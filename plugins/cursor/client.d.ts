@@ -29,5 +29,6 @@ export interface CursorPosition<UserInfo = unknown, Data = unknown> {
  * ```
  */
 export function cursor<UserInfo = unknown, Data = unknown>(
-	topic: string
+	topic: string,
+	options?: { maxAge?: number }
 ): Readable<Map<string, CursorPosition<UserInfo, Data>>>;

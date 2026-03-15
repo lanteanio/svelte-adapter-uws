@@ -60,6 +60,7 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 
 **Help**
 - [Troubleshooting](#troubleshooting)
+- [Related projects](#related-projects)
 - [License](#license)
 
 ---
@@ -998,6 +999,7 @@ One-liner for real-time collections. Handles `created`, `updated`, and `deleted`
 Options:
 - `key` - property to match items by (default: `'id'`)
 - `prepend` - add new items to the beginning instead of end (default: `false`)
+- `maxAge` - auto-remove entries that haven't been created/updated within this many milliseconds (see [maxAge](#maxage---client-side-entry-expiry) below)
 
 ```js
 // Notifications, newest first
@@ -1043,6 +1045,29 @@ Like `crud()` but returns a `Record<string, T>` instead of an array. Better for 
   <UserCard user={$users[selectedId]} />
 {/if}
 ```
+
+Options:
+- `key` - property to match items by (default: `'id'`)
+- `maxAge` - auto-remove entries that haven't been created/updated within this many milliseconds (see [maxAge](#maxage---client-side-entry-expiry) below)
+
+### `maxAge` - client-side entry expiry
+
+Both `crud()` and `lookup()` accept a `maxAge` option (in milliseconds). When set, entries that haven't received a `created` or `updated` event within that window are automatically removed from the store. Explicit `deleted` events still remove entries immediately.
+
+This is useful for state backed by an external store with TTL (e.g. Redis). If the server fails to broadcast a removal event (mass disconnects, crashes, Redis TTL expiry without keyspace notifications), clients clean up on their own:
+
+```js
+// Presence entries expire after 90s without a refresh
+const users = lookup('__presence:board', data.users, { key: 'key', maxAge: 90_000 });
+
+// Sensor readings expire after 30s without an update
+const sensors = lookup('sensors', [], { key: 'id', maxAge: 30_000 });
+
+// Same option works on crud()
+const items = crud('items', data.items, { maxAge: 60_000 });
+```
+
+The sweep runs at `maxAge / 2` intervals (minimum 1 second). The timer is cleaned up automatically when the last subscriber unsubscribes.
 
 ### `latest(topic, max?, initial?)` - ring buffer
 
@@ -1552,6 +1577,13 @@ const users = presence('room');
 // $users = [{ id: '1', name: 'Alice' }, { id: '2', name: 'Bob' }]
 ```
 
+The `presence()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, entries that haven't been refreshed (via `list` or `join` events) within that window are automatically removed from the store. This makes clients self-healing when the server fails to broadcast `leave` events under load:
+
+```js
+// Entries expire after 90s without a server refresh
+const users = presence('room', { maxAge: 90_000 });
+```
+
 #### How multi-tab dedup works
 
 If user "Alice" (key `id: '1'`) has three browser tabs open, `presence.join()` is called three times with the same key. The plugin ref-counts connections per key: Alice appears once in the list. When she closes two tabs, she stays present. Only when the last tab closes does the plugin broadcast a `leave` event.
@@ -1846,6 +1878,12 @@ export function close(ws, { platform }) {
 ```
 
 The client store is a `Readable<Map<string, { user, data }>>`. The Map updates when cursors move or disconnect.
+
+The `cursor()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, cursor entries that haven't received an update within that window are automatically removed. This makes clients self-healing when the server fails to broadcast `remove` events under load:
+
+```js
+const positions = cursor('canvas', { maxAge: 30_000 });
+```
 
 #### Server API
 
@@ -2519,6 +2557,11 @@ Or if you're using `on()` directly (which auto-connects), call `connect()` first
 ```
 
 ---
+
+## Related projects
+
+- [svelte-adapter-uws-extensions](https://github.com/lanteanio/svelte-adapter-uws-extensions) -- Redis-backed extensions for multi-server deployments: persistent presence, distributed pub/sub, session storage, and more.
+- [svelte-realtime](https://github.com/lanteanio/svelte-realtime) -- Opinionated full-stack starter built on this adapter. Auth, database, real-time CRUD, and deployment config out of the box.
 
 ## License
 

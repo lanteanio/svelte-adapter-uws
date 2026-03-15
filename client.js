@@ -104,49 +104,225 @@ export function ready() {
  * Live CRUD list - one line for real-time collections.
  * Auto-connects, auto-subscribes, and auto-handles created/updated/deleted events.
  *
+ * When `maxAge` is set, entries that haven't been created or updated
+ * within that window are automatically removed from the list.
+ *
  * @template T
  * @param {string} topic - Topic to subscribe to
  * @param {T[]} [initial] - Starting data (e.g. from a load function)
- * @param {{ key?: string, prepend?: boolean }} [options] - Options
+ * @param {{ key?: string, prepend?: boolean, maxAge?: number }} [options] - Options
  * @returns {import('svelte/store').Readable<T[]>}
  */
 export function crud(topic, initial = [], options = {}) {
 	const key = options.key || 'id';
 	const prepend = options.prepend || false;
-	return on(topic).scan(/** @type {any[]} */ (initial), (list, { event, data }) => {
-		if (event === 'created') return prepend ? [data, ...list] : [...list, data];
-		if (event === 'updated') return list.map((item) => item[key] === data[key] ? data : item);
-		if (event === 'deleted') return list.filter((item) => item[key] !== data[key]);
-		return list;
-	});
+	const maxAge = options.maxAge;
+
+	if (maxAge == null || maxAge <= 0) {
+		return on(topic).scan(/** @type {any[]} */ (initial), (list, { event, data }) => {
+			if (event === 'created') return prepend ? [data, ...list] : [...list, data];
+			if (event === 'updated') return list.map((item) => item[key] === data[key] ? data : item);
+			if (event === 'deleted') return list.filter((item) => item[key] !== data[key]);
+			return list;
+		});
+	}
+
+	// maxAge mode: track timestamps per key, sweep on interval
+	const conn = ensureConnection();
+	const source = conn.on(topic);
+
+	/** @type {any[]} */
+	let list = [...initial];
+	/** @type {Map<string, number>} */
+	const timestamps = new Map();
+	const now = Date.now();
+	for (const item of initial) {
+		timestamps.set(String(item[key]), now);
+	}
+
+	const output = writable(list);
+	/** @type {(() => void) | null} */
+	let sourceUnsub = null;
+	/** @type {ReturnType<typeof setInterval> | null} */
+	let sweepTimer = null;
+	let subCount = 0;
+
+	function sweep() {
+		const cutoff = Date.now() - /** @type {number} */ (maxAge);
+		let changed = false;
+		for (const [id, ts] of timestamps) {
+			if (ts < cutoff) {
+				timestamps.delete(id);
+				const before = list.length;
+				list = list.filter((item) => String(item[key]) !== id);
+				if (list.length !== before) changed = true;
+			}
+		}
+		if (changed) output.set(list);
+	}
+
+	function start() {
+		sourceUnsub = source.subscribe((event) => {
+			if (event === null) return;
+			const { event: evt, data } = event;
+			const id = String(data[key]);
+			if (evt === 'created') {
+				timestamps.set(id, Date.now());
+				list = prepend ? [data, ...list] : [...list, data];
+				output.set(list);
+			} else if (evt === 'updated') {
+				timestamps.set(id, Date.now());
+				list = list.map((item) => String(item[key]) === id ? data : item);
+				output.set(list);
+			} else if (evt === 'deleted') {
+				timestamps.delete(id);
+				list = list.filter((item) => String(item[key]) !== id);
+				output.set(list);
+			}
+		});
+		sweepTimer = setInterval(sweep, Math.max(maxAge / 2, 1000));
+	}
+
+	function stop() {
+		if (sourceUnsub) { sourceUnsub(); sourceUnsub = null; }
+		if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
+		list = [...initial];
+		const now = Date.now();
+		timestamps.clear();
+		for (const item of initial) {
+			timestamps.set(String(item[key]), now);
+		}
+		output.set(list);
+	}
+
+	return {
+		subscribe(fn) {
+			if (subCount++ === 0) start();
+			const unsub = output.subscribe(fn);
+			return () => {
+				unsub();
+				if (--subCount === 0) stop();
+			};
+		}
+	};
 }
 
 /**
  * Live keyed object - like `crud()` but returns a `Record` keyed by ID.
  * Better for dashboards and fast lookups.
  *
+ * When `maxAge` is set, entries that haven't been created or updated
+ * within that window are automatically removed. Useful for presence,
+ * cursors, or any state backed by an external store with TTL expiry.
+ *
  * @template T
  * @param {string} topic - Topic to subscribe to
  * @param {T[]} [initial] - Starting data (e.g. from a load function)
- * @param {{ key?: string }} [options] - Options
+ * @param {{ key?: string, maxAge?: number }} [options] - Options
  * @returns {import('svelte/store').Readable<Record<string, T>>}
  */
 export function lookup(topic, initial = [], options = {}) {
 	const key = options.key || 'id';
+	const maxAge = options.maxAge;
 	/** @type {Record<string, any>} */
 	const initialMap = {};
 	for (const item of initial) {
 		initialMap[/** @type {any} */ (item)[key]] = item;
 	}
-	return on(topic).scan(initialMap, (map, { event, data }) => {
-		const id = data[key];
-		if (event === 'created' || event === 'updated') return { ...map, [id]: data };
-		if (event === 'deleted') {
-			const { [id]: _, ...rest } = map;
-			return rest;
+
+	if (maxAge == null || maxAge <= 0) {
+		return on(topic).scan(initialMap, (map, { event, data }) => {
+			const id = data[key];
+			if (event === 'created' || event === 'updated') return { ...map, [id]: data };
+			if (event === 'deleted') {
+				const { [id]: _, ...rest } = map;
+				return rest;
+			}
+			return map;
+		});
+	}
+
+	// maxAge mode: track timestamps per key, sweep on interval
+	const conn = ensureConnection();
+	const source = conn.on(topic);
+
+	/** @type {Record<string, any>} */
+	let map = { ...initialMap };
+	/** @type {Map<string, number>} */
+	const timestamps = new Map();
+	const now = Date.now();
+	for (const id in initialMap) {
+		timestamps.set(id, now);
+	}
+
+	const output = writable(map);
+	/** @type {(() => void) | null} */
+	let sourceUnsub = null;
+	/** @type {ReturnType<typeof setInterval> | null} */
+	let sweepTimer = null;
+	let subCount = 0;
+
+	function sweep() {
+		const cutoff = Date.now() - /** @type {number} */ (maxAge);
+		let changed = false;
+		for (const [id, ts] of timestamps) {
+			if (ts < cutoff) {
+				timestamps.delete(id);
+				if (id in map) {
+					const { [id]: _, ...rest } = map;
+					map = rest;
+					changed = true;
+				}
+			}
 		}
-		return map;
-	});
+		if (changed) output.set(map);
+	}
+
+	function start() {
+		sourceUnsub = source.subscribe((event) => {
+			if (event === null) return;
+			const { event: evt, data } = event;
+			const id = data[key];
+			if (evt === 'created' || evt === 'updated') {
+				timestamps.set(id, Date.now());
+				map = { ...map, [id]: data };
+				output.set(map);
+			} else if (evt === 'deleted') {
+				timestamps.delete(id);
+				if (id in map) {
+					const { [id]: _, ...rest } = map;
+					map = rest;
+					output.set(map);
+				}
+			}
+		});
+		// Sweep at half the maxAge interval for responsive cleanup
+		// without burning cycles on very short intervals
+		sweepTimer = setInterval(sweep, Math.max(maxAge / 2, 1000));
+	}
+
+	function stop() {
+		if (sourceUnsub) { sourceUnsub(); sourceUnsub = null; }
+		if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
+		map = { ...initialMap };
+		const now = Date.now();
+		timestamps.clear();
+		for (const id in initialMap) {
+			timestamps.set(id, now);
+		}
+		output.set(map);
+	}
+
+	return {
+		subscribe(fn) {
+			if (subCount++ === 0) start();
+			const unsub = output.subscribe(fn);
+			return () => {
+				unsub();
+				if (--subCount === 0) stop();
+			};
+		}
+	};
 }
 
 /**

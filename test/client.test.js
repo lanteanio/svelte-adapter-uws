@@ -348,6 +348,117 @@ describe('client store patterns', () => {
 		});
 	});
 
+	describe('presence maxAge pattern', () => {
+		it('sweeps stale entries based on timestamps', () => {
+			vi.useFakeTimers();
+			const maxAge = 2000;
+
+			/** @type {Map<string, any>} */
+			const userMap = new Map();
+			/** @type {Map<string, number>} */
+			const timestamps = new Map();
+
+			function join(key, data) {
+				userMap.set(key, data);
+				timestamps.set(key, Date.now());
+			}
+
+			function sweep() {
+				const cutoff = Date.now() - maxAge;
+				let changed = false;
+				for (const [key, ts] of timestamps) {
+					if (ts < cutoff) {
+						timestamps.delete(key);
+						if (userMap.delete(key)) changed = true;
+					}
+				}
+				return changed;
+			}
+
+			join('1', { name: 'Alice' });
+			join('2', { name: 'Bob' });
+			expect(userMap.size).toBe(2);
+
+			vi.advanceTimersByTime(1500);
+			// Refresh Alice
+			timestamps.set('1', Date.now());
+
+			vi.advanceTimersByTime(600);
+			const changed = sweep();
+			expect(changed).toBe(true);
+			expect(userMap.size).toBe(1);
+			expect(userMap.has('1')).toBe(true);
+			expect(userMap.has('2')).toBe(false);
+
+			vi.useRealTimers();
+		});
+
+		it('does not sweep when maxAge is not set', () => {
+			const userMap = new Map();
+			userMap.set('1', { name: 'Alice' });
+			// Without maxAge, no sweep should happen -- entries persist indefinitely
+			expect(userMap.size).toBe(1);
+		});
+
+		it('leave removes entry and timestamp immediately', () => {
+			const userMap = new Map();
+			const timestamps = new Map();
+
+			userMap.set('1', { name: 'Alice' });
+			timestamps.set('1', Date.now());
+
+			// Explicit leave
+			timestamps.delete('1');
+			userMap.delete('1');
+			expect(userMap.size).toBe(0);
+			expect(timestamps.size).toBe(0);
+		});
+	});
+
+	describe('cursor maxAge pattern', () => {
+		it('sweeps stale cursor entries', () => {
+			vi.useFakeTimers();
+			const maxAge = 3000;
+
+			/** @type {Map<string, { user: any, data: any }>} */
+			const cursorMap = new Map();
+			/** @type {Map<string, number>} */
+			const timestamps = new Map();
+
+			function update(key, user, data) {
+				cursorMap.set(key, { user, data });
+				timestamps.set(key, Date.now());
+			}
+
+			function sweep() {
+				const cutoff = Date.now() - maxAge;
+				let changed = false;
+				for (const [key, ts] of timestamps) {
+					if (ts < cutoff) {
+						timestamps.delete(key);
+						if (cursorMap.delete(key)) changed = true;
+					}
+				}
+				return changed;
+			}
+
+			update('c1', { name: 'Alice' }, { x: 10, y: 20 });
+			update('c2', { name: 'Bob' }, { x: 50, y: 60 });
+
+			vi.advanceTimersByTime(2000);
+			// Bob moves
+			update('c2', { name: 'Bob' }, { x: 55, y: 65 });
+
+			vi.advanceTimersByTime(1100);
+			sweep();
+			expect(cursorMap.size).toBe(1);
+			expect(cursorMap.has('c1')).toBe(false);
+			expect(cursorMap.get('c2').data).toEqual({ x: 55, y: 65 });
+
+			vi.useRealTimers();
+		});
+	});
+
 	describe('queue management', () => {
 		it('drops oldest when full', () => {
 			const MAX_QUEUE_SIZE = 5;

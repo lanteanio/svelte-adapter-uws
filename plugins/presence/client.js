@@ -5,6 +5,11 @@
  * a live list of who's connected. The server handles join/leave tracking;
  * this module just keeps the client-side state in sync.
  *
+ * When `maxAge` is set, entries that haven't been refreshed (via `list`
+ * or `join` events) within that window are automatically removed. This
+ * makes clients self-healing when the server fails to broadcast a `leave`
+ * event (e.g. mass disconnects overwhelming Redis cleanup).
+ *
  * @module svelte-adapter-uws/plugins/presence/client
  */
 
@@ -20,8 +25,9 @@ const presenceStores = new Map();
  * Returns a readable Svelte store containing an array of user data objects.
  * The array updates automatically when users join or leave.
  *
- * Memoized by topic: calling `presence('room')` multiple times (e.g. from
- * `$derived`) returns the same store instance, preventing flickering.
+ * Memoized by topic + maxAge: calling `presence('room', { maxAge: 90000 })`
+ * multiple times (e.g. from `$derived`) returns the same store instance,
+ * preventing flickering.
  *
  * You must also subscribe to the topic itself (via `on()`, `crud()`, etc.)
  * for the server's `subscribe` hook to fire and register your presence.
@@ -30,6 +36,7 @@ const presenceStores = new Map();
  *
  * @template T
  * @param {string} topic - Topic to track presence on
+ * @param {{ maxAge?: number }} [options] - Options
  * @returns {import('svelte/store').Readable<T[]>}
  *
  * @example
@@ -49,19 +56,51 @@ const presenceStores = new Map();
  *   {/each}
  * </aside>
  * ```
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   // Self-healing: entries expire after 90s without a refresh
+ *   const users = presence('room', { maxAge: 90_000 });
+ * </script>
+ * ```
  */
-export function presence(topic) {
-	const cached = presenceStores.get(topic);
+export function presence(topic, options) {
+	const maxAge = options?.maxAge;
+	const cacheKey = maxAge > 0 ? topic + '\0' + maxAge : topic;
+
+	const cached = presenceStores.get(cacheKey);
 	if (cached) return cached;
 
 	const presenceTopic = '__presence:' + topic;
 
 	/** @type {Map<string, any>} */
 	let userMap = new Map();
+	/** @type {Map<string, number>} */
+	const timestamps = new Map();
 	const output = writable(/** @type {any[]} */ ([]));
 
 	let sourceUnsub = /** @type {(() => void) | null} */ (null);
+	/** @type {ReturnType<typeof setInterval> | null} */
+	let sweepTimer = null;
 	let refCount = 0;
+
+	function flush() {
+		output.set([...userMap.values()]);
+	}
+
+	function sweep() {
+		if (!maxAge || maxAge <= 0) return;
+		const cutoff = Date.now() - maxAge;
+		let changed = false;
+		for (const [key, ts] of timestamps) {
+			if (ts < cutoff) {
+				timestamps.delete(key);
+				if (userMap.delete(key)) changed = true;
+			}
+		}
+		if (changed) flush();
+	}
 
 	function startListening() {
 		// Fresh on() call each time -- the underlying writable in client.js
@@ -73,29 +112,38 @@ export function presence(topic) {
 
 			if (event.event === 'list' && Array.isArray(event.data)) {
 				userMap = new Map();
+				timestamps.clear();
+				const now = Date.now();
 				for (const entry of event.data) {
 					userMap.set(entry.key, entry.data);
+					timestamps.set(entry.key, now);
 				}
-				output.set([...userMap.values()]);
+				flush();
 				return;
 			}
 
 			if (event.event === 'join' && event.data != null) {
 				const { key, data } = event.data;
+				timestamps.set(key, Date.now());
 				if (!userMap.has(key)) {
 					userMap.set(key, data);
-					output.set([...userMap.values()]);
+					flush();
 				}
 				return;
 			}
 
 			if (event.event === 'leave' && event.data != null) {
 				const { key } = event.data;
+				timestamps.delete(key);
 				if (userMap.delete(key)) {
-					output.set([...userMap.values()]);
+					flush();
 				}
 			}
 		});
+
+		if (maxAge > 0) {
+			sweepTimer = setInterval(sweep, Math.max(maxAge / 2, 1000));
+		}
 	}
 
 	function stopListening() {
@@ -103,7 +151,12 @@ export function presence(topic) {
 			sourceUnsub();
 			sourceUnsub = null;
 		}
+		if (sweepTimer) {
+			clearInterval(sweepTimer);
+			sweepTimer = null;
+		}
 		userMap = new Map();
+		timestamps.clear();
 		output.set([]);
 	}
 
@@ -118,6 +171,6 @@ export function presence(topic) {
 		}
 	};
 
-	presenceStores.set(topic, store);
+	presenceStores.set(cacheKey, store);
 	return store;
 }

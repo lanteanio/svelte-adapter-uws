@@ -179,7 +179,7 @@ export const status: Readable<'connecting' | 'open' | 'closed'>;
 export function crud<T extends Record<string, any>>(
 	topic: string,
 	initial?: T[],
-	options?: { key?: keyof T & string; prepend?: boolean }
+	options?: { key?: keyof T & string; prepend?: boolean; maxAge?: number }
 ): Readable<T[]>;
 
 /**
@@ -207,7 +207,7 @@ export function crud<T extends Record<string, any>>(
 export function lookup<T extends Record<string, any>>(
 	topic: string,
 	initial?: T[],
-	options?: { key?: keyof T & string }
+	options?: { key?: keyof T & string; maxAge?: number }
 ): Readable<Record<string, T>>;
 
 /**

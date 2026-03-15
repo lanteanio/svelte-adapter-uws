@@ -340,6 +340,173 @@ describe('client.js (real module)', () => {
 		});
 	});
 
+	describe('lookup() with maxAge', () => {
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it('expires entries after maxAge', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.lookup('sensors', [], { key: 'id', maxAge: 2000 });
+			let value;
+			const unsub = store.subscribe((v) => { value = v; });
+			// Let MockWebSocket auto-open (microtask) and flush pending timers
+			await vi.advanceTimersByTimeAsync(0);
+
+			const ws = MockWebSocket._last;
+			ws._receive({ topic: 'sensors', event: 'created', data: { id: 'a', temp: 20 } });
+			expect(value).toEqual({ a: { id: 'a', temp: 20 } });
+
+			// Advance past maxAge + one full sweep cycle
+			// Sweep fires at 1000ms intervals (maxAge/2). Entry created at T=0.
+			// At T=3000 sweep: cutoff = 3000-2000 = 1000 > 0, so entry expires.
+			vi.advanceTimersByTime(3100);
+			expect(value).toEqual({});
+
+			unsub();
+			vi.useRealTimers();
+			clientModule.connect().close();
+		});
+
+		it('refreshes timestamp on update, only expires stale entries', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.lookup('sensors', [], { key: 'id', maxAge: 2000 });
+			let value;
+			const unsub = store.subscribe((v) => { value = v; });
+			await vi.advanceTimersByTimeAsync(0);
+
+			const ws = MockWebSocket._last;
+			ws._receive({ topic: 'sensors', event: 'created', data: { id: 'a', temp: 20 } });
+			ws._receive({ topic: 'sensors', event: 'created', data: { id: 'b', temp: 30 } });
+
+			// Advance 1500ms then refresh 'a' (its timestamp becomes T+1500)
+			vi.advanceTimersByTime(1500);
+			ws._receive({ topic: 'sensors', event: 'updated', data: { id: 'a', temp: 22 } });
+
+			// Advance to T=3100: sweep at T=3000, cutoff=1000.
+			// 'b' created at T=0 < 1000: expired. 'a' refreshed at T=1500 >= 1000: survives.
+			vi.advanceTimersByTime(1600);
+			expect(value).toEqual({ a: { id: 'a', temp: 22 } });
+
+			unsub();
+			vi.useRealTimers();
+			clientModule.connect().close();
+		});
+
+		it('does not expire when maxAge is not set', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.lookup('users', [{ id: 'a', name: 'Alice' }]);
+			let value;
+			const unsub = store.subscribe((v) => { value = v; });
+			await vi.advanceTimersByTimeAsync(0);
+
+			vi.advanceTimersByTime(100000);
+			expect(value).toEqual({ a: { id: 'a', name: 'Alice' } });
+
+			unsub();
+			vi.useRealTimers();
+			clientModule.connect().close();
+		});
+
+		it('cleans up sweep timer on last unsubscribe', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.lookup('sensors', [], { key: 'id', maxAge: 2000 });
+			const unsub = store.subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+
+			const ws = MockWebSocket._last;
+			ws._receive({ topic: 'sensors', event: 'created', data: { id: 'a', temp: 20 } });
+
+			unsub();
+			// Should not throw after cleanup
+			vi.advanceTimersByTime(5000);
+
+			vi.useRealTimers();
+			clientModule.connect().close();
+		});
+
+		it('explicit delete removes entry immediately regardless of maxAge', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.lookup('sensors', [], { key: 'id', maxAge: 60000 });
+			let value;
+			const unsub = store.subscribe((v) => { value = v; });
+			await vi.advanceTimersByTimeAsync(0);
+
+			const ws = MockWebSocket._last;
+			ws._receive({ topic: 'sensors', event: 'created', data: { id: 'a', temp: 20 } });
+			ws._receive({ topic: 'sensors', event: 'deleted', data: { id: 'a' } });
+			expect(value).toEqual({});
+
+			unsub();
+			vi.useRealTimers();
+			clientModule.connect().close();
+		});
+	});
+
+	describe('crud() with maxAge', () => {
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it('expires entries after maxAge', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.crud('items', [], { key: 'id', maxAge: 2000 });
+			let value;
+			const unsub = store.subscribe((v) => { value = v; });
+			await vi.advanceTimersByTimeAsync(0);
+
+			const ws = MockWebSocket._last;
+			ws._receive({ topic: 'items', event: 'created', data: { id: 1, text: 'a' } });
+			expect(value).toEqual([{ id: 1, text: 'a' }]);
+
+			vi.advanceTimersByTime(3100);
+			expect(value).toEqual([]);
+
+			unsub();
+			vi.useRealTimers();
+			clientModule.connect().close();
+		});
+
+		it('refreshes timestamp on update', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.crud('items', [], { key: 'id', maxAge: 2000 });
+			let value;
+			const unsub = store.subscribe((v) => { value = v; });
+			await vi.advanceTimersByTimeAsync(0);
+
+			const ws = MockWebSocket._last;
+			ws._receive({ topic: 'items', event: 'created', data: { id: 1, text: 'a' } });
+			ws._receive({ topic: 'items', event: 'created', data: { id: 2, text: 'b' } });
+
+			vi.advanceTimersByTime(1500);
+			ws._receive({ topic: 'items', event: 'updated', data: { id: 1, text: 'A' } });
+
+			vi.advanceTimersByTime(1600);
+			expect(value).toEqual([{ id: 1, text: 'A' }]);
+
+			unsub();
+			vi.useRealTimers();
+			clientModule.connect().close();
+		});
+
+		it('prepend still works with maxAge', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.crud('items', [], { key: 'id', maxAge: 5000, prepend: true });
+			let value;
+			const unsub = store.subscribe((v) => { value = v; });
+			await vi.advanceTimersByTimeAsync(0);
+
+			const ws = MockWebSocket._last;
+			ws._receive({ topic: 'items', event: 'created', data: { id: 1 } });
+			ws._receive({ topic: 'items', event: 'created', data: { id: 2 } });
+			expect(value).toEqual([{ id: 2 }, { id: 1 }]);
+
+			unsub();
+			vi.useRealTimers();
+			clientModule.connect().close();
+		});
+	});
+
 	describe('ref-counted subscriptions (real module)', () => {
 		it('sends subscribe on first on() and unsubscribe when all unsub', async () => {
 			const conn = clientModule.connect();

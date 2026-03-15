@@ -30,5 +30,6 @@ import type { Readable } from 'svelte/store';
  * ```
  */
 export function presence<T extends Record<string, any> = Record<string, any>>(
-	topic: string
+	topic: string,
+	options?: { maxAge?: number }
 ): Readable<T[]>;
