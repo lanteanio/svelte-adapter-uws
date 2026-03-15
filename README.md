@@ -2174,6 +2174,35 @@ Per-worker limitations (acceptable for most apps):
 - `platform.subscribers(topic)`  - returns the count for the local worker only
 - `platform.sendTo(filter, ...)`  - only reaches connections on the local worker
 
+### Docker / multi-process deployments (Linux)
+
+On Linux, `SO_REUSEPORT` is set on every `app.listen()` call -- including single-process mode. This means multiple independent `node build` processes can bind to the same port without any adapter-level clustering. The kernel distributes connections across them.
+
+If you already have external pub/sub (Redis, Postgres LISTEN/NOTIFY) handling cross-process messaging, you do not need `CLUSTER_WORKERS` at all. Just run multiple replicas and let your infrastructure handle the rest:
+
+```yaml
+# docker-compose.yml
+services:
+  app:
+    build: .
+    command: node build
+    network_mode: host
+    environment:
+      - PORT=443
+      - SSL_CERT=/certs/cert.pem
+      - SSL_KEY=/certs/key.pem
+    deploy:
+      replicas: 4
+```
+
+Each replica is a plain single-process `node build`. No coordinator thread, no built-in relay. Docker handles restarts, Redis handles cross-process messaging, the kernel handles port sharing.
+
+With `network_mode: host`, containers share the host network stack directly -- no port mapping needed, and services like Postgres and Redis are reachable via `127.0.0.1`. This avoids Docker bridge DNS and gives the best network performance.
+
+**When to use what:**
+- **`CLUSTER_WORKERS`** -- single-machine deployments without Docker/k8s/systemd managing processes for you
+- **Docker replicas** -- production deployments where your infrastructure already handles process management and you have external pub/sub for cross-process messaging
+
 ---
 
 ## Performance
