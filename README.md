@@ -291,7 +291,7 @@ The client store automatically uses `wss://` when the page is served over HTTPS 
 
 The Vite plugin is required for WebSocket support in both dev and production (see [Step 2](#step-2-add-the-vite-plugin-required)). It spins up a `ws` WebSocket server alongside Vite's dev server, so your client store and `event.platform` work identically to production.
 
-Changes to your `hooks.ws` file are picked up automatically — the plugin reloads the handler on save and closes existing connections so they reconnect with the new code. No dev server restart needed.
+Changes to your `hooks.ws` file are picked up automatically -- the plugin reloads the handler on save and closes existing connections so they reconnect with the new code. No dev server restart needed.
 
 **Note:** The dev server does not enforce `allowedOrigins`. Origin checks only run in production. A warning is logged at startup as a reminder.
 
@@ -2219,6 +2219,7 @@ net.ipv4.tcp_max_syn_backlog = 4096   # pending TCP connection queue
 net.ipv4.tcp_tw_reuse = 1             # reuse TIME_WAIT sockets faster
 net.core.somaxconn = 4096             # listen() backlog limit
 fs.file-max = 1024000                 # system-wide file descriptor limit
+net.netfilter.nf_conntrack_max = 262144  # connection tracking table size (default 65536 fills up fast under load, drops ALL new TCP including SSH)
 ```
 
 ### File descriptor limits
@@ -2250,6 +2251,19 @@ services:
 Without these changes, each process is limited to 1024 file descriptors (the default). Each WebSocket connection uses one file descriptor, so the default caps you at roughly 1000 concurrent connections per process. The server CPU can be well under 50% and you will still hit this ceiling -- the bottleneck is the OS, not uWS or your application code.
 
 For a deeper walkthrough, see [Millions of active WebSockets with Node.js](https://unetworkingab.medium.com/millions-of-active-websockets-with-node-js-7dc575746a01) from the uWebSockets.js authors.
+
+### Stress testing: run it from the server
+
+If you run a stress test from your local machine against a remote server, every WebSocket connection goes through your home router's NAT table. Home routers typically have 1024 to 4096 NAT entries. Once the table fills up, the router drops ALL new outbound connections -- not just your test, but SSH, your phone on WiFi, everything on your network.
+
+Symptoms of NAT table exhaustion:
+- Connection ceiling stuck around 1200-1900 regardless of server tuning
+- SSH to the server times out during the test
+- Other devices on the same WiFi lose internet access
+- Server CPU is barely loaded (the server is fine, your router is not)
+- Switching your phone from WiFi to mobile data works immediately
+
+The fix: run the stress test from the server itself (localhost to localhost) or from a machine on the same network as the server. This bypasses NAT entirely and lets you hit the actual server limits.
 
 ---
 
