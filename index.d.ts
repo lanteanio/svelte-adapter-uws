@@ -21,6 +21,7 @@ import type { WebSocket } from 'uWebSockets.js';
  * | `BODY_SIZE_LIMIT` | `512K` | Max request body size (`K`, `M`, `G` suffixes) |
  * | `SHUTDOWN_TIMEOUT` | `30` | Seconds to wait during graceful shutdown |
  * | `CLUSTER_WORKERS` | - | Number of worker threads (`'auto'` for CPU count) |
+ * | `CLUSTER_MODE` | *(auto)* | `'reuseport'` (Linux default) or `'acceptor'` (other platforms) |
  *
  * All variables respect the `envPrefix` option (e.g. `MY_APP_PORT` if `envPrefix: 'MY_APP_'`).
  *
@@ -31,8 +32,17 @@ import type { WebSocket } from 'uWebSockets.js';
  * CLUSTER_WORKERS=4 node build       # fixed 4 workers
  * ```
  *
- * Uses uWebSockets.js worker thread distribution (acceptor app + child app descriptors).
- * Works on **all platforms** (Linux, macOS, Windows). Workers auto-restart on crash.
+ * Two clustering modes are available:
+ *
+ * - **`reuseport`** (Linux default) - each worker binds to the same port via `SO_REUSEPORT`.
+ *   The kernel distributes incoming connections across workers. No single-threaded acceptor
+ *   bottleneck, no single point of failure. One worker crashing does not affect others.
+ *
+ * - **`acceptor`** (macOS/Windows default) - a primary thread accepts all connections and
+ *   distributes them to workers via uWS child app descriptors. Works on all platforms.
+ *
+ * The mode is auto-detected from the platform. Override with `CLUSTER_MODE=acceptor` or
+ * `CLUSTER_MODE=reuseport` (reuseport requires Linux). Workers auto-restart on crash.
  *
  * **WebSocket + clustering:** `publish()` is automatically relayed across all workers.
  * `sendTo()`, `connections`, and `subscribers()` operate on the local worker only.

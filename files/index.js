@@ -1,5 +1,5 @@
 import process from 'node:process';
-import { isMainThread, parentPort, threadId, Worker } from 'node:worker_threads';
+import { isMainThread, parentPort, threadId, Worker, workerData } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { env } from 'ENV';
 
@@ -11,10 +11,9 @@ const cluster_workers = env('CLUSTER_WORKERS', '');
 const is_primary = cluster_workers && isMainThread;
 
 if (is_primary) {
-	// ── Primary thread: accept connections, distribute to worker threads ──
+	// ── Primary thread: spawn workers, coordinate shutdown ──
 
 	const { availableParallelism } = await import('node:os');
-	const uWS = (await import('uWebSockets.js')).default;
 
 	const num = cluster_workers === 'auto'
 		? availableParallelism()
@@ -25,16 +24,40 @@ if (is_primary) {
 		process.exit(1);
 	}
 
-	// Acceptor app must match worker SSL mode
+	// On Linux, uWS sets SO_REUSEPORT by default so each worker can bind
+	// to the same port independently and the kernel distributes connections.
+	// No single-threaded acceptor bottleneck, no single point of failure.
+	// On other platforms, fall back to the acceptor model (main thread
+	// accepts connections and distributes them to workers via descriptors).
+	const cluster_mode = env('CLUSTER_MODE', process.platform === 'linux' ? 'reuseport' : 'acceptor');
+
+	if (cluster_mode === 'reuseport' && process.platform !== 'linux') {
+		console.error(
+			`CLUSTER_MODE=reuseport requires Linux (SO_REUSEPORT is not reliable on ${process.platform}). ` +
+			'Remove CLUSTER_MODE to use the default acceptor mode.'
+		);
+		process.exit(1);
+	}
+
+	if (cluster_mode !== 'reuseport' && cluster_mode !== 'acceptor') {
+		console.error(`Invalid CLUSTER_MODE: '${cluster_mode}'. Use 'reuseport' or 'acceptor'.`);
+		process.exit(1);
+	}
+
+	// Acceptor mode needs a uWS app to receive and distribute connections
 	const ssl_cert = env('SSL_CERT', '');
 	const ssl_key = env('SSL_KEY', '');
 	const is_tls = !!(ssl_cert && ssl_key);
 
-	const acceptorApp = is_tls
-		? uWS.SSLApp({ cert_file_name: ssl_cert, key_file_name: ssl_key })
-		: uWS.App();
+	let uWS, acceptorApp;
+	if (cluster_mode === 'acceptor') {
+		uWS = (await import('uWebSockets.js')).default;
+		acceptorApp = is_tls
+			? uWS.SSLApp({ cert_file_name: ssl_cert, key_file_name: ssl_key })
+			: uWS.App();
+	}
 
-	console.log(`Primary thread starting ${num} workers...`);
+	console.log(`Primary thread starting ${num} workers (${cluster_mode} mode)...`);
 
 	/** @type {Map<import('node:worker_threads').Worker, any>} */
 	const workers = new Map();
@@ -51,11 +74,13 @@ if (is_primary) {
 	const restart_timers = new Set();
 
 	function spawn_worker() {
-		const worker = new Worker(fileURLToPath(import.meta.url));
+		const worker = new Worker(fileURLToPath(import.meta.url), {
+			workerData: { mode: cluster_mode }
+		});
 		workers.set(worker, null);
 
 		worker.on('message', (msg) => {
-			if (msg.type === 'descriptor') {
+			if (msg.type === 'descriptor' && cluster_mode === 'acceptor') {
 				workers.set(worker, msg.descriptor);
 				acceptorApp.addChildAppDescriptor(msg.descriptor);
 				console.log(`Worker thread ${worker.threadId} registered`);
@@ -78,6 +103,12 @@ if (is_primary) {
 						}
 					});
 				}
+			} else if (msg.type === 'ready' && cluster_mode === 'reuseport') {
+				console.log(`Worker thread ${worker.threadId} listening on :${port}`);
+				restart_delay = 0;
+				restart_attempts = 0;
+				for (const t of restart_timers) clearTimeout(t);
+				restart_timers.clear();
 			} else if (msg.type === 'publish') {
 				// Relay pub/sub to all OTHER workers
 				for (const [w] of workers) {
@@ -87,20 +118,26 @@ if (is_primary) {
 		});
 
 		worker.on('exit', (code) => {
-			const descriptor = workers.get(worker);
-			if (descriptor) {
-				try { acceptorApp.removeChildAppDescriptor(descriptor); } catch {}
+			if (cluster_mode === 'acceptor') {
+				const descriptor = workers.get(worker);
+				if (descriptor) {
+					try { acceptorApp.removeChildAppDescriptor(descriptor); } catch {}
+				}
 			}
 			workers.delete(worker);
 			if (!shutting_down) {
-				// If no workers have descriptors, stop accepting connections so
+				// In acceptor mode, stop accepting when all workers are down so
 				// clients get a clean connection-refused instead of an empty app.
-				const has_live_worker = [...workers.values()].some(d => d !== null);
-				if (!has_live_worker && listen_socket) {
-					uWS.us_listen_socket_close(listen_socket);
-					listen_socket = null;
-					listening = false;
-					console.log('All workers down, acceptor paused until a replacement is ready');
+				// In reuseport mode, each worker owns its listen socket -- when
+				// it dies, the kernel stops routing to it automatically.
+				if (cluster_mode === 'acceptor') {
+					const has_live_worker = [...workers.values()].some(d => d !== null);
+					if (!has_live_worker && listen_socket) {
+						uWS.us_listen_socket_close(listen_socket);
+						listen_socket = null;
+						listening = false;
+						console.log('All workers down, acceptor paused until a replacement is ready');
+					}
 				}
 				restart_attempts++;
 				if (restart_attempts > RESTART_MAX_ATTEMPTS) {
@@ -139,8 +176,8 @@ if (is_primary) {
 		for (const t of restart_timers) clearTimeout(t);
 		restart_timers.clear();
 
-		// Stop accepting new connections
-		if (listen_socket) {
+		// Stop accepting new connections (acceptor mode only)
+		if (cluster_mode === 'acceptor' && listen_socket) {
 			uWS.us_listen_socket_close(listen_socket);
 			listen_socket = null;
 		}
@@ -168,8 +205,16 @@ if (is_primary) {
 		// Single-process mode (no clustering)
 		start(host, parseInt(port, 10));
 	} else {
-		// Worker thread  - register with acceptor, don't listen
-		parentPort.postMessage({ type: 'descriptor', descriptor: getDescriptor() });
+		// Worker thread startup depends on clustering mode
+		if (workerData?.mode === 'reuseport') {
+			// Reuseport: each worker listens on the shared port directly.
+			// The kernel distributes incoming connections via SO_REUSEPORT.
+			start(host, parseInt(port, 10));
+			parentPort.postMessage({ type: 'ready' });
+		} else {
+			// Acceptor: register with the main thread's acceptor app
+			parentPort.postMessage({ type: 'descriptor', descriptor: getDescriptor() });
+		}
 
 		parentPort.on('message', (msg) => {
 			if (msg.type === 'shutdown') {

@@ -419,6 +419,7 @@ If you set `envPrefix: 'MY_APP_'` in the adapter config, all variables are prefi
 | `BODY_SIZE_LIMIT` | `512K` | Max request body size (supports `K`, `M`, `G` suffixes) |
 | `SHUTDOWN_TIMEOUT` | `30` | Seconds to wait during graceful shutdown |
 | `CLUSTER_WORKERS` | - | Number of worker threads (or `auto` for CPU count) |
+| `CLUSTER_MODE` | *(auto)* | `reuseport` (Linux default) or `acceptor` (other platforms) |
 
 ### Graceful shutdown
 
@@ -2130,7 +2131,7 @@ docker run -p 3000:3000 \
 
 ## Clustering
 
-The adapter supports multi-core scaling via uWebSockets.js worker thread distribution. A primary thread creates an acceptor app that distributes incoming connections across worker threads, each running their own uWS instance. This works on **all platforms** (Linux, macOS, Windows).
+The adapter supports multi-core scaling with two modes, auto-selected based on platform.
 
 Set the `CLUSTER_WORKERS` environment variable to enable it:
 
@@ -2146,6 +2147,21 @@ CLUSTER_WORKERS=auto PORT=8080 ORIGIN=https://example.com node build
 ```
 
 If a worker crashes, it is automatically restarted with exponential backoff. On `SIGTERM`/`SIGINT`, the primary tells all workers to drain in-flight requests and shut down gracefully.
+
+### Clustering modes
+
+**`reuseport`** (Linux default) -- each worker binds to the same port via `SO_REUSEPORT`. The kernel distributes incoming connections across all listening workers. There is no single-threaded acceptor bottleneck and no single point of failure -- one worker crashing does not affect the others.
+
+**`acceptor`** (macOS/Windows default) -- a primary thread creates an acceptor app that receives all connections and distributes them to worker threads via uWS child app descriptors. Works on all platforms.
+
+The mode is auto-detected. Override it explicitly if needed:
+
+```bash
+# Force acceptor mode on Linux (e.g. for debugging)
+CLUSTER_MODE=acceptor CLUSTER_WORKERS=auto node build
+```
+
+Setting `CLUSTER_MODE=reuseport` on non-Linux platforms is an error (SO_REUSEPORT is not reliable outside Linux).
 
 ### WebSocket + clustering
 
