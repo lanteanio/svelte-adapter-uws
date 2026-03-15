@@ -1886,7 +1886,7 @@ export function close(ws, { platform }) {
 {/each}
 ```
 
-The client store is a `Readable<Map<string, { user, data }>>`. The Map updates when cursors move or disconnect.
+The client store is a `Readable<Map<string, { user, data }>>`. The Map updates when cursors move or disconnect. The store handles `update`, `remove`, and `bulk` events -- the `bulk` event applies multiple cursor updates in a single store emission, which is used by the [extensions repo](https://github.com/lanteanio/svelte-adapter-uws-extensions) topicThrottle feature when flushing coalesced updates.
 
 The `cursor()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, cursor entries that haven't received an update within that window are automatically removed. This makes clients self-healing when the server fails to broadcast `remove` events under load:
 

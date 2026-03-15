@@ -92,6 +92,17 @@ export function cursor(topic, options) {
 				return;
 			}
 
+			if (event.event === 'bulk' && Array.isArray(event.data)) {
+				const now = Date.now();
+				for (const entry of event.data) {
+					const { key, user, data } = entry;
+					cursorMap.set(key, { user, data });
+					timestamps.set(key, now);
+				}
+				output.set(new Map(cursorMap));
+				return;
+			}
+
 			if (event.event === 'remove' && event.data != null) {
 				const { key } = event.data;
 				timestamps.delete(key);

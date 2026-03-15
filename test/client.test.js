@@ -502,6 +502,66 @@ describe('client store patterns', () => {
 		});
 	});
 
+	describe('cursor bulk event pattern', () => {
+		it('applies all entries from a bulk event in one pass', () => {
+			const cursorMap = new Map();
+
+			function handleBulk(entries) {
+				for (const { key, user, data } of entries) {
+					cursorMap.set(key, { user, data });
+				}
+			}
+
+			handleBulk([
+				{ key: 'c1', user: { name: 'Alice' }, data: { x: 10, y: 20 } },
+				{ key: 'c2', user: { name: 'Bob' }, data: { x: 50, y: 60 } }
+			]);
+
+			expect(cursorMap.size).toBe(2);
+			expect(cursorMap.get('c1').data).toEqual({ x: 10, y: 20 });
+			expect(cursorMap.get('c2').data).toEqual({ x: 50, y: 60 });
+		});
+
+		it('bulk updates overwrite existing entries', () => {
+			const cursorMap = new Map();
+			cursorMap.set('c1', { user: { name: 'Alice' }, data: { x: 0, y: 0 } });
+
+			function handleBulk(entries) {
+				for (const { key, user, data } of entries) {
+					cursorMap.set(key, { user, data });
+				}
+			}
+
+			handleBulk([
+				{ key: 'c1', user: { name: 'Alice' }, data: { x: 99, y: 99 } }
+			]);
+
+			expect(cursorMap.get('c1').data).toEqual({ x: 99, y: 99 });
+		});
+
+		it('bulk refreshes timestamps for maxAge', () => {
+			vi.useFakeTimers();
+			const timestamps = new Map();
+			const now = Date.now();
+			timestamps.set('c1', now);
+
+			vi.advanceTimersByTime(1000);
+
+			function handleBulk(entries) {
+				const bulkTime = Date.now();
+				for (const { key } of entries) {
+					timestamps.set(key, bulkTime);
+				}
+			}
+
+			handleBulk([{ key: 'c1', user: {}, data: {} }]);
+
+			expect(timestamps.get('c1')).toBe(now + 1000);
+
+			vi.useRealTimers();
+		});
+	});
+
 	describe('cursor maxAge pattern', () => {
 		it('sweeps stale cursor entries', () => {
 			vi.useFakeTimers();
