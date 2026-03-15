@@ -226,10 +226,11 @@ describe('origin validation (WebSocket)', () => {
 	 * @param {'same-origin' | '*' | string[]} allowedOrigins
 	 * @param {string} hostHeader - The Host (or HOST_HEADER) value
 	 * @param {string} [scheme='http'] - The request scheme (from PROTOCOL_HEADER or TLS detection)
+	 * @param {boolean} [hasUpgradeHandler=false] - Whether a user upgrade handler is configured
 	 */
-	function checkOrigin(reqOrigin, allowedOrigins, hostHeader, scheme = 'http') {
-		if (!reqOrigin) return true; // non-browser
+	function checkOrigin(reqOrigin, allowedOrigins, hostHeader, scheme = 'http', hasUpgradeHandler = false) {
 		if (allowedOrigins === '*') return true;
+		if (!reqOrigin) return hasUpgradeHandler;
 		if (allowedOrigins === 'same-origin') {
 			try {
 				const parsed = new URL(reqOrigin);
@@ -245,8 +246,12 @@ describe('origin validation (WebSocket)', () => {
 		return false;
 	}
 
-	it('allows requests without Origin header (non-browser)', () => {
-		expect(checkOrigin(undefined, 'same-origin', 'localhost:3000')).toBe(true);
+	it('rejects requests without Origin header when no upgrade handler', () => {
+		expect(checkOrigin(undefined, 'same-origin', 'localhost:3000')).toBe(false);
+	});
+
+	it('allows requests without Origin header when upgrade handler is configured', () => {
+		expect(checkOrigin(undefined, 'same-origin', 'localhost:3000', 'http', true)).toBe(true);
 	});
 
 	it('allows all origins with wildcard', () => {

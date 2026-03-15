@@ -45,6 +45,8 @@ if (is_primary) {
 	// Exponential backoff for crash-looping workers
 	let restart_delay = 0;
 	const RESTART_DELAY_MAX = 5000;
+	const RESTART_MAX_ATTEMPTS = 50;
+	let restart_attempts = 0;
 	/** @type {Set<ReturnType<typeof setTimeout>>} */
 	const restart_timers = new Set();
 
@@ -57,8 +59,9 @@ if (is_primary) {
 				workers.set(worker, msg.descriptor);
 				acceptorApp.addChildAppDescriptor(msg.descriptor);
 				console.log(`Worker thread ${worker.threadId} registered`);
-				// Worker started successfully  - reset backoff
+				// Worker started successfully  - reset backoff and attempt counter
 				restart_delay = 0;
+				restart_attempts = 0;
 				for (const t of restart_timers) clearTimeout(t);
 				restart_timers.clear();
 				// Start (or resume) listening once a worker is ready to handle requests
@@ -99,8 +102,13 @@ if (is_primary) {
 					listening = false;
 					console.log('All workers down, acceptor paused until a replacement is ready');
 				}
+				restart_attempts++;
+				if (restart_attempts > RESTART_MAX_ATTEMPTS) {
+					console.error(`Worker restart limit reached (${RESTART_MAX_ATTEMPTS}). Exiting.`);
+					process.exit(1);
+				}
 				restart_delay = restart_delay ? Math.min(restart_delay * 2, RESTART_DELAY_MAX) : 100;
-				console.log(`Worker thread ${worker.threadId} exited with code ${code}, restarting in ${restart_delay}ms...`);
+				console.log(`Worker thread ${worker.threadId} exited with code ${code}, restarting in ${restart_delay}ms... (attempt ${restart_attempts}/${RESTART_MAX_ATTEMPTS})`);
 				const timer = setTimeout(() => {
 				restart_timers.delete(timer);
 				if (shutting_down) return;

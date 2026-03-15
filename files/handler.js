@@ -110,7 +110,7 @@ function cacheDir(dir, urlPrefix, immutable) {
 		if (immutable && relPath.startsWith(`${manifest.appPath}/immutable/`)) {
 			headers.push(['cache-control', 'public, max-age=31536000, immutable']);
 		} else {
-			etag = `W/"${createHash('md5').update(buffer).digest('hex').slice(0, 12)}"`;
+			etag = `W/"${createHash('sha256').update(buffer).digest('hex').slice(0, 16)}"`;
 			headers.push(['cache-control', 'no-cache'], ['etag', etag]);
 		}
 
@@ -575,6 +575,10 @@ async function handleSSR(res, method, url, headers, remoteAddress, state, abortS
 					const value = headers[address_header] || '';
 
 					if (address_header === 'x-forwarded-for') {
+						// Reject absurdly long XFF headers (max ~8KB)
+						if (value.length > 8192) {
+							throw new Error('X-Forwarded-For header too large');
+						}
 						const addresses = value.split(',');
 
 						if (xff_depth > addresses.length) {
@@ -696,17 +700,18 @@ async function writeResponse(res, response, state) {
 			res.write(second.value);
 		});
 
-		// Stream remaining chunks with backpressure
+		// Stream remaining chunks with backpressure (30s timeout per drain)
 		for (;;) {
 			const { done, value } = await reader.read();
 			if (done || state.aborted) break;
 
 			const ok = res.write(value);
 			if (!ok) {
-				await new Promise((resolve) =>
-					res.onWritable(() => { resolve(undefined); return true; })
-				);
-				if (state.aborted) break;
+				const drained = await new Promise((resolve) => {
+					const timer = setTimeout(() => resolve(false), 30000);
+					res.onWritable(() => { clearTimeout(timer); resolve(true); return true; });
+				});
+				if (!drained || state.aborted) break;
 			}
 		}
 	} finally {
@@ -799,6 +804,19 @@ if (WS_ENABLED) {
 	const wsOptions = WS_OPTIONS;
 	const allowedOrigins = wsOptions.allowedOrigins || 'same-origin';
 
+	// Per-IP upgrade rate limiter: max 10 upgrades per 10 seconds
+	const UPGRADE_WINDOW_MS = 10000;
+	const UPGRADE_MAX_PER_WINDOW = 10;
+	/** @type {Map<string, { count: number, resetAt: number }>} */
+	const upgradeRateMap = new Map();
+	// Purge stale entries every 60s to prevent unbounded growth
+	setInterval(() => {
+		const now = Date.now();
+		for (const [ip, entry] of upgradeRateMap) {
+			if (now > entry.resetAt) upgradeRateMap.delete(ip);
+		}
+	}, 60000).unref();
+
 	app.ws(WS_PATH, {
 		// Handle HTTP -> WebSocket upgrade with user-provided auth
 		upgrade: (res, req, context) => {
@@ -808,16 +826,40 @@ if (WS_ENABLED) {
 			req.forEach((key, value) => {
 				headers[key] = value;
 			});
+			const upgradeIp = textDecoder.decode(res.getRemoteAddressAsText());
+
+			// Rate limit upgrade requests per IP
+			const now = Date.now();
+			let rateEntry = upgradeRateMap.get(upgradeIp);
+			if (!rateEntry || now > rateEntry.resetAt) {
+				rateEntry = { count: 0, resetAt: now + UPGRADE_WINDOW_MS };
+				upgradeRateMap.set(upgradeIp, rateEntry);
+			}
+			rateEntry.count++;
+			if (rateEntry.count > UPGRADE_MAX_PER_WINDOW) {
+				res.cork(() => {
+					res.writeStatus('429 Too Many Requests');
+					res.writeHeader('content-type', 'text/plain');
+					res.end('Too many upgrade requests');
+				});
+				return;
+			}
+
 			const secKey = req.getHeader('sec-websocket-key');
 			const secProtocol = req.getHeader('sec-websocket-protocol');
 			const secExtensions = req.getHeader('sec-websocket-extensions');
 
 			// Origin validation - reject cross-origin WebSocket connections.
-			// Non-browser clients (no Origin header) are always allowed.
-			const reqOrigin = headers['origin'];
-			if (reqOrigin && allowedOrigins !== '*') {
+			// Requests without an Origin header are also rejected (non-browser
+			// clients must be authenticated via the upgrade handler instead).
+			if (allowedOrigins !== '*') {
+				const reqOrigin = headers['origin'];
 				let allowed = false;
-				if (allowedOrigins === 'same-origin') {
+				if (!reqOrigin) {
+					// No Origin header - reject unless an upgrade handler is
+					// configured (it can authenticate non-browser clients itself)
+					allowed = !!wsModule.upgrade;
+				} else if (allowedOrigins === 'same-origin') {
 					try {
 						const parsed = new URL(reqOrigin);
 						const requestHost = (host_header && headers[host_header]) || headers['host'];
@@ -942,6 +984,11 @@ if (WS_ENABLED) {
 				try {
 					const msg = JSON.parse(textDecoder.decode(message));
 					if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
+						// Validate topic name: max 256 chars, no control characters
+						if (msg.topic.length === 0 || msg.topic.length > 256) return;
+						for (let i = 0; i < msg.topic.length; i++) {
+							if (msg.topic.charCodeAt(i) < 32) return;
+						}
 						// If a subscribe hook exists, let it gate access
 						if (wsModule.subscribe && wsModule.subscribe(ws, msg.topic, { platform }) === false) {
 							return;
@@ -964,8 +1011,11 @@ if (WS_ENABLED) {
 		drain: wsModule.drain ? (ws) => wsModule.drain(ws, { platform }) : undefined,
 
 		close: (ws, code, message) => {
-			wsConnections.delete(ws);
-			wsModule.close?.(ws, { code, message, platform });
+			try {
+				wsModule.close?.(ws, { code, message, platform });
+			} finally {
+				wsConnections.delete(ws);
+			}
 		},
 
 		maxPayloadLength: wsOptions.maxPayloadLength,

@@ -314,6 +314,11 @@ function createConnection(options) {
 
 		ws.onmessage = (rawEvent) => {
 			try {
+				// Reject oversized messages to prevent main-thread blocking
+				if (typeof rawEvent.data === 'string' && rawEvent.data.length > 1048576) {
+					if (debug) console.warn('[ws] message too large, dropped:', rawEvent.data.length, 'bytes');
+					return;
+				}
 				const msg = JSON.parse(rawEvent.data);
 				if (msg.topic && msg.event !== undefined) {
 					/** @type {import('./client.js').WSEvent} */
@@ -548,7 +553,7 @@ function createConnection(options) {
 			ws.send(JSON.stringify(data));
 		} else {
 			if (sendQueue.length >= MAX_QUEUE_SIZE) {
-				if (debug) console.warn('[ws] queue full, dropping oldest message');
+				console.warn('[ws] queue full (' + MAX_QUEUE_SIZE + '), dropping oldest message');
 				sendQueue.shift();
 			}
 			if (debug) console.log('[ws] queued ->', data);

@@ -364,6 +364,11 @@ export default function uws(options = {}) {
 						try {
 							const msg = JSON.parse(buf.toString());
 							if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
+								// Validate topic name: max 256 chars, no control characters
+								if (msg.topic.length === 0 || msg.topic.length > 256) return;
+								for (let ci = 0; ci < msg.topic.length; ci++) {
+									if (msg.topic.charCodeAt(ci) < 32) return;
+								}
 								if (userHandlers.subscribe && userHandlers.subscribe(wrapped, msg.topic, { platform }) === false) {
 									return;
 								}
@@ -416,7 +421,12 @@ export default function uws(options = {}) {
 					mod.drain !== userHandlers.drain ||
 					mod.subscribe !== userHandlers.subscribe) {
 					applyHandlers(mod);
-					console.log('[adapter-uws] WebSocket handler reloaded');
+					// Close existing connections so they reconnect with the new handler.
+					// 1012 = "Service Restart" - clients with auto-reconnect will reconnect.
+					for (const ws of connections) {
+						ws.close(1012, 'Handler reloaded');
+					}
+					console.log('[adapter-uws] WebSocket handler reloaded, existing connections closed');
 				}
 			}).catch((err) => {
 				handlerFailed = true;

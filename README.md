@@ -289,7 +289,7 @@ The client store automatically uses `wss://` when the page is served over HTTPS 
 
 The Vite plugin is required for WebSocket support in both dev and production (see [Step 2](#step-2-add-the-vite-plugin-required)). It spins up a `ws` WebSocket server alongside Vite's dev server, so your client store and `event.platform` work identically to production.
 
-Changes to your `hooks.ws` file are picked up automatically — the plugin reloads the handler on save, no dev server restart needed.
+Changes to your `hooks.ws` file are picked up automatically — the plugin reloads the handler on save and closes existing connections so they reconnect with the new code. No dev server restart needed.
 
 **Note:** The dev server does not enforce `allowedOrigins`. Origin checks only run in production. A warning is logged at startup as a reminder.
 
@@ -388,6 +388,8 @@ adapter({
     // 'same-origin' - only accept where Origin matches Host and scheme (default)
     // '*' - accept from any origin
     // ['https://example.com'] - whitelist specific origins
+    // Requests without an Origin header (non-browser clients) are rejected
+    // unless an upgrade handler is configured to authenticate them.
     allowedOrigins: 'same-origin' // default: 'same-origin'
   }
 })
