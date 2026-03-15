@@ -53,6 +53,7 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 **Deployment & scaling**
 - [Deploying with Docker](#deploying-with-docker)
 - [Clustering](#clustering)
+- [OS tuning for production](#os-tuning-for-production)
 - [Performance](#performance)
 
 **Examples**
@@ -2202,6 +2203,49 @@ With `network_mode: host`, containers share the host network stack directly -- n
 **When to use what:**
 - **`CLUSTER_WORKERS`** -- single-machine deployments without Docker/k8s/systemd managing processes for you
 - **Docker replicas** -- production deployments where your infrastructure already handles process management and you have external pub/sub for cross-process messaging
+
+---
+
+## OS tuning for production
+
+uWebSockets.js can handle hundreds of thousands of connections per process, but Linux defaults are conservative. For any deployment expecting more than a few hundred concurrent WebSocket connections, apply these settings on the host machine.
+
+### Kernel parameters
+
+Add to `/etc/sysctl.conf` and run `sysctl -p`:
+
+```
+net.ipv4.tcp_max_syn_backlog = 4096   # pending TCP connection queue
+net.ipv4.tcp_tw_reuse = 1             # reuse TIME_WAIT sockets faster
+net.core.somaxconn = 4096             # listen() backlog limit
+fs.file-max = 1024000                 # system-wide file descriptor limit
+```
+
+### File descriptor limits
+
+Add to `/etc/security/limits.conf` (takes effect on next login):
+
+```
+*  soft  nofile  1024000
+*  hard  nofile  1024000
+```
+
+### Docker
+
+If running in Docker, the container also needs raised limits. Add to your `docker-compose.yml`:
+
+```yaml
+services:
+  app:
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+```
+
+Without these changes, each process is limited to 1024 file descriptors (the default). Each WebSocket connection uses one file descriptor, so the default caps you at roughly 1000 concurrent connections per process. The server CPU can be well under 50% and you will still hit this ceiling -- the bottleneck is the OS, not uWS or your application code.
+
+For a deeper walkthrough, see [Millions of active WebSockets with Node.js](https://unetworkingab.medium.com/millions-of-active-websockets-with-node-js-7dc575746a01) from the uWebSockets.js authors.
 
 ---
 
