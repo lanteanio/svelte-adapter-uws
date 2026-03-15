@@ -166,11 +166,26 @@ export interface WebSocketOptions {
 	 * - `'*'` - accept connections from any origin
 	 * - `string[]` - whitelist of allowed origin URLs (e.g. `['https://example.com']`)
 	 *
-	 * Non-browser clients (no Origin header) are always allowed.
+	 * Requests without an Origin header (non-browser clients) are rejected
+	 * unless an upgrade handler is configured to authenticate them.
 	 *
 	 * @default 'same-origin'
 	 */
 	allowedOrigins?: 'same-origin' | '*' | string[];
+
+	/**
+	 * Maximum number of WebSocket upgrade requests allowed per IP address
+	 * within `upgradeRateLimitWindow` seconds.
+	 * Set to `0` to disable upgrade rate limiting.
+	 * @default 10
+	 */
+	upgradeRateLimit?: number;
+
+	/**
+	 * Time window in seconds for the upgrade rate limiter.
+	 * @default 10
+	 */
+	upgradeRateLimitWindow?: number;
 }
 
 // -- User's WebSocket handler module exports ---------------------------------

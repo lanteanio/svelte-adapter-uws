@@ -60,7 +60,9 @@ describe('adapter options', () => {
 				sendPingsAutomatically: websocket?.sendPingsAutomatically ?? true,
 				compression: websocket?.compression ?? false,
 				allowedOrigins: websocket?.allowedOrigins ?? 'same-origin',
-				upgradeTimeout: websocket?.upgradeTimeout ?? 10
+				upgradeTimeout: websocket?.upgradeTimeout ?? 10,
+				upgradeRateLimit: websocket?.upgradeRateLimit ?? 10,
+				upgradeRateLimitWindow: websocket?.upgradeRateLimitWindow ?? 10
 			};
 
 			expect(wsPath).toBe('/ws');
@@ -71,6 +73,8 @@ describe('adapter options', () => {
 			expect(wsOpts.compression).toBe(false);
 			expect(wsOpts.allowedOrigins).toBe('same-origin');
 			expect(wsOpts.upgradeTimeout).toBe(10);
+			expect(wsOpts.upgradeRateLimit).toBe(10);
+			expect(wsOpts.upgradeRateLimitWindow).toBe(10);
 		});
 
 		it('preserves upgradeTimeout: 0 through build-time defaults', () => {

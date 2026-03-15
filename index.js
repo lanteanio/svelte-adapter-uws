@@ -221,7 +221,9 @@ export default function (opts = {}) {
 				sendPingsAutomatically: websocket?.sendPingsAutomatically ?? true,
 				compression: websocket?.compression ?? false,
 				allowedOrigins: websocket?.allowedOrigins ?? 'same-origin',
-				upgradeTimeout: websocket?.upgradeTimeout ?? 10
+				upgradeTimeout: websocket?.upgradeTimeout ?? 10,
+				upgradeRateLimit: websocket?.upgradeRateLimit ?? 10,
+				upgradeRateLimitWindow: websocket?.upgradeRateLimitWindow ?? 10
 			};
 
 			builder.copy(files, out, {

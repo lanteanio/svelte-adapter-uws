@@ -804,18 +804,20 @@ if (WS_ENABLED) {
 	const wsOptions = WS_OPTIONS;
 	const allowedOrigins = wsOptions.allowedOrigins || 'same-origin';
 
-	// Per-IP upgrade rate limiter: max 10 upgrades per 10 seconds
-	const UPGRADE_WINDOW_MS = 10000;
-	const UPGRADE_MAX_PER_WINDOW = 10;
+	// Per-IP upgrade rate limiter (configurable, 0 = disabled)
+	const UPGRADE_MAX_PER_WINDOW = wsOptions.upgradeRateLimit ?? 10;
+	const UPGRADE_WINDOW_MS = (wsOptions.upgradeRateLimitWindow ?? 10) * 1000;
 	/** @type {Map<string, { count: number, resetAt: number }>} */
 	const upgradeRateMap = new Map();
-	// Purge stale entries every 60s to prevent unbounded growth
-	setInterval(() => {
-		const now = Date.now();
-		for (const [ip, entry] of upgradeRateMap) {
-			if (now > entry.resetAt) upgradeRateMap.delete(ip);
-		}
-	}, 60000).unref();
+	if (UPGRADE_MAX_PER_WINDOW > 0) {
+		// Purge stale entries every 60s to prevent unbounded growth
+		setInterval(() => {
+			const now = Date.now();
+			for (const [ip, entry] of upgradeRateMap) {
+				if (now > entry.resetAt) upgradeRateMap.delete(ip);
+			}
+		}, 60000).unref();
+	}
 
 	app.ws(WS_PATH, {
 		// Handle HTTP -> WebSocket upgrade with user-provided auth
@@ -828,21 +830,23 @@ if (WS_ENABLED) {
 			});
 			const upgradeIp = textDecoder.decode(res.getRemoteAddressAsText());
 
-			// Rate limit upgrade requests per IP
-			const now = Date.now();
-			let rateEntry = upgradeRateMap.get(upgradeIp);
-			if (!rateEntry || now > rateEntry.resetAt) {
-				rateEntry = { count: 0, resetAt: now + UPGRADE_WINDOW_MS };
-				upgradeRateMap.set(upgradeIp, rateEntry);
-			}
-			rateEntry.count++;
-			if (rateEntry.count > UPGRADE_MAX_PER_WINDOW) {
-				res.cork(() => {
-					res.writeStatus('429 Too Many Requests');
-					res.writeHeader('content-type', 'text/plain');
-					res.end('Too many upgrade requests');
-				});
-				return;
+			// Rate limit upgrade requests per IP (0 = disabled)
+			if (UPGRADE_MAX_PER_WINDOW > 0) {
+				const now = Date.now();
+				let rateEntry = upgradeRateMap.get(upgradeIp);
+				if (!rateEntry || now > rateEntry.resetAt) {
+					rateEntry = { count: 0, resetAt: now + UPGRADE_WINDOW_MS };
+					upgradeRateMap.set(upgradeIp, rateEntry);
+				}
+				rateEntry.count++;
+				if (rateEntry.count > UPGRADE_MAX_PER_WINDOW) {
+					res.cork(() => {
+						res.writeStatus('429 Too Many Requests');
+						res.writeHeader('content-type', 'text/plain');
+						res.end('Too many upgrade requests');
+					});
+					return;
+				}
 			}
 
 			const secKey = req.getHeader('sec-websocket-key');
