@@ -2226,9 +2226,13 @@ fs.file-max = 1024000                 # system-wide file descriptor limit
 Add to `/etc/security/limits.conf` (takes effect on next login):
 
 ```
-*  soft  nofile  1024000
-*  hard  nofile  1024000
+*     soft  nofile  1024000
+*     hard  nofile  1024000
+root  soft  nofile  1024000
+root  hard  nofile  1024000
 ```
+
+The wildcard `*` does not apply to the root user on most Linux distributions. If the app runs as root (common in Docker), the explicit `root` lines are required.
 
 ### Docker
 
