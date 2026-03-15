@@ -1488,7 +1488,8 @@ import { createPresence } from 'svelte-adapter-uws/plugins/presence';
 
 export const presence = createPresence({
   key: 'id',
-  select: (userData) => ({ id: userData.id, name: userData.name })
+  select: (userData) => ({ id: userData.id, name: userData.name }),
+  heartbeat: 60_000  // optional: needed if clients use maxAge
 });
 ```
 
@@ -1556,7 +1557,8 @@ import { createPresence } from 'svelte-adapter-uws/plugins/presence';
 
 const presence = createPresence({
   key: 'id',             // field for multi-tab dedup (default: 'id')
-  select: (userData) => userData  // extract public fields (default: full userData)
+  select: (userData) => userData,  // extract public fields (default: full userData)
+  heartbeat: 60_000      // broadcast active keys every 60s (default: disabled)
 });
 
 presence.hooks                       // ready-made { subscribe, close } hooks
@@ -1565,7 +1567,7 @@ presence.leave(ws, platform)         // remove from all topics (call from close 
 presence.sync(ws, topic, platform)   // send list without joining (for observers)
 presence.list(topic)                 // current user data array
 presence.count(topic)                // unique user count
-presence.clear()                     // reset everything
+presence.clear()                     // reset everything (stops heartbeat timer)
 ```
 
 #### Client API
@@ -1577,12 +1579,19 @@ const users = presence('room');
 // $users = [{ id: '1', name: 'Alice' }, { id: '2', name: 'Bob' }]
 ```
 
-The `presence()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, entries that haven't been refreshed (via `list` or `join` events) within that window are automatically removed from the store. This makes clients self-healing when the server fails to broadcast `leave` events under load:
+The `presence()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, entries that haven't been refreshed within that window are automatically removed from the store. This makes clients self-healing when the server fails to broadcast `leave` events under load.
+
+**Important:** `maxAge` requires the server-side `heartbeat` option. Without heartbeat, no events arrive between the initial `list` and eventual `leave`, so maxAge would expire every user -- including ones who are still connected. The heartbeat periodically tells clients which keys are still active, resetting their maxAge timers.
 
 ```js
-// Entries expire after 90s without a server refresh
-const users = presence('room', { maxAge: 90_000 });
+// Server: heartbeat every 60s
+const presence = createPresence({ key: 'id', heartbeat: 60_000 });
+
+// Client: entries expire after 120s without a heartbeat refresh
+const users = presence('room', { maxAge: 120_000 });
 ```
+
+Rule of thumb: set `heartbeat` to half (or less) of the client's `maxAge`.
 
 #### How multi-tab dedup works
 

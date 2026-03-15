@@ -27,6 +27,25 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	 * ```
 	 */
 	select?: (userData: UserData) => Selected;
+
+	/**
+	 * Interval in milliseconds between heartbeat broadcasts.
+	 *
+	 * When set, the server periodically publishes a `heartbeat` event to all
+	 * presence topics containing the list of active user keys. This resets
+	 * the `maxAge` timer on clients, preventing live users from being expired.
+	 *
+	 * Set this to a value shorter than the client's `maxAge`.
+	 *
+	 * @default 0 (disabled)
+	 *
+	 * @example
+	 * ```js
+	 * // Server heartbeat every 60s, client maxAge 120s
+	 * const presence = createPresence({ heartbeat: 60_000 });
+	 * ```
+	 */
+	heartbeat?: number;
 }
 
 export interface PresenceTracker<Selected extends Record<string, any> = Record<string, any>> {

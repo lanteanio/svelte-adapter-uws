@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createPresence } from '../plugins/presence/server.js';
 
 /**
@@ -432,6 +432,169 @@ describe('presence plugin - server', () => {
 
 			// Each connection tracked separately
 			expect(p.count('room')).toBe(2);
+		});
+	});
+
+	describe('heartbeat', () => {
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it('publishes heartbeat events at the configured interval', () => {
+			vi.useFakeTimers();
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, name: userData.name }),
+				heartbeat: 5000
+			});
+
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			p.join(ws, 'room', platform);
+			platform.reset();
+
+			vi.advanceTimersByTime(5000);
+
+			const heartbeats = platform.published.filter(e => e.event === 'heartbeat');
+			expect(heartbeats).toHaveLength(1);
+			expect(heartbeats[0].topic).toBe('__presence:room');
+			expect(heartbeats[0].data).toEqual(['1']);
+
+			p.clear();
+		});
+
+		it('includes all active keys in heartbeat', () => {
+			vi.useFakeTimers();
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, name: userData.name }),
+				heartbeat: 5000
+			});
+
+			const ws1 = mockWs({ id: '1', name: 'Alice' });
+			const ws2 = mockWs({ id: '2', name: 'Bob' });
+			p.join(ws1, 'room', platform);
+			p.join(ws2, 'room', platform);
+			platform.reset();
+
+			vi.advanceTimersByTime(5000);
+
+			const heartbeats = platform.published.filter(e => e.event === 'heartbeat');
+			expect(heartbeats).toHaveLength(1);
+			expect(heartbeats[0].data.sort()).toEqual(['1', '2']);
+
+			p.clear();
+		});
+
+		it('publishes heartbeats for all topics', () => {
+			vi.useFakeTimers();
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, name: userData.name }),
+				heartbeat: 5000
+			});
+
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			p.join(ws, 'room-a', platform);
+			p.join(ws, 'room-b', platform);
+			platform.reset();
+
+			vi.advanceTimersByTime(5000);
+
+			const heartbeats = platform.published.filter(e => e.event === 'heartbeat');
+			expect(heartbeats).toHaveLength(2);
+			const topics = heartbeats.map(h => h.topic).sort();
+			expect(topics).toEqual(['__presence:room-a', '__presence:room-b']);
+
+			p.clear();
+		});
+
+		it('does not publish heartbeats when heartbeat is 0 or omitted', () => {
+			vi.useFakeTimers();
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, name: userData.name })
+			});
+
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			p.join(ws, 'room', platform);
+			platform.reset();
+
+			vi.advanceTimersByTime(60000);
+
+			const heartbeats = platform.published.filter(e => e.event === 'heartbeat');
+			expect(heartbeats).toHaveLength(0);
+
+			p.clear();
+		});
+
+		it('clear() stops the heartbeat timer', () => {
+			vi.useFakeTimers();
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, name: userData.name }),
+				heartbeat: 5000
+			});
+
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			p.join(ws, 'room', platform);
+			platform.reset();
+
+			p.clear();
+			vi.advanceTimersByTime(10000);
+
+			const heartbeats = platform.published.filter(e => e.event === 'heartbeat');
+			expect(heartbeats).toHaveLength(0);
+		});
+
+		it('heartbeat does not include users who have left', () => {
+			vi.useFakeTimers();
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, name: userData.name }),
+				heartbeat: 5000
+			});
+
+			const ws1 = mockWs({ id: '1', name: 'Alice' });
+			const ws2 = mockWs({ id: '2', name: 'Bob' });
+			p.join(ws1, 'room', platform);
+			p.join(ws2, 'room', platform);
+			p.leave(ws2, platform);
+			platform.reset();
+
+			vi.advanceTimersByTime(5000);
+
+			const heartbeats = platform.published.filter(e => e.event === 'heartbeat');
+			expect(heartbeats).toHaveLength(1);
+			expect(heartbeats[0].data).toEqual(['1']);
+
+			p.clear();
+		});
+
+		it('heartbeat restarts after clear and re-join', () => {
+			vi.useFakeTimers();
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, name: userData.name }),
+				heartbeat: 5000
+			});
+
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			p.join(ws, 'room', platform);
+			p.clear();
+			platform.reset();
+
+			// Re-join after clear -- should restart heartbeat
+			const ws2 = mockWs({ id: '2', name: 'Bob' });
+			p.join(ws2, 'lobby', platform);
+			platform.reset();
+
+			vi.advanceTimersByTime(5000);
+
+			const heartbeats = platform.published.filter(e => e.event === 'heartbeat');
+			expect(heartbeats).toHaveLength(1);
+			expect(heartbeats[0].topic).toBe('__presence:lobby');
+
+			p.clear();
 		});
 	});
 });

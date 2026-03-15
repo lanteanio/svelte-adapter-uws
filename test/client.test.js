@@ -415,6 +415,93 @@ describe('client store patterns', () => {
 		});
 	});
 
+	describe('presence heartbeat pattern', () => {
+		it('heartbeat refreshes timestamps for active keys', () => {
+			vi.useFakeTimers();
+			const maxAge = 5000;
+
+			const userMap = new Map();
+			const timestamps = new Map();
+
+			// Simulate initial list
+			const now = Date.now();
+			userMap.set('1', { name: 'Alice' });
+			userMap.set('2', { name: 'Bob' });
+			timestamps.set('1', now);
+			timestamps.set('2', now);
+
+			// Advance time near maxAge
+			vi.advanceTimersByTime(4000);
+
+			// Simulate heartbeat -- refreshes timestamps for listed keys
+			const heartbeatKeys = ['1', '2'];
+			const heartbeatTime = Date.now();
+			for (const key of heartbeatKeys) {
+				if (timestamps.has(key)) {
+					timestamps.set(key, heartbeatTime);
+				}
+			}
+
+			// Advance past original maxAge but within heartbeat maxAge
+			vi.advanceTimersByTime(2000);
+			const cutoff = Date.now() - maxAge;
+
+			// Both should survive (heartbeat refreshed them at T+4000)
+			for (const [key, ts] of timestamps) {
+				expect(ts).toBeGreaterThanOrEqual(cutoff);
+			}
+
+			vi.useRealTimers();
+		});
+
+		it('heartbeat does not refresh keys not in the heartbeat', () => {
+			vi.useFakeTimers();
+			const maxAge = 5000;
+
+			const timestamps = new Map();
+			const now = Date.now();
+			timestamps.set('1', now);
+			timestamps.set('ghost', now);
+
+			vi.advanceTimersByTime(4000);
+
+			// Heartbeat only includes '1', not 'ghost'
+			const heartbeatKeys = ['1'];
+			const heartbeatTime = Date.now();
+			for (const key of heartbeatKeys) {
+				if (timestamps.has(key)) {
+					timestamps.set(key, heartbeatTime);
+				}
+			}
+
+			vi.advanceTimersByTime(2000);
+			const cutoff = Date.now() - maxAge;
+
+			// '1' survives (refreshed), 'ghost' is stale
+			expect(timestamps.get('1')).toBeGreaterThanOrEqual(cutoff);
+			expect(timestamps.get('ghost')).toBeLessThan(cutoff);
+
+			vi.useRealTimers();
+		});
+
+		it('heartbeat ignores keys not in the local map', () => {
+			const timestamps = new Map();
+			timestamps.set('1', Date.now());
+
+			// Heartbeat includes unknown key '99' -- should be ignored
+			const heartbeatKeys = ['1', '99'];
+			const heartbeatTime = Date.now();
+			for (const key of heartbeatKeys) {
+				if (timestamps.has(key)) {
+					timestamps.set(key, heartbeatTime);
+				}
+			}
+
+			expect(timestamps.has('99')).toBe(false);
+			expect(timestamps.size).toBe(1);
+		});
+	});
+
 	describe('cursor maxAge pattern', () => {
 		it('sweeps stale cursor entries', () => {
 			vi.useFakeTimers();

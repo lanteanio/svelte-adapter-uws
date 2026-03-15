@@ -138,6 +138,19 @@ export function presence(topic, options) {
 				if (userMap.delete(key)) {
 					flush();
 				}
+				return;
+			}
+
+			if (event.event === 'heartbeat' && Array.isArray(event.data)) {
+				// Server confirms these keys are still active -- refresh their
+				// timestamps so maxAge doesn't expire them. Keys not in the
+				// heartbeat are left alone (maxAge will handle them).
+				const now = Date.now();
+				for (const key of event.data) {
+					if (timestamps.has(key)) {
+						timestamps.set(key, now);
+					}
+				}
 			}
 		});
 

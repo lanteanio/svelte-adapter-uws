@@ -20,6 +20,11 @@
  *   presence data from the connection's userData (whatever your `upgrade` handler returned).
  *   Only the selected fields are broadcast to other clients. Defaults to the full userData.
  *   Use this to avoid leaking private fields like session tokens.
+ * @property {number} [heartbeat=0] - Interval in milliseconds between heartbeat broadcasts.
+ *   When set, the server periodically publishes a `heartbeat` event to all presence topics
+ *   containing the list of active keys. This resets the `maxAge` timer on clients, preventing
+ *   live users from being expired. Set this to a value shorter than the client's `maxAge`.
+ *   Disabled by default (0 or omitted).
  */
 
 /**
@@ -96,9 +101,20 @@
 export function createPresence(options = {}) {
 	const keyField = options.key || 'id';
 	const select = options.select || ((userData) => userData);
+	const heartbeatMs = options.heartbeat || 0;
 
 	// Auto-generated ID counter for connections without a key field
 	let connCounter = 0;
+
+	/**
+	 * Platform reference, captured on first use of join/leave/sync.
+	 * Needed by the heartbeat timer to publish without a hook context.
+	 * @type {import('../../index.js').Platform | null}
+	 */
+	let _platform = null;
+
+	/** @type {ReturnType<typeof setInterval> | null} */
+	let heartbeatTimer = null;
 
 	/**
 	 * Per-connection state: which topics they've joined and their key on each.
@@ -126,9 +142,33 @@ export function createPresence(options = {}) {
 		return '__conn:' + (++connCounter);
 	}
 
+	/**
+	 * Capture the platform reference and start the heartbeat if configured.
+	 * Called lazily on first join/leave/sync -- the platform object isn't
+	 * available at createPresence() time.
+	 * @param {import('../../index.js').Platform} platform
+	 */
+	function capturePlatform(platform) {
+		if (_platform) return;
+		_platform = platform;
+		if (heartbeatMs > 0) {
+			heartbeatTimer = setInterval(() => {
+				for (const [topic, users] of topicPresence) {
+					_platform.publish(
+						'__presence:' + topic,
+						'heartbeat',
+						[...users.keys()]
+					);
+				}
+			}, heartbeatMs);
+		}
+	}
+
 	/** @type {PresenceTracker} */
 	const tracker = {
 		join(ws, topic, platform) {
+			capturePlatform(platform);
+
 			// Skip internal topics to prevent recursion when the subscribe
 			// hook fires for __presence:* subscriptions
 			if (topic.startsWith('__')) return;
@@ -181,6 +221,7 @@ export function createPresence(options = {}) {
 		},
 
 		leave(ws, platform) {
+			capturePlatform(platform);
 			const connTopics = wsTopics.get(ws);
 			if (!connTopics) return;
 
@@ -207,6 +248,7 @@ export function createPresence(options = {}) {
 		},
 
 		sync(ws, topic, platform) {
+			capturePlatform(platform);
 			const users = topicPresence.get(topic);
 			const presenceTopic = '__presence:' + topic;
 			const list = [];
@@ -235,6 +277,11 @@ export function createPresence(options = {}) {
 		},
 
 		clear() {
+			if (heartbeatTimer) {
+				clearInterval(heartbeatTimer);
+				heartbeatTimer = null;
+			}
+			_platform = null;
 			wsTopics.clear();
 			topicPresence.clear();
 			connCounter = 0;
