@@ -28,7 +28,7 @@ const cursorStores = new Map();
  *
  * @template UserInfo, Data
  * @param {string} topic - Topic to track cursors on
- * @param {{ maxAge?: number }} [options] - Options
+ * @param {{ maxAge?: number, interpolate?: boolean }} [options] - Options
  * @returns {import('svelte/store').Readable<Map<string, { user: UserInfo, data: Data }>>}
  *
  * @example
@@ -56,7 +56,10 @@ const cursorStores = new Map();
  */
 export function cursor(topic, options) {
 	const maxAge = options?.maxAge;
-	const cacheKey = maxAge > 0 ? topic + '\0' + maxAge : topic;
+	const interpolate = options?.interpolate === true;
+	let cacheKey = topic;
+	if (maxAge > 0) cacheKey += '\0' + maxAge;
+	if (interpolate) cacheKey += '\0lerp';
 
 	const cached = cursorStores.get(cacheKey);
 	if (cached) return cached;
@@ -73,8 +76,37 @@ export function cursor(topic, options) {
 	let statusUnsub = /** @type {(() => void) | null} */ (null);
 	/** @type {ReturnType<typeof setInterval> | null} */
 	let sweepTimer = null;
+	/** @type {Map<string, { x: number, y: number }>} */
+	const targets = new Map();
+	let rafId = /** @type {number | null} */ (null);
 	let refCount = 0;
 	let cancelled = false;
+
+	function tick() {
+		let changed = false;
+		for (const [key, target] of targets) {
+			const entry = cursorMap.get(key);
+			if (!entry) { targets.delete(key); continue; }
+			const dx = target.x - entry.data.x;
+			const dy = target.y - entry.data.y;
+			if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
+				if (entry.data.x !== target.x || entry.data.y !== target.y) {
+					entry.data = { ...entry.data, x: target.x, y: target.y };
+					changed = true;
+				}
+				targets.delete(key);
+				continue;
+			}
+			entry.data = { ...entry.data, x: entry.data.x + dx * 0.3, y: entry.data.y + dy * 0.3 };
+			changed = true;
+		}
+		if (changed) output.set(new Map(cursorMap));
+		if (targets.size > 0) {
+			rafId = requestAnimationFrame(tick);
+		} else {
+			rafId = null;
+		}
+	}
 
 	function sweep() {
 		if (!maxAge || maxAge <= 0) return;
@@ -97,15 +129,27 @@ export function cursor(topic, options) {
 
 			if (event.event === 'update' && event.data != null) {
 				const { key, user, data } = event.data;
-				cursorMap.set(key, { user, data });
 				timestamps.set(key, Date.now());
-				output.set(new Map(cursorMap));
+				if (interpolate && typeof data?.x === 'number' && typeof data?.y === 'number') {
+					if (!cursorMap.has(key)) {
+						cursorMap.set(key, { user, data });
+						output.set(new Map(cursorMap));
+					} else {
+						cursorMap.get(key).user = user;
+					}
+					targets.set(key, { x: data.x, y: data.y });
+					if (rafId === null) rafId = requestAnimationFrame(tick);
+				} else {
+					cursorMap.set(key, { user, data });
+					output.set(new Map(cursorMap));
+				}
 				return;
 			}
 
 			if (event.event === 'snapshot' && Array.isArray(event.data)) {
 				cursorMap = new Map();
 				timestamps.clear();
+				targets.clear();
 				const now = Date.now();
 				for (const entry of event.data) {
 					const { key, user, data } = entry;
@@ -117,6 +161,7 @@ export function cursor(topic, options) {
 			}
 
 			if (event.event === 'bulk' && Array.isArray(event.data)) {
+				targets.clear();
 				const now = Date.now();
 				for (const entry of event.data) {
 					const { key, user, data } = entry;
@@ -130,6 +175,7 @@ export function cursor(topic, options) {
 			if (event.event === 'remove' && event.data != null) {
 				const { key } = event.data;
 				timestamps.delete(key);
+				targets.delete(key);
 				if (cursorMap.delete(key)) {
 					output.set(new Map(cursorMap));
 				}
@@ -164,6 +210,11 @@ export function cursor(topic, options) {
 			clearInterval(sweepTimer);
 			sweepTimer = null;
 		}
+		if (rafId !== null) {
+			cancelAnimationFrame(rafId);
+			rafId = null;
+		}
+		targets.clear();
 		cursorMap = new Map();
 		timestamps.clear();
 		// Push the cleared state to the output store so a new subscriber does

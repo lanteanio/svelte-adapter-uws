@@ -2008,10 +2008,24 @@ The client store is a `Readable<Map<string, { user, data }>>`. The Map updates w
 
 **Initial sync and reconnect.** The `cursor(topic)` store sends a `{ type: 'cursor-snapshot', topic }` message every time the WebSocket connection opens -- both on first connect and on every reconnect. The server calls `cursors.snapshot(ws, topic, platform)` in its `message` handler, which sends a `snapshot` event back with the current cursor state (or an empty array if nobody is active). The client replaces its entire cursor map with the snapshot contents, clearing any stale entries from before the disconnect. Wire `cursors.snapshot()` in your message handler as shown in the server example above.
 
-The `cursor()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, cursor entries that haven't received an update within that window are automatically removed. This makes clients self-healing when the server fails to broadcast `remove` events under load:
+The `cursor()` function accepts an optional second argument:
 
 ```js
 const positions = cursor('canvas', { maxAge: 30_000 });
+```
+
+`maxAge` (milliseconds) -- cursor entries that haven't received an update within that window are automatically removed. Makes clients self-healing when the server fails to broadcast `remove` events under load.
+
+`interpolate` -- enables smooth cursor rendering via `requestAnimationFrame`. Incoming `update` events set a lerp target and the displayed position moves toward it at 30% of the remaining distance per frame, eliminating visual jitter from network timing. The first update for each cursor snaps immediately (no lerp from 0,0). `snapshot`, `bulk`, and `remove` events always snap. Only applies to cursor data with numeric `x` and `y` fields -- non-numeric data falls back to direct assignment.
+
+```js
+const positions = cursor('canvas', { interpolate: true });
+```
+
+Options can be combined:
+
+```js
+const positions = cursor('canvas', { maxAge: 30_000, interpolate: true });
 ```
 
 #### Server API

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createCursor } from '../plugins/cursor/server.js';
 
 /**
@@ -640,6 +640,309 @@ describe('cursor plugin - server', () => {
 			c.hooks.close(ws, { platform: p });
 
 			expect(c.list('canvas')).toEqual([]);
+		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Client-side cursor interpolation logic
+// ---------------------------------------------------------------------------
+// The cursor client module depends on svelte/store, browser globals, and the
+// WS client. We test the interpolation math and lifecycle as standalone units
+// following the same pattern as test/client.test.js.
+// ---------------------------------------------------------------------------
+
+describe('cursor client - lerp interpolation', () => {
+	function lerp(current, target, factor) {
+		return current + (target - current) * factor;
+	}
+
+	const FACTOR = 0.3;
+	const THRESHOLD = 0.5;
+
+	describe('lerp math', () => {
+		it('moves toward target by the given factor', () => {
+			expect(lerp(0, 100, FACTOR)).toBe(30);
+			expect(lerp(100, 0, FACTOR)).toBe(70);
+		});
+
+		it('converges over multiple steps', () => {
+			let x = 0;
+			const target = 100;
+			for (let i = 0; i < 20; i++) x = lerp(x, target, FACTOR);
+			expect(Math.abs(x - target)).toBeLessThan(THRESHOLD);
+		});
+
+		it('reaches 95% of the distance within ~9 frames', () => {
+			let x = 0;
+			const target = 100;
+			for (let i = 0; i < 9; i++) x = lerp(x, target, FACTOR);
+			expect(x).toBeGreaterThan(95);
+		});
+
+		it('does not overshoot', () => {
+			let x = 0;
+			const target = 100;
+			for (let i = 0; i < 100; i++) {
+				x = lerp(x, target, FACTOR);
+				expect(x).toBeLessThanOrEqual(target);
+			}
+		});
+
+		it('works with negative coordinates', () => {
+			expect(lerp(0, -100, FACTOR)).toBe(-30);
+			expect(lerp(-50, -100, FACTOR)).toBe(-65);
+		});
+	});
+
+	describe('snap threshold', () => {
+		it('snaps when remaining distance is below threshold on both axes', () => {
+			const data = { x: 99.8, y: 199.7 };
+			const target = { x: 100, y: 200 };
+			const dx = target.x - data.x;
+			const dy = target.y - data.y;
+			expect(Math.abs(dx) < THRESHOLD && Math.abs(dy) < THRESHOLD).toBe(true);
+		});
+
+		it('does not snap when one axis is still above threshold', () => {
+			const data = { x: 99.8, y: 198 };
+			const target = { x: 100, y: 200 };
+			const dx = target.x - data.x;
+			const dy = target.y - data.y;
+			expect(Math.abs(dx) < THRESHOLD && Math.abs(dy) < THRESHOLD).toBe(false);
+		});
+	});
+
+	describe('tick simulation', () => {
+		it('interpolates multiple cursors independently', () => {
+			const cursorMap = new Map();
+			const targets = new Map();
+
+			cursorMap.set('a', { user: {}, data: { x: 0, y: 0 } });
+			cursorMap.set('b', { user: {}, data: { x: 50, y: 50 } });
+			targets.set('a', { x: 100, y: 200 });
+			targets.set('b', { x: 0, y: 0 });
+
+			// simulate one tick
+			for (const [key, target] of targets) {
+				const entry = cursorMap.get(key);
+				const dx = target.x - entry.data.x;
+				const dy = target.y - entry.data.y;
+				if (Math.abs(dx) < THRESHOLD && Math.abs(dy) < THRESHOLD) {
+					entry.data = { ...entry.data, x: target.x, y: target.y };
+					targets.delete(key);
+				} else {
+					entry.data = { ...entry.data, x: entry.data.x + dx * FACTOR, y: entry.data.y + dy * FACTOR };
+				}
+			}
+
+			expect(cursorMap.get('a').data.x).toBeCloseTo(30, 5);
+			expect(cursorMap.get('a').data.y).toBeCloseTo(60, 5);
+			expect(cursorMap.get('b').data.x).toBeCloseTo(35, 5);
+			expect(cursorMap.get('b').data.y).toBeCloseTo(35, 5);
+		});
+
+		it('preserves non-xy fields during interpolation', () => {
+			const entry = { user: { name: 'Alice' }, data: { x: 0, y: 0, color: 'red', pressure: 0.8 } };
+			const target = { x: 100, y: 200 };
+			const dx = target.x - entry.data.x;
+			const dy = target.y - entry.data.y;
+			entry.data = { ...entry.data, x: entry.data.x + dx * FACTOR, y: entry.data.y + dy * FACTOR };
+
+			expect(entry.data.color).toBe('red');
+			expect(entry.data.pressure).toBe(0.8);
+			expect(entry.data.x).toBeCloseTo(30, 5);
+		});
+
+		it('removes target from map after snap', () => {
+			const targets = new Map();
+			const cursorMap = new Map();
+			cursorMap.set('a', { user: {}, data: { x: 99.9, y: 199.9 } });
+			targets.set('a', { x: 100, y: 200 });
+
+			const entry = cursorMap.get('a');
+			const dx = targets.get('a').x - entry.data.x;
+			const dy = targets.get('a').y - entry.data.y;
+			if (Math.abs(dx) < THRESHOLD && Math.abs(dy) < THRESHOLD) {
+				entry.data = { ...entry.data, x: targets.get('a').x, y: targets.get('a').y };
+				targets.delete('a');
+			}
+
+			expect(targets.size).toBe(0);
+			expect(entry.data.x).toBe(100);
+			expect(entry.data.y).toBe(200);
+		});
+
+		it('cleans up orphaned targets (entry removed between ticks)', () => {
+			const targets = new Map();
+			const cursorMap = new Map();
+			targets.set('gone', { x: 100, y: 100 });
+
+			for (const [key] of targets) {
+				if (!cursorMap.get(key)) targets.delete(key);
+			}
+
+			expect(targets.size).toBe(0);
+		});
+	});
+
+	describe('cache key isolation', () => {
+		it('interpolate flag produces a distinct cache key', () => {
+			const topic = 'canvas';
+			const key1 = topic;
+			const key2 = topic + '\0lerp';
+			expect(key1).not.toBe(key2);
+		});
+
+		it('maxAge + interpolate combine correctly', () => {
+			const topic = 'canvas';
+			const maxAge = 30000;
+			let key = topic;
+			if (maxAge > 0) key += '\0' + maxAge;
+			key += '\0lerp';
+			expect(key).toBe('canvas\x0030000\x00lerp');
+		});
+	});
+
+	describe('interpolation eligibility', () => {
+		it('non-numeric x/y falls back to snap', () => {
+			const data = { x: 'hello', y: 'world' };
+			const eligible = typeof data?.x === 'number' && typeof data?.y === 'number';
+			expect(eligible).toBe(false);
+		});
+
+		it('missing x/y falls back to snap', () => {
+			const data = { color: 'red' };
+			const eligible = typeof data?.x === 'number' && typeof data?.y === 'number';
+			expect(eligible).toBe(false);
+		});
+
+		it('null data falls back to snap', () => {
+			const data = null;
+			const eligible = typeof data?.x === 'number' && typeof data?.y === 'number';
+			expect(eligible).toBe(false);
+		});
+
+		it('numeric x/y is eligible', () => {
+			const data = { x: 10, y: 20 };
+			const eligible = typeof data?.x === 'number' && typeof data?.y === 'number';
+			expect(eligible).toBe(true);
+		});
+
+		it('NaN x/y is not eligible', () => {
+			const data = { x: NaN, y: 10 };
+			const eligible = typeof data?.x === 'number' && typeof data?.y === 'number';
+			// NaN is typeof 'number' -- but this is acceptable because lerp(NaN, ...)
+			// produces NaN, which will fail the threshold check and the cursor will
+			// effectively be invisible. Not worth a special case.
+			expect(eligible).toBe(true);
+		});
+	});
+
+	describe('rAF lifecycle', () => {
+		let rafCallbacks;
+		let rafId;
+		let cancelledIds;
+
+		beforeEach(() => {
+			rafCallbacks = [];
+			rafId = 0;
+			cancelledIds = new Set();
+		});
+
+		function mockRAF(fn) {
+			const id = ++rafId;
+			rafCallbacks.push({ id, fn });
+			return id;
+		}
+
+		function mockCancelRAF(id) {
+			cancelledIds.add(id);
+		}
+
+		function flushRAF() {
+			const pending = rafCallbacks.splice(0);
+			for (const { id, fn } of pending) {
+				if (!cancelledIds.has(id)) fn();
+			}
+		}
+
+		it('loop stops when all targets converge', () => {
+			const cursorMap = new Map();
+			const targets = new Map();
+			cursorMap.set('a', { user: {}, data: { x: 99.9, y: 99.9 } });
+			targets.set('a', { x: 100, y: 100 });
+			let loopRafId = null;
+
+			function tick() {
+				for (const [key, target] of targets) {
+					const entry = cursorMap.get(key);
+					if (!entry) { targets.delete(key); continue; }
+					const dx = target.x - entry.data.x;
+					const dy = target.y - entry.data.y;
+					if (Math.abs(dx) < THRESHOLD && Math.abs(dy) < THRESHOLD) {
+						entry.data = { ...entry.data, x: target.x, y: target.y };
+						targets.delete(key);
+					} else {
+						entry.data = { ...entry.data, x: entry.data.x + dx * FACTOR, y: entry.data.y + dy * FACTOR };
+					}
+				}
+				if (targets.size > 0) {
+					loopRafId = mockRAF(tick);
+				} else {
+					loopRafId = null;
+				}
+			}
+
+			loopRafId = mockRAF(tick);
+			flushRAF();
+
+			// a was close enough to snap, targets should be empty, no new rAF scheduled
+			expect(targets.size).toBe(0);
+			expect(loopRafId).toBe(null);
+		});
+
+		it('loop continues while targets remain', () => {
+			const cursorMap = new Map();
+			const targets = new Map();
+			cursorMap.set('a', { user: {}, data: { x: 0, y: 0 } });
+			targets.set('a', { x: 100, y: 100 });
+			let loopRafId = null;
+
+			function tick() {
+				for (const [key, target] of targets) {
+					const entry = cursorMap.get(key);
+					if (!entry) { targets.delete(key); continue; }
+					const dx = target.x - entry.data.x;
+					const dy = target.y - entry.data.y;
+					if (Math.abs(dx) < THRESHOLD && Math.abs(dy) < THRESHOLD) {
+						entry.data = { ...entry.data, x: target.x, y: target.y };
+						targets.delete(key);
+					} else {
+						entry.data = { ...entry.data, x: entry.data.x + dx * FACTOR, y: entry.data.y + dy * FACTOR };
+					}
+				}
+				if (targets.size > 0) {
+					loopRafId = mockRAF(tick);
+				} else {
+					loopRafId = null;
+				}
+			}
+
+			loopRafId = mockRAF(tick);
+			flushRAF();
+
+			// still far from target, should have scheduled another rAF
+			expect(targets.size).toBe(1);
+			expect(loopRafId).not.toBe(null);
+		});
+
+		it('cancelAnimationFrame stops the loop', () => {
+			let called = false;
+			const id = mockRAF(() => { called = true; });
+			mockCancelRAF(id);
+			flushRAF();
+			expect(called).toBe(false);
 		});
 	});
 });

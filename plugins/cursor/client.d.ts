@@ -30,5 +30,14 @@ export interface CursorPosition<UserInfo = unknown, Data = unknown> {
  */
 export function cursor<UserInfo = unknown, Data = unknown>(
 	topic: string,
-	options?: { maxAge?: number }
+	options?: {
+		maxAge?: number;
+		/**
+		 * Enable smooth lerp interpolation for cursor movement.
+		 * When enabled, `update` events with numeric `x` and `y` fields
+		 * are interpolated via requestAnimationFrame instead of snapping.
+		 * `snapshot`, `bulk`, and `remove` events always snap immediately.
+		 */
+		interpolate?: boolean;
+	}
 ): Readable<Map<string, CursorPosition<UserInfo, Data>>>;
