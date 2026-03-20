@@ -97,7 +97,7 @@ export function cursor(topic, options) {
 				targets.delete(key);
 				continue;
 			}
-			entry.data = { ...entry.data, x: entry.data.x + dx * 0.3, y: entry.data.y + dy * 0.3 };
+			entry.data = { ...entry.data, x: entry.data.x + dx * 0.5, y: entry.data.y + dy * 0.5 };
 			changed = true;
 		}
 		if (changed) output.set(new Map(cursorMap));
@@ -131,13 +131,21 @@ export function cursor(topic, options) {
 				const { key, user, data } = event.data;
 				timestamps.set(key, Date.now());
 				if (interpolate && typeof data?.x === 'number' && typeof data?.y === 'number') {
-					if (!cursorMap.has(key)) {
+					const existing = cursorMap.get(key);
+					if (!existing) {
 						cursorMap.set(key, { user, data });
-						output.set(new Map(cursorMap));
 					} else {
-						cursorMap.get(key).user = user;
+						const dx = data.x - existing.data.x;
+						const dy = data.y - existing.data.y;
+						existing.user = user;
+						existing.data = {
+							...existing.data,
+							x: existing.data.x + dx * 0.5,
+							y: existing.data.y + dy * 0.5
+						};
 					}
 					targets.set(key, { x: data.x, y: data.y });
+					output.set(new Map(cursorMap));
 					if (rafId === null) rafId = requestAnimationFrame(tick);
 				} else {
 					cursorMap.set(key, { user, data });
