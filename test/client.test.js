@@ -623,4 +623,274 @@ describe('client store patterns', () => {
 			expect(queue[4]).toBe('msg-7');
 		});
 	});
+
+	describe('batch resubscribe', () => {
+		const encoder = new TextEncoder();
+
+		// Mirrors the chunking logic from client.js onopen
+		function buildBatches(subscribedTopics) {
+			const allTopics = [...subscribedTopics];
+			const ENVELOPE_BYTES = 39;
+			const MAX_BYTES = 8000;
+			const MAX_TOPICS = 200;
+			const batches = [];
+			let chunk = [];
+			let chunkBytes = ENVELOPE_BYTES;
+			for (const t of allTopics) {
+				const entryBytes = encoder.encode(JSON.stringify(t)).length + 1;
+				if (chunk.length > 0 && (chunk.length >= MAX_TOPICS || chunkBytes + entryBytes > MAX_BYTES)) {
+					batches.push(JSON.stringify({ type: 'subscribe-batch', topics: chunk }));
+					chunk = [];
+					chunkBytes = ENVELOPE_BYTES;
+				}
+				chunk.push(t);
+				chunkBytes += entryBytes;
+			}
+			if (chunk.length > 0) {
+				batches.push(JSON.stringify({ type: 'subscribe-batch', topics: chunk }));
+			}
+			return batches;
+		}
+
+		function utf8ByteLength(str) {
+			return encoder.encode(str).length;
+		}
+
+		it('formats a subscribe-batch message correctly', () => {
+			const subscribedTopics = new Set(['todos', 'chat', 'online']);
+			const batches = buildBatches(subscribedTopics);
+			expect(batches).toHaveLength(1);
+			const parsed = JSON.parse(batches[0]);
+			expect(parsed.type).toBe('subscribe-batch');
+			expect(Array.isArray(parsed.topics)).toBe(true);
+			expect(parsed.topics).toHaveLength(3);
+			expect(parsed.topics).toContain('todos');
+			expect(parsed.topics).toContain('chat');
+			expect(parsed.topics).toContain('online');
+		});
+
+		it('sends one message for small topic sets', () => {
+			const subscribedTopics = new Set(['a', 'b', 'c', 'd', 'e']);
+			const batches = buildBatches(subscribedTopics);
+			expect(batches).toHaveLength(1);
+			expect(JSON.parse(batches[0]).topics).toHaveLength(5);
+		});
+
+		it('sends nothing when there are no subscribed topics', () => {
+			const batches = buildBatches(new Set());
+			expect(batches).toHaveLength(0);
+		});
+
+		it('chunks when topic count exceeds 200', () => {
+			const topics = new Set();
+			for (let i = 0; i < 300; i++) topics.add('t' + i);
+			const batches = buildBatches(topics);
+			expect(batches.length).toBe(2);
+
+			const first = JSON.parse(batches[0]);
+			const second = JSON.parse(batches[1]);
+			expect(first.topics).toHaveLength(200);
+			expect(second.topics).toHaveLength(100);
+
+			const all = [...first.topics, ...second.topics];
+			expect(new Set(all).size).toBe(300);
+		});
+
+		it('chunks when byte size approaches 8192 ceiling', () => {
+			const topics = new Set();
+			for (let i = 0; i < 150; i++) topics.add('x'.repeat(95) + String(i).padStart(5, '0'));
+			const batches = buildBatches(topics);
+			expect(batches.length).toBeGreaterThan(1);
+
+			for (const batch of batches) {
+				expect(utf8ByteLength(batch)).toBeLessThan(8192);
+				const parsed = JSON.parse(batch);
+				expect(parsed.topics.length).toBeLessThanOrEqual(200);
+			}
+
+			const all = batches.flatMap(b => JSON.parse(b).topics);
+			expect(new Set(all).size).toBe(150);
+		});
+
+		it('accounts for JSON escaping in topic names', () => {
+			const topics = new Set();
+			for (let i = 0; i < 100; i++) {
+				topics.add('room"with\\special' + i);
+			}
+			const batches = buildBatches(topics);
+
+			for (const batch of batches) {
+				expect(utf8ByteLength(batch)).toBeLessThan(8192);
+			}
+
+			const all = batches.flatMap(b => JSON.parse(b).topics);
+			expect(new Set(all).size).toBe(100);
+		});
+
+		it('accounts for multibyte UTF-8 characters in topic names', () => {
+			const topics = new Set();
+			// Each topic has 40 emoji (4 bytes each in UTF-8) plus a number suffix.
+			// This ensures string length != byte length and forces chunking.
+			const emoji = '\u{1F600}'; // 4 bytes in UTF-8, 2 code units in JS
+			for (let i = 0; i < 100; i++) {
+				topics.add(emoji.repeat(40) + i);
+			}
+			const batches = buildBatches(topics);
+			expect(batches.length).toBeGreaterThan(1);
+
+			for (const batch of batches) {
+				expect(utf8ByteLength(batch)).toBeLessThan(8192);
+			}
+
+			const all = batches.flatMap(b => JSON.parse(b).topics);
+			expect(new Set(all).size).toBe(100);
+		});
+	});
+
+	// -- onDerived logic --------------------------------------------------------
+	// Tests the core lifecycle of the reactive topic subscription pattern used
+	// by onDerived(). The actual function uses svelte/store derived(), but the
+	// behavior it must satisfy is independent of the framework primitive.
+
+	describe('onDerived pattern', () => {
+		// Minimal derived() implementation matching the contract used by onDerived()
+		function derived(source, fn, initial = undefined) {
+			return {
+				subscribe(outerFn) {
+					let lastValue = initial;
+					let cleanup = null;
+					outerFn(initial);
+
+					const unsub = source.subscribe((v) => {
+						// Call cleanup from previous run before calling fn again
+						if (cleanup) { cleanup(); cleanup = null; }
+						cleanup = fn(v, (val) => {
+							lastValue = val;
+							outerFn(val);
+						});
+					});
+
+					return () => {
+						if (cleanup) { cleanup(); cleanup = null; }
+						unsub();
+					};
+				}
+			};
+		}
+
+		function makeTopicStore(topicName, subscribeCallback, unsubscribeCallback) {
+			return {
+				subscribe(fn) {
+					subscribeCallback(topicName);
+					fn(null); // initial value
+					return () => unsubscribeCallback(topicName);
+				}
+			};
+		}
+
+		it('subscribes to the initial topic when source store has a value', () => {
+			const source = writable('room-1');
+			const subscribed = [];
+			const unsubscribed = [];
+
+			const derived_ = derived(source, ($value, set) => {
+				if ($value == null) { set(null); return; }
+				const topic = `room:${$value}`;
+				const store = makeTopicStore(topic, (t) => subscribed.push(t), (t) => unsubscribed.push(t));
+				return store.subscribe(set);
+			}, null);
+
+			const unsub = derived_.subscribe(() => {});
+			expect(subscribed).toEqual(['room:room-1']);
+			expect(unsubscribed).toEqual([]);
+			unsub();
+		});
+
+		it('switches topics and releases the old one when the source changes', () => {
+			const source = writable('room-1');
+			const subscribed = [];
+			const unsubscribed = [];
+
+			const derived_ = derived(source, ($value, set) => {
+				if ($value == null) { set(null); return; }
+				const topic = `room:${$value}`;
+				const store = makeTopicStore(topic, (t) => subscribed.push(t), (t) => unsubscribed.push(t));
+				return store.subscribe(set);
+			}, null);
+
+			const unsub = derived_.subscribe(() => {});
+			expect(subscribed).toEqual(['room:room-1']);
+
+			source.set('room-2');
+			expect(subscribed).toEqual(['room:room-1', 'room:room-2']);
+			// Old topic must be released before new one is subscribed
+			expect(unsubscribed).toEqual(['room:room-1']);
+
+			unsub();
+			expect(unsubscribed).toEqual(['room:room-1', 'room:room-2']);
+		});
+
+		it('releases the current topic when all subscribers leave', () => {
+			const source = writable('room-1');
+			const unsubscribed = [];
+
+			const derived_ = derived(source, ($value, set) => {
+				if ($value == null) { set(null); return; }
+				const store = makeTopicStore(`room:${$value}`, () => {}, (t) => unsubscribed.push(t));
+				return store.subscribe(set);
+			}, null);
+
+			const unsub = derived_.subscribe(() => {});
+			expect(unsubscribed).toHaveLength(0);
+			unsub();
+			expect(unsubscribed).toEqual(['room:room-1']);
+		});
+
+		it('sets inner value to null when source is null', () => {
+			const source = writable(null);
+			const values = [];
+
+			const derived_ = derived(source, ($value, set) => {
+				if ($value == null) { set(null); return; }
+				const store = makeTopicStore(`room:${$value}`, () => {}, () => {});
+				return store.subscribe(set);
+			}, null);
+
+			const unsub = derived_.subscribe((v) => values.push(v));
+			// Initial value (null) + first source emission (null)  - all nulls
+			expect(values.every((v) => v === null)).toBe(true);
+			expect(values.length).toBeGreaterThan(0);
+			unsub();
+		});
+
+		it('forwards messages from the active topic store to subscribers', () => {
+			const source = writable('chat');
+			const values = [];
+			const callbacks = new Map();
+
+			// Topic store that lets us push events manually
+			function makeActiveStore(topic) {
+				return {
+					subscribe(fn) {
+						callbacks.set(topic, fn);
+						fn(null);
+						return () => callbacks.delete(topic);
+					}
+				};
+			}
+
+			const derived_ = derived(source, ($value, set) => {
+				if ($value == null) { set(null); return; }
+				return makeActiveStore($value).subscribe(set);
+			}, null);
+
+			const unsub = derived_.subscribe((v) => { if (v !== null) values.push(v); });
+
+			// Simulate a message on 'chat' topic
+			callbacks.get('chat')?.({ topic: 'chat', event: 'message', data: 'hi' });
+			expect(values).toEqual([{ topic: 'chat', event: 'message', data: 'hi' }]);
+
+			unsub();
+		});
+	});
 });

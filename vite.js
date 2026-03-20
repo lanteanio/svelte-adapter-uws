@@ -241,6 +241,25 @@ export default function uws(options = {}) {
 			}
 		},
 		configureServer(server) {
+			// In middleware mode Vite does not own the HTTP server, so WS upgrade cannot be attached.
+			if (!server.httpServer) {
+				server.config.logger.warn(
+					'[svelte-adapter-uws] WebSocket support requires Vite to own the HTTP server. ' +
+					'It is not available in middleware mode (server.httpServer is null). ' +
+					'WebSocket features will be disabled in dev.'
+				);
+				return;
+			}
+
+			// E7: warn if our WS path collides with the Vite HMR WebSocket path.
+			const hmrConfig = server.config.server?.hmr;
+			if (hmrConfig && typeof hmrConfig === 'object' && hmrConfig.path === wsPath) {
+				server.config.logger.warn(
+					`[svelte-adapter-uws] WebSocket path "${wsPath}" collides with the Vite HMR path. ` +
+					'Set a different path via the websocket.path adapter option or server.hmr.path in vite.config.'
+				);
+			}
+
 			console.warn('[adapter-uws] Dev mode does not enforce allowedOrigins. ' +
 				'WebSocket origin checks only run in production.');
 			wss = new WebSocketServer({ noServer: true });
@@ -336,7 +355,13 @@ export default function uws(options = {}) {
 				}
 
 				wss.handleUpgrade(req, socket, head, (ws) => {
-					/** @type {any} */ (ws).__userData = userData;
+					// Ensure remoteAddress is always present in userData, matching
+					// what the production handler injects. Plugins like ratelimit
+					// depend on ws.getUserData().remoteAddress for per-IP keying.
+					const remoteAddress = /** @type {any} */ (userData).remoteAddress
+						|| req.socket?.remoteAddress
+						|| '';
+					/** @type {any} */ (ws).__userData = { remoteAddress, .../** @type {any} */ (userData) };
 					wss.emit('connection', ws, req);
 				});
 			});
@@ -346,6 +371,7 @@ export default function uws(options = {}) {
 				subscriptions.set(ws, new Set());
 
 				const userData = /** @type {any} */ (ws).__userData || {};
+				userData.__subscriptions = new Set();
 				const wrapped = wrapWebSocket(ws, userData);
 				wsWrappers.set(ws, wrapped);
 
@@ -357,10 +383,12 @@ export default function uws(options = {}) {
 					const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(/** @type {any} */ (raw));
 					const arrayBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 
-					// Handle subscribe/unsubscribe from client store
+					// Handle subscribe/unsubscribe/subscribe-batch from client store.
 				// Byte-prefix check: {"type" has byte[3]='y' (0x79), user envelopes
 				// {"topic" have byte[3]='o' - skip JSON.parse for non-control messages.
-					if (!isBinary && buf.byteLength < 512 && buf[3] === 0x79) {
+				// 8192 bytes matches the production handler ceiling and is large
+				// enough for a subscribe-batch with many topics.
+					if (!isBinary && buf.byteLength < 8192 && buf[3] === 0x79) {
 						try {
 							const msg = JSON.parse(buf.toString());
 							if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
@@ -373,10 +401,31 @@ export default function uws(options = {}) {
 									return;
 								}
 								subscriptions.get(ws)?.add(msg.topic);
+								/** @type {any} */ (ws).__userData?.__subscriptions?.add(msg.topic);
 								return;
 							}
 							if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
 								subscriptions.get(ws)?.delete(msg.topic);
+								/** @type {any} */ (ws).__userData?.__subscriptions?.delete(msg.topic);
+								userHandlers.unsubscribe?.(wrapped, msg.topic, { platform });
+								return;
+							}
+							if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
+								// Sent by the client store on open/reconnect to resubscribe all
+								// topics in one message instead of N individual subscribe frames.
+								const subs = subscriptions.get(ws);
+								const topics = msg.topics.slice(0, 256);
+								for (const topic of topics) {
+									if (typeof topic !== 'string' || topic.length === 0 || topic.length > 256) continue;
+									let valid = true;
+									for (let ci = 0; ci < topic.length; ci++) {
+										if (topic.charCodeAt(ci) < 32) { valid = false; break; }
+									}
+									if (!valid) continue;
+									if (userHandlers.subscribe && userHandlers.subscribe(wrapped, topic, { platform }) === false) continue;
+									subs?.add(topic);
+									/** @type {any} */ (ws).__userData?.__subscriptions?.add(topic);
+								}
 								return;
 							}
 						} catch {
@@ -394,7 +443,8 @@ export default function uws(options = {}) {
 				ws.on('close', (code, reason) => {
 					const reasonBuf = reason || Buffer.alloc(0);
 					const reasonAB = reasonBuf.buffer.slice(reasonBuf.byteOffset, reasonBuf.byteOffset + reasonBuf.byteLength);
-					userHandlers.close?.(wrapped, { code, message: reasonAB, platform });
+					const subs = /** @type {any} */ (ws).__userData?.__subscriptions || new Set();
+					userHandlers.close?.(wrapped, { code, message: reasonAB, platform, subscriptions: subs });
 					connections.delete(ws);
 					subscriptions.delete(ws);
 					wsWrappers.delete(ws);

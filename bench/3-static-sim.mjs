@@ -1,5 +1,5 @@
 // Simulates the adapter's static file fast path:
-// Map lookup + accept-encoding + if-none-match header reads + cork + headers
+// Map lookup + 4 header reads (accept-encoding, if-none-match, range, if-range) + cork + headers
 import uWS from 'uWebSockets.js';
 
 const PORT = parseInt(process.env.PORT || '9001');
@@ -29,6 +29,8 @@ uWS.App().any('/*', (res, req) => {
 	if (entry) {
 		const acceptEncoding = req.getHeader('accept-encoding');
 		const ifNoneMatch = req.getHeader('if-none-match');
+		const rangeHeader = req.getHeader('range');
+		const ifRangeHeader = req.getHeader('if-range');
 
 		if (entry.etag && ifNoneMatch === entry.etag) {
 			res.cork(() => { res.writeStatus('304 Not Modified').end(); });

@@ -20,6 +20,8 @@
  *   presence data from the connection's userData (whatever your `upgrade` handler returned).
  *   Only the selected fields are broadcast to other clients. Defaults to the full userData.
  *   Use this to avoid leaking private fields like session tokens.
+ *   Should return JSON-serializable data (plain objects, arrays, strings, numbers,
+ *   booleans, null) since the result is sent over WebSocket.
  * @property {number} [heartbeat=0] - Interval in milliseconds between heartbeat broadcasts.
  *   When set, the server periodically publishes a `heartbeat` event to all presence topics
  *   containing the list of active keys. This resets the `maxAge` timer on clients, preventing
@@ -40,14 +42,15 @@
  *   without being present themselves.
  * @property {(topic: string) => Record<string, any>[]} list -
  *   Get the current presence list for a topic. Use in load() functions or API routes.
+ *   Returns deep copies (via structuredClone) when data is JSON-serializable.
+ *   Falls back to shared references for non-cloneable data.
  * @property {(topic: string) => number} count -
  *   Get the number of unique users present on a topic.
  * @property {() => void} clear -
  *   Clear all presence tracking state.
- * @property {{ subscribe: (ws: any, topic: string, ctx: { platform: import('../../index.js').Platform }) => void, close: (ws: any, ctx: { platform: import('../../index.js').Platform }) => void }} hooks -
- *   Ready-made WebSocket hooks. Handles join for regular topics, sync for
- *   __presence:* topics, and leave on close. Spread into hooks.ws.js for
- *   zero-config presence.
+ * @property {{ subscribe: Function, unsubscribe: Function, close: Function }} hooks -
+ *   Ready-made WebSocket hooks. subscribe handles join, unsubscribe removes
+ *   from a single topic, close removes from all topics.
  */
 
 /**
@@ -72,7 +75,7 @@
  * // src/hooks.ws.js - zero-config (just spread hooks)
  * import { presence } from '$lib/server/presence';
  *
- * export const { subscribe, close } = presence.hooks;
+ * export const { subscribe, unsubscribe, close } = presence.hooks;
  * ```
  *
  * @example
@@ -85,7 +88,7 @@
  *   presence.hooks.subscribe(ws, topic, ctx);
  * }
  *
- * export const close = presence.hooks.close;
+ * export const { unsubscribe, close } = presence.hooks;
  * ```
  *
  * @example
@@ -98,6 +101,69 @@
  * }
  * ```
  */
+
+/**
+ * Deep equality check for presence data.
+ * Handles plain objects, arrays, Date, and primitives. Set and Map are
+ * compared by membership/entries but only reliably for primitive members
+ * and primitive keys (object members use identity via has()).
+ * Cycle-safe via pair tracking: if the same (a, b) pair is encountered
+ * again during recursion, it is assumed equal (co-inductive equality).
+ * Shared subobjects are handled correctly -- the same object appearing
+ * in multiple fields does not trigger false positives.
+ * @param {any} a
+ * @param {any} b
+ * @param {Map<any, Set<any>>} [seen]
+ * @returns {boolean}
+ */
+function deepEqual(a, b, seen) {
+	if (a === b) return true;
+	if (a == null || b == null || typeof a !== typeof b) return false;
+	if (typeof a !== 'object') return false;
+
+	if (!seen) seen = new Map();
+	const seenB = seen.get(a);
+	if (seenB && seenB.has(b)) return true;
+	if (!seenB) seen.set(a, new Set([b]));
+	else seenB.add(b);
+
+	if (a instanceof Date) return b instanceof Date && a.getTime() === b.getTime();
+	if (b instanceof Date) return false;
+
+	if (a instanceof Set) {
+		if (!(b instanceof Set) || a.size !== b.size) return false;
+		for (const v of a) if (!b.has(v)) return false;
+		return true;
+	}
+	if (b instanceof Set) return false;
+
+	if (a instanceof Map) {
+		if (!(b instanceof Map) || a.size !== b.size) return false;
+		for (const [k, v] of a) {
+			if (!b.has(k) || !deepEqual(b.get(k), v, seen)) return false;
+		}
+		return true;
+	}
+	if (b instanceof Map) return false;
+
+	if (Array.isArray(a)) {
+		if (!Array.isArray(b) || a.length !== b.length) return false;
+		for (let i = 0; i < a.length; i++) {
+			if (!deepEqual(a[i], b[i], seen)) return false;
+		}
+		return true;
+	}
+	if (Array.isArray(b)) return false;
+
+	const keysA = Object.keys(a);
+	const keysB = Object.keys(b);
+	if (keysA.length !== keysB.length) return false;
+	for (const k of keysA) {
+		if (!Object.prototype.hasOwnProperty.call(b, k) || !deepEqual(a[k], b[k], seen)) return false;
+	}
+	return true;
+}
+
 export function createPresence(options = {}) {
 	const keyField = options.key || 'id';
 	const select = options.select || ((userData) => userData);
@@ -164,6 +230,37 @@ export function createPresence(options = {}) {
 		}
 	}
 
+	/**
+	 * Remove a connection from a single topic's presence.
+	 * @param {any} ws
+	 * @param {string} topic
+	 * @param {Map<string, { key: string, data: Record<string, any> }>} connTopics
+	 * @param {import('../../index.js').Platform} platform
+	 */
+	function leaveTopic(ws, topic, connTopics, platform) {
+		const entry = connTopics.get(topic);
+		if (!entry) return;
+		connTopics.delete(topic);
+		if (connTopics.size === 0) wsTopics.delete(ws);
+
+		const users = topicPresence.get(topic);
+		if (!users) return;
+
+		const existing = users.get(entry.key);
+		if (!existing) return;
+
+		existing.count--;
+		if (existing.count <= 0) {
+			const data = existing.data;
+			users.delete(entry.key);
+			if (users.size === 0) {
+				topicPresence.delete(topic);
+			}
+			platform.publish('__presence:' + topic, 'leave', { key: entry.key, data });
+		}
+		try { ws.unsubscribe('__presence:' + topic); } catch { /* ws already closed */ }
+	}
+
 	/** @type {PresenceTracker} */
 	const tracker = {
 		join(ws, topic, platform) {
@@ -197,9 +294,14 @@ export function createPresence(options = {}) {
 			const presenceTopic = '__presence:' + topic;
 			const existing = users.get(key);
 			if (existing) {
-				// Same user, additional connection (another tab) - just bump count
+				// Same user, additional connection (another tab) - bump count.
+				// If the displayed data changed (e.g. user updated their avatar in a
+				// different session), notify other clients with an 'updated' event.
 				existing.count++;
-				existing.data = data;
+				if (!deepEqual(existing.data, data)) {
+					existing.data = data;
+					platform.publish(presenceTopic, 'updated', { key, data });
+				}
 			} else {
 				// New user on this topic
 				users.set(key, { data, count: 1 });
@@ -225,23 +327,8 @@ export function createPresence(options = {}) {
 			const connTopics = wsTopics.get(ws);
 			if (!connTopics) return;
 
-			for (const [topic, { key }] of connTopics) {
-				const users = topicPresence.get(topic);
-				if (!users) continue;
-
-				const existing = users.get(key);
-				if (!existing) continue;
-
-				existing.count--;
-				if (existing.count <= 0) {
-					const data = existing.data;
-					users.delete(key);
-					if (users.size === 0) {
-						topicPresence.delete(topic);
-					}
-					// Last connection for this user left - broadcast departure
-					platform.publish('__presence:' + topic, 'leave', { key, data });
-				}
+			for (const [topic] of connTopics) {
+				leaveTopic(ws, topic, connTopics, platform);
 			}
 
 			wsTopics.delete(ws);
@@ -266,7 +353,7 @@ export function createPresence(options = {}) {
 			if (!users) return [];
 			const result = [];
 			for (const [, entry] of users) {
-				result.push(entry.data);
+				try { result.push(structuredClone(entry.data)); } catch { result.push(entry.data); }
 			}
 			return result;
 		},
@@ -290,13 +377,15 @@ export function createPresence(options = {}) {
 		hooks: {
 			subscribe(ws, topic, { platform }) {
 				if (topic.startsWith('__presence:')) {
-					// Observer subscribing to presence channel directly --
-					// sync() subscribes + sends the current list
 					tracker.sync(ws, topic.slice(11), platform);
 					return;
 				}
-				// Regular topic -- join presence
 				tracker.join(ws, topic, platform);
+			},
+			unsubscribe(ws, topic, { platform }) {
+				if (topic.startsWith('__')) return;
+				const connTopics = wsTopics.get(ws);
+				if (connTopics) leaveTopic(ws, topic, connTopics, platform);
 			},
 			close(ws, { platform }) {
 				tracker.leave(ws, platform);

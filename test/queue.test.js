@@ -259,6 +259,47 @@ describe('queue plugin', () => {
 		it('drain with no active queues resolves immediately', async () => {
 			await expect(queue.drain()).resolves.toBeUndefined();
 		});
+
+		it('waits for all parallel tasks when concurrency > 1', async () => {
+			const q = createQueue({ concurrency: 3 });
+			let running = 0;
+			let maxRunning = 0;
+			let completed = 0;
+
+			for (let i = 0; i < 5; i++) {
+				q.push('k', async () => {
+					running++;
+					if (running > maxRunning) maxRunning = running;
+					await new Promise(r => setTimeout(r, 20));
+					running--;
+					completed++;
+				});
+			}
+
+			await q.drain('k');
+			expect(completed).toBe(5);
+			expect(running).toBe(0);
+			expect(maxRunning).toBeGreaterThan(1);
+		});
+
+		it('does not resolve while tasks are still in flight (concurrency=2)', async () => {
+			const q = createQueue({ concurrency: 2 });
+			let slowDone = false;
+			let fastDone = false;
+
+			q.push('k', async () => {
+				await new Promise(r => setTimeout(r, 50));
+				slowDone = true;
+			});
+			q.push('k', async () => {
+				await new Promise(r => setTimeout(r, 5));
+				fastDone = true;
+			});
+
+			await q.drain('k');
+			expect(fastDone).toBe(true);
+			expect(slowDone).toBe(true);
+		});
 	});
 
 	describe('cleanup', () => {

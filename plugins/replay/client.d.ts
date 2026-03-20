@@ -11,12 +11,30 @@ export interface OnReplayOptions {
 }
 
 /**
+ * Emitted by `onReplay()` when the ring buffer was overwritten before the client
+ * connected and some messages are permanently lost. Handle it to reload data from
+ * the server or show a warning.
+ */
+export interface TruncatedEvent {
+	/** The topic this store is subscribed to. */
+	topic: string;
+	/** Always `'truncated'`. */
+	event: 'truncated';
+	/** Always `null`. */
+	data: null;
+}
+
+/**
  * Subscribe to a topic with replay support.
  *
  * Works exactly like `on(topic)` from `svelte-adapter-uws/client` but also
  * requests a replay of messages the client missed between SSR and WebSocket
  * connect. During the replay window, live messages are held back. Once the
  * server signals replay is done, the store switches to live mode with no gaps.
+ *
+ * **Buffer overflow:** If the ring buffer was overwritten before the client
+ * connected, the store emits a `TruncatedEvent` (`{ event: 'truncated', data: null }`)
+ * so your app can react (e.g. reload all data from the server).
  *
  * @param topic - Topic to subscribe to
  * @param options - Must include `since` (the sequence number from your load function)
@@ -44,6 +62,7 @@ export interface OnReplayOptions {
  *   const messages = onReplay('chat', { since: data.seq }).scan(
  *     data.messages,
  *     (list, { event, data }) => {
+ *       if (event === 'truncated') return []; // buffer overflow - reload from server
  *       if (event === 'created') return [...list, data];
  *       return list;
  *     }
@@ -54,4 +73,4 @@ export interface OnReplayOptions {
 export function onReplay<T = unknown>(
 	topic: string,
 	options: OnReplayOptions
-): TopicStore<WSEvent<T>>;
+): TopicStore<WSEvent<T> | TruncatedEvent>;

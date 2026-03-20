@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { writable, derived } from 'svelte/store';
 
 /** @type {ReturnType<typeof createConnection> | null} */
 let singleton = null;
@@ -70,6 +70,50 @@ export function on(topic, event) {
 }
 
 /**
+ * Create a store that subscribes to a topic derived from a reactive value.
+ * When the source store changes, the subscription automatically switches to
+ * the new topic and the old one is released.
+ *
+ * Useful when the topic depends on runtime state like a user ID, selected item,
+ * or route parameter  - no manual subscribe/unsubscribe lifecycle to manage.
+ *
+ * @template T
+ * @param {(value: T) => string} topicFn - Maps the source store's value to a topic name
+ * @param {import('svelte/store').Readable<T>} store - Reactive input value
+ * @returns {import('svelte/store').Readable<import('./client.js').WSEvent | null>}
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { page } from '$app/stores';
+ *   import { onDerived } from 'svelte-adapter-uws/client';
+ *   import { derived } from 'svelte/store';
+ *
+ *   // Subscribe to a topic based on the current page's item ID
+ *   const roomId = derived(page, ($page) => $page.params.id);
+ *   const messages = onDerived((id) => `room:${id}`, roomId);
+ * </script>
+ *
+ * {#if $messages}
+ *   <p>{$messages.event}: {JSON.stringify($messages.data)}</p>
+ * {/if}
+ * ```
+ */
+export function onDerived(topicFn, store) {
+	return derived(store, ($value, set) => {
+		if ($value == null) {
+			set(null);
+			return;
+		}
+		// on() is ref-counted  - the returned unsubscribe function decrements
+		// the ref count and releases the server subscription when it hits zero.
+		// derived() calls this cleanup whenever the source store produces a new
+		// value or when all subscribers of the derived store are gone.
+		return on(topicFn($value)).subscribe(set);
+	}, null);
+}
+
+/**
  * Readable store - connection status: `'connecting'` | `'open'` | `'closed'`.
  * Auto-connects on first access.
  *
@@ -88,13 +132,35 @@ export const status = {
  * @returns {Promise<void>}
  */
 export function ready() {
+	// In non-browser environments (SSR) there is no WebSocket and status
+	// will never reach 'open'. Resolve immediately so await ready() is a no-op.
+	if (typeof window === 'undefined') return Promise.resolve();
+
 	const conn = ensureConnection();
-	return new Promise((resolve) => {
-		const unsub = conn.status.subscribe((s) => {
-			if (s === 'open') {
-				// Defer unsubscribe to avoid removing during subscribe callback
-				queueMicrotask(() => unsub());
-				resolve();
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		/** @type {(() => void) | null} */
+		let statusUnsub = null;
+		/** @type {(() => void) | null} */
+		let permaUnsub = null;
+
+		function cleanup() {
+			if (settled) return;
+			settled = true;
+			queueMicrotask(() => {
+				statusUnsub?.();
+				permaUnsub?.();
+			});
+		}
+
+		statusUnsub = conn.status.subscribe((s) => {
+			if (s === 'open') { cleanup(); resolve(); }
+		});
+
+		permaUnsub = conn._permaClosed.subscribe((dead) => {
+			if (dead) {
+				cleanup();
+				reject(new Error('WebSocket connection permanently closed'));
 			}
 		});
 	});
@@ -120,9 +186,18 @@ export function crud(topic, initial = [], options = {}) {
 
 	if (maxAge == null || maxAge <= 0) {
 		return on(topic).scan(/** @type {any[]} */ (initial), (list, { event, data }) => {
-			if (event === 'created') return prepend ? [data, ...list] : [...list, data];
-			if (event === 'updated') return list.map((item) => item[key] === data[key] ? data : item);
-			if (event === 'deleted') return list.filter((item) => item[key] !== data[key]);
+			if (event === 'created') {
+				if (data == null || typeof data !== 'object') return list;
+				return prepend ? [data, ...list] : [...list, data];
+			}
+			if (event === 'updated') {
+				if (data == null || typeof data !== 'object') return list;
+				return list.map((item) => item[key] === data[key] ? data : item);
+			}
+			if (event === 'deleted') {
+				if (data == null || typeof data !== 'object') return list;
+				return list.filter((item) => item[key] !== data[key]);
+			}
 			return list;
 		});
 	}
@@ -165,7 +240,9 @@ export function crud(topic, initial = [], options = {}) {
 		sourceUnsub = source.subscribe((event) => {
 			if (event === null) return;
 			const { event: evt, data } = event;
-			const id = String(data[key]);
+			if (evt !== 'created' && evt !== 'updated' && evt !== 'deleted') return;
+			if (data == null || typeof data !== 'object') return;
+			const id = String(/** @type {any} */ (data)[key]);
 			if (evt === 'created') {
 				timestamps.set(id, Date.now());
 				list = prepend ? [data, ...list] : [...list, data];
@@ -232,7 +309,8 @@ export function lookup(topic, initial = [], options = {}) {
 
 	if (maxAge == null || maxAge <= 0) {
 		return on(topic).scan(initialMap, (map, { event, data }) => {
-			const id = data[key];
+			if (data == null || typeof data !== 'object') return map;
+			const id = /** @type {any} */ (data)[key];
 			if (event === 'created' || event === 'updated') return { ...map, [id]: data };
 			if (event === 'deleted') {
 				const { [id]: _, ...rest } = map;
@@ -282,7 +360,9 @@ export function lookup(topic, initial = [], options = {}) {
 		sourceUnsub = source.subscribe((event) => {
 			if (event === null) return;
 			const { event: evt, data } = event;
-			const id = data[key];
+			if (evt !== 'created' && evt !== 'updated' && evt !== 'deleted') return;
+			if (data == null || typeof data !== 'object') return;
+			const id = /** @type {any} */ (data)[key];
 			if (evt === 'created' || evt === 'updated') {
 				timestamps.set(id, Date.now());
 				map = { ...map, [id]: data };
@@ -406,6 +486,20 @@ export function once(topic, event, options) {
 	});
 }
 
+// Close codes that indicate the server has permanently rejected this client.
+// Reconnecting would be pointless (credentials invalid, policy violation, etc.).
+const TERMINAL_CLOSE_CODES = new Set([
+	1008, // Policy Violation
+	4401, // Unauthorized (custom)
+	4403, // Forbidden (custom)
+]);
+
+// Close codes indicating server-side throttling. Reconnect is still attempted
+// but we jump ahead in the backoff curve to avoid hammering a rate-limited server.
+const THROTTLE_CLOSE_CODES = new Set([
+	4429, // Rate limited (custom)
+]);
+
 /**
  * @param {import('./client.js').ConnectOptions} options
  * @returns {import('./client.js').WSConnection & { _onEvent: (topic: string, event: string) => import('svelte/store').Readable<unknown> }}
@@ -424,9 +518,24 @@ function createConnection(options) {
 
 	/** @type {ReturnType<typeof setTimeout> | null} */
 	let reconnectTimer = null;
+	/** @type {ReturnType<typeof setInterval> | null} */
+	let activityTimer = null;
 
 	let attempt = 0;
 	let intentionallyClosed = false;
+	// Set when the server permanently rejects us (terminal close code) or when
+	// retries are exhausted. Distinct from intentionallyClosed (user-initiated).
+	// Both prevent the visibility handler from triggering a reconnect.
+	let terminalClosed = false;
+	// Set when the page is hidden  - signals that the next disconnect may be
+	// browser-initiated and should reconnect immediately when the tab resumes.
+	let hiddenDisconnect = false;
+	// Timestamp of the last message received from the server. Used to detect
+	// zombie connections  - cases where onclose was suppressed by browser throttling.
+	let lastServerMessage = Date.now();
+	// 2.5x the server's 120s idle timeout. If the server has been completely
+	// silent for this long while the socket appears open, it is likely a zombie.
+	const SERVER_TIMEOUT_MS = 150000;
 
 	/** @type {Set<string>} */
 	const subscribedTopics = new Set();
@@ -450,6 +559,11 @@ function createConnection(options) {
 	/** @type {import('svelte/store').Writable<'connecting' | 'open' | 'closed'>} */
 	const statusStore = writable('closed');
 
+	// Set to true when no more reconnects will ever be attempted.
+	// Consumers (ready()) watch this to reject instead of waiting forever.
+	/** @type {import('svelte/store').Writable<boolean>} */
+	const permaClosedStore = writable(false);
+
 	function getUrl() {
 		if (typeof window === 'undefined') return '';
 		const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -471,13 +585,36 @@ function createConnection(options) {
 
 		ws.onopen = () => {
 			attempt = 0;
+			lastServerMessage = Date.now();
 			statusStore.set('open');
 			if (debug) console.log('[ws] connected');
 
-			// Re-subscribe to all topics after reconnect
-			for (const topic of subscribedTopics) {
-				if (debug) console.log('[ws] resubscribe ->', topic);
-				ws?.send(JSON.stringify({ type: 'subscribe', topic }));
+			// Batch resubscriptions into subscribe-batch messages. The server
+			// caps each batch at 256 topics and only parses control messages
+			// under 8192 bytes, so we chunk to stay within both limits.
+			if (subscribedTopics.size > 0) {
+				const allTopics = [...subscribedTopics];
+				const encoder = new TextEncoder();
+				const ENVELOPE_BYTES = 39; // '{"type":"subscribe-batch","topics":[]}'
+				const MAX_BYTES = 8000; // under 8192 server ceiling
+				const MAX_TOPICS = 200; // under 256 server cap
+				let chunk = [];
+				let chunkBytes = ENVELOPE_BYTES;
+				for (const t of allTopics) {
+					const entryBytes = encoder.encode(JSON.stringify(t)).length + 1;
+					if (chunk.length > 0 && (chunk.length >= MAX_TOPICS || chunkBytes + entryBytes > MAX_BYTES)) {
+						if (debug) console.log('[ws] resubscribe-batch ->', chunk);
+						ws?.send(JSON.stringify({ type: 'subscribe-batch', topics: chunk }));
+						chunk = [];
+						chunkBytes = ENVELOPE_BYTES;
+					}
+					chunk.push(t);
+					chunkBytes += entryBytes;
+				}
+				if (chunk.length > 0) {
+					if (debug) console.log('[ws] resubscribe-batch ->', chunk);
+					ws?.send(JSON.stringify({ type: 'subscribe-batch', topics: chunk }));
+				}
 			}
 
 			// Flush queued messages
@@ -489,6 +626,7 @@ function createConnection(options) {
 		};
 
 		ws.onmessage = (rawEvent) => {
+			lastServerMessage = Date.now();
 			try {
 				// Reject oversized messages to prevent main-thread blocking
 				if (typeof rawEvent.data === 'string' && rawEvent.data.length > 1048576) {
@@ -517,13 +655,29 @@ function createConnection(options) {
 			}
 		};
 
-		ws.onclose = () => {
+		ws.onclose = (event) => {
 			statusStore.set('closed');
 			ws = null;
 			if (debug) console.log('[ws] disconnected');
-			if (!intentionallyClosed) {
-				scheduleReconnect();
+			if (intentionallyClosed) return;
+
+			if (TERMINAL_CLOSE_CODES.has(event?.code)) {
+				// Server has permanently rejected this client  - do not retry.
+				// Use ws.close(4401) or ws.close(1008) on the server when credentials
+				// are invalid or the connection is forbidden, to stop the retry loop.
+				if (debug) console.warn('[ws] connection permanently closed by server (code ' + event.code + ')');
+				terminalClosed = true;
+				permaClosedStore.set(true);
+				return;
 			}
+
+			if (THROTTLE_CLOSE_CODES.has(event?.code)) {
+				// Server is rate-limiting us  - jump ahead in the backoff curve
+				// to avoid hammering it with immediate reconnect attempts.
+				attempt = Math.max(attempt, 5);
+			}
+
+			scheduleReconnect();
 		};
 
 		ws.onerror = () => {
@@ -535,12 +689,17 @@ function createConnection(options) {
 		if (reconnectTimer) return;
 		if (attempt >= maxReconnectAttempts) {
 			statusStore.set('closed');
+			terminalClosed = true;
+			permaClosedStore.set(true);
 			return;
 		}
-		const delay = Math.min(
-			reconnectInterval * Math.pow(1.5, attempt) + Math.random() * 1000,
-			maxReconnectInterval
-		);
+		// Proportional jitter (±25% of the base delay) prevents thundering herd
+		// on server restarts. With 10K clients and additive ±500ms jitter all
+		// reconnections cluster in a 1s window; proportional jitter spreads them
+		// over ~15s at higher attempt counts where the base delay is large.
+		const base = Math.min(reconnectInterval * Math.pow(1.5, attempt), maxReconnectInterval);
+		const jitter = base * 0.25 * (Math.random() * 2 - 1);
+		const delay = Math.max(0, base + jitter);
 		attempt++;
 		reconnectTimer = setTimeout(() => {
 			reconnectTimer = null;
@@ -655,17 +814,42 @@ function createConnection(options) {
 	 * @returns {import('./client.js').TopicStore<import('./client.js').WSEvent>}
 	 */
 	function onTopic(topic) {
+		// Register the store immediately so messages dispatched before any
+		// Svelte subscriber arrives are captured in the writable's current value.
 		let store = topicStores.get(topic);
 		if (!store) {
 			store = writable(null);
 			topicStores.set(topic, store);
+			// If nothing subscribes before the next microtask, remove the entry.
+			// Guards against accumulating entries for topics that are constructed
+			// but never actually used (e.g. dead code paths, conditional renders
+			// that never mount). Safe: if another wrapper for the same topic has
+			// an active subscriber, topicRefCounts will be non-empty and we skip.
+			const ownStore = store;
+			queueMicrotask(() => {
+				if (subs === 0 && !topicRefCounts.has(topic) && topicStores.get(topic) === ownStore) {
+					topicStores.delete(topic);
+				}
+			});
 		}
 
 		// Ref-counted: subscribes to WS topic when first Svelte subscriber
-		// arrives, releases when last leaves
+		// arrives, releases when last leaves.
 		let subs = 0;
 		function wrappedSubscribe(fn) {
-			if (subs++ === 0) subscribe(topic);
+			if (subs++ === 0) {
+				// After a full unsubscribe cycle, release() deletes the store from
+				// the map. Re-register (or adopt a concurrent store) so that new
+				// messages are dispatched to this wrapper.
+				const current = topicStores.get(topic);
+				if (!current) {
+					store = writable(null);
+					topicStores.set(topic, store);
+				} else if (current !== store) {
+					store = current;
+				}
+				subscribe(topic);
+			}
 			const unsub = store.subscribe(fn);
 			return () => {
 				unsub();
@@ -685,15 +869,31 @@ function createConnection(options) {
 	 */
 	function onEvent(topic, event) {
 		const key = `${topic}\0${event}`;
+		// Same register-at-call-time and refresh-on-resubscribe pattern as onTopic.
 		let store = eventStores.get(key);
 		if (!store) {
 			store = writable(null);
 			eventStores.set(key, store);
+			const ownStore = store;
+			queueMicrotask(() => {
+				if (subs === 0 && !topicRefCounts.has(topic) && eventStores.get(key) === ownStore) {
+					eventStores.delete(key);
+				}
+			});
 		}
 
 		let subs = 0;
 		function wrappedSubscribe(fn) {
-			if (subs++ === 0) subscribe(topic);
+			if (subs++ === 0) {
+				const current = eventStores.get(key);
+				if (!current) {
+					store = writable(null);
+					eventStores.set(key, store);
+				} else if (current !== store) {
+					store = current;
+				}
+				subscribe(topic);
+			}
 			const unsub = store.subscribe(fn);
 			return () => {
 				unsub();
@@ -740,11 +940,23 @@ function createConnection(options) {
 	/**
 	 * Close the connection permanently.
 	 */
+	/** @type {(() => void) | null} */
+	let visibilityHandler = null;
+
 	function close() {
 		intentionallyClosed = true;
+		permaClosedStore.set(true);
 		if (reconnectTimer) {
 			clearTimeout(reconnectTimer);
 			reconnectTimer = null;
+		}
+		if (activityTimer) {
+			clearInterval(activityTimer);
+			activityTimer = null;
+		}
+		if (visibilityHandler && typeof document !== 'undefined') {
+			document.removeEventListener('visibilitychange', visibilityHandler);
+			visibilityHandler = null;
 		}
 		ws?.close();
 		ws = null;
@@ -756,9 +968,44 @@ function createConnection(options) {
 	// Auto-connect on creation
 	doConnect();
 
+	// Page visibility reconnect: when a tab resumes from background (or the user
+	// unlocks their phone), reconnect immediately instead of waiting for the
+	// exponential backoff timer. Browsers often close WS connections during hide.
+	if (typeof document !== 'undefined') {
+		visibilityHandler = () => {
+			if (document.hidden) {
+				hiddenDisconnect = true;
+			} else if (!intentionallyClosed && !terminalClosed && (hiddenDisconnect || !ws || ws.readyState !== WebSocket.OPEN)) {
+				hiddenDisconnect = false;
+				attempt = 0;
+				if (reconnectTimer) {
+					clearTimeout(reconnectTimer);
+					reconnectTimer = null;
+				}
+				doConnect();
+			}
+		};
+		document.addEventListener('visibilitychange', visibilityHandler);
+	}
+
+	// Zombie connection detection: check every 30s whether the server has gone
+	// completely silent. If so, the connection is likely a zombie (server dropped
+	// us but the client's onclose was suppressed by browser throttling  - common
+	// on mobile after wake from sleep). Force a close so onclose fires and the
+	// normal reconnect path takes over.
+	if (typeof window !== 'undefined') {
+		activityTimer = setInterval(() => {
+			if (ws?.readyState === WebSocket.OPEN && Date.now() - lastServerMessage > SERVER_TIMEOUT_MS) {
+				if (debug) console.log('[ws] server silent for', Date.now() - lastServerMessage, 'ms, reconnecting');
+				ws.close();
+			}
+		}, 30000);
+	}
+
 	return {
 		events: { subscribe: eventsStore.subscribe },
 		status: { subscribe: statusStore.subscribe },
+		_permaClosed: { subscribe: permaClosedStore.subscribe },
 		on: onTopic,
 		_onEvent: onEvent,
 		_release: release,

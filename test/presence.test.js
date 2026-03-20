@@ -213,6 +213,200 @@ describe('presence plugin - server', () => {
 			expect(platform.published[0].event).toBe('leave');
 			expect(presence.count('room')).toBe(0);
 		});
+
+		it('publishes updated when a returning user rejoins with changed data', () => {
+			const ws1 = mockWs({ id: '1', name: 'Alice' });
+			presence.join(ws1, 'room', platform);
+			platform.published.length = 0;
+
+			// Second connection with updated name
+			const ws2 = mockWs({ id: '1', name: 'Alice Renamed' });
+			presence.join(ws2, 'room', platform);
+
+			expect(platform.published).toHaveLength(1);
+			expect(platform.published[0]).toEqual({
+				topic: '__presence:room',
+				event: 'updated',
+				data: { key: '1', data: { id: '1', name: 'Alice Renamed' } }
+			});
+
+			// The stored data should reflect the new value
+			expect(presence.list('room')).toEqual([{ id: '1', name: 'Alice Renamed' }]);
+		});
+
+		it('does not publish updated when a returning user rejoins with identical data', () => {
+			const ws1 = mockWs({ id: '1', name: 'Alice' });
+			presence.join(ws1, 'room', platform);
+			platform.published.length = 0;
+
+			// Second connection with identical data
+			const ws2 = mockWs({ id: '1', name: 'Alice' });
+			presence.join(ws2, 'room', platform);
+
+			expect(platform.published).toHaveLength(0);
+		});
+
+		it('does not publish updated when data keys are in a different order', () => {
+			const ws1 = mockWs({ id: '1', name: 'Alice', role: 'admin' });
+			presence.join(ws1, 'room', platform);
+			platform.published.length = 0;
+
+			// Same values, different key insertion order
+			const ws2 = mockWs({ id: '1', role: 'admin', name: 'Alice' });
+			presence.join(ws2, 'room', platform);
+
+			expect(platform.published).toHaveLength(0);
+		});
+
+		it('detects changes in nested objects on rejoin', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, prefs: { theme: userData.theme } })
+			});
+			const ws1 = mockWs({ id: '1', theme: 'light' });
+			p.join(ws1, 'room', platform);
+			platform.published.length = 0;
+
+			const ws2 = mockWs({ id: '1', theme: 'dark' });
+			p.join(ws2, 'room', platform);
+
+			expect(platform.published).toHaveLength(1);
+			expect(platform.published[0].event).toBe('updated');
+			expect(platform.published[0].data.data.prefs.theme).toBe('dark');
+		});
+
+		it('does not publish updated when nested objects are equal', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, prefs: { theme: userData.theme } })
+			});
+			const ws1 = mockWs({ id: '1', theme: 'light' });
+			p.join(ws1, 'room', platform);
+			platform.published.length = 0;
+
+			const ws2 = mockWs({ id: '1', theme: 'light' });
+			p.join(ws2, 'room', platform);
+
+			expect(platform.published).toHaveLength(0);
+		});
+
+		it('does not throw when selected data contains non-serializable values', () => {
+			const bigintPresence = createPresence({
+				key: 'id',
+				select: (userData) => userData
+			});
+			const ws1 = mockWs({ id: '1', score: BigInt(42) });
+			const ws2 = mockWs({ id: '1', score: BigInt(42) });
+			bigintPresence.join(ws1, 'room', platform);
+			platform.published.length = 0;
+			expect(() => bigintPresence.join(ws2, 'room', platform)).not.toThrow();
+			expect(platform.published).toHaveLength(0); // same BigInt value, no update
+		});
+
+		it('does not blow the stack on cyclic data', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => userData
+			});
+			const cyclic = { id: '1', name: 'Alice' };
+			cyclic.self = cyclic;
+			const ws1 = mockWs(cyclic);
+			p.join(ws1, 'room', platform);
+			platform.published.length = 0;
+
+			const cyclic2 = { id: '1', name: 'Alice' };
+			cyclic2.self = cyclic2;
+			const ws2 = mockWs(cyclic2);
+			expect(() => p.join(ws2, 'room', platform)).not.toThrow();
+		});
+
+		it('does not false-positive when equal data reuses the same subobject', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => userData
+			});
+			const shared = { x: 1, y: 2 };
+			const ws1 = mockWs({ id: '1', a: shared, b: shared });
+			p.join(ws1, 'room', platform);
+			platform.published.length = 0;
+
+			const shared2 = { x: 1, y: 2 };
+			const ws2 = mockWs({ id: '1', a: shared2, b: shared2 });
+			p.join(ws2, 'room', platform);
+			expect(platform.published).toHaveLength(0);
+		});
+
+		it('compares Date values by time, not reference', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, joined: userData.joined })
+			});
+			const ws1 = mockWs({ id: '1', joined: new Date('2025-01-01') });
+			p.join(ws1, 'room', platform);
+			platform.published.length = 0;
+
+			const ws2 = mockWs({ id: '1', joined: new Date('2025-01-01') });
+			p.join(ws2, 'room', platform);
+			expect(platform.published).toHaveLength(0);
+		});
+
+		it('detects different Date values on rejoin', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, joined: userData.joined })
+			});
+			const ws1 = mockWs({ id: '1', joined: new Date('2025-01-01') });
+			p.join(ws1, 'room', platform);
+			platform.published.length = 0;
+
+			const ws2 = mockWs({ id: '1', joined: new Date('2025-06-15') });
+			p.join(ws2, 'room', platform);
+			expect(platform.published).toHaveLength(1);
+			expect(platform.published[0].event).toBe('updated');
+		});
+
+		it('compares Set values by content, not reference', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, roles: userData.roles })
+			});
+			const ws1 = mockWs({ id: '1', roles: new Set(['admin', 'user']) });
+			p.join(ws1, 'room', platform);
+			platform.published.length = 0;
+
+			const ws2 = mockWs({ id: '1', roles: new Set(['admin', 'user']) });
+			p.join(ws2, 'room', platform);
+			expect(platform.published).toHaveLength(0);
+		});
+
+		it('detects different Set values on rejoin', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, roles: userData.roles })
+			});
+			const ws1 = mockWs({ id: '1', roles: new Set(['admin']) });
+			p.join(ws1, 'room', platform);
+			platform.published.length = 0;
+
+			const ws2 = mockWs({ id: '1', roles: new Set(['admin', 'moderator']) });
+			p.join(ws2, 'room', platform);
+			expect(platform.published).toHaveLength(1);
+			expect(platform.published[0].event).toBe('updated');
+		});
+
+		it('compares Map values by content, not reference', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, settings: userData.settings })
+			});
+			const ws1 = mockWs({ id: '1', settings: new Map([['theme', 'dark']]) });
+			p.join(ws1, 'room', platform);
+			platform.published.length = 0;
+
+			const ws2 = mockWs({ id: '1', settings: new Map([['theme', 'dark']]) });
+			p.join(ws2, 'room', platform);
+			expect(platform.published).toHaveLength(0);
+		});
 	});
 
 	describe('leave', () => {
@@ -312,6 +506,48 @@ describe('presence plugin - server', () => {
 			expect(presence.list('nonexistent')).toEqual([]);
 			expect(presence.count('nonexistent')).toBe(0);
 		});
+
+		it('returns copies - mutating list() results does not affect internal state', () => {
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			presence.join(ws, 'room', platform);
+
+			const list1 = presence.list('room');
+			list1[0].name = 'Hacked';
+			list1[0].injected = true;
+
+			const list2 = presence.list('room');
+			expect(list2[0].name).toBe('Alice');
+			expect(list2[0].injected).toBeUndefined();
+		});
+
+		it('deeply isolates nested objects from internal state', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, meta: { role: userData.role } })
+			});
+			const ws = mockWs({ id: '1', role: 'admin' });
+			p.join(ws, 'room', platform);
+
+			const list1 = p.list('room');
+			list1[0].meta.role = 'hacked';
+
+			const list2 = p.list('room');
+			expect(list2[0].meta.role).toBe('admin');
+		});
+
+		it('does not throw when data contains non-cloneable values', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, callback: userData.callback })
+			});
+			const ws = mockWs({ id: '1', callback: () => {} });
+			p.join(ws, 'room', platform);
+
+			expect(() => p.list('room')).not.toThrow();
+			const list = p.list('room');
+			expect(list).toHaveLength(1);
+			expect(list[0].id).toBe('1');
+		});
 	});
 
 	describe('clear', () => {
@@ -327,8 +563,9 @@ describe('presence plugin - server', () => {
 	});
 
 	describe('hooks', () => {
-		it('exposes subscribe and close functions', () => {
+		it('exposes subscribe, unsubscribe, and close functions', () => {
 			expect(typeof presence.hooks.subscribe).toBe('function');
+			expect(typeof presence.hooks.unsubscribe).toBe('function');
 			expect(typeof presence.hooks.close).toBe('function');
 		});
 
@@ -381,6 +618,35 @@ describe('presence plugin - server', () => {
 			expect(platform.sent).toHaveLength(0);
 		});
 
+		it('hooks.unsubscribe removes from a single topic', () => {
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			presence.join(ws, 'room-a', platform);
+			presence.join(ws, 'room-b', platform);
+			platform.reset();
+
+			presence.hooks.unsubscribe(ws, 'room-a', { platform });
+
+			expect(presence.count('room-a')).toBe(0);
+			expect(presence.count('room-b')).toBe(1);
+			expect(platform.published).toHaveLength(1);
+			expect(platform.published[0].event).toBe('leave');
+			expect(platform.published[0].topic).toBe('__presence:room-a');
+		});
+
+		it('hooks.unsubscribe ignores __-prefixed topics', () => {
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			presence.join(ws, 'room', platform);
+
+			presence.hooks.unsubscribe(ws, '__presence:room', { platform });
+
+			expect(presence.count('room')).toBe(1);
+		});
+
+		it('hooks.unsubscribe is safe for unknown ws', () => {
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			expect(() => presence.hooks.unsubscribe(ws, 'room', { platform })).not.toThrow();
+		});
+
 		it('hooks.close calls leave', () => {
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			presence.join(ws, 'room', platform);
@@ -394,15 +660,13 @@ describe('presence plugin - server', () => {
 		});
 
 		it('destructured hooks work correctly', () => {
-			const { subscribe, close } = presence.hooks;
+			const { subscribe, unsubscribe, close } = presence.hooks;
 
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			subscribe(ws, 'room', { platform });
-
 			expect(presence.count('room')).toBe(1);
 
-			close(ws, { platform });
-
+			unsubscribe(ws, 'room', { platform });
 			expect(presence.count('room')).toBe(0);
 		});
 	});

@@ -11,7 +11,8 @@ export interface ReplayOptions {
 
 	/**
 	 * Max number of topics to track.
-	 * Oldest topic is evicted when this limit is reached.
+	 * The least recently used topic is evicted when this limit is reached.
+	 * Topics are touched (marked recently used) by publish(), seq(), since(), and replay().
 	 * @default 100
 	 */
 	maxTopics?: number;
@@ -68,18 +69,22 @@ export interface ReplayBuffer {
 	 * a replay request. Messages are sent on `__replay:{topic}` with an
 	 * end marker so the client knows when to switch to live mode.
 	 *
+	 * Pass `msg.reqId` as the fifth argument so that multiple concurrent
+	 * `onReplay()` instances on the same page for the same topic each
+	 * receive only their own responses and don't see each other's events.
+	 *
 	 * @example
 	 * ```js
 	 * export function message(ws, { data, platform }) {
 	 *   const msg = JSON.parse(Buffer.from(data).toString());
 	 *   if (msg.type === 'replay') {
-	 *     replay.replay(ws, msg.topic, msg.since, platform);
+	 *     replay.replay(ws, msg.topic, msg.since, platform, msg.reqId);
 	 *     return;
 	 *   }
 	 * }
 	 * ```
 	 */
-	replay(ws: WebSocket<any>, topic: string, sinceSeq: number, platform: Platform): void;
+	replay(ws: WebSocket<any>, topic: string, sinceSeq: number, platform: Platform, reqId?: number | string): void;
 
 	/** Clear all buffers and reset all sequence numbers. */
 	clear(): void;

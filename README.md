@@ -386,6 +386,13 @@ adapter({
     // Seconds before an async upgrade handler is rejected with 504 (0 to disable)
     upgradeTimeout: 10, // default: 10
 
+    // Sliding-window rate limit: max WebSocket upgrade requests per IP per window.
+    // Prevents connection flood attacks. Uses a sliding window so a client cannot
+    // double the effective rate by placing requests at a fixed-window boundary.
+    // Set to 0 to disable.
+    upgradeRateLimit: 10,       // default: 10
+    upgradeRateLimitWindow: 10, // window size in seconds, default: 10
+
     // Allowed origins for WebSocket connections
     // 'same-origin' - only accept where Origin matches Host and scheme (default)
     // '*' - accept from any origin
@@ -396,6 +403,24 @@ adapter({
   }
 })
 ```
+
+### Static file behavior
+
+All static assets (from the `client/` and `prerendered/` output directories) are loaded once at startup and served directly from RAM. Each response automatically includes:
+
+- `Content-Type`: detected from the file extension
+- `Vary: Accept-Encoding`: required for correct CDN/proxy caching when serving precompressed variants
+- `Accept-Ranges: bytes`: enables partial content requests (e.g. for download resume)
+- `X-Content-Type-Options: nosniff`: prevents MIME-type sniffing in browsers
+- `ETag`: derived from the file's modification time and size; enables `304 Not Modified` responses
+- `Cache-Control: public, max-age=31536000, immutable`: for versioned assets under `/_app/immutable/`
+- `Cache-Control: no-cache`: for all other assets (forces ETag revalidation)
+
+**Range requests (HTTP 206):** The server handles `Range: bytes=start-end` requests for static files. Single byte ranges are supported (`bytes=0-499`, `bytes=-500`, `bytes=500-`). Multi-range requests (comma-separated) are served as full `200` responses. An unsatisfiable range returns `416 Range Not Satisfiable`. When a `Range` header is present, the response is always served uncompressed so byte offsets are correct. The `If-Range` header is respected: if it doesn't match the file's ETag, the full file is returned.
+
+Files with extensions that browsers cannot render inline (`.zip`, `.tar`, `.tgz`, `.exe`, `.dmg`, `.pkg`, `.deb`, `.apk`, `.iso`, `.img`, `.bin`, etc.) automatically receive `Content-Disposition: attachment` so browsers prompt a download dialog instead of attempting to display them.
+
+If `precompress: true` is set in the adapter options, brotli (`.br`) and gzip (`.gz`) precompressed variants are loaded at startup and served when the client's `Accept-Encoding` header includes `br` or `gzip`. Precompressed variants are only used when they are smaller than the original file.
 
 ---
 
@@ -421,6 +446,7 @@ If you set `envPrefix: 'MY_APP_'` in the adapter config, all variables are prefi
 | `SHUTDOWN_TIMEOUT` | `30` | Seconds to wait during graceful shutdown |
 | `CLUSTER_WORKERS` | - | Number of worker threads (or `auto` for CPU count) |
 | `CLUSTER_MODE` | *(auto)* | `reuseport` (Linux default) or `acceptor` (other platforms) |
+| `WS_DEBUG` | - | Set to `1` to enable structured WebSocket debug logging (open, close, subscribe, publish) |
 
 ### Graceful shutdown
 
@@ -564,6 +590,12 @@ export function subscribe(ws, topic, { platform }) {
   const { role } = ws.getUserData();
   // Only admins can subscribe to admin topics
   if (topic.startsWith('admin') && role !== 'admin') return false;
+}
+
+// Called when a client unsubscribes from a topic (optional)
+// Use this to clean up per-topic state (presence, groups, etc.)
+export function unsubscribe(ws, topic, { platform }) {
+  console.log(`Unsubscribed from ${topic}`);
 }
 
 // Called when the connection closes
@@ -849,6 +881,8 @@ platform.sendTo(
 );
 ```
 
+> **Performance:** `sendTo` iterates every open connection and runs your filter function against each one. It's fine for low-frequency operations like sending a DM or notifying admins, but don't use it in a hot loop. If you're broadcasting to a known group of users, subscribe them to a shared topic and use `platform.publish()` instead -- topic-based pub/sub is handled natively by uWS in C++ and doesn't touch the JS event loop.
+
 ### `platform.connections`
 
 Number of active WebSocket connections:
@@ -911,6 +945,20 @@ online.increment();     // -> { event: 'increment', data: 1 }
 online.increment(5);    // -> { event: 'increment', data: 5 }
 online.decrement();     // -> { event: 'decrement', data: 1 }
 ```
+
+### `platform.batch(messages)`
+
+Publish multiple messages in a single call. Useful when an action updates several topics at once:
+
+```js
+platform.batch([
+  { topic: 'todos', event: 'created', data: todo },
+  { topic: `user:${userId}`, event: 'activity', data: { action: 'create' } },
+  { topic: 'stats', event: 'increment', data: { key: 'todos_created' } }
+]);
+```
+
+Each entry is published with `platform.publish()`. Cross-worker relay is batched automatically, so this is more efficient than three separate `publish()` calls from a relay overhead perspective.
 
 ---
 
@@ -979,9 +1027,31 @@ Like `Array.reduce` but reactive. Each new event feeds through the reducer:
 {/each}
 ```
 
+### `onDerived(topicFn, store)` - reactive topic subscription
+
+Subscribes to a topic derived from a reactive value. When the source store changes, the old topic is released and the new one is subscribed automatically.
+
+```svelte
+<script>
+  import { page } from '$app/stores';
+  import { onDerived } from 'svelte-adapter-uws/client';
+  import { derived } from 'svelte/store';
+
+  // Subscribe to a different topic based on the current route
+  const roomId = derived(page, ($page) => $page.params.id);
+  const messages = onDerived((id) => `room:${id}`, roomId);
+</script>
+
+{#if $messages}
+  <p>{$messages.event}: {JSON.stringify($messages.data)}</p>
+{/if}
+```
+
+Without `onDerived`, you'd need to manually watch the source store and call `connect().subscribe()` / `connect().unsubscribe()` yourself when it changes. `onDerived` handles the full lifecycle: subscribes when the first Svelte subscriber arrives, switches topics when the source changes, and unsubscribes from the server when the last Svelte subscriber leaves.
+
 ### `crud(topic, initial?, options?)` - live CRUD list
 
-One-liner for real-time collections. Handles `created`, `updated`, and `deleted` events automatically:
+Subscribes to a topic and handles `created`, `updated`, and `deleted` events automatically:
 
 ```svelte
 <script>
@@ -1167,6 +1237,10 @@ await ready();
 // connection is now open, safe to send messages
 ```
 
+In SSR (no browser WebSocket), `ready()` resolves immediately and is a no-op.
+
+`ready()` rejects if the connection is permanently closed before it opens. This happens when the server sends a terminal close code (1008/4401/4403), retries are exhausted, or `close()` is called explicitly. If you call `ready()` in a context where permanent closure is possible, add a `.catch()` handler or use `try/await/catch`.
+
 ### `connect(options?)` - power-user API
 
 Most users don't need this - `on()` and `status` auto-connect. Use `connect()` when you need `close()`, `send()`, or custom options.
@@ -1191,7 +1265,7 @@ const ws = connect({
 //   [ws] send -> { type: "ping" }
 //   [ws] disconnected
 //   [ws] queued -> { type: "important" }
-//   [ws] resubscribe -> todos
+//   [ws] resubscribe-batch -> ['todos', 'chat']
 //   [ws] flush -> { type: "important" }
 
 // Manual topic management
@@ -1207,6 +1281,18 @@ ws.sendQueued({ type: 'important', data: '...' });
 // Permanent disconnect (won't auto-reconnect)
 ws.close();
 ```
+
+### Automatic connection behaviors
+
+The client handles several edge cases automatically, with no configuration required:
+
+**Exponential backoff with proportional jitter**: each reconnect attempt waits longer than the previous one. The jitter is +-25% of the base delay (not a fixed +-500ms), so at high attempt counts thousands of clients are spread over a wide window rather than clustering.
+
+**Page visibility reconnect**: when a browser tab resumes from background or a phone is unlocked, the client reconnects immediately instead of waiting for the backoff timer. Browsers often close WebSocket connections silently when a tab is hidden.
+
+**Batch resubscription**: on reconnect, all topics are resubscribed in batched `subscribe-batch` messages. Each batch stays under the server's 8 KB control-message ceiling and 256-topic-per-batch cap. For typical apps (under 200 topics with short names) this is a single frame; larger sets are automatically chunked.
+
+**Zombie detection**: the client checks every 30 seconds whether the server has been completely silent for more than 150 seconds (2.5x the server's idle timeout). If so, it forces a close and reconnects. This catches connections that appear open but were silently dropped by the server, which is common on mobile after wake from sleep.
 
 ---
 
@@ -1323,7 +1409,7 @@ export const pipeline = createMiddleware(
 // src/hooks.ws.js
 import { pipeline } from '$lib/server/pipeline';
 
-export async function message(ws, data, { platform }) {
+export async function message(ws, { data, platform }) {
   const msg = JSON.parse(Buffer.from(data).toString());
   const ctx = await pipeline.run(ws, msg, platform);
   if (!ctx) return; // chain was stopped (e.g. auth failed)
@@ -1410,7 +1496,7 @@ import { replay } from '$lib/server/replay';
 export function message(ws, { data, platform }) {
   const msg = JSON.parse(Buffer.from(data).toString());
   if (msg.type === 'replay') {
-    replay.replay(ws, msg.topic, msg.since, platform);
+    replay.replay(ws, msg.topic, msg.since, platform, msg.reqId);
     return;
   }
 }
@@ -1445,15 +1531,15 @@ import { createReplay } from 'svelte-adapter-uws/plugins/replay';
 
 const replay = createReplay({
   size: 1000,      // max messages per topic (default: 1000)
-  maxTopics: 100   // max tracked topics, oldest evicted (default: 100)
+  maxTopics: 100   // max tracked topics, LRU evicted (default: 100)
 });
 
-replay.publish(platform, topic, event, data)  // publish + buffer
-replay.seq(topic)                              // current sequence number
-replay.since(topic, seq)                       // buffered messages after seq
-replay.replay(ws, topic, sinceSeq, platform)   // send missed messages to one client
-replay.clear()                                 // reset everything
-replay.clearTopic(topic)                       // reset one topic
+replay.publish(platform, topic, event, data)           // publish + buffer
+replay.seq(topic)                                      // current sequence number
+replay.since(topic, seq)                               // buffered messages after seq
+replay.replay(ws, topic, sinceSeq, platform, reqId)    // send missed messages to one client
+replay.clear()                                         // reset everything
+replay.clearTopic(topic)                               // reset one topic
 ```
 
 #### Client API
@@ -1466,6 +1552,18 @@ const store = onReplay('chat', { since: data.seq });
 
 // .scan() works the same as on().scan()
 const messages = onReplay('chat', { since: data.seq }).scan([], reducer);
+```
+
+Each `onReplay()` call generates a unique request ID that is sent with the replay request and matched against the server's responses. This means multiple `onReplay('chat', ...)` instances on the same page (e.g. two components subscribing to the same topic) each receive only their own replay stream and don't see each other's events. The server must pass `msg.reqId` to `replay.replay()` as shown above for this to work.
+
+**Buffer overflow:** If more than `size` messages were published before the client connected and the ring buffer wrapped around, the store emits a synthetic `{ event: 'truncated', data: null }` event after the replayed messages. Check for it in your reducer or subscriber to decide whether to reload all data from the server:
+
+```js
+const messages = onReplay('chat', { since: data.seq }).scan(data.messages, (list, { event, data }) => {
+  if (event === 'truncated') return []; // buffer overflow - reload from server
+  if (event === 'created') return [...list, data];
+  return list;
+});
 ```
 
 #### Limitations
@@ -1507,7 +1605,7 @@ export function upgrade({ cookies }) {
   return { id: user.id, name: user.name };
 }
 
-export const { subscribe, close } = presence.hooks;
+export const { subscribe, unsubscribe, close } = presence.hooks;
 ```
 
 The `hooks` object handles everything: `subscribe` calls `join()` for regular topics and sends the current presence list for `__presence:*` topics, `close` calls `leave()`. If you need custom logic (auth gating, topic filtering), wrap the hook:
@@ -1518,7 +1616,7 @@ export function subscribe(ws, topic, ctx) {
   presence.hooks.subscribe(ws, topic, ctx);
 }
 
-export const close = presence.hooks.close;
+export const { unsubscribe, close } = presence.hooks;
 ```
 
 Use it on the client:
@@ -1563,7 +1661,7 @@ const presence = createPresence({
   heartbeat: 60_000      // broadcast active keys every 60s (default: disabled)
 });
 
-presence.hooks                       // ready-made { subscribe, close } hooks
+presence.hooks                       // ready-made { subscribe, unsubscribe, close } hooks
 presence.join(ws, topic, platform)   // add user to topic (call from subscribe hook)
 presence.leave(ws, platform)         // remove from all topics (call from close hook)
 presence.sync(ws, topic, platform)   // send list without joining (for observers)
@@ -1598,6 +1696,8 @@ Rule of thumb: set `heartbeat` to half (or less) of the client's `maxAge`.
 #### How multi-tab dedup works
 
 If user "Alice" (key `id: '1'`) has three browser tabs open, `presence.join()` is called three times with the same key. The plugin ref-counts connections per key: Alice appears once in the list. When she closes two tabs, she stays present. Only when the last tab closes does the plugin broadcast a `leave` event.
+
+If Alice's data changes between connections (for example she updates her avatar in one session and opens a fresh tab), `join()` detects the difference and broadcasts an `updated` event so other clients immediately see the new data. The `updated` event has the same shape as `join`: `{ key, data }`.
 
 If no `key` field is found in the selected data (e.g. no auth), each connection is tracked separately.
 
@@ -1800,7 +1900,7 @@ export const limiter = createRateLimit({
 // src/hooks.ws.js
 import { limiter } from '$lib/server/ratelimit';
 
-export function message(ws, data, { platform }) {
+export function message(ws, { data, platform }) {
   const { allowed, remaining, resetMs } = limiter.consume(ws);
   if (!allowed) return; // drop the message
 
@@ -1853,14 +1953,30 @@ export const cursors = createCursor({
 
 #### Server usage
 
+Use the `hooks` helper for zero-config cursor handling. The `message` hook handles `cursor` and `cursor-snapshot` messages automatically, and `close` calls `remove()`. The hooks verify that the sender is subscribed to the `__cursor:{topic}` channel before processing -- clients that haven't passed the `subscribe` hook for that topic are silently rejected.
+
 ```js
 // src/hooks.ws.js
 import { cursors } from '$lib/server/cursors';
 
-export function message(ws, data, { platform }) {
+export function message(ws, ctx) {
+  if (cursors.hooks.message(ws, ctx)) return;
+  // handle other messages...
+}
+
+export const close = cursors.hooks.close;
+```
+
+For custom auth or topic filtering, handle the messages manually:
+
+```js
+export function message(ws, { data, platform }) {
   const msg = JSON.parse(Buffer.from(data).toString());
   if (msg.type === 'cursor') {
     cursors.update(ws, msg.topic, { x: msg.x, y: msg.y }, platform);
+  }
+  if (msg.type === 'cursor-snapshot') {
+    cursors.snapshot(ws, msg.topic, platform);
   }
 }
 
@@ -1888,7 +2004,9 @@ export function close(ws, { platform }) {
 {/each}
 ```
 
-The client store is a `Readable<Map<string, { user, data }>>`. The Map updates when cursors move or disconnect. The store handles `update`, `remove`, and `bulk` events -- the `bulk` event applies multiple cursor updates in a single store emission, which is used by the [extensions repo](https://github.com/lanteanio/svelte-adapter-uws-extensions) topicThrottle feature when flushing coalesced updates.
+The client store is a `Readable<Map<string, { user, data }>>`. The Map updates when cursors move or disconnect. The store handles `update`, `remove`, `snapshot`, and `bulk` events. The `snapshot` event is authoritative -- it replaces all client-side state (used for initial sync and reconnect). The `bulk` event merges entries additively (used by the [extensions repo](https://github.com/lanteanio/svelte-adapter-uws-extensions) topicThrottle feature when flushing coalesced updates).
+
+**Initial sync and reconnect.** The `cursor(topic)` store sends a `{ type: 'cursor-snapshot', topic }` message every time the WebSocket connection opens -- both on first connect and on every reconnect. The server calls `cursors.snapshot(ws, topic, platform)` in its `message` handler, which sends a `snapshot` event back with the current cursor state (or an empty array if nobody is active). The client replaces its entire cursor map with the snapshot contents, clearing any stale entries from before the disconnect. Wire `cursors.snapshot()` in your message handler as shown in the server example above.
 
 The `cursor()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, cursor entries that haven't received an update within that window are automatically removed. This makes clients self-healing when the server fails to broadcast `remove` events under load:
 
@@ -1902,6 +2020,7 @@ const positions = cursor('canvas', { maxAge: 30_000 });
 |---|---|
 | `cursors.update(ws, topic, data, platform)` | Broadcast position (throttled) |
 | `cursors.remove(ws, platform)` | Remove from all topics, broadcast removal |
+| `cursors.snapshot(ws, topic, platform)` | Send current positions to one connection (initial sync) |
 | `cursors.list(topic)` | Current positions (for SSR) |
 | `cursors.clear()` | Reset all state and timers |
 
@@ -1925,7 +2044,7 @@ The trailing edge ensures you always see where the cursor stopped, even if the u
 
 ### Queue (ordered delivery)
 
-Per-key async task queue with configurable concurrency and backpressure. Guarantees in-order processing per key -- useful for sequential operations like collaborative editing, turn-based games, or transaction sequences.
+Per-key async task queue with configurable concurrency and backpressure. With the default `concurrency: 1`, tasks are processed strictly in order per key -- useful for sequential operations like collaborative editing, turn-based games, or transaction sequences. With `concurrency > 1`, dequeue order is preserved but tasks run in parallel, so completion order is not guaranteed.
 
 #### Setup
 
@@ -1943,7 +2062,7 @@ export const queue = createQueue({ maxSize: 100 });
 // src/hooks.ws.js
 import { queue } from '$lib/server/queue';
 
-export async function message(ws, data, { platform }) {
+export async function message(ws, { data, platform }) {
   const msg = JSON.parse(Buffer.from(data).toString());
 
   // Messages for the same topic are processed one at a time
@@ -2002,22 +2121,30 @@ export const lobby = createGroup('lobby', {
 
 #### Server usage
 
+Use the `hooks` helper for zero-config access control. The `subscribe` hook intercepts the internal `__group:lobby` topic, calls `join()`, and blocks the subscription if the group is full or closed. The `close` hook calls `leave()`.
+
 ```js
 // src/hooks.ws.js
 import { lobby } from '$lib/server/lobby';
 
-export function subscribe(ws, topic, { platform }) {
-  if (topic === 'lobby') {
-    const joined = lobby.join(ws, platform, 'member');
-    if (!joined) {
-      platform.send(ws, 'system', 'error', 'Lobby is full');
-    }
+export const { subscribe, unsubscribe, close } = lobby.hooks;
+```
+
+If you need custom logic (role selection, auth gating), wrap the hook:
+
+```js
+// src/hooks.ws.js
+import { lobby } from '$lib/server/lobby';
+
+export function subscribe(ws, topic, ctx) {
+  if (topic === '__group:lobby') {
+    const role = ws.getUserData().isAdmin ? 'admin' : 'member';
+    return lobby.join(ws, ctx.platform, role) ? undefined : false;
   }
+  lobby.hooks.subscribe(ws, topic, ctx);
 }
 
-export function close(ws, { platform }) {
-  lobby.leave(ws, platform);
-}
+export const { unsubscribe, close } = lobby.hooks;
 ```
 
 Publish to group members:
@@ -2059,6 +2186,7 @@ The client store exposes two reactive values: the main store for events (`$lobby
 | `group.close(platform)` | Dissolve group, notify everyone |
 | `group.name` | Group name (read-only) |
 | `group.meta` | Metadata (get/set) |
+| `group.hooks` | Ready-made `{ subscribe, unsubscribe, close }` hooks with access control |
 
 Roles: `'member'` (default), `'admin'`, `'viewer'`.
 
@@ -2220,7 +2348,13 @@ net.ipv4.tcp_tw_reuse = 1             # reuse TIME_WAIT sockets faster
 net.core.somaxconn = 4096             # listen() backlog limit
 fs.file-max = 1024000                 # system-wide file descriptor limit
 net.netfilter.nf_conntrack_max = 262144  # connection tracking table size (default 65536 fills up fast under load, drops ALL new TCP including SSH)
+net.ipv4.tcp_fastopen = 3             # TCP Fast Open for both client and server (saves 1 RTT on reconnecting clients)
+net.ipv4.tcp_defer_accept = 5         # don't wake the app until data arrives (ignores port scanners and half-open probes)
 ```
+
+**TCP Fast Open** (`tcp_fastopen = 3`) lets a returning client send data in the SYN packet, eliminating one round-trip for the first request after a short idle. Browsers and HTTP clients that support TFO will use it automatically. The value `3` enables it for both incoming (server) and outgoing (client) connections.
+
+**TCP Defer Accept** (`tcp_defer_accept = 5`) keeps the kernel from delivering the accepted socket to the application until data arrives. Port scanners, SYN probes, and clients that open a TCP connection but send nothing are handled at the kernel level rather than consuming event loop time. The value is the timeout in seconds before a data-less connection is dropped.
 
 ### File descriptor limits
 
@@ -2265,6 +2399,26 @@ Symptoms of NAT table exhaustion:
 
 The fix: run the stress test from the server itself (localhost to localhost) or from a machine on the same network as the server. This bypasses NAT entirely and lets you hit the actual server limits.
 
+### Connection management (uWS defaults)
+
+uWebSockets.js manages connection lifecycle at the C++ level. These are its built-in behaviors:
+
+**HTTP keepalive:** uWS closes idle HTTP connections after 10 seconds of inactivity. This is compiled into the C++ layer and is not configurable from JavaScript. Behind a reverse proxy (nginx, Caddy, Cloudflare), the proxy manages keepalive for external clients; uWS handles only the proxy-to-app leg.
+
+**Slow-loris protection:** uWS requires at least 16 KB/second of throughput from each HTTP client. Connections that send data slower than this (a common DoS technique) are dropped by the C++ layer before they reach your application code.
+
+**WebSocket ping/pong:** Set `idleTimeout` in the adapter's `websocket` option (in seconds) to have uWS send automatic WebSocket ping frames and close connections that don't respond. The default is 120 seconds. The client store handles pong automatically.
+
+```js
+// svelte.config.js
+adapter({
+  websocket: {
+    idleTimeout: 120,   // close WS connections silent for 120s
+    maxPayloadLength: 16 * 1024 * 1024  // max incoming WS message size
+  }
+})
+```
+
 ---
 
 ## Performance
@@ -2281,8 +2435,8 @@ Tested with a trivial SvelteKit handler (isolates adapter overhead from your app
 
 | | adapter-uws | adapter-node | Multiplier |
 |---|---|---|---|
-| **Static files** | 135,300 req/s | 20,100 req/s | **6.7x faster** |
-| **SSR** | 125,100 req/s | 53,900 req/s | **2.3x faster** |
+| **Static files** | 165,700 req/s | 24,500 req/s | **6.8x faster** |
+| **SSR** | 150,500 req/s | 58,300 req/s | **2.6x faster** |
 
 <sup>100 connections, 10 pipelining, 10s, 2 runs averaged. Node v24, Windows 11.</sup>
 
@@ -2294,34 +2448,32 @@ The static file gap is the largest because `adapter-node` uses sirv which calls 
 
 | Server | Messages delivered/s | vs adapter-uws |
 |---|---|---|
-| **uWS native** (barebones) | 3,642,000 | baseline |
-| **adapter-uws** (full handler) | 3,625,000 | 1.0x |
-| **ws** library | 177,200 | **20.5x slower** |
-| **socket.io** | 164,500 | **22.1x slower** |
+| **uWS native** (barebones) | 3,583,000 | baseline |
+| **adapter-uws** (full handler) | 3,583,000 | 1.0x |
+| **ws** library | 232,200 | **15.4x slower** |
+| **socket.io** | 226,700 | **15.8x slower** |
 
-uWS native pub/sub delivered 3.6M messages/s with perfect 50x fan-out. After optimization, the adapter matches it -- the byte-prefix check and string template envelope add near-zero overhead to the hot path. `socket.io` and `ws` both collapsed under the same load, delivering less than 1x fan-out (massive message loss/queueing).
+uWS native pub/sub delivered 3.5M messages/s with exact 50x fan-out. The adapter matches it -- the byte-prefix check and string template envelope add near-zero overhead to the hot path. `socket.io` and `ws` both collapsed under the same load, delivering less than 1x fan-out (massive message loss/queueing).
 
 ### Where the overhead goes
 
-**HTTP (SSR path) - 23% total overhead vs barebones uWS:**
+**HTTP (SSR path) - ~32% total overhead vs barebones uWS:**
 
 | Layer | Cost | Notes |
 |---|---|---|
-| `res.cork()` + status + headers | 11.4% | Writing a proper HTTP response - unavoidable |
-| `new Request()` construction | 9.7% | Required by SvelteKit's `server.respond()` contract |
-| Response body reader loop | ~2% | `getReader()` + `read()` + async scheduling |
-| Header collection, AbortController | ~0% | Measured at 0.08us and 0.004us per request |
+| `res.cork()` + status + headers | ~12.6% | Writing a proper HTTP response - unavoidable |
+| `new Request()` construction | ~9% | Required by SvelteKit's `server.respond()` contract |
+| async/Promise scheduling | ~3% | `getReader()` + `read()` + event loop yield |
+| Header collection, remoteAddress | ~1% | `req.forEach` + TextDecoder |
 
-**WebSocket - optimized down from 27% to ~4% overhead vs barebones uWS pub/sub:**
+**WebSocket - at parity with barebones uWS pub/sub:**
 
-The two largest WebSocket costs were `JSON.parse()` on every message for the subscribe/unsubscribe check (15%) and `JSON.stringify()` for envelope wrapping (8%). Both have been optimized:
-
-| Layer | Before | After | How |
-|---|---|---|---|
-| Subscribe/unsubscribe check | ~15% | ~0% | Byte-prefix discriminator: control messages start with `{"ty` (byte[3]=`y`), user envelopes start with `{"to` (byte[3]=`o`). A single byte comparison skips `JSON.parse` for all regular messages -- from 0.39us to 0.001us per message. |
-| Envelope wrapping | ~8% | ~4.5% | String template with `esc()` validation instead of `JSON.stringify` on a wrapper object. Topic and event names are validated with a fast char scan (~10ns) that throws on quotes, backslashes, or control characters  - only `data` is stringified. From 0.135us to ~0.085us per publish. |
-| Connection tracking | ~2% | ~2% | Unchanged |
-| Origin validation, upgrade headers | ~2% | ~2% | Unchanged |
+| Layer | Cost | How |
+|---|---|---|
+| Subscribe/unsubscribe check | ~0% | Byte-prefix discriminator: byte[3] is `y` for `{"ty` (control) and `o` for `{"to` (user envelope). One comparison skips `JSON.parse` for all user messages (0.001us per message). |
+| Envelope wrapping | ~0% | String template + `esc()` char scan instead of `JSON.stringify` on a wrapper object. Only `data` is stringified. ~0.085us per publish. |
+| Connection tracking | ~2% | `Set` add/delete on open/close. |
+| Origin validation, upgrade headers | ~2% | Four `req.getHeader` calls on upgrade. |
 
 **What we don't add:**
 - No middleware chain (no Polka, no Express)
@@ -2329,9 +2481,31 @@ The two largest WebSocket costs were `JSON.parse()` on every message for the sub
 - No per-request stream allocation for static files (in-memory Buffer, not `fs.createReadStream`)
 - No Node.js `http.IncomingMessage` shim (we construct `Request` directly from uWS)
 
+### SSR request deduplication
+
+When multiple concurrent requests arrive for the same anonymous (no cookie/auth) GET or HEAD URL, only one is dispatched to SvelteKit. The others wait for the result and reconstruct their own response from the shared buffer. This prevents redundant rendering work during traffic spikes, a common pattern when a post goes viral or a cron job hits a popular page at the same time as real users.
+
+Dedup is automatically skipped for:
+- Any request with a `Cookie` or `Authorization` header (personalized responses must not be shared)
+- POST, PUT, PATCH, DELETE (mutations must always execute)
+- Responses with a `Set-Cookie` header (personalized)
+- Response bodies larger than 512 KB (too large to buffer and share)
+- Requests with an `X-No-Dedup: 1` header (opt-out escape hatch)
+
+No configuration is needed. The dedup map holds at most 500 in-flight keys simultaneously as a safety valve against memory pressure from unique URLs.
+
+**Vary and personalization contract:** The adapter deduplicates by method + URL only. It cannot inspect every possible input that might affect your response (user-agent quirks, custom headers, etc.). The contract is:
+
+- If your route handler produces different output based on a request header or other input, emit a `Vary` header listing those headers. The adapter checks the `Vary` header after rendering and discards the dedup entry if `Vary` is present, preventing that response from being shared.
+- If you have a route that varies by something the adapter cannot detect (e.g. server-side A/B test state), add `X-No-Dedup: 1` to opt out entirely.
+
+Anonymous GET/HEAD routes that produce the same output for all users (landing pages, docs, prerendered pages) benefit most from dedup and require no action.
+
+**Measured benefit:** 200 concurrent requests to the same anonymous URL with a 5ms render delay: without dedup, 200 render calls; with dedup, 1 render call. 200x reduction in CPU and memory pressure.
+
 ### The bottom line
 
-The adapter retains 77% of raw uWS HTTP throughput and ~96% of raw uWS WebSocket throughput. The HTTP overhead is dominated by things SvelteKit requires (`new Request()`, proper HTTP headers). The WebSocket overhead is now almost entirely the `JSON.stringify` of your `data` payload -- the adapter's own machinery costs near zero. In a real app, your load functions and component rendering will dwarf all of this -- the adapter's job is to get out of the way, and it does.
+The adapter retains ~68% of raw uWS HTTP throughput and matches uWS native WebSocket throughput. The HTTP overhead is dominated by things SvelteKit requires (`new Request()`, proper HTTP headers). The WebSocket overhead is now almost entirely the `JSON.stringify` of your `data` payload -- the adapter's own machinery costs near zero. In a real app, your load functions and component rendering will dwarf all of this -- the adapter's job is to get out of the way, and it does.
 
 To run the benchmarks yourself:
 
@@ -2339,6 +2513,7 @@ To run the benchmarks yourself:
 npm install  # installs uWebSockets.js, autocannon, etc.
 node bench/run.mjs          # adapter overhead breakdown
 node bench/run-compare.mjs  # full comparison vs adapter-node + socket.io
+node bench/run-dedup.mjs    # SSR dedup render-call reduction
 ```
 
 ---
@@ -2504,6 +2679,27 @@ Then check the browser's Network tab -> WS tab. You'll see the upgrade request a
 - The cookie name doesn't match (`cookies.session` vs `cookies.session_id`)
 - The session expired or is invalid
 - `sameSite: 'strict'` can block cookies on cross-origin navigations - try `'lax'` if you're redirecting from an external site
+
+**To stop the retry loop when credentials are permanently invalid**, close the WebSocket with a terminal close code from inside your `open` or `message` handler. The client will not reconnect on these codes:
+
+| Code | Meaning |
+|---|---|
+| `1008` | Policy Violation (standard) |
+| `4401` | Unauthorized (custom) |
+| `4403` | Forbidden (custom) |
+
+```js
+// src/hooks.ws.js
+export async function open(ws, { platform }) {
+  const userData = ws.getUserData();
+  if (!userData.userId) {
+    ws.close(4401, 'Unauthorized'); // client will not retry
+    return;
+  }
+}
+```
+
+When the server closes with code `4429`, the client treats it as a rate limit signal and backs off more aggressively before retrying.
 
 ### "WebSocket doesn't work with `npm run preview`"
 
@@ -2678,6 +2874,7 @@ Or if you're using `on()` directly (which auto-connects), call `connect()` first
 
 - [svelte-adapter-uws-extensions](https://github.com/lanteanio/svelte-adapter-uws-extensions) -- Redis-backed extensions for multi-server deployments: persistent presence, distributed pub/sub, session storage, and more.
 - [svelte-realtime](https://github.com/lanteanio/svelte-realtime) -- Opinionated full-stack starter built on this adapter. Auth, database, real-time CRUD, and deployment config out of the box.
+- [svelte-realtime-demo](https://github.com/lanteanio/svelte-realtime-demo) -- Live demo of svelte-realtime. [Try it here.](https://svelte-realtime-demo.lantean.io/)
 
 ## License
 

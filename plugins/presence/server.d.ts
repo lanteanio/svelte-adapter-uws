@@ -21,6 +21,9 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	 * Use this to avoid leaking private fields (session tokens, internal IDs, etc.).
 	 * Defaults to the full userData object.
 	 *
+	 * Should return JSON-serializable data (plain objects, arrays, strings,
+	 * numbers, booleans, null) since the result is sent over WebSocket.
+	 *
 	 * @example
 	 * ```js
 	 * select: (userData) => ({ id: userData.id, name: userData.name, avatar: userData.avatar })
@@ -109,6 +112,9 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 	 * Get the current presence list for a topic.
 	 * Returns an array of the selected data objects.
 	 *
+	 * Returns deep copies when data is JSON-serializable.
+	 * Falls back to shared references for non-cloneable data.
+	 *
 	 * Use in `load()` functions or API routes for SSR.
 	 *
 	 * @example
@@ -140,17 +146,20 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 	 *
 	 * `subscribe` handles both regular topics (calls `join`) and `__presence:*`
 	 * topics (calls `sync` so the client gets the current list immediately).
-	 * `close` calls `leave`.
+	 * `unsubscribe` removes the user from a single topic's presence when the
+	 * client unsubscribes without disconnecting.
+	 * `close` calls `leave` (removes from all topics).
 	 *
 	 * @example
 	 * ```js
 	 * // src/hooks.ws.js
 	 * import { presence } from '$lib/server/presence';
-	 * export const { subscribe, close } = presence.hooks;
+	 * export const { subscribe, unsubscribe, close } = presence.hooks;
 	 * ```
 	 */
 	hooks: {
 		subscribe(ws: WebSocket<any>, topic: string, ctx: { platform: Platform }): void;
+		unsubscribe(ws: WebSocket<any>, topic: string, ctx: { platform: Platform }): void;
 		close(ws: WebSocket<any>, ctx: { platform: Platform }): void;
 	};
 }

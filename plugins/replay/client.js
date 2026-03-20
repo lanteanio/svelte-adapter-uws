@@ -21,6 +21,12 @@
 import { on, connect, ready } from '../../client.js';
 import { writable } from 'svelte/store';
 
+let _reqIdCounter = 0;
+
+/**
+ * @typedef {{ topic: string, event: 'truncated', data: null }} TruncatedEvent
+ */
+
 /**
  * Subscribe to a topic with replay support.
  *
@@ -31,7 +37,7 @@ import { writable } from 'svelte/store';
  *
  * @param {string} topic - Topic to subscribe to
  * @param {{ since: number }} options - `since` is the sequence number from your load() function
- * @returns {import('../../client.js').TopicStore<import('../../client.js').WSEvent>}
+ * @returns {import('../../client.js').TopicStore<import('../../client.js').WSEvent | TruncatedEvent>}
  *
  * @example
  * ```svelte
@@ -72,6 +78,12 @@ export function onReplay(topic, options) {
 
 	const since = options.since;
 
+	// Unique ID for this request, used to correlate responses on the shared
+	// __replay:{topic} channel when multiple onReplay() instances exist for the
+	// same topic. The server embeds the reqId in every msg and end event it sends
+	// back, so each instance can ignore responses that belong to another request.
+	const reqId = ++_reqIdCounter;
+
 	// Output store - what the user subscribes to
 	/** @type {import('svelte/store').Writable<import('../../client.js').WSEvent | null>} */
 	const output = writable(null);
@@ -80,8 +92,12 @@ export function onReplay(topic, options) {
 	let storeUnsub = /** @type {(() => void) | null} */ (null);
 	let replayUnsub = /** @type {(() => void) | null} */ (null);
 	let refCount = 0;
+	// Prevents a stale ready().then() from firing a replay request after
+	// the store has been torn down (e.g. component destroyed before socket opens).
+	let cancelled = false;
 
 	function startListening() {
+		cancelled = false;
 		const liveStore = on(topic);
 		const replayStore = on('__replay:' + topic);
 
@@ -95,7 +111,18 @@ export function onReplay(topic, options) {
 		replayUnsub = replayStore.subscribe((event) => {
 			if (event === null) return;
 
+			// If the server embedded a reqId, ignore responses for other requests.
+			// Servers that don't embed reqId (old deployments) omit the field and
+			// pass through unfiltered, preserving backwards compatibility.
+			const d = /** @type {any} */ (event.data);
+			if (d != null && 'reqId' in d && d.reqId !== reqId) return;
+
 			if (event.event === 'end') {
+				// If the server's buffer was overwritten before we connected, signal
+				// truncation so the app can show a warning or reload all data.
+				if (d != null && d.truncated) {
+					output.set({ topic, event: 'truncated', data: null });
+				}
 				replayDone = true;
 				// Clean up the replay subscription - no longer needed
 				if (replayUnsub) {
@@ -107,25 +134,29 @@ export function onReplay(topic, options) {
 				return;
 			}
 
-			if (event.event === 'msg' && event.data != null) {
+			if (event.event === 'msg' && d != null) {
 				output.set({
 					topic,
-					event: event.data.event,
-					data: event.data.data
+					event: d.event,
+					data: d.data
 				});
 			}
 		});
 
-		// Request replay once connected
+		// Request replay once connected. If the connection is permanently closed
+		// before open, ready() rejects - swallow the error so it does not become
+		// an unhandled rejection. The store will simply receive no replay messages.
 		ready().then(() => {
-			connect().send({ type: 'replay', topic, since });
-		});
+			if (!cancelled) connect().send({ type: 'replay', topic, since, reqId });
+		}).catch(() => {});
 	}
 
 	function stopListening() {
+		cancelled = true;
 		if (storeUnsub) { storeUnsub(); storeUnsub = null; }
 		if (replayUnsub) { replayUnsub(); replayUnsub = null; }
 		replayDone = false;
+		output.set(null);
 	}
 
 	/**

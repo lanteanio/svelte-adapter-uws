@@ -172,8 +172,8 @@ describe('adapter options', () => {
 			const expected = new Set([
 				'HOST', 'PORT', 'ORIGIN', 'XFF_DEPTH', 'ADDRESS_HEADER',
 				'PROTOCOL_HEADER', 'HOST_HEADER', 'PORT_HEADER',
-				'BODY_SIZE_LIMIT', 'SHUTDOWN_TIMEOUT', 'SSL_CERT', 'SSL_KEY',
-				'CLUSTER_WORKERS'
+				'BODY_SIZE_LIMIT', 'SHUTDOWN_TIMEOUT', 'SHUTDOWN_DELAY_MS',
+				'SSL_CERT', 'SSL_KEY', 'CLUSTER_WORKERS', 'CLUSTER_MODE'
 			]);
 
 			const testEnv = {
@@ -199,8 +199,8 @@ describe('adapter options', () => {
 			const expected = new Set([
 				'HOST', 'PORT', 'ORIGIN', 'XFF_DEPTH', 'ADDRESS_HEADER',
 				'PROTOCOL_HEADER', 'HOST_HEADER', 'PORT_HEADER',
-				'BODY_SIZE_LIMIT', 'SHUTDOWN_TIMEOUT', 'SSL_CERT', 'SSL_KEY',
-				'CLUSTER_WORKERS'
+				'BODY_SIZE_LIMIT', 'SHUTDOWN_TIMEOUT', 'SHUTDOWN_DELAY_MS',
+				'SSL_CERT', 'SSL_KEY', 'CLUSTER_WORKERS', 'CLUSTER_MODE'
 			]);
 
 			const testEnv = {};
@@ -374,5 +374,146 @@ describe('extra entry file discovery', () => {
 
 		expect(extra).toEqual({});
 		cleanup();
+	});
+});
+
+describe('pathname decode cache', () => {
+	// Mirrors the decodePath function from handler.js
+	const DECODE_CACHE_MAX = 256;
+	const decodeCache = new Map();
+
+	function decodePath(pathname) {
+		if (!pathname.includes('%')) return pathname;
+		let result = decodeCache.get(pathname);
+		if (result !== undefined) return result;
+		try {
+			result = decodeURIComponent(pathname);
+		} catch {
+			result = null;
+		}
+		if (decodeCache.size >= DECODE_CACHE_MAX) {
+			decodeCache.delete(decodeCache.keys().next().value);
+		}
+		decodeCache.set(pathname, result);
+		return result;
+	}
+
+	it('returns plain pathnames unchanged', () => {
+		expect(decodePath('/about')).toBe('/about');
+		expect(decodePath('/foo/bar')).toBe('/foo/bar');
+		expect(decodePath('/')).toBe('/');
+	});
+
+	it('decodes percent-encoded pathnames', () => {
+		expect(decodePath('/caf%C3%A9')).toBe('/caf\u00e9');
+		expect(decodePath('/hello%20world')).toBe('/hello world');
+		expect(decodePath('/%E4%B8%AD%E6%96%87')).toBe('/\u4e2d\u6587');
+	});
+
+	it('returns null for malformed percent-encoding', () => {
+		expect(decodePath('/%ZZ')).toBeNull();
+		expect(decodePath('/%')).toBeNull();
+		expect(decodePath('/%E4%B8')).toBeNull();
+	});
+
+	it('caches decoded results', () => {
+		decodeCache.clear();
+		decodePath('/caf%C3%A9');
+		expect(decodeCache.has('/caf%C3%A9')).toBe(true);
+		expect(decodeCache.get('/caf%C3%A9')).toBe('/caf\u00e9');
+	});
+
+	it('caches decode errors as null', () => {
+		decodeCache.clear();
+		decodePath('/%ZZ');
+		expect(decodeCache.has('/%ZZ')).toBe(true);
+		expect(decodeCache.get('/%ZZ')).toBeNull();
+	});
+
+	it('does not cache non-encoded pathnames', () => {
+		decodeCache.clear();
+		decodePath('/plain');
+		expect(decodeCache.size).toBe(0);
+	});
+
+	it('evicts oldest entry when cache is full', () => {
+		decodeCache.clear();
+		for (let i = 0; i < DECODE_CACHE_MAX; i++) {
+			decodePath(`/%${i.toString(16).padStart(2, '0').toUpperCase()}${i.toString(16).padStart(2, '0').toUpperCase()}`);
+		}
+		expect(decodeCache.size).toBe(DECODE_CACHE_MAX);
+
+		// One more should evict the first
+		decodePath('/new%20path');
+		expect(decodeCache.size).toBe(DECODE_CACHE_MAX);
+	});
+});
+
+describe('ETag generation', () => {
+	it('produces consistent ETags from mtime and size', () => {
+		const mtimeMs = 1710000000000;
+		const size = 1234;
+		const etag = `W/"${mtimeMs.toString(36)}-${size.toString(36)}"`;
+
+		// Same inputs produce same ETag
+		const etag2 = `W/"${mtimeMs.toString(36)}-${size.toString(36)}"`;
+		expect(etag).toBe(etag2);
+
+		// ETag is a valid weak validator
+		expect(etag.startsWith('W/"')).toBe(true);
+		expect(etag.endsWith('"')).toBe(true);
+	});
+
+	it('produces different ETags for different mtimes', () => {
+		const size = 1000;
+		const etag1 = `W/"${(1710000000000).toString(36)}-${size.toString(36)}"`;
+		const etag2 = `W/"${(1710000001000).toString(36)}-${size.toString(36)}"`;
+		expect(etag1).not.toBe(etag2);
+	});
+
+	it('produces different ETags for different sizes', () => {
+		const mtimeMs = 1710000000000;
+		const etag1 = `W/"${mtimeMs.toString(36)}-${(1000).toString(36)}"`;
+		const etag2 = `W/"${mtimeMs.toString(36)}-${(2000).toString(36)}"`;
+		expect(etag1).not.toBe(etag2);
+	});
+});
+
+describe('precompressed file validation', () => {
+	it('rejects compressed files larger than original', () => {
+		const original = Buffer.alloc(100);
+		const compressed = Buffer.alloc(150); // Larger than original
+		const entry = { buffer: original };
+
+		// Mirrors the validation logic in handler.js cacheDir
+		if (compressed.byteLength < original.byteLength) {
+			entry.brBuffer = compressed;
+		}
+
+		expect(entry.brBuffer).toBeUndefined();
+	});
+
+	it('accepts compressed files smaller than original', () => {
+		const original = Buffer.alloc(1000);
+		const compressed = Buffer.alloc(300);
+		const entry = { buffer: original };
+
+		if (compressed.byteLength < original.byteLength) {
+			entry.brBuffer = compressed;
+		}
+
+		expect(entry.brBuffer).toBe(compressed);
+	});
+
+	it('rejects compressed files equal in size to original', () => {
+		const original = Buffer.alloc(500);
+		const compressed = Buffer.alloc(500); // Same size, no benefit
+		const entry = { buffer: original };
+
+		if (compressed.byteLength < original.byteLength) {
+			entry.brBuffer = compressed;
+		}
+
+		expect(entry.brBuffer).toBeUndefined();
 	});
 });

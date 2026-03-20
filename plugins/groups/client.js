@@ -1,7 +1,8 @@
 /**
  * Client-side group helper for svelte-adapter-uws.
  *
- * Subscribes to the internal `__group:{name}` channel and exposes
+ * Subscribes to the internal `__group:{name}` channel. The server-side
+ * hooks helper intercepts this to call join(), gating access. Exposes
  * two reactive stores: one for messages and one for the member list.
  * The server handles membership, roles, and lifecycle; this module
  * keeps the client-side state in sync.
@@ -11,6 +12,9 @@
 
 import { on } from '../../client.js';
 import { writable } from 'svelte/store';
+
+/** @type {Map<string, ReturnType<typeof group>>} */
+const groupStores = new Map();
 
 /**
  * Get a reactive group store.
@@ -38,8 +42,10 @@ import { writable } from 'svelte/store';
  * ```
  */
 export function group(name) {
+	const cached = groupStores.get(name);
+	if (cached) return cached;
+
 	const groupTopic = '__group:' + name;
-	const source = on(groupTopic);
 
 	const membersStore = writable(/** @type {Array<{ role: string }>} */ ([]));
 	const messagesStore = writable(/** @type {any} */ (null));
@@ -48,6 +54,10 @@ export function group(name) {
 	let refCount = 0;
 
 	function startListening() {
+		// Call on() fresh each time. When all subscribers unsubscribe, the
+		// client store deletes the underlying writable for that topic. A cached
+		// reference would be stale and stop receiving events on resubscribe.
+		const source = on(groupTopic);
 		sourceUnsub = source.subscribe((event) => {
 			if (event === null) return;
 
@@ -90,15 +100,22 @@ export function group(name) {
 			sourceUnsub();
 			sourceUnsub = null;
 		}
+		// Clear stores so a new subscriber doesn't see stale data from the
+		// previous subscription cycle before the server sends fresh events.
+		membersStore.set([]);
+		messagesStore.set(null);
 	}
 
-	return {
+	const store = {
 		subscribe(fn) {
 			if (refCount++ === 0) startListening();
 			const unsub = messagesStore.subscribe(fn);
 			return () => {
 				unsub();
-				if (--refCount === 0) stopListening();
+				if (--refCount === 0) {
+					stopListening();
+					groupStores.delete(name);
+				}
 			};
 		},
 
@@ -108,9 +125,23 @@ export function group(name) {
 				const unsub = membersStore.subscribe(fn);
 				return () => {
 					unsub();
-					if (--refCount === 0) stopListening();
+					if (--refCount === 0) {
+						stopListening();
+						groupStores.delete(name);
+					}
 				};
 			}
 		}
 	};
+
+	groupStores.set(name, store);
+
+	// If nothing subscribes before the next microtask, remove the cache entry.
+	// This bounds memory use when code creates group stores for many distinct
+	// names and then drops them without ever subscribing.
+	queueMicrotask(() => {
+		if (refCount === 0) groupStores.delete(name);
+	});
+
+	return store;
 }

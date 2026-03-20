@@ -70,7 +70,7 @@
  * // src/hooks.ws.js
  * import { pipeline } from '$lib/server/pipeline';
  *
- * export async function message(ws, data, { platform }) {
+ * export async function message(ws, { data, platform }) {
  *   const msg = JSON.parse(Buffer.from(data).toString());
  *   const ctx = await pipeline.run(ws, msg, platform);
  *   if (!ctx) return; // chain was stopped

@@ -287,6 +287,80 @@ describe('cursor plugin - server', () => {
 			expect(cursors.list('nonexistent')).toEqual([]);
 		});
 
+		it('returns copies - mutating list() results does not affect internal state', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id, name: ud.name }) });
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			c.update(ws, 'canvas', { x: 5, y: 10 }, platform);
+
+			const list1 = c.list('canvas');
+			list1[0].user.name = 'Hacked';
+			list1[0].data.x = 999;
+			list1[0].extra = true;
+
+			const list2 = c.list('canvas');
+			expect(list2[0].user.name).toBe('Alice');
+			expect(list2[0].data.x).toBe(5);
+			expect(list2[0].extra).toBeUndefined();
+		});
+
+		it('handles non-object user and data values without mangling them', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ud.name });
+			const ws = mockWs({ name: 'Alice' });
+			c.update(ws, 'canvas', 42, platform);
+
+			const list = c.list('canvas');
+			expect(list[0].user).toBe('Alice');
+			expect(list[0].data).toBe(42);
+		});
+
+		it('handles null and undefined user and data values', () => {
+			const c = createCursor({ throttle: 0, select: () => null });
+			const ws = mockWs({});
+			c.update(ws, 'canvas', undefined, platform);
+
+			const list = c.list('canvas');
+			expect(list[0].user).toBe(null);
+			expect(list[0].data).toBe(undefined);
+		});
+
+		it('handles array data without converting to an object', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ud });
+			const ws = mockWs({ id: '1' });
+			c.update(ws, 'canvas', [1, 2, 3], platform);
+
+			const list = c.list('canvas');
+			expect(Array.isArray(list[0].data)).toBe(true);
+			expect(list[0].data).toEqual([1, 2, 3]);
+		});
+
+		it('deeply isolates nested objects from internal state', () => {
+			const c = createCursor({
+				throttle: 0,
+				select: (ud) => ({ id: ud.id, meta: { color: ud.color } })
+			});
+			const ws = mockWs({ id: '1', color: 'red' });
+			c.update(ws, 'canvas', { pos: { x: 1, y: 2 } }, platform);
+
+			const list1 = c.list('canvas');
+			list1[0].user.meta.color = 'blue';
+			list1[0].data.pos.x = 999;
+
+			const list2 = c.list('canvas');
+			expect(list2[0].user.meta.color).toBe('red');
+			expect(list2[0].data.pos.x).toBe(1);
+		});
+
+		it('does not throw when data contains non-cloneable values', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id, fn: ud.fn }) });
+			const ws = mockWs({ id: '1', fn: () => {} });
+			c.update(ws, 'canvas', { handler: () => {} }, platform);
+
+			expect(() => c.list('canvas')).not.toThrow();
+			const list = c.list('canvas');
+			expect(list).toHaveLength(1);
+			expect(list[0].user.id).toBe('1');
+		});
+
 		it('reflects latest stored data even if not yet broadcast', () => {
 			vi.useFakeTimers();
 			const ws = mockWs({ id: '1', name: 'Alice' });
@@ -297,6 +371,114 @@ describe('cursor plugin - server', () => {
 
 			const list = cursors.list('canvas');
 			expect(list[0].data).toEqual({ x: 99 });
+		});
+	});
+
+	describe('snapshot', () => {
+		it('returns the cursor tracker with a snapshot method', () => {
+			expect(typeof cursors.snapshot).toBe('function');
+		});
+
+		it('sends a snapshot event with current positions to the given ws', () => {
+			const c = createCursor({
+				throttle: 0,
+				select: (ud) => ({ id: ud.id, name: ud.name })
+			});
+			const ws1 = mockWs({ id: '1', name: 'Alice' });
+			const ws2 = mockWs({ id: '2', name: 'Bob' });
+			const p = mockPlatform();
+
+			c.update(ws1, 'canvas', { x: 10, y: 20 }, p);
+			c.update(ws2, 'canvas', { x: 30, y: 40 }, p);
+			p.reset();
+
+			const newWs = mockWs({ id: '3', name: 'Carol' });
+			c.snapshot(newWs, 'canvas', p);
+
+			expect(p.sent).toHaveLength(1);
+			expect(p.sent[0].ws).toBe(newWs);
+			expect(p.sent[0].topic).toBe('__cursor:canvas');
+			expect(p.sent[0].event).toBe('snapshot');
+			expect(Array.isArray(p.sent[0].data)).toBe(true);
+			expect(p.sent[0].data).toHaveLength(2);
+
+			const keys = p.sent[0].data.map((e) => e.key);
+			expect(new Set(keys).size).toBe(2);
+		});
+
+		it('sends correct user and data per entry', () => {
+			const c = createCursor({
+				throttle: 0,
+				select: (ud) => ({ id: ud.id, name: ud.name })
+			});
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
+
+			c.update(ws, 'room', { x: 5, y: 15 }, p);
+			p.reset();
+
+			const newWs = mockWs({ id: '2', name: 'Bob' });
+			c.snapshot(newWs, 'room', p);
+
+			const entry = p.sent[0].data[0];
+			expect(entry.user).toEqual({ id: '1', name: 'Alice' });
+			expect(entry.data).toEqual({ x: 5, y: 15 });
+		});
+
+		it('sends empty snapshot for an unknown topic', () => {
+			const p = mockPlatform();
+			cursors.snapshot(mockWs({ id: '1' }), 'nonexistent', p);
+			expect(p.sent).toHaveLength(1);
+			expect(p.sent[0].event).toBe('snapshot');
+			expect(p.sent[0].data).toEqual([]);
+		});
+
+		it('sends empty snapshot when the topic has no active cursors', () => {
+			const c = createCursor({ throttle: 0 });
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
+
+			c.update(ws, 'canvas', { x: 1 }, p);
+			c.remove(ws, p);
+			p.reset();
+
+			c.snapshot(mockWs({ id: '2' }), 'canvas', p);
+			expect(p.sent).toHaveLength(1);
+			expect(p.sent[0].event).toBe('snapshot');
+			expect(p.sent[0].data).toEqual([]);
+		});
+
+		it('reflects the latest stored position even if not yet broadcast', () => {
+			vi.useFakeTimers();
+			const c = createCursor({ throttle: 100 });
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
+
+			c.update(ws, 'canvas', { x: 0 }, p); // immediate broadcast
+			vi.advanceTimersByTime(50);
+			c.update(ws, 'canvas', { x: 99 }, p); // throttled, stored but not broadcast yet
+			p.reset();
+
+			const newWs = mockWs({ id: '2' });
+			c.snapshot(newWs, 'canvas', p);
+
+			expect(p.sent[0].data[0].data).toEqual({ x: 99 });
+		});
+
+		it('sends snapshots independently per topic', () => {
+			const c = createCursor({ throttle: 0 });
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
+
+			c.update(ws, 'canvas-a', { x: 1 }, p);
+			c.update(ws, 'canvas-b', { x: 2 }, p);
+			p.reset();
+
+			const viewer = mockWs({ id: '2' });
+			c.snapshot(viewer, 'canvas-a', p);
+
+			expect(p.sent).toHaveLength(1);
+			expect(p.sent[0].topic).toBe('__cursor:canvas-a');
 		});
 	});
 
@@ -325,6 +507,139 @@ describe('cursor plugin - server', () => {
 
 			vi.advanceTimersByTime(100);
 			expect(platform.published).toHaveLength(0); // timer was cleared
+		});
+	});
+
+	describe('hooks', () => {
+		it('exposes message and close functions', () => {
+			expect(typeof cursors.hooks.message).toBe('function');
+			expect(typeof cursors.hooks.close).toBe('function');
+		});
+
+		function mockWsSubs(userData, subscribedTopics) {
+			const subs = new Set(subscribedTopics);
+			return {
+				getUserData: () => userData,
+				isSubscribed: (topic) => subs.has(topic)
+			};
+		}
+
+		function encode(obj) {
+			return new TextEncoder().encode(JSON.stringify(obj)).buffer;
+		}
+
+		it('hooks.message handles cursor updates for subscribed clients', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const ws = mockWsSubs({ id: '1' }, ['__cursor:canvas']);
+			const p = mockPlatform();
+
+			const handled = c.hooks.message(ws, { data: encode({ type: 'cursor', topic: 'canvas', data: { x: 5, y: 10 } }), platform: p });
+
+			expect(handled).toBe(true);
+			expect(p.published).toHaveLength(1);
+			expect(p.published[0].event).toBe('update');
+		});
+
+		it('hooks.message handles cursor-snapshot for subscribed clients', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const ws1 = mockWs({ id: '1' });
+			const p = mockPlatform();
+
+			c.update(ws1, 'canvas', { x: 1 }, p);
+			p.reset();
+
+			const ws2 = mockWsSubs({ id: '2' }, ['__cursor:canvas']);
+			const handled = c.hooks.message(ws2, { data: encode({ type: 'cursor-snapshot', topic: 'canvas' }), platform: p });
+
+			expect(handled).toBe(true);
+			expect(p.sent).toHaveLength(1);
+			expect(p.sent[0].event).toBe('snapshot');
+		});
+
+		it('hooks.message rejects cursor updates from unsubscribed clients', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const ws = mockWsSubs({ id: '1' }, []);
+			const p = mockPlatform();
+
+			const handled = c.hooks.message(ws, { data: encode({ type: 'cursor', topic: 'secret', data: { x: 1 } }), platform: p });
+
+			expect(handled).toBe(true);
+			expect(p.published).toHaveLength(0);
+		});
+
+		it('hooks.message rejects cursor-snapshot from unsubscribed clients', () => {
+			const c = createCursor({ throttle: 0 });
+			const ws = mockWsSubs({}, ['__cursor:public']);
+			const p = mockPlatform();
+
+			const handled = c.hooks.message(ws, { data: encode({ type: 'cursor-snapshot', topic: 'secret' }), platform: p });
+
+			expect(handled).toBe(true);
+			expect(p.sent).toHaveLength(0);
+		});
+
+		it('hooks.message works with manual ws.subscribe() (isSubscribed-based auth)', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const subs = new Set();
+			const ws = {
+				getUserData: () => ({ id: '1' }),
+				isSubscribed: (topic) => subs.has(topic),
+				subscribe: (topic) => subs.add(topic)
+			};
+			const p = mockPlatform();
+
+			// Not subscribed yet -- rejected
+			const r1 = c.hooks.message(ws, { data: encode({ type: 'cursor', topic: 'canvas', data: { x: 1 } }), platform: p });
+			expect(r1).toBe(true);
+			expect(p.published).toHaveLength(0);
+
+			// Manually subscribe
+			ws.subscribe('__cursor:canvas');
+
+			// Now accepted
+			const r2 = c.hooks.message(ws, { data: encode({ type: 'cursor', topic: 'canvas', data: { x: 2 } }), platform: p });
+			expect(r2).toBe(true);
+			expect(p.published).toHaveLength(1);
+		});
+
+		it('hooks.message returns undefined for non-JSON data', () => {
+			const data = new TextEncoder().encode('not json').buffer;
+			const result = cursors.hooks.message(mockWs(), { data, platform });
+			expect(result).toBeUndefined();
+		});
+
+		it('hooks.message surfaces errors from select() instead of swallowing them', () => {
+			const c = createCursor({ throttle: 0, select: () => { throw new Error('select failed'); } });
+			const ws = mockWsSubs({}, ['__cursor:canvas']);
+			expect(() => c.hooks.message(ws, { data: encode({ type: 'cursor', topic: 'canvas', data: { x: 1 } }), platform })).toThrow('select failed');
+		});
+
+		it('hooks.message surfaces errors from platform.publish() instead of swallowing them', () => {
+			const c = createCursor({ throttle: 0 });
+			const badPlatform = {
+				...mockPlatform(),
+				publish() { throw new Error('publish failed'); }
+			};
+			const ws = mockWsSubs({}, ['__cursor:canvas']);
+			expect(() => c.hooks.message(ws, { data: encode({ type: 'cursor', topic: 'canvas', data: { x: 1 } }), platform: badPlatform })).toThrow('publish failed');
+		});
+
+		it('hooks.message returns undefined for non-cursor messages', () => {
+			const result = cursors.hooks.message(mockWs(), { data: encode({ type: 'chat', text: 'hello' }), platform });
+			expect(result).toBeUndefined();
+		});
+
+		it('hooks.close calls remove', () => {
+			const c = createCursor({ throttle: 0 });
+			const ws = mockWs({ id: '1' });
+			const p = mockPlatform();
+
+			c.update(ws, 'canvas', { x: 1 }, p);
+			expect(c.list('canvas')).toHaveLength(1);
+
+			c.hooks.close(ws, { platform: p });
+
+			expect(c.list('canvas')).toEqual([]);
 		});
 	});
 });

@@ -132,6 +132,14 @@ export function presence(topic, options) {
 				return;
 			}
 
+			if (event.event === 'updated' && event.data != null) {
+				const { key, data } = event.data;
+				timestamps.set(key, Date.now());
+				userMap.set(key, data);
+				flush();
+				return;
+			}
+
 			if (event.event === 'leave' && event.data != null) {
 				const { key } = event.data;
 				timestamps.delete(key);
@@ -179,11 +187,22 @@ export function presence(topic, options) {
 			const unsub = output.subscribe(fn);
 			return () => {
 				unsub();
-				if (--refCount === 0) stopListening();
+				if (--refCount === 0) {
+					stopListening();
+					presenceStores.delete(cacheKey);
+				}
 			};
 		}
 	};
 
 	presenceStores.set(cacheKey, store);
+
+	// If nothing subscribes before the next microtask, remove the cache entry.
+	// This bounds memory use when code creates presence stores for many distinct
+	// topics and then drops them without ever subscribing.
+	queueMicrotask(() => {
+		if (refCount === 0) presenceStores.delete(cacheKey);
+	});
+
 	return store;
 }

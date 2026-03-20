@@ -13,9 +13,12 @@ const expected = new Set([
 	'PORT_HEADER',
 	'BODY_SIZE_LIMIT',
 	'SHUTDOWN_TIMEOUT',
+	'SHUTDOWN_DELAY_MS',
 	'SSL_CERT',
 	'SSL_KEY',
-	'CLUSTER_WORKERS'
+	'CLUSTER_WORKERS',
+	'CLUSTER_MODE',
+	'WS_DEBUG'
 ]);
 
 if (ENV_PREFIX) {
@@ -31,11 +34,18 @@ if (ENV_PREFIX) {
 	}
 }
 
+// IMPORTANT: process.env property access crosses the V8-to-OS boundary on every
+// call (uv_os_getenv() behind a global mutex  - it is NOT a cached Map lookup).
+// All env() calls must be at module level, never inside request handlers or
+// per-message callbacks. One access per call; the `in` + property pattern
+// would cost two OS round-trips.
+
 /**
  * @param {string} name
  * @param {any} fallback
  */
 export function env(name, fallback) {
 	const prefixed = ENV_PREFIX + name;
-	return prefixed in process.env ? process.env[prefixed] : fallback;
+	const value = process.env[prefixed];
+	return value !== undefined ? value : fallback;
 }

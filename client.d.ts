@@ -282,8 +282,40 @@ export function once<T = unknown>(topic: string, options?: { timeout?: number })
 export function once<T = unknown>(topic: string, event: string, options?: { timeout?: number }): Promise<{ data: T }>;
 
 /**
+ * Create a store that subscribes to a topic derived from a reactive value.
+ * When the source store changes, the subscription automatically switches to
+ * the new topic and the old one is released.
+ *
+ * Useful when the topic depends on runtime state like a user ID, selected item,
+ * or route parameter — no manual subscribe/unsubscribe lifecycle to manage.
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { page } from '$app/stores';
+ *   import { onDerived } from 'svelte-adapter-uws/client';
+ *   import { derived } from 'svelte/store';
+ *
+ *   // Subscribe to a topic based on the current page's item ID
+ *   const roomId = derived(page, ($page) => $page.params.id);
+ *   const messages = onDerived((id) => `room:${id}`, roomId);
+ * </script>
+ * ```
+ */
+export function onDerived<T = unknown>(
+	topicFn: (value: T) => string,
+	store: import('svelte/store').Readable<T>
+): import('svelte/store').Readable<WSEvent | null>;
+
+/**
  * Returns a promise that resolves when the WebSocket connection is open.
  * Auto-connects if not already connected.
+ *
+ * Resolves immediately in SSR (no WebSocket available).
+ *
+ * Rejects with an error if the connection is permanently closed before it
+ * opens - for example, when the server sends a terminal close code (1008,
+ * 4401, 4403), retries are exhausted, or `close()` is called explicitly.
  *
  * @example
  * ```js

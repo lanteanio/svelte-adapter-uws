@@ -244,6 +244,12 @@ export interface CloseContext {
 	message: ArrayBuffer;
 	/** The platform API - publish, send, topic helpers, etc. */
 	platform: Platform;
+	/**
+	 * Topics this connection was subscribed to via the client store's
+	 * subscribe/unsubscribe protocol. Does not include topics subscribed
+	 * via manual `ws.subscribe()` calls in server hooks.
+	 */
+	subscriptions: Set<string>;
 }
 
 /**
@@ -329,6 +335,14 @@ export interface WebSocketHandler<UserData = unknown> {
 	subscribe?: (ws: WebSocket<UserData>, topic: string, ctx: SubscribeContext) => boolean | void;
 
 	/**
+	 * Called when a client unsubscribes from a topic (ref count reached zero).
+	 *
+	 * Use this to clean up per-topic state like presence or group membership
+	 * without waiting for the socket to close.
+	 */
+	unsubscribe?: (ws: WebSocket<UserData>, topic: string, ctx: SubscribeContext) => void;
+
+	/**
 	 * Called when backpressure has drained (buffered data was sent).
 	 * Use this for flow control when sending large or frequent messages.
 	 */
@@ -381,6 +395,20 @@ export interface Platform {
 	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean }): boolean;
 
 	/**
+	 * Publish multiple messages in one call.
+	 * Returns an array of `publish()` results (one per message; `false` means no subscribers).
+	 *
+	 * @example
+	 * ```js
+	 * export async function POST({ platform, request }) {
+	 *   const { items } = await request.json();
+	 *   platform.batch(items.map(item => ({ topic: 'orders', event: 'created', data: item })));
+	 * }
+	 * ```
+	 */
+	batch(messages: { topic: string; event: string; data?: unknown }[]): boolean[];
+
+	/**
 	 * Send a message to a single WebSocket connection.
 	 * Wraps in the same `{ topic, event, data }` envelope as `publish()`.
 	 *
@@ -401,6 +429,16 @@ export interface Platform {
 	 *
 	 * The filter receives each connection's userData (whatever `upgrade()` returned).
 	 *
+	 * **Performance note:** `sendTo()` iterates every open connection on the local
+	 * worker to evaluate the filter. For broadcasting to large groups, prefer
+	 * `publish()` with a topic — topics are dispatched by uWS's C++ TopicTree
+	 * with O(subscribers) fan-out and no JS loop. Use `sendTo()` when you need
+	 * to target connections by arbitrary runtime properties that can't be mapped
+	 * to a static topic name (e.g., filtering by session data set at upgrade time).
+	 *
+	 * In clustered mode, `sendTo()` only reaches connections on the local worker.
+	 * `publish()` relays across all workers automatically.
+	 *
 	 * @example
 	 * ```js
 	 * // Send to a specific user (no need to maintain your own Map):
@@ -412,11 +450,9 @@ export interface Platform {
 	 *   );
 	 * }
 	 *
-	 * // Send to all admins:
-	 * platform.sendTo(
-	 *   (userData) => userData.role === 'admin',
-	 *   'alerts', 'warning', { message: 'Server load high' }
-	 * );
+	 * // For a known user ID, subscribing each user to a personal topic
+	 * // at upgrade time and using publish() is more efficient at scale:
+	 * // platform.publish(`user:${targetUserId}`, 'dm', 'new-message', { message });
 	 * ```
 	 */
 	sendTo(filter: (userData: any) => boolean, topic: string, event: string, data?: unknown): number;

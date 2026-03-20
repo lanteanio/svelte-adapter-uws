@@ -2,9 +2,9 @@
  * Queue plugin for svelte-adapter-uws.
  *
  * Per-key async task queue with configurable concurrency and
- * backpressure. Guarantees in-order processing per key --
- * useful for sequential operations like collaborative editing,
- * turn-based games, or transaction sequences.
+ * backpressure. With concurrency=1 (default), tasks are processed
+ * strictly in order per key. With concurrency > 1, dequeue order
+ * is preserved but completion order is not guaranteed.
  *
  * Zero impact on the adapter core - this is a standalone utility.
  *
@@ -53,7 +53,7 @@
  * // src/hooks.ws.js
  * import { queue } from '$lib/server/queue';
  *
- * export async function message(ws, data, { platform }) {
+ * export async function message(ws, { data, platform }) {
  *   const msg = JSON.parse(Buffer.from(data).toString());
  *   await queue.push(msg.topic, async () => {
  *     await db.update(msg.data);
@@ -79,14 +79,14 @@ export function createQueue(options = {}) {
 
 	/**
 	 * Per-key queue state.
-	 * @type {Map<string, { items: Array<{ task: Function, resolve: Function, reject: Function }>, running: number }>}
+	 * @type {Map<string, { items: Array<{ task: Function, resolve: Function, reject: Function }>, running: number, drains: Function[] }>}
 	 */
 	const queues = new Map();
 
 	function getQueue(key) {
 		let q = queues.get(key);
 		if (!q) {
-			q = { items: [], running: 0 };
+			q = { items: [], running: 0, drains: [] };
 			queues.set(key, q);
 		}
 		return q;
@@ -122,7 +122,9 @@ export function createQueue(options = {}) {
 	function cleanup(key) {
 		const q = queues.get(key);
 		if (q && q.running === 0 && q.items.length === 0) {
+			const drains = q.drains;
 			queues.delete(key);
+			for (const resolve of drains) resolve();
 		}
 	}
 
@@ -187,13 +189,8 @@ export function createQueue(options = {}) {
 				if (!q || (q.items.length === 0 && q.running === 0)) {
 					return Promise.resolve();
 				}
-				// Push a sentinel no-op task that resolves the drain promise
 				return new Promise((resolve) => {
-					q.items.push({
-						task: () => {},
-						resolve: () => resolve(),
-						reject: () => resolve()
-					});
+					q.drains.push(resolve);
 				});
 			}
 			// Drain all keys

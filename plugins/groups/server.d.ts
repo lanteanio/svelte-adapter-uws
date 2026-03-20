@@ -88,6 +88,25 @@ export interface Group {
 	 * members, and clears state. Subsequent joins return `false`.
 	 */
 	close(platform: Platform): void;
+
+	/**
+	 * Ready-made WebSocket hooks for access-controlled groups.
+	 *
+	 * `subscribe` intercepts the internal `__group:{name}` topic and calls
+	 * `join()` to gate access. Returns `false` if the group is full or closed.
+	 * `unsubscribe` calls `leave()` when the client unsubscribes from the
+	 * internal topic. `close` calls `leave()`.
+	 *
+	 * @example
+	 * ```js
+	 * export const { subscribe, unsubscribe, close } = lobby.hooks;
+	 * ```
+	 */
+	hooks: {
+		subscribe(ws: WebSocket<any>, topic: string, ctx: { platform: Platform }): boolean | void;
+		unsubscribe(ws: WebSocket<any>, topic: string, ctx: { platform: Platform }): void;
+		close(ws: WebSocket<any>, ctx: { platform: Platform }): void;
+	};
 }
 
 /**

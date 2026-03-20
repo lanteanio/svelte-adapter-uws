@@ -51,6 +51,10 @@
  * @property {(ws: any) => boolean} has - Check if a ws is a member.
  * @property {(platform: import('../../index.js').Platform) => void} close -
  *   Dissolve the group, notify all members, and clean up.
+ * @property {{ subscribe: Function, unsubscribe: Function, close: Function }} hooks -
+ *   Ready-made WebSocket hooks. subscribe intercepts the internal
+ *   __group:{name} topic and calls join() to gate access. unsubscribe
+ *   calls leave() when the client unsubscribes. close calls leave().
  */
 
 /**
@@ -76,16 +80,10 @@
  *
  * @example
  * ```js
- * // src/hooks.ws.js
+ * // src/hooks.ws.js - zero-config (just spread hooks)
  * import { lobby } from '$lib/server/lobby';
  *
- * export function subscribe(ws, topic, { platform }) {
- *   if (topic === 'lobby') lobby.join(ws, platform);
- * }
- *
- * export function close(ws, { platform }) {
- *   lobby.leave(ws, platform);
- * }
+ * export const { subscribe, unsubscribe, close } = lobby.hooks;
  * ```
  */
 export function createGroup(name, options = {}) {
@@ -133,7 +131,8 @@ export function createGroup(name, options = {}) {
 		return list;
 	}
 
-	return {
+	/** @type {Group} */
+	const grp = {
 		get name() { return name; },
 
 		get meta() { return metadata; },
@@ -171,7 +170,7 @@ export function createGroup(name, options = {}) {
 			if (!entry) return;
 
 			members.delete(ws);
-			ws.unsubscribe(internalTopic);
+			try { ws.unsubscribe(internalTopic); } catch (_) {}
 
 			platform.publish(internalTopic, 'leave', { role: entry.role, count: members.size });
 
@@ -225,11 +224,29 @@ export function createGroup(name, options = {}) {
 			platform.publish(internalTopic, 'close', null);
 
 			for (const [ws] of members) {
-				ws.unsubscribe(internalTopic);
+				try { ws.unsubscribe(internalTopic); } catch (_) {}
 			}
 
 			members.clear();
 			if (onClose) onClose();
+		},
+
+		hooks: {
+			subscribe(ws, topic, { platform }) {
+				if (topic === internalTopic) {
+					return grp.join(ws, platform) ? undefined : false;
+				}
+			},
+			unsubscribe(ws, topic, { platform }) {
+				if (topic === internalTopic) {
+					grp.leave(ws, platform);
+				}
+			},
+			close(ws, { platform }) {
+				grp.leave(ws, platform);
+			}
 		}
 	};
+
+	return grp;
 }

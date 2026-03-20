@@ -67,7 +67,7 @@
  * // src/hooks.ws.js
  * import { limiter } from '$lib/server/ratelimit';
  *
- * export function message(ws, data, { platform }) {
+ * export function message(ws, { data, platform }) {
  *   const { allowed } = limiter.consume(ws);
  *   if (!allowed) return; // drop the message
  *   // ... handle message

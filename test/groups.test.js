@@ -337,6 +337,15 @@ describe('groups plugin - server', () => {
 		});
 	});
 
+	describe('leave (defensive)', () => {
+		it('does not throw if ws.unsubscribe throws during leave', () => {
+			const ws = mockWs();
+			ws.unsubscribe = () => { throw new Error('socket closed'); };
+			group.join(ws, platform);
+			expect(() => group.leave(ws, platform)).not.toThrow();
+		});
+	});
+
 	describe('close', () => {
 		it('publishes close event', () => {
 			group.join(mockWs(), platform);
@@ -391,6 +400,103 @@ describe('groups plugin - server', () => {
 		it('closing twice is safe (idempotent)', () => {
 			group.close(platform);
 			expect(() => group.close(platform)).not.toThrow();
+		});
+	});
+
+	describe('hooks', () => {
+		it('exposes subscribe, unsubscribe, and close functions', () => {
+			expect(typeof group.hooks.subscribe).toBe('function');
+			expect(typeof group.hooks.unsubscribe).toBe('function');
+			expect(typeof group.hooks.close).toBe('function');
+		});
+
+		it('hooks.subscribe calls join for __group:{name} topic', () => {
+			const ws = mockWs();
+			const result = group.hooks.subscribe(ws, '__group:lobby', { platform });
+
+			expect(result).not.toBe(false);
+			expect(group.has(ws)).toBe(true);
+			expect(group.count()).toBe(1);
+		});
+
+		it('hooks.subscribe returns false when group is full', () => {
+			const g = createGroup('tiny', { maxMembers: 1 });
+			g.join(mockWs(), platform);
+
+			const ws = mockWs();
+			const result = g.hooks.subscribe(ws, '__group:tiny', { platform });
+
+			expect(result).toBe(false);
+			expect(g.has(ws)).toBe(false);
+		});
+
+		it('hooks.subscribe returns false when group is closed', () => {
+			group.close(platform);
+
+			const ws = mockWs();
+			const result = group.hooks.subscribe(ws, '__group:lobby', { platform });
+
+			expect(result).toBe(false);
+			expect(group.has(ws)).toBe(false);
+		});
+
+		it('hooks.subscribe passes through unrelated topics', () => {
+			const ws = mockWs();
+			const result = group.hooks.subscribe(ws, 'chat', { platform });
+
+			expect(result).toBeUndefined();
+			expect(group.has(ws)).toBe(false);
+		});
+
+		it('hooks.subscribe passes through other __group: topics', () => {
+			const ws = mockWs();
+			const result = group.hooks.subscribe(ws, '__group:other', { platform });
+
+			expect(result).toBeUndefined();
+			expect(group.has(ws)).toBe(false);
+		});
+
+		it('hooks.unsubscribe calls leave for __group:{name}', () => {
+			const ws = mockWs();
+			group.join(ws, platform);
+			expect(group.count()).toBe(1);
+
+			group.hooks.unsubscribe(ws, '__group:lobby', { platform });
+
+			expect(group.count()).toBe(0);
+			expect(group.has(ws)).toBe(false);
+		});
+
+		it('hooks.unsubscribe ignores unrelated topics', () => {
+			const ws = mockWs();
+			group.join(ws, platform);
+
+			group.hooks.unsubscribe(ws, 'chat', { platform });
+
+			expect(group.has(ws)).toBe(true);
+			expect(group.count()).toBe(1);
+		});
+
+		it('hooks.close calls leave', () => {
+			const ws = mockWs();
+			group.join(ws, platform);
+			expect(group.count()).toBe(1);
+
+			group.hooks.close(ws, { platform });
+
+			expect(group.count()).toBe(0);
+			expect(group.has(ws)).toBe(false);
+		});
+
+		it('destructured hooks work correctly', () => {
+			const { subscribe, unsubscribe, close } = group.hooks;
+			const ws = mockWs();
+
+			subscribe(ws, '__group:lobby', { platform });
+			expect(group.has(ws)).toBe(true);
+
+			unsubscribe(ws, '__group:lobby', { platform });
+			expect(group.has(ws)).toBe(false);
 		});
 	});
 });

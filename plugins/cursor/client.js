@@ -13,8 +13,11 @@
  * @module svelte-adapter-uws/plugins/cursor/client
  */
 
-import { on } from '../../client.js';
+import { on, connect, status } from '../../client.js';
 import { writable } from 'svelte/store';
+
+/** @type {Map<string, ReturnType<typeof cursor>>} */
+const cursorStores = new Map();
 
 /**
  * Get a reactive store of cursor positions on a topic.
@@ -53,6 +56,11 @@ import { writable } from 'svelte/store';
  */
 export function cursor(topic, options) {
 	const maxAge = options?.maxAge;
+	const cacheKey = maxAge > 0 ? topic + '\0' + maxAge : topic;
+
+	const cached = cursorStores.get(cacheKey);
+	if (cached) return cached;
+
 	const cursorTopic = '__cursor:' + topic;
 
 	/** @type {Map<string, { user: any, data: any }>} */
@@ -62,9 +70,11 @@ export function cursor(topic, options) {
 	const output = writable(/** @type {Map<string, any>} */ (new Map()));
 
 	let sourceUnsub = /** @type {(() => void) | null} */ (null);
+	let statusUnsub = /** @type {(() => void) | null} */ (null);
 	/** @type {ReturnType<typeof setInterval> | null} */
 	let sweepTimer = null;
 	let refCount = 0;
+	let cancelled = false;
 
 	function sweep() {
 		if (!maxAge || maxAge <= 0) return;
@@ -80,6 +90,7 @@ export function cursor(topic, options) {
 	}
 
 	function startListening() {
+		cancelled = false;
 		const source = on(cursorTopic);
 		sourceUnsub = source.subscribe((event) => {
 			if (event === null) return;
@@ -88,6 +99,19 @@ export function cursor(topic, options) {
 				const { key, user, data } = event.data;
 				cursorMap.set(key, { user, data });
 				timestamps.set(key, Date.now());
+				output.set(new Map(cursorMap));
+				return;
+			}
+
+			if (event.event === 'snapshot' && Array.isArray(event.data)) {
+				cursorMap = new Map();
+				timestamps.clear();
+				const now = Date.now();
+				for (const entry of event.data) {
+					const { key, user, data } = entry;
+					cursorMap.set(key, { user, data });
+					timestamps.set(key, now);
+				}
 				output.set(new Map(cursorMap));
 				return;
 			}
@@ -115,12 +139,26 @@ export function cursor(topic, options) {
 		if (maxAge > 0) {
 			sweepTimer = setInterval(sweep, Math.max(maxAge / 2, 1000));
 		}
+
+		// Request a snapshot of existing cursor positions every time the socket
+		// opens (initial connect and reconnects). Without this, the store would
+		// miss cursors that appeared while the client was offline.
+		statusUnsub = status.subscribe((s) => {
+			if (s === 'open' && !cancelled) {
+				connect().send({ type: 'cursor-snapshot', topic });
+			}
+		});
 	}
 
 	function stopListening() {
+		cancelled = true;
 		if (sourceUnsub) {
 			sourceUnsub();
 			sourceUnsub = null;
+		}
+		if (statusUnsub) {
+			statusUnsub();
+			statusUnsub = null;
 		}
 		if (sweepTimer) {
 			clearInterval(sweepTimer);
@@ -128,16 +166,31 @@ export function cursor(topic, options) {
 		}
 		cursorMap = new Map();
 		timestamps.clear();
+		// Push the cleared state to the output store so a new subscriber does
+		// not see ghost cursors from the previous subscription cycle.
+		output.set(new Map());
 	}
 
-	return {
+	const store = {
 		subscribe(fn) {
 			if (refCount++ === 0) startListening();
 			const unsub = output.subscribe(fn);
 			return () => {
 				unsub();
-				if (--refCount === 0) stopListening();
+				if (--refCount === 0) {
+					stopListening();
+					cursorStores.delete(cacheKey);
+				}
 			};
 		}
 	};
+
+	cursorStores.set(cacheKey, store);
+
+	// If nothing subscribes before the next microtask, remove the cache entry.
+	queueMicrotask(() => {
+		if (refCount === 0) cursorStores.delete(cacheKey);
+	});
+
+	return store;
 }

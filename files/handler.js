@@ -2,7 +2,6 @@ import 'SHIMS';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { parentPort } from 'node:worker_threads';
 import uWS from 'uWebSockets.js';
@@ -22,6 +21,61 @@ import { mimeLookup, parse_as_bytes, parse_origin } from './utils.js';
 
 class PayloadTooLargeError extends Error {
 	constructor() { super('Payload too large'); }
+}
+
+// Uppercase method lookup - avoids a string allocation from toUpperCase() per SSR request.
+// uWS returns lowercase; the Request constructor expects uppercase.
+const METHODS = /** @type {Record<string, string>} */ ({
+	get: 'GET', head: 'HEAD', post: 'POST', put: 'PUT',
+	delete: 'DELETE', patch: 'PATCH', options: 'OPTIONS'
+});
+
+// -- Error response helpers ---------------------------------------------------
+
+/** @param {import('uWebSockets.js').HttpResponse} res */
+function send400(res) {
+	res.cork(() => {
+		res.writeStatus('400 Bad Request');
+		res.writeHeader('content-type', 'text/plain');
+		res.end('Bad Request');
+	});
+}
+
+/** @param {import('uWebSockets.js').HttpResponse} res */
+function send413(res) {
+	res.cork(() => {
+		res.writeStatus('413 Content Too Large');
+		res.writeHeader('content-type', 'text/plain');
+		res.end('Content Too Large');
+	});
+}
+
+/** @param {import('uWebSockets.js').HttpResponse} res */
+function send500(res) {
+	res.cork(() => {
+		res.writeStatus('500 Internal Server Error');
+		res.writeHeader('content-type', 'text/plain');
+		res.end('Internal Server Error');
+	});
+}
+
+// -- State object pool --------------------------------------------------------
+// Avoids allocating { aborted: false } per SSR request. Objects survive to
+// V8's old generation quickly and stay there, eliminating young-gen GC churn.
+
+/** @type {{ aborted: boolean }[]} */
+const statePool = [];
+const STATE_POOL_MAX = 256;
+
+function acquireState() {
+	const s = statePool.pop();
+	if (s) { s.aborted = false; return s; }
+	return { aborted: false };
+}
+
+/** @param {{ aborted: boolean }} s */
+function releaseState(s) {
+	if (statePool.length < STATE_POOL_MAX) statePool.push(s);
 }
 
 /**
@@ -44,6 +98,32 @@ function esc(s) {
 	return '"' + s + '"';
 }
 
+// Cache for pre-built envelope prefixes. Repeated publishes to the same
+// topic+event (e.g. platform.topic('chat').created()) reuse the prefix
+// instead of rebuilding it from 4 string concatenations each time.
+const ENVELOPE_CACHE_MAX = 256;
+/** @type {Map<string, string>} */
+const envelopePrefixCache = new Map();
+
+/**
+ * Build or retrieve the JSON envelope prefix for a topic+event pair.
+ * @param {string} topic
+ * @param {string} event
+ * @returns {string} e.g. '{"topic":"chat","event":"created","data":'
+ */
+function envelopePrefix(topic, event) {
+	const key = topic + '\0' + event;
+	let prefix = envelopePrefixCache.get(key);
+	if (prefix === undefined) {
+		prefix = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":';
+		if (envelopePrefixCache.size >= ENVELOPE_CACHE_MAX) {
+			envelopePrefixCache.delete(envelopePrefixCache.keys().next().value);
+		}
+		envelopePrefixCache.set(key, prefix);
+	}
+	return prefix;
+}
+
 // -- In-memory static file cache ---------------------------------------------
 
 /**
@@ -60,6 +140,15 @@ function esc(s) {
 /** @type {Map<string, StaticEntry>} */
 const staticCache = new Map();
 
+// File extensions that browsers cannot render inline. Serving these with
+// Content-Disposition: attachment prompts a download dialog instead of
+// showing a blank or error page.
+const DOWNLOAD_EXTENSIONS = new Set([
+	'.zip', '.tar', '.tgz', '.bz2', '.xz', '.7z', '.rar',
+	'.exe', '.msi', '.dmg', '.pkg', '.deb', '.rpm', '.apk', '.ipa',
+	'.iso', '.img', '.bin'
+]);
+
 /**
  * Prerendered paths whose canonical URL has a trailing slash.
  * Detected from the filesystem: about/index.html means trailingSlash: 'always',
@@ -70,6 +159,16 @@ const prerenderedDirStyle = new Set();
 
 const textDecoder = new TextDecoder();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Both values update together so the rate limiter and static handler share
+// a single timer wakeup instead of two, and Date.now() is never called on
+// the hot path for static file serving or per-upgrade rate checks.
+let cachedNow = Date.now();
+let cachedDateHeader = new Date(cachedNow).toUTCString();
+setInterval(() => {
+	cachedNow = Date.now();
+	cachedDateHeader = new Date(cachedNow).toUTCString();
+}, 1000).unref();
 
 /**
  * Recursively walk a directory and call fn for each file.
@@ -103,15 +202,28 @@ function cacheDir(dir, urlPrefix, immutable) {
 		const urlPath = `${urlPrefix}/${relPath}`;
 		const contentType = mimeLookup(relPath);
 		const buffer = fs.readFileSync(absPath);
+		const stat = fs.statSync(absPath);
 
 		/** @type {[string, string][]} */
-		const headers = [];
+		const headers = [
+			['x-content-type-options', 'nosniff'],
+			['vary', 'Accept-Encoding'],
+			['accept-ranges', 'bytes']
+		];
 		let etag = '';
 		if (immutable && relPath.startsWith(`${manifest.appPath}/immutable/`)) {
 			headers.push(['cache-control', 'public, max-age=31536000, immutable']);
 		} else {
-			etag = `W/"${createHash('sha256').update(buffer).digest('hex').slice(0, 16)}"`;
+			etag = `W/"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`;
 			headers.push(['cache-control', 'no-cache'], ['etag', etag]);
+		}
+
+		const ext = path.extname(relPath).toLowerCase();
+		if (DOWNLOAD_EXTENSIONS.has(ext)) {
+			const basename = path.basename(relPath);
+			// Strip characters that are not allowed in a quoted Content-Disposition filename.
+			const safe = basename.replace(/["\\]/g, '');
+			headers.push(['content-disposition', `attachment; filename="${safe}"`]);
 		}
 
 		/** @type {StaticEntry} */
@@ -120,8 +232,14 @@ function cacheDir(dir, urlPrefix, immutable) {
 		if (PRECOMPRESS) {
 			const brPath = absPath + '.br';
 			const gzPath = absPath + '.gz';
-			if (fs.existsSync(brPath)) entry.brBuffer = fs.readFileSync(brPath);
-			if (fs.existsSync(gzPath)) entry.gzBuffer = fs.readFileSync(gzPath);
+			if (fs.existsSync(brPath)) {
+				const brBuf = fs.readFileSync(brPath);
+				if (brBuf.byteLength < buffer.byteLength) entry.brBuffer = brBuf;
+			}
+			if (fs.existsSync(gzPath)) {
+				const gzBuf = fs.readFileSync(gzPath);
+				if (gzBuf.byteLength < buffer.byteLength) entry.gzBuffer = gzBuf;
+			}
 		}
 
 		staticCache.set(urlPath, entry);
@@ -213,6 +331,27 @@ if (!origin && !host_header && !protocol_header && !is_tls) {
 	);
 }
 
+/**
+ * Resolve the real client IP from a raw socket address, applying the
+ * configured proxy header when present. Returns the raw IP on any error
+ * so rate limiting and userData injection always get a usable string.
+ * @param {string} rawIp
+ * @param {Record<string, string>} headers
+ * @returns {string}
+ */
+function resolveClientIp(rawIp, headers) {
+	if (!address_header) return rawIp;
+	const value = headers[address_header];
+	if (!value) return rawIp;
+	if (address_header === 'x-forwarded-for') {
+		if (value.length > 8192) return rawIp;
+		const addresses = value.split(',');
+		if (xff_depth > addresses.length) return rawIp;
+		return addresses[addresses.length - xff_depth].trim();
+	}
+	return value;
+}
+
 const asset_dir = `${__dirname}/client${base}`;
 
 const server = new Server(manifest);
@@ -227,10 +366,39 @@ const app = is_tls
 	? uWS.SSLApp({ cert_file_name: ssl_cert, key_file_name: ssl_key })
 	: uWS.App();
 
+// -- Cross-worker pub/sub relay (batched) ------------------------------------
+// Batch postMessage calls within a single microtask. A SvelteKit action that
+// publishes N events sends one structured-clone across the thread boundary
+// instead of N. No-op in single-process mode (parentPort is null).
+
+/** @type {Array<{topic: string, envelope: string}> | null} */
+let relayBatch = null;
+
+/**
+ * @param {string} topic
+ * @param {string} envelope
+ */
+function batchRelay(topic, envelope) {
+	if (!relayBatch) {
+		relayBatch = [];
+		queueMicrotask(() => {
+			if (relayBatch) {
+				parentPort.postMessage({ type: 'publish-batch', messages: relayBatch });
+			}
+			relayBatch = null;
+		});
+	}
+	relayBatch.push({ topic, envelope });
+}
+
 // -- Platform (exposed to SvelteKit via event.platform) ----------------------
 
 /** @type {Set<import('uWebSockets.js').WebSocket<any>>} */
 const wsConnections = new Set();
+
+// WS_DEBUG=1 enables per-event logging for subscribe/publish/open/close.
+// Read once at module load so it is never sampled inside a hot callback.
+const wsDebug = WS_ENABLED && env('WS_DEBUG', '') === '1';
 
 /** @type {import('./index.js').Platform} */
 const platform = {
@@ -240,16 +408,24 @@ const platform = {
 	 * No-op if no clients are subscribed - safe to call unconditionally.
 	 */
 	publish(topic, event, data, options) {
-		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}';
+		const envelope = envelopePrefix(topic, event) + JSON.stringify(data) + '}';
 		const result = app.publish(topic, envelope, false, false);
 		// Relay to other workers via main thread (no-op in single-process mode).
 		// Pass { relay: false } when the message originates from an external
 		// pub/sub source (Redis, Postgres, etc.) that already fans out to
 		// every process -- relaying would cause duplicate delivery.
-		if (parentPort && (!options || options.relay !== false)) {
-			parentPort.postMessage({ type: 'publish', topic, envelope });
+		const relayed = !!(parentPort && (!options || options.relay !== false));
+		if (relayed) {
+			batchRelay(topic, envelope);
 		}
-		return result;
+		if (wsDebug) {
+			console.log('[ws] publish topic=%s event=%s bytes=%d delivered=%s',
+				topic, event, envelope.length, result || relayed);
+		}
+		// In clustered mode, subscribers may be on other workers. Return true
+		// when the relay fires even if the local worker has no subscribers,
+		// because callers cannot query cross-worker subscriber counts.
+		return result || relayed;
 	},
 
 	/**
@@ -257,7 +433,7 @@ const platform = {
 	 * Wraps in the same { topic, event, data } envelope as publish().
 	 */
 	send(ws, topic, event, data) {
-		return ws.send('{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}', false, false);
+		return ws.send(envelopePrefix(topic, event) + JSON.stringify(data) + '}', false, false);
 	},
 
 	/**
@@ -266,7 +442,7 @@ const platform = {
 	 * Returns the number of connections the message was sent to.
 	 */
 	sendTo(filter, topic, event, data) {
-		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}';
+		const envelope = envelopePrefix(topic, event) + JSON.stringify(data) + '}';
 		let count = 0;
 		for (const ws of wsConnections) {
 			if (filter(ws.getUserData())) {
@@ -289,6 +465,24 @@ const platform = {
 	 */
 	subscribers(topic) {
 		return app.numSubscribers(topic);
+	},
+
+	/**
+	 * Publish multiple messages in one call.
+	 * Equivalent to calling publish() for each message, but the cross-worker
+	 * relay sends one postMessage per microtask regardless of how many
+	 * messages are in the batch (batching is always active for individual
+	 * publish() calls too  - this method is purely a convenience).
+	 * @param {{ topic: string, event: string, data?: unknown }[]} messages
+	 * @returns {boolean[]} publish result for each message (false = no subscribers)
+	 */
+	batch(messages) {
+		const results = [];
+		for (let i = 0; i < messages.length; i++) {
+			const { topic, event, data } = messages[i];
+			results.push(platform.publish(topic, event, data));
+		}
+		return results;
 	},
 
 	/**
@@ -354,39 +548,99 @@ function get_origin(headers) {
 	return port ? `${protocol}://${hostWithoutPort}:${port}` : `${protocol}://${host}`;
 }
 
+// -- SSR request deduplication -----------------------------------------------
+// When multiple concurrent anonymous GET/HEAD requests arrive for the same URL,
+// only one is dispatched to SvelteKit. The rest await the result and reconstruct
+// their own Response from the shared buffer. This eliminates redundant SSR work
+// during traffic spikes on public (non-personalized) pages.
+
+// Maximum number of in-flight dedup keys tracked simultaneously.
+const MAX_SSR_DEDUP = 500;
+// Maximum response body size (bytes) that may be shared across waiters.
+// Responses larger than this are not shared  - each waiter makes its own call.
+const MAX_SSR_DEDUP_BODY = 512 * 1024; // 512 KB
+
+/**
+ * @typedef {{ status: number, statusText: string, headers: [string, string][], body: Uint8Array }} SharedResponse
+ */
+
+/**
+ * In-flight SSR dedup map. Key is "<METHOD>\0<URL>".
+ * Value is a Promise that resolves to a SharedResponse (shareable) or null (not shareable).
+ * @type {Map<string, Promise<SharedResponse | null>>}
+ */
+const ssrInflight = new Map();
+
 // -- Body reading ------------------------------------------------------------
+
+// When Content-Length is known and fits in this threshold, pre-allocate
+// a single Buffer and fill it as chunks arrive instead of creating a
+// separate Buffer per chunk. Reduces GC pressure for typical form/JSON bodies.
+const SMALL_BODY_THRESHOLD = 65536; // 64 KB
 
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {number} limit
- * @param {AbortSignal} signal - Aborted when the client disconnects
+ * @param {{ aborted: boolean }} state - Shared abort flag from request handler
+ * @param {number} [contentLength] - Known Content-Length (NaN if unknown)
  * @returns {ReadableStream<Uint8Array>}
  */
-function readBody(res, limit, signal) {
+function readBody(res, limit, state, contentLength) {
+	// Fast path: pre-allocate one buffer when size is known and small.
+	// Eliminates N allocations for chunked bodies  - one allocation + in-place fills.
+	const usePrealloc = contentLength >= 0 && contentLength <= SMALL_BODY_THRESHOLD &&
+		(limit === Infinity || contentLength <= limit);
+
 	let initialized = false;
 	return new ReadableStream({
 		start(controller) {
-			if (signal.aborted) {
+			if (state.aborted) {
 				controller.error(new Error('Request aborted'));
 				return;
 			}
-			signal.addEventListener('abort', () => {
-				try { controller.error(new Error('Request aborted')); } catch { /* already closed */ }
-			}, { once: true });
 		},
 		pull(controller) {
+			if (state.aborted) {
+				try { controller.error(new Error('Request aborted')); } catch { /* already closed */ }
+				return;
+			}
 			// Lazy: only register res.onData() when SvelteKit actually reads
 			// the body. For redirects / actions that ignore the body, this
 			// avoids the onData registration + per-chunk copy entirely.
 			if (initialized) return;
 			initialized = true;
 
+			if (usePrealloc) {
+				const buf = Buffer.allocUnsafe(contentLength);
+				let offset = 0;
+				let done = false;
+				res.onData((chunk, isLast) => {
+					if (done || state.aborted) return;
+					const view = new Uint8Array(chunk);
+					if (offset + view.byteLength > buf.byteLength) {
+						// Body exceeded Content-Length - treat as too large
+						done = true;
+						controller.error(new PayloadTooLargeError());
+						return;
+					}
+					// Zero-copy fill into pre-allocated buffer (no new Buffer per chunk)
+					buf.set(view, offset);
+					offset += view.byteLength;
+					if (isLast) {
+						done = true;
+						controller.enqueue(buf.subarray(0, offset));
+						controller.close();
+					}
+				});
+				return;
+			}
+
 			let size = 0;
 			let done = false;
 			res.onData((chunk, isLast) => {
-				if (done) return;
+				if (done || state.aborted) return;
 				// MUST copy - uWS reuses the ArrayBuffer after callback returns
-				const copy = Buffer.from(chunk.slice(0));
+				const copy = Buffer.from(new Uint8Array(chunk));
 				size += copy.byteLength;
 				if (limit !== Infinity && size > limit) {
 					done = true;
@@ -406,18 +660,117 @@ function readBody(res, limit, signal) {
 // -- Static file serving -----------------------------------------------------
 
 /**
+ * Parse an HTTP Range header value for a single byte range.
+ * Returns { start, end } (both inclusive) or null when the range is absent,
+ * malformed, multi-range, or would be unsatisfiable for the given file size.
+ *
+ * @param {string} header - Value of the Range header (e.g. "bytes=0-499")
+ * @param {number} fileSize - Total number of bytes in the file
+ * @returns {{ start: number, end: number } | null}
+ */
+// parseRange returns:
+//   { start, end } - valid range, serve 206
+//   null           - syntactically valid but unsatisfiable (start >= fileSize), send 416
+//   false          - syntactically invalid, ignore the header and serve full 200
+function parseRange(header, fileSize) {
+	if (!header.startsWith('bytes=')) return false;
+	const spec = header.slice(6);
+	// Multi-range (comma-separated)  - not supported; serve full content instead
+	if (spec.includes(',')) return false;
+
+	const dash = spec.indexOf('-');
+	if (dash < 0) return false;
+
+	const rawStart = spec.slice(0, dash);
+	const rawEnd = spec.slice(dash + 1);
+
+	// Reject tokens with non-digit characters (e.g. "1oops"). RFC 7233 requires
+	// range values to be pure integers (1*DIGIT grammar production).
+	if (rawStart !== '' && /\D/.test(rawStart)) return false;
+	if (rawEnd !== '' && /\D/.test(rawEnd)) return false;
+
+	let start, end;
+	if (rawStart === '') {
+		// Suffix range: bytes=-N (last N bytes)
+		const suffix = parseInt(rawEnd, 10);
+		if (!Number.isFinite(suffix) || suffix <= 0) return false;
+		start = Math.max(0, fileSize - suffix);
+		end = fileSize - 1;
+	} else {
+		start = parseInt(rawStart, 10);
+		if (!Number.isFinite(start) || start < 0) return false;
+		if (rawEnd === '') {
+			// Open-ended: bytes=N- (from N to EOF)
+			end = fileSize - 1;
+		} else {
+			end = parseInt(rawEnd, 10);
+			if (!Number.isFinite(end) || end < start) return false;
+		}
+	}
+
+	if (start >= fileSize) return null; // Syntactically valid but unsatisfiable
+	end = Math.min(end, fileSize - 1);
+	return { start, end };
+}
+
+/**
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {StaticEntry} entry
  * @param {string} acceptEncoding
  * @param {string} ifNoneMatch
  * @param {boolean} headOnly
+ * @param {string} [rangeHeader]
+ * @param {string} [ifRangeHeader]
  */
-function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = false) {
+function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = false, rangeHeader = '', ifRangeHeader = '') {
 	if (entry.etag && ifNoneMatch === entry.etag) {
 		res.cork(() => {
 			res.writeStatus('304 Not Modified').end();
 		});
 		return;
+	}
+
+	// Range requests are only valid for files with an ETag (mutable assets).
+	// Immutable versioned assets (_app/immutable/*) never need range requests.
+	// When a Range header is present we always serve the uncompressed bytes so
+	// the client gets the correct byte offsets (range + content-encoding don't mix).
+	if (rangeHeader && entry.etag) {
+		// If-Range: only honour Range if the client's cached ETag matches
+		if (!ifRangeHeader || ifRangeHeader === entry.etag) {
+			// Multi-range (bytes=0-499,600-700) is not supported. RFC 7233 allows
+			// servers to ignore multiple ranges and respond with the full entity.
+			if (!rangeHeader.includes(',')) {
+				const range = parseRange(rangeHeader, entry.buffer.byteLength);
+				if (range === null) {
+					// Syntactically valid but start position is beyond EOF
+					res.cork(() => {
+						res.writeStatus('416 Range Not Satisfiable');
+						res.writeHeader('content-range', `bytes */${entry.buffer.byteLength}`);
+						res.end();
+					});
+					return;
+				}
+				if (range !== false) {
+					// Valid range - serve partial content
+					const slice = entry.buffer.subarray(range.start, range.end + 1);
+					res.cork(() => {
+						res.writeStatus('206 Partial Content');
+						res.writeHeader('content-type', entry.contentType);
+						res.writeHeader('content-range', `bytes ${range.start}-${range.end}/${entry.buffer.byteLength}`);
+						res.writeHeader('date', cachedDateHeader);
+						for (let i = 0; i < entry.headers.length; i++) {
+							res.writeHeader(entry.headers[i][0], entry.headers[i][1]);
+						}
+						if (headOnly) res.endWithoutBody(slice.byteLength);
+						else res.end(slice);
+					});
+					return;
+				}
+				// range === false: syntactically invalid - fall through to full 200
+			}
+			// Multi-range or invalid range  - fall through to full 200 response
+		}
+		// If-Range mismatch  - fall through to full 200 response
 	}
 
 	res.cork(() => {
@@ -430,19 +783,15 @@ function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = false) 
 			body = entry.gzBuffer;
 		}
 
-		if (entry.brBuffer || entry.gzBuffer) {
-			res.writeHeader('vary', 'Accept-Encoding');
-		}
-
 		res.writeStatus('200 OK');
 		res.writeHeader('content-type', entry.contentType);
-		res.writeHeader('content-length', String(body.byteLength));
+		res.writeHeader('date', cachedDateHeader);
 		// Pre-computed [key, value] tuples - no Object.entries() allocation per request
 		for (let i = 0; i < entry.headers.length; i++) {
 			res.writeHeader(entry.headers[i][0], entry.headers[i][1]);
 		}
 		if (headOnly) {
-			res.endWithoutBody();
+			res.endWithoutBody(body.byteLength);
 		} else {
 			res.end(body);
 		}
@@ -451,31 +800,50 @@ function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = false) 
 
 // -- Prerendered page check --------------------------------------------------
 
+// Bounded cache for decoded URI pathnames. Avoids repeated decodeURIComponent
+// calls for the same encoded path. Uses Map insertion order for LRU eviction.
+const DECODE_CACHE_MAX = 256;
+/** @type {Map<string, string | null>} null = decode error */
+const decodeCache = new Map();
+
+/**
+ * Decode a URI-encoded pathname, returning a cached result when available.
+ * Returns null if the pathname is malformed (invalid percent-encoding).
+ * @param {string} pathname
+ * @returns {string | null}
+ */
+function decodePath(pathname) {
+	if (!pathname.includes('%')) return pathname;
+	let result = decodeCache.get(pathname);
+	if (result !== undefined) return result;
+	try {
+		result = decodeURIComponent(pathname);
+	} catch {
+		result = null;
+	}
+	if (decodeCache.size >= DECODE_CACHE_MAX) {
+		decodeCache.delete(decodeCache.keys().next().value);
+	}
+	decodeCache.set(pathname, result);
+	return result;
+}
+
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {string} pathname
  * @param {string} search
  * @param {string} acceptEncoding
  * @param {string} ifNoneMatch
+ * @param {boolean} headOnly
+ * @param {string} [rangeHeader]
+ * @param {string} [ifRangeHeader]
  * @returns {boolean}
  */
-function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, headOnly = false) {
-	// Fast path: skip decodeURIComponent when there are no encoded characters
-	const needsDecode = pathname.includes('%');
-	let decoded;
-	if (needsDecode) {
-		try {
-			decoded = decodeURIComponent(pathname);
-		} catch {
-			res.cork(() => {
-				res.writeStatus('400 Bad Request');
-				res.writeHeader('content-type', 'text/plain');
-				res.end('Bad Request');
-			});
-			return true;
-		}
-	} else {
-		decoded = pathname;
+function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, headOnly = false, rangeHeader = '', ifRangeHeader = '') {
+	const decoded = decodePath(pathname);
+	if (decoded === null) {
+		send400(res);
+		return true;
 	}
 
 	if (prerendered.has(decoded)) {
@@ -491,7 +859,7 @@ function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, head
 		}
 		const entry = staticCache.get(decoded);
 		if (entry) {
-			serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly);
+			serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly, rangeHeader, ifRangeHeader);
 			return true;
 		}
 	}
@@ -504,7 +872,7 @@ function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, head
 		if (prerenderedDirStyle.has(alt) && decoded.endsWith('/')) {
 			const entry = staticCache.get(decoded);
 			if (entry) {
-				serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly);
+				serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly, rangeHeader, ifRangeHeader);
 				return true;
 			}
 		}
@@ -530,29 +898,29 @@ function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, head
  * @param {Record<string, string>} headers
  * @param {string} remoteAddress - Client IP address
  * @param {{ aborted: boolean }} state
- * @param {AbortSignal} abortSignal
  */
-async function handleSSR(res, method, url, headers, remoteAddress, state, abortSignal) {
+async function handleSSR(res, method, url, headers, remoteAddress, state) {
 	try {
 		const base_origin = origin || get_origin(headers);
 
-		// Reject oversized bodies early when Content-Length is known
-		if (method !== 'GET' && method !== 'HEAD' && body_size_limit !== Infinity) {
-			const contentLength = parseInt(headers['content-length'], 10);
-			if (contentLength > body_size_limit) {
-				res.cork(() => {
-					res.writeStatus('413 Content Too Large');
-					res.writeHeader('content-type', 'text/plain');
-					res.end('Content Too Large');
-				});
-				return;
+		// Parse Content-Length once for both the 413 check and the small-body
+		// pre-allocation hint. Keep NaN when the header is absent or non-numeric.
+		let contentLengthHint = NaN;
+		if (method !== 'GET' && method !== 'HEAD') {
+			const cl = parseInt(headers['content-length'], 10);
+			if (!isNaN(cl)) {
+				if (body_size_limit !== Infinity && cl > body_size_limit) {
+					send413(res);
+					return;
+				}
+				contentLengthHint = cl;
 			}
 		}
 
 		const body =
 			method === 'GET' || method === 'HEAD'
 				? undefined
-				: readBody(res, body_size_limit, abortSignal);
+				: readBody(res, body_size_limit, state, contentLengthHint);
 
 		const request = new Request(base_origin + url, {
 			method,
@@ -562,59 +930,160 @@ async function handleSSR(res, method, url, headers, remoteAddress, state, abortS
 			duplex: 'half'
 		});
 
-		const response = await server.respond(request, {
-			platform,
-			getClientAddress: () => {
-				if (address_header) {
-					if (!(address_header in headers)) {
+		// Branch at definition time on the module-level constant address_header.
+		// In the common case (no proxy), the closure captures only remoteAddress
+		// and V8 sees a trivially-inlinable one-liner. When address_header IS set,
+		// the closure captures the full set of proxy variables.
+		const getClientAddress = address_header
+			? () => {
+				if (!(address_header in headers)) {
+					throw new Error(
+						`Address header was specified with ${ENV_PREFIX + 'ADDRESS_HEADER'}=${address_header} but is absent from request`
+					);
+				}
+
+				const value = headers[address_header] || '';
+
+				if (address_header === 'x-forwarded-for') {
+					// Reject absurdly long XFF headers (max ~8KB)
+					if (value.length > 8192) {
+						throw new Error('X-Forwarded-For header too large');
+					}
+					const addresses = value.split(',');
+
+					if (xff_depth > addresses.length) {
 						throw new Error(
-							`Address header was specified with ${ENV_PREFIX + 'ADDRESS_HEADER'}=${address_header} but is absent from request`
+							`${ENV_PREFIX + 'XFF_DEPTH'} is ${xff_depth}, but only found ${addresses.length} addresses`
 						);
 					}
+					return addresses[addresses.length - xff_depth].trim();
+				}
 
-					const value = headers[address_header] || '';
+				return value;
+			}
+			: () => remoteAddress;
 
-					if (address_header === 'x-forwarded-for') {
-						// Reject absurdly long XFF headers (max ~8KB)
-						if (value.length > 8192) {
-							throw new Error('X-Forwarded-For header too large');
+		// Dedup: for anonymous GET/HEAD requests that arrive concurrently for the
+		// same URL, only the first (the leader) calls server.respond(). Subsequent
+		// requests (waiters) await the leader's promise and reconstruct a Response
+		// from the shared buffer. This prevents redundant SSR work during traffic
+		// spikes on public pages.
+		//
+		// Dedup is skipped for:
+		//   - Non-GET/HEAD methods (mutations must not be coalesced)
+		//   - Authenticated requests (cookie or authorization header present)
+		//   - Requests opting out via x-no-dedup: 1
+		//   - When the dedup map is at capacity (safety valve)
+		const canDedup =
+			(method === 'GET' || method === 'HEAD') &&
+			!headers.cookie &&
+			!headers.authorization &&
+			!headers['x-no-dedup'] &&
+			ssrInflight.size < MAX_SSR_DEDUP;
+
+		if (canDedup) {
+			const dedupKey = method + '\0' + url;
+			const existing = ssrInflight.get(dedupKey);
+
+			if (existing) {
+				// Waiter: await the leader's result
+				const shared = await existing;
+				if (state.aborted) return;
+				if (shared) {
+					// Reconstruct a fresh Response from the shared buffer (zero-copy view)
+					await writeResponse(
+						res,
+						new Response(shared.body, {
+							status: shared.status,
+							statusText: shared.statusText,
+							headers: shared.headers
+						}),
+						state
+					);
+					return;
+				}
+				// Leader marked this non-shareable  - fall through to our own call
+			} else {
+				// Leader: register the promise before any await so waiters attach to it
+				let resolveShared;
+				const sharedPromise = /** @type {Promise<SharedResponse | null>} */ (
+					new Promise((r) => { resolveShared = r; })
+				);
+				ssrInflight.set(dedupKey, sharedPromise);
+				// Always remove when settled, even on throw
+				sharedPromise.finally(() => ssrInflight.delete(dedupKey));
+
+				try {
+					const response = await server.respond(request, { platform, getClientAddress });
+					if (state.aborted) { resolveShared(null); return; }
+
+					// Responses with Set-Cookie must not be shared (they're personalized).
+					// Responses that declare Vary on anything other than Accept-Encoding
+					// are personalized by some other request header (Accept-Language,
+					// geo, feature flags, tenant, etc.)  - sharing would serve the
+					// leader's content to waiters that may legitimately differ.
+					if (response.headers.has('set-cookie') || !response.body) {
+						resolveShared(null);
+						await writeResponse(res, response, state);
+						return;
+					}
+					const varyHeader = response.headers.get('vary');
+					if (varyHeader) {
+						const personalized = varyHeader.toLowerCase().split(',').some(
+							(p) => { const t = p.trim(); return t !== '' && t !== 'accept-encoding'; }
+						);
+						if (personalized) {
+							resolveShared(null);
+							await writeResponse(res, response, state);
+							return;
 						}
-						const addresses = value.split(',');
-
-						if (xff_depth > addresses.length) {
-							throw new Error(
-								`${ENV_PREFIX + 'XFF_DEPTH'} is ${xff_depth}, but only found ${addresses.length} addresses`
-							);
-						}
-						return addresses[addresses.length - xff_depth].trim();
 					}
 
-					return value;
-				}
-				return remoteAddress;
-			}
-		});
+					// Buffer the body. Responses above the size cap are not shared.
+					const ab = await response.arrayBuffer();
+					if (state.aborted) { resolveShared(null); return; }
 
+					const shared = ab.byteLength <= MAX_SSR_DEDUP_BODY
+						? /** @type {SharedResponse} */ ({
+							status: response.status,
+							statusText: response.statusText,
+							headers: /** @type {[string, string][]} */ ([...response.headers]),
+							body: new Uint8Array(ab)
+						})
+						: null;
+
+					resolveShared(shared);
+
+					// Serve the leader's own response from the same buffer
+					await writeResponse(
+						res,
+						new Response(ab, {
+							status: response.status,
+							statusText: response.statusText,
+							headers: response.headers
+						}),
+						state
+					);
+				} catch (err) {
+					resolveShared(null);
+					throw err;
+				}
+				return;
+			}
+		}
+
+		// Normal (non-dedup) path
+		const response = await server.respond(request, { platform, getClientAddress });
 		if (state.aborted) return;
 		await writeResponse(res, response, state);
 	} catch (err) {
 		if (state.aborted) return;
 		if (err instanceof PayloadTooLargeError) {
-			res.cork(() => {
-				res.writeStatus('413 Content Too Large');
-				res.writeHeader('content-type', 'text/plain');
-				res.end('Content Too Large');
-			});
+			send413(res);
 			return;
 		}
 		console.error('SSR error:', err);
-		if (!state.aborted) {
-			res.cork(() => {
-				res.writeStatus('500 Internal Server Error');
-				res.writeHeader('content-type', 'text/plain');
-				res.end('Internal Server Error');
-			});
-		}
+		if (!state.aborted) send500(res);
 	}
 }
 
@@ -628,7 +1097,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state, abortS
 function writeHeaders(res, response) {
 	res.writeStatus(String(response.status));
 	for (const [key, value] of response.headers) {
-		if (key === 'set-cookie') continue;
+		if (key === 'set-cookie' || key === 'content-length') continue;
 		res.writeHeader(key, value);
 	}
 	for (const cookie of response.headers.getSetCookie()) {
@@ -642,12 +1111,16 @@ function writeHeaders(res, response) {
  * @param {{ aborted: boolean }} state
  */
 async function writeResponse(res, response, state) {
-	// No body - write headers + end in a single cork (one syscall)
+	// No body - write headers + end in a single cork (one syscall).
+	// For HEAD responses SvelteKit sets Content-Length to the full body size;
+	// pass it to endWithoutBody() so the client knows the entity size.
 	if (!response.body) {
 		if (state.aborted) return;
+		const cl = response.headers.get('content-length');
 		res.cork(() => {
 			writeHeaders(res, response);
-			res.end();
+			if (cl) res.endWithoutBody(parseInt(cl, 10));
+			else res.endWithoutBody(0);
 		});
 		return;
 	}
@@ -667,6 +1140,7 @@ async function writeResponse(res, response, state) {
 
 	const reader = response.body.getReader();
 	let streaming = false;
+	let streamTimedOut = false;
 	try {
 		// Read first chunk - if it's also the last, write headers + body in one cork
 		const first = await reader.read();
@@ -689,7 +1163,7 @@ async function writeResponse(res, response, state) {
 
 		// Multi-chunk streaming response - write headers + first two chunks in one cork.
 		// cork() batches these writes into a single syscall, so backpressure from
-		// individual res.write() calls inside cork is not actionable — the data is
+		// individual res.write() calls inside cork is not actionable  - the data is
 		// buffered and flushed together when cork returns. The backpressure loop
 		// below handles all subsequent chunks.
 		if (state.aborted) return;
@@ -711,11 +1185,21 @@ async function writeResponse(res, response, state) {
 					const timer = setTimeout(() => resolve(false), 30000);
 					res.onWritable(() => { clearTimeout(timer); resolve(true); return true; });
 				});
-				if (!drained || state.aborted) break;
+				if (!drained) { streamTimedOut = true; break; }
+				if (state.aborted) break;
 			}
 		}
 	} finally {
-		if (streaming && !state.aborted) res.cork(() => res.end());
+		if (streaming && !state.aborted) {
+			if (streamTimedOut) {
+				// Backpressure drained past the 30s deadline. Abruptly close the
+				// connection rather than sending a clean EOF on a partial body,
+				// which would look like a successful but truncated response.
+				res.close();
+			} else {
+				res.cork(() => res.end());
+			}
+		}
 		reader.cancel().catch(() => {});
 	}
 }
@@ -730,32 +1214,40 @@ function handleRequest(res, req) {
 	// === SYNCHRONOUS PHASE ===
 	// uWS HttpRequest is stack-allocated - MUST read everything before any await.
 	// uWS returns lowercase method; we use lowercase comparisons on the fast path
-	// and only toUpperCase() for SSR where the Request constructor expects it.
+	// and only the METHODS lookup for SSR where the Request constructor expects it.
 	const method = req.getMethod();
 	const pathname = req.getUrl();
 
 	// === STATIC FILE FAST PATH ===
-	// Minimum work: 1 Map lookup + 2 header reads. No header collection,
-	// no query string handling, no remoteAddress decode, no toUpperCase().
+	// Minimum work: 1 Map lookup + 4 header reads. No header collection,
+	// no query string handling, no remoteAddress decode.
 	const staticFile = staticCache.get(pathname);
 	if (staticFile && (method === 'get' || method === 'head')) {
 		return serveStatic(
 			res, staticFile,
 			req.getHeader('accept-encoding'),
 			req.getHeader('if-none-match'),
-			method === 'head'
+			method === 'head',
+			req.getHeader('range'),
+			req.getHeader('if-range')
 		);
+	}
+
+	// Windows: reject paths with : (Alternate Data Streams) or ~ (8.3 short names)
+	if (process.platform === 'win32' && (pathname.includes(':') || pathname.includes('~'))) {
+		return send400(res);
 	}
 
 	// Build full URL only for SSR - static files never reach here
 	const query = req.getQuery();
-	const METHOD = method.toUpperCase();
+	const METHOD = METHODS[method] || method.toUpperCase();
 
 	// === PRERENDERED CHECK ===
-	// Lightweight: only 2 header reads, no full collection, no remoteAddress decode
+	// Lightweight: only 4 header reads, no full collection, no remoteAddress decode
 	if (METHOD === 'GET' || METHOD === 'HEAD') {
 		if (tryPrerendered(res, pathname, query ? `?${query}` : '',
-			req.getHeader('accept-encoding'), req.getHeader('if-none-match'), METHOD === 'HEAD')) {
+			req.getHeader('accept-encoding'), req.getHeader('if-none-match'), METHOD === 'HEAD',
+			req.getHeader('range'), req.getHeader('if-range'))) {
 			return;
 		}
 	}
@@ -772,18 +1264,20 @@ function handleRequest(res, req) {
 	// Decode remote address eagerly - uWS may reuse the underlying buffer
 	const remoteAddress = textDecoder.decode(res.getRemoteAddressAsText());
 
-	// Set onAborted BEFORE any async work (mandatory uWS pattern)
-	const abortController = new AbortController();
-	const state = { aborted: false };
+	// Set onAborted BEFORE any async work (mandatory uWS pattern).
+	// No AbortController here - readBody uses the state flag directly,
+	// avoiding 4-5 object allocations (controller + signal + event target)
+	// on every request. GET/HEAD requests (majority of traffic) never
+	// need an AbortController at all.
+	const state = acquireState();
 	res.onAborted(() => {
 		state.aborted = true;
-		abortController.abort();
 	});
 
 	// === ASYNC PHASE: SSR ===
 	inFlightCount++;
-	handleSSR(res, METHOD, url, headers, remoteAddress, state, abortController.signal)
-		.finally(requestDone);
+	handleSSR(res, METHOD, url, headers, remoteAddress, state)
+		.finally(() => { releaseState(state); requestDone(); });
 }
 
 // -- WebSocket support -------------------------------------------------------
@@ -804,20 +1298,63 @@ if (WS_ENABLED) {
 	const wsOptions = WS_OPTIONS;
 	const allowedOrigins = wsOptions.allowedOrigins || 'same-origin';
 
+	// Keys that suggest sensitive data being stored in userData.
+	// userData is accessible to every server-side handler via ws.getUserData(),
+	// so storing raw credentials there is a footgun.
+	const SENSITIVE_KEY_PATTERNS = ['token', 'secret', 'password', 'key', 'session', 'credential'];
+	/** @type {Set<string>} warned key names - suppress duplicate warnings across connections */
+	const warnedUserDataKeys = new Set();
+
 	// Per-IP upgrade rate limiter (configurable, 0 = disabled)
 	const UPGRADE_MAX_PER_WINDOW = wsOptions.upgradeRateLimit ?? 10;
 	const UPGRADE_WINDOW_MS = (wsOptions.upgradeRateLimitWindow ?? 10) * 1000;
-	/** @type {Map<string, { count: number, resetAt: number }>} */
+	// Maximum number of IP entries to retain in the rate map under sustained DDoS.
+	// Excess entries are evicted by lowest activity score during the 60s sweep.
+	const MAX_RATE_ENTRIES = 10000;
+	/** @type {Map<string, { prev: number, curr: number, windowStart: number }>} */
 	const upgradeRateMap = new Map();
-	if (UPGRADE_MAX_PER_WINDOW > 0) {
-		// Purge stale entries every 60s to prevent unbounded growth
-		setInterval(() => {
-			const now = Date.now();
+
+	// Single 60-second interval for all periodic cache maintenance.
+	// Keeps timer overhead to one wakeup per minute regardless of how many
+	// caches exist. Add future periodic tasks here rather than creating
+	// additional intervals.
+	setInterval(() => {
+		// 1. Purge rate-limit entries whose entire two-window history has expired,
+		//    then evict the least active entries if the map exceeds the cap.
+		//    Two windows must elapse with no activity before an entry is stale  -
+		//    after one window the previous slot still contributes to the estimate.
+		if (UPGRADE_MAX_PER_WINDOW > 0) {
+			const now = cachedNow;
 			for (const [ip, entry] of upgradeRateMap) {
-				if (now > entry.resetAt) upgradeRateMap.delete(ip);
+				if (now - entry.windowStart >= 2 * UPGRADE_WINDOW_MS) upgradeRateMap.delete(ip);
 			}
-		}, 60000).unref();
-	}
+			if (upgradeRateMap.size > MAX_RATE_ENTRIES) {
+				const sorted = [...upgradeRateMap.entries()].sort(
+					(a, b) => (a[1].prev + a[1].curr) - (b[1].prev + b[1].curr)
+				);
+				const excess = upgradeRateMap.size - MAX_RATE_ENTRIES;
+				for (let i = 0; i < excess; i++) upgradeRateMap.delete(sorted[i][0]);
+			}
+		}
+		// 2. Trim module-level LRU caches if they are full. When a cache is at
+		//    capacity it evicts one entry per insertion, but traffic patterns can
+		//    shift and leave the cache full of stale entries. Clearing the oldest
+		//    half every 60 s lets hot entries reclaim the freed slots.
+		if (decodeCache.size >= DECODE_CACHE_MAX) {
+			let i = 0;
+			for (const k of decodeCache.keys()) {
+				if (i++ >= DECODE_CACHE_MAX / 2) break;
+				decodeCache.delete(k);
+			}
+		}
+		if (envelopePrefixCache.size >= ENVELOPE_CACHE_MAX) {
+			let i = 0;
+			for (const k of envelopePrefixCache.keys()) {
+				if (i++ >= ENVELOPE_CACHE_MAX / 2) break;
+				envelopePrefixCache.delete(k);
+			}
+		}
+	}, 60000).unref();
 
 	app.ws(WS_PATH, {
 		// Handle HTTP -> WebSocket upgrade with user-provided auth
@@ -828,18 +1365,35 @@ if (WS_ENABLED) {
 			req.forEach((key, value) => {
 				headers[key] = value;
 			});
-			const upgradeIp = textDecoder.decode(res.getRemoteAddressAsText());
+			// Decode the client IP once. resolveClientIp applies the configured
+			// proxy header (ADDRESS_HEADER / XFF_DEPTH) so rate limiting keys
+			// on the real client address, not the proxy address.
+			const clientIp = resolveClientIp(textDecoder.decode(res.getRemoteAddressAsText()), headers);
 
-			// Rate limit upgrade requests per IP (0 = disabled)
+			// Rate limit upgrade requests per IP using a sliding window (0 = disabled).
+			// Sliding window prevents a client from doubling their effective rate by
+			// placing requests at the boundary between two fixed windows.
 			if (UPGRADE_MAX_PER_WINDOW > 0) {
-				const now = Date.now();
-				let rateEntry = upgradeRateMap.get(upgradeIp);
-				if (!rateEntry || now > rateEntry.resetAt) {
-					rateEntry = { count: 0, resetAt: now + UPGRADE_WINDOW_MS };
-					upgradeRateMap.set(upgradeIp, rateEntry);
+				const now = cachedNow;
+				let rateEntry = upgradeRateMap.get(clientIp);
+				if (!rateEntry) {
+					rateEntry = { prev: 0, curr: 0, windowStart: now };
+					upgradeRateMap.set(clientIp, rateEntry);
+				} else {
+					const elapsed = now - rateEntry.windowStart;
+					if (elapsed >= UPGRADE_WINDOW_MS) {
+						// Current window is complete  - rotate it into the previous slot
+						rateEntry.prev = rateEntry.curr;
+						rateEntry.curr = 0;
+						rateEntry.windowStart = now;
+					}
 				}
-				rateEntry.count++;
-				if (rateEntry.count > UPGRADE_MAX_PER_WINDOW) {
+				// Sliding estimate: the previous window's count fades out linearly as
+				// the current window progresses. At 0% elapsed, prev counts fully.
+				// At 100% elapsed, prev contributes nothing and we rotate next time.
+				const elapsed = now - rateEntry.windowStart;
+				const estimate = rateEntry.prev * (1 - elapsed / UPGRADE_WINDOW_MS) + rateEntry.curr;
+				if (estimate >= UPGRADE_MAX_PER_WINDOW) {
 					res.cork(() => {
 						res.writeStatus('429 Too Many Requests');
 						res.writeHeader('content-type', 'text/plain');
@@ -847,6 +1401,7 @@ if (WS_ENABLED) {
 					});
 					return;
 				}
+				rateEntry.curr++;
 			}
 
 			const secKey = req.getHeader('sec-websocket-key');
@@ -903,17 +1458,17 @@ if (WS_ENABLED) {
 			}
 
 			// No user upgrade handler - accept synchronously (no microtask yield,
-			// no cookie parsing, no remoteAddress decode)
+			// no cookie parsing). Inject remoteAddress so plugins/ratelimit can
+			// key on the real client IP via ws.getUserData().remoteAddress.
 			if (!wsModule.upgrade) {
 				res.cork(() => {
-					res.upgrade({}, secKey, secProtocol, secExtensions, context);
+					res.upgrade({ remoteAddress: clientIp }, secKey, secProtocol, secExtensions, context);
 				});
 				return;
 			}
 
 			// -- User upgrade handler path (may be async) --
 			const url = req.getUrl();
-			const remoteAddress = textDecoder.decode(res.getRemoteAddressAsText());
 
 			let aborted = false;
 			res.onAborted(() => {
@@ -937,7 +1492,7 @@ if (WS_ENABLED) {
 				}, wsOptions.upgradeTimeout * 1000);
 			}
 
-			Promise.resolve(wsModule.upgrade({ headers, cookies, url, remoteAddress }))
+			Promise.resolve(wsModule.upgrade({ headers, cookies, url, remoteAddress: clientIp }))
 				.then((userData) => {
 					clearTimeout(timer);
 					if (aborted || timedOut) return;
@@ -949,9 +1504,31 @@ if (WS_ENABLED) {
 						});
 						return;
 					}
+					// Warn once per unique key name about potentially sensitive data in userData.
+					// userData is readable by every server-side handler via ws.getUserData().
+					if (userData && typeof userData === 'object') {
+						for (const key of Object.keys(userData)) {
+							if (!warnedUserDataKeys.has(key)) {
+								const lower = key.toLowerCase();
+								if (SENSITIVE_KEY_PATTERNS.some((s) => lower.includes(s))) {
+									warnedUserDataKeys.add(key);
+									console.warn(
+										'[ws] userData key "' + key + '" may contain sensitive data. ' +
+										'userData is accessible to all server-side handlers via ws.getUserData(). ' +
+										'Store sensitive data outside userData and reference it by a non-sensitive ID.'
+									);
+								}
+							}
+						}
+					}
+					// Ensure remoteAddress is in userData so plugins (e.g. ratelimit)
+					// can key on the real client IP without requiring the app to
+					// manually copy it from the upgrade callback arguments.
+					const ud = userData || {};
+					if (!ud.remoteAddress) ud.remoteAddress = clientIp;
 					res.cork(() => {
 						res.upgrade(
-							userData || {},
+							ud,
 							secKey,
 							secProtocol,
 							secExtensions,
@@ -973,7 +1550,12 @@ if (WS_ENABLED) {
 		},
 
 		open: (ws) => {
+			// Track which topics this connection is subscribed to.
+			// Used to populate CloseContext.subscriptions for the user's close handler,
+			// enabling deterministic cleanup of per-subscription server state.
+			ws.getUserData().__subscriptions = new Set();
 			wsConnections.add(ws);
+			if (wsDebug) console.log('[ws] open connections=%d', wsConnections.size);
 			wsModule.open?.(ws, { platform });
 		},
 
@@ -983,7 +1565,10 @@ if (WS_ENABLED) {
 			// Byte-prefix check: {"type" has byte[3]='y' (0x79), while user
 			// envelopes {"topic" have byte[3]='o' (0x6F). Only JSON.parse when
 			// the prefix matches - skips parsing for 99%+ of messages.
-			if (!isBinary && message.byteLength < 512 &&
+			// The 8192-byte ceiling is generous enough for subscribe-batch with
+			// many topics (N * 256-char names) while keeping the JSON.parse
+			// guard against truly large user messages.
+			if (!isBinary && message.byteLength < 8192 &&
 				(new Uint8Array(message))[3] === 0x79 /* 'y' in {"type" */) {
 				try {
 					const msg = JSON.parse(textDecoder.decode(message));
@@ -998,10 +1583,37 @@ if (WS_ENABLED) {
 							return;
 						}
 						ws.subscribe(msg.topic);
+						ws.getUserData().__subscriptions.add(msg.topic);
+						if (wsDebug) console.log('[ws] subscribe topic=%s', msg.topic);
 						return;
 					}
 					if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
 						ws.unsubscribe(msg.topic);
+						ws.getUserData().__subscriptions.delete(msg.topic);
+						if (wsDebug) console.log('[ws] unsubscribe topic=%s', msg.topic);
+						wsModule.unsubscribe?.(ws, msg.topic, { platform });
+						return;
+					}
+					if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
+						// Sent by the client store on reconnect to resubscribe all topics
+						// in a single message instead of N individual subscribe messages.
+						// Cap at 256 topics  - the client only sends what it was subscribed to.
+						const topics = msg.topics.slice(0, 256);
+						const userData = ws.getUserData();
+						let subscribed = 0;
+						for (const topic of topics) {
+							if (typeof topic !== 'string' || topic.length === 0 || topic.length > 256) continue;
+							let valid = true;
+							for (let i = 0; i < topic.length; i++) {
+								if (topic.charCodeAt(i) < 32) { valid = false; break; }
+							}
+							if (!valid) continue;
+							if (wsModule.subscribe && wsModule.subscribe(ws, topic, { platform }) === false) continue;
+							ws.subscribe(topic);
+							userData.__subscriptions.add(topic);
+							subscribed++;
+						}
+						if (wsDebug) console.log('[ws] subscribe-batch count=%d', subscribed);
 						return;
 					}
 				} catch {
@@ -1015,10 +1627,12 @@ if (WS_ENABLED) {
 		drain: wsModule.drain ? (ws) => wsModule.drain(ws, { platform }) : undefined,
 
 		close: (ws, code, message) => {
+			const subscriptions = ws.getUserData().__subscriptions || new Set();
 			try {
-				wsModule.close?.(ws, { code, message, platform });
+				wsModule.close?.(ws, { code, message, platform, subscriptions });
 			} finally {
 				wsConnections.delete(ws);
+				if (wsDebug) console.log('[ws] close code=%d connections=%d', code, wsConnections.size);
 			}
 		},
 
@@ -1097,11 +1711,18 @@ export function start(host, port) {
 
 /**
  * Stop the server.
+ * Closes the listen socket (stops accepting new connections) and terminates
+ * all idle WebSocket connections with code 1001 (Going Away) so clients
+ * reconnect to the new instance. In-flight HTTP requests continue until
+ * drain() resolves.
  */
 export function shutdown() {
 	if (listenSocket) {
 		uWS.us_listen_socket_close(listenSocket);
 		listenSocket = null;
+	}
+	for (const ws of wsConnections) {
+		ws.close(1001, 'Server shutting down');
 	}
 }
 

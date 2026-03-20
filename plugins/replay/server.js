@@ -15,7 +15,7 @@
 /**
  * @typedef {Object} ReplayOptions
  * @property {number} [size=1000] - Max messages per topic in the ring buffer
- * @property {number} [maxTopics=100] - Max number of topics to track (oldest evicted on overflow)
+ * @property {number} [maxTopics=100] - Max number of topics to track (least recently used topic evicted on overflow)
  */
 
 /**
@@ -124,24 +124,44 @@ export function createReplay(options = {}) {
 	 */
 	const topics = new Map();
 
-	/** @type {string[]} - Topic insertion order for LRU eviction */
-	const topicOrder = [];
+	/** @type {Map<string, null>} - LRU order (first key = least recently used, last = most recently used) */
+	const topicOrder = new Map();
 
 	/**
-	 * Get or create topic state.
+	 * Touch a topic in the LRU order without creating it. Call this from read
+	 * operations (seq, since, replay) so topics under active use are not evicted
+	 * while cold topics with earlier creation times are still around.
+	 * @param {string} topic
+	 */
+	function touchTopic(topic) {
+		if (!topics.has(topic)) return;
+		topicOrder.delete(topic);
+		topicOrder.set(topic, null);
+	}
+
+	/**
+	 * Get or create topic state. Touches the LRU order so recently accessed topics
+	 * are not evicted before cold ones.
 	 * @param {string} topic
 	 */
 	function getTopic(topic) {
 		let state = topics.get(topic);
 		if (!state) {
-			// Evict oldest topic if at capacity
+			// Evict least-recently-used topic if at capacity
 			if (topics.size >= maxTopics) {
-				const oldest = topicOrder.shift();
-				if (oldest) topics.delete(oldest);
+				const lru = topicOrder.keys().next().value;
+				if (lru !== undefined) {
+					topics.delete(lru);
+					topicOrder.delete(lru);
+				}
 			}
 			state = { seq: 0, buf: new Array(maxSize), start: 0, len: 0 };
 			topics.set(topic, state);
-			topicOrder.push(topic);
+			topicOrder.set(topic, null);
+		} else {
+			// Move to most-recently-used end so this topic is evicted last
+			topicOrder.delete(topic);
+			topicOrder.set(topic, null);
 		}
 		return state;
 	}
@@ -190,45 +210,57 @@ export function createReplay(options = {}) {
 		},
 
 		seq(topic) {
+			touchTopic(topic);
 			const state = topics.get(topic);
 			return state ? state.seq : 0;
 		},
 
 		since(topic, since) {
+			touchTopic(topic);
 			const state = topics.get(topic);
 			if (!state) return [];
 			return readSince(state, since);
 		},
 
-		replay(ws, topic, sinceSeq, platform) {
+		replay(ws, topic, sinceSeq, platform, reqId) {
+			touchTopic(topic);
 			const state = topics.get(topic);
 			if (!state) {
 				// No buffer for this topic - just send end marker
-				platform.send(ws, '__replay:' + topic, 'end', null);
+				platform.send(ws, '__replay:' + topic, 'end', reqId != null ? { reqId } : null);
 				return;
 			}
 			const missed = readSince(state, sinceSeq);
 			const replayTopic = '__replay:' + topic;
 			for (let i = 0; i < missed.length; i++) {
 				const msg = missed[i];
-				platform.send(ws, replayTopic, 'msg', {
-					seq: msg.seq,
-					event: msg.event,
-					data: msg.data
-				});
+				platform.send(ws, replayTopic, 'msg', reqId != null
+					? { reqId, seq: msg.seq, event: msg.event, data: msg.data }
+					: { seq: msg.seq, event: msg.event, data: msg.data }
+				);
 			}
-			platform.send(ws, replayTopic, 'end', null);
+			// Detect whether the buffer covers sinceSeq completely.
+			// If the oldest retained message has seq > sinceSeq + 1, the buffer
+			// was overwritten before the client connected and some messages are lost.
+			// Signal this via the end payload so callers can show a "missed events"
+			// warning or trigger a full data reload instead of silently continuing.
+			const oldestSeq = state.len > 0 ? state.buf[state.start].seq : null;
+			const truncated = oldestSeq !== null && oldestSeq > sinceSeq + 1;
+			if (reqId != null) {
+				platform.send(ws, replayTopic, 'end', truncated ? { reqId, truncated: true } : { reqId });
+			} else {
+				platform.send(ws, replayTopic, 'end', truncated ? { truncated: true } : null);
+			}
 		},
 
 		clear() {
 			topics.clear();
-			topicOrder.length = 0;
+			topicOrder.clear();
 		},
 
 		clearTopic(topic) {
 			topics.delete(topic);
-			const idx = topicOrder.indexOf(topic);
-			if (idx !== -1) topicOrder.splice(idx, 1);
+			topicOrder.delete(topic);
 		}
 	};
 }

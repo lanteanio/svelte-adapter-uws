@@ -24,7 +24,9 @@ export interface Queue {
 	 * Enqueue an async task under a key. Returns a promise that resolves
 	 * with the task's return value when it completes.
 	 *
-	 * Tasks with the same key execute in order (up to `concurrency`).
+	 * Tasks with the same key are dequeued in order. With `concurrency: 1`
+	 * (default), this means strictly sequential execution. With higher
+	 * concurrency, start order is preserved but completion order is not.
 	 * Tasks with different keys execute independently.
 	 *
 	 * @example

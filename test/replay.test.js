@@ -225,6 +225,129 @@ describe('replay plugin - server', () => {
 			// replay should not publish - only send to the one client
 			expect(mockPlatform.published).toEqual([]);
 		});
+
+		it('end marker has null data when replay is complete (not truncated)', () => {
+			replay.publish(mockPlatform, 'chat', 'created', { id: 1 });
+			replay.publish(mockPlatform, 'chat', 'created', { id: 2 });
+
+			const fakeWs = {};
+			replay.replay(fakeWs, 'chat', 0, mockPlatform);
+
+			const end = mockPlatform.sent.find((s) => s.event === 'end');
+			expect(end.data).toBeNull();
+		});
+
+		it('end marker has truncated:true when sinceSeq predates the buffer', () => {
+			// Buffer size is 5; publish 7 messages so seq 1 and 2 are evicted
+			for (let i = 1; i <= 7; i++) {
+				replay.publish(mockPlatform, 'chat', 'created', { id: i });
+			}
+			mockPlatform.sent = [];
+
+			// Client asks for since=1, oldest retained is seq=3 (gap: seq 2 is missing)
+			const fakeWs = {};
+			replay.replay(fakeWs, 'chat', 1, mockPlatform);
+
+			const end = mockPlatform.sent.find((s) => s.event === 'end');
+			expect(end.data).toEqual({ truncated: true });
+		});
+
+		it('end marker has null data when sinceSeq is exactly one before the oldest retained', () => {
+			// Publish 7, oldest retained is seq 3. sinceSeq=2 means "give me after 2" -> oldest=3, no gap.
+			for (let i = 1; i <= 7; i++) {
+				replay.publish(mockPlatform, 'chat', 'created', { id: i });
+			}
+			mockPlatform.sent = [];
+
+			// sinceSeq=2, oldest=3: oldestSeq(3) > sinceSeq+1(3) is false -> not truncated
+			replay.replay({}, 'chat', 2, mockPlatform);
+
+			const end = mockPlatform.sent.find((s) => s.event === 'end');
+			expect(end.data).toBeNull();
+		});
+	});
+
+	describe('replay with reqId', () => {
+		it('embeds reqId in each msg event', () => {
+			replay.publish(mockPlatform, 'chat', 'created', { id: 1 });
+			replay.publish(mockPlatform, 'chat', 'created', { id: 2 });
+
+			replay.replay({}, 'chat', 0, mockPlatform, 42);
+
+			const msgs = mockPlatform.sent.filter((s) => s.event === 'msg');
+			expect(msgs).toHaveLength(2);
+			expect(msgs[0].data).toEqual({ reqId: 42, seq: 1, event: 'created', data: { id: 1 } });
+			expect(msgs[1].data).toEqual({ reqId: 42, seq: 2, event: 'created', data: { id: 2 } });
+		});
+
+		it('embeds reqId in end event when not truncated', () => {
+			replay.publish(mockPlatform, 'chat', 'created', { id: 1 });
+
+			replay.replay({}, 'chat', 1, mockPlatform, 'abc');
+
+			const end = mockPlatform.sent.find((s) => s.event === 'end');
+			expect(end.data).toEqual({ reqId: 'abc' });
+		});
+
+		it('embeds reqId in end event when truncated', () => {
+			for (let i = 1; i <= 7; i++) {
+				replay.publish(mockPlatform, 'chat', 'created', { id: i });
+			}
+			mockPlatform.sent = [];
+
+			replay.replay({}, 'chat', 1, mockPlatform, 99);
+
+			const end = mockPlatform.sent.find((s) => s.event === 'end');
+			expect(end.data).toEqual({ reqId: 99, truncated: true });
+		});
+
+		it('embeds reqId in end event for unknown topics', () => {
+			replay.replay({}, 'nonexistent', 0, mockPlatform, 7);
+
+			expect(mockPlatform.sent).toHaveLength(1);
+			expect(mockPlatform.sent[0]).toEqual({
+				topic: '__replay:nonexistent',
+				event: 'end',
+				data: { reqId: 7 }
+			});
+		});
+
+		it('omitting reqId keeps original null-data end for non-truncated', () => {
+			replay.publish(mockPlatform, 'chat', 'created', { id: 1 });
+
+			replay.replay({}, 'chat', 1, mockPlatform);
+
+			const end = mockPlatform.sent.find((s) => s.event === 'end');
+			expect(end.data).toBeNull();
+		});
+
+		it('two concurrent requests for same topic produce independent responses', () => {
+			replay.publish(mockPlatform, 'chat', 'created', { id: 1 });
+			replay.publish(mockPlatform, 'chat', 'created', { id: 2 });
+
+			// Simulate two onReplay() instances sending simultaneous requests
+			const ws1 = {};
+			const ws2 = {};
+			const platform1 = { sent: [], publish() {} };
+			const platform2 = { sent: [], publish() {} };
+			platform1.send = (ws, topic, event, data) => platform1.sent.push({ topic, event, data });
+			platform2.send = (ws, topic, event, data) => platform2.sent.push({ topic, event, data });
+
+			replay.replay(ws1, 'chat', 0, platform1, 1);
+			replay.replay(ws2, 'chat', 0, platform2, 2);
+
+			// Each platform receives its own reqId
+			const msgs1 = platform1.sent.filter((s) => s.event === 'msg');
+			const msgs2 = platform2.sent.filter((s) => s.event === 'msg');
+
+			expect(msgs1.every((m) => m.data.reqId === 1)).toBe(true);
+			expect(msgs2.every((m) => m.data.reqId === 2)).toBe(true);
+
+			const end1 = platform1.sent.find((s) => s.event === 'end');
+			const end2 = platform2.sent.find((s) => s.event === 'end');
+			expect(end1.data.reqId).toBe(1);
+			expect(end2.data.reqId).toBe(2);
+		});
 	});
 
 	describe('clear / clearTopic', () => {
@@ -263,11 +386,49 @@ describe('replay plugin - server', () => {
 			expect(small.seq('topic-b')).toBe(1);
 			expect(small.seq('topic-c')).toBe(1);
 
-			// Adding a 4th should evict topic-a
+			// Adding a 4th should evict topic-a (least recently used)
 			small.publish(mockPlatform, 'topic-d', 'x', 4);
 
 			expect(small.seq('topic-a')).toBe(0); // evicted
 			expect(small.seq('topic-b')).toBe(1);
+			expect(small.seq('topic-c')).toBe(1);
+			expect(small.seq('topic-d')).toBe(1);
+		});
+
+		it('LRU: accessing a topic keeps it alive while cold topics are evicted', () => {
+			const small = createReplay({ size: 10, maxTopics: 3 });
+
+			small.publish(mockPlatform, 'topic-a', 'x', 1);
+			small.publish(mockPlatform, 'topic-b', 'x', 2);
+			small.publish(mockPlatform, 'topic-c', 'x', 3);
+
+			// Touch topic-a by reading its seq - marks it as recently used
+			small.seq('topic-a');
+
+			// Adding topic-d should evict topic-b (oldest untouched) not topic-a
+			small.publish(mockPlatform, 'topic-d', 'x', 4);
+
+			expect(small.seq('topic-a')).toBe(1); // still alive (was touched)
+			expect(small.seq('topic-b')).toBe(0); // evicted (was cold)
+			expect(small.seq('topic-c')).toBe(1);
+			expect(small.seq('topic-d')).toBe(1);
+		});
+
+		it('LRU: publishing to an existing topic keeps it alive', () => {
+			const small = createReplay({ size: 10, maxTopics: 3 });
+
+			small.publish(mockPlatform, 'topic-a', 'x', 1);
+			small.publish(mockPlatform, 'topic-b', 'x', 2);
+			small.publish(mockPlatform, 'topic-c', 'x', 3);
+
+			// Publish another message to topic-a, making it the most recently used
+			small.publish(mockPlatform, 'topic-a', 'x', 99);
+
+			// Adding topic-d should evict topic-b (now the LRU), not topic-a
+			small.publish(mockPlatform, 'topic-d', 'x', 4);
+
+			expect(small.seq('topic-a')).toBe(2); // still alive, seq incremented
+			expect(small.seq('topic-b')).toBe(0); // evicted
 			expect(small.seq('topic-c')).toBe(1);
 			expect(small.seq('topic-d')).toBe(1);
 		});

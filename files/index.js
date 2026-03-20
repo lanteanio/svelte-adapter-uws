@@ -6,6 +6,7 @@ import { env } from 'ENV';
 const host = env('HOST', '0.0.0.0');
 const port = env('PORT', '3000');
 const shutdown_timeout = parseInt(env('SHUTDOWN_TIMEOUT', '30'), 10);
+const shutdown_delay = parseInt(env('SHUTDOWN_DELAY_MS', '0'), 10);
 const cluster_workers = env('CLUSTER_WORKERS', '');
 
 const is_primary = cluster_workers && isMainThread;
@@ -59,7 +60,12 @@ if (is_primary) {
 
 	console.log(`Primary thread starting ${num} workers (${cluster_mode} mode)...`);
 
-	/** @type {Map<import('node:worker_threads').Worker, any>} */
+	/**
+	 * Per-worker metadata.
+	 * @typedef {{ descriptor: any, lastHeartbeat: number }} WorkerMeta
+	 */
+
+	/** @type {Map<import('node:worker_threads').Worker, WorkerMeta>} */
 	const workers = new Map();
 	let shutting_down = false;
 	let listening = false;
@@ -73,18 +79,46 @@ if (is_primary) {
 	/** @type {Set<ReturnType<typeof setTimeout>>} */
 	const restart_timers = new Set();
 
+	// Worker health monitoring: send a heartbeat every 10 s.
+	// A worker that has not responded within 30 s is assumed stuck (deadlock /
+	// infinite loop) and terminated so the exit handler can restart it.
+	// lastHeartbeat === 0 means the worker has not confirmed it is alive yet
+	// (still starting up)  - don't count that as unresponsive.
+	const HEARTBEAT_INTERVAL_MS = 10000;
+	const HEARTBEAT_TIMEOUT_MS = 30000;
+
+	setInterval(() => {
+		if (shutting_down) return;
+		const now = Date.now();
+		for (const [worker, meta] of workers) {
+			if (meta.lastHeartbeat > 0 && now - meta.lastHeartbeat > HEARTBEAT_TIMEOUT_MS) {
+				console.error(
+					`[primary] Worker ${worker.threadId} unresponsive ` +
+					`(no heartbeat ack in ${HEARTBEAT_TIMEOUT_MS}ms), terminating...`
+				);
+				worker.terminate();
+			} else {
+				worker.postMessage({ type: 'heartbeat' });
+			}
+		}
+	}, HEARTBEAT_INTERVAL_MS).unref();
+
 	function spawn_worker() {
 		const worker = new Worker(fileURLToPath(import.meta.url), {
 			workerData: { mode: cluster_mode }
 		});
-		workers.set(worker, null);
+		// lastHeartbeat starts at 0  - worker is confirmed alive only after the
+		// first 'descriptor' / 'ready' / 'heartbeat-ack' message arrives.
+		workers.set(worker, { descriptor: null, lastHeartbeat: 0 });
 
 		worker.on('message', (msg) => {
+			const meta = workers.get(worker);
 			if (msg.type === 'descriptor' && cluster_mode === 'acceptor') {
-				workers.set(worker, msg.descriptor);
+				meta.descriptor = msg.descriptor;
+				meta.lastHeartbeat = Date.now();
 				acceptorApp.addChildAppDescriptor(msg.descriptor);
 				console.log(`Worker thread ${worker.threadId} registered`);
-				// Worker started successfully  - reset backoff and attempt counter
+				// Worker started successfully - reset backoff and attempt counter
 				restart_delay = 0;
 				restart_attempts = 0;
 				for (const t of restart_timers) clearTimeout(t);
@@ -104,25 +138,36 @@ if (is_primary) {
 					});
 				}
 			} else if (msg.type === 'ready' && cluster_mode === 'reuseport') {
+				meta.lastHeartbeat = Date.now();
 				console.log(`Worker thread ${worker.threadId} listening on :${port}`);
 				restart_delay = 0;
 				restart_attempts = 0;
 				for (const t of restart_timers) clearTimeout(t);
 				restart_timers.clear();
+			} else if (msg.type === 'heartbeat-ack') {
+				if (meta) meta.lastHeartbeat = Date.now();
 			} else if (msg.type === 'publish') {
-				// Relay pub/sub to all OTHER workers
+				// Single relay (legacy / non-batched path)
 				for (const [w] of workers) {
 					if (w !== worker) w.postMessage(msg);
+				}
+			} else if (msg.type === 'publish-batch') {
+				// Batched relay: one postMessage per microtask from the publishing worker.
+				// Forward each message individually so receiving workers use the same
+				// single-message 'publish' path in their relayPublish handler.
+				for (const { topic, envelope } of msg.messages) {
+					const relay = { type: 'publish', topic, envelope };
+					for (const [w] of workers) {
+						if (w !== worker) w.postMessage(relay);
+					}
 				}
 			}
 		});
 
 		worker.on('exit', (code) => {
-			if (cluster_mode === 'acceptor') {
-				const descriptor = workers.get(worker);
-				if (descriptor) {
-					try { acceptorApp.removeChildAppDescriptor(descriptor); } catch {}
-				}
+			const meta = workers.get(worker);
+			if (cluster_mode === 'acceptor' && meta?.descriptor) {
+				try { acceptorApp.removeChildAppDescriptor(meta.descriptor); } catch {}
 			}
 			workers.delete(worker);
 			if (!shutting_down) {
@@ -131,7 +176,7 @@ if (is_primary) {
 				// In reuseport mode, each worker owns its listen socket -- when
 				// it dies, the kernel stops routing to it automatically.
 				if (cluster_mode === 'acceptor') {
-					const has_live_worker = [...workers.values()].some(d => d !== null);
+					const has_live_worker = [...workers.values()].some(m => m.descriptor !== null);
 					if (!has_live_worker && listen_socket) {
 						uWS.us_listen_socket_close(listen_socket);
 						listen_socket = null;
@@ -167,7 +212,7 @@ if (is_primary) {
 	for (let i = 0; i < num; i++) spawn_worker();
 
 	/** @param {'SIGINT' | 'SIGTERM'} reason */
-	function graceful_shutdown(reason) {
+	async function graceful_shutdown(reason) {
 		if (shutting_down) return;
 		shutting_down = true;
 		console.log(`Primary received ${reason}, shutting down ${workers.size} workers...`);
@@ -176,13 +221,21 @@ if (is_primary) {
 		for (const t of restart_timers) clearTimeout(t);
 		restart_timers.clear();
 
-		// Stop accepting new connections (acceptor mode only)
+		// Phase 1: Keep accepting connections until the load balancer has
+		// had time to remove this pod from rotation (Kubernetes rolling updates).
+		// SHUTDOWN_DELAY_MS=0 (default) skips this and is correct for non-k8s deploys.
+		if (shutdown_delay > 0) {
+			console.log(`[primary] Waiting ${shutdown_delay}ms for load balancer drain...`);
+			await new Promise((resolve) => setTimeout(resolve, shutdown_delay));
+		}
+
+		// Phase 2: Stop accepting new connections (acceptor mode only)
 		if (cluster_mode === 'acceptor' && listen_socket) {
 			uWS.us_listen_socket_close(listen_socket);
 			listen_socket = null;
 		}
 
-		// Tell workers to drain and exit
+		// Tell workers to drain and exit (workers handle their own drain timeout)
 		for (const [worker] of workers) {
 			worker.postMessage({ type: 'shutdown' });
 		}
@@ -221,6 +274,9 @@ if (is_primary) {
 				graceful_shutdown('shutdown');
 			} else if (msg.type === 'publish') {
 				relayPublish(msg.topic, msg.envelope);
+			} else if (msg.type === 'heartbeat') {
+				// Respond immediately  - primary uses acks to detect stuck workers.
+				parentPort.postMessage({ type: 'heartbeat-ack' });
 			}
 		});
 	}
@@ -233,6 +289,14 @@ if (is_primary) {
 		shutting_down = true;
 		const prefix = isMainThread ? '' : `[worker ${threadId}] `;
 		console.log(`${prefix}Received ${reason}, shutting down gracefully...`);
+
+		// Phase 1: Load balancer drain delay (only for OS signals, not when the
+		// primary tells us to shutdown  - the primary already waited its own delay).
+		if (shutdown_delay > 0 && (reason === 'SIGTERM' || reason === 'SIGINT')) {
+			console.log(`${prefix}Waiting ${shutdown_delay}ms for load balancer drain...`);
+			await new Promise((resolve) => setTimeout(resolve, shutdown_delay));
+		}
+
 		shutdown();
 		await Promise.race([
 			drain(),

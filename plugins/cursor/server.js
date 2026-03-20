@@ -20,6 +20,8 @@
  * @property {(userData: any) => any} [select] - Extract user-identifying data from
  *   the connection's userData. This is broadcast alongside the cursor data so other
  *   clients know who the cursor belongs to. Defaults to the full userData.
+ *   Should return JSON-serializable data (plain objects, arrays, strings, numbers,
+ *   booleans, null). The same applies to the `data` argument passed to `update()`.
  */
 
 /**
@@ -39,6 +41,8 @@
  *   Call this from your `close` hook.
  * @property {(topic: string) => CursorEntry[]} list -
  *   Get current cursor positions for a topic. Use in load() functions for SSR.
+ *   Returns deep copies (via structuredClone) when data is JSON-serializable.
+ *   Falls back to shared references for non-cloneable data.
  * @property {() => void} clear -
  *   Clear all cursor tracking state and pending timers.
  */
@@ -62,19 +66,15 @@
  *
  * @example
  * ```js
- * // src/hooks.ws.js
+ * // src/hooks.ws.js - using hooks helper
  * import { cursors } from '$lib/server/cursors';
  *
- * export function message(ws, data, { platform }) {
- *   const msg = JSON.parse(Buffer.from(data).toString());
- *   if (msg.type === 'cursor') {
- *     cursors.update(ws, msg.topic, msg.position, platform);
- *   }
+ * export function message(ws, ctx) {
+ *   if (cursors.hooks.message(ws, ctx)) return;
+ *   // handle other messages...
  * }
  *
- * export function close(ws, { platform }) {
- *   cursors.remove(ws, platform);
- * }
+ * export const close = cursors.hooks.close;
  * ```
  */
 export function createCursor(options = {}) {
@@ -133,7 +133,8 @@ export function createCursor(options = {}) {
 		platform.publish('__cursor:' + topic, 'update', { key, user, data });
 	}
 
-	return {
+	/** @type {CursorTracker} */
+	const tracker = {
 		update(ws, topic, data, platform) {
 			const state = getWsState(ws);
 			state.topics.add(topic);
@@ -209,9 +210,21 @@ export function createCursor(options = {}) {
 			if (!topicMap) return [];
 			const result = [];
 			for (const [key, entry] of topicMap) {
-				result.push({ key, user: entry.user, data: entry.data });
+				const item = { key, user: entry.user, data: entry.data };
+			try { result.push(structuredClone(item)); } catch { result.push(item); }
 			}
 			return result;
+		},
+
+		snapshot(ws, topic, platform) {
+			const topicMap = topics.get(topic);
+			const entries = [];
+			if (topicMap) {
+				for (const [key, entry] of topicMap) {
+					entries.push({ key, user: entry.user, data: entry.data });
+				}
+			}
+			platform.send(ws, '__cursor:' + topic, 'snapshot', entries);
 		},
 
 		clear() {
@@ -224,6 +237,28 @@ export function createCursor(options = {}) {
 			topics.clear();
 			wsState.clear();
 			connCounter = 0;
+		},
+
+		hooks: {
+			message(ws, { data, platform }) {
+				let parsed;
+				try { parsed = JSON.parse(new TextDecoder().decode(data)); } catch { return; }
+				if (parsed.type === 'cursor' && typeof parsed.topic === 'string') {
+					if (typeof ws.isSubscribed === 'function' && !ws.isSubscribed('__cursor:' + parsed.topic)) return true;
+					tracker.update(ws, parsed.topic, parsed.data ?? parsed.position, platform);
+					return true;
+				}
+				if (parsed.type === 'cursor-snapshot' && typeof parsed.topic === 'string') {
+					if (typeof ws.isSubscribed === 'function' && !ws.isSubscribed('__cursor:' + parsed.topic)) return true;
+					tracker.snapshot(ws, parsed.topic, platform);
+					return true;
+				}
+			},
+			close(ws, { platform }) {
+				tracker.remove(ws, platform);
+			}
 		}
 	};
+
+	return tracker;
 }
