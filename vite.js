@@ -1,4 +1,3 @@
-import { WebSocketServer } from 'ws';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { parseCookies } from './files/cookies.js';
@@ -34,7 +33,7 @@ function esc(s) {
 export default function uws(options = {}) {
 	const wsPath = options.path || '/ws';
 
-	/** @type {WebSocketServer} */
+	/** @type {import('ws').WebSocketServer | undefined} */
 	let wss;
 
 	/** @type {Map<import('ws').WebSocket, Set<string>>} */
@@ -240,13 +239,25 @@ export default function uws(options = {}) {
 				}
 			}
 		},
-		configureServer(server) {
+		async configureServer(server) {
 			// In middleware mode Vite does not own the HTTP server, so WS upgrade cannot be attached.
 			if (!server.httpServer) {
 				server.config.logger.warn(
 					'[svelte-adapter-uws] WebSocket support requires Vite to own the HTTP server. ' +
 					'It is not available in middleware mode (server.httpServer is null). ' +
 					'WebSocket features will be disabled in dev.'
+				);
+				return;
+			}
+
+			/** @type {typeof import('ws').WebSocketServer} */
+			let WebSocketServer;
+			try {
+				({ WebSocketServer } = await import('ws'));
+			} catch {
+				server.config.logger.warn(
+					'[svelte-adapter-uws] The "ws" package is not installed. ' +
+					'WebSocket features are disabled in dev. Install with: npm i -D ws'
 				);
 				return;
 			}
