@@ -1,5 +1,6 @@
 import type { Adapter } from '@sveltejs/kit';
 import type { WebSocket } from 'uWebSockets.js';
+export type { WebSocket } from 'uWebSockets.js';
 
 /**
  * ## Environment variables (runtime)
