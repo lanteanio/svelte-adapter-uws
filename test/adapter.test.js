@@ -116,6 +116,31 @@ describe('adapter options', () => {
 		});
 	});
 
+	describe('upgrade URL includes query string', () => {
+		function buildUpgradeUrl(getUrl, getQuery) {
+			const query = getQuery();
+			return query ? getUrl() + '?' + query : getUrl();
+		}
+
+		it('appends query string when present', () => {
+			expect(buildUpgradeUrl(() => '/ws', () => 'token=abc&foo=1')).toBe('/ws?token=abc&foo=1');
+		});
+
+		it('returns path alone when query is empty', () => {
+			expect(buildUpgradeUrl(() => '/ws', () => '')).toBe('/ws');
+		});
+
+		it('returns path alone when query is undefined', () => {
+			const query = undefined;
+			const url = query ? '/ws' + '?' + query : '/ws';
+			expect(url).toBe('/ws');
+		});
+
+		it('handles path with no trailing slash', () => {
+			expect(buildUpgradeUrl(() => '/custom/path', () => 'key=val')).toBe('/custom/path?key=val');
+		});
+	});
+
 	describe('WS_ENABLED flag', () => {
 		it('is true when websocket is configured', () => {
 			expect(JSON.stringify(!!{})).toBe('true');

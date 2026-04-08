@@ -358,7 +358,7 @@ export default function uws(options = {}) {
 							userHandlers.upgrade({
 								headers,
 								cookies: parseCookies(headers['cookie']),
-								url: pathname,
+								url: req.url || pathname,
 								remoteAddress: req.socket?.remoteAddress || ''
 							})
 						);

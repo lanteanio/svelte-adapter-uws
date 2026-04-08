@@ -630,7 +630,7 @@ The `upgrade` function receives an `UpgradeContext`:
 {
   headers: { 'cookie': '...', 'host': 'localhost:3000', ... },  // all lowercase
   cookies: { session_id: 'abc123', theme: 'dark' },             // parsed from Cookie header
-  url: '/ws',                                                    // request path
+  url: '/ws?token=abc',                                           // request path + query string
   remoteAddress: '127.0.0.1'                                     // client IP
 }
 ```

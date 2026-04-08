@@ -209,7 +209,7 @@ export interface UpgradeContext {
 	headers: Record<string, string>;
 	/** Parsed cookies from the Cookie header. */
 	cookies: Record<string, string>;
-	/** The request URL path. */
+	/** The request URL path, including query string if present (e.g. '/ws?token=abc'). */
 	url: string;
 	/** Remote IP address. */
 	remoteAddress: string;

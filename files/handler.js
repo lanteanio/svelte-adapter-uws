@@ -1471,7 +1471,8 @@ if (WS_ENABLED) {
 			}
 
 			// -- User upgrade handler path (may be async) --
-			const url = req.getUrl();
+			const query = req.getQuery();
+			const url = query ? req.getUrl() + '?' + query : req.getUrl();
 
 			let aborted = false;
 			res.onAborted(() => {
