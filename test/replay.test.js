@@ -61,6 +61,35 @@ describe('replay plugin - server', () => {
 			expect(result).toBe(true);
 		});
 
+		it('snapshots data so mutations do not affect buffered messages', () => {
+			const obj = { n: 1 };
+			replay.publish(mockPlatform, 'chat', 'created', obj);
+			obj.n = 999;
+
+			const messages = replay.since('chat', 0);
+			expect(messages[0].data.n).toBe(1);
+		});
+
+		it('snapshots nested objects', () => {
+			const obj = { user: { name: 'Alice' } };
+			replay.publish(mockPlatform, 'chat', 'joined', obj);
+			obj.user.name = 'Bob';
+
+			const messages = replay.since('chat', 0);
+			expect(messages[0].data.user.name).toBe('Alice');
+		});
+
+		it('handles primitive data without cloning', () => {
+			replay.publish(mockPlatform, 'chat', 'count', 42);
+			replay.publish(mockPlatform, 'chat', 'label', 'hello');
+			replay.publish(mockPlatform, 'chat', 'flag', null);
+
+			const messages = replay.since('chat', 0);
+			expect(messages[0].data).toBe(42);
+			expect(messages[1].data).toBe('hello');
+			expect(messages[2].data).toBeNull();
+		});
+
 		it('increments the sequence number', () => {
 			expect(replay.seq('chat')).toBe(0);
 			replay.publish(mockPlatform, 'chat', 'created', { id: 1 });

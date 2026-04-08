@@ -80,12 +80,22 @@ export default function uws(options = {}) {
 			getBufferedAmount() { return rawWs.bufferedAmount || 0; },
 			getRemoteAddress() {
 				// uWS returns raw binary bytes (4 for IPv4, 16 for IPv6).
-				// Dev only handles IPv4; exotic addresses fall back to text encoding.
 				const ip = rawWs._socket?.remoteAddress || '127.0.0.1';
 				const v4 = ip.replace(/^::ffff:/, '');
 				const parts = v4.split('.');
 				if (parts.length === 4) return new Uint8Array(parts.map(Number)).buffer;
-				return new TextEncoder().encode(ip).buffer;
+				// IPv6: expand :: into zeroes, pack 8 groups into 16 bytes
+				const halves = v4.split('::');
+				const left = halves[0] ? halves[0].split(':') : [];
+				const right = halves.length > 1 && halves[1] ? halves[1].split(':') : [];
+				const pad = Array(8 - left.length - right.length).fill('0');
+				const groups = [...left, ...pad, ...right].map(g => parseInt(g, 16));
+				const buf = new Uint8Array(16);
+				for (let i = 0; i < 8; i++) {
+					buf[i * 2] = (groups[i] >> 8) & 0xff;
+					buf[i * 2 + 1] = groups[i] & 0xff;
+				}
+				return buf.buffer;
 			},
 			getRemoteAddressAsText() {
 				return new TextEncoder().encode(rawWs._socket?.remoteAddress || '127.0.0.1').buffer;
@@ -103,7 +113,7 @@ export default function uws(options = {}) {
 	 * @returns {boolean}
 	 */
 	function publish(topic, event, data, _options) {
-		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}';
+		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + '}';
 		let sent = false;
 		for (const [ws, topics] of subscriptions) {
 			if (topics.has(topic) && ws.readyState === 1) {
@@ -123,7 +133,7 @@ export default function uws(options = {}) {
 	 * @returns {number}
 	 */
 	function send(ws, topic, event, data) {
-		return ws.send('{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}', false, false) ?? 1;
+		return ws.send('{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + '}', false, false) ?? 1;
 	}
 
 	/**
@@ -135,7 +145,7 @@ export default function uws(options = {}) {
 	 * @returns {number}
 	 */
 	function sendTo(filter, topic, event, data) {
-		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data) + '}';
+		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + '}';
 		let count = 0;
 		for (const [, wrapped] of wsWrappers) {
 			if (filter(wrapped.getUserData())) {
@@ -198,7 +208,8 @@ export default function uws(options = {}) {
 			message: mod.message,
 			close: mod.close,
 			drain: mod.drain,
-			subscribe: mod.subscribe
+			subscribe: mod.subscribe,
+			unsubscribe: mod.unsubscribe
 		};
 	}
 
@@ -480,7 +491,8 @@ export default function uws(options = {}) {
 					mod.message !== userHandlers.message ||
 					mod.close !== userHandlers.close ||
 					mod.drain !== userHandlers.drain ||
-					mod.subscribe !== userHandlers.subscribe) {
+					mod.subscribe !== userHandlers.subscribe ||
+					mod.unsubscribe !== userHandlers.unsubscribe) {
 					applyHandlers(mod);
 					// Close existing connections so they reconnect with the new handler.
 					// 1012 = "Service Restart" - clients with auto-reconnect will reconnect.

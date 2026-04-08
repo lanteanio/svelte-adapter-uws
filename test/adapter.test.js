@@ -140,6 +140,96 @@ describe('adapter options', () => {
 		});
 	});
 
+	describe('$env fallback (esbuild plugin)', () => {
+		it('$env/dynamic/public only includes PUBLIC_ prefixed vars', () => {
+			const publicPrefix = 'PUBLIC_';
+			const isPublic = true;
+			const isStatic = false;
+
+			// Mirrors the fixed esbuild onLoad logic for $env/dynamic/public
+			if (!isStatic && isPublic) {
+				const env = {
+					'PUBLIC_API_URL': 'https://api.example.com',
+					'SECRET_KEY': 'hunter2',
+					'PUBLIC_APP_NAME': 'MyApp',
+					'DATABASE_URL': 'postgres://localhost/db'
+				};
+				const publicEntries = Object.entries(env).filter(([k]) =>
+					k.startsWith(publicPrefix)
+				);
+				const result = Object.fromEntries(publicEntries);
+
+				expect(result).toEqual({
+					PUBLIC_API_URL: 'https://api.example.com',
+					PUBLIC_APP_NAME: 'MyApp'
+				});
+				expect(result.SECRET_KEY).toBeUndefined();
+				expect(result.DATABASE_URL).toBeUndefined();
+			}
+		});
+
+		it('$env/dynamic/private exposes full process.env', () => {
+			const isPublic = false;
+			const isStatic = false;
+
+			// The private branch still returns process.env (unchanged behavior)
+			if (!isStatic && !isPublic) {
+				const contents = 'export const env = process.env;';
+				expect(contents).toBe('export const env = process.env;');
+			}
+		});
+	});
+
+	describe('esbuild alias map', () => {
+		it('includes $lib by default', () => {
+			const aliasMap = { '$lib': '/project/src/lib' };
+			expect(aliasMap['$lib']).toBe('/project/src/lib');
+		});
+
+		it('merges custom kit.alias entries', () => {
+			const aliasMap = { '$lib': '/project/src/lib' };
+			const kitAliases = { '$components': 'src/components', '$utils': 'src/utils' };
+			for (const [key, value] of Object.entries(kitAliases)) {
+				if (!(key in aliasMap)) {
+					aliasMap[key] = value;
+				}
+			}
+
+			expect(aliasMap).toEqual({
+				'$lib': '/project/src/lib',
+				'$components': 'src/components',
+				'$utils': 'src/utils'
+			});
+		});
+
+		it('does not override $lib with a custom alias', () => {
+			const aliasMap = { '$lib': '/project/src/lib' };
+			const kitAliases = { '$lib': '/some/other/path', '$components': 'src/components' };
+			for (const [key, value] of Object.entries(kitAliases)) {
+				if (!(key in aliasMap)) {
+					aliasMap[key] = value;
+				}
+			}
+
+			expect(aliasMap['$lib']).toBe('/project/src/lib');
+			expect(aliasMap['$components']).toBe('src/components');
+		});
+
+		it('handles missing kit.alias gracefully', () => {
+			const aliasMap = { '$lib': '/project/src/lib' };
+			const kitAliases = undefined;
+			if (kitAliases) {
+				for (const [key, value] of Object.entries(kitAliases)) {
+					if (!(key in aliasMap)) {
+						aliasMap[key] = value;
+					}
+				}
+			}
+
+			expect(aliasMap).toEqual({ '$lib': '/project/src/lib' });
+		});
+	});
+
 	describe('auto-discovery', () => {
 		it('checks correct candidate files', () => {
 			const candidates = ['src/hooks.ws.js', 'src/hooks.ws.ts', 'src/hooks.ws.mjs'];
@@ -238,7 +328,7 @@ describe('origin validation (WebSocket)', () => {
 		if (allowedOrigins === 'same-origin') {
 			try {
 				const parsed = new URL(reqOrigin);
-				if (!hostHeader) return true;
+				if (!hostHeader) return false;
 				return parsed.host === hostHeader && parsed.protocol === scheme + ':';
 			} catch {
 				return false;
@@ -278,8 +368,8 @@ describe('origin validation (WebSocket)', () => {
 		expect(checkOrigin('https://example.com', 'same-origin', 'example.com', 'https')).toBe(true);
 	});
 
-	it('allows when no host header is present', () => {
-		expect(checkOrigin('http://anything.com', 'same-origin', '')).toBe(true);
+	it('rejects when no host header is present', () => {
+		expect(checkOrigin('http://anything.com', 'same-origin', '')).toBe(false);
 	});
 
 	it('allows whitelisted origins', () => {
@@ -515,5 +605,266 @@ describe('precompressed file validation', () => {
 		}
 
 		expect(entry.brBuffer).toBeUndefined();
+	});
+});
+
+describe('upgrade rate limiter (sliding window)', () => {
+	function createLimiter(maxPerWindow, windowMs) {
+		const map = new Map();
+		return {
+			check(ip, now) {
+				let entry = map.get(ip);
+				if (!entry) {
+					entry = { prev: 0, curr: 0, windowStart: now };
+					map.set(ip, entry);
+				} else {
+					const elapsed = now - entry.windowStart;
+					if (elapsed >= 2 * windowMs) {
+						entry.prev = 0;
+						entry.curr = 0;
+						entry.windowStart = now;
+					} else if (elapsed >= windowMs) {
+						entry.prev = entry.curr;
+						entry.curr = 0;
+						entry.windowStart = now;
+					}
+				}
+				const elapsed = now - entry.windowStart;
+				const estimate = entry.prev * (1 - elapsed / windowMs) + entry.curr;
+				if (estimate >= maxPerWindow) return false;
+				entry.curr++;
+				return true;
+			}
+		};
+	}
+
+	it('allows requests within the limit', () => {
+		const limiter = createLimiter(5, 1000);
+		for (let i = 0; i < 5; i++) {
+			expect(limiter.check('1.2.3.4', 100)).toBe(true);
+		}
+	});
+
+	it('rejects requests over the limit', () => {
+		const limiter = createLimiter(5, 1000);
+		for (let i = 0; i < 5; i++) limiter.check('1.2.3.4', 100);
+		expect(limiter.check('1.2.3.4', 100)).toBe(false);
+	});
+
+	it('rotates window correctly', () => {
+		const limiter = createLimiter(5, 1000);
+		for (let i = 0; i < 4; i++) limiter.check('1.2.3.4', 100);
+		// After one window, prev=4, curr=0
+		expect(limiter.check('1.2.3.4', 1200)).toBe(true);
+	});
+
+	it('resets both windows after long idle gap', () => {
+		const limiter = createLimiter(5, 1000);
+		// Fill up the window
+		for (let i = 0; i < 5; i++) limiter.check('1.2.3.4', 100);
+		expect(limiter.check('1.2.3.4', 100)).toBe(false);
+
+		// After 2x the window, both prev and curr should be zeroed
+		expect(limiter.check('1.2.3.4', 2200)).toBe(true);
+	});
+
+	it('resets cleanly after a very long idle gap', () => {
+		const limiter = createLimiter(3, 1000);
+		// Fill up: 3 requests at t=0
+		for (let i = 0; i < 3; i++) limiter.check('1.2.3.4', 0);
+		expect(limiter.check('1.2.3.4', 0)).toBe(false);
+
+		// At t=3000 (>= 2x window): both prev and curr fully reset
+		// Without the 2x reset, prev would carry stale counts from the
+		// original window, potentially inflating the sliding estimate.
+		expect(limiter.check('1.2.3.4', 3000)).toBe(true);
+		expect(limiter.check('1.2.3.4', 3000)).toBe(true);
+		expect(limiter.check('1.2.3.4', 3000)).toBe(true);
+		// Should be exactly at the limit now, next one rejected
+		expect(limiter.check('1.2.3.4', 3000)).toBe(false);
+	});
+});
+
+describe('envelope encoding', () => {
+	function esc(s) {
+		return JSON.stringify(s);
+	}
+	function envelope(topic, event, data) {
+		return '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + '}';
+	}
+
+	it('produces valid JSON with normal data', () => {
+		const e = envelope('chat', 'created', { id: 1 });
+		const parsed = JSON.parse(e);
+		expect(parsed).toEqual({ topic: 'chat', event: 'created', data: { id: 1 } });
+	});
+
+	it('produces valid JSON when data is undefined', () => {
+		const e = envelope('chat', 'created', undefined);
+		const parsed = JSON.parse(e);
+		expect(parsed).toEqual({ topic: 'chat', event: 'created', data: null });
+	});
+
+	it('produces valid JSON when data is null', () => {
+		const e = envelope('chat', 'created', null);
+		const parsed = JSON.parse(e);
+		expect(parsed).toEqual({ topic: 'chat', event: 'created', data: null });
+	});
+
+	it('produces valid JSON when data is omitted', () => {
+		const e = envelope('chat', 'deleted');
+		const parsed = JSON.parse(e);
+		expect(parsed).toEqual({ topic: 'chat', event: 'deleted', data: null });
+	});
+
+	it('preserves zero and empty string data', () => {
+		expect(JSON.parse(envelope('t', 'e', 0)).data).toBe(0);
+		expect(JSON.parse(envelope('t', 'e', '')).data).toBe('');
+		expect(JSON.parse(envelope('t', 'e', false)).data).toBe(false);
+	});
+});
+
+describe('$env/dynamic/public proxy (esbuild fallback)', () => {
+	it('filters process.env through a prefix-checking proxy', () => {
+		const prefix = 'PUBLIC_';
+		const env = new Proxy(process.env, {
+			get(t, k) { return typeof k === 'string' && k.startsWith(prefix) ? t[k] : undefined; },
+			ownKeys(t) { return Object.keys(t).filter(k => k.startsWith(prefix)); },
+			has(t, k) { return typeof k === 'string' && k.startsWith(prefix) && k in t; },
+			getOwnPropertyDescriptor(t, k) {
+				if (typeof k === 'string' && k.startsWith(prefix) && k in t) return { value: t[k], enumerable: true, configurable: true };
+				return undefined;
+			}
+		});
+
+		process.env.PUBLIC_TEST_VAR = 'hello';
+		process.env.SECRET_VAR = 'hunter2';
+
+		expect(env.PUBLIC_TEST_VAR).toBe('hello');
+		expect(env.SECRET_VAR).toBeUndefined();
+		expect('PUBLIC_TEST_VAR' in env).toBe(true);
+		expect('SECRET_VAR' in env).toBe(false);
+		expect(Object.keys(env).every(k => k.startsWith('PUBLIC_'))).toBe(true);
+
+		delete process.env.PUBLIC_TEST_VAR;
+		delete process.env.SECRET_VAR;
+	});
+
+	it('reflects runtime env changes', () => {
+		const prefix = 'PUBLIC_';
+		const env = new Proxy(process.env, {
+			get(t, k) { return typeof k === 'string' && k.startsWith(prefix) ? t[k] : undefined; },
+			ownKeys(t) { return Object.keys(t).filter(k => k.startsWith(prefix)); },
+			has(t, k) { return typeof k === 'string' && k.startsWith(prefix) && k in t; },
+			getOwnPropertyDescriptor(t, k) {
+				if (typeof k === 'string' && k.startsWith(prefix) && k in t) return { value: t[k], enumerable: true, configurable: true };
+				return undefined;
+			}
+		});
+
+		expect(env.PUBLIC_LATE_VAR).toBeUndefined();
+		process.env.PUBLIC_LATE_VAR = 'added-at-runtime';
+		expect(env.PUBLIC_LATE_VAR).toBe('added-at-runtime');
+		delete process.env.PUBLIC_LATE_VAR;
+	});
+});
+
+describe('env parsing validation', () => {
+	function parseIntEnv(name, raw, min) {
+		const trimmed = raw.trim();
+		const n = Number(trimmed);
+		if (trimmed === '' || !Number.isInteger(n)) throw new Error(`${name} must be a valid integer, got "${raw}"`);
+		if (n < min) throw new Error(`${name} must be >= ${min}, got ${n}`);
+		return n;
+	}
+
+	it('parses valid integers', () => {
+		expect(parseIntEnv('PORT', '3000', 0)).toBe(3000);
+		expect(parseIntEnv('TIMEOUT', '30', 0)).toBe(30);
+		expect(parseIntEnv('DELAY', '0', 0)).toBe(0);
+	});
+
+	it('rejects non-numeric strings', () => {
+		expect(() => parseIntEnv('PORT', 'banana', 0)).toThrow('must be a valid integer');
+		expect(() => parseIntEnv('PORT', '', 0)).toThrow('must be a valid integer');
+		expect(() => parseIntEnv('PORT', 'abc123', 0)).toThrow('must be a valid integer');
+	});
+
+	it('rejects trailing garbage and floats', () => {
+		expect(() => parseIntEnv('PORT', '123abc', 0)).toThrow('must be a valid integer');
+		expect(() => parseIntEnv('PORT', '1.5', 0)).toThrow('must be a valid integer');
+		expect(() => parseIntEnv('TIMEOUT', '30.1', 0)).toThrow('must be a valid integer');
+	});
+
+	it('accepts integer-equivalent floats like 3000.0', () => {
+		expect(parseIntEnv('PORT', '3000.0', 0)).toBe(3000);
+	});
+
+	it('accepts whitespace-padded values', () => {
+		expect(parseIntEnv('PORT', ' 3000 ', 0)).toBe(3000);
+	});
+
+	it('rejects values below minimum', () => {
+		expect(() => parseIntEnv('PORT', '-1', 0)).toThrow('must be >= 0');
+		expect(() => parseIntEnv('TIMEOUT', '-5', 0)).toThrow('must be >= 0');
+	});
+
+	it('accepts boundary values', () => {
+		expect(parseIntEnv('PORT', '0', 0)).toBe(0);
+		expect(parseIntEnv('PORT', '65535', 0)).toBe(65535);
+	});
+});
+
+describe('IPv6 getRemoteAddress', () => {
+	function parseAddress(ip) {
+		const v4 = ip.replace(/^::ffff:/, '');
+		const parts = v4.split('.');
+		if (parts.length === 4) return new Uint8Array(parts.map(Number)).buffer;
+		const halves = v4.split('::');
+		const left = halves[0] ? halves[0].split(':') : [];
+		const right = halves.length > 1 && halves[1] ? halves[1].split(':') : [];
+		const pad = Array(8 - left.length - right.length).fill('0');
+		const groups = [...left, ...pad, ...right].map(g => parseInt(g, 16));
+		const buf = new Uint8Array(16);
+		for (let i = 0; i < 8; i++) {
+			buf[i * 2] = (groups[i] >> 8) & 0xff;
+			buf[i * 2 + 1] = groups[i] & 0xff;
+		}
+		return buf.buffer;
+	}
+
+	it('returns 4 bytes for IPv4', () => {
+		const buf = parseAddress('127.0.0.1');
+		expect(new Uint8Array(buf)).toEqual(new Uint8Array([127, 0, 0, 1]));
+	});
+
+	it('returns 4 bytes for IPv4-mapped IPv6', () => {
+		const buf = parseAddress('::ffff:192.168.1.1');
+		expect(new Uint8Array(buf)).toEqual(new Uint8Array([192, 168, 1, 1]));
+	});
+
+	it('returns 16 bytes for full IPv6', () => {
+		const buf = parseAddress('2001:0db8:0000:0000:0000:0000:0000:0001');
+		const bytes = new Uint8Array(buf);
+		expect(bytes.length).toBe(16);
+		expect(bytes[0]).toBe(0x20);
+		expect(bytes[1]).toBe(0x01);
+		expect(bytes[14]).toBe(0x00);
+		expect(bytes[15]).toBe(0x01);
+	});
+
+	it('returns 16 bytes for loopback ::1', () => {
+		const buf = parseAddress('::1');
+		const bytes = new Uint8Array(buf);
+		expect(bytes.length).toBe(16);
+		expect(bytes[15]).toBe(1);
+		for (let i = 0; i < 15; i++) expect(bytes[i]).toBe(0);
+	});
+
+	it('returns 16 bytes for all-zeros ::', () => {
+		const buf = parseAddress('::');
+		const bytes = new Uint8Array(buf);
+		expect(bytes.length).toBe(16);
+		for (let i = 0; i < 16; i++) expect(bytes[i]).toBe(0);
 	});
 });

@@ -408,7 +408,7 @@ const platform = {
 	 * No-op if no clients are subscribed - safe to call unconditionally.
 	 */
 	publish(topic, event, data, options) {
-		const envelope = envelopePrefix(topic, event) + JSON.stringify(data) + '}';
+		const envelope = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
 		const result = app.publish(topic, envelope, false, false);
 		// Relay to other workers via main thread (no-op in single-process mode).
 		// Pass { relay: false } when the message originates from an external
@@ -433,7 +433,7 @@ const platform = {
 	 * Wraps in the same { topic, event, data } envelope as publish().
 	 */
 	send(ws, topic, event, data) {
-		return ws.send(envelopePrefix(topic, event) + JSON.stringify(data) + '}', false, false);
+		return ws.send(envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}', false, false);
 	},
 
 	/**
@@ -442,7 +442,7 @@ const platform = {
 	 * Returns the number of connections the message was sent to.
 	 */
 	sendTo(filter, topic, event, data) {
-		const envelope = envelopePrefix(topic, event) + JSON.stringify(data) + '}';
+		const envelope = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
 		let count = 0;
 		for (const ws of wsConnections) {
 			if (filter(ws.getUserData())) {
@@ -1381,8 +1381,11 @@ if (WS_ENABLED) {
 					upgradeRateMap.set(clientIp, rateEntry);
 				} else {
 					const elapsed = now - rateEntry.windowStart;
-					if (elapsed >= UPGRADE_WINDOW_MS) {
-						// Current window is complete  - rotate it into the previous slot
+					if (elapsed >= 2 * UPGRADE_WINDOW_MS) {
+						rateEntry.prev = 0;
+						rateEntry.curr = 0;
+						rateEntry.windowStart = now;
+					} else if (elapsed >= UPGRADE_WINDOW_MS) {
 						rateEntry.prev = rateEntry.curr;
 						rateEntry.curr = 0;
 						rateEntry.windowStart = now;
@@ -1423,7 +1426,7 @@ if (WS_ENABLED) {
 						const parsed = new URL(reqOrigin);
 						const requestHost = (host_header && headers[host_header]) || headers['host'];
 						if (!requestHost) {
-							allowed = true;
+							allowed = false;
 						} else {
 							const requestScheme = protocol_header
 								? (headers[protocol_header] || (is_tls ? 'https' : 'http'))

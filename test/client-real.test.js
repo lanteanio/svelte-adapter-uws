@@ -230,6 +230,391 @@ describe('client.js (real module)', () => {
 		});
 	});
 
+	describe('visibility reconnect on tab resume', () => {
+		it('reconnects immediately when tab resumes after hidden disconnect', async () => {
+			const origDoc = globalThis.document;
+			let visibilityHandler;
+			globalThis.document = {
+				hidden: false,
+				addEventListener(evt, fn) { if (evt === 'visibilitychange') visibilityHandler = fn; },
+				removeEventListener() {}
+			};
+
+			const conn = clientModule.connect();
+			await flush();
+			const ws1 = MockWebSocket._last;
+
+			// Simulate network drop while tab is hidden
+			globalThis.document.hidden = true;
+			visibilityHandler?.();
+
+			ws1.readyState = MockWebSocket.CLOSED;
+			ws1.onclose?.({ code: 1006 });
+
+			// Resume tab -- should reconnect immediately
+			globalThis.document.hidden = false;
+			visibilityHandler?.();
+			await flush();
+
+			expect(MockWebSocket._last).not.toBe(ws1);
+			expect(MockWebSocket._last.url).toBe('ws://localhost:5173/ws');
+
+			globalThis.document = origDoc;
+			conn.close();
+		});
+
+		it('clears pending reconnect timer on tab resume', async () => {
+			vi.useFakeTimers();
+			const origDoc = globalThis.document;
+			let visibilityHandler;
+			globalThis.document = {
+				hidden: false,
+				addEventListener(evt, fn) { if (evt === 'visibilitychange') visibilityHandler = fn; },
+				removeEventListener() {}
+			};
+
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const ws1 = MockWebSocket._last;
+
+			// Drop connection (starts backoff timer)
+			ws1.readyState = MockWebSocket.CLOSED;
+			ws1.onclose?.({ code: 1006 });
+
+			// Tab resumes -- should reconnect immediately, not wait for backoff
+			globalThis.document.hidden = false;
+			visibilityHandler?.();
+			await vi.advanceTimersByTimeAsync(0);
+
+			expect(MockWebSocket._last).not.toBe(ws1);
+
+			globalThis.document = origDoc;
+			vi.useRealTimers();
+			conn.close();
+		});
+	});
+
+	describe('once()', () => {
+		it('resolves with the first matching event', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const p = clientModule.once('once-topic');
+			ws._receive({ topic: 'once-topic', event: 'hello', data: 42 });
+
+			const result = await p;
+			expect(result.data).toBe(42);
+
+			conn.close();
+		});
+
+		it('resolves with filtered event when event name is provided', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const p = clientModule.once('once-filtered', 'created');
+			ws._receive({ topic: 'once-filtered', event: 'deleted', data: 'no' });
+			ws._receive({ topic: 'once-filtered', event: 'created', data: 'yes' });
+
+			const result = await p;
+			expect(result.data).toBe('yes');
+
+			conn.close();
+		});
+
+		it('rejects on timeout', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+
+			const p = clientModule.once('once-timeout', { timeout: 1000 });
+			vi.advanceTimersByTime(1001);
+
+			await expect(p).rejects.toThrow('timed out');
+
+			vi.useRealTimers();
+			conn.close();
+		});
+
+		it('timeout with event name includes event in error', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+
+			const p = clientModule.once('once-evt-timeout', 'specific', { timeout: 500 });
+			vi.advanceTimersByTime(501);
+
+			await expect(p).rejects.toThrow("'specific'");
+
+			vi.useRealTimers();
+			conn.close();
+		});
+	});
+
+	describe('onDerived()', () => {
+		it('subscribes to a topic derived from a source store', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			// Create a minimal writable store to use as source
+			let sourceValue = 'room-1';
+			const subscribers = new Set();
+			const sourceStore = {
+				subscribe(fn) {
+					subscribers.add(fn);
+					fn(sourceValue);
+					return () => subscribers.delete(fn);
+				}
+			};
+
+			const derived = clientModule.onDerived((id) => `room:${id}`, sourceStore);
+			const values = [];
+			const unsub = derived.subscribe((v) => { if (v) values.push(v); });
+			await flush();
+
+			ws._receive({ topic: 'room:room-1', event: 'msg', data: 'hello' });
+			expect(values).toHaveLength(1);
+			expect(values[0].topic).toBe('room:room-1');
+
+			unsub();
+			conn.close();
+		});
+
+		it('returns null when source value is null', async () => {
+			const conn = clientModule.connect();
+			await flush();
+
+			const sourceStore = {
+				subscribe(fn) {
+					fn(null);
+					return () => {};
+				}
+			};
+
+			const derived = clientModule.onDerived((id) => `room:${id}`, sourceStore);
+			let value = 'not-null';
+			const unsub = derived.subscribe((v) => { value = v; });
+
+			expect(value).toBeNull();
+
+			unsub();
+			conn.close();
+		});
+	});
+
+	describe('maxReconnectAttempts exhaustion', () => {
+		it('stops reconnecting after maxReconnectAttempts consecutive failures', async () => {
+			vi.useFakeTimers();
+
+			// Make subsequent connections fail by throwing in the constructor
+			let connectCount = 0;
+			const OrigWS = globalThis.WebSocket;
+			globalThis.WebSocket = class extends MockWebSocket {
+				constructor(url) {
+					super(url);
+					connectCount++;
+					if (connectCount > 1) {
+						// Simulate connection failure
+						this.readyState = MockWebSocket.CLOSED;
+						queueMicrotask(() => {
+							this.onclose?.({ code: 1006 });
+						});
+					}
+				}
+			};
+			globalThis.WebSocket.CONNECTING = 0;
+			globalThis.WebSocket.OPEN = 1;
+			globalThis.WebSocket.CLOSING = 2;
+			globalThis.WebSocket.CLOSED = 3;
+
+			const conn = clientModule.connect({ maxReconnectAttempts: 2 });
+			await vi.advanceTimersByTimeAsync(0);
+
+			// Initial connection succeeds (connectCount=1)
+			const ws1 = MockWebSocket._last;
+			ws1.readyState = MockWebSocket.CLOSED;
+			ws1.onclose?.({ code: 1006 });
+
+			// Reconnect attempt 1 fails (connectCount=2)
+			await vi.advanceTimersByTimeAsync(5000);
+
+			// Reconnect attempt 2 fails (connectCount=3)
+			await vi.advanceTimersByTimeAsync(10000);
+
+			const lastWs = MockWebSocket._last;
+			// No more reconnects after exhaustion
+			await vi.advanceTimersByTimeAsync(60000);
+			expect(MockWebSocket._last).toBe(lastWs);
+			expect(connectCount).toBe(3);
+
+			globalThis.WebSocket = OrigWS;
+			vi.useRealTimers();
+			conn.close();
+		});
+	});
+
+	describe('throttle close code', () => {
+		it('jumps ahead in backoff on rate-limit close code (4429)', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const ws1 = MockWebSocket._last;
+
+			ws1.readyState = MockWebSocket.CLOSED;
+			ws1.onclose?.({ code: 4429 });
+
+			// Should still reconnect (not terminal), but with higher backoff
+			await vi.advanceTimersByTimeAsync(60000);
+			expect(MockWebSocket._last).not.toBe(ws1);
+
+			vi.useRealTimers();
+			conn.close();
+		});
+	});
+
+	describe('debug mode', () => {
+		it('logs all WebSocket lifecycle events when debug is true', async () => {
+			const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const conn = clientModule.connect({ debug: true });
+			await flush();
+
+			const ws = MockWebSocket._last;
+
+			// Subscribe to a topic so resubscription is tested on reconnect
+			const store = clientModule.on('debug-topic');
+			const unsub = store.subscribe(() => {});
+			await flush();
+
+			// Send + sendQueued while connected
+			conn.send({ type: 'ping' });
+			conn.sendQueued({ type: 'queued-while-open' });
+
+			// Queue a message while disconnected
+			ws.readyState = MockWebSocket.CLOSED;
+			ws.onclose?.({ code: 1006 });
+			conn.sendQueued({ type: 'queued-while-closed' });
+
+			// Reconnect -> should log resubscribe-batch and flush
+			await new Promise((r) => setTimeout(r, 50));
+			await flush();
+
+			const allLogs = logSpy.mock.calls.map(c => String(c[0]));
+			expect(allLogs.some(m => m.includes('[ws] connected'))).toBe(true);
+			expect(allLogs.some(m => m.includes('[ws] subscribe'))).toBe(true);
+			expect(allLogs.some(m => m.includes('[ws] send'))).toBe(true);
+			expect(allLogs.some(m => m.includes('[ws] disconnected'))).toBe(true);
+			expect(allLogs.some(m => m.includes('[ws] queued'))).toBe(true);
+
+			unsub();
+			logSpy.mockRestore();
+			warnSpy.mockRestore();
+			conn.close();
+		});
+
+		it('logs terminal close with debug', async () => {
+			const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const conn = clientModule.connect({ debug: true });
+			await flush();
+
+			const ws = MockWebSocket._last;
+			ws.readyState = MockWebSocket.CLOSED;
+			ws.onclose?.({ code: 1008 });
+
+			const warns = warnSpy.mock.calls.map(c => String(c[0]));
+			expect(warns.some(m => m.includes('permanently closed'))).toBe(true);
+
+			logSpy.mockRestore();
+			warnSpy.mockRestore();
+			conn.close();
+		});
+	});
+
+	describe('oversized message rejection', () => {
+		it('drops messages larger than 1MB', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = clientModule.on('big-topic');
+			const events = [];
+			const unsub = store.subscribe((v) => { if (v) events.push(v); });
+			await flush();
+
+			// Simulate a >1MB message
+			const bigData = 'x'.repeat(1048577);
+			ws.onmessage?.({ data: bigData });
+
+			expect(events).toHaveLength(0);
+
+			unsub();
+			conn.close();
+		});
+	});
+
+	describe('visibility cleanup on close()', () => {
+		it('removes visibilitychange listener on close()', async () => {
+			const origDoc = globalThis.document;
+			let removed = false;
+			globalThis.document = {
+				hidden: false,
+				addEventListener() {},
+				removeEventListener(evt) { if (evt === 'visibilitychange') removed = true; }
+			};
+
+			const conn = clientModule.connect();
+			await flush();
+			conn.close();
+			expect(removed).toBe(true);
+
+			globalThis.document = origDoc;
+		});
+	});
+
+	describe('sendQueued overflow', () => {
+		it('drops oldest message when queue is full', async () => {
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			// Close connection so messages go to queue
+			ws.readyState = MockWebSocket.CLOSED;
+			ws.onclose?.({ code: 1006 });
+
+			// Fill queue to MAX_QUEUE_SIZE (1000)
+			for (let i = 0; i < 1001; i++) {
+				conn.sendQueued({ i });
+			}
+
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('queue full'));
+			warnSpy.mockRestore();
+			conn.close();
+		});
+	});
+
+	describe('zombie connection detection', () => {
+		it('force-closes a silent connection after SERVER_TIMEOUT_MS', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const ws = MockWebSocket._last;
+
+			// Advance past SERVER_TIMEOUT_MS (150s) + one 30s interval
+			vi.advanceTimersByTime(180000);
+
+			// The zombie detection should have called ws.close()
+			expect(ws.readyState).toBe(MockWebSocket.CLOSED);
+
+			vi.useRealTimers();
+			conn.close();
+		});
+	});
+
 	describe('ready()', () => {
 		it('resolves when connection is open', async () => {
 			const p = clientModule.ready();
@@ -254,6 +639,42 @@ describe('client.js (real module)', () => {
 			ws.readyState = MockWebSocket.CLOSED;
 			ws.onclose?.({ code: 1008 });
 			await expect(p).rejects.toThrow('permanently closed');
+		});
+	});
+
+	describe('ready() SSR', () => {
+		it('resolves immediately in SSR when no url is set', async () => {
+			clientModule.connect();
+			await flush();
+
+			const savedWindow = globalThis.window;
+			delete globalThis.window;
+			try {
+				const p = clientModule.ready();
+				await p;
+			} finally {
+				globalThis.window = savedWindow;
+			}
+			clientModule.connect().close();
+		});
+
+		it('waits for connection in native app (no window, but url is set)', async () => {
+			const savedWindow = globalThis.window;
+			delete globalThis.window;
+			try {
+				clientModule.connect({ url: 'ws://backend.example.com/ws' });
+				const p = clientModule.ready();
+				// Should NOT resolve immediately - it should wait for the WS to open
+				let resolved = false;
+				p.then(() => { resolved = true; });
+				// Give microtasks a chance
+				await new Promise((r) => setTimeout(r, 0));
+				// The mock auto-opens after a microtask, so it should resolve
+				expect(resolved).toBe(true);
+			} finally {
+				globalThis.window = savedWindow;
+			}
+			clientModule.connect().close();
 		});
 	});
 
@@ -434,6 +855,70 @@ describe('client.js (real module)', () => {
 		});
 	});
 
+	describe('url option', () => {
+		it('connects to the given URL instead of deriving from window.location', async () => {
+			const conn = clientModule.connect({ url: 'wss://remote.example.com/ws' });
+			await flush();
+
+			const ws = MockWebSocket._last;
+			expect(ws.url).toBe('wss://remote.example.com/ws');
+
+			conn.close();
+		});
+
+		it('url takes precedence over path', async () => {
+			const conn = clientModule.connect({ url: 'wss://remote.example.com/custom', path: '/ignored' });
+			await flush();
+
+			const ws = MockWebSocket._last;
+			expect(ws.url).toBe('wss://remote.example.com/custom');
+
+			conn.close();
+		});
+
+		it('on() works after connect({ url }) for cross-origin usage', async () => {
+			clientModule.connect({ url: 'wss://remote.example.com/ws' });
+			await flush();
+
+			const ws = MockWebSocket._last;
+			const store = clientModule.on('chat');
+			const events = [];
+			const unsub = store.subscribe((v) => { if (v) events.push(v); });
+			await flush();
+
+			ws._receive({ topic: 'chat', event: 'msg', data: 'hello' });
+			expect(events).toHaveLength(1);
+			expect(events[0]).toEqual({ topic: 'chat', event: 'msg', data: 'hello' });
+
+			unsub();
+			clientModule.connect().close();
+		});
+
+		it('reconnects to the same url after a disconnect', async () => {
+			vi.useFakeTimers();
+
+			const conn = clientModule.connect({ url: 'wss://remote.example.com/ws' });
+			await vi.advanceTimersByTimeAsync(0);
+
+			const ws1 = MockWebSocket._last;
+			expect(ws1.url).toBe('wss://remote.example.com/ws');
+
+			// Simulate network drop (non-terminal code so it reconnects)
+			ws1.readyState = MockWebSocket.CLOSED;
+			ws1.onclose?.({ code: 1006 });
+
+			// Wait for reconnect (backoff timer + microtask for WS open)
+			await vi.advanceTimersByTimeAsync(4000);
+
+			const ws2 = MockWebSocket._last;
+			expect(ws2).not.toBe(ws1);
+			expect(ws2.url).toBe('wss://remote.example.com/ws');
+
+			vi.useRealTimers();
+			conn.close();
+		});
+	});
+
 	describe('lookup() with maxAge', () => {
 		afterEach(() => {
 			vi.useRealTimers();
@@ -540,6 +1025,49 @@ describe('client.js (real module)', () => {
 			clientModule.connect().close();
 		});
 
+		it('initializes timestamps for non-empty initial data', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.lookup('seeded-sensors',
+				[{ id: 'x', temp: 99 }],
+				{ key: 'id', maxAge: 2000 });
+			let value;
+			const unsub = store.subscribe((v) => { value = v; });
+			await vi.advanceTimersByTimeAsync(0);
+
+			expect(value).toEqual({ x: { id: 'x', temp: 99 } });
+
+			vi.advanceTimersByTime(3100);
+			expect(value).toEqual({});
+
+			unsub();
+			vi.useRealTimers();
+			clientModule.connect().close();
+		});
+
+		it('stop() resets to initial map on full unsubscribe', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.lookup('stop-sensors',
+				[{ id: 'a', temp: 10 }],
+				{ key: 'id', maxAge: 60000 });
+			let value;
+			const unsub = store.subscribe((v) => { value = v; });
+			await vi.advanceTimersByTimeAsync(0);
+
+			const ws = MockWebSocket._last;
+			ws._receive({ topic: 'stop-sensors', event: 'created', data: { id: 'b', temp: 20 } });
+			expect(Object.keys(value)).toHaveLength(2);
+
+			unsub();
+
+			let value2;
+			const unsub2 = store.subscribe((v) => { value2 = v; });
+			expect(value2).toEqual({ a: { id: 'a', temp: 10 } });
+
+			unsub2();
+			vi.useRealTimers();
+			clientModule.connect().close();
+		});
+
 		it('explicit delete removes entry immediately regardless of maxAge', async () => {
 			vi.useFakeTimers();
 			const store = clientModule.lookup('sensors', [], { key: 'id', maxAge: 60000 });
@@ -638,6 +1166,68 @@ describe('client.js (real module)', () => {
 			expect(value).toEqual([{ id: 2 }, { id: 1 }]);
 
 			unsub();
+			vi.useRealTimers();
+			clientModule.connect().close();
+		});
+
+		it('initializes timestamps for non-empty initial data', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.crud('seeded-items',
+				[{ id: 1, text: 'seed' }],
+				{ key: 'id', maxAge: 2000 });
+			let value;
+			const unsub = store.subscribe((v) => { value = v; });
+			await vi.advanceTimersByTimeAsync(0);
+
+			expect(value).toEqual([{ id: 1, text: 'seed' }]);
+
+			// Advance past maxAge + sweep interval
+			vi.advanceTimersByTime(3100);
+			expect(value).toEqual([]);
+
+			unsub();
+			vi.useRealTimers();
+			clientModule.connect().close();
+		});
+
+		it('handles deleted event in maxAge mode', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.crud('del-items', [], { key: 'id', maxAge: 60000 });
+			let value;
+			const unsub = store.subscribe((v) => { value = v; });
+			await vi.advanceTimersByTimeAsync(0);
+
+			const ws = MockWebSocket._last;
+			ws._receive({ topic: 'del-items', event: 'created', data: { id: 1 } });
+			ws._receive({ topic: 'del-items', event: 'deleted', data: { id: 1 } });
+			expect(value).toEqual([]);
+
+			unsub();
+			vi.useRealTimers();
+			clientModule.connect().close();
+		});
+
+		it('stop() resets list to initial on full unsubscribe', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.crud('stop-items',
+				[{ id: 1, text: 'init' }],
+				{ key: 'id', maxAge: 60000 });
+			let value;
+			const unsub = store.subscribe((v) => { value = v; });
+			await vi.advanceTimersByTimeAsync(0);
+
+			const ws = MockWebSocket._last;
+			ws._receive({ topic: 'stop-items', event: 'created', data: { id: 2, text: 'new' } });
+			expect(value).toHaveLength(2);
+
+			unsub();
+
+			// Resubscribe -- should start with initial data, not accumulated
+			let value2;
+			const unsub2 = store.subscribe((v) => { value2 = v; });
+			expect(value2).toEqual([{ id: 1, text: 'init' }]);
+
+			unsub2();
 			vi.useRealTimers();
 			clientModule.connect().close();
 		});
@@ -1023,6 +1613,107 @@ describe('client.js (real module)', () => {
 
 			conn.close();
 		});
+
+		it('handles join events by adding to members list', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = groupFn('join-lobby');
+			let members = [];
+			const unsub = store.members.subscribe((v) => { members = v; });
+
+			ws._receive({ topic: '__group:join-lobby', event: 'members', data: [] });
+			ws._receive({ topic: '__group:join-lobby', event: 'join', data: { role: 'member' } });
+			expect(members).toEqual([{ role: 'member' }]);
+
+			ws._receive({ topic: '__group:join-lobby', event: 'join', data: { role: 'admin' } });
+			expect(members).toHaveLength(2);
+
+			unsub();
+			conn.close();
+		});
+
+		it('handles leave events by removing from members list', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = groupFn('leave-lobby');
+			let members = [];
+			const unsub = store.members.subscribe((v) => { members = v; });
+
+			ws._receive({ topic: '__group:leave-lobby', event: 'members',
+				data: [{ role: 'member' }, { role: 'admin' }] });
+			expect(members).toHaveLength(2);
+
+			ws._receive({ topic: '__group:leave-lobby', event: 'leave', data: { role: 'member' } });
+			expect(members).toEqual([{ role: 'admin' }]);
+
+			unsub();
+			conn.close();
+		});
+
+		it('handles close events by clearing members', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = groupFn('close-lobby');
+			let members = [];
+			const unsub = store.members.subscribe((v) => { members = v; });
+
+			ws._receive({ topic: '__group:close-lobby', event: 'members',
+				data: [{ role: 'member' }] });
+			expect(members).toHaveLength(1);
+
+			ws._receive({ topic: '__group:close-lobby', event: 'close', data: null });
+			expect(members).toEqual([]);
+
+			unsub();
+			conn.close();
+		});
+
+		it('forwards user messages to the messages store', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = groupFn('msg-lobby');
+			const messages = [];
+			const unsub = store.subscribe((v) => { if (v) messages.push(v); });
+
+			ws._receive({ topic: '__group:msg-lobby', event: 'chat', data: { text: 'hello' } });
+			expect(messages).toHaveLength(1);
+			expect(messages[0].event).toBe('chat');
+
+			unsub();
+			conn.close();
+		});
+
+		it('stopListening clears stores on full unsubscribe', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = groupFn('lifecycle-lobby');
+			let members = [];
+			const unsub = store.members.subscribe((v) => { members = v; });
+
+			ws._receive({ topic: '__group:lifecycle-lobby', event: 'members',
+				data: [{ role: 'member' }] });
+			expect(members).toHaveLength(1);
+
+			unsub();
+
+			// Resubscribe -- should start clean
+			let members2 = [];
+			const unsub2 = store.members.subscribe((v) => { members2 = v; });
+			expect(members2).toEqual([]);
+
+			unsub2();
+			conn.close();
+		});
 	});
 	});
 
@@ -1210,6 +1901,326 @@ describe('client.js (real module)', () => {
 			unsubA();
 			unsubB();
 			conn.close();
+		});
+
+		it('handles remove events', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = cursorFn('cursor-remove');
+			const snapshots = [];
+			const unsub = store.subscribe((m) => snapshots.push(m));
+			await flush();
+
+			ws._receive({ topic: '__cursor:cursor-remove', event: 'update',
+				data: { key: 'u1', user: {}, data: { x: 1, y: 2 } } });
+			expect(snapshots[snapshots.length - 1].has('u1')).toBe(true);
+
+			ws._receive({ topic: '__cursor:cursor-remove', event: 'remove',
+				data: { key: 'u1' } });
+			expect(snapshots[snapshots.length - 1].has('u1')).toBe(false);
+
+			unsub();
+			conn.close();
+		});
+
+		it('handles bulk snapshot events', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = cursorFn('cursor-bulk');
+			const snapshots = [];
+			const unsub = store.subscribe((m) => snapshots.push(m));
+			await flush();
+
+			ws._receive({ topic: '__cursor:cursor-bulk', event: 'snapshot',
+				data: [
+					{ key: 'a', user: { name: 'A' }, data: { x: 1, y: 1 } },
+					{ key: 'b', user: { name: 'B' }, data: { x: 2, y: 2 } }
+				] });
+
+			const last = snapshots[snapshots.length - 1];
+			expect(last.size).toBe(2);
+			expect(last.get('a').data).toEqual({ x: 1, y: 1 });
+
+			unsub();
+			conn.close();
+		});
+
+		it('handles bulk (batched) events', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = cursorFn('cursor-batch');
+			const snapshots = [];
+			const unsub = store.subscribe((m) => snapshots.push(m));
+			await flush();
+
+			ws._receive({ topic: '__cursor:cursor-batch', event: 'bulk',
+				data: [
+					{ key: 'a', user: { name: 'A' }, data: { x: 10, y: 10 } },
+					{ key: 'b', user: { name: 'B' }, data: { x: 20, y: 20 } }
+				] });
+
+			const last = snapshots[snapshots.length - 1];
+			expect(last.size).toBe(2);
+			expect(last.get('b').data).toEqual({ x: 20, y: 20 });
+
+			unsub();
+			conn.close();
+		});
+
+		it('sends cursor-snapshot request on reconnect', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = cursorFn('cursor-snap-req');
+			const unsub = store.subscribe(() => {});
+			await flush();
+
+			const snapshotMsgs = ws._sent
+				.map((s) => JSON.parse(s))
+				.filter((m) => m.type === 'cursor-snapshot' && m.topic === 'cursor-snap-req');
+			expect(snapshotMsgs.length).toBeGreaterThanOrEqual(1);
+
+			unsub();
+			conn.close();
+		});
+
+		it('maxAge sweeps stale cursor entries', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const ws = MockWebSocket._last;
+
+			const store = cursorFn('cursor-maxage', { maxAge: 2000 });
+			const snapshots = [];
+			const unsub = store.subscribe((m) => snapshots.push(m));
+			await vi.advanceTimersByTimeAsync(0);
+
+			ws._receive({ topic: '__cursor:cursor-maxage', event: 'update',
+				data: { key: 'stale', user: {}, data: { x: 0, y: 0 } } });
+			expect(snapshots[snapshots.length - 1].has('stale')).toBe(true);
+
+			vi.advanceTimersByTime(3000);
+			expect(snapshots[snapshots.length - 1].has('stale')).toBe(false);
+
+			unsub();
+			vi.useRealTimers();
+			conn.close();
+		});
+
+		it('cleans up sweep timer on unsubscribe', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+
+			const store = cursorFn('cursor-cleanup');
+			const unsub = store.subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+
+			unsub();
+			// Should not throw after cleanup
+			vi.advanceTimersByTime(5000);
+
+			vi.useRealTimers();
+			conn.close();
+		});
+	});
+
+	describe('presence client - join/leave/heartbeat events', () => {
+		/** @type {any} */
+		let presenceFn;
+
+		beforeEach(async () => {
+			const mod = await import('../plugins/presence/client.js');
+			presenceFn = mod.presence;
+		});
+
+		it('handles join events', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = presenceFn('p-join');
+			let current = [];
+			const unsub = store.subscribe((v) => { current = v; });
+
+			ws._receive({ topic: '__presence:p-join', event: 'list', data: [] });
+			ws._receive({ topic: '__presence:p-join', event: 'join', data: { key: '1', data: { name: 'Alice' } } });
+			expect(current).toEqual([{ name: 'Alice' }]);
+
+			unsub();
+			conn.close();
+		});
+
+		it('ignores join for already-present key', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = presenceFn('p-join-dup');
+			let current = [];
+			const unsub = store.subscribe((v) => { current = v; });
+
+			ws._receive({ topic: '__presence:p-join-dup', event: 'list',
+				data: [{ key: '1', data: { name: 'Alice' } }] });
+			ws._receive({ topic: '__presence:p-join-dup', event: 'join',
+				data: { key: '1', data: { name: 'Alice' } } });
+			expect(current).toHaveLength(1);
+
+			unsub();
+			conn.close();
+		});
+
+		it('handles leave events', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = presenceFn('p-leave');
+			let current = [];
+			const unsub = store.subscribe((v) => { current = v; });
+
+			ws._receive({ topic: '__presence:p-leave', event: 'list',
+				data: [{ key: '1', data: { name: 'Alice' } }, { key: '2', data: { name: 'Bob' } }] });
+			expect(current).toHaveLength(2);
+
+			ws._receive({ topic: '__presence:p-leave', event: 'leave', data: { key: '1' } });
+			expect(current).toEqual([{ name: 'Bob' }]);
+
+			unsub();
+			conn.close();
+		});
+
+		it('handles heartbeat events by refreshing timestamps', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const ws = MockWebSocket._last;
+
+			const store = presenceFn('p-heartbeat', { maxAge: 5000 });
+			let current = [];
+			const unsub = store.subscribe((v) => { current = v; });
+
+			ws._receive({ topic: '__presence:p-heartbeat', event: 'list',
+				data: [{ key: '1', data: { name: 'Alice' } }] });
+			expect(current).toHaveLength(1);
+
+			// Advance near maxAge, then send heartbeat to refresh
+			vi.advanceTimersByTime(4000);
+			ws._receive({ topic: '__presence:p-heartbeat', event: 'heartbeat', data: ['1'] });
+
+			// Advance past original maxAge but within heartbeat refresh
+			vi.advanceTimersByTime(2000);
+			expect(current).toHaveLength(1);
+
+			unsub();
+			vi.useRealTimers();
+			conn.close();
+		});
+	});
+
+	describe('presence client - maxAge sweep', () => {
+		/** @type {any} */
+		let presenceFn;
+
+		beforeEach(async () => {
+			const mod = await import('../plugins/presence/client.js');
+			presenceFn = mod.presence;
+		});
+
+		it('sweeps stale entries after maxAge', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const ws = MockWebSocket._last;
+
+			const store = presenceFn('presence-sweep', { maxAge: 2000 });
+			let current = [];
+			const unsub = store.subscribe((v) => { current = v; });
+
+			ws._receive({ topic: '__presence:presence-sweep', event: 'list',
+				data: [{ key: '1', data: { id: '1', name: 'Alice' } }] });
+			expect(current).toHaveLength(1);
+
+			vi.advanceTimersByTime(3000);
+			expect(current).toHaveLength(0);
+
+			unsub();
+			vi.useRealTimers();
+			conn.close();
+		});
+
+		it('cleans up sweep timer on unsubscribe', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+
+			const store = presenceFn('presence-sweep-cleanup', { maxAge: 2000 });
+			const unsub = store.subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+
+			unsub();
+			vi.advanceTimersByTime(5000);
+
+			vi.useRealTimers();
+			conn.close();
+		});
+	});
+
+	describe('replay client - scan()', () => {
+		/** @type {any} */
+		let onReplayFn;
+
+		beforeEach(async () => {
+			const mod = await import('../plugins/replay/client.js');
+			onReplayFn = mod.onReplay;
+		});
+
+		it('throws on invalid options.since', async () => {
+			expect(() => onReplayFn('topic', {})).toThrow('options.since must be a number');
+			expect(() => onReplayFn('topic')).toThrow('options.since must be a number');
+		});
+
+		it('scan() accumulates events through a reducer', async () => {
+			const store = onReplayFn('scan-test', { since: 0 });
+			const accumulated = store.scan([], (acc, event) => [...acc, event.data]);
+			let value = [];
+			const unsub = accumulated.subscribe((v) => { value = v; });
+			await flush();
+
+			const ws = MockWebSocket._last;
+			ws._receive({ topic: '__replay:scan-test', event: 'end', data: null });
+			ws._receive({ topic: 'scan-test', event: 'created', data: { id: 1 } });
+			ws._receive({ topic: 'scan-test', event: 'created', data: { id: 2 } });
+
+			expect(value).toEqual([{ id: 1 }, { id: 2 }]);
+
+			unsub();
+			clientModule.connect().close();
+		});
+
+		it('scan() cleans up source subscription on last unsubscribe', async () => {
+			const store = onReplayFn('scan-cleanup', { since: 0 });
+			const accumulated = store.scan(0, (acc) => acc + 1);
+			const unsub1 = accumulated.subscribe(() => {});
+			await flush();
+
+			// Unsubscribe -- should clean up without errors
+			unsub1();
+
+			// Second subscriber re-activates cleanly
+			let value = 0;
+			const unsub2 = accumulated.subscribe((v) => { value = v; });
+			expect(value).toBe(0);
+
+			unsub2();
+			clientModule.connect().close();
 		});
 	});
 });

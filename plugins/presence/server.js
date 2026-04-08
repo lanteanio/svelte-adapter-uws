@@ -275,6 +275,11 @@ export function createPresence(options = {}) {
 			if (connTopics && connTopics.has(topic)) return;
 
 			const data = select(ws.getUserData());
+			if (!data || typeof data !== 'object') {
+				throw new TypeError(
+					`presence select() must return a plain object, got ${data === null ? 'null' : typeof data}`
+				);
+			}
 			const key = resolveKey(data);
 
 			// Track per-connection

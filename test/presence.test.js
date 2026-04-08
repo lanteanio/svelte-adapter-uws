@@ -69,6 +69,39 @@ describe('presence plugin - server', () => {
 		});
 	});
 
+	describe('select() validation', () => {
+		it('throws TypeError when select returns a string', () => {
+			const p = createPresence({ select: () => 'alice' });
+			const ws = mockWs({ id: '1' });
+			expect(() => p.join(ws, 'room', mockPlatform())).toThrow(TypeError);
+			expect(() => p.join(ws, 'room', mockPlatform())).toThrow('must return a plain object');
+		});
+
+		it('throws TypeError when select returns a number', () => {
+			const p = createPresence({ select: () => 42 });
+			const ws = mockWs({ id: '1' });
+			expect(() => p.join(ws, 'room', mockPlatform())).toThrow('must return a plain object');
+		});
+
+		it('throws TypeError when select returns null', () => {
+			const p = createPresence({ select: () => null });
+			const ws = mockWs({ id: '1' });
+			expect(() => p.join(ws, 'room', mockPlatform())).toThrow('must return a plain object');
+		});
+
+		it('throws TypeError when select returns undefined', () => {
+			const p = createPresence({ select: () => undefined });
+			const ws = mockWs({ id: '1' });
+			expect(() => p.join(ws, 'room', mockPlatform())).toThrow('must return a plain object');
+		});
+
+		it('accepts a plain object from select', () => {
+			const p = createPresence({ select: (ud) => ({ id: ud.id }) });
+			const ws = mockWs({ id: '1' });
+			expect(() => p.join(ws, 'room', mockPlatform())).not.toThrow();
+		});
+	});
+
 	describe('join', () => {
 		it('adds user to presence and sends list to joining client', () => {
 			const ws = mockWs({ id: '1', name: 'Alice' });
@@ -859,6 +892,105 @@ describe('presence plugin - server', () => {
 			expect(heartbeats[0].topic).toBe('__presence:lobby');
 
 			p.clear();
+		});
+	});
+
+	describe('deepEqual edge cases', () => {
+		it('compares Sets correctly', () => {
+			const p = createPresence({ key: 'id', select: (ud) => ({ id: ud.id, s: ud.s }) });
+			const platform = mockPlatform();
+
+			const ws1 = mockWs({ id: '1', s: new Set([1, 2]) });
+			p.join(ws1, 'room', platform);
+			platform.reset();
+
+			const ws2 = mockWs({ id: '1', s: new Set([1, 2]) });
+			p.join(ws2, 'room', platform);
+			expect(platform.published.filter(e => e.event === 'updated')).toHaveLength(0);
+
+			platform.reset();
+			const ws3 = mockWs({ id: '1', s: new Set([1, 3]) });
+			p.join(ws3, 'room', platform);
+			expect(platform.published.filter(e => e.event === 'updated')).toHaveLength(1);
+		});
+
+		it('compares Maps correctly', () => {
+			const p = createPresence({ key: 'id', select: (ud) => ({ id: ud.id, m: ud.m }) });
+			const platform = mockPlatform();
+
+			const ws1 = mockWs({ id: '1', m: new Map([['a', 1]]) });
+			p.join(ws1, 'room', platform);
+			platform.reset();
+
+			const ws2 = mockWs({ id: '1', m: new Map([['a', 1]]) });
+			p.join(ws2, 'room', platform);
+			expect(platform.published.filter(e => e.event === 'updated')).toHaveLength(0);
+
+			platform.reset();
+			const ws3 = mockWs({ id: '1', m: new Map([['a', 2]]) });
+			p.join(ws3, 'room', platform);
+			expect(platform.published.filter(e => e.event === 'updated')).toHaveLength(1);
+		});
+
+		it('compares arrays correctly', () => {
+			const p = createPresence({ key: 'id', select: (ud) => ({ id: ud.id, a: ud.a }) });
+			const platform = mockPlatform();
+
+			const ws1 = mockWs({ id: '1', a: [1, 2, 3] });
+			p.join(ws1, 'room', platform);
+			platform.reset();
+
+			const ws2 = mockWs({ id: '1', a: [1, 2, 3] });
+			p.join(ws2, 'room', platform);
+			expect(platform.published.filter(e => e.event === 'updated')).toHaveLength(0);
+
+			platform.reset();
+			const ws3 = mockWs({ id: '1', a: [1, 2, 4] });
+			p.join(ws3, 'room', platform);
+			expect(platform.published.filter(e => e.event === 'updated')).toHaveLength(1);
+		});
+
+		it('handles circular references without infinite loop', () => {
+			const p = createPresence({ key: 'id', select: (ud) => ({ id: ud.id, ...ud.obj }) });
+			const platform = mockPlatform();
+
+			const a = { x: 1 };
+			a.self = a;
+			const ws1 = mockWs({ id: '1', obj: a });
+			p.join(ws1, 'room', platform);
+			platform.reset();
+
+			const b = { x: 1 };
+			b.self = b;
+			const ws2 = mockWs({ id: '1', obj: b });
+			p.join(ws2, 'room', platform);
+			expect(platform.published.filter(e => e.event === 'updated')).toHaveLength(0);
+		});
+
+		it('detects mismatched types (array vs object)', () => {
+			const p = createPresence({ key: 'id', select: (ud) => ({ id: ud.id, v: ud.v }) });
+			const platform = mockPlatform();
+
+			const ws1 = mockWs({ id: '1', v: [1, 2] });
+			p.join(ws1, 'room', platform);
+			platform.reset();
+
+			const ws2 = mockWs({ id: '1', v: { 0: 1, 1: 2 } });
+			p.join(ws2, 'room', platform);
+			expect(platform.published.filter(e => e.event === 'updated')).toHaveLength(1);
+		});
+
+		it('detects Set vs Map mismatches', () => {
+			const p = createPresence({ key: 'id', select: (ud) => ({ id: ud.id, v: ud.v }) });
+			const platform = mockPlatform();
+
+			const ws1 = mockWs({ id: '1', v: new Set([1]) });
+			p.join(ws1, 'room', platform);
+			platform.reset();
+
+			const ws2 = mockWs({ id: '1', v: new Map([[1, true]]) });
+			p.join(ws2, 'room', platform);
+			expect(platform.published.filter(e => e.event === 'updated')).toHaveLength(1);
 		});
 	});
 });

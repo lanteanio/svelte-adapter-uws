@@ -6,3 +6,8 @@ coverage
 .DS_Store
 *.log
 source
+test/fixture/node_modules
+test/fixture/.svelte-kit
+test/fixture/build
+test-results
+playwright-report

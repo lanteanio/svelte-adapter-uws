@@ -2,6 +2,14 @@ import type { Readable } from 'svelte/store';
 
 export interface ConnectOptions {
 	/**
+	 * Full WebSocket URL to connect to.
+	 * When set, `path` is ignored and the client connects to this URL directly.
+	 * Enables cross-origin usage (e.g. svelte-native, React Native, standalone clients).
+	 * @example 'wss://my-app.com/ws'
+	 */
+	url?: string;
+
+	/**
 	 * WebSocket endpoint path. Must match the adapter config.
 	 * @default '/ws'
 	 */

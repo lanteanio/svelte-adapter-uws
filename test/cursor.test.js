@@ -642,4 +642,38 @@ describe('cursor plugin - server', () => {
 			expect(c.list('canvas')).toEqual([]);
 		});
 	});
+
+	describe('throttle leading-edge clears pending timer', () => {
+		it('clears trailing timer when leading edge fires after window passes', () => {
+			vi.useFakeTimers();
+			const c = createCursor({ throttle: 200 });
+			const ws = mockWs({ id: '1' });
+			const p = mockPlatform();
+
+			// T=0: leading edge fires immediately
+			c.update(ws, 'canvas', { x: 0, y: 0 }, p);
+			expect(p.published).toHaveLength(1);
+
+			// T=10: within window, schedules trailing timer at T=10+(200-10)=T=200
+			vi.advanceTimersByTime(10);
+			c.update(ws, 'canvas', { x: 1, y: 1 }, p);
+			expect(p.published).toHaveLength(1);
+
+			// Jump Date.now() to T=210 WITHOUT advancing timers (timer stays pending)
+			const base = Date.now();
+			vi.spyOn(Date, 'now').mockReturnValue(base + 200);
+
+			// Update: 210-0 >= 200 -> leading edge, entry.timer exists -> clearTimeout
+			c.update(ws, 'canvas', { x: 2, y: 2 }, p);
+			expect(p.published).toHaveLength(2);
+
+			Date.now.mockRestore();
+
+			// Advance timers far past the scheduled time -- the cleared timer must not fire
+			vi.advanceTimersByTime(500);
+			expect(p.published).toHaveLength(2);
+
+			vi.useRealTimers();
+		});
+	});
 });

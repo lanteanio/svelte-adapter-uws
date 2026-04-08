@@ -102,13 +102,23 @@ export default function (opts = {}) {
 						const allEnv = loadEnv('production', process.cwd(), '');
 						const version = builder.config.kit.version?.name ?? '';
 
+						const aliasMap = { '$lib': libDir };
+						const kitAliases = builder.config.kit.alias;
+						if (kitAliases) {
+							for (const [key, value] of Object.entries(kitAliases)) {
+								if (!(key in aliasMap)) {
+									aliasMap[key] = path.resolve(value);
+								}
+							}
+						}
+
 						await esbuild.build({
 							entryPoints: [path.resolve(handlerFile)],
 							bundle: true,
 							format: 'esm',
 							platform: 'node',
 							outfile: `${tmp}/ws-handler.js`,
-							alias: { '$lib': libDir },
+							alias: aliasMap,
 							packages: 'external',
 							plugins: [{
 								name: 'sveltekit-virtual-modules',
@@ -124,6 +134,9 @@ export default function (opts = {}) {
 										const isPublic = args.path.includes('/public');
 										const isStatic = args.path.includes('/static');
 										if (!isStatic) {
+											if (isPublic) {
+												return { contents: `export const env = new Proxy(process.env, { get(t, k) { return typeof k === 'string' && k.startsWith(${JSON.stringify(publicPrefix)}) ? t[k] : undefined; }, ownKeys(t) { return Object.keys(t).filter(k => k.startsWith(${JSON.stringify(publicPrefix)})); }, has(t, k) { return typeof k === 'string' && k.startsWith(${JSON.stringify(publicPrefix)}) && k in t; }, getOwnPropertyDescriptor(t, k) { if (typeof k === 'string' && k.startsWith(${JSON.stringify(publicPrefix)}) && k in t) return { value: t[k], enumerable: true, configurable: true }; return undefined; } });` };
+											}
 											return { contents: 'export const env = process.env;' };
 										}
 										const entries = Object.entries(allEnv).filter(([k]) =>

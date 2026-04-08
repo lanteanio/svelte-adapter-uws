@@ -132,9 +132,7 @@ export const status = {
  * @returns {Promise<void>}
  */
 export function ready() {
-	// In non-browser environments (SSR) there is no WebSocket and status
-	// will never reach 'open'. Resolve immediately so await ready() is a no-op.
-	if (typeof window === 'undefined') return Promise.resolve();
+	if (typeof window === 'undefined' && !(singleton && singleton._hasUrl)) return Promise.resolve();
 
 	const conn = ensureConnection();
 	return new Promise((resolve, reject) => {
@@ -506,6 +504,7 @@ const THROTTLE_CLOSE_CODES = new Set([
  */
 function createConnection(options) {
 	const {
+		url,
 		path = '/ws',
 		reconnectInterval = 3000,
 		maxReconnectInterval = 30000,
@@ -565,13 +564,14 @@ function createConnection(options) {
 	const permaClosedStore = writable(false);
 
 	function getUrl() {
+		if (url) return url;
 		if (typeof window === 'undefined') return '';
 		const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 		return `${protocol}//${window.location.host}${path}`;
 	}
 
 	function doConnect() {
-		if (typeof window === 'undefined') return;
+		if (!url && typeof window === 'undefined') return;
 		if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
 
 		statusStore.set('connecting');
@@ -1006,6 +1006,7 @@ function createConnection(options) {
 		events: { subscribe: eventsStore.subscribe },
 		status: { subscribe: statusStore.subscribe },
 		_permaClosed: { subscribe: permaClosedStore.subscribe },
+		_hasUrl: !!url,
 		on: onTopic,
 		_onEvent: onEvent,
 		_release: release,

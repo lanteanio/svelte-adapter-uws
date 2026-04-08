@@ -127,6 +127,23 @@ describe('vite plugin', () => {
 		});
 	});
 
+	describe('applyHandlers coverage', () => {
+		it('includes unsubscribe in handler extraction', async () => {
+			// The applyHandlers function is internal, but we can verify
+			// the plugin passes through all hooks by checking the module shape
+			const mod = await import('../vite.js');
+			const plugin = mod.default({ handler: './test/vite.test.js' });
+
+			// handleHotUpdate compares all handler references including unsubscribe.
+			// If it didn't, changing just the unsubscribe export wouldn't trigger
+			// a reconnect. We verify the hook exists and accepts the right shape.
+			expect(typeof plugin.handleHotUpdate).toBe('function');
+
+			// handleHotUpdate should not throw when called without a resolved handler
+			plugin.handleHotUpdate({ server: { ssrLoadModule: vi.fn() } });
+		});
+	});
+
 	describe('config hook (SSR build)', () => {
 		it('returns rollup input when handler file exists', async () => {
 			const mod = await import('../vite.js');

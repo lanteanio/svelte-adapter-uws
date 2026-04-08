@@ -1237,7 +1237,7 @@ await ready();
 // connection is now open, safe to send messages
 ```
 
-In SSR (no browser WebSocket), `ready()` resolves immediately and is a no-op.
+In SSR (no browser WebSocket and no explicit `url`), `ready()` resolves immediately and is a no-op. In native app environments where `window` doesn't exist but you passed a `url` to `connect()`, `ready()` correctly waits for the connection to open.
 
 `ready()` rejects if the connection is permanently closed before it opens. This happens when the server sends a terminal close code (1008/4401/4403), retries are exhausted, or `close()` is called explicitly. If you call `ready()` in a context where permanent closure is possible, add a `.catch()` handler or use `try/await/catch`.
 
@@ -1251,6 +1251,7 @@ Most users don't need this - `on()` and `status` auto-connect. Use `connect()` w
 import { connect } from 'svelte-adapter-uws/client';
 
 const ws = connect({
+  url: 'wss://my-app.com/ws', // full URL for cross-origin / native app usage (overrides path)
   path: '/ws',               // default: '/ws'
   reconnectInterval: 3000,   // default: 3000 ms
   maxReconnectInterval: 30000, // default: 30000 ms
@@ -1293,6 +1294,22 @@ The client handles several edge cases automatically, with no configuration requi
 **Batch resubscription**: on reconnect, all topics are resubscribed in batched `subscribe-batch` messages. Each batch stays under the server's 8 KB control-message ceiling and 256-topic-per-batch cap. For typical apps (under 200 topics with short names) this is a single frame; larger sets are automatically chunked.
 
 **Zombie detection**: the client checks every 30 seconds whether the server has been completely silent for more than 150 seconds (2.5x the server's idle timeout). If so, it forces a close and reconnects. This catches connections that appear open but were silently dropped by the server, which is common on mobile after wake from sleep.
+
+### Cross-origin and native app usage
+
+By default, the client derives the WebSocket URL from `window.location`. If your client runs on a different origin -- a mobile app (Svelte Native, React Native), a standalone Node.js script, or any context where the backend lives elsewhere -- pass a `url` to connect to it directly:
+
+```js
+import { connect, on } from 'svelte-adapter-uws/client';
+
+connect({ url: 'wss://my-app.com/ws' });
+
+const todos = on('todos');
+```
+
+When `url` is set, `path` is ignored and the `window` check is bypassed, so the client works in environments without a browser DOM. All other features (reconnect, backoff, batch resubscription, topic stores) work the same way.
+
+> **Note:** Your server's `allowedOrigins` config must include the origin your client connects from (or `'*'` during development). See the [origin validation](#origin-validation) section.
 
 ---
 
@@ -2866,6 +2883,32 @@ Or if you're using `on()` directly (which auto-connects), call `connect()` first
 
   const todos = on('todos');
 </script>
+```
+
+---
+
+## Testing
+
+```bash
+npm test              # 711 unit tests (vitest, ~2s)
+npm run test:e2e      # 25 e2e tests (playwright, ~13s)
+npm run test:coverage # both + coverage reports (~30s)
+```
+
+Unit tests cover store patterns, adapter options, plugin logic, and client behavior using mocked WebSocket globals. They run in vitest with the `vmForks` pool.
+
+E2e tests start a real SvelteKit app (`test/fixture/`) with the adapter installed via `file:../..`. Playwright runs two projects:
+
+- **dev** -- `vite dev` with the Vite plugin. Tests SSR, static files, WebSocket pub/sub (via `ws` clients), and the real `client.js` running in Chromium.
+- **prod** -- `vite build` + `node build/index.js` through uWebSockets.js. Tests the same surface against the production runtime, plus the health check endpoint and 404 handling.
+
+The coverage script collects V8 coverage from both the Playwright server processes (vite.js, handler.js) and the browser (client.js via Chrome DevTools Protocol), then reports them alongside the vitest unit coverage.
+
+First-time setup for e2e:
+
+```bash
+cd test/fixture && npm install && cd ../..
+npx playwright install chromium
 ```
 
 ---

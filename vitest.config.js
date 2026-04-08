@@ -17,6 +17,6 @@ export default defineConfig({
 	test: {
 		pool: 'vmForks',
 		include: ['test/**/*.test.js'],
-		exclude: ['source/**', 'node_modules/**', 'bench/**']
+		exclude: ['source/**', 'node_modules/**', 'bench/**', 'test/e2e/**', 'test/fixture/**']
 	}
 });

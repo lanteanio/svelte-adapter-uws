@@ -327,6 +327,81 @@ describe('ratelimit plugin', () => {
 		});
 	});
 
+	describe('unban', () => {
+		it('unbans a previously banned key', () => {
+			const rl = createRateLimit({ points: 1, interval: 1000 });
+			const ws = mockWs({ remoteAddress: '1.2.3.4' });
+			rl.ban('1.2.3.4', 5000);
+			expect(rl.consume(ws).allowed).toBe(false);
+			rl.unban('1.2.3.4');
+			rl.reset('1.2.3.4');
+			expect(rl.consume(ws).allowed).toBe(true);
+		});
+
+		it('unban on non-existent key is a no-op', () => {
+			expect(() => limiter.unban('never-seen')).not.toThrow();
+		});
+	});
+
+	describe('keyBy ip fallback', () => {
+		it('uses remoteAddress from userData', () => {
+			const rl = createRateLimit({ points: 1, interval: 1000, keyBy: 'ip' });
+			const ws = mockWs({ remoteAddress: '10.0.0.1' });
+			rl.consume(ws);
+			const r = rl.consume(ws);
+			expect(r.allowed).toBe(false);
+		});
+
+		it('falls back to ip field', () => {
+			const rl = createRateLimit({ points: 1, interval: 1000, keyBy: 'ip' });
+			const ws = mockWs({ ip: '10.0.0.2' });
+			rl.consume(ws);
+			expect(rl.consume(ws).allowed).toBe(false);
+		});
+
+		it('falls back to address field', () => {
+			const rl = createRateLimit({ points: 1, interval: 1000, keyBy: 'ip' });
+			const ws = mockWs({ address: '10.0.0.3' });
+			rl.consume(ws);
+			expect(rl.consume(ws).allowed).toBe(false);
+		});
+
+		it('returns unknown when getUserData returns null', () => {
+			const rl = createRateLimit({ points: 1, interval: 1000, keyBy: 'ip' });
+			const ws = { getUserData: () => null };
+			rl.consume(ws);
+			expect(rl.consume(ws).allowed).toBe(false);
+		});
+
+		it('returns unknown when ws has no getUserData', () => {
+			const rl = createRateLimit({ points: 1, interval: 1000, keyBy: 'ip' });
+			const ws = {};
+			rl.consume(ws);
+			expect(rl.consume(ws).allowed).toBe(false);
+		});
+	});
+
+	describe('keyBy connection', () => {
+		it('assigns unique keys per connection', () => {
+			const rl = createRateLimit({ points: 1, interval: 1000, keyBy: 'connection' });
+			const ws1 = mockWs();
+			const ws2 = mockWs();
+			rl.consume(ws1);
+			rl.consume(ws2);
+			// Each ws gets its own bucket, so second consume on each should fail
+			expect(rl.consume(ws1).allowed).toBe(false);
+			expect(rl.consume(ws2).allowed).toBe(false);
+		});
+
+		it('reuses same key for same connection', () => {
+			const rl = createRateLimit({ points: 2, interval: 1000, keyBy: 'connection' });
+			const ws = mockWs();
+			rl.consume(ws);
+			const r = rl.consume(ws);
+			expect(r.remaining).toBe(0);
+		});
+	});
+
 	describe('lazy cleanup', () => {
 		it('removes expired entries when map exceeds threshold', () => {
 			const rl = createRateLimit({ points: 1, interval: 100, keyBy: (ws) => ws.getUserData().id });

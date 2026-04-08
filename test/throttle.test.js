@@ -467,5 +467,57 @@ describe('throttle plugin', () => {
 			expect(platform.published).toHaveLength(1);
 			expect(platform.published[0].topic).toBe('filter');
 		});
+
+		it('cancel on a topic with no pending state is a no-op', () => {
+			const d = debounce(100);
+			expect(() => d.cancel('nonexistent')).not.toThrow();
+		});
+
+		it('cancelAll clears timers for all pending topics', () => {
+			const platform = mockPlatform();
+			const d = debounce(100);
+
+			d.publish(platform, 'a', 'e', 1);
+			d.publish(platform, 'b', 'e', 2);
+			d.cancel(); // cancel all
+			vi.advanceTimersByTime(200);
+
+			expect(platform.published).toHaveLength(0);
+		});
+
+		it('cancelAll on topic with no timer does not throw', () => {
+			const d = debounce(100);
+			d.publish(mockPlatform(), 'x', 'e', 1);
+			d.flush('x'); // flushes and clears timer
+			expect(() => d.cancel()).not.toThrow();
+		});
+	});
+
+	describe('debounce - timer callback', () => {
+		it('timer fires and publishes the latest value', () => {
+			const platform = mockPlatform();
+			const d = debounce(100);
+
+			d.publish(platform, 'topic', 'event', 'first');
+			d.publish(platform, 'topic', 'event', 'second');
+			vi.advanceTimersByTime(100);
+
+			expect(platform.published).toHaveLength(1);
+			expect(platform.published[0].data).toBe('second');
+		});
+
+		it('timer callback cleans up state', () => {
+			const platform = mockPlatform();
+			const d = debounce(100);
+
+			d.publish(platform, 'topic', 'event', 'data');
+			vi.advanceTimersByTime(100);
+
+			// Publishing again should create fresh state
+			d.publish(platform, 'topic', 'event', 'data2');
+			vi.advanceTimersByTime(100);
+
+			expect(platform.published).toHaveLength(2);
+		});
 	});
 });

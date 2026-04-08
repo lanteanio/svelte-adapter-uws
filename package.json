@@ -1,6 +1,6 @@
 {
   "name": "svelte-adapter-uws",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "SvelteKit adapter for uWebSockets.js - high-performance C++ HTTP server with built-in WebSocket support",
   "author": "Kevin Radziszewski",
   "license": "MIT",
@@ -98,7 +98,9 @@
   ],
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "npx playwright test --config test/e2e/playwright.config.js",
+    "test:coverage": "node scripts/coverage.js"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -132,8 +134,10 @@
     "websocket"
   ],
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@vitest/coverage-v8": "^4.0.18",
     "autocannon": "^8.0.0",
+    "c8": "^11.0.0",
     "polka": "^0.5.2",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",

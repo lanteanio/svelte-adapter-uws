@@ -4,9 +4,19 @@ import { fileURLToPath } from 'node:url';
 import { env } from 'ENV';
 
 const host = env('HOST', '0.0.0.0');
-const port = env('PORT', '3000');
-const shutdown_timeout = parseInt(env('SHUTDOWN_TIMEOUT', '30'), 10);
-const shutdown_delay = parseInt(env('SHUTDOWN_DELAY_MS', '0'), 10);
+const port_raw = env('PORT', '3000');
+
+function parseIntEnv(name, raw, min) {
+	const trimmed = raw.trim();
+	const n = Number(trimmed);
+	if (trimmed === '' || !Number.isInteger(n)) throw new Error(`${name} must be a valid integer, got "${raw}"`);
+	if (n < min) throw new Error(`${name} must be >= ${min}, got ${n}`);
+	return n;
+}
+
+const port = parseIntEnv('PORT', port_raw, 0);
+const shutdown_timeout = parseIntEnv('SHUTDOWN_TIMEOUT', env('SHUTDOWN_TIMEOUT', '30'), 0);
+const shutdown_delay = parseIntEnv('SHUTDOWN_DELAY_MS', env('SHUTDOWN_DELAY_MS', '0'), 0);
 const cluster_workers = env('CLUSTER_WORKERS', '');
 
 const is_primary = cluster_workers && isMainThread;
@@ -126,7 +136,7 @@ if (is_primary) {
 				// Start (or resume) listening once a worker is ready to handle requests
 				if (!listening) {
 					listening = true;
-					const portNum = parseInt(port, 10);
+					const portNum = port;
 					acceptorApp.listen(host, portNum, (socket) => {
 						if (socket) {
 							listen_socket = socket;
@@ -256,13 +266,13 @@ if (is_primary) {
 
 	if (isMainThread) {
 		// Single-process mode (no clustering)
-		start(host, parseInt(port, 10));
+		start(host, port);
 	} else {
 		// Worker thread startup depends on clustering mode
 		if (workerData?.mode === 'reuseport') {
 			// Reuseport: each worker listens on the shared port directly.
 			// The kernel distributes incoming connections via SO_REUSEPORT.
-			start(host, parseInt(port, 10));
+			start(host, port);
 			parentPort.postMessage({ type: 'ready' });
 		} else {
 			// Acceptor: register with the main thread's acceptor app

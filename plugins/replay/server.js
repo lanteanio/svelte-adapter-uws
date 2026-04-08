@@ -205,7 +205,11 @@ export function createReplay(options = {}) {
 		publish(platform, topic, event, data) {
 			const state = getTopic(topic);
 			state.seq++;
-			pushMessage(state, { seq: state.seq, topic, event, data });
+			let snapshot = data;
+			if (data != null && typeof data === 'object') {
+				try { snapshot = structuredClone(data); } catch { snapshot = JSON.parse(JSON.stringify(data)); }
+			}
+			pushMessage(state, { seq: state.seq, topic, event, data: snapshot });
 			return platform.publish(topic, event, data);
 		},
 
