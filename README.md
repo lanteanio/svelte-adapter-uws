@@ -404,6 +404,16 @@ adapter({
 })
 ```
 
+### Backpressure and connection limits
+
+These options control how the server handles misbehaving or slow clients at the WebSocket level:
+
+**`maxPayloadLength`** (default: 16 KB) -- the maximum size of a single incoming WebSocket message. If a client sends a message larger than this, uWS closes the connection immediately (not just the message -- the entire connection is dropped). Set this based on the largest message your application expects to receive.
+
+**`maxBackpressure`** (default: 1 MB) -- the per-connection outbound send buffer. When a client reads slower than the server writes, messages queue up in this buffer. Once it overflows, subsequent `send()` and `publish()` calls for that connection silently drop the message. The `drain` hook fires when the buffer empties again. Lower this if you expect many slow consumers to avoid per-connection memory bloat.
+
+**`upgradeRateLimit`** (default: 10 per 10s window) -- sliding-window rate limit on WebSocket upgrade requests per client IP. Clients exceeding the limit get a `429 Too Many Requests` response. The IP rate map is capped at 10,000 entries with LRU eviction by activity score, so sustained connection floods from many IPs don't cause unbounded memory growth.
+
 ### Static file behavior
 
 All static assets (from the `client/` and `prerendered/` output directories) are loaded once at startup and served directly from RAM. Each response automatically includes:
@@ -609,6 +619,22 @@ export function drain(ws, { platform }) {
   // You can resume sending large messages here
 }
 ```
+
+### Message protocol
+
+The adapter uses a JSON envelope format for all pub/sub messages: `{ topic, event, data }`. Control messages from the client store (`subscribe`, `unsubscribe`, `subscribe-batch`) use `{ type, topic }` or `{ type, topics }`.
+
+To avoid JSON-parsing every incoming message, the handler uses a byte-prefix discriminator: control messages start with `{"type"` (byte 3 is `y`), while user envelopes start with `{"topic"` (byte 3 is `o`). A single byte comparison skips `JSON.parse` entirely for user messages. Messages over 8 KB are also skipped (generous ceiling for `subscribe-batch` with many topics, well above any realistic control message).
+
+### Topic validation
+
+Topics submitted by clients are validated before being accepted:
+
+- Must be between 1 and 256 characters
+- Must not contain control characters (code points below 32)
+- `subscribe-batch` accepts at most 256 topics per message (the client only sends what it was subscribed to before a reconnect)
+
+Topics prefixed with `__` are reserved for adapter plugins (presence uses `__presence:*`, replay uses `__replay:*`). They are not blocked at the protocol level because plugins subscribe to them from the client, but application code should not use the `__` prefix for its own topics.
 
 ### Explicit handler path
 
@@ -2292,7 +2318,9 @@ CLUSTER_WORKERS=4 node build
 CLUSTER_WORKERS=auto PORT=8080 ORIGIN=https://example.com node build
 ```
 
-If a worker crashes, it is automatically restarted with exponential backoff. On `SIGTERM`/`SIGINT`, the primary tells all workers to drain in-flight requests and shut down gracefully.
+If a worker crashes, it is automatically restarted with exponential backoff (100ms initial, doubling up to 5s, max 50 attempts before the primary exits). On `SIGTERM`/`SIGINT`, the primary tells all workers to drain in-flight requests and shut down gracefully.
+
+The primary thread monitors worker health with a 10-second heartbeat interval. If a worker fails to acknowledge a heartbeat within 30 seconds (stuck event loop, deadlock), the primary terminates it and the restart policy kicks in.
 
 ### Clustering modes
 
@@ -2311,14 +2339,14 @@ Setting `CLUSTER_MODE=reuseport` on non-Linux platforms is an error (SO_REUSEPOR
 
 ### WebSocket + clustering
 
-`platform.publish()` is automatically relayed across all workers via the primary thread, so subscribers on any worker receive the message. This is built in -- no external pub/sub needed.
+`platform.publish()` is automatically relayed across all workers via the primary thread, so subscribers on any worker receive the message. This is built in -- no external pub/sub needed. The relay is microtask-batched: a SvelteKit action that calls `publish()` multiple times sends a single IPC message per microtask instead of one per call.
 
 If you add your own cross-process messaging (Redis, Postgres LISTEN/NOTIFY, etc.), pass `{ relay: false }` to prevent duplicate delivery -- your external source already fans out to every worker, so the built-in relay would double it.
 
 Per-worker limitations (acceptable for most apps):
 - `platform.connections`  - returns the count for the local worker only
 - `platform.subscribers(topic)`  - returns the count for the local worker only
-- `platform.sendTo(filter, ...)`  - only reaches connections on the local worker
+- `platform.sendTo(filter, ...)`  - iterates the local worker's connections only, no cross-worker relay
 
 ### Docker / multi-process deployments (Linux)
 
@@ -2497,6 +2525,13 @@ uWS native pub/sub delivered 3.5M messages/s with exact 50x fan-out. The adapter
 - No routing layer (uWS native routing + SvelteKit's router)
 - No per-request stream allocation for static files (in-memory Buffer, not `fs.createReadStream`)
 - No Node.js `http.IncomingMessage` shim (we construct `Request` directly from uWS)
+
+### Internal optimizations
+
+The adapter applies several allocation and caching strategies to stay off the GC's radar on the hot path:
+
+- **Request state pooling** -- SSR requests need a `{ aborted: false }` state object. Instead of allocating one per request (which promotes to V8's old generation and stays there), the adapter maintains a pool of up to 256 reusable state objects. Eliminates young-gen GC churn under sustained load.
+- **Envelope prefix cache** -- `platform.publish()` and `platform.send()` wrap data in a `{"topic":"...","event":"...","data":...}` envelope. The prefix up to `"data":` is cached in a 256-entry LRU map keyed by topic+event. Repeated publishes to the same topic/event (the common case) skip 4 string concatenations and the character validation scan. The cache is trimmed every 60 seconds to reclaim stale entries from shifted traffic patterns.
 
 ### SSR request deduplication
 
