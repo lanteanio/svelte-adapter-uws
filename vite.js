@@ -367,7 +367,14 @@ export default function uws(options = {}) {
 							socket.destroy();
 							return;
 						}
-						userData = result || {};
+						if (result && result.__upgradeResponse === true) {
+							userData = result.userData || {};
+							if (result.headers && Object.keys(result.headers).length > 0) {
+								console.warn('[adapter-uws] upgrade() returned response headers — these are only applied in production (uWS). The ws library used in dev does not support custom 101 headers.');
+							}
+						} else {
+							userData = result || {};
+						}
 					} catch (err) {
 						console.error('[adapter-uws] WebSocket upgrade error:', err);
 						socket.write('HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nInternal Server Error');

@@ -303,7 +303,10 @@ export interface WebSocketHandler<UserData = unknown> {
 	 *
 	 * May be async.
 	 */
-	upgrade?: (ctx: UpgradeContext) => UserData | false | Promise<UserData | false>;
+	upgrade?: (ctx: UpgradeContext) =>
+		| UserData | false
+		| ReturnType<typeof upgradeResponse<UserData>>
+		| Promise<UserData | false | ReturnType<typeof upgradeResponse<UserData>>>;
 
 	/** Called when a WebSocket connection is established. */
 	open?: (ws: WebSocket<UserData>, ctx: OpenContext) => void;
@@ -532,5 +535,28 @@ export interface TopicHelper {
 	/** Shorthand for `.publish('decrement', amount)`. Pairs with `count()`. */
 	decrement(amount?: number): void;
 }
+
+/**
+ * Wrap upgrade hook return value to include response headers on the 101
+ * Switching Protocols response (e.g. `Set-Cookie` for session refresh).
+ *
+ * @example
+ * ```js
+ * import { upgradeResponse } from 'svelte-adapter-uws';
+ *
+ * export function upgrade({ cookies }) {
+ *   const session = validateSession(cookies.session_id);
+ *   if (!session) return false;
+ *   return upgradeResponse(
+ *     { userId: session.userId },
+ *     { 'set-cookie': refreshSessionCookie(session) }
+ *   );
+ * }
+ * ```
+ */
+export function upgradeResponse<UserData>(
+	userData: UserData,
+	headers: Record<string, string | string[]>
+): { __upgradeResponse: true; userData: UserData; headers: Record<string, string | string[]> };
 
 export default function adapter(options?: AdapterOptions): Adapter;

@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
+import { performance } from 'node:perf_hooks';
+import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
 import { parentPort } from 'node:worker_threads';
 import uWS from 'uWebSockets.js';
 import { Server } from 'SERVER';
@@ -281,8 +283,10 @@ function cacheDir(dir, urlPrefix, immutable) {
 const clientDir = path.join(__dirname, 'client');
 const prerenderedDir = path.join(__dirname, 'prerendered');
 
+const _t_static = performance.now();
 cacheDir(path.join(clientDir, base), base, true);
 cacheDir(path.join(prerenderedDir, base), base, false);
+console.log(`Static files indexed in ${(performance.now() - _t_static).toFixed(1)}ms (${staticCache.size} entries)`);
 
 // -- TLS config (must be before origin warning) ------------------------------
 
@@ -354,14 +358,17 @@ function resolveClientIp(rawIp, headers) {
 
 const asset_dir = `${__dirname}/client${base}`;
 
+const _t_init = performance.now();
 const server = new Server(manifest);
 await server.init({
 	env: /** @type {Record<string, string>} */ (process.env),
 	read: (file) => /** @type {ReadableStream} */ (Readable.toWeb(fs.createReadStream(`${asset_dir}/${file}`)))
 });
+console.log(`SvelteKit server initialized in ${(performance.now() - _t_init).toFixed(1)}ms`);
 
 // -- uWS App -----------------------------------------------------------------
 
+const _t_app = performance.now();
 const app = is_tls
 	? uWS.SSLApp({ cert_file_name: ssl_cert, key_file_name: ssl_key })
 	: uWS.App();
@@ -577,6 +584,18 @@ const ssrInflight = new Map();
 // a single Buffer and fill it as chunks arrive instead of creating a
 // separate Buffer per chunk. Reduces GC pressure for typical form/JSON bodies.
 const SMALL_BODY_THRESHOLD = 65536; // 64 KB
+
+// Dynamic response compression: only compress text content types above a threshold.
+// Static files use build-time precompression and are never affected by this.
+const COMPRESS_MIN_SIZE = 1024;
+const COMPRESSIBLE_TYPES = new Set([
+	'text/html', 'text/css', 'text/plain', 'text/xml', 'text/javascript',
+	'text/csv', 'text/markdown',
+	'application/json', 'application/xml', 'application/javascript',
+	'application/xhtml+xml', 'application/ld+json', 'application/manifest+json',
+	'application/rss+xml', 'application/atom+xml',
+	'image/svg+xml'
+]);
 
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
@@ -998,7 +1017,8 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 							statusText: shared.statusText,
 							headers: shared.headers
 						}),
-						state
+						state,
+						headers['accept-encoding']
 					);
 					return;
 				}
@@ -1024,7 +1044,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 					// leader's content to waiters that may legitimately differ.
 					if (response.headers.has('set-cookie') || !response.body) {
 						resolveShared(null);
-						await writeResponse(res, response, state);
+						await writeResponse(res, response, state, headers['accept-encoding']);
 						return;
 					}
 					const varyHeader = response.headers.get('vary');
@@ -1034,7 +1054,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 						);
 						if (personalized) {
 							resolveShared(null);
-							await writeResponse(res, response, state);
+							await writeResponse(res, response, state, headers['accept-encoding']);
 							return;
 						}
 					}
@@ -1062,7 +1082,8 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 							statusText: response.statusText,
 							headers: response.headers
 						}),
-						state
+						state,
+						headers['accept-encoding']
 					);
 				} catch (err) {
 					resolveShared(null);
@@ -1075,7 +1096,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 		// Normal (non-dedup) path
 		const response = await server.respond(request, { platform, getClientAddress });
 		if (state.aborted) return;
-		await writeResponse(res, response, state);
+		await writeResponse(res, response, state, headers['accept-encoding']);
 	} catch (err) {
 		if (state.aborted) return;
 		if (err instanceof PayloadTooLargeError) {
@@ -1109,8 +1130,9 @@ function writeHeaders(res, response) {
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {Response} response
  * @param {{ aborted: boolean }} state
+ * @param {string} [acceptEncoding]
  */
-async function writeResponse(res, response, state) {
+async function writeResponse(res, response, state, acceptEncoding) {
 	// No body - write headers + end in a single cork (one syscall).
 	// For HEAD responses SvelteKit sets Content-Length to the full body size;
 	// pass it to endWithoutBody() so the client knows the entity size.
@@ -1153,9 +1175,34 @@ async function writeResponse(res, response, state) {
 		if (second.done || state.aborted) {
 			// Single-chunk response (common for SSR) - one cork, one syscall
 			if (!state.aborted) {
+				let body = first.value;
+				let encoding = '';
+				if (acceptEncoding && body.byteLength >= COMPRESS_MIN_SIZE &&
+					!response.headers.has('content-encoding')) {
+					const ctRaw = response.headers.get('content-type') || '';
+					const semi = ctRaw.indexOf(';');
+					const ct = semi === -1 ? ctRaw : ctRaw.slice(0, semi).trimEnd();
+					if (COMPRESSIBLE_TYPES.has(ct)) {
+						const useBr = acceptEncoding.includes('br');
+						const useGz = !useBr && acceptEncoding.includes('gzip');
+						if (useBr || useGz) {
+							const compressed = useBr
+								? brotliCompressSync(body, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 4 } })
+								: gzipSync(body, { level: 6 });
+							if (compressed.byteLength < body.byteLength) {
+								body = compressed;
+								encoding = useBr ? 'br' : 'gzip';
+							}
+						}
+					}
+				}
 				res.cork(() => {
 					writeHeaders(res, response);
-					res.end(first.value);
+					if (encoding) {
+						res.writeHeader('content-encoding', encoding);
+						res.writeHeader('vary', 'Accept-Encoding');
+					}
+					res.end(body);
 				});
 			}
 			return;
@@ -1497,16 +1544,25 @@ if (WS_ENABLED) {
 			}
 
 			Promise.resolve(wsModule.upgrade({ headers, cookies, url, remoteAddress: clientIp }))
-				.then((userData) => {
+				.then((result) => {
 					clearTimeout(timer);
 					if (aborted || timedOut) return;
-					if (userData === false) {
+					if (result === false) {
 						res.cork(() => {
 							res.writeStatus('401 Unauthorized');
 							res.writeHeader('content-type', 'text/plain');
 							res.end('Unauthorized');
 						});
 						return;
+					}
+					// Unpack upgradeResponse() wrapper if present
+					let responseHeaders = null;
+					let userData;
+					if (result && result.__upgradeResponse === true) {
+						userData = result.userData || {};
+						responseHeaders = result.headers;
+					} else {
+						userData = result || {};
 					}
 					// Warn once per unique key name about potentially sensitive data in userData.
 					// userData is readable by every server-side handler via ws.getUserData().
@@ -1525,12 +1581,18 @@ if (WS_ENABLED) {
 							}
 						}
 					}
-					// Ensure remoteAddress is in userData so plugins (e.g. ratelimit)
-					// can key on the real client IP without requiring the app to
-					// manually copy it from the upgrade callback arguments.
 					const ud = userData || {};
 					if (!ud.remoteAddress) ud.remoteAddress = clientIp;
 					res.cork(() => {
+						if (responseHeaders) {
+							for (const [hk, hv] of Object.entries(responseHeaders)) {
+								if (Array.isArray(hv)) {
+									for (const v of hv) res.writeHeader(hk, v);
+								} else {
+									res.writeHeader(hk, hv);
+								}
+							}
+						}
 						res.upgrade(
 							ud,
 							secKey,
@@ -1705,7 +1767,8 @@ export function start(host, port) {
 	app.listen(host, port, (socket) => {
 		if (socket) {
 			listenSocket = socket;
-			console.log(`Listening on ${is_tls ? 'https' : 'http'}://${host}:${port}`);
+			const startup = (performance.now() - _t_app).toFixed(0);
+			console.log(`Listening on ${is_tls ? 'https' : 'http'}://${host}:${port} (ready in ${startup}ms)`);
 		} else {
 			console.error(`Failed to listen on ${host}:${port}`);
 			process.exit(1);

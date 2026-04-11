@@ -9,6 +9,7 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 - **HTTP & HTTPS** - native TLS via uWebSockets.js `SSLApp`, no reverse proxy needed
 - **WebSocket & WSS** - built-in pub/sub with a reactive Svelte client store
 - **In-memory static file cache** - assets loaded once at startup, served from RAM with precompressed brotli/gzip variants
+- **Dynamic response compression** - SSR HTML and API JSON compressed on the fly with brotli or gzip
 - **Backpressure handling** - streaming responses that won't blow up memory
 - **Graceful shutdown** - waits for in-flight requests before exiting
 - **Health check endpoint** - `/healthz` out of the box
@@ -725,6 +726,8 @@ export async function upgrade({ cookies }) {
   if (!user) return false; // -> 401, expired or invalid session
 
   // Attach user data to the socket - available via ws.getUserData()
+  // To also set response headers on the 101 (e.g. refresh session cookie):
+  // return upgradeResponse({ userId: user.id }, { 'set-cookie': '...' });
   return { userId: user.id, name: user.name, role: user.role };
 }
 
@@ -2925,12 +2928,12 @@ Or if you're using `on()` directly (which auto-connects), call `connect()` first
 ## Testing
 
 ```bash
-npm test              # 711 unit tests (vitest, ~2s)
+npm test              # 777 unit tests (vitest, ~2s)
 npm run test:e2e      # 25 e2e tests (playwright, ~13s)
 npm run test:coverage # both + coverage reports (~30s)
 ```
 
-Unit tests cover store patterns, adapter options, plugin logic, and client behavior using mocked WebSocket globals. They run in vitest with the `vmForks` pool.
+Unit tests cover store patterns, adapter options, plugin logic, client behavior, and the WebSocket test harness. They run in vitest with the `vmForks` pool.
 
 E2e tests start a real SvelteKit app (`test/fixture/`) with the adapter installed via `file:../..`. Playwright runs two projects:
 
@@ -2945,6 +2948,51 @@ First-time setup for e2e:
 cd test/fixture && npm install && cd ../..
 npx playwright install chromium
 ```
+
+### Test harness for WebSocket handlers
+
+The `svelte-adapter-uws/testing` entry point provides `createTestServer()` for integration-testing your `hooks.ws` handlers against a real uWebSockets.js server:
+
+```js
+import { createTestServer } from 'svelte-adapter-uws/testing';
+import { WebSocket } from 'ws';
+import { describe, it, expect, afterEach } from 'vitest';
+import * as myHandler from '../src/hooks.ws.js';
+
+let server;
+afterEach(() => server?.close());
+
+it('rejects unauthenticated upgrades', async () => {
+  server = await createTestServer({ handler: myHandler });
+
+  const ws = new WebSocket(server.wsUrl);
+  const code = await new Promise((resolve) => {
+    ws.on('unexpected-response', (_, res) => resolve(res.statusCode));
+    ws.on('open', () => resolve('open'));
+  });
+  expect(code).toBe(401);
+});
+
+it('publishes to subscribers', async () => {
+  server = await createTestServer({ handler: myHandler });
+
+  const ws = new WebSocket(server.wsUrl, {
+    headers: { cookie: 'session=valid-token' }
+  });
+  await new Promise(r => ws.on('open', r));
+
+  ws.send(JSON.stringify({ type: 'subscribe', topic: 'todos' }));
+  await new Promise(r => setTimeout(r, 10));
+
+  const msg = new Promise(r => ws.on('message', d => r(JSON.parse(d.toString()))));
+  server.platform.publish('todos', 'created', { id: 1 });
+  expect(await msg).toMatchObject({ topic: 'todos', event: 'created' });
+
+  ws.close();
+});
+```
+
+The test server starts on a random port (typically in ~2ms), uses the same subscribe/unsubscribe protocol as production, and exposes the full Platform API (`publish`, `send`, `sendTo`, `topic`, `connections`, `subscribers`).
 
 ---
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { upgradeResponse } from '../upgrade-response.js';
 
 // We can't run the full adapter (it needs SvelteKit's builder),
 // but we can test the validation logic and option handling.
@@ -891,5 +892,37 @@ describe('IPv6 getRemoteAddress', () => {
 		const bytes = new Uint8Array(buf);
 		expect(bytes.length).toBe(16);
 		for (let i = 0; i < 16; i++) expect(bytes[i]).toBe(0);
+	});
+});
+
+describe('upgradeResponse helper', () => {
+	it('wraps userData and headers with sentinel', () => {
+		const result = upgradeResponse({ userId: 'u1' }, { 'set-cookie': 'session=abc' });
+		expect(result.__upgradeResponse).toBe(true);
+		expect(result.userData).toEqual({ userId: 'u1' });
+		expect(result.headers).toEqual({ 'set-cookie': 'session=abc' });
+	});
+
+	it('handles array header values', () => {
+		const result = upgradeResponse({}, { 'set-cookie': ['a=1', 'b=2'] });
+		expect(result.__upgradeResponse).toBe(true);
+		expect(result.headers['set-cookie']).toEqual(['a=1', 'b=2']);
+	});
+
+	it('handles empty userData', () => {
+		const result = upgradeResponse(null, { 'x-custom': 'val' });
+		expect(result.__upgradeResponse).toBe(true);
+		expect(result.userData).toBeNull();
+	});
+
+	it('is distinguishable from plain userData with a headers key', () => {
+		// Plain userData that happens to have a headers property
+		const plain = { headers: { foo: 'bar' }, role: 'admin' };
+		expect(plain.__upgradeResponse).toBeUndefined();
+
+		// Wrapped via upgradeResponse
+		const wrapped = upgradeResponse(plain, { 'set-cookie': 'x=1' });
+		expect(wrapped.__upgradeResponse).toBe(true);
+		expect(wrapped.userData).toBe(plain);
 	});
 });
