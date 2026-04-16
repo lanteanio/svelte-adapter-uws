@@ -93,6 +93,7 @@ describe('vite plugin', () => {
 						if (event === 'upgrade') upgradeHandlers.push(handler);
 					}
 				},
+				middlewares: { use: vi.fn() },
 				config: {
 					root: process.cwd(),
 					server: {},
@@ -115,6 +116,7 @@ describe('vite plugin', () => {
 			const warnings = [];
 			const server = {
 				httpServer: { on: vi.fn() },
+				middlewares: { use: vi.fn() },
 				config: {
 					root: process.cwd(),
 					server: { hmr: { path: '/__hmr' } },
@@ -124,6 +126,53 @@ describe('vite plugin', () => {
 
 			await plugin.configureServer(server);
 			expect(warnings.some(w => w.includes('collides with the Vite HMR path'))).toBe(true);
+		});
+
+		it('mounts the authenticate middleware at /__ws/auth', async () => {
+			const mod = await import('../vite.js');
+			const plugin = mod.default();
+
+			const warnings = [];
+			const middlewarePaths = [];
+			const server = {
+				httpServer: { on: vi.fn() },
+				middlewares: {
+					use: (pathOrFn, maybeFn) => {
+						if (typeof pathOrFn === 'string') middlewarePaths.push(pathOrFn);
+					}
+				},
+				config: {
+					root: process.cwd(),
+					server: {},
+					logger: { warn: (msg) => warnings.push(msg) }
+				}
+			};
+
+			await plugin.configureServer(server);
+			expect(middlewarePaths).toContain('/__ws/auth');
+		});
+
+		it('mounts the authenticate middleware at a custom path', async () => {
+			const mod = await import('../vite.js');
+			const plugin = mod.default({ authPath: '/api/ws-auth' });
+
+			const middlewarePaths = [];
+			const server = {
+				httpServer: { on: vi.fn() },
+				middlewares: {
+					use: (pathOrFn) => {
+						if (typeof pathOrFn === 'string') middlewarePaths.push(pathOrFn);
+					}
+				},
+				config: {
+					root: process.cwd(),
+					server: {},
+					logger: { warn: vi.fn() }
+				}
+			};
+
+			await plugin.configureServer(server);
+			expect(middlewarePaths).toContain('/api/ws-auth');
 		});
 	});
 

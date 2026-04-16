@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseCookies } from '../files/cookies.js';
+import { parseCookies, serializeCookie, createCookies } from '../files/cookies.js';
 import {
 	mimeLookup,
 	splitCookiesString,
@@ -1137,5 +1137,155 @@ describe('resolveClientIp', () => {
 	it('trims whitespace from XFF result', () => {
 		const resolve = makeResolveClientIp('x-forwarded-for', 1);
 		expect(resolve('10.0.0.1', { 'x-forwarded-for': '1.1.1.1,  203.0.113.5  ' })).toBe('203.0.113.5');
+	});
+});
+
+// -- serializeCookie --------------------------------------------------------
+
+describe('serializeCookie', () => {
+	it('serializes a minimal cookie', () => {
+		expect(serializeCookie('session', 'abc')).toBe('session=abc');
+	});
+
+	it('URL-encodes the value by default', () => {
+		expect(serializeCookie('name', 'a b&c')).toBe('name=a%20b%26c');
+	});
+
+	it('skips URL-encoding when encode:false', () => {
+		expect(serializeCookie('name', 'raw.base64+stuff/==', { encode: false })).toBe('name=raw.base64+stuff/==');
+	});
+
+	it('adds Path, Domain, and Max-Age', () => {
+		expect(serializeCookie('s', 'x', { path: '/', domain: 'example.com', maxAge: 60 }))
+			.toBe('s=x; Domain=example.com; Path=/; Max-Age=60');
+	});
+
+	it('adds Expires as UTC string', () => {
+		const expires = new Date('2026-04-16T12:00:00Z');
+		const out = serializeCookie('s', 'x', { expires });
+		expect(out).toBe('s=x; Expires=' + expires.toUTCString());
+	});
+
+	it('adds HttpOnly, Secure, and Partitioned', () => {
+		expect(serializeCookie('s', 'x', { httpOnly: true, secure: true, partitioned: true }))
+			.toBe('s=x; HttpOnly; Secure; Partitioned');
+	});
+
+	it('normalizes SameSite to Pascal case', () => {
+		expect(serializeCookie('s', 'x', { sameSite: 'lax' })).toBe('s=x; SameSite=Lax');
+		expect(serializeCookie('s', 'x', { sameSite: 'Strict' })).toBe('s=x; SameSite=Strict');
+		expect(serializeCookie('s', 'x', { sameSite: 'none' })).toBe('s=x; SameSite=None');
+	});
+
+	it('maps SameSite boolean to string', () => {
+		expect(serializeCookie('s', 'x', { sameSite: true })).toBe('s=x; SameSite=Strict');
+		expect(serializeCookie('s', 'x', { sameSite: false })).toBe('s=x; SameSite=Lax');
+	});
+
+	it('rejects invalid SameSite values', () => {
+		// @ts-expect-error intentional invalid input
+		expect(() => serializeCookie('s', 'x', { sameSite: 'banana' })).toThrow('SameSite');
+	});
+
+	it('rejects invalid cookie names', () => {
+		expect(() => serializeCookie('', 'x')).toThrow('Invalid cookie name');
+		expect(() => serializeCookie('a b', 'x')).toThrow('Invalid cookie name');
+		expect(() => serializeCookie('a;b', 'x')).toThrow('Invalid cookie name');
+		expect(() => serializeCookie('a=b', 'x')).toThrow('Invalid cookie name');
+	});
+
+	it('rejects invalid values when encode:false', () => {
+		expect(() => serializeCookie('s', 'a b', { encode: false })).toThrow('Invalid cookie value');
+		expect(() => serializeCookie('s', 'a;b', { encode: false })).toThrow('Invalid cookie value');
+	});
+
+	it('rejects non-finite Max-Age', () => {
+		expect(() => serializeCookie('s', 'x', { maxAge: Infinity })).toThrow('Max-Age');
+		expect(() => serializeCookie('s', 'x', { maxAge: NaN })).toThrow('Max-Age');
+	});
+
+	it('floors fractional Max-Age', () => {
+		expect(serializeCookie('s', 'x', { maxAge: 60.9 })).toBe('s=x; Max-Age=60');
+	});
+
+	it('supports the full session-cookie pattern', () => {
+		const out = serializeCookie('session', 'abc.def', {
+			path: '/',
+			httpOnly: true,
+			secure: true,
+			sameSite: 'lax',
+			maxAge: 60 * 60 * 24 * 7
+		});
+		expect(out).toBe('session=abc.def; Path=/; Max-Age=604800; HttpOnly; Secure; SameSite=Lax');
+	});
+});
+
+// -- createCookies ----------------------------------------------------------
+
+describe('createCookies', () => {
+	it('reads cookies from the request Cookie header', () => {
+		const c = createCookies('session=abc; theme=dark');
+		expect(c.get('session')).toBe('abc');
+		expect(c.get('theme')).toBe('dark');
+		expect(c.get('missing')).toBeUndefined();
+	});
+
+	it('returns all cookies via getAll()', () => {
+		const c = createCookies('a=1; b=2');
+		expect(c.getAll()).toEqual({ a: '1', b: '2' });
+	});
+
+	it('set() accumulates outgoing Set-Cookie strings', () => {
+		const c = createCookies();
+		c.set('a', '1');
+		c.set('b', '2', { path: '/' });
+		expect(c._serialize()).toEqual(['a=1', 'b=2; Path=/']);
+	});
+
+	it('set() makes subsequent get() return the new value', () => {
+		const c = createCookies('a=old');
+		c.set('a', 'new');
+		expect(c.get('a')).toBe('new');
+	});
+
+	it('set() on the same name + path + domain overwrites', () => {
+		const c = createCookies();
+		c.set('session', 'first', { path: '/', httpOnly: true });
+		c.set('session', 'second', { path: '/', httpOnly: true });
+		const out = c._serialize();
+		expect(out).toHaveLength(1);
+		expect(out[0]).toContain('session=second');
+	});
+
+	it('set() on the same name but different path does NOT overwrite', () => {
+		const c = createCookies();
+		c.set('session', 'a', { path: '/' });
+		c.set('session', 'b', { path: '/admin' });
+		expect(c._serialize()).toHaveLength(2);
+	});
+
+	it('delete() emits a zero-Max-Age, expired Set-Cookie', () => {
+		const c = createCookies('session=abc');
+		c.delete('session', { path: '/' });
+		const out = c._serialize();
+		expect(out).toHaveLength(1);
+		expect(out[0]).toContain('session=');
+		expect(out[0]).toContain('Max-Age=0');
+		expect(out[0]).toContain('Expires=Thu, 01 Jan 1970');
+		expect(c.get('session')).toBeUndefined();
+	});
+
+	it('_serialize() returns a fresh array (no mutation leakage)', () => {
+		const c = createCookies();
+		c.set('a', '1');
+		const snapshot = c._serialize();
+		c.set('b', '2');
+		expect(snapshot).toEqual(['a=1']);
+	});
+
+	it('handles empty or missing cookie header', () => {
+		const c = createCookies();
+		expect(c.getAll()).toEqual({});
+		expect(c._serialize()).toEqual([]);
 	});
 });

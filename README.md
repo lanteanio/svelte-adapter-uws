@@ -36,6 +36,7 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 **WebSocket deep dive**
 - [WebSocket handler (`hooks.ws`)](#websocket-handler-hooksws)
 - [Authentication](#authentication)
+- [Refreshing session cookies on WebSocket connect](#refreshing-session-cookies-on-websocket-connect)
 - [Platform API (`event.platform`)](#platform-api-eventplatform)
 - [Client store API](#client-store-api)
 - [Seeding initial state](#seeding-initial-state)
@@ -726,8 +727,10 @@ export async function upgrade({ cookies }) {
   if (!user) return false; // -> 401, expired or invalid session
 
   // Attach user data to the socket - available via ws.getUserData()
-  // To also set response headers on the 101 (e.g. refresh session cookie):
-  // return upgradeResponse({ userId: user.id }, { 'set-cookie': '...' });
+  // To refresh the session cookie on connect, use the `authenticate` hook
+  // (see "Refreshing session cookies on WebSocket connect" below).
+  // `upgradeResponse()` with custom non-cookie headers is also supported:
+  // return upgradeResponse({ userId: user.id }, { 'x-session-version': '2' });
   return { userId: user.id, name: user.name, role: user.role };
 }
 
@@ -796,6 +799,72 @@ The WebSocket upgrade is an HTTP request. The browser treats it like any other r
 | API route | `+server.js` | Yes |
 | Server hook | `hooks.server.js` `handle()` | Yes |
 | **WebSocket upgrade** | **`hooks.ws.js` `upgrade()`** | **Yes** |
+
+### Refreshing session cookies on WebSocket connect
+
+For short-lived sessions you often want to rotate the session cookie every time a client connects. The obvious approach -- attaching `Set-Cookie` to the 101 Switching Protocols response via `upgradeResponse()` -- is RFC-compliant but **is silently rejected by Cloudflare Tunnel, Cloudflare's proxy, and some other strict edge proxies**. The symptom is that the WebSocket `open` handler fires server-side, then the connection closes with code 1006 (`Received TCP FIN before WebSocket close frame`) before any frames are exchanged. The adapter emits a build-time warning when it detects this pattern.
+
+The adapter ships a first-class solution: the optional `authenticate` hook runs as a normal HTTP POST **before** the WebSocket upgrade. `Set-Cookie` rides on a standard 2xx response, which every proxy handles correctly; the browser then attaches the refreshed cookie to the upgrade request that follows.
+
+**Step 1: add an `authenticate` export to `hooks.ws.js`**
+
+```js
+// src/hooks.ws.js
+import { getSession, renewSession } from '$lib/server/auth.js';
+
+// Runs as POST /__ws/auth, before the WebSocket upgrade.
+// cookies.set() becomes Set-Cookie on a standard 204 response.
+export async function authenticate({ cookies }) {
+  const session = await getSession(cookies.get('session'));
+  if (!session) return false; // -> 401, client does not open the WebSocket
+
+  const renewed = await renewSession(session);
+  cookies.set('session', renewed.token, {
+    path: '/',
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    maxAge: 60 * 60 * 24 * 7
+  });
+}
+
+// Your existing upgrade() hook stays unchanged - it reads the now-fresh cookie.
+export async function upgrade({ cookies }) {
+  const session = await getSession(cookies.session);
+  if (!session) return false;
+  return { userId: session.userId, role: session.role };
+}
+```
+
+The `authenticate` event exposes the SvelteKit event shape you already know: `{ request, headers, cookies, url, remoteAddress, getClientAddress, platform }`. Return values:
+
+- `undefined` / nothing - success, responds `204 No Content` with any `Set-Cookie` headers from `cookies.set()` (recommended).
+- `false` - responds `401 Unauthorized`. The client does not open the WebSocket.
+- A full `Response` - used as-is; any `cookies.set()` calls are merged in.
+
+**Step 2: opt in from the client**
+
+```js
+import { connect } from 'svelte-adapter-uws/client';
+
+// Hit /__ws/auth before every WebSocket connect (including reconnects)
+connect({ auth: true });
+
+// Or point at a custom path (e.g. behind a Cloudflare Access rule)
+connect({ auth: '/api/ws-auth' });
+```
+
+With `auth: true` the client stores runs `fetch('/__ws/auth', { method: 'POST', credentials: 'include' })` before every `new WebSocket(...)` call, including after automatic reconnects. Concurrent connect attempts share a single in-flight preflight. A `4xx` response is treated as terminal (the user is not authenticated); `5xx` and network errors fall back to the normal reconnect backoff.
+
+**Configuration**
+
+- The default auth path is `/__ws/auth`. Override with `adapter({ websocket: { authPath: '/api/ws-auth' } })`.
+- The hook is only mounted when `authenticate` is exported from `hooks.ws` -- no runtime cost when unused.
+- Dev mode (Vite plugin) mirrors the production route on the same path.
+
+**Why not put `Set-Cookie` on the 101?**
+
+Cloudflare's HTTP/2 WebSocket bridging rewrites 101 responses, and `Set-Cookie` on the 101 trips the edge into tearing the connection down. This is undocumented Cloudflare behavior, but reproducible on every tunnel and proxy connector. The `authenticate` hook sidesteps it entirely by using a standard HTTP response.
 
 ---
 

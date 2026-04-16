@@ -12,6 +12,47 @@ const files = fileURLToPath(new URL('./files', import.meta.url).href);
 // by handler.js for ALL messages regardless of user handler.
 const DEFAULT_WS_HANDLER = '// Built-in: subscribe/unsubscribe handled by the runtime\n';
 
+/**
+ * Scan a bundled WS handler for `upgradeResponse(..., { 'set-cookie': ... })`
+ * usage. Emits a loud warning at build time because Cloudflare Tunnel and some
+ * other strict edge proxies silently drop WebSocket connections whose 101
+ * response carries Set-Cookie -- symptom is 1006 TCP FIN immediately after
+ * open fires server-side. The recommended fix is the `authenticate` hook.
+ *
+ * @param {string} source
+ * @returns {boolean}
+ */
+function detectSetCookieOnUpgrade(source) {
+	// Scan each upgradeResponse( call for a 'set-cookie' / "Set-Cookie" literal
+	// inside its arguments. Works against bundler output (esbuild/rollup/Vite),
+	// which preserves these as literals even after minification rewrites the
+	// surrounding identifiers.
+	const re = /upgradeResponse\s*\(/gi;
+	let match;
+	while ((match = re.exec(source)) !== null) {
+		// Walk forward matching parens to find the end of the call
+		let depth = 1;
+		let i = match.index + match[0].length;
+		let inStr = '';
+		let esc = false;
+		for (; i < source.length && depth > 0; i++) {
+			const c = source[i];
+			if (esc) { esc = false; continue; }
+			if (inStr) {
+				if (c === '\\') esc = true;
+				else if (c === inStr) inStr = '';
+				continue;
+			}
+			if (c === '"' || c === "'" || c === '`') { inStr = c; continue; }
+			if (c === '(') depth++;
+			else if (c === ')') depth--;
+		}
+		const args = source.slice(match.index + match[0].length, i - 1);
+		if (/['"`]\s*set-cookie\s*['"`]/i.test(args)) return true;
+	}
+	return false;
+}
+
 /** @type {import('./index.js').default} */
 export default function (opts = {}) {
 	const { out = 'build', precompress = true, envPrefix = '', healthCheckPath = '/healthz' } = opts;
@@ -227,6 +268,18 @@ export default function (opts = {}) {
 					`Use '/${wsPath}' instead.`
 				);
 			}
+			const wsAuthPath = websocket?.authPath ?? '/__ws/auth';
+			if (wsAuthPath[0] !== '/') {
+				throw new Error(
+					`websocket.authPath must start with '/' - got '${wsAuthPath}'. ` +
+					`Use '/${wsAuthPath}' instead.`
+				);
+			}
+			if (wsAuthPath === wsPath) {
+				throw new Error(
+					`websocket.authPath ('${wsAuthPath}') must differ from websocket.path ('${wsPath}').`
+				);
+			}
 			const wsOpts = {
 				maxPayloadLength: websocket?.maxPayloadLength ?? 16 * 1024,
 				idleTimeout: websocket?.idleTimeout ?? 120,
@@ -238,6 +291,38 @@ export default function (opts = {}) {
 				upgradeRateLimit: websocket?.upgradeRateLimit ?? 10,
 				upgradeRateLimitWindow: websocket?.upgradeRateLimitWindow ?? 10
 			};
+
+			// Scan the bundled WS handler for `upgradeResponse(..., { 'set-cookie': ... })`
+			// and warn loudly. Cloudflare Tunnel and some other strict edge proxies
+			// silently close WebSocket connections whose 101 response carries
+			// Set-Cookie (1006 TCP FIN immediately after the server-side open fires).
+			if (websocket && existsSync(`${tmp}/ws-handler.js`)) {
+				try {
+					const handlerSrc = readFileSync(`${tmp}/ws-handler.js`, 'utf8');
+					if (detectSetCookieOnUpgrade(handlerSrc)) {
+						builder.log.warn(
+							'[adapter-uws] Your upgrade() hook attaches Set-Cookie to the 101 response ' +
+							'via upgradeResponse(). This fails silently behind Cloudflare Tunnel, ' +
+							"Cloudflare's proxy, and some other strict edge proxies: the WebSocket " +
+							'opens, then closes with code 1006 before any frames are exchanged.\n' +
+							'\n' +
+							'Migrate to the `authenticate` hook to refresh session cookies over a ' +
+							'normal HTTP response that works behind every proxy:\n' +
+							'\n' +
+							'  export function authenticate({ cookies }) {\n' +
+							"    const session = validateSession(cookies.get('session'));\n" +
+							'    if (!session) return false;\n' +
+							"    cookies.set('session', renewSession(session), { httpOnly: true, secure: true, sameSite: 'lax', path: '/' });\n" +
+							'  }\n' +
+							'\n' +
+							'Then opt in from the client: connect({ auth: true }).\n' +
+							'This warning is safe to ignore if you do not deploy behind Cloudflare.'
+						);
+					}
+				} catch {
+					// Scanner is best-effort; ignore IO errors
+				}
+			}
 
 			builder.copy(files, out, {
 				replace: {
@@ -252,6 +337,7 @@ export default function (opts = {}) {
 					WS_ENABLED: JSON.stringify(!!websocket),
 					WS_PATH: JSON.stringify(wsPath),
 					WS_OPTIONS: JSON.stringify(wsOpts),
+					WS_AUTH_PATH: JSON.stringify(wsAuthPath),
 					HEALTH_CHECK_PATH: JSON.stringify(healthCheckPath)
 				}
 			});

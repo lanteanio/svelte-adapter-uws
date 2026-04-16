@@ -128,6 +128,20 @@ export interface WebSocketOptions {
 	path?: string;
 
 	/**
+	 * URL path for the `authenticate` preflight endpoint.
+	 *
+	 * The adapter auto-mounts a `POST` endpoint here when your `hooks.ws` file
+	 * exports an `authenticate` function. The client store hits it before
+	 * opening a WebSocket when `connect({ auth: true })` is used.
+	 *
+	 * Must differ from `path`. Change this only if the default collides with
+	 * your routing or if Cloudflare Access requires a non-`__`-prefixed path.
+	 *
+	 * @default '/__ws/auth'
+	 */
+	authPath?: string;
+
+	/**
 	 * Max message size in bytes. Connections sending larger messages are closed.
 	 * @default 16384 (16 KB)
 	 */
@@ -202,6 +216,36 @@ export interface WebSocketOptions {
 // -- User's WebSocket handler module exports ---------------------------------
 
 /**
+ * Options accepted by `authenticateCookies.set()` and `.delete()`. Matches the
+ * shape SvelteKit uses for `cookies.set()`.
+ */
+export interface CookieSerializeOptions {
+	path?: string;
+	domain?: string;
+	expires?: Date;
+	/** In seconds. */
+	maxAge?: number;
+	httpOnly?: boolean;
+	secure?: boolean;
+	partitioned?: boolean;
+	sameSite?: 'strict' | 'lax' | 'none' | boolean;
+	/** Defaults to `true`. Set to `false` to skip URI-encoding the value. */
+	encode?: boolean;
+}
+
+/**
+ * SvelteKit-like cookies API available inside the `authenticate` hook.
+ * Mutations via `.set()` and `.delete()` become `Set-Cookie` headers on the
+ * HTTP response returned from the endpoint.
+ */
+export interface AuthenticateCookies {
+	get(name: string): string | undefined;
+	getAll(): Record<string, string>;
+	set(name: string, value: string, options?: CookieSerializeOptions): void;
+	delete(name: string, options?: Pick<CookieSerializeOptions, 'path' | 'domain'>): void;
+}
+
+/**
  * Context passed to the `upgrade` handler.
  */
 export interface UpgradeContext {
@@ -213,6 +257,31 @@ export interface UpgradeContext {
 	url: string;
 	/** Remote IP address. */
 	remoteAddress: string;
+}
+
+/**
+ * Context passed to the optional `authenticate` handler.
+ *
+ * `authenticate` runs as a normal HTTP POST before the WebSocket upgrade, so
+ * any `Set-Cookie` headers from `cookies.set()` ride on a standard response
+ * and work behind every proxy (unlike `Set-Cookie` on the 101 upgrade, which
+ * Cloudflare Tunnel and some other strict edge proxies silently drop).
+ */
+export interface AuthenticateContext {
+	/** The incoming request (standard `Request` object, with body). */
+	request: Request;
+	/** Request headers (all lowercase keys). */
+	headers: Record<string, string>;
+	/** SvelteKit-like cookies API. Mutations become Set-Cookie on the response. */
+	cookies: AuthenticateCookies;
+	/** The request URL path, including query string if present. */
+	url: string;
+	/** Remote IP address (honoring `ADDRESS_HEADER` / `XFF_DEPTH`). */
+	remoteAddress: string;
+	/** Shorthand for returning `remoteAddress`. Matches the SvelteKit event shape. */
+	getClientAddress: () => string;
+	/** The platform API (publish, send, topic helpers, etc.). */
+	platform: Platform;
 }
 
 /**
@@ -294,6 +363,41 @@ export interface SubscribeContext {
  * ```
  */
 export interface WebSocketHandler<UserData = unknown> {
+	/**
+	 * Optional HTTP preflight that runs before the WebSocket upgrade.
+	 *
+	 * Recommended for any flow that needs to refresh a session cookie on WS
+	 * connect. Returning cookies from this hook goes out via a standard HTTP
+	 * response, which works behind every proxy. Setting `Set-Cookie` on the
+	 * 101 upgrade response (via `upgradeResponse()`) is silently dropped by
+	 * Cloudflare Tunnel and some other strict edge proxies.
+	 *
+	 * Triggered by the client store via `connect({ auth: true })`, which
+	 * POSTs to `/__ws/auth` (configurable via `websocket.authPath`) before
+	 * opening every WebSocket - including after reconnects.
+	 *
+	 * Return values:
+	 * - `undefined` / `void` - success, responds 204 with any cookies set via `cookies.set()`.
+	 * - `false` - respond 401 Unauthorized.
+	 * - `Response` - use the returned response directly; any `cookies.set()` calls are merged in.
+	 *
+	 * May be async.
+	 *
+	 * @example
+	 * ```js
+	 * export function authenticate({ cookies }) {
+	 *   const session = validateSessionToken(cookies.get('session'));
+	 *   if (!session) return false;
+	 *   cookies.set('session', renewSession(session), {
+	 *     httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: 60 * 60 * 24 * 7
+	 *   });
+	 * }
+	 * ```
+	 */
+	authenticate?: (ctx: AuthenticateContext) =>
+		| Response | false | void
+		| Promise<Response | false | void>;
+
 	/**
 	 * Called during the HTTP upgrade handshake.
 	 *
@@ -538,19 +642,25 @@ export interface TopicHelper {
 
 /**
  * Wrap upgrade hook return value to include response headers on the 101
- * Switching Protocols response (e.g. `Set-Cookie` for session refresh).
+ * Switching Protocols response.
  *
- * @example
+ * **Warning (Cloudflare):** attaching `Set-Cookie` to the 101 response is
+ * rejected by Cloudflare Tunnel and some other strict edge proxies. The
+ * WebSocket opens, then closes with code 1006 before any frames are exchanged.
+ * For session-cookie refresh use the `authenticate` hook instead, which
+ * refreshes cookies over a normal HTTP response and works behind every proxy.
+ *
+ * This helper remains supported for non-cookie response headers and for
+ * deployments that do not sit behind strict proxies.
+ *
+ * @example Custom non-cookie headers (safe):
  * ```js
  * import { upgradeResponse } from 'svelte-adapter-uws';
  *
  * export function upgrade({ cookies }) {
  *   const session = validateSession(cookies.session_id);
  *   if (!session) return false;
- *   return upgradeResponse(
- *     { userId: session.userId },
- *     { 'set-cookie': refreshSessionCookie(session) }
- *   );
+ *   return upgradeResponse({ userId: session.userId }, { 'x-session-version': '2' });
  * }
  * ```
  */

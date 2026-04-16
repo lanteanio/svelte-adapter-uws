@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { existsSync } from 'node:fs';
-import { parseCookies } from './files/cookies.js';
+import { parseCookies, createCookies } from './files/cookies.js';
 
 /**
  * Safely quote a string for JSON embedding. Throws on invalid characters
@@ -27,11 +27,12 @@ function esc(s) {
  * Uses the same subscribe/unsubscribe/publish protocol as the production
  * uWS handler, so the client store works identically in dev and prod.
  *
- * @param {{ path?: string, handler?: string }} [options]
+ * @param {{ path?: string, handler?: string, authPath?: string }} [options]
  * @returns {import('vite').Plugin}
  */
 export default function uws(options = {}) {
 	const wsPath = options.path || '/ws';
+	const wsAuthPath = options.authPath || '/__ws/auth';
 
 	/** @type {import('ws').WebSocketServer | undefined} */
 	let wss;
@@ -45,7 +46,7 @@ export default function uws(options = {}) {
 	/** @type {Map<import('ws').WebSocket, object>} */
 	const wsWrappers = new Map();
 
-	/** @type {{ upgrade?: Function, open?: Function, message?: Function, close?: Function, drain?: Function, subscribe?: Function }} */
+	/** @type {{ upgrade?: Function, open?: Function, message?: Function, close?: Function, drain?: Function, subscribe?: Function, unsubscribe?: Function, authenticate?: Function }} */
 	let userHandlers = {};
 
 	/**
@@ -209,7 +210,8 @@ export default function uws(options = {}) {
 			close: mod.close,
 			drain: mod.drain,
 			subscribe: mod.subscribe,
-			unsubscribe: mod.unsubscribe
+			unsubscribe: mod.unsubscribe,
+			authenticate: mod.authenticate
 		};
 	}
 
@@ -324,6 +326,110 @@ export default function uws(options = {}) {
 				})();
 			}
 
+			// /__ws/auth middleware: runs the user's `authenticate` hook as a normal
+			// HTTP POST so session cookies are refreshed via a standard Set-Cookie
+			// on a 200-series response. Mirrors the production handler in dev.
+			server.middlewares.use(wsAuthPath, async (req, res, next) => {
+				await handlerReady;
+				if (!userHandlers.authenticate) { next(); return; }
+				if (req.method !== 'POST') {
+					res.statusCode = 405;
+					res.setHeader('allow', 'POST');
+					res.setHeader('content-type', 'text/plain');
+					res.end('Method Not Allowed');
+					return;
+				}
+
+				/** @type {Record<string, string>} */
+				const headers = {};
+				for (const [k, v] of Object.entries(req.headers)) {
+					if (typeof v === 'string') headers[k] = v;
+					else if (Array.isArray(v)) headers[k] = v.join(', ');
+				}
+
+				// Read body (capped at 64 KB; the hook rarely needs it).
+				const AUTH_BODY_LIMIT = 64 * 1024;
+				/** @type {Buffer[]} */
+				const chunks = [];
+				let total = 0;
+				let oversized = false;
+				for await (const chunk of req) {
+					total += chunk.length;
+					if (total > AUTH_BODY_LIMIT) { oversized = true; break; }
+					chunks.push(chunk);
+				}
+				if (oversized) {
+					res.statusCode = 413;
+					res.setHeader('content-type', 'text/plain');
+					res.end('Content Too Large');
+					return;
+				}
+				const bodyBuf = Buffer.concat(chunks);
+
+				const origin = 'http://' + (headers['host'] || 'localhost');
+				const url = req.url || wsAuthPath;
+				const request = new Request(origin + url, {
+					method: 'POST',
+					headers,
+					body: bodyBuf.length > 0 ? bodyBuf : undefined,
+					// @ts-expect-error
+					duplex: 'half'
+				});
+
+				const cookies = createCookies(headers['cookie']);
+				const clientIp = req.socket?.remoteAddress || '';
+				const event = {
+					request,
+					headers,
+					cookies,
+					url,
+					remoteAddress: clientIp,
+					getClientAddress: () => clientIp,
+					platform
+				};
+
+				try {
+					const result = await Promise.resolve(userHandlers.authenticate(event));
+
+					if (result === false) {
+						res.statusCode = 401;
+						res.setHeader('content-type', 'text/plain');
+						res.end('Unauthorized');
+						return;
+					}
+
+					if (result instanceof Response) {
+						res.statusCode = result.status;
+						for (const [hk, hv] of result.headers) {
+							if (hk === 'set-cookie' || hk === 'content-length') continue;
+							res.setHeader(hk, hv);
+						}
+						const outCookies = [
+							...result.headers.getSetCookie(),
+							...cookies._serialize()
+						];
+						if (outCookies.length > 0) res.setHeader('set-cookie', outCookies);
+						if (result.body) {
+							const buf = Buffer.from(await result.arrayBuffer());
+							res.end(buf);
+						} else {
+							res.end();
+						}
+						return;
+					}
+
+					res.statusCode = 204;
+					const outCookies = cookies._serialize();
+					if (outCookies.length > 0) res.setHeader('set-cookie', outCookies);
+					res.end();
+				} catch (err) {
+					console.error('[adapter-uws] authenticate error:', err);
+					res.statusCode = 500;
+					res.setHeader('content-type', 'text/plain');
+					res.end('Internal Server Error');
+				}
+			});
+
 			server.httpServer?.on('upgrade', async (req, socket, head) => {
 				const { pathname } = new URL(req.url || '', 'http://localhost');
 				if (pathname !== wsPath) return;
@@ -370,7 +476,19 @@ export default function uws(options = {}) {
 						if (result && result.__upgradeResponse === true) {
 							userData = result.userData || {};
 							if (result.headers && Object.keys(result.headers).length > 0) {
-								console.warn('[adapter-uws] upgrade() returned response headers — these are only applied in production (uWS). The ws library used in dev does not support custom 101 headers.');
+								const hasSetCookie = Object.keys(result.headers).some(
+									(k) => k.toLowerCase() === 'set-cookie'
+								);
+								if (hasSetCookie) {
+									console.warn(
+										'[adapter-uws] upgradeResponse() attaches Set-Cookie to the 101 response. ' +
+										'This fails silently behind Cloudflare Tunnel and some other strict edge proxies ' +
+										'(WebSocket opens, then closes with 1006). Use the `authenticate` hook to ' +
+										'refresh session cookies over a normal HTTP response.'
+									);
+								} else {
+									console.warn('[adapter-uws] upgrade() returned response headers. These are only applied in production (uWS); the ws library used in dev does not support custom 101 headers.');
+								}
 							}
 						} else {
 							userData = result || {};

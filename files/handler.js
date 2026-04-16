@@ -11,7 +11,7 @@ import { Server } from 'SERVER';
 import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
-import { parseCookies } from './cookies.js';
+import { parseCookies, createCookies } from './cookies.js';
 import { mimeLookup, parse_as_bytes, parse_origin } from './utils.js';
 
 /* global ENV_PREFIX */
@@ -19,6 +19,7 @@ import { mimeLookup, parse_as_bytes, parse_origin } from './utils.js';
 /* global WS_ENABLED */
 /* global WS_PATH */
 /* global WS_OPTIONS */
+/* global WS_AUTH_PATH */
 /* global HEALTH_CHECK_PATH */
 
 class PayloadTooLargeError extends Error {
@@ -1332,13 +1333,37 @@ function handleRequest(res, req) {
 // WS_ENABLED is set by the adapter at build time - no inference from exports needed
 if (WS_ENABLED) {
 	// Warn about unrecognized exports - catches typos like "mesage" or "opn"
-	const knownWsExports = new Set(['open', 'message', 'upgrade', 'close', 'drain', 'subscribe', 'unsubscribe']);
+	const knownWsExports = new Set(['open', 'message', 'upgrade', 'close', 'drain', 'subscribe', 'unsubscribe', 'authenticate']);
 	for (const name of Object.keys(wsModule)) {
 		if (!knownWsExports.has(name)) {
 			console.warn(
 				`Warning: WebSocket handler exports unknown "${name}". ` +
 				`Did you mean one of: ${[...knownWsExports].join(', ')}?`
 			);
+		}
+	}
+
+	// One-shot runtime warning when a user upgrade handler attaches Set-Cookie
+	// to the 101 Switching Protocols response. Cloudflare Tunnel and some other
+	// strict edge proxies silently close WebSocket connections with 1006 when
+	// the 101 carries Set-Cookie. The `authenticate` hook refreshes cookies
+	// over a normal HTTP response and works behind every proxy.
+	let warnedSetCookieOnUpgrade = false;
+	/** @param {Record<string, string | string[]> | null | undefined} responseHeaders */
+	function maybeWarnSetCookieOnUpgrade(responseHeaders) {
+		if (warnedSetCookieOnUpgrade || !responseHeaders) return;
+		for (const k of Object.keys(responseHeaders)) {
+			if (k.toLowerCase() === 'set-cookie') {
+				warnedSetCookieOnUpgrade = true;
+				console.warn(
+					'[adapter-uws] Set-Cookie on the 101 upgrade response is rejected by ' +
+					'Cloudflare Tunnel and some other edge proxies (WebSocket opens, then ' +
+					'closes with 1006 TCP FIN). Migrate to the `authenticate` hook to ' +
+					'refresh session cookies over a normal HTTP response: ' +
+					'export function authenticate({ cookies }) { cookies.set(...); }'
+				);
+				return;
+			}
 		}
 	}
 
@@ -1402,6 +1427,127 @@ if (WS_ENABLED) {
 			}
 		}
 	}, 60000).unref();
+
+	// -- Authenticate endpoint (pre-upgrade HTTP hook) ---------------------
+	// Optional `authenticate` export in hooks.ws.ts runs as a normal HTTP POST
+	// so session cookies can be refreshed via a standard Set-Cookie on a 200
+	// response. This works behind Cloudflare Tunnel and other strict edge
+	// proxies that silently drop WebSocket connections whose 101 response
+	// carries Set-Cookie. The client store POSTs here before opening the WS
+	// when `connect({ auth: true })` is used.
+	if (typeof wsModule.authenticate === 'function') {
+		const authPath = WS_AUTH_PATH;
+		// Body size cap for the authenticate endpoint. Most requests have no
+		// body at all -- the hook reads cookies from the Cookie header. Cap at
+		// a small value to make malicious payloads cheap to reject.
+		const AUTH_BODY_LIMIT = 64 * 1024;
+
+		app.post(authPath, (res, req) => {
+			/** @type {Record<string, string>} */
+			const authHeaders = {};
+			req.forEach((k, v) => { authHeaders[k] = v; });
+			const method = 'POST';
+			const url = req.getUrl() + (req.getQuery() ? '?' + req.getQuery() : '');
+			const clientIp = resolveClientIp(textDecoder.decode(res.getRemoteAddressAsText()), authHeaders);
+
+			const state = acquireState();
+			res.onAborted(() => { state.aborted = true; });
+
+			const contentLength = parseInt(authHeaders['content-length'], 10);
+			if (!isNaN(contentLength) && contentLength > AUTH_BODY_LIMIT) {
+				send413(res);
+				releaseState(state);
+				return;
+			}
+
+			const body = readBody(res, AUTH_BODY_LIMIT, state, isNaN(contentLength) ? -1 : contentLength);
+
+			const base_origin = origin || get_origin(authHeaders);
+			const request = new Request(base_origin + url, {
+				method,
+				headers: authHeaders,
+				body,
+				// @ts-expect-error
+				duplex: 'half'
+			});
+
+			const cookies = createCookies(authHeaders['cookie']);
+
+			const event = {
+				request,
+				headers: authHeaders,
+				cookies,
+				url,
+				remoteAddress: clientIp,
+				getClientAddress: () => clientIp,
+				platform
+			};
+
+			Promise.resolve()
+				.then(() => wsModule.authenticate(event))
+				.then(async (result) => {
+					if (state.aborted) return;
+
+					if (result === false) {
+						res.cork(() => {
+							res.writeStatus('401 Unauthorized');
+							res.writeHeader('content-type', 'text/plain');
+							res.end('Unauthorized');
+						});
+						return;
+					}
+
+					if (result instanceof Response) {
+						// User returned a full Response -- honour it, but merge any
+						// cookies set via cookies.set() so both APIs work together.
+						const buf = result.body ? Buffer.from(await result.arrayBuffer()) : null;
+						if (state.aborted) return;
+						res.cork(() => {
+							res.writeStatus(String(result.status));
+							for (const [hk, hv] of result.headers) {
+								if (hk === 'set-cookie' || hk === 'content-length') continue;
+								res.writeHeader(hk, hv);
+							}
+							for (const c of result.headers.getSetCookie()) res.writeHeader('set-cookie', c);
+							for (const c of cookies._serialize()) res.writeHeader('set-cookie', c);
+							if (buf) res.end(buf);
+							else res.end();
+						});
+						return;
+					}
+
+					// Implicit success: 204 No Content with any Set-Cookie headers
+					res.cork(() => {
+						res.writeStatus('204 No Content');
+						for (const c of cookies._serialize()) res.writeHeader('set-cookie', c);
+						res.endWithoutBody(0);
+					});
+				})
+				.catch((err) => {
+					if (state.aborted) return;
+					if (err instanceof PayloadTooLargeError) {
+						send413(res);
+						return;
+					}
+					console.error('[adapter-uws] authenticate error:', err);
+					if (!state.aborted) send500(res);
+				})
+				.finally(() => { releaseState(state); });
+		});
+
+		// Reject non-POST verbs on the auth path so GET/HEAD do not fall through
+		// to the SSR catch-all (which would try to render a SvelteKit route).
+		app.any(authPath, (res) => {
+			res.cork(() => {
+				res.writeStatus('405 Method Not Allowed');
+				res.writeHeader('allow', 'POST');
+				res.writeHeader('content-type', 'text/plain');
+				res.end('Method Not Allowed');
+			});
+		});
+
+		console.log(`WebSocket auth endpoint registered at ${authPath}`);
+	}
 
 	app.ws(WS_PATH, {
 		// Handle HTTP -> WebSocket upgrade with user-provided auth
@@ -1582,6 +1728,7 @@ if (WS_ENABLED) {
 					const ud = userData || {};
 					if (!ud.remoteAddress) ud.remoteAddress = clientIp;
 					if (responseHeaders) {
+						maybeWarnSetCookieOnUpgrade(responseHeaders);
 						for (const [hk, hv] of Object.entries(responseHeaders)) {
 							if (Array.isArray(hv)) {
 								for (const v of hv) res.writeHeader(hk, v);

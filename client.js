@@ -509,8 +509,14 @@ function createConnection(options) {
 		reconnectInterval = 3000,
 		maxReconnectInterval = 30000,
 		maxReconnectAttempts = Infinity,
-		debug = false
+		debug = false,
+		auth = false
 	} = options;
+
+	// Resolve the auth preflight path. `auth: true` -> default '/__ws/auth',
+	// `auth: '/custom'` -> use the provided path, `auth: false` (default) -> disabled.
+	/** @type {string | null} */
+	const authPath = auth === true ? '/__ws/auth' : (typeof auth === 'string' && auth) ? auth : null;
 
 	/** @type {WebSocket | null} */
 	let ws = null;
@@ -519,6 +525,9 @@ function createConnection(options) {
 	let reconnectTimer = null;
 	/** @type {ReturnType<typeof setInterval> | null} */
 	let activityTimer = null;
+
+	/** @type {Promise<boolean> | null} deduped in-flight auth preflight */
+	let authInFlight = null;
 
 	let attempt = 0;
 	let intentionallyClosed = false;
@@ -570,12 +579,99 @@ function createConnection(options) {
 		return `${protocol}//${window.location.host}${path}`;
 	}
 
+	/**
+	 * Build the HTTP URL for the auth preflight. Mirrors getUrl() but emits
+	 * http/https instead of ws/wss so same-origin cookies flow correctly.
+	 * Returns null in SSR or when auth is disabled.
+	 */
+	function getAuthUrl() {
+		if (!authPath) return null;
+		if (url) {
+			try {
+				const wsUrl = new URL(url);
+				const httpScheme = wsUrl.protocol === 'wss:' ? 'https:' : 'http:';
+				return httpScheme + '//' + wsUrl.host + authPath;
+			} catch {
+				return null;
+			}
+		}
+		if (typeof window === 'undefined') return null;
+		return window.location.origin + authPath;
+	}
+
+	/**
+	 * Run the auth preflight. Returns one of:
+	 *  - `'ok'` - request accepted (2xx). Open the socket.
+	 *  - `'unauthorized'` - server rejected with 4xx. Terminal: the user is
+	 *    not authenticated and retrying won't help without new credentials.
+	 *  - `'transient'` - 5xx or network error. Fall back to normal reconnect
+	 *    backoff so the preflight retries alongside the socket.
+	 *
+	 * Deduped: concurrent doConnect() calls share a single in-flight fetch.
+	 *
+	 * @returns {Promise<'ok' | 'unauthorized' | 'transient'>}
+	 */
+	function runAuth() {
+		if (!authPath) return Promise.resolve('ok');
+		if (authInFlight) return authInFlight;
+		const target = getAuthUrl();
+		if (!target) return Promise.resolve('ok');
+
+		authInFlight = (async () => {
+			try {
+				const resp = await fetch(target, {
+					method: 'POST',
+					credentials: 'include',
+					headers: { 'x-requested-with': 'svelte-adapter-uws' }
+				});
+				if (debug) console.log('[ws] auth preflight status=%d', resp.status);
+				if (resp.ok) return 'ok';
+				if (resp.status >= 400 && resp.status < 500) return 'unauthorized';
+				return 'transient';
+			} catch (err) {
+				if (debug) console.warn('[ws] auth preflight network error:', err);
+				return 'transient';
+			} finally {
+				authInFlight = null;
+			}
+		})();
+		return authInFlight;
+	}
+
 	function doConnect() {
 		if (!url && typeof window === 'undefined') return;
 		if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
 
 		statusStore.set('connecting');
 
+		if (authPath) {
+			runAuth().then((outcome) => {
+				if (intentionallyClosed || terminalClosed) return;
+				if (outcome === 'unauthorized') {
+					// Server rejected the request with a 4xx. The user is not
+					// authenticated and retrying won't help until they log in.
+					if (debug) console.warn('[ws] auth preflight rejected (4xx), not opening WebSocket');
+					statusStore.set('closed');
+					terminalClosed = true;
+					permaClosedStore.set(true);
+					return;
+				}
+				if (outcome === 'transient') {
+					// Network error or 5xx. Retry via the normal backoff loop so
+					// the preflight automatically re-runs on the next attempt.
+					if (debug) console.warn('[ws] auth preflight transient failure, scheduling reconnect');
+					statusStore.set('closed');
+					scheduleReconnect();
+					return;
+				}
+				openSocket();
+			});
+			return;
+		}
+		openSocket();
+	}
+
+	function openSocket() {
 		try {
 			ws = new WebSocket(getUrl());
 		} catch {

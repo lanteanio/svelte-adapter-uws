@@ -40,6 +40,46 @@ export interface ConnectOptions {
 	 * @default false
 	 */
 	debug?: boolean;
+
+	/**
+	 * Run a pre-WebSocket HTTP preflight against the adapter's `authenticate`
+	 * endpoint before opening the socket. Required only when your server's
+	 * `hooks.ws` exports an `authenticate` hook that refreshes session cookies.
+	 *
+	 * - `true` (recommended) - use the default path `/__ws/auth`
+	 * - `string` - use a custom path, e.g. `'/api/ws/auth'`
+	 * - `false` / omit - disabled, no preflight (default)
+	 *
+	 * The preflight is a `fetch(authPath, { method: 'POST', credentials: 'include' })`
+	 * that runs before every connect (including reconnects) so rotated session
+	 * cookies are picked up. Concurrent connect attempts share a single in-flight
+	 * request. On a non-2xx response, the connection is not opened and the status
+	 * store transitions to `'closed'` with a permanent rejection.
+	 *
+	 * This exists because `Set-Cookie` on a 101 Switching Protocols response is
+	 * silently dropped by Cloudflare Tunnel and some other strict edge proxies,
+	 * which closes the WebSocket with code 1006 before any frames are exchanged.
+	 * Refreshing cookies via a normal HTTP response works behind every proxy.
+	 *
+	 * @default false
+	 *
+	 * @example
+	 * ```ts
+	 * // src/hooks.ws.ts
+	 * export function authenticate({ cookies }) {
+	 *   const session = validateSession(cookies.get('session'));
+	 *   if (!session) return false;
+	 *   cookies.set('session', renewSession(session), {
+	 *     httpOnly: true, secure: true, sameSite: 'lax', path: '/'
+	 *   });
+	 * }
+	 *
+	 * // src/routes/+layout.svelte
+	 * import { connect } from 'svelte-adapter-uws/client';
+	 * connect({ auth: true });
+	 * ```
+	 */
+	auth?: boolean | string;
 }
 
 /**
