@@ -1,10 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { parseCookies, serializeCookie, createCookies } from '../files/cookies.js';
 import {
 	mimeLookup,
 	splitCookiesString,
 	parse_as_bytes,
-	parse_origin
+	parse_origin,
+	writeChunkWithBackpressure
 } from '../files/utils.js';
 
 // -- parse_as_bytes ---------------------------------------------------------
@@ -1287,5 +1288,118 @@ describe('createCookies', () => {
 		const c = createCookies();
 		expect(c.getAll()).toEqual({});
 		expect(c._serialize()).toEqual([]);
+	});
+});
+
+// -- writeChunkWithBackpressure ---------------------------------------------
+
+/**
+ * Build a fake uWS HttpResponse that records every method call in order.
+ * Tracks whether a call happens inside a cork callback so tests can assert
+ * that every write and onWritable registration is corked.
+ */
+function makeFakeRes({ writeReturns = [true], onWritableAction = 'never' } = {}) {
+	const calls = [];
+	let corked = 0;
+	let writeIdx = 0;
+	let writableCb = null;
+	const res = {
+		cork(fn) {
+			calls.push({ name: 'cork:enter' });
+			corked++;
+			try {
+				fn();
+			} finally {
+				corked--;
+				calls.push({ name: 'cork:exit' });
+			}
+		},
+		write(value) {
+			const ok = writeReturns[Math.min(writeIdx, writeReturns.length - 1)];
+			writeIdx++;
+			calls.push({ name: 'write', value, corked: corked > 0, ok });
+			return ok;
+		},
+		onWritable(fn) {
+			calls.push({ name: 'onWritable', corked: corked > 0 });
+			writableCb = fn;
+			if (onWritableAction === 'immediate') fn();
+		},
+		trigger() {
+			if (writableCb) writableCb();
+		}
+	};
+	return { res, calls, get corkDepth() { return corked; } };
+}
+
+describe('writeChunkWithBackpressure', () => {
+	it('writes inside cork and returns true synchronously when write succeeds', () => {
+		const { res, calls } = makeFakeRes({ writeReturns: [true] });
+		const result = writeChunkWithBackpressure(res, 'chunk');
+		expect(result).toBe(true);
+		expect(calls.map((c) => c.name)).toEqual(['cork:enter', 'write', 'cork:exit']);
+		expect(calls[1].corked).toBe(true);
+		expect(calls[1].value).toBe('chunk');
+	});
+
+	it('does not register onWritable when write succeeds', () => {
+		const { res, calls } = makeFakeRes({ writeReturns: [true] });
+		writeChunkWithBackpressure(res, 'chunk');
+		expect(calls.some((c) => c.name === 'onWritable')).toBe(false);
+	});
+
+	it('registers onWritable inside cork when backpressure builds', () => {
+		const { res, calls } = makeFakeRes({ writeReturns: [false] });
+		const result = writeChunkWithBackpressure(res, 'chunk');
+		expect(result).not.toBe(true);
+		expect(result).toBeInstanceOf(Promise);
+		const names = calls.map((c) => c.name);
+		expect(names).toEqual(['cork:enter', 'write', 'onWritable', 'cork:exit']);
+		const writable = calls.find((c) => c.name === 'onWritable');
+		expect(writable.corked).toBe(true);
+	});
+
+	it('returned promise resolves true when onWritable fires', async () => {
+		const { res } = makeFakeRes({ writeReturns: [false] });
+		const result = writeChunkWithBackpressure(res, 'chunk', 1000);
+		res.trigger();
+		await expect(result).resolves.toBe(true);
+	});
+
+	it('returned promise resolves false when the timeout elapses', async () => {
+		vi.useFakeTimers();
+		try {
+			const { res } = makeFakeRes({ writeReturns: [false] });
+			const result = writeChunkWithBackpressure(res, 'chunk', 50);
+			vi.advanceTimersByTime(50);
+			await expect(result).resolves.toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('clears the drain timeout when onWritable fires first', async () => {
+		vi.useFakeTimers();
+		try {
+			const { res } = makeFakeRes({ writeReturns: [false] });
+			const result = writeChunkWithBackpressure(res, 'chunk', 50);
+			res.trigger();
+			await expect(result).resolves.toBe(true);
+			vi.advanceTimersByTime(1000);
+			await expect(result).resolves.toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('onWritable callback returns true so uWS keeps the handler registered', () => {
+		let cbReturn;
+		const res = {
+			cork(fn) { fn(); },
+			write() { return false; },
+			onWritable(fn) { cbReturn = fn(); }
+		};
+		writeChunkWithBackpressure(res, 'chunk', 1000);
+		expect(cbReturn).toBe(true);
 	});
 });

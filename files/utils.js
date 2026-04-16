@@ -112,6 +112,40 @@ export function parse_as_bytes(value) {
 }
 
 /**
+ * Write a chunk to a uWS HttpResponse inside a cork and, if backpressure
+ * builds, return a Promise that resolves when the socket drains or the
+ * timeout elapses. Returns `true` synchronously when no drain is needed.
+ *
+ * All uWS response mutations (write + onWritable registration) happen
+ * inside the cork callback, which uWS invokes synchronously, so the
+ * boolean return value of `res.write()` is captured correctly.
+ *
+ * @param {{ cork: (fn: () => void) => void, write: (value: any) => boolean, onWritable: (fn: () => boolean) => void }} res
+ * @param {any} value
+ * @param {number} [timeoutMs]
+ * @returns {true | Promise<boolean>} true if the write succeeded without drain; otherwise a promise that resolves true on drain or false on timeout.
+ */
+export function writeChunkWithBackpressure(res, value, timeoutMs = 30000) {
+	let ok = false;
+	/** @type {Promise<boolean> | null} */
+	let drainPromise = null;
+	res.cork(() => {
+		ok = res.write(value);
+		if (!ok) {
+			drainPromise = new Promise((resolve) => {
+				const timer = setTimeout(() => resolve(false), timeoutMs);
+				res.onWritable(() => {
+					clearTimeout(timer);
+					resolve(true);
+					return true;
+				});
+			});
+		}
+	});
+	return ok ? true : /** @type {Promise<boolean>} */ (drainPromise);
+}
+
+/**
  * @param {string | undefined} value
  * @returns {string | undefined}
  */

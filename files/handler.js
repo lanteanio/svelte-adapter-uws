@@ -12,7 +12,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -1209,11 +1209,11 @@ async function writeResponse(res, response, state, acceptEncoding) {
 			return;
 		}
 
-		// Multi-chunk streaming response - write headers + first two chunks in one cork.
-		// cork() batches these writes into a single syscall, so backpressure from
-		// individual res.write() calls inside cork is not actionable  - the data is
-		// buffered and flushed together when cork returns. The backpressure loop
-		// below handles all subsequent chunks.
+		// Multi-chunk streaming response. Headers + first two chunks share one
+		// cork so they flush as a single syscall. Subsequent chunks are each
+		// written inside their own cork via writeChunkWithBackpressure, which
+		// also captures the drain signal from res.write() without tripping the
+		// uWS "writes must be made from within a corked callback" warning.
 		if (state.aborted) return;
 		streaming = true;
 		res.cork(() => {
@@ -1222,17 +1222,13 @@ async function writeResponse(res, response, state, acceptEncoding) {
 			res.write(second.value);
 		});
 
-		// Stream remaining chunks with backpressure (30s timeout per drain)
 		for (;;) {
 			const { done, value } = await reader.read();
 			if (done || state.aborted) break;
 
-			const ok = res.write(value);
-			if (!ok) {
-				const drained = await new Promise((resolve) => {
-					const timer = setTimeout(() => resolve(false), 30000);
-					res.onWritable(() => { clearTimeout(timer); resolve(true); return true; });
-				});
+			const result = writeChunkWithBackpressure(res, value);
+			if (result !== true) {
+				const drained = await result;
 				if (!drained) { streamTimedOut = true; break; }
 				if (state.aborted) break;
 			}
@@ -1243,7 +1239,7 @@ async function writeResponse(res, response, state, acceptEncoding) {
 				// Backpressure drained past the 30s deadline. Abruptly close the
 				// connection rather than sending a clean EOF on a partial body,
 				// which would look like a successful but truncated response.
-				res.close();
+				res.cork(() => res.close());
 			} else {
 				res.cork(() => res.end());
 			}

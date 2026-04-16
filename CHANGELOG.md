@@ -43,6 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.13] - 2026-04-17
+
+### Fixed
+
+- **Streaming SSR `res.write()` warning**: the multi-chunk streaming branch of `writeResponse()` wrote chunks 3+ via a bare `res.write(value)` outside of any cork, which tripped uWS's `writes must be made from within a corked callback` warning once per streamed chunk. The original comment assumed that corking each chunk would hide the backpressure signal, but `res.cork()` invokes its callback synchronously, so the boolean return value of `res.write()` inside cork still reflects the live socket state. Fixed by extracting a `writeChunkWithBackpressure()` helper that corks the write and, if backpressure builds, registers the `onWritable` drain handler inside the same cork. The backpressure semantics, 30s drain timeout, and per-chunk syscall batching are all preserved.
+- **Streaming timeout `res.close()` cork**: when the 30s drain timeout fires and the adapter abruptly closes the connection to avoid sending a truncated clean EOF, the close now runs inside `res.cork()` to stay consistent with the rest of the response path and suppress any future uWS state-mutation warnings.
+
+---
+
 ## [0.4.12] - 2026-04-16
 
 ### Added
