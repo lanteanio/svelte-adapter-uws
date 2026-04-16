@@ -43,6 +43,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.14] - 2026-04-17
+
+### Fixed
+
+- **`res.upgrade()` fires uWS "writes must be made from within a corked callback" warning**: restored `res.cork()` around the WebSocket upgrade in both the sync (no-upgrade-handler) path and the async (user-upgrade-handler) path, and in the same-signature path in `testing.js`. One warning per upgrade is now gone.
+- **Revisited the 0.4.11 "Windows upgrade" fix**: 0.4.11 removed the cork wrapper around `res.upgrade()` based on a 1006 reproducer that turned out to be the same root cause 0.4.12 then fixed with the `authenticate` hook -- Cloudflare Tunnel (and similar edge proxies) silently closing WebSocket connections whose 101 response carries `Set-Cookie`. The cork was never the problem: 0.2.9 shipped the same `res.cork(() => res.upgrade(...))` pattern and has been running on Windows native (NSSM service, no proxy) in production for months without a single 1006. Same uWS version (v20.60.0) in both. With `authenticate` now owning the session-refresh-over-WS contract, `upgradeResponse()` with `Set-Cookie` is already discouraged and emits a build-time + runtime warning, so the proxy-strip scenario no longer rides on the cork site.
+
+### Verification
+
+- Full unit suite: 839/839 pass.
+- Playwright e2e suite (dev + prod, browser + raw `ws` client, 25 tests): pass on Windows native against a real uWS server with the restored cork.
+- Raw upgrade smoke test against the prod fixture: 3 consecutive WS upgrades, all clean close 1005, no uWS warnings, no 1006.
+
+### Note on the prior diagnosis
+
+The 0.4.11 CHANGELOG entry is kept as-is for historical accuracy. The real fix for the symptom it described landed one commit later in 0.4.12 (`authenticate` hook). If you were relying on `upgradeResponse({ 'set-cookie': ... })` through Cloudflare Tunnel, migrate to `authenticate`.
+
+---
+
 ## [0.4.13] - 2026-04-17
 
 ### Fixed

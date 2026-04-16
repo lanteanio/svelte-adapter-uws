@@ -115,7 +115,9 @@ export async function createTestServer(options = {}) {
 			const rawIp = new TextDecoder().decode(res.getRemoteAddressAsText());
 
 			if (!handler.upgrade) {
-				res.upgrade({ remoteAddress: rawIp }, secKey, secProtocol, secExtensions, context);
+				res.cork(() => {
+					res.upgrade({ remoteAddress: rawIp }, secKey, secProtocol, secExtensions, context);
+				});
 				return;
 			}
 
@@ -143,16 +145,18 @@ export async function createTestServer(options = {}) {
 						userData = result || {};
 					}
 					if (!userData.remoteAddress) userData.remoteAddress = rawIp;
-					if (responseHeaders) {
-						for (const [hk, hv] of Object.entries(responseHeaders)) {
-							if (Array.isArray(hv)) {
-								for (const v of hv) res.writeHeader(hk, v);
-							} else {
-								res.writeHeader(hk, hv);
+					res.cork(() => {
+						if (responseHeaders) {
+							for (const [hk, hv] of Object.entries(responseHeaders)) {
+								if (Array.isArray(hv)) {
+									for (const v of hv) res.writeHeader(hk, v);
+								} else {
+									res.writeHeader(hk, hv);
+								}
 							}
 						}
-					}
-					res.upgrade(userData, secKey, secProtocol, secExtensions, context);
+						res.upgrade(userData, secKey, secProtocol, secExtensions, context);
+					});
 				})
 				.catch((err) => {
 					if (!aborted) {
