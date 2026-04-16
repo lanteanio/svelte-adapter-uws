@@ -1511,9 +1511,7 @@ if (WS_ENABLED) {
 			// no cookie parsing). Inject remoteAddress so plugins/ratelimit can
 			// key on the real client IP via ws.getUserData().remoteAddress.
 			if (!wsModule.upgrade) {
-				res.cork(() => {
-					res.upgrade({ remoteAddress: clientIp }, secKey, secProtocol, secExtensions, context);
-				});
+				res.upgrade({ remoteAddress: clientIp }, secKey, secProtocol, secExtensions, context);
 				return;
 			}
 
@@ -1583,24 +1581,22 @@ if (WS_ENABLED) {
 					}
 					const ud = userData || {};
 					if (!ud.remoteAddress) ud.remoteAddress = clientIp;
-					res.cork(() => {
-						if (responseHeaders) {
-							for (const [hk, hv] of Object.entries(responseHeaders)) {
-								if (Array.isArray(hv)) {
-									for (const v of hv) res.writeHeader(hk, v);
-								} else {
-									res.writeHeader(hk, hv);
-								}
+					if (responseHeaders) {
+						for (const [hk, hv] of Object.entries(responseHeaders)) {
+							if (Array.isArray(hv)) {
+								for (const v of hv) res.writeHeader(hk, v);
+							} else {
+								res.writeHeader(hk, hv);
 							}
 						}
-						res.upgrade(
-							ud,
-							secKey,
-							secProtocol,
-							secExtensions,
-							context
-						);
-					});
+					}
+					res.upgrade(
+						ud,
+						secKey,
+						secProtocol,
+						secExtensions,
+						context
+					);
 				})
 				.catch((err) => {
 					clearTimeout(timer);
