@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`createLock()` plugin at `svelte-adapter-uws/plugins/lock`.** Per-key serialization for critical sections that must not interleave - atomic read-modify-write on user state, "only one in-flight upgrade per resource," anywhere two requests racing the same record would corrupt it. Concurrent `withLock(key, fn)` calls on the same key queue FIFO; calls on different keys run in parallel. Errors from `fn` propagate to the caller and do not block subsequent waiters on the same key. Backed by a single `Map<string, Promise>` chain - no timers, no allocations on the steady-state path. The plugin also exposes `held(key)`, `size()`, and `clear()` for inspection and test teardown. The contract is shaped to map cleanly onto a future Redis-backed swap (`SET NX PX`) in the extensions package, so user code written against the in-process plugin moves to a distributed lock without an API change.
+
 ## [0.5.0-next.1] - 2026-04-28
 
 ### Added

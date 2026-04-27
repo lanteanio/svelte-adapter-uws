@@ -92,6 +92,10 @@
     "./plugins/groups/client": {
       "types": "./plugins/groups/client.d.ts",
       "default": "./plugins/groups/client.js"
+    },
+    "./plugins/lock": {
+      "types": "./plugins/lock/server.d.ts",
+      "default": "./plugins/lock/server.js"
     }
   },
   "types": "./index.d.ts",
