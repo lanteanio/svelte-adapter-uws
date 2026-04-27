@@ -5,52 +5,20 @@ All notable changes to `svelte-adapter-uws` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 0.5.0 Roadmap
+## [Unreleased]
+
+## [0.5.0-next.1] - 2026-04-28
 
 ### Added
 
 - **`platform.sendCoalesced(ws, { key, topic, event, data })`** - new per-connection send primitive with coalesce-by-key semantics. Each `(connection, key)` pair holds at most one pending message; if a newer call for the same key arrives before the previous frame drains, the older value is replaced in place. Latest value wins, original insertion order across keys is preserved. Use for latest-value streams where intermediate values are noise (price ticks, cursor positions, presence state, typing indicators, scroll position). Serialization is deferred to flush time, so a stream that overwrites the same key 1000 times before a drain pays one `JSON.stringify`, not 1000. Pumping resumes automatically on the connection's next drain event - `send()` and `publish()` are unchanged.
 - **`platform.pressure`** and **`platform.onPressure(cb)`** - worker-local backpressure signal. The adapter samples once per second (configurable) and exposes `{ active, subscriberRatio, publishRate, memoryMB, reason }` where `reason` is one of `'NONE'`, `'PUBLISH_RATE'`, `'SUBSCRIBERS'`, `'MEMORY'` with fixed precedence (memory wins over publish rate wins over subscribers). `onPressure(cb)` fires on `reason` transitions and returns an unsubscribe function. Use this to drive targeted degradation (shed background streams, return 503 for non-critical writes) instead of generic panic on slow consumers. Thresholds are configurable via `WebSocketOptions.pressure`; each individual signal can be set to `false` to disable. Defaults are conservative and a healthy small app should not trip them in steady state.
-- **Per-topic monotonic `seq` on every broadcast envelope** - `platform.publish()` now stamps a monotonic per-topic sequence number into the envelope (`{ topic, event, data, seq }`). The first publish to a topic sends `seq: 1`, the next `seq: 2`, and so on; each topic has its own counter. Reconnecting clients can use the seq to detect dropped frames and resume from where they left off (foundation for the upcoming session-resume primitive). The wire change is purely additive - clients that don't care about seq simply ignore the extra field. Pass `{ seq: false }` to opt out for ephemeral or high-cardinality topics where the counter map would grow unbounded. The `WSEvent<T>` client type gains an optional `seq?: number` field for downstream consumers. In clustered mode the seq is worker-local; the originating worker's seq propagates verbatim through the relay to other workers, but cluster-wide monotonic seq across multiple publisher workers requires the upcoming Redis Lua INCR variant in the extensions package. The testing harness (`createTestServer`) is brought to wire-format parity, so user tests against the harness see the same envelope shape as production.
-- **`classifyCloseCode(code)` - explicit close-code classification on the client.** The reconnect dispatch now goes through a named primitive that maps every WebSocket close code into one of three buckets: `'TERMINAL'` (1008/4401/4403 - permanent rejection, no further reconnect), `'THROTTLE'` (4429 - server-side rate-limit, jump ahead in the backoff curve), or `'RETRY'` (everything else, including normal closes 1000/1001 and abnormal 1006/1011/1012). Behavior is unchanged: terminal codes still stop the retry loop, throttle codes still bump the attempt counter to 5, retry codes still go through the standard backoff. The lift from implicit-third-branch to named primitive makes the contract testable in isolation and gives downstream layers (richer state machine, server-side metrics) a single place to reason about close semantics.
+- **Per-topic monotonic `seq` on every broadcast envelope** - `platform.publish()` now stamps a monotonic per-topic sequence number into the envelope (`{ topic, event, data, seq }`). The first publish to a topic sends `seq: 1`, the next `seq: 2`, and so on; each topic has its own counter. Reconnecting clients can use the seq to detect dropped frames and resume from where they left off. The wire change is purely additive - clients that don't care about seq simply ignore the extra field. Pass `{ seq: false }` to opt out for ephemeral or high-cardinality topics where the counter map would grow unbounded. The `WSEvent<T>` client type gains an optional `seq?: number` field for downstream consumers. In clustered mode the seq is worker-local; the originating worker's seq propagates verbatim through the relay to other workers, so concurrent publishers on the same topic across multiple workers can produce colliding seqs. The testing harness (`createTestServer`) is brought to wire-format parity, so user tests against the harness see the same envelope shape as production.
+- **`classifyCloseCode(code)` - explicit close-code classification on the client.** The reconnect dispatch now goes through a named primitive that maps every WebSocket close code into one of three buckets: `'TERMINAL'` (1008/4401/4403 - permanent rejection, no further reconnect), `'THROTTLE'` (4429 - server-side rate-limit, jump ahead in the backoff curve), or `'RETRY'` (everything else, including normal closes 1000/1001 and abnormal 1006/1011/1012). Behavior is unchanged: terminal codes still stop the retry loop, throttle codes still bump the attempt counter to 5, retry codes still go through the standard backoff. The lift from implicit-third-branch to named primitive makes the contract testable in isolation and gives callers a single place to reason about close semantics.
 
 ### Changed
 
-- **Reconnect curve flipped to `2.2^attempt` with a 5 minute cap.** The exponential factor moves from `1.5^attempt` to `2.2^attempt` and the default `maxReconnectInterval` cap moves from `30000` (30 seconds) to `300000` (5 minutes). The proportional +/- 25% jitter is unchanged. The new curve hits the cap by attempt 6 with the default 3 second base, vs the old curve which capped at 30 seconds and stayed there from attempt 6 onward. Net effect: brief restarts feel the same (first few attempts are short), but a sustained outage backs off harder, which is kinder to a server that is genuinely struggling. The `'THROTTLE'` close-code response (4429) inherits the new curve; jumping to attempt 5 now lands at ~155 seconds instead of ~22 seconds, matching the curve's design intent of harder backoff under sustained pain. Users who want the old behavior can pass `{ maxReconnectInterval: 30000 }` explicitly. The delay calculation is now a pure helper (`nextReconnectDelay`) on `client.js`, with unit tests covering attempt-zero base case, exponential growth, cap-saturation, multiplicative jitter at the cap (so 10K clients hitting the cap simultaneously don't reconnect in lockstep), and custom base/cap overrides.
-
-### Reliability & Correctness
-
-- [ ] **Subscribe acknowledgement** - server confirms or denies topic subscriptions so the client knows if a sub succeeded
-- [ ] **Session ID for stale message filtering** - prevent duplicate events from a previous session leaking into a reconnected session
-
-### Client DX
-
-- [ ] **Richer connection state machine** - `disconnected` / `suspended` / `failed` states instead of just `connecting` / `open` / `closed`
-- [ ] **Push-with-reply (request-response over WS)** - correlated request/response pairs over WebSocket, enabling RPC-style patterns
-
-### Scalability
-
-- [ ] **WebSocket upgrade admission control** - per-tick budget limiting concurrent upgrades to prevent event loop starvation under connection storms
-- [ ] **Presence diff protocol** - broadcast joins/leaves instead of full state snapshots for bandwidth savings at scale
-- [ ] **Batch subscribe hook** - server validates all topics at once instead of per-topic callback
-- [ ] **Publish rate monitoring** - warn at >10MB/s per topic to catch runaway publishers
-
-### Performance
-
-- [ ] **Split writeResponse into specialized sync/async** - separate fast-path for known-length bodies vs streaming for better V8 optimization
-- [ ] **Known header extraction** - extract a fixed set of headers in consistent order for better JIT optimization
-- [ ] **WS control message manual parse** - skip `JSON.parse` for subscribe/unsubscribe (known fixed shapes)
-
-### Plugins
-
-- [ ] **Lock / Mutex** - `withLock(key, fn)` serializes access per key using in-memory `Map<string, Promise>`. Prevents concurrent upgrades on the same resource and atomic read-modify-write on user state. API contract designed for drop-in Redis `SET NX PX` swap via extensions.
-- [ ] **Session** - `Map<token, data>` with sliding TTL. Hooks into `upgrade` to load and `close` to persist. Survives reconnects within the same instance. API contract designed for Redis hash swap via extensions.
-- [ ] **Dedup** - `Set<messageId>` with TTL eviction for idempotent message delivery. Client retries after disconnect don't trigger side effects twice. API contract designed for Redis `SET NX EX` swap via extensions.
-
-### Future / Optional
-
-- [ ] **Stale-while-revalidate SSR cache** - serve cached SSR while re-rendering in background
-- [ ] **Client transport abstraction** - pluggable transports (WS / SSE / MessagePort)
+- **Reconnect curve: `2.2^attempt` with a 5 minute cap.** The exponential factor moves from `1.5^attempt` to `2.2^attempt` and the default `maxReconnectInterval` cap moves from `30000` (30 seconds) to `300000` (5 minutes). The proportional +/- 25% jitter is unchanged. The new curve hits the cap by attempt 6 with the default 3 second base, vs the old curve which capped at 30 seconds and stayed there from attempt 6 onward. Net effect: brief restarts feel the same (first few attempts are short), but a sustained outage backs off harder, which is kinder to a server that is genuinely struggling. The `'THROTTLE'` close-code response (4429) inherits the new curve; jumping to attempt 5 now lands at ~155 seconds instead of ~22 seconds. Users who want the old behavior can pass `{ maxReconnectInterval: 30000 }` explicitly. The delay calculation is now a pure helper (`nextReconnectDelay`) on `client.js`, with unit tests covering attempt-zero base case, exponential growth, cap-saturation, multiplicative jitter at the cap (so 10K clients hitting the cap simultaneously don't reconnect in lockstep), and custom base/cap overrides.
 
 ---
 
