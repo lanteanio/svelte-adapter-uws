@@ -100,6 +100,10 @@
     "./plugins/session": {
       "types": "./plugins/session/server.d.ts",
       "default": "./plugins/session/server.js"
+    },
+    "./plugins/dedup": {
+      "types": "./plugins/dedup/server.d.ts",
+      "default": "./plugins/dedup/server.js"
     }
   },
   "types": "./index.d.ts",
