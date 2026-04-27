@@ -96,6 +96,10 @@
     "./plugins/lock": {
       "types": "./plugins/lock/server.d.ts",
       "default": "./plugins/lock/server.js"
+    },
+    "./plugins/session": {
+      "types": "./plugins/session/server.d.ts",
+      "default": "./plugins/session/server.js"
     }
   },
   "types": "./index.d.ts",
