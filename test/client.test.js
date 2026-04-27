@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 // Mock WebSocket before importing the client module
 class MockWebSocket {
@@ -244,18 +244,54 @@ describe('client store patterns', () => {
 		});
 	});
 
-	describe('exponential backoff', () => {
-		it('increases delay with jitter, capped at max', () => {
-			const reconnectInterval = 3000;
-			const maxReconnectInterval = 30000;
+	describe('nextReconnectDelay', () => {
+		// Pure helper - import lazily to avoid pulling svelte/store into the
+		// reducer-shape tests above.
+		/** @type {(base: number, maxDelay: number, attempt: number, randFactor?: number) => number} */
+		let nextReconnectDelay;
+		beforeAll(async () => {
+			({ nextReconnectDelay } = await import('../client.js'));
+		});
 
-			for (let attempt = 0; attempt < 20; attempt++) {
-				const delay = Math.min(
-					reconnectInterval * Math.pow(1.5, attempt) + Math.random() * 1000,
-					maxReconnectInterval
-				);
-				expect(delay).toBeLessThanOrEqual(maxReconnectInterval + 1000);
-				expect(delay).toBeGreaterThan(0);
+		it('returns base * (0.75..1.25) on the first attempt', () => {
+			expect(nextReconnectDelay(3000, 300000, 0, 0)).toBe(2250);
+			expect(nextReconnectDelay(3000, 300000, 0, 1)).toBe(3750);
+			expect(nextReconnectDelay(3000, 300000, 0, 0.5)).toBe(3000);
+		});
+
+		it('grows by a 2.2 factor per attempt before hitting the cap', () => {
+			// randFactor 0.5 = mid-point, jitter cancels to 1.0, so the math
+			// is the un-jittered curve modulo IEEE-754 floating-point fuzz.
+			expect(nextReconnectDelay(3000, 300000, 1, 0.5)).toBeCloseTo(6600, 0);
+			expect(nextReconnectDelay(3000, 300000, 2, 0.5)).toBeCloseTo(14520, 0);
+			expect(nextReconnectDelay(3000, 300000, 3, 0.5)).toBeCloseTo(31944, 0);
+		});
+
+		it('caps the un-jittered delay at maxDelay', () => {
+			// 3000 * 2.2^10 is far past 300000 - the cap kicks in.
+			// At randFactor 0.5 the multiplicative jitter is 1.0, so delay == cap.
+			expect(nextReconnectDelay(3000, 300000, 10, 0.5)).toBe(300000);
+		});
+
+		it('keeps proportional +/- 25% jitter even at the cap', () => {
+			// At the cap, jitter still spreads delays by 25% so 10K clients
+			// hitting the cap simultaneously don't all reconnect in lockstep.
+			expect(nextReconnectDelay(3000, 300000, 10, 0)).toBe(225000);
+			expect(nextReconnectDelay(3000, 300000, 10, 1)).toBe(375000);
+		});
+
+		it('honors a custom base interval', () => {
+			expect(nextReconnectDelay(1000, 300000, 0, 0.5)).toBe(1000);
+			expect(nextReconnectDelay(5000, 300000, 1, 0.5)).toBe(11000);
+		});
+
+		it('honors a custom maxDelay cap', () => {
+			expect(nextReconnectDelay(3000, 30000, 5, 0.5)).toBe(30000);
+		});
+
+		it('produces strictly positive delays for any randFactor in [0, 1)', () => {
+			for (const r of [0, 0.001, 0.5, 0.999]) {
+				expect(nextReconnectDelay(3000, 300000, 0, r)).toBeGreaterThan(0);
 			}
 		});
 	});

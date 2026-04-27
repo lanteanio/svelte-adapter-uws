@@ -12,7 +12,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -408,6 +408,160 @@ const wsConnections = new Set();
 // Read once at module load so it is never sampled inside a hot callback.
 const wsDebug = WS_ENABLED && env('WS_DEBUG', '') === '1';
 
+// -- Per-topic broadcast sequence numbers ------------------------------------
+// Each platform.publish() stamps a monotonic per-topic seq into the envelope
+// so reconnecting clients can detect gaps and resume from where they left
+// off. Worker-local in clustered mode: cross-worker authority requires the
+// extensions package's Lua INCR variant. See README "Sequence numbers" for
+// the cluster caveat. The map persists for process lifetime; one entry per
+// topic ever published. High-cardinality producers can opt out per-call
+// via { seq: false }.
+/** @type {Map<string, number>} */
+const topicSeqs = new Map();
+
+// -- Pressure tracking -------------------------------------------------------
+// Coarse 1 Hz sampler exposed as `platform.pressure` (snapshot) and
+// `platform.onPressure(cb)` (transition callback). State lives at module
+// scope so platform.publish() and the subscribe/unsubscribe handlers can
+// bump counters with one integer add - no allocations on the hot path.
+
+let publishCountWindow = 0;
+let totalSubscriptions = 0;
+
+/**
+ * @typedef {{
+ *   active: boolean,
+ *   subscriberRatio: number,
+ *   publishRate: number,
+ *   memoryMB: number,
+ *   reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY'
+ * }} PressureSnapshot
+ */
+
+/** @type {PressureSnapshot} */
+const pressureSnapshot = {
+	active: false,
+	subscriberRatio: 0,
+	publishRate: 0,
+	memoryMB: 0,
+	reason: 'NONE'
+};
+
+/** @type {Set<(snapshot: PressureSnapshot) => void>} */
+const pressureListeners = new Set();
+
+/** @type {ReturnType<typeof setInterval> | null} */
+let pressureTimer = null;
+
+/**
+ * Default pressure thresholds. Designed to be safe rather than tight: the
+ * goal is "no false positives in the steady state of a healthy small app,"
+ * not "perfectly tuned for sustained five-figure publish rates." Override
+ * per-deployment via the `pressure` field on the WebSocket options.
+ */
+const DEFAULT_PRESSURE_THRESHOLDS = {
+	memoryHeapUsedRatio: 0.85,
+	publishRatePerSec: 10000,
+	subscriberRatio: 50,
+	sampleIntervalMs: 1000
+};
+
+/**
+ * Sample once: read counters, fold them into the snapshot, fire listeners
+ * iff `reason` changed. Called by the 1 Hz timer; also extracted so a test
+ * harness can drive samples directly without spinning real timers.
+ *
+ * @param {{ memoryHeapUsedRatio: number | false, publishRatePerSec: number | false, subscriberRatio: number | false, sampleIntervalMs: number }} thresholds
+ */
+function samplePressure(thresholds) {
+	const interval = thresholds.sampleIntervalMs / 1000;
+	const publishRate = interval > 0 ? publishCountWindow / interval : 0;
+	publishCountWindow = 0;
+
+	const connections = wsConnections.size;
+	const subscriberRatio = connections > 0 ? totalSubscriptions / connections : 0;
+
+	const mem = process.memoryUsage();
+	const heapUsedRatio = mem.heapTotal > 0 ? mem.heapUsed / mem.heapTotal : 0;
+	const memoryMB = mem.rss / (1024 * 1024);
+
+	const reason = computePressureReason(
+		{ heapUsedRatio, publishRate, subscriberRatio },
+		thresholds
+	);
+
+	const transitioned = reason !== pressureSnapshot.reason;
+	pressureSnapshot.subscriberRatio = subscriberRatio;
+	pressureSnapshot.publishRate = publishRate;
+	pressureSnapshot.memoryMB = memoryMB;
+	pressureSnapshot.reason = reason;
+	pressureSnapshot.active = reason !== 'NONE';
+
+	if (transitioned) {
+		for (const cb of pressureListeners) {
+			try {
+				cb(pressureSnapshot);
+			} catch (err) {
+				console.error('[pressure] listener threw:', err);
+			}
+		}
+	}
+}
+
+/**
+ * Merge user-supplied pressure options on top of the safe defaults. Each
+ * threshold accepts `false` to disable that signal. `sampleIntervalMs` is
+ * clamped to a sane minimum to avoid pathological tight-loop sampling if
+ * a user passes 0 or a negative number.
+ *
+ * @param {{ memoryHeapUsedRatio?: number | false, publishRatePerSec?: number | false, subscriberRatio?: number | false, sampleIntervalMs?: number } | undefined} opts
+ */
+function resolvePressureThresholds(opts) {
+	const merged = { ...DEFAULT_PRESSURE_THRESHOLDS, ...(opts || {}) };
+	if (typeof merged.sampleIntervalMs !== 'number' || merged.sampleIntervalMs < 100) {
+		merged.sampleIntervalMs = DEFAULT_PRESSURE_THRESHOLDS.sampleIntervalMs;
+	}
+	return merged;
+}
+
+/**
+ * Start the 1 Hz pressure sampler. Idempotent: a second call replaces the
+ * existing timer with a new one using the supplied thresholds.
+ *
+ * @param {Parameters<typeof resolvePressureThresholds>[0]} opts
+ */
+function startPressureSampling(opts) {
+	const thresholds = resolvePressureThresholds(opts);
+	if (pressureTimer) clearInterval(pressureTimer);
+	pressureTimer = setInterval(() => samplePressure(thresholds), thresholds.sampleIntervalMs);
+	if (typeof pressureTimer.unref === 'function') pressureTimer.unref();
+}
+
+function stopPressureSampling() {
+	if (pressureTimer) {
+		clearInterval(pressureTimer);
+		pressureTimer = null;
+	}
+}
+
+/**
+ * Drain any pending coalesce-by-key messages on a single connection.
+ * Serializes lazily: only the surviving (latest) value per key pays
+ * JSON.stringify cost.
+ *
+ * @param {import('uWebSockets.js').WebSocket<any>} ws
+ */
+function flushCoalescedFor(ws) {
+	const userData = ws.getUserData();
+	const pending = userData.__coalesced;
+	if (!pending || pending.size === 0) return;
+	drainCoalesced(pending, (msg) => ws.send(
+		envelopePrefix(msg.topic, msg.event) + JSON.stringify(msg.data ?? null) + '}',
+		false,
+		false
+	));
+}
+
 /** @type {import('./index.js').Platform} */
 const platform = {
 	/**
@@ -416,7 +570,11 @@ const platform = {
 	 * No-op if no clients are subscribed - safe to call unconditionally.
 	 */
 	publish(topic, event, data, options) {
-		const envelope = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
+		publishCountWindow++;
+		const seq = (options && options.seq === false)
+			? null
+			: nextTopicSeq(topicSeqs, topic);
+		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
 		const result = app.publish(topic, envelope, false, false);
 		// Relay to other workers via main thread (no-op in single-process mode).
 		// Pass { relay: false } when the message originates from an external
@@ -442,6 +600,38 @@ const platform = {
 	 */
 	send(ws, topic, event, data) {
 		return ws.send(envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}', false, false);
+	},
+
+	/**
+	 * Send a message to a single connection with coalesce-by-key semantics.
+	 *
+	 * Each (ws, key) pair holds at most one pending message. If a newer
+	 * sendCoalesced for the same key arrives before the previous one drains
+	 * out to the wire, the older message is dropped in place: latest value
+	 * wins, original insertion order is preserved.
+	 *
+	 * Use for latest-value streams where intermediate values are noise:
+	 * price ticks, cursor positions, presence state, typing indicators,
+	 * scroll/scrub positions. For at-least-once delivery use send() or
+	 * publish() instead.
+	 *
+	 * Serialization is deferred to the actual flush, so a stream that
+	 * overwrites the same key 1000 times before a single drain pays only
+	 * one JSON.stringify, not 1000.
+	 *
+	 * The flush attempts immediately and again on every uWS drain event.
+	 * On BACKPRESSURE or DROPPED from ws.send, pumping stops and resumes
+	 * on the next drain.
+	 */
+	sendCoalesced(ws, { key, topic, event, data }) {
+		const userData = ws.getUserData();
+		let pending = userData.__coalesced;
+		if (!pending) {
+			pending = new Map();
+			userData.__coalesced = pending;
+		}
+		pending.set(key, { topic, event, data });
+		flushCoalescedFor(ws);
 	},
 
 	/**
@@ -491,6 +681,35 @@ const platform = {
 			results.push(platform.publish(topic, event, data));
 		}
 		return results;
+	},
+
+	/**
+	 * Live snapshot of worker-local backpressure signals.
+	 *
+	 * `reason` is one of `'NONE'`, `'PUBLISH_RATE'`, `'SUBSCRIBERS'`,
+	 * `'MEMORY'`. Precedence is fixed (MEMORY > PUBLISH_RATE > SUBSCRIBERS),
+	 * so a worker under multiple stresses reports the most urgent one.
+	 *
+	 * Sampled by a coarse 1 Hz timer. Reading the snapshot is a property
+	 * access; no I/O or computation per read. Use `onPressure` for
+	 * push-style reaction on transitions.
+	 */
+	get pressure() {
+		return pressureSnapshot;
+	},
+
+	/**
+	 * Register a callback fired on each pressure-state transition (when
+	 * `reason` changes between samples). Fired at most once per sample
+	 * tick. Returns an unsubscribe function.
+	 *
+	 * Callbacks are invoked synchronously inside the sampler. A throwing
+	 * listener does not break the sampler or other listeners; the error
+	 * is logged and the next listener still runs.
+	 */
+	onPressure(cb) {
+		pressureListeners.add(cb);
+		return () => pressureListeners.delete(cb);
 	},
 
 	/**
@@ -1791,14 +2010,19 @@ if (WS_ENABLED) {
 						if (wsModule.subscribe && wsModule.subscribe(ws, msg.topic, { platform }) === false) {
 							return;
 						}
+						const subs = ws.getUserData().__subscriptions;
+						const isNew = !subs.has(msg.topic);
 						ws.subscribe(msg.topic);
-						ws.getUserData().__subscriptions.add(msg.topic);
+						subs.add(msg.topic);
+						if (isNew) totalSubscriptions++;
 						if (wsDebug) console.log('[ws] subscribe topic=%s', msg.topic);
 						return;
 					}
 					if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
 						ws.unsubscribe(msg.topic);
-						ws.getUserData().__subscriptions.delete(msg.topic);
+						if (ws.getUserData().__subscriptions.delete(msg.topic)) {
+							totalSubscriptions--;
+						}
 						if (wsDebug) console.log('[ws] unsubscribe topic=%s', msg.topic);
 						wsModule.unsubscribe?.(ws, msg.topic, { platform });
 						return;
@@ -1818,8 +2042,10 @@ if (WS_ENABLED) {
 							}
 							if (!valid) continue;
 							if (wsModule.subscribe && wsModule.subscribe(ws, topic, { platform }) === false) continue;
+							const isNew = !userData.__subscriptions.has(topic);
 							ws.subscribe(topic);
 							userData.__subscriptions.add(topic);
+							if (isNew) totalSubscriptions++;
 							subscribed++;
 						}
 						if (wsDebug) console.log('[ws] subscribe-batch count=%d', subscribed);
@@ -1833,13 +2059,19 @@ if (WS_ENABLED) {
 			wsModule.message?.(ws, { data: message, isBinary, platform });
 		},
 
-		drain: wsModule.drain ? (ws) => wsModule.drain(ws, { platform }) : undefined,
+		drain: (ws) => {
+			// Resume any sendCoalesced traffic held back by backpressure
+			// before delegating to the user's drain hook.
+			flushCoalescedFor(ws);
+			wsModule.drain?.(ws, { platform });
+		},
 
 		close: (ws, code, message) => {
 			const subscriptions = ws.getUserData().__subscriptions || new Set();
 			try {
 				wsModule.close?.(ws, { code, message, platform, subscriptions });
 			} finally {
+				totalSubscriptions -= subscriptions.size;
 				wsConnections.delete(ws);
 				if (wsDebug) console.log('[ws] close code=%d connections=%d', code, wsConnections.size);
 			}
@@ -1860,6 +2092,8 @@ if (WS_ENABLED) {
 	if (WS_PATH !== '/ws') {
 		console.log(`Client must match: connect({ path: '${WS_PATH}' })`);
 	}
+
+	startPressureSampling(wsOptions.pressure);
 }
 
 // Health check endpoint (before catch-all so it never hits SSR)
@@ -1931,6 +2165,7 @@ export function shutdown() {
 		uWS.us_listen_socket_close(listenSocket);
 		listenSocket = null;
 	}
+	stopPressureSampling();
 	for (const ws of wsConnections) {
 		ws.close(1001, 'Server shutting down');
 	}

@@ -1,11 +1,15 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeAll } from 'vitest';
 import { parseCookies, serializeCookie, createCookies } from '../files/cookies.js';
 import {
 	mimeLookup,
 	splitCookiesString,
 	parse_as_bytes,
 	parse_origin,
-	writeChunkWithBackpressure
+	writeChunkWithBackpressure,
+	drainCoalesced,
+	computePressureReason,
+	nextTopicSeq,
+	completeEnvelope
 } from '../files/utils.js';
 
 // -- parse_as_bytes ---------------------------------------------------------
@@ -662,32 +666,44 @@ describe('proportional jitter backoff', () => {
 });
 
 // -- Close code classification ------------------------------------------------
-// Inline copies of the sets used in the onclose handler in client.js.
 
-const TERMINAL_CLOSE_CODES = new Set([1008, 4401, 4403]);
-const THROTTLE_CLOSE_CODES = new Set([4429]);
+describe('classifyCloseCode', () => {
+	/** @type {(code: number | undefined) => 'TERMINAL' | 'THROTTLE' | 'RETRY'} */
+	let classifyCloseCode;
 
-describe('WebSocket close code classification', () => {
-	it('terminal codes do not retry', () => {
-		expect(TERMINAL_CLOSE_CODES.has(1008)).toBe(true);
-		expect(TERMINAL_CLOSE_CODES.has(4401)).toBe(true);
-		expect(TERMINAL_CLOSE_CODES.has(4403)).toBe(true);
+	beforeAll(async () => {
+		({ classifyCloseCode } = await import('../client.js'));
 	});
 
-	it('throttle codes back off aggressively', () => {
-		expect(THROTTLE_CLOSE_CODES.has(4429)).toBe(true);
+	it('classifies 1008 (policy violation) as TERMINAL', () => {
+		expect(classifyCloseCode(1008)).toBe('TERMINAL');
 	});
 
-	it('normal close codes are retryable', () => {
+	it('classifies 4401 (unauthorized) as TERMINAL', () => {
+		expect(classifyCloseCode(4401)).toBe('TERMINAL');
+	});
+
+	it('classifies 4403 (forbidden) as TERMINAL', () => {
+		expect(classifyCloseCode(4403)).toBe('TERMINAL');
+	});
+
+	it('classifies 4429 (rate limited) as THROTTLE', () => {
+		expect(classifyCloseCode(4429)).toBe('THROTTLE');
+	});
+
+	it('classifies normal close codes as RETRY', () => {
 		for (const code of [1000, 1001, 1006, 1011, 1012]) {
-			expect(TERMINAL_CLOSE_CODES.has(code)).toBe(false);
-			expect(THROTTLE_CLOSE_CODES.has(code)).toBe(false);
+			expect(classifyCloseCode(code)).toBe('RETRY');
 		}
 	});
 
-	it('terminal and throttle sets are disjoint', () => {
-		for (const code of THROTTLE_CLOSE_CODES) {
-			expect(TERMINAL_CLOSE_CODES.has(code)).toBe(false);
+	it('classifies undefined as RETRY (best-effort retry on weird disconnect)', () => {
+		expect(classifyCloseCode(undefined)).toBe('RETRY');
+	});
+
+	it('classifies arbitrary unknown codes as RETRY', () => {
+		for (const code of [1002, 3000, 4000, 4500, 5000]) {
+			expect(classifyCloseCode(code)).toBe('RETRY');
 		}
 	});
 });
@@ -1401,5 +1417,323 @@ describe('writeChunkWithBackpressure', () => {
 		};
 		writeChunkWithBackpressure(res, 'chunk', 1000);
 		expect(cbReturn).toBe(true);
+	});
+});
+
+// -- drainCoalesced ---------------------------------------------------------
+
+describe('drainCoalesced', () => {
+	const SUCCESS = 0;
+	const BACKPRESSURE = 1;
+	const DROPPED = 2;
+
+	function makeSender(results) {
+		const sent = [];
+		const queue = results.slice();
+		return {
+			sent,
+			send: (value) => {
+				sent.push(value);
+				return queue.length ? queue.shift() : SUCCESS;
+			}
+		};
+	}
+
+	it('is a no-op on an empty map', () => {
+		const pending = new Map();
+		const { sent, send } = makeSender([]);
+		drainCoalesced(pending, send);
+		expect(sent).toEqual([]);
+		expect(pending.size).toBe(0);
+	});
+
+	it('sends every entry in insertion order on a clean drain', () => {
+		const pending = new Map([
+			['a', 1],
+			['b', 2],
+			['c', 3]
+		]);
+		const { sent, send } = makeSender([SUCCESS, SUCCESS, SUCCESS]);
+		drainCoalesced(pending, send);
+		expect(sent).toEqual([1, 2, 3]);
+		expect(pending.size).toBe(0);
+	});
+
+	it('preserves the original slot when a key is overwritten', () => {
+		// Reproduces the latest-wins, order-stable contract: setting an existing
+		// key replaces the value but keeps the slot. A user calling sendCoalesced
+		// rapid-fire on the same key never reorders the rest of the queue.
+		const pending = new Map();
+		pending.set('a', 1);
+		pending.set('b', 2);
+		pending.set('a', 99);
+		const { sent, send } = makeSender([SUCCESS, SUCCESS]);
+		drainCoalesced(pending, send);
+		expect(sent).toEqual([99, 2]);
+	});
+
+	it('stops on DROPPED and leaves the entry in the map for retry', () => {
+		const pending = new Map([
+			['a', 1],
+			['b', 2],
+			['c', 3]
+		]);
+		const { sent, send } = makeSender([SUCCESS, DROPPED]);
+		drainCoalesced(pending, send);
+		expect(sent).toEqual([1, 2]);
+		expect([...pending]).toEqual([
+			['b', 2],
+			['c', 3]
+		]);
+	});
+
+	it('removes the entry on BACKPRESSURE but stops pumping', () => {
+		// BACKPRESSURE means uWS accepted the bytes into its buffer. The entry is
+		// effectively delivered and can be removed, but we stop sending more so
+		// the kernel has a chance to drain before we keep pushing.
+		const pending = new Map([
+			['a', 1],
+			['b', 2],
+			['c', 3]
+		]);
+		const { sent, send } = makeSender([SUCCESS, BACKPRESSURE]);
+		drainCoalesced(pending, send);
+		expect(sent).toEqual([1, 2]);
+		expect([...pending]).toEqual([['c', 3]]);
+	});
+
+	it('resumes from where it stopped on the next call', () => {
+		const pending = new Map([
+			['a', 1],
+			['b', 2],
+			['c', 3]
+		]);
+		const first = makeSender([DROPPED]);
+		drainCoalesced(pending, first.send);
+		expect(first.sent).toEqual([1]);
+		expect([...pending]).toEqual([
+			['a', 1],
+			['b', 2],
+			['c', 3]
+		]);
+
+		const second = makeSender([SUCCESS, SUCCESS, SUCCESS]);
+		drainCoalesced(pending, second.send);
+		expect(second.sent).toEqual([1, 2, 3]);
+		expect(pending.size).toBe(0);
+	});
+
+	it('overwrites coalesce target across a stalled drain', () => {
+		// First flush hits backpressure and leaves 'a' pending. A new
+		// sendCoalesced on the same key updates the value in place. The next
+		// drain delivers the latest value, not the stale one.
+		const pending = new Map();
+		pending.set('a', 'v1');
+		const stalled = makeSender([DROPPED]);
+		drainCoalesced(pending, stalled.send);
+		expect(stalled.sent).toEqual(['v1']);
+
+		pending.set('a', 'v2');
+		const resumed = makeSender([SUCCESS]);
+		drainCoalesced(pending, resumed.send);
+		expect(resumed.sent).toEqual(['v2']);
+		expect(pending.size).toBe(0);
+	});
+
+	it('only invokes send for the latest value when serialization is deferred', () => {
+		// Models the lazy-stringify path the platform method uses: the map
+		// holds the unserialized triple, the send callback does the work.
+		// Rapid overwrites on a single key must materialize exactly once.
+		const pending = new Map();
+		const stringify = vi.fn((m) => JSON.stringify(m));
+		const send = (msg) => { stringify(msg); return SUCCESS; };
+
+		pending.set('price', { v: 1 });
+		pending.set('price', { v: 2 });
+		pending.set('price', { v: 3 });
+
+		drainCoalesced(pending, send);
+		expect(stringify).toHaveBeenCalledTimes(1);
+		expect(stringify).toHaveBeenCalledWith({ v: 3 });
+	});
+});
+
+// -- computePressureReason --------------------------------------------------
+
+describe('computePressureReason', () => {
+	const thresholds = {
+		memoryHeapUsedRatio: 0.85,
+		publishRatePerSec: 10000,
+		subscriberRatio: 50
+	};
+	const calm = { heapUsedRatio: 0.4, publishRate: 100, subscriberRatio: 5 };
+
+	it('returns NONE when every signal is below its threshold', () => {
+		expect(computePressureReason(calm, thresholds)).toBe('NONE');
+	});
+
+	it('returns MEMORY when heap usage crosses the threshold alone', () => {
+		expect(computePressureReason(
+			{ ...calm, heapUsedRatio: 0.9 },
+			thresholds
+		)).toBe('MEMORY');
+	});
+
+	it('returns PUBLISH_RATE when only the publish rate crosses', () => {
+		expect(computePressureReason(
+			{ ...calm, publishRate: 12000 },
+			thresholds
+		)).toBe('PUBLISH_RATE');
+	});
+
+	it('returns SUBSCRIBERS when only the subscriber ratio crosses', () => {
+		expect(computePressureReason(
+			{ ...calm, subscriberRatio: 80 },
+			thresholds
+		)).toBe('SUBSCRIBERS');
+	});
+
+	it('precedence: MEMORY beats PUBLISH_RATE and SUBSCRIBERS', () => {
+		expect(computePressureReason(
+			{ heapUsedRatio: 0.9, publishRate: 50000, subscriberRatio: 200 },
+			thresholds
+		)).toBe('MEMORY');
+	});
+
+	it('precedence: PUBLISH_RATE beats SUBSCRIBERS', () => {
+		expect(computePressureReason(
+			{ heapUsedRatio: 0.4, publishRate: 50000, subscriberRatio: 200 },
+			thresholds
+		)).toBe('PUBLISH_RATE');
+	});
+
+	it('triggers on equality (>=)', () => {
+		expect(computePressureReason(
+			{ heapUsedRatio: 0.85, publishRate: 0, subscriberRatio: 0 },
+			thresholds
+		)).toBe('MEMORY');
+		expect(computePressureReason(
+			{ heapUsedRatio: 0, publishRate: 10000, subscriberRatio: 0 },
+			thresholds
+		)).toBe('PUBLISH_RATE');
+		expect(computePressureReason(
+			{ heapUsedRatio: 0, publishRate: 0, subscriberRatio: 50 },
+			thresholds
+		)).toBe('SUBSCRIBERS');
+	});
+
+	it('respects per-signal disable via false', () => {
+		// Memory disabled - even Infinity heap usage cannot fire MEMORY.
+		// Publish rate fires instead.
+		expect(computePressureReason(
+			{ heapUsedRatio: Infinity, publishRate: 12000, subscriberRatio: 0 },
+			{ ...thresholds, memoryHeapUsedRatio: false }
+		)).toBe('PUBLISH_RATE');
+	});
+
+	it('returns NONE when every threshold is disabled, regardless of input', () => {
+		expect(computePressureReason(
+			{ heapUsedRatio: 0.99, publishRate: 1e9, subscriberRatio: 1e9 },
+			{ memoryHeapUsedRatio: false, publishRatePerSec: false, subscriberRatio: false }
+		)).toBe('NONE');
+	});
+
+	it('a single disabled signal does not block the others', () => {
+		// Subscribers disabled, memory below, publish rate above - PUBLISH_RATE wins.
+		expect(computePressureReason(
+			{ heapUsedRatio: 0.4, publishRate: 12000, subscriberRatio: 9999 },
+			{ ...thresholds, subscriberRatio: false }
+		)).toBe('PUBLISH_RATE');
+	});
+});
+
+// -- nextTopicSeq -----------------------------------------------------------
+
+describe('nextTopicSeq', () => {
+	it('starts at 1 for an unseen topic', () => {
+		const map = new Map();
+		expect(nextTopicSeq(map, 'todos')).toBe(1);
+	});
+
+	it('increments monotonically per topic', () => {
+		const map = new Map();
+		expect(nextTopicSeq(map, 'todos')).toBe(1);
+		expect(nextTopicSeq(map, 'todos')).toBe(2);
+		expect(nextTopicSeq(map, 'todos')).toBe(3);
+	});
+
+	it('keeps independent counters per topic', () => {
+		const map = new Map();
+		expect(nextTopicSeq(map, 'a')).toBe(1);
+		expect(nextTopicSeq(map, 'b')).toBe(1);
+		expect(nextTopicSeq(map, 'a')).toBe(2);
+		expect(nextTopicSeq(map, 'b')).toBe(2);
+		expect(nextTopicSeq(map, 'c')).toBe(1);
+	});
+
+	it('persists state in the supplied map', () => {
+		const map = new Map();
+		nextTopicSeq(map, 'todos');
+		nextTopicSeq(map, 'todos');
+		expect(map.get('todos')).toBe(2);
+	});
+
+	it('does not touch other map entries', () => {
+		const map = new Map([['untouched', 99]]);
+		nextTopicSeq(map, 'todos');
+		expect(map.get('untouched')).toBe(99);
+	});
+});
+
+// -- completeEnvelope -------------------------------------------------------
+
+describe('completeEnvelope', () => {
+	const prefix = '{"topic":"chat","event":"created","data":';
+
+	it('completes an envelope without a seq when seq is null', () => {
+		const out = completeEnvelope(prefix, { id: 1 }, null);
+		expect(out).toBe('{"topic":"chat","event":"created","data":{"id":1}}');
+		expect(JSON.parse(out)).toEqual({ topic: 'chat', event: 'created', data: { id: 1 } });
+	});
+
+	it('completes an envelope without a seq when seq is undefined', () => {
+		const out = completeEnvelope(prefix, { id: 1 }, undefined);
+		expect(out).toBe('{"topic":"chat","event":"created","data":{"id":1}}');
+	});
+
+	it('appends ,"seq":N before the closing brace when seq is a number', () => {
+		const out = completeEnvelope(prefix, { id: 1 }, 7);
+		expect(out).toBe('{"topic":"chat","event":"created","data":{"id":1},"seq":7}');
+		expect(JSON.parse(out)).toEqual({ topic: 'chat', event: 'created', data: { id: 1 }, seq: 7 });
+	});
+
+	it('handles a seq of 0 as a real value (does not omit)', () => {
+		// Defensive: 0 is not the disable sentinel; null/undefined is.
+		const out = completeEnvelope(prefix, null, 0);
+		expect(out).toBe('{"topic":"chat","event":"created","data":null,"seq":0}');
+		expect(JSON.parse(out).seq).toBe(0);
+	});
+
+	it('handles undefined and null data identically (both serialize to null)', () => {
+		expect(completeEnvelope(prefix, undefined, 1))
+			.toBe('{"topic":"chat","event":"created","data":null,"seq":1}');
+		expect(completeEnvelope(prefix, null, 1))
+			.toBe('{"topic":"chat","event":"created","data":null,"seq":1}');
+	});
+
+	it('round-trips with nextTopicSeq for an end-to-end stamping flow', () => {
+		// Models the production hot path: an empty map, an envelope prefix,
+		// and a publish that allocates the next seq and bakes it into the
+		// wire string. Three publishes to two topics should produce three
+		// independently-monotonic seqs.
+		const seqs = new Map();
+		const wire = (topic, data) => {
+			const p = '{"topic":"' + topic + '","event":"x","data":';
+			return completeEnvelope(p, data, nextTopicSeq(seqs, topic));
+		};
+
+		expect(JSON.parse(wire('a', { v: 1 })).seq).toBe(1);
+		expect(JSON.parse(wire('b', { v: 1 })).seq).toBe(1);
+		expect(JSON.parse(wire('a', { v: 2 })).seq).toBe(2);
 	});
 });

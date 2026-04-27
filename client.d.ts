@@ -17,14 +17,20 @@ export interface ConnectOptions {
 
 	/**
 	 * Base delay in ms before reconnecting after a disconnect.
-	 * Uses exponential backoff with jitter.
+	 * The actual delay grows as `base * 2.2^attempt` with a +/- 25%
+	 * jitter, capped at `maxReconnectInterval`.
 	 * @default 3000
 	 */
 	reconnectInterval?: number;
 
 	/**
-	 * Maximum delay in ms between reconnection attempts.
-	 * @default 30000
+	 * Maximum delay in ms between reconnection attempts. Once the
+	 * exponential curve hits this cap it stays there until the
+	 * connection succeeds. The default 5 minute cap is long enough
+	 * that 10K clients hammering a recovering server don't sustain the
+	 * outage, short enough that a recovered server picks up its
+	 * clients within a coffee break.
+	 * @default 300000
 	 */
 	maxReconnectInterval?: number;
 
@@ -92,6 +98,16 @@ export interface WSEvent<T = unknown> {
 	event: string;
 	/** The event payload. */
 	data: T;
+	/**
+	 * Monotonic per-topic sequence number stamped by the server on every
+	 * `platform.publish()` (omitted when the publisher opts out via
+	 * `{ seq: false }`). Each topic has an independent counter starting
+	 * at 1.
+	 *
+	 * Worker-local in clustered mode unless an extension provides a
+	 * cluster-wide source of truth (e.g. Redis Lua INCR).
+	 */
+	seq?: number;
 }
 
 // -- Scannable store ----------------------------------------------------------
@@ -335,7 +351,7 @@ export function once<T = unknown>(topic: string, event: string, options?: { time
  * the new topic and the old one is released.
  *
  * Useful when the topic depends on runtime state like a user ID, selected item,
- * or route parameter — no manual subscribe/unsubscribe lifecycle to manage.
+ * or route parameter - no manual subscribe/unsubscribe lifecycle to manage.
  *
  * @example
  * ```svelte

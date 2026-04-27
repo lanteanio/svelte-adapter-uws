@@ -1,4 +1,5 @@
 import { parseCookies } from './files/cookies.js';
+import { nextTopicSeq, completeEnvelope } from './files/utils.js';
 
 /**
  * Safely quote a string for JSON embedding. Throws on invalid characters.
@@ -23,10 +24,12 @@ function esc(s) {
  * @param {string} topic
  * @param {string} event
  * @param {unknown} [data]
+ * @param {number | null} [seq]
  * @returns {string}
  */
-function envelope(topic, event, data) {
-	return '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + '}';
+function envelope(topic, event, data, seq) {
+	const prefix = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":';
+	return completeEnvelope(prefix, data, seq);
 }
 
 /**
@@ -56,6 +59,9 @@ export async function createTestServer(options = {}) {
 	/** @type {Set<import('uWebSockets.js').WebSocket<any>>} */
 	const wsConnections = new Set();
 
+	/** @type {Map<string, number>} */
+	const topicSeqs = new Map();
+
 	/** @type {Array<(value: any) => void>} */
 	let connectionWaiters = [];
 
@@ -63,8 +69,11 @@ export async function createTestServer(options = {}) {
 	let messageWaiters = [];
 
 	const platform = {
-		publish(topic, event, data) {
-			const msg = envelope(topic, event, data);
+		publish(topic, event, data, options) {
+			const seq = (options && options.seq === false)
+				? null
+				: nextTopicSeq(topicSeqs, topic);
+			const msg = envelope(topic, event, data, seq);
 			return app.publish(topic, msg, false, false);
 		},
 		send(ws, topic, event, data) {

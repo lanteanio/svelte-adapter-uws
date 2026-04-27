@@ -466,8 +466,11 @@ describe('client.js (real module)', () => {
 			ws1.readyState = MockWebSocket.CLOSED;
 			ws1.onclose?.({ code: 4429 });
 
-			// Should still reconnect (not terminal), but with higher backoff
-			await vi.advanceTimersByTimeAsync(60000);
+			// Should still reconnect (not terminal), but with higher backoff.
+			// Throttle bumps attempt to 5; with the 2.2^n curve and a 3 second
+			// base that lands at ~155 seconds plus jitter (worst case ~194s),
+			// so a 250 second advance is enough to guarantee the timer fires.
+			await vi.advanceTimersByTimeAsync(250000);
 			expect(MockWebSocket._last).not.toBe(ws1);
 
 			vi.useRealTimers();

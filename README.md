@@ -887,6 +887,13 @@ sub.on('message', (channel, payload) => {
 });
 ```
 
+Every published frame is also stamped with a monotonic per-topic `seq` field in the envelope (first publish to a topic is `seq: 1`, then 2, 3, ...). Reconnecting clients can use this to detect dropped frames and resume from where they left off. Pass `{ seq: false }` to skip stamping for ephemeral or high-cardinality topics where the counter map would grow unbounded:
+
+```js
+// Skip seq for per-user cursor topics: counter map would grow with users
+platform.publish(`cursor:${userId}`, 'move', pos, { seq: false });
+```
+
 ```js
 // src/routes/todos/+page.server.js
 export const actions = {
@@ -953,6 +960,40 @@ export function message(ws, { data, platform }) {
 }
 ```
 
+### `platform.sendCoalesced(ws, { key, topic, event, data })`
+
+Send a message to a single connection with **coalesce-by-key** semantics. Each `(connection, key)` pair holds at most one pending message; if a newer call for the same `key` arrives before the previous frame drains to the wire, the older value is replaced in place.
+
+Use this for latest-value streams where intermediate values are noise -- price ticks, cursor positions, presence state, typing indicators, scroll position. Under load, this is the difference between the client lagging by a thousand stale frames and the client always seeing the most recent value.
+
+For at-least-once delivery use `platform.send()` or `platform.publish()` instead. `sendCoalesced` is explicitly drop-the-middle, keep-the-latest.
+
+```js
+// src/hooks.ws.js - cursor positions during a collaborative edit
+export function message(ws, { data, platform }) {
+  const msg = JSON.parse(Buffer.from(data).toString());
+  if (msg.event === 'cursor') {
+    const { docId, userId } = ws.getUserData();
+    // Coalesce per (connection, user) - one pending cursor frame per peer.
+    // High-frequency mousemove updates collapse cleanly under backpressure.
+    for (const peer of getPeersOf(docId)) {
+      platform.sendCoalesced(peer, {
+        key: 'cursor:' + userId,
+        topic: 'doc:' + docId,
+        event: 'cursor',
+        data: { userId, x: msg.data.x, y: msg.data.y }
+      });
+    }
+  }
+}
+```
+
+Three properties worth knowing:
+
+- **Latest value wins.** `set` on an existing key replaces the value but keeps the original slot, so coalescing one key never reorders the rest of the queue.
+- **Lazy serialization.** `data` is held as-is in the per-connection buffer and only `JSON.stringify`'d at flush time. A stream that overwrites the same key 1000 times before a single drain pays one serialization, not 1000.
+- **Auto-resume on drain.** When `maxBackpressure` is hit, pumping stops and resumes on the next uWS drain event automatically. No manual flow control.
+
 ### `platform.sendTo(filter, topic, event, data)`
 
 Send a message to all connections whose `userData` matches a filter function. Returns the number of connections the message was sent to.
@@ -1005,6 +1046,77 @@ export async function GET({ platform, params }) {
   });
 }
 ```
+
+### `platform.pressure` and `platform.onPressure(cb)`
+
+Worker-local backpressure signal. The adapter samples once per second (configurable) and reports the most urgent active stress as a single `reason` enum, so user code can degrade with intent instead of generic panic.
+
+```js
+platform.pressure
+// {
+//   active: false,
+//   subscriberRatio: 12.4,    // total subscriptions / connections, on this worker
+//   publishRate: 240,         // platform.publish() calls/sec, last sample
+//   memoryMB: 128,            // process.memoryUsage().rss in MB
+//   reason: 'NONE'            // 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY'
+// }
+```
+
+Reading `platform.pressure` is a property access -- safe in hot paths, no I/O. Use it for synchronous shed decisions in request handlers:
+
+```js
+// src/routes/api/heavy-write/+server.js
+export async function POST({ platform, request }) {
+  if (platform.pressure.reason === 'MEMORY') {
+    return new Response('Try again shortly', { status: 503 });
+  }
+  // ... normal write path
+}
+```
+
+`platform.onPressure(cb)` fires only on **transitions** (when `reason` changes between samples), not on every tick. Returns an unsubscribe function:
+
+```js
+// src/hooks.ws.js - notify the connected client when pressure state changes
+export function open(ws, { platform }) {
+  const off = platform.onPressure(({ reason, active }) => {
+    platform.send(ws, '__pressure', reason, { active });
+  });
+  ws.getUserData().__offPressure = off;
+}
+
+export function close(ws) {
+  ws.getUserData().__offPressure?.();
+}
+```
+
+**Reason precedence is fixed:** `MEMORY > PUBLISH_RATE > SUBSCRIBERS`. A worker under multiple stresses reports the most urgent one. Memory wins because the worker is approaching OOM and nothing else matters; publish rate is next because CPU saturation cascades fastest; subscriber ratio is last because heavy fan-out degrades gracefully.
+
+**Thresholds are configurable per-deployment.** Defaults are conservative -- a healthy small app should never trip them in steady state. Override via `WebSocketOptions.pressure`:
+
+```js
+// svelte.config.js
+import adapter from 'svelte-adapter-uws';
+
+export default {
+  kit: {
+    adapter: adapter({
+      websocket: {
+        pressure: {
+          memoryHeapUsedRatio: 0.9,    // default 0.85
+          publishRatePerSec: 50000,    // default 10000
+          subscriberRatio: false,      // disable this signal
+          sampleIntervalMs: 500        // default 1000; clamped to >=100
+        }
+      }
+    })
+  }
+};
+```
+
+Set any individual threshold to `false` to disable that signal. `sampleIntervalMs` is clamped to a minimum of 100 ms.
+
+> **Clustering:** `platform.pressure` is per-worker. Each worker samples its own counters and reports its own snapshot. There is no aggregate "cluster pressure" -- a hot worker should shed its own load without waiting for the rest of the cluster.
 
 ### `platform.topic(name)` - scoped helper
 
@@ -2900,13 +3012,26 @@ Every message sent through `platform.publish()` or `platform.topic().created()` 
 {
   "topic": "todos",
   "event": "created",
-  "data": { "id": 1, "text": "Buy milk", "done": false }
+  "data": { "id": 1, "text": "Buy milk", "done": false },
+  "seq": 42
 }
 ```
 
+The `seq` field is a monotonic per-topic sequence number stamped automatically on every `platform.publish()`. The first publish to a topic sends `seq: 1`, the next `seq: 2`, and so on; each topic has its own counter. Reconnecting clients can use the seq to detect dropped frames and resume from where they left off. Pass `{ seq: false }` to skip stamping when you don't care about gap detection or when topic cardinality is unbounded:
+
+```js
+// Standard publish - seq stamped automatically
+platform.publish('chat', 'message', msg);
+
+// Opt out for ephemeral or high-cardinality topics
+platform.publish(`cursor:${userId}`, 'move', pos, { seq: false });
+```
+
+> **Clustering:** the per-topic counter is worker-local. Each worker stamps its own publishes; relayed messages from other workers pass through with the originating worker's seq. For cluster-wide monotonic seq across all workers, wire up the Redis Lua INCR variant from the extensions package.
+
 The client store parses this automatically. When you use `on('todos')`, the store value is:
 ```js
-{ topic: 'todos', event: 'created', data: { id: 1, text: 'Buy milk', done: false } }
+{ topic: 'todos', event: 'created', data: { id: 1, text: 'Buy milk', done: false }, seq: 42 }
 ```
 
 When you use `on('todos', 'created')`, you get the payload wrapped in `{ data }`:

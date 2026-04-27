@@ -289,7 +289,8 @@ export default function (opts = {}) {
 				allowedOrigins: websocket?.allowedOrigins ?? 'same-origin',
 				upgradeTimeout: websocket?.upgradeTimeout ?? 10,
 				upgradeRateLimit: websocket?.upgradeRateLimit ?? 10,
-				upgradeRateLimitWindow: websocket?.upgradeRateLimitWindow ?? 10
+				upgradeRateLimitWindow: websocket?.upgradeRateLimitWindow ?? 10,
+				pressure: websocket?.pressure
 			};
 
 			// Scan the bundled WS handler for `upgradeResponse(..., { 'set-cookie': ... })`

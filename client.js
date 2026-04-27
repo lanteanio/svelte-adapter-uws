@@ -499,6 +499,62 @@ const THROTTLE_CLOSE_CODES = new Set([
 ]);
 
 /**
+ * Classify a WebSocket close code into one of three reconnect behaviors.
+ *
+ * - `'TERMINAL'`: the server has permanently rejected this client.
+ *   Reconnecting would be pointless. The client store transitions to a
+ *   permanently-closed state and stops trying. Codes: 1008 (policy
+ *   violation), 4401 (unauthorized), 4403 (forbidden).
+ * - `'THROTTLE'`: the server is rate-limiting. Reconnect is still
+ *   attempted but the client jumps ahead in the backoff curve to avoid
+ *   hammering a busy server. Code: 4429 (too many requests).
+ * - `'RETRY'`: every other code, including normal closes (1000/1001) and
+ *   abnormal ones (1006/1011/1012). The client reconnects with the
+ *   standard backoff curve.
+ *
+ * Pure: no I/O, no globals. Suitable for unit tests.
+ *
+ * @param {number | undefined} code
+ * @returns {'TERMINAL' | 'THROTTLE' | 'RETRY'}
+ */
+export function classifyCloseCode(code) {
+	if (TERMINAL_CLOSE_CODES.has(code)) return 'TERMINAL';
+	if (THROTTLE_CLOSE_CODES.has(code)) return 'THROTTLE';
+	return 'RETRY';
+}
+
+/**
+ * Compute the next reconnect delay using exponential backoff with
+ * proportional jitter.
+ *
+ * The capped delay is `min(base * 2.2^attempt, maxDelay)`. A random factor
+ * in `[0.75, 1.25]` is then applied multiplicatively, so the final delay
+ * spans +/- 25% of the capped value. Multiplicative jitter keeps spread
+ * meaningful at high attempt counts: with 10K clients all reconnecting
+ * after a server restart, additive +/- 500ms jitter clusters reconnects
+ * inside a 1 second window; proportional jitter spreads them across
+ * a window proportional to the current backoff.
+ *
+ * The 2.2 exponent with a 5 minute cap is aggressive enough to back off
+ * fast under sustained server pain (the default 3 second base hits the
+ * cap by attempt 6) and gentle enough that a brief restart resolves
+ * before the user notices.
+ *
+ * Pure: no I/O, no globals. Pass a deterministic `randFactor` for
+ * reproducible assertions in tests.
+ *
+ * @param {number} base       base interval in ms (e.g. 3000)
+ * @param {number} maxDelay   cap in ms (e.g. 300000)
+ * @param {number} attempt    zero-based attempt counter
+ * @param {number} [randFactor]  random factor in [0, 1); defaults to Math.random()
+ * @returns {number}
+ */
+export function nextReconnectDelay(base, maxDelay, attempt, randFactor = Math.random()) {
+	const capped = Math.min(base * Math.pow(2.2, attempt), maxDelay);
+	return capped * (0.75 + randFactor * 0.5);
+}
+
+/**
  * @param {import('./client.js').ConnectOptions} options
  * @returns {import('./client.js').WSConnection & { _onEvent: (topic: string, event: string) => import('svelte/store').Readable<unknown> }}
  */
@@ -507,7 +563,7 @@ function createConnection(options) {
 		url,
 		path = '/ws',
 		reconnectInterval = 3000,
-		maxReconnectInterval = 30000,
+		maxReconnectInterval = 300000,
 		maxReconnectAttempts = Infinity,
 		debug = false,
 		auth = false
@@ -757,19 +813,19 @@ function createConnection(options) {
 			if (debug) console.log('[ws] disconnected');
 			if (intentionallyClosed) return;
 
-			if (TERMINAL_CLOSE_CODES.has(event?.code)) {
+			const cls = classifyCloseCode(event?.code);
+			if (cls === 'TERMINAL') {
 				// Server has permanently rejected this client  - do not retry.
 				// Use ws.close(4401) or ws.close(1008) on the server when credentials
 				// are invalid or the connection is forbidden, to stop the retry loop.
-				if (debug) console.warn('[ws] connection permanently closed by server (code ' + event.code + ')');
+				if (debug) console.warn('[ws] connection permanently closed by server (code ' + event?.code + ')');
 				terminalClosed = true;
 				permaClosedStore.set(true);
 				return;
 			}
 
-			if (THROTTLE_CLOSE_CODES.has(event?.code)) {
-				// Server is rate-limiting us  - jump ahead in the backoff curve
-				// to avoid hammering it with immediate reconnect attempts.
+			if (cls === 'THROTTLE') {
+				// Jump ahead in the backoff curve to avoid hammering a rate-limited server.
 				attempt = Math.max(attempt, 5);
 			}
 
@@ -789,13 +845,7 @@ function createConnection(options) {
 			permaClosedStore.set(true);
 			return;
 		}
-		// Proportional jitter (±25% of the base delay) prevents thundering herd
-		// on server restarts. With 10K clients and additive ±500ms jitter all
-		// reconnections cluster in a 1s window; proportional jitter spreads them
-		// over ~15s at higher attempt counts where the base delay is large.
-		const base = Math.min(reconnectInterval * Math.pow(1.5, attempt), maxReconnectInterval);
-		const jitter = base * 0.25 * (Math.random() * 2 - 1);
-		const delay = Math.max(0, base + jitter);
+		const delay = nextReconnectDelay(reconnectInterval, maxReconnectInterval, attempt);
 		attempt++;
 		reconnectTimer = setTimeout(() => {
 			reconnectTimer = null;

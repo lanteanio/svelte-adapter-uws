@@ -175,7 +175,7 @@ describeUWS('createTestServer', () => {
 
 		server.platform.publish('todos', 'created', { id: 1, text: 'hello' });
 		const msg = await msgPromise;
-		expect(msg).toEqual({ topic: 'todos', event: 'created', data: { id: 1, text: 'hello' } });
+		expect(msg).toEqual({ topic: 'todos', event: 'created', data: { id: 1, text: 'hello' }, seq: 1 });
 
 		ws.close();
 	});
@@ -199,9 +199,9 @@ describeUWS('createTestServer', () => {
 		await new Promise(r => setTimeout(r, 50));
 
 		expect(messages).toHaveLength(3);
-		expect(messages[0]).toEqual({ topic: 'items', event: 'created', data: { id: 1 } });
-		expect(messages[1]).toEqual({ topic: 'items', event: 'updated', data: { id: 1, name: 'changed' } });
-		expect(messages[2]).toEqual({ topic: 'items', event: 'deleted', data: { id: 1 } });
+		expect(messages[0]).toEqual({ topic: 'items', event: 'created', data: { id: 1 }, seq: 1 });
+		expect(messages[1]).toEqual({ topic: 'items', event: 'updated', data: { id: 1, name: 'changed' }, seq: 2 });
+		expect(messages[2]).toEqual({ topic: 'items', event: 'deleted', data: { id: 1 }, seq: 3 });
 
 		ws.close();
 	});

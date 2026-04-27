@@ -275,7 +275,7 @@ export default function uws(options = {}) {
 				return;
 			}
 
-			// E7: warn if our WS path collides with the Vite HMR WebSocket path.
+			// Warn if our WS path collides with the Vite HMR WebSocket path.
 			const hmrConfig = server.config.server?.hmr;
 			if (hmrConfig && typeof hmrConfig === 'object' && hmrConfig.path === wsPath) {
 				server.config.logger.warn(

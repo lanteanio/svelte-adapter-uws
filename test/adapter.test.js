@@ -63,7 +63,8 @@ describe('adapter options', () => {
 				allowedOrigins: websocket?.allowedOrigins ?? 'same-origin',
 				upgradeTimeout: websocket?.upgradeTimeout ?? 10,
 				upgradeRateLimit: websocket?.upgradeRateLimit ?? 10,
-				upgradeRateLimitWindow: websocket?.upgradeRateLimitWindow ?? 10
+				upgradeRateLimitWindow: websocket?.upgradeRateLimitWindow ?? 10,
+				pressure: websocket?.pressure
 			};
 
 			expect(wsPath).toBe('/ws');
@@ -76,6 +77,21 @@ describe('adapter options', () => {
 			expect(wsOpts.upgradeTimeout).toBe(10);
 			expect(wsOpts.upgradeRateLimit).toBe(10);
 			expect(wsOpts.upgradeRateLimitWindow).toBe(10);
+			// Pressure defaults are resolved at runtime by the handler so users
+			// who omit the option get the safe defaults; build-time just passes
+			// the user's value through (undefined when omitted).
+			expect(wsOpts.pressure).toBeUndefined();
+		});
+
+		it('passes a custom pressure config through wsOpts as-is', () => {
+			const websocket = {
+				pressure: { memoryHeapUsedRatio: 0.9, subscriberRatio: false }
+			};
+			const wsOpts = { pressure: websocket?.pressure };
+			expect(wsOpts.pressure).toEqual({
+				memoryHeapUsedRatio: 0.9,
+				subscriberRatio: false
+			});
 		});
 
 		it('preserves upgradeTimeout: 0 through build-time defaults', () => {

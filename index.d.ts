@@ -211,6 +211,77 @@ export interface WebSocketOptions {
 	 * @default 10
 	 */
 	upgradeRateLimitWindow?: number;
+
+	/**
+	 * Backpressure-signal thresholds for `platform.pressure` and
+	 * `platform.onPressure(cb)`. The adapter samples the worker once per
+	 * `sampleIntervalMs` and reports the most urgent active signal.
+	 *
+	 * Any individual threshold may be set to `false` to disable that
+	 * signal entirely. The defaults are conservative: a small healthy app
+	 * should never trip them in steady state.
+	 *
+	 * @example
+	 * ```js
+	 * adapter({
+	 *   websocket: {
+	 *     pressure: {
+	 *       memoryHeapUsedRatio: 0.9,
+	 *       publishRatePerSec: 50000,
+	 *       subscriberRatio: false  // disable this signal
+	 *     }
+	 *   }
+	 * });
+	 * ```
+	 */
+	pressure?: {
+		/**
+		 * Trigger `'MEMORY'` pressure when `process.memoryUsage().heapUsed
+		 * / heapTotal` is greater than or equal to this ratio (0 to 1).
+		 *
+		 * Memory has the highest precedence: a worker approaching OOM
+		 * reports `'MEMORY'` even if publish rate or fan-out are also
+		 * elevated.
+		 *
+		 * Set to `false` to disable.
+		 *
+		 * @default 0.85
+		 */
+		memoryHeapUsedRatio?: number | false;
+
+		/**
+		 * Trigger `'PUBLISH_RATE'` pressure when `platform.publish()`
+		 * calls per second on this worker reach this value.
+		 *
+		 * Set to `false` to disable.
+		 *
+		 * @default 10000
+		 */
+		publishRatePerSec?: number | false;
+
+		/**
+		 * Trigger `'SUBSCRIBERS'` pressure when the average number of
+		 * subscriptions per active connection (total subscriptions /
+		 * connections, on the local worker) reaches this value.
+		 *
+		 * High fan-out per connection means each `publish()` does heavy
+		 * work; this signal lets a multi-tenant deployment shed
+		 * background streams before broadcast latency climbs.
+		 *
+		 * Set to `false` to disable.
+		 *
+		 * @default 50
+		 */
+		subscriberRatio?: number | false;
+
+		/**
+		 * Sample interval in milliseconds. Clamped to a minimum of 100 ms
+		 * to prevent pathological tight-loop sampling.
+		 *
+		 * @default 1000
+		 */
+		sampleIntervalMs?: number;
+	};
 }
 
 // -- User's WebSocket handler module exports ---------------------------------
@@ -463,6 +534,30 @@ export interface WebSocketHandler<UserData = unknown> {
 // -- Platform type for event.platform ----------------------------------------
 
 /**
+ * Snapshot returned by `platform.pressure` and supplied to
+ * `platform.onPressure(cb)` callbacks. All numbers are worker-local.
+ */
+export interface PressureSnapshot {
+	/** `true` when `reason !== 'NONE'`. Convenience flag for boolean checks. */
+	readonly active: boolean;
+	/**
+	 * Average subscriptions per connection on this worker
+	 * (`totalSubscriptions / connections`). `0` when the worker has no
+	 * connections.
+	 */
+	readonly subscriberRatio: number;
+	/** `platform.publish()` calls per second on this worker, last sample window. */
+	readonly publishRate: number;
+	/** Resident-set size in megabytes (`process.memoryUsage().rss`). */
+	readonly memoryMB: number;
+	/**
+	 * Most urgent active signal, by fixed precedence:
+	 * `MEMORY > PUBLISH_RATE > SUBSCRIBERS > NONE`.
+	 */
+	readonly reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY';
+}
+
+/**
  * Available on `event.platform` in server hooks, load functions, and actions.
  *
  * To get type-checking, add this to your `src/app.d.ts`:
@@ -484,12 +579,29 @@ export interface Platform {
 	 * The message is automatically wrapped in a `{ topic, event, data }` envelope
 	 * that the client store (`svelte-adapter-uws/client`) understands.
 	 *
+	 * Every published frame is automatically stamped with a monotonic
+	 * per-topic `seq` field in the envelope. The first publish to a topic
+	 * sends `seq: 1`, the next `seq: 2`, and so on; each topic has an
+	 * independent counter. Reconnecting clients can use the seq to detect
+	 * gaps and resume from where they left off. Pass `{ seq: false }` to
+	 * skip stamping for high-cardinality or perf-sensitive topics where
+	 * the counter map would grow unbounded.
+	 *
+	 * In clustered mode the seq is worker-local (each worker stamps its
+	 * own publishes; relayed messages pass through with the originating
+	 * worker's seq). For cluster-wide monotonic seq, wire up the Redis
+	 * Lua INCR variant from the extensions package.
+	 *
 	 * @param topic - Topic string (e.g. `'todos'`, `'user:123'`, `'org:456'`)
 	 * @param event - Event name (e.g. `'created'`, `'updated'`, `'deleted'`)
 	 * @param data - Payload (will be JSON-serialized)
-	 * @param options - Optional. Pass `{ relay: false }` to skip cross-worker relay
-	 *   (use this when the message comes from an external pub/sub source like Redis
-	 *   or Postgres that already delivers to every process).
+	 * @param options - Optional.
+	 *   - `relay: false` skips cross-worker relay (use when the message
+	 *     comes from an external pub/sub source like Redis or Postgres
+	 *     that already delivers to every process).
+	 *   - `seq: false` skips the per-topic monotonic seq stamp (use for
+	 *     ephemeral or high-cardinality topics where the counter map
+	 *     would grow unbounded).
 	 *
 	 * @example
 	 * ```js
@@ -500,7 +612,7 @@ export interface Platform {
 	 * }
 	 * ```
 	 */
-	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean }): boolean;
+	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean }): boolean;
 
 	/**
 	 * Publish multiple messages in one call.
@@ -532,6 +644,57 @@ export interface Platform {
 	send(ws: WebSocket<any>, topic: string, event: string, data?: unknown): number;
 
 	/**
+	 * Send a message to a single connection with coalesce-by-key semantics.
+	 *
+	 * Each `(ws, key)` pair holds at most one pending message. If a newer
+	 * `sendCoalesced` for the same `key` arrives before the previous frame
+	 * drains to the wire, the older one is dropped in place: latest value
+	 * wins. Insertion order is preserved across overwrites.
+	 *
+	 * Use for latest-value streams where intermediate values are noise -
+	 * price ticks, cursor positions, presence state, typing indicators,
+	 * scroll/scrub positions. For at-least-once delivery, use `send()` or
+	 * `publish()` instead.
+	 *
+	 * Serialization is deferred to the actual flush, so a stream that
+	 * overwrites the same `key` 1000 times before a single drain pays one
+	 * `JSON.stringify`, not 1000.
+	 *
+	 * The flush attempts immediately and again on every uWS drain event.
+	 * On backpressure or drop from the underlying socket, pumping stops
+	 * and resumes when the connection drains.
+	 *
+	 * @example
+	 * ```js
+	 * // In hooks.ws.js - cursor positions during a collaborative edit.
+	 * // Each peer sees only the latest cursor for every other user;
+	 * // intermediate positions are dropped under load.
+	 * export function message(ws, { data, platform }) {
+	 *   const msg = JSON.parse(Buffer.from(data).toString());
+	 *   if (msg.event !== 'cursor') return;
+	 *   const { docId, userId } = ws.getUserData();
+	 *   for (const peer of getPeersOf(docId)) {
+	 *     platform.sendCoalesced(peer, {
+	 *       key: 'cursor:' + userId,
+	 *       topic: 'doc:' + docId,
+	 *       event: 'cursor',
+	 *       data: { userId, x: msg.data.x, y: msg.data.y }
+	 *     });
+	 *   }
+	 * }
+	 * ```
+	 *
+	 * @param ws - The WebSocket connection.
+	 * @param message - `{ key, topic, event, data }`. `key` identifies the
+	 *   coalesce slot per connection; `topic`, `event`, `data` are the
+	 *   envelope fields the client store understands.
+	 */
+	sendCoalesced(
+		ws: WebSocket<any>,
+		message: { key: string; topic: string; event: string; data?: unknown }
+	): void;
+
+	/**
 	 * Send a message to all connections whose userData matches a filter.
 	 * Returns the number of connections the message was sent to.
 	 *
@@ -539,7 +702,7 @@ export interface Platform {
 	 *
 	 * **Performance note:** `sendTo()` iterates every open connection on the local
 	 * worker to evaluate the filter. For broadcasting to large groups, prefer
-	 * `publish()` with a topic — topics are dispatched by uWS's C++ TopicTree
+	 * `publish()` with a topic - topics are dispatched by uWS's C++ TopicTree
 	 * with O(subscribers) fan-out and no JS loop. Use `sendTo()` when you need
 	 * to target connections by arbitrary runtime properties that can't be mapped
 	 * to a static topic name (e.g., filtering by session data set at upgrade time).
@@ -588,6 +751,59 @@ export interface Platform {
 	 * ```
 	 */
 	subscribers(topic: string): number;
+
+	/**
+	 * Live snapshot of worker-local backpressure signals.
+	 *
+	 * Sampled by a coarse 1 Hz timer (configurable via
+	 * `WebSocketOptions.pressure.sampleIntervalMs`). Reading the snapshot
+	 * is a property access; no I/O or computation per read.
+	 *
+	 * `reason` is the most urgent active signal. Precedence is fixed:
+	 * `MEMORY > PUBLISH_RATE > SUBSCRIBERS`. A worker under multiple
+	 * stresses reports the highest-priority one.
+	 *
+	 * @example
+	 * ```js
+	 * export async function POST({ platform, request }) {
+	 *   if (platform.pressure.reason === 'MEMORY') {
+	 *     return new Response('Try again shortly', { status: 503 });
+	 *   }
+	 *   const todo = await db.create(await request.formData());
+	 *   platform.publish('todos', 'created', todo);
+	 *   return new Response('OK');
+	 * }
+	 * ```
+	 */
+	readonly pressure: PressureSnapshot;
+
+	/**
+	 * Register a callback fired on each pressure-state transition (when
+	 * `pressure.reason` changes between samples). Fired at most once per
+	 * sample tick. Returns an unsubscribe function.
+	 *
+	 * Use this for push-style reaction: pause background streams when the
+	 * worker is under load, resume them when it recovers.
+	 *
+	 * Callbacks run synchronously inside the sampler. A throwing listener
+	 * does not break the sampler or other listeners; the error is logged
+	 * and the next listener still runs.
+	 *
+	 * @example
+	 * ```js
+	 * export function open(ws, { platform }) {
+	 *   const off = platform.onPressure(({ reason, active }) => {
+	 *     ws.send(JSON.stringify({ topic: '__pressure', event: reason, data: { active } }));
+	 *   });
+	 *   ws.getUserData().__offPressure = off;
+	 * }
+	 *
+	 * export function close(ws) {
+	 *   ws.getUserData().__offPressure?.();
+	 * }
+	 * ```
+	 */
+	onPressure(cb: (snapshot: PressureSnapshot) => void): () => void;
 
 	/**
 	 * Get a scoped helper for a topic. Reduces repetition when publishing

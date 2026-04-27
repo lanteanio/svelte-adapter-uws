@@ -146,6 +146,118 @@ export function writeChunkWithBackpressure(res, value, timeoutMs = 30000) {
 }
 
 /**
+ * Drain a coalesce-by-key buffer.
+ *
+ * Iterates entries in insertion order and calls `send` for each. Entries
+ * whose send result is SUCCESS (0) are removed from the map. The function
+ * stops on the first BACKPRESSURE (1) or DROPPED (2) result, leaving the
+ * remaining entries (and the one that just hit pressure, in the DROPPED
+ * case) for a later flush.
+ *
+ * Pure: no I/O of its own, no timers, no globals. The caller supplies
+ * `send`, which is the only side-effecting boundary, so this is unit-
+ * testable with a mock send fn.
+ *
+ * Map insertion order is preserved across overwrites: setting an existing
+ * key replaces the value but keeps the original slot. Latest value wins,
+ * order is stable.
+ *
+ * @template T
+ * @param {Map<string, T>} pending
+ * @param {(value: T) => number} send  0 SUCCESS, 1 BACKPRESSURE, 2 DROPPED
+ */
+export function drainCoalesced(pending, send) {
+	for (const [key, value] of pending) {
+		const result = send(value);
+		if (result === 2) return;
+		pending.delete(key);
+		if (result === 1) return;
+	}
+}
+
+/**
+ * Allocate the next monotonic sequence number for a topic, mutating
+ * `seqMap` in place. The first call for a topic returns 1; subsequent
+ * calls return the previous value plus one. Each topic has an
+ * independent counter.
+ *
+ * Pure with respect to inputs other than the supplied map. Suitable
+ * for unit tests that pass a fresh map per case.
+ *
+ * @param {Map<string, number>} seqMap
+ * @param {string} topic
+ * @returns {number}
+ */
+export function nextTopicSeq(seqMap, topic) {
+	const next = (seqMap.get(topic) ?? 0) + 1;
+	seqMap.set(topic, next);
+	return next;
+}
+
+/**
+ * Complete a JSON envelope started by an `envelopePrefix` builder.
+ *
+ * Appends the JSON-encoded data and an optional `seq` field, plus the
+ * closing brace. When `seq` is `null` or `undefined` the field is
+ * omitted entirely so the wire shape matches the legacy
+ * `{topic,event,data}` envelope verbatim. When `seq` is a number the
+ * resulting envelope is `{topic,event,data,seq}`.
+ *
+ * No JSON.stringify on the seq itself: numbers serialize identically
+ * via plain string concatenation, saving a stringify call on the
+ * publish hot path.
+ *
+ * @param {string} prefix  output of envelopePrefix(topic, event)
+ * @param {unknown} data
+ * @param {number | null | undefined} seq
+ * @returns {string}
+ */
+export function completeEnvelope(prefix, data, seq) {
+	const body = prefix + JSON.stringify(data ?? null);
+	return seq == null ? body + '}' : body + ',"seq":' + seq + '}';
+}
+
+/**
+ * Resolve which pressure signal (if any) is firing for a given sample.
+ *
+ * Precedence is fixed: MEMORY beats PUBLISH_RATE beats SUBSCRIBERS. Memory
+ * is the most urgent signal because the worker is approaching OOM; publish
+ * rate is next because CPU saturation cascades fastest; subscriber ratio
+ * comes last because heavy fan-out degrades gracefully.
+ *
+ * Any threshold may be `false` to disable that signal entirely. A signal
+ * fires when the corresponding sample value is greater than or equal to
+ * its threshold.
+ *
+ * Pure: no I/O, no globals. Suitable for unit tests.
+ *
+ * @param {{ heapUsedRatio: number, publishRate: number, subscriberRatio: number }} sample
+ * @param {{ memoryHeapUsedRatio: number | false, publishRatePerSec: number | false, subscriberRatio: number | false }} thresholds
+ * @returns {'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY'}
+ */
+export function computePressureReason(sample, thresholds) {
+	if (
+		thresholds.memoryHeapUsedRatio !== false &&
+		sample.heapUsedRatio >= thresholds.memoryHeapUsedRatio
+	) {
+		return 'MEMORY';
+	}
+	if (
+		thresholds.publishRatePerSec !== false &&
+		sample.publishRate >= thresholds.publishRatePerSec
+	) {
+		return 'PUBLISH_RATE';
+	}
+	if (
+		thresholds.subscriberRatio !== false &&
+		sample.subscriberRatio >= thresholds.subscriberRatio
+	) {
+		return 'SUBSCRIBERS';
+	}
+	return 'NONE';
+}
+
+/**
  * @param {string | undefined} value
  * @returns {string | undefined}
  */
