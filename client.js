@@ -164,6 +164,63 @@ export function ready() {
 	});
 }
 
+// Storage adapters for the live-CRUD reducer pattern shared by crud()
+// and lookup() (with and without maxAge). Each adapter implements
+// create / update / delete for a particular collection shape (Array or
+// Record). The keyOf(item) extractor lets callers control whether keys
+// are coerced to string (e.g. for the maxAge variants whose long-lived
+// timestamp Map needs primitive-stable keys) or left as-is.
+
+const arrayCrudStorage = {
+	create(list, item, { prepend }) {
+		return prepend ? [item, ...list] : [...list, item];
+	},
+	update(list, item, { keyOf }) {
+		const id = keyOf(item);
+		return list.map((x) => keyOf(x) === id ? item : x);
+	},
+	delete(list, item, { keyOf }) {
+		const id = keyOf(item);
+		return list.filter((x) => keyOf(x) !== id);
+	}
+};
+
+const recordCrudStorage = {
+	create(map, item, { keyOf }) {
+		return { ...map, [keyOf(item)]: item };
+	},
+	update(map, item, { keyOf }) {
+		return { ...map, [keyOf(item)]: item };
+	},
+	delete(map, item, { keyOf }) {
+		const id = keyOf(item);
+		if (!(id in map)) return map;
+		const { [id]: _, ...rest } = map;
+		return rest;
+	}
+};
+
+/**
+ * Apply a single created / updated / deleted event to a collection.
+ * Returns the new collection, or the original reference if the event
+ * was not a CRUD verb or the data was not an object.
+ *
+ * @template S
+ * @param {S} state
+ * @param {string} event
+ * @param {unknown} data
+ * @param {{ create: Function, update: Function, delete: Function }} storage
+ * @param {{ keyOf: (item: any) => unknown, prepend?: boolean }} options
+ * @returns {S}
+ */
+function applyCrudReducer(state, event, data, storage, options) {
+	if (data == null || typeof data !== 'object') return state;
+	if (event === 'created') return storage.create(state, data, options);
+	if (event === 'updated') return storage.update(state, data, options);
+	if (event === 'deleted') return storage.delete(state, data, options);
+	return state;
+}
+
 /**
  * Live CRUD list - one line for real-time collections.
  * Auto-connects, auto-subscribes, and auto-handles created/updated/deleted events.
@@ -183,26 +240,17 @@ export function crud(topic, initial = [], options = {}) {
 	const maxAge = options.maxAge;
 
 	if (maxAge == null || maxAge <= 0) {
-		return on(topic).scan(/** @type {any[]} */ (initial), (list, { event, data }) => {
-			if (event === 'created') {
-				if (data == null || typeof data !== 'object') return list;
-				return prepend ? [data, ...list] : [...list, data];
-			}
-			if (event === 'updated') {
-				if (data == null || typeof data !== 'object') return list;
-				return list.map((item) => item[key] === data[key] ? data : item);
-			}
-			if (event === 'deleted') {
-				if (data == null || typeof data !== 'object') return list;
-				return list.filter((item) => item[key] !== data[key]);
-			}
-			return list;
-		});
+		const opts = { keyOf: (/** @type {any} */ x) => x[key], prepend };
+		return on(topic).scan(/** @type {any[]} */ (initial), (list, { event, data }) =>
+			applyCrudReducer(list, event, data, arrayCrudStorage, opts)
+		);
 	}
 
 	// maxAge mode: track timestamps per key, sweep on interval
 	const conn = ensureConnection();
 	const source = conn.on(topic);
+	const keyOf = (/** @type {any} */ x) => String(x[key]);
+	const reducerOpts = { keyOf, prepend };
 
 	/** @type {any[]} */
 	let list = [...initial];
@@ -210,7 +258,7 @@ export function crud(topic, initial = [], options = {}) {
 	const timestamps = new Map();
 	const now = Date.now();
 	for (const item of initial) {
-		timestamps.set(String(item[key]), now);
+		timestamps.set(keyOf(item), now);
 	}
 
 	const output = writable(list);
@@ -227,7 +275,7 @@ export function crud(topic, initial = [], options = {}) {
 			if (ts < cutoff) {
 				timestamps.delete(id);
 				const before = list.length;
-				list = list.filter((item) => String(item[key]) !== id);
+				list = list.filter((item) => keyOf(item) !== id);
 				if (list.length !== before) changed = true;
 			}
 		}
@@ -240,20 +288,11 @@ export function crud(topic, initial = [], options = {}) {
 			const { event: evt, data } = event;
 			if (evt !== 'created' && evt !== 'updated' && evt !== 'deleted') return;
 			if (data == null || typeof data !== 'object') return;
-			const id = String(/** @type {any} */ (data)[key]);
-			if (evt === 'created') {
-				timestamps.set(id, Date.now());
-				list = prepend ? [data, ...list] : [...list, data];
-				output.set(list);
-			} else if (evt === 'updated') {
-				timestamps.set(id, Date.now());
-				list = list.map((item) => String(item[key]) === id ? data : item);
-				output.set(list);
-			} else if (evt === 'deleted') {
-				timestamps.delete(id);
-				list = list.filter((item) => String(item[key]) !== id);
-				output.set(list);
-			}
+			const id = keyOf(data);
+			if (evt === 'deleted') timestamps.delete(id);
+			else timestamps.set(id, Date.now());
+			list = applyCrudReducer(list, evt, data, arrayCrudStorage, reducerOpts);
+			output.set(list);
 		});
 		sweepTimer = setInterval(sweep, Math.max(maxAge / 2, 1000));
 	}
@@ -265,7 +304,7 @@ export function crud(topic, initial = [], options = {}) {
 		const now = Date.now();
 		timestamps.clear();
 		for (const item of initial) {
-			timestamps.set(String(item[key]), now);
+			timestamps.set(keyOf(item), now);
 		}
 		output.set(list);
 	}
@@ -306,21 +345,17 @@ export function lookup(topic, initial = [], options = {}) {
 	}
 
 	if (maxAge == null || maxAge <= 0) {
-		return on(topic).scan(initialMap, (map, { event, data }) => {
-			if (data == null || typeof data !== 'object') return map;
-			const id = /** @type {any} */ (data)[key];
-			if (event === 'created' || event === 'updated') return { ...map, [id]: data };
-			if (event === 'deleted') {
-				const { [id]: _, ...rest } = map;
-				return rest;
-			}
-			return map;
-		});
+		const opts = { keyOf: (/** @type {any} */ x) => x[key] };
+		return on(topic).scan(initialMap, (map, { event, data }) =>
+			applyCrudReducer(map, event, data, recordCrudStorage, opts)
+		);
 	}
 
 	// maxAge mode: track timestamps per key, sweep on interval
 	const conn = ensureConnection();
 	const source = conn.on(topic);
+	const keyOf = (/** @type {any} */ x) => x[key];
+	const reducerOpts = { keyOf };
 
 	/** @type {Record<string, any>} */
 	let map = { ...initialMap };
@@ -360,19 +395,13 @@ export function lookup(topic, initial = [], options = {}) {
 			const { event: evt, data } = event;
 			if (evt !== 'created' && evt !== 'updated' && evt !== 'deleted') return;
 			if (data == null || typeof data !== 'object') return;
-			const id = /** @type {any} */ (data)[key];
-			if (evt === 'created' || evt === 'updated') {
-				timestamps.set(id, Date.now());
-				map = { ...map, [id]: data };
-				output.set(map);
-			} else if (evt === 'deleted') {
-				timestamps.delete(id);
-				if (id in map) {
-					const { [id]: _, ...rest } = map;
-					map = rest;
-					output.set(map);
-				}
-			}
+			const id = keyOf(data);
+			if (evt === 'deleted') timestamps.delete(id);
+			else timestamps.set(id, Date.now());
+			const next = applyCrudReducer(map, evt, data, recordCrudStorage, reducerOpts);
+			if (next === map) return;
+			map = next;
+			output.set(map);
 		});
 		// Sweep at half the maxAge interval for responsive cleanup
 		// without burning cycles on very short intervals

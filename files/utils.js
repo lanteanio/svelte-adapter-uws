@@ -323,6 +323,72 @@ export function createScopedTopic(publish, name) {
 }
 
 /**
+ * @typedef {Object} OriginCheckContext
+ * @property {'*' | 'same-origin' | string[]} allowedOrigins
+ * @property {string} [hostHeader]    - lowercased name of a HOST_HEADER env override (e.g. 'x-forwarded-host')
+ * @property {string} [protocolHeader] - lowercased name of a PROTOCOL_HEADER env override
+ * @property {string} [portHeader]    - lowercased name of a PORT_HEADER env override
+ * @property {boolean} isTls          - true when running under SSLApp
+ * @property {boolean} hasUpgradeHook - true when the user supplied an upgrade handler (used to decide whether to accept Origin-less clients)
+ */
+
+/**
+ * Decide whether a WebSocket upgrade request's Origin should be accepted
+ * under the configured policy.
+ *
+ * Returns `true` when:
+ *   - allowedOrigins is '*' (wildcard accepts everything)
+ *   - the request has no Origin header AND an upgrade hook is configured
+ *     (the hook can authenticate non-browser clients itself)
+ *   - allowedOrigins is 'same-origin' AND the Origin host+scheme match the
+ *     request's host (PROTOCOL_HEADER / HOST_HEADER / PORT_HEADER overrides
+ *     applied; default ports stripped to allow port-omitted Host comparisons)
+ *   - allowedOrigins is an array AND the Origin is a member
+ *
+ * Returns `false` otherwise. Malformed Origin headers (URL parse failure)
+ * are rejected.
+ *
+ * Pure with respect to inputs - no I/O, no globals, no module state. The
+ * env-driven header-name overrides and TLS state are passed via `ctx` so
+ * the function is unit-testable and benchable.
+ *
+ * @param {string | undefined} reqOrigin - The request's Origin header value, if any
+ * @param {Record<string, string>} headers - All request headers (lowercased keys)
+ * @param {OriginCheckContext} ctx
+ * @returns {boolean}
+ */
+export function isOriginAllowed(reqOrigin, headers, ctx) {
+	if (ctx.allowedOrigins === '*') return true;
+	if (!reqOrigin) return ctx.hasUpgradeHook;
+	if (ctx.allowedOrigins === 'same-origin') {
+		try {
+			const parsed = new URL(reqOrigin);
+			const requestHost = (ctx.hostHeader && headers[ctx.hostHeader]) || headers['host'];
+			if (!requestHost) return false;
+			const requestScheme = ctx.protocolHeader
+				? (headers[ctx.protocolHeader] || (ctx.isTls ? 'https' : 'http'))
+				: (ctx.isTls ? 'https' : 'http');
+			// Merge PORT_HEADER into the host the same way get_origin() does,
+			// so proxies that split host/port across headers still match.
+			const requestPort = ctx.portHeader ? headers[ctx.portHeader] : undefined;
+			let expectedHost = requestHost;
+			if (requestPort) {
+				expectedHost = requestHost.replace(/:\d+$/, '') + ':' + requestPort;
+			}
+			// Strip the default port so "example.com" matches "example.com:443"
+			// (URL.host omits the port when it is the default for the scheme).
+			const defaultPort = requestScheme === 'https' ? '443' : '80';
+			expectedHost = expectedHost.replace(':' + defaultPort, '');
+			return parsed.host === expectedHost && parsed.protocol === requestScheme + ':';
+		} catch {
+			return false;
+		}
+	}
+	if (Array.isArray(ctx.allowedOrigins)) return ctx.allowedOrigins.includes(reqOrigin);
+	return false;
+}
+
+/**
  * @param {string | undefined} value
  * @returns {string | undefined}
  */

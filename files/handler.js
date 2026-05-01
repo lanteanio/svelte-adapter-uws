@@ -12,7 +12,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -1790,52 +1790,23 @@ if (WS_ENABLED) {
 			const secExtensions = req.getHeader('sec-websocket-extensions');
 
 			// Origin validation - reject cross-origin WebSocket connections.
-			// Requests without an Origin header are also rejected (non-browser
-			// clients must be authenticated via the upgrade handler instead).
-			if (allowedOrigins !== '*') {
-				const reqOrigin = headers['origin'];
-				let allowed = false;
-				if (!reqOrigin) {
-					// No Origin header - reject unless an upgrade handler is
-					// configured (it can authenticate non-browser clients itself)
-					allowed = !!wsModule.upgrade;
-				} else if (allowedOrigins === 'same-origin') {
-					try {
-						const parsed = new URL(reqOrigin);
-						const requestHost = (host_header && headers[host_header]) || headers['host'];
-						if (!requestHost) {
-							allowed = false;
-						} else {
-							const requestScheme = protocol_header
-								? (headers[protocol_header] || (is_tls ? 'https' : 'http'))
-								: (is_tls ? 'https' : 'http');
-							// Merge PORT_HEADER into the host the same way get_origin() does,
-							// so proxies that split host/port across headers still match.
-							const requestPort = port_header ? headers[port_header] : undefined;
-							let expectedHost = requestHost;
-							if (requestPort) {
-								expectedHost = requestHost.replace(/:\d+$/, '') + ':' + requestPort;
-							}
-							// Strip default ports so "example.com" matches "example.com:443"
-							// (URL.host omits the port when it is the default for the scheme)
-							const defaultPort = requestScheme === 'https' ? '443' : '80';
-							expectedHost = expectedHost.replace(':' + defaultPort, '');
-							allowed = parsed.host === expectedHost && parsed.protocol === requestScheme + ':';
-						}
-					} catch {
-						allowed = false;
-					}
-				} else if (Array.isArray(allowedOrigins)) {
-					allowed = allowedOrigins.includes(reqOrigin);
-				}
-				if (!allowed) {
-					res.cork(() => {
-						res.writeStatus('403 Forbidden');
-						res.writeHeader('content-type', 'text/plain');
-						res.end('Origin not allowed');
-					});
-					return;
-				}
+			// Requests without an Origin header are also rejected unless the
+			// user supplied an upgrade hook that can authenticate non-browser
+			// clients itself.
+			if (!isOriginAllowed(headers['origin'], headers, {
+				allowedOrigins,
+				hostHeader: host_header,
+				protocolHeader: protocol_header,
+				portHeader: port_header,
+				isTls: is_tls,
+				hasUpgradeHook: !!wsModule.upgrade
+			})) {
+				res.cork(() => {
+					res.writeStatus('403 Forbidden');
+					res.writeHeader('content-type', 'text/plain');
+					res.end('Origin not allowed');
+				});
+				return;
 			}
 
 			// No user upgrade handler - accept synchronously (no microtask yield,

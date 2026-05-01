@@ -12,7 +12,8 @@ import {
 	completeEnvelope,
 	esc,
 	isValidWireTopic,
-	createScopedTopic
+	createScopedTopic,
+	isOriginAllowed
 } from '../files/utils.js';
 
 // -- parse_as_bytes ---------------------------------------------------------
@@ -1921,5 +1922,166 @@ describe('createScopedTopic', () => {
 		const t = createScopedTopic(fn, 'x');
 		expect(t.publish('e', 1)).toBe(1);
 		expect(t.created(1)).toBe(2);
+	});
+});
+
+// -- isOriginAllowed --------------------------------------------------------
+
+describe('isOriginAllowed', () => {
+	const baseCtx = { isTls: false, hasUpgradeHook: false };
+
+	describe('wildcard', () => {
+		it('accepts any origin when allowedOrigins is *', () => {
+			const ctx = { ...baseCtx, allowedOrigins: '*' };
+			expect(isOriginAllowed('https://anywhere.com', { host: 'a.b' }, ctx)).toBe(true);
+			expect(isOriginAllowed(undefined, {}, ctx)).toBe(true);
+			expect(isOriginAllowed('not a url', {}, ctx)).toBe(true);
+		});
+	});
+
+	describe('missing Origin header', () => {
+		it('rejects when no upgrade hook is configured', () => {
+			const ctx = { ...baseCtx, allowedOrigins: 'same-origin', hasUpgradeHook: false };
+			expect(isOriginAllowed(undefined, { host: 'example.com' }, ctx)).toBe(false);
+			expect(isOriginAllowed('', { host: 'example.com' }, ctx)).toBe(false);
+		});
+
+		it('accepts when an upgrade hook is configured', () => {
+			const ctx = { ...baseCtx, allowedOrigins: 'same-origin', hasUpgradeHook: true };
+			expect(isOriginAllowed(undefined, { host: 'example.com' }, ctx)).toBe(true);
+		});
+	});
+
+	describe('same-origin policy', () => {
+		it('accepts a matching origin (http)', () => {
+			const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: false };
+			expect(isOriginAllowed('http://example.com', { host: 'example.com' }, ctx)).toBe(true);
+		});
+
+		it('accepts a matching origin (https)', () => {
+			const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: true };
+			expect(isOriginAllowed('https://example.com', { host: 'example.com' }, ctx)).toBe(true);
+		});
+
+		it('rejects a different host', () => {
+			const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: true };
+			expect(isOriginAllowed('https://evil.com', { host: 'example.com' }, ctx)).toBe(false);
+		});
+
+		it('rejects a different scheme', () => {
+			const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: true };
+			expect(isOriginAllowed('http://example.com', { host: 'example.com' }, ctx)).toBe(false);
+		});
+
+		it('strips the default https port from the host', () => {
+			const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: true };
+			expect(isOriginAllowed('https://example.com', { host: 'example.com:443' }, ctx)).toBe(true);
+		});
+
+		it('strips the default http port from the host', () => {
+			const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: false };
+			expect(isOriginAllowed('http://example.com', { host: 'example.com:80' }, ctx)).toBe(true);
+		});
+
+		it('keeps a non-default port intact', () => {
+			const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: false };
+			expect(isOriginAllowed('http://example.com:3000', { host: 'example.com:3000' }, ctx)).toBe(true);
+			expect(isOriginAllowed('http://example.com:3000', { host: 'example.com:4000' }, ctx)).toBe(false);
+		});
+
+		it('rejects when the request has no Host header', () => {
+			const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: true };
+			expect(isOriginAllowed('https://example.com', {}, ctx)).toBe(false);
+		});
+
+		it('rejects a malformed Origin (URL parse throws)', () => {
+			const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: true };
+			expect(isOriginAllowed('not a url', { host: 'example.com' }, ctx)).toBe(false);
+		});
+
+		describe('proxy header overrides', () => {
+			it('uses HOST_HEADER override when set', () => {
+				const ctx = {
+					...baseCtx,
+					allowedOrigins: 'same-origin',
+					hostHeader: 'x-forwarded-host',
+					isTls: true
+				};
+				const headers = { host: 'internal:8080', 'x-forwarded-host': 'public.example.com' };
+				expect(isOriginAllowed('https://public.example.com', headers, ctx)).toBe(true);
+				expect(isOriginAllowed('https://internal', headers, ctx)).toBe(false);
+			});
+
+			it('uses PROTOCOL_HEADER override when set', () => {
+				const ctx = {
+					...baseCtx,
+					allowedOrigins: 'same-origin',
+					protocolHeader: 'x-forwarded-proto',
+					isTls: false
+				};
+				const headers = { host: 'example.com', 'x-forwarded-proto': 'https' };
+				expect(isOriginAllowed('https://example.com', headers, ctx)).toBe(true);
+				expect(isOriginAllowed('http://example.com', headers, ctx)).toBe(false);
+			});
+
+			it('uses PORT_HEADER override when set', () => {
+				const ctx = {
+					...baseCtx,
+					allowedOrigins: 'same-origin',
+					portHeader: 'x-forwarded-port',
+					isTls: false
+				};
+				const headers = { host: 'example.com', 'x-forwarded-port': '3000' };
+				expect(isOriginAllowed('http://example.com:3000', headers, ctx)).toBe(true);
+				expect(isOriginAllowed('http://example.com', headers, ctx)).toBe(false);
+			});
+
+			it('falls back to is_tls default when PROTOCOL_HEADER is set but unset', () => {
+				const ctx = {
+					...baseCtx,
+					allowedOrigins: 'same-origin',
+					protocolHeader: 'x-forwarded-proto',
+					isTls: true
+				};
+				// Header configured but missing -> use isTls default (https)
+				expect(isOriginAllowed('https://example.com', { host: 'example.com' }, ctx)).toBe(true);
+				expect(isOriginAllowed('http://example.com', { host: 'example.com' }, ctx)).toBe(false);
+			});
+		});
+	});
+
+	describe('array allowlist', () => {
+		it('accepts a member', () => {
+			const ctx = {
+				...baseCtx,
+				allowedOrigins: ['https://app.example.com', 'https://admin.example.com']
+			};
+			expect(isOriginAllowed('https://app.example.com', { host: 'api.example.com' }, ctx)).toBe(true);
+			expect(isOriginAllowed('https://admin.example.com', { host: 'api.example.com' }, ctx)).toBe(true);
+		});
+
+		it('rejects a non-member', () => {
+			const ctx = { ...baseCtx, allowedOrigins: ['https://app.example.com'] };
+			expect(isOriginAllowed('https://other.com', { host: 'api.example.com' }, ctx)).toBe(false);
+		});
+
+		it('rejects when the array is empty', () => {
+			const ctx = { ...baseCtx, allowedOrigins: [] };
+			expect(isOriginAllowed('https://anything.com', { host: 'api' }, ctx)).toBe(false);
+		});
+
+		it('does exact string match (no normalization)', () => {
+			const ctx = { ...baseCtx, allowedOrigins: ['https://example.com'] };
+			expect(isOriginAllowed('https://example.com', { host: 'api' }, ctx)).toBe(true);
+			expect(isOriginAllowed('https://example.com/', { host: 'api' }, ctx)).toBe(false);
+			expect(isOriginAllowed('https://example.com:443', { host: 'api' }, ctx)).toBe(false);
+		});
+	});
+
+	describe('unknown allowedOrigins value', () => {
+		it('rejects everything when allowedOrigins is an unrecognized string', () => {
+			const ctx = { ...baseCtx, allowedOrigins: 'whatever' };
+			expect(isOriginAllowed('https://example.com', { host: 'example.com' }, ctx)).toBe(false);
+		});
 	});
 });
