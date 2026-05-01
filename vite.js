@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { parseCookies, createCookies } from './files/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic } from './files/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS } from './files/utils.js';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -492,7 +492,7 @@ export default function uws(options = {}) {
 				subscriptions.set(ws, new Set());
 
 				const userData = /** @type {any} */ (ws).__userData || {};
-				userData.__subscriptions = new Set();
+				userData[WS_SUBSCRIPTIONS] = new Set();
 				const wrapped = wrapWebSocket(ws, userData);
 				wsWrappers.set(ws, wrapped);
 
@@ -518,12 +518,12 @@ export default function uws(options = {}) {
 									return;
 								}
 								subscriptions.get(ws)?.add(msg.topic);
-								/** @type {any} */ (ws).__userData?.__subscriptions?.add(msg.topic);
+								/** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS]?.add(msg.topic);
 								return;
 							}
 							if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
 								subscriptions.get(ws)?.delete(msg.topic);
-								/** @type {any} */ (ws).__userData?.__subscriptions?.delete(msg.topic);
+								/** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS]?.delete(msg.topic);
 								userHandlers.unsubscribe?.(wrapped, msg.topic, { platform });
 								return;
 							}
@@ -536,7 +536,7 @@ export default function uws(options = {}) {
 									if (!isValidWireTopic(topic)) continue;
 									if (userHandlers.subscribe && userHandlers.subscribe(wrapped, topic, { platform }) === false) continue;
 									subs?.add(topic);
-									/** @type {any} */ (ws).__userData?.__subscriptions?.add(topic);
+									/** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS]?.add(topic);
 								}
 								return;
 							}
@@ -555,7 +555,7 @@ export default function uws(options = {}) {
 				ws.on('close', (code, reason) => {
 					const reasonBuf = reason || Buffer.alloc(0);
 					const reasonAB = reasonBuf.buffer.slice(reasonBuf.byteOffset, reasonBuf.byteOffset + reasonBuf.byteLength);
-					const subs = /** @type {any} */ (ws).__userData?.__subscriptions || new Set();
+					const subs = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS] || new Set();
 					userHandlers.close?.(wrapped, { code, message: reasonAB, platform, subscriptions: subs });
 					connections.delete(ws);
 					subscriptions.delete(ws);

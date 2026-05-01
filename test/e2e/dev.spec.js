@@ -1,8 +1,9 @@
 import { test, expect } from '@playwright/test';
 import WebSocket from 'ws';
 import { startBrowserCoverage, stopBrowserCoverage } from './browser-coverage.js';
+import { DEV_PORT } from './ports.js';
 
-const WS_URL = 'ws://localhost:49321/ws';
+const WS_URL = `ws://localhost:${DEV_PORT}/ws`;
 
 // -- Helpers ------------------------------------------------------------------
 
@@ -170,11 +171,11 @@ test.describe('WebSocket pub/sub via ws client', () => {
 
 test.describe('WebSocket platform API coverage', () => {
 	test('sendTo delivers only to matching connections', async () => {
-		const client = await connectWs('ws://localhost:49321/ws');
+		const client = await connectWs(WS_URL);
 		subscribe(client, 'test-topic');
 		await new Promise((r) => setTimeout(r, 100));
 
-		const sender = await connectWs('ws://localhost:49321/ws');
+		const sender = await connectWs(WS_URL);
 		sender.send(JSON.stringify({
 			type: 'sendto',
 			token: 'nonexistent-token-xyz',

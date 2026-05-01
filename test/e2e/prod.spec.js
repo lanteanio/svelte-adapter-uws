@@ -1,8 +1,9 @@
 import { test, expect } from '@playwright/test';
 import WebSocket from 'ws';
 import { startBrowserCoverage, stopBrowserCoverage } from './browser-coverage.js';
+import { PROD_PORT } from './ports.js';
 
-const PORT = 49322;
+const PORT = PROD_PORT;
 const BASE_URL = `http://localhost:${PORT}`;
 const WS_URL = `ws://localhost:${PORT}/ws`;
 

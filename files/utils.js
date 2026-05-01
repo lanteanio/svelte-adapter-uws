@@ -257,6 +257,31 @@ export function computePressureReason(sample, thresholds) {
 	return 'NONE';
 }
 
+// Symbol-keyed slots for adapter-internal scratch state on the
+// per-connection userData object.
+//
+// The adapter needs to track per-connection state (the topic Set used
+// to populate CloseContext.subscriptions, the coalesce-by-key buffer
+// used by sendCoalesced) somewhere accessible from the WebSocket
+// message handler. Stashing it on userData keeps the access pattern
+// fast - the WS message handler already has userData in hand via
+// ws.getUserData() and a property lookup is cheaper than a WeakMap.
+//
+// Using Symbol-keyed properties (rather than dunder strings like
+// '__subscriptions') prevents collisions with arbitrary user upgrade
+// hook returns: a user that does `return { __subscriptions: ... }`
+// from upgrade() can no longer clobber the adapter's tracking, and
+// Object.keys / JSON.stringify / spread on userData skip these slots
+// so they do not leak into client serializations.
+//
+// The symbols are exported from this module so handler.js, vite.js,
+// and testing.js share the same identity. Each Symbol() call creates
+// a unique value, so the adapter's slot is unreachable from user code
+// that does not import this module.
+
+export const WS_SUBSCRIPTIONS = Symbol('adapter-uws.ws.subscriptions');
+export const WS_COALESCED = Symbol('adapter-uws.ws.coalesced');
+
 /**
  * Safely quote a string for JSON embedding in topic / event positions.
  *

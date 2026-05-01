@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test';
+import { DEV_PORT, PROD_PORT } from './ports.js';
 
 export default defineConfig({
 	testDir: '.',
@@ -14,12 +15,12 @@ export default defineConfig({
 		{
 			name: 'dev',
 			testMatch: 'dev.spec.js',
-			use: { baseURL: 'http://localhost:49321' }
+			use: { baseURL: `http://localhost:${DEV_PORT}` }
 		},
 		{
 			name: 'prod',
 			testMatch: 'prod.spec.js',
-			use: { baseURL: 'http://localhost:49322' }
+			use: { baseURL: `http://localhost:${PROD_PORT}` }
 		}
 	]
 });

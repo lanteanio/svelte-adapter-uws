@@ -12,7 +12,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, WS_SUBSCRIPTIONS, WS_COALESCED } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -533,7 +533,7 @@ function stopPressureSampling() {
  */
 function flushCoalescedFor(ws) {
 	const userData = ws.getUserData();
-	const pending = userData.__coalesced;
+	const pending = userData[WS_COALESCED];
 	if (!pending || pending.size === 0) return;
 	drainCoalesced(pending, (msg) => ws.send(
 		envelopePrefix(msg.topic, msg.event) + JSON.stringify(msg.data ?? null) + '}',
@@ -605,10 +605,10 @@ const platform = {
 	 */
 	sendCoalesced(ws, { key, topic, event, data }) {
 		const userData = ws.getUserData();
-		let pending = userData.__coalesced;
+		let pending = userData[WS_COALESCED];
 		if (!pending) {
 			pending = new Map();
-			userData.__coalesced = pending;
+			userData[WS_COALESCED] = pending;
 		}
 		pending.set(key, { topic, event, data });
 		flushCoalescedFor(ws);
@@ -1922,7 +1922,7 @@ if (WS_ENABLED) {
 			// Track which topics this connection is subscribed to.
 			// Used to populate CloseContext.subscriptions for the user's close handler,
 			// enabling deterministic cleanup of per-subscription server state.
-			ws.getUserData().__subscriptions = new Set();
+			ws.getUserData()[WS_SUBSCRIPTIONS] = new Set();
 			wsConnections.add(ws);
 			if (wsDebug) console.log('[ws] open connections=%d', wsConnections.size);
 			wsModule.open?.(ws, { platform });
@@ -1947,7 +1947,7 @@ if (WS_ENABLED) {
 						if (wsModule.subscribe && wsModule.subscribe(ws, msg.topic, { platform }) === false) {
 							return;
 						}
-						const subs = ws.getUserData().__subscriptions;
+						const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
 						const isNew = !subs.has(msg.topic);
 						ws.subscribe(msg.topic);
 						subs.add(msg.topic);
@@ -1957,7 +1957,7 @@ if (WS_ENABLED) {
 					}
 					if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
 						ws.unsubscribe(msg.topic);
-						if (ws.getUserData().__subscriptions.delete(msg.topic)) {
+						if (ws.getUserData()[WS_SUBSCRIPTIONS].delete(msg.topic)) {
 							totalSubscriptions--;
 						}
 						if (wsDebug) console.log('[ws] unsubscribe topic=%s', msg.topic);
@@ -1974,9 +1974,9 @@ if (WS_ENABLED) {
 						for (const topic of topics) {
 							if (!isValidWireTopic(topic)) continue;
 							if (wsModule.subscribe && wsModule.subscribe(ws, topic, { platform }) === false) continue;
-							const isNew = !userData.__subscriptions.has(topic);
+							const isNew = !userData[WS_SUBSCRIPTIONS].has(topic);
 							ws.subscribe(topic);
-							userData.__subscriptions.add(topic);
+							userData[WS_SUBSCRIPTIONS].add(topic);
 							if (isNew) totalSubscriptions++;
 							subscribed++;
 						}
@@ -1999,7 +1999,7 @@ if (WS_ENABLED) {
 		},
 
 		close: (ws, code, message) => {
-			const subscriptions = ws.getUserData().__subscriptions || new Set();
+			const subscriptions = ws.getUserData()[WS_SUBSCRIPTIONS] || new Set();
 			try {
 				wsModule.close?.(ws, { code, message, platform, subscriptions });
 			} finally {

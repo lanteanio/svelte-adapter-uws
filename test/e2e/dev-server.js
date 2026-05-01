@@ -6,7 +6,15 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixtureDir = path.resolve(__dirname, '../fixture');
-const port = parseInt(process.argv[2] || '49321', 10);
+// Port arrives as argv[2] from global-setup. Fallback E2E_DEV_PORT lets you
+// run this script standalone (e.g. `node test/e2e/dev-server.js` with the
+// env var set) without re-hardcoding a number that might collide with
+// Windows Hyper-V port reservations.
+const port = parseInt(process.argv[2] || process.env.E2E_DEV_PORT || '0', 10);
+if (!port) {
+	console.error('dev-server: pass a port via argv[2] or E2E_DEV_PORT env');
+	process.exit(1);
+}
 
 const server = await createServer({
 	configFile: path.join(fixtureDir, 'vite.config.js'),

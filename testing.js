@@ -1,5 +1,5 @@
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS } from './files/utils.js';
 
 /**
  * Build a JSON envelope string matching the production wire format.
@@ -153,7 +153,7 @@ export async function createTestServer(options = {}) {
 		},
 
 		open(ws) {
-			ws.getUserData().__subscriptions = new Set();
+			ws.getUserData()[WS_SUBSCRIPTIONS] = new Set();
 			wsConnections.add(ws);
 			handler.open?.(ws, { platform });
 			for (const resolve of connectionWaiters) resolve(undefined);
@@ -171,12 +171,12 @@ export async function createTestServer(options = {}) {
 							if (!isValidWireTopic(msg.topic)) return;
 							if (handler.subscribe && handler.subscribe(ws, msg.topic, { platform }) === false) return;
 							ws.subscribe(msg.topic);
-							ws.getUserData().__subscriptions?.add(msg.topic);
+							ws.getUserData()[WS_SUBSCRIPTIONS]?.add(msg.topic);
 							return;
 						}
 						if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
 							ws.unsubscribe(msg.topic);
-							ws.getUserData().__subscriptions?.delete(msg.topic);
+							ws.getUserData()[WS_SUBSCRIPTIONS]?.delete(msg.topic);
 							handler.unsubscribe?.(ws, msg.topic, { platform });
 							return;
 						}
@@ -185,7 +185,7 @@ export async function createTestServer(options = {}) {
 								if (!isValidWireTopic(topic)) continue;
 								if (handler.subscribe && handler.subscribe(ws, topic, { platform }) === false) continue;
 								ws.subscribe(topic);
-								ws.getUserData().__subscriptions?.add(topic);
+								ws.getUserData()[WS_SUBSCRIPTIONS]?.add(topic);
 							}
 							return;
 						}
@@ -203,7 +203,7 @@ export async function createTestServer(options = {}) {
 		},
 
 		close(ws, code, message) {
-			const subs = ws.getUserData()?.__subscriptions || new Set();
+			const subs = ws.getUserData()?.[WS_SUBSCRIPTIONS] || new Set();
 			handler.close?.(ws, { code, message, platform, subscriptions: subs });
 			wsConnections.delete(ws);
 		}
