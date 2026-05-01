@@ -109,7 +109,6 @@ export function createMiddleware(...fns) {
 					return;
 				}
 				const fn = stack[index++];
-				const calledIndex = index;
 				let called = false;
 				await fn(ctx, async () => {
 					if (called) return; // guard against double next()

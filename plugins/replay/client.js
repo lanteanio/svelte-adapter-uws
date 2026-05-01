@@ -21,6 +21,8 @@
 import { on, connect, ready } from '../../client.js';
 import { writable } from 'svelte/store';
 
+const TOPIC_PREFIX = '__replay:';
+
 let _reqIdCounter = 0;
 
 /**
@@ -99,7 +101,7 @@ export function onReplay(topic, options) {
 	function startListening() {
 		cancelled = false;
 		const liveStore = on(topic);
-		const replayStore = on('__replay:' + topic);
+		const replayStore = on(TOPIC_PREFIX + topic);
 
 		// Subscribe to the live topic - messages are dropped until replay ends
 		storeUnsub = liveStore.subscribe((event) => {

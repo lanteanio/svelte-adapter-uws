@@ -13,6 +13,8 @@
  * @module svelte-adapter-uws/plugins/cursor/client
  */
 
+const TOPIC_PREFIX = '__cursor:';
+
 import { on, connect, status } from '../../client.js';
 import { writable } from 'svelte/store';
 
@@ -61,7 +63,7 @@ export function cursor(topic, options) {
 	const cached = cursorStores.get(cacheKey);
 	if (cached) return cached;
 
-	const cursorTopic = '__cursor:' + topic;
+	const cursorTopic = TOPIC_PREFIX + topic;
 
 	/** @type {Map<string, { user: any, data: any }>} */
 	let cursorMap = new Map();

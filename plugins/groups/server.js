@@ -12,6 +12,8 @@
  * @module svelte-adapter-uws/plugins/groups
  */
 
+const TOPIC_PREFIX = '__group:';
+
 /**
  * @typedef {'member' | 'admin' | 'viewer'} GroupRole
  */
@@ -114,7 +116,7 @@ export function createGroup(name, options = {}) {
 	}
 
 	const VALID_ROLES = new Set(['member', 'admin', 'viewer']);
-	const internalTopic = '__group:' + name;
+	const internalTopic = TOPIC_PREFIX + name;
 
 	/** @type {Map<any, { role: GroupRole }>} */
 	const members = new Map();

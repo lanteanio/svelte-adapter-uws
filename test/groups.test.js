@@ -1,43 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createGroup } from '../plugins/groups/server.js';
-
-/**
- * Create a mock WebSocket.
- * @param {Record<string, any>} userData
- */
-function mockWs(userData = {}) {
-	const topics = new Set();
-	return {
-		getUserData: () => userData,
-		subscribe: (topic) => { topics.add(topic); return true; },
-		unsubscribe: (topic) => { topics.delete(topic); return true; },
-		isSubscribed: (topic) => topics.has(topic),
-		_topics: topics
-	};
-}
-
-/**
- * Create a mock platform that records publish/send calls.
- */
-function mockPlatform() {
-	const p = {
-		published: [],
-		sent: [],
-		publish(topic, event, data) {
-			p.published.push({ topic, event, data });
-			return true;
-		},
-		send(ws, topic, event, data) {
-			p.sent.push({ ws, topic, event, data });
-			return 1;
-		},
-		reset() {
-			p.published.length = 0;
-			p.sent.length = 0;
-		}
-	};
-	return p;
-}
+import { mockWs, mockPlatform } from './_helpers.js';
 
 describe('groups plugin - server', () => {
 	let group;

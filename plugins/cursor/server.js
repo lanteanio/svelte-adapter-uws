@@ -12,6 +12,8 @@
  * @module svelte-adapter-uws/plugins/cursor
  */
 
+const TOPIC_PREFIX = '__cursor:';
+
 /**
  * @typedef {Object} CursorOptions
  * @property {number} [throttle=50] - Minimum milliseconds between broadcasts per
@@ -130,7 +132,7 @@ export function createCursor(options = {}) {
 	 * @param {import('../../index.js').Platform} platform
 	 */
 	function broadcast(topic, key, user, data, platform) {
-		platform.publish('__cursor:' + topic, 'update', { key, user, data });
+		platform.publish(TOPIC_PREFIX + topic, 'update', { key, user, data });
 	}
 
 	/** @type {CursorTracker} */
@@ -198,7 +200,7 @@ export function createCursor(options = {}) {
 					if (topicMap.size === 0) {
 						topics.delete(topic);
 					}
-					platform.publish('__cursor:' + topic, 'remove', { key: state.key });
+					platform.publish(TOPIC_PREFIX + topic, 'remove', { key: state.key });
 				}
 			}
 
@@ -224,7 +226,7 @@ export function createCursor(options = {}) {
 					entries.push({ key, user: entry.user, data: entry.data });
 				}
 			}
-			platform.send(ws, '__cursor:' + topic, 'snapshot', entries);
+			platform.send(ws, TOPIC_PREFIX + topic, 'snapshot', entries);
 		},
 
 		clear() {
@@ -244,12 +246,12 @@ export function createCursor(options = {}) {
 				let parsed;
 				try { parsed = JSON.parse(new TextDecoder().decode(data)); } catch { return; }
 				if (parsed.type === 'cursor' && typeof parsed.topic === 'string') {
-					if (typeof ws.isSubscribed === 'function' && !ws.isSubscribed('__cursor:' + parsed.topic)) return true;
+					if (typeof ws.isSubscribed === 'function' && !ws.isSubscribed(TOPIC_PREFIX + parsed.topic)) return true;
 					tracker.update(ws, parsed.topic, parsed.data ?? parsed.position, platform);
 					return true;
 				}
 				if (parsed.type === 'cursor-snapshot' && typeof parsed.topic === 'string') {
-					if (typeof ws.isSubscribed === 'function' && !ws.isSubscribed('__cursor:' + parsed.topic)) return true;
+					if (typeof ws.isSubscribed === 'function' && !ws.isSubscribed(TOPIC_PREFIX + parsed.topic)) return true;
 					tracker.snapshot(ws, parsed.topic, platform);
 					return true;
 				}

@@ -1,38 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createCursor } from '../plugins/cursor/server.js';
-
-/**
- * Create a mock WebSocket.
- * @param {Record<string, any>} userData
- */
-function mockWs(userData = {}) {
-	return {
-		getUserData: () => userData
-	};
-}
-
-/**
- * Create a mock platform that records publish/send calls.
- */
-function mockPlatform() {
-	const p = {
-		published: [],
-		sent: [],
-		publish(topic, event, data) {
-			p.published.push({ topic, event, data });
-			return true;
-		},
-		send(ws, topic, event, data) {
-			p.sent.push({ ws, topic, event, data });
-			return 1;
-		},
-		reset() {
-			p.published.length = 0;
-			p.sent.length = 0;
-		}
-	};
-	return p;
-}
+import { mockWs, mockPlatform } from './_helpers.js';
 
 describe('cursor plugin - server', () => {
 	let cursors;

@@ -77,7 +77,6 @@ describe('createDedup', () => {
 			const d = createDedup({ ttl: 1000 });
 			d.claim('msg-1');
 			vi.advanceTimersByTime(800);
-			// A duplicate claim inside the window must not slide the deadline.
 			expect(d.claim('msg-1')).toBe(false);
 			vi.advanceTimersByTime(300);
 			// 1100ms total from first claim - already past the window.
@@ -129,7 +128,6 @@ describe('createDedup', () => {
 			d.claim('msg-1');
 			expect(d.delete('msg-1')).toBe(true);
 			expect(d.has('msg-1')).toBe(false);
-			// After delete, claim should succeed as new.
 			expect(d.claim('msg-1')).toBe(true);
 		});
 

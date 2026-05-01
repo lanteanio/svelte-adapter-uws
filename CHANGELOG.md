@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Throttle plugin no longer leaks topic state.** The trailing-edge tick in `throttle()` now removes the topic entry from its internal map when the trailing window closes with no pending value (matching the existing `debounce()` cleanup). Previously, every topic ever published through `throttle.publish()` left one map entry behind for the lifetime of the limiter; with high-cardinality patterns like `throttle.publish(platform, 'cursor:' + userId, ...)` this grew without bound. External behavior (leading edge, trailing edge, idle restart) is unchanged.
+- **Test harness now applies the same wire-protocol topic validation as production.** `createTestServer()` (`svelte-adapter-uws/testing`) was previously checking only the 256-character length cap on `subscribe` / `subscribe-batch` topics; the production handler also rejects topics that contain control characters. Tests written against the harness now reject the same inputs production rejects.
+
+### Changed
+
+- **Internal: shared the JSON-identifier escape, wire-topic validator, and scoped-topic factory across the production handler, the dev Vite plugin, and the test harness.** The production `files/handler.js`, `vite.js`, and `testing.js` previously held byte-identical copies of `esc(s)`, the topic validation loop, and the `platform.topic(name)` shape (publish / created / updated / deleted / set / increment / decrement). All three now import `esc`, `isValidWireTopic`, and `createScopedTopic` from `files/utils.js`, which is the single source of truth for wire-protocol shape. A/B microbench (5M iterations x 10 alternating rounds): cross-module cost was within baseline noise (esc -0.03%, isValidWireTopic +0.41%, createScopedTopic -0.07%; baseline stddev 1.3-4.2%).
+- **Internal: shared the `mockWs` / `mockPlatform` test factories across the seven plugin test files** that previously declared their own copies (`channels`, `cursor`, `groups`, `middleware`, `presence`, `ratelimit`, `throttle`). They now live in `test/_helpers.js`. No behavior change.
+- **Removed an unused local in `plugins/middleware/server.js`** (`calledIndex`).
+- **Internal: each plugin now declares its wire-protocol topic prefix as a `TOPIC_PREFIX` constant** instead of repeating the literal across the file. Affects `cursor`, `groups`, `presence`, `replay` (server + client). Eliminates a class of refactor-rot bugs - notably `plugins/presence/server.js` previously had `topic.slice(11)` for the length of `'__presence:'`, which would silently misbehave if anyone ever changed the prefix string. Now `topic.slice(TOPIC_PREFIX.length)`. No external behavior change.
+
 ## [0.5.0-next.2] - 2026-04-28
 
 ### Added

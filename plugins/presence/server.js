@@ -11,6 +11,8 @@
  * @module svelte-adapter-uws/plugins/presence
  */
 
+const TOPIC_PREFIX = '__presence:';
+
 /**
  * @typedef {Object} PresenceOptions
  * @property {string} [key='id'] - Field in the selected data that uniquely identifies a user.
@@ -221,7 +223,7 @@ export function createPresence(options = {}) {
 			heartbeatTimer = setInterval(() => {
 				for (const [topic, users] of topicPresence) {
 					_platform.publish(
-						'__presence:' + topic,
+						TOPIC_PREFIX + topic,
 						'heartbeat',
 						[...users.keys()]
 					);
@@ -256,9 +258,9 @@ export function createPresence(options = {}) {
 			if (users.size === 0) {
 				topicPresence.delete(topic);
 			}
-			platform.publish('__presence:' + topic, 'leave', { key: entry.key, data });
+			platform.publish(TOPIC_PREFIX + topic, 'leave', { key: entry.key, data });
 		}
-		try { ws.unsubscribe('__presence:' + topic); } catch { /* ws already closed */ }
+		try { ws.unsubscribe(TOPIC_PREFIX + topic); } catch { /* ws already closed */ }
 	}
 
 	/** @type {PresenceTracker} */
@@ -296,7 +298,7 @@ export function createPresence(options = {}) {
 				topicPresence.set(topic, users);
 			}
 
-			const presenceTopic = '__presence:' + topic;
+			const presenceTopic = TOPIC_PREFIX + topic;
 			const existing = users.get(key);
 			if (existing) {
 				// Same user, additional connection (another tab) - bump count.
@@ -342,7 +344,7 @@ export function createPresence(options = {}) {
 		sync(ws, topic, platform) {
 			capturePlatform(platform);
 			const users = topicPresence.get(topic);
-			const presenceTopic = '__presence:' + topic;
+			const presenceTopic = TOPIC_PREFIX + topic;
 			const list = [];
 			if (users) {
 				for (const [k, entry] of users) {
@@ -381,8 +383,8 @@ export function createPresence(options = {}) {
 
 		hooks: {
 			subscribe(ws, topic, { platform }) {
-				if (topic.startsWith('__presence:')) {
-					tracker.sync(ws, topic.slice(11), platform);
+				if (topic.startsWith(TOPIC_PREFIX)) {
+					tracker.sync(ws, topic.slice(TOPIC_PREFIX.length), platform);
 					return;
 				}
 				tracker.join(ws, topic, platform);

@@ -258,6 +258,71 @@ export function computePressureReason(sample, thresholds) {
 }
 
 /**
+ * Safely quote a string for JSON embedding in topic / event positions.
+ *
+ * Topics and events are developer-defined identifiers, so a quote,
+ * backslash, or control character is always a bug. We throw rather than
+ * silently escape, so the bug surfaces at the publish site instead of
+ * producing malformed JSON on the wire.
+ *
+ * @param {string} s
+ * @returns {string} JSON-quoted string, e.g. '"chat"'
+ */
+export function esc(s) {
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charCodeAt(i);
+		if (c < 32 || c === 34 || c === 92) {
+			throw new Error(
+				`Topic/event name contains invalid character at index ${i}: '${s}'. ` +
+				'Names must not contain quotes, backslashes, or control characters.'
+			);
+		}
+	}
+	return '"' + s + '"';
+}
+
+/**
+ * Validate a wire-protocol topic name from a subscribe / unsubscribe /
+ * subscribe-batch control message. Topics are non-empty strings, at most
+ * 256 chars, with no control characters.
+ *
+ * Cheap (single linear scan, no regex). Used by the production handler,
+ * the dev vite plugin, and the test harness so all three apply identical
+ * rules and stay in lockstep.
+ *
+ * @param {unknown} topic
+ * @returns {boolean}
+ */
+export function isValidWireTopic(topic) {
+	if (typeof topic !== 'string' || topic.length === 0 || topic.length > 256) return false;
+	for (let i = 0; i < topic.length; i++) {
+		if (topic.charCodeAt(i) < 32) return false;
+	}
+	return true;
+}
+
+/**
+ * Build the `platform.topic(name)` scoped publisher: a small object that
+ * forwards each named action (created / updated / deleted / set /
+ * increment / decrement) and a generic `publish(event, data)` to the
+ * supplied `publish(topic, event, data)` with `topic` bound.
+ *
+ * @param {(topic: string, event: string, data: unknown) => unknown} publish
+ * @param {string} name
+ */
+export function createScopedTopic(publish, name) {
+	return {
+		publish: (event, data) => publish(name, event, data),
+		created: (data) => publish(name, 'created', data),
+		updated: (data) => publish(name, 'updated', data),
+		deleted: (data) => publish(name, 'deleted', data),
+		set: (value) => publish(name, 'set', value),
+		increment: (amount = 1) => publish(name, 'increment', amount),
+		decrement: (amount = 1) => publish(name, 'decrement', amount)
+	};
+}
+
+/**
  * @param {string | undefined} value
  * @returns {string | undefined}
  */

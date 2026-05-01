@@ -1,22 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { throttle, debounce } from '../plugins/throttle/server.js';
-
-/**
- * Create a mock platform that records publish calls.
- */
-function mockPlatform() {
-	const p = {
-		published: [],
-		publish(topic, event, data) {
-			p.published.push({ topic, event, data });
-			return true;
-		},
-		reset() {
-			p.published.length = 0;
-		}
-	};
-	return p;
-}
+import { mockPlatform } from './_helpers.js';
 
 describe('throttle plugin', () => {
 	beforeEach(() => {

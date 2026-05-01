@@ -1,23 +1,5 @@
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope } from './files/utils.js';
-
-/**
- * Safely quote a string for JSON embedding. Throws on invalid characters.
- * @param {string} s
- * @returns {string}
- */
-function esc(s) {
-	for (let i = 0; i < s.length; i++) {
-		const c = s.charCodeAt(i);
-		if (c < 32 || c === 34 || c === 92) {
-			throw new Error(
-				`Topic/event name contains invalid character at index ${i}: '${s}'. ` +
-				'Names must not contain quotes, backslashes, or control characters.'
-			);
-		}
-	}
-	return '"' + s + '"';
-}
+import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic } from './files/utils.js';
 
 /**
  * Build a JSON envelope string matching the production wire format.
@@ -96,15 +78,7 @@ export async function createTestServer(options = {}) {
 			return messages.map(({ topic, event, data }) => platform.publish(topic, event, data));
 		},
 		topic(name) {
-			return {
-				publish: (event, data) => platform.publish(name, event, data),
-				created: (data) => platform.publish(name, 'created', data),
-				updated: (data) => platform.publish(name, 'updated', data),
-				deleted: (data) => platform.publish(name, 'deleted', data),
-				set: (value) => platform.publish(name, 'set', value),
-				increment: (amount = 1) => platform.publish(name, 'increment', amount),
-				decrement: (amount = 1) => platform.publish(name, 'decrement', amount)
-			};
+			return createScopedTopic(platform.publish, name);
 		}
 	};
 
@@ -194,7 +168,7 @@ export async function createTestServer(options = {}) {
 					try {
 						const msg = JSON.parse(Buffer.from(message).toString());
 						if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
-							if (msg.topic.length === 0 || msg.topic.length > 256) return;
+							if (!isValidWireTopic(msg.topic)) return;
 							if (handler.subscribe && handler.subscribe(ws, msg.topic, { platform }) === false) return;
 							ws.subscribe(msg.topic);
 							ws.getUserData().__subscriptions?.add(msg.topic);
@@ -208,7 +182,7 @@ export async function createTestServer(options = {}) {
 						}
 						if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
 							for (const topic of msg.topics.slice(0, 256)) {
-								if (typeof topic !== 'string' || topic.length === 0 || topic.length > 256) continue;
+								if (!isValidWireTopic(topic)) continue;
 								if (handler.subscribe && handler.subscribe(ws, topic, { platform }) === false) continue;
 								ws.subscribe(topic);
 								ws.getUserData().__subscriptions?.add(topic);

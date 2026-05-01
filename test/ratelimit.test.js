@@ -1,15 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createRateLimit } from '../plugins/ratelimit/server.js';
-
-/**
- * Create a mock WebSocket that mimics the uWS/vite wrapper API.
- * @param {Record<string, any>} userData
- */
-function mockWs(userData = {}) {
-	return {
-		getUserData: () => userData
-	};
-}
+import { mockWs } from './_helpers.js';
 
 describe('ratelimit plugin', () => {
 	let limiter;

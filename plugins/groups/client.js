@@ -13,6 +13,8 @@
 import { on } from '../../client.js';
 import { writable } from 'svelte/store';
 
+const TOPIC_PREFIX = '__group:';
+
 /** @type {Map<string, ReturnType<typeof group>>} */
 const groupStores = new Map();
 
@@ -45,7 +47,7 @@ export function group(name) {
 	const cached = groupStores.get(name);
 	if (cached) return cached;
 
-	const groupTopic = '__group:' + name;
+	const groupTopic = TOPIC_PREFIX + name;
 
 	const membersStore = writable(/** @type {Array<{ role: string }>} */ ([]));
 	const messagesStore = writable(/** @type {any} */ (null));

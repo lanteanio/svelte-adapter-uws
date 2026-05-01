@@ -1,28 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createChannel } from '../plugins/channels/server.js';
-
-/**
- * Create a mock platform that records publish/send calls.
- */
-function mockPlatform() {
-	const p = {
-		published: [],
-		sent: [],
-		publish(topic, event, data) {
-			p.published.push({ topic, event, data });
-			return true;
-		},
-		send(ws, topic, event, data) {
-			p.sent.push({ ws, topic, event, data });
-			return 1;
-		},
-		reset() {
-			p.published.length = 0;
-			p.sent.length = 0;
-		}
-	};
-	return p;
-}
+import { mockPlatform } from './_helpers.js';
 
 describe('channels plugin - server', () => {
 	describe('createChannel', () => {

@@ -12,6 +12,8 @@
  * @module svelte-adapter-uws/plugins/replay
  */
 
+const TOPIC_PREFIX = '__replay:';
+
 /**
  * @typedef {Object} ReplayOptions
  * @property {number} [size=1000] - Max messages per topic in the ring buffer
@@ -231,11 +233,11 @@ export function createReplay(options = {}) {
 			const state = topics.get(topic);
 			if (!state) {
 				// No buffer for this topic - just send end marker
-				platform.send(ws, '__replay:' + topic, 'end', reqId != null ? { reqId } : null);
+				platform.send(ws, TOPIC_PREFIX + topic, 'end', reqId != null ? { reqId } : null);
 				return;
 			}
 			const missed = readSince(state, sinceSeq);
-			const replayTopic = '__replay:' + topic;
+			const replayTopic = TOPIC_PREFIX + topic;
 			for (let i = 0; i < missed.length; i++) {
 				const msg = missed[i];
 				platform.send(ws, replayTopic, 'msg', reqId != null

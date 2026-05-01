@@ -9,7 +9,10 @@ import {
 	drainCoalesced,
 	computePressureReason,
 	nextTopicSeq,
-	completeEnvelope
+	completeEnvelope,
+	esc,
+	isValidWireTopic,
+	createScopedTopic
 } from '../files/utils.js';
 
 // -- parse_as_bytes ---------------------------------------------------------
@@ -1735,5 +1738,188 @@ describe('completeEnvelope', () => {
 		expect(JSON.parse(wire('a', { v: 1 })).seq).toBe(1);
 		expect(JSON.parse(wire('b', { v: 1 })).seq).toBe(1);
 		expect(JSON.parse(wire('a', { v: 2 })).seq).toBe(2);
+	});
+});
+
+// -- esc --------------------------------------------------------------------
+
+describe('esc', () => {
+	it('quotes a plain identifier', () => {
+		expect(esc('chat')).toBe('"chat"');
+		expect(esc('todos')).toBe('"todos"');
+	});
+
+	it('accepts characters that are valid in JSON strings', () => {
+		expect(esc('a-b_c.d:e/f')).toBe('"a-b_c.d:e/f"');
+		expect(esc('__presence:room1')).toBe('"__presence:room1"');
+		expect(esc('Hello, world!')).toBe('"Hello, world!"');
+	});
+
+	it('accepts an empty string', () => {
+		expect(esc('')).toBe('""');
+	});
+
+	it('accepts unicode (non-ASCII printable)', () => {
+		expect(esc('café')).toBe('"café"');
+	});
+
+	it('throws on a double quote', () => {
+		expect(() => esc('a"b')).toThrow(/invalid character at index 1/);
+	});
+
+	it('throws on a backslash', () => {
+		expect(() => esc('a\\b')).toThrow(/invalid character at index 1/);
+	});
+
+	it('throws on a control character (0)', () => {
+		expect(() => esc('a\x00b')).toThrow(/invalid character at index 1/);
+	});
+
+	it('throws on a control character (newline)', () => {
+		expect(() => esc('line1\nline2')).toThrow(/invalid character at index 5/);
+	});
+
+	it('throws on a control character (tab)', () => {
+		expect(() => esc('col\tnext')).toThrow(/invalid character at index 3/);
+	});
+
+	it('throws on DEL (0x7f) only via the upper bound? No: DEL is allowed (>= 32)', () => {
+		expect(esc('\x7f')).toBe('"\x7f"');
+	});
+
+	it('output is valid JSON when wrapped', () => {
+		const out = '{' + esc('topic') + ':' + esc('chat') + '}';
+		expect(JSON.parse(out)).toEqual({ topic: 'chat' });
+	});
+});
+
+// -- isValidWireTopic -------------------------------------------------------
+
+describe('isValidWireTopic', () => {
+	it('accepts a plain topic', () => {
+		expect(isValidWireTopic('chat')).toBe(true);
+		expect(isValidWireTopic('todos')).toBe(true);
+		expect(isValidWireTopic('a')).toBe(true);
+	});
+
+	it('accepts namespaced topics', () => {
+		expect(isValidWireTopic('__presence:room1')).toBe(true);
+		expect(isValidWireTopic('chat:user-42')).toBe(true);
+	});
+
+	it('rejects empty string', () => {
+		expect(isValidWireTopic('')).toBe(false);
+	});
+
+	it('rejects topics longer than 256 chars', () => {
+		expect(isValidWireTopic('a'.repeat(256))).toBe(true);
+		expect(isValidWireTopic('a'.repeat(257))).toBe(false);
+	});
+
+	it('rejects non-string inputs', () => {
+		expect(isValidWireTopic(undefined)).toBe(false);
+		expect(isValidWireTopic(null)).toBe(false);
+		expect(isValidWireTopic(123)).toBe(false);
+		expect(isValidWireTopic({})).toBe(false);
+		expect(isValidWireTopic([])).toBe(false);
+		expect(isValidWireTopic(true)).toBe(false);
+	});
+
+	it('rejects topics with control characters', () => {
+		expect(isValidWireTopic('a\x00b')).toBe(false);
+		expect(isValidWireTopic('a\nb')).toBe(false);
+		expect(isValidWireTopic('a\rb')).toBe(false);
+		expect(isValidWireTopic('a\tb')).toBe(false);
+		expect(isValidWireTopic('\x01')).toBe(false);
+		expect(isValidWireTopic('\x1f')).toBe(false);
+	});
+
+	it('accepts space and printable chars at the boundary', () => {
+		expect(isValidWireTopic(' ')).toBe(true);
+		expect(isValidWireTopic('!')).toBe(true);
+		expect(isValidWireTopic('"')).toBe(true);
+		expect(isValidWireTopic('\\')).toBe(true);
+		expect(isValidWireTopic('\x7f')).toBe(true);
+	});
+});
+
+// -- createScopedTopic ------------------------------------------------------
+
+describe('createScopedTopic', () => {
+	function recorder() {
+		const calls = [];
+		const fn = (topic, event, data) => {
+			calls.push({ topic, event, data });
+			return calls.length;
+		};
+		return { fn, calls };
+	}
+
+	it('exposes the documented surface', () => {
+		const { fn } = recorder();
+		const t = createScopedTopic(fn, 'chat');
+		expect(typeof t.publish).toBe('function');
+		expect(typeof t.created).toBe('function');
+		expect(typeof t.updated).toBe('function');
+		expect(typeof t.deleted).toBe('function');
+		expect(typeof t.set).toBe('function');
+		expect(typeof t.increment).toBe('function');
+		expect(typeof t.decrement).toBe('function');
+	});
+
+	it('publish forwards to publish(name, event, data)', () => {
+		const { fn, calls } = recorder();
+		const t = createScopedTopic(fn, 'chat');
+		t.publish('typing', { user: 'a' });
+		expect(calls).toEqual([{ topic: 'chat', event: 'typing', data: { user: 'a' } }]);
+	});
+
+	it('created/updated/deleted use fixed event names', () => {
+		const { fn, calls } = recorder();
+		const t = createScopedTopic(fn, 'todos');
+		t.created({ id: 1 });
+		t.updated({ id: 1, name: 'changed' });
+		t.deleted({ id: 1 });
+		expect(calls).toEqual([
+			{ topic: 'todos', event: 'created', data: { id: 1 } },
+			{ topic: 'todos', event: 'updated', data: { id: 1, name: 'changed' } },
+			{ topic: 'todos', event: 'deleted', data: { id: 1 } }
+		]);
+	});
+
+	it('set forwards the value as data', () => {
+		const { fn, calls } = recorder();
+		const t = createScopedTopic(fn, 'counter');
+		t.set(42);
+		expect(calls).toEqual([{ topic: 'counter', event: 'set', data: 42 }]);
+	});
+
+	it('increment / decrement default to amount=1', () => {
+		const { fn, calls } = recorder();
+		const t = createScopedTopic(fn, 'counter');
+		t.increment();
+		t.decrement();
+		t.increment(5);
+		t.decrement(2);
+		expect(calls).toEqual([
+			{ topic: 'counter', event: 'increment', data: 1 },
+			{ topic: 'counter', event: 'decrement', data: 1 },
+			{ topic: 'counter', event: 'increment', data: 5 },
+			{ topic: 'counter', event: 'decrement', data: 2 }
+		]);
+	});
+
+	it('binds the same name across all methods', () => {
+		const { fn, calls } = recorder();
+		const t = createScopedTopic(fn, 'fixed-name');
+		t.created(1); t.updated(2); t.deleted(3); t.set(4); t.increment(); t.decrement();
+		for (const c of calls) expect(c.topic).toBe('fixed-name');
+	});
+
+	it('returns the underlying publish result', () => {
+		const { fn } = recorder();
+		const t = createScopedTopic(fn, 'x');
+		expect(t.publish('e', 1)).toBe(1);
+		expect(t.created(1)).toBe(2);
 	});
 });

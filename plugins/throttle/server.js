@@ -132,6 +132,7 @@ export function throttle(interval) {
 						state.timer = setTimeout(tick, interval);
 					} else {
 						state.timer = null;
+						topics.delete(topic);
 					}
 				}, interval);
 			} else {

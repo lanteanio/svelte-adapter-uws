@@ -1,13 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createMiddleware } from '../plugins/middleware/server.js';
-
-function mockWs(userData = {}) {
-	return { getUserData: () => userData };
-}
-
-function mockPlatform() {
-	return { publish() {}, send() {} };
-}
+import { mockWs, mockPlatform } from './_helpers.js';
 
 function msg(topic = 'chat', event = 'message', data = {}) {
 	return { topic, event, data };

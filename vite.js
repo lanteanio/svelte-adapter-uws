@@ -1,25 +1,7 @@
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { parseCookies, createCookies } from './files/cookies.js';
-
-/**
- * Safely quote a string for JSON embedding. Throws on invalid characters
- * (quotes, backslashes, control chars)  - these are always bugs in topic/event names.
- * @param {string} s
- * @returns {string}
- */
-function esc(s) {
-	for (let i = 0; i < s.length; i++) {
-		const c = s.charCodeAt(i);
-		if (c < 32 || c === 34 || c === 92) {
-			throw new Error(
-				`Topic/event name contains invalid character at index ${i}: '${s}'. ` +
-				'Names must not contain quotes, backslashes, or control characters.'
-			);
-		}
-	}
-	return '"' + s + '"';
-}
+import { esc, isValidWireTopic, createScopedTopic } from './files/utils.js';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -171,15 +153,7 @@ export default function uws(options = {}) {
 			return count;
 		},
 		topic(name) {
-			return {
-				publish: (/** @type {string} */ event, /** @type {unknown} */ data) => publish(name, event, data),
-				created: (/** @type {unknown} */ data) => publish(name, 'created', data),
-				updated: (/** @type {unknown} */ data) => publish(name, 'updated', data),
-				deleted: (/** @type {unknown} */ data) => publish(name, 'deleted', data),
-				set: (/** @type {number} */ value) => publish(name, 'set', value),
-				increment: (/** @type {number} */ amount = 1) => publish(name, 'increment', amount),
-				decrement: (/** @type {number} */ amount = 1) => publish(name, 'decrement', amount)
-			};
+			return createScopedTopic(publish, name);
 		}
 	};
 
@@ -539,11 +513,7 @@ export default function uws(options = {}) {
 						try {
 							const msg = JSON.parse(buf.toString());
 							if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
-								// Validate topic name: max 256 chars, no control characters
-								if (msg.topic.length === 0 || msg.topic.length > 256) return;
-								for (let ci = 0; ci < msg.topic.length; ci++) {
-									if (msg.topic.charCodeAt(ci) < 32) return;
-								}
+								if (!isValidWireTopic(msg.topic)) return;
 								if (userHandlers.subscribe && userHandlers.subscribe(wrapped, msg.topic, { platform }) === false) {
 									return;
 								}
@@ -563,12 +533,7 @@ export default function uws(options = {}) {
 								const subs = subscriptions.get(ws);
 								const topics = msg.topics.slice(0, 256);
 								for (const topic of topics) {
-									if (typeof topic !== 'string' || topic.length === 0 || topic.length > 256) continue;
-									let valid = true;
-									for (let ci = 0; ci < topic.length; ci++) {
-										if (topic.charCodeAt(ci) < 32) { valid = false; break; }
-									}
-									if (!valid) continue;
+									if (!isValidWireTopic(topic)) continue;
 									if (userHandlers.subscribe && userHandlers.subscribe(wrapped, topic, { platform }) === false) continue;
 									subs?.add(topic);
 									/** @type {any} */ (ws).__userData?.__subscriptions?.add(topic);

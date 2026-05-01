@@ -120,7 +120,6 @@ export function createDedup(options) {
 			const now = Date.now();
 			const prev = seen.get(id);
 			if (prev !== undefined && prev > now) return false;
-			// Either unseen or previous window expired - claim with fresh TTL.
 			// Re-insert (delete + set) so insertion order tracks last-claim
 			// time for the LRU-ish hard eviction path.
 			if (prev !== undefined) seen.delete(id);

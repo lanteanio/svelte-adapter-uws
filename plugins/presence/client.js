@@ -13,6 +13,8 @@
  * @module svelte-adapter-uws/plugins/presence/client
  */
 
+const TOPIC_PREFIX = '__presence:';
+
 import { on } from '../../client.js';
 import { writable } from 'svelte/store';
 
@@ -72,7 +74,7 @@ export function presence(topic, options) {
 	const cached = presenceStores.get(cacheKey);
 	if (cached) return cached;
 
-	const presenceTopic = '__presence:' + topic;
+	const presenceTopic = TOPIC_PREFIX + topic;
 
 	/** @type {Map<string, any>} */
 	let userMap = new Map();

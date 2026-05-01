@@ -12,7 +12,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -79,26 +79,6 @@ function acquireState() {
 /** @param {{ aborted: boolean }} s */
 function releaseState(s) {
 	if (statePool.length < STATE_POOL_MAX) statePool.push(s);
-}
-
-/**
- * Safely quote a string for JSON embedding. Topics and events are
- * developer-defined identifiers  - a quote, backslash, or control character
- * is always a bug, so we throw instead of silently escaping.
- * @param {string} s
- * @returns {string} JSON-quoted string, e.g. '"todos"'
- */
-function esc(s) {
-	for (let i = 0; i < s.length; i++) {
-		const c = s.charCodeAt(i);
-		if (c < 32 || c === 34 || c === 92) {
-			throw new Error(
-				`Topic/event name contains invalid character at index ${i}: '${s}'. ` +
-				'Names must not contain quotes, backslashes, or control characters.'
-			);
-		}
-	}
-	return '"' + s + '"';
 }
 
 // Cache for pre-built envelope prefixes. Repeated publishes to the same
@@ -717,17 +697,7 @@ const platform = {
 	 * multiple events to the same topic.
 	 */
 	topic(name) {
-		return {
-			publish: (/** @type {string} */ event, /** @type {unknown} */ data) => {
-				platform.publish(name, event, data);
-			},
-			created: (/** @type {unknown} */ data) => platform.publish(name, 'created', data),
-			updated: (/** @type {unknown} */ data) => platform.publish(name, 'updated', data),
-			deleted: (/** @type {unknown} */ data) => platform.publish(name, 'deleted', data),
-			set: (/** @type {number} */ value) => platform.publish(name, 'set', value),
-			increment: (/** @type {number} */ amount = 1) => platform.publish(name, 'increment', amount),
-			decrement: (/** @type {number} */ amount = 1) => platform.publish(name, 'decrement', amount)
-		};
+		return createScopedTopic(platform.publish, name);
 	}
 };
 
@@ -2001,11 +1971,7 @@ if (WS_ENABLED) {
 				try {
 					const msg = JSON.parse(textDecoder.decode(message));
 					if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
-						// Validate topic name: max 256 chars, no control characters
-						if (msg.topic.length === 0 || msg.topic.length > 256) return;
-						for (let i = 0; i < msg.topic.length; i++) {
-							if (msg.topic.charCodeAt(i) < 32) return;
-						}
+						if (!isValidWireTopic(msg.topic)) return;
 						// If a subscribe hook exists, let it gate access
 						if (wsModule.subscribe && wsModule.subscribe(ws, msg.topic, { platform }) === false) {
 							return;
@@ -2035,12 +2001,7 @@ if (WS_ENABLED) {
 						const userData = ws.getUserData();
 						let subscribed = 0;
 						for (const topic of topics) {
-							if (typeof topic !== 'string' || topic.length === 0 || topic.length > 256) continue;
-							let valid = true;
-							for (let i = 0; i < topic.length; i++) {
-								if (topic.charCodeAt(i) < 32) { valid = false; break; }
-							}
-							if (!valid) continue;
+							if (!isValidWireTopic(topic)) continue;
 							if (wsModule.subscribe && wsModule.subscribe(ws, topic, { platform }) === false) continue;
 							const isNew = !userData.__subscriptions.has(topic);
 							ws.subscribe(topic);
