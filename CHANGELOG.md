@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.3] - 2026-04-29
+
 ### Fixed
 
 - **Throttle plugin no longer leaks topic state.** The trailing-edge tick in `throttle()` now removes the topic entry from its internal map when the trailing window closes with no pending value (matching the existing `debounce()` cleanup). Previously, every topic ever published through `throttle.publish()` left one map entry behind for the lifetime of the limiter; with high-cardinality patterns like `throttle.publish(platform, 'cursor:' + userId, ...)` this grew without bound. External behavior (leading edge, trailing edge, idle restart) is unchanged.
