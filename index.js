@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { rollup } from 'rollup';
 import { nodeResolve } from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
@@ -374,9 +375,15 @@ export default function (opts = {}) {
 		emulate() {
 			return {
 				platform() {
-					// Vite plugin sets this when installed
+					// Vite plugin sets this when installed. Wrap with a fresh
+					// requestId per call - Kit invokes platform() once per
+					// dev request, but without access to the request itself,
+					// so X-Request-ID is not honoured in dev (production
+					// reads the header).
 					if (globalThis.__uws_dev_platform) {
-						return globalThis.__uws_dev_platform;
+						const clone = Object.create(globalThis.__uws_dev_platform);
+						clone.requestId = randomUUID();
+						return clone;
 					}
 
 					// No Vite plugin - if WebSocket isn't configured, that's fine

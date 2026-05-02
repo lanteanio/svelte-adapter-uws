@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, resolveRequestId, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY } from './files/utils.js';
 
 /**
  * Build a JSON envelope string matching the production wire format.
@@ -32,7 +32,7 @@ export async function createTestServer(options = {}) {
 	/** @param {any} ws @param {string} topic @returns {string | null} */
 	function runSubscribeHookT(ws, topic) {
 		if (!handler.subscribe) return null;
-		const result = handler.subscribe(ws, topic, { platform });
+		const result = handler.subscribe(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
 		if (result === false) return 'FORBIDDEN';
 		if (typeof result === 'string') return result;
 		return null;
@@ -40,7 +40,7 @@ export async function createTestServer(options = {}) {
 	/** @param {any} ws @param {string[]} topics @returns {Record<string, string> | null} */
 	function runSubscribeBatchHookT(ws, topics) {
 		if (!handler.subscribeBatch) return null;
-		const result = handler.subscribeBatch(ws, topics, { platform });
+		const result = handler.subscribeBatch(ws, topics, { platform: ws.getUserData()[WS_PLATFORM] });
 		/** @type {Record<string, string>} */
 		const denials = {};
 		if (!result || typeof result !== 'object') return denials;
@@ -176,9 +176,11 @@ export async function createTestServer(options = {}) {
 			const url = query ? req.getUrl() + '?' + query : req.getUrl();
 			const rawIp = new TextDecoder().decode(res.getRemoteAddressAsText());
 
+			const wsRequestId = resolveRequestId(headers['x-request-id']) || randomUUID();
+
 			if (!handler.upgrade) {
 				res.cork(() => {
-					res.upgrade({ remoteAddress: rawIp }, secKey, secProtocol, secExtensions, context);
+					res.upgrade({ remoteAddress: rawIp, [WS_REQUEST_ID_KEY]: wsRequestId }, secKey, secProtocol, secExtensions, context);
 				});
 				return;
 			}
@@ -187,7 +189,7 @@ export async function createTestServer(options = {}) {
 			res.onAborted(() => { aborted = true; });
 
 			const cookies = parseCookies(headers['cookie']);
-			Promise.resolve(handler.upgrade({ headers, cookies, url, remoteAddress: rawIp }))
+			Promise.resolve(handler.upgrade({ headers, cookies, url, remoteAddress: rawIp, requestId: wsRequestId }))
 				.then((result) => {
 					if (aborted) return;
 					if (result === false) {
@@ -207,6 +209,7 @@ export async function createTestServer(options = {}) {
 						userData = result || {};
 					}
 					if (!userData.remoteAddress) userData.remoteAddress = rawIp;
+					userData[WS_REQUEST_ID_KEY] = wsRequestId;
 					res.cork(() => {
 						if (responseHeaders) {
 							for (const [hk, hv] of Object.entries(responseHeaders)) {
@@ -234,6 +237,14 @@ export async function createTestServer(options = {}) {
 		open(ws) {
 			const userData = ws.getUserData();
 			userData[WS_SUBSCRIPTIONS] = new Set();
+			// Promote the upgrade-time requestId into a Symbol-keyed
+			// per-connection platform clone (parity with the production
+			// handler - uWS strips Symbol keys at upgrade so the string
+			// slot is the upgrade->open carrier).
+			const wsPlatform = Object.create(platform);
+			wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
+			userData[WS_PLATFORM] = wsPlatform;
+			delete userData[WS_REQUEST_ID_KEY];
 			const sessionId = randomUUID();
 			userData[WS_SESSION_ID] = sessionId;
 			if (closeHookRegisteredT) {
@@ -249,7 +260,7 @@ export async function createTestServer(options = {}) {
 			ws.send(welcome, false, false);
 			bumpOutT(ws, welcome);
 			wsConnections.add(ws);
-			handler.open?.(ws, { platform });
+			handler.open?.(ws, { platform: userData[WS_PLATFORM] });
 			for (const resolve of connectionWaiters) resolve(undefined);
 			connectionWaiters = [];
 		},
@@ -281,7 +292,7 @@ export async function createTestServer(options = {}) {
 						if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
 							ws.unsubscribe(msg.topic);
 							ws.getUserData()[WS_SUBSCRIPTIONS]?.delete(msg.topic);
-							handler.unsubscribe?.(ws, msg.topic, { platform });
+							handler.unsubscribe?.(ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
 							return;
 						}
 						if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
@@ -327,7 +338,7 @@ export async function createTestServer(options = {}) {
 									handler.resume(ws, {
 										sessionId: msg.sessionId,
 										lastSeenSeqs: msg.lastSeenSeqs,
-										platform
+										platform: ws.getUserData()[WS_PLATFORM]
 									});
 								} catch (err) {
 									console.error('[adapter-uws/testing] resume hook threw:', err);
@@ -347,7 +358,7 @@ export async function createTestServer(options = {}) {
 			}
 			messageWaiters = [];
 
-			handler.message?.(ws, { data: message, isBinary, platform });
+			handler.message?.(ws, { data: message, isBinary, platform: ws.getUserData()[WS_PLATFORM] });
 		},
 
 		close(ws, code, message) {
@@ -362,11 +373,12 @@ export async function createTestServer(options = {}) {
 				pending.clear();
 			}
 			const stats = ud[WS_STATS];
+			const closePlatform = ud[WS_PLATFORM];
 			const ctx = stats
 				? {
 					code,
 					message,
-					platform,
+					platform: closePlatform,
 					subscriptions: subs,
 					id: ud[WS_SESSION_ID],
 					duration: Date.now() - stats.openedAt,
@@ -375,7 +387,7 @@ export async function createTestServer(options = {}) {
 					bytesIn: stats.bytesIn,
 					bytesOut: stats.bytesOut
 				}
-				: { code, message, platform, subscriptions: subs };
+				: { code, message, platform: closePlatform, subscriptions: subs };
 			handler.close?.(ws, ctx);
 			wsConnections.delete(ws);
 		}

@@ -1330,6 +1330,49 @@ onRequest(async (event, data) => {
 
 Throw or reject from the handler to send an error reply; the server's awaiting Promise rejects with the same message. With no handler installed, request frames are dropped silently and the server times out.
 
+### `platform.requestId`
+
+A correlation id you can thread through structured logs to follow a single request across server hooks, load functions, and downstream services.
+
+For HTTP requests, a fresh UUID is generated per request. For WebSocket connections the id is stamped once at upgrade and reused for every hook on that connection (`open`, `subscribe`, `message`, `drain`, `close`). In both cases an inbound `X-Request-ID` header overrides the generated value when present, so callers, gateways, and tracing collectors can supply their own id and have it follow the request through your code.
+
+```js
+// src/routes/api/orders/+server.js
+export async function POST({ platform, request }) {
+  const log = logger.child({ requestId: platform.requestId });
+  log.info('order request received');
+
+  const order = await db.create(await request.json());
+  platform.publish('orders', 'created', order);
+
+  log.info({ orderId: order.id }, 'order published');
+  return json({ ok: true, requestId: platform.requestId });
+}
+```
+
+```js
+// hooks.ws.js - the same id flows through every WS hook on a connection
+export function open(ws, { platform }) {
+  logger.info({ requestId: platform.requestId }, 'ws open');
+}
+
+export function close(ws, { platform, code }) {
+  logger.info({ requestId: platform.requestId, code }, 'ws close');
+}
+```
+
+The header value is sanitized before being used: only printable ASCII (no whitespace, no control chars) up to 128 chars is honoured. Anything else is ignored and a fresh UUID is generated instead, so the id is always safe to interpolate into log lines.
+
+The adapter never writes `X-Request-ID` on the response automatically -- emitting it back is an app-layer choice (usually for outbound observability). Set it explicitly if you want callers to see it:
+
+```js
+return new Response(body, {
+  headers: { 'x-request-id': platform.requestId }
+});
+```
+
+> **Dev-mode note:** in `vite dev`, the dev server generates a fresh UUID per request but does not honour `X-Request-ID` for HTTP traffic (SvelteKit's `emulate.platform()` runs without access to request headers). Production reads the header. Dev-mode WebSocket connections honour the header normally.
+
 ---
 
 ## Client store API

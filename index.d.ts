@@ -388,6 +388,14 @@ export interface UpgradeContext {
 	url: string;
 	/** Remote IP address. */
 	remoteAddress: string;
+	/**
+	 * Per-connection correlation id. Reads `X-Request-ID` from the upgrade
+	 * request when present (sanitized; printable ASCII, max 128 chars), else
+	 * a fresh UUID. Stamped once at upgrade and reused for every WS hook on
+	 * this connection (`platform.requestId` matches in `open`, `message`,
+	 * `subscribe`, `drain`, `close`, etc.).
+	 */
+	requestId: string;
 }
 
 /**
@@ -805,6 +813,30 @@ export interface TopicPublishRate {
  * ```
  */
 export interface Platform {
+	/**
+	 * Per-request / per-connection correlation id, suitable for threading
+	 * through structured logs.
+	 *
+	 * For HTTP requests, a fresh UUID is generated per request. For WS
+	 * connections, the id is stamped once at upgrade and reused for every
+	 * hook on that connection. In both cases, an inbound `X-Request-ID`
+	 * header overrides the generated value when present (sanitized:
+	 * printable ASCII only, max 128 chars; invalid values are ignored).
+	 *
+	 * The adapter never writes a response header automatically - emitting
+	 * `X-Request-ID` on the response is an app-layer concern.
+	 *
+	 * @example
+	 * ```js
+	 * export async function GET({ platform, url }) {
+	 *   logger.info({ requestId: platform.requestId, path: url.pathname }, 'request started');
+	 *   const data = await loadData();
+	 *   return json({ data, requestId: platform.requestId });
+	 * }
+	 * ```
+	 */
+	readonly requestId: string;
+
 	/**
 	 * Publish a message to all WebSocket clients subscribed to a topic.
 	 *

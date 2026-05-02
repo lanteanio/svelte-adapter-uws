@@ -15,7 +15,8 @@ import {
 	isValidWireTopic,
 	createScopedTopic,
 	isOriginAllowed,
-	createUpgradeAdmission
+	createUpgradeAdmission,
+	resolveRequestId
 } from '../files/utils.js';
 
 // -- parse_as_bytes ---------------------------------------------------------
@@ -2296,5 +2297,58 @@ describe('computeTopPublishers', () => {
 		computeTopPublishers(stats, 1, noLimits);
 		expect(stats.size).toBe(1);
 		expect(stats.get('chat')).toEqual({ m: 10, b: 1000 });
+	});
+});
+
+// -- resolveRequestId -------------------------------------------------------
+
+describe('resolveRequestId', () => {
+	it('returns null for non-string inputs', () => {
+		expect(resolveRequestId(undefined)).toBe(null);
+		expect(resolveRequestId(null)).toBe(null);
+		expect(resolveRequestId(42)).toBe(null);
+		expect(resolveRequestId({})).toBe(null);
+	});
+
+	it('returns null for empty / whitespace-only strings', () => {
+		expect(resolveRequestId('')).toBe(null);
+		expect(resolveRequestId('   ')).toBe(null);
+		expect(resolveRequestId('\t\n')).toBe(null);
+	});
+
+	it('rejects values longer than 128 chars (post-trim)', () => {
+		expect(resolveRequestId('a'.repeat(128))).toBe('a'.repeat(128));
+		expect(resolveRequestId('a'.repeat(129))).toBe(null);
+		expect(resolveRequestId('  ' + 'a'.repeat(128) + '  ')).toBe('a'.repeat(128));
+	});
+
+	it('rejects values containing whitespace or control chars', () => {
+		expect(resolveRequestId('valid-id-123')).toBe('valid-id-123');
+		expect(resolveRequestId('has space')).toBe(null);
+		expect(resolveRequestId('has\ttab')).toBe(null);
+		expect(resolveRequestId('has\nnewline')).toBe(null);
+		expect(resolveRequestId('has\x1bescape')).toBe(null);
+		expect(resolveRequestId('has\x00null')).toBe(null);
+	});
+
+	it('rejects non-ASCII characters', () => {
+		expect(resolveRequestId('cafe-é')).toBe(null);
+		expect(resolveRequestId('emoji-\u{1F600}')).toBe(null);
+	});
+
+	it('accepts UUID v4 shape', () => {
+		const uuid = '550e8400-e29b-41d4-a716-446655440000';
+		expect(resolveRequestId(uuid)).toBe(uuid);
+	});
+
+	it('accepts vendor trace id formats', () => {
+		expect(resolveRequestId('00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01')).toBe(
+			'00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
+		);
+		expect(resolveRequestId('req_abc123XYZ')).toBe('req_abc123XYZ');
+	});
+
+	it('trims surrounding whitespace before validating length', () => {
+		expect(resolveRequestId('  abc  ')).toBe('abc');
 	});
 });

@@ -2,7 +2,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS } from './files/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY } from './files/utils.js';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -244,7 +244,7 @@ export default function uws(options = {}) {
 	 */
 	function runSubscribeHookV(wrapped, topic) {
 		if (!userHandlers.subscribe) return null;
-		const result = userHandlers.subscribe(wrapped, topic, { platform });
+		const result = userHandlers.subscribe(wrapped, topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
 		if (result === false) return 'FORBIDDEN';
 		if (typeof result === 'string') return result;
 		return null;
@@ -257,7 +257,7 @@ export default function uws(options = {}) {
 	 */
 	function runSubscribeBatchHookV(wrapped, topics) {
 		if (!userHandlers.subscribeBatch) return null;
-		const result = userHandlers.subscribeBatch(wrapped, topics, { platform });
+		const result = userHandlers.subscribeBatch(wrapped, topics, { platform: wrapped.getUserData()[WS_PLATFORM] });
 		/** @type {Record<string, string>} */
 		const denials = {};
 		if (!result || typeof result !== 'object') return denials;
@@ -471,6 +471,9 @@ export default function uws(options = {}) {
 
 				const cookies = createCookies(headers['cookie']);
 				const clientIp = req.socket?.remoteAddress || '';
+				const authRequestId = resolveRequestId(headers['x-request-id']) || randomUUID();
+				const authPlatform = Object.create(platform);
+				authPlatform.requestId = authRequestId;
 				const event = {
 					request,
 					headers,
@@ -478,7 +481,7 @@ export default function uws(options = {}) {
 					url,
 					remoteAddress: clientIp,
 					getClientAddress: () => clientIp,
-					platform
+					platform: authPlatform
 				};
 
 				try {
@@ -544,21 +547,23 @@ export default function uws(options = {}) {
 					return;
 				}
 
-				if (userHandlers.upgrade) {
-					/** @type {Record<string, string>} */
-					const headers = {};
-					for (const [key, value] of Object.entries(req.headers)) {
-						if (typeof value === 'string') headers[key] = value;
-						else if (Array.isArray(value)) headers[key] = value.join(', ');
-					}
+				/** @type {Record<string, string>} */
+				const upgradeHeaders = {};
+				for (const [key, value] of Object.entries(req.headers)) {
+					if (typeof value === 'string') upgradeHeaders[key] = value;
+					else if (Array.isArray(value)) upgradeHeaders[key] = value.join(', ');
+				}
+				const wsRequestId = resolveRequestId(upgradeHeaders['x-request-id']) || randomUUID();
 
+				if (userHandlers.upgrade) {
 					try {
 						const result = await Promise.resolve(
 							userHandlers.upgrade({
-								headers,
-								cookies: parseCookies(headers['cookie']),
+								headers: upgradeHeaders,
+								cookies: parseCookies(upgradeHeaders['cookie']),
 								url: req.url || pathname,
-								remoteAddress: req.socket?.remoteAddress || ''
+								remoteAddress: req.socket?.remoteAddress || '',
+								requestId: wsRequestId
 							})
 						);
 						if (result === false) {
@@ -601,7 +606,9 @@ export default function uws(options = {}) {
 					const remoteAddress = /** @type {any} */ (userData).remoteAddress
 						|| req.socket?.remoteAddress
 						|| '';
-					/** @type {any} */ (ws).__userData = { remoteAddress, .../** @type {any} */ (userData) };
+					const merged = { remoteAddress, .../** @type {any} */ (userData) };
+					merged[WS_REQUEST_ID_KEY] = wsRequestId;
+					/** @type {any} */ (ws).__userData = merged;
 					wss.emit('connection', ws, req);
 				});
 			});
@@ -612,6 +619,12 @@ export default function uws(options = {}) {
 
 				const userData = /** @type {any} */ (ws).__userData || {};
 				userData[WS_SUBSCRIPTIONS] = new Set();
+				// Promote the upgrade-time requestId into a per-connection
+				// platform clone (parity with the production handler).
+				const wsPlatform = Object.create(platform);
+				wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
+				userData[WS_PLATFORM] = wsPlatform;
+				delete userData[WS_REQUEST_ID_KEY];
 				const sessionId = randomUUID();
 				userData[WS_SESSION_ID] = sessionId;
 				userData[WS_STATS] = {
@@ -629,7 +642,7 @@ export default function uws(options = {}) {
 				bumpOutV(userData, welcome);
 
 				// Call user open handler
-				userHandlers.open?.(wrapped, { platform });
+				userHandlers.open?.(wrapped, { platform: userData[WS_PLATFORM] });
 
 				ws.on('message', async (raw, isBinary) => {
 					// Convert to ArrayBuffer (matching uWS interface)
@@ -664,7 +677,7 @@ export default function uws(options = {}) {
 							if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
 								subscriptions.get(ws)?.delete(msg.topic);
 								/** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS]?.delete(msg.topic);
-								userHandlers.unsubscribe?.(wrapped, msg.topic, { platform });
+								userHandlers.unsubscribe?.(wrapped, msg.topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
 								return;
 							}
 							if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
@@ -715,7 +728,7 @@ export default function uws(options = {}) {
 										userHandlers.resume(wrapped, {
 											sessionId: msg.sessionId,
 											lastSeenSeqs: msg.lastSeenSeqs,
-											platform
+											platform: wrapped.getUserData()[WS_PLATFORM]
 										});
 									} catch (err) {
 										console.error('[adapter-uws] resume hook threw:', err);
@@ -733,7 +746,7 @@ export default function uws(options = {}) {
 					// Delegate to user handler
 					await handlerReady;
 					if (userHandlers.message) {
-						userHandlers.message(wrapped, { data: arrayBuffer, isBinary: !!isBinary, platform });
+						userHandlers.message(wrapped, { data: arrayBuffer, isBinary: !!isBinary, platform: wrapped.getUserData()[WS_PLATFORM] });
 					}
 				});
 
@@ -751,11 +764,12 @@ export default function uws(options = {}) {
 						pending.clear();
 					}
 					const stats = ud[WS_STATS];
+					const closePlatform = ud[WS_PLATFORM];
 					const ctx = stats
 						? {
 							code,
 							message: reasonAB,
-							platform,
+							platform: closePlatform,
 							subscriptions: subs,
 							id: ud[WS_SESSION_ID],
 							duration: Date.now() - stats.openedAt,
@@ -764,7 +778,7 @@ export default function uws(options = {}) {
 							bytesIn: stats.bytesIn,
 							bytesOut: stats.bytesOut
 						}
-						: { code, message: reasonAB, platform, subscriptions: subs };
+						: { code, message: reasonAB, platform: closePlatform, subscriptions: subs };
 					userHandlers.close?.(wrapped, ctx);
 					connections.delete(ws);
 					subscriptions.delete(ws);

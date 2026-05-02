@@ -13,7 +13,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, resolveRequestId, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -666,7 +666,7 @@ function hasRef(ref) {
  */
 function runSubscribeHook(ws, topic) {
 	if (!wsModule.subscribe) return null;
-	const result = wsModule.subscribe(ws, topic, { platform });
+	const result = wsModule.subscribe(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
 	if (result === false) return 'FORBIDDEN';
 	if (typeof result === 'string') return result;
 	return null;
@@ -690,7 +690,7 @@ function runSubscribeHook(ws, topic) {
  */
 function runSubscribeBatchHook(ws, topics) {
 	if (!wsModule.subscribeBatch) return null;
-	const result = wsModule.subscribeBatch(ws, topics, { platform });
+	const result = wsModule.subscribeBatch(ws, topics, { platform: ws.getUserData()[WS_PLATFORM] });
 	/** @type {Record<string, string>} */
 	const denials = {};
 	if (!result || typeof result !== 'object') return denials;
@@ -1447,6 +1447,15 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 			}
 			: () => remoteAddress;
 
+		// Per-request platform: same surface as the shared platform (publish,
+		// pressure, connections, etc.) plus a unique requestId for structured
+		// logging. Object.create keeps the live-getters intact via the
+		// prototype chain - a flat spread would freeze `connections` and
+		// `pressure` to their snapshot value at clone time.
+		const requestId = resolveRequestId(headers['x-request-id']) || randomUUID();
+		const requestPlatform = Object.create(platform);
+		requestPlatform.requestId = requestId;
+
 		// Dedup: for anonymous GET/HEAD requests that arrive concurrently for the
 		// same URL, only the first (the leader) calls server.respond(). Subsequent
 		// requests (waiters) await the leader's promise and reconstruct a Response
@@ -1499,7 +1508,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 				sharedPromise.finally(() => ssrInflight.delete(dedupKey));
 
 				try {
-					const response = await server.respond(request, { platform, getClientAddress });
+					const response = await server.respond(request, { platform: requestPlatform, getClientAddress });
 					if (state.aborted) { resolveShared(null); return; }
 
 					// Responses with Set-Cookie must not be shared (they're personalized).
@@ -1559,7 +1568,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 		}
 
 		// Normal (non-dedup) path
-		const response = await server.respond(request, { platform, getClientAddress });
+		const response = await server.respond(request, { platform: requestPlatform, getClientAddress });
 		if (state.aborted) return;
 		await writeResponse(res, response, state, headers['accept-encoding']);
 	} catch (err) {
@@ -1939,6 +1948,10 @@ if (WS_ENABLED) {
 
 			const cookies = createCookies(authHeaders['cookie']);
 
+			const authRequestId = resolveRequestId(authHeaders['x-request-id']) || randomUUID();
+			const authPlatform = Object.create(platform);
+			authPlatform.requestId = authRequestId;
+
 			const event = {
 				request,
 				headers: authHeaders,
@@ -1946,7 +1959,7 @@ if (WS_ENABLED) {
 				url,
 				remoteAddress: clientIp,
 				getClientAddress: () => clientIp,
-				platform
+				platform: authPlatform
 			};
 
 			Promise.resolve()
@@ -2111,6 +2124,14 @@ if (WS_ENABLED) {
 				return;
 			}
 
+			// Per-connection requestId stamped at upgrade time. Honours an
+			// X-Request-ID upgrade header if present, else generates a fresh
+			// UUID. Carried across the upgrade boundary as a string-keyed
+			// userData slot (uWebSockets.js strips Symbol keys when handing
+			// userData to the WS binding). The `open` hook promotes this
+			// string into the Symbol-keyed per-connection platform clone.
+			const wsRequestId = resolveRequestId(headers['x-request-id']) || randomUUID();
+
 			// No user upgrade handler - accept synchronously (no microtask yield,
 			// no cookie parsing). Inject remoteAddress so plugins/ratelimit can
 			// key on the real client IP via ws.getUserData().remoteAddress.
@@ -2125,7 +2146,7 @@ if (WS_ENABLED) {
 				admission.admit(() => {
 					if (fastPathAborted) return;
 					res.cork(() => {
-						res.upgrade({ remoteAddress: clientIp }, secKey, secProtocol, secExtensions, context);
+						res.upgrade({ remoteAddress: clientIp, [WS_REQUEST_ID_KEY]: wsRequestId }, secKey, secProtocol, secExtensions, context);
 					});
 					releaseInFlight();
 				});
@@ -2160,7 +2181,7 @@ if (WS_ENABLED) {
 				}, wsOptions.upgradeTimeout * 1000);
 			}
 
-			Promise.resolve(wsModule.upgrade({ headers, cookies, url, remoteAddress: clientIp }))
+			Promise.resolve(wsModule.upgrade({ headers, cookies, url, remoteAddress: clientIp, requestId: wsRequestId }))
 				.then((result) => {
 					clearTimeout(timer);
 					if (aborted || timedOut) return;
@@ -2201,6 +2222,7 @@ if (WS_ENABLED) {
 					}
 					const ud = userData || {};
 					if (!ud.remoteAddress) ud.remoteAddress = clientIp;
+					ud[WS_REQUEST_ID_KEY] = wsRequestId;
 					if (responseHeaders) maybeWarnSetCookieOnUpgrade(responseHeaders);
 					admission.admit(() => {
 						// Recheck after possible setImmediate defer: the client
@@ -2247,6 +2269,14 @@ if (WS_ENABLED) {
 			// enabling deterministic cleanup of per-subscription server state.
 			const userData = ws.getUserData();
 			userData[WS_SUBSCRIPTIONS] = new Set();
+			// Promote the upgrade-time requestId (carried as a string slot
+			// because Symbol keys do not survive res.upgrade) into a
+			// per-connection platform clone on the Symbol slot, then drop
+			// the string slot so userData stays clean for hook code.
+			const wsPlatform = Object.create(platform);
+			wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
+			userData[WS_PLATFORM] = wsPlatform;
+			delete userData[WS_REQUEST_ID_KEY];
 			// Stamp a fresh session id and announce it. The client stores it
 			// in sessionStorage and presents it back via { type: 'resume' }
 			// after a reconnect so the user's resume hook can fill the gap.
@@ -2269,7 +2299,7 @@ if (WS_ENABLED) {
 			bumpOut(ws, welcome);
 			wsConnections.add(ws);
 			if (wsDebug) console.log('[ws] open connections=%d session=%s', wsConnections.size, sessionId);
-			wsModule.open?.(ws, { platform });
+			wsModule.open?.(ws, { platform: userData[WS_PLATFORM] });
 		},
 
 		message: (ws, message, isBinary) => {
@@ -2312,7 +2342,7 @@ if (WS_ENABLED) {
 							totalSubscriptions--;
 						}
 						if (wsDebug) console.log('[ws] unsubscribe topic=%s', msg.topic);
-						wsModule.unsubscribe?.(ws, msg.topic, { platform });
+						wsModule.unsubscribe?.(ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
 						return;
 					}
 					if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
@@ -2386,7 +2416,7 @@ if (WS_ENABLED) {
 								wsModule.resume(ws, {
 									sessionId: msg.sessionId,
 									lastSeenSeqs: msg.lastSeenSeqs,
-									platform
+									platform: ws.getUserData()[WS_PLATFORM]
 								});
 							} catch (err) {
 								console.error('[ws] resume hook threw:', err);
@@ -2402,14 +2432,14 @@ if (WS_ENABLED) {
 				}
 			}
 			// Delegate everything else to the user's handler (if provided)
-			wsModule.message?.(ws, { data: message, isBinary, platform });
+			wsModule.message?.(ws, { data: message, isBinary, platform: ws.getUserData()[WS_PLATFORM] });
 		},
 
 		drain: (ws) => {
 			// Resume any sendCoalesced traffic held back by backpressure
 			// before delegating to the user's drain hook.
 			flushCoalescedFor(ws);
-			wsModule.drain?.(ws, { platform });
+			wsModule.drain?.(ws, { platform: ws.getUserData()[WS_PLATFORM] });
 		},
 
 		close: (ws, code, message) => {
@@ -2431,11 +2461,12 @@ if (WS_ENABLED) {
 			// Counters were populated by the bumpIn / bumpOut helpers across
 			// the connection's lifetime; this is the single read site.
 			const stats = userData[WS_STATS];
+			const closePlatform = userData[WS_PLATFORM];
 			const ctx = stats
 				? {
 					code,
 					message,
-					platform,
+					platform: closePlatform,
 					subscriptions,
 					id: userData[WS_SESSION_ID],
 					duration: Date.now() - stats.openedAt,
@@ -2444,7 +2475,7 @@ if (WS_ENABLED) {
 					bytesIn: stats.bytesIn,
 					bytesOut: stats.bytesOut
 				}
-				: { code, message, platform, subscriptions };
+				: { code, message, platform: closePlatform, subscriptions };
 			try {
 				wsModule.close?.(ws, ctx);
 			} finally {
