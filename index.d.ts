@@ -213,6 +213,42 @@ export interface WebSocketOptions {
 	upgradeRateLimitWindow?: number;
 
 	/**
+	 * Admission control for WebSocket upgrades. Two independent layers,
+	 * both opt-in (omit or set to `0` to disable):
+	 *
+	 * - `maxConcurrent` caps how many upgrades may be in flight at once.
+	 *   Crossed requests get a fast `503 Service Unavailable` before any
+	 *   per-request work, so a connection storm can be shed without
+	 *   spending CPU on TLS / header parsing / cookie decoding.
+	 * - `perTickBudget` caps how many `res.upgrade()` calls run per
+	 *   event-loop tick. Once the budget is spent, the actual upgrade
+	 *   call is deferred via `setImmediate` so the loop is not starved
+	 *   by 10K synchronous handshakes from one I/O batch. Pre-upgrade
+	 *   work (rate limit check, origin check, hook dispatch) still runs
+	 *   in the original tick; only the hand-off to the C++ upgrade
+	 *   path is paced.
+	 *
+	 * Both default to `0` (disabled). Tune to your peak-load envelope:
+	 * `maxConcurrent` should be just above your steady-state in-flight
+	 * count to act as a circuit breaker; `perTickBudget` should be
+	 * small enough that one full burst does not block other I/O for
+	 * more than a few milliseconds (start with `64` and adjust).
+	 *
+	 * @example
+	 * ```js
+	 * adapter({
+	 *   websocket: {
+	 *     upgradeAdmission: { maxConcurrent: 1000, perTickBudget: 64 }
+	 *   }
+	 * });
+	 * ```
+	 */
+	upgradeAdmission?: {
+		maxConcurrent?: number;
+		perTickBudget?: number;
+	};
+
+	/**
 	 * Backpressure-signal thresholds for `platform.pressure` and
 	 * `platform.onPressure(cb)`. The adapter samples the worker once per
 	 * `sampleIntervalMs` and reports the most urgent active signal.

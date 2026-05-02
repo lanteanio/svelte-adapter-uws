@@ -13,7 +13,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -1572,6 +1572,12 @@ if (WS_ENABLED) {
 	/** @type {Map<string, { prev: number, curr: number, windowStart: number }>} */
 	const upgradeRateMap = new Map();
 
+	// Upgrade admission control. Both layers opt-in via WebSocketOptions
+	// (`upgradeAdmission: { maxConcurrent, perTickBudget }`); zero or unset
+	// means disabled. State + queue live inside the factory closure.
+	const admission = createUpgradeAdmission(wsOptions.upgradeAdmission);
+	const ADMISSION_PER_TICK_BUDGET = wsOptions.upgradeAdmission?.perTickBudget ?? 0;
+
 	// Single 60-second interval for all periodic cache maintenance.
 	// Keeps timer overhead to one wakeup per minute regardless of how many
 	// caches exist. Add future periodic tasks here rather than creating
@@ -1738,6 +1744,25 @@ if (WS_ENABLED) {
 	app.ws(WS_PATH, {
 		// Handle HTTP -> WebSocket upgrade with user-provided auth
 		upgrade: (res, req, context) => {
+			// Pre-upgrade soft filter: cap on concurrent upgrades currently
+			// being processed. The cheapest possible rejection - no header
+			// walk, no IP decode, no origin check - so a connection storm
+			// is shed before it consumes per-request CPU.
+			if (!admission.tryAcquire()) {
+				res.cork(() => {
+					res.writeStatus('503 Service Unavailable');
+					res.writeHeader('content-type', 'text/plain');
+					res.end('Server is at upgrade capacity, please retry');
+				});
+				return;
+			}
+			let inFlightReleased = false;
+			function releaseInFlight() {
+				if (inFlightReleased) return;
+				inFlightReleased = true;
+				admission.release();
+			}
+
 			// Read everything synchronously - uWS req is stack-allocated
 			/** @type {Record<string, string>} */
 			const headers = {};
@@ -1781,6 +1806,7 @@ if (WS_ENABLED) {
 						res.writeHeader('content-type', 'text/plain');
 						res.end('Too many upgrade requests');
 					});
+					releaseInFlight();
 					return;
 				}
 				rateEntry.curr++;
@@ -1807,6 +1833,7 @@ if (WS_ENABLED) {
 					res.writeHeader('content-type', 'text/plain');
 					res.end('Origin not allowed');
 				});
+				releaseInFlight();
 				return;
 			}
 
@@ -1814,8 +1841,19 @@ if (WS_ENABLED) {
 			// no cookie parsing). Inject remoteAddress so plugins/ratelimit can
 			// key on the real client IP via ws.getUserData().remoteAddress.
 			if (!wsModule.upgrade) {
-				res.cork(() => {
-					res.upgrade({ remoteAddress: clientIp }, secKey, secProtocol, secExtensions, context);
+				// Track aborted so a deferred upgrade does not call res.upgrade()
+				// on a connection the client already closed. Only relevant when
+				// the per-tick budget pushes the call onto setImmediate.
+				let fastPathAborted = false;
+				if (ADMISSION_PER_TICK_BUDGET > 0) {
+					res.onAborted(() => { fastPathAborted = true; releaseInFlight(); });
+				}
+				admission.admit(() => {
+					if (fastPathAborted) return;
+					res.cork(() => {
+						res.upgrade({ remoteAddress: clientIp }, secKey, secProtocol, secExtensions, context);
+					});
+					releaseInFlight();
 				});
 				return;
 			}
@@ -1827,6 +1865,7 @@ if (WS_ENABLED) {
 			let aborted = false;
 			res.onAborted(() => {
 				aborted = true;
+				releaseInFlight();
 			});
 
 			const cookies = parseCookies(headers['cookie']);
@@ -1843,6 +1882,7 @@ if (WS_ENABLED) {
 							res.end('Upgrade timed out');
 						});
 					}
+					releaseInFlight();
 				}, wsOptions.upgradeTimeout * 1000);
 			}
 
@@ -1856,6 +1896,7 @@ if (WS_ENABLED) {
 							res.writeHeader('content-type', 'text/plain');
 							res.end('Unauthorized');
 						});
+						releaseInFlight();
 						return;
 					}
 					// Unpack upgradeResponse() wrapper if present
@@ -1887,23 +1928,29 @@ if (WS_ENABLED) {
 					const ud = userData || {};
 					if (!ud.remoteAddress) ud.remoteAddress = clientIp;
 					if (responseHeaders) maybeWarnSetCookieOnUpgrade(responseHeaders);
-					res.cork(() => {
-						if (responseHeaders) {
-							for (const [hk, hv] of Object.entries(responseHeaders)) {
-								if (Array.isArray(hv)) {
-									for (const v of hv) res.writeHeader(hk, v);
-								} else {
-									res.writeHeader(hk, hv);
+					admission.admit(() => {
+						// Recheck after possible setImmediate defer: the client
+						// may have hung up between admission and execution.
+						if (aborted || timedOut) { releaseInFlight(); return; }
+						res.cork(() => {
+							if (responseHeaders) {
+								for (const [hk, hv] of Object.entries(responseHeaders)) {
+									if (Array.isArray(hv)) {
+										for (const v of hv) res.writeHeader(hk, v);
+									} else {
+										res.writeHeader(hk, hv);
+									}
 								}
 							}
-						}
-						res.upgrade(
-							ud,
-							secKey,
-							secProtocol,
-							secExtensions,
-							context
-						);
+							res.upgrade(
+								ud,
+								secKey,
+								secProtocol,
+								secExtensions,
+								context
+							);
+						});
+						releaseInFlight();
 					});
 				})
 				.catch((err) => {
@@ -1916,6 +1963,7 @@ if (WS_ENABLED) {
 							res.end('Internal Server Error');
 						});
 					}
+					releaseInFlight();
 				});
 		},
 

@@ -290,6 +290,7 @@ export default function (opts = {}) {
 				upgradeTimeout: websocket?.upgradeTimeout ?? 10,
 				upgradeRateLimit: websocket?.upgradeRateLimit ?? 10,
 				upgradeRateLimitWindow: websocket?.upgradeRateLimitWindow ?? 10,
+				upgradeAdmission: websocket?.upgradeAdmission,
 				pressure: websocket?.pressure
 			};
 

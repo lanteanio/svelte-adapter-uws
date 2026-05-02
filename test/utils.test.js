@@ -13,7 +13,8 @@ import {
 	esc,
 	isValidWireTopic,
 	createScopedTopic,
-	isOriginAllowed
+	isOriginAllowed,
+	createUpgradeAdmission
 } from '../files/utils.js';
 
 // -- parse_as_bytes ---------------------------------------------------------
@@ -2082,6 +2083,126 @@ describe('isOriginAllowed', () => {
 		it('rejects everything when allowedOrigins is an unrecognized string', () => {
 			const ctx = { ...baseCtx, allowedOrigins: 'whatever' };
 			expect(isOriginAllowed('https://example.com', { host: 'example.com' }, ctx)).toBe(false);
+		});
+	});
+});
+
+// -- createUpgradeAdmission ---------------------------------------------------
+
+describe('createUpgradeAdmission', () => {
+	describe('disabled (defaults)', () => {
+		it('admits unconditionally and runs synchronously', () => {
+			const a = createUpgradeAdmission();
+			expect(a.tryAcquire()).toBe(true);
+			expect(a.tryAcquire()).toBe(true);
+			expect(a.inFlight).toBe(2);
+			let ran = 0;
+			expect(a.admit(() => { ran++; })).toBe(true);
+			expect(ran).toBe(1);
+			a.release();
+			a.release();
+			expect(a.inFlight).toBe(0);
+		});
+
+		it('treats undefined opts identically to {}', () => {
+			const a = createUpgradeAdmission();
+			const b = createUpgradeAdmission({});
+			expect(a.tryAcquire()).toBe(true);
+			expect(b.tryAcquire()).toBe(true);
+		});
+	});
+
+	describe('maxConcurrent', () => {
+		it('rejects once inFlight reaches the cap', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 2 });
+			expect(a.tryAcquire()).toBe(true);
+			expect(a.tryAcquire()).toBe(true);
+			expect(a.tryAcquire()).toBe(false);
+			expect(a.inFlight).toBe(2);
+		});
+
+		it('accepts again after release()', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 1 });
+			expect(a.tryAcquire()).toBe(true);
+			expect(a.tryAcquire()).toBe(false);
+			a.release();
+			expect(a.tryAcquire()).toBe(true);
+		});
+
+		it('does not double-count a rejected attempt', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 1 });
+			a.tryAcquire();
+			expect(a.tryAcquire()).toBe(false);
+			expect(a.inFlight).toBe(1);
+		});
+	});
+
+	describe('perTickBudget', () => {
+		it('runs up to budget synchronously and defers the rest', () => {
+			const a = createUpgradeAdmission({ perTickBudget: 2 });
+			const order = [];
+			expect(a.admit(() => order.push(1))).toBe(true);
+			expect(a.admit(() => order.push(2))).toBe(true);
+			expect(a.admit(() => order.push(3))).toBe(false);
+			expect(a.admit(() => order.push(4))).toBe(false);
+			// First two ran synchronously; rest are queued.
+			expect(order).toEqual([1, 2]);
+		});
+
+		it('drains the deferred queue on the next setImmediate tick', async () => {
+			const a = createUpgradeAdmission({ perTickBudget: 2 });
+			const order = [];
+			for (let i = 1; i <= 5; i++) a.admit(() => order.push(i));
+			expect(order).toEqual([1, 2]);
+			await new Promise(r => setImmediate(r));
+			// Second tick drains 2 more.
+			expect(order).toEqual([1, 2, 3, 4]);
+			await new Promise(r => setImmediate(r));
+			// Third tick drains the last one.
+			expect(order).toEqual([1, 2, 3, 4, 5]);
+		});
+
+		it('preserves submission order across drain ticks', async () => {
+			const a = createUpgradeAdmission({ perTickBudget: 1 });
+			const order = [];
+			for (let i = 0; i < 6; i++) a.admit(() => order.push(i));
+			expect(order).toEqual([0]);
+			for (let i = 1; i < 6; i++) {
+				await new Promise(r => setImmediate(r));
+			}
+			expect(order).toEqual([0, 1, 2, 3, 4, 5]);
+		});
+
+		it('isolates a thrown closure so others still drain', async () => {
+			const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const a = createUpgradeAdmission({ perTickBudget: 1 });
+			const order = [];
+			a.admit(() => order.push('a'));
+			a.admit(() => { throw new Error('boom'); });
+			a.admit(() => order.push('c'));
+			expect(order).toEqual(['a']);
+			await new Promise(r => setImmediate(r));
+			await new Promise(r => setImmediate(r));
+			await new Promise(r => setImmediate(r));
+			expect(order).toEqual(['a', 'c']);
+			errSpy.mockRestore();
+		});
+	});
+
+	describe('layers compose independently', () => {
+		it('maxConcurrent does not affect admit() pacing', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 1, perTickBudget: 0 });
+			expect(a.tryAcquire()).toBe(true);
+			let ran = 0;
+			expect(a.admit(() => { ran++; })).toBe(true);
+			expect(ran).toBe(1);
+		});
+
+		it('perTickBudget does not affect tryAcquire() counting', () => {
+			const a = createUpgradeAdmission({ perTickBudget: 1 });
+			expect(a.tryAcquire()).toBe(true);
+			expect(a.tryAcquire()).toBe(true);
+			expect(a.inFlight).toBe(2);
 		});
 	});
 });

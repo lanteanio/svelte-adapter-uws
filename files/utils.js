@@ -284,6 +284,85 @@ export const WS_COALESCED = Symbol('adapter-uws.ws.coalesced');
 export const WS_SESSION_ID = Symbol('adapter-uws.ws.session-id');
 
 /**
+ * Build a self-contained admission controller for WebSocket upgrades.
+ *
+ * Two independent layers, both opt-in (zero or unset = disabled):
+ *
+ * - `maxConcurrent` caps how many upgrades may be in flight at once.
+ *   Crossed requests get rejected before any per-request work, so a
+ *   connection storm can be shed without spending CPU on TLS / header
+ *   parsing.
+ * - `perTickBudget` caps how many `res.upgrade()` calls run per
+ *   event-loop tick. Once the budget is spent, subsequent calls are
+ *   deferred via `setImmediate` so the loop is not starved by 10K
+ *   synchronous handshakes from one I/O batch.
+ *
+ * The returned object owns the counters and queue; one instance per
+ * uWS app. Pure factory: no module-state capture, no globals - all
+ * state lives in the closure so multiple instances do not interfere
+ * (relevant for testing.js / vite.js parity in future work).
+ *
+ * @param {{ maxConcurrent?: number, perTickBudget?: number }} [opts]
+ */
+export function createUpgradeAdmission(opts) {
+	const maxConcurrent = (opts && opts.maxConcurrent) || 0;
+	const perTickBudget = (opts && opts.perTickBudget) || 0;
+	let inFlight = 0;
+	let perTickCount = 0;
+	/** @type {Array<() => void>} */
+	const deferred = [];
+	let drainScheduled = false;
+
+	function drain() {
+		drainScheduled = false;
+		perTickCount = 0;
+		while (perTickCount < perTickBudget && deferred.length > 0) {
+			const fn = /** @type {() => void} */ (deferred.shift());
+			perTickCount++;
+			try { fn(); } catch (err) { console.error('[ws] deferred upgrade failed:', err); }
+		}
+		if (deferred.length > 0) {
+			drainScheduled = true;
+			setImmediate(drain);
+		}
+	}
+
+	return {
+		/** `true` if there is room; caller is responsible for `release()`. */
+		tryAcquire() {
+			if (maxConcurrent > 0 && inFlight >= maxConcurrent) return false;
+			inFlight++;
+			return true;
+		},
+		release() { inFlight--; },
+		/** Live snapshot, primarily for tests / introspection. */
+		get inFlight() { return inFlight; },
+		/**
+		 * Run `fn` (the actual `res.upgrade()` call) under the per-tick
+		 * budget. Returns `true` if `fn` ran synchronously, `false` if
+		 * deferred to a later tick.
+		 *
+		 * @param {() => void} fn
+		 * @returns {boolean}
+		 */
+		admit(fn) {
+			if (perTickBudget <= 0) { fn(); return true; }
+			if (perTickCount < perTickBudget) {
+				perTickCount++;
+				fn();
+				return true;
+			}
+			deferred.push(fn);
+			if (!drainScheduled) {
+				drainScheduled = true;
+				setImmediate(drain);
+			}
+			return false;
+		}
+	};
+}
+
+/**
  * Safely quote a string for JSON embedding in topic / event positions.
  *
  * Topics and events are developer-defined identifiers, so a quote,

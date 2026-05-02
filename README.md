@@ -416,6 +416,21 @@ These options control how the server handles misbehaving or slow clients at the 
 
 **`upgradeRateLimit`** (default: 10 per 10s window) -- sliding-window rate limit on WebSocket upgrade requests per client IP. Clients exceeding the limit get a `429 Too Many Requests` response. The IP rate map is capped at 10,000 entries with LRU eviction by activity score, so sustained connection floods from many IPs don't cause unbounded memory growth.
 
+**`upgradeAdmission`** (default: disabled) -- two-layer admission control on the upgrade path, both opt-in:
+
+- `maxConcurrent` caps how many upgrades may be in flight at once. Crossed requests get a fast `503 Service Unavailable` before any per-request work, so a connection storm can be shed without spending CPU on TLS, header parsing, or cookie decoding. Set this just above your steady-state in-flight count to act as a circuit breaker.
+- `perTickBudget` caps how many actual `res.upgrade()` calls run per Node.js event-loop tick. Once the budget is spent, subsequent calls are deferred via `setImmediate` so the loop is not starved by 10K synchronous handshakes from one I/O batch. Pre-upgrade work (rate limit, origin check, hook dispatch) still runs in the original tick; only the hand-off to the C++ upgrade path is paced. Start with `64` and adjust based on your peak burst envelope.
+
+```js
+adapter({
+  websocket: {
+    upgradeAdmission: { maxConcurrent: 1000, perTickBudget: 64 }
+  }
+});
+```
+
+The two layers are independent: each works without the other. Both default to `0` (disabled) so the upgrade path stays unchanged unless you opt in.
+
 ### Static file behavior
 
 All static assets (from the `client/` and `prerendered/` output directories) are loaded once at startup and served directly from RAM. Each response automatically includes:
