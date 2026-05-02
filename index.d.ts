@@ -790,6 +790,39 @@ export interface Platform {
 	batch(messages: { topic: string; event: string; data?: unknown }[]): boolean[];
 
 	/**
+	 * Send a request to a single connection and await its reply.
+	 *
+	 * The server picks a fresh `ref`, sends `{type:'request', ref, event, data}`,
+	 * and the returned Promise resolves with whatever the client's
+	 * `onRequest` handler returned (or rejects with an `Error` carrying
+	 * the message the client sent back if its handler threw / rejected).
+	 *
+	 * Rejects with `Error('request timed out')` after `timeoutMs`
+	 * (default `5000`) and with `Error('connection closed')` if the
+	 * WebSocket closes before a reply arrives. Pending requests are
+	 * tracked per-connection, so close cleanup is automatic.
+	 *
+	 * Pairs with the client store's `onRequest(handler)`. Use this for
+	 * server-driven confirmations, capability challenges, or
+	 * push-driven state queries.
+	 *
+	 * @example
+	 * ```js
+	 * // In a hook on the server:
+	 * const reply = await platform.request(ws, 'confirm-action', { op: 'delete' }, {
+	 *   timeoutMs: 5000
+	 * });
+	 * if (reply.confirmed) await actuallyDelete();
+	 * ```
+	 */
+	request<TReply = unknown>(
+		ws: WebSocket<any>,
+		event: string,
+		data?: unknown,
+		options?: { timeoutMs?: number }
+	): Promise<TReply>;
+
+	/**
 	 * Send a message to a single WebSocket connection.
 	 * Wraps in the same `{ topic, event, data }` envelope as `publish()`.
 	 *

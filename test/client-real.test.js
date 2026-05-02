@@ -2437,4 +2437,149 @@ describe('client.js (real module)', () => {
 			clientModule.connect().close();
 		});
 	});
+
+	describe('onRequest push-with-reply (real module)', () => {
+		it('replies with the handler return value', async () => {
+			const conn = clientModule.connect();
+			conn.onRequest((event, data) => ({ event, data, ok: true }));
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'request', ref: 1, event: 'ping', data: { n: 7 } });
+
+			await flush();
+			const reply = ws._sent.map(s => JSON.parse(s)).find(m => m.type === 'reply');
+			expect(reply).toEqual({ type: 'reply', ref: 1, data: { event: 'ping', data: { n: 7 }, ok: true } });
+
+			conn.close();
+		});
+
+		it('awaits async handler before replying', async () => {
+			const conn = clientModule.connect();
+			conn.onRequest(async (event) => {
+				await new Promise(r => setTimeout(r, 20));
+				return { event, async: true };
+			});
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'request', ref: 5, event: 'slow', data: null });
+
+			// Reply has not been sent yet
+			await flush();
+			expect(ws._sent.map(s => JSON.parse(s)).find(m => m.type === 'reply')).toBeUndefined();
+
+			await new Promise(r => setTimeout(r, 50));
+			const reply = ws._sent.map(s => JSON.parse(s)).find(m => m.type === 'reply');
+			expect(reply).toEqual({ type: 'reply', ref: 5, data: { event: 'slow', async: true } });
+
+			conn.close();
+		});
+
+		it('sends an error reply when the handler throws', async () => {
+			const conn = clientModule.connect();
+			conn.onRequest(() => { throw new Error('handler exploded'); });
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'request', ref: 9, event: 'risky', data: null });
+
+			await flush();
+			const reply = ws._sent.map(s => JSON.parse(s)).find(m => m.type === 'reply');
+			expect(reply).toEqual({ type: 'reply', ref: 9, error: 'handler exploded' });
+
+			conn.close();
+		});
+
+		it('sends an error reply when an async handler rejects', async () => {
+			const conn = clientModule.connect();
+			conn.onRequest(async () => { throw new Error('async fail'); });
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'request', ref: 11, event: 'risky', data: null });
+
+			await new Promise(r => setTimeout(r, 20));
+			const reply = ws._sent.map(s => JSON.parse(s)).find(m => m.type === 'reply');
+			expect(reply).toEqual({ type: 'reply', ref: 11, error: 'async fail' });
+
+			conn.close();
+		});
+
+		it('drops request frames silently when no handler is installed', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._sent.length = 0;
+			ws._receive({ type: 'request', ref: 1, event: 'whatever', data: null });
+
+			await flush();
+			const reply = ws._sent.map(s => JSON.parse(s)).find(m => m.type === 'reply');
+			expect(reply).toBeUndefined();
+
+			conn.close();
+		});
+
+		it('replaces the handler on a second onRequest call', async () => {
+			const conn = clientModule.connect();
+			conn.onRequest(() => 'first');
+			conn.onRequest(() => 'second');
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'request', ref: 1, event: 'x', data: null });
+
+			await flush();
+			const reply = ws._sent.map(s => JSON.parse(s)).find(m => m.type === 'reply');
+			expect(reply.data).toBe('second');
+
+			conn.close();
+		});
+
+		it('unsubscribe clears only the matching handler', async () => {
+			const conn = clientModule.connect();
+			const fn1 = () => 'one';
+			const fn2 = () => 'two';
+			const unsub1 = conn.onRequest(fn1);
+			conn.onRequest(fn2);
+			// fn1 is no longer active; unsub1 should be a no-op
+			unsub1();
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'request', ref: 1, event: 'x', data: null });
+
+			await flush();
+			const reply = ws._sent.map(s => JSON.parse(s)).find(m => m.type === 'reply');
+			expect(reply.data).toBe('two');
+
+			conn.close();
+		});
+
+		it('does not dispatch request frames as data events', async () => {
+			const store = clientModule.on('chat');
+			const events = [];
+			const unsub = store.subscribe((v) => { if (v) events.push(v); });
+			const conn = clientModule.connect();
+			conn.onRequest(() => null);
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'request', ref: 1, event: 'ping', data: null });
+			ws._receive({ topic: 'chat', event: 'msg', data: 'live' });
+
+			expect(events).toHaveLength(1);
+			expect(events[0].data).toBe('live');
+
+			unsub();
+			conn.close();
+		});
+
+		it('exports a top-level onRequest', async () => {
+			const unsub = clientModule.onRequest(() => 'top-level');
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'request', ref: 1, event: 'x', data: null });
+
+			await flush();
+			const reply = ws._sent.map(s => JSON.parse(s)).find(m => m.type === 'reply');
+			expect(reply.data).toBe('top-level');
+
+			unsub();
+			clientModule.connect().close();
+		});
+	});
 });

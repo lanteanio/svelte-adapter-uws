@@ -2,7 +2,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS, WS_SESSION_ID } from './files/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS } from './files/utils.js';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -140,11 +140,41 @@ export default function uws(options = {}) {
 		return count;
 	}
 
+	let nextRequestRefV = 1;
+
+	/**
+	 * Dev-mode equivalent of `platform.request`. Same wire contract as
+	 * production so apps that work in dev work in prod.
+	 * @param {object} wrapped
+	 * @param {string} event
+	 * @param {unknown} [data]
+	 * @param {{ timeoutMs?: number }} [options]
+	 * @returns {Promise<unknown>}
+	 */
+	function request(wrapped, event, data, options) {
+		const userData = wrapped.getUserData();
+		let pending = userData[WS_PENDING_REQUESTS];
+		if (!pending) {
+			pending = new Map();
+			userData[WS_PENDING_REQUESTS] = pending;
+		}
+		const ref = nextRequestRefV++;
+		const timeoutMs = (options && options.timeoutMs) || 5000;
+		return new Promise((resolve, reject) => {
+			const timer = setTimeout(() => {
+				if (pending.delete(ref)) reject(new Error('request timed out'));
+			}, timeoutMs);
+			pending.set(ref, { resolve, reject, timer });
+			wrapped.send(JSON.stringify({ type: 'request', ref, event, data: data ?? null }));
+		});
+	}
+
 	// Dev-mode platform - same API shape as production
 	const platform = {
 		publish,
 		send,
 		sendTo,
+		request,
 		get connections() { return connections.size; },
 		subscribers(topic) {
 			let count = 0;
@@ -630,6 +660,18 @@ export default function uws(options = {}) {
 								}
 								return;
 							}
+							if (msg.type === 'reply' && hasRefValue(msg.ref)) {
+								const ud = /** @type {any} */ (ws).__userData || {};
+								const pending = ud[WS_PENDING_REQUESTS];
+								const entry = pending?.get(msg.ref);
+								if (entry) {
+									pending.delete(msg.ref);
+									clearTimeout(entry.timer);
+									if (typeof msg.error === 'string') entry.reject(new Error(msg.error));
+									else entry.resolve(msg.data);
+								}
+								return;
+							}
 							if (msg.type === 'resume' && typeof msg.sessionId === 'string' &&
 								msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
 								if (userHandlers.resume) {
@@ -661,7 +703,16 @@ export default function uws(options = {}) {
 				ws.on('close', (code, reason) => {
 					const reasonBuf = reason || Buffer.alloc(0);
 					const reasonAB = reasonBuf.buffer.slice(reasonBuf.byteOffset, reasonBuf.byteOffset + reasonBuf.byteLength);
-					const subs = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS] || new Set();
+					const ud = /** @type {any} */ (ws).__userData || {};
+					const subs = ud[WS_SUBSCRIPTIONS] || new Set();
+					const pending = ud[WS_PENDING_REQUESTS];
+					if (pending && pending.size > 0) {
+						for (const entry of pending.values()) {
+							clearTimeout(entry.timer);
+							try { entry.reject(new Error('connection closed')); } catch {}
+						}
+						pending.clear();
+					}
 					userHandlers.close?.(wrapped, { code, message: reasonAB, platform, subscriptions: subs });
 					connections.delete(ws);
 					subscriptions.delete(ws);

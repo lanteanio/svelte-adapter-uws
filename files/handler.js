@@ -13,7 +13,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -385,6 +385,13 @@ function batchRelay(topic, envelope) {
 /** @type {Set<import('uWebSockets.js').WebSocket<any>>} */
 const wsConnections = new Set();
 
+// Monotonic counter for server-initiated requests. Refs are scoped per
+// connection (looked up in ws.getUserData()[WS_PENDING_REQUESTS]) but
+// the source is module-level so two requests on the same connection
+// never collide. Wraps at MAX_SAFE_INTEGER, which at one request per
+// nanosecond would still take 285 years.
+let nextRequestRef = 1;
+
 // WS_DEBUG=1 enables per-event logging for subscribe/publish/open/close.
 // Read once at module load so it is never sampled inside a hot callback.
 const wsDebug = WS_ENABLED && env('WS_DEBUG', '') === '1';
@@ -752,6 +759,37 @@ const platform = {
 			results.push(platform.publish(topic, event, data));
 		}
 		return results;
+	},
+
+	/**
+	 * Send a request to a single connection and await its reply.
+	 *
+	 * The server picks a fresh `ref`, sends `{type:'request', ref, event, data}`,
+	 * and the returned Promise resolves with whatever the client's
+	 * `onRequest` handler returns (or rejects with the error string the
+	 * client sent back if the handler threw). Rejects with `'request timed out'`
+	 * after `timeoutMs` (default 5000), and with `'connection closed'`
+	 * if the WebSocket closes before a reply arrives.
+	 *
+	 * Pending requests live in `WS_PENDING_REQUESTS` on `ws.getUserData()`,
+	 * so cleanup is automatic on close - no module-level leak risk.
+	 */
+	request(ws, event, data, options) {
+		const userData = ws.getUserData();
+		let pending = userData[WS_PENDING_REQUESTS];
+		if (!pending) {
+			pending = new Map();
+			userData[WS_PENDING_REQUESTS] = pending;
+		}
+		const ref = nextRequestRef++;
+		const timeoutMs = (options && options.timeoutMs) || 5000;
+		return new Promise((resolve, reject) => {
+			const timer = setTimeout(() => {
+				if (pending.delete(ref)) reject(new Error('request timed out'));
+			}, timeoutMs);
+			pending.set(ref, { resolve, reject, timer });
+			ws.send(JSON.stringify({ type: 'request', ref, event, data: data ?? null }), false, false);
+		});
 	},
 
 	/**
@@ -2160,6 +2198,21 @@ if (WS_ENABLED) {
 						if (wsDebug) console.log('[ws] subscribe-batch count=%d', subscribed);
 						return;
 					}
+					if (msg.type === 'reply' && hasRef(msg.ref)) {
+						// Reply to a server-initiated request. Look up the pending
+						// promise on this connection's userData, clear its timeout,
+						// and resolve / reject accordingly. Refs scoped per-WS so a
+						// stray reply from one connection cannot affect another.
+						const pending = ws.getUserData()[WS_PENDING_REQUESTS];
+						const entry = pending?.get(msg.ref);
+						if (entry) {
+							pending.delete(msg.ref);
+							clearTimeout(entry.timer);
+							if (typeof msg.error === 'string') entry.reject(new Error(msg.error));
+							else entry.resolve(msg.data);
+						}
+						return;
+					}
 					if (msg.type === 'resume' && typeof msg.sessionId === 'string' &&
 						msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
 						// Client presents the previous session id plus per-topic
@@ -2198,7 +2251,20 @@ if (WS_ENABLED) {
 		},
 
 		close: (ws, code, message) => {
-			const subscriptions = ws.getUserData()[WS_SUBSCRIPTIONS] || new Set();
+			const userData = ws.getUserData();
+			const subscriptions = userData[WS_SUBSCRIPTIONS] || new Set();
+			// Reject any in-flight server-initiated requests so callers stop
+			// awaiting promises that can never resolve. Clearing the timer
+			// avoids the close-then-timer race that would otherwise reject
+			// twice (delete from the map first so the timer's check is a no-op).
+			const pending = userData[WS_PENDING_REQUESTS];
+			if (pending && pending.size > 0) {
+				for (const entry of pending.values()) {
+					clearTimeout(entry.timer);
+					try { entry.reject(new Error('connection closed')); } catch {}
+				}
+				pending.clear();
+			}
 			try {
 				wsModule.close?.(ws, { code, message, platform, subscriptions });
 			} finally {

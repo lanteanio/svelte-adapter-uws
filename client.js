@@ -141,6 +141,26 @@ export const denials = {
 };
 
 /**
+ * Install a handler for server-initiated requests. The server may call
+ * `platform.request(ws, event, data)` and await your reply; this is
+ * where that lands. Return a value (sync or async) and the framework
+ * sends it back as the reply. Throw or reject to send an error reply
+ * the server will surface as a Promise rejection.
+ *
+ * Only one handler may be installed at a time. Calling `onRequest`
+ * again replaces the previous handler. Returns an unsubscribe function
+ * that clears the handler if it is still the active one. With no
+ * handler installed, incoming request frames are dropped and the
+ * server's awaiting Promise times out.
+ *
+ * @param {(event: string, data: unknown) => unknown | Promise<unknown>} handler
+ * @returns {() => void}
+ */
+export function onRequest(handler) {
+	return ensureConnection().onRequest(handler);
+}
+
+/**
  * Returns a promise that resolves when the WebSocket connection is open.
  * Auto-connects if not already connected.
  *
@@ -702,6 +722,17 @@ function createConnection(options) {
 	/** @type {import('svelte/store').Writable<{ topic: string, reason: string, ref: number | string } | null>} */
 	const denialsStore = writable(null);
 
+	// Single onRequest handler. Server-initiated push-with-reply lands
+	// here: server sends { type: 'request', ref, event, data }, this
+	// callback returns the reply value (sync or async) and the framework
+	// sends { type: 'reply', ref, data } back. A throwing / rejecting
+	// handler turns into { type: 'reply', ref, error: <message> } so the
+	// server's awaiting Promise rejects symmetrically. With no handler
+	// installed, request frames are dropped silently and the server's
+	// request times out.
+	/** @type {((event: string, data: unknown) => unknown | Promise<unknown>) | null} */
+	let requestHandler = null;
+
 	// Set to true when no more reconnects will ever be attempted.
 	// Consumers (ready()) watch this to reject instead of waiting forever.
 	/** @type {import('svelte/store').Writable<boolean>} */
@@ -921,6 +952,27 @@ function createConnection(options) {
 				if (msg.type === 'subscribe-denied' && typeof msg.topic === 'string' && typeof msg.reason === 'string') {
 					console.warn('[ws] subscribe denied topic=%s reason=%s', msg.topic, msg.reason);
 					denialsStore.set({ topic: msg.topic, reason: msg.reason, ref: msg.ref });
+					return;
+				}
+				if (msg.type === 'request' && (typeof msg.ref === 'number' || typeof msg.ref === 'string') && typeof msg.event === 'string') {
+					if (!requestHandler) {
+						if (debug) console.warn('[ws] request received but no handler installed - dropping (server will time out)');
+						return;
+					}
+					const ref = msg.ref;
+					Promise.resolve()
+						.then(() => requestHandler(msg.event, msg.data))
+						.then((result) => {
+							if (ws?.readyState === WebSocket.OPEN) {
+								ws.send(JSON.stringify({ type: 'reply', ref, data: result ?? null }));
+							}
+						})
+						.catch((err) => {
+							const message = err && err.message ? String(err.message) : String(err);
+							if (ws?.readyState === WebSocket.OPEN) {
+								ws.send(JSON.stringify({ type: 'reply', ref, error: message }));
+							}
+						});
 					return;
 				}
 			} catch {
@@ -1269,6 +1321,11 @@ function createConnection(options) {
 		}, 30000);
 	}
 
+	function onRequest(handler) {
+		requestHandler = typeof handler === 'function' ? handler : null;
+		return () => { if (requestHandler === handler) requestHandler = null; };
+	}
+
 	return {
 		events: { subscribe: eventsStore.subscribe },
 		status: { subscribe: statusStore.subscribe },
@@ -1282,6 +1339,7 @@ function createConnection(options) {
 		unsubscribe,
 		send,
 		sendQueued,
+		onRequest,
 		close
 	};
 }

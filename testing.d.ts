@@ -19,6 +19,12 @@ export interface TestServer {
 	port: number;
 	/** Platform API for publishing, sending, and querying connections. */
 	platform: Platform;
+	/**
+	 * Live set of currently connected uWS WebSocket instances. Useful in
+	 * tests that need to call `platform.request(ws, ...)` or otherwise
+	 * target a specific connection.
+	 */
+	wsConnections: Set<import('uWebSockets.js').WebSocket<any>>;
 	/** Stop the server and close all connections. */
 	close(): void;
 	/** Wait for a WebSocket client to connect. */

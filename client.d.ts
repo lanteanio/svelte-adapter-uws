@@ -245,6 +245,36 @@ export const denials: Readable<{
 } | null>;
 
 /**
+ * Install a handler for server-initiated requests over the same WebSocket.
+ *
+ * The server calls `platform.request(ws, event, data)` and awaits a
+ * reply; this handler is where that lands. Return a value (sync or
+ * async) and the framework sends it back. Throw or reject to send an
+ * error reply, which surfaces on the server as a Promise rejection.
+ *
+ * Only one handler may be installed at a time. Calling `onRequest`
+ * again replaces the previous handler; the returned function clears
+ * the handler if it is still the active one. With no handler
+ * installed, incoming request frames are dropped and the server's
+ * awaiting Promise times out.
+ *
+ * @example
+ * ```js
+ * import { onRequest } from 'svelte-adapter-uws/client';
+ *
+ * onRequest(async (event, data) => {
+ *   if (event === 'confirm-action') {
+ *     return { confirmed: confirm(`Are you sure? (${data.op})`) };
+ *   }
+ *   throw new Error('unknown event: ' + event);
+ * });
+ * ```
+ */
+export function onRequest(
+	handler: (event: string, data: unknown) => unknown | Promise<unknown>
+): () => void;
+
+/**
  * Live CRUD list - one line for real-time collections.
  *
  * Subscribes to a topic and automatically handles `created`, `updated`,
@@ -443,6 +473,14 @@ export interface WSConnection {
 		reason: SubscribeDenialReason | string;
 		ref: number | string;
 	} | null>;
+
+	/**
+	 * Install a handler for server-initiated requests. Returns an
+	 * unsubscribe function that clears the handler if still active.
+	 */
+	onRequest: (
+		handler: (event: string, data: unknown) => unknown | Promise<unknown>
+	) => () => void;
 
 	/**
 	 * Get a reactive store for a specific topic.

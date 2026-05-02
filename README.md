@@ -1260,6 +1260,37 @@ platform.batch([
 
 Each entry is published with `platform.publish()`. Cross-worker relay is batched automatically, so this is more efficient than three separate `publish()` calls from a relay overhead perspective.
 
+### `platform.request(ws, event, data, options?)`
+
+Send a request to one connection and await its reply. Use this for server-driven confirmations, capability challenges, or any flow where the server needs an answer from a specific client.
+
+```js
+// In a hook on the server
+const reply = await platform.request(ws, 'confirm-action', { op: 'delete' }, {
+  timeoutMs: 5000
+});
+if (reply.confirmed) {
+  await actuallyDelete();
+}
+```
+
+The framework picks a fresh `ref`, sends `{type:'request', ref, event, data}`, and the returned Promise resolves with whatever the client's `onRequest` handler returned. Rejects with `Error('request timed out')` after `timeoutMs` (default `5000`) and with `Error('connection closed')` if the WebSocket closes before a reply arrives.
+
+The client side opts in by registering a single handler:
+
+```js
+import { onRequest } from 'svelte-adapter-uws/client';
+
+onRequest(async (event, data) => {
+  if (event === 'confirm-action') {
+    return { confirmed: confirm(`Are you sure? (${data.op})`) };
+  }
+  throw new Error('unknown event: ' + event);
+});
+```
+
+Throw or reject from the handler to send an error reply; the server's awaiting Promise rejects with the same message. With no handler installed, request frames are dropped silently and the server times out.
+
 ---
 
 ## Client store API

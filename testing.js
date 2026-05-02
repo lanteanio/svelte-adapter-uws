@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS, WS_SESSION_ID } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS } from './files/utils.js';
 
 /**
  * Build a JSON envelope string matching the production wire format.
@@ -112,10 +112,28 @@ export async function createTestServer(options = {}) {
 		batch(messages) {
 			return messages.map(({ topic, event, data }) => platform.publish(topic, event, data));
 		},
+		request(ws, event, data, options) {
+			const userData = ws.getUserData();
+			let pending = userData[WS_PENDING_REQUESTS];
+			if (!pending) {
+				pending = new Map();
+				userData[WS_PENDING_REQUESTS] = pending;
+			}
+			const ref = nextRequestRefT++;
+			const timeoutMs = (options && options.timeoutMs) || 5000;
+			return new Promise((resolve, reject) => {
+				const timer = setTimeout(() => {
+					if (pending.delete(ref)) reject(new Error('request timed out'));
+				}, timeoutMs);
+				pending.set(ref, { resolve, reject, timer });
+				ws.send(JSON.stringify({ type: 'request', ref, event, data: data ?? null }), false, false);
+			});
+		},
 		topic(name) {
 			return createScopedTopic(platform.publish, name);
 		}
 	};
+	let nextRequestRefT = 1;
 
 	app.ws(wsPath, {
 		maxPayloadLength: 64 * 1024,
@@ -253,6 +271,17 @@ export async function createTestServer(options = {}) {
 							}
 							return;
 						}
+						if (msg.type === 'reply' && hasRefT(msg.ref)) {
+							const pending = ws.getUserData()[WS_PENDING_REQUESTS];
+							const entry = pending?.get(msg.ref);
+							if (entry) {
+								pending.delete(msg.ref);
+								clearTimeout(entry.timer);
+								if (typeof msg.error === 'string') entry.reject(new Error(msg.error));
+								else entry.resolve(msg.data);
+							}
+							return;
+						}
 						if (msg.type === 'resume' && typeof msg.sessionId === 'string' &&
 							msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
 							if (handler.resume) {
@@ -283,7 +312,16 @@ export async function createTestServer(options = {}) {
 		},
 
 		close(ws, code, message) {
-			const subs = ws.getUserData()?.[WS_SUBSCRIPTIONS] || new Set();
+			const ud = ws.getUserData() || {};
+			const subs = ud[WS_SUBSCRIPTIONS] || new Set();
+			const pending = ud[WS_PENDING_REQUESTS];
+			if (pending && pending.size > 0) {
+				for (const entry of pending.values()) {
+					clearTimeout(entry.timer);
+					try { entry.reject(new Error('connection closed')); } catch {}
+				}
+				pending.clear();
+			}
 			handler.close?.(ws, { code, message, platform, subscriptions: subs });
 			wsConnections.delete(ws);
 		}
@@ -298,6 +336,7 @@ export async function createTestServer(options = {}) {
 				wsUrl: `ws://localhost:${boundPort}${wsPath}`,
 				port: boundPort,
 				platform,
+				wsConnections,
 				close() {
 					for (const ws of wsConnections) ws.close(1001, 'Test server closing');
 					wsConnections.clear();
