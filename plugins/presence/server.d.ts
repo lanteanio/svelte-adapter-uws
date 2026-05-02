@@ -61,9 +61,9 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 	 *
 	 * What happens:
 	 * 1. Adds the user to the topic's presence map
-	 * 2. Broadcasts a `join` event to others already present
+	 * 2. Buffers a `join` entry into the next presence_diff broadcast (microtask-flushed)
 	 * 3. Subscribes this ws to the presence channel
-	 * 4. Sends the full current list to this ws
+	 * 4. Sends the full current snapshot (`presence_state`) to this ws
 	 *
 	 * @example
 	 * ```js
@@ -79,7 +79,8 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 	 *
 	 * Call this from your `close` hook. Handles multi-tab correctly:
 	 * if the user has other connections still open, they stay present.
-	 * Only broadcasts a `leave` event when the last connection closes.
+	 * Only buffers a `leave` entry into the next presence_diff when the
+	 * last connection closes.
 	 *
 	 * @example
 	 * ```js
@@ -91,7 +92,7 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 	leave(ws: WebSocket<any>, platform: Platform): void;
 
 	/**
-	 * Send the current presence list to a connection without joining.
+	 * Send the current presence snapshot (`presence_state`) to a connection without joining.
 	 *
 	 * Use this for observers (admin dashboards, spectators) who want to
 	 * see who's present without being counted as present themselves.
@@ -142,10 +143,23 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 	clear(): void;
 
 	/**
+	 * Drain any buffered `presence_diff` publishes synchronously.
+	 *
+	 * Diffs are normally microtask-batched: multiple joins / leaves in the
+	 * same tick collapse into one broadcast frame. Tests use this to
+	 * assert on the wire output without awaiting the microtask queue.
+	 * Production code rarely needs it; useful when a caller must make
+	 * presence state visible before its own synchronous block returns.
+	 *
+	 * No-op when there is nothing buffered.
+	 */
+	flushDiffs(): void;
+
+	/**
 	 * Ready-made WebSocket hooks for zero-config presence.
 	 *
 	 * `subscribe` handles both regular topics (calls `join`) and `__presence:*`
-	 * topics (calls `sync` so the client gets the current list immediately).
+	 * topics (calls `sync` so the client gets the current snapshot immediately).
 	 * `unsubscribe` removes the user from a single topic's presence when the
 	 * client unsubscribes without disconnecting.
 	 * `close` calls `leave` (removes from all topics).

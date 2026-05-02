@@ -198,6 +198,65 @@ export function createPresence(options = {}) {
 	const topicPresence = new Map();
 
 	/**
+	 * Per-topic pending diff buffer: latest op per key wins. Joins and leaves
+	 * happening on the same key in a tick collapse so the wire only sees the
+	 * net change. Flushed once per microtask via `scheduleDiffFlush`.
+	 * @type {Map<string, Map<string, { op: 'join' | 'leave', data: Record<string, any> }>>}
+	 */
+	const pendingDiffs = new Map();
+	let diffFlushScheduled = false;
+
+	/**
+	 * @param {string} topic
+	 * @param {'join' | 'leave'} op
+	 * @param {string} key
+	 * @param {Record<string, any>} data
+	 * @param {import('../../index.js').Platform} platform
+	 */
+	function bufferDiff(topic, op, key, data, platform) {
+		let entries = pendingDiffs.get(topic);
+		if (!entries) {
+			entries = new Map();
+			pendingDiffs.set(topic, entries);
+		}
+		entries.set(key, { op, data });
+		if (!diffFlushScheduled) {
+			diffFlushScheduled = true;
+			queueMicrotask(() => flushDiffs(platform));
+		}
+	}
+
+	/** @param {import('../../index.js').Platform} platform */
+	function flushDiffs(platform) {
+		diffFlushScheduled = false;
+		for (const [topic, entries] of pendingDiffs) {
+			/** @type {Record<string, Record<string, any>>} */
+			const joins = {};
+			/** @type {Record<string, Record<string, any>>} */
+			const leaves = {};
+			for (const [key, { op, data }] of entries) {
+				if (op === 'join') joins[key] = data;
+				else leaves[key] = data;
+			}
+			platform.publish(TOPIC_PREFIX + topic, 'presence_diff', { joins, leaves });
+		}
+		pendingDiffs.clear();
+	}
+
+	/**
+	 * Build a presence_state snapshot for a topic: {[key]: data}.
+	 * @param {Map<string, { data: Record<string, any>, count: number }> | undefined} users
+	 * @returns {Record<string, Record<string, any>>}
+	 */
+	function snapshotState(users) {
+		/** @type {Record<string, Record<string, any>>} */
+		const state = {};
+		if (!users) return state;
+		for (const [k, entry] of users) state[k] = entry.data;
+		return state;
+	}
+
+	/**
 	 * Resolve the dedup key from selected data.
 	 * Falls back to a unique connection ID if the key field is missing.
 	 * @param {Record<string, any>} data
@@ -258,7 +317,7 @@ export function createPresence(options = {}) {
 			if (users.size === 0) {
 				topicPresence.delete(topic);
 			}
-			platform.publish(TOPIC_PREFIX + topic, 'leave', { key: entry.key, data });
+			bufferDiff(topic, 'leave', entry.key, data, platform);
 		}
 		try { ws.unsubscribe(TOPIC_PREFIX + topic); } catch { /* ws already closed */ }
 	}
@@ -302,31 +361,29 @@ export function createPresence(options = {}) {
 			const existing = users.get(key);
 			if (existing) {
 				// Same user, additional connection (another tab) - bump count.
-				// If the displayed data changed (e.g. user updated their avatar in a
-				// different session), notify other clients with an 'updated' event.
+				// A data change (e.g. avatar updated in another session) becomes
+				// a `join` entry in the next presence_diff: client overwrites
+				// the existing key with the new data.
 				existing.count++;
 				if (!deepEqual(existing.data, data)) {
 					existing.data = data;
-					platform.publish(presenceTopic, 'updated', { key, data });
+					bufferDiff(topic, 'join', key, data, platform);
 				}
 			} else {
-				// New user on this topic
+				// New user on this topic - record the join in the next diff so
+				// other subscribers see them appear.
 				users.set(key, { data, count: 1 });
-				// Publish join BEFORE subscribing ws - the joining client
-				// doesn't need to see their own join event (they get the
-				// full list below). Other clients see the join.
-				platform.publish(presenceTopic, 'join', { key, data });
+				bufferDiff(topic, 'join', key, data, platform);
 			}
 
 			// Subscribe this ws to the presence channel (server-side, idempotent)
 			ws.subscribe(presenceTopic);
 
-			// Send the full current list to this connection
-			const list = [];
-			for (const [k, entry] of users) {
-				list.push({ key: k, data: entry.data });
-			}
-			platform.send(ws, presenceTopic, 'list', list);
+			// Send the full current snapshot to this connection. The joining
+			// user sees the complete state (including themselves) immediately;
+			// any pending diff fan-out reaches them too but is idempotent on
+			// the client (joins[key] = data is a no-op if already set).
+			platform.send(ws, presenceTopic, 'presence_state', snapshotState(users));
 		},
 
 		leave(ws, platform) {
@@ -345,14 +402,8 @@ export function createPresence(options = {}) {
 			capturePlatform(platform);
 			const users = topicPresence.get(topic);
 			const presenceTopic = TOPIC_PREFIX + topic;
-			const list = [];
-			if (users) {
-				for (const [k, entry] of users) {
-					list.push({ key: k, data: entry.data });
-				}
-			}
 			ws.subscribe(presenceTopic);
-			platform.send(ws, presenceTopic, 'list', list);
+			platform.send(ws, presenceTopic, 'presence_state', snapshotState(users));
 		},
 
 		list(topic) {
@@ -378,7 +429,23 @@ export function createPresence(options = {}) {
 			_platform = null;
 			wsTopics.clear();
 			topicPresence.clear();
+			pendingDiffs.clear();
+			diffFlushScheduled = false;
 			connCounter = 0;
+		},
+
+		/**
+		 * Drain any buffered diff publishes synchronously. Tests use this
+		 * to assert on the wire output without awaiting the microtask
+		 * queue. Production code generally does not need to call it - the
+		 * microtask flush happens automatically. Useful when a caller
+		 * needs presence state visible to other workers before its own
+		 * synchronous block returns (e.g. before responding to an HTTP
+		 * request that just triggered a leave).
+		 */
+		flushDiffs() {
+			if (!diffFlushScheduled || !_platform) return;
+			flushDiffs(_platform);
 		},
 
 		hooks: {

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Presence plugin wire format switched to a compact diff protocol.** The five-event format (`list` / `join` / `updated` / `leave` / `heartbeat`) collapses to two diff-shaped events plus the existing heartbeat:
+  - `{event: 'presence_state', data: {[key]: meta}}` - full snapshot, sent to a single connection on join or sync. Replaces the array-shaped `list`.
+  - `{event: 'presence_diff', data: {joins: {[key]: meta}, leaves: {[key]: meta}}}` - changes, broadcast to topic subscribers. Replaces individual `join` / `updated` / `leave` frames.
+
+  Diffs are now microtask-batched: multiple joins / leaves in the same tick collapse into one frame. Within a diff, leaves apply first then joins, so an update (same key in both) ends with the user present using the new data; if a key cycles join then leave in the same tick, the diff carries only the latest op (leave wins). `heartbeat` is unchanged. The `presence()` Svelte store API on the client is unchanged - the wire change is internal to the plugin's server <-> client round-trip. Hand-rolled clients that consume the wire directly need to switch decoders. Bundle ships server + client together so single-package upgrades are seamless; stale browser tabs from a previous deploy will see a blank presence list until refresh (same compat surface as A4 / A6).
+- **`tracker.flushDiffs()` exposed on the presence tracker** for callers that need the buffered diff to land synchronously - tests are the primary user, but production code that needs presence state visible to other workers before its own block returns can call it explicitly. No-op when nothing is buffered.
+
 ### Added
 
 - **`platform.request(ws, event, data, options?)` for server-initiated request/reply over the same WebSocket.** The server picks a fresh `ref`, sends `{type:'request', ref, event, data}`, and the returned Promise resolves with whatever the client's `onRequest` handler returned. Rejects with `Error('request timed out')` after `timeoutMs` (default `5000`) and with `Error('connection closed')` if the WebSocket closes before a reply arrives. Pending requests are tracked per-connection on `userData[WS_PENDING_REQUESTS]`, so close cleanup is automatic; refs scoped per-connection so a stray reply on one socket cannot resolve a request on another. Use this for server-driven confirmations, capability challenges, or push-driven state queries that today require user code to maintain its own correlation state.

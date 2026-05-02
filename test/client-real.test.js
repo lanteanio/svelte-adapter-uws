@@ -1526,14 +1526,14 @@ describe('client.js (real module)', () => {
 			let current = [];
 			const unsub = store.subscribe((v) => { current = v; });
 
-			// Initial list
-			ws._receive({ topic: '__presence:presence-updated-topic', event: 'list',
-				data: [{ key: '1', data: { id: '1', name: 'Alice' } }] });
+			// Initial state snapshot
+			ws._receive({ topic: '__presence:presence-updated-topic', event: 'presence_state',
+				data: { '1': { id: '1', name: 'Alice' } } });
 			expect(current).toEqual([{ id: '1', name: 'Alice' }]);
 
-			// Server broadcasts updated data for the same key
-			ws._receive({ topic: '__presence:presence-updated-topic', event: 'updated',
-				data: { key: '1', data: { id: '1', name: 'Alice Renamed' } } });
+			// Server broadcasts updated data for the same key (a 'join' in the diff overwrites)
+			ws._receive({ topic: '__presence:presence-updated-topic', event: 'presence_diff',
+				data: { joins: { '1': { id: '1', name: 'Alice Renamed' } }, leaves: {} } });
 			expect(current).toEqual([{ id: '1', name: 'Alice Renamed' }]);
 
 			unsub();
@@ -2053,8 +2053,9 @@ describe('client.js (real module)', () => {
 			let current = [];
 			const unsub = store.subscribe((v) => { current = v; });
 
-			ws._receive({ topic: '__presence:p-join', event: 'list', data: [] });
-			ws._receive({ topic: '__presence:p-join', event: 'join', data: { key: '1', data: { name: 'Alice' } } });
+			ws._receive({ topic: '__presence:p-join', event: 'presence_state', data: {} });
+			ws._receive({ topic: '__presence:p-join', event: 'presence_diff',
+				data: { joins: { '1': { name: 'Alice' } }, leaves: {} } });
 			expect(current).toEqual([{ name: 'Alice' }]);
 
 			unsub();
@@ -2070,10 +2071,10 @@ describe('client.js (real module)', () => {
 			let current = [];
 			const unsub = store.subscribe((v) => { current = v; });
 
-			ws._receive({ topic: '__presence:p-join-dup', event: 'list',
-				data: [{ key: '1', data: { name: 'Alice' } }] });
-			ws._receive({ topic: '__presence:p-join-dup', event: 'join',
-				data: { key: '1', data: { name: 'Alice' } } });
+			ws._receive({ topic: '__presence:p-join-dup', event: 'presence_state',
+				data: { '1': { name: 'Alice' } } });
+			ws._receive({ topic: '__presence:p-join-dup', event: 'presence_diff',
+				data: { joins: { '1': { name: 'Alice' } }, leaves: {} } });
 			expect(current).toHaveLength(1);
 
 			unsub();
@@ -2089,11 +2090,12 @@ describe('client.js (real module)', () => {
 			let current = [];
 			const unsub = store.subscribe((v) => { current = v; });
 
-			ws._receive({ topic: '__presence:p-leave', event: 'list',
-				data: [{ key: '1', data: { name: 'Alice' } }, { key: '2', data: { name: 'Bob' } }] });
+			ws._receive({ topic: '__presence:p-leave', event: 'presence_state',
+				data: { '1': { name: 'Alice' }, '2': { name: 'Bob' } } });
 			expect(current).toHaveLength(2);
 
-			ws._receive({ topic: '__presence:p-leave', event: 'leave', data: { key: '1' } });
+			ws._receive({ topic: '__presence:p-leave', event: 'presence_diff',
+				data: { joins: {}, leaves: { '1': { name: 'Alice' } } } });
 			expect(current).toEqual([{ name: 'Bob' }]);
 
 			unsub();
@@ -2110,8 +2112,8 @@ describe('client.js (real module)', () => {
 			let current = [];
 			const unsub = store.subscribe((v) => { current = v; });
 
-			ws._receive({ topic: '__presence:p-heartbeat', event: 'list',
-				data: [{ key: '1', data: { name: 'Alice' } }] });
+			ws._receive({ topic: '__presence:p-heartbeat', event: 'presence_state',
+				data: { '1': { name: 'Alice' } } });
 			expect(current).toHaveLength(1);
 
 			// Advance near maxAge, then send heartbeat to refresh
@@ -2147,8 +2149,8 @@ describe('client.js (real module)', () => {
 			let current = [];
 			const unsub = store.subscribe((v) => { current = v; });
 
-			ws._receive({ topic: '__presence:presence-sweep', event: 'list',
-				data: [{ key: '1', data: { id: '1', name: 'Alice' } }] });
+			ws._receive({ topic: '__presence:presence-sweep', event: 'presence_state',
+				data: { '1': { id: '1', name: 'Alice' } } });
 			expect(current).toHaveLength(1);
 
 			vi.advanceTimersByTime(3000);

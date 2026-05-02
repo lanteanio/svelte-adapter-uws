@@ -112,42 +112,41 @@ export function presence(topic, options) {
 		sourceUnsub = source.subscribe((event) => {
 			if (event === null) return;
 
-			if (event.event === 'list' && Array.isArray(event.data)) {
+			if (event.event === 'presence_state' && event.data && typeof event.data === 'object') {
 				userMap = new Map();
 				timestamps.clear();
 				const now = Date.now();
-				for (const entry of event.data) {
-					userMap.set(entry.key, entry.data);
-					timestamps.set(entry.key, now);
-				}
-				flush();
-				return;
-			}
-
-			if (event.event === 'join' && event.data != null) {
-				const { key, data } = event.data;
-				timestamps.set(key, Date.now());
-				if (!userMap.has(key)) {
+				for (const [key, data] of Object.entries(event.data)) {
 					userMap.set(key, data);
-					flush();
+					timestamps.set(key, now);
 				}
-				return;
-			}
-
-			if (event.event === 'updated' && event.data != null) {
-				const { key, data } = event.data;
-				timestamps.set(key, Date.now());
-				userMap.set(key, data);
 				flush();
 				return;
 			}
 
-			if (event.event === 'leave' && event.data != null) {
-				const { key } = event.data;
-				timestamps.delete(key);
-				if (userMap.delete(key)) {
-					flush();
+			if (event.event === 'presence_diff' && event.data && typeof event.data === 'object') {
+				const { joins, leaves } = event.data;
+				const now = Date.now();
+				let changed = false;
+				// Apply leaves first so a leave-then-rejoin in the same diff
+				// (rare) ends with the user present.
+				if (leaves && typeof leaves === 'object') {
+					for (const key of Object.keys(leaves)) {
+						timestamps.delete(key);
+						if (userMap.delete(key)) changed = true;
+					}
 				}
+				if (joins && typeof joins === 'object') {
+					for (const [key, data] of Object.entries(joins)) {
+						timestamps.set(key, now);
+						const prev = userMap.get(key);
+						if (prev !== data) {
+							userMap.set(key, data);
+							changed = true;
+						}
+					}
+				}
+				if (changed) flush();
 				return;
 			}
 

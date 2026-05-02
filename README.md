@@ -1924,7 +1924,7 @@ const messages = onReplay('chat', { since: data.seq }).scan(data.messages, (list
 
 ### Presence
 
-Track who's connected to a topic in real time. Handles multi-tab dedup (same user with two tabs open = one presence entry), broadcasts join/leave events, and provides a live store on the client.
+Track who's connected to a topic in real time. Handles multi-tab dedup (same user with two tabs open = one presence entry), broadcasts compact join/leave diffs (microtask-batched so multi-event ticks collapse to one frame), and provides a live store on the client.
 
 #### Setup
 
@@ -1956,7 +1956,7 @@ export function upgrade({ cookies }) {
 export const { subscribe, unsubscribe, close } = presence.hooks;
 ```
 
-The `hooks` object handles everything: `subscribe` calls `join()` for regular topics and sends the current presence list for `__presence:*` topics, `close` calls `leave()`. If you need custom logic (auth gating, topic filtering), wrap the hook:
+The `hooks` object handles everything: `subscribe` calls `join()` for regular topics and sends the current presence snapshot for `__presence:*` topics, `close` calls `leave()`. If you need custom logic (auth gating, topic filtering), wrap the hook:
 
 ```js
 export function subscribe(ws, topic, ctx) {
@@ -2012,11 +2012,23 @@ const presence = createPresence({
 presence.hooks                       // ready-made { subscribe, unsubscribe, close } hooks
 presence.join(ws, topic, platform)   // add user to topic (call from subscribe hook)
 presence.leave(ws, platform)         // remove from all topics (call from close hook)
-presence.sync(ws, topic, platform)   // send list without joining (for observers)
+presence.sync(ws, topic, platform)   // send snapshot without joining (for observers)
 presence.list(topic)                 // current user data array
 presence.count(topic)                // unique user count
+presence.flushDiffs()                // drain buffered presence_diff publishes synchronously
 presence.clear()                     // reset everything (stops heartbeat timer)
 ```
+
+#### Wire format
+
+The plugin emits two frame types on the `__presence:{topic}` channel:
+
+- `{event: 'presence_state', data: {[key]: meta}}` - full snapshot, sent to a single connection on join or sync.
+- `{event: 'presence_diff', data: {joins: {[key]: meta}, leaves: {[key]: meta}}}` - changes, broadcast to all subscribers of the topic.
+
+Diffs are buffered in a microtask queue: multiple joins / leaves in the same tick collapse into one diff frame. Within a diff, `leaves` are applied first then `joins`, so an update (same key in both) ends with the user present using the new data. If a key cycles join then leave in the same tick, the diff carries only the latest op (`leave` wins).
+
+`heartbeat` events (when configured) are unchanged: they carry an array of currently-active keys.
 
 #### Client API
 
@@ -2027,9 +2039,9 @@ const users = presence('room');
 // $users = [{ id: '1', name: 'Alice' }, { id: '2', name: 'Bob' }]
 ```
 
-The `presence()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, entries that haven't been refreshed within that window are automatically removed from the store. This makes clients self-healing when the server fails to broadcast `leave` events under load.
+The `presence()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, entries that haven't been refreshed within that window are automatically removed from the store. This makes clients self-healing when the server fails to broadcast a leaving entry in a `presence_diff` frame under load.
 
-**Important:** `maxAge` requires the server-side `heartbeat` option. Without heartbeat, no events arrive between the initial `list` and eventual `leave`, so maxAge would expire every user -- including ones who are still connected. The heartbeat periodically tells clients which keys are still active, resetting their maxAge timers.
+**Important:** `maxAge` requires the server-side `heartbeat` option. Without heartbeat, no events arrive between the initial `presence_state` snapshot and eventual leave, so maxAge would expire every user -- including ones who are still connected. The heartbeat periodically tells clients which keys are still active, resetting their maxAge timers.
 
 ```js
 // Server: heartbeat every 60s
