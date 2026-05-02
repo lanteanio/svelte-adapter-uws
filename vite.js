@@ -1,7 +1,8 @@
 import path from 'node:path';
 import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS } from './files/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS, WS_SESSION_ID } from './files/utils.js';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -28,7 +29,7 @@ export default function uws(options = {}) {
 	/** @type {Map<import('ws').WebSocket, object>} */
 	const wsWrappers = new Map();
 
-	/** @type {{ upgrade?: Function, open?: Function, message?: Function, close?: Function, drain?: Function, subscribe?: Function, unsubscribe?: Function, authenticate?: Function }} */
+	/** @type {{ upgrade?: Function, open?: Function, message?: Function, close?: Function, drain?: Function, subscribe?: Function, unsubscribe?: Function, resume?: Function, authenticate?: Function }} */
 	let userHandlers = {};
 
 	/**
@@ -185,6 +186,7 @@ export default function uws(options = {}) {
 			drain: mod.drain,
 			subscribe: mod.subscribe,
 			unsubscribe: mod.unsubscribe,
+			resume: mod.resume,
 			authenticate: mod.authenticate
 		};
 	}
@@ -493,8 +495,12 @@ export default function uws(options = {}) {
 
 				const userData = /** @type {any} */ (ws).__userData || {};
 				userData[WS_SUBSCRIPTIONS] = new Set();
+				const sessionId = randomUUID();
+				userData[WS_SESSION_ID] = sessionId;
 				const wrapped = wrapWebSocket(ws, userData);
 				wsWrappers.set(ws, wrapped);
+
+				ws.send('{"type":"welcome","sessionId":"' + sessionId + '"}');
 
 				// Call user open handler
 				userHandlers.open?.(wrapped, { platform });
@@ -540,6 +546,22 @@ export default function uws(options = {}) {
 								}
 								return;
 							}
+							if (msg.type === 'resume' && typeof msg.sessionId === 'string' &&
+								msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
+								if (userHandlers.resume) {
+									try {
+										userHandlers.resume(wrapped, {
+											sessionId: msg.sessionId,
+											lastSeenSeqs: msg.lastSeenSeqs,
+											platform
+										});
+									} catch (err) {
+										console.error('[adapter-uws] resume hook threw:', err);
+									}
+								}
+								ws.send('{"type":"resumed"}');
+								return;
+							}
 						} catch {
 							// Not JSON - fall through to user handler
 						}
@@ -582,7 +604,8 @@ export default function uws(options = {}) {
 					mod.close !== userHandlers.close ||
 					mod.drain !== userHandlers.drain ||
 					mod.subscribe !== userHandlers.subscribe ||
-					mod.unsubscribe !== userHandlers.unsubscribe) {
+					mod.unsubscribe !== userHandlers.unsubscribe ||
+					mod.resume !== userHandlers.resume) {
 					applyHandlers(mod);
 					// Close existing connections so they reconnect with the new handler.
 					// 1012 = "Service Restart" - clients with auto-reconnect will reconnect.

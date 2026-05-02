@@ -636,6 +636,31 @@ function createConnection(options) {
 	/** @type {Map<string, number>} */
 	const topicRefCounts = new Map();
 
+	// Highest seq seen per topic. Sent back to the server on reconnect via
+	// the resume frame so the user's resume hook can replay anything we
+	// missed during the disconnect window. Only topics that the server is
+	// stamping with seq end up here; opted-out topics ({ seq: false }) are
+	// skipped.
+	/** @type {Map<string, number>} */
+	const lastSeenSeqs = new Map();
+
+	// sessionStorage key for the previous connection's session id. Scoped
+	// by ws path so two clients on different endpoints in the same tab do
+	// not collide. Read in-place rather than cached so private-mode tabs
+	// (where sessionStorage throws) silently fall back to no-resume.
+	const sessionStorageKey = 'svelte-adapter-uws.session.' + path;
+
+	function storedSessionId() {
+		try {
+			return typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(sessionStorageKey) : null;
+		} catch { return null; }
+	}
+	function storeSessionId(id) {
+		try {
+			if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(sessionStorageKey, id);
+		} catch {}
+	}
+
 	/** @type {string[]} */
 	const sendQueue = [];
 	const MAX_QUEUE_SIZE = 1000;
@@ -770,6 +795,21 @@ function createConnection(options) {
 			statusStore.set('open');
 			if (debug) console.log('[ws] connected');
 
+			// If we have a previous session id and any tracked seqs, ask the
+			// server to fill the gap before we resubscribe. The server's
+			// resume hook is what actually replays; if no hook is wired, the
+			// server just acks with { type: 'resumed' } and we fall through
+			// to subscribe-batch + live mode (same as a cold connect). The
+			// resume frame is sent before subscribe-batch so any replayed
+			// frames arrive ahead of the first live frames.
+			const prevSessionId = storedSessionId();
+			if (prevSessionId && lastSeenSeqs.size > 0) {
+				const seqs = {};
+				for (const [topic, seq] of lastSeenSeqs) seqs[topic] = seq;
+				if (debug) console.log('[ws] resume sessionId=%s seqs=%o', prevSessionId, seqs);
+				ws?.send(JSON.stringify({ type: 'resume', sessionId: prevSessionId, lastSeenSeqs: seqs }));
+			}
+
 			// Batch resubscriptions into subscribe-batch messages. The server
 			// caps each batch at 256 topics and only parses control messages
 			// under 8192 bytes, so we chunk to stay within both limits.
@@ -820,6 +860,14 @@ function createConnection(options) {
 					const wsEvent = { topic: msg.topic, event: msg.event, data: msg.data };
 					if (debug) console.log('[ws] <-', msg.topic, msg.event, msg.data);
 
+					// Track the highest seq we have seen per topic so we can
+					// present it back on the next reconnect via the resume
+					// frame. Server may opt out of seq stamping per call.
+					if (typeof msg.seq === 'number') {
+						const prev = lastSeenSeqs.get(msg.topic);
+						if (prev === undefined || msg.seq > prev) lastSeenSeqs.set(msg.topic, msg.seq);
+					}
+
 					// Update global events store
 					eventsStore.set(wsEvent);
 
@@ -830,6 +878,16 @@ function createConnection(options) {
 					// Update topic+event filtered stores (wrapped for unique reference)
 					const eStore = eventStores.get(`${msg.topic}\0${msg.event}`);
 					if (eStore) eStore.set({ data: msg.data });
+					return;
+				}
+				if (msg.type === 'welcome' && typeof msg.sessionId === 'string') {
+					storeSessionId(msg.sessionId);
+					if (debug) console.log('[ws] welcome sessionId=%s', msg.sessionId);
+					return;
+				}
+				if (msg.type === 'resumed') {
+					if (debug) console.log('[ws] resumed');
+					return;
 				}
 			} catch {
 				// Not a valid envelope - ignore

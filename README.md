@@ -620,11 +620,32 @@ export function close(ws, { code, message, platform }) {
 export function drain(ws, { platform }) {
   // You can resume sending large messages here
 }
+
+// Called when a reconnecting client presents the previous session id
+// plus the per-topic seq numbers it last saw. Use this to fill the
+// disconnect gap, typically by replaying buffered events. Optional -
+// without this hook, reconnects still work; the client just falls
+// through to live mode without a gap fill.
+export function resume(ws, { sessionId, lastSeenSeqs, platform }) {
+  for (const [topic, sinceSeq] of Object.entries(lastSeenSeqs)) {
+    replay.replay(ws, topic, sinceSeq, platform);
+  }
+}
 ```
+
+### Session resume
+
+On every WS open, the server stamps a session id and announces it to the client (`{"type":"welcome","sessionId":"..."}`). The client stores the id in `sessionStorage` (keyed per ws path) and tracks the highest `seq` it has seen for each topic.
+
+When the connection drops and the client reconnects, it presents the previous session id plus the per-topic last-seen seqs in a `{"type":"resume", sessionId, lastSeenSeqs}` frame, sent before `subscribe-batch`. If you export a `resume` hook, you receive `(ws, { sessionId, lastSeenSeqs, platform })` and can replay any events the client missed during the disconnect window. The server acks with `{"type":"resumed"}` once your hook returns; the client then resubscribes and live messages resume.
+
+Without a `resume` hook the protocol is still safe: the server acks the resume frame, the client falls through to live mode, and your app behaves the same as a cold connect.
+
+The session id is per-process and per-connection. It does not persist across server restarts; a client presenting a session id the server has never seen receives the same `resumed` ack and falls through.
 
 ### Message protocol
 
-The adapter uses a JSON envelope format for all pub/sub messages: `{ topic, event, data }`. Control messages from the client store (`subscribe`, `unsubscribe`, `subscribe-batch`) use `{ type, topic }` or `{ type, topics }`.
+The adapter uses a JSON envelope format for all pub/sub messages: `{ topic, event, data, seq? }`. Control messages from the client store (`subscribe`, `unsubscribe`, `subscribe-batch`, `resume`) use `{ type, topic }`, `{ type, topics }`, or `{ type, sessionId, lastSeenSeqs }`. The server emits `{"type":"welcome","sessionId":"..."}` on open and `{"type":"resumed"}` after handling a resume frame.
 
 To avoid JSON-parsing every incoming message, the handler uses a byte-prefix discriminator: control messages start with `{"type"` (byte 3 is `y`), while user envelopes start with `{"topic"` (byte 3 is `o`). A single byte comparison skips `JSON.parse` entirely for user messages. Messages over 8 KB are also skipped (generous ceiling for `subscribe-batch` with many topics, well above any realistic control message).
 

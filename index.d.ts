@@ -402,6 +402,27 @@ export interface SubscribeContext {
 }
 
 /**
+ * Context passed to the `resume` handler.
+ *
+ * Fired when a reconnecting client presents the session id from its
+ * previous connection plus the per-topic seq numbers it last saw. Use
+ * this to fill the disconnect gap, typically by calling
+ * `replay.replay(ws, topic, sinceSeq, platform)` per entry.
+ */
+export interface ResumeContext {
+	/** Session id the client received in the welcome envelope of its previous connection. */
+	sessionId: string;
+	/**
+	 * Highest seq the client saw per topic before disconnecting. Topics
+	 * the client never received a message for are absent. Pass each
+	 * `(topic, sinceSeq)` to your replay buffer.
+	 */
+	lastSeenSeqs: Record<string, number>;
+	/** The platform API - publish, send, topic helpers, etc. */
+	platform: Platform;
+}
+
+/**
  * Shape of the user's WebSocket handler module.
  *
  * Create a file (e.g. `src/lib/server/websocket.js`) and export any
@@ -526,6 +547,36 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * Use this for flow control when sending large or frequent messages.
 	 */
 	drain?: (ws: WebSocket<UserData>, ctx: OpenContext) => void;
+
+	/**
+	 * Called when a reconnecting client presents a previous session id and
+	 * the per-topic sequence numbers it last saw. Use this to fill the gap
+	 * caused by the disconnect window, typically by calling
+	 * `replay.replay(ws, topic, sinceSeq, platform)` from the replay plugin
+	 * for each topic the client cares about.
+	 *
+	 * If you do not export this hook, reconnects still work; the client
+	 * just falls through to live mode without a gap fill (same as a cold
+	 * connect). Wire it up only when your app needs in-flight events that
+	 * landed during a brief network blip.
+	 *
+	 * The `lastSeenSeqs` object keys are topic names, values are the
+	 * highest `seq` the client received before disconnect. Topics the
+	 * client never received a message for are absent.
+	 *
+	 * @example
+	 * ```js
+	 * import { createReplay } from 'svelte-adapter-uws/plugins/replay';
+	 * const replay = createReplay({ size: 500 });
+	 *
+	 * export function resume(ws, { lastSeenSeqs, platform }) {
+	 *   for (const [topic, sinceSeq] of Object.entries(lastSeenSeqs)) {
+	 *     replay.replay(ws, topic, sinceSeq, platform);
+	 *   }
+	 * }
+	 * ```
+	 */
+	resume?: (ws: WebSocket<UserData>, ctx: ResumeContext) => void;
 
 	/** Called when the connection closes. */
 	close?: (ws: WebSocket<UserData>, ctx: CloseContext) => void;

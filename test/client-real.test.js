@@ -2226,4 +2226,125 @@ describe('client.js (real module)', () => {
 			clientModule.connect().close();
 		});
 	});
+
+	describe('session resume (real module)', () => {
+		/** @type {Map<string, string>} */
+		let storage;
+
+		beforeEach(() => {
+			storage = new Map();
+			globalThis.sessionStorage = /** @type {any} */ ({
+				getItem: (k) => storage.get(k) ?? null,
+				setItem: (k, v) => storage.set(k, String(v)),
+				removeItem: (k) => storage.delete(k),
+				clear: () => storage.clear()
+			});
+		});
+
+		afterEach(() => {
+			delete (/** @type {any} */ (globalThis)).sessionStorage;
+		});
+
+		it('stores sessionId from welcome envelope', async () => {
+			clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'welcome', sessionId: 'abc-123' });
+			expect(storage.get('svelte-adapter-uws.session./ws')).toBe('abc-123');
+			clientModule.connect().close();
+		});
+
+		it('tracks highest seq per topic from incoming events', async () => {
+			vi.useFakeTimers();
+			clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'welcome', sessionId: 's1' });
+			ws._receive({ topic: 'a', event: 'x', data: 1, seq: 5 });
+			ws._receive({ topic: 'a', event: 'x', data: 2, seq: 7 });
+			ws._receive({ topic: 'a', event: 'x', data: 3, seq: 6 }); // out-of-order, ignored
+			ws._receive({ topic: 'b', event: 'y', data: 9, seq: 2 });
+
+			ws.close();
+			await vi.advanceTimersByTimeAsync(10000);
+			const ws2 = MockWebSocket._last;
+			const resumeFrame = ws2._sent.map(s => JSON.parse(s)).find(m => m.type === 'resume');
+			expect(resumeFrame).toBeTruthy();
+			expect(resumeFrame.sessionId).toBe('s1');
+			expect(resumeFrame.lastSeenSeqs).toEqual({ a: 7, b: 2 });
+
+			clientModule.connect().close();
+			vi.useRealTimers();
+		});
+
+		it('sends resume frame before subscribe-batch on reconnect', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.on('topic-x');
+			const unsub = store.subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'welcome', sessionId: 's2' });
+			ws._receive({ topic: 'topic-x', event: 'created', data: {}, seq: 4 });
+
+			ws.close();
+			await vi.advanceTimersByTimeAsync(10000);
+			const ws2 = MockWebSocket._last;
+			const sent = ws2._sent.map(s => JSON.parse(s));
+			const resumeIdx = sent.findIndex(m => m.type === 'resume');
+			const subIdx = sent.findIndex(m => m.type === 'subscribe-batch');
+			expect(resumeIdx).toBeGreaterThanOrEqual(0);
+			expect(subIdx).toBeGreaterThanOrEqual(0);
+			expect(resumeIdx).toBeLessThan(subIdx);
+
+			unsub();
+			clientModule.connect().close();
+			vi.useRealTimers();
+		});
+
+		it('skips resume frame when no seqs have been observed', async () => {
+			vi.useFakeTimers();
+			clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'welcome', sessionId: 's3' });
+
+			ws.close();
+			await vi.advanceTimersByTimeAsync(10000);
+			const ws2 = MockWebSocket._last;
+			const resumeFrame = ws2._sent.map(s => JSON.parse(s)).find(m => m.type === 'resume');
+			expect(resumeFrame).toBeUndefined();
+
+			clientModule.connect().close();
+			vi.useRealTimers();
+		});
+
+		it('does not dispatch welcome or resumed envelopes as data events', async () => {
+			const store = clientModule.on('topic-y');
+			const events = [];
+			const unsub = store.subscribe((v) => { if (v) events.push(v); });
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'welcome', sessionId: 's4' });
+			ws._receive({ type: 'resumed' });
+			ws._receive({ topic: 'topic-y', event: 'msg', data: 'hi' });
+
+			expect(events).toHaveLength(1);
+			expect(events[0].data).toBe('hi');
+
+			unsub();
+			clientModule.connect().close();
+		});
+
+		it('survives missing sessionStorage (private mode)', async () => {
+			delete (/** @type {any} */ (globalThis)).sessionStorage;
+
+			clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+			expect(() => ws._receive({ type: 'welcome', sessionId: 'lost' })).not.toThrow();
+			expect(() => ws._receive({ topic: 't', event: 'e', data: 1, seq: 1 })).not.toThrow();
+
+			clientModule.connect().close();
+		});
+	});
 });

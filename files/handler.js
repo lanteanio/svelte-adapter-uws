@@ -6,13 +6,14 @@ import { Readable } from 'node:stream';
 import { performance } from 'node:perf_hooks';
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
 import { parentPort } from 'node:worker_threads';
+import { randomUUID } from 'node:crypto';
 import uWS from 'uWebSockets.js';
 import { Server } from 'SERVER';
 import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, WS_SUBSCRIPTIONS, WS_COALESCED } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -1922,9 +1923,16 @@ if (WS_ENABLED) {
 			// Track which topics this connection is subscribed to.
 			// Used to populate CloseContext.subscriptions for the user's close handler,
 			// enabling deterministic cleanup of per-subscription server state.
-			ws.getUserData()[WS_SUBSCRIPTIONS] = new Set();
+			const userData = ws.getUserData();
+			userData[WS_SUBSCRIPTIONS] = new Set();
+			// Stamp a fresh session id and announce it. The client stores it
+			// in sessionStorage and presents it back via { type: 'resume' }
+			// after a reconnect so the user's resume hook can fill the gap.
+			const sessionId = randomUUID();
+			userData[WS_SESSION_ID] = sessionId;
+			ws.send('{"type":"welcome","sessionId":"' + sessionId + '"}', false, false);
 			wsConnections.add(ws);
-			if (wsDebug) console.log('[ws] open connections=%d', wsConnections.size);
+			if (wsDebug) console.log('[ws] open connections=%d session=%s', wsConnections.size, sessionId);
 			wsModule.open?.(ws, { platform });
 		},
 
@@ -1981,6 +1989,28 @@ if (WS_ENABLED) {
 							subscribed++;
 						}
 						if (wsDebug) console.log('[ws] subscribe-batch count=%d', subscribed);
+						return;
+					}
+					if (msg.type === 'resume' && typeof msg.sessionId === 'string' &&
+						msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
+						// Client presents the previous session id plus per-topic
+						// lastSeenSeqs so the user's resume hook can fill the gap
+						// (typically by calling replay.replay(ws, topic, sinceSeq, platform)
+						// for each topic). The hook is optional - if unset, we still
+						// ack so the client can switch to live mode.
+						if (wsModule.resume) {
+							try {
+								wsModule.resume(ws, {
+									sessionId: msg.sessionId,
+									lastSeenSeqs: msg.lastSeenSeqs,
+									platform
+								});
+							} catch (err) {
+								console.error('[ws] resume hook threw:', err);
+							}
+						}
+						ws.send('{"type":"resumed"}', false, false);
+						if (wsDebug) console.log('[ws] resume sessionId=%s', msg.sessionId);
 						return;
 					}
 				} catch {

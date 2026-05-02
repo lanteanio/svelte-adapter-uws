@@ -281,6 +281,7 @@ export function computePressureReason(sample, thresholds) {
 
 export const WS_SUBSCRIPTIONS = Symbol('adapter-uws.ws.subscriptions');
 export const WS_COALESCED = Symbol('adapter-uws.ws.coalesced');
+export const WS_SESSION_ID = Symbol('adapter-uws.ws.session-id');
 
 /**
  * Safely quote a string for JSON embedding in topic / event positions.

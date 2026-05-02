@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Session resume protocol on WebSocket reconnect.** On every WS open the server now stamps a per-connection session id and announces it to the client (`{"type":"welcome","sessionId":"..."}`). The client stores the id in `sessionStorage` (keyed per ws path) and tracks the highest `seq` it has seen for each topic. When the connection drops and the client reconnects, it presents the previous session id plus the per-topic last-seen seqs in a `{"type":"resume", sessionId, lastSeenSeqs}` frame, sent before `subscribe-batch`. The server acks with `{"type":"resumed"}`.
+- **New optional `resume` hook on `hooks.ws`** receiving `(ws, { sessionId, lastSeenSeqs, platform })`. Use this to fill the disconnect gap, typically by calling the replay plugin's `replay.replay(ws, topic, sinceSeq, platform)` for each topic. Without the hook, the server still acks the resume frame and the client falls through to live mode (same behavior as a cold connect). Old clients ignore the welcome envelope; old servers ignore the resume frame; both directions stay backward compatible. The dev Vite plugin and the test harness (`createTestServer`) carry the same protocol so dev mode, tests, and prod behave identically.
+- **`WS_SESSION_ID` Symbol slot on `ws.getUserData()`** stamped before the user's `open` hook runs, so handlers can read the session id from `userData[WS_SESSION_ID]` (export from `svelte-adapter-uws/files/utils.js`) without parsing the wire envelope.
+
 ## [0.5.0-next.3] - 2026-04-29
 
 ### Fixed

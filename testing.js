@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS, WS_SESSION_ID } from './files/utils.js';
 
 /**
  * Build a JSON envelope string matching the production wire format.
@@ -153,7 +154,11 @@ export async function createTestServer(options = {}) {
 		},
 
 		open(ws) {
-			ws.getUserData()[WS_SUBSCRIPTIONS] = new Set();
+			const userData = ws.getUserData();
+			userData[WS_SUBSCRIPTIONS] = new Set();
+			const sessionId = randomUUID();
+			userData[WS_SESSION_ID] = sessionId;
+			ws.send('{"type":"welcome","sessionId":"' + sessionId + '"}', false, false);
 			wsConnections.add(ws);
 			handler.open?.(ws, { platform });
 			for (const resolve of connectionWaiters) resolve(undefined);
@@ -187,6 +192,22 @@ export async function createTestServer(options = {}) {
 								ws.subscribe(topic);
 								ws.getUserData()[WS_SUBSCRIPTIONS]?.add(topic);
 							}
+							return;
+						}
+						if (msg.type === 'resume' && typeof msg.sessionId === 'string' &&
+							msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
+							if (handler.resume) {
+								try {
+									handler.resume(ws, {
+										sessionId: msg.sessionId,
+										lastSeenSeqs: msg.lastSeenSeqs,
+										platform
+									});
+								} catch (err) {
+									console.error('[adapter-uws/testing] resume hook threw:', err);
+								}
+							}
+							ws.send('{"type":"resumed"}', false, false);
 							return;
 						}
 					} catch {}
