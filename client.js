@@ -871,6 +871,12 @@ function createConnection(options) {
 			setStatusOpen();
 			if (debug) console.log('[ws] connected');
 
+			// Advertise client capabilities. Server stores these on the
+			// connection's userData and uses them to gate opt-in wire
+			// features (currently: 'batch' for platform.publishBatched
+			// frames). Old servers ignore the unknown frame type.
+			ws?.send('{"type":"hello","caps":["batch"]}');
+
 			// If we have a previous session id and any tracked seqs, ask the
 			// server to fill the gap before we resubscribe. The server's
 			// resume hook is what actually replays; if no hook is wired, the
@@ -922,6 +928,26 @@ function createConnection(options) {
 			}
 		};
 
+		// Dispatch a single inbound event envelope through the per-topic
+		// store ladder. Extracted so that a batched frame ({type:'batch',
+		// events:[...]}) can drive each contained event through the same
+		// path - indistinguishable from N individual frames except for
+		// the latency drop and the lower onmessage bill.
+		function dispatchEvent(msg) {
+			/** @type {import('./client.js').WSEvent} */
+			const wsEvent = { topic: msg.topic, event: msg.event, data: msg.data };
+			if (debug) console.log('[ws] <-', msg.topic, msg.event, msg.data);
+			if (typeof msg.seq === 'number') {
+				const prev = lastSeenSeqs.get(msg.topic);
+				if (prev === undefined || msg.seq > prev) lastSeenSeqs.set(msg.topic, msg.seq);
+			}
+			eventsStore.set(wsEvent);
+			const tStore = topicStores.get(msg.topic);
+			if (tStore) tStore.set(wsEvent);
+			const eStore = eventStores.get(`${msg.topic}\0${msg.event}`);
+			if (eStore) eStore.set({ data: msg.data });
+		}
+
 		ws.onmessage = (rawEvent) => {
 			lastServerMessage = Date.now();
 			try {
@@ -932,28 +958,20 @@ function createConnection(options) {
 				}
 				const msg = JSON.parse(rawEvent.data);
 				if (msg.topic && msg.event !== undefined) {
-					/** @type {import('./client.js').WSEvent} */
-					const wsEvent = { topic: msg.topic, event: msg.event, data: msg.data };
-					if (debug) console.log('[ws] <-', msg.topic, msg.event, msg.data);
-
-					// Track the highest seq we have seen per topic so we can
-					// present it back on the next reconnect via the resume
-					// frame. Server may opt out of seq stamping per call.
-					if (typeof msg.seq === 'number') {
-						const prev = lastSeenSeqs.get(msg.topic);
-						if (prev === undefined || msg.seq > prev) lastSeenSeqs.set(msg.topic, msg.seq);
+					dispatchEvent(msg);
+					return;
+				}
+				if (msg.type === 'batch' && Array.isArray(msg.events)) {
+					// Wire-level batched frame from platform.publishBatched.
+					// Demux: drive each contained event through the same
+					// per-topic store ladder a single-event frame would
+					// take. Order matches the server's submitted order.
+					for (let i = 0; i < msg.events.length; i++) {
+						const e = msg.events[i];
+						if (e && typeof e.topic === 'string' && e.event !== undefined) {
+							dispatchEvent(e);
+						}
 					}
-
-					// Update global events store
-					eventsStore.set(wsEvent);
-
-					// Update topic-level store
-					const tStore = topicStores.get(msg.topic);
-					if (tStore) tStore.set(wsEvent);
-
-					// Update topic+event filtered stores (wrapped for unique reference)
-					const eStore = eventStores.get(`${msg.topic}\0${msg.event}`);
-					if (eStore) eStore.set({ data: msg.data });
 					return;
 				}
 				if (msg.type === 'welcome' && typeof msg.sessionId === 'string') {

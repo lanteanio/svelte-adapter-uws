@@ -2,7 +2,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY } from './files/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS } from './files/utils.js';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -109,6 +109,90 @@ export default function uws(options = {}) {
 	}
 
 	/**
+	 * Dev-mode equivalent of `platform.publishBatched`. Same wire shape
+	 * as production - one `{type:'batch',events:[...]}` frame per
+	 * cap-able subscriber, fall back to N individual frames per old
+	 * client. Note: dev mode does not currently stamp per-topic seq on
+	 * publish frames, so batch events emitted in dev carry no `seq`
+	 * field. Tests that need to exercise the seq protocol should run
+	 * against `createTestServer` (testing.js).
+	 *
+	 * @param {Array<{ topic: string, event: string, data?: unknown, options?: { relay?: boolean, seq?: boolean } }>} messages
+	 */
+	function publishBatched(messages) {
+		if (!Array.isArray(messages) || messages.length === 0) return;
+		messages = collapseByCoalesceKey(messages);
+		if (messages.length === 0) return;
+		const firstTopic = messages[0].topic;
+		let allSameTopic = true;
+		for (let i = 1; i < messages.length; i++) {
+			if (messages[i].topic !== firstTopic) { allSameTopic = false; break; }
+		}
+		let allSeeAll = allSameTopic;
+		let batchTopics = null;
+		if (!allSameTopic) {
+			batchTopics = new Set();
+			for (let i = 0; i < messages.length; i++) batchTopics.add(messages[i].topic);
+			allSeeAll = true;
+			for (const [ws, topics] of subscriptions) {
+				if (ws.readyState !== 1 || topics.size === 0) continue;
+				let touchesAny = false;
+				let touchesAll = true;
+				for (const t of batchTopics) {
+					if (topics.has(t)) touchesAny = true;
+					else touchesAll = false;
+				}
+				if (touchesAny && !touchesAll) { allSeeAll = false; break; }
+			}
+		}
+		if (!allSameTopic && !allSeeAll) {
+			// Slow-path fallback: per-event publish() so the caller
+			// pays no penalty on small / disjoint batch shapes (parity
+			// with the production handler).
+			for (let i = 0; i < messages.length; i++) {
+				const m = messages[i];
+				publish(m.topic, m.event, m.data, m.options);
+			}
+			return;
+		}
+		// Fast path: build envelopes and a shared batch frame.
+		const events = new Array(messages.length);
+		for (let i = 0; i < messages.length; i++) {
+			const m = messages[i];
+			events[i] = {
+				topic: m.topic,
+				env: '{"topic":' + esc(m.topic) + ',"event":' + esc(m.event) + ',"data":' + JSON.stringify(m.data ?? null) + '}'
+			};
+		}
+		const slice = new Array(events.length);
+		for (let i = 0; i < events.length; i++) slice[i] = events[i].env;
+		const sharedBatchEnv = wrapBatchEnvelope(slice);
+		for (const [ws, topics] of subscriptions) {
+			if (ws.readyState !== 1) continue;
+			let receives = false;
+			if (allSameTopic) {
+				receives = topics.has(firstTopic);
+			} else {
+				for (const t of batchTopics) {
+					if (topics.has(t)) { receives = true; break; }
+				}
+			}
+			if (!receives) continue;
+			const userData = /** @type {any} */ (ws).__userData || {};
+			const caps = userData[WS_CAPS];
+			if (caps && caps.has('batch')) {
+				ws.send(sharedBatchEnv);
+				bumpOutV(userData, sharedBatchEnv);
+			} else {
+				for (let i = 0; i < events.length; i++) {
+					ws.send(events[i].env);
+					bumpOutV(userData, events[i].env);
+				}
+			}
+		}
+	}
+
+	/**
 	 * Send to a single connection.
 	 * @param {object} ws - Wrapped WebSocket
 	 * @param {string} topic
@@ -194,6 +278,7 @@ export default function uws(options = {}) {
 	// Dev-mode platform - same API shape as production
 	const platform = {
 		publish,
+		publishBatched,
 		send,
 		sendTo,
 		request,
@@ -678,6 +763,17 @@ export default function uws(options = {}) {
 								subscriptions.get(ws)?.delete(msg.topic);
 								/** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS]?.delete(msg.topic);
 								userHandlers.unsubscribe?.(wrapped, msg.topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
+								return;
+							}
+							if (msg.type === 'hello' && Array.isArray(msg.caps)) {
+								const ud = /** @type {any} */ (ws).__userData;
+								if (ud) {
+									const caps = new Set();
+									for (let i = 0; i < msg.caps.length; i++) {
+										if (typeof msg.caps[i] === 'string') caps.add(msg.caps[i]);
+									}
+									ud[WS_CAPS] = caps;
+								}
 								return;
 							}
 							if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {

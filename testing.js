@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS } from './files/utils.js';
 
 /**
  * Build a JSON envelope string matching the production wire format.
@@ -175,6 +175,83 @@ export async function createTestServer(options = {}) {
 		batch(messages) {
 			return messages.map(({ topic, event, data }) => platform.publish(topic, event, data));
 		},
+		publishBatched(messages) {
+			if (!Array.isArray(messages) || messages.length === 0) return;
+			messages = collapseByCoalesceKey(messages);
+			if (messages.length === 0) return;
+			const firstTopic = messages[0].topic;
+			let allSameTopic = true;
+			for (let i = 1; i < messages.length; i++) {
+				if (messages[i].topic !== firstTopic) { allSameTopic = false; break; }
+			}
+			let allSeeAll = true;
+			let everyoneCapable = true;
+			let batchTopics = null;
+			if (!allSameTopic) {
+				batchTopics = new Set();
+				for (let i = 0; i < messages.length; i++) batchTopics.add(messages[i].topic);
+			}
+			for (const ws of wsConnections) {
+				const ud = ws.getUserData();
+				const subs = ud[WS_SUBSCRIPTIONS];
+				if (!subs || subs.size === 0) continue;
+				let touchesAny = false;
+				if (allSameTopic) {
+					touchesAny = subs.has(firstTopic);
+				} else {
+					let touchesAll = true;
+					for (const t of batchTopics) {
+						if (subs.has(t)) touchesAny = true;
+						else touchesAll = false;
+					}
+					if (touchesAny && !touchesAll) { allSeeAll = false; break; }
+				}
+				if (!touchesAny) continue;
+				const caps = ud[WS_CAPS];
+				if (!caps || !caps.has('batch')) { everyoneCapable = false; break; }
+			}
+			if ((!allSameTopic && !allSeeAll) || !everyoneCapable) {
+				// Slow-path fallback: per-event publish().
+				for (let i = 0; i < messages.length; i++) {
+					const m = messages[i];
+					platform.publish(m.topic, m.event, m.data, m.options);
+				}
+				return;
+			}
+			const events = new Array(messages.length);
+			for (let i = 0; i < messages.length; i++) {
+				const m = messages[i];
+				const seq = (m.options && m.options.seq === false)
+					? null
+					: nextTopicSeq(topicSeqs, m.topic);
+				events[i] = { topic: m.topic, env: envelope(m.topic, m.event, m.data, seq) };
+			}
+			const slice = new Array(events.length);
+			for (let i = 0; i < events.length; i++) slice[i] = events[i].env;
+			const sharedBatchEnv = wrapBatchEnvelope(slice);
+			// Chaos check: when active, sendOutboundT consults drop /
+			// delay state per recipient, so we cannot use the C++
+			// fanout shortcut. Walk subs in JS and route through the
+			// chaos chokepoint.
+			if (chaos.scenario !== null) {
+				for (const ws of wsConnections) {
+					const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+					if (!subs || subs.size === 0) continue;
+					let receives = false;
+					if (allSameTopic) {
+						receives = subs.has(firstTopic);
+					} else {
+						for (const t of batchTopics) {
+							if (subs.has(t)) { receives = true; break; }
+						}
+					}
+					if (receives) sendOutboundT(ws, sharedBatchEnv);
+				}
+				return;
+			}
+			const fanoutTopic = allSameTopic ? firstTopic : messages[0].topic;
+			app.publish(fanoutTopic, sharedBatchEnv, false, false);
+		},
 		request(ws, event, data, options) {
 			const userData = ws.getUserData();
 			let pending = userData[WS_PENDING_REQUESTS];
@@ -337,6 +414,14 @@ export async function createTestServer(options = {}) {
 							ws.unsubscribe(msg.topic);
 							ws.getUserData()[WS_SUBSCRIPTIONS]?.delete(msg.topic);
 							handler.unsubscribe?.(ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
+							return;
+						}
+						if (msg.type === 'hello' && Array.isArray(msg.caps)) {
+							const caps = new Set();
+							for (let i = 0; i < msg.caps.length; i++) {
+								if (typeof msg.caps[i] === 'string') caps.add(msg.caps[i]);
+							}
+							ws.getUserData()[WS_CAPS] = caps;
 							return;
 						}
 						if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {

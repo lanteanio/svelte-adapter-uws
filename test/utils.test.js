@@ -11,6 +11,8 @@ import {
 	computeTopPublishers,
 	nextTopicSeq,
 	completeEnvelope,
+	wrapBatchEnvelope,
+	collapseByCoalesceKey,
 	esc,
 	isValidWireTopic,
 	createScopedTopic,
@@ -2438,5 +2440,129 @@ describe('createChaosState', () => {
 		c.set({ scenario: 'drop-outbound', dropRate: 1 });
 		expect(c.getDelayMs()).toBe(0);
 		expect(c.shouldDropOutbound()).toBe(true);
+	});
+});
+
+// -- wrapBatchEnvelope ------------------------------------------------------
+
+describe('wrapBatchEnvelope', () => {
+	it('produces a {type:"batch",events:[]} frame for an empty list', () => {
+		expect(wrapBatchEnvelope([])).toBe('{"type":"batch","events":[]}');
+	});
+
+	it('wraps a single event envelope', () => {
+		const env = '{"topic":"feed","event":"tick","data":1}';
+		const out = wrapBatchEnvelope([env]);
+		expect(JSON.parse(out)).toEqual({
+			type: 'batch',
+			events: [{ topic: 'feed', event: 'tick', data: 1 }]
+		});
+	});
+
+	it('joins multiple envelopes in submitted order', () => {
+		const a = '{"topic":"a","event":"x","data":1}';
+		const b = '{"topic":"b","event":"y","data":2}';
+		const c = '{"topic":"c","event":"z","data":3}';
+		const out = wrapBatchEnvelope([a, b, c]);
+		const parsed = JSON.parse(out);
+		expect(parsed.type).toBe('batch');
+		expect(parsed.events).toHaveLength(3);
+		expect(parsed.events[0].topic).toBe('a');
+		expect(parsed.events[1].topic).toBe('b');
+		expect(parsed.events[2].topic).toBe('c');
+	});
+
+	it('preserves seq fields produced by completeEnvelope', () => {
+		const env = completeEnvelope('{"topic":"feed","event":"tick","data":', { i: 0 }, 7);
+		const out = wrapBatchEnvelope([env]);
+		const parsed = JSON.parse(out);
+		expect(parsed.events[0].seq).toBe(7);
+	});
+
+	it('emits the same byte sequence regardless of how built', () => {
+		// Verifies that a batch frame composed by hand from JSON matches
+		// the wrap output: simple structural equality rather than a
+		// fingerprint to avoid coupling to whitespace.
+		const env = '{"topic":"x","event":"y","data":null}';
+		const wrapped = wrapBatchEnvelope([env, env]);
+		expect(wrapped).toBe(
+			'{"type":"batch","events":[{"topic":"x","event":"y","data":null},{"topic":"x","event":"y","data":null}]}'
+		);
+	});
+});
+
+// -- collapseByCoalesceKey --------------------------------------------------
+
+describe('collapseByCoalesceKey', () => {
+	it('returns the input unchanged when no event carries a coalesceKey', () => {
+		const input = [
+			{ topic: 'a', event: 'x', data: 1 },
+			{ topic: 'b', event: 'y', data: 2 }
+		];
+		expect(collapseByCoalesceKey(input)).toBe(input);
+	});
+
+	it('collapses same-key events to the latest value', () => {
+		const out = collapseByCoalesceKey([
+			{ topic: 't', event: 'move', data: 1, coalesceKey: 'k' },
+			{ topic: 't', event: 'move', data: 2, coalesceKey: 'k' },
+			{ topic: 't', event: 'move', data: 3, coalesceKey: 'k' }
+		]);
+		expect(out).toHaveLength(1);
+		expect(out[0].data).toBe(3);
+	});
+
+	it('preserves submitted order at the latest occurrence position', () => {
+		const out = collapseByCoalesceKey([
+			{ topic: 't', event: 'a', data: 1, coalesceKey: 'k1' },
+			{ topic: 't', event: 'b', data: 2, coalesceKey: 'k2' },
+			{ topic: 't', event: 'c', data: 3, coalesceKey: 'k1' },
+			{ topic: 't', event: 'd', data: 4, coalesceKey: 'k2' }
+		]);
+		// k1's latest is at index 2, k2's latest is at index 3.
+		// Output order: [k1@2, k2@3] (the dropped earlier slots vanish,
+		// remaining entries keep their relative order).
+		expect(out).toHaveLength(2);
+		expect(out[0].data).toBe(3);
+		expect(out[1].data).toBe(4);
+	});
+
+	it('passes through events without a coalesceKey unchanged', () => {
+		const out = collapseByCoalesceKey([
+			{ topic: 't', event: 'plain', data: 1 },
+			{ topic: 't', event: 'cursor', data: 2, coalesceKey: 'c' },
+			{ topic: 't', event: 'plain', data: 3 },
+			{ topic: 't', event: 'cursor', data: 4, coalesceKey: 'c' }
+		]);
+		// Plain events keep their original positions; cursor entries
+		// collapse to the latest one at index 3.
+		expect(out).toHaveLength(3);
+		expect(out[0].data).toBe(1);
+		expect(out[1].data).toBe(3);
+		expect(out[2].data).toBe(4);
+	});
+
+	it('treats different keys as independent dedup buckets', () => {
+		const out = collapseByCoalesceKey([
+			{ topic: 't', event: 'move', data: 1, coalesceKey: 'a' },
+			{ topic: 't', event: 'move', data: 2, coalesceKey: 'b' },
+			{ topic: 't', event: 'move', data: 3, coalesceKey: 'a' }
+		]);
+		expect(out).toHaveLength(2);
+		expect(out.map(e => e.data)).toEqual([2, 3]);
+	});
+
+	it('returns an empty array for empty input', () => {
+		expect(collapseByCoalesceKey([])).toEqual([]);
+	});
+
+	it('does not mutate the input array', () => {
+		const input = [
+			{ topic: 't', event: 'm', data: 1, coalesceKey: 'k' },
+			{ topic: 't', event: 'm', data: 2, coalesceKey: 'k' }
+		];
+		const before = [...input];
+		collapseByCoalesceKey(input);
+		expect(input).toEqual(before);
 	});
 });

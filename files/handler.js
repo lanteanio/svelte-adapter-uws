@@ -13,7 +13,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, resolveRequestId, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, resolveRequestId, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -503,6 +503,23 @@ const publishRateListeners = new Set();
 /** @type {Map<string, number>} */
 const lastPublishWarnAt = new Map();
 
+// Soft cap on a single batched WebSocket frame produced by
+// platform.publishBatched. Above this size, uWS per-message-deflate may
+// kick in (depending on user config) and large frames can surprise
+// per-CPU-cycle budgets; we emit a throttled console.warn rather than
+// hard-rejecting so the call still delivers. Callers chunk via repeated
+// publishBatched calls when the warning fires.
+const BATCH_FRAME_WARN_BYTES = 256 * 1024;
+let lastBatchOversizeWarnAt = 0;
+function warnLargeBatchFrame(size) {
+	const now = Date.now();
+	if (now - lastBatchOversizeWarnAt < 60000) return;
+	lastBatchOversizeWarnAt = now;
+	console.warn('[ws] publishBatched frame is ' + size + ' bytes (>' + BATCH_FRAME_WARN_BYTES +
+		'). Large frames may trip per-message-deflate and surprise CPU budgets. ' +
+		'Consider chunking the batch into multiple publishBatched calls.');
+}
+
 /** @type {ReturnType<typeof setInterval> | null} */
 let pressureTimer = null;
 
@@ -870,11 +887,22 @@ const platform = {
 	},
 
 	/**
-	 * Publish multiple messages in one call.
-	 * Equivalent to calling publish() for each message, but the cross-worker
-	 * relay sends one postMessage per microtask regardless of how many
-	 * messages are in the batch (batching is always active for individual
-	 * publish() calls too  - this method is purely a convenience).
+	 * Publish multiple messages, returning per-message delivery results.
+	 *
+	 * NOT wire-level batching: under the hood this is a `for` loop calling
+	 * `publish()` once per message, so N submitted messages still produce
+	 * N WebSocket frames per subscribed connection. The cross-worker
+	 * relay coalesces per microtask (one postMessage no matter how many
+	 * publish() calls the loop makes), but the client still pays N
+	 * onmessage dispatches.
+	 *
+	 * For one-frame-per-subscriber wire batching, use `publishBatched()`
+	 * instead. Two distinct contracts:
+	 *
+	 * - `batch(messages)` -> N frames per subscriber, returns boolean[].
+	 * - `publishBatched(messages)` -> 1 frame per subscriber (events array),
+	 *   returns void; opt-in by client capability ('batch').
+	 *
 	 * @param {{ topic: string, event: string, data?: unknown }[]} messages
 	 * @returns {boolean[]} publish result for each message (false = no subscribers)
 	 */
@@ -885,6 +913,214 @@ const platform = {
 			results.push(platform.publish(topic, event, data));
 		}
 		return results;
+	},
+
+	/**
+	 * Publish a list of `{topic, event, data}` events as a single
+	 * `{type:'batch',events:[...]}` WebSocket frame per affected
+	 * subscriber. Each subscriber receives only the events whose topics
+	 * are in their subscription set, in submitted order. Subscribers
+	 * with no overlap with the batch's topics receive nothing.
+	 *
+	 * Compared to a `publish()` loop, the wire savings are
+	 * one-frame-per-subscriber instead of N-frames-per-subscriber. The
+	 * benefit grows with N (events per call) and with the
+	 * subscriber-set overlap; tiny batches with disjoint topics may pay
+	 * a small JS-fanout cost over the C++ TopicTree path used by
+	 * `publish()` (the receiver decode is faster regardless).
+	 *
+	 * Capability gating: clients advertise `'batch'` support via a
+	 * `{type:'hello', caps:['batch']}` frame after open. Connections
+	 * that have not advertised the capability fall back to N
+	 * individual frames automatically - mixing old and new clients in
+	 * the same call is safe.
+	 *
+	 * Per-event seq stamping: every event in the batch is independently
+	 * stamped with a per-topic monotonic seq, identical to `publish()`.
+	 * Pass `{seq: false}` in an event's `options` to skip stamping for
+	 * that one event.
+	 *
+	 * Cross-worker relay: events are relayed individually through the
+	 * existing per-microtask relay path, so receiving workers see N
+	 * relayed publishes (not a batched delivery). The wire-level
+	 * batching applies to the originating worker's local fanout only.
+	 * Pass `{relay: false}` in an event's `options` to skip the relay
+	 * for messages that came from an external pub/sub source already
+	 * fanning out to every worker.
+	 *
+	 * Frame-size budget: a batched frame larger than 256 KB triggers a
+	 * throttled console warning (uWS per-message-deflate kicks in over
+	 * a configurable threshold and large frames may surprise CPU
+	 * budgets). Chunk large batches into multiple `publishBatched`
+	 * calls to stay under the cap.
+	 *
+	 * Order guarantee: within one batched frame, events appear in call
+	 * order. Across batches, same subscriber-side ordering as today.
+	 *
+	 * Coalesce interaction (v1): events submitted via `publishBatched`
+	 * do NOT interact with `sendCoalesced` per-key replacement. The
+	 * batch is delivered as-is, in submitted order, with no coalesce
+	 * filtering. Mixing batched topics with sendCoalesced topics on
+	 * the same subscriber is supported but the two paths produce
+	 * separate frames.
+	 *
+	 * @example
+	 * ```js
+	 * platform.publishBatched([
+	 *   { topic: 'org:42:items', event: 'updated', data: a },
+	 *   { topic: 'org:42:items', event: 'updated', data: b },
+	 *   { topic: 'org:42:audit', event: 'created', data: c }
+	 * ]);
+	 * // Subscribers of org:42:items only -> one frame, two events.
+	 * // Subscribers of both topics      -> one frame, three events.
+	 * // Subscribers of neither          -> no frame at all.
+	 * ```
+	 *
+	 * @param {Array<{ topic: string, event: string, data?: unknown, options?: { relay?: boolean, seq?: boolean } }>} messages
+	 * @returns {void}
+	 */
+	publishBatched(messages) {
+		if (!Array.isArray(messages) || messages.length === 0) return;
+
+		// Coalesce-by-key dedup runs first. Events that carry a
+		// `coalesceKey` collapse so only the latest value per key
+		// survives; events without a key pass through unchanged. This
+		// is the same latest-value-wins primitive sendCoalesced offers
+		// for streaming sends, lifted into the batched path so a single
+		// publishBatched call carrying 100 cursor positions for the
+		// same user delivers only the latest.
+		messages = collapseByCoalesceKey(messages);
+		if (messages.length === 0) return;
+
+		// Pick the fanout strategy before allocating per-event envelopes.
+		// uWS's C++ TopicTree dispatch via app.publish is genuinely faster
+		// than a JS-side per-subscriber loop for mixed-subscriber-set
+		// batches; the wire-batching win is real only when every relevant
+		// subscriber receives the same event slice. Two such cases:
+		//
+		//   1. Single-topic batch: every subscriber to that topic gets
+		//      every event. Build one shared batch frame.
+		//   2. All-see-all: a multi-topic batch where every connection
+		//      subscribed to ANY batch topic is subscribed to ALL of
+		//      them. Same shared-frame outcome.
+		//
+		// Otherwise we fall back to per-event publish() so the caller
+		// pays no penalty for choosing publishBatched on small / disjoint
+		// shapes (verified by `bench/27-publish-batched-ab.mjs`).
+		const firstTopic = messages[0].topic;
+		let allSameTopic = true;
+		for (let i = 1; i < messages.length; i++) {
+			if (messages[i].topic !== firstTopic) { allSameTopic = false; break; }
+		}
+
+		// Combined detection pass: walk the subscriber set once to
+		// determine whether the batch qualifies for the fast path
+		// (single-topic or all-see-all) AND whether every interested
+		// connection has advertised the 'batch' capability. We need
+		// both: the shared-frame fast path is only safe when every
+		// recipient can decode the {type:'batch',...} envelope.
+		let allSeeAll = true;
+		let everyoneCapable = true;
+		/** @type {Set<string> | null} */
+		let batchTopics = null;
+		if (!allSameTopic) {
+			batchTopics = new Set();
+			for (let i = 0; i < messages.length; i++) batchTopics.add(messages[i].topic);
+		}
+		for (const ws of wsConnections) {
+			const ud = ws.getUserData();
+			const subs = ud[WS_SUBSCRIPTIONS];
+			if (!subs || subs.size === 0) continue;
+			let touchesAny = false;
+			if (allSameTopic) {
+				touchesAny = subs.has(firstTopic);
+			} else {
+				let touchesAll = true;
+				for (const t of /** @type {Set<string>} */ (batchTopics)) {
+					if (subs.has(t)) touchesAny = true;
+					else touchesAll = false;
+				}
+				if (touchesAny && !touchesAll) { allSeeAll = false; break; }
+			}
+			if (!touchesAny) continue;
+			const caps = ud[WS_CAPS];
+			if (!caps || !caps.has('batch')) { everyoneCapable = false; break; }
+		}
+
+		// Slow-path fallback: per-event publish() so the caller pays
+		// no penalty on small / disjoint shapes. Also the safe
+		// degradation when any interested subscriber is non-cap-able -
+		// they would otherwise receive an unparseable batch frame.
+		if ((!allSameTopic && !allSeeAll) || !everyoneCapable) {
+			for (let i = 0; i < messages.length; i++) {
+				const m = messages[i];
+				platform.publish(m.topic, m.event, m.data, m.options);
+			}
+			return;
+		}
+
+		// Fast path: build per-event envelopes (also stamps seq + bumps
+		// per-topic stats), wrap into a shared batch frame, and hand
+		// fanout to uWS's C++ TopicTree via app.publish. In all-see-all
+		// every interested subscriber is subscribed to every batch
+		// topic, so dispatching on any one of them reaches them all.
+		/** @type {Array<{ topic: string, env: string }>} */
+		const events = new Array(messages.length);
+		for (let i = 0; i < messages.length; i++) {
+			const m = messages[i];
+			publishCountWindow++;
+			const seq = (m.options && m.options.seq === false)
+				? null
+				: nextTopicSeq(topicSeqs, m.topic);
+			const env = completeEnvelope(envelopePrefix(m.topic, m.event), m.data, seq);
+			events[i] = { topic: m.topic, env };
+			let s = topicPublishStats.get(m.topic);
+			if (!s) {
+				s = { m: 0, b: 0 };
+				topicPublishStats.set(m.topic, s);
+			}
+			s.m++;
+			s.b += env.length;
+		}
+
+		// Cross-worker relay: a single 'publish-batched' IPC carrying the
+		// pre-built per-event envelopes. The receiving worker re-runs the
+		// detection (allSeeAll + everyoneCapable for ITS local subscriber
+		// set) and dispatches via its own fast or slow path. This keeps
+		// the wire-batching benefit cluster-wide instead of degrading to
+		// per-event relays on worker boundaries.
+		if (parentPort) {
+			const relayed = [];
+			for (let i = 0; i < messages.length; i++) {
+				const m = messages[i];
+				if (!m.options || m.options.relay !== false) {
+					relayed.push({ topic: events[i].topic, env: events[i].env });
+				}
+			}
+			if (relayed.length > 0) {
+				parentPort.postMessage({ type: 'publish-batched', events: relayed });
+			}
+		}
+
+		// Build the shared batch frame once.
+		const slice = new Array(events.length);
+		for (let i = 0; i < events.length; i++) slice[i] = events[i].env;
+		const sharedBatchEnv = wrapBatchEnvelope(slice);
+		if (sharedBatchEnv.length > BATCH_FRAME_WARN_BYTES) {
+			warnLargeBatchFrame(sharedBatchEnv.length);
+		}
+
+		// Hand fanout to uWS's C++ TopicTree. Any batch topic works
+		// as the dispatch channel because every interested subscriber
+		// is subscribed to every batch topic in the all-see-all case
+		// (single-topic is the trivial sub-case).
+		const fanoutTopic = allSameTopic ? firstTopic : messages[0].topic;
+		const result = app.publish(fanoutTopic, sharedBatchEnv, false, false);
+
+		if (wsDebug) {
+			console.log('[ws] publishBatched events=%d single-topic=%s fanoutTopic=%s delivered=%s',
+				events.length, allSameTopic, fanoutTopic, result);
+		}
 	},
 
 	/**
@@ -2404,6 +2640,19 @@ if (WS_ENABLED) {
 						}
 						return;
 					}
+					if (msg.type === 'hello' && Array.isArray(msg.caps)) {
+						// Capability negotiation. Old clients never send 'hello',
+						// so the absence of the WS_CAPS slot is the safe-default
+						// "no opt-in features" signal that publishBatched relies
+						// on to fall back to N individual frames per connection.
+						const caps = new Set();
+						for (let i = 0; i < msg.caps.length; i++) {
+							if (typeof msg.caps[i] === 'string') caps.add(msg.caps[i]);
+						}
+						ws.getUserData()[WS_CAPS] = caps;
+						if (wsDebug) console.log('[ws] hello caps=%o', [...caps]);
+						return;
+					}
 					if (msg.type === 'resume' && typeof msg.sessionId === 'string' &&
 						msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
 						// Client presents the previous session id plus per-topic
@@ -2596,4 +2845,70 @@ export function getDescriptor() {
  */
 export function relayPublish(topic, envelope) {
 	app.publish(topic, envelope, false, false);
+}
+
+/**
+ * Re-dispatch a relayed publishBatched call from another worker. The
+ * detection (allSeeAll + everyoneCapable) is re-run against THIS
+ * worker's local subscriber set: a worker with a different cap profile
+ * or different subscription overlap may take the slow path even when
+ * the originating worker took the fast path. Seqs were stamped by the
+ * originator and ride along in each per-event envelope; we never
+ * re-stamp and never re-relay.
+ *
+ * @param {Array<{ topic: string, env: string }>} events
+ */
+export function relayPublishBatched(events) {
+	if (!Array.isArray(events) || events.length === 0) return;
+
+	const firstTopic = events[0].topic;
+	let allSameTopic = true;
+	for (let i = 1; i < events.length; i++) {
+		if (events[i].topic !== firstTopic) { allSameTopic = false; break; }
+	}
+
+	let allSeeAll = true;
+	let everyoneCapable = true;
+	let batchTopics = null;
+	if (!allSameTopic) {
+		batchTopics = new Set();
+		for (let i = 0; i < events.length; i++) batchTopics.add(events[i].topic);
+	}
+	for (const ws of wsConnections) {
+		const ud = ws.getUserData();
+		const subs = ud[WS_SUBSCRIPTIONS];
+		if (!subs || subs.size === 0) continue;
+		let touchesAny = false;
+		if (allSameTopic) {
+			touchesAny = subs.has(firstTopic);
+		} else {
+			let touchesAll = true;
+			for (const t of /** @type {Set<string>} */ (batchTopics)) {
+				if (subs.has(t)) touchesAny = true;
+				else touchesAll = false;
+			}
+			if (touchesAny && !touchesAll) { allSeeAll = false; break; }
+		}
+		if (!touchesAny) continue;
+		const caps = ud[WS_CAPS];
+		if (!caps || !caps.has('batch')) { everyoneCapable = false; break; }
+	}
+
+	if ((!allSameTopic && !allSeeAll) || !everyoneCapable) {
+		// Slow path: per-event app.publish, mirroring the local
+		// fallback and matching the receive-side semantics that
+		// cap-able subs on this worker would have seen if the
+		// originator had taken its slow path too.
+		for (let i = 0; i < events.length; i++) {
+			app.publish(events[i].topic, events[i].env, false, false);
+		}
+		return;
+	}
+
+	// Fast path: wrap and dispatch on the C++ TopicTree.
+	const slice = new Array(events.length);
+	for (let i = 0; i < events.length; i++) slice[i] = events[i].env;
+	const sharedBatchEnv = wrapBatchEnvelope(slice);
+	const fanoutTopic = allSameTopic ? firstTopic : events[0].topic;
+	app.publish(fanoutTopic, sharedBatchEnv, false, false);
 }

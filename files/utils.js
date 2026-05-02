@@ -218,6 +218,69 @@ export function completeEnvelope(prefix, data, seq) {
 }
 
 /**
+ * Wrap an array of pre-built per-event envelope strings into a single
+ * `{"type":"batch","events":[...]}` wire frame. Each input string is
+ * a complete `{topic, event, data, seq?}` envelope as produced by
+ * `completeEnvelope`. The output is the wire format
+ * `platform.publishBatched` emits for clients that have advertised
+ * the `'batch'` capability.
+ *
+ * Pure helper: pure string concatenation, no allocations beyond the
+ * result string and the intermediate join. Cheap enough to live on
+ * the publishBatched hot path.
+ *
+ * @param {string[]} eventEnvelopes
+ * @returns {string}
+ */
+export function wrapBatchEnvelope(eventEnvelopes) {
+	if (eventEnvelopes.length === 0) return '{"type":"batch","events":[]}';
+	return '{"type":"batch","events":[' + eventEnvelopes.join(',') + ']}';
+}
+
+/**
+ * Collapse events that share a `coalesceKey` so only the latest value
+ * survives in the batch. Events without a `coalesceKey` pass through
+ * unchanged. The latest occurrence's position is preserved (so the
+ * order of non-collapsed events is stable, and the surviving entry
+ * appears at the position the latest value arrived in).
+ *
+ * Use case: high-frequency `publishBatched` calls carrying many
+ * cursor / presence / price-tick events, where intermediate values are
+ * noise. Tagging each with a `coalesceKey` (e.g. `'cursor:' + userId`)
+ * lets a single batch deliver only the latest position per user even
+ * if the caller submitted hundreds.
+ *
+ * Pure helper: returns the input array untouched (same reference) when
+ * no event carries a `coalesceKey`, so the common no-coalesce path
+ * pays only one linear scan.
+ *
+ * @template {{ coalesceKey?: string }} T
+ * @param {T[]} messages
+ * @returns {T[]}
+ */
+export function collapseByCoalesceKey(messages) {
+	let hasCoalesce = false;
+	for (let i = 0; i < messages.length; i++) {
+		if (messages[i].coalesceKey !== undefined) { hasCoalesce = true; break; }
+	}
+	if (!hasCoalesce) return messages;
+	/** @type {Map<string, number>} */
+	const lastByKey = new Map();
+	for (let i = 0; i < messages.length; i++) {
+		const key = messages[i].coalesceKey;
+		if (key !== undefined) lastByKey.set(key, i);
+	}
+	const out = [];
+	for (let i = 0; i < messages.length; i++) {
+		const key = messages[i].coalesceKey;
+		if (key === undefined || lastByKey.get(key) === i) {
+			out.push(messages[i]);
+		}
+	}
+	return out;
+}
+
+/**
  * Resolve which pressure signal (if any) is firing for a given sample.
  *
  * Precedence is fixed: MEMORY beats PUBLISH_RATE beats SUBSCRIBERS. Memory
@@ -317,6 +380,14 @@ export const WS_SESSION_ID = Symbol('adapter-uws.ws.session-id');
 export const WS_PENDING_REQUESTS = Symbol('adapter-uws.ws.pending-requests');
 export const WS_STATS = Symbol('adapter-uws.ws.stats');
 export const WS_PLATFORM = Symbol('adapter-uws.ws.platform');
+/**
+ * Set of capabilities the connected client has advertised via a
+ * `{type:'hello', caps: [...]}` frame. Read by `platform.publishBatched`
+ * to decide whether to emit a wire-level batch envelope or fall back
+ * to N individual frames for that connection. Empty / undefined is
+ * the safe default - assume the client has no opt-in features.
+ */
+export const WS_CAPS = Symbol('adapter-uws.ws.caps');
 
 /**
  * String-keyed slot used to carry the per-connection requestId from

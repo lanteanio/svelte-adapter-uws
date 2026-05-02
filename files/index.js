@@ -171,6 +171,14 @@ if (is_primary) {
 						if (w !== worker) w.postMessage(relay);
 					}
 				}
+			} else if (msg.type === 'publish-batched') {
+				// Wire-level batched relay (platform.publishBatched). Forward
+				// the whole event list as one IPC frame so receiving workers
+				// can re-detect the fast path locally and dispatch a single
+				// batch envelope, instead of degrading to N individual relays.
+				for (const [w] of workers) {
+					if (w !== worker) w.postMessage(msg);
+				}
 			}
 		});
 
@@ -262,7 +270,7 @@ if (is_primary) {
 } else {
 	// ── Worker thread or single-process mode ─────────────────────────────
 
-	const { start, shutdown, drain, getDescriptor, relayPublish } = await import('HANDLER');
+	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched } = await import('HANDLER');
 
 	if (isMainThread) {
 		// Single-process mode (no clustering)
@@ -284,6 +292,8 @@ if (is_primary) {
 				graceful_shutdown('shutdown');
 			} else if (msg.type === 'publish') {
 				relayPublish(msg.topic, msg.envelope);
+			} else if (msg.type === 'publish-batched') {
+				relayPublishBatched(msg.events);
 			} else if (msg.type === 'heartbeat') {
 				// Respond immediately  - primary uses acks to detect stuck workers.
 				parentPort.postMessage({ type: 'heartbeat-ack' });

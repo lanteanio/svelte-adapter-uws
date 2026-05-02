@@ -879,8 +879,17 @@ export interface Platform {
 	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean }): boolean;
 
 	/**
-	 * Publish multiple messages in one call.
-	 * Returns an array of `publish()` results (one per message; `false` means no subscribers).
+	 * Publish multiple messages, returning per-message delivery results.
+	 *
+	 * **NOT wire-level batching.** Under the hood this is a `for` loop
+	 * calling `publish()` once per message, so N submitted messages still
+	 * produce N WebSocket frames per subscribed connection. For
+	 * one-frame-per-subscriber wire batching, use `publishBatched()`.
+	 *
+	 * Two distinct contracts:
+	 * - `batch(messages)` -> N frames per subscriber, returns `boolean[]`.
+	 * - `publishBatched(messages)` -> 1 frame per subscriber (events
+	 *   array), returns `void`; opt-in by client capability.
 	 *
 	 * @example
 	 * ```js
@@ -891,6 +900,86 @@ export interface Platform {
 	 * ```
 	 */
 	batch(messages: { topic: string; event: string; data?: unknown }[]): boolean[];
+
+	/**
+	 * Publish a list of `{topic, event, data}` events as a single
+	 * `{type:'batch', events:[...]}` WebSocket frame per affected
+	 * subscriber. Each subscriber receives only the events whose topics
+	 * are in their subscription set, in submitted order. Subscribers
+	 * with no overlap with the batch's topics receive nothing.
+	 *
+	 * Compared to a `publish()` loop, the wire savings are
+	 * one-frame-per-subscriber instead of N-frames-per-subscriber. The
+	 * benefit grows with N (events per call) and with subscriber-set
+	 * overlap; tiny batches with disjoint topics may pay a small
+	 * JS-fanout cost over the C++ TopicTree path used by `publish()`
+	 * (the receiver-side decode is faster regardless).
+	 *
+	 * Capability gating: clients advertise `'batch'` support via a
+	 * `{type:'hello', caps:['batch']}` frame after open. The bundled
+	 * `svelte-adapter-uws/client` does this automatically. Connections
+	 * that have not advertised the capability fall back to N
+	 * individual frames - mixing old and new clients in the same call
+	 * is safe.
+	 *
+	 * Cross-worker relay: events are relayed individually through the
+	 * existing per-microtask relay path. Receiving workers see N
+	 * individual relayed publishes, not a batched delivery. Wire-level
+	 * batching applies to the originating worker's local fanout only.
+	 * Pass `{relay: false}` per-event to skip the relay (use when the
+	 * messages came from an external pub/sub source already fanning
+	 * out to every worker).
+	 *
+	 * Frame-size budget: a batched frame larger than 256 KB triggers a
+	 * throttled `console.warn`. Chunk large batches into multiple
+	 * `publishBatched` calls.
+	 *
+	 * Order guarantee: within one batched frame, events appear in call
+	 * order. Across batches, same subscriber-side ordering as today.
+	 *
+	 * Coalesce interaction: events submitted via `publishBatched` do
+	 * not interact with `sendCoalesced` per-key replacement; mixing
+	 * batched topics and sendCoalesced topics on the same subscriber
+	 * is supported but produces separate frames.
+	 *
+	 * @example
+	 * ```js
+	 * platform.publishBatched([
+	 *   { topic: 'org:42:items', event: 'updated', data: a },
+	 *   { topic: 'org:42:items', event: 'updated', data: b },
+	 *   { topic: 'org:42:audit', event: 'created', data: c }
+	 * ]);
+	 * // Subscribers of org:42:items only -> one frame, two events.
+	 * // Subscribers of both topics      -> one frame, three events.
+	 * // Subscribers of neither          -> no frame at all.
+	 * ```
+	 */
+	publishBatched(messages: Array<{
+		topic: string;
+		event: string;
+		data?: unknown;
+		/**
+		 * Optional coalesce key. When two events in the same call share
+		 * a `coalesceKey`, only the latest one survives - the earlier
+		 * value is dropped before the batch frame is built. Use this
+		 * for high-frequency streams where intermediate values are
+		 * noise (cursor positions, price ticks, presence, typing
+		 * indicators). Events without a `coalesceKey` are never
+		 * coalesced.
+		 *
+		 * @example
+		 * ```js
+		 * platform.publishBatched(positions.map(p => ({
+		 *   topic: 'cursors',
+		 *   event: 'move',
+		 *   data: p,
+		 *   coalesceKey: 'cursor:' + p.userId  // latest position per user
+		 * })));
+		 * ```
+		 */
+		coalesceKey?: string;
+		options?: { relay?: boolean; seq?: boolean };
+	}>): void;
 
 	/**
 	 * Send a request to a single connection and await its reply.

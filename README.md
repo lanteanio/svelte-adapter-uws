@@ -1330,6 +1330,63 @@ onRequest(async (event, data) => {
 
 Throw or reject from the handler to send an error reply; the server's awaiting Promise rejects with the same message. With no handler installed, request frames are dropped silently and the server times out.
 
+### `platform.publishBatched(messages)`
+
+Publish a list of `{topic, event, data}` events as a single `{type:'batch', events:[...]}` WebSocket frame per affected subscriber, instead of one frame per event. Each subscriber receives only the events whose topics are in their subscription set, in submitted order. Subscribers with no overlap with the batch's topics receive nothing.
+
+```js
+// Form action publishing several related events:
+export const actions = {
+  closeBook: async ({ platform }) => {
+    const { items, audit } = await db.closeBook();
+    platform.publishBatched([
+      ...items.map(i => ({ topic: 'org:42:items', event: 'updated', data: i })),
+      { topic: 'org:42:audit', event: 'closed', data: audit }
+    ]);
+  }
+};
+```
+
+The frame the client receives:
+
+```json
+{ "type": "batch", "events": [
+  { "topic": "org:42:items", "event": "updated", "data": ..., "seq": 17 },
+  { "topic": "org:42:items", "event": "updated", "data": ..., "seq": 18 },
+  { "topic": "org:42:audit", "event": "closed", "data": ..., "seq": 4 }
+] }
+```
+
+The bundled `svelte-adapter-uws/client` decodes the batch frame and dispatches each contained event through the same per-topic store ladder a single-event frame would take -- indistinguishable from N individual frames except for the latency drop and the lower onmessage bill.
+
+**When the win shows up.** Wire-level batching has two characteristic shapes that pay off:
+
+- **Bulk fan-out, single topic.** A bulk import publishing 50 events to a topic with 500 subscribers used to send 25,000 frames (50 events x 500 subs); now it sends 500 frames (1 batch x 500 subs). The publishBatched path benches at ~3.2M events/sec on this profile vs ~840K events/sec for an equivalent `publish()` loop (~3.8x speedup, measured locally).
+- **Room-state reset, overlapping topics.** A handler that publishes 5 events across 3 rooms where every viewer is in all 3 rooms benches at ~1.46M events/sec vs ~1.15M events/sec for the loop (~27% speedup).
+
+**When the win does not apply.** Mixed subscriber views (some subs see only a subset of the batch's topics) and small disjoint batches (e.g. 3 events to 3 topics with disjoint subscriber sets) cannot share one frame -- the C++ TopicTree fanout used by `publish()` is faster than building per-subscriber payloads in JS for those shapes. `publishBatched` detects these cases and falls back to a per-event `publish()` loop, so calling it is at least as fast as the publish loop the user would have written by hand. Verified on a third bench profile (3 events x 50 subs disjoint topics): delta `0.3%` (within noise).
+
+**Capability handshake.** The client opts in by sending `{type:'hello', caps:['batch']}` after the WebSocket opens. The bundled client does this automatically. When the server detects that any interested subscriber has not advertised the `'batch'` capability, the call falls back to the publish loop so old clients receive plain envelopes they can decode. Mixing old and new clients in the same call is safe; old clients simply do not benefit from the batched optimization.
+
+**Cross-worker relay.** A single `publish-batched` IPC frame carries the full event list to other workers in cluster mode. Each receiving worker re-runs the fast-path detection against ITS local subscriber set and dispatches via either a single batch envelope (fast path) or per-event publishes (slow path). Wire batching is preserved cluster-wide instead of degrading to per-event relays at the worker boundary. Pass `{relay: false}` per-event to skip the relay (use when the messages came from an external pub/sub source already fanning out to every worker).
+
+**Coalesce by key.** Each event takes an optional `coalesceKey?: string` field. Events that share a key collapse so only the latest value survives, with the surviving entry kept at the latest occurrence's position. Events without a key pass through unchanged. Use this for high-frequency batches where intermediate values are noise -- a single call carrying 100 cursor positions for the same user delivers only the latest.
+
+```js
+platform.publishBatched(positions.map(p => ({
+  topic: 'cursors',
+  event: 'move',
+  data: p,
+  coalesceKey: 'cursor:' + p.userId   // latest position per user wins
+})));
+```
+
+**Frame-size budget.** A batched frame larger than 256 KB triggers a throttled `console.warn`; uWS per-message-deflate may kick in at large sizes and surprise CPU budgets. Chunk into multiple `publishBatched` calls when the warning fires.
+
+**Order and seq.** Within one batched frame, events appear in call order (after any `coalesceKey` collapsing). Each event is independently stamped with a per-topic monotonic `seq`, identical to `publish()`; pass `{seq: false}` per-event to skip stamping for that one event. The streaming `sendCoalesced` API (per-key replacement on a single connection) is independent of `publishBatched`'s batch-level `coalesceKey`; mixing the two on the same subscriber is supported but produces separate frames.
+
+**Two distinct contracts -- pick one.** The existing `platform.batch(messages)` is NOT wire-level batching -- it is a `for` loop calling `publish()` once per message, so N submitted messages still produce N WebSocket frames per subscribed connection. The cross-worker relay coalesces per microtask, but the client still pays N onmessage dispatches. Use `batch()` when you want per-message return values; use `publishBatched()` when you want one-frame-per-subscriber wire batching.
+
 ### `platform.requestId`
 
 A correlation id you can thread through structured logs to follow a single request across server hooks, load functions, and downstream services.
