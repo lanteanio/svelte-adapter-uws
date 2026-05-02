@@ -7,12 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.5] - 2026-05-02
+
 ### Added
 
 - **Curated pure helpers and userData slot constants re-exported from `svelte-adapter-uws/testing`.** Downstream test code (extensions, app-side integration tests, custom transport bridges) can now `import { wrapBatchEnvelope, completeEnvelope, WS_CAPS, ... } from 'svelte-adapter-uws/testing'` to assert on the same wire shapes and userData state the production runtime produces, without redeclaring helpers that would drift over time. Curated set: five wire-protocol helpers (`esc`, `completeEnvelope`, `wrapBatchEnvelope`, `isValidWireTopic`, `createScopedTopic`), three behavior helpers (`collapseByCoalesceKey`, `resolveRequestId`, `createChaosState`), and all eight per-connection userData slot constants (`WS_SUBSCRIPTIONS`, `WS_COALESCED`, `WS_SESSION_ID`, `WS_PENDING_REQUESTS`, `WS_STATS`, `WS_PLATFORM`, `WS_CAPS`, `WS_REQUEST_ID_KEY`). Production-internal plumbing (mime lookup, byte parsing, cookie split, write-chunk backpressure, sampler internals, upgrade admission factory, origin allowlist matcher) is deliberately NOT re-exported so the test surface can stay semver-stable while production hot paths remain free to refactor. Type declarations land alongside the re-exports in `testing.d.ts`. The same names continue to live in `files/utils.js`; the re-export is purely an additive public surface, not a relocation.
 - **`failure` Readable on the client store, sibling to `status`.** Carries the cause of the most recent non-open status transition so consumers can render targeted UI per failure type: `'TERMINAL'` (server permanently rejected: 1008/4401/4403), `'EXHAUSTED'` (`maxReconnectAttempts` hit), `'THROTTLE'` (server signalled rate-limit via 4429), `'RETRY'` (normal transient drop), `'AUTH'` (auth preflight failed before the WebSocket was opened). Discriminated union by `kind` (`'ws-close'` carries `code`, `'auth-preflight'` carries `status`) plus a `reason` string label. Stays `null` while connected, set on the failing transition, cleared on the next successful `'open'`. NOT set on an intentional `close()` call; `status === 'failed'` paired with `failure === null` is the deliberately-ended state. Available as a top-level `failure` export and on the `WSConnection` returned by `connect()`. The information was previously computed (`classifyCloseCode` + auth-preflight outcome) and discarded immediately into a less-specific `status` value; this surface preserves it for app-layer rendering without forcing apps to re-derive close-code semantics.
 
-## [0.5.0-next.3] - 2026-04-02
+## [0.5.0-next.4] - 2026-05-02
 
 ### Added
 
