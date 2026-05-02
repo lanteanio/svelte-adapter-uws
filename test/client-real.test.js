@@ -2347,4 +2347,94 @@ describe('client.js (real module)', () => {
 			clientModule.connect().close();
 		});
 	});
+
+	describe('subscribe ack protocol (real module)', () => {
+		it('attaches an incrementing ref to every subscribe', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._sent.length = 0;
+
+			const a = clientModule.on('topic-a');
+			const unsubA = a.subscribe(() => {});
+			const b = clientModule.on('topic-b');
+			const unsubB = b.subscribe(() => {});
+			await flush();
+
+			const subs = ws._sent.map(s => JSON.parse(s)).filter(m => m.type === 'subscribe');
+			expect(subs.length).toBe(2);
+			for (const s of subs) expect(typeof s.ref).toBe('number');
+			expect(subs[1].ref).toBeGreaterThan(subs[0].ref);
+
+			unsubA();
+			unsubB();
+			conn.close();
+		});
+
+		it('attaches a ref to subscribe-batch on reconnect', async () => {
+			vi.useFakeTimers();
+			const store = clientModule.on('topic-x');
+			const unsub = store.subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+			const ws = MockWebSocket._last;
+			ws.close();
+			await vi.advanceTimersByTimeAsync(10000);
+			const ws2 = MockWebSocket._last;
+			const batch = ws2._sent.map(s => JSON.parse(s)).find(m => m.type === 'subscribe-batch');
+			expect(batch).toBeTruthy();
+			expect(typeof batch.ref).toBe('number');
+
+			unsub();
+			clientModule.connect().close();
+			vi.useRealTimers();
+		});
+
+		it('emits subscribe-denied frames into the denials store', async () => {
+			const conn = clientModule.connect();
+			const seen = [];
+			const unsub = conn.denials.subscribe((d) => { if (d) seen.push(d); });
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'subscribe-denied', topic: 'admin', ref: 7, reason: 'FORBIDDEN' });
+			ws._receive({ type: 'subscribe-denied', topic: 'private', ref: 8, reason: 'UNAUTHENTICATED' });
+
+			expect(seen).toHaveLength(2);
+			expect(seen[0]).toEqual({ topic: 'admin', reason: 'FORBIDDEN', ref: 7 });
+			expect(seen[1]).toEqual({ topic: 'private', reason: 'UNAUTHENTICATED', ref: 8 });
+
+			unsub();
+			conn.close();
+		});
+
+		it('does not dispatch subscribed/denied as data events', async () => {
+			const store = clientModule.on('chat');
+			const events = [];
+			const unsub = store.subscribe((v) => { if (v) events.push(v); });
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'subscribed', topic: 'chat', ref: 1 });
+			ws._receive({ type: 'subscribe-denied', topic: 'chat', ref: 2, reason: 'FORBIDDEN' });
+			ws._receive({ topic: 'chat', event: 'msg', data: 'live' });
+
+			expect(events).toHaveLength(1);
+			expect(events[0].data).toBe('live');
+
+			unsub();
+			clientModule.connect().close();
+		});
+
+		it('exports a top-level denials store', async () => {
+			const seen = [];
+			const unsub = clientModule.denials.subscribe((d) => { if (d) seen.push(d); });
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._receive({ type: 'subscribe-denied', topic: 'x', ref: 1, reason: 'FORBIDDEN' });
+
+			expect(seen).toHaveLength(1);
+			expect(seen[0].topic).toBe('x');
+
+			unsub();
+			clientModule.connect().close();
+		});
+	});
 });

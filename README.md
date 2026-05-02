@@ -658,9 +658,45 @@ Without a `resume` hook the protocol is still safe: the server acks the resume f
 
 The session id is per-process and per-connection. It does not persist across server restarts; a client presenting a session id the server has never seen receives the same `resumed` ack and falls through.
 
+### Subscribe acknowledgements
+
+When the client subscribes, it includes a numeric `ref` so the server can ack with the result:
+
+- `{"type":"subscribed", topic, ref}` - subscription accepted.
+- `{"type":"subscribe-denied", topic, ref, reason}` - subscription rejected. `reason` is one of the canonical codes `'UNAUTHENTICATED'`, `'FORBIDDEN'`, `'INVALID_TOPIC'`, `'RATE_LIMITED'`, or any custom string the server's `subscribe` hook returned.
+
+The denial is surfaced on the client through the `denials` store. Show it as a banner, route to a login page, anything you like:
+
+```svelte
+<script>
+  import { denials } from 'svelte-adapter-uws/client';
+</script>
+
+{#if $denials}
+  <p class="error">Cannot subscribe to {$denials.topic}: {$denials.reason}</p>
+{/if}
+```
+
+The server's `subscribe` hook controls denial reasons:
+
+```js
+export function subscribe(ws, topic, { platform }) {
+  const { userId, role } = ws.getUserData();
+  if (!userId) return 'UNAUTHENTICATED';                  // -> subscribe-denied
+  if (topic.startsWith('admin') && role !== 'admin') {
+    return 'FORBIDDEN';
+  }
+  // omit / return undefined / return true -> subscribed
+}
+```
+
+Old clients that send `subscribe` without a `ref` get no ack frame (silent allow / silent deny, as before). Old servers that ignore `ref` don't break new clients - they just don't emit acks; the client sees no entry in `denials` and treats the subscription as active.
+
+`subscribe-batch` works the same way: one ack frame per topic in the batch, all sharing the batch's single `ref`.
+
 ### Message protocol
 
-The adapter uses a JSON envelope format for all pub/sub messages: `{ topic, event, data, seq? }`. Control messages from the client store (`subscribe`, `unsubscribe`, `subscribe-batch`, `resume`) use `{ type, topic }`, `{ type, topics }`, or `{ type, sessionId, lastSeenSeqs }`. The server emits `{"type":"welcome","sessionId":"..."}` on open and `{"type":"resumed"}` after handling a resume frame.
+The adapter uses a JSON envelope format for all pub/sub messages: `{ topic, event, data, seq? }`. Control messages from the client store (`subscribe`, `unsubscribe`, `subscribe-batch`, `resume`) use `{ type, topic, ref? }`, `{ type, topics, ref? }`, or `{ type, sessionId, lastSeenSeqs }`. The server emits `{"type":"welcome","sessionId":"..."}` on open, `{"type":"resumed"}` after a resume frame, and `{"type":"subscribed",...}` / `{"type":"subscribe-denied",...}` per topic when the client supplied a `ref`.
 
 To avoid JSON-parsing every incoming message, the handler uses a byte-prefix discriminator: control messages start with `{"type"` (byte 3 is `y`), while user envelopes start with `{"topic"` (byte 3 is `o`). A single byte comparison skips `JSON.parse` entirely for user messages. Messages over 8 KB are also skipped (generous ceiling for `subscribe-batch` with many topics, well above any realistic control message).
 

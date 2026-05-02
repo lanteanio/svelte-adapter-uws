@@ -210,6 +210,41 @@ export function on<T = unknown>(topic: string, event: string): TopicStore<{ data
 export const status: Readable<'connecting' | 'open' | 'closed'>;
 
 /**
+ * Canonical reasons for a `subscribe-denied` server response. The
+ * server's `subscribe` hook may return any of these or any custom
+ * string; the framework also emits `'INVALID_TOPIC'` automatically
+ * when a client sends a malformed topic.
+ */
+export type SubscribeDenialReason =
+	| 'UNAUTHENTICATED'
+	| 'FORBIDDEN'
+	| 'INVALID_TOPIC'
+	| 'RATE_LIMITED';
+
+/**
+ * Latest subscribe-denied response from the server. The store stays at
+ * `null` until the first denial; on each new denial it emits
+ * `{ topic, reason, ref }`. `reason` is one of the canonical codes
+ * above, or any custom string the server hook returned.
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { denials } from 'svelte-adapter-uws/client';
+ * </script>
+ *
+ * {#if $denials}
+ *   <p class="error">Subscription to {$denials.topic} denied: {$denials.reason}</p>
+ * {/if}
+ * ```
+ */
+export const denials: Readable<{
+	topic: string;
+	reason: SubscribeDenialReason | string;
+	ref: number | string;
+} | null>;
+
+/**
  * Live CRUD list - one line for real-time collections.
  *
  * Subscribes to a topic and automatically handles `created`, `updated`,
@@ -398,6 +433,16 @@ export interface WSConnection {
 
 	/** Readable store - connection status. */
 	status: Readable<'connecting' | 'open' | 'closed'>;
+
+	/**
+	 * Readable store - latest subscribe-denied response from the server.
+	 * `null` until the first denial.
+	 */
+	denials: Readable<{
+		topic: string;
+		reason: SubscribeDenialReason | string;
+		ref: number | string;
+	} | null>;
 
 	/**
 	 * Get a reactive store for a specific topic.

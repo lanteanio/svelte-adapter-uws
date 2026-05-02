@@ -438,6 +438,25 @@ export interface SubscribeContext {
 }
 
 /**
+ * Canonical reasons for a `subscribe-denied` ack. The `subscribe` hook
+ * may return any of these strings, or any other string (forwarded
+ * verbatim to the client). The framework also emits `'INVALID_TOPIC'`
+ * automatically when a client sends a malformed topic.
+ *
+ * - `'UNAUTHENTICATED'` - no valid session / user identity.
+ * - `'FORBIDDEN'` - user is identified but not authorised for the topic.
+ * - `'INVALID_TOPIC'` - topic failed wire-protocol validation
+ *   (length / control chars). Emitted by the framework, not the hook.
+ * - `'RATE_LIMITED'` - per-subscribe rate limit hit. Reserved; not
+ *   emitted by the framework today.
+ */
+export type SubscribeDenialReason =
+	| 'UNAUTHENTICATED'
+	| 'FORBIDDEN'
+	| 'INVALID_TOPIC'
+	| 'RATE_LIMITED';
+
+/**
  * Context passed to the `resume` handler.
  *
  * Fired when a reconnecting client presents the session id from its
@@ -555,20 +574,31 @@ export interface WebSocketHandler<UserData = unknown> {
 	/**
 	 * Called when a client tries to subscribe to a topic.
 	 *
-	 * - Return `false` to deny the subscription (silently ignored on the client).
-	 * - Return anything else (or omit this export) to allow.
+	 * Return values:
+	 * - `false` - deny with the default reason `'FORBIDDEN'`.
+	 * - A string - deny with that string as the reason. The framework
+	 *   recognises `'UNAUTHENTICATED'`, `'FORBIDDEN'`, `'INVALID_TOPIC'`,
+	 *   and `'RATE_LIMITED'` as the canonical codes; any other string
+	 *   is forwarded verbatim to the client.
+	 * - Anything else (or omit this export) - allow.
 	 *
-	 * Use this for per-topic authorization - e.g. only let admins subscribe to `'admin'`.
+	 * When the client supplied a `ref` with its subscribe op, the
+	 * server emits a `{type:'subscribed', topic, ref}` ack on accept or
+	 * a `{type:'subscribe-denied', topic, ref, reason}` ack on deny.
+	 * Old clients that send subscribe without a `ref` get no ack
+	 * (silent allow / silent deny, as before).
 	 *
 	 * @example
 	 * ```js
 	 * export function subscribe(ws, topic, { platform }) {
-	 *   const { role } = ws.getUserData();
-	 *   if (topic.startsWith('admin') && role !== 'admin') return false;
+	 *   const { role, userId } = ws.getUserData();
+	 *   if (!userId) return 'UNAUTHENTICATED';
+	 *   if (topic.startsWith('admin') && role !== 'admin') return 'FORBIDDEN';
 	 * }
 	 * ```
 	 */
-	subscribe?: (ws: WebSocket<UserData>, topic: string, ctx: SubscribeContext) => boolean | void;
+	subscribe?: (ws: WebSocket<UserData>, topic: string, ctx: SubscribeContext) =>
+		| boolean | void | SubscribeDenialReason | string;
 
 	/**
 	 * Called when a client unsubscribes from a topic (ref count reached zero).

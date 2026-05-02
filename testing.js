@@ -27,6 +27,27 @@ function envelope(topic, event, data, seq) {
 export async function createTestServer(options = {}) {
 	const { port = 0, wsPath = '/ws', handler = {} } = options;
 
+	/** @param {unknown} ref @returns {ref is number | string} */
+	function hasRefT(ref) { return typeof ref === 'number' || typeof ref === 'string'; }
+	/** @param {any} ws @param {string} topic @returns {string | null} */
+	function runSubscribeHookT(ws, topic) {
+		if (!handler.subscribe) return null;
+		const result = handler.subscribe(ws, topic, { platform });
+		if (result === false) return 'FORBIDDEN';
+		if (typeof result === 'string') return result;
+		return null;
+	}
+	/** @param {any} ws @param {string} topic @param {number | string | null} ref */
+	function sendSubscribedT(ws, topic, ref) {
+		if (ref === null) return;
+		ws.send(JSON.stringify({ type: 'subscribed', topic, ref }), false, false);
+	}
+	/** @param {any} ws @param {string} topic @param {number | string | null} ref @param {string} reason */
+	function sendDeniedT(ws, topic, ref, reason) {
+		if (ref === null) return;
+		ws.send(JSON.stringify({ type: 'subscribe-denied', topic, ref, reason }), false, false);
+	}
+
 	let uWS;
 	try {
 		uWS = (await import('uWebSockets.js')).default;
@@ -173,10 +194,19 @@ export async function createTestServer(options = {}) {
 					try {
 						const msg = JSON.parse(Buffer.from(message).toString());
 						if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
-							if (!isValidWireTopic(msg.topic)) return;
-							if (handler.subscribe && handler.subscribe(ws, msg.topic, { platform }) === false) return;
+							const ref = hasRefT(msg.ref) ? msg.ref : null;
+							if (!isValidWireTopic(msg.topic)) {
+								sendDeniedT(ws, msg.topic, ref, 'INVALID_TOPIC');
+								return;
+							}
+							const denial = runSubscribeHookT(ws, msg.topic);
+							if (denial !== null) {
+								sendDeniedT(ws, msg.topic, ref, denial);
+								return;
+							}
 							ws.subscribe(msg.topic);
 							ws.getUserData()[WS_SUBSCRIPTIONS]?.add(msg.topic);
+							sendSubscribedT(ws, msg.topic, ref);
 							return;
 						}
 						if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
@@ -186,11 +216,20 @@ export async function createTestServer(options = {}) {
 							return;
 						}
 						if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
+							const ref = hasRefT(msg.ref) ? msg.ref : null;
 							for (const topic of msg.topics.slice(0, 256)) {
-								if (!isValidWireTopic(topic)) continue;
-								if (handler.subscribe && handler.subscribe(ws, topic, { platform }) === false) continue;
+								if (!isValidWireTopic(topic)) {
+									sendDeniedT(ws, topic, ref, 'INVALID_TOPIC');
+									continue;
+								}
+								const denial = runSubscribeHookT(ws, topic);
+								if (denial !== null) {
+									sendDeniedT(ws, topic, ref, denial);
+									continue;
+								}
 								ws.subscribe(topic);
 								ws.getUserData()[WS_SUBSCRIPTIONS]?.add(topic);
+								sendSubscribedT(ws, topic, ref);
 							}
 							return;
 						}

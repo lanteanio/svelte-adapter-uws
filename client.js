@@ -126,6 +126,21 @@ export const status = {
 };
 
 /**
+ * Readable store of the latest subscribe-denied response from the server.
+ * Each entry is `{ topic, reason, ref }` where `reason` is one of the
+ * built-in codes (`'UNAUTHENTICATED'`, `'FORBIDDEN'`, `'INVALID_TOPIC'`,
+ * `'RATE_LIMITED'`) or any custom string the server's `subscribe` hook
+ * returned. The store stays at `null` until the first denial.
+ *
+ * @type {import('svelte/store').Readable<{ topic: string, reason: string, ref: number | string } | null>}
+ */
+export const denials = {
+	subscribe(fn) {
+		return ensureConnection().denials.subscribe(fn);
+	}
+};
+
+/**
  * Returns a promise that resolves when the WebSocket connection is open.
  * Auto-connects if not already connected.
  *
@@ -677,6 +692,16 @@ function createConnection(options) {
 	/** @type {import('svelte/store').Writable<'connecting' | 'open' | 'closed'>} */
 	const statusStore = writable('closed');
 
+	// Subscribe ref counter and the subscribe-denied surface. Every
+	// subscribe / subscribe-batch the client emits carries a numeric ref
+	// so the server can reply with a per-topic { type: 'subscribed' } or
+	// { type: 'subscribe-denied', reason } ack. The latest denial is
+	// exposed via the `denials` Readable for consumers that want to show
+	// a banner ("Access denied") or reason-coded retry.
+	let nextSubscribeRef = 1;
+	/** @type {import('svelte/store').Writable<{ topic: string, reason: string, ref: number | string } | null>} */
+	const denialsStore = writable(null);
+
 	// Set to true when no more reconnects will ever be attempted.
 	// Consumers (ready()) watch this to reject instead of waiting forever.
 	/** @type {import('svelte/store').Writable<boolean>} */
@@ -816,7 +841,7 @@ function createConnection(options) {
 			if (subscribedTopics.size > 0) {
 				const allTopics = [...subscribedTopics];
 				const encoder = new TextEncoder();
-				const ENVELOPE_BYTES = 39; // '{"type":"subscribe-batch","topics":[]}'
+				const ENVELOPE_BYTES = 50; // '{"type":"subscribe-batch","topics":[],"ref":12345}'
 				const MAX_BYTES = 8000; // under 8192 server ceiling
 				const MAX_TOPICS = 200; // under 256 server cap
 				let chunk = [];
@@ -825,7 +850,7 @@ function createConnection(options) {
 					const entryBytes = encoder.encode(JSON.stringify(t)).length + 1;
 					if (chunk.length > 0 && (chunk.length >= MAX_TOPICS || chunkBytes + entryBytes > MAX_BYTES)) {
 						if (debug) console.log('[ws] resubscribe-batch ->', chunk);
-						ws?.send(JSON.stringify({ type: 'subscribe-batch', topics: chunk }));
+						ws?.send(JSON.stringify({ type: 'subscribe-batch', topics: chunk, ref: nextSubscribeRef++ }));
 						chunk = [];
 						chunkBytes = ENVELOPE_BYTES;
 					}
@@ -834,7 +859,7 @@ function createConnection(options) {
 				}
 				if (chunk.length > 0) {
 					if (debug) console.log('[ws] resubscribe-batch ->', chunk);
-					ws?.send(JSON.stringify({ type: 'subscribe-batch', topics: chunk }));
+					ws?.send(JSON.stringify({ type: 'subscribe-batch', topics: chunk, ref: nextSubscribeRef++ }));
 				}
 			}
 
@@ -887,6 +912,15 @@ function createConnection(options) {
 				}
 				if (msg.type === 'resumed') {
 					if (debug) console.log('[ws] resumed');
+					return;
+				}
+				if (msg.type === 'subscribed' && typeof msg.topic === 'string') {
+					if (debug) console.log('[ws] subscribed topic=%s ref=%s', msg.topic, msg.ref);
+					return;
+				}
+				if (msg.type === 'subscribe-denied' && typeof msg.topic === 'string' && typeof msg.reason === 'string') {
+					console.warn('[ws] subscribe denied topic=%s reason=%s', msg.topic, msg.reason);
+					denialsStore.set({ topic: msg.topic, reason: msg.reason, ref: msg.ref });
 					return;
 				}
 			} catch {
@@ -952,7 +986,7 @@ function createConnection(options) {
 		subscribedTopics.add(topic);
 		if (debug) console.log('[ws] subscribe ->', topic);
 		if (ws?.readyState === WebSocket.OPEN) {
-			ws.send(JSON.stringify({ type: 'subscribe', topic }));
+			ws.send(JSON.stringify({ type: 'subscribe', topic, ref: nextSubscribeRef++ }));
 		}
 	}
 
@@ -1238,6 +1272,7 @@ function createConnection(options) {
 	return {
 		events: { subscribe: eventsStore.subscribe },
 		status: { subscribe: statusStore.subscribe },
+		denials: { subscribe: denialsStore.subscribe },
 		_permaClosed: { subscribe: permaClosedStore.subscribe },
 		_hasUrl: !!url,
 		on: onTopic,

@@ -526,6 +526,66 @@ function stopPressureSampling() {
 }
 
 /**
+ * True when `ref` is a usable handle for subscribe acks. Numeric refs
+ * are the canonical client-side shape; strings are accepted so external
+ * clients that ID their requests with UUIDs interop without translation.
+ *
+ * @param {unknown} ref
+ * @returns {ref is number | string}
+ */
+function hasRef(ref) {
+	return typeof ref === 'number' || typeof ref === 'string';
+}
+
+/**
+ * Run the user's subscribe hook (if any) and translate its return value
+ * into either `null` (allow) or a string denial reason. The hook may
+ * return `false` (deny with the default `'FORBIDDEN'`), a string (use
+ * that string verbatim as the reason - the framework recognises
+ * `'UNAUTHENTICATED' | 'FORBIDDEN' | 'INVALID_TOPIC' | 'RATE_LIMITED'`
+ * but does not enforce the enum), or anything else (allow).
+ *
+ * @param {import('uWebSockets.js').WebSocket<any>} ws
+ * @param {string} topic
+ * @returns {string | null}
+ */
+function runSubscribeHook(ws, topic) {
+	if (!wsModule.subscribe) return null;
+	const result = wsModule.subscribe(ws, topic, { platform });
+	if (result === false) return 'FORBIDDEN';
+	if (typeof result === 'string') return result;
+	return null;
+}
+
+/**
+ * Send a `subscribed` ack frame to the client when it provided a `ref`
+ * with its subscribe op. No frame goes out for ref-less subscribes
+ * (old clients) so backward compatibility is preserved.
+ *
+ * @param {import('uWebSockets.js').WebSocket<any>} ws
+ * @param {string} topic
+ * @param {number | string | null} ref
+ */
+function sendSubscribed(ws, topic, ref) {
+	if (ref === null) return;
+	ws.send(JSON.stringify({ type: 'subscribed', topic, ref }), false, false);
+}
+
+/**
+ * Send a `subscribe-denied` ack frame. Same back-compat rule as
+ * `sendSubscribed` - silent when the client did not supply a `ref`.
+ *
+ * @param {import('uWebSockets.js').WebSocket<any>} ws
+ * @param {string} topic
+ * @param {number | string | null} ref
+ * @param {string} reason
+ */
+function sendSubscribeDenied(ws, topic, ref, reason) {
+	if (ref === null) return;
+	ws.send(JSON.stringify({ type: 'subscribe-denied', topic, ref, reason }), false, false);
+}
+
+/**
  * Drain any pending coalesce-by-key messages on a single connection.
  * Serializes lazily: only the surviving (latest) value per key pays
  * JSON.stringify cost.
@@ -1998,9 +2058,14 @@ if (WS_ENABLED) {
 				try {
 					const msg = JSON.parse(textDecoder.decode(message));
 					if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
-						if (!isValidWireTopic(msg.topic)) return;
-						// If a subscribe hook exists, let it gate access
-						if (wsModule.subscribe && wsModule.subscribe(ws, msg.topic, { platform }) === false) {
+						const ref = hasRef(msg.ref) ? msg.ref : null;
+						if (!isValidWireTopic(msg.topic)) {
+							sendSubscribeDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
+							return;
+						}
+						const denial = runSubscribeHook(ws, msg.topic);
+						if (denial !== null) {
+							sendSubscribeDenied(ws, msg.topic, ref, denial);
 							return;
 						}
 						const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
@@ -2009,6 +2074,7 @@ if (WS_ENABLED) {
 						subs.add(msg.topic);
 						if (isNew) totalSubscriptions++;
 						if (wsDebug) console.log('[ws] subscribe topic=%s', msg.topic);
+						sendSubscribed(ws, msg.topic, ref);
 						return;
 					}
 					if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
@@ -2025,16 +2091,25 @@ if (WS_ENABLED) {
 						// in a single message instead of N individual subscribe messages.
 						// Cap at 256 topics  - the client only sends what it was subscribed to.
 						const topics = msg.topics.slice(0, 256);
+						const ref = hasRef(msg.ref) ? msg.ref : null;
 						const userData = ws.getUserData();
 						let subscribed = 0;
 						for (const topic of topics) {
-							if (!isValidWireTopic(topic)) continue;
-							if (wsModule.subscribe && wsModule.subscribe(ws, topic, { platform }) === false) continue;
+							if (!isValidWireTopic(topic)) {
+								sendSubscribeDenied(ws, topic, ref, 'INVALID_TOPIC');
+								continue;
+							}
+							const denial = runSubscribeHook(ws, topic);
+							if (denial !== null) {
+								sendSubscribeDenied(ws, topic, ref, denial);
+								continue;
+							}
 							const isNew = !userData[WS_SUBSCRIPTIONS].has(topic);
 							ws.subscribe(topic);
 							userData[WS_SUBSCRIPTIONS].add(topic);
 							if (isNew) totalSubscriptions++;
 							subscribed++;
+							sendSubscribed(ws, topic, ref);
 						}
 						if (wsDebug) console.log('[ws] subscribe-batch count=%d', subscribed);
 						return;
