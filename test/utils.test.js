@@ -16,7 +16,8 @@ import {
 	createScopedTopic,
 	isOriginAllowed,
 	createUpgradeAdmission,
-	resolveRequestId
+	resolveRequestId,
+	createChaosState
 } from '../files/utils.js';
 
 // -- parse_as_bytes ---------------------------------------------------------
@@ -2350,5 +2351,92 @@ describe('resolveRequestId', () => {
 
 	it('trims surrounding whitespace before validating length', () => {
 		expect(resolveRequestId('  abc  ')).toBe('abc');
+	});
+});
+
+// -- createChaosState -------------------------------------------------------
+
+describe('createChaosState', () => {
+	it('starts inactive', () => {
+		const c = createChaosState();
+		expect(c.scenario).toBe(null);
+		expect(c.dropRate).toBe(0);
+		expect(c.delayMs).toBe(0);
+		expect(c.shouldDropOutbound()).toBe(false);
+		expect(c.getDelayMs()).toBe(0);
+	});
+
+	it('drop-outbound: respects dropRate via the injected RNG', () => {
+		// Sequence of fixed RNG values so the test is deterministic.
+		const sequence = [0.0, 0.05, 0.5, 0.99];
+		let idx = 0;
+		const c = createChaosState({ random: () => sequence[idx++ % sequence.length] });
+		c.set({ scenario: 'drop-outbound', dropRate: 0.1 });
+		// rng=0.0 < 0.1 -> drop
+		expect(c.shouldDropOutbound()).toBe(true);
+		// rng=0.05 < 0.1 -> drop
+		expect(c.shouldDropOutbound()).toBe(true);
+		// rng=0.5 not < 0.1 -> keep
+		expect(c.shouldDropOutbound()).toBe(false);
+		// rng=0.99 not < 0.1 -> keep
+		expect(c.shouldDropOutbound()).toBe(false);
+	});
+
+	it('drop-outbound with rate 0 never drops, with rate 1 always drops', () => {
+		const c = createChaosState({ random: () => 0.5 });
+		c.set({ scenario: 'drop-outbound', dropRate: 0 });
+		for (let i = 0; i < 5; i++) expect(c.shouldDropOutbound()).toBe(false);
+		c.set({ scenario: 'drop-outbound', dropRate: 1 });
+		for (let i = 0; i < 5; i++) expect(c.shouldDropOutbound()).toBe(true);
+	});
+
+	it('rejects an out-of-range dropRate', () => {
+		const c = createChaosState();
+		expect(() => c.set({ scenario: 'drop-outbound', dropRate: -0.1 })).toThrow();
+		expect(() => c.set({ scenario: 'drop-outbound', dropRate: 1.1 })).toThrow();
+		expect(() => c.set({ scenario: 'drop-outbound', dropRate: NaN })).toThrow();
+	});
+
+	it('slow-drain: returns the configured delay', () => {
+		const c = createChaosState();
+		c.set({ scenario: 'slow-drain', delayMs: 50 });
+		expect(c.getDelayMs()).toBe(50);
+		expect(c.shouldDropOutbound()).toBe(false);
+	});
+
+	it('rejects a negative or non-finite delayMs', () => {
+		const c = createChaosState();
+		expect(() => c.set({ scenario: 'slow-drain', delayMs: -1 })).toThrow();
+		expect(() => c.set({ scenario: 'slow-drain', delayMs: Infinity })).toThrow();
+	});
+
+	it('rejects an unknown scenario name', () => {
+		const c = createChaosState();
+		expect(() => c.set({ scenario: 'mystery' })).toThrow(/unknown scenario/);
+	});
+
+	it('reset() clears any active scenario', () => {
+		const c = createChaosState();
+		c.set({ scenario: 'drop-outbound', dropRate: 1 });
+		expect(c.shouldDropOutbound()).toBe(true);
+		c.reset();
+		expect(c.scenario).toBe(null);
+		expect(c.shouldDropOutbound()).toBe(false);
+	});
+
+	it('set(null) is equivalent to reset()', () => {
+		const c = createChaosState();
+		c.set({ scenario: 'slow-drain', delayMs: 25 });
+		c.set(null);
+		expect(c.scenario).toBe(null);
+		expect(c.getDelayMs()).toBe(0);
+	});
+
+	it('switching scenarios clears the prior scenario fields', () => {
+		const c = createChaosState({ random: () => 0 });
+		c.set({ scenario: 'slow-drain', delayMs: 100 });
+		c.set({ scenario: 'drop-outbound', dropRate: 1 });
+		expect(c.getDelayMs()).toBe(0);
+		expect(c.shouldDropOutbound()).toBe(true);
 	});
 });

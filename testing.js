@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, resolveRequestId, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY } from './files/utils.js';
 
 /**
  * Build a JSON envelope string matching the production wire format.
@@ -54,15 +54,13 @@ export async function createTestServer(options = {}) {
 	function sendSubscribedT(ws, topic, ref) {
 		if (ref === null) return;
 		const payload = JSON.stringify({ type: 'subscribed', topic, ref });
-		ws.send(payload, false, false);
-		bumpOutT(ws, payload);
+		sendOutboundT(ws, payload);
 	}
 	/** @param {any} ws @param {string} topic @param {number | string | null} ref @param {string} reason */
 	function sendDeniedT(ws, topic, ref, reason) {
 		if (ref === null) return;
 		const payload = JSON.stringify({ type: 'subscribe-denied', topic, ref, reason });
-		ws.send(payload, false, false);
-		bumpOutT(ws, payload);
+		sendOutboundT(ws, payload);
 	}
 
 	let uWS;
@@ -105,27 +103,68 @@ export async function createTestServer(options = {}) {
 		stats.bytesOut += payload.length;
 	}
 
+	// Chaos / fault-injection harness. Inactive by default - all platform
+	// methods take their fast path. Tests opt in via platform.__chaos({...})
+	// to drop or delay outbound frames; sendOutboundT is the single
+	// chokepoint every server-to-client frame in this harness flows through.
+	const chaos = createChaosState();
+
+	/**
+	 * Single outbound chokepoint. Consults the chaos state, then either
+	 * drops the frame, defers it via setTimeout, or sends it immediately.
+	 * Returns the same number ws.send returns on the immediate path
+	 * (uWS: 0 BACKPRESSURE, 1 SUCCESS, 2 DROPPED). Returns 0 on drop and
+	 * 1 on slow-drain (the dispatch is queued; tests assert via timing).
+	 *
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @param {string} payload
+	 */
+	function sendOutboundT(ws, payload) {
+		if (chaos.shouldDropOutbound()) return 0;
+		const delay = chaos.getDelayMs();
+		if (delay > 0) {
+			setTimeout(() => {
+				try { ws.send(payload, false, false); } catch {}
+				bumpOutT(ws, payload);
+			}, delay);
+			return 1;
+		}
+		const result = ws.send(payload, false, false);
+		bumpOutT(ws, payload);
+		return result;
+	}
+
 	const platform = {
 		publish(topic, event, data, options) {
 			const seq = (options && options.seq === false)
 				? null
 				: nextTopicSeq(topicSeqs, topic);
 			const msg = envelope(topic, event, data, seq);
-			return app.publish(topic, msg, false, false);
+			// Fast path: hand fan-out to uWS's C++ TopicTree. Chaos cannot
+			// intercept C++ dispatch, so when a scenario is active we
+			// degrade to a JS-side fanout that consults the chaos state
+			// per recipient.
+			if (chaos.scenario === null) {
+				return app.publish(topic, msg, false, false);
+			}
+			let delivered = false;
+			for (const ws of wsConnections) {
+				if (!ws.isSubscribed(topic)) continue;
+				sendOutboundT(ws, msg);
+				delivered = true;
+			}
+			return delivered;
 		},
 		send(ws, topic, event, data) {
 			const payload = envelope(topic, event, data);
-			const result = ws.send(payload, false, false);
-			bumpOutT(ws, payload);
-			return result;
+			return sendOutboundT(ws, payload);
 		},
 		sendTo(filter, topic, event, data) {
 			const msg = envelope(topic, event, data);
 			let count = 0;
 			for (const ws of wsConnections) {
 				if (filter(ws.getUserData())) {
-					ws.send(msg, false, false);
-					bumpOutT(ws, msg);
+					sendOutboundT(ws, msg);
 					count++;
 				}
 			}
@@ -151,13 +190,19 @@ export async function createTestServer(options = {}) {
 				}, timeoutMs);
 				pending.set(ref, { resolve, reject, timer });
 				const payload = JSON.stringify({ type: 'request', ref, event, data: data ?? null });
-				ws.send(payload, false, false);
-				bumpOutT(ws, payload);
+				sendOutboundT(ws, payload);
 			});
 		},
 		topic(name) {
 			return createScopedTopic(platform.publish, name);
-		}
+		},
+		/**
+		 * Activate or clear a chaos / fault-injection scenario. See
+		 * `createChaosState` in `files/utils.js` for the supported shapes.
+		 * Pass `null` to reset; the harness returns to its zero-overhead
+		 * fast paths.
+		 */
+		__chaos(cfg) { chaos.set(cfg); }
 	};
 	let nextRequestRefT = 1;
 
@@ -257,8 +302,7 @@ export async function createTestServer(options = {}) {
 				};
 			}
 			const welcome = '{"type":"welcome","sessionId":"' + sessionId + '"}';
-			ws.send(welcome, false, false);
-			bumpOutT(ws, welcome);
+			sendOutboundT(ws, welcome);
 			wsConnections.add(ws);
 			handler.open?.(ws, { platform: userData[WS_PLATFORM] });
 			for (const resolve of connectionWaiters) resolve(undefined);
@@ -344,8 +388,7 @@ export async function createTestServer(options = {}) {
 									console.error('[adapter-uws/testing] resume hook threw:', err);
 								}
 							}
-							ws.send('{"type":"resumed"}', false, false);
-							bumpOutT(ws, '{"type":"resumed"}');
+							sendOutboundT(ws, '{"type":"resumed"}');
 							return;
 						}
 					} catch {}

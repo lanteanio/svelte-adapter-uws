@@ -10,6 +10,43 @@ export interface TestServerOptions {
 	handler?: Partial<WebSocketHandler>;
 }
 
+/**
+ * Chaos / fault-injection scenario passed to `platform.__chaos`.
+ *
+ * - `'drop-outbound'` discards outbound frames before they reach the wire
+ *   with the configured `dropRate` (a probability in [0, 1]).
+ * - `'slow-drain'` defers outbound frames by `delayMs` milliseconds via
+ *   `setTimeout`, simulating a slow consumer or congested network.
+ *
+ * Pass `null` (or call with no argument) to clear the active scenario;
+ * the harness returns to its zero-overhead fast paths.
+ */
+export type ChaosScenario =
+	| { scenario: 'drop-outbound'; dropRate: number }
+	| { scenario: 'slow-drain'; delayMs: number };
+
+/**
+ * Platform exposed by `createTestServer`. Adds the `__chaos` fault-injection
+ * setter on top of the production `Platform` surface. Tests can use the
+ * harness to simulate broken-network conditions while exercising protocol
+ * code (subscribe acks, session resume, sendCoalesced under backpressure,
+ * request/reply timeouts, etc).
+ */
+export interface TestPlatform extends Platform {
+	/**
+	 * Activate or clear a chaos / fault-injection scenario. Pass `null`
+	 * to reset; the harness returns to its zero-overhead fast paths.
+	 *
+	 * @example
+	 * ```js
+	 * server.platform.__chaos({ scenario: 'drop-outbound', dropRate: 0.5 });
+	 * // ... assert client recovers from 50% packet loss ...
+	 * server.platform.__chaos(null);
+	 * ```
+	 */
+	__chaos(cfg: ChaosScenario | null): void;
+}
+
 export interface TestServer {
 	/** HTTP URL of the test server (e.g. 'http://localhost:12345'). */
 	url: string;
@@ -18,7 +55,7 @@ export interface TestServer {
 	/** The port the server is listening on. */
 	port: number;
 	/** Platform API for publishing, sending, and querying connections. */
-	platform: Platform;
+	platform: TestPlatform;
 	/**
 	 * Live set of currently connected uWS WebSocket instances. Useful in
 	 * tests that need to call `platform.request(ws, ...)` or otherwise

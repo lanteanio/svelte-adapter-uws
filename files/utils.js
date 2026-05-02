@@ -587,3 +587,106 @@ export function parse_origin(value) {
 	}
 	return url.origin;
 }
+
+// -- Chaos / fault-injection state ------------------------------------------
+// State machine consulted by the test harness to simulate broken-network
+// conditions while exercising protocol code (subscribe acks, session resume,
+// per-topic seq, sendCoalesced, request/reply, etc). Pure helper - no I/O,
+// no module-state capture; one instance per server / per harness so parallel
+// tests do not stomp on each other.
+//
+// Two scenarios in this revision:
+//   - 'drop-outbound': probabilistically discard outbound frames before they
+//     reach the wire. dropRate is a number in [0, 1].
+//   - 'slow-drain': defer outbound frames by delayMs via setTimeout. Useful
+//     for backpressure / coalesce-under-load tests; the delivered order is
+//     preserved per call site.
+// Future scenarios ('worker-flap', 'ipc-reorder') need to live one layer up
+// against the worker_threads relay, not at the per-connection send chokepoint.
+
+/**
+ * Build a chaos state machine. Inactive by default; callers gate their
+ * interception logic on `state.scenario !== null`.
+ *
+ * @param {{ random?: () => number }} [opts] Optional injection point for
+ *   tests that need a deterministic RNG (default `Math.random`).
+ */
+export function createChaosState(opts) {
+	const random = (opts && opts.random) || Math.random;
+	/** @type {{ scenario: string | null, dropRate: number, delayMs: number }} */
+	const state = { scenario: null, dropRate: 0, delayMs: 0 };
+
+	return {
+		get scenario() { return state.scenario; },
+		get dropRate() { return state.dropRate; },
+		get delayMs() { return state.delayMs; },
+
+		/**
+		 * Activate a scenario. Pass `null` (or call `reset()`) to clear.
+		 *
+		 * @param {{
+		 *   scenario: 'drop-outbound' | 'slow-drain',
+		 *   dropRate?: number,
+		 *   delayMs?: number
+		 * } | null} cfg
+		 */
+		set(cfg) {
+			if (cfg === null || cfg === undefined) {
+				state.scenario = null;
+				state.dropRate = 0;
+				state.delayMs = 0;
+				return;
+			}
+			if (cfg.scenario === 'drop-outbound') {
+				const r = typeof cfg.dropRate === 'number' ? cfg.dropRate : 0;
+				if (r < 0 || r > 1 || Number.isNaN(r)) {
+					throw new Error('chaos: dropRate must be a number in [0, 1]');
+				}
+				state.scenario = 'drop-outbound';
+				state.dropRate = r;
+				state.delayMs = 0;
+				return;
+			}
+			if (cfg.scenario === 'slow-drain') {
+				const d = typeof cfg.delayMs === 'number' ? cfg.delayMs : 0;
+				if (d < 0 || !Number.isFinite(d)) {
+					throw new Error('chaos: delayMs must be a non-negative finite number');
+				}
+				state.scenario = 'slow-drain';
+				state.delayMs = d;
+				state.dropRate = 0;
+				return;
+			}
+			throw new Error(
+				`chaos: unknown scenario '${cfg.scenario}'. Supported: 'drop-outbound', 'slow-drain'.`
+			);
+		},
+
+		reset() {
+			state.scenario = null;
+			state.dropRate = 0;
+			state.delayMs = 0;
+		},
+
+		/**
+		 * Returns true if the caller should drop the outbound frame. Always
+		 * false when the active scenario is not 'drop-outbound'. dropRate of
+		 * 0 never drops; dropRate of 1 always drops; values in between drop
+		 * with the configured probability.
+		 */
+		shouldDropOutbound() {
+			if (state.scenario !== 'drop-outbound') return false;
+			if (state.dropRate <= 0) return false;
+			if (state.dropRate >= 1) return true;
+			return random() < state.dropRate;
+		},
+
+		/**
+		 * Returns the delay in ms the caller should defer an outbound frame
+		 * by, or 0 when the active scenario is not 'slow-drain'.
+		 */
+		getDelayMs() {
+			return state.scenario === 'slow-drain' ? state.delayMs : 0;
+		}
+	};
+}
