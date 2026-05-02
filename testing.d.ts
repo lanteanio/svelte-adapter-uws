@@ -118,3 +118,134 @@ export interface TestServer {
  * ```
  */
 export function createTestServer(options?: TestServerOptions): Promise<TestServer>;
+
+// -- Re-exported pure helpers -----------------------------------------------
+// Curated for downstream test code asserting on wire shape, userData
+// state, or chaos / fault-injection behavior. Production-internal helpers
+// (mime lookup, byte parsing, sampler internals) deliberately stay
+// unexported so the test surface can evolve without churning production.
+
+/**
+ * JSON-quote a topic or event name for use inside a wire envelope. Throws
+ * on control characters, double-quotes, or backslashes - the same
+ * validation the production handler enforces. Pure.
+ */
+export function esc(s: string): string;
+
+/**
+ * Append the JSON-encoded `data` (and optional `seq`) plus the closing
+ * brace to a prebuilt envelope prefix. Pairs with the wire shape
+ * `{topic, event, data, seq?}`. When `seq` is `null` / `undefined` the
+ * field is omitted entirely so the envelope matches the legacy
+ * `{topic,event,data}` shape verbatim. Pure.
+ */
+export function completeEnvelope(prefix: string, data: unknown, seq?: number | null): string;
+
+/**
+ * Wrap an array of pre-built per-event envelope strings into a single
+ * `{"type":"batch","events":[...]}` wire frame. Each input is a complete
+ * `{topic, event, data, seq?}` envelope as produced by `completeEnvelope`.
+ * The output is the wire format `platform.publishBatched` emits. Pure.
+ */
+export function wrapBatchEnvelope(eventEnvelopes: string[]): string;
+
+/**
+ * True if the topic name is safe to interpolate into a wire envelope:
+ * no control characters, no quotes, no backslashes, max 256 chars.
+ * Pure helper used to validate subscribe / unsubscribe inputs.
+ */
+export function isValidWireTopic(topic: unknown): boolean;
+
+/**
+ * Build a `TopicHelper`-shaped scoped publisher bound to a single topic.
+ * Used internally by `platform.topic(name)`; useful in tests that want to
+ * exercise the `created` / `updated` / `deleted` / `set` / `increment` /
+ * `decrement` shorthands without going through a real platform. Pure.
+ */
+export function createScopedTopic(
+	publish: (topic: string, event: string, data?: unknown) => unknown,
+	name: string
+): {
+	publish(event: string, data?: unknown): void;
+	created(data?: unknown): void;
+	updated(data?: unknown): void;
+	deleted(data?: unknown): void;
+	set(value: number): void;
+	increment(amount?: number): void;
+	decrement(amount?: number): void;
+};
+
+/**
+ * Collapse events that share a `coalesceKey` so only the latest value
+ * survives, preserving the latest occurrence's position. Events without a
+ * `coalesceKey` pass through unchanged. Pure helper that drives the
+ * coalesce-by-key behavior of `platform.publishBatched`.
+ */
+export function collapseByCoalesceKey<T extends { coalesceKey?: string }>(messages: T[]): T[];
+
+/**
+ * Sanitize a possibly-present `X-Request-ID` header value into a value
+ * safe to expose as `platform.requestId`. Returns `null` for absent /
+ * empty / over-128-char / control-char inputs; trims and validates
+ * printable-ASCII otherwise. Pure.
+ */
+export function resolveRequestId(value: string | undefined | null): string | null;
+
+/**
+ * Chaos / fault-injection state machine consulted by the test harness.
+ * The `createTestServer` instance owns one of these; callers normally
+ * drive it via `server.platform.__chaos(cfg)`. Exposed directly here for
+ * tests that want a unit-level helper with deterministic RNG injection.
+ */
+export function createChaosState(opts?: { random?: () => number }): {
+	readonly scenario: 'drop-outbound' | 'slow-drain' | null;
+	readonly dropRate: number;
+	readonly delayMs: number;
+	set(cfg: ChaosScenario | null): void;
+	reset(): void;
+	shouldDropOutbound(): boolean;
+	getDelayMs(): number;
+};
+
+// -- Per-connection userData slot constants ---------------------------------
+// Symbol-keyed slots the adapter stamps on `ws.getUserData()` for its own
+// per-connection bookkeeping. Tests asserting on connection state read
+// userData via these to avoid coupling to Symbol identity tricks.
+//
+// `WS_REQUEST_ID_KEY` is a string (not a Symbol): uWebSockets.js strips
+// Symbol-keyed properties from the userData object passed to
+// `res.upgrade()`, so the upgrade->open carrier slot has to be a string
+// key. The `open` hook moves the value into the Symbol-keyed
+// `WS_PLATFORM` slot and deletes the string key, so test code reading
+// userData after `open` should read `WS_PLATFORM`, not the string key.
+
+/** Set of topics a connection is subscribed to. Stamped before `open` fires. */
+export const WS_SUBSCRIPTIONS: unique symbol;
+
+/** `Map<key, {topic,event,data}>` of pending `sendCoalesced` messages. Lazy. */
+export const WS_COALESCED: unique symbol;
+
+/** Per-connection session UUID. Stamped in `open` and announced to the client. */
+export const WS_SESSION_ID: unique symbol;
+
+/** `Map<ref, {resolve,reject,timer}>` of in-flight `platform.request()` promises. Lazy. */
+export const WS_PENDING_REQUESTS: unique symbol;
+
+/** Per-connection traffic counters. Only allocated when a `close` hook is registered. */
+export const WS_STATS: unique symbol;
+
+/** Per-connection `Platform` clone carrying the connection's `requestId`. */
+export const WS_PLATFORM: unique symbol;
+
+/** Set of capabilities the client advertised via `{type:'hello', caps:[...]}`. */
+export const WS_CAPS: unique symbol;
+
+/**
+ * String key (not a Symbol) used to ferry the per-connection requestId
+ * across the upgrade->open transition. uWebSockets.js strips Symbol keys
+ * from the userData object handed to `res.upgrade()`, so the carrier has
+ * to be a string. The `open` hook deletes this slot after promoting the
+ * value into the `WS_PLATFORM` Symbol slot, so it never appears in
+ * userData while a hook is running.
+ */
+export const WS_REQUEST_ID_KEY: '__adapter_uws_request_id__';

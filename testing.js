@@ -1,6 +1,32 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS } from './files/utils.js';
+
+// Curated re-exports for downstream test code (extensions, app-side
+// integration tests, custom transport bridges that need to assert on
+// the wire shape). Five wire-protocol helpers, three behavior helpers,
+// and all eight userData slot constants. Production-internal helpers
+// (mime lookup, byte parsing, sampler internals, etc.) deliberately
+// stay unexported so the surface stays semver-stable for tests without
+// blocking future refactors of the production hot paths.
+export {
+	esc,
+	completeEnvelope,
+	wrapBatchEnvelope,
+	isValidWireTopic,
+	createScopedTopic,
+	collapseByCoalesceKey,
+	resolveRequestId,
+	createChaosState,
+	WS_SUBSCRIPTIONS,
+	WS_COALESCED,
+	WS_SESSION_ID,
+	WS_PENDING_REQUESTS,
+	WS_STATS,
+	WS_PLATFORM,
+	WS_CAPS,
+	WS_REQUEST_ID_KEY
+};
 
 /**
  * Build a JSON envelope string matching the production wire format.

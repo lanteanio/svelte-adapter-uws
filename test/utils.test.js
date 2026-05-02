@@ -2566,3 +2566,62 @@ describe('collapseByCoalesceKey', () => {
 		expect(input).toEqual(before);
 	});
 });
+
+// -- Public re-export surface from `./testing` ------------------------------
+// Locks the curated set of helpers and slot constants so a refactor that
+// silently drops one breaks here instead of in a downstream package.
+
+describe('public re-exports from svelte-adapter-uws/testing', () => {
+	it('re-exports the curated wire-protocol helpers, behavior helpers, and userData slots', async () => {
+		const testing = await import('../testing.js');
+		const utils = await import('../files/utils.js');
+		const expected = [
+			// Wire-protocol helpers
+			'esc',
+			'completeEnvelope',
+			'wrapBatchEnvelope',
+			'isValidWireTopic',
+			'createScopedTopic',
+			// Behavior helpers
+			'collapseByCoalesceKey',
+			'resolveRequestId',
+			'createChaosState',
+			// userData slot constants
+			'WS_SUBSCRIPTIONS',
+			'WS_COALESCED',
+			'WS_SESSION_ID',
+			'WS_PENDING_REQUESTS',
+			'WS_STATS',
+			'WS_PLATFORM',
+			'WS_CAPS',
+			'WS_REQUEST_ID_KEY'
+		];
+		for (const name of expected) {
+			expect(testing[name], `testing.${name} missing`).toBeDefined();
+			expect(testing[name], `testing.${name} drifted from utils.${name}`).toBe(utils[name]);
+		}
+	});
+
+	it('does not expose production-internal helpers via ./testing', async () => {
+		const testing = await import('../testing.js');
+		// Sanity check that we are NOT promoting the production-internal
+		// surface inadvertently. If one of these starts being legitimately
+		// useful in tests, move it to the curated list above with intent.
+		const internal = [
+			'mimeLookup',
+			'splitCookiesString',
+			'parse_as_bytes',
+			'parse_origin',
+			'writeChunkWithBackpressure',
+			'drainCoalesced',
+			'nextTopicSeq',
+			'computePressureReason',
+			'computeTopPublishers',
+			'createUpgradeAdmission',
+			'isOriginAllowed'
+		];
+		for (const name of internal) {
+			expect(testing[name], `testing.${name} should NOT be re-exported`).toBeUndefined();
+		}
+	});
+});
