@@ -257,6 +257,38 @@ export function computePressureReason(sample, thresholds) {
 	return 'NONE';
 }
 
+/**
+ * Reduce a per-topic publish-stats Map (`topic -> { m, b }` where `m` is
+ * messages-in-window and `b` is bytes-in-window) into per-second rates.
+ * Returns the top 5 topics by message rate plus any topics that crossed
+ * either threshold.
+ *
+ * Pure: no I/O, no globals, does not mutate the input. The caller is
+ * responsible for clearing the source map after sampling.
+ *
+ * @param {Map<string, { m: number, b: number }>} stats
+ * @param {number} intervalSec
+ * @param {{ topicPublishRatePerSec: number | false, topicPublishBytesPerSec: number | false }} thresholds
+ * @returns {{ topPublishers: { topic: string, messagesPerSec: number, bytesPerSec: number }[], overThreshold: { topic: string, messagesPerSec: number, bytesPerSec: number }[] }}
+ */
+export function computeTopPublishers(stats, intervalSec, thresholds) {
+	const topicRates = [];
+	const overThreshold = [];
+	const msgThreshold = thresholds.topicPublishRatePerSec;
+	const byteThreshold = thresholds.topicPublishBytesPerSec;
+	for (const [topic, s] of stats) {
+		const messagesPerSec = intervalSec > 0 ? s.m / intervalSec : 0;
+		const bytesPerSec = intervalSec > 0 ? s.b / intervalSec : 0;
+		const entry = { topic, messagesPerSec, bytesPerSec };
+		topicRates.push(entry);
+		const tooManyMsg = msgThreshold !== false && messagesPerSec >= msgThreshold;
+		const tooManyBytes = byteThreshold !== false && bytesPerSec >= byteThreshold;
+		if (tooManyMsg || tooManyBytes) overThreshold.push(entry);
+	}
+	topicRates.sort((a, b) => b.messagesPerSec - a.messagesPerSec);
+	return { topPublishers: topicRates.slice(0, 5), overThreshold };
+}
+
 // Symbol-keyed slots for adapter-internal scratch state on the
 // per-connection userData object.
 //

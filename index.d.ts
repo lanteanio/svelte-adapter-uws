@@ -317,6 +317,30 @@ export interface WebSocketOptions {
 		 * @default 1000
 		 */
 		sampleIntervalMs?: number;
+
+		/**
+		 * Per-topic message-rate threshold for runaway-publisher detection.
+		 * When a topic crosses this value in a sample window the
+		 * `onPublishRate` callback fires (or a throttled `console.warn`
+		 * does, by default). Independent of the aggregate
+		 * `publishRatePerSec` signal - this one names the offender.
+		 *
+		 * Set to `false` to disable per-topic message-rate detection.
+		 *
+		 * @default 5000
+		 */
+		topicPublishRatePerSec?: number | false;
+
+		/**
+		 * Per-topic byte-rate threshold for runaway-publisher detection.
+		 * When a topic's outgoing bytes per second cross this value the
+		 * same surface fires as `topicPublishRatePerSec`.
+		 *
+		 * Set to `false` to disable per-topic byte-rate detection.
+		 *
+		 * @default 10485760 (10 MB/s)
+		 */
+		topicPublishBytesPerSec?: number | false;
 	};
 }
 
@@ -746,6 +770,23 @@ export interface PressureSnapshot {
 	 * `MEMORY > PUBLISH_RATE > SUBSCRIBERS > NONE`.
 	 */
 	readonly reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY';
+	/**
+	 * Top 5 topics by message rate during the last sample window, sorted
+	 * descending by `messagesPerSec`. Each entry is
+	 * `{ topic, messagesPerSec, bytesPerSec }`. Empty when no
+	 * `platform.publish()` calls landed in the window.
+	 */
+	readonly topPublishers: TopicPublishRate[];
+}
+
+/**
+ * Per-topic publish-rate sample, surfaced via `platform.pressure.topPublishers`
+ * and the `platform.onPublishRate(cb)` callback.
+ */
+export interface TopicPublishRate {
+	topic: string;
+	messagesPerSec: number;
+	bytesPerSec: number;
 }
 
 /**
@@ -1028,6 +1069,43 @@ export interface Platform {
 	 * ```
 	 */
 	onPressure(cb: (snapshot: PressureSnapshot) => void): () => void;
+
+	/**
+	 * Register a callback fired once per sample window with the list of
+	 * topics whose publish rate has crossed `topicPublishRatePerSec` or
+	 * `topicPublishBytesPerSec` for that window. Each entry is
+	 * `{ topic, messagesPerSec, bytesPerSec }`.
+	 *
+	 * Use this to log, page on-call, or apply a per-topic backpressure
+	 * response. Registering at least one callback suppresses the
+	 * default throttled `console.warn` output - the user owns the
+	 * surface at that point.
+	 *
+	 * Callbacks run synchronously inside the sampler. A throwing
+	 * listener does not break the sampler or other listeners; the
+	 * error is logged and the next listener still runs. Returns an
+	 * unsubscribe function.
+	 *
+	 * @example
+	 * ```js
+	 * adapter({
+	 *   websocket: {
+	 *     pressure: {
+	 *       topicPublishRatePerSec: 10000,
+	 *       topicPublishBytesPerSec: 5 * 1024 * 1024
+	 *     }
+	 *   }
+	 * });
+	 *
+	 * // In a server hook or load function:
+	 * platform.onPublishRate((events) => {
+	 *   for (const e of events) {
+	 *     metrics.record('runaway_publisher', { topic: e.topic, rate: e.messagesPerSec });
+	 *   }
+	 * });
+	 * ```
+	 */
+	onPublishRate(cb: (events: TopicPublishRate[]) => void): () => void;
 
 	/**
 	 * Get a scoped helper for a topic. Reduces repetition when publishing

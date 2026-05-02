@@ -13,7 +13,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -456,12 +456,27 @@ let publishCountWindow = 0;
 let totalSubscriptions = 0;
 
 /**
+ * Per-topic publish counters for runaway-publisher detection. Single
+ * Map keyed by topic, value object mutated in place so steady-state
+ * publish only does two integer increments per call (no Map.set, no
+ * allocation). The map is sampled and reset at every pressure tick.
+ *
+ * @type {Map<string, { m: number, b: number }>}
+ */
+const topicPublishStats = new Map();
+
+/**
+ * @typedef {{ topic: string, messagesPerSec: number, bytesPerSec: number }} TopicPublishRate
+ */
+
+/**
  * @typedef {{
  *   active: boolean,
  *   subscriberRatio: number,
  *   publishRate: number,
  *   memoryMB: number,
- *   reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY'
+ *   reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY',
+ *   topPublishers: TopicPublishRate[]
  * }} PressureSnapshot
  */
 
@@ -471,11 +486,22 @@ const pressureSnapshot = {
 	subscriberRatio: 0,
 	publishRate: 0,
 	memoryMB: 0,
-	reason: 'NONE'
+	reason: 'NONE',
+	topPublishers: []
 };
 
 /** @type {Set<(snapshot: PressureSnapshot) => void>} */
 const pressureListeners = new Set();
+
+/** @type {Set<(events: TopicPublishRate[]) => void>} */
+const publishRateListeners = new Set();
+
+// Throttle the default console.warn output for runaway publishers to one
+// message per topic per minute, so a sustained over-threshold publisher
+// does not flood the log. Suppressed entirely when at least one
+// onPublishRate callback is registered (the user owns the surface).
+/** @type {Map<string, number>} */
+const lastPublishWarnAt = new Map();
 
 /** @type {ReturnType<typeof setInterval> | null} */
 let pressureTimer = null;
@@ -490,7 +516,14 @@ const DEFAULT_PRESSURE_THRESHOLDS = {
 	memoryHeapUsedRatio: 0.85,
 	publishRatePerSec: 10000,
 	subscriberRatio: 50,
-	sampleIntervalMs: 1000
+	sampleIntervalMs: 1000,
+	// Per-topic runaway-publisher thresholds. A topic that crosses
+	// either of these in a sample window fires the configured callback
+	// (or a throttled console.warn by default). Both can be set to
+	// false to disable per-topic tracking entirely; in that case the
+	// hot-path bump is skipped.
+	topicPublishRatePerSec: 5000,
+	topicPublishBytesPerSec: 10 * 1024 * 1024
 };
 
 /**
@@ -498,7 +531,7 @@ const DEFAULT_PRESSURE_THRESHOLDS = {
  * iff `reason` changed. Called by the 1 Hz timer; also extracted so a test
  * harness can drive samples directly without spinning real timers.
  *
- * @param {{ memoryHeapUsedRatio: number | false, publishRatePerSec: number | false, subscriberRatio: number | false, sampleIntervalMs: number }} thresholds
+ * @param {{ memoryHeapUsedRatio: number | false, publishRatePerSec: number | false, subscriberRatio: number | false, sampleIntervalMs: number, topicPublishRatePerSec: number | false, topicPublishBytesPerSec: number | false }} thresholds
  */
 function samplePressure(thresholds) {
 	const interval = thresholds.sampleIntervalMs / 1000;
@@ -512,6 +545,14 @@ function samplePressure(thresholds) {
 	const heapUsedRatio = mem.heapTotal > 0 ? mem.heapUsed / mem.heapTotal : 0;
 	const memoryMB = mem.rss / (1024 * 1024);
 
+	// Drain per-topic counters into per-second rates. The pure helper
+	// reads but does not mutate; we clear the source map after to start
+	// the next window fresh.
+	const { topPublishers, overThreshold } = computeTopPublishers(
+		topicPublishStats, interval, thresholds
+	);
+	topicPublishStats.clear();
+
 	const reason = computePressureReason(
 		{ heapUsedRatio, publishRate, subscriberRatio },
 		thresholds
@@ -523,6 +564,7 @@ function samplePressure(thresholds) {
 	pressureSnapshot.memoryMB = memoryMB;
 	pressureSnapshot.reason = reason;
 	pressureSnapshot.active = reason !== 'NONE';
+	pressureSnapshot.topPublishers = topPublishers;
 
 	if (transitioned) {
 		for (const cb of pressureListeners) {
@@ -530,6 +572,33 @@ function samplePressure(thresholds) {
 				cb(pressureSnapshot);
 			} catch (err) {
 				console.error('[pressure] listener threw:', err);
+			}
+		}
+	}
+
+	if (overThreshold.length > 0) {
+		if (publishRateListeners.size > 0) {
+			for (const cb of publishRateListeners) {
+				try {
+					cb(overThreshold);
+				} catch (err) {
+					console.error('[pressure] publish-rate listener threw:', err);
+				}
+			}
+		} else {
+			// Default: throttled console.warn per topic so a sustained
+			// runaway does not flood the log. Suppressed entirely when
+			// the user has registered an onPublishRate callback - they
+			// own the surface at that point.
+			const now = Date.now();
+			for (const e of overThreshold) {
+				const last = lastPublishWarnAt.get(e.topic) || 0;
+				if (now - last < 60_000) continue;
+				lastPublishWarnAt.set(e.topic, now);
+				console.warn(
+					'[ws] runaway publisher topic=%s msg/s=%d bytes/s=%d',
+					e.topic, Math.round(e.messagesPerSec), Math.round(e.bytesPerSec)
+				);
 			}
 		}
 	}
@@ -541,7 +610,7 @@ function samplePressure(thresholds) {
  * clamped to a sane minimum to avoid pathological tight-loop sampling if
  * a user passes 0 or a negative number.
  *
- * @param {{ memoryHeapUsedRatio?: number | false, publishRatePerSec?: number | false, subscriberRatio?: number | false, sampleIntervalMs?: number } | undefined} opts
+ * @param {{ memoryHeapUsedRatio?: number | false, publishRatePerSec?: number | false, subscriberRatio?: number | false, sampleIntervalMs?: number, topicPublishRatePerSec?: number | false, topicPublishBytesPerSec?: number | false } | undefined} opts
  */
 function resolvePressureThresholds(opts) {
 	const merged = { ...DEFAULT_PRESSURE_THRESHOLDS, ...(opts || {}) };
@@ -696,6 +765,16 @@ const platform = {
 			? null
 			: nextTopicSeq(topicSeqs, topic);
 		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
+		// Per-topic counter for runaway-publisher detection. Allocates
+		// one entry per topic on first publish, then mutates two int
+		// fields in place forever. Sampler drains and resets at 1 Hz.
+		let s = topicPublishStats.get(topic);
+		if (!s) {
+			s = { m: 0, b: 0 };
+			topicPublishStats.set(topic, s);
+		}
+		s.m++;
+		s.b += envelope.length;
 		const result = app.publish(topic, envelope, false, false);
 		// Relay to other workers via main thread (no-op in single-process mode).
 		// Pass { relay: false } when the message originates from an external
@@ -868,6 +947,24 @@ const platform = {
 	onPressure(cb) {
 		pressureListeners.add(cb);
 		return () => pressureListeners.delete(cb);
+	},
+
+	/**
+	 * Register a callback fired once per sample window with the list of
+	 * topics whose publish rate has crossed `topicPublishRatePerSec` or
+	 * `topicPublishBytesPerSec` for that window. Each entry is
+	 * `{ topic, messagesPerSec, bytesPerSec }`. Use this to log,
+	 * page on-call, or apply a per-topic backpressure response.
+	 *
+	 * Registering at least one callback suppresses the default
+	 * throttled `console.warn` output - the user owns the surface.
+	 * Returns an unsubscribe function.
+	 *
+	 * @param {(events: TopicPublishRate[]) => void} cb
+	 */
+	onPublishRate(cb) {
+		publishRateListeners.add(cb);
+		return () => publishRateListeners.delete(cb);
 	},
 
 	/**

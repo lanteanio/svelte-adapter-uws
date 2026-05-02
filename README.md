@@ -1201,10 +1201,12 @@ export default {
     adapter: adapter({
       websocket: {
         pressure: {
-          memoryHeapUsedRatio: 0.9,    // default 0.85
-          publishRatePerSec: 50000,    // default 10000
-          subscriberRatio: false,      // disable this signal
-          sampleIntervalMs: 500        // default 1000; clamped to >=100
+          memoryHeapUsedRatio: 0.9,         // default 0.85
+          publishRatePerSec: 50000,          // default 10000 (aggregate)
+          subscriberRatio: false,            // disable this signal
+          sampleIntervalMs: 500,             // default 1000; clamped to >=100
+          topicPublishRatePerSec: 10000,     // default 5000 (per topic)
+          topicPublishBytesPerSec: 5_000_000 // default 10485760 (10 MB/s per topic)
         }
       }
     })
@@ -1215,6 +1217,35 @@ export default {
 Set any individual threshold to `false` to disable that signal. `sampleIntervalMs` is clamped to a minimum of 100 ms.
 
 > **Clustering:** `platform.pressure` is per-worker. Each worker samples its own counters and reports its own snapshot. There is no aggregate "cluster pressure" -- a hot worker should shed its own load without waiting for the rest of the cluster.
+
+#### Per-topic publish-rate detection
+
+Beyond the aggregate `publishRatePerSec` signal, the sampler also tracks **per-topic** publish rates and surfaces the top 5 each tick:
+
+```js
+platform.pressure.topPublishers
+// [
+//   { topic: 'cursor:room-42', messagesPerSec: 8500, bytesPerSec: 1234567 },
+//   { topic: 'audit:org-1',    messagesPerSec: 1200, bytesPerSec:  234567 },
+//   ...
+// ]
+```
+
+When a topic crosses `topicPublishRatePerSec` or `topicPublishBytesPerSec` in a sample window, the adapter flags it as a runaway publisher. By default this prints a throttled `console.warn` (one per topic per minute). For programmatic handling, register `platform.onPublishRate(cb)` -- doing so suppresses the default warning so you own the surface:
+
+```js
+platform.onPublishRate((events) => {
+  for (const e of events) {
+    metrics.record('runaway_publisher', {
+      topic: e.topic,
+      msgRate: e.messagesPerSec,
+      byteRate: e.bytesPerSec
+    });
+  }
+});
+```
+
+The bookkeeping is cheap: the per-topic counter mutates two integer fields in place per `platform.publish()` call (one entry allocated the first time a topic is published to, then zero allocations forever after). Set `topicPublishRatePerSec: false` and `topicPublishBytesPerSec: false` to disable per-topic tracking entirely if you do not want it.
 
 ### `platform.topic(name)` - scoped helper
 

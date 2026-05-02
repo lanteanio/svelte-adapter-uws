@@ -8,6 +8,7 @@ import {
 	writeChunkWithBackpressure,
 	drainCoalesced,
 	computePressureReason,
+	computeTopPublishers,
 	nextTopicSeq,
 	completeEnvelope,
 	esc,
@@ -2204,5 +2205,96 @@ describe('createUpgradeAdmission', () => {
 			expect(a.tryAcquire()).toBe(true);
 			expect(a.inFlight).toBe(2);
 		});
+	});
+});
+
+// -- computeTopPublishers ----------------------------------------------------
+
+describe('computeTopPublishers', () => {
+	const noLimits = { topicPublishRatePerSec: false, topicPublishBytesPerSec: false };
+
+	it('returns empty arrays for an empty stats map', () => {
+		const result = computeTopPublishers(new Map(), 1, noLimits);
+		expect(result.topPublishers).toEqual([]);
+		expect(result.overThreshold).toEqual([]);
+	});
+
+	it('computes per-second rates from the window counters', () => {
+		const stats = new Map([['chat', { m: 10, b: 1000 }]]);
+		const result = computeTopPublishers(stats, 1, noLimits);
+		expect(result.topPublishers).toEqual([
+			{ topic: 'chat', messagesPerSec: 10, bytesPerSec: 1000 }
+		]);
+	});
+
+	it('scales rates by sub-second intervals', () => {
+		const stats = new Map([['chat', { m: 5, b: 500 }]]);
+		const result = computeTopPublishers(stats, 0.5, noLimits);
+		expect(result.topPublishers[0].messagesPerSec).toBe(10);
+		expect(result.topPublishers[0].bytesPerSec).toBe(1000);
+	});
+
+	it('zero interval reports zero rates without dividing', () => {
+		const stats = new Map([['chat', { m: 5, b: 500 }]]);
+		const result = computeTopPublishers(stats, 0, noLimits);
+		expect(result.topPublishers[0].messagesPerSec).toBe(0);
+		expect(result.topPublishers[0].bytesPerSec).toBe(0);
+	});
+
+	it('sorts top publishers descending by message rate', () => {
+		const stats = new Map([
+			['low', { m: 1, b: 100 }],
+			['high', { m: 100, b: 200 }],
+			['mid', { m: 50, b: 300 }]
+		]);
+		const result = computeTopPublishers(stats, 1, noLimits);
+		expect(result.topPublishers.map(p => p.topic)).toEqual(['high', 'mid', 'low']);
+	});
+
+	it('caps top publishers at 5 entries', () => {
+		const stats = new Map();
+		for (let i = 0; i < 10; i++) stats.set('t' + i, { m: i + 1, b: 100 });
+		const result = computeTopPublishers(stats, 1, noLimits);
+		expect(result.topPublishers).toHaveLength(5);
+	});
+
+	it('flags topics over the message-rate threshold', () => {
+		const stats = new Map([
+			['ok', { m: 50, b: 100 }],
+			['hot', { m: 200, b: 100 }]
+		]);
+		const result = computeTopPublishers(stats, 1, {
+			topicPublishRatePerSec: 100,
+			topicPublishBytesPerSec: false
+		});
+		expect(result.overThreshold.map(e => e.topic)).toEqual(['hot']);
+	});
+
+	it('flags topics over the byte-rate threshold', () => {
+		const stats = new Map([
+			['ok', { m: 1, b: 1000 }],
+			['fat', { m: 1, b: 1_000_000 }]
+		]);
+		const result = computeTopPublishers(stats, 1, {
+			topicPublishRatePerSec: false,
+			topicPublishBytesPerSec: 500_000
+		});
+		expect(result.overThreshold.map(e => e.topic)).toEqual(['fat']);
+	});
+
+	it('disables individual signals when set to false', () => {
+		const stats = new Map([['hot', { m: 1_000_000, b: 1_000_000_000 }]]);
+		const result = computeTopPublishers(stats, 1, {
+			topicPublishRatePerSec: false,
+			topicPublishBytesPerSec: false
+		});
+		expect(result.overThreshold).toEqual([]);
+	});
+
+	it('does not mutate the input stats map', () => {
+		const stats = new Map([['chat', { m: 10, b: 1000 }]]);
+		computeTopPublishers(stats, 1, noLimits);
+		expect(stats.size).toBe(1);
+		expect(stats.get('chat')).toEqual({ m: 10, b: 1000 });
 	});
 });
