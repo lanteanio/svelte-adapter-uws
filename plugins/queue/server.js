@@ -14,8 +14,9 @@
 /**
  * @typedef {Object} QueueOptions
  * @property {number} [concurrency=1] - Maximum concurrent tasks per key. Must be a positive integer.
- * @property {number} [maxSize=Infinity] - Maximum waiting (not-yet-started) tasks per key.
- *   When exceeded, `push()` rejects and `onDrop` is called (if provided).
+ * @property {number} [maxSize=1_000_000] - Maximum waiting (not-yet-started) tasks per key.
+ *   When exceeded, `push()` rejects and `onDrop` is called (if provided). Pass
+ *   `Infinity` to disable the cap (not recommended at uWS scale).
  * @property {(dropped: { key: string, task: Function }) => void} [onDrop] -
  *   Called when a task is rejected due to `maxSize`. Useful for logging or metrics.
  */
@@ -64,7 +65,7 @@
  */
 export function createQueue(options = {}) {
 	const concurrency = options.concurrency ?? 1;
-	const maxSize = options.maxSize ?? Infinity;
+	const maxSize = options.maxSize ?? 1_000_000;
 	const onDrop = options.onDrop ?? null;
 
 	if (!Number.isInteger(concurrency) || concurrency < 1) {

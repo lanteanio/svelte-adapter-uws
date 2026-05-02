@@ -13,7 +13,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, resolveRequestId, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, resolveRequestId, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -88,6 +88,11 @@ function releaseState(s) {
 const ENVELOPE_CACHE_MAX = 256;
 /** @type {Map<string, string>} */
 const envelopePrefixCache = new Map();
+
+// Capacity caps (`MAX_SUBSCRIPTIONS_PER_CONNECTION`,
+// `MAX_PENDING_REQUESTS_PER_CONNECTION`, `MAX_COALESCED_KEYS_PER_CONNECTION`,
+// `TOPIC_SEQS_WARN_THRESHOLD`, `PUBLISH_WARN_DEDUP_MAX`) live in utils.js
+// so handler.js, vite.js, and testing.js all enforce identical limits.
 
 /**
  * Build or retrieve the JSON envelope prefix for a topic+event pair.
@@ -446,6 +451,29 @@ function bumpOut(ws, payload) {
 /** @type {Map<string, number>} */
 const topicSeqs = new Map();
 
+// Fires once when the topic registry first crosses the warn threshold.
+// Apps with unbounded topic cardinality (e.g. publishing to a topic
+// keyed on a per-user id) leak memory because each entry persists for
+// the process lifetime - the resume protocol cannot evict without
+// corrupting recovering clients. Surfacing the threshold loudly with
+// the topN publishers lets ops identify the source before OOM.
+let topicSeqsWarnFired = false;
+function maybeWarnTopicRegistry() {
+	if (topicSeqsWarnFired) return;
+	if (topicSeqs.size < TOPIC_SEQS_WARN_THRESHOLD) return;
+	topicSeqsWarnFired = true;
+	let top;
+	try { top = computeTopPublishers(topicPublishStats, 0).slice(0, 5); }
+	catch { top = []; }
+	console.warn(
+		'[ws] topic registry has grown to ' + topicSeqs.size +
+		' distinct topics. Each entry persists for the process lifetime ' +
+		'(required by the resume protocol). Reduce topic cardinality or ' +
+		'opt out of seq stamping for high-cardinality publishes via ' +
+		'{ seq: false }. Top recent publishers: ' + JSON.stringify(top)
+	);
+}
+
 // -- Pressure tracking -------------------------------------------------------
 // Coarse 1 Hz sampler exposed as `platform.pressure` (snapshot) and
 // `platform.onPressure(cb)` (transition callback). State lives at module
@@ -611,6 +639,14 @@ function samplePressure(thresholds) {
 			for (const e of overThreshold) {
 				const last = lastPublishWarnAt.get(e.topic) || 0;
 				if (now - last < 60_000) continue;
+				// FIFO-evict the oldest entry once at cap. Pure dedup
+				// state, so dropping the oldest just resets the warn
+				// throttle for that topic on its next over-threshold
+				// publish - no correctness impact.
+				if (lastPublishWarnAt.size >= PUBLISH_WARN_DEDUP_MAX && !lastPublishWarnAt.has(e.topic)) {
+					const oldest = lastPublishWarnAt.keys().next().value;
+					if (oldest !== undefined) lastPublishWarnAt.delete(oldest);
+				}
 				lastPublishWarnAt.set(e.topic, now);
 				console.warn(
 					'[ws] runaway publisher topic=%s msg/s=%d bytes/s=%d',
@@ -789,6 +825,10 @@ const platform = {
 		if (!s) {
 			s = { m: 0, b: 0 };
 			topicPublishStats.set(topic, s);
+			// Cold path: a brand-new topic just entered the registry. Cheap
+			// place to check the topic-cardinality warn threshold without
+			// touching the steady-state hot path.
+			maybeWarnTopicRegistry();
 		}
 		s.m++;
 		s.b += envelope.length;
@@ -849,6 +889,16 @@ const platform = {
 		if (!pending) {
 			pending = new Map();
 			userData[WS_COALESCED] = pending;
+		}
+		// At cap with a brand-new key: drop the oldest insertion-order
+		// entry. sendCoalesced is latest-value-wins by contract, so an
+		// evicted oldest is simply a value the caller already replaced
+		// with a fresher write under the same key (or, with unbounded
+		// distinct keys, the caller is leaking and the oldest-pending
+		// is the most stale value to lose).
+		if (pending.size >= MAX_COALESCED_KEYS_PER_CONNECTION && !pending.has(key)) {
+			const oldest = pending.keys().next().value;
+			if (oldest !== undefined) pending.delete(oldest);
 		}
 		pending.set(key, { topic, event, data });
 		flushCoalescedFor(ws);
@@ -1078,6 +1128,7 @@ const platform = {
 			if (!s) {
 				s = { m: 0, b: 0 };
 				topicPublishStats.set(m.topic, s);
+				maybeWarnTopicRegistry();
 			}
 			s.m++;
 			s.b += env.length;
@@ -1142,6 +1193,12 @@ const platform = {
 		if (!pending) {
 			pending = new Map();
 			userData[WS_PENDING_REQUESTS] = pending;
+		}
+		if (pending.size >= MAX_PENDING_REQUESTS_PER_CONNECTION) {
+			return Promise.reject(new Error(
+				'pending requests exceeded ' + MAX_PENDING_REQUESTS_PER_CONNECTION +
+				' on this connection'
+			));
 		}
 		const ref = nextRequestRef++;
 		const timeoutMs = (options && options.timeoutMs) || 5000;
@@ -2558,13 +2615,17 @@ if (WS_ENABLED) {
 							sendSubscribeDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
 							return;
 						}
+						const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+						const isNew = !subs.has(msg.topic);
+						if (isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+							sendSubscribeDenied(ws, msg.topic, ref, 'RATE_LIMITED');
+							return;
+						}
 						const denial = runSubscribeHook(ws, msg.topic);
 						if (denial !== null) {
 							sendSubscribeDenied(ws, msg.topic, ref, denial);
 							return;
 						}
-						const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
-						const isNew = !subs.has(msg.topic);
 						ws.subscribe(msg.topic);
 						subs.add(msg.topic);
 						if (isNew) totalSubscriptions++;
@@ -2608,6 +2669,12 @@ if (WS_ENABLED) {
 
 						let subscribed = 0;
 						for (const topic of valid) {
+							const subs = userData[WS_SUBSCRIPTIONS];
+							const isNew = !subs.has(topic);
+							if (isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+								sendSubscribeDenied(ws, topic, ref, 'RATE_LIMITED');
+								continue;
+							}
 							const denial = batchDenials !== null
 								? (batchDenials[topic] ?? null)
 								: runSubscribeHook(ws, topic);
@@ -2615,9 +2682,8 @@ if (WS_ENABLED) {
 								sendSubscribeDenied(ws, topic, ref, denial);
 								continue;
 							}
-							const isNew = !userData[WS_SUBSCRIPTIONS].has(topic);
 							ws.subscribe(topic);
-							userData[WS_SUBSCRIPTIONS].add(topic);
+							subs.add(topic);
 							if (isNew) totalSubscriptions++;
 							subscribed++;
 							sendSubscribed(ws, topic, ref);

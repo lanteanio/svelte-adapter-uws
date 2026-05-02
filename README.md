@@ -462,6 +462,45 @@ adapter({
 
 The two layers do not share state, configuration, or call sites. They cannot drift apart because the WebSocket lifecycle enforces the ordering: a connection that fails `upgradeAdmission` never reaches the message handler at all, so `createAdmissionControl` only ever sees connections that were already admitted at the handshake. The layering is a structural property, not a runtime one.
 
+### Capacity model
+
+Every internal `Map` / `Set` that grows with client behaviour or topic cardinality has an explicit upper bound and a defined behaviour at saturation. The defaults are deliberately generous (1,000,000 across the board) -- far above any healthy single-connection use, even at uWS's million-connection scale -- so the cap catches obvious bugs and runaway clients without ever biting real apps. Aggregate memory at extreme scale is bounded separately by `upgradeAdmission.maxConcurrent`; per-connection caps are not the right place to defend against a 1M-connection DoS.
+
+| Site | Default cap | Behaviour at saturation | Override |
+|------|-------------|-------------------------|----------|
+| Subscriptions per connection | 1,000,000 | `subscribe-denied` with reason `'RATE_LIMITED'` | not exposed |
+| Pending `platform.request` calls per connection | 1,000,000 | promise rejects with "pending requests exceeded" | not exposed |
+| `sendCoalesced` keys per connection | 1,000,000 | drop oldest insertion-order entry on insert | not exposed |
+| Topic seq registry (`topicSeqs`) | 1,000,000 | one structured `console.warn` with topN publishers; publish continues | not exposed (resume protocol depends on persistence) |
+| Runaway-publisher warn dedup | 1,000,000 | FIFO-evict oldest entry on insert | not exposed |
+| `envelopePrefixCache` | 256 | FIFO half-evict | not exposed |
+| `decodeCache` | 256 | FIFO half-evict | not exposed |
+| SSR dedup in-flight | 500 | new request bypasses dedup | not exposed |
+| SSR dedup body buffer per request | 512 KB | response replays without dedup | not exposed |
+| Upgrade rate-limit IP map | 10,000 | LRU on 60s sweep | not exposed |
+| Aggregate live connections | unbounded by default | reject upgrade with 503 once `maxConcurrent` set | `upgradeAdmission.maxConcurrent` |
+| Outbound buffer per connection | 1 MB | uWS drops the frame for that subscriber only | `wsOptions.maxBackpressure` |
+
+**Plugin caps** all default to 1,000,000 with the same idiot-proof bias:
+
+| Plugin | Cap | Behaviour at saturation | Override |
+|--------|-----|-------------------------|----------|
+| `replay` | `maxTopics: 100`, ring `size: 1000` | LRU evict / ring overwrite | per-topic options |
+| `presence` | `maxConnections: 1_000_000`, `maxTopics: 1_000_000` | drop oldest insertion-order entry | constructor options |
+| `cursor` | `maxConnections: 1_000_000`, `maxTopics: 1_000_000` | drop oldest insertion-order entry; pending throttle timers cleared | constructor options |
+| `throttle` / `debounce` | `maxTopics: 1_000_000` | flush pending then drop oldest topic | second arg to `throttle(interval, options)` / `debounce(...)` |
+| `lock` | `maxKeys: 1_000_000` | new-key `withLock` rejects with "active key count exceeded" | constructor options |
+| `ratelimit` | `maxBuckets: 1_000_000` | drop oldest insertion-order bucket on insert | constructor options |
+| `queue` | `maxSize: 1_000_000` per key | `push` rejects, `onDrop` callback fires | constructor options (pass `Infinity` to opt out) |
+| `dedup` | `maxEntries: 10_000` | soft + hard cap, oldest insertion-order evicted | constructor options |
+| `session` | `maxEntries: 10_000` | soft + hard cap, oldest insertion-order evicted | constructor options |
+| `groups` | `maxMembers` (per group, required) | `join` returns `false`, `onFull` callback fires | required option |
+
+Two policy notes:
+
+- **Per-conn cap math at uWS scale.** `1,000,000 subscriptions × 1,000,000 connections` is more than any realistic process can handle. The per-conn caps catch single-connection bugs (a `for (i=0; i<N; i++) ws.subscribe('topic-' + i)` loop, a misbehaving extension); they do not pretend to OOM-protect a 1M-connection server. Set `upgradeAdmission.maxConcurrent` for that.
+- **`topicSeqs` is warn-only.** The seq registry cannot evict entries -- the resume protocol depends on each topic's monotonic counter persisting for the process lifetime, and dropping a row would corrupt any reconnecting client trying to resume that topic. The cap fires a single structured `console.warn` with the topN recent publishers when the threshold is first crossed; ops sees the leak shape and can reduce topic cardinality (or opt out with `{ seq: false }` per publish) before OOM.
+
 ### Static file behavior
 
 All static assets (from the `client/` and `prerendered/` output directories) are loaded once at startup and served directly from RAM. Each response automatically includes:

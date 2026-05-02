@@ -72,7 +72,7 @@ export interface Limiter {
  * }
  * ```
  */
-export function throttle(interval: number): Limiter;
+export function throttle(interval: number, options?: LimiterOptions): Limiter;
 
 /**
  * Create a debounced publisher.
@@ -96,4 +96,17 @@ export function throttle(interval: number): Limiter;
  * }
  * ```
  */
-export function debounce(interval: number): Limiter;
+export function debounce(interval: number, options?: LimiterOptions): Limiter;
+
+export interface LimiterOptions {
+	/**
+	 * Hard cap on the active topic registry. When the cap is reached,
+	 * the oldest insertion-order entry is flushed (its pending value
+	 * publishes immediately) and dropped, then the new topic is
+	 * inserted. Protects against unbounded topic cardinality on
+	 * `chat-${userId}`-style usage.
+	 *
+	 * @default 1_000_000
+	 */
+	maxTopics?: number;
+}

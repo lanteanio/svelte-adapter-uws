@@ -35,6 +35,16 @@ export interface RateLimitOptions<UserData = unknown> {
 	 * @default 'ip'
 	 */
 	keyBy?: 'ip' | 'connection' | ((ws: import('uWebSockets.js').WebSocket<UserData>) => string);
+
+	/**
+	 * Hard cap on retained buckets. When the map crosses this size on a
+	 * new insert, the oldest insertion-order entry is evicted. The lazy
+	 * expired-entry sweep at 1000+ entries still runs first; the hard cap
+	 * protects against sustained DDoS where every entry is unexpired.
+	 *
+	 * @default 1_000_000
+	 */
+	maxBuckets?: number;
 }
 
 export interface ConsumeResult {

@@ -24,6 +24,10 @@
  *   - `'ip'` (default): uses `userData.remoteAddress`, `userData.ip`, or `'unknown'`
  *   - `'connection'`: each WebSocket object gets its own independent bucket
  *   - `function`: custom extractor, receives the ws and returns a string key
+ * @property {number} [maxBuckets=1_000_000] - Hard cap on retained buckets. When the
+ *   map crosses this size on a new insert, the oldest insertion-order entry is
+ *   evicted. The lazy expired-entry sweep at 1000+ entries still runs first; the
+ *   hard cap protects against sustained DDoS where every entry is unexpired.
  */
 
 /**
@@ -79,7 +83,7 @@ export function createRateLimit(options) {
 		throw new Error('ratelimit: options object is required');
 	}
 
-	const { points, interval, blockDuration = 0, keyBy = 'ip' } = options;
+	const { points, interval, blockDuration = 0, keyBy = 'ip', maxBuckets = 1_000_000 } = options;
 
 	if (!Number.isInteger(points) || points <= 0) {
 		throw new Error('ratelimit: points must be a positive integer');
@@ -92,6 +96,9 @@ export function createRateLimit(options) {
 	}
 	if (keyBy !== 'ip' && keyBy !== 'connection' && typeof keyBy !== 'function') {
 		throw new Error("ratelimit: keyBy must be 'ip', 'connection', or a function");
+	}
+	if (!Number.isInteger(maxBuckets) || maxBuckets < 1) {
+		throw new Error('ratelimit: maxBuckets must be a positive integer');
 	}
 
 	/**
@@ -149,6 +156,16 @@ export function createRateLimit(options) {
 
 			let bucket = buckets.get(key);
 			if (!bucket) {
+				// Hard cap: evict the oldest insertion-order entry if the
+				// lazy expired-entry sweep above did not free a slot. The
+				// dropped entry's worst-case cost to the system is one
+				// extra "free" bucket for that key (the next consume()
+				// recreates it with full points), which under sustained
+				// DDoS is preferable to unbounded memory growth.
+				if (buckets.size >= maxBuckets) {
+					const oldest = buckets.keys().next().value;
+					if (oldest !== undefined) buckets.delete(oldest);
+				}
 				bucket = { points, resetAt: now + interval, bannedUntil: 0 };
 				buckets.set(key, bucket);
 			}

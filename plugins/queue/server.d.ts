@@ -7,8 +7,9 @@ export interface QueueOptions {
 
 	/**
 	 * Maximum waiting (not-yet-started) tasks per key.
-	 * When exceeded, `push()` rejects and `onDrop` is called.
-	 * @default Infinity
+	 * When exceeded, `push()` rejects and `onDrop` is called. Pass
+	 * `Infinity` to disable the cap (not recommended at uWS scale).
+	 * @default 1_000_000
 	 */
 	maxSize?: number;
 

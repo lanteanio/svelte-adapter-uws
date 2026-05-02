@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.0-next.7] - 2026-05-02
+### Added
+
+- **Bounded-by-default capacity caps across the adapter and bundled plugins.** Every `Map` / `Set` whose growth is driven by client behaviour or topic cardinality now declares an explicit upper bound and a documented saturation behaviour, so an unbounded subscribe loop, a runaway server-initiated request stream, or a `chat-${userId}` topic-cardinality leak can no longer exhaust process memory silently. Defaults are deliberately generous (1,000,000 across the board) to avoid biting any healthy app at uWS scale; aggregate-memory protection still belongs to `upgradeAdmission.maxConcurrent`.
+  - **Adapter core** (handler.js, vite.js, testing.js):
+    - `WS_SUBSCRIPTIONS` per-connection set: cap 1,000,000. New subscribes past the cap respond with `subscribe-denied` reason `'RATE_LIMITED'`. Applies to both the single-subscribe and `subscribe-batch` paths in production, dev, and the test harness.
+    - `WS_PENDING_REQUESTS` per-connection map: cap 1,000,000. New `platform.request()` calls past the cap reject synchronously with "pending requests exceeded".
+    - `WS_COALESCED` per-connection map: cap 1,000,000. New keys past the cap drop the oldest insertion-order entry on insert (latest-value-wins contract is preserved by definition).
+    - `topicSeqs` module-level seq registry: warn-only at 1,000,000 distinct topics. The resume protocol depends on each entry persisting for the process lifetime, so eviction would corrupt reconnecting clients - instead, a single structured `console.warn` with the topN recent publishers fires when the threshold is first crossed, surfacing the leak shape before OOM.
+    - `lastPublishWarnAt` runaway-publisher dedup: cap 1,000,000 with FIFO eviction; pure dedup state, dropping oldest just resets the warn cooldown for that topic.
+  - **Plugins**:
+    - `ratelimit`: new `maxBuckets` option (default 1,000,000). Hard-evicts oldest insertion-order bucket on insert at cap, protecting against sustained DDoS where the lazy expired-entry sweep cannot free slots.
+    - `throttle` and `debounce`: new `maxTopics` option (default 1,000,000). When the topic registry is at cap, the oldest insertion-order entry is flushed (its pending value publishes immediately) and dropped before the new topic is inserted.
+    - `cursor`: new `maxConnections` and `maxTopics` options (each default 1,000,000). Drop oldest insertion-order entry on insert at cap; pending throttle timers on the dropped topic are cleared first.
+    - `presence`: new `maxConnections` and `maxTopics` options (each default 1,000,000).
+    - `lock`: new `maxKeys` option (default 1,000,000). New-key `withLock` synchronously rejects with "active key count exceeded" when the chain is at cap; existing keys can still be re-entered.
+- **README "Capacity model" section** under Backpressure & connection limits. Single tabular reference for every internal cap, its default, its saturation behaviour, and whether it is overridable. Documents the per-conn-cap-multiplier reasoning (per-conn caps catch single-connection bugs; aggregate memory bounds come from `upgradeAdmission.maxConcurrent`) and the `topicSeqs` warn-only rationale.
+
+### Changed
+
+- **`queue` plugin `maxSize` default changed from `Infinity` to `1,000,000`.** Soft API change: existing users who relied on unbounded queues see their queue start dropping tasks via `onDrop` once 1M waiting tasks accumulate per key. Pass `{ maxSize: Infinity }` explicitly to opt back into the previous behaviour. The new default brings the plugin in line with the rest of the bounded-by-default audit; no real workload should reach 1M waiting tasks per key without a leak.
 
 ### Changed
 

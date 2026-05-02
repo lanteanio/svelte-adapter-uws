@@ -170,6 +170,15 @@ export function createPresence(options = {}) {
 	const keyField = options.key || 'id';
 	const select = options.select || ((userData) => userData);
 	const heartbeatMs = options.heartbeat || 0;
+	const maxConnections = options.maxConnections ?? 1_000_000;
+	const maxTopics = options.maxTopics ?? 1_000_000;
+
+	if (!Number.isInteger(maxConnections) || maxConnections < 1) {
+		throw new Error('presence: maxConnections must be a positive integer');
+	}
+	if (!Number.isInteger(maxTopics) || maxTopics < 1) {
+		throw new Error('presence: maxTopics must be a positive integer');
+	}
 
 	// Auto-generated ID counter for connections without a key field
 	let connCounter = 0;
@@ -345,6 +354,10 @@ export function createPresence(options = {}) {
 
 			// Track per-connection
 			if (!connTopics) {
+				if (wsTopics.size >= maxConnections) {
+					const oldest = wsTopics.keys().next().value;
+					if (oldest !== undefined) wsTopics.delete(oldest);
+				}
 				connTopics = new Map();
 				wsTopics.set(ws, connTopics);
 			}
@@ -353,6 +366,10 @@ export function createPresence(options = {}) {
 			// Track per-topic
 			let users = topicPresence.get(topic);
 			if (!users) {
+				if (topicPresence.size >= maxTopics) {
+					const oldest = topicPresence.keys().next().value;
+					if (oldest !== undefined) topicPresence.delete(oldest);
+				}
 				users = new Map();
 				topicPresence.set(topic, users);
 			}

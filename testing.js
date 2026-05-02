@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -292,6 +292,12 @@ export async function createTestServer(options = {}) {
 				pending = new Map();
 				userData[WS_PENDING_REQUESTS] = pending;
 			}
+			if (pending.size >= MAX_PENDING_REQUESTS_PER_CONNECTION) {
+				return Promise.reject(new Error(
+					'pending requests exceeded ' + MAX_PENDING_REQUESTS_PER_CONNECTION +
+					' on this connection'
+				));
+			}
 			const ref = nextRequestRefT++;
 			const timeoutMs = (options && options.timeoutMs) || 5000;
 			return new Promise((resolve, reject) => {
@@ -465,13 +471,19 @@ export async function createTestServer(options = {}) {
 								sendDeniedT(ws, msg.topic, ref, 'INVALID_TOPIC');
 								return;
 							}
+							const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+							const isNew = subs ? !subs.has(msg.topic) : true;
+							if (subs && isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+								sendDeniedT(ws, msg.topic, ref, 'RATE_LIMITED');
+								return;
+							}
 							const denial = runSubscribeHookT(ws, msg.topic);
 							if (denial !== null) {
 								sendDeniedT(ws, msg.topic, ref, denial);
 								return;
 							}
 							ws.subscribe(msg.topic);
-							ws.getUserData()[WS_SUBSCRIPTIONS]?.add(msg.topic);
+							subs?.add(msg.topic);
 							sendSubscribedT(ws, msg.topic, ref);
 							return;
 						}
@@ -500,7 +512,13 @@ export async function createTestServer(options = {}) {
 								valid.push(topic);
 							}
 							const batchDenials = runSubscribeBatchHookT(ws, valid);
+							const udSubs = ws.getUserData()[WS_SUBSCRIPTIONS];
 							for (const topic of valid) {
+								const isNew = udSubs ? !udSubs.has(topic) : true;
+								if (udSubs && isNew && udSubs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+									sendDeniedT(ws, topic, ref, 'RATE_LIMITED');
+									continue;
+								}
 								const denial = batchDenials !== null
 									? (batchDenials[topic] ?? null)
 									: runSubscribeHookT(ws, topic);
@@ -509,7 +527,7 @@ export async function createTestServer(options = {}) {
 									continue;
 								}
 								ws.subscribe(topic);
-								ws.getUserData()[WS_SUBSCRIPTIONS]?.add(topic);
+								udSubs?.add(topic);
 								sendSubscribedT(ws, topic, ref);
 							}
 							return;

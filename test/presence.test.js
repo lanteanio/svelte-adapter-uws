@@ -1052,4 +1052,44 @@ describe('presence plugin - server', () => {
 			expect(platform.published.filter(e => e.event === 'presence_diff')).toHaveLength(1);
 		});
 	});
+
+	describe('caps', () => {
+		it('rejects invalid maxConnections / maxTopics', () => {
+			expect(() => createPresence({ maxConnections: 0 })).toThrow('maxConnections must be a positive integer');
+			expect(() => createPresence({ maxTopics: -1 })).toThrow('maxTopics must be a positive integer');
+		});
+
+		it('evicts oldest connection state when at maxConnections', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id }),
+				maxConnections: 2
+			});
+			const platform = mockPlatform();
+			p.join(mockWs({ id: 'A' }), 'room', platform);
+			p.join(mockWs({ id: 'B' }), 'room', platform);
+			// Adding the third connection evicts the oldest wsTopics entry.
+			p.join(mockWs({ id: 'C' }), 'room', platform);
+			// All three users are still tracked in the topic-level map,
+			// since eviction is connection-scoped (the per-ws bookkeeping)
+			// not topic-scoped (the per-user roster).
+			expect(p.count('room')).toBe(3);
+		});
+
+		it('evicts oldest topic when at maxTopics', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id }),
+				maxTopics: 2
+			});
+			const platform = mockPlatform();
+			p.join(mockWs({ id: 'A' }), 'a', platform);
+			p.join(mockWs({ id: 'B' }), 'b', platform);
+			// Adding 'c' evicts 'a' (oldest insertion order).
+			p.join(mockWs({ id: 'C' }), 'c', platform);
+			expect(p.count('a')).toBe(0);
+			expect(p.count('b')).toBe(1);
+			expect(p.count('c')).toBe(1);
+		});
+	});
 });

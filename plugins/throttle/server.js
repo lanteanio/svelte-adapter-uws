@@ -78,6 +78,49 @@ function validateInterval(interval, name) {
 }
 
 /**
+ * Resolve `maxTopics` from a possibly-omitted options bag and validate.
+ * Default cap is 1_000_000 - far above any realistic per-process active
+ * topic count, but still bounded to catch unbounded-cardinality leaks
+ * (e.g. throttling on a per-user topic for many distinct users).
+ *
+ * @param {{ maxTopics?: number } | undefined} options
+ * @param {string} name
+ * @returns {number}
+ */
+function resolveMaxTopics(options, name) {
+	const value = options && options.maxTopics !== undefined ? options.maxTopics : 1_000_000;
+	if (!Number.isInteger(value) || value < 1) {
+		throw new Error(`${name}: maxTopics must be a positive integer`);
+	}
+	return value;
+}
+
+/**
+ * Insert a topic state, dropping the oldest insertion-order entry when
+ * the map is at cap. The dropped entry's pending payload is published
+ * synchronously so the value is not silently lost - the caller's
+ * trailing-edge contract still holds for that topic, just earlier than
+ * its scheduled fire time.
+ *
+ * @param {Map<string, { timer: any, pending: { platform: any, event: string, data: any } | null }>} topics
+ * @param {number} maxTopics
+ */
+function evictOldestIfAtCap(topics, maxTopics) {
+	if (topics.size < maxTopics) return;
+	const oldestKey = topics.keys().next().value;
+	if (oldestKey === undefined) return;
+	const state = topics.get(oldestKey);
+	if (state) {
+		if (state.timer) clearTimeout(state.timer);
+		if (state.pending) {
+			const p = state.pending;
+			try { p.platform.publish(oldestKey, p.event, p.data); } catch {}
+		}
+	}
+	topics.delete(oldestKey);
+}
+
+/**
  * Create a throttled publisher.
  *
  * Sends the first publish immediately (leading edge), then at most once
@@ -87,6 +130,10 @@ function validateInterval(interval, name) {
  * Rate limiting is per-topic: different topics have independent timers.
  *
  * @param {number} interval - Minimum time (ms) between publishes per topic
+ * @param {{ maxTopics?: number }} [options] - `maxTopics` caps the active
+ *   topic registry (default 1_000_000). When the cap is reached, the
+ *   oldest insertion-order entry is flushed (its pending value publishes
+ *   immediately) and dropped, then the new topic is inserted.
  * @returns {import('./server.js').Limiter}
  *
  * @example
@@ -104,8 +151,9 @@ function validateInterval(interval, name) {
  * }
  * ```
  */
-export function throttle(interval) {
+export function throttle(interval, options) {
 	validateInterval(interval, 'throttle');
+	const maxTopics = resolveMaxTopics(options, 'throttle');
 
 	/** @type {Map<string, { timer: any, pending: { platform: any, event: string, data: any } | null }>} */
 	const topics = new Map();
@@ -116,6 +164,7 @@ export function throttle(interval) {
 		publish(platform, topic, event, data) {
 			let state = topics.get(topic);
 			if (!state) {
+				evictOldestIfAtCap(topics, maxTopics);
 				state = { timer: null, pending: null };
 				topics.set(topic, state);
 			}
@@ -162,6 +211,10 @@ export function throttle(interval) {
  * Rate limiting is per-topic: different topics have independent timers.
  *
  * @param {number} interval - Quiet period (ms) before publishing
+ * @param {{ maxTopics?: number }} [options] - `maxTopics` caps the active
+ *   topic registry (default 1_000_000). When the cap is reached, the
+ *   oldest insertion-order entry is flushed (its pending value publishes
+ *   immediately) and dropped, then the new topic is inserted.
  * @returns {import('./server.js').Limiter}
  *
  * @example
@@ -179,8 +232,9 @@ export function throttle(interval) {
  * }
  * ```
  */
-export function debounce(interval) {
+export function debounce(interval, options) {
 	validateInterval(interval, 'debounce');
+	const maxTopics = resolveMaxTopics(options, 'debounce');
 
 	/** @type {Map<string, { timer: any, pending: { platform: any, event: string, data: any } | null }>} */
 	const topics = new Map();
@@ -191,6 +245,7 @@ export function debounce(interval) {
 		publish(platform, topic, event, data) {
 			let state = topics.get(topic);
 			if (!state) {
+				evictOldestIfAtCap(topics, maxTopics);
 				state = { timer: null, pending: null };
 				topics.set(topic, state);
 			}

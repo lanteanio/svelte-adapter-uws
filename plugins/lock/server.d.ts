@@ -51,6 +51,18 @@ export interface Lock {
 	clear(): void;
 }
 
+export interface LockOptions {
+	/**
+	 * Hard cap on the number of distinct keys with an in-flight lock.
+	 * `withLock(newKey, fn)` rejects synchronously when the chain is at
+	 * cap; existing keys can still be re-entered (no growth). Protects
+	 * against unbounded key cardinality on `lock-${userId}` patterns.
+	 *
+	 * @default 1_000_000
+	 */
+	maxKeys?: number;
+}
+
 /**
  * Create an in-process lock primitive.
  *
@@ -60,4 +72,4 @@ export interface Lock {
  * export const locks = createLock();
  * ```
  */
-export function createLock(): Lock;
+export function createLock(options?: LockOptions): Lock;

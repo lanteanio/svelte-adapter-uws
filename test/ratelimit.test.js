@@ -416,4 +416,46 @@ describe('ratelimit plugin', () => {
 			expect(result.remaining).toBe(0); // 1 point, just consumed
 		});
 	});
+
+	describe('maxBuckets cap', () => {
+		it('rejects invalid maxBuckets', () => {
+			expect(() => createRateLimit({ points: 1, interval: 1000, maxBuckets: 0 }))
+				.toThrow('maxBuckets must be a positive integer');
+			expect(() => createRateLimit({ points: 1, interval: 1000, maxBuckets: -1 }))
+				.toThrow('maxBuckets must be a positive integer');
+			expect(() => createRateLimit({ points: 1, interval: 1000, maxBuckets: 1.5 }))
+				.toThrow('maxBuckets must be a positive integer');
+		});
+
+		it('evicts oldest insertion-order bucket when at cap and all entries are unexpired', () => {
+			// Tiny cap to make the saturation path testable in unit time.
+			const rl = createRateLimit({ points: 1, interval: 60_000, maxBuckets: 2 });
+
+			// Pin Date.now so the lazy expired-entry sweep does not free
+			// any slots: every bucket is unexpired.
+			const now = 1000;
+			vi.spyOn(Date, 'now').mockReturnValue(now);
+
+			rl.consume(mockWs({ ip: 'a' }));
+			rl.consume(mockWs({ ip: 'b' }));
+			// At cap. Inserting 'c' must evict 'a' (oldest insertion order).
+			rl.consume(mockWs({ ip: 'c' }));
+
+			// Check 'b' first - it must still be at the post-consume state
+			// (allowed: false because points was already drained to 0). If
+			// the cap evicted 'b' instead of 'a', we'd see a fresh bucket
+			// here with allowed: true.
+			const bAgain = rl.consume(mockWs({ ip: 'b' }));
+			expect(bAgain.allowed).toBe(false);
+
+			// 'a' was evicted in the previous consume('c') call, so its
+			// next consume creates a fresh bucket with full points. We
+			// know this because the cap is 2 and after the consume('b')
+			// above the map holds {b, c}; consume('a') then evicts 'b'
+			// (now oldest) and creates a fresh 'a'.
+			const aAgain = rl.consume(mockWs({ ip: 'a' }));
+			expect(aAgain.allowed).toBe(true);
+			expect(aAgain.remaining).toBe(0); // 1 point, just consumed
+		});
+	});
 });

@@ -41,6 +41,40 @@ describe('createLock', () => {
 			await expect(locks.withLock('k', null)).rejects.toThrow('fn must be a function');
 			await expect(locks.withLock('k', 'not a function')).rejects.toThrow('fn must be a function');
 		});
+
+		it('rejects invalid maxKeys', () => {
+			expect(() => createLock({ maxKeys: 0 })).toThrow('maxKeys must be a positive integer');
+			expect(() => createLock({ maxKeys: -1 })).toThrow('maxKeys must be a positive integer');
+			expect(() => createLock({ maxKeys: 1.5 })).toThrow('maxKeys must be a positive integer');
+		});
+	});
+
+	describe('maxKeys cap', () => {
+		it('rejects new-key withLock when chain is at cap', async () => {
+			const locks = createLock({ maxKeys: 2 });
+			const a = deferred();
+			const b = deferred();
+			const pa = locks.withLock('a', () => a.promise);
+			const pb = locks.withLock('b', () => b.promise);
+			await expect(locks.withLock('c', () => 'never'))
+				.rejects.toThrow('active key count exceeded 2');
+			a.resolve(1); b.resolve(2);
+			await pa; await pb;
+		});
+
+		it('allows re-entering an existing key when at cap', async () => {
+			const locks = createLock({ maxKeys: 2 });
+			const a = deferred();
+			const b = deferred();
+			const pa = locks.withLock('a', () => a.promise);
+			const pb = locks.withLock('b', () => b.promise);
+			// 'a' is already in the chain - chaining off it must NOT trip the cap
+			const pa2 = locks.withLock('a', () => 'second a');
+			a.resolve(1);
+			expect(await pa2).toBe('second a');
+			b.resolve(2);
+			await pb;
+		});
 	});
 
 	describe('basic execution', () => {

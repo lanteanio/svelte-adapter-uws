@@ -82,6 +82,8 @@ const TOPIC_PREFIX = '__cursor:';
 export function createCursor(options = {}) {
 	const throttleMs = options.throttle ?? 50;
 	const select = options.select || ((userData) => userData);
+	const maxConnections = options.maxConnections ?? 1_000_000;
+	const maxTopics = options.maxTopics ?? 1_000_000;
 
 	if (typeof throttleMs !== 'number' || !Number.isFinite(throttleMs) || throttleMs < 0) {
 		throw new Error('cursor: throttle must be a non-negative number');
@@ -89,18 +91,30 @@ export function createCursor(options = {}) {
 	if (typeof select !== 'function') {
 		throw new Error('cursor: select must be a function');
 	}
+	if (!Number.isInteger(maxConnections) || maxConnections < 1) {
+		throw new Error('cursor: maxConnections must be a positive integer');
+	}
+	if (!Number.isInteger(maxTopics) || maxTopics < 1) {
+		throw new Error('cursor: maxTopics must be a positive integer');
+	}
 
 	/** Auto-incrementing connection key. */
 	let connCounter = 0;
 
 	/**
 	 * Per-ws state: their key and which topics they have cursor state on.
+	 * Capped at `maxConnections` - oldest insertion-order entry evicted
+	 * on new insert at cap. Eviction is rare in practice because user
+	 * code is expected to call `remove(ws)` on disconnect.
 	 * @type {Map<any, { key: string, user: any, topics: Set<string> }>}
 	 */
 	const wsState = new Map();
 
 	/**
-	 * Per-topic cursor positions.
+	 * Per-topic cursor positions. Capped at `maxTopics` - oldest
+	 * insertion-order topic evicted on new insert at cap. Each evicted
+	 * topic's pending timers are cleared first so no callback fires on
+	 * a deleted entry.
 	 * @type {Map<string, Map<string, { user: any, data: any, lastBroadcast: number, timer: any }>>}
 	 */
 	const topics = new Map();
@@ -113,6 +127,10 @@ export function createCursor(options = {}) {
 	function getWsState(ws) {
 		let state = wsState.get(ws);
 		if (!state) {
+			if (wsState.size >= maxConnections) {
+				const oldest = wsState.keys().next().value;
+				if (oldest !== undefined) wsState.delete(oldest);
+			}
 			state = {
 				key: String(++connCounter),
 				user: select(typeof ws.getUserData === 'function' ? ws.getUserData() : {}),
@@ -143,6 +161,18 @@ export function createCursor(options = {}) {
 
 			let topicMap = topics.get(topic);
 			if (!topicMap) {
+				if (topics.size >= maxTopics) {
+					const oldest = topics.keys().next().value;
+					if (oldest !== undefined) {
+						const oldMap = topics.get(oldest);
+						if (oldMap) {
+							for (const e of oldMap.values()) {
+								if (e.timer) clearTimeout(e.timer);
+							}
+						}
+						topics.delete(oldest);
+					}
+				}
 				topicMap = new Map();
 				topics.set(topic, topicMap);
 			}

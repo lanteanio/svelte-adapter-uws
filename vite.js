@@ -2,7 +2,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS } from './files/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -261,6 +261,12 @@ export default function uws(options = {}) {
 		if (!pending) {
 			pending = new Map();
 			userData[WS_PENDING_REQUESTS] = pending;
+		}
+		if (pending.size >= MAX_PENDING_REQUESTS_PER_CONNECTION) {
+			return Promise.reject(new Error(
+				'pending requests exceeded ' + MAX_PENDING_REQUESTS_PER_CONNECTION +
+				' on this connection'
+			));
 		}
 		const ref = nextRequestRefV++;
 		const timeoutMs = (options && options.timeoutMs) || 5000;
@@ -749,13 +755,19 @@ export default function uws(options = {}) {
 									sendDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
 									return;
 								}
+								const subs = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS];
+								const isNew = subs ? !subs.has(msg.topic) : true;
+								if (subs && isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+									sendDenied(ws, msg.topic, ref, 'RATE_LIMITED');
+									return;
+								}
 								const denial = runSubscribeHookV(wrapped, msg.topic);
 								if (denial !== null) {
 									sendDenied(ws, msg.topic, ref, denial);
 									return;
 								}
 								subscriptions.get(ws)?.add(msg.topic);
-								/** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS]?.add(msg.topic);
+								subs?.add(msg.topic);
 								sendSubscribedV(ws, msg.topic, ref);
 								return;
 							}
@@ -791,7 +803,13 @@ export default function uws(options = {}) {
 									valid.push(topic);
 								}
 								const batchDenials = runSubscribeBatchHookV(wrapped, valid);
+								const udSubs = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS];
 								for (const topic of valid) {
+									const isNew = udSubs ? !udSubs.has(topic) : true;
+									if (udSubs && isNew && udSubs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+										sendDenied(ws, topic, ref, 'RATE_LIMITED');
+										continue;
+									}
 									const denial = batchDenials !== null
 										? (batchDenials[topic] ?? null)
 										: runSubscribeHookV(wrapped, topic);
@@ -800,7 +818,7 @@ export default function uws(options = {}) {
 										continue;
 									}
 									subs?.add(topic);
-									/** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS]?.add(topic);
+									udSubs?.add(topic);
 									sendSubscribedV(ws, topic, ref);
 								}
 								return;

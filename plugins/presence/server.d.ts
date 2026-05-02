@@ -49,6 +49,25 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	 * ```
 	 */
 	heartbeat?: number;
+
+	/**
+	 * Hard cap on tracked connections. When the cap is reached, the
+	 * oldest insertion-order connection state is dropped on the next
+	 * `join()` for a new ws. In practice eviction is rare because user
+	 * code is expected to call `leave(ws)` on disconnect.
+	 *
+	 * @default 1_000_000
+	 */
+	maxConnections?: number;
+
+	/**
+	 * Hard cap on the active topic registry. When the cap is reached,
+	 * the oldest insertion-order topic is dropped on the next `join()`
+	 * for a new topic.
+	 *
+	 * @default 1_000_000
+	 */
+	maxTopics?: number;
 }
 
 export interface PresenceTracker<Selected extends Record<string, any> = Record<string, any>> {

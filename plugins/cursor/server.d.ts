@@ -27,6 +27,26 @@ export interface CursorOptions<UserData = unknown, UserInfo = unknown> {
 	 * ```
 	 */
 	select?: (userData: UserData) => UserInfo;
+
+	/**
+	 * Hard cap on tracked connections. When the cap is reached, the
+	 * oldest insertion-order connection state is dropped on the next
+	 * `update()` for a new ws. In practice eviction is rare because
+	 * user code is expected to call `remove(ws)` on disconnect.
+	 *
+	 * @default 1_000_000
+	 */
+	maxConnections?: number;
+
+	/**
+	 * Hard cap on the active topic registry. When the cap is reached,
+	 * the oldest insertion-order topic is dropped on the next `update()`
+	 * for a new topic; any pending throttle timers on the dropped topic
+	 * are cleared first.
+	 *
+	 * @default 1_000_000
+	 */
+	maxTopics?: number;
 }
 
 export interface CursorEntry<UserInfo = unknown, Data = unknown> {

@@ -504,4 +504,58 @@ describe('throttle plugin', () => {
 			expect(platform.published).toHaveLength(2);
 		});
 	});
+
+	describe('maxTopics cap', () => {
+		it('throws on invalid maxTopics', () => {
+			expect(() => throttle(100, { maxTopics: 0 })).toThrow('positive integer');
+			expect(() => throttle(100, { maxTopics: -5 })).toThrow('positive integer');
+			expect(() => debounce(100, { maxTopics: 0 })).toThrow('positive integer');
+		});
+
+		it('throttle: flushes pending value of oldest topic when at cap', () => {
+			const platform = mockPlatform();
+			const t = throttle(100, { maxTopics: 2 });
+
+			// Fill the registry with 'a' and 'b'. Both publish leading-edge
+			// immediately, then enter cooldown with no pending value.
+			t.publish(platform, 'a', 'evt', 1);
+			t.publish(platform, 'b', 'evt', 2);
+			expect(platform.published).toHaveLength(2);
+
+			// Add a trailing value to 'a' so eviction has something to flush.
+			t.publish(platform, 'a', 'evt', 'a-trailing');
+			expect(platform.published).toHaveLength(2);
+
+			// New topic 'c' triggers eviction of oldest insertion-order entry
+			// (which is 'a'). Eviction flushes 'a's pending trailing value
+			// synchronously, then 'c' publishes leading-edge.
+			t.publish(platform, 'c', 'evt', 'c-leading');
+
+			// 4 publishes total: a-leading, b-leading, a-trailing (flushed
+			// on evict), c-leading.
+			expect(platform.published).toHaveLength(4);
+			expect(platform.published[2]).toEqual({ topic: 'a', event: 'evt', data: 'a-trailing' });
+			expect(platform.published[3]).toEqual({ topic: 'c', event: 'evt', data: 'c-leading' });
+		});
+
+		it('debounce: flushes pending value of oldest topic when at cap', () => {
+			const platform = mockPlatform();
+			const d = debounce(100, { maxTopics: 2 });
+
+			// Each debounce.publish stashes a pending value (no leading edge).
+			d.publish(platform, 'a', 'evt', 'a1');
+			d.publish(platform, 'b', 'evt', 'b1');
+			expect(platform.published).toHaveLength(0);
+
+			// 'c' triggers eviction of 'a'; the eviction flushes 'a's pending
+			// value synchronously, then 'c' is registered.
+			d.publish(platform, 'c', 'evt', 'c1');
+			expect(platform.published).toHaveLength(1);
+			expect(platform.published[0]).toEqual({ topic: 'a', event: 'evt', data: 'a1' });
+
+			// Letting timers run flushes b and c on schedule.
+			vi.advanceTimersByTime(100);
+			expect(platform.published).toHaveLength(3);
+		});
+	});
 });

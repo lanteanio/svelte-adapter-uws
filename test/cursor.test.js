@@ -644,4 +644,40 @@ describe('cursor plugin - server', () => {
 			vi.useRealTimers();
 		});
 	});
+
+	describe('caps', () => {
+		it('rejects invalid maxConnections / maxTopics', () => {
+			expect(() => createCursor({ maxConnections: 0 })).toThrow('maxConnections must be a positive integer');
+			expect(() => createCursor({ maxTopics: -1 })).toThrow('maxTopics must be a positive integer');
+		});
+
+		it('evicts oldest connection state when at maxConnections', () => {
+			const c = createCursor({ throttle: 0, maxConnections: 2, select: (ud) => ({ id: ud.id }) });
+			const p = mockPlatform();
+			const wsA = mockWs({ id: 'A' });
+			const wsB = mockWs({ id: 'B' });
+			const wsC = mockWs({ id: 'C' });
+			c.update(wsA, 'topic', { x: 1 }, p);
+			c.update(wsB, 'topic', { x: 2 }, p);
+			// Adding wsC at cap evicts wsA's state. wsA's data on 'topic'
+			// remains in the topic map (eviction is connection-scoped, not
+			// topic-scoped), but its wsState entry is gone so a new
+			// `update(wsA, ...)` will get a fresh connection key.
+			c.update(wsC, 'topic', { x: 3 }, p);
+			expect(c.list('topic').length).toBe(3);
+		});
+
+		it('evicts oldest topic when at maxTopics', () => {
+			const c = createCursor({ throttle: 0, maxTopics: 2, select: (ud) => ({ id: ud.id }) });
+			const p = mockPlatform();
+			const ws = mockWs({ id: 'A' });
+			c.update(ws, 'a', { x: 1 }, p);
+			c.update(ws, 'b', { x: 2 }, p);
+			c.update(ws, 'c', { x: 3 }, p);
+			// Topic 'a' was evicted to make room for 'c'.
+			expect(c.list('a')).toEqual([]);
+			expect(c.list('b').length).toBe(1);
+			expect(c.list('c').length).toBe(1);
+		});
+	});
 });

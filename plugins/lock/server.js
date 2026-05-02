@@ -60,7 +60,12 @@
  * };
  * ```
  */
-export function createLock() {
+export function createLock(options = {}) {
+	const maxKeys = options.maxKeys ?? 1_000_000;
+	if (!Number.isInteger(maxKeys) || maxKeys < 1) {
+		throw new Error('lock: maxKeys must be a positive integer');
+	}
+
 	/**
 	 * Per-key chain head. Each entry holds the promise of the most recent
 	 * caller for that key. New entrants chain off this and replace it
@@ -81,6 +86,11 @@ export function createLock() {
 		}
 		if (typeof fn !== 'function') {
 			return Promise.reject(new Error('lock: fn must be a function'));
+		}
+		if (chain.size >= maxKeys && !chain.has(key)) {
+			return Promise.reject(new Error(
+				'lock: active key count exceeded ' + maxKeys
+			));
 		}
 
 		const prev = chain.get(key);
