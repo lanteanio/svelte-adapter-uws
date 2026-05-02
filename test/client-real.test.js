@@ -2351,22 +2351,28 @@ describe('client.js (real module)', () => {
 	});
 
 	describe('subscribe ack protocol (real module)', () => {
-		it('attaches an incrementing ref to every subscribe', async () => {
+		it('attaches a numeric ref to the microtask-batched subscribe-batch frame', async () => {
 			const conn = clientModule.connect();
 			await flush();
 			const ws = MockWebSocket._last;
 			ws._sent.length = 0;
 
+			// Two subscribes in the same microtask coalesce into one
+			// subscribe-batch frame. Single-topic case stays as plain
+			// subscribe (covered separately above).
 			const a = clientModule.on('topic-a');
 			const unsubA = a.subscribe(() => {});
 			const b = clientModule.on('topic-b');
 			const unsubB = b.subscribe(() => {});
 			await flush();
 
-			const subs = ws._sent.map(s => JSON.parse(s)).filter(m => m.type === 'subscribe');
-			expect(subs.length).toBe(2);
-			for (const s of subs) expect(typeof s.ref).toBe('number');
-			expect(subs[1].ref).toBeGreaterThan(subs[0].ref);
+			const batches = ws._sent.map(s => JSON.parse(s)).filter(m => m.type === 'subscribe-batch');
+			expect(batches.length).toBe(1);
+			expect(typeof batches[0].ref).toBe('number');
+			expect(batches[0].topics).toEqual(['topic-a', 'topic-b']);
+			// No straggler single-topic subscribe frames in this microtask.
+			const singles = ws._sent.map(s => JSON.parse(s)).filter(m => m.type === 'subscribe');
+			expect(singles.length).toBe(0);
 
 			unsubA();
 			unsubB();
@@ -2437,6 +2443,141 @@ describe('client.js (real module)', () => {
 
 			unsub();
 			clientModule.connect().close();
+		});
+	});
+
+	describe('initial-mount subscribe-batch coalescing (real module)', () => {
+		it('coalesces multiple same-microtask subscribes into one subscribe-batch frame', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._sent.length = 0;
+
+			const a = clientModule.on('feed-a').subscribe(() => {});
+			const b = clientModule.on('feed-b').subscribe(() => {});
+			const c = clientModule.on('feed-c').subscribe(() => {});
+			await flush();
+
+			const sent = ws._sent.map(s => JSON.parse(s));
+			const batches = sent.filter(m => m.type === 'subscribe-batch');
+			const singles = sent.filter(m => m.type === 'subscribe');
+			expect(batches).toHaveLength(1);
+			expect(batches[0].topics).toEqual(['feed-a', 'feed-b', 'feed-c']);
+			expect(singles).toHaveLength(0);
+
+			a();
+			b();
+			c();
+			conn.close();
+		});
+
+		it('keeps single-topic subscribe as a plain subscribe frame', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._sent.length = 0;
+
+			const unsub = clientModule.on('only-topic').subscribe(() => {});
+			await flush();
+
+			const sent = ws._sent.map(s => JSON.parse(s));
+			const subs = sent.filter(m => m.type === 'subscribe');
+			const batches = sent.filter(m => m.type === 'subscribe-batch');
+			expect(subs).toHaveLength(1);
+			expect(subs[0].topic).toBe('only-topic');
+			expect(batches).toHaveLength(0);
+
+			unsub();
+			conn.close();
+		});
+
+		it('emits a fresh batch per microtask when subscribes are spread across awaits', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._sent.length = 0;
+
+			const a = clientModule.on('a').subscribe(() => {});
+			const b = clientModule.on('b').subscribe(() => {});
+			await flush();
+			const c = clientModule.on('c').subscribe(() => {});
+			await flush();
+
+			const sent = ws._sent.map(s => JSON.parse(s));
+			const batches = sent.filter(m => m.type === 'subscribe-batch');
+			const singles = sent.filter(m => m.type === 'subscribe');
+			// First microtask coalesced 2 -> one subscribe-batch.
+			expect(batches).toHaveLength(1);
+			expect(batches[0].topics).toEqual(['a', 'b']);
+			// Second microtask had only one topic -> plain subscribe.
+			expect(singles).toHaveLength(1);
+			expect(singles[0].topic).toBe('c');
+
+			a(); b(); c();
+			conn.close();
+		});
+
+		it('sends nothing while disconnected; reconnect path picks up the topics', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const ws1 = MockWebSocket._last;
+
+			ws1.close(1006);
+			await vi.advanceTimersByTimeAsync(0);
+
+			// Subscribe while the socket is closed; the queued frame
+			// should NOT go out, and the topic must land in subscribedTopics
+			// so the reconnect path resubscribes it.
+			const unsub = clientModule.on('queued-topic').subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+
+			// No new ws yet; nothing to assert against.
+			await vi.advanceTimersByTimeAsync(10000);
+			const ws2 = MockWebSocket._last;
+			expect(ws2).not.toBe(ws1);
+
+			const sent = ws2._sent.map(s => JSON.parse(s));
+			const batches = sent.filter(m => m.type === 'subscribe-batch');
+			expect(batches.length).toBeGreaterThan(0);
+			// Reconnect path resubscribes via subscribe-batch.
+			const allTopics = batches.flatMap(b => b.topics);
+			expect(allTopics).toContain('queued-topic');
+
+			unsub();
+			conn.close();
+			vi.useRealTimers();
+		});
+
+		it('does not double-emit when subscribe is called inside a topic-store handler', async () => {
+			// A consumer that subscribes inside an event-handler runs in a
+			// separate microtask from the original subscribe; both paths
+			// should produce correct (possibly distinct) frames without
+			// duplicates.
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._sent.length = 0;
+
+			const a = clientModule.on('first').subscribe(() => {
+				clientModule.on('second').subscribe(() => {});
+			});
+			await flush();
+			await flush();
+
+			const sent = ws._sent.map(s => JSON.parse(s));
+			const subs = sent.filter(m => m.type === 'subscribe');
+			const batches = sent.filter(m => m.type === 'subscribe-batch');
+			const allSubscribed = [
+				...subs.map(s => s.topic),
+				...batches.flatMap(b => b.topics)
+			];
+			// 'first' and 'second' each appear exactly once across all frames.
+			expect(allSubscribed.filter(t => t === 'first')).toHaveLength(1);
+			expect(allSubscribed.filter(t => t === 'second')).toHaveLength(1);
+
+			a();
+			conn.close();
 		});
 	});
 

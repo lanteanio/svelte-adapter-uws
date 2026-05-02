@@ -763,6 +763,69 @@ function createConnection(options) {
 	/** @type {import('svelte/store').Writable<{ topic: string, reason: string, ref: number | string } | null>} */
 	const denialsStore = writable(null);
 
+	// Wire-frame ceilings for subscribe-batch chunking. Match the server's
+	// control-message limits: 8192 byte parse ceiling and 256-topic batch
+	// cap. The envelope-bytes prelude leaves room for the {type, ref}
+	// scaffolding around the topics array.
+	const SUBSCRIBE_BATCH_ENVELOPE_BYTES = 50;
+	const SUBSCRIBE_BATCH_MAX_BYTES = 8000;
+	const SUBSCRIBE_BATCH_MAX_TOPICS = 200;
+	const subscribeBatchEncoder = new TextEncoder();
+
+	/**
+	 * Chunk a list of topics into subscribe-batch payloads bounded by the
+	 * server's parse ceiling and topic cap. Pure helper shared by the
+	 * reconnect-time resubscribe path and the initial-mount microtask
+	 * flush so the two cannot drift on the byte / topic limits.
+	 * @param {string[]} topics
+	 * @returns {string[][]}
+	 */
+	function chunkTopicsForBatch(topics) {
+		const out = [];
+		let chunk = [];
+		let chunkBytes = SUBSCRIBE_BATCH_ENVELOPE_BYTES;
+		for (const t of topics) {
+			const entryBytes = subscribeBatchEncoder.encode(JSON.stringify(t)).length + 1;
+			if (chunk.length > 0 && (chunk.length >= SUBSCRIBE_BATCH_MAX_TOPICS || chunkBytes + entryBytes > SUBSCRIBE_BATCH_MAX_BYTES)) {
+				out.push(chunk);
+				chunk = [];
+				chunkBytes = SUBSCRIBE_BATCH_ENVELOPE_BYTES;
+			}
+			chunk.push(t);
+			chunkBytes += entryBytes;
+		}
+		if (chunk.length > 0) out.push(chunk);
+		return out;
+	}
+
+	// Initial-mount subscribe coalescer. Multiple subscribe(topic) calls
+	// landing in the same microtask collapse to a single subscribe-batch
+	// frame, so a page mounting N streams triggers the server's
+	// subscribeBatch hook once instead of the per-topic subscribe hook
+	// N times. Single-topic case stays as plain subscribe for the
+	// minimal-change wire shape. Topics are also added to subscribedTopics
+	// upfront, so a disconnect before the microtask fires loses nothing -
+	// the reopen's resubscribe-batch path picks them up.
+	/** @type {string[] | null} */
+	let pendingSubscribes = null;
+
+	function flushPendingSubscribes() {
+		const batch = pendingSubscribes;
+		pendingSubscribes = null;
+		if (!batch || batch.length === 0) return;
+		if (!ws || ws.readyState !== WebSocket.OPEN) return;
+		if (batch.length === 1) {
+			const topic = batch[0];
+			if (debug) console.log('[ws] subscribe ->', topic);
+			ws.send(JSON.stringify({ type: 'subscribe', topic, ref: nextSubscribeRef++ }));
+			return;
+		}
+		for (const chunk of chunkTopicsForBatch(batch)) {
+			if (debug) console.log('[ws] subscribe-batch ->', chunk);
+			ws.send(JSON.stringify({ type: 'subscribe-batch', topics: chunk, ref: nextSubscribeRef++ }));
+		}
+	}
+
 	// Cause of the most recent non-open status transition. Set on
 	// TERMINAL/THROTTLE/RETRY close codes, on the reconnect cap being
 	// hit (EXHAUSTED), and on auth-preflight failures (AUTH). Cleared
@@ -943,29 +1006,12 @@ function createConnection(options) {
 				ws?.send(JSON.stringify({ type: 'resume', sessionId: prevSessionId, lastSeenSeqs: seqs }));
 			}
 
-			// Batch resubscriptions into subscribe-batch messages. The server
-			// caps each batch at 256 topics and only parses control messages
-			// under 8192 bytes, so we chunk to stay within both limits.
+			// Batch resubscriptions into subscribe-batch messages. Chunking
+			// rules (8192-byte server parse ceiling, 256-topic batch cap)
+			// live in chunkTopicsForBatch so this path and the
+			// initial-mount microtask flush stay in sync on the limits.
 			if (subscribedTopics.size > 0) {
-				const allTopics = [...subscribedTopics];
-				const encoder = new TextEncoder();
-				const ENVELOPE_BYTES = 50; // '{"type":"subscribe-batch","topics":[],"ref":12345}'
-				const MAX_BYTES = 8000; // under 8192 server ceiling
-				const MAX_TOPICS = 200; // under 256 server cap
-				let chunk = [];
-				let chunkBytes = ENVELOPE_BYTES;
-				for (const t of allTopics) {
-					const entryBytes = encoder.encode(JSON.stringify(t)).length + 1;
-					if (chunk.length > 0 && (chunk.length >= MAX_TOPICS || chunkBytes + entryBytes > MAX_BYTES)) {
-						if (debug) console.log('[ws] resubscribe-batch ->', chunk);
-						ws?.send(JSON.stringify({ type: 'subscribe-batch', topics: chunk, ref: nextSubscribeRef++ }));
-						chunk = [];
-						chunkBytes = ENVELOPE_BYTES;
-					}
-					chunk.push(t);
-					chunkBytes += entryBytes;
-				}
-				if (chunk.length > 0) {
+				for (const chunk of chunkTopicsForBatch([...subscribedTopics])) {
 					if (debug) console.log('[ws] resubscribe-batch ->', chunk);
 					ws?.send(JSON.stringify({ type: 'subscribe-batch', topics: chunk, ref: nextSubscribeRef++ }));
 				}
@@ -1140,6 +1186,12 @@ function createConnection(options) {
 	/**
 	 * Subscribe to a topic (ref-counted).
 	 * Multiple callers can subscribe; the WS subscription is sent on the first ref.
+	 *
+	 * Outgoing frames are microtask-batched: N subscribe(topic) calls in
+	 * the same microtask collapse to one subscribe-batch frame, so a page
+	 * mounting many streams triggers the server's subscribeBatch hook
+	 * once instead of N per-topic subscribe hook calls. Single-topic case
+	 * stays as a plain subscribe frame.
 	 * @param {string} topic
 	 */
 	function subscribe(topic) {
@@ -1147,10 +1199,12 @@ function createConnection(options) {
 		topicRefCounts.set(topic, count + 1);
 		if (count > 0) return; // Already subscribed at WS level
 		subscribedTopics.add(topic);
-		if (debug) console.log('[ws] subscribe ->', topic);
-		if (ws?.readyState === WebSocket.OPEN) {
-			ws.send(JSON.stringify({ type: 'subscribe', topic, ref: nextSubscribeRef++ }));
+		if (ws?.readyState !== WebSocket.OPEN) return;
+		if (!pendingSubscribes) {
+			pendingSubscribes = [];
+			queueMicrotask(flushPendingSubscribes);
 		}
+		pendingSubscribes.push(topic);
 	}
 
 	/**
