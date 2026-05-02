@@ -2731,4 +2731,174 @@ describe('client.js (real module)', () => {
 			globalThis.document = origDoc;
 		});
 	});
+
+	describe('failure store (real module)', () => {
+		afterEach(async () => {
+			MockWebSocket._last = null;
+			vi.useRealTimers();
+		});
+
+		it('starts at null and stays null while connected', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			let last = 'unset';
+			const unsub = conn.failure.subscribe((v) => { last = v; });
+			expect(last).toBe(null);
+
+			unsub();
+			conn.close();
+		});
+
+		it('sets class=TERMINAL on a 4401 close, includes the code and reason', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const seen = [];
+			const unsub = conn.failure.subscribe((v) => seen.push(v));
+
+			const ws = MockWebSocket._last;
+			ws.close(4401, 'session expired');
+
+			const last = seen[seen.length - 1];
+			expect(last).toMatchObject({
+				kind: 'ws-close',
+				class: 'TERMINAL',
+				code: 4401,
+				reason: 'session expired'
+			});
+
+			unsub();
+			conn.close();
+		});
+
+		it('sets class=THROTTLE on a 4429 close', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const seen = [];
+			const unsub = conn.failure.subscribe((v) => seen.push(v));
+
+			const ws = MockWebSocket._last;
+			ws.close(4429, 'rate limited');
+
+			const last = seen[seen.length - 1];
+			expect(last).toMatchObject({
+				kind: 'ws-close',
+				class: 'THROTTLE',
+				code: 4429,
+				reason: 'rate limited'
+			});
+
+			unsub();
+			conn.close();
+			vi.useRealTimers();
+		});
+
+		it('sets class=RETRY on a 1006 abnormal close', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const seen = [];
+			const unsub = conn.failure.subscribe((v) => seen.push(v));
+
+			const ws = MockWebSocket._last;
+			ws.close(1006);
+
+			const last = seen[seen.length - 1];
+			expect(last).toMatchObject({
+				kind: 'ws-close',
+				class: 'RETRY',
+				code: 1006
+			});
+
+			unsub();
+			conn.close();
+			vi.useRealTimers();
+		});
+
+		it('sets class=EXHAUSTED when max retries hit', async () => {
+			const conn = clientModule.connect({ maxReconnectAttempts: 0 });
+			await flush();
+			const seen = [];
+			const unsub = conn.failure.subscribe((v) => seen.push(v));
+
+			const ws = MockWebSocket._last;
+			ws.close(1006, 'transient blip');
+
+			// With maxReconnectAttempts: 0, scheduleReconnect bails to
+			// EXHAUSTED. The RETRY value lands first then is replaced
+			// by EXHAUSTED on the same tick.
+			const last = seen[seen.length - 1];
+			expect(last).toMatchObject({
+				kind: 'ws-close',
+				class: 'EXHAUSTED',
+				code: 1006,
+				reason: 'transient blip'
+			});
+
+			unsub();
+			conn.close();
+		});
+
+		it('clears to null on the next successful open', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const seen = [];
+			const unsub = conn.failure.subscribe((v) => seen.push(v));
+
+			const ws = MockWebSocket._last;
+			ws.close(1006);
+			expect(seen[seen.length - 1]).toMatchObject({ class: 'RETRY' });
+
+			// Advance past the reconnect backoff so a new MockWebSocket is
+			// constructed; its onopen fires synchronously and clears the
+			// failure store.
+			await vi.advanceTimersByTimeAsync(10000);
+			expect(seen[seen.length - 1]).toBe(null);
+
+			unsub();
+			conn.close();
+			vi.useRealTimers();
+		});
+
+		it('does NOT set on intentional close() and clears any prior value', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const seen = [];
+			const unsub = conn.failure.subscribe((v) => seen.push(v));
+
+			// Trigger a RETRY first to load the store with a non-null value.
+			const ws = MockWebSocket._last;
+			ws.close(1006);
+			expect(seen[seen.length - 1]).toMatchObject({ class: 'RETRY' });
+
+			// Now intentionally close. failure should clear; status='failed'
+			// alone is the deliberately-ended signal.
+			conn.close();
+			expect(seen[seen.length - 1]).toBe(null);
+
+			unsub();
+			vi.useRealTimers();
+		});
+
+		it('exposes failure as a top-level export mirroring the connection one', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const moduleSeen = [];
+			const connSeen = [];
+			const u1 = clientModule.failure.subscribe((v) => moduleSeen.push(v));
+			const u2 = conn.failure.subscribe((v) => connSeen.push(v));
+
+			const ws = MockWebSocket._last;
+			ws.close(4403);
+
+			expect(moduleSeen[moduleSeen.length - 1]).toMatchObject({ class: 'TERMINAL', code: 4403 });
+			expect(connSeen[connSeen.length - 1]).toMatchObject({ class: 'TERMINAL', code: 4403 });
+
+			u1();
+			u2();
+			conn.close();
+		});
+	});
 });

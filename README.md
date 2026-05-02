@@ -1733,6 +1733,46 @@ Readable store with the current connection state. Five states drive distinct UI 
 
 The `'suspended'` overlay flips back to `'open'` automatically when the tab returns to the foreground (assuming the WebSocket survived the hide period; if it did not, the state machine drives `'connecting'` -> `'open'` via the normal reconnect path).
 
+### `failure` - cause of the most recent disconnect
+
+Sibling Readable to `status`. Use `status` to drive UI state; use `failure` to drive what message you show. Stays at `null` while connected, set when the connection drops, cleared on the next successful `'open'`.
+
+The value is a discriminated union by `kind`:
+
+```ts
+type Failure =
+  | { kind: 'ws-close'; class: 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY'; code: number; reason: string }
+  | { kind: 'auth-preflight'; class: 'AUTH'; status: number; reason: string };
+```
+
+Five `class` values let consumers render targeted UI without inspecting raw close codes:
+
+- `'TERMINAL'` -- server permanently rejected the client (close codes 1008 / 4401 / 4403). The retry loop is stopped; the user must re-authenticate or refresh.
+- `'EXHAUSTED'` -- reconnect attempts exceeded `maxReconnectAttempts`. The network never recovered; surface a manual-retry button.
+- `'THROTTLE'` -- server signalled rate-limiting (close code 4429). Reconnect is still scheduled, jumped ahead in the backoff curve.
+- `'RETRY'` -- normal transient drop (1006 abnormal closure, network blip, server restart). Reconnect is in progress; usually paired with the `'disconnected'` status.
+- `'AUTH'` -- the auth preflight (`{ auth: true }`) failed before the WebSocket was opened. 4xx is terminal; 5xx and network errors retry. The HTTP status code is in `status`, not `code`.
+
+`failure === null` while `status === 'failed'` is the deliberately-ended state -- the user called `close()`, not a transport-level failure.
+
+```svelte
+<script>
+  import { status, failure } from 'svelte-adapter-uws/client';
+</script>
+
+{#if $failure?.class === 'TERMINAL'}
+  <p class="error">Session expired. <a href="/login">Sign in again</a></p>
+{:else if $failure?.class === 'EXHAUSTED'}
+  <p class="error">Connection lost. <button onclick={() => location.reload()}>Reload</button></p>
+{:else if $failure?.class === 'THROTTLE'}
+  <p class="warn">Server is busy. Retrying shortly...</p>
+{:else if $failure?.class === 'AUTH'}
+  <p class="error">Could not authenticate (HTTP {$failure.status}). <a href="/login">Sign in</a></p>
+{:else if $status === 'disconnected'}
+  <span>Reconnecting...</span>
+{/if}
+```
+
 ### `ready()` - wait for connection
 
 Returns a promise that resolves when the WebSocket connection is open:

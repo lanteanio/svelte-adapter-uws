@@ -258,6 +258,60 @@ export const denials: Readable<{
 } | null>;
 
 /**
+ * Coarse classification of the cause behind a non-open status transition.
+ *
+ * - `'TERMINAL'` - server permanently rejected the client (1008, 4401, 4403).
+ *   The retry loop is stopped; the user must re-authenticate or refresh.
+ * - `'EXHAUSTED'` - reconnect attempts exceeded `maxReconnectAttempts`. The
+ *   network never came back; the user typically needs a manual retry.
+ * - `'THROTTLE'` - server signalled rate-limiting (4429). Reconnect is still
+ *   scheduled, but jumped ahead in the backoff curve.
+ * - `'RETRY'` - normal transient drop (1006 abnormal closure, network blip,
+ *   server restart, etc). Reconnect is in progress.
+ * - `'AUTH'` - auth preflight (`{ auth: true }`) failed before the WebSocket
+ *   was opened. 4xx is terminal; 5xx and network errors retry.
+ */
+export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AUTH';
+
+/**
+ * Latest failure cause behind a non-open status transition. The `kind`
+ * discriminator tells you whether the failure came from a WebSocket close
+ * frame (`'ws-close'`, with a `code` field) or from the HTTP auth
+ * preflight (`'auth-preflight'`, with a `status` field).
+ */
+export type Failure =
+	| { kind: 'ws-close'; class: 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY'; code: number; reason: string }
+	| { kind: 'auth-preflight'; class: 'AUTH'; status: number; reason: string };
+
+/**
+ * Cause of the most recent non-open status transition. `null` while
+ * connected (or before any failure has occurred). Set on TERMINAL /
+ * THROTTLE / RETRY close codes, on the reconnect cap being exhausted
+ * (`'EXHAUSTED'`), and on auth-preflight failures (`'AUTH'`). Cleared
+ * on the next successful `'open'`. Not set on an intentional `close()`
+ * call - `status === 'failed'` plus `failure === null` is the
+ * deliberately-ended state.
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { status, failure } from 'svelte-adapter-uws/client';
+ * </script>
+ *
+ * {#if $failure?.class === 'TERMINAL'}
+ *   <p class="error">Session expired. Please log in again.</p>
+ * {:else if $failure?.class === 'THROTTLE'}
+ *   <p class="warn">Server is busy, retrying shortly...</p>
+ * {:else if $failure?.class === 'EXHAUSTED'}
+ *   <button onclick={() => location.reload()}>Reconnect</button>
+ * {:else if $status === 'disconnected'}
+ *   <span>Reconnecting...</span>
+ * {/if}
+ * ```
+ */
+export const failure: Readable<Failure | null>;
+
+/**
  * Install a handler for server-initiated requests over the same WebSocket.
  *
  * The server calls `platform.request(ws, event, data)` and awaits a
@@ -486,6 +540,14 @@ export interface WSConnection {
 		reason: SubscribeDenialReason | string;
 		ref: number | string;
 	} | null>;
+
+	/**
+	 * Readable store - cause of the most recent non-open status
+	 * transition. `null` while connected. See the `failure` top-level
+	 * export for full semantics and the `Failure` discriminated union
+	 * for the value shape.
+	 */
+	failure: Readable<Failure | null>;
 
 	/**
 	 * Install a handler for server-initiated requests. Returns an

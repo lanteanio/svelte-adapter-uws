@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`failure` Readable on the client store, sibling to `status`.** Carries the cause of the most recent non-open status transition so consumers can render targeted UI per failure type: `'TERMINAL'` (server permanently rejected: 1008/4401/4403), `'EXHAUSTED'` (`maxReconnectAttempts` hit), `'THROTTLE'` (server signalled rate-limit via 4429), `'RETRY'` (normal transient drop), `'AUTH'` (auth preflight failed before the WebSocket was opened). Discriminated union by `kind` (`'ws-close'` carries `code`, `'auth-preflight'` carries `status`) plus a `reason` string label. Stays `null` while connected, set on the failing transition, cleared on the next successful `'open'`. NOT set on an intentional `close()` call; `status === 'failed'` paired with `failure === null` is the deliberately-ended state. Available as a top-level `failure` export and on the `WSConnection` returned by `connect()`. The information was previously computed (`classifyCloseCode` + auth-preflight outcome) and discarded immediately into a less-specific `status` value; this surface preserves it for app-layer rendering without forcing apps to re-derive close-code semantics.
+
 ## [0.5.0-next.3] - 2026-04-02
 
 ### Added

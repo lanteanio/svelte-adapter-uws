@@ -148,6 +148,27 @@ export const denials = {
 };
 
 /**
+ * Readable store - cause of the most recent non-open status transition.
+ * `null` while connected (or before any failure has occurred). Set when
+ * the connection drops via a recognised close code, when the reconnect
+ * cap is hit, or when the auth preflight fails. Cleared on the next
+ * successful `'open'`. Does not fire for an intentional `close()` call -
+ * `status === 'failed'` plus `failure === null` is the deliberately-ended
+ * state.
+ *
+ * Use this alongside `status` to render targeted UI per failure cause:
+ * "Session expired" for `class: 'TERMINAL'`, "Server is busy" for
+ * `'THROTTLE'`, generic "Reconnecting" for `'RETRY'`, etc.
+ *
+ * @type {import('svelte/store').Readable<import('./client.js').Failure | null>}
+ */
+export const failure = {
+	subscribe(fn) {
+		return ensureConnection().failure.subscribe(fn);
+	}
+};
+
+/**
  * Install a handler for server-initiated requests. The server may call
  * `platform.request(ws, event, data)` and await your reply; this is
  * where that lands. Return a value (sync or async) and the framework
@@ -742,6 +763,17 @@ function createConnection(options) {
 	/** @type {import('svelte/store').Writable<{ topic: string, reason: string, ref: number | string } | null>} */
 	const denialsStore = writable(null);
 
+	// Cause of the most recent non-open status transition. Set on
+	// TERMINAL/THROTTLE/RETRY close codes, on the reconnect cap being
+	// hit (EXHAUSTED), and on auth-preflight failures (AUTH). Cleared
+	// on the next successful 'open'. `status === 'failed'` plus
+	// `failure === null` is the intentional-close state - the user
+	// terminated the connection, not the network.
+	/** @type {import('svelte/store').Writable<import('./client.js').Failure | null>} */
+	const failureStore = writable(null);
+	let lastCloseCode = 0;
+	let lastCloseReason = '';
+
 	// Single onRequest handler. Server-initiated push-with-reply lands
 	// here: server sends { type: 'request', ref, event, data }, this
 	// callback returns the reply value (sync or async) and the framework
@@ -795,13 +827,17 @@ function createConnection(options) {
 	 *
 	 * Deduped: concurrent doConnect() calls share a single in-flight fetch.
 	 *
-	 * @returns {Promise<'ok' | 'unauthorized' | 'transient'>}
+	 * Returns the outcome plus the HTTP status (0 on network error) and a
+	 * human-readable reason label, so callers can populate the failure
+	 * store without repeating the fetch logic.
+	 *
+	 * @returns {Promise<{ outcome: 'ok' | 'unauthorized' | 'transient', status: number, reason: string }>}
 	 */
 	function runAuth() {
-		if (!authPath) return Promise.resolve('ok');
+		if (!authPath) return Promise.resolve({ outcome: 'ok', status: 0, reason: '' });
 		if (authInFlight) return authInFlight;
 		const target = getAuthUrl();
-		if (!target) return Promise.resolve('ok');
+		if (!target) return Promise.resolve({ outcome: 'ok', status: 0, reason: '' });
 
 		authInFlight = (async () => {
 			try {
@@ -811,12 +847,14 @@ function createConnection(options) {
 					headers: { 'x-requested-with': 'svelte-adapter-uws' }
 				});
 				if (debug) console.log('[ws] auth preflight status=%d', resp.status);
-				if (resp.ok) return 'ok';
-				if (resp.status >= 400 && resp.status < 500) return 'unauthorized';
-				return 'transient';
+				if (resp.ok) return { outcome: 'ok', status: resp.status, reason: '' };
+				if (resp.status >= 400 && resp.status < 500) {
+					return { outcome: 'unauthorized', status: resp.status, reason: resp.statusText || 'unauthorized' };
+				}
+				return { outcome: 'transient', status: resp.status, reason: resp.statusText || 'service unavailable' };
 			} catch (err) {
 				if (debug) console.warn('[ws] auth preflight network error:', err);
-				return 'transient';
+				return { outcome: 'transient', status: 0, reason: 'network error' };
 			} finally {
 				authInFlight = null;
 			}
@@ -831,21 +869,33 @@ function createConnection(options) {
 		statusStore.set('connecting');
 
 		if (authPath) {
-			runAuth().then((outcome) => {
+			runAuth().then((result) => {
 				if (intentionallyClosed || terminalClosed) return;
-				if (outcome === 'unauthorized') {
+				if (result.outcome === 'unauthorized') {
 					// Server rejected the request with a 4xx. The user is not
 					// authenticated and retrying won't help until they log in.
 					if (debug) console.warn('[ws] auth preflight rejected (4xx), not opening WebSocket');
+					failureStore.set({
+						kind: 'auth-preflight',
+						class: 'AUTH',
+						status: result.status,
+						reason: result.reason
+					});
 					statusStore.set('failed');
 					terminalClosed = true;
 					permaClosedStore.set(true);
 					return;
 				}
-				if (outcome === 'transient') {
+				if (result.outcome === 'transient') {
 					// Network error or 5xx. Retry via the normal backoff loop so
 					// the preflight automatically re-runs on the next attempt.
 					if (debug) console.warn('[ws] auth preflight transient failure, scheduling reconnect');
+					failureStore.set({
+						kind: 'auth-preflight',
+						class: 'AUTH',
+						status: result.status,
+						reason: result.reason
+					});
 					statusStore.set('disconnected');
 					scheduleReconnect();
 					return;
@@ -868,6 +918,7 @@ function createConnection(options) {
 		ws.onopen = () => {
 			attempt = 0;
 			lastServerMessage = Date.now();
+			failureStore.set(null);
 			setStatusOpen();
 			if (debug) console.log('[ws] connected');
 
@@ -1021,12 +1072,20 @@ function createConnection(options) {
 		ws.onclose = (event) => {
 			ws = null;
 			if (debug) console.log('[ws] disconnected');
+			lastCloseCode = event?.code || 0;
+			lastCloseReason = event?.reason || '';
 			if (intentionallyClosed) {
+				// User-initiated termination is not a failure cause; clear
+				// any prior failure so the (status='failed', failure=null)
+				// pair encodes "deliberately ended."
+				failureStore.set(null);
 				statusStore.set('failed');
 				return;
 			}
 
 			const cls = classifyCloseCode(event?.code);
+			const code = lastCloseCode;
+			const reason = lastCloseReason;
 			if (cls === 'TERMINAL') {
 				// Server has permanently rejected this client  - do not retry.
 				// Use ws.close(4401) or ws.close(1008) on the server when credentials
@@ -1034,6 +1093,7 @@ function createConnection(options) {
 				if (debug) console.warn('[ws] connection permanently closed by server (code ' + event?.code + ')');
 				terminalClosed = true;
 				permaClosedStore.set(true);
+				failureStore.set({ kind: 'ws-close', class: 'TERMINAL', code, reason });
 				statusStore.set('failed');
 				return;
 			}
@@ -1041,6 +1101,9 @@ function createConnection(options) {
 			if (cls === 'THROTTLE') {
 				// Jump ahead in the backoff curve to avoid hammering a rate-limited server.
 				attempt = Math.max(attempt, 5);
+				failureStore.set({ kind: 'ws-close', class: 'THROTTLE', code, reason });
+			} else {
+				failureStore.set({ kind: 'ws-close', class: 'RETRY', code, reason });
 			}
 
 			statusStore.set('disconnected');
@@ -1055,6 +1118,12 @@ function createConnection(options) {
 	function scheduleReconnect() {
 		if (reconnectTimer) return;
 		if (attempt >= maxReconnectAttempts) {
+			failureStore.set({
+				kind: 'ws-close',
+				class: 'EXHAUSTED',
+				code: lastCloseCode,
+				reason: lastCloseReason || 'max reconnect attempts exhausted'
+			});
 			statusStore.set('failed');
 			terminalClosed = true;
 			permaClosedStore.set(true);
@@ -1323,6 +1392,11 @@ function createConnection(options) {
 		ws = null;
 		singleton = null;
 		singletonCreatedBy = '';
+		// Intentional termination is not a failure cause. Clear any prior
+		// value here too because if the user calls close() while we are
+		// already disconnected (no live ws), onclose never re-enters and
+		// the previous RETRY/EXHAUSTED entry would otherwise stick.
+		failureStore.set(null);
 		statusStore.set('failed');
 	}
 
@@ -1387,6 +1461,7 @@ function createConnection(options) {
 		events: { subscribe: eventsStore.subscribe },
 		status: { subscribe: statusStore.subscribe },
 		denials: { subscribe: denialsStore.subscribe },
+		failure: { subscribe: failureStore.subscribe },
 		_permaClosed: { subscribe: permaClosedStore.subscribe },
 		_hasUrl: !!url,
 		on: onTopic,
