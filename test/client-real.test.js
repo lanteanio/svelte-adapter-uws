@@ -2584,4 +2584,151 @@ describe('client.js (real module)', () => {
 			clientModule.connect().close();
 		});
 	});
+
+	describe('connection state machine (real module)', () => {
+		afterEach(() => {
+			// Guard against tests that left fake timers active so the next
+			// test does not hang waiting on setTimeout that never fires.
+			vi.useRealTimers();
+		});
+
+		it('transitions through connecting -> open on a successful connect', async () => {
+			const states = [];
+			const unsub = clientModule.status.subscribe((v) => states.push(v));
+			await flush();
+
+			expect(states).toContain('connecting');
+			expect(states).toContain('open');
+			expect(states.indexOf('connecting')).toBeLessThan(states.indexOf('open'));
+
+			unsub();
+			clientModule.connect().close();
+		});
+
+		it('transitions to disconnected on a retryable close, then to connecting on retry', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const states = [];
+			const unsub = conn.status.subscribe((v) => states.push(v));
+
+			const ws = MockWebSocket._last;
+			ws.close(1006); // abnormal close, retryable
+			expect(states[states.length - 1]).toBe('disconnected');
+
+			await vi.advanceTimersByTimeAsync(10000);
+			expect(states).toContain('connecting');
+			expect(states.lastIndexOf('connecting')).toBeGreaterThan(states.lastIndexOf('disconnected'));
+
+			unsub();
+			conn.close();
+			vi.useRealTimers();
+		});
+
+		it('transitions to failed on a terminal close', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const states = [];
+			const unsub = conn.status.subscribe((v) => states.push(v));
+
+			const ws = MockWebSocket._last;
+			ws.close(4401); // unauthorized, terminal
+			expect(states[states.length - 1]).toBe('failed');
+
+			unsub();
+			conn.close();
+		});
+
+		it('transitions to failed when no retries are allowed', async () => {
+			const conn = clientModule.connect({ maxReconnectAttempts: 0 });
+			await flush();
+			const states = [];
+			const unsub = conn.status.subscribe((v) => states.push(v));
+
+			const ws = MockWebSocket._last;
+			ws.close(1006); // retryable, but maxReconnectAttempts is 0
+			expect(states[states.length - 1]).toBe('failed');
+
+			unsub();
+			conn.close();
+		});
+
+		it('transitions to failed on intentional close()', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const states = [];
+			const unsub = conn.status.subscribe((v) => states.push(v));
+
+			conn.close();
+			expect(states[states.length - 1]).toBe('failed');
+
+			unsub();
+		});
+
+		it('downgrades open to suspended when the tab is hidden, restores on visible', async () => {
+			const origDoc = globalThis.document;
+			let hidden = false;
+			let listener = null;
+			globalThis.document = /** @type {any} */ ({
+				get hidden() { return hidden; },
+				addEventListener(evt, fn) { if (evt === 'visibilitychange') listener = fn; },
+				removeEventListener() { listener = null; }
+			});
+
+			const conn = clientModule.connect();
+			await flush();
+			const states = [];
+			const unsub = conn.status.subscribe((v) => states.push(v));
+
+			expect(states[states.length - 1]).toBe('open');
+
+			hidden = true;
+			listener?.();
+			expect(states[states.length - 1]).toBe('suspended');
+
+			hidden = false;
+			listener?.();
+			expect(states[states.length - 1]).toBe('open');
+
+			unsub();
+			conn.close();
+			globalThis.document = origDoc;
+		});
+
+		it('opens directly into suspended when the tab is already hidden', async () => {
+			const origDoc = globalThis.document;
+			globalThis.document = /** @type {any} */ ({
+				hidden: true,
+				addEventListener() {},
+				removeEventListener() {}
+			});
+
+			const conn = clientModule.connect();
+			await flush();
+			const states = [];
+			const unsub = conn.status.subscribe((v) => states.push(v));
+
+			expect(states[states.length - 1]).toBe('suspended');
+
+			unsub();
+			conn.close();
+			globalThis.document = origDoc;
+		});
+
+		it('ready() resolves on suspended as well as open', async () => {
+			const origDoc = globalThis.document;
+			globalThis.document = /** @type {any} */ ({
+				hidden: true,
+				addEventListener() {},
+				removeEventListener() {}
+			});
+
+			const promise = clientModule.ready();
+			await flush();
+			await expect(promise).resolves.toBeUndefined();
+
+			clientModule.connect().close();
+			globalThis.document = origDoc;
+		});
+	});
 });

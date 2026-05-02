@@ -114,10 +114,17 @@ export function onDerived(topicFn, store) {
 }
 
 /**
- * Readable store - connection status: `'connecting'` | `'open'` | `'closed'`.
- * Auto-connects on first access.
+ * Readable store - connection status. Auto-connects on first access.
  *
- * @type {import('svelte/store').Readable<'connecting' | 'open' | 'closed'>}
+ * Five states drive distinct UI affordances:
+ * - `'connecting'` - establishing a connection (initial attempt or retry)
+ * - `'open'` - connected, live data is flowing
+ * - `'suspended'` - WS is technically open but the tab is in the background;
+ *   server may close idle backgrounded sockets, so live data is best-effort
+ * - `'disconnected'` - lost connection, will retry automatically
+ * - `'failed'` - terminal: auth denied, max retries exhausted, or `close()` called
+ *
+ * @type {import('svelte/store').Readable<'connecting' | 'open' | 'suspended' | 'disconnected' | 'failed'>}
  */
 export const status = {
 	subscribe(fn) {
@@ -187,7 +194,9 @@ export function ready() {
 		}
 
 		statusUnsub = conn.status.subscribe((s) => {
-			if (s === 'open') { cleanup(); resolve(); }
+			// 'suspended' means WS is open but tab is in the background -
+			// the connection is established, so ready() resolves there too.
+			if (s === 'open' || s === 'suspended') { cleanup(); resolve(); }
 		});
 
 		permaUnsub = conn._permaClosed.subscribe((dead) => {
@@ -709,8 +718,19 @@ function createConnection(options) {
 	/** @type {Map<string, import('svelte/store').Writable<unknown>>} */
 	const eventStores = new Map();
 
-	/** @type {import('svelte/store').Writable<'connecting' | 'open' | 'closed'>} */
-	const statusStore = writable('closed');
+	/** @type {import('svelte/store').Writable<'connecting' | 'open' | 'suspended' | 'disconnected' | 'failed'>} */
+	const statusStore = writable('disconnected');
+
+	// Set status to 'open' normally, or 'suspended' if the tab is in the
+	// background. Centralised so onopen and the visibility handler stay
+	// in sync without duplicating the document.hidden check.
+	function setStatusOpen() {
+		if (typeof document !== 'undefined' && document.hidden) {
+			statusStore.set('suspended');
+		} else {
+			statusStore.set('open');
+		}
+	}
 
 	// Subscribe ref counter and the subscribe-denied surface. Every
 	// subscribe / subscribe-batch the client emits carries a numeric ref
@@ -817,7 +837,7 @@ function createConnection(options) {
 					// Server rejected the request with a 4xx. The user is not
 					// authenticated and retrying won't help until they log in.
 					if (debug) console.warn('[ws] auth preflight rejected (4xx), not opening WebSocket');
-					statusStore.set('closed');
+					statusStore.set('failed');
 					terminalClosed = true;
 					permaClosedStore.set(true);
 					return;
@@ -826,7 +846,7 @@ function createConnection(options) {
 					// Network error or 5xx. Retry via the normal backoff loop so
 					// the preflight automatically re-runs on the next attempt.
 					if (debug) console.warn('[ws] auth preflight transient failure, scheduling reconnect');
-					statusStore.set('closed');
+					statusStore.set('disconnected');
 					scheduleReconnect();
 					return;
 				}
@@ -848,7 +868,7 @@ function createConnection(options) {
 		ws.onopen = () => {
 			attempt = 0;
 			lastServerMessage = Date.now();
-			statusStore.set('open');
+			setStatusOpen();
 			if (debug) console.log('[ws] connected');
 
 			// If we have a previous session id and any tracked seqs, ask the
@@ -981,10 +1001,12 @@ function createConnection(options) {
 		};
 
 		ws.onclose = (event) => {
-			statusStore.set('closed');
 			ws = null;
 			if (debug) console.log('[ws] disconnected');
-			if (intentionallyClosed) return;
+			if (intentionallyClosed) {
+				statusStore.set('failed');
+				return;
+			}
 
 			const cls = classifyCloseCode(event?.code);
 			if (cls === 'TERMINAL') {
@@ -994,6 +1016,7 @@ function createConnection(options) {
 				if (debug) console.warn('[ws] connection permanently closed by server (code ' + event?.code + ')');
 				terminalClosed = true;
 				permaClosedStore.set(true);
+				statusStore.set('failed');
 				return;
 			}
 
@@ -1002,6 +1025,7 @@ function createConnection(options) {
 				attempt = Math.max(attempt, 5);
 			}
 
+			statusStore.set('disconnected');
 			scheduleReconnect();
 		};
 
@@ -1013,7 +1037,7 @@ function createConnection(options) {
 	function scheduleReconnect() {
 		if (reconnectTimer) return;
 		if (attempt >= maxReconnectAttempts) {
-			statusStore.set('closed');
+			statusStore.set('failed');
 			terminalClosed = true;
 			permaClosedStore.set(true);
 			return;
@@ -1281,7 +1305,7 @@ function createConnection(options) {
 		ws = null;
 		singleton = null;
 		singletonCreatedBy = '';
-		statusStore.set('closed');
+		statusStore.set('failed');
 	}
 
 	// Auto-connect on creation
@@ -1294,15 +1318,30 @@ function createConnection(options) {
 		visibilityHandler = () => {
 			if (document.hidden) {
 				hiddenDisconnect = true;
-			} else if (!intentionallyClosed && !terminalClosed && (hiddenDisconnect || !ws || ws.readyState !== WebSocket.OPEN)) {
-				hiddenDisconnect = false;
-				attempt = 0;
-				if (reconnectTimer) {
-					clearTimeout(reconnectTimer);
-					reconnectTimer = null;
+				// Tab moved to the background. If the WS is still open, downgrade
+				// to 'suspended' as a UI hint - browsers may close idle backgrounded
+				// sockets so live data is best-effort.
+				if (ws?.readyState === WebSocket.OPEN) {
+					statusStore.set('suspended');
 				}
-				doConnect();
+				return;
 			}
+			// Tab is visible.
+			if (intentionallyClosed || terminalClosed) return;
+			if (ws?.readyState === WebSocket.OPEN) {
+				// Connection survived the hide - clear the 'suspended' overlay.
+				statusStore.set('open');
+				hiddenDisconnect = false;
+				return;
+			}
+			// Connection did not survive (or was never open) - force a reconnect.
+			hiddenDisconnect = false;
+			attempt = 0;
+			if (reconnectTimer) {
+				clearTimeout(reconnectTimer);
+				reconnectTimer = null;
+			}
+			doConnect();
 		};
 		document.addEventListener('visibilitychange', visibilityHandler);
 	}

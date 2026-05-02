@@ -1541,7 +1541,13 @@ const event = await once('jobs', { timeout: 5000 });
 
 ### `status` - connection status
 
-Readable store with the current connection state:
+Readable store with the current connection state. Five states drive distinct UI affordances:
+
+- `'connecting'` - establishing a connection (initial attempt or retry)
+- `'open'` - connected, live data is flowing
+- `'suspended'` - WS is technically open but the tab is in the background; server may close idle backgrounded sockets, so live data is best-effort
+- `'disconnected'` - lost connection, will retry automatically
+- `'failed'` - terminal: auth denied, max retries exhausted, or `close()` called
 
 ```svelte
 <script>
@@ -1550,12 +1556,18 @@ Readable store with the current connection state:
 
 {#if $status === 'open'}
   <span class="badge green">Live</span>
+{:else if $status === 'suspended'}
+  <span class="badge muted">Paused (tab in background)</span>
 {:else if $status === 'connecting'}
   <span class="badge yellow">Connecting...</span>
+{:else if $status === 'disconnected'}
+  <span class="badge orange">Reconnecting...</span>
 {:else}
-  <span class="badge red">Disconnected</span>
+  <span class="badge red">Connection failed</span>
 {/if}
 ```
+
+The `'suspended'` overlay flips back to `'open'` automatically when the tab returns to the foreground (assuming the WebSocket survived the hide period; if it did not, the state machine drives `'connecting'` -> `'open'` via the normal reconnect path).
 
 ### `ready()` - wait for connection
 

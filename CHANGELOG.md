@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Client `status` store expanded to a five-state machine.** Was `'connecting' | 'open' | 'closed'`; now `'connecting' | 'open' | 'suspended' | 'disconnected' | 'failed'`. The previous catch-all `'closed'` is split into three distinct states so apps can drive different UI affordances:
+  - `'disconnected'` - lost connection, will retry automatically (show "Reconnecting...").
+  - `'failed'` - terminal: auth denied (close codes 1008 / 4401 / 4403), max reconnect attempts exhausted, or `close()` was called. Stays in this state; user action required to recover.
+  - `'suspended'` - WS is technically open but the tab is in the background. Driven by `visibilitychange`; flips back to `'open'` automatically when the tab returns. Browsers may kill idle backgrounded sockets, so live data is best-effort while suspended.
+
+  `ready()` now resolves on either `'open'` or `'suspended'` (both indicate an established WS). Apps that previously matched `$status === 'closed'` need to map to `'disconnected'` (transient) or `'failed'` (terminal) - or use `_permaClosed` if the only thing they cared about was the terminal case. Tests in `client-real.test.js` cover all five transitions.
 - **Presence plugin wire format switched to a compact diff protocol.** The five-event format (`list` / `join` / `updated` / `leave` / `heartbeat`) collapses to two diff-shaped events plus the existing heartbeat:
   - `{event: 'presence_state', data: {[key]: meta}}` - full snapshot, sent to a single connection on join or sync. Replaces the array-shaped `list`.
   - `{event: 'presence_diff', data: {joins: {[key]: meta}, leaves: {[key]: meta}}}` - changes, broadcast to topic subscribers. Replaces individual `join` / `updated` / `leave` frames.

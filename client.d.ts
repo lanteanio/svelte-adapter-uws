@@ -193,8 +193,15 @@ export function on<T = unknown>(topic: string): TopicStore<WSEvent<T>>;
 export function on<T = unknown>(topic: string, event: string): TopicStore<{ data: T }>;
 
 /**
- * Readable store - connection status: `'connecting'` | `'open'` | `'closed'`.
- * Auto-connects on first access.
+ * Readable store - connection status. Auto-connects on first access.
+ *
+ * Five states drive distinct UI affordances:
+ * - `'connecting'` - establishing a connection (initial attempt or retry)
+ * - `'open'` - connected, live data is flowing
+ * - `'suspended'` - WS is technically open but the tab is in the background;
+ *   server may close idle backgrounded sockets, so live data is best-effort
+ * - `'disconnected'` - lost connection, will retry automatically
+ * - `'failed'` - terminal: auth denied, max retries exhausted, or `close()` called
  *
  * @example
  * ```svelte
@@ -204,10 +211,16 @@ export function on<T = unknown>(topic: string, event: string): TopicStore<{ data
  *
  * {#if $status === 'open'}
  *   <span class="badge">Live</span>
+ * {:else if $status === 'suspended'}
+ *   <span class="badge muted">Paused (background)</span>
+ * {:else if $status === 'failed'}
+ *   <span class="badge error">Connection failed</span>
+ * {:else}
+ *   <span class="badge">Reconnecting...</span>
  * {/if}
  * ```
  */
-export const status: Readable<'connecting' | 'open' | 'closed'>;
+export const status: Readable<'connecting' | 'open' | 'suspended' | 'disconnected' | 'failed'>;
 
 /**
  * Canonical reasons for a `subscribe-denied` server response. The
@@ -462,7 +475,7 @@ export interface WSConnection {
 	events: Readable<WSEvent | null>;
 
 	/** Readable store - connection status. */
-	status: Readable<'connecting' | 'open' | 'closed'>;
+	status: Readable<'connecting' | 'open' | 'suspended' | 'disconnected' | 'failed'>;
 
 	/**
 	 * Readable store - latest subscribe-denied response from the server.
