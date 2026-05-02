@@ -412,7 +412,7 @@ These options control how the server handles misbehaving or slow clients at the 
 
 **`maxPayloadLength`** (default: 16 KB) -- the maximum size of a single incoming WebSocket message. If a client sends a message larger than this, uWS closes the connection immediately (not just the message -- the entire connection is dropped). Set this based on the largest message your application expects to receive.
 
-**`maxBackpressure`** (default: 1 MB) -- the per-connection outbound send buffer. When a client reads slower than the server writes, messages queue up in this buffer. Once it overflows, subsequent `send()` and `publish()` calls for that connection silently drop the message. The `drain` hook fires when the buffer empties again. Lower this if you expect many slow consumers to avoid per-connection memory bloat.
+**`maxBackpressure`** (default: 1 MB) -- the per-connection outbound send buffer, AND the threshold above which `publish` / `send` / `publishBatched` silently skip a subscriber. When a specific subscriber's buffer is over this size, uWS drops that frame *for that subscriber only* while continuing to deliver to every non-backpressured subscriber. This makes `publish` / `send` / `publishBatched` volatile-by-default for slow consumers (the right behavior for cursor positions, typing indicators, presence pings -- see "Volatile / fire-and-forget delivery" below). The `drain` hook fires per-connection when the buffer empties again. Lower this if you want subscribers shed sooner; raise it if you prefer to keep the connection queued and absorb temporary slowness. uWS's own default is 64 KB; this adapter sets 1 MB to favor keeping the connection alive under pub/sub spikes.
 
 **`upgradeRateLimit`** (default: 10 per 10s window) -- sliding-window rate limit on WebSocket upgrade requests per client IP. Clients exceeding the limit get a `429 Too Many Requests` response. The IP rate map is capped at 10,000 entries with LRU eviction by activity score, so sustained connection floods from many IPs don't cause unbounded memory growth.
 
@@ -1064,7 +1064,7 @@ Send a message to a single connection with **coalesce-by-key** semantics. Each `
 
 Use this for latest-value streams where intermediate values are noise -- price ticks, cursor positions, presence state, typing indicators, scroll position. Under load, this is the difference between the client lagging by a thousand stale frames and the client always seeing the most recent value.
 
-For at-least-once delivery use `platform.send()` or `platform.publish()` instead. `sendCoalesced` is explicitly drop-the-middle, keep-the-latest.
+If you want a backpressured subscriber to keep eventually receiving the latest value (the queue-and-drain shape), `sendCoalesced` is the right primitive. If you want backpressured subscribers skipped entirely so the wire stays current for everyone else, use `platform.publish` / `platform.send` instead -- those drop on backpressure (see the "Volatile / fire-and-forget delivery" section below). `sendCoalesced` is explicitly drop-the-middle, keep-the-latest; `publish` / `send` are explicitly drop-the-laggard, keep-everyone-else-current.
 
 ```js
 // src/hooks.ws.js - cursor positions during a collaborative edit
@@ -1429,6 +1429,31 @@ return new Response(body, {
 ```
 
 > **Dev-mode note:** in `vite dev`, the dev server generates a fresh UUID per request but does not honour `X-Request-ID` for HTTP traffic (SvelteKit's `emulate.platform()` runs without access to request headers). Production reads the header. Dev-mode WebSocket connections honour the header normally.
+
+### Volatile / fire-and-forget delivery
+
+`platform.publish`, `platform.send`, and `platform.publishBatched` are **all volatile under backpressure**. When a specific subscriber's outbound buffer is over `maxBackpressure` (default 1 MB, configurable in `websocket.maxBackpressure`), uWS skips that subscriber for that frame while continuing to deliver to every non-backpressured subscriber. The skip is silent, per-subscriber, and does not queue for retry. There is no separate `volatile: true` flag because the volatile semantic is the default.
+
+This is the right behavior for transient state where stale values are worse than dropped ones -- cursor positions, typing indicators, presence pings, telemetry pulses, draft auto-saves. Slow / disconnected / backgrounded subscribers fall behind silently while everyone else stays current.
+
+```js
+// Cursor broadcast: every reader gets the latest position they can keep up
+// with; lagging readers silently lose intermediate values, no queue grows.
+platform.publish(`doc:${docId}:cursors`, 'move', { userId, x, y }, { seq: false });
+```
+
+Pair with `{ seq: false }` to opt out of seq stamping for these high-cardinality, replay-uninteresting topics. The seq counter map is per-topic and grows with cardinality, so opting out keeps memory bounded for unbounded-cardinality topic spaces like `cursor:${userId}` or `presence:${sessionId}`.
+
+For the **drop-the-middle, keep-the-latest** shape on a single connection (the value still arrives, just collapsed across intermediate frames), use `platform.sendCoalesced(ws, ...)` instead. That path queues per `(connection, key)` and drains on the next uWS `drain` event rather than dropping. Quick comparison:
+
+| Primitive | Behavior under backpressure |
+|---|---|
+| `platform.publish` / `send` / `publishBatched` | Skip the backpressured subscriber, deliver to others. No retry. |
+| `platform.sendCoalesced(ws, { key, ... })` | Queue per `(ws, key)`, latest value wins, drain on next `onWritable`. |
+
+To tune how aggressively backpressured subscribers get skipped, lower `maxBackpressure` in `websocket` options (the smaller the buffer, the sooner uWS starts skipping). The 1 MB default favors keeping the connection alive over shedding load; drop to 64 KB or 256 KB if your workload prefers shedding faster.
+
+For visibility into whether subscribers are actually being skipped at scale, watch `platform.pressure.publishRate` and `platform.pressure.topPublishers` -- a topic publishing far above its consumer rate is the canonical signature of a backpressure-shedding workload.
 
 ---
 
