@@ -29,7 +29,7 @@ export default function uws(options = {}) {
 	/** @type {Map<import('ws').WebSocket, object>} */
 	const wsWrappers = new Map();
 
-	/** @type {{ upgrade?: Function, open?: Function, message?: Function, close?: Function, drain?: Function, subscribe?: Function, unsubscribe?: Function, resume?: Function, authenticate?: Function }} */
+	/** @type {{ upgrade?: Function, open?: Function, message?: Function, close?: Function, drain?: Function, subscribe?: Function, subscribeBatch?: Function, unsubscribe?: Function, resume?: Function, authenticate?: Function }} */
 	let userHandlers = {};
 
 	/**
@@ -199,6 +199,24 @@ export default function uws(options = {}) {
 	}
 
 	/**
+	 * @param {object} wrapped
+	 * @param {string[]} topics
+	 * @returns {Record<string, string> | null}
+	 */
+	function runSubscribeBatchHookV(wrapped, topics) {
+		if (!userHandlers.subscribeBatch) return null;
+		const result = userHandlers.subscribeBatch(wrapped, topics, { platform });
+		/** @type {Record<string, string>} */
+		const denials = {};
+		if (!result || typeof result !== 'object') return denials;
+		for (const [topic, val] of Object.entries(result)) {
+			if (val === false) denials[topic] = 'FORBIDDEN';
+			else if (typeof val === 'string') denials[topic] = val;
+		}
+		return denials;
+	}
+
+	/**
 	 * @param {import('ws').WebSocket} ws
 	 * @param {string} topic
 	 * @param {number | string | null} ref
@@ -227,6 +245,7 @@ export default function uws(options = {}) {
 			close: mod.close,
 			drain: mod.drain,
 			subscribe: mod.subscribe,
+			subscribeBatch: mod.subscribeBatch,
 			unsubscribe: mod.unsubscribe,
 			resume: mod.resume,
 			authenticate: mod.authenticate
@@ -588,12 +607,19 @@ export default function uws(options = {}) {
 								const subs = subscriptions.get(ws);
 								const topics = msg.topics.slice(0, 256);
 								const ref = hasRefValue(msg.ref) ? msg.ref : null;
+								const valid = [];
 								for (const topic of topics) {
 									if (!isValidWireTopic(topic)) {
 										sendDenied(ws, topic, ref, 'INVALID_TOPIC');
 										continue;
 									}
-									const denial = runSubscribeHookV(wrapped, topic);
+									valid.push(topic);
+								}
+								const batchDenials = runSubscribeBatchHookV(wrapped, valid);
+								for (const topic of valid) {
+									const denial = batchDenials !== null
+										? (batchDenials[topic] ?? null)
+										: runSubscribeHookV(wrapped, topic);
 									if (denial !== null) {
 										sendDenied(ws, topic, ref, denial);
 										continue;
@@ -662,6 +688,7 @@ export default function uws(options = {}) {
 					mod.close !== userHandlers.close ||
 					mod.drain !== userHandlers.drain ||
 					mod.subscribe !== userHandlers.subscribe ||
+					mod.subscribeBatch !== userHandlers.subscribeBatch ||
 					mod.unsubscribe !== userHandlers.unsubscribe ||
 					mod.resume !== userHandlers.resume) {
 					applyHandlers(mod);

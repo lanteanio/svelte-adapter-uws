@@ -558,6 +558,36 @@ function runSubscribeHook(ws, topic) {
 }
 
 /**
+ * Run the user's `subscribeBatch` hook (if any) once for an entire
+ * batch of pre-validated topics. Returns a normalized denial map -
+ * each entry is either a string denial reason or absent (= allow).
+ * Returns `null` when no batch hook is exported, signalling the caller
+ * to fall back to the per-topic `subscribe` hook (or open access).
+ *
+ * The user hook returns a `Record<string, boolean | string>` where
+ * `false` means FORBIDDEN, a string is the verbatim reason, and any
+ * other value (or absent key) means allow. Returning `undefined` or
+ * an empty object both mean "allow everything".
+ *
+ * @param {import('uWebSockets.js').WebSocket<any>} ws
+ * @param {string[]} topics
+ * @returns {Record<string, string> | null}
+ */
+function runSubscribeBatchHook(ws, topics) {
+	if (!wsModule.subscribeBatch) return null;
+	const result = wsModule.subscribeBatch(ws, topics, { platform });
+	/** @type {Record<string, string>} */
+	const denials = {};
+	if (!result || typeof result !== 'object') return denials;
+	for (const [topic, val] of Object.entries(result)) {
+		if (val === false) denials[topic] = 'FORBIDDEN';
+		else if (typeof val === 'string') denials[topic] = val;
+		// truthy / true / undefined -> allow (skip)
+	}
+	return denials;
+}
+
+/**
  * Send a `subscribed` ack frame to the client when it provided a `ref`
  * with its subscribe op. No frame goes out for ref-less subscribes
  * (old clients) so backward compatibility is preserved.
@@ -2093,13 +2123,29 @@ if (WS_ENABLED) {
 						const topics = msg.topics.slice(0, 256);
 						const ref = hasRef(msg.ref) ? msg.ref : null;
 						const userData = ws.getUserData();
-						let subscribed = 0;
+
+						// Pass 1: validate topics. INVALID_TOPIC denials emit immediately;
+						// the batch hook (if any) only sees validated topics.
+						const valid = [];
 						for (const topic of topics) {
 							if (!isValidWireTopic(topic)) {
 								sendSubscribeDenied(ws, topic, ref, 'INVALID_TOPIC');
 								continue;
 							}
-							const denial = runSubscribeHook(ws, topic);
+							valid.push(topic);
+						}
+
+						// Pass 2: gather denial decisions. If a batch hook is exported,
+						// call it once (typically backed by a single DB auth query) and
+						// use its decisions. Otherwise fall back to the per-topic
+						// `subscribe` hook for parity with single-subscribe behaviour.
+						const batchDenials = runSubscribeBatchHook(ws, valid);
+
+						let subscribed = 0;
+						for (const topic of valid) {
+							const denial = batchDenials !== null
+								? (batchDenials[topic] ?? null)
+								: runSubscribeHook(ws, topic);
 							if (denial !== null) {
 								sendSubscribeDenied(ws, topic, ref, denial);
 								continue;

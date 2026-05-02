@@ -37,6 +37,19 @@ export async function createTestServer(options = {}) {
 		if (typeof result === 'string') return result;
 		return null;
 	}
+	/** @param {any} ws @param {string[]} topics @returns {Record<string, string> | null} */
+	function runSubscribeBatchHookT(ws, topics) {
+		if (!handler.subscribeBatch) return null;
+		const result = handler.subscribeBatch(ws, topics, { platform });
+		/** @type {Record<string, string>} */
+		const denials = {};
+		if (!result || typeof result !== 'object') return denials;
+		for (const [topic, val] of Object.entries(result)) {
+			if (val === false) denials[topic] = 'FORBIDDEN';
+			else if (typeof val === 'string') denials[topic] = val;
+		}
+		return denials;
+	}
 	/** @param {any} ws @param {string} topic @param {number | string | null} ref */
 	function sendSubscribedT(ws, topic, ref) {
 		if (ref === null) return;
@@ -217,12 +230,19 @@ export async function createTestServer(options = {}) {
 						}
 						if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
 							const ref = hasRefT(msg.ref) ? msg.ref : null;
+							const valid = [];
 							for (const topic of msg.topics.slice(0, 256)) {
 								if (!isValidWireTopic(topic)) {
 									sendDeniedT(ws, topic, ref, 'INVALID_TOPIC');
 									continue;
 								}
-								const denial = runSubscribeHookT(ws, topic);
+								valid.push(topic);
+							}
+							const batchDenials = runSubscribeBatchHookT(ws, valid);
+							for (const topic of valid) {
+								const denial = batchDenials !== null
+									? (batchDenials[topic] ?? null)
+									: runSubscribeHookT(ws, topic);
 								if (denial !== null) {
 									sendDeniedT(ws, topic, ref, denial);
 									continue;

@@ -694,6 +694,24 @@ Old clients that send `subscribe` without a `ref` get no ack frame (silent allow
 
 `subscribe-batch` works the same way: one ack frame per topic in the batch, all sharing the batch's single `ref`.
 
+For batch subscribes (typically the resubscribe-on-reconnect path) you can opt into a single-call `subscribeBatch` hook instead of paying N `subscribe` calls. The framework calls it once with all pre-validated topics and applies the returned per-topic decisions:
+
+```js
+export async function subscribeBatch(ws, topics, { platform }) {
+  const { userId } = ws.getUserData();
+  // One DB query for all topics instead of N
+  const allowed = await db.allowedTopics(userId, topics);
+  const allowedSet = new Set(allowed);
+  const denials = {};
+  for (const topic of topics) {
+    if (!allowedSet.has(topic)) denials[topic] = 'FORBIDDEN';
+  }
+  return denials; // omit a topic -> allow; false -> FORBIDDEN; string -> that reason
+}
+```
+
+If you only export `subscribe`, the framework still loops it per topic for batch-subscribes (no behaviour change). Export `subscribeBatch` only when you need the single-query optimization. The hook is sync in this version; for async lookups, pre-cache user grants on `userData` during `upgrade`.
+
 ### Message protocol
 
 The adapter uses a JSON envelope format for all pub/sub messages: `{ topic, event, data, seq? }`. Control messages from the client store (`subscribe`, `unsubscribe`, `subscribe-batch`, `resume`) use `{ type, topic, ref? }`, `{ type, topics, ref? }`, or `{ type, sessionId, lastSeenSeqs }`. The server emits `{"type":"welcome","sessionId":"..."}` on open, `{"type":"resumed"}` after a resume frame, and `{"type":"subscribed",...}` / `{"type":"subscribe-denied",...}` per topic when the client supplied a `ref`.

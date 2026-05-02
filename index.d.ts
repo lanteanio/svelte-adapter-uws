@@ -601,6 +601,50 @@ export interface WebSocketHandler<UserData = unknown> {
 		| boolean | void | SubscribeDenialReason | string;
 
 	/**
+	 * Optional batch variant of `subscribe`. Called once when a client
+	 * sends a `subscribe-batch` frame (typically on reconnect, where
+	 * the client resubscribes to every topic it had before in a single
+	 * message). Use this to authorise N topics with one DB query
+	 * instead of N.
+	 *
+	 * Receives the set of pre-validated topics (already filtered for
+	 * `INVALID_TOPIC`) and returns a record mapping the topics you
+	 * want to deny to a reason. Use:
+	 *
+	 * - `false` -> deny with the default reason `'FORBIDDEN'`.
+	 * - A string -> deny with that string as the reason. Canonical
+	 *   codes are `'UNAUTHENTICATED'`, `'FORBIDDEN'`, `'INVALID_TOPIC'`,
+	 *   `'RATE_LIMITED'`; any other string is forwarded verbatim to
+	 *   the client.
+	 * - Omit a topic, return `true`, or return `undefined` for it -> allow.
+	 *
+	 * Returning `undefined` or `{}` from the hook means "allow
+	 * everything". Sync only in v1.
+	 *
+	 * If you do not export this hook, the per-topic `subscribe` hook
+	 * is called once per topic in the batch (unchanged behaviour).
+	 *
+	 * @example
+	 * ```js
+	 * export async function subscribeBatch(ws, topics, { platform }) {
+	 *   const { userId } = ws.getUserData();
+	 *   const allowed = await db.allowedTopics(userId, topics);
+	 *   const allowedSet = new Set(allowed);
+	 *   const denials = {};
+	 *   for (const topic of topics) {
+	 *     if (!allowedSet.has(topic)) denials[topic] = 'FORBIDDEN';
+	 *   }
+	 *   return denials;
+	 * }
+	 * ```
+	 */
+	subscribeBatch?: (
+		ws: WebSocket<UserData>,
+		topics: string[],
+		ctx: SubscribeContext
+	) => Record<string, boolean | SubscribeDenialReason | string> | void;
+
+	/**
 	 * Called when a client unsubscribes from a topic (ref count reached zero).
 	 *
 	 * Use this to clean up per-topic state like presence or group membership
