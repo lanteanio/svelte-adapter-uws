@@ -3601,6 +3601,49 @@ Pass `null` (or call `__chaos()` with no argument) to clear the active scenario;
 
 > Note: `__chaos` lives on the test platform only. The production runtime does not ship the harness; chaos belongs in test files, not user code.
 
+##### Scope: WS-frame outbound only
+
+`__chaos` is a WebSocket-frame outbound chokepoint -- it intercepts what the test harness sends to its connected WS clients, and only that. Transport-level traffic to anything else you've wired up alongside the adapter (an ioredis client for cross-instance pub/sub, a `pg` connection for `LISTEN/NOTIFY`, a NATS subscription, a custom HTTP backend) does NOT pass through `sendOutboundT` and is untouched by the harness.
+
+This is intentional: each layer's chaos surface stays cohesive with what that layer actually owns. The adapter knows its WS wire and ships chaos for that. Each backend / extension knows its own wire and is the right place to wrap that wire's client.
+
+##### Wrap your own transport for cross-wire chaos
+
+For cross-wire fault injection, the `createChaosState` factory re-exported from `svelte-adapter-uws/testing` is the same primitive `__chaos` uses internally. Wrap any transport client with it and you get the same `__chaos({ scenario, dropRate, delayMs })` ergonomic, scoped to that client. The pattern is one helper:
+
+```js
+import { createChaosState } from 'svelte-adapter-uws/testing';
+
+// Wrap any transport client (ioredis, pg, NATS, fetch, ...) so its
+// outbound calls become chaos-controllable from test code. Same shape
+// as __chaos on the test platform, scoped to this one client.
+function makeChaosClient(client, methodName = 'publish') {
+  const chaos = createChaosState();
+  const original = client[methodName].bind(client);
+
+  return new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop === '__chaos') return (cfg) => chaos.set(cfg);
+      if (prop !== methodName) return Reflect.get(target, prop, receiver);
+      return async (...args) => {
+        if (chaos.shouldDropOutbound()) return 0;
+        const delay = chaos.getDelayMs();
+        if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+        return original(...args);
+      };
+    }
+  });
+}
+
+// Test:
+const redis = makeChaosClient(realRedisClient, 'publish');
+redis.__chaos({ scenario: 'drop-outbound', dropRate: 0.3 });
+// ... drive the system, assert it tolerates 30% Redis publish loss ...
+redis.__chaos(null);
+```
+
+Composes across transports: `makeChaosClient(pgClient, 'query')`, `makeChaosClient(natsClient, 'publish')`, etc. Zero new adapter surface; downstream extensions that need cross-wire fault injection own their own wrappers.
+
 ---
 
 ## Related projects

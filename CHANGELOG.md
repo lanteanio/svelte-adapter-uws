@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Chaos harness scope explicitly documented** in the `ChaosScenario` JSDoc (`testing.d.ts`) and the README chaos section. `__chaos` is a WebSocket-frame outbound chokepoint inside the test harness; it covers what the bundled WS protocol does (subscribe acks, session resume, sendCoalesced under backpressure, request/reply timeouts) and does NOT cover transport-level traffic outside the harness (ioredis, pg, NATS, custom HTTP backends). Prevents the misunderstanding that chaos covers cross-wire testing for distributed primitives - that responsibility lives in the layer that owns each wire.
+- **README "Wrap your own transport for cross-wire chaos" pattern.** Shows downstream extension authors and app-side test code how to compose the `createChaosState` factory (already re-exported from `svelte-adapter-uws/testing`) with any transport client (ioredis, pg, NATS, fetch) to get the same `__chaos({ scenario, dropRate, delayMs })` ergonomic scoped to that client. Zero new adapter surface; the pattern transfers across transports without anyone needing to invent a new API. ~30 LOC sketch in the README, anchor-stable for downstream docs to link to.
+
 ## [0.5.0-next.6] - 2026-05-02
 
 ### Added

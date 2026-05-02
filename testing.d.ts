@@ -41,6 +41,18 @@ export interface TestServerOptions {
  *
  * Pass `null` (or call with no argument) to clear the active scenario;
  * the harness returns to its zero-overhead fast paths.
+ *
+ * **Scope.** This is a WebSocket-frame outbound chokepoint. It intercepts
+ * what the test harness sends to its connected WS clients - every frame
+ * routed through `sendOutboundT` (`platform.publish`, `platform.send`,
+ * `platform.sendTo`, `platform.request`, the welcome envelope, subscribe
+ * acks, the resumed ack). It does NOT cover transport-level traffic
+ * outside the harness: an ioredis client, a pg connection, a NATS
+ * subscription, or any backend you've wired up alongside the adapter
+ * stays untouched. For cross-wire fault injection, wrap the transport
+ * client at the integration layer using the same `createChaosState`
+ * factory exported from `svelte-adapter-uws/testing` - see the README
+ * "Wrap your own transport for cross-wire chaos" pattern.
  */
 export type ChaosScenario =
 	| { scenario: 'drop-outbound'; dropRate: number }
@@ -57,6 +69,9 @@ export interface TestPlatform extends Platform {
 	/**
 	 * Activate or clear a chaos / fault-injection scenario. Pass `null`
 	 * to reset; the harness returns to its zero-overhead fast paths.
+	 *
+	 * Scope is the WS-frame outbound chokepoint inside the test harness;
+	 * see the `ChaosScenario` JSDoc for what is and is not covered.
 	 *
 	 * @example
 	 * ```js
