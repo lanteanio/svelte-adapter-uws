@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.7] - 2026-05-02
+
 ### Changed
 
 - **Initial-mount subscribe frames are now microtask-batched.** Multiple `subscribe(topic)` calls landing in the same microtask coalesce into one `{type:'subscribe-batch', topics, ref}` wire frame instead of N individual `{type:'subscribe', topic, ref}` frames. A page mounting many topic stores (a typical multi-stream dashboard, an `svelte-realtime` page that initializes 5 stream RPCs in a tight loop, etc.) now triggers the server's `subscribeBatch` hook ONCE instead of the per-topic `subscribe` hook N times - which is the whole reason `subscribeBatch` exists. Single-topic case stays as a plain `subscribe` frame for the minimal-change wire shape. Same chunking limits the reconnect path uses (8000 byte / 200 topic per batch); the limits live in a shared `chunkTopicsForBatch` helper so the two call sites cannot drift. Topics are still added to `subscribedTopics` synchronously, so a disconnect between the call and the microtask flush loses nothing - the reopen's resubscribe-batch path picks them up. **Behaviour change**: any test code asserting on the exact wire shape of two same-microtask subscribes seeing two `subscribe` frames now sees one `subscribe-batch` frame. Use `.find(m => m.type === 'subscribe-batch' && m.topics.includes(...))` instead.
