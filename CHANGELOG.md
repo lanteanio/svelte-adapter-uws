@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`upgradeAdmission` option on `createTestServer`.** Mirror of the production handler's `wsOptions.upgradeAdmission` setting (`maxConcurrent`, `perTickBudget`). Lets adapter-side and downstream test code drive a real connection storm against the harness and assert the admission shed-shape (503 with the documented status text) without booting a full SvelteKit app. Off by default; production users continue to configure the same thing via `adapter({ websocket: { upgradeAdmission: { ... } } })`. New `test/upgrade-admission-wiring.test.js` covers the wiring end-to-end (default-disabled accepts everyone, in-flight cap sheds the surplus with 503, slow user upgrade hooks hold the slot, in-flight slots are released after the upgrade completes). Closes the coverage gap between "the `createUpgradeAdmission` factory works in isolation" and "the wiring inside the upgrade hook actually triggers the shed."
+- **README "Layered admission" section** under Backpressure & connection limits. Documents that `upgradeAdmission` sheds at the handshake layer (before TLS work), and points readers at the extensions package's `createAdmissionControl` for the message-dispatch layer that sheds RPC traffic on already-accepted connections. Includes a wiring snippet showing both factories side-by-side. Covers the structural ordering (uWS lifecycle enforces "no message handler dispatch before upgrade", so the two layers cannot drift apart).
+
 ## [0.5.0-next.5] - 2026-05-02
 
 ### Added

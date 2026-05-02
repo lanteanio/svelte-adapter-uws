@@ -431,6 +431,37 @@ adapter({
 
 The two layers are independent: each works without the other. Both default to `0` (disabled) so the upgrade path stays unchanged unless you opt in.
 
+#### Layered admission: upgrade-path + message-path
+
+`upgradeAdmission` operates at the WebSocket handshake. It sheds connection attempts before TLS work and before any per-request CPU is spent. That is the right primitive when the threat is "too many clients are trying to connect" -- a connection flood, a thundering herd after a deploy, a runaway client retry loop.
+
+It is NOT the right primitive when the threat is "established connections are sending too many RPCs" -- a chatty client, an abusive presence ping loop, a misbehaving game tick. Those calls have already passed the handshake; the connection is open; you want to shed at the message dispatch layer instead.
+
+For that second layer, [`svelte-adapter-uws-extensions`](https://github.com/lanteanio/svelte-adapter-uws-extensions) ships `createAdmissionControl`, an opt-in message-path admission wrapper that runs against already-accepted connections. The two stack naturally:
+
+```js
+// Production wiring sketch
+import { createAdmissionControl } from 'svelte-adapter-uws-extensions';
+
+const messageAdmission = createAdmissionControl({ /* RPC concurrency, per-key buckets, ... */ });
+
+// In hooks.ws.js
+export function message(ws, ctx) {
+  messageAdmission.run(ws, ctx, async () => {
+    // ... your message handler ...
+  });
+}
+
+// In svelte.config.js
+adapter({
+  websocket: {
+    upgradeAdmission: { maxConcurrent: 1000, perTickBudget: 64 }  // handshake layer
+  }
+});
+```
+
+The two layers do not share state, configuration, or call sites. They cannot drift apart because the WebSocket lifecycle enforces the ordering: a connection that fails `upgradeAdmission` never reaches the message handler at all, so `createAdmissionControl` only ever sees connections that were already admitted at the handshake. The layering is a structural property, not a runtime one.
+
 ### Static file behavior
 
 All static assets (from the `client/` and `prerendered/` output directories) are loaded once at startup and served directly from RAM. Each response automatically includes:

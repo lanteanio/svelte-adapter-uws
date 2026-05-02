@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS } from './files/utils.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -51,7 +51,14 @@ function envelope(topic, event, data, seq) {
  * @returns {Promise<import('./testing.js').TestServer>}
  */
 export async function createTestServer(options = {}) {
-	const { port = 0, wsPath = '/ws', handler = {} } = options;
+	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission } = options;
+
+	// Same wiring shape as the production handler: a per-instance
+	// admission state instantiated once, consulted at the top of the
+	// upgrade hook (`tryAcquire` -> 503), and paced via `admit()` around
+	// the actual `res.upgrade()` call. Off when both knobs are 0/unset.
+	const admission = createUpgradeAdmission(upgradeAdmission);
+	const ADMISSION_PER_TICK_BUDGET = upgradeAdmission?.perTickBudget || 0;
 
 	/** @param {unknown} ref @returns {ref is number | string} */
 	function hasRefT(ref) { return typeof ref === 'number' || typeof ref === 'string'; }
@@ -315,6 +322,24 @@ export async function createTestServer(options = {}) {
 		sendPingsAutomatically: true,
 
 		upgrade(res, req, context) {
+			// Pre-upgrade soft filter: cap concurrent in-flight upgrades.
+			// Crossed requests get a fast 503 before any per-request work,
+			// matching handler.js's wiring exactly.
+			if (!admission.tryAcquire()) {
+				res.cork(() => {
+					res.writeStatus('503 Service Unavailable');
+					res.writeHeader('content-type', 'text/plain');
+					res.end('Server is at upgrade capacity, please retry');
+				});
+				return;
+			}
+			let inFlightReleased = false;
+			function releaseInFlight() {
+				if (inFlightReleased) return;
+				inFlightReleased = true;
+				admission.release();
+			}
+
 			const headers = {};
 			req.forEach((k, v) => { headers[k] = v; });
 			const secKey = req.getHeader('sec-websocket-key');
@@ -327,25 +352,34 @@ export async function createTestServer(options = {}) {
 			const wsRequestId = resolveRequestId(headers['x-request-id']) || randomUUID();
 
 			if (!handler.upgrade) {
-				res.cork(() => {
-					res.upgrade({ remoteAddress: rawIp, [WS_REQUEST_ID_KEY]: wsRequestId }, secKey, secProtocol, secExtensions, context);
+				let fastPathAborted = false;
+				if (ADMISSION_PER_TICK_BUDGET > 0) {
+					res.onAborted(() => { fastPathAborted = true; releaseInFlight(); });
+				}
+				admission.admit(() => {
+					if (fastPathAborted) return;
+					res.cork(() => {
+						res.upgrade({ remoteAddress: rawIp, [WS_REQUEST_ID_KEY]: wsRequestId }, secKey, secProtocol, secExtensions, context);
+					});
+					releaseInFlight();
 				});
 				return;
 			}
 
 			let aborted = false;
-			res.onAborted(() => { aborted = true; });
+			res.onAborted(() => { aborted = true; releaseInFlight(); });
 
 			const cookies = parseCookies(headers['cookie']);
 			Promise.resolve(handler.upgrade({ headers, cookies, url, remoteAddress: rawIp, requestId: wsRequestId }))
 				.then((result) => {
-					if (aborted) return;
+					if (aborted) { releaseInFlight(); return; }
 					if (result === false) {
 						res.cork(() => {
 							res.writeStatus('401 Unauthorized');
 							res.writeHeader('content-type', 'text/plain');
 							res.end('Unauthorized');
 						});
+						releaseInFlight();
 						return;
 					}
 					let userData;
@@ -358,17 +392,21 @@ export async function createTestServer(options = {}) {
 					}
 					if (!userData.remoteAddress) userData.remoteAddress = rawIp;
 					userData[WS_REQUEST_ID_KEY] = wsRequestId;
-					res.cork(() => {
-						if (responseHeaders) {
-							for (const [hk, hv] of Object.entries(responseHeaders)) {
-								if (Array.isArray(hv)) {
-									for (const v of hv) res.writeHeader(hk, v);
-								} else {
-									res.writeHeader(hk, hv);
+					admission.admit(() => {
+						if (aborted) { releaseInFlight(); return; }
+						res.cork(() => {
+							if (responseHeaders) {
+								for (const [hk, hv] of Object.entries(responseHeaders)) {
+									if (Array.isArray(hv)) {
+										for (const v of hv) res.writeHeader(hk, v);
+									} else {
+										res.writeHeader(hk, hv);
+									}
 								}
 							}
-						}
-						res.upgrade(userData, secKey, secProtocol, secExtensions, context);
+							res.upgrade(userData, secKey, secProtocol, secExtensions, context);
+						});
+						releaseInFlight();
 					});
 				})
 				.catch((err) => {
@@ -379,6 +417,7 @@ export async function createTestServer(options = {}) {
 							res.end('Internal Server Error');
 						});
 					}
+					releaseInFlight();
 				});
 		},
 

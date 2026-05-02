@@ -8,6 +8,27 @@ export interface TestServerOptions {
 	wsPath?: string;
 	/** WebSocket handler hooks (same shape as hooks.ws.ts exports). */
 	handler?: Partial<WebSocketHandler>;
+	/**
+	 * Two-layer admission control on the WebSocket upgrade path. Same
+	 * wiring as the production handler's `wsOptions.upgradeAdmission`
+	 * setting. Both layers are opt-in; both default to disabled (`0`).
+	 *
+	 * - `maxConcurrent` caps how many upgrades may be in flight at once.
+	 *   Crossed requests get a fast `503 Service Unavailable` before
+	 *   any per-request work (no header walk, no cookie parsing).
+	 * - `perTickBudget` caps how many `res.upgrade()` calls run per
+	 *   event-loop tick. Once spent, subsequent calls are deferred via
+	 *   `setImmediate`.
+	 *
+	 * Useful in integration tests that want to assert the admission
+	 * shed-shape under a real connection storm without booting a full
+	 * SvelteKit app. Production users configure the same options via
+	 * `adapter({ websocket: { upgradeAdmission: { ... } } })`.
+	 */
+	upgradeAdmission?: {
+		maxConcurrent?: number;
+		perTickBudget?: number;
+	};
 }
 
 /**
