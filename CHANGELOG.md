@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-connection traffic stats on the `close` hook.** When you export `close` from `hooks.ws`, the context now carries `id` (the session id from the welcome envelope), `duration` (lifetime in ms), `messagesIn`, `messagesOut`, `bytesIn`, and `bytesOut` alongside the existing `code` / `message` / `subscriptions`. Useful for per-session logging, quota accounting, and connection-quality dashboards. Counters are only populated when the close hook is registered - the adapter skips the bookkeeping otherwise to keep the hot path zero-cost for stats-uninterested apps. Caveat: `messagesOut` / `bytesOut` count direct sends to the specific connection (welcome, subscribe acks, replies, `platform.send`, `platform.sendCoalesced`, matched `platform.sendTo`). Topic-broadcast `platform.publish()` fan-out is **not** counted because uWS does the dispatch in C++ and per-recipient byte accounting would defeat the fast path - use `platform.pressure.publishRate` for aggregate publish-rate signals instead.
+
 ### Changed
 
 - **Client `status` store expanded to a five-state machine.** Was `'connecting' | 'open' | 'closed'`; now `'connecting' | 'open' | 'suspended' | 'disconnected' | 'failed'`. The previous catch-all `'closed'` is split into three distinct states so apps can drive different UI affordances:

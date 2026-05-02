@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS } from './files/utils.js';
 
 /**
  * Build a JSON envelope string matching the production wire format.
@@ -53,12 +53,16 @@ export async function createTestServer(options = {}) {
 	/** @param {any} ws @param {string} topic @param {number | string | null} ref */
 	function sendSubscribedT(ws, topic, ref) {
 		if (ref === null) return;
-		ws.send(JSON.stringify({ type: 'subscribed', topic, ref }), false, false);
+		const payload = JSON.stringify({ type: 'subscribed', topic, ref });
+		ws.send(payload, false, false);
+		bumpOutT(ws, payload);
 	}
 	/** @param {any} ws @param {string} topic @param {number | string | null} ref @param {string} reason */
 	function sendDeniedT(ws, topic, ref, reason) {
 		if (ref === null) return;
-		ws.send(JSON.stringify({ type: 'subscribe-denied', topic, ref, reason }), false, false);
+		const payload = JSON.stringify({ type: 'subscribe-denied', topic, ref, reason });
+		ws.send(payload, false, false);
+		bumpOutT(ws, payload);
 	}
 
 	let uWS;
@@ -85,6 +89,22 @@ export async function createTestServer(options = {}) {
 	/** @type {Array<{ resolve: (value: any) => void, timer: ReturnType<typeof setTimeout> }>} */
 	let messageWaiters = [];
 
+	const closeHookRegisteredT = !!handler.close;
+	function bumpInT(ws, message) {
+		if (!closeHookRegisteredT) return;
+		const stats = ws.getUserData()[WS_STATS];
+		if (!stats) return;
+		stats.messagesIn++;
+		stats.bytesIn += typeof message === 'string' ? message.length : message.byteLength;
+	}
+	function bumpOutT(ws, payload) {
+		if (!closeHookRegisteredT) return;
+		const stats = ws.getUserData()[WS_STATS];
+		if (!stats) return;
+		stats.messagesOut++;
+		stats.bytesOut += payload.length;
+	}
+
 	const platform = {
 		publish(topic, event, data, options) {
 			const seq = (options && options.seq === false)
@@ -94,7 +114,10 @@ export async function createTestServer(options = {}) {
 			return app.publish(topic, msg, false, false);
 		},
 		send(ws, topic, event, data) {
-			return ws.send(envelope(topic, event, data), false, false);
+			const payload = envelope(topic, event, data);
+			const result = ws.send(payload, false, false);
+			bumpOutT(ws, payload);
+			return result;
 		},
 		sendTo(filter, topic, event, data) {
 			const msg = envelope(topic, event, data);
@@ -102,6 +125,7 @@ export async function createTestServer(options = {}) {
 			for (const ws of wsConnections) {
 				if (filter(ws.getUserData())) {
 					ws.send(msg, false, false);
+					bumpOutT(ws, msg);
 					count++;
 				}
 			}
@@ -126,7 +150,9 @@ export async function createTestServer(options = {}) {
 					if (pending.delete(ref)) reject(new Error('request timed out'));
 				}, timeoutMs);
 				pending.set(ref, { resolve, reject, timer });
-				ws.send(JSON.stringify({ type: 'request', ref, event, data: data ?? null }), false, false);
+				const payload = JSON.stringify({ type: 'request', ref, event, data: data ?? null });
+				ws.send(payload, false, false);
+				bumpOutT(ws, payload);
 			});
 		},
 		topic(name) {
@@ -210,7 +236,18 @@ export async function createTestServer(options = {}) {
 			userData[WS_SUBSCRIPTIONS] = new Set();
 			const sessionId = randomUUID();
 			userData[WS_SESSION_ID] = sessionId;
-			ws.send('{"type":"welcome","sessionId":"' + sessionId + '"}', false, false);
+			if (closeHookRegisteredT) {
+				userData[WS_STATS] = {
+					openedAt: Date.now(),
+					messagesIn: 0,
+					messagesOut: 0,
+					bytesIn: 0,
+					bytesOut: 0
+				};
+			}
+			const welcome = '{"type":"welcome","sessionId":"' + sessionId + '"}';
+			ws.send(welcome, false, false);
+			bumpOutT(ws, welcome);
 			wsConnections.add(ws);
 			handler.open?.(ws, { platform });
 			for (const resolve of connectionWaiters) resolve(undefined);
@@ -218,6 +255,7 @@ export async function createTestServer(options = {}) {
 		},
 
 		message(ws, message, isBinary) {
+			bumpInT(ws, message);
 			// Handle subscribe/unsubscribe from client store
 			if (!isBinary && message.byteLength < 8192) {
 				const bytes = new Uint8Array(message);
@@ -296,6 +334,7 @@ export async function createTestServer(options = {}) {
 								}
 							}
 							ws.send('{"type":"resumed"}', false, false);
+							bumpOutT(ws, '{"type":"resumed"}');
 							return;
 						}
 					} catch {}
@@ -322,7 +361,22 @@ export async function createTestServer(options = {}) {
 				}
 				pending.clear();
 			}
-			handler.close?.(ws, { code, message, platform, subscriptions: subs });
+			const stats = ud[WS_STATS];
+			const ctx = stats
+				? {
+					code,
+					message,
+					platform,
+					subscriptions: subs,
+					id: ud[WS_SESSION_ID],
+					duration: Date.now() - stats.openedAt,
+					messagesIn: stats.messagesIn,
+					messagesOut: stats.messagesOut,
+					bytesIn: stats.bytesIn,
+					bytesOut: stats.bytesOut
+				}
+				: { code, message, platform, subscriptions: subs };
+			handler.close?.(ws, ctx);
 			wsConnections.delete(ws);
 		}
 	});

@@ -283,6 +283,7 @@ export const WS_SUBSCRIPTIONS = Symbol('adapter-uws.ws.subscriptions');
 export const WS_COALESCED = Symbol('adapter-uws.ws.coalesced');
 export const WS_SESSION_ID = Symbol('adapter-uws.ws.session-id');
 export const WS_PENDING_REQUESTS = Symbol('adapter-uws.ws.pending-requests');
+export const WS_STATS = Symbol('adapter-uws.ws.stats');
 
 /**
  * Build a self-contained admission controller for WebSocket upgrades.

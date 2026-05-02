@@ -413,6 +413,11 @@ export interface MessageContext {
 
 /**
  * Context passed to the `close` handler.
+ *
+ * The `id` / `duration` / `messagesIn` / `messagesOut` / `bytesIn` /
+ * `bytesOut` fields are populated only when a `close` hook is exported
+ * - the adapter skips the per-connection counter bookkeeping otherwise
+ * to keep the hot path zero-cost for stats-uninterested apps.
  */
 export interface CloseContext {
 	/** The WebSocket close code. */
@@ -427,6 +432,31 @@ export interface CloseContext {
 	 * via manual `ws.subscribe()` calls in server hooks.
 	 */
 	subscriptions: Set<string>;
+	/**
+	 * Per-connection session id, the same UUID announced to the client
+	 * in the `welcome` envelope. Useful for correlating server logs with
+	 * a specific socket lifecycle.
+	 */
+	id?: string;
+	/** Connection lifetime in milliseconds (open -> close). */
+	duration?: number;
+	/** Count of incoming messages from the client over the connection. */
+	messagesIn?: number;
+	/**
+	 * Count of direct outgoing messages to this specific connection
+	 * (welcome, subscribe acks, replies, `platform.send`,
+	 * `platform.sendCoalesced`, matched `platform.sendTo`).
+	 *
+	 * Topic-broadcast `platform.publish()` fan-out is **not** counted
+	 * because uWS does the dispatch in C++ and per-recipient byte
+	 * accounting would defeat the fast path. For aggregate publish-rate
+	 * pressure use `platform.pressure.publishRate` instead.
+	 */
+	messagesOut?: number;
+	/** Total bytes received over the connection. */
+	bytesIn?: number;
+	/** Total bytes sent directly to this connection (same caveat as `messagesOut`). */
+	bytesOut?: number;
 }
 
 /**

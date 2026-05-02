@@ -625,10 +625,18 @@ export function unsubscribe(ws, topic, { platform }) {
   console.log(`Unsubscribed from ${topic}`);
 }
 
-// Called when the connection closes
-export function close(ws, { code, message, platform }) {
+// Called when the connection closes. The context carries per-connection
+// stats (id / duration / messagesIn / messagesOut / bytesIn / bytesOut)
+// alongside `code` / `message` / `subscriptions`. Counters are only
+// populated when this hook is exported - the adapter skips the
+// per-connection bookkeeping otherwise to keep the hot path zero-cost.
+export function close(ws, { code, id, duration, messagesIn, messagesOut, bytesIn, bytesOut, subscriptions }) {
   const { userId } = ws.getUserData();
-  console.log(`User ${userId} disconnected`);
+  console.log(
+    `User ${userId} (session ${id}) disconnected after ${duration}ms ` +
+    `(${messagesIn} in / ${messagesOut} out, ${bytesIn} / ${bytesOut} bytes, ` +
+    `topics: ${[...subscriptions].join(', ')})`
+  );
 }
 
 // Called when backpressure has drained (optional, for flow control)

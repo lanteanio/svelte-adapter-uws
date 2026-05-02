@@ -2,7 +2,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS } from './files/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS } from './files/utils.js';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -117,7 +117,10 @@ export default function uws(options = {}) {
 	 * @returns {number}
 	 */
 	function send(ws, topic, event, data) {
-		return ws.send('{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + '}', false, false) ?? 1;
+		const payload = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + '}';
+		const result = ws.send(payload, false, false) ?? 1;
+		bumpOutV(ws.getUserData(), payload);
+		return result;
 	}
 
 	/**
@@ -134,10 +137,27 @@ export default function uws(options = {}) {
 		for (const [, wrapped] of wsWrappers) {
 			if (filter(wrapped.getUserData())) {
 				wrapped.send(envelope);
+				bumpOutV(wrapped.getUserData(), envelope);
 				count++;
 			}
 		}
 		return count;
+	}
+
+	// Dev-mode parity for the per-connection traffic counters surfaced via
+	// CloseContext. Cost is irrelevant in dev so the helpers run
+	// unconditionally; the slot is always populated on open.
+	function bumpInV(userData, payload) {
+		const stats = userData?.[WS_STATS];
+		if (!stats) return;
+		stats.messagesIn++;
+		stats.bytesIn += typeof payload === 'string' ? payload.length : payload.byteLength;
+	}
+	function bumpOutV(userData, payload) {
+		const stats = userData?.[WS_STATS];
+		if (!stats) return;
+		stats.messagesOut++;
+		stats.bytesOut += typeof payload === 'string' ? payload.length : payload.byteLength;
 	}
 
 	let nextRequestRefV = 1;
@@ -165,7 +185,9 @@ export default function uws(options = {}) {
 				if (pending.delete(ref)) reject(new Error('request timed out'));
 			}, timeoutMs);
 			pending.set(ref, { resolve, reject, timer });
-			wrapped.send(JSON.stringify({ type: 'request', ref, event, data: data ?? null }));
+			const payload = JSON.stringify({ type: 'request', ref, event, data: data ?? null });
+			wrapped.send(payload);
+			bumpOutV(wrapped.getUserData(), payload);
 		});
 	}
 
@@ -253,7 +275,9 @@ export default function uws(options = {}) {
 	 */
 	function sendSubscribedV(ws, topic, ref) {
 		if (ref === null) return;
-		ws.send(JSON.stringify({ type: 'subscribed', topic, ref }));
+		const payload = JSON.stringify({ type: 'subscribed', topic, ref });
+		ws.send(payload);
+		bumpOutV(/** @type {any} */ (ws).__userData, payload);
 	}
 
 	/**
@@ -264,7 +288,9 @@ export default function uws(options = {}) {
 	 */
 	function sendDenied(ws, topic, ref, reason) {
 		if (ref === null) return;
-		ws.send(JSON.stringify({ type: 'subscribe-denied', topic, ref, reason }));
+		const payload = JSON.stringify({ type: 'subscribe-denied', topic, ref, reason });
+		ws.send(payload);
+		bumpOutV(/** @type {any} */ (ws).__userData, payload);
 	}
 
 	function applyHandlers(mod) {
@@ -588,10 +614,19 @@ export default function uws(options = {}) {
 				userData[WS_SUBSCRIPTIONS] = new Set();
 				const sessionId = randomUUID();
 				userData[WS_SESSION_ID] = sessionId;
+				userData[WS_STATS] = {
+					openedAt: Date.now(),
+					messagesIn: 0,
+					messagesOut: 0,
+					bytesIn: 0,
+					bytesOut: 0
+				};
 				const wrapped = wrapWebSocket(ws, userData);
 				wsWrappers.set(ws, wrapped);
 
-				ws.send('{"type":"welcome","sessionId":"' + sessionId + '"}');
+				const welcome = '{"type":"welcome","sessionId":"' + sessionId + '"}';
+				ws.send(welcome);
+				bumpOutV(userData, welcome);
 
 				// Call user open handler
 				userHandlers.open?.(wrapped, { platform });
@@ -600,6 +635,7 @@ export default function uws(options = {}) {
 					// Convert to ArrayBuffer (matching uWS interface)
 					const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(/** @type {any} */ (raw));
 					const arrayBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+					bumpInV(userData, arrayBuffer);
 
 					// Handle subscribe/unsubscribe/subscribe-batch from client store.
 				// Byte-prefix check: {"type" has byte[3]='y' (0x79), user envelopes
@@ -686,6 +722,7 @@ export default function uws(options = {}) {
 									}
 								}
 								ws.send('{"type":"resumed"}');
+								bumpOutV(userData, '{"type":"resumed"}');
 								return;
 							}
 						} catch {
@@ -713,7 +750,22 @@ export default function uws(options = {}) {
 						}
 						pending.clear();
 					}
-					userHandlers.close?.(wrapped, { code, message: reasonAB, platform, subscriptions: subs });
+					const stats = ud[WS_STATS];
+					const ctx = stats
+						? {
+							code,
+							message: reasonAB,
+							platform,
+							subscriptions: subs,
+							id: ud[WS_SESSION_ID],
+							duration: Date.now() - stats.openedAt,
+							messagesIn: stats.messagesIn,
+							messagesOut: stats.messagesOut,
+							bytesIn: stats.bytesIn,
+							bytesOut: stats.bytesOut
+						}
+						: { code, message: reasonAB, platform, subscriptions: subs };
+					userHandlers.close?.(wrapped, ctx);
 					connections.delete(ws);
 					subscriptions.delete(ws);
 					wsWrappers.delete(ws);

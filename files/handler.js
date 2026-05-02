@@ -13,7 +13,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, nextTopicSeq, completeEnvelope, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -396,6 +396,45 @@ let nextRequestRef = 1;
 // Read once at module load so it is never sampled inside a hot callback.
 const wsDebug = WS_ENABLED && env('WS_DEBUG', '') === '1';
 
+// Per-connection traffic counters are only populated when the user has
+// wired a `close` hook - the only place they surface. Sampled once at
+// module load so the bump helpers below early-return at near-zero cost
+// when no hook is registered.
+const closeHookRegistered = WS_ENABLED && !!wsModule.close;
+
+/**
+ * Bump the per-connection inbound counters. No-op when no `close` hook
+ * is registered (zero-cost when the user does not need stats).
+ *
+ * @param {import('uWebSockets.js').WebSocket<any>} ws
+ * @param {ArrayBuffer | string} message
+ */
+function bumpIn(ws, message) {
+	if (!closeHookRegistered) return;
+	const stats = ws.getUserData()[WS_STATS];
+	if (!stats) return;
+	stats.messagesIn++;
+	stats.bytesIn += typeof message === 'string' ? message.length : message.byteLength;
+}
+
+/**
+ * Bump the per-connection outbound counters for a direct send to this
+ * connection (welcome / resumed / subscribe-ack / reply / send /
+ * sendCoalesced / sendTo). Topic `publish()` fan-out is not counted -
+ * uWS does the dispatch in C++ and counting per-recipient would mean
+ * walking subscribers in JS on every publish, defeating the fast path.
+ *
+ * @param {import('uWebSockets.js').WebSocket<any>} ws
+ * @param {string} payload
+ */
+function bumpOut(ws, payload) {
+	if (!closeHookRegistered) return;
+	const stats = ws.getUserData()[WS_STATS];
+	if (!stats) return;
+	stats.messagesOut++;
+	stats.bytesOut += payload.length;
+}
+
 // -- Per-topic broadcast sequence numbers ------------------------------------
 // Each platform.publish() stamps a monotonic per-topic seq into the envelope
 // so reconnecting clients can detect gaps and resume from where they left
@@ -605,7 +644,9 @@ function runSubscribeBatchHook(ws, topics) {
  */
 function sendSubscribed(ws, topic, ref) {
 	if (ref === null) return;
-	ws.send(JSON.stringify({ type: 'subscribed', topic, ref }), false, false);
+	const payload = JSON.stringify({ type: 'subscribed', topic, ref });
+	ws.send(payload, false, false);
+	bumpOut(ws, payload);
 }
 
 /**
@@ -619,7 +660,9 @@ function sendSubscribed(ws, topic, ref) {
  */
 function sendSubscribeDenied(ws, topic, ref, reason) {
 	if (ref === null) return;
-	ws.send(JSON.stringify({ type: 'subscribe-denied', topic, ref, reason }), false, false);
+	const payload = JSON.stringify({ type: 'subscribe-denied', topic, ref, reason });
+	ws.send(payload, false, false);
+	bumpOut(ws, payload);
 }
 
 /**
@@ -633,11 +676,11 @@ function flushCoalescedFor(ws) {
 	const userData = ws.getUserData();
 	const pending = userData[WS_COALESCED];
 	if (!pending || pending.size === 0) return;
-	drainCoalesced(pending, (msg) => ws.send(
-		envelopePrefix(msg.topic, msg.event) + JSON.stringify(msg.data ?? null) + '}',
-		false,
-		false
-	));
+	drainCoalesced(pending, (msg) => {
+		const payload = envelopePrefix(msg.topic, msg.event) + JSON.stringify(msg.data ?? null) + '}';
+		ws.send(payload, false, false);
+		bumpOut(ws, payload);
+	});
 }
 
 /** @type {import('./index.js').Platform} */
@@ -677,7 +720,10 @@ const platform = {
 	 * Wraps in the same { topic, event, data } envelope as publish().
 	 */
 	send(ws, topic, event, data) {
-		return ws.send(envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}', false, false);
+		const payload = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
+		const result = ws.send(payload, false, false);
+		bumpOut(ws, payload);
+		return result;
 	},
 
 	/**
@@ -723,6 +769,7 @@ const platform = {
 		for (const ws of wsConnections) {
 			if (filter(ws.getUserData())) {
 				ws.send(envelope, false, false);
+				bumpOut(ws, envelope);
 				count++;
 			}
 		}
@@ -788,7 +835,9 @@ const platform = {
 				if (pending.delete(ref)) reject(new Error('request timed out'));
 			}, timeoutMs);
 			pending.set(ref, { resolve, reject, timer });
-			ws.send(JSON.stringify({ type: 'request', ref, event, data: data ?? null }), false, false);
+			const payload = JSON.stringify({ type: 'request', ref, event, data: data ?? null });
+			ws.send(payload, false, false);
+			bumpOut(ws, payload);
 		});
 	},
 
@@ -2106,13 +2155,28 @@ if (WS_ENABLED) {
 			// after a reconnect so the user's resume hook can fill the gap.
 			const sessionId = randomUUID();
 			userData[WS_SESSION_ID] = sessionId;
-			ws.send('{"type":"welcome","sessionId":"' + sessionId + '"}', false, false);
+			// Per-connection traffic stats are only allocated when the user
+			// has a `close` hook to receive them - keeps userData lean for
+			// stats-uninterested apps.
+			if (closeHookRegistered) {
+				userData[WS_STATS] = {
+					openedAt: Date.now(),
+					messagesIn: 0,
+					messagesOut: 0,
+					bytesIn: 0,
+					bytesOut: 0
+				};
+			}
+			const welcome = '{"type":"welcome","sessionId":"' + sessionId + '"}';
+			ws.send(welcome, false, false);
+			bumpOut(ws, welcome);
 			wsConnections.add(ws);
 			if (wsDebug) console.log('[ws] open connections=%d session=%s', wsConnections.size, sessionId);
 			wsModule.open?.(ws, { platform });
 		},
 
 		message: (ws, message, isBinary) => {
+			bumpIn(ws, message);
 			// Built-in: handle subscribe/unsubscribe from the client store.
 			// Control messages are JSON text: {"type":"subscribe","topic":"..."}
 			// Byte-prefix check: {"type" has byte[3]='y' (0x79), while user
@@ -2232,6 +2296,7 @@ if (WS_ENABLED) {
 							}
 						}
 						ws.send('{"type":"resumed"}', false, false);
+						bumpOut(ws, '{"type":"resumed"}');
 						if (wsDebug) console.log('[ws] resume sessionId=%s', msg.sessionId);
 						return;
 					}
@@ -2265,8 +2330,26 @@ if (WS_ENABLED) {
 				}
 				pending.clear();
 			}
+			// Build the per-connection stats meta when a close hook exists.
+			// Counters were populated by the bumpIn / bumpOut helpers across
+			// the connection's lifetime; this is the single read site.
+			const stats = userData[WS_STATS];
+			const ctx = stats
+				? {
+					code,
+					message,
+					platform,
+					subscriptions,
+					id: userData[WS_SESSION_ID],
+					duration: Date.now() - stats.openedAt,
+					messagesIn: stats.messagesIn,
+					messagesOut: stats.messagesOut,
+					bytesIn: stats.bytesIn,
+					bytesOut: stats.bytesOut
+				}
+				: { code, message, platform, subscriptions };
 			try {
-				wsModule.close?.(ws, { code, message, platform, subscriptions });
+				wsModule.close?.(ws, ctx);
 			} finally {
 				totalSubscriptions -= subscriptions.size;
 				wsConnections.delete(ws);
