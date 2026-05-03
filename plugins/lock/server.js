@@ -2,8 +2,8 @@
  * Lock plugin for svelte-adapter-uws.
  *
  * Per-key serialization for critical sections that must not interleave.
- * Backed by a `Map<string, Promise>` chain: concurrent `withLock(key, fn)`
- * calls on the same key run one at a time in FIFO order; calls on
+ * Backed by a per-key FIFO waiter queue: concurrent `withLock(key, fn)`
+ * calls on the same key run one at a time in arrival order; calls on
  * different keys run in parallel.
  *
  * Use this for atomic read-modify-write on user state, "only one
@@ -17,22 +17,59 @@
  */
 
 /**
+ * @typedef {Object} WithLockOptions
+ * @property {number} [maxWaitMs] - When set, the caller is rejected with
+ *   a `LOCK_TIMEOUT` error if it does not acquire the lock within this
+ *   many milliseconds of the call. The current holder's `fn` is not
+ *   interrupted; only the waiting caller gives up. Subsequent waiters
+ *   on the same key are unaffected and continue in their original
+ *   order.
+ */
+
+/**
  * @typedef {Object} Lock
- * @property {<T>(key: string, fn: () => T | Promise<T>) => Promise<T>} withLock -
+ * @property {<T>(key: string, fn: () => T | Promise<T>, options?: WithLockOptions) => Promise<T>} withLock -
  *   Run `fn` with exclusive access to `key`. Concurrent calls on the same
  *   key queue FIFO; different keys run in parallel. Errors in `fn`
  *   propagate to the caller and do not block subsequent waiters.
  * @property {(key: string) => boolean} held - True iff a lock is currently
- *   in flight for `key`.
- * @property {() => number} size - Number of currently-held keys.
- * @property {() => void} clear - Drop all in-flight tracking. Pending
- *   `withLock` calls still resolve normally; this only clears the
- *   bookkeeping. Use in tests/teardown.
+ *   in flight for `key` (running `fn` or with at least one queued waiter).
+ * @property {() => number} size - Number of keys with any in-flight or
+ *   queued activity.
+ * @property {() => void} clear - Drop all in-flight tracking AND reject
+ *   any pending waiters with a `LOCK_CLEARED` error. Currently-running
+ *   `fn` calls are not interrupted (they finish normally); only waiters
+ *   that have not yet acquired are rejected. Use in tests/teardown.
+ */
+
+// -- Internal: per-key state ------------------------------------------------
+//
+// Each active key carries a `running` flag (true while a caller's `fn` is
+// executing) and a FIFO `queue` of pending waiters. When the running
+// caller completes, `advance()` pops the next waiter and runs it. Timed
+// -out waiters mark themselves cancelled before rejecting; `advance()`
+// skips cancelled entries so a timeout never blocks the queue for later
+// callers, even if multiple cancellations sit at the head.
+
+/**
+ * @typedef {Object} Waiter
+ * @property {() => any | Promise<any>} fn
+ * @property {(value: any) => void} resolve
+ * @property {(err: Error) => void} reject
+ * @property {ReturnType<typeof setTimeout> | null} timer
+ * @property {boolean} cancelled
+ */
+
+/**
+ * @typedef {Object} KeyState
+ * @property {boolean} running
+ * @property {Array<Waiter>} queue
  */
 
 /**
  * Create an in-process lock primitive.
  *
+ * @param {{ maxKeys?: number }} [options]
  * @returns {Lock}
  *
  * @example
@@ -59,6 +96,17 @@
  *   }
  * };
  * ```
+ *
+ * @example
+ * ```js
+ * // Bounded wait: throw if we don't acquire within 5s.
+ * try {
+ *   await locks.withLock('user:42', work, { maxWaitMs: 5000 });
+ * } catch (err) {
+ *   if (err.code === 'LOCK_TIMEOUT') return new Response('busy', { status: 503 });
+ *   throw err;
+ * }
+ * ```
  */
 export function createLock(options = {}) {
 	const maxKeys = options.maxKeys ?? 1_000_000;
@@ -66,66 +114,155 @@ export function createLock(options = {}) {
 		throw new Error('lock: maxKeys must be a positive integer');
 	}
 
+	/** @type {Map<string, KeyState>} */
+	const states = new Map();
+
 	/**
-	 * Per-key chain head. Each entry holds the promise of the most recent
-	 * caller for that key. New entrants chain off this and replace it
-	 * with their own promise so subsequent entrants chain off them.
-	 * @type {Map<string, Promise<unknown>>}
+	 * Run `fn` as the currently-acquired holder for `key`. When `fn`
+	 * settles, advance the queue. Used both for the initial acquirer
+	 * (called directly from `withLock`) and for waiters being promoted
+	 * to head by `advance`.
+	 *
+	 * @template T
+	 * @param {string} key
+	 * @param {KeyState} state
+	 * @param {() => T | Promise<T>} fn
+	 * @returns {Promise<T>}
 	 */
-	const chain = new Map();
+	async function runHead(key, state, fn) {
+		try {
+			return await fn();
+		} finally {
+			advance(key, state);
+		}
+	}
+
+	/**
+	 * Promote the next non-cancelled waiter to head, or release the key
+	 * entirely if the queue has drained. Called from the `finally` of
+	 * `runHead`.
+	 *
+	 * @param {string} key
+	 * @param {KeyState} state
+	 */
+	function advance(key, state) {
+		while (state.queue.length > 0) {
+			const waiter = /** @type {Waiter} */ (state.queue.shift());
+			if (waiter.cancelled) continue;
+			if (waiter.timer != null) {
+				clearTimeout(waiter.timer);
+				waiter.timer = null;
+			}
+			// Promote: run waiter as the new head, plumb its result back
+			// into the original caller's promise. We deliberately do not
+			// `await` here - returning lets the previous head's `finally`
+			// unwind cleanly.
+			runHead(key, state, waiter.fn).then(waiter.resolve, waiter.reject);
+			return;
+		}
+		// Queue drained. Release the key from the registry.
+		state.running = false;
+		states.delete(key);
+	}
 
 	/**
 	 * @template T
 	 * @param {string} key
 	 * @param {() => T | Promise<T>} fn
+	 * @param {WithLockOptions} [opts]
 	 * @returns {Promise<T>}
 	 */
-	function withLock(key, fn) {
+	function withLock(key, fn, opts) {
 		if (typeof key !== 'string' || key.length === 0) {
 			return Promise.reject(new Error('lock: key must be a non-empty string'));
 		}
 		if (typeof fn !== 'function') {
 			return Promise.reject(new Error('lock: fn must be a function'));
 		}
-		if (chain.size >= maxKeys && !chain.has(key)) {
-			return Promise.reject(new Error(
-				'lock: active key count exceeded ' + maxKeys
-			));
+		const maxWaitMs = opts?.maxWaitMs;
+		if (maxWaitMs != null) {
+			if (typeof maxWaitMs !== 'number' || !Number.isFinite(maxWaitMs) || maxWaitMs < 0) {
+				return Promise.reject(new Error(
+					'lock: maxWaitMs must be a non-negative finite number'
+				));
+			}
 		}
 
-		const prev = chain.get(key);
-		// Build our promise as a chain off prev. Errors in prev are
-		// swallowed at the chain boundary - they belong to the previous
-		// caller and must not block this one.
-		const ours = (async () => {
-			if (prev) {
-				try { await prev; } catch { /* not our concern */ }
+		let state = states.get(key);
+		if (!state) {
+			// New key. Cap check before allocating state.
+			if (states.size >= maxKeys) {
+				return Promise.reject(new Error(
+					'lock: active key count exceeded ' + maxKeys
+				));
 			}
-			return fn();
-		})();
-		chain.set(key, ours);
+			state = { running: false, queue: [] };
+			states.set(key, state);
+		}
 
-		// Release: only clear the chain head if no later entrant has
-		// replaced us. This prevents us from clobbering a waiter that
-		// chained off ours and is now the new head.
-		const release = () => {
-			if (chain.get(key) === ours) chain.delete(key);
-		};
-		ours.then(release, release);
+		if (!state.running) {
+			// Acquire immediately - no waiters, no holder.
+			state.running = true;
+			return runHead(key, state, fn);
+		}
 
-		return ours;
+		// Queue up. The caller's promise resolves / rejects when their
+		// `fn` later runs as head, OR when their timeout fires first.
+		return new Promise((resolve, reject) => {
+			/** @type {Waiter} */
+			const waiter = { fn, resolve, reject, timer: null, cancelled: false };
+			if (maxWaitMs != null) {
+				waiter.timer = setTimeout(() => {
+					if (waiter.cancelled) return;
+					waiter.cancelled = true;
+					waiter.timer = null;
+					const err = /** @type {Error & { code: string, key: string, maxWaitMs: number }} */ (
+						new Error(
+							'lock: timed out after ' + maxWaitMs +
+							'ms waiting for key \'' + key + '\''
+						)
+					);
+					err.code = 'LOCK_TIMEOUT';
+					err.key = key;
+					err.maxWaitMs = maxWaitMs;
+					reject(err);
+				}, maxWaitMs);
+			}
+			state.queue.push(waiter);
+		});
 	}
 
 	return {
 		withLock,
 		held(key) {
-			return chain.has(key);
+			return states.has(key);
 		},
 		size() {
-			return chain.size;
+			return states.size;
 		},
 		clear() {
-			chain.clear();
+			// Reject all pending waiters with a typed error and drop the
+			// registry. The waiter-queue holds the only references to the
+			// caller-facing promises, so without a rejection here the
+			// callers would hang forever. Currently-running `fn` calls are
+			// untouched and finish normally; their `finally` -> advance()
+			// will see an empty / removed state and no-op.
+			for (const state of states.values()) {
+				for (const waiter of state.queue) {
+					if (waiter.cancelled) continue;
+					waiter.cancelled = true;
+					if (waiter.timer != null) {
+						clearTimeout(waiter.timer);
+						waiter.timer = null;
+					}
+					const err = /** @type {Error & { code: string }} */ (
+						new Error('lock: cleared')
+					);
+					err.code = 'LOCK_CLEARED';
+					waiter.reject(err);
+				}
+			}
+			states.clear();
 		}
 	};
 }

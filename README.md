@@ -2847,7 +2847,7 @@ Different keys are independent -- `push('room-a', ...)` and `push('room-b', ...)
 
 Per-key critical-section primitive. Concurrent `withLock(key, fn)` calls on the same key run one at a time in FIFO order; calls on different keys run in parallel. Use this for atomic read-modify-write on user state, "only one in-flight upgrade per resource," or anywhere two concurrent requests racing the same record would corrupt it.
 
-Backed by a `Map<string, Promise>` chain: each waiter awaits the previous caller's promise, then runs `fn`. Errors in one caller's `fn` propagate to that caller and do NOT block subsequent waiters.
+Backed by a per-key FIFO waiter queue: the holder runs `fn` until it settles, then the next waiter is promoted to head. Errors in one caller's `fn` propagate to that caller and do NOT block subsequent waiters.
 
 #### Setup
 
@@ -2883,26 +2883,46 @@ export const actions = {
 
 The lock holds until `fn` resolves (or rejects); the next waiter in line then runs. Different keys are independent -- `withLock('user:1', ...)` and `withLock('user:2', ...)` run in parallel.
 
+#### Bounded wait with `maxWaitMs`
+
+The third argument to `withLock` is an optional `{ maxWaitMs }`. When set, the caller is rejected with a `LOCK_TIMEOUT` error if it does not acquire the lock within `maxWaitMs` milliseconds. The current holder's `fn` is not interrupted; only the waiting caller gives up. Subsequent waiters on the same key are unaffected -- they continue in their original order, and a timeout never blocks the queue.
+
+```js
+try {
+  return await locks.withLock('user:' + userId, work, { maxWaitMs: 5000 });
+} catch (err) {
+  if (err.code === 'LOCK_TIMEOUT') {
+    // Surface a 503, retry elsewhere, fall back to a degraded path...
+    return new Response('busy', { status: 503 });
+  }
+  throw err;
+}
+```
+
+The thrown error carries `code: 'LOCK_TIMEOUT'`, `key` (the contended key), and `maxWaitMs` (the configured wait), so error-handler code can render a useful response without parsing the message string.
+
+`maxWaitMs: 0` fails immediately if any other caller currently holds or is queued ahead of you. Useful for "try-lock" patterns where you want to fall back instead of wait.
+
 #### API
 
 | Method | Description |
 |---|---|
-| `locks.withLock(key, fn)` | Run `fn` with exclusive access to `key`. Returns the promise `fn` returns. |
-| `locks.held(key)` | `true` iff a lock is currently in flight for `key`. Observational only -- do not branch on it to decide whether to acquire (the answer can change before your `withLock` call). |
-| `locks.size()` | Number of keys with an in-flight lock. |
-| `locks.clear()` | Drop all in-flight tracking. Pending `withLock` calls still resolve normally; this only clears the bookkeeping. Use in tests / teardown. |
+| `locks.withLock(key, fn, options?)` | Run `fn` with exclusive access to `key`. Returns the promise `fn` returns. Pass `{ maxWaitMs }` to bound the wait. |
+| `locks.held(key)` | `true` iff a lock is currently in flight for `key` (running `fn` or with at least one queued waiter). Observational only -- do not branch on it to decide whether to acquire (the answer can change before your `withLock` call). |
+| `locks.size()` | Number of keys with any in-flight or queued activity. |
+| `locks.clear()` | Drop all in-flight tracking AND reject any pending waiters with a `LOCK_CLEARED` error. Currently-running `fn` calls are not interrupted; they finish normally. Use in tests / teardown. |
 
 #### Options
 
 | Option | Default | Description |
 |---|---|---|
-| `maxKeys` | `1_000_000` | Hard cap on the number of distinct keys with an in-flight lock. New-key `withLock` calls reject synchronously with "active key count exceeded" when the chain is at cap; existing keys can still be re-entered. Protects against unbounded key cardinality on `lock-${userId}` patterns. |
+| `maxKeys` | `1_000_000` | Hard cap on the number of distinct keys with any in-flight or queued activity. New-key `withLock` calls reject synchronously with "active key count exceeded" when the registry is at cap; existing keys can still be entered. Protects against unbounded key cardinality on `lock-${userId}` patterns. |
 
 #### Limitations
 
 - **Re-entrant calls deadlock.** Calling `locks.withLock(key, ...)` from inside a function already holding `key` queues behind the outer lock and never resolves. Avoid recursive locking; if you need it, derive a sub-key.
-- **Single-process only.** In cluster mode, each worker has its own lock chain. If two requests race the same key on different workers, the lock does not coordinate them. For cluster-coherent locks, use Redis `SET NX` or a database advisory lock.
-- **No timeouts.** A `fn` that hangs holds the lock until it resolves. Wrap `fn` in a timeout guard if you need to cap hold time.
+- **Single-process only.** In cluster mode, each worker has its own waiter queue. If two requests race the same key on different workers, the lock does not coordinate them. For cluster-coherent locks, use Redis `SET NX` or a database advisory lock.
+- **No hold-time bound.** `maxWaitMs` caps how long a caller waits for the lock, but does NOT cap how long the holder retains it. A `fn` that hangs holds the lock until it resolves. Wrap `fn` in a timeout guard if you need to cap hold time.
 
 ### Session (in-process store with sliding TTL)
 

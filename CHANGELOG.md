@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`maxWaitMs` option on `lock.withLock`.** Third argument now accepts `{ maxWaitMs: number }`. When set, the caller is rejected with a typed `LOCK_TIMEOUT` error (with `.code`, `.key`, and `.maxWaitMs` fields) if it does not acquire the lock within `maxWaitMs` milliseconds. The current holder's `fn` is not interrupted; only the waiting caller gives up. Subsequent waiters on the same key are unaffected and continue in their original order, so a timeout never blocks the queue for later callers. `maxWaitMs: 0` fails immediately if any other caller holds or is queued ahead of you (try-lock pattern). Negative or non-finite values are rejected with a validation error. Unblocks bounded-wait surfaces in downstream consumers (e.g. `live.lock` in `svelte-realtime`) without forcing each consumer to reimplement the queueing algorithm.
+
+### Changed
+
+- **`lock` plugin internals refactored from chain-of-promises to per-key waiter queue.** No-op for users of `withLock(key, fn)` -- the contract (FIFO ordering, error-isolation between callers, per-key independence, the `maxKeys` cap) is unchanged. The new representation is what makes `maxWaitMs` implementable correctly: the chain-of-promises pattern could not support timeouts without race conditions because cancelling B mid-wait would leave C chained off B's promise but C's `await prev` would resolve immediately when B's rejection settled, letting C run while A still held the lock. The waiter-queue makes "skip cancelled entries on advance" a one-line check in the dispatch loop.
+- **`lock.clear()` now rejects pending waiters with a typed `LOCK_CLEARED` error**, instead of orphaning them. Soft semantic change from the prior chain-of-promises implementation, where `clear()` only cleared the lookup Map and pending callers continued to resolve as the chain unfolded (each promise was independent of the Map, held only by its caller). The waiter-queue owns the only reference to pending callers, so without an explicit rejection in `clear()` they would hang forever -- which is worse than the documented teardown use case. If you relied on pending calls completing across a `clear()` in a teardown path, catch `LOCK_CLEARED` and treat it as success.
+
+### Documentation
+
+- **README catch-up pass.** Three plugins shipped without README sections (`lock`, `session`, `dedup`); each now has a full Setup / Usage / API / Options / Limitations entry. Plugin sections that already existed but were stale gained the new cap options inline (`cursor.maxConnections` / `maxTopics`, `presence.maxConnections` / `maxTopics`, `throttle` / `debounce` second-arg `maxTopics`, `ratelimit.maxBuckets` row in Options table); `queue.maxSize` default updated to `1_000_000` in the Options table. The test harness section gained `upgradeAdmission` configuration documentation (shipped in next.6 but undocumented) and a curated-re-exports note pointing at the helpers and userData slot constants that downstream test code can import from `svelte-adapter-uws/testing` (shipped in next.5 but undocumented). Client-store automatic-behaviours section gained a "Microtask-batched initial subscribes" entry covering the next.7 wire-shape change. Table of contents updated for the three new plugin sections.
+
+- **README `Lock` section updated for `maxWaitMs`.** New "Bounded wait with `maxWaitMs`" subsection covers the third-argument shape, the `LOCK_TIMEOUT` error code + fields, the `maxWaitMs: 0` try-lock pattern, and the "subsequent waiters unaffected" guarantee. API table entry for `withLock` mentions the new options arg. `clear()` row updated to call out the `LOCK_CLEARED` rejection semantic. Limitations section clarifies that `maxWaitMs` caps wait time, not hold time -- a hung `fn` still holds the lock indefinitely.
+
 ## [0.5.0-next.8] - 2026-05-03
 
 ### Added
@@ -31,10 +46,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **`queue` plugin `maxSize` default changed from `Infinity` to `1,000,000`.** Soft API change: existing users who relied on unbounded queues see their queue start dropping tasks via `onDrop` once 1M waiting tasks accumulate per key. Pass `{ maxSize: Infinity }` explicitly to opt back into the previous behaviour. The new default brings the plugin in line with the rest of the bounded-by-default audit; no real workload should reach 1M waiting tasks per key without a leak.
-
-### Documentation
-
-- **README catch-up pass.** Three plugins shipped without README sections (`lock`, `session`, `dedup`); each now has a full Setup / Usage / API / Options / Limitations entry. Plugin sections that already existed but were stale gained the new cap options inline (`cursor.maxConnections` / `maxTopics`, `presence.maxConnections` / `maxTopics`, `throttle` / `debounce` second-arg `maxTopics`, `ratelimit.maxBuckets` row in Options table); `queue.maxSize` default updated to `1_000_000` in the Options table. The test harness section gained `upgradeAdmission` configuration documentation (shipped in next.6 but undocumented) and a curated-re-exports note pointing at the helpers and userData slot constants that downstream test code can import from `svelte-adapter-uws/testing` (shipped in next.5 but undocumented). Client-store automatic-behaviours section gained a "Microtask-batched initial subscribes" entry covering the next.7 wire-shape change. Table of contents updated for the three new plugin sections.
 
 ## [0.5.0-next.7] - 2026-05-02
 

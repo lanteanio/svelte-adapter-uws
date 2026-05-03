@@ -313,4 +313,169 @@ describe('createLock', () => {
 			expect(locks.held('k')).toBe(false);
 		});
 	});
+
+	describe('maxWaitMs', () => {
+		it('rejects invalid maxWaitMs', async () => {
+			const locks = createLock();
+			await expect(locks.withLock('k', () => 1, { maxWaitMs: -1 }))
+				.rejects.toThrow('non-negative finite number');
+			await expect(locks.withLock('k', () => 1, { maxWaitMs: NaN }))
+				.rejects.toThrow('non-negative finite number');
+			await expect(locks.withLock('k', () => 1, { maxWaitMs: Infinity }))
+				.rejects.toThrow('non-negative finite number');
+			await expect(locks.withLock('k', () => 1, { maxWaitMs: 'soon' }))
+				.rejects.toThrow('non-negative finite number');
+		});
+
+		it('does not fire when caller acquires immediately', async () => {
+			const locks = createLock();
+			// No prior holder; acquisition is synchronous-ish.
+			const result = await locks.withLock('k', () => 'ok', { maxWaitMs: 50 });
+			expect(result).toBe('ok');
+			expect(locks.held('k')).toBe(false);
+		});
+
+		it('does not fire when caller acquires before the timer', async () => {
+			const locks = createLock();
+			const dA = deferred();
+			const a = locks.withLock('k', () => dA.promise);
+			// b waits 100ms max; resolve A almost immediately so b acquires.
+			const b = locks.withLock('k', () => 'b-result', { maxWaitMs: 100 });
+			dA.resolve('a-result');
+			expect(await a).toBe('a-result');
+			expect(await b).toBe('b-result');
+		});
+
+		it('rejects with LOCK_TIMEOUT when wait exceeds maxWaitMs', async () => {
+			const locks = createLock();
+			const dA = deferred();
+			const a = locks.withLock('user:42', () => dA.promise);
+			let caught;
+			try {
+				await locks.withLock('user:42', () => 'never', { maxWaitMs: 20 });
+			} catch (err) {
+				caught = err;
+			}
+			expect(caught).toBeInstanceOf(Error);
+			expect(caught.code).toBe('LOCK_TIMEOUT');
+			expect(caught.key).toBe('user:42');
+			expect(caught.maxWaitMs).toBe(20);
+			expect(caught.message).toContain('timed out');
+			expect(caught.message).toContain('user:42');
+			// A still owns the lock; cleanup so the test does not leak
+			dA.resolve('a-result');
+			expect(await a).toBe('a-result');
+		});
+
+		it('maxWaitMs=0 fires immediately when a prior caller holds the key', async () => {
+			const locks = createLock();
+			const dA = deferred();
+			const a = locks.withLock('k', () => dA.promise);
+			let caught;
+			try {
+				await locks.withLock('k', () => 'never', { maxWaitMs: 0 });
+			} catch (err) {
+				caught = err;
+			}
+			expect(caught.code).toBe('LOCK_TIMEOUT');
+			expect(caught.maxWaitMs).toBe(0);
+			dA.resolve();
+			await a;
+		});
+
+		it('a timed-out waiter does not block subsequent waiters', async () => {
+			const locks = createLock();
+			const dA = deferred();
+			const a = locks.withLock('k', () => dA.promise);
+
+			// b times out fast
+			const b = locks.withLock('k', () => 'b-never', { maxWaitMs: 10 });
+			// c has a longer timeout and should still get the lock after a
+			const c = locks.withLock('k', () => 'c-result', { maxWaitMs: 1000 });
+
+			await expect(b).rejects.toMatchObject({ code: 'LOCK_TIMEOUT' });
+
+			// a finishes; advance() must skip b (cancelled) and run c
+			dA.resolve('a-result');
+			expect(await a).toBe('a-result');
+			expect(await c).toBe('c-result');
+		});
+
+		it('multiple consecutive timeouts all reject; later untimed-out caller still runs', async () => {
+			const locks = createLock();
+			const dA = deferred();
+			const a = locks.withLock('k', () => dA.promise);
+			// Three impatient waiters in a row
+			const b = locks.withLock('k', () => 'never', { maxWaitMs: 5 });
+			const c = locks.withLock('k', () => 'never', { maxWaitMs: 5 });
+			const d = locks.withLock('k', () => 'never', { maxWaitMs: 5 });
+			// One patient waiter
+			const e = locks.withLock('k', () => 'e-result');
+
+			await expect(b).rejects.toMatchObject({ code: 'LOCK_TIMEOUT' });
+			await expect(c).rejects.toMatchObject({ code: 'LOCK_TIMEOUT' });
+			await expect(d).rejects.toMatchObject({ code: 'LOCK_TIMEOUT' });
+
+			dA.resolve();
+			await a;
+			expect(await e).toBe('e-result');
+		});
+
+		it('error in fn does not break subsequent waiters (regression)', async () => {
+			const locks = createLock();
+			const a = locks.withLock('k', async () => { throw new Error('a-failed'); });
+			const b = locks.withLock('k', () => 'b-result', { maxWaitMs: 1000 });
+			await expect(a).rejects.toThrow('a-failed');
+			expect(await b).toBe('b-result');
+		});
+
+		it('held() returns true while a waiter is queued, even with no running fn returned yet', async () => {
+			const locks = createLock();
+			const dA = deferred();
+			const a = locks.withLock('k', () => dA.promise);
+			// b is queued behind a
+			const b = locks.withLock('k', () => 'b', { maxWaitMs: 1000 });
+			expect(locks.held('k')).toBe(true);
+			expect(locks.size()).toBe(1);
+			dA.resolve();
+			await a;
+			await b;
+			expect(locks.held('k')).toBe(false);
+			expect(locks.size()).toBe(0);
+		});
+	});
+
+	describe('clear() with pending waiters', () => {
+		it('rejects pending waiters with LOCK_CLEARED', async () => {
+			const locks = createLock();
+			const dA = deferred();
+			const a = locks.withLock('k', () => dA.promise);
+			const b = locks.withLock('k', () => 'b-never');
+			const c = locks.withLock('k', () => 'c-never', { maxWaitMs: 10_000 });
+
+			locks.clear();
+
+			await expect(b).rejects.toMatchObject({ code: 'LOCK_CLEARED' });
+			await expect(c).rejects.toMatchObject({ code: 'LOCK_CLEARED' });
+			// Currently-running fn (a) is NOT interrupted - it finishes normally
+			dA.resolve('a-result');
+			expect(await a).toBe('a-result');
+		});
+
+		it('clear() also clears pending timers (no rogue timer fire after clear)', async () => {
+			const locks = createLock();
+			const dA = deferred();
+			const a = locks.withLock('k', () => dA.promise);
+			// b has a long maxWaitMs; clear() should drop the entry AND clear the timer
+			const b = locks.withLock('k', () => 'never', { maxWaitMs: 60_000 });
+
+			locks.clear();
+			await expect(b).rejects.toMatchObject({ code: 'LOCK_CLEARED' });
+			// If clear() did not clear the timer, b would have rejected
+			// twice and we would see the second rejection on an unhandled
+			// promise - which vitest surfaces as a test failure.
+			dA.resolve();
+			await a;
+		});
+	});
 });
