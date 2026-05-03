@@ -3926,12 +3926,35 @@ server.platform.__chaos(null);  // back to normal delivery
 server.platform.__chaos({ scenario: 'slow-drain', delayMs: 50 });
 ```
 
-Two scenarios are available:
+```js
+// Reorder publishes within a 50ms jitter window: each frame waits
+// an independently-random delay before reaching subscribers.
+// Adjacent frames can arrive out of order, exercising seq-gap
+// detection and idempotency-key handling.
+server.platform.__chaos({ scenario: 'ipc-reorder', maxJitterMs: 50 });
+```
+
+```js
+// Simulate a worker process restart: close all live WebSocket
+// connections with a clean close frame. The server stays up and
+// keeps accepting new connections, so the test can immediately
+// observe the client's reconnect + resume behavior.
+server.platform.__chaos({ scenario: 'worker-flap' });
+// Or with a custom close code / reason:
+server.platform.__chaos({ scenario: 'worker-flap', code: 4001, reason: 'maintenance' });
+```
+
+**Continuous scenarios** (consulted on every outbound frame):
 
 - **`drop-outbound`** -- discards outbound frames before they reach the wire with the configured `dropRate` (a probability in `[0, 1]`). Affects every server-to-client frame: `platform.publish`, `platform.send`, `platform.sendTo`, `platform.request`, the welcome envelope, subscribe acks, and the resumed ack.
-- **`slow-drain`** -- defers outbound frames by `delayMs` milliseconds via `setTimeout`. Order is preserved per call site.
+- **`slow-drain`** -- defers outbound frames by `delayMs` milliseconds via `setTimeout`. Order is preserved per call site (every frame waits the same delay).
+- **`ipc-reorder`** -- defers each outbound frame by an independently-random delay in `[0, maxJitterMs)`. Adjacent frames can arrive out of order, simulating cross-worker relay reordering or queue jitter. `maxJitterMs` is capped at `60_000`.
 
-Pass `null` (or call `__chaos()` with no argument) to clear the active scenario; the harness returns to its zero-overhead fast paths. While a scenario is active, `platform.publish` switches from uWS's C++ TopicTree fan-out to a JS-side fanout so the chaos state can intercept per recipient.
+**One-shot trigger** (does NOT change continuous chaos state):
+
+- **`worker-flap`** -- closes every currently-live WebSocket connection with a clean close frame. Defaults to `code: 1012` ("server restart") and `reason: 'worker restart'`; both are configurable. The server stays up and accepts new connections; an active continuous scenario (e.g. `drop-outbound`) survives the flap and applies to subsequent frames. Use to verify clients reconnect, present their resume token, and your `resume` hook fills the gap correctly.
+
+Pass `null` (or call `__chaos()` with no argument) to clear the active continuous scenario; the harness returns to its zero-overhead fast paths. While a scenario is active, `platform.publish` switches from uWS's C++ TopicTree fan-out to a JS-side fanout so the chaos state can intercept per recipient.
 
 > Note: `__chaos` lives on the test platform only. The production runtime does not ship the harness; chaos belongs in test files, not user code.
 

@@ -2445,6 +2445,44 @@ describe('createChaosState', () => {
 		expect(c.getDelayMs()).toBe(0);
 		expect(c.shouldDropOutbound()).toBe(true);
 	});
+
+	it('ipc-reorder activates and exposes maxJitterMs', () => {
+		const c = createChaosState({ random: () => 0.5 });
+		c.set({ scenario: 'ipc-reorder', maxJitterMs: 100 });
+		expect(c.scenario).toBe('ipc-reorder');
+		expect(c.maxJitterMs).toBe(100);
+		// 0.5 random * 100ms window = 50ms
+		expect(c.getDelayMs()).toBe(50);
+	});
+
+	it('ipc-reorder returns a different delay each call (per-frame jitter)', () => {
+		const sequence = [0.1, 0.5, 0.9];
+		let i = 0;
+		const c = createChaosState({ random: () => sequence[i++ % sequence.length] });
+		c.set({ scenario: 'ipc-reorder', maxJitterMs: 100 });
+		expect(c.getDelayMs()).toBe(10);
+		expect(c.getDelayMs()).toBe(50);
+		expect(c.getDelayMs()).toBe(90);
+	});
+
+	it('ipc-reorder rejects negative / non-finite / over-cap maxJitterMs', () => {
+		const c = createChaosState();
+		expect(() => c.set({ scenario: 'ipc-reorder', maxJitterMs: -1 }))
+			.toThrow('non-negative finite number');
+		expect(() => c.set({ scenario: 'ipc-reorder', maxJitterMs: Infinity }))
+			.toThrow('non-negative finite number');
+		expect(() => c.set({ scenario: 'ipc-reorder', maxJitterMs: 60_001 }))
+			.toThrow('<= 60000');
+	});
+
+	it('reset() clears ipc-reorder state', () => {
+		const c = createChaosState({ random: () => 0.5 });
+		c.set({ scenario: 'ipc-reorder', maxJitterMs: 100 });
+		c.reset();
+		expect(c.scenario).toBe(null);
+		expect(c.maxJitterMs).toBe(0);
+		expect(c.getDelayMs()).toBe(0);
+	});
 });
 
 // -- wrapBatchEnvelope ------------------------------------------------------

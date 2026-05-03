@@ -318,8 +318,33 @@ export async function createTestServer(options = {}) {
 		 * `createChaosState` in `files/utils.js` for the supported shapes.
 		 * Pass `null` to reset; the harness returns to its zero-overhead
 		 * fast paths.
+		 *
+		 * Continuous scenarios (`drop-outbound`, `slow-drain`, `ipc-reorder`)
+		 * are stored on the chaos state and consulted on every outbound
+		 * frame. The `worker-flap` scenario is a one-shot trigger handled
+		 * here directly: it closes every currently-live WS connection with
+		 * the configured code/reason and returns; it does NOT change the
+		 * continuous chaos state, so an active drop-outbound or
+		 * ipc-reorder survives a flap.
 		 */
-		__chaos(cfg) { chaos.set(cfg); }
+		__chaos(cfg) {
+			if (cfg && cfg.scenario === 'worker-flap') {
+				const code = typeof cfg.code === 'number' ? cfg.code : 1012;
+				const reason = typeof cfg.reason === 'string' ? cfg.reason : 'worker restart';
+				// Snapshot first - end() removes the entry from
+				// wsConnections via the close handler, which would mutate
+				// the Set we are iterating. We use ws.end(code, reason)
+				// rather than ws.close() so the client receives a clean
+				// close frame with the configured code; ws.close() drops
+				// the underlying socket and the client sees 1006 instead.
+				const targets = Array.from(wsConnections);
+				for (const ws of targets) {
+					try { ws.end(code, reason); } catch {}
+				}
+				return;
+			}
+			chaos.set(cfg);
+		}
 	};
 	let nextRequestRefT = 1;
 

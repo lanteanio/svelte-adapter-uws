@@ -34,13 +34,27 @@ export interface TestServerOptions {
 /**
  * Chaos / fault-injection scenario passed to `platform.__chaos`.
  *
+ * Continuous scenarios (consulted on every outbound frame):
  * - `'drop-outbound'` discards outbound frames before they reach the wire
  *   with the configured `dropRate` (a probability in [0, 1]).
  * - `'slow-drain'` defers outbound frames by `delayMs` milliseconds via
- *   `setTimeout`, simulating a slow consumer or congested network.
+ *   `setTimeout`. Order is preserved (every frame waits the same delay).
+ * - `'ipc-reorder'` defers each outbound frame by an independently-random
+ *   delay in `[0, maxJitterMs)`. Adjacent frames can arrive out of order,
+ *   simulating cross-worker relay reordering or queue jitter. Use to
+ *   verify protocol code (seq gap detection, idempotency keys, resume
+ *   tokens) handles disordered delivery. `maxJitterMs` is capped at
+ *   60_000 ms.
  *
- * Pass `null` (or call with no argument) to clear the active scenario;
- * the harness returns to its zero-overhead fast paths.
+ * One-shot trigger (does NOT change continuous chaos state):
+ * - `'worker-flap'` closes every currently-live WebSocket connection
+ *   with the configured `code` (default `1012`) and `reason` (default
+ *   `'worker restart'`). The server stays alive and accepts new
+ *   connections. Use to verify clients reconnect and resume correctly
+ *   after a worker process restart in cluster mode.
+ *
+ * Pass `null` (or call with no argument) to clear the active continuous
+ * scenario; the harness returns to its zero-overhead fast paths.
  *
  * **Scope.** This is a WebSocket-frame outbound chokepoint. It intercepts
  * what the test harness sends to its connected WS clients - every frame
@@ -56,7 +70,9 @@ export interface TestServerOptions {
  */
 export type ChaosScenario =
 	| { scenario: 'drop-outbound'; dropRate: number }
-	| { scenario: 'slow-drain'; delayMs: number };
+	| { scenario: 'slow-drain'; delayMs: number }
+	| { scenario: 'ipc-reorder'; maxJitterMs: number }
+	| { scenario: 'worker-flap'; code?: number; reason?: string };
 
 /**
  * Platform exposed by `createTestServer`. Adds the `__chaos` fault-injection
@@ -234,10 +250,17 @@ export function resolveRequestId(value: string | undefined | null): string | nul
  * tests that want a unit-level helper with deterministic RNG injection.
  */
 export function createChaosState(opts?: { random?: () => number }): {
-	readonly scenario: 'drop-outbound' | 'slow-drain' | null;
+	readonly scenario: 'drop-outbound' | 'slow-drain' | 'ipc-reorder' | null;
 	readonly dropRate: number;
 	readonly delayMs: number;
-	set(cfg: ChaosScenario | null): void;
+	readonly maxJitterMs: number;
+	/**
+	 * Activate a continuous scenario (`drop-outbound`, `slow-drain`,
+	 * `ipc-reorder`) or pass `null` to clear. The `worker-flap`
+	 * one-shot trigger is NOT routed through here; it is handled by
+	 * `platform.__chaos` directly inside the test server.
+	 */
+	set(cfg: Exclude<ChaosScenario, { scenario: 'worker-flap' }> | null): void;
 	reset(): void;
 	shouldDropOutbound(): boolean;
 	getDelayMs(): number;
