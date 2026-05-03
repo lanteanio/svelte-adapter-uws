@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.10] - 2026-05-04
+
+### Changed
+
+- **`package-lock.json` refreshed via `npm audit fix` to clear all four high-severity advisories in transitive dev / peer dependencies** (`@sveltejs/kit`, `picomatch`, `socket.io-parser`, `vite`) plus two moderates (`postcss`, `devalue`). No `package.json` range changes; no runtime dependency added or removed; the published package's `dependencies` (the four `@rollup/plugin-*` + `rollup`) remain clean and audit-free as they have always been. This is a dev-tree cleanup -- npm consumers of `svelte-adapter-uws` are unaffected because `package-lock.json` does not ship in the npm tarball and peer-dep versions are resolved against the consumer's own tree. Five low-severity advisories remain (`cookie` transitive of `@sveltejs/kit`; `uuid` / `hyperid` / `autocannon` chain pulled in by the bench scripts), all fix-by-`--force` only and would either require a kit major bump or downgrade `autocannon` to an unusable 6-year-old version.
+
 ## [0.5.0-next.9] - 2026-05-04
 
 ### Added
