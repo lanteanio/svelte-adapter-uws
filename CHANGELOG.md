@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.8] - 2026-05-03
+
 ### Added
 
 - **Framework invariant assertions + `platform.assertions` observability.** A two-tier `assert(cond, category, context)` / `devAssert(cond, message, context)` helper pair lands in `files/utils.js` and is installed at ~27 invariant sites in the production handler covering envelope build, WebSocket lifecycle (open / message / drain / close / resume hook entries), subscription bookkeeping (`subs.shape`, `subs.total-negative`), server-initiated request entry shape, sendCoalesced state, cross-worker IPC payload types, and per-topic publish stats shape. On violation the counter for the category increments on the live module-level Map exposed via the new `platform.assertions` getter, and a structured `[adapter-uws/assert] {"category":"...","context":...}` line is logged. In production a violation does NOT throw - a thrown exception inside a uWS C++ callback frame can corrupt the binding state, and the metric + structured log are sufficient observability. In test mode (`process.env.VITEST` set, or `NODE_ENV === 'test'`) `assert` additionally throws so vitest surfaces the failure as a test error. `devAssert` is dev-time only - a complete no-op when `NODE_ENV === 'production'`. New README "platform.assertions" section under Platform API documents the shape and the report-an-issue workflow when a counter goes non-zero. The `platform.assertions` getter is also exposed on `TestPlatform` (createTestServer) for symmetry, so test code can read counts during integration runs.
@@ -29,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **`queue` plugin `maxSize` default changed from `Infinity` to `1,000,000`.** Soft API change: existing users who relied on unbounded queues see their queue start dropping tasks via `onDrop` once 1M waiting tasks accumulate per key. Pass `{ maxSize: Infinity }` explicitly to opt back into the previous behaviour. The new default brings the plugin in line with the rest of the bounded-by-default audit; no real workload should reach 1M waiting tasks per key without a leak.
+
+## [0.5.0-next.7] - 2026-05-02
 
 ### Changed
 
