@@ -321,4 +321,10 @@ describeUWS('createTestServer', () => {
 		expect(ws.readyState).toBe(WebSocket.CLOSED);
 		server = null;
 	});
+
+	it('exposes platform.assertions as a Map', async () => {
+		const { createTestServer } = await import('../testing.js');
+		server = await createTestServer({});
+		expect(server.platform.assertions).toBeInstanceOf(Map);
+	});
 });

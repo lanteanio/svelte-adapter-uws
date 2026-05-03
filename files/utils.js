@@ -792,3 +792,108 @@ export function createChaosState(opts) {
 		}
 	};
 }
+
+// -- Framework-internal assertions ------------------------------------------
+// Library-author defensive coding only. App developers do not call these
+// directly - they consume the read-only `platform.assertions` Map via
+// handler.js's getter for ops dashboards, and the structured `console.error`
+// output for issue reports. Categories follow a `<area>.<thing>` convention
+// (e.g. `'relay.topic-type'`, `'ws.platform-missing'`); extension authors
+// adopt a package prefix to avoid collisions (`'redis.*'`, `'realtime.*'`).
+//
+// Behaviour is asymmetric between production and test:
+// - In production, assert() logs + increments the counter, but does NOT
+//   throw. A throw inside a uWS C++ callback frame can corrupt the worker's
+//   binding state; the structured log + the queryable counter are enough
+//   for ops to detect a regression and file an issue.
+// - In test mode (`process.env.VITEST` set, or `NODE_ENV === 'test'`),
+//   assert() throws so the runner fails loudly. The counter still
+//   increments so test code can assert on it.
+//
+// devAssert is dev-time only: it throws in dev and test, and is a complete
+// no-op in production. Use it for cosmetic / DX-shape checks where the
+// runtime cost of the comparison is unwelcome in production.
+
+const assertionCounts = new Map();
+
+const isTestEnv = process.env.VITEST !== undefined ||
+	process.env.NODE_ENV === 'test';
+const isProdEnv = process.env.NODE_ENV === 'production';
+
+/**
+ * Always-on framework invariant assertion. On violation: increments
+ * `assertionCounts.get(category)`, logs a structured `console.error`,
+ * and (in test mode only) throws so vitest surfaces the failure.
+ *
+ * Hot-path safe: the success branch is one comparison, JIT-folded.
+ *
+ * @param {unknown} cond - any truthy expression
+ * @param {string} category - dot-prefixed namespace (e.g. `'relay.topic-type'`)
+ * @param {object} [context] - free-form context payload for logs / error
+ */
+export function assert(cond, category, context) {
+	if (cond) return;
+	assertionCounts.set(category, (assertionCounts.get(category) || 0) + 1);
+	if (isTestEnv) {
+		const err = new Error('adapter-uws assert: ' + category);
+		// @ts-ignore augment with context for test diagnostics
+		err.context = context ?? null;
+		throw err;
+	}
+	try {
+		console.error('[adapter-uws/assert]', JSON.stringify({
+			category,
+			context: context ?? null
+		}));
+	} catch {
+		// JSON.stringify can fail on circular context; fall back to bare log
+		console.error('[adapter-uws/assert]', category);
+	}
+}
+
+/**
+ * Dev-time invariant. No-op in production (zero runtime cost when
+ * `NODE_ENV === 'production'`); throws in dev / test so the violation
+ * surfaces during development. Use for DX hints and cosmetic shape
+ * checks that should not cost anything in shipped builds.
+ *
+ * @param {unknown} cond
+ * @param {string} message
+ * @param {object} [context]
+ */
+export function devAssert(cond, message, context) {
+	if (cond) return;
+	if (isProdEnv) return;
+	const err = new Error('adapter-uws devAssert: ' + message);
+	// @ts-ignore
+	err.context = context ?? null;
+	try {
+		console.error('[adapter-uws/devAssert]', JSON.stringify({
+			message,
+			context: context ?? null
+		}));
+	} catch {
+		console.error('[adapter-uws/devAssert]', message);
+	}
+	throw err;
+}
+
+/**
+ * Read-only access to the per-category violation counts. The returned
+ * Map is the live module-level instance - do not mutate. Surfaced via
+ * `platform.assertions` for ops dashboards and integration tests.
+ *
+ * @returns {Map<string, number>}
+ */
+export function readAssertionCounts() {
+	return assertionCounts;
+}
+
+/**
+ * Reset the assertion counter map. Test-only utility - production code
+ * should never call this. Exists so unit tests can isolate counters
+ * between cases without leaking state across `describe` blocks.
+ */
+export function _resetAssertionCountsForTest() {
+	assertionCounts.clear();
+}

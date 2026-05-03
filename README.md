@@ -1215,6 +1215,25 @@ export async function GET({ platform, params }) {
 }
 ```
 
+### `platform.assertions`
+
+Per-category counter of framework invariant violations. The adapter ships internal hard-asserts at ~30 invariant sites (envelope build, WebSocket lifecycle, subscription bookkeeping, cross-worker IPC payloads, server-initiated request entry shape, sendCoalesced state). When one fires, the counter for that category increments and a structured `[adapter-uws/assert]` line is logged.
+
+Most apps will never see a non-empty entry here. A non-zero counter indicates a regression in the framework or a third-party plugin and should be reported as a GitHub issue with the category string and accompanying log context.
+
+```js
+export async function GET({ platform }) {
+  // Surface the counters in your /healthz or ops dashboard
+  const assertions = {};
+  for (const [category, count] of platform.assertions) {
+    assertions[category] = count;
+  }
+  return json({ healthy: Object.keys(assertions).length === 0, assertions });
+}
+```
+
+The returned `Map` is the live module-level instance - read-only, do not mutate. In test mode (`process.env.VITEST` set, or `NODE_ENV === 'test'`) the assert helper additionally throws so test runners surface the failure; in production it logs and counts but does not throw, so a violation inside a uWS callback frame cannot crash the worker.
+
 ### `platform.pressure` and `platform.onPressure(cb)`
 
 Worker-local backpressure signal. The adapter samples once per second (configurable) and reports the most urgent active stress as a single `reason` enum, so user code can degrade with intent instead of generic panic.

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 import { parseCookies, serializeCookie, createCookies } from '../files/cookies.js';
 import {
 	mimeLookup,
@@ -19,7 +19,11 @@ import {
 	isOriginAllowed,
 	createUpgradeAdmission,
 	resolveRequestId,
-	createChaosState
+	createChaosState,
+	assert,
+	devAssert,
+	readAssertionCounts,
+	_resetAssertionCountsForTest
 } from '../files/utils.js';
 
 // -- parse_as_bytes ---------------------------------------------------------
@@ -2622,6 +2626,86 @@ describe('public re-exports from svelte-adapter-uws/testing', () => {
 		];
 		for (const name of internal) {
 			expect(testing[name], `testing.${name} should NOT be re-exported`).toBeUndefined();
+		}
+	});
+});
+
+// -- assert / devAssert ----------------------------------------------------
+
+describe('assert', () => {
+	beforeEach(() => {
+		_resetAssertionCountsForTest();
+	});
+
+	it('passes silently on truthy condition', () => {
+		expect(() => assert(true, 'test.passes')).not.toThrow();
+		expect(() => assert(1, 'test.passes')).not.toThrow();
+		expect(() => assert('non-empty', 'test.passes')).not.toThrow();
+		expect(() => assert({}, 'test.passes')).not.toThrow();
+		expect(readAssertionCounts().size).toBe(0);
+	});
+
+	it('throws in test mode on falsy condition', () => {
+		// vitest sets process.env.VITEST so we're in test mode here.
+		expect(() => assert(false, 'test.fails')).toThrow('adapter-uws assert: test.fails');
+		expect(() => assert(0, 'test.zero')).toThrow('adapter-uws assert: test.zero');
+		expect(() => assert(null, 'test.null')).toThrow('adapter-uws assert: test.null');
+		expect(() => assert(undefined, 'test.undef')).toThrow('adapter-uws assert: test.undef');
+	});
+
+	it('attaches the context payload to the thrown error', () => {
+		try {
+			assert(false, 'test.context', { foo: 'bar', topic: 'chat' });
+			expect.fail('should have thrown');
+		} catch (err) {
+			expect(err.message).toBe('adapter-uws assert: test.context');
+			expect(err.context).toEqual({ foo: 'bar', topic: 'chat' });
+		}
+	});
+
+	it('increments the per-category violation counter', () => {
+		expect(() => assert(false, 'test.counter-a')).toThrow();
+		expect(() => assert(false, 'test.counter-a')).toThrow();
+		expect(() => assert(false, 'test.counter-b')).toThrow();
+		const counts = readAssertionCounts();
+		expect(counts.get('test.counter-a')).toBe(2);
+		expect(counts.get('test.counter-b')).toBe(1);
+	});
+
+	it('counter remains at zero for passing asserts', () => {
+		assert(true, 'test.passing');
+		assert(true, 'test.passing');
+		assert(1, 'test.passing');
+		expect(readAssertionCounts().get('test.passing')).toBeUndefined();
+	});
+
+	it('readAssertionCounts returns a live Map (not a snapshot)', () => {
+		const a = readAssertionCounts();
+		const b = readAssertionCounts();
+		expect(a).toBe(b);
+		expect(() => assert(false, 'test.live')).toThrow();
+		expect(a.get('test.live')).toBe(1);
+	});
+});
+
+describe('devAssert', () => {
+	it('passes silently on truthy condition', () => {
+		expect(() => devAssert(true, 'should not fire')).not.toThrow();
+		expect(() => devAssert({ a: 1 }, 'should not fire')).not.toThrow();
+	});
+
+	it('throws in dev / test on falsy condition', () => {
+		// NODE_ENV !== 'production' in vitest so devAssert is active.
+		expect(() => devAssert(false, 'dev message'))
+			.toThrow('adapter-uws devAssert: dev message');
+	});
+
+	it('attaches context to the thrown error', () => {
+		try {
+			devAssert(false, 'dev shape', { which: 'thing' });
+			expect.fail('should have thrown');
+		} catch (err) {
+			expect(err.context).toEqual({ which: 'thing' });
 		}
 	});
 });

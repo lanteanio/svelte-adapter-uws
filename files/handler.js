@@ -13,7 +13,7 @@ import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, resolveRequestId, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -798,7 +798,10 @@ function flushCoalescedFor(ws) {
 	const userData = ws.getUserData();
 	const pending = userData[WS_COALESCED];
 	if (!pending || pending.size === 0) return;
+	assert(pending instanceof Map, 'coalesce.pending-type', null);
 	drainCoalesced(pending, (msg) => {
+		assert(typeof msg.topic === 'string', 'coalesce.entry-topic-type', null);
+		assert(typeof msg.event === 'string', 'coalesce.entry-event-type', null);
 		const payload = envelopePrefix(msg.topic, msg.event) + JSON.stringify(msg.data ?? null) + '}';
 		ws.send(payload, false, false);
 		bumpOut(ws, payload);
@@ -818,6 +821,7 @@ const platform = {
 			? null
 			: nextTopicSeq(topicSeqs, topic);
 		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
+		assert(envelope.length > 0, 'envelope.empty', { topic, event });
 		// Per-topic counter for runaway-publisher detection. Allocates
 		// one entry per topic on first publish, then mutates two int
 		// fields in place forever. Sampler drains and resets at 1 Hz.
@@ -829,6 +833,8 @@ const platform = {
 			// place to check the topic-cardinality warn threshold without
 			// touching the steady-state hot path.
 			maybeWarnTopicRegistry();
+		} else {
+			assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape', { topic });
 		}
 		s.m++;
 		s.b += envelope.length;
@@ -857,6 +863,7 @@ const platform = {
 	 */
 	send(ws, topic, event, data) {
 		const payload = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
+		assert(payload.length > 0, 'envelope.send-empty', { topic, event });
 		const result = ws.send(payload, false, false);
 		bumpOut(ws, payload);
 		return result;
@@ -890,6 +897,7 @@ const platform = {
 			pending = new Map();
 			userData[WS_COALESCED] = pending;
 		}
+		assert(pending instanceof Map, 'coalesce.userdata-pending-type', null);
 		// At cap with a brand-new key: drop the oldest insertion-order
 		// entry. sendCoalesced is latest-value-wins by contract, so an
 		// evicted oldest is simply a value the caller already replaced
@@ -927,6 +935,26 @@ const platform = {
 	 */
 	get connections() {
 		return wsConnections.size;
+	},
+
+	/**
+	 * Per-category counter of framework invariant violations. The
+	 * returned value is the live `Map<string, number>` shared across
+	 * the worker process - read-only, do not mutate. Categories follow
+	 * a `<area>.<thing>` convention (e.g. `'envelope.malformed'`,
+	 * `'ws.platform-missing'`, `'relay.topic-type'`).
+	 *
+	 * Most apps will see this map empty for the lifetime of the
+	 * process; non-empty entries indicate a regression in the
+	 * framework or a third-party plugin and should be reported as a
+	 * GitHub issue with the category string. The structured
+	 * `[adapter-uws/assert]` log lines accompanying each violation
+	 * carry the context payload needed to reproduce.
+	 *
+	 * @returns {Map<string, number>}
+	 */
+	get assertions() {
+		return readAssertionCounts();
 	},
 
 	/**
@@ -1129,6 +1157,8 @@ const platform = {
 				s = { m: 0, b: 0 };
 				topicPublishStats.set(m.topic, s);
 				maybeWarnTopicRegistry();
+			} else {
+				assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape-batch', { topic: m.topic });
 			}
 			s.m++;
 			s.b += env.length;
@@ -1157,6 +1187,7 @@ const platform = {
 		const slice = new Array(events.length);
 		for (let i = 0; i < events.length; i++) slice[i] = events[i].env;
 		const sharedBatchEnv = wrapBatchEnvelope(slice);
+		assert(sharedBatchEnv.length > 0, 'envelope.batch-empty', { events: events.length });
 		if (sharedBatchEnv.length > BATCH_FRAME_WARN_BYTES) {
 			warnLargeBatchFrame(sharedBatchEnv.length);
 		}
@@ -1194,6 +1225,7 @@ const platform = {
 			pending = new Map();
 			userData[WS_PENDING_REQUESTS] = pending;
 		}
+		assert(pending instanceof Map, 'request.pending-type', null);
 		if (pending.size >= MAX_PENDING_REQUESTS_PER_CONNECTION) {
 			return Promise.reject(new Error(
 				'pending requests exceeded ' + MAX_PENDING_REQUESTS_PER_CONNECTION +
@@ -2561,6 +2593,7 @@ if (WS_ENABLED) {
 			// Used to populate CloseContext.subscriptions for the user's close handler,
 			// enabling deterministic cleanup of per-subscription server state.
 			const userData = ws.getUserData();
+			assert(!userData[WS_PLATFORM], 'ws.platform-double-init', null);
 			userData[WS_SUBSCRIPTIONS] = new Set();
 			// Promote the upgrade-time requestId (carried as a string slot
 			// because Symbol keys do not survive res.upgrade) into a
@@ -2570,6 +2603,7 @@ if (WS_ENABLED) {
 			wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
 			userData[WS_PLATFORM] = wsPlatform;
 			delete userData[WS_REQUEST_ID_KEY];
+			assert(userData[WS_REQUEST_ID_KEY] === undefined, 'ws.request-id-leak', null);
 			// Stamp a fresh session id and announce it. The client stores it
 			// in sessionStorage and presents it back via { type: 'resume' }
 			// after a reconnect so the user's resume hook can fill the gap.
@@ -2596,6 +2630,7 @@ if (WS_ENABLED) {
 		},
 
 		message: (ws, message, isBinary) => {
+			assert(ws.getUserData()[WS_PLATFORM], 'ws.platform-missing-in-message', null);
 			bumpIn(ws, message);
 			// Built-in: handle subscribe/unsubscribe from the client store.
 			// Control messages are JSON text: {"type":"subscribe","topic":"..."}
@@ -2616,6 +2651,7 @@ if (WS_ENABLED) {
 							return;
 						}
 						const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+						assert(subs instanceof Set, 'subs.shape', null);
 						const isNew = !subs.has(msg.topic);
 						if (isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
 							sendSubscribeDenied(ws, msg.topic, ref, 'RATE_LIMITED');
@@ -2635,8 +2671,11 @@ if (WS_ENABLED) {
 					}
 					if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
 						ws.unsubscribe(msg.topic);
-						if (ws.getUserData()[WS_SUBSCRIPTIONS].delete(msg.topic)) {
+						const udSubs = ws.getUserData()[WS_SUBSCRIPTIONS];
+						assert(udSubs instanceof Set, 'subs.shape-unsubscribe', null);
+						if (udSubs.delete(msg.topic)) {
 							totalSubscriptions--;
+							assert(totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions });
 						}
 						if (wsDebug) console.log('[ws] unsubscribe topic=%s', msg.topic);
 						wsModule.unsubscribe?.(ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
@@ -2649,6 +2688,7 @@ if (WS_ENABLED) {
 						const topics = msg.topics.slice(0, 256);
 						const ref = hasRef(msg.ref) ? msg.ref : null;
 						const userData = ws.getUserData();
+						assert(userData[WS_SUBSCRIPTIONS] instanceof Set, 'subs.shape-batch', null);
 
 						// Pass 1: validate topics. INVALID_TOPIC denials emit immediately;
 						// the batch hook (if any) only sees validated topics.
@@ -2699,6 +2739,8 @@ if (WS_ENABLED) {
 						const pending = ws.getUserData()[WS_PENDING_REQUESTS];
 						const entry = pending?.get(msg.ref);
 						if (entry) {
+							assert(typeof entry.resolve === 'function', 'request.entry-resolve-shape', { ref: msg.ref });
+							assert(typeof entry.reject === 'function', 'request.entry-reject-shape', { ref: msg.ref });
 							pending.delete(msg.ref);
 							clearTimeout(entry.timer);
 							if (typeof msg.error === 'string') entry.reject(new Error(msg.error));
@@ -2726,6 +2768,7 @@ if (WS_ENABLED) {
 						// (typically by calling replay.replay(ws, topic, sinceSeq, platform)
 						// for each topic). The hook is optional - if unset, we still
 						// ack so the client can switch to live mode.
+						assert(ws.getUserData()[WS_PLATFORM], 'ws.platform-missing-in-resume', null);
 						if (wsModule.resume) {
 							try {
 								wsModule.resume(ws, {
@@ -2751,6 +2794,7 @@ if (WS_ENABLED) {
 		},
 
 		drain: (ws) => {
+			assert(ws.getUserData()[WS_PLATFORM], 'ws.platform-missing-in-drain', null);
 			// Resume any sendCoalesced traffic held back by backpressure
 			// before delegating to the user's drain hook.
 			flushCoalescedFor(ws);
@@ -2759,6 +2803,7 @@ if (WS_ENABLED) {
 
 		close: (ws, code, message) => {
 			const userData = ws.getUserData();
+			assert(userData[WS_PLATFORM], 'ws.platform-missing-in-close', null);
 			const subscriptions = userData[WS_SUBSCRIPTIONS] || new Set();
 			// Reject any in-flight server-initiated requests so callers stop
 			// awaiting promises that can never resolve. Clearing the timer
@@ -2795,6 +2840,7 @@ if (WS_ENABLED) {
 				wsModule.close?.(ws, ctx);
 			} finally {
 				totalSubscriptions -= subscriptions.size;
+				assert(totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions });
 				wsConnections.delete(ws);
 				if (wsDebug) console.log('[ws] close code=%d connections=%d', code, wsConnections.size);
 			}
@@ -2910,6 +2956,11 @@ export function getDescriptor() {
  * @param {string} envelope - Pre-serialized JSON envelope
  */
 export function relayPublish(topic, envelope) {
+	assert(typeof topic === 'string', 'relay.topic-type', { topic: typeof topic });
+	assert(typeof envelope === 'string' && envelope.length > 0, 'relay.envelope-type', {
+		envelopeType: typeof envelope,
+		envelopeLen: typeof envelope === 'string' ? envelope.length : null
+	});
 	app.publish(topic, envelope, false, false);
 }
 
@@ -2926,6 +2977,12 @@ export function relayPublish(topic, envelope) {
  */
 export function relayPublishBatched(events) {
 	if (!Array.isArray(events) || events.length === 0) return;
+	assert(typeof events[0].topic === 'string', 'relay.batched-topic-type', {
+		first: typeof events[0].topic
+	});
+	assert(typeof events[0].env === 'string', 'relay.batched-env-type', {
+		first: typeof events[0].env
+	});
 
 	const firstTopic = events[0].topic;
 	let allSameTopic = true;
