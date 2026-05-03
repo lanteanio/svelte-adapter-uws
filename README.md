@@ -44,12 +44,15 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 **Plugins**
 - [Middleware](#middleware)
 - [Replay (SSR gap)](#replay-ssr-gap)
+- [Dedup (idempotency window)](#dedup-idempotency-window)
 - [Presence](#presence)
 - [Typed channels](#typed-channels)
 - [Throttle/debounce](#throttledebounce)
 - [Rate limiting](#rate-limiting)
 - [Cursor (ephemeral state)](#cursor-ephemeral-state)
 - [Queue (ordered delivery)](#queue-ordered-delivery)
+- [Lock (per-key serialization)](#lock-per-key-serialization)
+- [Session (in-process store with sliding TTL)](#session-in-process-store-with-sliding-ttl)
 - [Broadcast groups](#broadcast-groups)
 
 **Deployment & scaling**
@@ -1929,6 +1932,8 @@ The client handles several edge cases automatically, with no configuration requi
 
 **Batch resubscription**: on reconnect, all topics are resubscribed in batched `subscribe-batch` messages. Each batch stays under the server's 8 KB control-message ceiling and 256-topic-per-batch cap. For typical apps (under 200 topics with short names) this is a single frame; larger sets are automatically chunked.
 
+**Microtask-batched initial subscribes**: multiple `subscribe(topic)` calls landing in the same microtask coalesce into one `subscribe-batch` wire frame. A page that mounts many topic stores in a tight loop (a multi-stream dashboard, a `svelte-realtime` page initializing 5 stream RPCs) triggers the server's `subscribeBatch` hook ONCE instead of the per-topic `subscribe` hook N times. Single-topic case stays as a plain `subscribe` frame for the minimal-change wire shape. Same chunking limits as the reconnect path. Topics are still added to the local subscription set synchronously, so a disconnect between the call and the microtask flush loses nothing - the reopen path picks them up. **Test-code note**: code asserting on the exact wire shape of two same-microtask subscribes seeing two `subscribe` frames now sees one `subscribe-batch` frame; use `.find(m => m.type === 'subscribe-batch' && m.topics.includes(...))` instead.
+
 **Zombie detection**: the client checks every 30 seconds whether the server has been completely silent for more than 150 seconds (2.5x the server's idle timeout). If so, it forces a close and reconnects. This catches connections that appear open but were silently dropped by the server, which is common on mobile after wake from sleep.
 
 ### Cross-origin and native app usage
@@ -2227,6 +2232,63 @@ const messages = onReplay('chat', { since: data.seq }).scan(data.messages, (list
 
 ---
 
+### Dedup (idempotency window)
+
+In-process "have I seen this id before?" cache with fixed-window TTL. The natural use is wrapping a side-effecting handler so client retries after a flaky disconnect don't double-execute -- charge a card once, send an email once, deduct inventory once -- even when the client legitimately retries the same call.
+
+The TTL is the deduplication window: an id is considered "fresh" for `ttl` ms after the first claim. Duplicate claims within the window do NOT extend the TTL (semantics match Redis `SET NX EX`, which is the eventual swap target if you outgrow the in-process variant).
+
+#### Setup
+
+```js
+// src/lib/server/dedup.js
+import { createDedup } from 'svelte-adapter-uws/plugins/dedup';
+
+// 5-minute window: a retry within 5 minutes sees the duplicate; after
+// the window the same id is treated as a fresh delivery.
+export const messages = createDedup({ ttl: 5 * 60 * 1000 });
+```
+
+#### Usage
+
+```js
+// src/hooks.ws.js
+import { messages } from '$lib/server/dedup';
+
+export function message(ws, { data }) {
+  const msg = JSON.parse(Buffer.from(data).toString());
+  if (!messages.claim(msg.id)) return; // duplicate, ignore silently
+  processMessage(msg); // side effects only run once per id within ttl
+}
+```
+
+The pattern composes with idempotency-key headers on form actions and RPCs the same way -- the client generates a stable id (UUID v7 or `crypto.randomUUID()`), persists it locally before submission, and reuses it on retry. The server's first `claim()` succeeds and runs the side effect; the retry's `claim()` returns `false` and the handler exits early.
+
+#### API
+
+| Method | Description |
+|---|---|
+| `dedup.claim(id)` | Try to claim `id` as first-sight. Returns `true` if unseen / expired (and records a fresh window). Returns `false` if `id` is currently inside its window. |
+| `dedup.has(id)` | `true` iff `id` was claimed and is still within its window. Lazy-prunes expired ids on access. |
+| `dedup.delete(id)` | Forget `id` explicitly. Returns `true` if the entry was live before deletion, `false` otherwise. |
+| `dedup.size()` | Current number of retained ids (may include expired ids not yet pruned). |
+| `dedup.clear()` | Forget all ids. |
+
+#### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `ttl` | *required* | Deduplication window in milliseconds. Must be positive. |
+| `maxEntries` | `10000` | Soft cap on retained ids. When the map grows past 110% of this cap, expired entries are pruned in a single pass; if still over cap (every entry is inside its window), the oldest insertion-order entries are evicted regardless. |
+
+#### Limitations
+
+- **In-memory and per-process.** In cluster mode, each worker has its own dedup cache. If a client retry lands on a different worker than the original, it will not see the duplicate. For cluster-coherent dedup, swap to the Redis variant in `svelte-adapter-uws-extensions`.
+- **No persistence.** Restarting the worker forgets all in-flight ids. The window after a restart is effectively zero until clients re-claim. For payment-grade idempotency, back the cache with a durable store.
+- **Window-bounded, not exactly-once.** A retry that arrives more than `ttl` after the original is treated as a fresh delivery. Choose `ttl` longer than your worst-case retry latency.
+
+---
+
 ### Presence
 
 Track who's connected to a topic in real time. Handles multi-tab dedup (same user with two tabs open = one presence entry), broadcasts compact join/leave diffs (microtask-batched so multi-event ticks collapse to one frame), and provides a live store on the client.
@@ -2243,8 +2305,12 @@ export const presence = createPresence({
   key: 'id',
   select: (userData) => ({ id: userData.id, name: userData.name }),
   heartbeat: 60_000  // optional: needed if clients use maxAge
+  // maxConnections: 1_000_000 (default) - hard cap on tracked connections
+  // maxTopics:      1_000_000 (default) - hard cap on active topic registry
 });
 ```
+
+The two cap options bound internal Maps that grow with topic cardinality (`chat-${userId}` patterns) and connection count. Eviction at cap drops the oldest insertion-order entry. In practice eviction is rare because `presence.hooks.close` calls `leave(ws)` automatically on disconnect.
 
 Wire it into your WebSocket hooks:
 
@@ -2472,6 +2538,14 @@ import { throttle, debounce } from 'svelte-adapter-uws/plugins/throttle';
 
 const mouse  = throttle(50);   // at most once per 50ms per topic
 const search = debounce(300);  // wait for 300ms of silence
+
+// Both factories accept an optional second argument with a `maxTopics`
+// cap on the active topic registry (default 1_000_000). When the cap is
+// reached, the oldest insertion-order topic is flushed (its pending
+// value publishes immediately) and dropped before the new topic is
+// inserted. Lower the cap if you want louder feedback when topic
+// cardinality runs away.
+const positions = throttle(50, { maxTopics: 10_000 });
 ```
 
 #### Usage
@@ -2591,6 +2665,7 @@ export function message(ws, { data, platform }) {
 | `interval` | *required* | Refill interval in ms |
 | `blockDuration` | `0` | Auto-ban duration in ms when exhausted (0 = no auto-ban) |
 | `keyBy` | `'ip'` | `'ip'`, `'connection'`, or `(ws) => string` |
+| `maxBuckets` | `1_000_000` | Hard cap on retained buckets. Lazy expired-entry sweep runs first; the hard cap protects against sustained DDoS where every entry is unexpired. Oldest insertion-order entry is evicted on insert at cap. |
 
 With `keyBy: 'ip'` (default), the limiter reads `userData.remoteAddress`, `.ip`, or `.address`. With `keyBy: 'connection'`, each WebSocket gets its own bucket. Pass a function for custom grouping (e.g. by user ID or room).
 
@@ -2613,8 +2688,12 @@ import { createCursor } from 'svelte-adapter-uws/plugins/cursor';
 export const cursors = createCursor({
   throttle: 50, // at most one broadcast per 50ms per user per topic
   select: (userData) => ({ id: userData.id, name: userData.name, color: userData.color })
+  // maxConnections: 1_000_000 (default) - hard cap on tracked connections
+  // maxTopics:      1_000_000 (default) - hard cap on active topic registry
 });
 ```
+
+The two cap options bound internal Maps that grow with client behaviour. Eviction at cap drops the oldest insertion-order entry; for `maxTopics` the dropped topic's pending throttle timers are cleared first so no callback fires on a deleted entry. In practice eviction is rare because user code is expected to call `remove(ws)` on disconnect (the `cursors.hooks.close` helper does this automatically).
 
 #### Server usage
 
@@ -2753,7 +2832,7 @@ export async function message(ws, { data, platform }) {
 | Option | Default | Description |
 |---|---|---|
 | `concurrency` | `1` | Max concurrent tasks per key |
-| `maxSize` | `Infinity` | Max waiting tasks per key (rejects when exceeded) |
+| `maxSize` | `1_000_000` | Max waiting tasks per key (rejects when exceeded). Pass `Infinity` to disable the cap (not recommended at uWS scale). |
 | `onDrop` | `null` | Called with `{ key, task }` when a task is rejected |
 
 Different keys are independent -- `push('room-a', ...)` and `push('room-b', ...)` run concurrently. Only tasks with the same key are queued.
@@ -2763,6 +2842,145 @@ Different keys are independent -- `push('room-a', ...)` and `push('room-b', ...)
 - **Server-side only.** No client component.
 - **In-memory.** Queue state lives in the process. Not durable across restarts.
 - **No cancellation.** Running tasks cannot be aborted. `clear()` only rejects waiting tasks.
+
+### Lock (per-key serialization)
+
+Per-key critical-section primitive. Concurrent `withLock(key, fn)` calls on the same key run one at a time in FIFO order; calls on different keys run in parallel. Use this for atomic read-modify-write on user state, "only one in-flight upgrade per resource," or anywhere two concurrent requests racing the same record would corrupt it.
+
+Backed by a `Map<string, Promise>` chain: each waiter awaits the previous caller's promise, then runs `fn`. Errors in one caller's `fn` propagate to that caller and do NOT block subsequent waiters.
+
+#### Setup
+
+```js
+// src/lib/server/locks.js
+import { createLock } from 'svelte-adapter-uws/plugins/lock';
+
+export const locks = createLock();
+// Or with an explicit cap:
+// export const locks = createLock({ maxKeys: 100_000 });
+```
+
+#### Usage
+
+```js
+// src/routes/account/+page.server.js
+import { locks } from '$lib/server/locks';
+
+export const actions = {
+  topUp: async ({ request, locals }) => {
+    const amount = Number((await request.formData()).get('amount'));
+
+    // Two concurrent top-ups for the same user must not interleave.
+    return locks.withLock('user:' + locals.userId, async () => {
+      const user = await db.getUser(locals.userId);
+      user.balance += amount;
+      await db.saveUser(user);
+      return { balance: user.balance };
+    });
+  }
+};
+```
+
+The lock holds until `fn` resolves (or rejects); the next waiter in line then runs. Different keys are independent -- `withLock('user:1', ...)` and `withLock('user:2', ...)` run in parallel.
+
+#### API
+
+| Method | Description |
+|---|---|
+| `locks.withLock(key, fn)` | Run `fn` with exclusive access to `key`. Returns the promise `fn` returns. |
+| `locks.held(key)` | `true` iff a lock is currently in flight for `key`. Observational only -- do not branch on it to decide whether to acquire (the answer can change before your `withLock` call). |
+| `locks.size()` | Number of keys with an in-flight lock. |
+| `locks.clear()` | Drop all in-flight tracking. Pending `withLock` calls still resolve normally; this only clears the bookkeeping. Use in tests / teardown. |
+
+#### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `maxKeys` | `1_000_000` | Hard cap on the number of distinct keys with an in-flight lock. New-key `withLock` calls reject synchronously with "active key count exceeded" when the chain is at cap; existing keys can still be re-entered. Protects against unbounded key cardinality on `lock-${userId}` patterns. |
+
+#### Limitations
+
+- **Re-entrant calls deadlock.** Calling `locks.withLock(key, ...)` from inside a function already holding `key` queues behind the outer lock and never resolves. Avoid recursive locking; if you need it, derive a sub-key.
+- **Single-process only.** In cluster mode, each worker has its own lock chain. If two requests race the same key on different workers, the lock does not coordinate them. For cluster-coherent locks, use Redis `SET NX` or a database advisory lock.
+- **No timeouts.** A `fn` that hangs holds the lock until it resolves. Wrap `fn` in a timeout guard if you need to cap hold time.
+
+### Session (in-process store with sliding TTL)
+
+In-process key-value store with sliding TTL: every read or `touch()` extends an entry's lifetime by another full `ttl` window. Designed for the "load on WebSocket upgrade, refresh on activity" pattern -- the upgrade handler reads a session by token, and any subsequent message keeps it alive while the user is active.
+
+Use this when your auth layer hands you a token (cookie, header, query param) and you need a place to put the resolved session data without re-querying your database on every message. Pair with the `dedup` plugin if you want once-per-window semantics on side effects.
+
+#### Setup
+
+```js
+// src/lib/server/sessions.js
+import { createSession } from 'svelte-adapter-uws/plugins/session';
+
+// 30-minute sliding window.
+export const sessions = createSession({ ttl: 30 * 60 * 1000 });
+```
+
+#### Usage
+
+```js
+// src/hooks.server.js - populate on login.
+import { sessions } from '$lib/server/sessions';
+
+export const handle = async ({ event, resolve }) => {
+  if (event.url.pathname === '/login' && event.request.method === 'POST') {
+    const { username, password } = await event.request.formData();
+    const user = await db.authenticate(username, password);
+    if (user) {
+      const token = crypto.randomUUID();
+      sessions.set(token, { userId: user.id, role: user.role });
+      event.cookies.set('session_id', token, { path: '/', httpOnly: true });
+    }
+  }
+  return resolve(event);
+};
+```
+
+```js
+// src/hooks.ws.js - read on upgrade, refresh on every message.
+import { sessions } from '$lib/server/sessions';
+
+export function upgrade({ cookies }) {
+  const token = cookies.session_id;
+  if (!token) return false;
+  const session = sessions.get(token); // get() also extends TTL
+  if (!session) return false;
+  return { token, userId: session.userId, role: session.role };
+}
+
+export function message(ws) {
+  // Keep the session alive on any client traffic
+  sessions.touch(ws.getUserData().token);
+}
+```
+
+#### API
+
+| Method | Description |
+|---|---|
+| `sessions.get(token)` | Look up by token. Returns the stored data if present and not expired, else `null`. On a hit, extends TTL (sliding window). Expired entries are removed lazily on access. |
+| `sessions.set(token, data)` | Store or replace data for `token`. Resets the TTL. |
+| `sessions.delete(token)` | Remove an entry. Returns `true` if the token was present (and not yet expired), `false` otherwise. |
+| `sessions.touch(token)` | Extend TTL without reading data. Returns `true` if the entry was present and refreshed, `false` if missing / expired. |
+| `sessions.size()` | Current number of retained entries (may include expired entries not yet pruned). |
+| `sessions.clear()` | Remove all entries. |
+
+#### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `ttl` | *required* | Time to live in milliseconds. Each `get` / `touch` / `set` extends an entry's expiry to `Date.now() + ttl`. Must be positive. |
+| `maxEntries` | `10000` | Soft cap on retained entries. When the map grows past 110% of this cap, expired entries are pruned in a single pass; if still over cap after pruning, the oldest insertion-order entries are evicted regardless. |
+
+#### Limitations
+
+- **In-memory and per-process.** In cluster mode, each worker has its own store. A user's WebSocket connection sticks to one worker (uWS sticky-routing), so this is fine for the connect-time read; if you need cross-worker session sharing, swap to Redis or database-backed sessions.
+- **No persistence.** A worker restart forgets all sessions. For long-lived sessions across restarts, store the canonical record in a durable store and use this plugin only as a hot cache.
+- **No pubsub on expiry.** Sessions silently disappear when their TTL elapses. If you need a logout-on-expiry signal to the client, layer your own timer on top.
 
 ### Broadcast groups
 
@@ -3624,7 +3842,45 @@ it('publishes to subscribers', async () => {
 });
 ```
 
-The test server starts on a random port (typically in ~2ms), uses the same subscribe/unsubscribe protocol as production, and exposes the full Platform API (`publish`, `send`, `sendTo`, `topic`, `connections`, `subscribers`).
+The test server starts on a random port (typically in ~2ms), uses the same subscribe/unsubscribe protocol as production, and exposes the full Platform API (`publish`, `send`, `sendTo`, `topic`, `connections`, `subscribers`, `assertions`).
+
+#### `createTestServer` options
+
+```js
+server = await createTestServer({
+  handler: myHandler,
+  // Mirror of the production wsOptions; pass either to test the same
+  // behaviour your production app gets.
+  upgradeAdmission: { maxConcurrent: 100, perTickBudget: 16 },
+  // Other production-equivalents available:
+  // wsOptions: { maxBackpressure, idleTimeout, maxPayloadLength, ... },
+  // origin: '*' | 'same-origin' | string[],
+  // env: { ... }   // ENV_PREFIX-aware env shim for the SvelteKit `platform.env`
+});
+```
+
+`upgradeAdmission` is the same `{ maxConcurrent, perTickBudget }` shape the production handler accepts via `adapter({ websocket: { upgradeAdmission: ... } })`. Passing it to `createTestServer` lets you assert admission shedding (503 responses on the upgrade path) end-to-end without booting a full SvelteKit app.
+
+#### Curated helper re-exports from `svelte-adapter-uws/testing`
+
+Downstream test code (extensions, app-side integration tests, custom transport bridges) often needs to assert on the same wire shapes the production runtime produces. The `testing` entry point re-exports a curated set of pure helpers and userData slot constants so you don't redeclare helpers that would drift over time:
+
+```js
+import {
+  createTestServer,
+  // wire-protocol helpers
+  esc, completeEnvelope, wrapBatchEnvelope,
+  isValidWireTopic, createScopedTopic,
+  // behaviour helpers
+  collapseByCoalesceKey, resolveRequestId, createChaosState,
+  // per-connection userData slot constants (use as Symbol keys on userData)
+  WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID,
+  WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM,
+  WS_CAPS, WS_REQUEST_ID_KEY
+} from 'svelte-adapter-uws/testing';
+```
+
+Production-internal plumbing (mime lookup, byte parsing, cookie split, write-chunk backpressure, sampler internals, upgrade admission factory, origin allowlist matcher) is deliberately NOT re-exported so the test surface can stay stable while production hot paths remain free to refactor.
 
 #### Chaos / fault-injection
 

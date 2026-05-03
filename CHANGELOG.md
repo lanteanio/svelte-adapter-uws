@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`queue` plugin `maxSize` default changed from `Infinity` to `1,000,000`.** Soft API change: existing users who relied on unbounded queues see their queue start dropping tasks via `onDrop` once 1M waiting tasks accumulate per key. Pass `{ maxSize: Infinity }` explicitly to opt back into the previous behaviour. The new default brings the plugin in line with the rest of the bounded-by-default audit; no real workload should reach 1M waiting tasks per key without a leak.
 
+### Documentation
+
+- **README catch-up pass.** Three plugins shipped without README sections (`lock`, `session`, `dedup`); each now has a full Setup / Usage / API / Options / Limitations entry. Plugin sections that already existed but were stale gained the new cap options inline (`cursor.maxConnections` / `maxTopics`, `presence.maxConnections` / `maxTopics`, `throttle` / `debounce` second-arg `maxTopics`, `ratelimit.maxBuckets` row in Options table); `queue.maxSize` default updated to `1_000_000` in the Options table. The test harness section gained `upgradeAdmission` configuration documentation (shipped in next.6 but undocumented) and a curated-re-exports note pointing at the helpers and userData slot constants that downstream test code can import from `svelte-adapter-uws/testing` (shipped in next.5 but undocumented). Client-store automatic-behaviours section gained a "Microtask-batched initial subscribes" entry covering the next.7 wire-shape change. Table of contents updated for the three new plugin sections.
+
 ## [0.5.0-next.7] - 2026-05-02
 
 ### Changed
