@@ -2127,7 +2127,11 @@ function handleRequest(res, req) {
 // WS_ENABLED is set by the adapter at build time - no inference from exports needed
 if (WS_ENABLED) {
 	// Warn about unrecognized exports - catches typos like "mesage" or "opn"
-	const knownWsExports = new Set(['open', 'message', 'upgrade', 'close', 'drain', 'subscribe', 'unsubscribe', 'authenticate']);
+	const knownWsExports = new Set([
+		'open', 'message', 'upgrade', 'close', 'drain',
+		'subscribe', 'subscribeBatch', 'unsubscribe',
+		'authenticate', 'resume'
+	]);
 	for (const name of Object.keys(wsModule)) {
 		if (!knownWsExports.has(name)) {
 			console.warn(

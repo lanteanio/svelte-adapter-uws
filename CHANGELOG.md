@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.11] - 2026-05-04
+
+### Fixed
+
+- **False-positive boot warning when `hooks.ws` exports `subscribeBatch` or `resume`.** The `knownWsExports` whitelist in `files/handler.js` was not updated when those two hooks shipped, so any app exporting either got a `Warning: WebSocket handler exports unknown "subscribeBatch"` (or `"resume"`) line at startup, with a `Did you mean one of: open, message, upgrade, close, drain, subscribe, unsubscribe, authenticate?` suggestion that pointedly omitted the hook the user had just written. The hook itself was always picked up and called correctly -- the runtime reads `wsModule.subscribeBatch` directly in the bulk-subscribe path and `wsModule.resume` directly in the resume-protocol path -- but the warning text actively misled downstream users into deleting the export to silence it, which silently disabled the documented bulk-auth and gap-fill paths. Whitelist now includes `subscribeBatch` and `resume` alongside the rest of the supported hook surface.
+
 ## [0.5.0-next.10] - 2026-05-04
 
 ### Changed
