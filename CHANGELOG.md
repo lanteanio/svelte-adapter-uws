@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Throttle plugin docstrings rewritten to stop pointing readers at the multi-publisher trap.** The module-level docstring previously cited "mouse position, typing indicators" as canonical use cases, and the `@example` for `throttle()` showed N users emitting cursor moves into one shared topic -- exactly the multi-publisher pattern the plugin's single shared pending slot handles wrong (fast publishers overwrite slow publishers' pending payloads, slow publishers' updates almost never reach subscribers; measured at `bench/28-throttle-per-key-ab.mjs`). Module docstring now describes the plugin as "per-topic publish rate limiting for single-publisher streams" and lists actually-safe use cases (server-aggregated metrics, live counters, world-state snapshots, job-progress feeds), with an explicit "not suitable for multi-publisher streams that share a topic" line. Function-level docstring gains a Caveat block linking to the bench and pointing at the world-state-tick aggregation pattern as the fix. The `@example` is rewritten to demonstrate that pattern (server maintains `Map<userId, latestPos>`, publishes one snapshot per tick), so the canonical example reading teaches the right architecture instead of the broken one. No runtime change.
+
 ## [0.5.0-next.12] - 2026-05-04
 
 ### Fixed

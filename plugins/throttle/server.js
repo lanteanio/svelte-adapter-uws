@@ -1,10 +1,17 @@
 /**
  * Throttle/debounce plugin for svelte-adapter-uws.
  *
- * Per-topic publish rate limiting. Wraps platform.publish() to coalesce
- * rapid-fire updates (e.g. mouse position, typing indicators). Sends the
- * latest value at most once per interval. Prevents flooding without the
+ * Per-topic publish rate limiting for single-publisher streams. Wraps
+ * platform.publish() to coalesce rapid-fire updates (e.g. server-aggregated
+ * metrics, live counters, world-state snapshots, job-progress feeds). Sends
+ * the latest value at most once per interval. Prevents flooding without the
  * user having to implement timers.
+ *
+ * Not suitable for multi-publisher streams that share a topic (many clients
+ * emitting cursor moves, drawing strokes, or presence pings into one
+ * topic) -- the single shared pending slot lets fast publishers overwrite
+ * slow publishers' updates. Aggregate server-side first, then throttle the
+ * aggregate.
  *
  * Zero impact on the adapter core - this is a standalone module that
  * wraps platform.publish() with timer-based rate limiting.
@@ -129,6 +136,15 @@ function evictOldestIfAtCap(topics, maxTopics) {
  *
  * Rate limiting is per-topic: different topics have independent timers.
  *
+ * Caveat: the pending slot is per-topic, so for multi-publisher streams
+ * (many users emitting into one shared topic) fast publishers will
+ * overwrite slow publishers' pending payloads -- slow publishers' updates
+ * almost never reach subscribers. The fix is to aggregate at the server
+ * (e.g. world-state tick: maintain `Map<publisher, latest>` and publish
+ * snapshots on a fixed cadence) rather than throttling per-move broadcasts
+ * directly. See `bench/28-throttle-per-key-ab.mjs` in the repo for the
+ * fairness measurement.
+ *
  * @param {number} interval - Minimum time (ms) between publishes per topic
  * @param {{ maxTopics?: number }} [options] - `maxTopics` caps the active
  *   topic registry (default 1_000_000). When the cap is reached, the
@@ -140,13 +156,18 @@ function evictOldestIfAtCap(topics, maxTopics) {
  * ```js
  * import { throttle } from 'svelte-adapter-uws/plugins/throttle';
  *
- * const mouse = throttle(50); // at most once per 50ms per topic
+ * const worldTick = throttle(16); // 60 Hz world-state cap per topic
  *
- * // In your WebSocket message handler:
+ * // Server maintains the latest cursor position per user and broadcasts
+ * // a single world-state snapshot per tick. Per-topic throttle is safe
+ * // here because only one source -- this aggregator -- publishes to the
+ * // topic; the multi-publisher trap is sidestepped by aggregating first.
+ * const positions = new Map(); // userId -> { x, y }
  * export function message(ws, { data, platform }) {
  *   const msg = JSON.parse(Buffer.from(data).toString());
  *   if (msg.type === 'cursor') {
- *     mouse.publish(platform, 'cursors', 'move', { userId: ws.getUserData().id, ...msg.pos });
+ *     positions.set(ws.getUserData().id, msg.pos);
+ *     worldTick.publish(platform, 'cursors:room42', 'world', Object.fromEntries(positions));
  *   }
  * }
  * ```

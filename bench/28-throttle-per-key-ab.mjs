@@ -12,7 +12,7 @@
 //
 // Workload: cursor-style mix.
 //   100 users total: 10 fast (60 Hz) + 90 slow (5 Hz)
-//   Throttle interval: 33 ms (≈ 30 Hz cap per bucket)
+//   Throttle interval: 16 ms (≈ 60 Hz cap per bucket)
 //   Sim duration: 5000 ms
 //
 // Measures per-user delivery rate (delivered / generated) under each
@@ -28,7 +28,7 @@ const SLOW_USERS = 90;
 const FAST_HZ = 60;
 const SLOW_HZ = 5;
 const DURATION_MS = 5000;
-const INTERVAL_MS = 33;
+const INTERVAL_MS = 16;
 
 function buildEvents() {
 	const events = [];
