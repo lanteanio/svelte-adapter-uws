@@ -281,14 +281,58 @@ export default function uws(options = {}) {
 		});
 	}
 
-	// Dev-mode platform - same API shape as production
+	// Dev-mode platform - same API shape as production. Every primitive on
+	// the production base platform must exist here too, even when dev
+	// degrades it to a no-op or zero-valued snapshot. Downstream wrappers
+	// (extensions packages, app-level platform decorators) capture method
+	// references via `platform.X.bind(platform)` at construction time, and
+	// silently-undefined properties become "Cannot read properties of
+	// undefined (reading 'bind')" on the first message. Missing surface in
+	// dev defeats the dev/prod parity contract.
 	const platform = {
 		publish,
 		publishBatched,
+		batch(messages) {
+			const results = [];
+			for (let i = 0; i < messages.length; i++) {
+				const { topic, event, data } = messages[i];
+				results.push(publish(topic, event, data));
+			}
+			return results;
+		},
 		send,
 		sendTo,
+		sendCoalesced(ws, { topic, event, data }) {
+			// dev runs over the `ws` library; there is no real C++ outbound
+			// queue, so no backpressure to coalesce against. Immediate-send
+			// matches the production happy-path observable behavior (entry
+			// flushes on the first attempt with result === 0).
+			send(ws, topic, event, data);
+		},
 		request,
 		get connections() { return connections.size; },
+		get pressure() {
+			// Zero-valued snapshot rather than null so downstream code that
+			// destructures `pressure.active` / `.reason` / `.topPublishers`
+			// does not crash on field access.
+			return {
+				active: false,
+				subscriberRatio: 0,
+				publishRate: 0,
+				memoryMB: 0,
+				reason: 'NONE',
+				topPublishers: []
+			};
+		},
+		onPressure(_cb) { return () => {}; },
+		onPublishRate(_cb) { return () => {}; },
+		get assertions() {
+			// Dev never tracks invariant violations; production exposes a
+			// live shared Map of category counts. Return a fresh empty Map
+			// per read so downstream diagnostics that iterate or check size
+			// see the documented "no violations" state.
+			return new Map();
+		},
 		subscribers(topic) {
 			let count = 0;
 			for (const [, topics] of subscriptions) {

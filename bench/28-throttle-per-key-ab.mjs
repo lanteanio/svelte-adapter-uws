@@ -19,7 +19,7 @@
 // strategy and reports fast vs slow buckets separately. The fairness
 // claim is: per-topic starves slow users; per-key does not.
 //
-// Pure JS simulation (no uWS, no real WS) — this is an algorithmic
+// Pure JS simulation (no uWS, no real WS) -- this is an algorithmic
 // fairness property, not a network property. Deterministic, repeatable,
 // runs in < 50 ms.
 
@@ -121,11 +121,11 @@ console.log();
 
 const events = buildEvents();
 
-console.log('Per-topic throttle (current shape — single shared bucket):');
+console.log('Per-topic throttle (current shape -- single shared bucket):');
 summarize('per-topic', runThrottle(events, () => 'shared'));
 
 console.log();
-console.log('Per-key throttle (proposed — bucket keyed by userId):');
+console.log('Per-key throttle (proposed -- bucket keyed by userId):');
 summarize('per-key', runThrottle(events, (userId) => userId));
 
 console.log();
