@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.12] - 2026-05-04
+
+### Fixed
+
+- **`sendCoalesced` silently dropped messages over `maxBackpressure`.** The flush callback in `flushCoalescedFor` (`files/handler.js`) was refactored to a block-bodied arrow when assertions and per-connection byte accounting landed in next.8, and the explicit `return` of `ws.send`'s status code was lost in that refactor. `drainCoalesced` therefore saw `undefined` instead of the documented 0/1/2 contract, treating every send -- including ones uWS reported as DROPPED (return code 2, sent over the configurable `maxBackpressure` cap) -- as a clean success. The pending Map entry was deleted, the message never reached the wire, and the resume-on-drain path at the `drain` hook had nothing to retry. In healthy conditions the bug was invisible because `ws.send` returned 0; under sustained backpressure on a slow client (the exact workload `sendCoalesced` exists to handle), messages exceeding `maxBackpressure` were silently lost. The callback now propagates `ws.send`'s return code so DROPPED retains the entry for retry and BACKPRESSURE halts the loop as the algorithm intended. As a small companion correction, the per-connection `bytesOut` counter exposed on the `close` hook (next.4) no longer counts payloads that were DROPPED -- the byte count now reflects what actually reached the kernel buffer rather than what was attempted. The `drainCoalesced` algorithm itself in `files/utils.js` was correct all along and unit-tested in `test/utils.test.js`; the regression lived purely at the production caller's wiring.
+
 ## [0.5.0-next.11] - 2026-05-04
 
 ### Fixed

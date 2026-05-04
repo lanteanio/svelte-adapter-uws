@@ -803,8 +803,14 @@ function flushCoalescedFor(ws) {
 		assert(typeof msg.topic === 'string', 'coalesce.entry-topic-type', null);
 		assert(typeof msg.event === 'string', 'coalesce.entry-event-type', null);
 		const payload = envelopePrefix(msg.topic, msg.event) + JSON.stringify(msg.data ?? null) + '}';
-		ws.send(payload, false, false);
-		bumpOut(ws, payload);
+		const result = ws.send(payload, false, false);
+		// `result` MUST propagate to drainCoalesced. 0=SUCCESS removes the
+		// entry; 1=BACKPRESSURE removes it and halts the loop; 2=DROPPED
+		// retains the entry for retry on next drain. Don't refactor away
+		// the explicit return -- a previous refactor did and silently lost
+		// every DROPPED message.
+		if (result !== 2) bumpOut(ws, payload);
+		return result;
 	});
 }
 
