@@ -326,6 +326,38 @@ export default function uws(options = {}) {
 		},
 		onPressure(_cb) { return () => {}; },
 		onPublishRate(_cb) { return () => {}; },
+		subscribe(ws, topic) {
+			// Server-side subscribe with the user's `hooks.ws.subscribe`
+			// authorization hook. Same contract as production: returns null
+			// on success, denial reason string on failure.
+			if (!isValidWireTopic(topic)) return 'INVALID_TOPIC';
+			const ud = ws.getUserData();
+			const subs = ud?.[WS_SUBSCRIPTIONS];
+			if (!(subs instanceof Set)) return 'INVALID_TOPIC';
+			if (subs.has(topic)) return null;
+			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
+			const denial = runUserSubscribeGateV(ws, topic);
+			if (denial !== null) return denial;
+			ws.subscribe(topic);
+			subs.add(topic);
+			return null;
+		},
+		checkSubscribe(ws, topic) {
+			// Pure gate: consult the user's hook chain without subscribing.
+			// Same precedence as production (subscribeBatch first, falls
+			// back to subscribe). No state mutation, no cap check.
+			if (!isValidWireTopic(topic)) return 'INVALID_TOPIC';
+			return runUserSubscribeGateV(ws, topic);
+		},
+		unsubscribe(ws, topic) {
+			const ud = ws.getUserData();
+			const subs = ud?.[WS_SUBSCRIPTIONS];
+			if (!(subs instanceof Set) || !subs.has(topic)) return false;
+			ws.unsubscribe(topic);
+			subs.delete(topic);
+			userHandlers.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+			return true;
+		},
 		get assertions() {
 			// Dev never tracks invariant violations; production exposes a
 			// live shared Map of category counts. Return a fresh empty Map
@@ -379,10 +411,15 @@ export default function uws(options = {}) {
 	 */
 	function runSubscribeHookV(wrapped, topic) {
 		if (!userHandlers.subscribe) return null;
-		const result = userHandlers.subscribe(wrapped, topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
-		if (result === false) return 'FORBIDDEN';
-		if (typeof result === 'string') return result;
-		return null;
+		try {
+			const result = userHandlers.subscribe(wrapped, topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
+			if (result === false) return 'FORBIDDEN';
+			if (typeof result === 'string') return result;
+			return null;
+		} catch (err) {
+			console.error('[ws] subscribe hook threw:', err);
+			return 'INTERNAL_ERROR';
+		}
 	}
 
 	/**
@@ -392,7 +429,16 @@ export default function uws(options = {}) {
 	 */
 	function runSubscribeBatchHookV(wrapped, topics) {
 		if (!userHandlers.subscribeBatch) return null;
-		const result = userHandlers.subscribeBatch(wrapped, topics, { platform: wrapped.getUserData()[WS_PLATFORM] });
+		let result;
+		try {
+			result = userHandlers.subscribeBatch(wrapped, topics, { platform: wrapped.getUserData()[WS_PLATFORM] });
+		} catch (err) {
+			console.error('[ws] subscribeBatch hook threw:', err);
+			/** @type {Record<string, string>} */
+			const failed = {};
+			for (let i = 0; i < topics.length; i++) failed[topics[i]] = 'INTERNAL_ERROR';
+			return failed;
+		}
 		/** @type {Record<string, string>} */
 		const denials = {};
 		if (!result || typeof result !== 'object') return denials;
@@ -401,6 +447,24 @@ export default function uws(options = {}) {
 			else if (typeof val === 'string') denials[topic] = val;
 		}
 		return denials;
+	}
+
+	/**
+	 * Run the user's subscribe-hook chain for a single topic, mirroring
+	 * production: subscribeBatch wins if exported, else fall back to
+	 * subscribe. Used by platform.subscribe, platform.checkSubscribe, and
+	 * the wire-level single-subscribe path.
+	 *
+	 * @param {object} wrapped
+	 * @param {string} topic
+	 * @returns {string | null}
+	 */
+	function runUserSubscribeGateV(wrapped, topic) {
+		const batchDenials = runSubscribeBatchHookV(wrapped, [topic]);
+		if (batchDenials !== null) {
+			return batchDenials[topic] ?? null;
+		}
+		return runSubscribeHookV(wrapped, topic);
 	}
 
 	/**
@@ -805,7 +869,7 @@ export default function uws(options = {}) {
 									sendDenied(ws, msg.topic, ref, 'RATE_LIMITED');
 									return;
 								}
-								const denial = runSubscribeHookV(wrapped, msg.topic);
+								const denial = runUserSubscribeGateV(wrapped, msg.topic);
 								if (denial !== null) {
 									sendDenied(ws, msg.topic, ref, denial);
 									return;

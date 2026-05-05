@@ -636,6 +636,16 @@ export interface WebSocketHandler<UserData = unknown> {
 	/**
 	 * Called when a client tries to subscribe to a topic.
 	 *
+	 * **Wire-level scope only.** This hook fires when a client sends a
+	 * `{type:'subscribe'}` (or `{type:'subscribe-batch'}`) wire frame.
+	 * Server-side code that calls `ws.subscribe(topic)` directly bypasses
+	 * this hook -- the uWS C++ subscribe is not intercepted. Frameworks
+	 * and plugins that subscribe a connection on the user's behalf
+	 * (RPC handlers, integration layers) must route through
+	 * `platform.subscribe(ws, topic)` to inherit this gate. Otherwise the
+	 * loader / RPC response runs and any data fans out before the
+	 * client's eventual wire-level subscribe is denied.
+	 *
 	 * Return values:
 	 * - `false` - deny with the default reason `'FORBIDDEN'`.
 	 * - A string - deny with that string as the reason. The framework
@@ -668,6 +678,13 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * the client resubscribes to every topic it had before in a single
 	 * message). Use this to authorise N topics with one DB query
 	 * instead of N.
+	 *
+	 * **Wire-level scope only.** Same caveat as `subscribe`: server-side
+	 * code that calls `ws.subscribe(topic)` directly does not pass through
+	 * this hook. Frameworks subscribing on the user's behalf must route
+	 * through `platform.subscribe(ws, topic)` -- one call per topic, the
+	 * per-topic `subscribe` hook fires for each. This hook is exclusively
+	 * the optimization point for client-initiated bulk authorization.
 	 *
 	 * Receives the set of pre-validated topics (already filtered for
 	 * `INVALID_TOPIC`) and returns a record mapping the topics you
@@ -1137,6 +1154,99 @@ export interface Platform {
 	 * ```
 	 */
 	subscribers(topic: string): number;
+
+	/**
+	 * Subscribe a connection to a topic from server-side code, running the
+	 * user's `hooks.ws.subscribe` authorization hook first.
+	 *
+	 * Use this from any server-side path that needs to subscribe a
+	 * connection on the user's behalf -- RPC handlers, framework
+	 * integration layers, plugins -- to inherit the centralized
+	 * `hooks.ws.subscribe` authorization gate. Calling `ws.subscribe(topic)`
+	 * directly bypasses the gate (the wire-level subscribe hook fires only
+	 * for `{type:'subscribe'}` and `{type:'subscribe-batch'}` wire frames,
+	 * not for direct uWS API calls).
+	 *
+	 * Returns `null` on success, or a denial reason string on failure
+	 * (`'INVALID_TOPIC'`, `'RATE_LIMITED'`, `'FORBIDDEN'`, or any custom
+	 * string returned from the user's subscribe hook). On denial, no
+	 * subscription is created and internal state is unchanged.
+	 *
+	 * Idempotent: calling twice with the same `(ws, topic)` returns `null`
+	 * both times and does not double-charge counters or trigger the hook
+	 * a second time. Updates `WS_SUBSCRIPTIONS` and `totalSubscriptions`
+	 * so observability stays consistent with client-initiated subscribes.
+	 * Does not send a `{type:'subscribed', topic, ref}` ack frame -- there
+	 * is no client `ref` for a server-initiated subscribe.
+	 *
+	 * @example
+	 * ```js
+	 * // In an RPC handler that needs to subscribe the connection
+	 * // on the user's behalf, with the centralized auth gate:
+	 * const denial = platform.subscribe(ws, topic);
+	 * if (denial) {
+	 *   return reply({ error: denial });
+	 * }
+	 * // Authorized -- proceed with the loader / initial data.
+	 * ```
+	 */
+	subscribe(ws: WebSocket<unknown>, topic: string): string | null;
+
+	/**
+	 * Consult the user's subscribe-hook chain for a single topic without
+	 * actually subscribing the connection. Returns `null` to allow or a
+	 * string denial reason to deny.
+	 *
+	 * Use this when the caller wants to make the subscribe decision in
+	 * one step and perform the actual `ws.subscribe` later as part of a
+	 * different orchestration -- e.g. an RPC framework that runs a
+	 * loader between authorization and the subscribe, and wants the
+	 * loader to fail cleanly without leaving a half-subscribed
+	 * connection or a spurious 'join' broadcast.
+	 *
+	 * Mirrors the wire-level subscribe-batch precedence: if the user
+	 * has exported `subscribeBatch`, that hook is consulted first (with
+	 * the single topic in a 1-element array); otherwise the per-topic
+	 * `subscribe` hook is consulted. A user who exports only one of the
+	 * two still gets a consistent gate across single and batch entry
+	 * points.
+	 *
+	 * Pure -- does not modify subscription state, does not call
+	 * `ws.subscribe`, does not increment the subscription counter. The
+	 * cap (`MAX_SUBSCRIPTIONS_PER_CONNECTION`) is NOT consulted here
+	 * because no subscription is being created; cap enforcement belongs
+	 * on the actual subscribe action. If the caller plans to follow a
+	 * `null` return with a `ws.subscribe`, route through
+	 * `platform.subscribe` for atomic gate + subscribe + cap + state
+	 * update instead.
+	 *
+	 * Synchronous and fail-closed: a throwing user hook denies with
+	 * `'INTERNAL_ERROR'` rather than crashing the caller.
+	 *
+	 * @example
+	 * ```js
+	 * // Inside a stream-RPC handler that gates before running the
+	 * // loader, and subscribes only if the loader succeeds:
+	 * const denial = platform.checkSubscribe(ws, topic);
+	 * if (denial) return reply({ id, ok: false, error: denial });
+	 * const initial = await loader(args, ws);
+	 * ws.subscribe(topic);
+	 * onJoin(ws, topic);
+	 * reply({ id, ok: true, data: initial, topic });
+	 * ```
+	 */
+	checkSubscribe(ws: WebSocket<unknown>, topic: string): string | null;
+
+	/**
+	 * Unsubscribe a connection from a topic from server-side code.
+	 * Symmetric counterpart to `platform.subscribe()`.
+	 *
+	 * Idempotent: returns `false` if the connection was not subscribed,
+	 * otherwise removes the subscription, decrements `totalSubscriptions`,
+	 * fires `hooks.ws.unsubscribe` (informational, not a gate -- mirrors
+	 * the wire-level unsubscribe path), and returns `true`.
+	 */
+	unsubscribe(ws: WebSocket<unknown>, topic: string): boolean;
 
 	/**
 	 * Live snapshot of worker-local backpressure signals.

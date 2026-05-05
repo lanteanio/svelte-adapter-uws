@@ -65,15 +65,29 @@ export async function createTestServer(options = {}) {
 	/** @param {any} ws @param {string} topic @returns {string | null} */
 	function runSubscribeHookT(ws, topic) {
 		if (!handler.subscribe) return null;
-		const result = handler.subscribe(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
-		if (result === false) return 'FORBIDDEN';
-		if (typeof result === 'string') return result;
-		return null;
+		try {
+			const result = handler.subscribe(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
+			if (result === false) return 'FORBIDDEN';
+			if (typeof result === 'string') return result;
+			return null;
+		} catch (err) {
+			console.error('[ws] subscribe hook threw:', err);
+			return 'INTERNAL_ERROR';
+		}
 	}
 	/** @param {any} ws @param {string[]} topics @returns {Record<string, string> | null} */
 	function runSubscribeBatchHookT(ws, topics) {
 		if (!handler.subscribeBatch) return null;
-		const result = handler.subscribeBatch(ws, topics, { platform: ws.getUserData()[WS_PLATFORM] });
+		let result;
+		try {
+			result = handler.subscribeBatch(ws, topics, { platform: ws.getUserData()[WS_PLATFORM] });
+		} catch (err) {
+			console.error('[ws] subscribeBatch hook threw:', err);
+			/** @type {Record<string, string>} */
+			const failed = {};
+			for (let i = 0; i < topics.length; i++) failed[topics[i]] = 'INTERNAL_ERROR';
+			return failed;
+		}
 		/** @type {Record<string, string>} */
 		const denials = {};
 		if (!result || typeof result !== 'object') return denials;
@@ -82,6 +96,14 @@ export async function createTestServer(options = {}) {
 			else if (typeof val === 'string') denials[topic] = val;
 		}
 		return denials;
+	}
+	/** @param {any} ws @param {string} topic @returns {string | null} */
+	function runUserSubscribeGateT(ws, topic) {
+		const batchDenials = runSubscribeBatchHookT(ws, [topic]);
+		if (batchDenials !== null) {
+			return batchDenials[topic] ?? null;
+		}
+		return runSubscribeHookT(ws, topic);
 	}
 	/** @param {any} ws @param {string} topic @param {number | string | null} ref */
 	function sendSubscribedT(ws, topic, ref) {
@@ -206,6 +228,35 @@ export async function createTestServer(options = {}) {
 		get connections() { return wsConnections.size; },
 		get assertions() { return readAssertionCounts(); },
 		subscribers(topic) { return app.numSubscribers(topic); },
+		subscribe(ws, topic) {
+			// Same contract as production platform.subscribe: runs the
+			// user's hook chain before the actual ws.subscribe so
+			// server-side test code that subscribes a connection on the
+			// user's behalf inherits the centralized auth gate. Returns
+			// null on success, denial reason string on failure.
+			if (!isValidWireTopic(topic)) return 'INVALID_TOPIC';
+			const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+			if (!(subs instanceof Set)) return 'INVALID_TOPIC';
+			if (subs.has(topic)) return null;
+			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
+			const denial = runUserSubscribeGateT(ws, topic);
+			if (denial !== null) return denial;
+			ws.subscribe(topic);
+			subs.add(topic);
+			return null;
+		},
+		checkSubscribe(ws, topic) {
+			if (!isValidWireTopic(topic)) return 'INVALID_TOPIC';
+			return runUserSubscribeGateT(ws, topic);
+		},
+		unsubscribe(ws, topic) {
+			const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+			if (!(subs instanceof Set) || !subs.has(topic)) return false;
+			ws.unsubscribe(topic);
+			subs.delete(topic);
+			handler.unsubscribe?.(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
+			return true;
+		},
 		batch(messages) {
 			return messages.map(({ topic, event, data }) => platform.publish(topic, event, data));
 		},
@@ -503,7 +554,7 @@ export async function createTestServer(options = {}) {
 								sendDeniedT(ws, msg.topic, ref, 'RATE_LIMITED');
 								return;
 							}
-							const denial = runSubscribeHookT(ws, msg.topic);
+							const denial = runUserSubscribeGateT(ws, msg.topic);
 							if (denial !== null) {
 								sendDeniedT(ws, msg.topic, ref, denial);
 								return;

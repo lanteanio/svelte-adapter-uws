@@ -719,10 +719,20 @@ function hasRef(ref) {
  */
 function runSubscribeHook(ws, topic) {
 	if (!wsModule.subscribe) return null;
-	const result = wsModule.subscribe(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
-	if (result === false) return 'FORBIDDEN';
-	if (typeof result === 'string') return result;
-	return null;
+	try {
+		const result = wsModule.subscribe(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
+		if (result === false) return 'FORBIDDEN';
+		if (typeof result === 'string') return result;
+		return null;
+	} catch (err) {
+		// Fail closed: a hook that throws denies access rather than
+		// falling through to allow. Surfaces as a canonical 'INTERNAL_ERROR'
+		// reason on the wire so the client can distinguish it from
+		//'FORBIDDEN' / 'UNAUTHENTICATED' / etc. Logging the actual error
+		// keeps the cause visible without blowing up the message handler.
+		console.error('[ws] subscribe hook threw:', err);
+		return 'INTERNAL_ERROR';
+	}
 }
 
 /**
@@ -743,7 +753,18 @@ function runSubscribeHook(ws, topic) {
  */
 function runSubscribeBatchHook(ws, topics) {
 	if (!wsModule.subscribeBatch) return null;
-	const result = wsModule.subscribeBatch(ws, topics, { platform: ws.getUserData()[WS_PLATFORM] });
+	let result;
+	try {
+		result = wsModule.subscribeBatch(ws, topics, { platform: ws.getUserData()[WS_PLATFORM] });
+	} catch (err) {
+		// Fail closed: deny every topic in the batch with 'INTERNAL_ERROR'
+		// so a throwing hook cannot let unauthorized subscribes through.
+		console.error('[ws] subscribeBatch hook threw:', err);
+		/** @type {Record<string, string>} */
+		const failed = {};
+		for (let i = 0; i < topics.length; i++) failed[topics[i]] = 'INTERNAL_ERROR';
+		return failed;
+	}
 	/** @type {Record<string, string>} */
 	const denials = {};
 	if (!result || typeof result !== 'object') return denials;
@@ -753,6 +774,30 @@ function runSubscribeBatchHook(ws, topics) {
 		// truthy / true / undefined -> allow (skip)
 	}
 	return denials;
+}
+
+/**
+ * Run the user's subscribe-hook chain for a single topic, mirroring the
+ * precedence the wire-level subscribe-batch handler uses: if `subscribeBatch`
+ * is exported, treat the single subscribe as a 1-element batch and route
+ * through it; otherwise fall back to the per-topic `subscribe` hook. This
+ * way a user who exports only `subscribeBatch` for centralized auth gets
+ * their gate fired for individual subscribes too -- not just batch frames.
+ *
+ * Used by `platform.subscribe`, `platform.checkSubscribe`, and the wire-
+ * level single-subscribe path so all three entry points share one decision
+ * function. Fail-closed semantics inherited from the helpers above.
+ *
+ * @param {import('uWebSockets.js').WebSocket<any>} ws
+ * @param {string} topic
+ * @returns {string | null}
+ */
+function runUserSubscribeGate(ws, topic) {
+	const batchDenials = runSubscribeBatchHook(ws, [topic]);
+	if (batchDenials !== null) {
+		return batchDenials[topic] ?? null;
+	}
+	return runSubscribeHook(ws, topic);
 }
 
 /**
@@ -968,6 +1013,138 @@ const platform = {
 	 */
 	subscribers(topic) {
 		return app.numSubscribers(topic);
+	},
+
+	/**
+	 * Subscribe a connection to a topic from server-side code, running the
+	 * user's `hooks.ws.subscribe` authorization hook first.
+	 *
+	 * Use this from any server-side path that needs to subscribe a
+	 * connection on the user's behalf -- RPC handlers, framework
+	 * integration layers, plugins -- to inherit the centralized
+	 * `hooks.ws.subscribe` authorization gate. Calling `ws.subscribe(topic)`
+	 * directly bypasses the gate: the wire-level subscribe hook fires only
+	 * for `{type:'subscribe'}` and `{type:'subscribe-batch'}` wire frames,
+	 * not for direct uWS API calls. Always route server-initiated
+	 * subscriptions through this method when centralized authorization
+	 * matters (data-leak risk: the loader / RPC response runs before the
+	 * client's eventual wire-level subscribe is denied).
+	 *
+	 * Returns `null` on success, or a denial reason string on failure
+	 * (`'INVALID_TOPIC'`, `'RATE_LIMITED'`, `'FORBIDDEN'`, or any custom
+	 * string returned from the user's subscribe hook). On denial, no
+	 * subscription is created and internal subscription state is unchanged
+	 * -- the caller decides how to surface the denial to the client (e.g.
+	 * an error reply on the RPC frame).
+	 *
+	 * Idempotent: calling `subscribe(ws, topic)` twice for the same
+	 * `(ws, topic)` returns `null` both times and does not double-charge
+	 * the per-worker `totalSubscriptions` counter or trigger the hook a
+	 * second time. The cap check fires only on the first subscribe.
+	 *
+	 * Updates `WS_SUBSCRIPTIONS` and `totalSubscriptions` so observability
+	 * (`platform.subscribers(topic)`, `platform.pressure`, the close-hook
+	 * `subscriptions` set) stays consistent with client-initiated subscribe
+	 * frames.
+	 *
+	 * Does NOT send a `{type:'subscribed', topic, ref}` ack frame -- there
+	 * is no client `ref` for a server-initiated subscribe. If the caller
+	 * needs to inform the client of the subscription, that is an
+	 * application-level concern (typically via the RPC response).
+	 *
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @param {string} topic
+	 * @returns {string | null} denial reason string or `null` on success
+	 */
+	subscribe(ws, topic) {
+		if (!isValidWireTopic(topic)) return 'INVALID_TOPIC';
+		const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+		assert(subs instanceof Set, 'subs.shape', null);
+		if (subs.has(topic)) return null;
+		if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
+		const denial = runUserSubscribeGate(ws, topic);
+		if (denial !== null) return denial;
+		ws.subscribe(topic);
+		subs.add(topic);
+		totalSubscriptions++;
+		return null;
+	},
+
+	/**
+	 * Consult the user's subscribe-hook chain for a single topic without
+	 * actually subscribing the connection. Returns `null` to allow or a
+	 * string denial reason to deny.
+	 *
+	 * Use this when the caller wants to make the subscribe decision in one
+	 * step and perform the actual `ws.subscribe` later as part of a
+	 * different orchestration (e.g. an RPC framework that runs a loader
+	 * between authorization and the subscribe, and wants the loader to
+	 * fail cleanly without leaving a half-subscribed connection or a
+	 * spurious 'join' broadcast).
+	 *
+	 * Mirrors the wire-level `subscribe-batch` precedence: if the user has
+	 * exported `subscribeBatch`, that hook is consulted first (with the
+	 * single topic in a 1-element array); otherwise the per-topic
+	 * `subscribe` hook is consulted. A user who exports only one of the
+	 * two still gets a consistent gate across single and batch entry
+	 * points.
+	 *
+	 * Pure -- does not modify subscription state, does not call
+	 * `ws.subscribe`, does not increment `totalSubscriptions`. The cap
+	 * (`MAX_SUBSCRIPTIONS_PER_CONNECTION`) is NOT consulted here because
+	 * no subscription is being created; cap enforcement belongs on the
+	 * actual subscribe action. If the caller plans to follow a `null`
+	 * return with a `ws.subscribe`, route through `platform.subscribe`
+	 * for atomic gate + subscribe + cap + state update instead.
+	 *
+	 * Synchronous and fail-closed. A throwing user hook denies with
+	 * `'INTERNAL_ERROR'` rather than crashing the caller.
+	 *
+	 * @example
+	 * ```js
+	 * // Inside a stream-RPC handler that needs to gate before running
+	 * // the loader, and subscribe only if the loader succeeds:
+	 * const denial = platform.checkSubscribe(ws, topic);
+	 * if (denial) return reply({ id, ok: false, error: denial });
+	 * const initial = await loader(args, ws);
+	 * ws.subscribe(topic);
+	 * onJoin(ws, topic);
+	 * reply({ id, ok: true, data: initial, topic });
+	 * ```
+	 *
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @param {string} topic
+	 * @returns {string | null} denial reason string or `null` on allow
+	 */
+	checkSubscribe(ws, topic) {
+		if (!isValidWireTopic(topic)) return 'INVALID_TOPIC';
+		return runUserSubscribeGate(ws, topic);
+	},
+
+	/**
+	 * Unsubscribe a connection from a topic from server-side code.
+	 * Symmetric counterpart to `platform.subscribe()`.
+	 *
+	 * Idempotent: returns `false` if the connection was not subscribed to
+	 * the topic, otherwise removes the subscription, decrements
+	 * `totalSubscriptions`, fires `hooks.ws.unsubscribe` (informational, not
+	 * a gate -- mirrors the wire-level unsubscribe path), and returns
+	 * `true`.
+	 *
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @param {string} topic
+	 * @returns {boolean} `true` if a subscription was removed
+	 */
+	unsubscribe(ws, topic) {
+		const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+		assert(subs instanceof Set, 'subs.shape-unsubscribe', null);
+		if (!subs.has(topic)) return false;
+		ws.unsubscribe(topic);
+		subs.delete(topic);
+		totalSubscriptions--;
+		assert(totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions });
+		wsModule.unsubscribe?.(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
+		return true;
 	},
 
 	/**
@@ -2667,7 +2844,7 @@ if (WS_ENABLED) {
 							sendSubscribeDenied(ws, msg.topic, ref, 'RATE_LIMITED');
 							return;
 						}
-						const denial = runSubscribeHook(ws, msg.topic);
+						const denial = runUserSubscribeGate(ws, msg.topic);
 						if (denial !== null) {
 							sendSubscribeDenied(ws, msg.topic, ref, denial);
 							return;
