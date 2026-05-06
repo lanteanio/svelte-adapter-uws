@@ -682,16 +682,40 @@ export async function createTestServer(options = {}) {
 	});
 
 	return new Promise((resolve, reject) => {
-		app.listen(port, (listenSocket) => {
+		app.listen(port, async (listenSocket) => {
 			if (!listenSocket) return reject(new Error('Failed to listen'));
 			const boundPort = uWS.us_socket_local_port(listenSocket);
+
+			// Fire the user's `init` hook once the test server is listening,
+			// before resolving createTestServer(). Mirrors production
+			// handler.js semantics: throwing init rejects the createTestServer
+			// promise so test setup failure is loud.
+			if (typeof handler.init === 'function') {
+				try {
+					await handler.init({ platform });
+				} catch (err) {
+					try { uWS.us_listen_socket_close(listenSocket); } catch {}
+					return reject(err);
+				}
+			}
+
 			resolve({
 				url: `http://localhost:${boundPort}`,
 				wsUrl: `ws://localhost:${boundPort}${wsPath}`,
 				port: boundPort,
 				platform,
 				wsConnections,
-				close() {
+				async close() {
+					// Fire `shutdown` hook before kicking connections so the
+					// hook sees a healthy platform. Throws are logged-and-
+					// ignored (best-effort, mirrors production).
+					if (typeof handler.shutdown === 'function') {
+						try {
+							await handler.shutdown({ platform });
+						} catch (err) {
+							console.error('[ws] shutdown hook threw:', err);
+						}
+					}
 					for (const ws of wsConnections) ws.close(1001, 'Test server closing');
 					wsConnections.clear();
 					uWS.us_listen_socket_close(listenSocket);

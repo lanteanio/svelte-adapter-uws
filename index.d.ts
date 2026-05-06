@@ -608,6 +608,75 @@ export interface WebSocketHandler<UserData = unknown> {
 		| Promise<Response | false | void>;
 
 	/**
+	 * Called once after the listen socket is bound and before any
+	 * `upgrade` / `open` / `message` hooks fire. Use this to capture
+	 * `platform` at boot time -- the canonical entry point for cron
+	 * registration, warmup tasks, scheduled metrics dumps, external
+	 * pubsub bridge setup, or any "I need platform before the first
+	 * connection" pattern.
+	 *
+	 * Async-allowed. The adapter awaits the returned promise before
+	 * `start()` resolves (production) or `createTestServer()` resolves
+	 * (test harness). Connections accepted at the kernel level during a
+	 * slow async init queue until init resolves -- but `open` / `message`
+	 * hooks for those queued connections may run concurrently with the
+	 * tail of init's execution. For most "capture platform" patterns the
+	 * race is harmless (writes are idempotent); use synchronous init or
+	 * an app-level ready-gate if strict ordering matters.
+	 *
+	 * **Per-worker firing in clustered mode.** Each worker process calls
+	 * `start()` and fires `init` independently. An app running with N
+	 * workers will see N `init` calls -- one per worker. Do not assume
+	 * singleton semantics; if you need a singleton (e.g. a single cron
+	 * publisher across the cluster), layer leader election on top.
+	 *
+	 * Throws re-throw to the caller: boot failure should be loud. The
+	 * `start()` promise rejects, the index.js entrypoint logs it, and the
+	 * process crashes -- which is the right behavior for a server that
+	 * cannot complete its boot work.
+	 *
+	 * @example
+	 * ```js
+	 * // hooks.ws.js
+	 * import { live } from 'svelte-realtime/server';
+	 *
+	 * export function init({ platform }) {
+	 *   // Capture platform so live.cron can publish without waiting
+	 *   // for the first WebSocket connection.
+	 *   live.setCronPlatform(platform);
+	 * }
+	 * ```
+	 */
+	init?: (ctx: { platform: Platform }) => void | Promise<void>;
+
+	/**
+	 * Called once during graceful shutdown, before the listen socket is
+	 * closed and before existing WebSocket connections are kicked. Use
+	 * this for app-level teardown that needs `platform` -- cron drain,
+	 * last metrics dump, external pubsub bridge teardown, queue flush.
+	 *
+	 * Async-allowed. The adapter awaits the returned promise before
+	 * closing the listen socket. Throws are logged and ignored: shutdown
+	 * is best-effort and the adapter cannot refuse to stop. If your
+	 * teardown is strictly required, surface its failure via your own
+	 * logging / alerting before the adapter logs it.
+	 *
+	 * Per-worker firing in clustered mode, same as `init`. Each worker
+	 * fires `shutdown` independently when it receives the shutdown signal.
+	 *
+	 * @example
+	 * ```js
+	 * // hooks.ws.js
+	 * import { live } from 'svelte-realtime/server';
+	 *
+	 * export async function shutdown({ platform }) {
+	 *   await live.flushPendingCronTicks(platform);
+	 * }
+	 * ```
+	 */
+	shutdown?: (ctx: { platform: Platform }) => void | Promise<void>;
+
+	/**
 	 * Called during the HTTP upgrade handshake.
 	 *
 	 * - Return an object to accept - it becomes `ws.getUserData()`.

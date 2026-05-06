@@ -2311,6 +2311,7 @@ function handleRequest(res, req) {
 if (WS_ENABLED) {
 	// Warn about unrecognized exports - catches typos like "mesage" or "opn"
 	const knownWsExports = new Set([
+		'init', 'shutdown',
 		'open', 'message', 'upgrade', 'close', 'drain',
 		'subscribe', 'subscribeBatch', 'unsubscribe',
 		'authenticate', 'resume'
@@ -3092,31 +3093,71 @@ export function drain() {
 let listenSocket = null;
 
 /**
- * Start the uWS server.
+ * Start the uWS server. Returns a promise that resolves once the listen
+ * socket is bound AND the user's `hooks.ws.init` hook (if any) has
+ * completed. Awaiting `start()` gives callers a "server is fully ready"
+ * signal that includes app-level boot work (cron registration, warmup
+ * tasks, external pubsub bridges).
+ *
+ * Listen failure logs and exits the process (preserves prior behavior).
+ * Init-hook failure rejects the promise -- boot is loud or nothing; the
+ * caller decides whether to abort or recover.
+ *
  * @param {string} host
  * @param {number} port
+ * @returns {Promise<void>}
  */
-export function start(host, port) {
-	app.listen(host, port, (socket) => {
-		if (socket) {
-			listenSocket = socket;
-			const startup = (performance.now() - _t_app).toFixed(0);
-			console.log(`Listening on ${is_tls ? 'https' : 'http'}://${host}:${port} (ready in ${startup}ms)`);
-		} else {
-			console.error(`Failed to listen on ${host}:${port}`);
-			process.exit(1);
-		}
+export async function start(host, port) {
+	await new Promise((resolve) => {
+		app.listen(host, port, (socket) => {
+			if (socket) {
+				listenSocket = socket;
+				const startup = (performance.now() - _t_app).toFixed(0);
+				console.log(`Listening on ${is_tls ? 'https' : 'http'}://${host}:${port} (ready in ${startup}ms)`);
+				resolve();
+			} else {
+				console.error(`Failed to listen on ${host}:${port}`);
+				process.exit(1);
+			}
+		});
 	});
+
+	// Fire the user's `init` hook (if exported) once per worker, after the
+	// listen socket is bound and before this function resolves. Async hooks
+	// are awaited so callers that `await start(...)` get a fully-ready
+	// signal that includes app-level boot work. A throwing hook re-throws
+	// to the caller -- boot failure should be loud.
+	if (WS_ENABLED && typeof wsModule.init === 'function') {
+		await wsModule.init({ platform });
+	}
 }
 
 /**
- * Stop the server.
- * Closes the listen socket (stops accepting new connections) and terminates
- * all idle WebSocket connections with code 1001 (Going Away) so clients
- * reconnect to the new instance. In-flight HTTP requests continue until
- * drain() resolves.
+ * Stop the server gracefully.
+ *
+ * Order of operations:
+ *   1. Fire the user's `hooks.ws.shutdown` hook (if any) so app-level code
+ *      can flush cron state, last metrics, external bridge teardown, etc.
+ *      Async hooks are awaited; throws are logged and ignored (we cannot
+ *      refuse to shut down).
+ *   2. Close the listen socket -- stops accepting new connections.
+ *   3. Send `code 1001 (Going Away)` to every WebSocket connection so
+ *      clients reconnect to the new instance.
+ *
+ * In-flight HTTP requests continue until `drain()` resolves -- the caller
+ * (index.js) typically races `drain()` against a shutdown timeout.
+ *
+ * @returns {Promise<void>}
  */
-export function shutdown() {
+export async function shutdown() {
+	if (WS_ENABLED && typeof wsModule.shutdown === 'function') {
+		try {
+			await wsModule.shutdown({ platform });
+		} catch (err) {
+			// Log-and-continue: shutdown is best-effort, we cannot refuse.
+			console.error('[ws] shutdown hook threw:', err);
+		}
+	}
 	if (listenSocket) {
 		uWS.us_listen_socket_close(listenSocket);
 		listenSocket = null;

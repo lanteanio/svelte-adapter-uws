@@ -494,6 +494,8 @@ export default function uws(options = {}) {
 
 	function applyHandlers(mod) {
 		userHandlers = {
+			init: mod.init,
+			shutdown: mod.shutdown,
 			upgrade: mod.upgrade,
 			open: mod.open,
 			message: mod.message,
@@ -505,6 +507,39 @@ export default function uws(options = {}) {
 			resume: mod.resume,
 			authenticate: mod.authenticate
 		};
+	}
+
+	/**
+	 * Fire the user's `init` hook once the WS server is set up. Awaited
+	 * so a slow async init does not race with incoming connections (the
+	 * dev WSS is attached to vite's HTTP server, so connections are
+	 * handled in the same process; for app-level "capture platform"
+	 * patterns the await is enough to guarantee init runs first).
+	 *
+	 * Throws are re-thrown to surface boot failures loudly. Mirrors
+	 * production `handler.js` semantics.
+	 */
+	let initFired = false;
+	async function fireInitOnceV() {
+		if (initFired) return;
+		initFired = true;
+		if (typeof userHandlers.init === 'function') {
+			await userHandlers.init({ platform });
+		}
+	}
+
+	/**
+	 * Fire the user's `shutdown` hook on dev server teardown. Throws are
+	 * logged-and-ignored (we cannot refuse to shut down).
+	 */
+	async function fireShutdownOnceV() {
+		if (typeof userHandlers.shutdown === 'function') {
+			try {
+				await userHandlers.shutdown({ platform });
+			} catch (err) {
+				console.error('[ws] shutdown hook threw:', err);
+			}
+		}
 	}
 
 	/**
@@ -617,6 +652,18 @@ export default function uws(options = {}) {
 					}
 				})();
 			}
+
+			// Fire the user's `init` hook once the handler module has loaded.
+			// Awaited so a throwing init surfaces during dev startup rather
+			// than on first connect. Skipped if the handler failed to load.
+			handlerReady = handlerReady.then(async () => {
+				if (!handlerFailed) await fireInitOnceV();
+			});
+
+			// Fire the user's `shutdown` hook when the vite dev server closes
+			// (Ctrl-C, restart, programmatic close). Awaited inside vite's
+			// own close pipeline.
+			server.httpServer?.once('close', () => { fireShutdownOnceV(); });
 
 			// /__ws/auth middleware: runs the user's `authenticate` hook as a normal
 			// HTTP POST so session cookies are refreshed via a standard Set-Cookie

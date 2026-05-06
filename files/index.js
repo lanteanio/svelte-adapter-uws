@@ -273,14 +273,21 @@ if (is_primary) {
 	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched } = await import('HANDLER');
 
 	if (isMainThread) {
-		// Single-process mode (no clustering)
-		start(host, port);
+		// Single-process mode (no clustering). Awaiting `start()` lets the
+		// hooks.ws `init` hook run to completion (cron registration, warmup
+		// tasks, etc.) before this entry script returns. A throwing init
+		// surfaces as an unhandled promise rejection and crashes the
+		// process -- which is the right behavior for boot failure.
+		await start(host, port);
 	} else {
 		// Worker thread startup depends on clustering mode
 		if (workerData?.mode === 'reuseport') {
 			// Reuseport: each worker listens on the shared port directly.
 			// The kernel distributes incoming connections via SO_REUSEPORT.
-			start(host, port);
+			// `init` fires once per worker; `ready` is posted only after
+			// the hook resolves so the primary's worker-ready bookkeeping
+			// matches actual readiness.
+			await start(host, port);
 			parentPort.postMessage({ type: 'ready' });
 		} else {
 			// Acceptor: register with the main thread's acceptor app
@@ -317,7 +324,11 @@ if (is_primary) {
 			await new Promise((resolve) => setTimeout(resolve, shutdown_delay));
 		}
 
-		shutdown();
+		// Awaiting `shutdown()` lets the hooks.ws `shutdown` hook flush app
+		// state (last metrics, cron drain, external bridge teardown) before
+		// the listen socket closes. Throws are logged-and-ignored inside
+		// shutdown() since we cannot refuse to stop.
+		await shutdown();
 		await Promise.race([
 			drain(),
 			new Promise((resolve) => setTimeout(resolve, shutdown_timeout * 1000).unref())
