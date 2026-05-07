@@ -575,14 +575,23 @@ export interface WSConnection {
 	unsubscribe(topic: string): void;
 
 	/**
-	 * Send a custom message to the server.
-	 * Dropped silently if not connected.
+	 * Send a custom message to the server. Dropped silently if not connected.
+	 *
+	 * Strings and JSON-serializable objects are sent as text frames after
+	 * `JSON.stringify`. `ArrayBuffer` and any `ArrayBufferView` (Uint8Array,
+	 * DataView, etc) are sent as binary frames unchanged.
 	 */
 	send(data: unknown): void;
 
 	/**
 	 * Send a message, queuing it if not currently connected.
 	 * Queued messages flush automatically on reconnect (FIFO order).
+	 *
+	 * Strings and JSON-serializable objects are sent as text frames after
+	 * `JSON.stringify`. `ArrayBuffer` and any `ArrayBufferView` (Uint8Array,
+	 * DataView, etc) are sent as binary frames unchanged. Queued binary
+	 * payloads are kept as-is in the in-memory queue and flushed verbatim
+	 * on reconnect.
 	 */
 	sendQueued(data: unknown): void;
 

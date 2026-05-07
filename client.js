@@ -726,7 +726,7 @@ function createConnection(options) {
 		} catch {}
 	}
 
-	/** @type {string[]} */
+	/** @type {Array<string | ArrayBuffer | ArrayBufferView>} */
 	const sendQueue = [];
 	const MAX_QUEUE_SIZE = 1000;
 
@@ -1017,11 +1017,14 @@ function createConnection(options) {
 				}
 			}
 
-			// Flush queued messages
+			// Flush queued messages. Each entry was already serialized by
+			// `serializeForSend` at enqueue time, so strings reach the wire
+			// as text frames and ArrayBuffer / ArrayBufferView entries reach
+			// the wire as binary frames -- no per-flush type branching needed.
 			while (sendQueue.length > 0) {
 				const msg = sendQueue.shift();
 				if (debug) console.log('[ws] flush ->', msg);
-				ws?.send(/** @type {string} */ (msg));
+				if (msg !== undefined) ws?.send(msg);
 			}
 		};
 
@@ -1390,13 +1393,35 @@ function createConnection(options) {
 	}
 
 	/**
+	 * Decide how a payload reaches `ws.send`. Strings and JSON-serializable
+	 * objects become text frames via JSON.stringify; `ArrayBuffer` and any
+	 * `ArrayBufferView` (Uint8Array, DataView, etc) pass through unchanged
+	 * so they reach the wire as binary frames. Used by `send`, `sendQueued`,
+	 * and the queue flush so all three paths agree on the contract.
+	 *
+	 * @param {unknown} data
+	 * @returns {string | ArrayBuffer | ArrayBufferView}
+	 */
+	function serializeForSend(data) {
+		if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+			return /** @type {ArrayBuffer | ArrayBufferView} */ (data);
+		}
+		return JSON.stringify(data);
+	}
+
+	/**
 	 * Send a custom message to the server. Dropped if not connected.
+	 *
+	 * Strings and JSON-serializable objects are sent as text frames after
+	 * `JSON.stringify`. `ArrayBuffer` and any `ArrayBufferView` (Uint8Array,
+	 * DataView, etc) are sent as binary frames unchanged.
+	 *
 	 * @param {unknown} data
 	 */
 	function send(data) {
 		if (ws?.readyState === WebSocket.OPEN) {
 			if (debug) console.log('[ws] send ->', data);
-			ws.send(JSON.stringify(data));
+			ws.send(serializeForSend(data));
 		} else if (debug) {
 			console.warn('[ws] send dropped (not connected) - use sendQueued() to queue messages for reconnect:', data);
 		}
@@ -1405,19 +1430,27 @@ function createConnection(options) {
 	/**
 	 * Send a message, queuing it if not currently connected.
 	 * Queued messages flush automatically on reconnect (FIFO).
+	 *
+	 * Strings and JSON-serializable objects are sent as text frames after
+	 * `JSON.stringify`. `ArrayBuffer` and any `ArrayBufferView` (Uint8Array,
+	 * DataView, etc) are sent as binary frames unchanged. Queued binary
+	 * payloads are kept as-is in the in-memory queue and flushed verbatim
+	 * on reconnect.
+	 *
 	 * @param {unknown} data
 	 */
 	function sendQueued(data) {
+		const serialized = serializeForSend(data);
 		if (ws?.readyState === WebSocket.OPEN) {
 			if (debug) console.log('[ws] send ->', data);
-			ws.send(JSON.stringify(data));
+			ws.send(serialized);
 		} else {
 			if (sendQueue.length >= MAX_QUEUE_SIZE) {
 				console.warn('[ws] queue full (' + MAX_QUEUE_SIZE + '), dropping oldest message');
 				sendQueue.shift();
 			}
 			if (debug) console.log('[ws] queued ->', data);
-			sendQueue.push(JSON.stringify(data));
+			sendQueue.push(serialized);
 		}
 	}
 

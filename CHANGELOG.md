@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.16] - 2026-05-08
+
+### Fixed
+
+- **`client.send` and `client.sendQueued` mangled `ArrayBuffer` and typed-array payloads into the literal text `'{}'`, blocking binary RPCs end-to-end.** Both methods (and the queue-flush path on reconnect) called `JSON.stringify(data)` unconditionally before handing the payload to `ws.send`. `JSON.stringify(new ArrayBuffer(N))` returns the 2-byte text `'{}'` because `ArrayBuffer` has no own enumerable properties, regardless of `N`. Every binary frame from a `live.binary` RPC (svelte-realtime: `0x00` marker + uint16 BE header length + JSON header + raw payload bytes) reached the wire as the literal text `'{}'`; the server's `handleRpc` failed its `data instanceof ArrayBuffer && bytes[0] === 0x00` check and silently dropped the frame as a malformed RPC envelope; the client-side promise hung to its 30-second timeout. Visible end-to-end as `[ws->] string len=2 {}` in Playwright `framesent` traces and as "0/N chunks" stalls on file-upload demos. The pre-binary handshake (hello, subscribe-batch, the JSON RPC envelope) all worked because they ARE plain JSON; only `ArrayBuffer` / `ArrayBufferView` payloads got mangled.
+
+  Both `send` and `sendQueued` now route through a shared `serializeForSend(data)` helper that branches on `data instanceof ArrayBuffer || ArrayBuffer.isView(data)` and passes binary inputs through to `ws.send` unchanged. JSON-serializable inputs continue to pass through `JSON.stringify` exactly as before -- this is a pure unblock for the binary path with zero behavior change for current text callers. The internal `sendQueue` now stores already-decided values (`string | ArrayBuffer | ArrayBufferView`) so the reconnect-flush path is trivially correct: each entry was serialized at enqueue time and reaches the wire verbatim, no per-flush type branching needed. Covers `Uint8Array`, `DataView`, and every other `ArrayBufferView`; deliberately does not introduce a `Blob` branch (YAGNI -- `live.binary` builds an `ArrayBuffer` directly, no current consumer asks for `Blob`).
+
+  JSDoc on `send` and `sendQueued` (in both `client.js` and `client.d.ts`) now spells out the contract: *"Strings and JSON-serializable objects are sent as text frames after `JSON.stringify`. `ArrayBuffer` and any `ArrayBufferView` (Uint8Array, DataView, etc) are sent as binary frames unchanged."* The same wording on `sendQueued` adds: *"Queued binary payloads are kept as-is in the in-memory queue and flushed verbatim on reconnect."* Closes the same class of "I called this with X and got mystery behavior" bug for whatever the next binary use case is.
+
+  No wire-format change for receivers -- server-side `handleRpc` already accepted both binary and text frames; uWS hands binary frames as `ArrayBuffer` to the user's `message` hook with `isBinary: true`. Test coverage in new `test/client-binary.test.js` (7 tests): `send` + `ArrayBuffer` reaches the wire by reference (no `JSON.stringify`), `send` + `Uint8Array` and `DataView` likewise (covers all `ArrayBufferView` shapes), `send` still `JSON.stringify`s plain objects, `sendQueued` mirrors `send` for both shapes, and the load-bearing regression test that explicitly asserts a 200 KB `ArrayBuffer` no longer reaches the wire as the literal text `'{}'` (with the right `byteLength` preserved). The full 146-test client-real suite continues to pass under the refactor, confirming no behavior change for the JSON path.
+
 ## [0.5.0-next.15] - 2026-05-06
 
 ### Added
