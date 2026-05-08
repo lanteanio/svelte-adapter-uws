@@ -557,27 +557,46 @@ export default function uws(options = {}) {
 		return null;
 	}
 
+	/** SSR-build state captured in `configResolved` and consumed in `buildStart`. */
+	let ssrHandlerPath = /** @type {string | null} */ (null);
+
 	return {
 		name: 'svelte-adapter-uws',
-		config(config, env) {
-			// During SSR build, inject ws-handler as an additional entry so it
-			// goes through the same Vite pipeline as hooks.server.ts - resolving
-			// $lib, $env, $app aliases and sharing modules with the server bundle.
-			if (env.isSsrBuild) {
-				const root = config.root || process.cwd();
-				const handlerPath = discoverHandler(root);
-				if (handlerPath) {
-					return {
-						build: {
-							rollupOptions: {
-								input: {
-									'ws-handler': handlerPath
-								}
-							}
-						}
-					};
-				}
+		configResolved(resolved) {
+			// Capture the handler path once the resolved Vite config is
+			// available. SvelteKit runs Vite 7's environment API with
+			// separate `client` and `ssr` environments; `env.isSsrBuild`
+			// in `config()` is `false` even during the SSR build, so we
+			// detect SSR via `resolved.build.ssr` instead.
+			if (resolved.build?.ssr) {
+				ssrHandlerPath = discoverHandler(resolved.root || process.cwd());
 			}
+		},
+		buildStart() {
+			// Inject the ws-handler entry directly into the active Rollup
+			// pass. Runs after SvelteKit has set its own input config, so
+			// our entry survives. Gated to the `ssr` environment so the
+			// client build does not also try to emit a server-side file.
+			//
+			// `fileName: 'ws-handler.js'` forces the output to the top
+			// level of the SSR output dir (overriding Vite's default of
+			// putting emitFile-emitted chunks under `chunks/`). The
+			// adapter's `index.js` checks `${tmp}/ws-handler.js` for the
+			// Vite plugin path; matching the location keeps the second-
+			// pass Rollup bundling fed correctly.
+			//
+			// The emitted chunk participates in Vite's chunking strategy,
+			// so modules shared between hooks.ws and SvelteKit routes
+			// (metrics registries, leader-election state, in-memory
+			// caches) land in `chunks/` rather than getting duplicated
+			// into the ws-handler bundle.
+			if (!ssrHandlerPath) return;
+			if (this.environment?.name && this.environment.name !== 'ssr') return;
+			this.emitFile({
+				type: 'chunk',
+				id: ssrHandlerPath,
+				fileName: 'ws-handler.js'
+			});
 		},
 		async configureServer(server) {
 			// In middleware mode Vite does not own the HTTP server, so WS upgrade cannot be attached.
