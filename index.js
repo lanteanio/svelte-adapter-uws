@@ -282,7 +282,17 @@ export default function (opts = {}) {
 				);
 			}
 			const wsOpts = {
-				maxPayloadLength: websocket?.maxPayloadLength ?? 16 * 1024,
+				// Default raised from 16 KB to 1 MB in next.19. Aligns with
+				// socket.io's default and Cloudflare Workers' WS message
+				// cap, both 1 MB. uWS itself defaults to 16 MB; 16 KB was
+				// excessively conservative and forced chunked-upload
+				// frameworks to use ~12 KB chunks. DoS exposure is bounded
+				// by `upgradeAdmission.maxConcurrent` (connection count)
+				// and `maxBackpressure` (per-conn outbound queue, also
+				// 1 MB), so per-frame cost stays predictable. Apps that
+				// want a stricter cap can pin via
+				// `websocket.maxPayloadLength` in svelte.config.js.
+				maxPayloadLength: websocket?.maxPayloadLength ?? 1024 * 1024,
 				idleTimeout: websocket?.idleTimeout ?? 120,
 				maxBackpressure: websocket?.maxBackpressure ?? 1024 * 1024,
 				sendPingsAutomatically: websocket?.sendPingsAutomatically ?? true,

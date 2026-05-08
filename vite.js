@@ -372,6 +372,20 @@ export default function uws(options = {}) {
 			}
 			return count;
 		},
+		// Dev mode runs over the `ws` library which does not enforce a
+		// per-frame cap; report the production default (1 MB) so app code
+		// that branches on `platform.maxPayloadLength` sees a consistent
+		// number across dev / prod.
+		get maxPayloadLength() { return 1024 * 1024; },
+		// `ws` library exposes `bufferedAmount` as a property, not a method.
+		// Wrap so the surface matches production exactly.
+		bufferedAmount(ws) {
+			try {
+				const raw = /** @type {any} */ (ws);
+				if (typeof raw.getBufferedAmount === 'function') return raw.getBufferedAmount();
+				return typeof raw.bufferedAmount === 'number' ? raw.bufferedAmount : 0;
+			} catch { return 0; }
+		},
 		topic(name) {
 			return createScopedTopic(publish, name);
 		}

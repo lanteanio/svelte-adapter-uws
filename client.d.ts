@@ -595,6 +595,29 @@ export interface WSConnection {
 	 */
 	sendQueued(data: unknown): void;
 
+	/**
+	 * Bytes the browser has accepted via `ws.send` but not yet flushed to
+	 * the OS socket buffer. Mirrors the native WebSocket property of the
+	 * same name. Returns 0 when the underlying socket does not exist
+	 * (pre-connect or post-close).
+	 *
+	 * Use for client-side paced sending: after each chunk, check
+	 * `conn.bufferedAmount` against a high-water mark and back off until
+	 * it drops below a low-water mark before sending the next chunk.
+	 * Keeps the browser send queue bounded regardless of payload size.
+	 *
+	 * @example
+	 * ```js
+	 * const HIGH = 4 * 1024 * 1024;
+	 * const LOW = 1 * 1024 * 1024;
+	 * for (const chunk of chunks) {
+	 *   while (conn.bufferedAmount > HIGH) await delay(LOW_WAIT_MS);
+	 *   conn.sendQueued(chunk);
+	 * }
+	 * ```
+	 */
+	readonly bufferedAmount: number;
+
 	/** Close the connection permanently. Will not auto-reconnect. */
 	close(): void;
 }

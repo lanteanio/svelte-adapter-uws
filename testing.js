@@ -228,6 +228,13 @@ export async function createTestServer(options = {}) {
 		get connections() { return wsConnections.size; },
 		get assertions() { return readAssertionCounts(); },
 		subscribers(topic) { return app.numSubscribers(topic); },
+		// Mirror production: report a numeric cap and a constant-time
+		// bufferedAmount so test code can exercise the same backpressure-
+		// aware branches it uses in production.
+		get maxPayloadLength() { return 1024 * 1024; },
+		bufferedAmount(ws) {
+			try { return ws.getBufferedAmount(); } catch { return 0; }
+		},
 		subscribe(ws, topic) {
 			// Same contract as production platform.subscribe: runs the
 			// user's hook chain before the actual ws.subscribe so

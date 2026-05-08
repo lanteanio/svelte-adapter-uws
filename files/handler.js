@@ -1020,6 +1020,50 @@ const platform = {
 	},
 
 	/**
+	 * The configured maximum size, in bytes, of a single inbound WebSocket
+	 * frame. Frames larger than this are rejected by uWS at the protocol
+	 * level (the connection is closed). Read this from server-side code
+	 * (RPC frameworks, upload primitives, chunked stream protocols) to
+	 * size payloads against the actual cap rather than guessing or
+	 * piggybacking the value on the wire.
+	 *
+	 * Configured via `websocket.maxPayloadLength` in svelte.config.js;
+	 * defaults to 1 MB.
+	 *
+	 * @example
+	 * ```js
+	 * // svelte-realtime live.upload sizing chunks below the cap:
+	 * const chunkSize = Math.floor(platform.maxPayloadLength * 0.9);
+	 * ```
+	 */
+	get maxPayloadLength() {
+		return WS_OPTIONS?.maxPayloadLength ?? (1024 * 1024);
+	},
+
+	/**
+	 * Bytes currently queued on `ws` that uWS has accepted but not yet
+	 * flushed to the OS socket buffer. Returns 0 for closed connections.
+	 *
+	 * Use this for backpressure-aware sends (skip / coalesce / pace when
+	 * the queue is large) and per-connection memory-pressure telemetry.
+	 * Reads cleanly through `ws.getBufferedAmount()` -- one C++ call,
+	 * constant-time, safe to call on every send.
+	 *
+	 * @example
+	 * ```js
+	 * // Skip publish to slow consumer above 4 MB queued:
+	 * if (platform.bufferedAmount(ws) > 4 * 1024 * 1024) return;
+	 * platform.send(ws, topic, event, data);
+	 * ```
+	 *
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @returns {number}
+	 */
+	bufferedAmount(ws) {
+		try { return ws.getBufferedAmount(); } catch { return 0; }
+	},
+
+	/**
 	 * Subscribe a connection to a topic from server-side code, running the
 	 * user's `hooks.ws.subscribe` authorization hook first.
 	 *

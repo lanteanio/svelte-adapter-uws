@@ -1558,6 +1558,13 @@ function createConnection(options) {
 		unsubscribe,
 		send,
 		sendQueued,
+		// Bytes the browser has accepted via `ws.send` but not yet flushed
+		// to the OS socket buffer. Mirrors the native WebSocket property.
+		// Returns 0 when the underlying socket does not exist (pre-connect
+		// or post-close). Use this for client-side paced sending: after
+		// each chunk, check `conn.bufferedAmount` against a high-water
+		// mark and back off until it drops below a low-water mark.
+		get bufferedAmount() { return ws?.bufferedAmount ?? 0; },
 		onRequest,
 		close
 	};
