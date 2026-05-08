@@ -2,15 +2,24 @@ import 'SHIMS';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Readable } from 'node:stream';
 import { performance } from 'node:perf_hooks';
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
 import { parentPort } from 'node:worker_threads';
 import { randomUUID } from 'node:crypto';
 import uWS from 'uWebSockets.js';
-import { Server } from 'SERVER';
 import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
+// IMPORTANT: ./_init.js MUST be imported before WS_HANDLER. It runs
+// `await server.init({ env: process.env })` at module top level, which
+// populates SvelteKit's `$env/dynamic/private` and `$env/dynamic/public`
+// runtime proxies. ESM evaluates imports depth-first in source order, so
+// _init.js's body (including the await) completes before the next import
+// (WS_HANDLER) is processed -- giving the user's hooks.ws / src/lib/server
+// modules populated env values when their top-level code reads
+// `env.DATABASE_URL` etc. Reordering these two imports re-introduces a
+// real bug where `$env/dynamic/private` returns empty in the ws-handler
+// import graph; do not move them.
+import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
 import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
@@ -343,15 +352,10 @@ function resolveClientIp(rawIp, headers) {
 	return value;
 }
 
-const asset_dir = `${__dirname}/client${base}`;
-
-const _t_init = performance.now();
-const server = new Server(manifest);
-await server.init({
-	env: /** @type {Record<string, string>} */ (process.env),
-	read: (file) => /** @type {ReadableStream} */ (Readable.toWeb(fs.createReadStream(`${asset_dir}/${file}`)))
-});
-console.log(`SvelteKit server initialized in ${(performance.now() - _t_init).toFixed(1)}ms`);
+// Server instance + init have moved to ./_init.js so they run BEFORE the
+// WS_HANDLER import is evaluated. See the comment above the import in the
+// header block of this file for the init-order rationale. `server` is
+// imported from there.
 
 // -- uWS App -----------------------------------------------------------------
 
