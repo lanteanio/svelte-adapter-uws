@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.21] - 2026-05-10
+
+### Fixed
+
+- **`platform.subscribe` and `platform.checkSubscribe` typed correctly as `Promise<string | null>` (was `string | null`).** Runtime has been `async` since the subscribe-hook async-safety fix; the type declaration drifted. TypeScript users who didn't `await` the call were getting back a `Promise` typed as a denial-reason string, leading to silent misbehavior (every truthy Promise read as a denial). The JSDoc text claiming "Synchronous and fail-closed" was also stale; updated to reflect that the framework awaits the hook before inspecting its return.
+
 ## [0.5.0-next.20] - 2026-05-10
 
 ### Changed

@@ -1379,18 +1379,22 @@ export interface Platform {
 	 * Does not send a `{type:'subscribed', topic, ref}` ack frame - there
 	 * is no client `ref` for a server-initiated subscribe.
 	 *
+	 * Returns a `Promise` because the user's subscribe / subscribeBatch
+	 * hook may be async (the framework awaits the hook before inspecting
+	 * its return). Callers must `await` the result.
+	 *
 	 * @example
 	 * ```js
 	 * // In an RPC handler that needs to subscribe the connection
 	 * // on the user's behalf, with the centralized auth gate:
-	 * const denial = platform.subscribe(ws, topic);
+	 * const denial = await platform.subscribe(ws, topic);
 	 * if (denial) {
 	 *   return reply({ error: denial });
 	 * }
 	 * // Authorized - proceed with the loader / initial data.
 	 * ```
 	 */
-	subscribe(ws: WebSocket<unknown>, topic: string): string | null;
+	subscribe(ws: WebSocket<unknown>, topic: string): Promise<string | null>;
 
 	/**
 	 * Consult the user's subscribe-hook chain for a single topic without
@@ -1420,14 +1424,17 @@ export interface Platform {
 	 * `platform.subscribe` for atomic gate + subscribe + cap + state
 	 * update instead.
 	 *
-	 * Synchronous and fail-closed: a throwing user hook denies with
-	 * `'INTERNAL_ERROR'` rather than crashing the caller.
+	 * Returns a `Promise` because the user's subscribe / subscribeBatch
+	 * hook may be async (the framework awaits the hook before inspecting
+	 * its return). Callers must `await` the result. Fail-closed: a
+	 * throwing user hook denies with `'INTERNAL_ERROR'` rather than
+	 * crashing the caller.
 	 *
 	 * @example
 	 * ```js
 	 * // Inside a stream-RPC handler that gates before running the
 	 * // loader, and subscribes only if the loader succeeds:
-	 * const denial = platform.checkSubscribe(ws, topic);
+	 * const denial = await platform.checkSubscribe(ws, topic);
 	 * if (denial) return reply({ id, ok: false, error: denial });
 	 * const initial = await loader(args, ws);
 	 * ws.subscribe(topic);
@@ -1435,7 +1442,7 @@ export interface Platform {
 	 * reply({ id, ok: true, data: initial, topic });
 	 * ```
 	 */
-	checkSubscribe(ws: WebSocket<unknown>, topic: string): string | null;
+	checkSubscribe(ws: WebSocket<unknown>, topic: string): Promise<string | null>;
 
 	/**
 	 * Unsubscribe a connection from a topic from server-side code.
