@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
 import { parentPort } from 'node:worker_threads';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import uWS from 'uWebSockets.js';
 import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
@@ -14,7 +14,7 @@ import { env } from 'ENV';
 // populates SvelteKit's `$env/dynamic/private` and `$env/dynamic/public`
 // runtime proxies. ESM evaluates imports depth-first in source order, so
 // _init.js's body (including the await) completes before the next import
-// (WS_HANDLER) is processed -- giving the user's hooks.ws / src/lib/server
+// (WS_HANDLER) is processed - giving the user's hooks.ws / src/lib/server
 // modules populated env values when their top-level code reads
 // `env.DATABASE_URL` etc. Reordering these two imports re-introduces a
 // real bug where `$env/dynamic/private` returns empty in the ws-handler
@@ -22,7 +22,7 @@ import { env } from 'ENV';
 import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -43,7 +43,7 @@ const METHODS = /** @type {Record<string, string>} */ ({
 	delete: 'DELETE', patch: 'PATCH', options: 'OPTIONS'
 });
 
-// -- Error response helpers ---------------------------------------------------
+// - Error response helpers ---------------------------------------------------
 
 /** @param {import('uWebSockets.js').HttpResponse} res */
 function send400(res) {
@@ -72,7 +72,7 @@ function send500(res) {
 	});
 }
 
-// -- State object pool --------------------------------------------------------
+// - State object pool --------------------------------------------------------
 // Avoids allocating { aborted: false } per SSR request. Objects survive to
 // V8's old generation quickly and stay there, eliminating young-gen GC churn.
 
@@ -122,7 +122,7 @@ function envelopePrefix(topic, event) {
 	return prefix;
 }
 
-// -- In-memory static file cache ---------------------------------------------
+// - In-memory static file cache ---------------------------------------------
 
 /**
  * @typedef {{
@@ -284,7 +284,7 @@ cacheDir(path.join(clientDir, base), base, true);
 cacheDir(path.join(prerenderedDir, base), base, false);
 console.log(`Static files indexed in ${(performance.now() - _t_static).toFixed(1)}ms (${staticCache.size} entries)`);
 
-// -- TLS config (must be before origin warning) ------------------------------
+// - TLS config (must be before origin warning) ------------------------------
 
 const ssl_cert = env('SSL_CERT', '');
 const ssl_key = env('SSL_KEY', '');
@@ -298,7 +298,7 @@ if ((ssl_cert || ssl_key) && !is_tls) {
 	);
 }
 
-// -- SvelteKit Server --------------------------------------------------------
+// - SvelteKit Server --------------------------------------------------------
 
 const origin = parse_origin(env('ORIGIN', undefined));
 const xff_depth = parseInt(env('XFF_DEPTH', '1'), 10);
@@ -357,20 +357,69 @@ function resolveClientIp(rawIp, headers) {
 // header block of this file for the init-order rationale. `server` is
 // imported from there.
 
-// -- uWS App -----------------------------------------------------------------
+// - uWS App -----------------------------------------------------------------
 
 const _t_app = performance.now();
 const app = is_tls
 	? uWS.SSLApp({ cert_file_name: ssl_cert, key_file_name: ssl_key })
 	: uWS.App();
 
-// -- Cross-worker pub/sub relay (batched) ------------------------------------
+// - Cross-worker pub/sub relay (batched) ------------------------------------
 // Batch postMessage calls within a single microtask. A SvelteKit action that
 // publishes N events sends one structured-clone across the thread boundary
 // instead of N. No-op in single-process mode (parentPort is null).
 
 /** @type {Array<{topic: string, envelope: string}> | null} */
 let relayBatch = null;
+
+// Cross-worker relay HMAC defense. When `WS_OPTIONS.workerRelayHmacSecret`
+// is configured, every relay envelope leaving this worker carries an HMAC
+// tag computed over the JSON-canonical (topic, envelope) pair. The
+// receiving worker re-computes the tag and refuses the envelope on
+// mismatch. Defends against an adjacent process injecting forged messages
+// into the worker_threads relay (typically only reachable post-compromise,
+// hence opt-in not default-on). The shared secret must reach every worker
+// via `workerData` or an env var; the framework cannot generate it on
+// its own without losing cross-worker verifiability.
+const RELAY_HMAC_SECRET = (() => {
+	const v = WS_OPTIONS?.workerRelayHmacSecret;
+	if (v === undefined || v === null) return null;
+	if (typeof v !== 'string' || v.length < 16) {
+		throw new Error('websocket.workerRelayHmacSecret must be a string of at least 16 characters');
+	}
+	return v;
+})();
+
+/**
+ * @param {string} topic
+ * @param {string} envelope
+ * @returns {string} base64-encoded HMAC-SHA256 tag
+ */
+function computeRelayMac(topic, envelope) {
+	const h = createHmac('sha256', /** @type {string} */ (RELAY_HMAC_SECRET));
+	h.update(topic);
+	h.update('\0');
+	h.update(envelope);
+	return h.digest('base64');
+}
+
+/**
+ * Constant-time HMAC compare. Returns false on length mismatch, decode
+ * failure, or any digest mismatch. Never throws.
+ * @param {string} expected
+ * @param {string} candidate
+ */
+function verifyRelayMac(expected, candidate) {
+	if (typeof candidate !== 'string' || candidate.length !== expected.length) return false;
+	try {
+		const a = Buffer.from(expected, 'base64');
+		const b = Buffer.from(candidate, 'base64');
+		if (a.length !== b.length || a.length === 0) return false;
+		return timingSafeEqual(a, b);
+	} catch {
+		return false;
+	}
+}
 
 /**
  * @param {string} topic
@@ -386,10 +435,13 @@ function batchRelay(topic, envelope) {
 			relayBatch = null;
 		});
 	}
-	relayBatch.push({ topic, envelope });
+	const entry = RELAY_HMAC_SECRET
+		? { topic, envelope, mac: computeRelayMac(topic, envelope) }
+		: { topic, envelope };
+	relayBatch.push(entry);
 }
 
-// -- Platform (exposed to SvelteKit via event.platform) ----------------------
+// - Platform (exposed to SvelteKit via event.platform) ----------------------
 
 /** @type {Set<import('uWebSockets.js').WebSocket<any>>} */
 const wsConnections = new Set();
@@ -444,7 +496,7 @@ function bumpOut(ws, payload) {
 	stats.bytesOut += payload.length;
 }
 
-// -- Per-topic broadcast sequence numbers ------------------------------------
+// - Per-topic broadcast sequence numbers ------------------------------------
 // Each platform.publish() stamps a monotonic per-topic seq into the envelope
 // so reconnecting clients can detect gaps and resume from where they left
 // off. Worker-local in clustered mode: cross-worker authority requires the
@@ -462,6 +514,7 @@ const topicSeqs = new Map();
 // corrupting recovering clients. Surfacing the threshold loudly with
 // the topN publishers lets ops identify the source before OOM.
 let topicSeqsWarnFired = false;
+let sendToAsyncWarned = false;
 function maybeWarnTopicRegistry() {
 	if (topicSeqsWarnFired) return;
 	if (topicSeqs.size < TOPIC_SEQS_WARN_THRESHOLD) return;
@@ -478,7 +531,7 @@ function maybeWarnTopicRegistry() {
 	);
 }
 
-// -- Pressure tracking -------------------------------------------------------
+// - Pressure tracking -------------------------------------------------------
 // Coarse 1 Hz sampler exposed as `platform.pressure` (snapshot) and
 // `platform.onPressure(cb)` (transition callback). State lives at module
 // scope so platform.publish() and the subscribe/unsubscribe handlers can
@@ -715,25 +768,27 @@ function hasRef(ref) {
  * return `false` (deny with the default `'FORBIDDEN'`), a string (use
  * that string verbatim as the reason - the framework recognises
  * `'UNAUTHENTICATED' | 'FORBIDDEN' | 'INVALID_TOPIC' | 'RATE_LIMITED'`
- * but does not enforce the enum), or anything else (allow).
+ * but does not enforce the enum), or anything else (allow). Async hooks
+ * are supported: the return value is awaited before its truthiness is
+ * inspected, so `async () => false` denies just like `() => false`.
  *
  * @param {import('uWebSockets.js').WebSocket<any>} ws
  * @param {string} topic
- * @returns {string | null}
+ * @returns {Promise<string | null>}
  */
-function runSubscribeHook(ws, topic) {
+async function runSubscribeHook(ws, topic) {
 	if (!wsModule.subscribe) return null;
 	try {
-		const result = wsModule.subscribe(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
+		const result = await wsModule.subscribe(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
 		if (result === false) return 'FORBIDDEN';
 		if (typeof result === 'string') return result;
 		return null;
 	} catch (err) {
-		// Fail closed: a hook that throws denies access rather than
-		// falling through to allow. Surfaces as a canonical 'INTERNAL_ERROR'
-		// reason on the wire so the client can distinguish it from
-		//'FORBIDDEN' / 'UNAUTHENTICATED' / etc. Logging the actual error
-		// keeps the cause visible without blowing up the message handler.
+		// Fail closed: a hook that throws (or rejects) denies access
+		// rather than falling through to allow. Surfaces as a canonical
+		// 'INTERNAL_ERROR' reason on the wire so the client can distinguish
+		// it from 'FORBIDDEN' / 'UNAUTHENTICATED' / etc. Logging the actual
+		// error keeps the cause visible without blowing up the message handler.
 		console.error('[ws] subscribe hook threw:', err);
 		return 'INTERNAL_ERROR';
 	}
@@ -749,20 +804,22 @@ function runSubscribeHook(ws, topic) {
  * The user hook returns a `Record<string, boolean | string>` where
  * `false` means FORBIDDEN, a string is the verbatim reason, and any
  * other value (or absent key) means allow. Returning `undefined` or
- * an empty object both mean "allow everything".
+ * an empty object both mean "allow everything". Async hooks are
+ * supported: the returned map is awaited before its entries are read.
  *
  * @param {import('uWebSockets.js').WebSocket<any>} ws
  * @param {string[]} topics
- * @returns {Record<string, string> | null}
+ * @returns {Promise<Record<string, string> | null>}
  */
-function runSubscribeBatchHook(ws, topics) {
+async function runSubscribeBatchHook(ws, topics) {
 	if (!wsModule.subscribeBatch) return null;
 	let result;
 	try {
-		result = wsModule.subscribeBatch(ws, topics, { platform: ws.getUserData()[WS_PLATFORM] });
+		result = await wsModule.subscribeBatch(ws, topics, { platform: ws.getUserData()[WS_PLATFORM] });
 	} catch (err) {
 		// Fail closed: deny every topic in the batch with 'INTERNAL_ERROR'
-		// so a throwing hook cannot let unauthorized subscribes through.
+		// so a throwing (or rejecting) hook cannot let unauthorized
+		// subscribes through.
 		console.error('[ws] subscribeBatch hook threw:', err);
 		/** @type {Record<string, string>} */
 		const failed = {};
@@ -786,7 +843,7 @@ function runSubscribeBatchHook(ws, topics) {
  * is exported, treat the single subscribe as a 1-element batch and route
  * through it; otherwise fall back to the per-topic `subscribe` hook. This
  * way a user who exports only `subscribeBatch` for centralized auth gets
- * their gate fired for individual subscribes too -- not just batch frames.
+ * their gate fired for individual subscribes too - not just batch frames.
  *
  * Used by `platform.subscribe`, `platform.checkSubscribe`, and the wire-
  * level single-subscribe path so all three entry points share one decision
@@ -794,14 +851,14 @@ function runSubscribeBatchHook(ws, topics) {
  *
  * @param {import('uWebSockets.js').WebSocket<any>} ws
  * @param {string} topic
- * @returns {string | null}
+ * @returns {Promise<string | null>}
  */
-function runUserSubscribeGate(ws, topic) {
-	const batchDenials = runSubscribeBatchHook(ws, [topic]);
+async function runUserSubscribeGate(ws, topic) {
+	const batchDenials = await runSubscribeBatchHook(ws, [topic]);
 	if (batchDenials !== null) {
 		return batchDenials[topic] ?? null;
 	}
-	return runSubscribeHook(ws, topic);
+	return await runSubscribeHook(ws, topic);
 }
 
 /**
@@ -856,7 +913,7 @@ function flushCoalescedFor(ws) {
 		// `result` MUST propagate to drainCoalesced. 0=SUCCESS removes the
 		// entry; 1=BACKPRESSURE removes it and halts the loop; 2=DROPPED
 		// retains the entry for retry on next drain. Don't refactor away
-		// the explicit return -- a previous refactor did and silently lost
+		// the explicit return - a previous refactor did and silently lost
 		// every DROPPED message.
 		if (result !== 2) bumpOut(ws, payload);
 		return result;
@@ -897,7 +954,7 @@ const platform = {
 		// Relay to other workers via main thread (no-op in single-process mode).
 		// Pass { relay: false } when the message originates from an external
 		// pub/sub source (Redis, Postgres, etc.) that already fans out to
-		// every process -- relaying would cause duplicate delivery.
+		// every process - relaying would cause duplicate delivery.
 		const relayed = !!(parentPort && (!options || options.relay !== false));
 		if (relayed) {
 			batchRelay(topic, envelope);
@@ -969,14 +1026,33 @@ const platform = {
 
 	/**
 	 * Send a message to connections matching a filter.
-	 * The filter receives each connection's userData (from the upgrade handler).
+	 * The filter receives each connection's userData (from the upgrade handler)
+	 * and must return synchronously. An async filter is treated as
+	 * fail-closed (the message is NOT sent to that connection) and a
+	 * one-time warning is logged. Filters that touch a database or session
+	 * store should resolve that data eagerly into `userData` from the
+	 * `upgrade` hook, not from inside the filter.
+	 *
 	 * Returns the number of connections the message was sent to.
 	 */
 	sendTo(filter, topic, event, data) {
 		const envelope = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
 		let count = 0;
 		for (const ws of wsConnections) {
-			if (filter(ws.getUserData())) {
+			const decision = filter(ws.getUserData());
+			if (decision && typeof decision.then === 'function') {
+				if (!sendToAsyncWarned) {
+					sendToAsyncWarned = true;
+					console.error(
+						'[ws] platform.sendTo filter returned a Promise; treating as fail-closed.\n' +
+						'  Async filters cannot be used here because sendTo iterates every active\n' +
+						'  connection synchronously. Resolve the relevant fields into userData from\n' +
+						'  your `upgrade` hook so the filter can read them synchronously.'
+					);
+				}
+				continue;
+			}
+			if (decision) {
 				ws.send(envelope, false, false);
 				bumpOut(ws, envelope);
 				count++;
@@ -1046,7 +1122,7 @@ const platform = {
 	 *
 	 * Use this for backpressure-aware sends (skip / coalesce / pace when
 	 * the queue is large) and per-connection memory-pressure telemetry.
-	 * Reads cleanly through `ws.getBufferedAmount()` -- one C++ call,
+	 * Reads cleanly through `ws.getBufferedAmount()` - one C++ call,
 	 * constant-time, safe to call on every send.
 	 *
 	 * @example
@@ -1068,8 +1144,8 @@ const platform = {
 	 * user's `hooks.ws.subscribe` authorization hook first.
 	 *
 	 * Use this from any server-side path that needs to subscribe a
-	 * connection on the user's behalf -- RPC handlers, framework
-	 * integration layers, plugins -- to inherit the centralized
+	 * connection on the user's behalf - RPC handlers, framework
+	 * integration layers, plugins - to inherit the centralized
 	 * `hooks.ws.subscribe` authorization gate. Calling `ws.subscribe(topic)`
 	 * directly bypasses the gate: the wire-level subscribe hook fires only
 	 * for `{type:'subscribe'}` and `{type:'subscribe-batch'}` wire frames,
@@ -1082,7 +1158,7 @@ const platform = {
 	 * (`'INVALID_TOPIC'`, `'RATE_LIMITED'`, `'FORBIDDEN'`, or any custom
 	 * string returned from the user's subscribe hook). On denial, no
 	 * subscription is created and internal subscription state is unchanged
-	 * -- the caller decides how to surface the denial to the client (e.g.
+	 * - the caller decides how to surface the denial to the client (e.g.
 	 * an error reply on the RPC frame).
 	 *
 	 * Idempotent: calling `subscribe(ws, topic)` twice for the same
@@ -1095,7 +1171,7 @@ const platform = {
 	 * `subscriptions` set) stays consistent with client-initiated subscribe
 	 * frames.
 	 *
-	 * Does NOT send a `{type:'subscribed', topic, ref}` ack frame -- there
+	 * Does NOT send a `{type:'subscribed', topic, ref}` ack frame - there
 	 * is no client `ref` for a server-initiated subscribe. If the caller
 	 * needs to inform the client of the subscription, that is an
 	 * application-level concern (typically via the RPC response).
@@ -1104,14 +1180,24 @@ const platform = {
 	 * @param {string} topic
 	 * @returns {string | null} denial reason string or `null` on success
 	 */
-	subscribe(ws, topic) {
-		if (!isValidWireTopic(topic)) return 'INVALID_TOPIC';
+	async subscribe(ws, topic) {
+		// Server-side caller: trust the topic shape past the
+		// always-illegal control / quote / backslash bytes. Apps using
+		// non-ASCII topic names (`__signal:Jose`, presence rooms with
+		// localized labels) must not be blocked at the platform layer.
+		if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
 		const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
 		assert(subs instanceof Set, 'subs.shape', null);
 		if (subs.has(topic)) return null;
 		if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
-		const denial = runUserSubscribeGate(ws, topic);
+		const denial = await runUserSubscribeGate(ws, topic);
 		if (denial !== null) return denial;
+		// Re-check after the await: a concurrent subscribe (wire frame
+		// or another platform.subscribe call) may have raced through
+		// while we awaited the user hook. Idempotent ack and skip the
+		// counter bump in that case.
+		if (subs.has(topic)) return null;
+		if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
 		ws.subscribe(topic);
 		subs.add(topic);
 		totalSubscriptions++;
@@ -1137,7 +1223,7 @@ const platform = {
 	 * two still gets a consistent gate across single and batch entry
 	 * points.
 	 *
-	 * Pure -- does not modify subscription state, does not call
+	 * Pure - does not modify subscription state, does not call
 	 * `ws.subscribe`, does not increment `totalSubscriptions`. The cap
 	 * (`MAX_SUBSCRIPTIONS_PER_CONNECTION`) is NOT consulted here because
 	 * no subscription is being created; cap enforcement belongs on the
@@ -1145,14 +1231,16 @@ const platform = {
 	 * return with a `ws.subscribe`, route through `platform.subscribe`
 	 * for atomic gate + subscribe + cap + state update instead.
 	 *
-	 * Synchronous and fail-closed. A throwing user hook denies with
-	 * `'INTERNAL_ERROR'` rather than crashing the caller.
+	 * Async and fail-closed. A throwing (or rejecting) user hook denies
+	 * with `'INTERNAL_ERROR'` rather than crashing the caller. Returns a
+	 * `Promise` so async user hooks (typically those touching a database
+	 * or session store) deny correctly when they return `false`.
 	 *
 	 * @example
 	 * ```js
 	 * // Inside a stream-RPC handler that needs to gate before running
 	 * // the loader, and subscribe only if the loader succeeds:
-	 * const denial = platform.checkSubscribe(ws, topic);
+	 * const denial = await platform.checkSubscribe(ws, topic);
 	 * if (denial) return reply({ id, ok: false, error: denial });
 	 * const initial = await loader(args, ws);
 	 * ws.subscribe(topic);
@@ -1162,11 +1250,14 @@ const platform = {
 	 *
 	 * @param {import('uWebSockets.js').WebSocket<any>} ws
 	 * @param {string} topic
-	 * @returns {string | null} denial reason string or `null` on allow
+	 * @returns {Promise<string | null>} denial reason string or `null` on allow
 	 */
-	checkSubscribe(ws, topic) {
-		if (!isValidWireTopic(topic)) return 'INVALID_TOPIC';
-		return runUserSubscribeGate(ws, topic);
+	async checkSubscribe(ws, topic) {
+		// Server-side caller: same trust as platform.subscribe (see
+		// note there). Wire-side gating happens earlier in the message
+		// handler with the strict ASCII-only default.
+		if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
+		return await runUserSubscribeGate(ws, topic);
 	},
 
 	/**
@@ -1176,7 +1267,7 @@ const platform = {
 	 * Idempotent: returns `false` if the connection was not subscribed to
 	 * the topic, otherwise removes the subscription, decrements
 	 * `totalSubscriptions`, fires `hooks.ws.unsubscribe` (informational, not
-	 * a gate -- mirrors the wire-level unsubscribe path), and returns
+	 * a gate - mirrors the wire-level unsubscribe path), and returns
 	 * `true`.
 	 *
 	 * @param {import('uWebSockets.js').WebSocket<any>} ws
@@ -1406,7 +1497,11 @@ const platform = {
 			for (let i = 0; i < messages.length; i++) {
 				const m = messages[i];
 				if (!m.options || m.options.relay !== false) {
-					relayed.push({ topic: events[i].topic, env: events[i].env });
+					const ev = { topic: events[i].topic, env: events[i].env };
+					if (RELAY_HMAC_SECRET) {
+						/** @type {any} */ (ev).mac = computeRelayMac(ev.topic, ev.env);
+					}
+					relayed.push(ev);
 				}
 			}
 			if (relayed.length > 0) {
@@ -1532,7 +1627,7 @@ const platform = {
 	}
 };
 
-// -- Origin construction -----------------------------------------------------
+// - Origin construction -----------------------------------------------------
 
 /**
  * Construct the origin from request headers.
@@ -1576,7 +1671,7 @@ function get_origin(headers) {
 	return port ? `${protocol}://${hostWithoutPort}:${port}` : `${protocol}://${host}`;
 }
 
-// -- SSR request deduplication -----------------------------------------------
+// - SSR request deduplication -----------------------------------------------
 // When multiple concurrent anonymous GET/HEAD requests arrive for the same URL,
 // only one is dispatched to SvelteKit. The rest await the result and reconstruct
 // their own Response from the shared buffer. This eliminates redundant SSR work
@@ -1599,7 +1694,7 @@ const MAX_SSR_DEDUP_BODY = 512 * 1024; // 512 KB
  */
 const ssrInflight = new Map();
 
-// -- Body reading ------------------------------------------------------------
+// - Body reading ------------------------------------------------------------
 
 // When Content-Length is known and fits in this threshold, pre-allocate
 // a single Buffer and fill it as chunks arrive instead of creating a
@@ -1609,6 +1704,15 @@ const SMALL_BODY_THRESHOLD = 65536; // 64 KB
 // Dynamic response compression: only compress text content types above a threshold.
 // Static files use build-time precompression and are never affected by this.
 const COMPRESS_MIN_SIZE = 1024;
+// BREACH defense: dynamic compression of credentialed responses turns the
+// response length into a side channel that leaks any secret reflected
+// alongside attacker-influenced input (CSRF tokens, session IDs, API keys
+// in the page body). Skip compression on every request that carries a
+// `Cookie` or `Authorization` header. Apps that have audited their pages
+// for BREACH defenses (random per-response masking, prefix randomization,
+// no secrets reflected with attacker input) can opt back in via
+// `websocket.compressCredentialedResponses: true`.
+const COMPRESS_CREDENTIALED = WS_OPTIONS?.compressCredentialedResponses === true;
 const COMPRESSIBLE_TYPES = new Set([
 	'text/html', 'text/css', 'text/plain', 'text/xml', 'text/javascript',
 	'text/csv', 'text/markdown',
@@ -1697,7 +1801,7 @@ function readBody(res, limit, state, contentLength) {
 	});
 }
 
-// -- Static file serving -----------------------------------------------------
+// - Static file serving -----------------------------------------------------
 
 /**
  * Parse an HTTP Range header value for a single byte range.
@@ -1838,7 +1942,7 @@ function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = false, 
 	});
 }
 
-// -- Prerendered page check --------------------------------------------------
+// - Prerendered page check --------------------------------------------------
 
 // Bounded cache for decoded URI pathnames. Avoids repeated decodeURIComponent
 // calls for the same encoded path. Uses Map insertion order for LRU eviction.
@@ -1929,7 +2033,7 @@ function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, head
 	return false;
 }
 
-// -- SSR handler -------------------------------------------------------------
+// - SSR handler -------------------------------------------------------------
 
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
@@ -2021,17 +2125,33 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 		// Dedup is skipped for:
 		//   - Non-GET/HEAD methods (mutations must not be coalesced)
 		//   - Authenticated requests (cookie or authorization header present)
-		//   - Requests opting out via x-no-dedup: 1
 		//   - When the dedup map is at capacity (safety valve)
+		//
+		// The earlier `x-no-dedup: 1` opt-out was anonymous-callable - a
+		// hostile client could stamp it on every request to defeat the
+		// shared-leader fan-in and amplify server-side SSR cost. Since
+		// the only legitimate caller of an opt-out (debug tooling) can
+		// always send a Cookie / Authorization header to skip dedup
+		// naturally, the header is no longer consulted.
+		const isCredentialedRequest = !!(headers.cookie || headers.authorization);
 		const canDedup =
 			(method === 'GET' || method === 'HEAD') &&
-			!headers.cookie &&
-			!headers.authorization &&
-			!headers['x-no-dedup'] &&
+			!isCredentialedRequest &&
 			ssrInflight.size < MAX_SSR_DEDUP;
+		// BREACH defense: suppress the accept-encoding signal for credentialed
+		// requests so writeResponse() leaves the body uncompressed. Apps that
+		// have audited their reflected-input surface can opt back in via the
+		// COMPRESS_CREDENTIALED module flag.
+		const respAcceptEncoding = (isCredentialedRequest && !COMPRESS_CREDENTIALED)
+			? ''
+			: headers['accept-encoding'];
 
 		if (canDedup) {
-			const dedupKey = method + '\0' + url;
+			// Include base_origin so virtual-hosting deployments (one uWS
+			// instance behind multiple `Host` aliases) keep per-tenant
+			// dedup buckets - SvelteKit consults `request.url`'s host
+			// when rendering, so the response IS host-dependent.
+			const dedupKey = method + '\0' + base_origin + '\0' + url;
 			const existing = ssrInflight.get(dedupKey);
 
 			if (existing) {
@@ -2048,7 +2168,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 							headers: shared.headers
 						}),
 						state,
-						headers['accept-encoding']
+						respAcceptEncoding
 					);
 					return;
 				}
@@ -2074,7 +2194,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 					// leader's content to waiters that may legitimately differ.
 					if (response.headers.has('set-cookie') || !response.body) {
 						resolveShared(null);
-						await writeResponse(res, response, state, headers['accept-encoding']);
+						await writeResponse(res, response, state, respAcceptEncoding);
 						return;
 					}
 					const varyHeader = response.headers.get('vary');
@@ -2084,7 +2204,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 						);
 						if (personalized) {
 							resolveShared(null);
-							await writeResponse(res, response, state, headers['accept-encoding']);
+							await writeResponse(res, response, state, respAcceptEncoding);
 							return;
 						}
 					}
@@ -2113,7 +2233,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 							headers: response.headers
 						}),
 						state,
-						headers['accept-encoding']
+						respAcceptEncoding
 					);
 				} catch (err) {
 					resolveShared(null);
@@ -2126,7 +2246,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 		// Normal (non-dedup) path
 		const response = await server.respond(request, { platform: requestPlatform, getClientAddress });
 		if (state.aborted) return;
-		await writeResponse(res, response, state, headers['accept-encoding']);
+		await writeResponse(res, response, state, respAcceptEncoding);
 	} catch (err) {
 		if (state.aborted) return;
 		if (err instanceof PayloadTooLargeError) {
@@ -2138,7 +2258,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 	}
 }
 
-// -- Response writer (with backpressure) -------------------------------------
+// - Response writer (with backpressure) -------------------------------------
 
 /**
  * Write response headers inside a cork.
@@ -2277,7 +2397,7 @@ async function writeResponse(res, response, state, acceptEncoding) {
 	}
 }
 
-// -- Main request handler ----------------------------------------------------
+// - Main request handler ----------------------------------------------------
 
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
@@ -2353,7 +2473,7 @@ function handleRequest(res, req) {
 		.finally(() => { releaseState(state); requestDone(); });
 }
 
-// -- WebSocket support -------------------------------------------------------
+// - WebSocket support -------------------------------------------------------
 
 // WS_ENABLED is set by the adapter at build time - no inference from exports needed
 if (WS_ENABLED) {
@@ -2400,10 +2520,60 @@ if (WS_ENABLED) {
 	const wsOptions = WS_OPTIONS;
 	const allowedOrigins = wsOptions.allowedOrigins || 'same-origin';
 
-	// Keys that suggest sensitive data being stored in userData.
-	// userData is accessible to every server-side handler via ws.getUserData(),
-	// so storing raw credentials there is a footgun.
-	const SENSITIVE_KEY_PATTERNS = ['token', 'secret', 'password', 'key', 'session', 'credential'];
+	// Refuse to start when the same-origin policy has no fronting trust to
+	// pin against (no ORIGIN env, no HOST_HEADER env, no native TLS, no
+	// upgrade hook). In that configuration the same-origin check compares
+	// two attacker-controlled headers (Origin vs Host) and trivially passes
+	// for any non-browser scripted client, leaving the WebSocket fully open
+	// on a public-internet listener. Apps that have audited this and want
+	// the previous warn-only behavior can opt out via
+	// `websocket.unsafeSameOriginWithoutHostPin: true`.
+	const _unsafeOriginErr = describeUnsafeSameOriginConfig({
+		allowedOrigins,
+		hasOriginEnv: !!origin,
+		hasHostHeader: !!host_header,
+		isTls: is_tls,
+		hasUpgradeHook: !!wsModule.upgrade,
+		optOut: wsOptions.unsafeSameOriginWithoutHostPin === true
+	});
+	if (_unsafeOriginErr) throw new Error(_unsafeOriginErr);
+
+	// CSRF defense for the authenticate POST endpoint: by default the
+	// request must carry one of `x-requested-with: XMLHttpRequest`,
+	// `Sec-Fetch-Site: same-origin`, or an `Origin` header that matches the
+	// configured `allowedOrigins`. Apps that need to accept this endpoint
+	// from native (non-browser) clients without these headers can set
+	// `websocket.authPathRequireOrigin: false` in svelte.config.js.
+	const AUTH_PATH_REQUIRE_ORIGIN = wsOptions.authPathRequireOrigin !== false;
+
+	// Wire-level subscribes to `__`-prefixed system topics are blocked by
+	// default. Framework internals (`__signal:userId`, `__rpc`, plugin
+	// channels like `__presence:*` / `__group:*` / `__replay:*`) reach
+	// clients via per-connection `platform.send` or via server-initiated
+	// `platform.publish` - never via a client `subscribe` frame. Allowing
+	// clients to subscribe to these topics let any authenticated user
+	// intercept other users' signals, presence rosters, and group
+	// broadcasts. Apps that intentionally route public topics through the
+	// `__` prefix can opt in via `websocket.allowSystemTopicSubscribe`.
+	const ALLOW_SYSTEM_TOPIC_SUBSCRIBE = wsOptions.allowSystemTopicSubscribe === true;
+
+	// Wire topics default to printable ASCII only - the loop in
+	// `isValidWireTopic` rejects characters outside 0x20-0x7E (plus the
+	// always-illegal `"` 0x22 and `\\` 0x5C). This closes a class of
+	// look-alike attacks (Unicode line separators U+2028/9, RTL override
+	// U+202E, BOM U+FEFF) and keeps the wire trivially log-safe. Apps
+	// that legitimately use non-ASCII topic names can opt in.
+	const ALLOW_NON_ASCII_TOPICS = wsOptions.allowNonAsciiTopics === true;
+
+	// Keys that suggest sensitive or personally-identifying data being
+	// stored in userData. userData is accessible to every server-side
+	// handler via ws.getUserData() and ships out via platform.publish
+	// fanout when callers stuff it into a publish payload, so storing
+	// raw credentials or PII there is a footgun.
+	const SENSITIVE_KEY_PATTERNS = [
+		'token', 'secret', 'password', 'key', 'session', 'credential',
+		'email', 'phone', 'ssn', 'dob', 'iban', 'creditcard', 'cc', 'pin'
+	];
 	/** @type {Set<string>} warned key names - suppress duplicate warnings across connections */
 	const warnedUserDataKeys = new Set();
 
@@ -2464,7 +2634,7 @@ if (WS_ENABLED) {
 		}
 	}, 60000).unref();
 
-	// -- Authenticate endpoint (pre-upgrade HTTP hook) ---------------------
+	// - Authenticate endpoint (pre-upgrade HTTP hook) ---------------------
 	// Optional `authenticate` export in hooks.ws.ts runs as a normal HTTP POST
 	// so session cookies can be refreshed via a standard Set-Cookie on a 200
 	// response. This works behind Cloudflare Tunnel and other strict edge
@@ -2474,7 +2644,7 @@ if (WS_ENABLED) {
 	if (typeof wsModule.authenticate === 'function') {
 		const authPath = WS_AUTH_PATH;
 		// Body size cap for the authenticate endpoint. Most requests have no
-		// body at all -- the hook reads cookies from the Cookie header. Cap at
+		// body at all - the hook reads cookies from the Cookie header. Cap at
 		// a small value to make malicious payloads cheap to reject.
 		const AUTH_BODY_LIMIT = 64 * 1024;
 
@@ -2485,6 +2655,22 @@ if (WS_ENABLED) {
 			const method = 'POST';
 			const url = req.getUrl() + (req.getQuery() ? '?' + req.getQuery() : '');
 			const clientIp = resolveClientIp(textDecoder.decode(res.getRemoteAddressAsText()), authHeaders);
+
+			if (AUTH_PATH_REQUIRE_ORIGIN && !isAuthOriginAccepted(authHeaders, {
+				allowedOrigins,
+				hostHeader: host_header,
+				protocolHeader: protocol_header,
+				portHeader: port_header,
+				isTls: is_tls,
+				hasUpgradeHook: false
+			})) {
+				res.cork(() => {
+					res.writeStatus('403 Forbidden');
+					res.writeHeader('content-type', 'text/plain');
+					res.end('Origin not allowed');
+				});
+				return;
+			}
 
 			const state = acquireState();
 			res.onAborted(() => { state.aborted = true; });
@@ -2538,7 +2724,7 @@ if (WS_ENABLED) {
 					}
 
 					if (result instanceof Response) {
-						// User returned a full Response -- honour it, but merge any
+						// User returned a full Response - honour it, but merge any
 						// cookies set via cookies.set() so both APIs work together.
 						const buf = result.body ? Buffer.from(await result.arrayBuffer()) : null;
 						if (state.aborted) return;
@@ -2714,7 +2900,7 @@ if (WS_ENABLED) {
 				return;
 			}
 
-			// -- User upgrade handler path (may be async) --
+			// - User upgrade handler path (may be async) --
 			const query = req.getQuery();
 			const url = query ? req.getUrl() + '?' + query : req.getUrl();
 
@@ -2865,7 +3051,7 @@ if (WS_ENABLED) {
 			wsModule.open?.(ws, { platform: userData[WS_PLATFORM] });
 		},
 
-		message: (ws, message, isBinary) => {
+		message: async (ws, message, isBinary) => {
 			assert(ws.getUserData()[WS_PLATFORM], 'ws.platform-missing-in-message', null);
 			bumpIn(ws, message);
 			// Built-in: handle subscribe/unsubscribe from the client store.
@@ -2878,151 +3064,197 @@ if (WS_ENABLED) {
 			// guard against truly large user messages.
 			if (!isBinary && message.byteLength < 8192 &&
 				(new Uint8Array(message))[3] === 0x79 /* 'y' in {"type" */) {
+				/** @type {any} */
+				let msg;
 				try {
-					const msg = JSON.parse(textDecoder.decode(message));
-					if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
-						const ref = hasRef(msg.ref) ? msg.ref : null;
-						if (!isValidWireTopic(msg.topic)) {
-							sendSubscribeDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
-							return;
-						}
-						const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
-						assert(subs instanceof Set, 'subs.shape', null);
-						const isNew = !subs.has(msg.topic);
-						if (isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
-							sendSubscribeDenied(ws, msg.topic, ref, 'RATE_LIMITED');
-							return;
-						}
-						const denial = runUserSubscribeGate(ws, msg.topic);
-						if (denial !== null) {
-							sendSubscribeDenied(ws, msg.topic, ref, denial);
-							return;
-						}
-						ws.subscribe(msg.topic);
-						subs.add(msg.topic);
-						if (isNew) totalSubscriptions++;
-						if (wsDebug) console.log('[ws] subscribe topic=%s', msg.topic);
+					msg = JSON.parse(textDecoder.decode(message));
+				} catch {
+					// Not valid JSON - fall through to user handler.
+					wsModule.message?.(ws, { data: message, isBinary, platform: ws.getUserData()[WS_PLATFORM] });
+					return;
+				}
+				if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
+					const ref = hasRef(msg.ref) ? msg.ref : null;
+					if (!isValidWireTopic(msg.topic, ALLOW_NON_ASCII_TOPICS)) {
+						sendSubscribeDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
+						return;
+					}
+					if (!ALLOW_SYSTEM_TOPIC_SUBSCRIBE && msg.topic.charCodeAt(0) === 95 && msg.topic.charCodeAt(1) === 95) {
+						sendSubscribeDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
+						return;
+					}
+					const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+					assert(subs instanceof Set, 'subs.shape', null);
+					const isNew = !subs.has(msg.topic);
+					if (isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+						sendSubscribeDenied(ws, msg.topic, ref, 'RATE_LIMITED');
+						return;
+					}
+					const denial = await runUserSubscribeGate(ws, msg.topic);
+					if (denial !== null) {
+						sendSubscribeDenied(ws, msg.topic, ref, denial);
+						return;
+					}
+					// Post-await re-check: a concurrent subscribe (single or batch)
+					// may have raced through and already added the topic while
+					// the user hook awaited. Idempotent ack and skip the
+					// totalSubscriptions++ to avoid double-counting.
+					if (subs.has(msg.topic)) {
 						sendSubscribed(ws, msg.topic, ref);
 						return;
 					}
-					if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
-						ws.unsubscribe(msg.topic);
-						const udSubs = ws.getUserData()[WS_SUBSCRIPTIONS];
-						assert(udSubs instanceof Set, 'subs.shape-unsubscribe', null);
-						if (udSubs.delete(msg.topic)) {
-							totalSubscriptions--;
-							assert(totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions });
-						}
-						if (wsDebug) console.log('[ws] unsubscribe topic=%s', msg.topic);
-						wsModule.unsubscribe?.(ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
+					if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+						sendSubscribeDenied(ws, msg.topic, ref, 'RATE_LIMITED');
 						return;
 					}
-					if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
-						// Sent by the client store on reconnect to resubscribe all topics
-						// in a single message instead of N individual subscribe messages.
-						// Cap at 256 topics  - the client only sends what it was subscribed to.
-						const topics = msg.topics.slice(0, 256);
-						const ref = hasRef(msg.ref) ? msg.ref : null;
-						const userData = ws.getUserData();
-						assert(userData[WS_SUBSCRIPTIONS] instanceof Set, 'subs.shape-batch', null);
+					try { ws.subscribe(msg.topic); } catch { return; }
+					subs.add(msg.topic);
+					totalSubscriptions++;
+					if (wsDebug) console.log('[ws] subscribe topic=%s', msg.topic);
+					sendSubscribed(ws, msg.topic, ref);
+					return;
+				}
+				if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
+					ws.unsubscribe(msg.topic);
+					const udSubs = ws.getUserData()[WS_SUBSCRIPTIONS];
+					assert(udSubs instanceof Set, 'subs.shape-unsubscribe', null);
+					if (udSubs.delete(msg.topic)) {
+						totalSubscriptions--;
+						assert(totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions });
+					}
+					if (wsDebug) console.log('[ws] unsubscribe topic=%s', msg.topic);
+					wsModule.unsubscribe?.(ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
+					return;
+				}
+				if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
+					// Sent by the client store on reconnect to resubscribe all topics
+					// in a single message instead of N individual subscribe messages.
+					// Cap at 256 topics  - the client only sends what it was subscribed to.
+					const topics = msg.topics.slice(0, 256);
+					const ref = hasRef(msg.ref) ? msg.ref : null;
+					const userData = ws.getUserData();
+					assert(userData[WS_SUBSCRIPTIONS] instanceof Set, 'subs.shape-batch', null);
 
-						// Pass 1: validate topics. INVALID_TOPIC denials emit immediately;
-						// the batch hook (if any) only sees validated topics.
-						const valid = [];
-						for (const topic of topics) {
-							if (!isValidWireTopic(topic)) {
-								sendSubscribeDenied(ws, topic, ref, 'INVALID_TOPIC');
-								continue;
-							}
-							valid.push(topic);
+					// Pass 1: validate topics. INVALID_TOPIC denials emit immediately;
+					// the batch hook (if any) only sees validated topics.
+					const valid = [];
+					for (const topic of topics) {
+						if (!isValidWireTopic(topic, ALLOW_NON_ASCII_TOPICS)) {
+							sendSubscribeDenied(ws, topic, ref, 'INVALID_TOPIC');
+							continue;
 						}
+						if (!ALLOW_SYSTEM_TOPIC_SUBSCRIBE && typeof topic === 'string' &&
+							topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) {
+							sendSubscribeDenied(ws, topic, ref, 'INVALID_TOPIC');
+							continue;
+						}
+						valid.push(topic);
+					}
 
-						// Pass 2: gather denial decisions. If a batch hook is exported,
-						// call it once (typically backed by a single DB auth query) and
-						// use its decisions. Otherwise fall back to the per-topic
-						// `subscribe` hook for parity with single-subscribe behaviour.
-						const batchDenials = runSubscribeBatchHook(ws, valid);
+					// Pass 2: gather denial decisions. If a batch hook is exported,
+					// call it once (typically backed by a single DB auth query) and
+					// use its decisions. Otherwise fall back to the per-topic
+					// `subscribe` hook for parity with single-subscribe behaviour.
+					// Both paths are awaited so async hooks (the idiomatic style for
+					// hooks that touch a session store or DB) gate correctly.
+					const batchDenials = await runSubscribeBatchHook(ws, valid);
+					// When falling back to per-topic, run the hooks in parallel so
+					// a slow async hook on N topics is one round-trip not N.
+					const perTopicDenials = batchDenials === null && wsModule.subscribe
+						? await Promise.all(valid.map((t) => runSubscribeHook(ws, t)))
+						: null;
 
-						let subscribed = 0;
-						for (const topic of valid) {
-							const subs = userData[WS_SUBSCRIPTIONS];
-							const isNew = !subs.has(topic);
-							if (isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
-								sendSubscribeDenied(ws, topic, ref, 'RATE_LIMITED');
-								continue;
-							}
-							const denial = batchDenials !== null
-								? (batchDenials[topic] ?? null)
-								: runSubscribeHook(ws, topic);
-							if (denial !== null) {
-								sendSubscribeDenied(ws, topic, ref, denial);
-								continue;
-							}
-							ws.subscribe(topic);
-							subs.add(topic);
-							if (isNew) totalSubscriptions++;
-							subscribed++;
+					let subscribed = 0;
+					for (let i = 0; i < valid.length; i++) {
+						const topic = valid[i];
+						const subs = userData[WS_SUBSCRIPTIONS];
+						const denial = batchDenials !== null
+							? (batchDenials[topic] ?? null)
+							: (perTopicDenials !== null ? perTopicDenials[i] : null);
+						if (denial !== null) {
+							sendSubscribeDenied(ws, topic, ref, denial);
+							continue;
+						}
+						// Post-await re-check: idempotent ack on race with another
+						// concurrent subscribe.
+						if (subs.has(topic)) {
 							sendSubscribed(ws, topic, ref);
+							continue;
 						}
-						if (wsDebug) console.log('[ws] subscribe-batch count=%d', subscribed);
-						return;
-					}
-					if (msg.type === 'reply' && hasRef(msg.ref)) {
-						// Reply to a server-initiated request. Look up the pending
-						// promise on this connection's userData, clear its timeout,
-						// and resolve / reject accordingly. Refs scoped per-WS so a
-						// stray reply from one connection cannot affect another.
-						const pending = ws.getUserData()[WS_PENDING_REQUESTS];
-						const entry = pending?.get(msg.ref);
-						if (entry) {
-							assert(typeof entry.resolve === 'function', 'request.entry-resolve-shape', { ref: msg.ref });
-							assert(typeof entry.reject === 'function', 'request.entry-reject-shape', { ref: msg.ref });
-							pending.delete(msg.ref);
-							clearTimeout(entry.timer);
-							if (typeof msg.error === 'string') entry.reject(new Error(msg.error));
-							else entry.resolve(msg.data);
+						if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+							sendSubscribeDenied(ws, topic, ref, 'RATE_LIMITED');
+							continue;
 						}
-						return;
+						try { ws.subscribe(topic); } catch { continue; }
+						subs.add(topic);
+						totalSubscriptions++;
+						subscribed++;
+						sendSubscribed(ws, topic, ref);
 					}
-					if (msg.type === 'hello' && Array.isArray(msg.caps)) {
-						// Capability negotiation. Old clients never send 'hello',
-						// so the absence of the WS_CAPS slot is the safe-default
-						// "no opt-in features" signal that publishBatched relies
-						// on to fall back to N individual frames per connection.
-						const caps = new Set();
-						for (let i = 0; i < msg.caps.length; i++) {
-							if (typeof msg.caps[i] === 'string') caps.add(msg.caps[i]);
+					if (wsDebug) console.log('[ws] subscribe-batch count=%d', subscribed);
+					return;
+				}
+				if (msg.type === 'reply' && hasRef(msg.ref)) {
+					// Reply to a server-initiated request. Look up the pending
+					// promise on this connection's userData, clear its timeout,
+					// and resolve / reject accordingly. Refs scoped per-WS so a
+					// stray reply from one connection cannot affect another.
+					const pending = ws.getUserData()[WS_PENDING_REQUESTS];
+					const entry = pending?.get(msg.ref);
+					if (entry) {
+						assert(typeof entry.resolve === 'function', 'request.entry-resolve-shape', { ref: msg.ref });
+						assert(typeof entry.reject === 'function', 'request.entry-reject-shape', { ref: msg.ref });
+						pending.delete(msg.ref);
+						clearTimeout(entry.timer);
+						if (typeof msg.error === 'string') entry.reject(new Error(msg.error));
+						else entry.resolve(msg.data);
+					}
+					return;
+				}
+				if (msg.type === 'hello' && Array.isArray(msg.caps)) {
+					// Capability negotiation. Old clients never send 'hello',
+					// so the absence of the WS_CAPS slot is the safe-default
+					// "no opt-in features" signal that publishBatched relies
+					// on to fall back to N individual frames per connection.
+					const caps = new Set();
+					for (let i = 0; i < msg.caps.length; i++) {
+						if (typeof msg.caps[i] === 'string') caps.add(msg.caps[i]);
+					}
+					ws.getUserData()[WS_CAPS] = caps;
+					if (wsDebug) console.log('[ws] hello caps=%o', [...caps]);
+					return;
+				}
+				if (msg.type === 'resume' && typeof msg.sessionId === 'string' &&
+					msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
+					// Client presents the previous session id plus per-topic
+					// lastSeenSeqs so the user's resume hook can fill the gap
+					// (typically by calling replay.replay(ws, topic, sinceSeq, platform)
+					// for each topic). The hook is optional - if unset, we still
+					// ack so the client can switch to live mode.
+					assert(ws.getUserData()[WS_PLATFORM], 'ws.platform-missing-in-resume', null);
+					if (wsModule.resume) {
+						try {
+							// Await the hook so per-topic replay flushes
+							// __replay frames before the `resumed` ack
+							// tells the client to switch to live mode -
+							// otherwise live publishes can arrive ahead of
+							// gap-fill frames and produce out-of-order
+							// events. Replay backends emit `denied` on
+							// `__replay:{topic}` for denied subscribes;
+							// the client store handles it like `truncated`.
+							await wsModule.resume(ws, {
+								sessionId: msg.sessionId,
+								lastSeenSeqs: msg.lastSeenSeqs,
+								platform: ws.getUserData()[WS_PLATFORM]
+							});
+						} catch (err) {
+							console.error('[ws] resume hook threw:', err);
 						}
-						ws.getUserData()[WS_CAPS] = caps;
-						if (wsDebug) console.log('[ws] hello caps=%o', [...caps]);
-						return;
 					}
-					if (msg.type === 'resume' && typeof msg.sessionId === 'string' &&
-						msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
-						// Client presents the previous session id plus per-topic
-						// lastSeenSeqs so the user's resume hook can fill the gap
-						// (typically by calling replay.replay(ws, topic, sinceSeq, platform)
-						// for each topic). The hook is optional - if unset, we still
-						// ack so the client can switch to live mode.
-						assert(ws.getUserData()[WS_PLATFORM], 'ws.platform-missing-in-resume', null);
-						if (wsModule.resume) {
-							try {
-								wsModule.resume(ws, {
-									sessionId: msg.sessionId,
-									lastSeenSeqs: msg.lastSeenSeqs,
-									platform: ws.getUserData()[WS_PLATFORM]
-								});
-							} catch (err) {
-								console.error('[ws] resume hook threw:', err);
-							}
-						}
-						ws.send('{"type":"resumed"}', false, false);
-						bumpOut(ws, '{"type":"resumed"}');
-						if (wsDebug) console.log('[ws] resume sessionId=%s', msg.sessionId);
-						return;
-					}
-				} catch {
-					// Not valid JSON - fall through to user handler
+					ws.send('{"type":"resumed"}', false, false);
+					bumpOut(ws, '{"type":"resumed"}');
+					if (wsDebug) console.log('[ws] resume sessionId=%s', msg.sessionId);
+					return;
 				}
 			}
 			// Delegate everything else to the user's handler (if provided)
@@ -3113,7 +3345,7 @@ if (HEALTH_CHECK_PATH) {
 // Register HTTP handler (after WS so the WS route takes priority)
 app.any('/*', handleRequest);
 
-// -- In-flight request tracking -------------------------------------------
+// - In-flight request tracking -------------------------------------------
 
 let inFlightCount = 0;
 /** @type {Array<() => void>} */
@@ -3136,7 +3368,7 @@ export function drain() {
 	return new Promise((resolve) => { drainResolvers.push(resolve); });
 }
 
-// -- Exports -----------------------------------------------------------------
+// - Exports -----------------------------------------------------------------
 
 let listenSocket = null;
 
@@ -3148,7 +3380,7 @@ let listenSocket = null;
  * tasks, external pubsub bridges).
  *
  * Listen failure logs and exits the process (preserves prior behavior).
- * Init-hook failure rejects the promise -- boot is loud or nothing; the
+ * Init-hook failure rejects the promise - boot is loud or nothing; the
  * caller decides whether to abort or recover.
  *
  * @param {string} host
@@ -3174,7 +3406,7 @@ export async function start(host, port) {
 	// listen socket is bound and before this function resolves. Async hooks
 	// are awaited so callers that `await start(...)` get a fully-ready
 	// signal that includes app-level boot work. A throwing hook re-throws
-	// to the caller -- boot failure should be loud.
+	// to the caller - boot failure should be loud.
 	if (WS_ENABLED && typeof wsModule.init === 'function') {
 		await wsModule.init({ platform });
 	}
@@ -3188,11 +3420,11 @@ export async function start(host, port) {
  *      can flush cron state, last metrics, external bridge teardown, etc.
  *      Async hooks are awaited; throws are logged and ignored (we cannot
  *      refuse to shut down).
- *   2. Close the listen socket -- stops accepting new connections.
+ *   2. Close the listen socket - stops accepting new connections.
  *   3. Send `code 1001 (Going Away)` to every WebSocket connection so
  *      clients reconnect to the new instance.
  *
- * In-flight HTTP requests continue until `drain()` resolves -- the caller
+ * In-flight HTTP requests continue until `drain()` resolves - the caller
  * (index.js) typically races `drain()` against a shutdown timeout.
  *
  * @returns {Promise<void>}
@@ -3231,12 +3463,22 @@ export function getDescriptor() {
  * @param {string} topic
  * @param {string} envelope - Pre-serialized JSON envelope
  */
-export function relayPublish(topic, envelope) {
+export function relayPublish(topic, envelope, mac) {
 	assert(typeof topic === 'string', 'relay.topic-type', { topic: typeof topic });
 	assert(typeof envelope === 'string' && envelope.length > 0, 'relay.envelope-type', {
 		envelopeType: typeof envelope,
 		envelopeLen: typeof envelope === 'string' ? envelope.length : null
 	});
+	if (RELAY_HMAC_SECRET) {
+		// Reject silently on missing or mismatched MAC. Logging the topic
+		// would leak the failed attempt to anyone watching the worker
+		// stderr; the assert counter (`relay.mac-fail`) is the audit
+		// trail.
+		if (typeof mac !== 'string' || !verifyRelayMac(computeRelayMac(topic, envelope), mac)) {
+			assert(false, 'relay.mac-fail', { topic, hasMac: typeof mac === 'string' });
+			return;
+		}
+	}
 	app.publish(topic, envelope, false, false);
 }
 
@@ -3259,6 +3501,16 @@ export function relayPublishBatched(events) {
 	assert(typeof events[0].env === 'string', 'relay.batched-env-type', {
 		first: typeof events[0].env
 	});
+
+	if (RELAY_HMAC_SECRET) {
+		for (let i = 0; i < events.length; i++) {
+			const ev = /** @type {any} */ (events[i]);
+			if (typeof ev.mac !== 'string' || !verifyRelayMac(computeRelayMac(ev.topic, ev.env), ev.mac)) {
+				assert(false, 'relay.mac-fail-batched', { topic: ev.topic, idx: i, hasMac: typeof ev.mac === 'string' });
+				return;
+			}
+		}
+	}
 
 	const firstTopic = events[0].topic;
 	let allSameTopic = true;

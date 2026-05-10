@@ -105,7 +105,7 @@ export function presence(topic, options) {
 	}
 
 	function startListening() {
-		// Fresh on() call each time -- the underlying writable in client.js
+		// Fresh on() call each time - the underlying writable in client.js
 		// is cleaned up on full unsubscribe, so a stale reference would
 		// silently stop receiving events.
 		const source = on(presenceTopic);
@@ -151,7 +151,7 @@ export function presence(topic, options) {
 			}
 
 			if (event.event === 'heartbeat' && Array.isArray(event.data)) {
-				// Server confirms these keys are still active -- refresh their
+				// Server confirms these keys are still active - refresh their
 				// timestamps so maxAge doesn't expire them. Keys not in the
 				// heartbeat are left alone (maxAge will handle them).
 				const now = Date.now();

@@ -4,8 +4,8 @@ import type { WebSocket } from 'uWebSockets.js';
 /**
  * A validator: either a transform function or a Zod-like object with `.parse()`.
  *
- * - Function: `(data: In) => Out` -- return validated/transformed data or throw
- * - Parse object: `{ parse(data: In): Out }` -- Zod, superstruct, valibot, etc.
+ * - Function: `(data: In) => Out` - return validated/transformed data or throw
+ * - Parse object: `{ parse(data: In): Out }` - Zod, superstruct, valibot, etc.
  */
 export type Validator<In = any, Out = In> =
 	| ((data: In) => Out)

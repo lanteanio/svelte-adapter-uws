@@ -58,7 +58,7 @@ describe('detectSetCookieOnUpgrade', () => {
 	});
 
 	it('does NOT flag set-cookie mentioned outside upgradeResponse', () => {
-		// Regular SSR route setting a cookie -- not the 101 upgrade response
+		// Regular SSR route setting a cookie - not the 101 upgrade response
 		const src = `
 			export function POST({ cookies }) {
 				cookies.set('session', 'abc');

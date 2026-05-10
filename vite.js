@@ -2,7 +2,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -16,6 +16,19 @@ import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnv
 export default function uws(options = {}) {
 	const wsPath = options.path || '/ws';
 	const wsAuthPath = options.authPath || '/__ws/auth';
+	// Mirror production: block client-initiated subscribes to `__`-prefixed
+	// system topics by default. Apps that need to opt in can pass
+	// `allowSystemTopicSubscribe: true` to the dev plugin in vite.config.js.
+	const ALLOW_SYSTEM_TOPIC_SUBSCRIBE_V = options.allowSystemTopicSubscribe === true;
+	// Mirror production: wire topics default to printable ASCII only.
+	const ALLOW_NON_ASCII_TOPICS_V = options.allowNonAsciiTopics === true;
+	// Mirror production CSRF defense for the authenticate POST endpoint.
+	// Same opt-out shape as the production handler: pass
+	// `authPathRequireOrigin: false` to the dev plugin to accept native
+	// (non-browser) clients without `x-requested-with` / `Sec-Fetch-Site`
+	// / matching `Origin`.
+	const AUTH_PATH_REQUIRE_ORIGIN_V = options.authPathRequireOrigin !== false;
+	const ALLOWED_ORIGINS_V = /** @type {'*' | 'same-origin' | string[]} */ (options.allowedOrigins ?? 'same-origin');
 
 	/** @type {import('ws').WebSocketServer | undefined} */
 	let wss;
@@ -31,6 +44,7 @@ export default function uws(options = {}) {
 
 	/** @type {{ upgrade?: Function, open?: Function, message?: Function, close?: Function, drain?: Function, subscribe?: Function, subscribeBatch?: Function, unsubscribe?: Function, resume?: Function, authenticate?: Function }} */
 	let userHandlers = {};
+	let sendToAsyncWarnedV = false;
 
 	/**
 	 * Wrap a ws WebSocket to mimic the uWS WebSocket API.
@@ -219,7 +233,19 @@ export default function uws(options = {}) {
 		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + '}';
 		let count = 0;
 		for (const [, wrapped] of wsWrappers) {
-			if (filter(wrapped.getUserData())) {
+			const decision = filter(wrapped.getUserData());
+			if (decision && typeof decision.then === 'function') {
+				if (!sendToAsyncWarnedV) {
+					sendToAsyncWarnedV = true;
+					console.error(
+						'[adapter-uws] platform.sendTo filter returned a Promise; treating as fail-closed.\n' +
+						'  Resolve filter inputs into userData from your `upgrade` hook so the\n' +
+						'  filter can read them synchronously.'
+					);
+				}
+				continue;
+			}
+			if (decision) {
 				wrapped.send(envelope);
 				bumpOutV(wrapped.getUserData(), envelope);
 				count++;
@@ -326,28 +352,34 @@ export default function uws(options = {}) {
 		},
 		onPressure(_cb) { return () => {}; },
 		onPublishRate(_cb) { return () => {}; },
-		subscribe(ws, topic) {
+		async subscribe(ws, topic) {
 			// Server-side subscribe with the user's `hooks.ws.subscribe`
 			// authorization hook. Same contract as production: returns null
-			// on success, denial reason string on failure.
-			if (!isValidWireTopic(topic)) return 'INVALID_TOPIC';
+			// on success, denial reason string on failure. Awaits the user
+			// hook so async hooks (the idiomatic style for hooks that touch
+			// a session store or DB) gate correctly.
+			if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
 			const ud = ws.getUserData();
 			const subs = ud?.[WS_SUBSCRIPTIONS];
 			if (!(subs instanceof Set)) return 'INVALID_TOPIC';
 			if (subs.has(topic)) return null;
 			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
-			const denial = runUserSubscribeGateV(ws, topic);
+			const denial = await runUserSubscribeGateV(ws, topic);
 			if (denial !== null) return denial;
+			// Post-await re-check: a concurrent subscribe may have raced
+			// through and already added the topic during the gate await.
+			if (subs.has(topic)) return null;
+			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
 			ws.subscribe(topic);
 			subs.add(topic);
 			return null;
 		},
-		checkSubscribe(ws, topic) {
+		async checkSubscribe(ws, topic) {
 			// Pure gate: consult the user's hook chain without subscribing.
 			// Same precedence as production (subscribeBatch first, falls
 			// back to subscribe). No state mutation, no cap check.
-			if (!isValidWireTopic(topic)) return 'INVALID_TOPIC';
-			return runUserSubscribeGateV(ws, topic);
+			if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
+			return await runUserSubscribeGateV(ws, topic);
 		},
 		unsubscribe(ws, topic) {
 			const ud = ws.getUserData();
@@ -421,12 +453,12 @@ export default function uws(options = {}) {
 	/**
 	 * @param {object} wrapped
 	 * @param {string} topic
-	 * @returns {string | null}
+	 * @returns {Promise<string | null>}
 	 */
-	function runSubscribeHookV(wrapped, topic) {
+	async function runSubscribeHookV(wrapped, topic) {
 		if (!userHandlers.subscribe) return null;
 		try {
-			const result = userHandlers.subscribe(wrapped, topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
+			const result = await userHandlers.subscribe(wrapped, topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
 			if (result === false) return 'FORBIDDEN';
 			if (typeof result === 'string') return result;
 			return null;
@@ -439,13 +471,13 @@ export default function uws(options = {}) {
 	/**
 	 * @param {object} wrapped
 	 * @param {string[]} topics
-	 * @returns {Record<string, string> | null}
+	 * @returns {Promise<Record<string, string> | null>}
 	 */
-	function runSubscribeBatchHookV(wrapped, topics) {
+	async function runSubscribeBatchHookV(wrapped, topics) {
 		if (!userHandlers.subscribeBatch) return null;
 		let result;
 		try {
-			result = userHandlers.subscribeBatch(wrapped, topics, { platform: wrapped.getUserData()[WS_PLATFORM] });
+			result = await userHandlers.subscribeBatch(wrapped, topics, { platform: wrapped.getUserData()[WS_PLATFORM] });
 		} catch (err) {
 			console.error('[ws] subscribeBatch hook threw:', err);
 			/** @type {Record<string, string>} */
@@ -471,14 +503,14 @@ export default function uws(options = {}) {
 	 *
 	 * @param {object} wrapped
 	 * @param {string} topic
-	 * @returns {string | null}
+	 * @returns {Promise<string | null>}
 	 */
-	function runUserSubscribeGateV(wrapped, topic) {
-		const batchDenials = runSubscribeBatchHookV(wrapped, [topic]);
+	async function runUserSubscribeGateV(wrapped, topic) {
+		const batchDenials = await runSubscribeBatchHookV(wrapped, [topic]);
 		if (batchDenials !== null) {
 			return batchDenials[topic] ?? null;
 		}
-		return runSubscribeHookV(wrapped, topic);
+		return await runSubscribeHookV(wrapped, topic);
 	}
 
 	/**
@@ -644,8 +676,6 @@ export default function uws(options = {}) {
 				);
 			}
 
-			console.warn('[adapter-uws] Dev mode does not enforce allowedOrigins. ' +
-				'WebSocket origin checks only run in production.');
 			wss = new WebSocketServer({ noServer: true });
 			viteServer = server;
 			const root = server.config.root;
@@ -717,6 +747,17 @@ export default function uws(options = {}) {
 				for (const [k, v] of Object.entries(req.headers)) {
 					if (typeof v === 'string') headers[k] = v;
 					else if (Array.isArray(v)) headers[k] = v.join(', ');
+				}
+
+				if (AUTH_PATH_REQUIRE_ORIGIN_V && !isAuthOriginAccepted(headers, {
+					allowedOrigins: ALLOWED_ORIGINS_V,
+					isTls: false,
+					hasUpgradeHook: false
+				})) {
+					res.statusCode = 403;
+					res.setHeader('content-type', 'text/plain');
+					res.end('Origin not allowed');
+					return;
 				}
 
 				// Read body (capped at 64 KB; the hook rarely needs it).
@@ -808,6 +849,32 @@ export default function uws(options = {}) {
 			server.httpServer?.on('upgrade', async (req, socket, head) => {
 				const { pathname } = new URL(req.url || '', 'http://localhost');
 				if (pathname !== wsPath) return;
+
+				// Mirror production: enforce allowedOrigins on the dev WSS
+				// upgrade. The dev plugin runs on a localhost port that is
+				// reachable from any other process on the machine - a hostile
+				// page in another browser tab can connect just like it can to
+				// the production endpoint, so we apply the same gate. Apps
+				// that need to accept dev connections from arbitrary origins
+				// can set `allowedOrigins: '*'` or pass `devSkipOriginCheck:
+				// true` to the plugin.
+				if (!options.devSkipOriginCheck) {
+					/** @type {Record<string, string>} */
+					const upgHeaders = {};
+					for (const [k, v] of Object.entries(req.headers)) {
+						if (typeof v === 'string') upgHeaders[k] = v;
+						else if (Array.isArray(v)) upgHeaders[k] = v.join(', ');
+					}
+					if (!isOriginAllowed(upgHeaders['origin'], upgHeaders, {
+						allowedOrigins: ALLOWED_ORIGINS_V,
+						isTls: false,
+						hasUpgradeHook: !!userHandlers.upgrade
+					})) {
+						socket.write('HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\r\nOrigin not allowed');
+						socket.destroy();
+						return;
+					}
+				}
 
 				// If user has an upgrade handler, run it for auth
 				let userData = {};
@@ -939,23 +1006,45 @@ export default function uws(options = {}) {
 							const msg = JSON.parse(buf.toString());
 							if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
 								const ref = hasRefValue(msg.ref) ? msg.ref : null;
-								if (!isValidWireTopic(msg.topic)) {
+								if (!isValidWireTopic(msg.topic, ALLOW_NON_ASCII_TOPICS_V)) {
+									sendDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
+									return;
+								}
+								if (!ALLOW_SYSTEM_TOPIC_SUBSCRIBE_V && msg.topic.charCodeAt(0) === 95 && msg.topic.charCodeAt(1) === 95) {
 									sendDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
 									return;
 								}
 								const subs = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS];
-								const isNew = subs ? !subs.has(msg.topic) : true;
-								if (subs && isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+								// Mirror production: a missing or wrong-shape subs Set is
+								// a framework invariant violation, not an
+								// every-subscribe-bypasses-the-cap shrug. Asserting here
+								// makes dev/test fail the same way the production
+								// handler does, so a regression that breaks userData
+								// initialization shows up in the CI lane that always
+								// runs first.
+								assert(subs instanceof Set, 'subs.shape', null);
+								const isNew = !subs.has(msg.topic);
+								if (isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
 									sendDenied(ws, msg.topic, ref, 'RATE_LIMITED');
 									return;
 								}
-								const denial = runUserSubscribeGateV(wrapped, msg.topic);
+								const denial = await runUserSubscribeGateV(wrapped, msg.topic);
 								if (denial !== null) {
 									sendDenied(ws, msg.topic, ref, denial);
 									return;
 								}
+								// Post-await re-check: a concurrent subscribe may have
+								// raced through and added the topic during the gate await.
+								if (subs.has(msg.topic)) {
+									sendSubscribedV(ws, msg.topic, ref);
+									return;
+								}
+								if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+									sendDenied(ws, msg.topic, ref, 'RATE_LIMITED');
+									return;
+								}
 								subscriptions.get(ws)?.add(msg.topic);
-								subs?.add(msg.topic);
+								subs.add(msg.topic);
 								sendSubscribedV(ws, msg.topic, ref);
 								return;
 							}
@@ -984,29 +1073,42 @@ export default function uws(options = {}) {
 								const ref = hasRefValue(msg.ref) ? msg.ref : null;
 								const valid = [];
 								for (const topic of topics) {
-									if (!isValidWireTopic(topic)) {
+									if (!isValidWireTopic(topic, ALLOW_NON_ASCII_TOPICS_V)) {
+										sendDenied(ws, topic, ref, 'INVALID_TOPIC');
+										continue;
+									}
+									if (!ALLOW_SYSTEM_TOPIC_SUBSCRIBE_V && typeof topic === 'string' &&
+										topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) {
 										sendDenied(ws, topic, ref, 'INVALID_TOPIC');
 										continue;
 									}
 									valid.push(topic);
 								}
-								const batchDenials = runSubscribeBatchHookV(wrapped, valid);
+								const batchDenials = await runSubscribeBatchHookV(wrapped, valid);
+								const perTopicDenials = batchDenials === null && userHandlers.subscribe
+									? await Promise.all(valid.map((t) => runSubscribeHookV(wrapped, t)))
+									: null;
 								const udSubs = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS];
-								for (const topic of valid) {
-									const isNew = udSubs ? !udSubs.has(topic) : true;
-									if (udSubs && isNew && udSubs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
-										sendDenied(ws, topic, ref, 'RATE_LIMITED');
-										continue;
-									}
+								assert(udSubs instanceof Set, 'subs.shape-batch', null);
+								for (let i = 0; i < valid.length; i++) {
+									const topic = valid[i];
 									const denial = batchDenials !== null
 										? (batchDenials[topic] ?? null)
-										: runSubscribeHookV(wrapped, topic);
+										: (perTopicDenials !== null ? perTopicDenials[i] : null);
 									if (denial !== null) {
 										sendDenied(ws, topic, ref, denial);
 										continue;
 									}
+									if (udSubs.has(topic)) {
+										sendSubscribedV(ws, topic, ref);
+										continue;
+									}
+									if (udSubs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+										sendDenied(ws, topic, ref, 'RATE_LIMITED');
+										continue;
+									}
 									subs?.add(topic);
-									udSubs?.add(topic);
+									udSubs.add(topic);
 									sendSubscribedV(ws, topic, ref);
 								}
 								return;
@@ -1027,7 +1129,11 @@ export default function uws(options = {}) {
 								msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
 								if (userHandlers.resume) {
 									try {
-										userHandlers.resume(wrapped, {
+										// Mirror production: await the user hook so
+										// per-topic replay completes before the
+										// `resumed` ack tells the client to switch
+										// to live mode.
+										await userHandlers.resume(wrapped, {
 											sessionId: msg.sessionId,
 											lastSeenSeqs: msg.lastSeenSeqs,
 											platform: wrapped.getUserData()[WS_PLATFORM]

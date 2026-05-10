@@ -120,7 +120,8 @@
     "files",
     "plugins",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "MIGRATION.md"
   ],
   "scripts": {
     "test": "vitest run",
@@ -129,10 +130,10 @@
     "test:coverage": "node scripts/coverage.js"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "peerDependencies": {
-    "@sveltejs/kit": "^2.0.0",
+    "@sveltejs/kit": "^2.59.0",
     "svelte": "^4.0.0 || ^5.0.0",
     "ws": "^8.0.0"
   },
@@ -171,6 +172,6 @@
     "ws": "^8.19.0"
   },
   "optionalDependencies": {
-    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.60.0"
+    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.67.0"
   }
 }

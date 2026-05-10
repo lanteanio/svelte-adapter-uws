@@ -120,7 +120,7 @@ export interface CursorTracker<UserInfo = unknown> {
 	 * The hooks verify that the sender is subscribed to `__cursor:{topic}`
 	 * before processing. For private topics, gate access in your `subscribe`
 	 * hook by blocking `__cursor:{topic}` subscriptions from unauthorized
-	 * clients -- the message hook will then reject their cursor messages.
+	 * clients - the message hook will then reject their cursor messages.
 	 *
 	 * @example
 	 * ```js

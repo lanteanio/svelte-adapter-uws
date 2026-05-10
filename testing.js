@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -52,6 +52,12 @@ function envelope(topic, event, data, seq) {
  */
 export async function createTestServer(options = {}) {
 	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission } = options;
+	// Mirror production: block client-initiated subscribes to `__`-prefixed
+	// system topics by default. Tests that intentionally exercise system
+	// channels can opt in with `allowSystemTopicSubscribe: true`.
+	const ALLOW_SYSTEM_TOPIC_SUBSCRIBE_T = options.allowSystemTopicSubscribe === true;
+	// Mirror production: wire topics default to printable ASCII only.
+	const ALLOW_NON_ASCII_TOPICS_T = options.allowNonAsciiTopics === true;
 
 	// Same wiring shape as the production handler: a per-instance
 	// admission state instantiated once, consulted at the top of the
@@ -62,11 +68,11 @@ export async function createTestServer(options = {}) {
 
 	/** @param {unknown} ref @returns {ref is number | string} */
 	function hasRefT(ref) { return typeof ref === 'number' || typeof ref === 'string'; }
-	/** @param {any} ws @param {string} topic @returns {string | null} */
-	function runSubscribeHookT(ws, topic) {
+	/** @param {any} ws @param {string} topic @returns {Promise<string | null>} */
+	async function runSubscribeHookT(ws, topic) {
 		if (!handler.subscribe) return null;
 		try {
-			const result = handler.subscribe(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
+			const result = await handler.subscribe(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
 			if (result === false) return 'FORBIDDEN';
 			if (typeof result === 'string') return result;
 			return null;
@@ -75,12 +81,12 @@ export async function createTestServer(options = {}) {
 			return 'INTERNAL_ERROR';
 		}
 	}
-	/** @param {any} ws @param {string[]} topics @returns {Record<string, string> | null} */
-	function runSubscribeBatchHookT(ws, topics) {
+	/** @param {any} ws @param {string[]} topics @returns {Promise<Record<string, string> | null>} */
+	async function runSubscribeBatchHookT(ws, topics) {
 		if (!handler.subscribeBatch) return null;
 		let result;
 		try {
-			result = handler.subscribeBatch(ws, topics, { platform: ws.getUserData()[WS_PLATFORM] });
+			result = await handler.subscribeBatch(ws, topics, { platform: ws.getUserData()[WS_PLATFORM] });
 		} catch (err) {
 			console.error('[ws] subscribeBatch hook threw:', err);
 			/** @type {Record<string, string>} */
@@ -97,13 +103,13 @@ export async function createTestServer(options = {}) {
 		}
 		return denials;
 	}
-	/** @param {any} ws @param {string} topic @returns {string | null} */
-	function runUserSubscribeGateT(ws, topic) {
-		const batchDenials = runSubscribeBatchHookT(ws, [topic]);
+	/** @param {any} ws @param {string} topic @returns {Promise<string | null>} */
+	async function runUserSubscribeGateT(ws, topic) {
+		const batchDenials = await runSubscribeBatchHookT(ws, [topic]);
 		if (batchDenials !== null) {
 			return batchDenials[topic] ?? null;
 		}
-		return runSubscribeHookT(ws, topic);
+		return await runSubscribeHookT(ws, topic);
 	}
 	/** @param {any} ws @param {string} topic @param {number | string | null} ref */
 	function sendSubscribedT(ws, topic, ref) {
@@ -143,6 +149,7 @@ export async function createTestServer(options = {}) {
 	let messageWaiters = [];
 
 	const closeHookRegisteredT = !!handler.close;
+	let sendToAsyncWarnedT = false;
 	function bumpInT(ws, message) {
 		if (!closeHookRegisteredT) return;
 		const stats = ws.getUserData()[WS_STATS];
@@ -218,7 +225,19 @@ export async function createTestServer(options = {}) {
 			const msg = envelope(topic, event, data);
 			let count = 0;
 			for (const ws of wsConnections) {
-				if (filter(ws.getUserData())) {
+				const decision = filter(ws.getUserData());
+				if (decision && typeof decision.then === 'function') {
+					if (!sendToAsyncWarnedT) {
+						sendToAsyncWarnedT = true;
+						console.error(
+							'[adapter-uws/testing] platform.sendTo filter returned a Promise; treating as fail-closed.\n' +
+							'  Resolve filter inputs into userData from your `upgrade` hook so the\n' +
+							'  filter can read them synchronously.'
+						);
+					}
+					continue;
+				}
+				if (decision) {
 					sendOutboundT(ws, msg);
 					count++;
 				}
@@ -235,26 +254,31 @@ export async function createTestServer(options = {}) {
 		bufferedAmount(ws) {
 			try { return ws.getBufferedAmount(); } catch { return 0; }
 		},
-		subscribe(ws, topic) {
+		async subscribe(ws, topic) {
 			// Same contract as production platform.subscribe: runs the
 			// user's hook chain before the actual ws.subscribe so
 			// server-side test code that subscribes a connection on the
 			// user's behalf inherits the centralized auth gate. Returns
-			// null on success, denial reason string on failure.
-			if (!isValidWireTopic(topic)) return 'INVALID_TOPIC';
+			// null on success, denial reason string on failure. Awaits the
+			// user hook so async hooks gate correctly.
+			// Server-side caller: trust non-ASCII topics (matches platform.subscribe in production).
+			if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
 			const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
 			if (!(subs instanceof Set)) return 'INVALID_TOPIC';
 			if (subs.has(topic)) return null;
 			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
-			const denial = runUserSubscribeGateT(ws, topic);
+			const denial = await runUserSubscribeGateT(ws, topic);
 			if (denial !== null) return denial;
+			if (subs.has(topic)) return null;
+			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
 			ws.subscribe(topic);
 			subs.add(topic);
 			return null;
 		},
-		checkSubscribe(ws, topic) {
-			if (!isValidWireTopic(topic)) return 'INVALID_TOPIC';
-			return runUserSubscribeGateT(ws, topic);
+		async checkSubscribe(ws, topic) {
+			// Server-side caller: see platform.subscribe note above.
+			if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
+			return await runUserSubscribeGateT(ws, topic);
 		},
 		unsubscribe(ws, topic) {
 			const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
@@ -541,7 +565,7 @@ export async function createTestServer(options = {}) {
 			connectionWaiters = [];
 		},
 
-		message(ws, message, isBinary) {
+		async message(ws, message, isBinary) {
 			bumpInT(ws, message);
 			// Handle subscribe/unsubscribe from client store
 			if (!isBinary && message.byteLength < 8192) {
@@ -551,23 +575,40 @@ export async function createTestServer(options = {}) {
 						const msg = JSON.parse(Buffer.from(message).toString());
 						if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
 							const ref = hasRefT(msg.ref) ? msg.ref : null;
-							if (!isValidWireTopic(msg.topic)) {
+							if (!isValidWireTopic(msg.topic, ALLOW_NON_ASCII_TOPICS_T)) {
+								sendDeniedT(ws, msg.topic, ref, 'INVALID_TOPIC');
+								return;
+							}
+							if (!ALLOW_SYSTEM_TOPIC_SUBSCRIBE_T && msg.topic.charCodeAt(0) === 95 && msg.topic.charCodeAt(1) === 95) {
 								sendDeniedT(ws, msg.topic, ref, 'INVALID_TOPIC');
 								return;
 							}
 							const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
-							const isNew = subs ? !subs.has(msg.topic) : true;
-							if (subs && isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+							// Mirror production: a missing or wrong-shape subs Set is
+							// a framework invariant violation. Asserting here makes
+							// the test harness fail the same way the production
+							// handler does instead of silently bypassing the cap.
+							assert(subs instanceof Set, 'subs.shape', null);
+							const isNew = !subs.has(msg.topic);
+							if (isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
 								sendDeniedT(ws, msg.topic, ref, 'RATE_LIMITED');
 								return;
 							}
-							const denial = runUserSubscribeGateT(ws, msg.topic);
+							const denial = await runUserSubscribeGateT(ws, msg.topic);
 							if (denial !== null) {
 								sendDeniedT(ws, msg.topic, ref, denial);
 								return;
 							}
+							if (subs.has(msg.topic)) {
+								sendSubscribedT(ws, msg.topic, ref);
+								return;
+							}
+							if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+								sendDeniedT(ws, msg.topic, ref, 'RATE_LIMITED');
+								return;
+							}
 							ws.subscribe(msg.topic);
-							subs?.add(msg.topic);
+							subs.add(msg.topic);
 							sendSubscribedT(ws, msg.topic, ref);
 							return;
 						}
@@ -589,29 +630,42 @@ export async function createTestServer(options = {}) {
 							const ref = hasRefT(msg.ref) ? msg.ref : null;
 							const valid = [];
 							for (const topic of msg.topics.slice(0, 256)) {
-								if (!isValidWireTopic(topic)) {
+								if (!isValidWireTopic(topic, ALLOW_NON_ASCII_TOPICS_T)) {
+									sendDeniedT(ws, topic, ref, 'INVALID_TOPIC');
+									continue;
+								}
+								if (!ALLOW_SYSTEM_TOPIC_SUBSCRIBE_T && typeof topic === 'string' &&
+									topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) {
 									sendDeniedT(ws, topic, ref, 'INVALID_TOPIC');
 									continue;
 								}
 								valid.push(topic);
 							}
-							const batchDenials = runSubscribeBatchHookT(ws, valid);
+							const batchDenials = await runSubscribeBatchHookT(ws, valid);
+							const perTopicDenials = batchDenials === null && handler.subscribe
+								? await Promise.all(valid.map((t) => runSubscribeHookT(ws, t)))
+								: null;
 							const udSubs = ws.getUserData()[WS_SUBSCRIPTIONS];
-							for (const topic of valid) {
-								const isNew = udSubs ? !udSubs.has(topic) : true;
-								if (udSubs && isNew && udSubs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
-									sendDeniedT(ws, topic, ref, 'RATE_LIMITED');
-									continue;
-								}
+							assert(udSubs instanceof Set, 'subs.shape-batch', null);
+							for (let i = 0; i < valid.length; i++) {
+								const topic = valid[i];
 								const denial = batchDenials !== null
 									? (batchDenials[topic] ?? null)
-									: runSubscribeHookT(ws, topic);
+									: (perTopicDenials !== null ? perTopicDenials[i] : null);
 								if (denial !== null) {
 									sendDeniedT(ws, topic, ref, denial);
 									continue;
 								}
+								if (udSubs.has(topic)) {
+									sendSubscribedT(ws, topic, ref);
+									continue;
+								}
+								if (udSubs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+									sendDeniedT(ws, topic, ref, 'RATE_LIMITED');
+									continue;
+								}
 								ws.subscribe(topic);
-								udSubs?.add(topic);
+								udSubs.add(topic);
 								sendSubscribedT(ws, topic, ref);
 							}
 							return;
@@ -631,7 +685,11 @@ export async function createTestServer(options = {}) {
 							msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
 							if (handler.resume) {
 								try {
-									handler.resume(ws, {
+									// Mirror production: await the user hook so
+									// per-topic replay completes before the
+									// `resumed` ack tells the client to switch
+									// to live mode.
+									await handler.resume(ws, {
 										sessionId: msg.sessionId,
 										lastSeenSeqs: msg.lastSeenSeqs,
 										platform: ws.getUserData()[WS_PLATFORM]

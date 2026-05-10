@@ -17,6 +17,8 @@ import {
 	isValidWireTopic,
 	createScopedTopic,
 	isOriginAllowed,
+	isAuthOriginAccepted,
+	describeUnsafeSameOriginConfig,
 	createUpgradeAdmission,
 	resolveRequestId,
 	createChaosState,
@@ -26,7 +28,7 @@ import {
 	_resetAssertionCountsForTest
 } from '../files/utils.js';
 
-// -- parse_as_bytes ---------------------------------------------------------
+// - parse_as_bytes ---------------------------------------------------------
 
 describe('parse_as_bytes', () => {
 	it('parses plain numbers', () => {
@@ -72,9 +74,20 @@ describe('parse_as_bytes', () => {
 	it('returns 0 for empty string', () => {
 		expect(parse_as_bytes('')).toBe(0);
 	});
+
+	it('returns NaN for negative values (callers throw on NaN)', () => {
+		expect(parse_as_bytes('-1')).toBeNaN();
+		expect(parse_as_bytes('-100K')).toBeNaN();
+		expect(parse_as_bytes('-1G')).toBeNaN();
+	});
+
+	it('returns NaN for Infinity and -Infinity', () => {
+		expect(parse_as_bytes('Infinity')).toBeNaN();
+		expect(parse_as_bytes('-Infinity')).toBeNaN();
+	});
 });
 
-// -- parse_origin -----------------------------------------------------------
+// - parse_origin -----------------------------------------------------------
 
 describe('parse_origin', () => {
 	it('returns undefined for undefined', () => {
@@ -106,7 +119,7 @@ describe('parse_origin', () => {
 	});
 });
 
-// -- splitCookiesString -----------------------------------------------------
+// - splitCookiesString -----------------------------------------------------
 
 describe('splitCookiesString', () => {
 	it('returns array as-is', () => {
@@ -140,7 +153,7 @@ describe('splitCookiesString', () => {
 	});
 });
 
-// -- Cookie parsing (imported from files/cookies.js) ------------------------
+// - Cookie parsing (imported from files/cookies.js) ------------------------
 
 describe('parseCookies', () => {
 	it('returns empty object for falsy input', () => {
@@ -171,9 +184,33 @@ describe('parseCookies', () => {
 	it('handles invalid percent-encoding gracefully', () => {
 		expect(parseCookies('bad=%ZZ')).toEqual({ bad: '%ZZ' });
 	});
+
+	// Backed by Object.create(null): no Object.prototype chain, so a
+	// hostile request with a `__proto__` cookie cannot stamp properties
+	// on the prototype of the returned bag.
+	it('returns a null-prototype object', () => {
+		const cookies = parseCookies('a=1');
+		expect(Object.getPrototypeOf(cookies)).toBe(null);
+		// `toString`, `hasOwnProperty`, etc. are not inherited
+		expect(/** @type {any} */ (cookies).toString).toBeUndefined();
+		expect(/** @type {any} */ (cookies).hasOwnProperty).toBeUndefined();
+	});
+
+	it('does not pollute Object.prototype when given a `__proto__` cookie', () => {
+		const cookies = parseCookies('__proto__=evil; sid=abc');
+		expect(/** @type {any} */ ({}).polluted).toBeUndefined();
+		// The cookie is still readable as an own property of the bag
+		expect(cookies['__proto__']).toBe('evil');
+		expect(cookies.sid).toBe('abc');
+	});
+
+	it('returns a null-proto bag even on empty input', () => {
+		expect(Object.getPrototypeOf(parseCookies())).toBe(null);
+		expect(Object.getPrototypeOf(parseCookies(''))).toBe(null);
+	});
 });
 
-// -- MIME lookup ------------------------------------------------------------
+// - MIME lookup ------------------------------------------------------------
 
 describe('mimeLookup', () => {
 	it('returns correct MIME types', () => {
@@ -206,7 +243,7 @@ describe('mimeLookup', () => {
 	});
 });
 
-// -- decodePath (LRU decode cache) ------------------------------------------
+// - decodePath (LRU decode cache) ------------------------------------------
 // Inline copy of the internal handler.js function - same logic, fresh cache.
 
 function makeDecodePath() {
@@ -276,7 +313,7 @@ describe('decodePath', () => {
 	});
 });
 
-// -- esc and envelopePrefix --------------------------------------------------
+// - esc and envelopePrefix --------------------------------------------------
 // Inline copies of the internal handler.js functions.
 
 function esc(s) {
@@ -385,7 +422,7 @@ describe('envelopePrefix', () => {
 	});
 });
 
-// -- get_origin (PORT_HEADER double-port fix) -------------------------------
+// - get_origin (PORT_HEADER double-port fix) -------------------------------
 // This function uses module-level env state in handler.js so we test
 // a parameterized version here.
 
@@ -458,7 +495,7 @@ describe('get_origin', () => {
 	});
 });
 
-// -- Sensitive userData key detection ----------------------------------------
+// - Sensitive userData key detection ----------------------------------------
 // Inline copy of the detection predicate from the upgrade handler.
 
 const SENSITIVE_KEY_PATTERNS = ['token', 'secret', 'password', 'key', 'session', 'credential'];
@@ -501,7 +538,7 @@ describe('sensitive userData key detection', () => {
 	});
 });
 
-// -- Cache trim algorithm -----------------------------------------------------
+// - Cache trim algorithm -----------------------------------------------------
 // Inline copy of the "delete oldest half when at capacity" logic.
 
 function trimCache(cache, max) {
@@ -541,7 +578,7 @@ describe('cache trim (oldest-half eviction)', () => {
 	});
 });
 
-// -- Worker heartbeat timeout decision ----------------------------------------
+// - Worker heartbeat timeout decision ----------------------------------------
 // Inline copy of the predicate used in the primary thread's heartbeat interval.
 
 function isWorkerUnresponsive(lastHeartbeat, now, timeoutMs) {
@@ -576,7 +613,7 @@ describe('worker heartbeat timeout', () => {
 	});
 });
 
-// -- Sliding window rate estimate ---------------------------------------------
+// - Sliding window rate estimate ---------------------------------------------
 // Inline copy of the estimate formula used in the upgrade rate limiter.
 
 function slidingEstimate(entry, now, windowMs) {
@@ -636,7 +673,7 @@ describe('sliding window rate estimate', () => {
 	});
 });
 
-// -- Proportional jitter backoff ----------------------------------------------
+// - Proportional jitter backoff ----------------------------------------------
 // Inline copy of the delay formula from scheduleReconnect().
 
 function getReconnectDelay(attempt, base, max) {
@@ -679,7 +716,7 @@ describe('proportional jitter backoff', () => {
 	});
 });
 
-// -- Close code classification ------------------------------------------------
+// - Close code classification ------------------------------------------------
 
 describe('classifyCloseCode', () => {
 	/** @type {(code: number | undefined) => 'TERMINAL' | 'THROTTLE' | 'RETRY'} */
@@ -722,7 +759,7 @@ describe('classifyCloseCode', () => {
 	});
 });
 
-// -- Zombie connection detection ----------------------------------------------
+// - Zombie connection detection ----------------------------------------------
 // Inline copy of the predicate used in the activity timer in client.js.
 
 function isZombieConnection(lastServerMessage, now, timeoutMs) {
@@ -758,7 +795,7 @@ describe('zombie connection detection', () => {
 	});
 });
 
-// -- Content-Disposition for download-type static files ----------------------
+// - Content-Disposition for download-type static files ----------------------
 // Inline copy of the extension check and header-value builder in cacheDir().
 
 const DOWNLOAD_EXTENSIONS = new Set([
@@ -817,7 +854,7 @@ describe('content-disposition for download files', () => {
 	});
 });
 
-// -- SSR dedup predicate -------------------------------------------------------
+// - SSR dedup predicate -------------------------------------------------------
 // Inline copy of the canDedup predicate from handleSSR, isolated for unit testing.
 // Tests cover: which methods qualify, which headers disqualify, capacity limit.
 
@@ -883,22 +920,40 @@ describe('SSR dedup predicate', () => {
 	});
 });
 
-// -- SSR dedup key construction ------------------------------------------------
+// - SSR dedup key construction ------------------------------------------------
 
 describe('SSR dedup key', () => {
-	it('includes method and url separated by NUL', () => {
-		const key = 'GET' + '\0' + '/about?ref=123';
-		expect(key).toBe('GET\0/about?ref=123');
+	it('includes method, base_origin, and url separated by NUL', () => {
+		const key = 'GET' + '\0' + 'https://example.com' + '\0' + '/about?ref=123';
+		expect(key).toBe('GET\0https://example.com\0/about?ref=123');
 	});
 
 	it('GET and HEAD produce distinct keys for the same URL', () => {
-		const getKey = 'GET' + '\0' + '/page';
-		const headKey = 'HEAD' + '\0' + '/page';
+		const getKey = 'GET' + '\0' + 'https://example.com' + '\0' + '/page';
+		const headKey = 'HEAD' + '\0' + 'https://example.com' + '\0' + '/page';
 		expect(getKey).not.toBe(headKey);
+	});
+
+	// Virtual-hosting deployments serve multiple Host aliases off
+	// one uWS instance. Pre-fix, the dedup key was only `method + url`,
+	// so `tenantA.example/` and `tenantB.example/` collapsed to one
+	// shared SSR call - the second waiter received the leader's
+	// host-rendered response. SvelteKit's `request.url.host` flows
+	// into the rendered HTML, so the bug was a real cross-tenant leak.
+	it('different base_origins produce distinct keys for the same URL', () => {
+		const a = 'GET' + '\0' + 'https://tenantA.example' + '\0' + '/';
+		const b = 'GET' + '\0' + 'https://tenantB.example' + '\0' + '/';
+		expect(a).not.toBe(b);
+	});
+
+	it('http vs https for the same host produce distinct keys', () => {
+		const insecure = 'GET' + '\0' + 'http://example.com' + '\0' + '/';
+		const secure = 'GET' + '\0' + 'https://example.com' + '\0' + '/';
+		expect(insecure).not.toBe(secure);
 	});
 });
 
-// -- SSR dedup body size cap ---------------------------------------------------
+// - SSR dedup body size cap ---------------------------------------------------
 
 describe('SSR dedup body cap', () => {
 	const MAX = 512 * 1024; // 512 KB
@@ -919,7 +974,7 @@ describe('SSR dedup body cap', () => {
 	});
 });
 
-// -- SSR dedup Vary header exclusion ------------------------------------------
+// - SSR dedup Vary header exclusion ------------------------------------------
 // Inline copy of the Vary check added to the SSR dedup leader path.
 
 function isDedupExcludedByVary(varyHeader) {
@@ -967,7 +1022,7 @@ describe('SSR dedup Vary exclusion', () => {
 	});
 });
 
-// -- parseRange behavior -------------------------------------------------------
+// - parseRange behavior -------------------------------------------------------
 // Inline copy of parseRange from files/handler.js.
 
 // Inline copy of parseRange from files/handler.js.
@@ -1064,7 +1119,7 @@ describe('parseRange', () => {
 	});
 });
 
-// -- serveStatic multi-range fallback decision ---------------------------------
+// - serveStatic multi-range fallback decision ---------------------------------
 // Inline copy of the comma-check that gates parseRange in serveStatic.
 
 function shouldServeFullForRange(rangeHeader) {
@@ -1085,7 +1140,7 @@ describe('serveStatic multi-range fallback', () => {
 	});
 });
 
-// -- platform.publish() clustered return value ---------------------------------
+// - platform.publish() clustered return value ---------------------------------
 // Inline copy of the return-value logic.
 
 function publishResult(localResult, relayed) {
@@ -1110,7 +1165,7 @@ describe('platform.publish clustered return value', () => {
 	});
 });
 
-// -- resolveClientIp ----------------------------------------------------------
+// - resolveClientIp ----------------------------------------------------------
 // Inline copy of the helper added to handler.js.
 
 function makeResolveClientIp(address_header, xff_depth) {
@@ -1171,7 +1226,7 @@ describe('resolveClientIp', () => {
 	});
 });
 
-// -- serializeCookie --------------------------------------------------------
+// - serializeCookie --------------------------------------------------------
 
 describe('serializeCookie', () => {
 	it('serializes a minimal cookie', () => {
@@ -1249,9 +1304,53 @@ describe('serializeCookie', () => {
 		});
 		expect(out).toBe('session=abc.def; Path=/; Max-Age=604800; HttpOnly; Secure; SameSite=Lax');
 	});
+
+	// Pre-fix, path/domain were concatenated verbatim. An attacker-
+	// influenced string with CRLF, `;`, or whitespace could splice an
+	// HTTP-response-splitting sequence or strip security attributes.
+	describe('rejects path/domain with structurally hostile chars', () => {
+		it('throws when path contains CR/LF', () => {
+			expect(() => serializeCookie('s', 'v', { path: '/foo\r\nX-Evil: pwned' }))
+				.toThrow(/Invalid Path/);
+		});
+		it('throws when domain contains CR/LF', () => {
+			expect(() => serializeCookie('s', 'v', { domain: 'evil.com\r\nSet-Cookie: stolen=1' }))
+				.toThrow(/Invalid Domain/);
+		});
+		it('throws when path contains a smuggled attribute', () => {
+			expect(() => serializeCookie('s', 'v', { path: '/a; HttpOnly; Domain=victim.com' }))
+				.toThrow(/Invalid Path/);
+		});
+		it('throws when domain contains a smuggled attribute', () => {
+			expect(() => serializeCookie('s', 'v', { domain: 'a.com; HttpOnly' }))
+				.toThrow(/Invalid Domain/);
+		});
+		it('throws on bare CR or LF in path', () => {
+			expect(() => serializeCookie('s', 'v', { path: '/foo\rbar' })).toThrow(/Invalid Path/);
+			expect(() => serializeCookie('s', 'v', { path: '/foo\nbar' })).toThrow(/Invalid Path/);
+		});
+		it('throws on whitespace in domain', () => {
+			expect(() => serializeCookie('s', 'v', { domain: 'a.com b.com' })).toThrow(/Invalid Domain/);
+		});
+		it('throws on a `,` in path (Set-Cookie split vector)', () => {
+			expect(() => serializeCookie('s', 'v', { path: '/a,/b' })).toThrow(/Invalid Path/);
+		});
+		it('throws on non-string path/domain', () => {
+			expect(() => serializeCookie('s', 'v', { path: /** @type {any} */ (42) })).toThrow(/Invalid Path/);
+			expect(() => serializeCookie('s', 'v', { domain: /** @type {any} */ (true) })).toThrow(/Invalid Domain/);
+		});
+		it('still accepts legitimate paths with `/`, `.`, `-`, alphanumeric', () => {
+			expect(serializeCookie('s', 'v', { path: '/api/v1' })).toContain('Path=/api/v1');
+			expect(serializeCookie('s', 'v', { path: '/users/123' })).toContain('Path=/users/123');
+		});
+		it('still accepts legitimate domains', () => {
+			expect(serializeCookie('s', 'v', { domain: 'example.com' })).toContain('Domain=example.com');
+			expect(serializeCookie('s', 'v', { domain: '.app.example.com' })).toContain('Domain=.app.example.com');
+		});
+	});
 });
 
-// -- createCookies ----------------------------------------------------------
+// - createCookies ----------------------------------------------------------
 
 describe('createCookies', () => {
 	it('reads cookies from the request Cookie header', () => {
@@ -1321,7 +1420,7 @@ describe('createCookies', () => {
 	});
 });
 
-// -- writeChunkWithBackpressure ---------------------------------------------
+// - writeChunkWithBackpressure ---------------------------------------------
 
 /**
  * Build a fake uWS HttpResponse that records every method call in order.
@@ -1434,7 +1533,7 @@ describe('writeChunkWithBackpressure', () => {
 	});
 });
 
-// -- drainCoalesced ---------------------------------------------------------
+// - drainCoalesced ---------------------------------------------------------
 
 describe('drainCoalesced', () => {
 	const SUCCESS = 0;
@@ -1572,7 +1671,7 @@ describe('drainCoalesced', () => {
 	});
 });
 
-// -- computePressureReason --------------------------------------------------
+// - computePressureReason --------------------------------------------------
 
 describe('computePressureReason', () => {
 	const thresholds = {
@@ -1661,7 +1760,7 @@ describe('computePressureReason', () => {
 	});
 });
 
-// -- nextTopicSeq -----------------------------------------------------------
+// - nextTopicSeq -----------------------------------------------------------
 
 describe('nextTopicSeq', () => {
 	it('starts at 1 for an unseen topic', () => {
@@ -1699,7 +1798,7 @@ describe('nextTopicSeq', () => {
 	});
 });
 
-// -- completeEnvelope -------------------------------------------------------
+// - completeEnvelope -------------------------------------------------------
 
 describe('completeEnvelope', () => {
 	const prefix = '{"topic":"chat","event":"created","data":';
@@ -1752,7 +1851,7 @@ describe('completeEnvelope', () => {
 	});
 });
 
-// -- esc --------------------------------------------------------------------
+// - esc --------------------------------------------------------------------
 
 describe('esc', () => {
 	it('quotes a plain identifier', () => {
@@ -1804,7 +1903,7 @@ describe('esc', () => {
 	});
 });
 
-// -- isValidWireTopic -------------------------------------------------------
+// - isValidWireTopic -------------------------------------------------------
 
 describe('isValidWireTopic', () => {
 	it('accepts a plain topic', () => {
@@ -1848,13 +1947,70 @@ describe('isValidWireTopic', () => {
 	it('accepts space and printable chars at the boundary', () => {
 		expect(isValidWireTopic(' ')).toBe(true);
 		expect(isValidWireTopic('!')).toBe(true);
-		expect(isValidWireTopic('"')).toBe(true);
-		expect(isValidWireTopic('\\')).toBe(true);
-		expect(isValidWireTopic('\x7f')).toBe(true);
+		expect(isValidWireTopic('~')).toBe(true);
 	});
+
+	it('rejects DEL (0x7F) outside the printable-ASCII window by default', () => {
+		expect(isValidWireTopic('\x7f')).toBe(false);
+		// DEL falls outside printable-ASCII (0x20-0x7E) so the strict
+		// default rejects it; the non-ASCII opt-in relaxes the upper
+		// bound, matching pre-fix behavior for callers that need it.
+		expect(isValidWireTopic('\x7f', true)).toBe(true);
+	});
+
+	// The wire-accept set must match esc()'s rejection set. Pre-fix, a
+	// client could subscribe to topic '"' (passes wire), and any later
+	// platform.publish('"', ...) crashed because envelopePrefix calls
+	// esc(topic) which throws on charCode 34/92.
+	it('rejects topics containing " or \\\\ (matches esc() rejection set)', () => {
+		expect(isValidWireTopic('"')).toBe(false);
+		expect(isValidWireTopic('\\')).toBe(false);
+		expect(isValidWireTopic('a"b')).toBe(false);
+		expect(isValidWireTopic('a\\b')).toBe(false);
+		expect(isValidWireTopic('chat\\room')).toBe(false);
+	});
+
+	// Default (allowNonAscii=false) rejects anything outside printable
+	// ASCII so look-alike attacks on dashboard renderers and admin UIs
+	// are closed at the wire boundary. The opt-in second arg restores
+	// pre-fix behavior for apps that legitimately use non-ASCII names.
+	describe('non-ASCII rejection (default printable-ASCII)', () => {
+		it('rejects U+2028 line separator and U+2029 paragraph separator', () => {
+			expect(isValidWireTopic('chat\u2028')).toBe(false);
+			expect(isValidWireTopic('chat\u2029')).toBe(false);
+		});
+
+		it('rejects U+202E right-to-left override (BiDi spoofing)', () => {
+			expect(isValidWireTopic('admin\u202e')).toBe(false);
+		});
+
+		it('rejects U+FEFF byte-order mark', () => {
+			expect(isValidWireTopic('chat\ufeff')).toBe(false);
+			expect(isValidWireTopic('\ufeffchat')).toBe(false);
+		});
+
+		it('rejects ordinary non-ASCII characters by default', () => {
+			expect(isValidWireTopic('chat:Jose')).toBe(true);
+			expect(isValidWireTopic('chat:Jos\u00e9')).toBe(false);
+			expect(isValidWireTopic('chat:emoji-room')).toBe(true);
+			expect(isValidWireTopic('chat:emoji-\u{1F600}')).toBe(false);
+		});
+
+		it('accepts non-ASCII when explicitly opted in', () => {
+			expect(isValidWireTopic('chat\u2028', true)).toBe(true);
+			expect(isValidWireTopic('chat:Jos\u00e9', true)).toBe(true);
+		});
+
+		it('still rejects control bytes / quote / backslash even with allowNonAscii=true', () => {
+			expect(isValidWireTopic('chat\x00', true)).toBe(false);
+			expect(isValidWireTopic('chat"x', true)).toBe(false);
+			expect(isValidWireTopic('chat\\x', true)).toBe(false);
+		});
+	});
+
 });
 
-// -- createScopedTopic ------------------------------------------------------
+// - createScopedTopic ------------------------------------------------------
 
 describe('createScopedTopic', () => {
 	function recorder() {
@@ -1935,7 +2091,7 @@ describe('createScopedTopic', () => {
 	});
 });
 
-// -- isOriginAllowed --------------------------------------------------------
+// - isOriginAllowed --------------------------------------------------------
 
 describe('isOriginAllowed', () => {
 	const baseCtx = { isTls: false, hasUpgradeHook: false };
@@ -2096,7 +2252,7 @@ describe('isOriginAllowed', () => {
 	});
 });
 
-// -- createUpgradeAdmission ---------------------------------------------------
+// - createUpgradeAdmission ---------------------------------------------------
 
 describe('createUpgradeAdmission', () => {
 	describe('disabled (defaults)', () => {
@@ -2216,7 +2372,7 @@ describe('createUpgradeAdmission', () => {
 	});
 });
 
-// -- computeTopPublishers ----------------------------------------------------
+// - computeTopPublishers ----------------------------------------------------
 
 describe('computeTopPublishers', () => {
 	const noLimits = { topicPublishRatePerSec: false, topicPublishBytesPerSec: false };
@@ -2307,7 +2463,7 @@ describe('computeTopPublishers', () => {
 	});
 });
 
-// -- resolveRequestId -------------------------------------------------------
+// - resolveRequestId -------------------------------------------------------
 
 describe('resolveRequestId', () => {
 	it('returns null for non-string inputs', () => {
@@ -2360,7 +2516,7 @@ describe('resolveRequestId', () => {
 	});
 });
 
-// -- createChaosState -------------------------------------------------------
+// - createChaosState -------------------------------------------------------
 
 describe('createChaosState', () => {
 	it('starts inactive', () => {
@@ -2485,7 +2641,7 @@ describe('createChaosState', () => {
 	});
 });
 
-// -- wrapBatchEnvelope ------------------------------------------------------
+// - wrapBatchEnvelope ------------------------------------------------------
 
 describe('wrapBatchEnvelope', () => {
 	it('produces a {type:"batch",events:[]} frame for an empty list', () => {
@@ -2533,7 +2689,7 @@ describe('wrapBatchEnvelope', () => {
 	});
 });
 
-// -- collapseByCoalesceKey --------------------------------------------------
+// - collapseByCoalesceKey --------------------------------------------------
 
 describe('collapseByCoalesceKey', () => {
 	it('returns the input unchanged when no event carries a coalesceKey', () => {
@@ -2609,7 +2765,7 @@ describe('collapseByCoalesceKey', () => {
 	});
 });
 
-// -- Public re-export surface from `./testing` ------------------------------
+// - Public re-export surface from `./testing` ------------------------------
 // Locks the curated set of helpers and slot constants so a refactor that
 // silently drops one breaks here instead of in a downstream package.
 
@@ -2668,7 +2824,7 @@ describe('public re-exports from svelte-adapter-uws/testing', () => {
 	});
 });
 
-// -- assert / devAssert ----------------------------------------------------
+// - assert / devAssert ----------------------------------------------------
 
 describe('assert', () => {
 	beforeEach(() => {
@@ -2745,5 +2901,223 @@ describe('devAssert', () => {
 		} catch (err) {
 			expect(err.context).toEqual({ which: 'thing' });
 		}
+	});
+});
+
+// - isAuthOriginAccepted (CSRF defense for /__ws/auth) ----------------------
+
+describe('isAuthOriginAccepted', () => {
+	const baseCtx = {
+		allowedOrigins: 'same-origin',
+		isTls: false,
+		hasUpgradeHook: false
+	};
+
+	it('rejects bare POST with no headers', () => {
+		expect(isAuthOriginAccepted({}, baseCtx)).toBe(false);
+	});
+
+	it('rejects POST with only host (no Origin, no XHR header)', () => {
+		expect(isAuthOriginAccepted({ host: 'app.example' }, baseCtx)).toBe(false);
+	});
+
+	it('accepts POST with x-requested-with: XMLHttpRequest', () => {
+		expect(isAuthOriginAccepted(
+			{ host: 'app.example', 'x-requested-with': 'XMLHttpRequest' },
+			baseCtx
+		)).toBe(true);
+	});
+
+	it('accepts x-requested-with case-insensitively', () => {
+		expect(isAuthOriginAccepted(
+			{ host: 'app.example', 'x-requested-with': 'xmlhttprequest' },
+			baseCtx
+		)).toBe(true);
+		expect(isAuthOriginAccepted(
+			{ host: 'app.example', 'x-requested-with': 'XmlHttpRequest' },
+			baseCtx
+		)).toBe(true);
+	});
+
+	it('rejects when x-requested-with has a different value', () => {
+		expect(isAuthOriginAccepted(
+			{ host: 'app.example', 'x-requested-with': 'fetch' },
+			baseCtx
+		)).toBe(false);
+	});
+
+	it('accepts POST with Sec-Fetch-Site: same-origin', () => {
+		expect(isAuthOriginAccepted(
+			{ host: 'app.example', 'sec-fetch-site': 'same-origin' },
+			baseCtx
+		)).toBe(true);
+	});
+
+	it('rejects POST with Sec-Fetch-Site: cross-site', () => {
+		expect(isAuthOriginAccepted(
+			{ host: 'app.example', 'sec-fetch-site': 'cross-site' },
+			baseCtx
+		)).toBe(false);
+	});
+
+	it('rejects POST with Sec-Fetch-Site: same-site (different subdomain)', () => {
+		// Browsers stamp `same-site` for same-eTLD+1 cross-subdomain requests
+		// (e.g. evil.app.example -> app.example). The auth endpoint refuses
+		// this; only `same-origin` is accepted via the Sec-Fetch-Site path.
+		expect(isAuthOriginAccepted(
+			{ host: 'app.example', 'sec-fetch-site': 'same-site' },
+			baseCtx
+		)).toBe(false);
+	});
+
+	it('accepts POST with matching same-origin Origin header', () => {
+		expect(isAuthOriginAccepted(
+			{ host: 'app.example', origin: 'http://app.example' },
+			baseCtx
+		)).toBe(true);
+	});
+
+	it('rejects POST with cross-origin Origin header', () => {
+		expect(isAuthOriginAccepted(
+			{ host: 'app.example', origin: 'https://evil.example' },
+			baseCtx
+		)).toBe(false);
+	});
+
+	it('accepts when allowedOrigins is "*" and Origin is present', () => {
+		expect(isAuthOriginAccepted(
+			{ host: 'app.example', origin: 'https://anything.example' },
+			{ ...baseCtx, allowedOrigins: '*' }
+		)).toBe(true);
+	});
+
+	it('accepts when Origin is in allowedOrigins array', () => {
+		expect(isAuthOriginAccepted(
+			{ host: 'app.example', origin: 'https://app.example' },
+			{ ...baseCtx, allowedOrigins: ['https://app.example'] }
+		)).toBe(true);
+	});
+
+	it('rejects when Origin is missing even if upgrade hook is set on the underlying check', () => {
+		// hasUpgradeHook is forced false inside isAuthOriginAccepted so the
+		// auth endpoint cannot rely on the upgrade hook to authenticate
+		// non-browser callers; only x-requested-with / Sec-Fetch-Site /
+		// matching Origin can authorize this endpoint.
+		expect(isAuthOriginAccepted(
+			{ host: 'app.example' },
+			{ ...baseCtx, hasUpgradeHook: true }
+		)).toBe(false);
+	});
+});
+
+// - describeUnsafeSameOriginConfig (startup misconfig detector) -----------
+
+describe('describeUnsafeSameOriginConfig', () => {
+	const safeBase = {
+		allowedOrigins: 'same-origin',
+		hasOriginEnv: false,
+		hasHostHeader: false,
+		isTls: false,
+		hasUpgradeHook: false,
+		optOut: false
+	};
+
+	it('returns null for the safe defaults: allowedOrigins is "*"', () => {
+		expect(describeUnsafeSameOriginConfig({ ...safeBase, allowedOrigins: '*' })).toBeNull();
+	});
+
+	it('returns null for explicit allowlist (not same-origin policy)', () => {
+		expect(describeUnsafeSameOriginConfig({
+			...safeBase,
+			allowedOrigins: ['https://app.example']
+		})).toBeNull();
+	});
+
+	it('returns null when ORIGIN env is set (host pin via fixed origin)', () => {
+		expect(describeUnsafeSameOriginConfig({ ...safeBase, hasOriginEnv: true })).toBeNull();
+	});
+
+	it('returns null when HOST_HEADER env is set (host pin via trusted proxy header)', () => {
+		expect(describeUnsafeSameOriginConfig({ ...safeBase, hasHostHeader: true })).toBeNull();
+	});
+
+	it('returns null when isTls (native TLS terminates the connection)', () => {
+		expect(describeUnsafeSameOriginConfig({ ...safeBase, isTls: true })).toBeNull();
+	});
+
+	it('returns null when upgrade hook is present (hook authenticates the connection)', () => {
+		expect(describeUnsafeSameOriginConfig({ ...safeBase, hasUpgradeHook: true })).toBeNull();
+	});
+
+	it('returns null when explicitly opted out', () => {
+		expect(describeUnsafeSameOriginConfig({ ...safeBase, optOut: true })).toBeNull();
+	});
+
+	it('returns an error string for the bare misconfig (no host pin, no upgrade hook)', () => {
+		const err = describeUnsafeSameOriginConfig(safeBase);
+		expect(typeof err).toBe('string');
+		expect(err).toMatch(/same-origin/);
+		expect(err).toMatch(/ORIGIN env unset/);
+		expect(err).toMatch(/unsafeSameOriginWithoutHostPin/);
+	});
+});
+
+// - BREACH defense: credentialed requests skip dynamic compression ----------
+// Inline copy of the credential-detection predicate from files/handler.js.
+// The handler computes `respAcceptEncoding`, which is later passed to
+// writeResponse(); writeResponse() compresses only when its
+// `acceptEncoding` argument is truthy. Suppressing the value to '' for
+// credentialed requests therefore disables compression on the BREACH attack
+// surface without touching the writer.
+function deriveAcceptEncodingForResponse(headers, optInCompressCredentialed) {
+	const isCredentialedRequest = !!(headers.cookie || headers.authorization);
+	return (isCredentialedRequest && !optInCompressCredentialed)
+		? ''
+		: headers['accept-encoding'];
+}
+
+describe('BREACH defense: dynamic compression skipped for credentialed responses', () => {
+	it('passes accept-encoding through for an anonymous request', () => {
+		expect(deriveAcceptEncodingForResponse(
+			{ 'accept-encoding': 'br, gzip' },
+			false
+		)).toBe('br, gzip');
+	});
+
+	it('suppresses accept-encoding when a Cookie header is present', () => {
+		expect(deriveAcceptEncodingForResponse(
+			{ cookie: 'sid=abc', 'accept-encoding': 'br, gzip' },
+			false
+		)).toBe('');
+	});
+
+	it('suppresses accept-encoding when an Authorization header is present', () => {
+		expect(deriveAcceptEncodingForResponse(
+			{ authorization: 'Bearer x', 'accept-encoding': 'br, gzip' },
+			false
+		)).toBe('');
+	});
+
+	it('suppresses accept-encoding when both Cookie and Authorization are present', () => {
+		expect(deriveAcceptEncodingForResponse(
+			{ cookie: 'sid=abc', authorization: 'Bearer x', 'accept-encoding': 'gzip' },
+			false
+		)).toBe('');
+	});
+
+	it('opt-in compressCredentialedResponses=true restores the original accept-encoding', () => {
+		expect(deriveAcceptEncodingForResponse(
+			{ cookie: 'sid=abc', 'accept-encoding': 'br, gzip' },
+			true
+		)).toBe('br, gzip');
+		expect(deriveAcceptEncodingForResponse(
+			{ authorization: 'Bearer x', 'accept-encoding': 'gzip' },
+			true
+		)).toBe('gzip');
+	});
+
+	it('returns undefined when no accept-encoding header was sent (no compression possible)', () => {
+		expect(deriveAcceptEncodingForResponse({}, false)).toBeUndefined();
+		expect(deriveAcceptEncodingForResponse({ cookie: 'sid=abc' }, false)).toBe('');
 	});
 });

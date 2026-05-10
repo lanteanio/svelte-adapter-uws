@@ -9,6 +9,14 @@
  * Zero impact on the adapter core - this is a standalone module that
  * wraps the existing platform.publish() and platform.send() APIs.
  *
+ * MULTI-TENANT NOTE
+ * The replay buffer is keyed by the topic name verbatim. In a single-
+ * process multi-tenant deployment, two tenants publishing to the same
+ * topic name share the SAME replay buffer; tenant A's reconnects can
+ * pick up tenant B's messages. Apps must namespace topic names with
+ * tenant scope. Same recommendation for the `presence`, `groups`, and
+ * `cursor` plugins.
+ *
  * @module svelte-adapter-uws/plugins/replay
  */
 

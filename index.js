@@ -17,7 +17,7 @@ const DEFAULT_WS_HANDLER = '// Built-in: subscribe/unsubscribe handled by the ru
  * Scan a bundled WS handler for `upgradeResponse(..., { 'set-cookie': ... })`
  * usage. Emits a loud warning at build time because Cloudflare Tunnel and some
  * other strict edge proxies silently drop WebSocket connections whose 101
- * response carries Set-Cookie -- symptom is 1006 TCP FIN immediately after
+ * response carries Set-Cookie - symptom is 1006 TCP FIN immediately after
  * open fires server-side. The recommended fix is the `authenticate` hook.
  *
  * @param {string} source
@@ -302,7 +302,62 @@ export default function (opts = {}) {
 				upgradeRateLimit: websocket?.upgradeRateLimit ?? 10,
 				upgradeRateLimitWindow: websocket?.upgradeRateLimitWindow ?? 10,
 				upgradeAdmission: websocket?.upgradeAdmission,
-				pressure: websocket?.pressure
+				pressure: websocket?.pressure,
+				// Wire-level subscribes to '__'-prefixed system topics
+				// (e.g. '__signal:userId', '__rpc', plugin '__presence:*'
+				// '__group:*' '__replay:*') are reserved for internal
+				// framework / plugin use. Default off; set to `true` only
+				// for advanced apps that intentionally let clients listen
+				// on framework-internal channels.
+				allowSystemTopicSubscribe: websocket?.allowSystemTopicSubscribe === true,
+				// Wire-level subscribe topics default to printable ASCII
+				// only (0x20-0x7E, minus the always-illegal `"` and `\\`).
+				// This closes Unicode line separators, RTL override, and
+				// the byte-order mark - all of which survive the wire
+				// and surprise log dashboards / admin tools that render
+				// topics back to a human. Apps that legitimately use
+				// non-ASCII topic names can opt back in.
+				allowNonAsciiTopics: websocket?.allowNonAsciiTopics === true,
+				// Cross-worker relay HMAC defense. When set to a string of
+				// at least 16 characters, every relay envelope leaving
+				// this worker carries an HMAC-SHA256 tag and the
+				// receiving worker refuses any envelope whose tag does
+				// not match. The secret must reach every worker (env
+				// var, workerData, etc.) - the framework cannot
+				// auto-generate a value that is shared across workers.
+				// Defends against an adjacent process injecting forged
+				// messages into the worker_threads relay (typically
+				// reachable only post-compromise, hence opt-in).
+				workerRelayHmacSecret: websocket?.workerRelayHmacSecret
+				// CSRF defense for the `/__ws/auth` POST endpoint. By
+				// default, the request must carry one of:
+				//   - `x-requested-with: XMLHttpRequest`
+				//   - `Sec-Fetch-Site: same-origin`
+				//   - an `Origin` header matching `allowedOrigins`
+				// Apps that need to accept this endpoint from native
+				// (non-browser) clients without these headers can set
+				// `authPathRequireOrigin: false` here.
+				authPathRequireOrigin: websocket?.authPathRequireOrigin !== false,
+				// BREACH defense: dynamic compression of credentialed
+				// responses turns the response length into a side channel
+				// that leaks any secret reflected alongside attacker
+				// input. Compression is skipped on every request that
+				// carries a `Cookie` or `Authorization` header. Apps that
+				// have audited their reflected-input surface (random
+				// per-response masking, no secrets reflected with attacker
+				// input) can opt back in by setting
+				// `compressCredentialedResponses: true`.
+				compressCredentialedResponses: websocket?.compressCredentialedResponses === true,
+				// When `allowedOrigins: 'same-origin'` is set without any
+				// fronting trust to pin Host against (no ORIGIN env, no
+				// HOST_HEADER env, no native TLS, no upgrade() hook), the
+				// runtime refuses to start because the same-origin check
+				// then compares two attacker-controlled headers and
+				// trivially passes for any non-browser scripted client.
+				// Apps that have audited this and want the previous
+				// warn-only behavior can set
+				// `unsafeSameOriginWithoutHostPin: true`.
+				unsafeSameOriginWithoutHostPin: websocket?.unsafeSameOriginWithoutHostPin === true
 			};
 
 			// Scan the bundled WS handler for `upgradeResponse(..., { 'set-cookie': ... })`

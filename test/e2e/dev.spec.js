@@ -5,7 +5,7 @@ import { DEV_PORT } from './ports.js';
 
 const WS_URL = `ws://localhost:${DEV_PORT}/ws`;
 
-// -- Helpers ------------------------------------------------------------------
+// - Helpers ------------------------------------------------------------------
 
 /** Connect a Node.js ws client and wait for open. */
 function connectWs(url = WS_URL) {
@@ -59,7 +59,7 @@ function collect(ws, durationMs = 1000) {
 	});
 }
 
-// -- SSR & HTTP ---------------------------------------------------------------
+// - SSR & HTTP ---------------------------------------------------------------
 
 test.describe('SSR and static files', () => {
 	test('renders the page with SSR data', async ({ page }) => {
@@ -75,7 +75,7 @@ test.describe('SSR and static files', () => {
 	});
 });
 
-// -- WebSocket (Node.js ws client) --------------------------------------------
+// - WebSocket (Node.js ws client) --------------------------------------------
 
 test.describe('WebSocket pub/sub via ws client', () => {
 	test('subscribe and receive published messages', async () => {
@@ -85,7 +85,7 @@ test.describe('WebSocket pub/sub via ws client', () => {
 		// Give the subscription a moment to register
 		await new Promise((r) => setTimeout(r, 100));
 
-		// Open a second client -- the hooks.ws.js open handler publishes to test-topic
+		// Open a second client - the hooks.ws.js open handler publishes to test-topic
 		const trigger = await connectWs();
 
 		const msg = await waitFor(client, (m) => m.event === 'connected');
@@ -167,7 +167,7 @@ test.describe('WebSocket pub/sub via ws client', () => {
 	});
 });
 
-// -- Upgrade handler (auth) ---------------------------------------------------
+// - Upgrade handler (auth) ---------------------------------------------------
 
 test.describe('WebSocket platform API coverage', () => {
 	test('sendTo delivers only to matching connections', async () => {
@@ -267,7 +267,7 @@ test.describe('WebSocket upgrade handler', () => {
 	});
 });
 
-// -- Browser client (Playwright) ----------------------------------------------
+// - Browser client (Playwright) ----------------------------------------------
 
 test.describe('browser client.js', () => {
 	/** @type {any} */

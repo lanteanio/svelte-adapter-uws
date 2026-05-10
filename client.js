@@ -1020,7 +1020,7 @@ function createConnection(options) {
 			// Flush queued messages. Each entry was already serialized by
 			// `serializeForSend` at enqueue time, so strings reach the wire
 			// as text frames and ArrayBuffer / ArrayBufferView entries reach
-			// the wire as binary frames -- no per-flush type branching needed.
+			// the wire as binary frames - no per-flush type branching needed.
 			while (sendQueue.length > 0) {
 				const msg = sendQueue.shift();
 				if (debug) console.log('[ws] flush ->', msg);

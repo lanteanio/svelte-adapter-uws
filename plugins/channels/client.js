@@ -3,7 +3,7 @@
  *
  * Scopes a topic's event subscriptions into a single object and validates
  * event names at call time. The runtime behavior is identical to calling
- * `on()` directly -- this is a convenience wrapper that catches typos
+ * `on()` directly - this is a convenience wrapper that catches typos
  * early and keeps topic strings DRY.
  *
  * @module svelte-adapter-uws/plugins/channels/client

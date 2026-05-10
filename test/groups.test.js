@@ -107,7 +107,7 @@ describe('groups plugin - server', () => {
 			expect(() => group.join(ws, platform, 'superuser')).toThrow('invalid role');
 		});
 
-		it('is idempotent -- joining twice returns true, no extra broadcast', () => {
+		it('is idempotent - joining twice returns true, no extra broadcast', () => {
 			const ws = mockWs();
 			group.join(ws, platform);
 			const pubCount = platform.published.length;

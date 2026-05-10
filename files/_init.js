@@ -1,13 +1,13 @@
 // Initialize SvelteKit's Server BEFORE the ws-handler module is evaluated.
 //
 // $env/dynamic/private and $env/dynamic/public are runtime-populated by
-// SvelteKit's Server.init({ env }) call -- until init runs, the resolved
+// SvelteKit's Server.init({ env }) call - until init runs, the resolved
 // `private_env` / `public_env` proxies are empty objects. If a user's
 // hooks.ws / src/lib/server/* module reads `env.X` at module-load time
 // (the default for `import { env } from '$env/dynamic/private'` followed
 // by a top-level `env.DATABASE_URL` read), those reads see empty values
 // when the ws-handler chunk is evaluated during handler.js's static
-// import resolution -- because Server.init in handler.js's body runs
+// import resolution - because Server.init in handler.js's body runs
 // AFTER all imports' modules have been fully evaluated.
 //
 // Putting Server.init in this side-effect-bearing module and importing

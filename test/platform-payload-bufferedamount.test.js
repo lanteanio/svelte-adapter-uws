@@ -70,7 +70,7 @@ describeUWS('platform.bufferedAmount', () => {
 
 	it('returns a non-negative number after publishing to a subscriber', async () => {
 		// Real-world value depends on kernel scheduling; the contract is
-		// "non-negative number, never throws" -- pin both.
+		// "non-negative number, never throws" - pin both.
 		const { createTestServer } = await import('../testing.js');
 		let capturedWs = null;
 		server = await createTestServer({
@@ -79,7 +79,7 @@ describeUWS('platform.bufferedAmount', () => {
 		const client = await connectClient(server.wsUrl);
 		await new Promise(r => setTimeout(r, 30));
 
-		server.platform.subscribe(capturedWs, 'feed');
+		await server.platform.subscribe(capturedWs, 'feed');
 		// Publish enough that some bytes will be in flight at least
 		// briefly. Pure timing assertions are flaky; we just check the
 		// shape of the return value.

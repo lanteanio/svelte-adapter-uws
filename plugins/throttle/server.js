@@ -9,7 +9,7 @@
  *
  * Not suitable for multi-publisher streams that share a topic (many clients
  * emitting cursor moves, drawing strokes, or presence pings into one
- * topic) -- the single shared pending slot lets fast publishers overwrite
+ * topic) - the single shared pending slot lets fast publishers overwrite
  * slow publishers' updates. Aggregate server-side first, then throttle the
  * aggregate.
  *
@@ -132,13 +132,13 @@ function evictOldestIfAtCap(topics, maxTopics) {
  *
  * Sends the first publish immediately (leading edge), then at most once
  * per interval after that (trailing edge). Within each interval, only
- * the latest value is kept -- earlier values are discarded.
+ * the latest value is kept - earlier values are discarded.
  *
  * Rate limiting is per-topic: different topics have independent timers.
  *
  * Caveat: the pending slot is per-topic, so for multi-publisher streams
  * (many users emitting into one shared topic) fast publishers will
- * overwrite slow publishers' pending payloads -- slow publishers' updates
+ * overwrite slow publishers' pending payloads - slow publishers' updates
  * almost never reach subscribers. The fix is to aggregate at the server
  * (e.g. world-state tick: maintain `Map<publisher, latest>` and publish
  * snapshots on a fixed cadence) rather than throttling per-move broadcasts
@@ -160,7 +160,7 @@ function evictOldestIfAtCap(topics, maxTopics) {
  *
  * // Server maintains the latest cursor position per user and broadcasts
  * // a single world-state snapshot per tick. Per-topic throttle is safe
- * // here because only one source -- this aggregator -- publishes to the
+ * // here because only one source - this aggregator - publishes to the
  * // topic; the multi-publisher trap is sidestepped by aggregating first.
  * const positions = new Map(); // userId -> { x, y }
  * export function message(ws, { data, platform }) {

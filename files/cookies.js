@@ -1,11 +1,19 @@
 /**
  * Parse cookies from a Cookie header string.
+ *
+ * Backed by `Object.create(null)` so the returned bag has no
+ * `Object.prototype` chain. A request with a `__proto__=evil` cookie
+ * would otherwise stamp a property on the prototype of the returned
+ * `{}`; downstream `cookies.toString` / `cookies.constructor` lookups
+ * could then read attacker-controlled values. Returning a null-proto
+ * bag closes that prototype-pollution surface at the parse boundary.
+ *
  * @param {string} [cookieHeader]
  * @returns {Record<string, string>}
  */
 export function parseCookies(cookieHeader) {
 	/** @type {Record<string, string>} */
-	const cookies = {};
+	const cookies = Object.create(null);
 	if (!cookieHeader) return cookies;
 	for (const pair of cookieHeader.split(';')) {
 		const eq = pair.indexOf('=');
@@ -26,6 +34,13 @@ export function parseCookies(cookieHeader) {
 
 const COOKIE_NAME_INVALID = /[\s"(),/:;<=>?@[\\\]{}\u0000-\u001f\u007f]/;
 const COOKIE_VALUE_INVALID = /[,;\s\u0000-\u001f\u007f]/;
+// Path / Domain attribute values share the cookie-value CHAR class:
+// no CTLs (CR/LF would enable response-splitting), no `;` (would close
+// the attribute and enable smuggling), no `,` (some servers split
+// Set-Cookie on commas), no whitespace, no DEL. Attacker-influenced
+// `path` / `domain` strings reach this check before flowing into the
+// Set-Cookie header.
+const COOKIE_ATTR_INVALID = /[,;\s\u0000-\u001f\u007f]/;
 const VALID_SAMESITE = new Set(['strict', 'lax', 'none']);
 
 /**
@@ -58,6 +73,16 @@ export function serializeCookie(name, value, options = {}) {
 	const encoded = options.encode === false ? value : encodeURIComponent(value);
 	if (COOKIE_VALUE_INVALID.test(encoded)) {
 		throw new Error(`Invalid cookie value for '${name}'`);
+	}
+	if (options.domain !== undefined) {
+		if (typeof options.domain !== 'string' || COOKIE_ATTR_INVALID.test(options.domain)) {
+			throw new Error(`Invalid Domain attribute for cookie '${name}'`);
+		}
+	}
+	if (options.path !== undefined) {
+		if (typeof options.path !== 'string' || COOKIE_ATTR_INVALID.test(options.path)) {
+			throw new Error(`Invalid Path attribute for cookie '${name}'`);
+		}
 	}
 	let out = name + '=' + encoded;
 	if (options.domain !== undefined) out += '; Domain=' + options.domain;

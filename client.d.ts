@@ -110,7 +110,7 @@ export interface WSEvent<T = unknown> {
 	seq?: number;
 }
 
-// -- Scannable store ----------------------------------------------------------
+// - Scannable store ----------------------------------------------------------
 
 /**
  * A readable store with an additional `.scan()` method for accumulating state.
@@ -146,7 +146,7 @@ export interface TopicStore<T> extends Readable<T | null> {
 	scan<A>(initial: A, reducer: (acc: A, value: T) => A): Readable<A>;
 }
 
-// -- Direct exports (recommended) --------------------------------------------
+// - Direct exports (recommended) --------------------------------------------
 
 /**
  * Get a reactive Svelte store for a topic. Auto-connects and auto-subscribes.
@@ -434,7 +434,7 @@ export function latest<T = unknown>(
 ): Readable<WSEvent<T>[]>;
 
 /**
- * Live counter store -- handles `set`, `increment`, and `decrement` events.
+ * Live counter store - handles `set`, `increment`, and `decrement` events.
  *
  * Pair with `platform.topic('metric').publish('increment', 1)` on the server.
  *
@@ -522,7 +522,7 @@ export function onDerived<T = unknown>(
  */
 export function ready(): Promise<void>;
 
-// -- Power-user API ----------------------------------------------------------
+// - Power-user API ----------------------------------------------------------
 
 export interface WSConnection {
 	/** Readable store - the latest event from any subscribed topic. */

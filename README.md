@@ -15,6 +15,8 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 - **Health check endpoint** - `/healthz` out of the box
 - **Zero-config WebSocket** - just set `websocket: true` and go
 
+**Upgrading from 0.4.x?** See the [migration guide](./MIGRATION.md) for every breaking change between 0.4.x and 0.5.x.
+
 ---
 
 ## Table of contents
@@ -296,9 +298,9 @@ The client store automatically uses `wss://` when the page is served over HTTPS 
 
 The Vite plugin is required for WebSocket support in both dev and production (see [Step 2](#step-2-add-the-vite-plugin-required)). It spins up a `ws` WebSocket server alongside Vite's dev server, so your client store and `event.platform` work identically to production.
 
-Changes to your `hooks.ws` file are picked up automatically -- the plugin reloads the handler on save and closes existing connections so they reconnect with the new code. No dev server restart needed.
+Changes to your `hooks.ws` file are picked up automatically - the plugin reloads the handler on save and closes existing connections so they reconnect with the new code. No dev server restart needed.
 
-**Note:** The dev server does not enforce `allowedOrigins`. Origin checks only run in production. A warning is logged at startup as a reminder.
+**Note:** The dev plugin enforces `allowedOrigins` on WebSocket upgrades the same way the production handler does. For local dev scenarios that need to accept arbitrary origins (e.g. WSS from a staging client during integration), pass `devSkipOriginCheck: true` to the plugin: `uws({ devSkipOriginCheck: true })`.
 
 **vite.config.js**
 ```js
@@ -372,7 +374,7 @@ adapter({
     handler: './src/lib/server/websocket.js', // default: auto-discover
 
     // Max message size in bytes (connections sending larger messages are closed)
-    maxPayloadLength: 16 * 1024, // default: 16 KB
+    maxPayloadLength: 1024 * 1024, // default: 1 MB
 
     // Seconds of inactivity before the connection is closed
     idleTimeout: 120, // default: 120
@@ -413,13 +415,13 @@ adapter({
 
 These options control how the server handles misbehaving or slow clients at the WebSocket level:
 
-**`maxPayloadLength`** (default: 16 KB) -- the maximum size of a single incoming WebSocket message. If a client sends a message larger than this, uWS closes the connection immediately (not just the message -- the entire connection is dropped). Set this based on the largest message your application expects to receive.
+**`maxPayloadLength`** (default: 1 MB) - the maximum size of a single incoming WebSocket message. If a client sends a message larger than this, uWS closes the connection immediately (not just the message - the entire connection is dropped). Set this based on the largest message your application expects to receive. The 1 MB default aligns with `socket.io`'s default and Cloudflare Workers' WebSocket message cap, keeping apps portable to the edge; uWS itself defaults to 16 MB. For a stricter cap, pin an explicit value (e.g. `16 * 1024` for 16 KB).
 
-**`maxBackpressure`** (default: 1 MB) -- the per-connection outbound send buffer, AND the threshold above which `publish` / `send` / `publishBatched` silently skip a subscriber. When a specific subscriber's buffer is over this size, uWS drops that frame *for that subscriber only* while continuing to deliver to every non-backpressured subscriber. This makes `publish` / `send` / `publishBatched` volatile-by-default for slow consumers (the right behavior for cursor positions, typing indicators, presence pings -- see "Volatile / fire-and-forget delivery" below). The `drain` hook fires per-connection when the buffer empties again. Lower this if you want subscribers shed sooner; raise it if you prefer to keep the connection queued and absorb temporary slowness. uWS's own default is 64 KB; this adapter sets 1 MB to favor keeping the connection alive under pub/sub spikes.
+**`maxBackpressure`** (default: 1 MB) - the per-connection outbound send buffer, AND the threshold above which `publish` / `send` / `publishBatched` silently skip a subscriber. When a specific subscriber's buffer is over this size, uWS drops that frame *for that subscriber only* while continuing to deliver to every non-backpressured subscriber. This makes `publish` / `send` / `publishBatched` volatile-by-default for slow consumers (the right behavior for cursor positions, typing indicators, presence pings - see "Volatile / fire-and-forget delivery" below). The `drain` hook fires per-connection when the buffer empties again. Lower this if you want subscribers shed sooner; raise it if you prefer to keep the connection queued and absorb temporary slowness. uWS's own default is 64 KB; this adapter sets 1 MB to favor keeping the connection alive under pub/sub spikes.
 
-**`upgradeRateLimit`** (default: 10 per 10s window) -- sliding-window rate limit on WebSocket upgrade requests per client IP. Clients exceeding the limit get a `429 Too Many Requests` response. The IP rate map is capped at 10,000 entries with LRU eviction by activity score, so sustained connection floods from many IPs don't cause unbounded memory growth.
+**`upgradeRateLimit`** (default: 10 per 10s window) - sliding-window rate limit on WebSocket upgrade requests per client IP. Clients exceeding the limit get a `429 Too Many Requests` response. The IP rate map is capped at 10,000 entries with LRU eviction by activity score, so sustained connection floods from many IPs don't cause unbounded memory growth.
 
-**`upgradeAdmission`** (default: disabled) -- two-layer admission control on the upgrade path, both opt-in:
+**`upgradeAdmission`** (default: disabled) - two-layer admission control on the upgrade path, both opt-in:
 
 - `maxConcurrent` caps how many upgrades may be in flight at once. Crossed requests get a fast `503 Service Unavailable` before any per-request work, so a connection storm can be shed without spending CPU on TLS, header parsing, or cookie decoding. Set this just above your steady-state in-flight count to act as a circuit breaker.
 - `perTickBudget` caps how many actual `res.upgrade()` calls run per Node.js event-loop tick. Once the budget is spent, subsequent calls are deferred via `setImmediate` so the loop is not starved by 10K synchronous handshakes from one I/O batch. Pre-upgrade work (rate limit, origin check, hook dispatch) still runs in the original tick; only the hand-off to the C++ upgrade path is paced. Start with `64` and adjust based on your peak burst envelope.
@@ -436,9 +438,9 @@ The two layers are independent: each works without the other. Both default to `0
 
 #### Layered admission: upgrade-path + message-path
 
-`upgradeAdmission` operates at the WebSocket handshake. It sheds connection attempts before TLS work and before any per-request CPU is spent. That is the right primitive when the threat is "too many clients are trying to connect" -- a connection flood, a thundering herd after a deploy, a runaway client retry loop.
+`upgradeAdmission` operates at the WebSocket handshake. It sheds connection attempts before TLS work and before any per-request CPU is spent. That is the right primitive when the threat is "too many clients are trying to connect" - a connection flood, a thundering herd after a deploy, a runaway client retry loop.
 
-It is NOT the right primitive when the threat is "established connections are sending too many RPCs" -- a chatty client, an abusive presence ping loop, a misbehaving game tick. Those calls have already passed the handshake; the connection is open; you want to shed at the message dispatch layer instead.
+It is NOT the right primitive when the threat is "established connections are sending too many RPCs" - a chatty client, an abusive presence ping loop, a misbehaving game tick. Those calls have already passed the handshake; the connection is open; you want to shed at the message dispatch layer instead.
 
 For that second layer, [`svelte-adapter-uws-extensions`](https://github.com/lanteanio/svelte-adapter-uws-extensions) ships `createAdmissionControl`, an opt-in message-path admission wrapper that runs against already-accepted connections. The two stack naturally:
 
@@ -465,9 +467,20 @@ adapter({
 
 The two layers do not share state, configuration, or call sites. They cannot drift apart because the WebSocket lifecycle enforces the ordering: a connection that fails `upgradeAdmission` never reaches the message handler at all, so `createAdmissionControl` only ever sees connections that were already admitted at the handshake. The layering is a structural property, not a runtime one.
 
+### Security configuration
+
+Defense-in-depth opt-ins layered on top of `allowedOrigins`. All default to safe values; flip them only after the documented audit step.
+
+- **`websocket.authPathRequireOrigin`** (default `true`) - the `/__ws/auth` POST endpoint requires `x-requested-with: XMLHttpRequest`, `Sec-Fetch-Site: same-origin`, or an `Origin` matching `allowedOrigins`. The adapter client always stamps `x-requested-with` so the browser path is unaffected. Set `false` to accept native (non-browser) clients without those headers.
+- **`websocket.compressCredentialedResponses`** (default `false`) - requests carrying `Cookie` or `Authorization` skip dynamic brotli/gzip compression to defend against the [BREACH](https://en.wikipedia.org/wiki/BREACH) attack (compressed length leaks attacker-influenced reflected input alongside a secret). Set `true` only after auditing the page surface for BREACH defenses (random per-response masking, prefix randomization, no secrets reflected with attacker input). Build-time precompressed static files are unaffected.
+- **`websocket.unsafeSameOriginWithoutHostPin`** (default `false`) - when `allowedOrigins: 'same-origin'` is paired with no fronting trust (no `ORIGIN` env, no `HOST_HEADER` env, no native TLS, no `upgrade()` hook), the runtime throws at startup because the same-origin check then compares two attacker-controlled headers (Origin vs Host). Set `true` to restore the previous warn-only behavior. Pin the deployment shape first (`ORIGIN`, `HOST_HEADER`, native TLS, or an `upgrade()` hook).
+- **`websocket.workerRelayHmacSecret`** - when set (must be at least 16 characters), every cross-worker relay envelope carries an HMAC-SHA256 tag computed over the (topic, envelope) pair. Receiving workers re-compute and refuse on mismatch. Defends against an adjacent process injecting forged messages into the `worker_threads` relay (typically reachable only post-compromise). The shared secret must reach every worker via env var or `workerData`. Without the option, behavior is unchanged.
+
+`websocket.allowSystemTopicSubscribe` (default `false`) and `websocket.allowNonAsciiTopics` (default `false`) are documented in [Topic validation](#topic-validation). The Vite plugin mirrors all of these flags; `devSkipOriginCheck` (default `false`) on the plugin disables the dev-mode `allowedOrigins` enforcement for local-only scenarios.
+
 ### Capacity model
 
-Every internal `Map` / `Set` that grows with client behaviour or topic cardinality has an explicit upper bound and a defined behaviour at saturation. The defaults are deliberately generous (1,000,000 across the board) -- far above any healthy single-connection use, even at uWS's million-connection scale -- so the cap catches obvious bugs and runaway clients without ever biting real apps. Aggregate memory at extreme scale is bounded separately by `upgradeAdmission.maxConcurrent`; per-connection caps are not the right place to defend against a 1M-connection DoS.
+Every internal `Map` / `Set` that grows with client behaviour or topic cardinality has an explicit upper bound and a defined behaviour at saturation. The defaults are deliberately generous (1,000,000 across the board) - far above any healthy single-connection use, even at uWS's million-connection scale - so the cap catches obvious bugs and runaway clients without ever biting real apps. Aggregate memory at extreme scale is bounded separately by `upgradeAdmission.maxConcurrent`; per-connection caps are not the right place to defend against a 1M-connection DoS.
 
 | Site | Default cap | Behaviour at saturation | Override |
 |------|-------------|-------------------------|----------|
@@ -502,7 +515,7 @@ Every internal `Map` / `Set` that grows with client behaviour or topic cardinali
 Two policy notes:
 
 - **Per-conn cap math at uWS scale.** `1,000,000 subscriptions × 1,000,000 connections` is more than any realistic process can handle. The per-conn caps catch single-connection bugs (a `for (i=0; i<N; i++) ws.subscribe('topic-' + i)` loop, a misbehaving extension); they do not pretend to OOM-protect a 1M-connection server. Set `upgradeAdmission.maxConcurrent` for that.
-- **`topicSeqs` is warn-only.** The seq registry cannot evict entries -- the resume protocol depends on each topic's monotonic counter persisting for the process lifetime, and dropping a row would corrupt any reconnecting client trying to resume that topic. The cap fires a single structured `console.warn` with the topN recent publishers when the threshold is first crossed; ops sees the leak shape and can reduce topic cardinality (or opt out with `{ seq: false }` per publish) before OOM.
+- **`topicSeqs` is warn-only.** The seq registry cannot evict entries - the resume protocol depends on each topic's monotonic counter persisting for the process lifetime, and dropping a row would corrupt any reconnecting client trying to resume that topic. The cap fires a single structured `console.warn` with the topN recent publishers when the threshold is first crossed; ops sees the leak shape and can reduce topic cardinality (or opt out with `{ seq: false }` per publish) before OOM.
 
 ### Static file behavior
 
@@ -804,10 +817,10 @@ To avoid JSON-parsing every incoming message, the handler uses a byte-prefix dis
 Topics submitted by clients are validated before being accepted:
 
 - Must be between 1 and 256 characters
-- Must not contain control characters (code points below 32)
+- Default accept set is printable ASCII (0x20-0x7E) excluding `"` and `\`. Control bytes, line separators (U+2028/U+2029), bidirectional overrides (U+202E), the byte-order mark, and other non-ASCII runes are rejected at the wire boundary so log dashboards and admin UIs see a clean, greppable topic name. Apps that legitimately accept non-ASCII topic names from clients can opt in via `websocket.allowNonAsciiTopics: true` (always-illegal `"` and `\` remain rejected).
 - `subscribe-batch` accepts at most 256 topics per message (the client only sends what it was subscribed to before a reconnect)
 
-Topics prefixed with `__` are reserved for adapter plugins (presence uses `__presence:*`, replay uses `__replay:*`). They are not blocked at the protocol level because plugins subscribe to them from the client, but application code should not use the `__` prefix for its own topics.
+Topics prefixed with `__` are reserved for framework-internal channels (presence uses `__presence:*`, replay uses `__replay:*`, plus `__signal:*`, `__group:*`, `__rpc`, etc.). Wire-level subscribes to `__`-prefixed topics are rejected with `INVALID_TOPIC`, so a client cannot intercept signals routed to other users or plugin broadcasts. Server-side `platform.subscribe(ws, '__signal:userId')` (the legitimate pattern that `enableSignals` uses) still works because the block is on the wire layer only. Advanced apps that intentionally route public topics through the `__` prefix can opt out via `websocket.allowSystemTopicSubscribe: true`.
 
 ### Explicit handler path
 
@@ -973,7 +986,7 @@ The WebSocket upgrade is an HTTP request. The browser treats it like any other r
 
 ### Refreshing session cookies on WebSocket connect
 
-For short-lived sessions you often want to rotate the session cookie every time a client connects. The obvious approach -- attaching `Set-Cookie` to the 101 Switching Protocols response via `upgradeResponse()` -- is RFC-compliant but **is silently rejected by Cloudflare Tunnel, Cloudflare's proxy, and some other strict edge proxies**. The symptom is that the WebSocket `open` handler fires server-side, then the connection closes with code 1006 (`Received TCP FIN before WebSocket close frame`) before any frames are exchanged. The adapter emits a build-time warning when it detects this pattern.
+For short-lived sessions you often want to rotate the session cookie every time a client connects. The obvious approach - attaching `Set-Cookie` to the 101 Switching Protocols response via `upgradeResponse()` - is RFC-compliant but **is silently rejected by Cloudflare Tunnel, Cloudflare's proxy, and some other strict edge proxies**. The symptom is that the WebSocket `open` handler fires server-side, then the connection closes with code 1006 (`Received TCP FIN before WebSocket close frame`) before any frames are exchanged. The adapter emits a build-time warning when it detects this pattern.
 
 The adapter ships a first-class solution: the optional `authenticate` hook runs as a normal HTTP POST **before** the WebSocket upgrade. `Set-Cookie` rides on a standard 2xx response, which every proxy handles correctly; the browser then attaches the refreshed cookie to the upgrade request that follows.
 
@@ -1030,8 +1043,9 @@ With `auth: true` the client stores runs `fetch('/__ws/auth', { method: 'POST', 
 **Configuration**
 
 - The default auth path is `/__ws/auth`. Override with `adapter({ websocket: { authPath: '/api/ws-auth' } })`.
-- The hook is only mounted when `authenticate` is exported from `hooks.ws` -- no runtime cost when unused.
+- The hook is only mounted when `authenticate` is exported from `hooks.ws` - no runtime cost when unused.
 - Dev mode (Vite plugin) mirrors the production route on the same path.
+- The endpoint requires `x-requested-with: XMLHttpRequest`, `Sec-Fetch-Site: same-origin`, or an `Origin` matching `allowedOrigins` (CSRF defense). The adapter client always stamps `x-requested-with`. Native (non-browser) clients that need to reach this endpoint without those headers can opt out via `websocket.authPathRequireOrigin: false`. See [Security configuration](#security-configuration).
 
 **Why not put `Set-Cookie` on the 101?**
 
@@ -1047,12 +1061,12 @@ Available in server hooks, load functions, form actions, API routes, and WebSock
 
 Send a message to all WebSocket clients subscribed to a topic.
 
-Topic and event names are validated before being written into the JSON envelope -- quotes, backslashes, and control characters will throw. This prevents JSON injection when names are built from dynamic values like user IDs (`platform.publish(\`user:\${id}\`, ...)`). The validation is a single-pass char scan and adds no measurable overhead.
+Topic and event names are validated before being written into the JSON envelope - quotes, backslashes, and control characters will throw. This prevents JSON injection when names are built from dynamic values like user IDs (`platform.publish(\`user:\${id}\`, ...)`). The validation is a single-pass char scan and adds no measurable overhead.
 
 In cluster mode, the message is automatically relayed to all other workers. Pass `{ relay: false }` to skip the relay when the message originates from an external pub/sub source (Redis, Postgres LISTEN/NOTIFY, etc.) that already delivers to every process:
 
 ```js
-// Redis subscriber running on every worker -- relay would cause duplicates
+// Redis subscriber running on every worker - relay would cause duplicates
 sub.on('message', (channel, payload) => {
   platform.publish(channel, 'update', JSON.parse(payload), { relay: false });
 });
@@ -1135,9 +1149,9 @@ export function message(ws, { data, platform }) {
 
 Send a message to a single connection with **coalesce-by-key** semantics. Each `(connection, key)` pair holds at most one pending message; if a newer call for the same `key` arrives before the previous frame drains to the wire, the older value is replaced in place.
 
-Use this for latest-value streams where intermediate values are noise -- price ticks, cursor positions, presence state, typing indicators, scroll position. Under load, this is the difference between the client lagging by a thousand stale frames and the client always seeing the most recent value.
+Use this for latest-value streams where intermediate values are noise - price ticks, cursor positions, presence state, typing indicators, scroll position. Under load, this is the difference between the client lagging by a thousand stale frames and the client always seeing the most recent value.
 
-If you want a backpressured subscriber to keep eventually receiving the latest value (the queue-and-drain shape), `sendCoalesced` is the right primitive. If you want backpressured subscribers skipped entirely so the wire stays current for everyone else, use `platform.publish` / `platform.send` instead -- those drop on backpressure (see the "Volatile / fire-and-forget delivery" section below). `sendCoalesced` is explicitly drop-the-middle, keep-the-latest; `publish` / `send` are explicitly drop-the-laggard, keep-everyone-else-current.
+If you want a backpressured subscriber to keep eventually receiving the latest value (the queue-and-drain shape), `sendCoalesced` is the right primitive. If you want backpressured subscribers skipped entirely so the wire stays current for everyone else, use `platform.publish` / `platform.send` instead - those drop on backpressure (see the "Volatile / fire-and-forget delivery" section below). `sendCoalesced` is explicitly drop-the-middle, keep-the-latest; `publish` / `send` are explicitly drop-the-laggard, keep-everyone-else-current.
 
 ```js
 // src/hooks.ws.js - cursor positions during a collaborative edit
@@ -1191,7 +1205,7 @@ platform.sendTo(
 );
 ```
 
-> **Performance:** `sendTo` iterates every open connection and runs your filter function against each one. It's fine for low-frequency operations like sending a DM or notifying admins, but don't use it in a hot loop. If you're broadcasting to a known group of users, subscribe them to a shared topic and use `platform.publish()` instead -- topic-based pub/sub is handled natively by uWS in C++ and doesn't touch the JS event loop.
+> **Performance:** `sendTo` iterates every open connection and runs your filter function against each one. It's fine for low-frequency operations like sending a DM or notifying admins, but don't use it in a hot loop. If you're broadcasting to a known group of users, subscribe them to a shared topic and use `platform.publish()` instead - topic-based pub/sub is handled natively by uWS in C++ and doesn't touch the JS event loop.
 
 ### `platform.connections`
 
@@ -1252,7 +1266,7 @@ platform.pressure
 // }
 ```
 
-Reading `platform.pressure` is a property access -- safe in hot paths, no I/O. Use it for synchronous shed decisions in request handlers:
+Reading `platform.pressure` is a property access - safe in hot paths, no I/O. Use it for synchronous shed decisions in request handlers:
 
 ```js
 // src/routes/api/heavy-write/+server.js
@@ -1282,7 +1296,7 @@ export function close(ws) {
 
 **Reason precedence is fixed:** `MEMORY > PUBLISH_RATE > SUBSCRIBERS`. A worker under multiple stresses reports the most urgent one. Memory wins because the worker is approaching OOM and nothing else matters; publish rate is next because CPU saturation cascades fastest; subscriber ratio is last because heavy fan-out degrades gracefully.
 
-**Thresholds are configurable per-deployment.** Defaults are conservative -- a healthy small app should never trip them in steady state. Override via `WebSocketOptions.pressure`:
+**Thresholds are configurable per-deployment.** Defaults are conservative - a healthy small app should never trip them in steady state. Override via `WebSocketOptions.pressure`:
 
 ```js
 // svelte.config.js
@@ -1308,7 +1322,7 @@ export default {
 
 Set any individual threshold to `false` to disable that signal. `sampleIntervalMs` is clamped to a minimum of 100 ms.
 
-> **Clustering:** `platform.pressure` is per-worker. Each worker samples its own counters and reports its own snapshot. There is no aggregate "cluster pressure" -- a hot worker should shed its own load without waiting for the rest of the cluster.
+> **Clustering:** `platform.pressure` is per-worker. Each worker samples its own counters and reports its own snapshot. There is no aggregate "cluster pressure" - a hot worker should shed its own load without waiting for the rest of the cluster.
 
 #### Per-topic publish-rate detection
 
@@ -1323,7 +1337,7 @@ platform.pressure.topPublishers
 // ]
 ```
 
-When a topic crosses `topicPublishRatePerSec` or `topicPublishBytesPerSec` in a sample window, the adapter flags it as a runaway publisher. By default this prints a throttled `console.warn` (one per topic per minute). For programmatic handling, register `platform.onPublishRate(cb)` -- doing so suppresses the default warning so you own the surface:
+When a topic crosses `topicPublishRatePerSec` or `topicPublishBytesPerSec` in a sample window, the adapter flags it as a runaway publisher. By default this prints a throttled `console.warn` (one per topic per minute). For programmatic handling, register `platform.onPublishRate(cb)` - doing so suppresses the default warning so you own the surface:
 
 ```js
 platform.onPublishRate((events) => {
@@ -1449,20 +1463,20 @@ The frame the client receives:
 ] }
 ```
 
-The bundled `svelte-adapter-uws/client` decodes the batch frame and dispatches each contained event through the same per-topic store ladder a single-event frame would take -- indistinguishable from N individual frames except for the latency drop and the lower onmessage bill.
+The bundled `svelte-adapter-uws/client` decodes the batch frame and dispatches each contained event through the same per-topic store ladder a single-event frame would take - indistinguishable from N individual frames except for the latency drop and the lower onmessage bill.
 
 **When the win shows up.** Wire-level batching has two characteristic shapes that pay off:
 
 - **Bulk fan-out, single topic.** A bulk import publishing 50 events to a topic with 500 subscribers used to send 25,000 frames (50 events x 500 subs); now it sends 500 frames (1 batch x 500 subs). The publishBatched path benches at ~3.2M events/sec on this profile vs ~840K events/sec for an equivalent `publish()` loop (~3.8x speedup, measured locally).
 - **Room-state reset, overlapping topics.** A handler that publishes 5 events across 3 rooms where every viewer is in all 3 rooms benches at ~1.46M events/sec vs ~1.15M events/sec for the loop (~27% speedup).
 
-**When the win does not apply.** Mixed subscriber views (some subs see only a subset of the batch's topics) and small disjoint batches (e.g. 3 events to 3 topics with disjoint subscriber sets) cannot share one frame -- the C++ TopicTree fanout used by `publish()` is faster than building per-subscriber payloads in JS for those shapes. `publishBatched` detects these cases and falls back to a per-event `publish()` loop, so calling it is at least as fast as the publish loop the user would have written by hand. Verified on a third bench profile (3 events x 50 subs disjoint topics): delta `0.3%` (within noise).
+**When the win does not apply.** Mixed subscriber views (some subs see only a subset of the batch's topics) and small disjoint batches (e.g. 3 events to 3 topics with disjoint subscriber sets) cannot share one frame - the C++ TopicTree fanout used by `publish()` is faster than building per-subscriber payloads in JS for those shapes. `publishBatched` detects these cases and falls back to a per-event `publish()` loop, so calling it is at least as fast as the publish loop the user would have written by hand. Verified on a third bench profile (3 events x 50 subs disjoint topics): delta `0.3%` (within noise).
 
 **Capability handshake.** The client opts in by sending `{type:'hello', caps:['batch']}` after the WebSocket opens. The bundled client does this automatically. When the server detects that any interested subscriber has not advertised the `'batch'` capability, the call falls back to the publish loop so old clients receive plain envelopes they can decode. Mixing old and new clients in the same call is safe; old clients simply do not benefit from the batched optimization.
 
 **Cross-worker relay.** A single `publish-batched` IPC frame carries the full event list to other workers in cluster mode. Each receiving worker re-runs the fast-path detection against ITS local subscriber set and dispatches via either a single batch envelope (fast path) or per-event publishes (slow path). Wire batching is preserved cluster-wide instead of degrading to per-event relays at the worker boundary. Pass `{relay: false}` per-event to skip the relay (use when the messages came from an external pub/sub source already fanning out to every worker).
 
-**Coalesce by key.** Each event takes an optional `coalesceKey?: string` field. Events that share a key collapse so only the latest value survives, with the surviving entry kept at the latest occurrence's position. Events without a key pass through unchanged. Use this for high-frequency batches where intermediate values are noise -- a single call carrying 100 cursor positions for the same user delivers only the latest.
+**Coalesce by key.** Each event takes an optional `coalesceKey?: string` field. Events that share a key collapse so only the latest value survives, with the surviving entry kept at the latest occurrence's position. Events without a key pass through unchanged. Use this for high-frequency batches where intermediate values are noise - a single call carrying 100 cursor positions for the same user delivers only the latest.
 
 ```js
 platform.publishBatched(positions.map(p => ({
@@ -1477,7 +1491,7 @@ platform.publishBatched(positions.map(p => ({
 
 **Order and seq.** Within one batched frame, events appear in call order (after any `coalesceKey` collapsing). Each event is independently stamped with a per-topic monotonic `seq`, identical to `publish()`; pass `{seq: false}` per-event to skip stamping for that one event. The streaming `sendCoalesced` API (per-key replacement on a single connection) is independent of `publishBatched`'s batch-level `coalesceKey`; mixing the two on the same subscriber is supported but produces separate frames.
 
-**Two distinct contracts -- pick one.** The existing `platform.batch(messages)` is NOT wire-level batching -- it is a `for` loop calling `publish()` once per message, so N submitted messages still produce N WebSocket frames per subscribed connection. The cross-worker relay coalesces per microtask, but the client still pays N onmessage dispatches. Use `batch()` when you want per-message return values; use `publishBatched()` when you want one-frame-per-subscriber wire batching.
+**Two distinct contracts - pick one.** The existing `platform.batch(messages)` is NOT wire-level batching - it is a `for` loop calling `publish()` once per message, so N submitted messages still produce N WebSocket frames per subscribed connection. The cross-worker relay coalesces per microtask, but the client still pays N onmessage dispatches. Use `batch()` when you want per-message return values; use `publishBatched()` when you want one-frame-per-subscriber wire batching.
 
 ### `platform.requestId`
 
@@ -1512,7 +1526,7 @@ export function close(ws, { platform, code }) {
 
 The header value is sanitized before being used: only printable ASCII (no whitespace, no control chars) up to 128 chars is honoured. Anything else is ignored and a fresh UUID is generated instead, so the id is always safe to interpolate into log lines.
 
-The adapter never writes `X-Request-ID` on the response automatically -- emitting it back is an app-layer choice (usually for outbound observability). Set it explicitly if you want callers to see it:
+The adapter never writes `X-Request-ID` on the response automatically - emitting it back is an app-layer choice (usually for outbound observability). Set it explicitly if you want callers to see it:
 
 ```js
 return new Response(body, {
@@ -1526,7 +1540,7 @@ return new Response(body, {
 
 `platform.publish`, `platform.send`, and `platform.publishBatched` are **all volatile under backpressure**. When a specific subscriber's outbound buffer is over `maxBackpressure` (default 1 MB, configurable in `websocket.maxBackpressure`), uWS skips that subscriber for that frame while continuing to deliver to every non-backpressured subscriber. The skip is silent, per-subscriber, and does not queue for retry. There is no separate `volatile: true` flag because the volatile semantic is the default.
 
-This is the right behavior for transient state where stale values are worse than dropped ones -- cursor positions, typing indicators, presence pings, telemetry pulses, draft auto-saves. Slow / disconnected / backgrounded subscribers fall behind silently while everyone else stays current.
+This is the right behavior for transient state where stale values are worse than dropped ones - cursor positions, typing indicators, presence pings, telemetry pulses, draft auto-saves. Slow / disconnected / backgrounded subscribers fall behind silently while everyone else stays current.
 
 ```js
 // Cursor broadcast: every reader gets the latest position they can keep up
@@ -1545,7 +1559,7 @@ For the **drop-the-middle, keep-the-latest** shape on a single connection (the v
 
 To tune how aggressively backpressured subscribers get skipped, lower `maxBackpressure` in `websocket` options (the smaller the buffer, the sooner uWS starts skipping). The 1 MB default favors keeping the connection alive over shedding load; drop to 64 KB or 256 KB if your workload prefers shedding faster.
 
-For visibility into whether subscribers are actually being skipped at scale, watch `platform.pressure.publishRate` and `platform.pressure.topPublishers` -- a topic publishing far above its consumer rate is the canonical signature of a backpressure-shedding workload.
+For visibility into whether subscribers are actually being skipped at scale, watch `platform.pressure.publishRate` and `platform.pressure.topPublishers` - a topic publishing far above its consumer rate is the canonical signature of a backpressure-shedding workload.
 
 ---
 
@@ -1839,13 +1853,13 @@ type Failure =
 
 Five `class` values let consumers render targeted UI without inspecting raw close codes:
 
-- `'TERMINAL'` -- server permanently rejected the client (close codes 1008 / 4401 / 4403). The retry loop is stopped; the user must re-authenticate or refresh.
-- `'EXHAUSTED'` -- reconnect attempts exceeded `maxReconnectAttempts`. The network never recovered; surface a manual-retry button.
-- `'THROTTLE'` -- server signalled rate-limiting (close code 4429). Reconnect is still scheduled, jumped ahead in the backoff curve.
-- `'RETRY'` -- normal transient drop (1006 abnormal closure, network blip, server restart). Reconnect is in progress; usually paired with the `'disconnected'` status.
-- `'AUTH'` -- the auth preflight (`{ auth: true }`) failed before the WebSocket was opened. 4xx is terminal; 5xx and network errors retry. The HTTP status code is in `status`, not `code`.
+- `'TERMINAL'` - server permanently rejected the client (close codes 1008 / 4401 / 4403). The retry loop is stopped; the user must re-authenticate or refresh.
+- `'EXHAUSTED'` - reconnect attempts exceeded `maxReconnectAttempts`. The network never recovered; surface a manual-retry button.
+- `'THROTTLE'` - server signalled rate-limiting (close code 4429). Reconnect is still scheduled, jumped ahead in the backoff curve.
+- `'RETRY'` - normal transient drop (1006 abnormal closure, network blip, server restart). Reconnect is in progress; usually paired with the `'disconnected'` status.
+- `'AUTH'` - the auth preflight (`{ auth: true }`) failed before the WebSocket was opened. 4xx is terminal; 5xx and network errors retry. The HTTP status code is in `status`, not `code`.
 
-`failure === null` while `status === 'failed'` is the deliberately-ended state -- the user called `close()`, not a transport-level failure.
+`failure === null` while `status === 'failed'` is the deliberately-ended state - the user called `close()`, not a transport-level failure.
 
 ```svelte
 <script>
@@ -1938,7 +1952,7 @@ The client handles several edge cases automatically, with no configuration requi
 
 ### Cross-origin and native app usage
 
-By default, the client derives the WebSocket URL from `window.location`. If your client runs on a different origin -- a mobile app (Svelte Native, React Native), a standalone Node.js script, or any context where the backend lives elsewhere -- pass a `url` to connect to it directly:
+By default, the client derives the WebSocket URL from `window.location`. If your client runs on a different origin - a mobile app (Svelte Native, React Native), a standalone Node.js script, or any context where the backend lives elsewhere - pass a `url` to connect to it directly:
 
 ```js
 import { connect, on } from 'svelte-adapter-uws/client';
@@ -2028,11 +2042,11 @@ export async function subscribe(ws, topic, { platform }) {
 
 ## Plugins
 
-Opt-in modules that build on top of the adapter's public API. They don't change any core behavior -- if you don't import them, they don't exist. Each plugin ships in its own subdirectory under `plugins/` with separate server and client entry points.
+Opt-in modules that build on top of the adapter's public API. They don't change any core behavior - if you don't import them, they don't exist. Each plugin ships in its own subdirectory under `plugins/` with separate server and client entry points.
 
 ### Middleware
 
-Composable message processing pipeline. Chain functions that run on inbound messages before your handler logic. Each middleware receives a context and a `next` function -- call `next()` to continue, skip it to stop the chain.
+Composable message processing pipeline. Chain functions that run on inbound messages before your handler logic. Each middleware receives a context and a `next` function - call `next()` to continue, skip it to stop the chain.
 
 #### Setup
 
@@ -2049,7 +2063,7 @@ export const pipeline = createMiddleware(
   // auth check
   async (ctx, next) => {
     const userId = ctx.ws.getUserData()?.userId;
-    if (!userId) return; // stop chain -- unauthenticated
+    if (!userId) return; // stop chain - unauthenticated
     ctx.locals.userId = userId;
     await next();
   },
@@ -2099,18 +2113,18 @@ The context object:
 #### Limitations
 
 - **Server-side only.** No client component.
-- **No state.** The middleware itself is stateless -- it's a pure pipeline. Use `ctx.locals` to pass data between middlewares within a single message.
+- **No state.** The middleware itself is stateless - it's a pure pipeline. Use `ctx.locals` to pass data between middlewares within a single message.
 - **Double `next()` guard.** Calling `next()` twice in the same middleware is a no-op (the second call does nothing).
 
 ### Replay (SSR gap)
 
 When you combine SSR with WebSocket live updates, there's a gap between server-side data loading and the moment the client's WebSocket connects. Messages published during that window are lost.
 
-The replay plugin solves this without touching the adapter core. It's opt-in -- if you don't import it, it doesn't exist.
+The replay plugin solves this without touching the adapter core. It's opt-in - if you don't import it, it doesn't exist.
 
 #### How it works
 
-1. **Server:** publish through a replay buffer instead of `platform.publish()` directly -- messages get a sequence number and are stored in a ring buffer
+1. **Server:** publish through a replay buffer instead of `platform.publish()` directly - messages get a sequence number and are stored in a ring buffer
 2. **SSR:** pass the current sequence number to the client via your `load()` function
 3. **Client:** `onReplay()` connects, requests missed messages, and switches to live mode once caught up
 
@@ -2226,7 +2240,7 @@ const messages = onReplay('chat', { since: data.seq }).scan(data.messages, (list
 
 #### Limitations
 
-- **In-memory only.** The ring buffer lives in the server process. A restart loses the buffer. For most apps this is fine -- the gap is typically under a second, and a page reload after a server restart gives fresh SSR data anyway.
+- **In-memory only.** The ring buffer lives in the server process. A restart loses the buffer. For most apps this is fine - the gap is typically under a second, and a page reload after a server restart gives fresh SSR data anyway.
 - **Single-worker only.** In clustered mode, each worker has its own buffer. If the SSR load runs on worker A and the WebSocket connects to worker B, the replay won't have the right messages. If you need replay with clustering, stick to a single worker or use an external store.
 - **Buffer overflow.** If more than `size` messages are published to a topic before a client requests replay, the oldest are gone. Size the buffer for your expected throughput during the SSR-to-connect window (usually well under 100 messages).
 
@@ -2234,7 +2248,7 @@ const messages = onReplay('chat', { since: data.seq }).scan(data.messages, (list
 
 ### Dedup (idempotency window)
 
-In-process "have I seen this id before?" cache with fixed-window TTL. The natural use is wrapping a side-effecting handler so client retries after a flaky disconnect don't double-execute -- charge a card once, send an email once, deduct inventory once -- even when the client legitimately retries the same call.
+In-process "have I seen this id before?" cache with fixed-window TTL. The natural use is wrapping a side-effecting handler so client retries after a flaky disconnect don't double-execute - charge a card once, send an email once, deduct inventory once - even when the client legitimately retries the same call.
 
 The TTL is the deduplication window: an id is considered "fresh" for `ttl` ms after the first claim. Duplicate claims within the window do NOT extend the TTL (semantics match Redis `SET NX EX`, which is the eventual swap target if you outgrow the in-process variant).
 
@@ -2262,7 +2276,7 @@ export function message(ws, { data }) {
 }
 ```
 
-The pattern composes with idempotency-key headers on form actions and RPCs the same way -- the client generates a stable id (UUID v7 or `crypto.randomUUID()`), persists it locally before submission, and reuses it on retry. The server's first `claim()` succeeds and runs the side effect; the retry's `claim()` returns `false` and the handler exits early.
+The pattern composes with idempotency-key headers on form actions and RPCs the same way - the client generates a stable id (UUID v7 or `crypto.randomUUID()`), persists it locally before submission, and reuses it on retry. The server's first `claim()` succeeds and runs the side effect; the retry's `claim()` returns `false` and the handler exits early.
 
 #### API
 
@@ -2412,7 +2426,7 @@ const users = presence('room');
 
 The `presence()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, entries that haven't been refreshed within that window are automatically removed from the store. This makes clients self-healing when the server fails to broadcast a leaving entry in a `presence_diff` frame under load.
 
-**Important:** `maxAge` requires the server-side `heartbeat` option. Without heartbeat, no events arrive between the initial `presence_state` snapshot and eventual leave, so maxAge would expire every user -- including ones who are still connected. The heartbeat periodically tells clients which keys are still active, resetting their maxAge timers.
+**Important:** `maxAge` requires the server-side `heartbeat` option. Without heartbeat, no events arrive between the initial `presence_state` snapshot and eventual leave, so maxAge would expire every user - including ones who are still connected. The heartbeat periodically tells clients which keys are still active, resetting their maxAge timers.
 
 ```js
 // Server: heartbeat every 60s
@@ -2434,13 +2448,13 @@ If no `key` field is found in the selected data (e.g. no auth), each connection 
 
 #### Limitations
 
-- **In-memory only.** Same as replay -- server restart clears presence. On restart, clients reconnect and re-subscribe, so the list rebuilds within seconds.
+- **In-memory only.** Same as replay - server restart clears presence. On restart, clients reconnect and re-subscribe, so the list rebuilds within seconds.
 - **Single-worker only.** Each worker tracks its own presence. In clustered mode, the list reflects only the local worker's connections.
 - **Requires subscription.** The client must subscribe to the topic (via `on()`, `crud()`, etc.) for the server's `subscribe` hook to fire. `presence('room')` alone shows you the list but doesn't register you as present unless you're also subscribed to `room`.
 
 ### Typed channels
 
-Define message schemas per topic so event names and data shapes are validated at publish time. Catches typos and shape mismatches before they reach the wire -- instead of silently sending garbage that the client ignores.
+Define message schemas per topic so event names and data shapes are validated at publish time. Catches typos and shape mismatches before they reach the wire - instead of silently sending garbage that the client ignores.
 
 #### Setup
 
@@ -2499,7 +2513,7 @@ Validators can strip private fields before publishing. If your validator returns
 
 #### Client API
 
-The client wrapper is optional -- it catches event name typos on the receiving side too.
+The client wrapper is optional - it catches event name typos on the receiving side too.
 
 ```svelte
 <script>
@@ -2513,7 +2527,7 @@ The client wrapper is optional -- it catches event name typos on the receiving s
 </script>
 ```
 
-The `events` array is optional. Without it, `.on()` works exactly like the regular `on()` with the topic pre-filled -- no validation, just convenience.
+The `events` array is optional. Without it, `.on()` works exactly like the regular `on()` with the topic pre-filled - no validation, just convenience.
 
 You can still use `crud()`, `lookup()`, `latest()`, etc. directly with the topic string. The client channel is purely additive.
 
@@ -2528,8 +2542,8 @@ Per-topic publish rate limiting. Wraps `platform.publish()` to coalesce rapid-fi
 
 Two modes:
 
-- **`throttle(ms)`** -- sends immediately on first call (leading edge), then at most once per interval (trailing edge). Latest value wins within each interval.
-- **`debounce(ms)`** -- waits until no calls for the full interval, then sends the latest value. Each new call resets the timer.
+- **`throttle(ms)`** - sends immediately on first call (leading edge), then at most once per interval (trailing edge). Latest value wins within each interval.
+- **`debounce(ms)`** - waits until no calls for the full interval, then sends the latest value. Each new call resets the timer.
 
 #### Setup
 
@@ -2567,7 +2581,7 @@ export function message(ws, { data, platform }) {
   }
 
   if (msg.type === 'search') {
-    // User types fast -- only publish when they pause
+    // User types fast - only publish when they pause
     search.publish(platform, 'search-results', 'query', { q: msg.q });
   }
 }
@@ -2610,7 +2624,7 @@ t=260  [timer fires, 100ms]  --> sends {q:"hel"}
 
 #### Limitations
 
-- **Server-side only.** No client component -- the client receives messages at the throttled rate naturally.
+- **Server-side only.** No client component - the client receives messages at the throttled rate naturally.
 - **Latest value only.** Intermediate values within an interval are discarded, not queued. If you need every message delivered, don't throttle.
 - **Timer-based.** Uses `setTimeout` internally. Precision depends on Node.js event loop load (typically < 1ms drift).
 
@@ -2618,7 +2632,7 @@ t=260  [timer fires, 100ms]  --> sends {q:"hel"}
 
 Token-bucket rate limiter for inbound WebSocket messages. Protects against spam, abuse, and runaway clients. Supports per-IP, per-connection, or custom key extraction, with optional auto-ban when a bucket is exhausted.
 
-Different from throttle -- throttle shapes **outbound** publish rate, rate limiting protects **inbound** against abuse.
+Different from throttle - throttle shapes **outbound** publish rate, rate limiting protects **inbound** against abuse.
 
 #### Setup
 
@@ -2672,12 +2686,12 @@ With `keyBy: 'ip'` (default), the limiter reads `userData.remoteAddress`, `.ip`,
 #### Limitations
 
 - **Server-side only.** No client component needed.
-- **In-memory.** Buckets live in the process. In cluster mode, each worker has independent rate limits (acceptable for most apps -- abusers hit the same worker via the acceptor).
+- **In-memory.** Buckets live in the process. In cluster mode, each worker has independent rate limits (acceptable for most apps - abusers hit the same worker via the acceptor).
 - **Lazy cleanup.** Expired buckets are swept when the internal map exceeds 1000 entries.
 
 ### Cursor (ephemeral state)
 
-Lightweight fire-and-forget broadcasting for transient state -- mouse cursors, text selections, drag positions, drawing strokes. Built-in throttle with trailing edge ensures the final position always arrives. Auto-cleanup on disconnect.
+Lightweight fire-and-forget broadcasting for transient state - mouse cursors, text selections, drag positions, drawing strokes. Built-in throttle with trailing edge ensures the final position always arrives. Auto-cleanup on disconnect.
 
 #### Setup
 
@@ -2697,7 +2711,7 @@ The two cap options bound internal Maps that grow with client behaviour. Evictio
 
 #### Server usage
 
-Use the `hooks` helper for zero-config cursor handling. The `message` hook handles `cursor` and `cursor-snapshot` messages automatically, and `close` calls `remove()`. The hooks verify that the sender is subscribed to the `__cursor:{topic}` channel before processing -- clients that haven't passed the `subscribe` hook for that topic are silently rejected.
+Use the `hooks` helper for zero-config cursor handling. The `message` hook handles `cursor` and `cursor-snapshot` messages automatically, and `close` calls `remove()`. The hooks verify that the sender is subscribed to the `__cursor:{topic}` channel before processing - clients that haven't passed the `subscribe` hook for that topic are silently rejected.
 
 ```js
 // src/hooks.ws.js
@@ -2748,9 +2762,9 @@ export function close(ws, { platform }) {
 {/each}
 ```
 
-The client store is a `Readable<Map<string, { user, data }>>`. The Map updates when cursors move or disconnect. The store handles `update`, `remove`, `snapshot`, and `bulk` events. The `snapshot` event is authoritative -- it replaces all client-side state (used for initial sync and reconnect). The `bulk` event merges entries additively (used by the [extensions repo](https://github.com/lanteanio/svelte-adapter-uws-extensions) topicThrottle feature when flushing coalesced updates).
+The client store is a `Readable<Map<string, { user, data }>>`. The Map updates when cursors move or disconnect. The store handles `update`, `remove`, `snapshot`, and `bulk` events. The `snapshot` event is authoritative - it replaces all client-side state (used for initial sync and reconnect). The `bulk` event merges entries additively (used by the [extensions repo](https://github.com/lanteanio/svelte-adapter-uws-extensions) topicThrottle feature when flushing coalesced updates).
 
-**Initial sync and reconnect.** The `cursor(topic)` store sends a `{ type: 'cursor-snapshot', topic }` message every time the WebSocket connection opens -- both on first connect and on every reconnect. The server calls `cursors.snapshot(ws, topic, platform)` in its `message` handler, which sends a `snapshot` event back with the current cursor state (or an empty array if nobody is active). The client replaces its entire cursor map with the snapshot contents, clearing any stale entries from before the disconnect. Wire `cursors.snapshot()` in your message handler as shown in the server example above.
+**Initial sync and reconnect.** The `cursor(topic)` store sends a `{ type: 'cursor-snapshot', topic }` message every time the WebSocket connection opens - both on first connect and on every reconnect. The server calls `cursors.snapshot(ws, topic, platform)` in its `message` handler, which sends a `snapshot` event back with the current cursor state (or an empty array if nobody is active). The client replaces its entire cursor map with the snapshot contents, clearing any stale entries from before the disconnect. Wire `cursors.snapshot()` in your message handler as shown in the server example above.
 
 The `cursor()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, cursor entries that haven't received an update within that window are automatically removed. This makes clients self-healing when the server fails to broadcast `remove` events under load:
 
@@ -2784,11 +2798,11 @@ The trailing edge ensures you always see where the cursor stopped, even if the u
 #### Limitations
 
 - **In-memory.** Cursor positions live in the process. In cluster mode, each worker tracks its own connections.
-- **No persistence.** Positions are lost on restart. This is intentional -- cursors are ephemeral.
+- **No persistence.** Positions are lost on restart. This is intentional - cursors are ephemeral.
 
 ### Queue (ordered delivery)
 
-Per-key async task queue with configurable concurrency and backpressure. With the default `concurrency: 1`, tasks are processed strictly in order per key -- useful for sequential operations like collaborative editing, turn-based games, or transaction sequences. With `concurrency > 1`, dequeue order is preserved but tasks run in parallel, so completion order is not guaranteed.
+Per-key async task queue with configurable concurrency and backpressure. With the default `concurrency: 1`, tasks are processed strictly in order per key - useful for sequential operations like collaborative editing, turn-based games, or transaction sequences. With `concurrency > 1`, dequeue order is preserved but tasks run in parallel, so completion order is not guaranteed.
 
 #### Setup
 
@@ -2835,7 +2849,7 @@ export async function message(ws, { data, platform }) {
 | `maxSize` | `1_000_000` | Max waiting tasks per key (rejects when exceeded). Pass `Infinity` to disable the cap (not recommended at uWS scale). |
 | `onDrop` | `null` | Called with `{ key, task }` when a task is rejected |
 
-Different keys are independent -- `push('room-a', ...)` and `push('room-b', ...)` run concurrently. Only tasks with the same key are queued.
+Different keys are independent - `push('room-a', ...)` and `push('room-b', ...)` run concurrently. Only tasks with the same key are queued.
 
 #### Limitations
 
@@ -2881,11 +2895,11 @@ export const actions = {
 };
 ```
 
-The lock holds until `fn` resolves (or rejects); the next waiter in line then runs. Different keys are independent -- `withLock('user:1', ...)` and `withLock('user:2', ...)` run in parallel.
+The lock holds until `fn` resolves (or rejects); the next waiter in line then runs. Different keys are independent - `withLock('user:1', ...)` and `withLock('user:2', ...)` run in parallel.
 
 #### Bounded wait with `maxWaitMs`
 
-The third argument to `withLock` is an optional `{ maxWaitMs }`. When set, the caller is rejected with a `LOCK_TIMEOUT` error if it does not acquire the lock within `maxWaitMs` milliseconds. The current holder's `fn` is not interrupted; only the waiting caller gives up. Subsequent waiters on the same key are unaffected -- they continue in their original order, and a timeout never blocks the queue.
+The third argument to `withLock` is an optional `{ maxWaitMs }`. When set, the caller is rejected with a `LOCK_TIMEOUT` error if it does not acquire the lock within `maxWaitMs` milliseconds. The current holder's `fn` is not interrupted; only the waiting caller gives up. Subsequent waiters on the same key are unaffected - they continue in their original order, and a timeout never blocks the queue.
 
 ```js
 try {
@@ -2908,7 +2922,7 @@ The thrown error carries `code: 'LOCK_TIMEOUT'`, `key` (the contended key), and 
 | Method | Description |
 |---|---|
 | `locks.withLock(key, fn, options?)` | Run `fn` with exclusive access to `key`. Returns the promise `fn` returns. Pass `{ maxWaitMs }` to bound the wait. |
-| `locks.held(key)` | `true` iff a lock is currently in flight for `key` (running `fn` or with at least one queued waiter). Observational only -- do not branch on it to decide whether to acquire (the answer can change before your `withLock` call). |
+| `locks.held(key)` | `true` iff a lock is currently in flight for `key` (running `fn` or with at least one queued waiter). Observational only - do not branch on it to decide whether to acquire (the answer can change before your `withLock` call). |
 | `locks.size()` | Number of keys with any in-flight or queued activity. |
 | `locks.clear()` | Drop all in-flight tracking AND reject any pending waiters with a `LOCK_CLEARED` error. Currently-running `fn` calls are not interrupted; they finish normally. Use in tests / teardown. |
 
@@ -2926,7 +2940,7 @@ The thrown error carries `code: 'LOCK_TIMEOUT'`, `key` (the contended key), and 
 
 ### Session (in-process store with sliding TTL)
 
-In-process key-value store with sliding TTL: every read or `touch()` extends an entry's lifetime by another full `ttl` window. Designed for the "load on WebSocket upgrade, refresh on activity" pattern -- the upgrade handler reads a session by token, and any subsequent message keeps it alive while the user is active.
+In-process key-value store with sliding TTL: every read or `touch()` extends an entry's lifetime by another full `ttl` window. Designed for the "load on WebSocket upgrade, refresh on activity" pattern - the upgrade handler reads a session by token, and any subsequent message keeps it alive while the user is active.
 
 Use this when your auth layer hands you a token (cookie, header, query param) and you need a place to put the resolved session data without re-querying your database on every message. Pair with the `dedup` plugin if you want once-per-window semantics on side effects.
 
@@ -3004,7 +3018,7 @@ export function message(ws) {
 
 ### Broadcast groups
 
-Named groups with explicit membership, roles, metadata, and lifecycle hooks. Like topics but with access control -- you decide who can join, what role they have, and what happens when the group fills up or closes.
+Named groups with explicit membership, roles, metadata, and lifecycle hooks. Like topics but with access control - you decide who can join, what role they have, and what happens when the group fills up or closes.
 
 #### Setup
 
@@ -3073,7 +3087,7 @@ lobby.publish(platform, 'admin-alert', { msg: 'new report' }, 'admin');
 <p>{$members.length} members</p>
 ```
 
-The client store exposes two reactive values: the main store for events (`$lobby` -- latest message) and `.members` for the live member list. The member list updates automatically on join, leave, and close events -- no polling needed.
+The client store exposes two reactive values: the main store for events (`$lobby` - latest message) and `.members` for the live member list. The member list updates automatically on join, leave, and close events - no polling needed.
 
 #### Server API
 
@@ -3099,10 +3113,10 @@ Roles: `'member'` (default), `'admin'`, `'viewer'`.
 |---|---|---|
 | `maxMembers` | `Infinity` | Maximum members |
 | `meta` | `{}` | Initial metadata (shallow-copied) |
-| `onJoin` | -- | `(ws, role) => void` |
-| `onLeave` | -- | `(ws, role) => void` |
-| `onFull` | -- | `(ws, role) => void` |
-| `onClose` | -- | `() => void` |
+| `onJoin` | - | `(ws, role) => void` |
+| `onLeave` | - | `(ws, role) => void` |
+| `onFull` | - | `(ws, role) => void` |
+| `onClose` | - | `() => void` |
 
 #### Limitations
 
@@ -3184,9 +3198,9 @@ The primary thread monitors worker health with a 10-second heartbeat interval. I
 
 ### Clustering modes
 
-**`reuseport`** (Linux default) -- each worker binds to the same port via `SO_REUSEPORT`. The kernel distributes incoming connections across all listening workers. There is no single-threaded acceptor bottleneck and no single point of failure -- one worker crashing does not affect the others.
+**`reuseport`** (Linux default) - each worker binds to the same port via `SO_REUSEPORT`. The kernel distributes incoming connections across all listening workers. There is no single-threaded acceptor bottleneck and no single point of failure - one worker crashing does not affect the others.
 
-**`acceptor`** (macOS/Windows default) -- a primary thread creates an acceptor app that receives all connections and distributes them to worker threads via uWS child app descriptors. Works on all platforms.
+**`acceptor`** (macOS/Windows default) - a primary thread creates an acceptor app that receives all connections and distributes them to worker threads via uWS child app descriptors. Works on all platforms.
 
 The mode is auto-detected. Override it explicitly if needed:
 
@@ -3199,9 +3213,9 @@ Setting `CLUSTER_MODE=reuseport` on non-Linux platforms is an error (SO_REUSEPOR
 
 ### WebSocket + clustering
 
-`platform.publish()` is automatically relayed across all workers via the primary thread, so subscribers on any worker receive the message. This is built in -- no external pub/sub needed. The relay is microtask-batched: a SvelteKit action that calls `publish()` multiple times sends a single IPC message per microtask instead of one per call.
+`platform.publish()` is automatically relayed across all workers via the primary thread, so subscribers on any worker receive the message. This is built in - no external pub/sub needed. The relay is microtask-batched: a SvelteKit action that calls `publish()` multiple times sends a single IPC message per microtask instead of one per call.
 
-If you add your own cross-process messaging (Redis, Postgres LISTEN/NOTIFY, etc.), pass `{ relay: false }` to prevent duplicate delivery -- your external source already fans out to every worker, so the built-in relay would double it.
+If you add your own cross-process messaging (Redis, Postgres LISTEN/NOTIFY, etc.), pass `{ relay: false }` to prevent duplicate delivery - your external source already fans out to every worker, so the built-in relay would double it.
 
 Per-worker limitations (acceptable for most apps):
 - `platform.connections`  - returns the count for the local worker only
@@ -3210,7 +3224,7 @@ Per-worker limitations (acceptable for most apps):
 
 ### Docker / multi-process deployments (Linux)
 
-On Linux, `SO_REUSEPORT` is set on every `app.listen()` call -- including single-process mode. This means multiple independent `node build` processes can bind to the same port without any adapter-level clustering. The kernel distributes connections across them.
+On Linux, `SO_REUSEPORT` is set on every `app.listen()` call - including single-process mode. This means multiple independent `node build` processes can bind to the same port without any adapter-level clustering. The kernel distributes connections across them.
 
 If you already have external pub/sub (Redis, Postgres LISTEN/NOTIFY) handling cross-process messaging, you do not need `CLUSTER_WORKERS` at all. Just run multiple replicas and let your infrastructure handle the rest:
 
@@ -3231,11 +3245,11 @@ services:
 
 Each replica is a plain single-process `node build`. No coordinator thread, no built-in relay. Docker handles restarts, Redis handles cross-process messaging, the kernel handles port sharing.
 
-With `network_mode: host`, containers share the host network stack directly -- no port mapping needed, and services like Postgres and Redis are reachable via `127.0.0.1`. This avoids Docker bridge DNS and gives the best network performance.
+With `network_mode: host`, containers share the host network stack directly - no port mapping needed, and services like Postgres and Redis are reachable via `127.0.0.1`. This avoids Docker bridge DNS and gives the best network performance.
 
 **When to use what:**
-- **`CLUSTER_WORKERS`** -- single-machine deployments without Docker/k8s/systemd managing processes for you
-- **Docker replicas** -- production deployments where your infrastructure already handles process management and you have external pub/sub for cross-process messaging
+- **`CLUSTER_WORKERS`** - single-machine deployments without Docker/k8s/systemd managing processes for you
+- **Docker replicas** - production deployments where your infrastructure already handles process management and you have external pub/sub for cross-process messaging
 
 ---
 
@@ -3287,13 +3301,13 @@ services:
         hard: 65536
 ```
 
-Without these changes, each process is limited to 1024 file descriptors (the default). Each WebSocket connection uses one file descriptor, so the default caps you at roughly 1000 concurrent connections per process. The server CPU can be well under 50% and you will still hit this ceiling -- the bottleneck is the OS, not uWS or your application code.
+Without these changes, each process is limited to 1024 file descriptors (the default). Each WebSocket connection uses one file descriptor, so the default caps you at roughly 1000 concurrent connections per process. The server CPU can be well under 50% and you will still hit this ceiling - the bottleneck is the OS, not uWS or your application code.
 
 For a deeper walkthrough, see [Millions of active WebSockets with Node.js](https://unetworkingab.medium.com/millions-of-active-websockets-with-node-js-7dc575746a01) from the uWebSockets.js authors.
 
 ### Stress testing: run it from the server
 
-If you run a stress test from your local machine against a remote server, every WebSocket connection goes through your home router's NAT table. Home routers typically have 1024 to 4096 NAT entries. Once the table fills up, the router drops ALL new outbound connections -- not just your test, but SSH, your phone on WiFi, everything on your network.
+If you run a stress test from your local machine against a remote server, every WebSocket connection goes through your home router's NAT table. Home routers typically have 1024 to 4096 NAT entries. Once the table fills up, the router drops ALL new outbound connections - not just your test, but SSH, your phone on WiFi, everything on your network.
 
 Symptoms of NAT table exhaustion:
 - Connection ceiling stuck around 1200-1900 regardless of server tuning
@@ -3358,7 +3372,7 @@ The static file gap is the largest because `adapter-node` uses sirv which calls 
 | **ws** library | 232,200 | **15.4x slower** |
 | **socket.io** | 226,700 | **15.8x slower** |
 
-uWS native pub/sub delivered 3.5M messages/s with exact 50x fan-out. The adapter matches it -- the byte-prefix check and string template envelope add near-zero overhead to the hot path. `socket.io` and `ws` both collapsed under the same load, delivering less than 1x fan-out (massive message loss/queueing).
+uWS native pub/sub delivered 3.5M messages/s with exact 50x fan-out. The adapter matches it - the byte-prefix check and string template envelope add near-zero overhead to the hot path. `socket.io` and `ws` both collapsed under the same load, delivering less than 1x fan-out (massive message loss/queueing).
 
 ### Where the overhead goes
 
@@ -3390,8 +3404,8 @@ uWS native pub/sub delivered 3.5M messages/s with exact 50x fan-out. The adapter
 
 The adapter applies several allocation and caching strategies to stay off the GC's radar on the hot path:
 
-- **Request state pooling** -- SSR requests need a `{ aborted: false }` state object. Instead of allocating one per request (which promotes to V8's old generation and stays there), the adapter maintains a pool of up to 256 reusable state objects. Eliminates young-gen GC churn under sustained load.
-- **Envelope prefix cache** -- `platform.publish()` and `platform.send()` wrap data in a `{"topic":"...","event":"...","data":...}` envelope. The prefix up to `"data":` is cached in a 256-entry LRU map keyed by topic+event. Repeated publishes to the same topic/event (the common case) skip 4 string concatenations and the character validation scan. The cache is trimmed every 60 seconds to reclaim stale entries from shifted traffic patterns.
+- **Request state pooling** - SSR requests need a `{ aborted: false }` state object. Instead of allocating one per request (which promotes to V8's old generation and stays there), the adapter maintains a pool of up to 256 reusable state objects. Eliminates young-gen GC churn under sustained load.
+- **Envelope prefix cache** - `platform.publish()` and `platform.send()` wrap data in a `{"topic":"...","event":"...","data":...}` envelope. The prefix up to `"data":` is cached in a 256-entry LRU map keyed by topic+event. Repeated publishes to the same topic/event (the common case) skip 4 string concatenations and the character validation scan. The cache is trimmed every 60 seconds to reclaim stale entries from shifted traffic patterns.
 
 ### SSR request deduplication
 
@@ -3417,7 +3431,7 @@ Anonymous GET/HEAD routes that produce the same output for all users (landing pa
 
 ### The bottom line
 
-The adapter retains ~68% of raw uWS HTTP throughput and matches uWS native WebSocket throughput. The HTTP overhead is dominated by things SvelteKit requires (`new Request()`, proper HTTP headers). The WebSocket overhead is now almost entirely the `JSON.stringify` of your `data` payload -- the adapter's own machinery costs near zero. In a real app, your load functions and component rendering will dwarf all of this -- the adapter's job is to get out of the way, and it does.
+The adapter retains ~68% of raw uWS HTTP throughput and matches uWS native WebSocket throughput. The HTTP overhead is dominated by things SvelteKit requires (`new Request()`, proper HTTP headers). The WebSocket overhead is now almost entirely the `JSON.stringify` of your `data` payload - the adapter's own machinery costs near zero. In a real app, your load functions and component rendering will dwarf all of this - the adapter's job is to get out of the way, and it does.
 
 To run the benchmarks yourself:
 
@@ -3682,7 +3696,7 @@ const todos = on('todo');      // 'todo'  - WRONG, singular vs plural
 
 ### "How do I see what the message envelope looks like?"
 
-Every message sent through `platform.publish()` or `platform.topic().created()` arrives as JSON with this shape. The envelope is constructed with string concatenation for speed, but `topic` and `event` are validated first -- if either contains a quote, backslash, or control character, the call throws instead of producing malformed JSON:
+Every message sent through `platform.publish()` or `platform.topic().created()` arrives as JSON with this shape. The envelope is constructed with string concatenation for speed, but `topic` and `event` are validated first - if either contains a quote, backslash, or control character, the call throws instead of producing malformed JSON:
 
 ```json
 {
@@ -3807,8 +3821,8 @@ Unit tests cover store patterns, adapter options, plugin logic, client behavior,
 
 E2e tests start a real SvelteKit app (`test/fixture/`) with the adapter installed via `file:../..`. Playwright runs two projects:
 
-- **dev** -- `vite dev` with the Vite plugin. Tests SSR, static files, WebSocket pub/sub (via `ws` clients), and the real `client.js` running in Chromium.
-- **prod** -- `vite build` + `node build/index.js` through uWebSockets.js. Tests the same surface against the production runtime, plus the health check endpoint and 404 handling.
+- **dev** - `vite dev` with the Vite plugin. Tests SSR, static files, WebSocket pub/sub (via `ws` clients), and the real `client.js` running in Chromium.
+- **prod** - `vite build` + `node build/index.js` through uWebSockets.js. Tests the same surface against the production runtime, plus the health check endpoint and 404 handling.
 
 The coverage script collects V8 coverage from both the Playwright server processes (vite.js, handler.js) and the browser (client.js via Chrome DevTools Protocol), then reports them alongside the vitest unit coverage.
 
@@ -3946,13 +3960,13 @@ server.platform.__chaos({ scenario: 'worker-flap', code: 4001, reason: 'maintena
 
 **Continuous scenarios** (consulted on every outbound frame):
 
-- **`drop-outbound`** -- discards outbound frames before they reach the wire with the configured `dropRate` (a probability in `[0, 1]`). Affects every server-to-client frame: `platform.publish`, `platform.send`, `platform.sendTo`, `platform.request`, the welcome envelope, subscribe acks, and the resumed ack.
-- **`slow-drain`** -- defers outbound frames by `delayMs` milliseconds via `setTimeout`. Order is preserved per call site (every frame waits the same delay).
-- **`ipc-reorder`** -- defers each outbound frame by an independently-random delay in `[0, maxJitterMs)`. Adjacent frames can arrive out of order, simulating cross-worker relay reordering or queue jitter. `maxJitterMs` is capped at `60_000`.
+- **`drop-outbound`** - discards outbound frames before they reach the wire with the configured `dropRate` (a probability in `[0, 1]`). Affects every server-to-client frame: `platform.publish`, `platform.send`, `platform.sendTo`, `platform.request`, the welcome envelope, subscribe acks, and the resumed ack.
+- **`slow-drain`** - defers outbound frames by `delayMs` milliseconds via `setTimeout`. Order is preserved per call site (every frame waits the same delay).
+- **`ipc-reorder`** - defers each outbound frame by an independently-random delay in `[0, maxJitterMs)`. Adjacent frames can arrive out of order, simulating cross-worker relay reordering or queue jitter. `maxJitterMs` is capped at `60_000`.
 
 **One-shot trigger** (does NOT change continuous chaos state):
 
-- **`worker-flap`** -- closes every currently-live WebSocket connection with a clean close frame. Defaults to `code: 1012` ("server restart") and `reason: 'worker restart'`; both are configurable. The server stays up and accepts new connections; an active continuous scenario (e.g. `drop-outbound`) survives the flap and applies to subsequent frames. Use to verify clients reconnect, present their resume token, and your `resume` hook fills the gap correctly.
+- **`worker-flap`** - closes every currently-live WebSocket connection with a clean close frame. Defaults to `code: 1012` ("server restart") and `reason: 'worker restart'`; both are configurable. The server stays up and accepts new connections; an active continuous scenario (e.g. `drop-outbound`) survives the flap and applies to subsequent frames. Use to verify clients reconnect, present their resume token, and your `resume` hook fills the gap correctly.
 
 Pass `null` (or call `__chaos()` with no argument) to clear the active continuous scenario; the harness returns to its zero-overhead fast paths. While a scenario is active, `platform.publish` switches from uWS's C++ TopicTree fan-out to a JS-side fanout so the chaos state can intercept per recipient.
 
@@ -3960,7 +3974,7 @@ Pass `null` (or call `__chaos()` with no argument) to clear the active continuou
 
 ##### Scope: WS-frame outbound only
 
-`__chaos` is a WebSocket-frame outbound chokepoint -- it intercepts what the test harness sends to its connected WS clients, and only that. Transport-level traffic to anything else you've wired up alongside the adapter (an ioredis client for cross-instance pub/sub, a `pg` connection for `LISTEN/NOTIFY`, a NATS subscription, a custom HTTP backend) does NOT pass through `sendOutboundT` and is untouched by the harness.
+`__chaos` is a WebSocket-frame outbound chokepoint - it intercepts what the test harness sends to its connected WS clients, and only that. Transport-level traffic to anything else you've wired up alongside the adapter (an ioredis client for cross-instance pub/sub, a `pg` connection for `LISTEN/NOTIFY`, a NATS subscription, a custom HTTP backend) does NOT pass through `sendOutboundT` and is untouched by the harness.
 
 This is intentional: each layer's chaos surface stays cohesive with what that layer actually owns. The adapter knows its WS wire and ships chaos for that. Each backend / extension knows its own wire and is the right place to wrap that wire's client.
 
@@ -4005,9 +4019,9 @@ Composes across transports: `makeChaosClient(pgClient, 'query')`, `makeChaosClie
 
 ## Related projects
 
-- [svelte-adapter-uws-extensions](https://github.com/lanteanio/svelte-adapter-uws-extensions) -- Redis-backed extensions for multi-server deployments: persistent presence, distributed pub/sub, session storage, and more.
-- [svelte-realtime](https://github.com/lanteanio/svelte-realtime) -- Opinionated full-stack starter built on this adapter. Auth, database, real-time CRUD, and deployment config out of the box.
-- [svelte-realtime-demo](https://github.com/lanteanio/svelte-realtime-demo) -- Live demo of svelte-realtime. [Try it here.](https://svelte-realtime-demo.lantean.io/)
+- [svelte-adapter-uws-extensions](https://github.com/lanteanio/svelte-adapter-uws-extensions) - Redis-backed extensions for multi-server deployments: persistent presence, distributed pub/sub, session storage, and more.
+- [svelte-realtime](https://github.com/lanteanio/svelte-realtime) - Opinionated full-stack starter built on this adapter. Auth, database, real-time CRUD, and deployment config out of the box.
+- [svelte-realtime-demo](https://github.com/lanteanio/svelte-realtime-demo) - Live demo of svelte-realtime. [Try it here.](https://svelte-realtime-demo.lantean.io/)
 
 ## License
 

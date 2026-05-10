@@ -7,7 +7,7 @@ const PORT = PROD_PORT;
 const BASE_URL = `http://localhost:${PORT}`;
 const WS_URL = `ws://localhost:${PORT}/ws`;
 
-// -- Helpers ------------------------------------------------------------------
+// - Helpers ------------------------------------------------------------------
 
 function connectWs(url = WS_URL) {
 	return new Promise((resolve, reject) => {
@@ -57,7 +57,7 @@ function collect(ws, durationMs = 1000) {
 	});
 }
 
-// -- SSR & HTTP ---------------------------------------------------------------
+// - SSR & HTTP ---------------------------------------------------------------
 
 test.describe('SSR and static files (production)', () => {
 	test('renders the page with SSR data', async ({ request }) => {
@@ -84,7 +84,7 @@ test.describe('SSR and static files (production)', () => {
 	});
 });
 
-// -- WebSocket (Node.js ws client) --------------------------------------------
+// - WebSocket (Node.js ws client) --------------------------------------------
 
 test.describe('WebSocket pub/sub (production)', () => {
 	test('subscribe and receive published messages', async () => {
@@ -167,7 +167,7 @@ test.describe('WebSocket pub/sub (production)', () => {
 	});
 });
 
-// -- Browser client -----------------------------------------------------------
+// - Browser client -----------------------------------------------------------
 
 test.describe('browser client.js (production)', () => {
 	/** @type {any} */

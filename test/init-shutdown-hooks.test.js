@@ -3,7 +3,7 @@
 // init fires once after the listen socket is bound, before any open hook.
 // Async init is awaited before createTestServer() resolves so test setup
 // is fully ready when the promise settles. Throwing init rejects the
-// createTestServer promise -- boot failure is loud.
+// createTestServer promise - boot failure is loud.
 //
 // shutdown fires during graceful close, before the listen socket closes
 // and before existing connections are kicked. Async shutdown is awaited.
@@ -53,7 +53,7 @@ describeUWS('hooks.ws.init', () => {
 
 	it('does not fire if the user did not export init', async () => {
 		const { createTestServer } = await import('../testing.js');
-		// No init export -- createTestServer should resolve normally.
+		// No init export - createTestServer should resolve normally.
 		server = await createTestServer({ handler: {} });
 		expect(server.platform).toBeDefined();
 	});
@@ -72,7 +72,7 @@ describeUWS('hooks.ws.init', () => {
 			}
 		});
 
-		// createTestServer resolved -- init must have completed.
+		// createTestServer resolved - init must have completed.
 		expect(initCompleted).toBe(true);
 		expect(Date.now() - startTime).toBeGreaterThanOrEqual(75);
 	});
@@ -92,7 +92,7 @@ describeUWS('hooks.ws.init', () => {
 		server = await createTestServer({
 			handler: {
 				init({ platform }) {
-					// No subscribers yet -- but we can call publish without crashing.
+					// No subscribers yet - but we can call publish without crashing.
 					publishedFromInit = platform.publish('boot-topic', 'ready', { stamp: 1 });
 				}
 			}

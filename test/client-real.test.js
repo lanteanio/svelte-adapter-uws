@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// -- Mock WebSocket -----------------------------------------------------------
+// - Mock WebSocket -----------------------------------------------------------
 
 class MockWebSocket {
 	static CONNECTING = 0;
@@ -36,17 +36,17 @@ class MockWebSocket {
 	}
 }
 
-// -- Setup globals before import ---------------------------------------------
+// - Setup globals before import ---------------------------------------------
 
 globalThis.WebSocket = /** @type {any} */ (MockWebSocket);
 globalThis.window = /** @type {any} */ ({
 	location: { protocol: 'http:', host: 'localhost:5173' }
 });
 
-// Import the real module -- vitest.config.js aliases 'svelte/store'
+// Import the real module - vitest.config.js aliases 'svelte/store'
 const clientModule = await import('../client.js');
 
-// -- Helpers ------------------------------------------------------------------
+// - Helpers ------------------------------------------------------------------
 
 /** Wait for all pending microtasks (WebSocket auto-open) */
 function flush() {
@@ -61,7 +61,7 @@ function get(store) {
 	return value;
 }
 
-// -- Tests --------------------------------------------------------------------
+// - Tests --------------------------------------------------------------------
 
 describe('client.js (real module)', () => {
 	beforeEach(() => {
@@ -109,7 +109,7 @@ describe('client.js (real module)', () => {
 			clientModule.on('some-topic');
 			await flush();
 
-			// Now call connect() with options -- should warn
+			// Now call connect() with options - should warn
 			clientModule.connect({ path: '/custom-ws' });
 			expect(warnSpy).toHaveBeenCalledWith(
 				expect.stringContaining('options are ignored')
@@ -175,11 +175,11 @@ describe('client.js (real module)', () => {
 			await flush();
 
 			const ws = MockWebSocket._last;
-			// Send a 'deleted' event -- should not update the filtered store
+			// Send a 'deleted' event - should not update the filtered store
 			ws._receive({ topic: 'todos', event: 'deleted', data: { id: 1 } });
 			expect(value).toBeNull();
 
-			// Send a 'created' event -- should update
+			// Send a 'created' event - should update
 			ws._receive({ topic: 'todos', event: 'created', data: { id: 2 } });
 			expect(value).toEqual({ data: { id: 2 } });
 			unsub();
@@ -251,7 +251,7 @@ describe('client.js (real module)', () => {
 			ws1.readyState = MockWebSocket.CLOSED;
 			ws1.onclose?.({ code: 1006 });
 
-			// Resume tab -- should reconnect immediately
+			// Resume tab - should reconnect immediately
 			globalThis.document.hidden = false;
 			visibilityHandler?.();
 			await flush();
@@ -281,7 +281,7 @@ describe('client.js (real module)', () => {
 			ws1.readyState = MockWebSocket.CLOSED;
 			ws1.onclose?.({ code: 1006 });
 
-			// Tab resumes -- should reconnect immediately, not wait for backoff
+			// Tab resumes - should reconnect immediately, not wait for backoff
 			globalThis.document.hidden = false;
 			visibilityHandler?.();
 			await vi.advanceTimersByTimeAsync(0);
@@ -1225,7 +1225,7 @@ describe('client.js (real module)', () => {
 
 			unsub();
 
-			// Resubscribe -- should start with initial data, not accumulated
+			// Resubscribe - should start with initial data, not accumulated
 			let value2;
 			const unsub2 = store.subscribe((v) => { value2 = v; });
 			expect(value2).toEqual([{ id: 1, text: 'init' }]);
@@ -1477,7 +1477,7 @@ describe('client.js (real module)', () => {
 			expect(sub1).toBeDefined();
 			ws._sent.length = 0;
 
-			// Second subscriber -- no new WS message
+			// Second subscriber - no new WS message
 			const store2 = clientModule.on('shared-topic');
 			const unsub2 = store2.subscribe(() => {});
 			await flush();
@@ -1487,7 +1487,7 @@ describe('client.js (real module)', () => {
 			});
 			expect(sub2).toBeUndefined();
 
-			// Unsubscribe first -- still subscribed at WS level
+			// Unsubscribe first - still subscribed at WS level
 			unsub1();
 			await flush();
 			expect(ws._sent.find((s) => {
@@ -1495,7 +1495,7 @@ describe('client.js (real module)', () => {
 				return m.type === 'unsubscribe' && m.topic === 'shared-topic';
 			})).toBeUndefined();
 
-			// Unsubscribe second -- now unsubscribe at WS level
+			// Unsubscribe second - now unsubscribe at WS level
 			unsub2();
 			await flush();
 			const unsub_msg = ws._sent.find((s) => {
@@ -1709,7 +1709,7 @@ describe('client.js (real module)', () => {
 
 			unsub();
 
-			// Resubscribe -- should start clean
+			// Resubscribe - should start clean
 			let members2 = [];
 			const unsub2 = store.members.subscribe((v) => { members2 = v; });
 			expect(members2).toEqual([]);
@@ -2216,7 +2216,7 @@ describe('client.js (real module)', () => {
 			const unsub1 = accumulated.subscribe(() => {});
 			await flush();
 
-			// Unsubscribe -- should clean up without errors
+			// Unsubscribe - should clean up without errors
 			unsub1();
 
 			// Second subscriber re-activates cleanly

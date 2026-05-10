@@ -2,12 +2,22 @@
  * Broadcast groups plugin for svelte-adapter-uws.
  *
  * Named groups with explicit membership, roles, metadata, and lifecycle
- * hooks. Like topics but with access control -- you decide who can join,
+ * hooks. Like topics but with access control - you decide who can join,
  * who can publish, and what happens when the group fills up or closes.
  *
  * Zero impact on the adapter core - this is a standalone module that
  * uses ws.subscribe(), ws.unsubscribe(), platform.publish(), and
  * platform.send().
+ *
+ * MULTI-TENANT NOTE
+ * Group state is keyed by the group name verbatim. In a single-process
+ * deployment with multiple tenants, two tenants creating a group with
+ * the same name (`'admins'`, `'staff'`) collide on the SAME state.
+ * Apps must namespace group names with a tenant scope:
+ *
+ *     createGroup('org-' + tenantId + ':admins', { ... })
+ *
+ * Same recommendation for `presence`, `replay`, and `cursor` plugins.
  *
  * @module svelte-adapter-uws/plugins/groups
  */

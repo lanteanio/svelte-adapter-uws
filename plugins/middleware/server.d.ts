@@ -6,7 +6,7 @@ export interface MiddlewareContext {
 	ws: WebSocket<any>;
 	/** The original parsed message object. */
 	message: { topic: string; event: string; data?: unknown };
-	/** Message topic (mutable -- downstream middlewares see changes). */
+	/** Message topic (mutable - downstream middlewares see changes). */
 	topic: string;
 	/** Message event (mutable). */
 	event: string;

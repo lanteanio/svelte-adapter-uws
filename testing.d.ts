@@ -171,7 +171,7 @@ export interface TestServer {
  */
 export function createTestServer(options?: TestServerOptions): Promise<TestServer>;
 
-// -- Re-exported pure helpers -----------------------------------------------
+// - Re-exported pure helpers -----------------------------------------------
 // Curated for downstream test code asserting on wire shape, userData
 // state, or chaos / fault-injection behavior. Production-internal helpers
 // (mime lookup, byte parsing, sampler internals) deliberately stay
@@ -266,7 +266,7 @@ export function createChaosState(opts?: { random?: () => number }): {
 	getDelayMs(): number;
 };
 
-// -- Per-connection userData slot constants ---------------------------------
+// - Per-connection userData slot constants ---------------------------------
 // Symbol-keyed slots the adapter stamps on `ws.getUserData()` for its own
 // per-connection bookkeeping. Tests asserting on connection state read
 // userData via these to avoid coupling to Symbol identity tricks.

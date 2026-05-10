@@ -556,7 +556,7 @@ describe('cursor plugin - server', () => {
 			};
 			const p = mockPlatform();
 
-			// Not subscribed yet -- rejected
+			// Not subscribed yet - rejected
 			const r1 = c.hooks.message(ws, { data: encode({ type: 'cursor', topic: 'canvas', data: { x: 1 } }), platform: p });
 			expect(r1).toBe(true);
 			expect(p.published).toHaveLength(0);
@@ -637,7 +637,7 @@ describe('cursor plugin - server', () => {
 
 			Date.now.mockRestore();
 
-			// Advance timers far past the scheduled time -- the cleared timer must not fire
+			// Advance timers far past the scheduled time - the cleared timer must not fire
 			vi.advanceTimersByTime(500);
 			expect(p.published).toHaveLength(2);
 

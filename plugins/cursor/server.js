@@ -9,6 +9,12 @@
  * Zero impact on the adapter core - this is a standalone module that
  * uses platform.publish() and platform.send().
  *
+ * MULTI-TENANT NOTE
+ * Cursor state is keyed by the topic name verbatim. Apps running
+ * multiple tenants in one process must namespace topic names with
+ * tenant scope to avoid cross-tenant cursor leakage. Same
+ * recommendation for the `presence`, `groups`, and `replay` plugins.
+ *
  * @module svelte-adapter-uws/plugins/cursor
  */
 

@@ -191,7 +191,7 @@ if (is_primary) {
 			if (!shutting_down) {
 				// In acceptor mode, stop accepting when all workers are down so
 				// clients get a clean connection-refused instead of an empty app.
-				// In reuseport mode, each worker owns its listen socket -- when
+				// In reuseport mode, each worker owns its listen socket - when
 				// it dies, the kernel stops routing to it automatically.
 				if (cluster_mode === 'acceptor') {
 					const has_live_worker = [...workers.values()].some(m => m.descriptor !== null);
@@ -239,7 +239,7 @@ if (is_primary) {
 		for (const t of restart_timers) clearTimeout(t);
 		restart_timers.clear();
 
-		// Phase 1: Keep accepting connections until the load balancer has
+		// Step 1: Keep accepting connections until the load balancer has
 		// had time to remove this pod from rotation (Kubernetes rolling updates).
 		// SHUTDOWN_DELAY_MS=0 (default) skips this and is correct for non-k8s deploys.
 		if (shutdown_delay > 0) {
@@ -247,7 +247,7 @@ if (is_primary) {
 			await new Promise((resolve) => setTimeout(resolve, shutdown_delay));
 		}
 
-		// Phase 2: Stop accepting new connections (acceptor mode only)
+		// Step 2: Stop accepting new connections (acceptor mode only)
 		if (cluster_mode === 'acceptor' && listen_socket) {
 			uWS.us_listen_socket_close(listen_socket);
 			listen_socket = null;
@@ -277,7 +277,7 @@ if (is_primary) {
 		// hooks.ws `init` hook run to completion (cron registration, warmup
 		// tasks, etc.) before this entry script returns. A throwing init
 		// surfaces as an unhandled promise rejection and crashes the
-		// process -- which is the right behavior for boot failure.
+		// process - which is the right behavior for boot failure.
 		await start(host, port);
 	} else {
 		// Worker thread startup depends on clustering mode
@@ -317,7 +317,7 @@ if (is_primary) {
 		const prefix = isMainThread ? '' : `[worker ${threadId}] `;
 		console.log(`${prefix}Received ${reason}, shutting down gracefully...`);
 
-		// Phase 1: Load balancer drain delay (only for OS signals, not when the
+		// Step 1: Load balancer drain delay (only for OS signals, not when the
 		// primary tells us to shutdown  - the primary already waited its own delay).
 		if (shutdown_delay > 0 && (reason === 'SIGTERM' || reason === 'SIGINT')) {
 			console.log(`${prefix}Waiting ${shutdown_delay}ms for load balancer drain...`);

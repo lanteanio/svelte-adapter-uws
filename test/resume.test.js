@@ -172,4 +172,43 @@ describeUWS('session resume protocol', () => {
 
 		client.ws.close();
 	});
+
+	it('awaits the resume hook before emitting resumed (so replay frames land first)', async () => {
+		// Pre-fix bug: the resume hook was fired-and-forgotten and the
+		// resumed ack went out immediately. Replay backends call
+		// platform.send(ws, '__replay:topic', 'msg', ...) asynchronously,
+		// so the client started processing live publishes before the
+		// gap-fill arrived. Assert ordering: every __replay:* frame
+		// dispatched from inside the user resume hook must appear on the
+		// wire BEFORE the resumed ack.
+		const { createTestServer } = await import('../testing.js');
+		server = await createTestServer({
+			handler: {
+				async resume(ws, ctx) {
+					await new Promise(r => setTimeout(r, 30));
+					ctx.platform.send(ws, '__replay:topic-a', 'msg', { seq: 1, data: 'gap-fill' });
+					ctx.platform.send(ws, '__replay:topic-a', 'end', null);
+				}
+			}
+		});
+
+		const client = await connectAndCapture(server.wsUrl);
+		await client.waitFor(f => f.parsed?.type === 'welcome');
+		client.ws.send(JSON.stringify({
+			type: 'resume',
+			sessionId: 's',
+			lastSeenSeqs: { 'topic-a': 0 }
+		}));
+
+		const resumed = await client.waitFor(f => f.parsed?.type === 'resumed', 500);
+		const resumedIdx = client.frames.indexOf(resumed);
+		// The replay 'msg' and 'end' must appear before the resumed ack.
+		const replayMsgIdx = client.frames.findIndex(f => f.parsed?.event === 'msg' && f.parsed?.topic === '__replay:topic-a');
+		const replayEndIdx = client.frames.findIndex(f => f.parsed?.event === 'end' && f.parsed?.topic === '__replay:topic-a');
+		expect(replayMsgIdx).toBeGreaterThanOrEqual(0);
+		expect(replayEndIdx).toBeGreaterThan(replayMsgIdx);
+		expect(resumedIdx).toBeGreaterThan(replayEndIdx);
+
+		client.ws.close();
+	});
 });

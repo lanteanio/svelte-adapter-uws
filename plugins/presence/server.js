@@ -8,6 +8,22 @@
  * Zero impact on the adapter core - this is a standalone module that
  * uses ws.subscribe(), platform.publish(), and platform.send().
  *
+ * MULTI-TENANT NOTE
+ * In a single-process deployment running multiple tenants, the plugin's
+ * `Map<topic, ...>` state is keyed by the topic name verbatim. Two
+ * tenants whose UI happens to share a room name (`'lobby'`, `'support'`,
+ * `'chat-1'`) will collide on the SAME map entry: tenant A's roster
+ * includes tenant B's members and vice versa. The fix is at the call
+ * site - prefix room/topic names with a tenant scope before passing
+ * them to `presence.join` / `presence.list`:
+ *
+ *     presence.join(ws, 'org-' + ctx.user.tenantId + ':lobby', platform);
+ *     presence.list('org-' + ctx.user.tenantId + ':lobby');
+ *
+ * Same recommendation for `groups`, `replay`, and `cursor` plugins.
+ * Live.room consumers can lift this into their `topic: (ctx, room) =>
+ * 'org-' + ctx.user.tenantId + ':' + room` factory once and forget it.
+ *
  * @module svelte-adapter-uws/plugins/presence
  */
 
@@ -111,7 +127,7 @@ const TOPIC_PREFIX = '__presence:';
  * and primitive keys (object members use identity via has()).
  * Cycle-safe via pair tracking: if the same (a, b) pair is encountered
  * again during recursion, it is assumed equal (co-inductive equality).
- * Shared subobjects are handled correctly -- the same object appearing
+ * Shared subobjects are handled correctly - the same object appearing
  * in multiple fields does not trigger false positives.
  * @param {any} a
  * @param {any} b
@@ -280,7 +296,7 @@ export function createPresence(options = {}) {
 
 	/**
 	 * Capture the platform reference and start the heartbeat if configured.
-	 * Called lazily on first join/leave/sync -- the platform object isn't
+	 * Called lazily on first join/leave/sync - the platform object isn't
 	 * available at createPresence() time.
 	 * @param {import('../../index.js').Platform} platform
 	 */

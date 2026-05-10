@@ -924,7 +924,7 @@ describe('presence plugin - server', () => {
 			p.clear();
 			platform.reset();
 
-			// Re-join after clear -- should restart heartbeat
+			// Re-join after clear - should restart heartbeat
 			const ws2 = mockWs({ id: '2', name: 'Bob' });
 			p.join(ws2, 'lobby', platform);
 			platform.reset();

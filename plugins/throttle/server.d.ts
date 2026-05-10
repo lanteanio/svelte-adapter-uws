@@ -54,7 +54,7 @@ export interface Limiter {
  *
  * Sends the first publish immediately (leading edge), then at most once
  * per interval after that (trailing edge). Within each interval, only
- * the latest value is kept -- earlier values are discarded.
+ * the latest value is kept - earlier values are discarded.
  *
  * Rate limiting is per-topic: different topics have independent timers.
  *

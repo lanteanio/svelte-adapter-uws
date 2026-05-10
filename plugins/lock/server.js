@@ -42,7 +42,7 @@
  *   that have not yet acquired are rejected. Use in tests/teardown.
  */
 
-// -- Internal: per-key state ------------------------------------------------
+// - Internal: per-key state ------------------------------------------------
 //
 // Each active key carries a `running` flag (true while a caller's `fn` is
 // executing) and a FIFO `queue` of pending waiters. When the running

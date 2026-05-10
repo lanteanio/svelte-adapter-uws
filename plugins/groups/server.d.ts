@@ -42,7 +42,7 @@ export interface Group {
 	 * Add a member to the group.
 	 *
 	 * Returns `true` on success, `false` if the group is full or closed.
-	 * Idempotent -- joining twice with the same ws is a no-op.
+	 * Idempotent - joining twice with the same ws is a no-op.
 	 *
 	 * @example
 	 * ```js

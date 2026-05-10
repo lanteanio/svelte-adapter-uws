@@ -143,7 +143,10 @@ export interface WebSocketOptions {
 
 	/**
 	 * Max message size in bytes. Connections sending larger messages are closed.
-	 * @default 16384 (16 KB)
+	 * The default aligns with `socket.io` and Cloudflare Workers' WebSocket
+	 * message cap; uWS itself defaults to 16 MB. Lower this for stricter caps
+	 * (e.g. `16 * 1024` for 16 KB) when payload-size discipline matters.
+	 * @default 1048576 (1 MB)
 	 */
 	maxPayloadLength?: number;
 
@@ -342,9 +345,100 @@ export interface WebSocketOptions {
 		 */
 		topicPublishBytesPerSec?: number | false;
 	};
+
+	// - Security and policy opt-ins -------------------------------------------
+
+	/**
+	 * Allow wire-level subscribes to `__`-prefixed topics. Default `false`:
+	 * the server rejects any `subscribe` / `subscribe-batch` whose topic
+	 * starts with `__` (those are framework-internal channels for signals,
+	 * presence, replay, etc.). Set `true` only for advanced apps that
+	 * intentionally route public topics through the `__` prefix.
+	 *
+	 * Server-side `platform.subscribe(ws, '__signal:userId')` and the like
+	 * always work because the block is on the wire layer only.
+	 *
+	 * @default false
+	 */
+	allowSystemTopicSubscribe?: boolean;
+
+	/**
+	 * Allow non-ASCII characters in wire-submitted topic names. Default
+	 * `false`: only printable ASCII (0x20-0x7E) excluding `"` and `\` is
+	 * accepted, blocking line separators (U+2028/U+2029), bidirectional
+	 * overrides (U+202E), the byte-order mark, and other surprise runes
+	 * that survive the wire and confuse log dashboards / admin UIs.
+	 *
+	 * Always-illegal `"` and `\` remain rejected even with this set.
+	 *
+	 * @default false
+	 */
+	allowNonAsciiTopics?: boolean;
+
+	/**
+	 * Require an `Origin`-equivalent header on the `/__ws/auth` POST
+	 * endpoint (CSRF defense). When `true`, the request must satisfy at
+	 * least one of: `x-requested-with: XMLHttpRequest`, `Sec-Fetch-Site:
+	 * same-origin`, or an `Origin` header matching `allowedOrigins`. The
+	 * adapter client always stamps `x-requested-with` so the browser path
+	 * is unaffected.
+	 *
+	 * Set `false` to accept native (non-browser) clients without those
+	 * headers.
+	 *
+	 * @default true
+	 */
+	authPathRequireOrigin?: boolean;
+
+	/**
+	 * Apply dynamic brotli/gzip compression to responses for credentialed
+	 * requests (those carrying `Cookie` or `Authorization`). Default
+	 * `false` defends against the [BREACH](https://en.wikipedia.org/wiki/BREACH)
+	 * attack (compressed length leaks attacker-influenced reflected
+	 * input alongside a secret in the page body).
+	 *
+	 * Set `true` only after auditing the page surface for BREACH
+	 * defenses (random per-response masking, prefix randomization, no
+	 * secrets reflected with attacker input). Build-time precompressed
+	 * static files are unaffected.
+	 *
+	 * @default false
+	 */
+	compressCredentialedResponses?: boolean;
+
+	/**
+	 * Restore the previous warn-only behavior when `allowedOrigins:
+	 * 'same-origin'` is paired with no fronting trust (no `ORIGIN` env,
+	 * no `HOST_HEADER` env, no native TLS, no `upgrade()` hook). Default
+	 * `false`: the runtime throws at startup because the same-origin
+	 * check then compares two attacker-controlled headers.
+	 *
+	 * Set `true` only when the deployment context has been independently
+	 * audited; pin the deployment shape first (`ORIGIN`, `HOST_HEADER`,
+	 * native TLS, or an `upgrade()` hook).
+	 *
+	 * @default false
+	 */
+	unsafeSameOriginWithoutHostPin?: boolean;
+
+	/**
+	 * Opt-in HMAC over the cross-worker relay envelope. When set, must
+	 * be at least 16 characters and must be the same value across every
+	 * worker that relays to / from this one. Producer side computes an
+	 * HMAC-SHA256 tag over the `(topic, envelope)` pair; consumer side
+	 * re-computes and refuses on mismatch.
+	 *
+	 * Defends against an adjacent process injecting forged messages into
+	 * the `worker_threads` relay (typically reachable only post-
+	 * compromise). The shared secret must reach every worker via env
+	 * var or `workerData`.
+	 *
+	 * Without this option set, behavior is unchanged.
+	 */
+	workerRelayHmacSecret?: string;
 }
 
-// -- User's WebSocket handler module exports ---------------------------------
+// - User's WebSocket handler module exports ---------------------------------
 
 /**
  * Options accepted by `authenticateCookies.set()` and `.delete()`. Matches the
@@ -610,7 +704,7 @@ export interface WebSocketHandler<UserData = unknown> {
 	/**
 	 * Called once after the listen socket is bound and before any
 	 * `upgrade` / `open` / `message` hooks fire. Use this to capture
-	 * `platform` at boot time -- the canonical entry point for cron
+	 * `platform` at boot time - the canonical entry point for cron
 	 * registration, warmup tasks, scheduled metrics dumps, external
 	 * pubsub bridge setup, or any "I need platform before the first
 	 * connection" pattern.
@@ -618,7 +712,7 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * Async-allowed. The adapter awaits the returned promise before
 	 * `start()` resolves (production) or `createTestServer()` resolves
 	 * (test harness). Connections accepted at the kernel level during a
-	 * slow async init queue until init resolves -- but `open` / `message`
+	 * slow async init queue until init resolves - but `open` / `message`
 	 * hooks for those queued connections may run concurrently with the
 	 * tail of init's execution. For most "capture platform" patterns the
 	 * race is harmless (writes are idempotent); use synchronous init or
@@ -626,13 +720,13 @@ export interface WebSocketHandler<UserData = unknown> {
 	 *
 	 * **Per-worker firing in clustered mode.** Each worker process calls
 	 * `start()` and fires `init` independently. An app running with N
-	 * workers will see N `init` calls -- one per worker. Do not assume
+	 * workers will see N `init` calls - one per worker. Do not assume
 	 * singleton semantics; if you need a singleton (e.g. a single cron
 	 * publisher across the cluster), layer leader election on top.
 	 *
 	 * Throws re-throw to the caller: boot failure should be loud. The
 	 * `start()` promise rejects, the index.js entrypoint logs it, and the
-	 * process crashes -- which is the right behavior for a server that
+	 * process crashes - which is the right behavior for a server that
 	 * cannot complete its boot work.
 	 *
 	 * @example
@@ -652,7 +746,7 @@ export interface WebSocketHandler<UserData = unknown> {
 	/**
 	 * Called once during graceful shutdown, before the listen socket is
 	 * closed and before existing WebSocket connections are kicked. Use
-	 * this for app-level teardown that needs `platform` -- cron drain,
+	 * this for app-level teardown that needs `platform` - cron drain,
 	 * last metrics dump, external pubsub bridge teardown, queue flush.
 	 *
 	 * Async-allowed. The adapter awaits the returned promise before
@@ -708,7 +802,7 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * **Wire-level scope only.** This hook fires when a client sends a
 	 * `{type:'subscribe'}` (or `{type:'subscribe-batch'}`) wire frame.
 	 * Server-side code that calls `ws.subscribe(topic)` directly bypasses
-	 * this hook -- the uWS C++ subscribe is not intercepted. Frameworks
+	 * this hook - the uWS C++ subscribe is not intercepted. Frameworks
 	 * and plugins that subscribe a connection on the user's behalf
 	 * (RPC handlers, integration layers) must route through
 	 * `platform.subscribe(ws, topic)` to inherit this gate. Otherwise the
@@ -751,7 +845,7 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * **Wire-level scope only.** Same caveat as `subscribe`: server-side
 	 * code that calls `ws.subscribe(topic)` directly does not pass through
 	 * this hook. Frameworks subscribing on the user's behalf must route
-	 * through `platform.subscribe(ws, topic)` -- one call per topic, the
+	 * through `platform.subscribe(ws, topic)` - one call per topic, the
 	 * per-topic `subscribe` hook fires for each. This hook is exclusively
 	 * the optimization point for client-initiated bulk authorization.
 	 *
@@ -840,7 +934,7 @@ export interface WebSocketHandler<UserData = unknown> {
 	close?: (ws: WebSocket<UserData>, ctx: CloseContext) => void;
 }
 
-// -- Platform type for event.platform ----------------------------------------
+// - Platform type for event.platform ----------------------------------------
 
 /**
  * Snapshot returned by `platform.pressure` and supplied to
@@ -1266,8 +1360,8 @@ export interface Platform {
 	 * user's `hooks.ws.subscribe` authorization hook first.
 	 *
 	 * Use this from any server-side path that needs to subscribe a
-	 * connection on the user's behalf -- RPC handlers, framework
-	 * integration layers, plugins -- to inherit the centralized
+	 * connection on the user's behalf - RPC handlers, framework
+	 * integration layers, plugins - to inherit the centralized
 	 * `hooks.ws.subscribe` authorization gate. Calling `ws.subscribe(topic)`
 	 * directly bypasses the gate (the wire-level subscribe hook fires only
 	 * for `{type:'subscribe'}` and `{type:'subscribe-batch'}` wire frames,
@@ -1282,7 +1376,7 @@ export interface Platform {
 	 * both times and does not double-charge counters or trigger the hook
 	 * a second time. Updates `WS_SUBSCRIPTIONS` and `totalSubscriptions`
 	 * so observability stays consistent with client-initiated subscribes.
-	 * Does not send a `{type:'subscribed', topic, ref}` ack frame -- there
+	 * Does not send a `{type:'subscribed', topic, ref}` ack frame - there
 	 * is no client `ref` for a server-initiated subscribe.
 	 *
 	 * @example
@@ -1293,7 +1387,7 @@ export interface Platform {
 	 * if (denial) {
 	 *   return reply({ error: denial });
 	 * }
-	 * // Authorized -- proceed with the loader / initial data.
+	 * // Authorized - proceed with the loader / initial data.
 	 * ```
 	 */
 	subscribe(ws: WebSocket<unknown>, topic: string): string | null;
@@ -1305,7 +1399,7 @@ export interface Platform {
 	 *
 	 * Use this when the caller wants to make the subscribe decision in
 	 * one step and perform the actual `ws.subscribe` later as part of a
-	 * different orchestration -- e.g. an RPC framework that runs a
+	 * different orchestration - e.g. an RPC framework that runs a
 	 * loader between authorization and the subscribe, and wants the
 	 * loader to fail cleanly without leaving a half-subscribed
 	 * connection or a spurious 'join' broadcast.
@@ -1317,7 +1411,7 @@ export interface Platform {
 	 * two still gets a consistent gate across single and batch entry
 	 * points.
 	 *
-	 * Pure -- does not modify subscription state, does not call
+	 * Pure - does not modify subscription state, does not call
 	 * `ws.subscribe`, does not increment the subscription counter. The
 	 * cap (`MAX_SUBSCRIPTIONS_PER_CONNECTION`) is NOT consulted here
 	 * because no subscription is being created; cap enforcement belongs
@@ -1349,7 +1443,7 @@ export interface Platform {
 	 *
 	 * Idempotent: returns `false` if the connection was not subscribed,
 	 * otherwise removes the subscription, decrements `totalSubscriptions`,
-	 * fires `hooks.ws.unsubscribe` (informational, not a gate -- mirrors
+	 * fires `hooks.ws.unsubscribe` (informational, not a gate - mirrors
 	 * the wire-level unsubscribe path), and returns `true`.
 	 */
 	unsubscribe(ws: WebSocket<unknown>, topic: string): boolean;

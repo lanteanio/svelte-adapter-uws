@@ -432,7 +432,7 @@ describe('client store patterns', () => {
 		it('does not sweep when maxAge is not set', () => {
 			const userMap = new Map();
 			userMap.set('1', { name: 'Alice' });
-			// Without maxAge, no sweep should happen -- entries persist indefinitely
+			// Without maxAge, no sweep should happen - entries persist indefinitely
 			expect(userMap.size).toBe(1);
 		});
 
@@ -469,7 +469,7 @@ describe('client store patterns', () => {
 			// Advance time near maxAge
 			vi.advanceTimersByTime(4000);
 
-			// Simulate heartbeat -- refreshes timestamps for listed keys
+			// Simulate heartbeat - refreshes timestamps for listed keys
 			const heartbeatKeys = ['1', '2'];
 			const heartbeatTime = Date.now();
 			for (const key of heartbeatKeys) {
@@ -524,7 +524,7 @@ describe('client store patterns', () => {
 			const timestamps = new Map();
 			timestamps.set('1', Date.now());
 
-			// Heartbeat includes unknown key '99' -- should be ignored
+			// Heartbeat includes unknown key '99' - should be ignored
 			const heartbeatKeys = ['1', '99'];
 			const heartbeatTime = Date.now();
 			for (const key of heartbeatKeys) {
@@ -783,7 +783,7 @@ describe('client store patterns', () => {
 		});
 	});
 
-	// -- onDerived logic --------------------------------------------------------
+	// - onDerived logic --------------------------------------------------------
 	// Tests the core lifecycle of the reactive topic subscription pattern used
 	// by onDerived(). The actual function uses svelte/store derived(), but the
 	// behavior it must satisfy is independent of the framework primitive.

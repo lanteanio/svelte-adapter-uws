@@ -3,7 +3,7 @@
  *
  * Composable message processing pipeline. Chain functions that run
  * on inbound WebSocket messages before your handler logic. Each
- * middleware receives a context and a `next` function -- call `next()`
+ * middleware receives a context and a `next` function - call `next()`
  * to pass control to the next middleware, or skip it to stop the chain.
  *
  * Zero impact on the adapter core - this is a standalone utility

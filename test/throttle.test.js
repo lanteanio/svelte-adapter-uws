@@ -112,7 +112,7 @@ describe('throttle plugin', () => {
 			vi.advanceTimersByTime(100);
 			expect(platform.published).toHaveLength(2);
 
-			// Idle check fires at t=200 -- should not send anything
+			// Idle check fires at t=200 - should not send anything
 			vi.advanceTimersByTime(100);
 			expect(platform.published).toHaveLength(2);
 		});
@@ -129,7 +129,7 @@ describe('throttle plugin', () => {
 
 			platform.reset();
 
-			// Second burst -- should get leading edge again
+			// Second burst - should get leading edge again
 			t.publish(platform, 'cursor', 'move', { x: 100 });
 			expect(platform.published).toHaveLength(1);
 			expect(platform.published[0].data).toEqual({ x: 100 });
@@ -340,12 +340,12 @@ describe('throttle plugin', () => {
 			d.publish(platform, 'search', 'query', { q: 'he' });
 			vi.advanceTimersByTime(80);
 
-			// 160ms total, but only 80ms since last call -- should not fire yet
+			// 160ms total, but only 80ms since last call - should not fire yet
 			expect(platform.published).toHaveLength(0);
 
 			vi.advanceTimersByTime(20);
 
-			// Now 100ms since last call -- fires
+			// Now 100ms since last call - fires
 			expect(platform.published).toHaveLength(1);
 			expect(platform.published[0].data).toEqual({ q: 'he' });
 		});
