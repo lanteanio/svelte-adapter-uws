@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.20] - 2026-05-10
+
 ### Changed
 
 - **Bumped `engines.node` to `>=22.0.0` (was `>=20.0.0`); pinned `uWebSockets.js` to v20.67.0 (was v20.60.0).** uWS v20.67.0 dropped Node 20 support upstream; the adapter follows. Node 22 LTS, Node 24 current, and Node 26 are supported. Picks up real upstream wins from v20.60 to v20.67: backpressure fix (v20.64), Latin-1 string handling (v20.65), faster String args via V8 ValueView (v20.63), zero-cost `getRemoteAddress` / `getRemoteAddressAsText` (v20.66), `getRemotePort` / `getProxiedRemotePort` (v20.61), DeclarativeResponse improvements, and symbol-keyed userData support. See `MIGRATION.md` for the runtime-bump checklist.
