@@ -28,7 +28,12 @@ These close real security bugs that affected idiomatic 0.4 code paths. Audit you
 
 **What changed.** Previously, any authenticated client could send `{"type":"subscribe","topic":"__signal:victim-userId"}` and intercept every `live.signal()` to that user, plus plugin presence / group / replay broadcasts on `__presence:*`, `__group:*`, `__replay:*`. The wire-level subscribe and subscribe-batch handlers now reject any topic whose first two bytes are `__` with `INVALID_TOPIC`. Server-side `platform.subscribe(ws, '__signal:userId')` (the legitimate framework pattern) still works.
 
-**How to migrate.** No action needed if you only subscribe to system topics from server code. If your app legitimately routes public topics through the `__` prefix (rare), set `websocket.allowSystemTopicSubscribe: true` in `svelte.config.js`.
+As of `0.5.0-next.23`, the bundled client's `on(topic)` complements the server-side block: `__`-prefixed topics are treated as local broadcast taps, registering the inbound dispatch entry without sending a wire `subscribe` frame. The plugin or framework that publishes on the topic owns server-side subscriber-set membership (via `ws.subscribe` or `platform.subscribe`); the wire subscribe was always redundant and would now be denied. This eliminates the `[ws] subscribe denied topic=__presence:<room> reason=INVALID_TOPIC` console.warn that bundled plugin clients (`presence`, `replay`, `cursor`, `groups`) and `svelte-realtime`'s `health` store emitted on every page mount and reconnect under `next.21` / `next.22`.
+
+**How to migrate.** No action needed if you only subscribe to system topics from server code, or if you use the bundled plugin clients or `svelte-realtime`'s `health` store (these are fixed automatically as of `next.23`). If your app legitimately routes public topics through the `__` prefix (rare), the migration is one of:
+
+- **Recommended**: rename the topic to a non-`__` prefix. The `__` namespace is reserved for the framework and its bundled plugins.
+- Send the wire frame directly via `connect().send({ type: 'subscribe', topic: '__foo', ref: 1 })` and set `websocket.allowSystemTopicSubscribe: true` in `svelte.config.js` on the server. `on('__foo')` from the bundled client will not send the frame for you.
 
 ### SSR dedup cache key includes `base_origin` (cross-tenant leak fix)
 
