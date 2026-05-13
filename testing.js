@@ -232,7 +232,8 @@ export async function createTestServer(options = {}) {
 						console.error(
 							'[adapter-uws/testing] platform.sendTo filter returned a Promise; treating as fail-closed.\n' +
 							'  Resolve filter inputs into userData from your `upgrade` hook so the\n' +
-							'  filter can read them synchronously.'
+							'  filter can read them synchronously.\n' +
+							'  See: https://svti.me/sendto-async'
 						);
 					}
 					continue;

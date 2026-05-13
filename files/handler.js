@@ -327,7 +327,8 @@ if (!origin && !host_header && !protocol_header && !is_tls) {
 		'For production, either:\n' +
 		'  SSL_CERT + SSL_KEY for native TLS (no proxy needed)\n' +
 		'  ORIGIN=https://example.com (behind a TLS proxy)\n' +
-		'  PROTOCOL_HEADER=x-forwarded-proto + HOST_HEADER=x-forwarded-host (flexible proxy)'
+		'  PROTOCOL_HEADER=x-forwarded-proto + HOST_HEADER=x-forwarded-host (flexible proxy)\n' +
+		'  See: https://svti.me/adapter-origin'
 	);
 }
 
@@ -527,7 +528,8 @@ function maybeWarnTopicRegistry() {
 		' distinct topics. Each entry persists for the process lifetime ' +
 		'(required by the resume protocol). Reduce topic cardinality or ' +
 		'opt out of seq stamping for high-cardinality publishes via ' +
-		'{ seq: false }. Top recent publishers: ' + JSON.stringify(top)
+		'{ seq: false }. Top recent publishers: ' + JSON.stringify(top) +
+		'\n  See: https://svti.me/topic-cardinality'
 	);
 }
 
@@ -602,7 +604,8 @@ function warnLargeBatchFrame(size) {
 	lastBatchOversizeWarnAt = now;
 	console.warn('[ws] publishBatched frame is ' + size + ' bytes (>' + BATCH_FRAME_WARN_BYTES +
 		'). Large frames may trip per-message-deflate and surprise CPU budgets. ' +
-		'Consider chunking the batch into multiple publishBatched calls.');
+		'Consider chunking the batch into multiple publishBatched calls.' +
+		'\n  See: https://svti.me/publish-batched');
 }
 
 /** @type {ReturnType<typeof setInterval> | null} */
@@ -706,7 +709,7 @@ function samplePressure(thresholds) {
 				}
 				lastPublishWarnAt.set(e.topic, now);
 				console.warn(
-					'[ws] runaway publisher topic=%s msg/s=%d bytes/s=%d',
+					'[ws] runaway publisher topic=%s msg/s=%d bytes/s=%d\n  See: https://svti.me/pressure',
 					e.topic, Math.round(e.messagesPerSec), Math.round(e.bytesPerSec)
 				);
 			}
@@ -1047,7 +1050,8 @@ const platform = {
 						'[ws] platform.sendTo filter returned a Promise; treating as fail-closed.\n' +
 						'  Async filters cannot be used here because sendTo iterates every active\n' +
 						'  connection synchronously. Resolve the relevant fields into userData from\n' +
-						'  your `upgrade` hook so the filter can read them synchronously.'
+						'  your `upgrade` hook so the filter can read them synchronously.\n' +
+						'  See: https://svti.me/sendto-async'
 					);
 				}
 				continue;
@@ -2488,7 +2492,8 @@ if (WS_ENABLED) {
 		if (!knownWsExports.has(name)) {
 			console.warn(
 				`Warning: WebSocket handler exports unknown "${name}". ` +
-				`Did you mean one of: ${[...knownWsExports].join(', ')}?`
+				`Did you mean one of: ${[...knownWsExports].join(', ')}?\n` +
+				'  See: https://svti.me/ws-hooks'
 			);
 		}
 	}
@@ -2510,7 +2515,8 @@ if (WS_ENABLED) {
 					'Cloudflare Tunnel and some other edge proxies (WebSocket opens, then ' +
 					'closes with 1006 TCP FIN). Migrate to the `authenticate` hook to ' +
 					'refresh session cookies over a normal HTTP response: ' +
-					'export function authenticate({ cookies }) { cookies.set(...); }'
+					'export function authenticate({ cookies }) { cookies.set(...); }\n' +
+					'  See: https://svti.me/cf-cookies'
 				);
 				return;
 			}
@@ -2961,7 +2967,8 @@ if (WS_ENABLED) {
 									console.warn(
 										'[ws] userData key "' + key + '" may contain sensitive data. ' +
 										'userData is accessible to all server-side handlers via ws.getUserData(). ' +
-										'Store sensitive data outside userData and reference it by a non-sensitive ID.'
+										'Store sensitive data outside userData and reference it by a non-sensitive ID.\n' +
+										'  See: https://svti.me/userdata-sensitive'
 									);
 								}
 							}

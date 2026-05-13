@@ -45,7 +45,8 @@ if (is_primary) {
 	if (cluster_mode === 'reuseport' && process.platform !== 'linux') {
 		console.error(
 			`CLUSTER_MODE=reuseport requires Linux (SO_REUSEPORT is not reliable on ${process.platform}). ` +
-			'Remove CLUSTER_MODE to use the default acceptor mode.'
+			'Remove CLUSTER_MODE to use the default acceptor mode.\n' +
+			'  See: https://svti.me/cluster-mode'
 		);
 		process.exit(1);
 	}
@@ -204,7 +205,7 @@ if (is_primary) {
 				}
 				restart_attempts++;
 				if (restart_attempts > RESTART_MAX_ATTEMPTS) {
-					console.error(`Worker restart limit reached (${RESTART_MAX_ATTEMPTS}). Exiting.`);
+					console.error(`Worker restart limit reached (${RESTART_MAX_ATTEMPTS}). Exiting.\n  See: https://svti.me/worker-restart-limit`);
 					process.exit(1);
 				}
 				restart_delay = restart_delay ? Math.min(restart_delay * 2, RESTART_DELAY_MAX) : 100;

@@ -240,7 +240,8 @@ export default function uws(options = {}) {
 					console.error(
 						'[adapter-uws] platform.sendTo filter returned a Promise; treating as fail-closed.\n' +
 						'  Resolve filter inputs into userData from your `upgrade` hook so the\n' +
-						'  filter can read them synchronously.'
+						'  filter can read them synchronously.\n' +
+						'  See: https://svti.me/sendto-async'
 					);
 				}
 				continue;
@@ -692,7 +693,7 @@ export default function uws(options = {}) {
 					applyHandlers(mod);
 				}).catch((err) => {
 					handlerFailed = true;
-					console.error(`[adapter-uws] Failed to load WebSocket handler '${options.handler}':`, err);
+					console.error(`[adapter-uws] Failed to load WebSocket handler '${options.handler}':`, err, '\n  See: https://svti.me/ws-handler-load');
 				});
 			} else {
 				// Auto-discover src/hooks.ws.{js,ts,mjs}
@@ -928,10 +929,11 @@ export default function uws(options = {}) {
 										'[adapter-uws] upgradeResponse() attaches Set-Cookie to the 101 response. ' +
 										'This fails silently behind Cloudflare Tunnel and some other strict edge proxies ' +
 										'(WebSocket opens, then closes with 1006). Use the `authenticate` hook to ' +
-										'refresh session cookies over a normal HTTP response.'
+										'refresh session cookies over a normal HTTP response.\n' +
+										'  See: https://svti.me/cf-cookies'
 									);
 								} else {
-									console.warn('[adapter-uws] upgrade() returned response headers. These are only applied in production (uWS); the ws library used in dev does not support custom 101 headers.');
+									console.warn('[adapter-uws] upgrade() returned response headers. These are only applied in production (uWS); the ws library used in dev does not support custom 101 headers.\n  See: https://svti.me/dev-101-headers');
 								}
 							}
 						} else {

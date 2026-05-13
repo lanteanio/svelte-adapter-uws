@@ -75,6 +75,17 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 
 **Getting started**
 
+## Version compatibility
+
+The three ecosystem packages move together. Bump them as a group:
+
+| `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Notes |
+|---|---|---|---|
+| `^0.4.x` | `^0.4.x` | `^0.4.x` | Legacy stable |
+| `^0.5.0` | `^0.5.0` | `^0.5.0` | Current. Node 22+ required. See `MIGRATION.md` if upgrading from 0.4. |
+
+Mixed-version installs are rejected at install time with a peer-dep warning.
+
 ## Installation
 
 ### Starting from scratch
@@ -415,7 +426,7 @@ adapter({
 
 These options control how the server handles misbehaving or slow clients at the WebSocket level:
 
-**`maxPayloadLength`** (default: 1 MB) - the maximum size of a single incoming WebSocket message. If a client sends a message larger than this, uWS closes the connection immediately (not just the message - the entire connection is dropped). Set this based on the largest message your application expects to receive. The 1 MB default aligns with `socket.io`'s default and Cloudflare Workers' WebSocket message cap, keeping apps portable to the edge; uWS itself defaults to 16 MB. For a stricter cap, pin an explicit value (e.g. `16 * 1024` for 16 KB).
+**`maxPayloadLength`** (default: 1 MB) - the maximum size of a single incoming WebSocket message. If a client sends a message larger than this, uWS closes the connection immediately (not just the message - the entire connection is dropped). Set this based on the largest message your application expects to receive. uWS itself defaults to 16 MB; this adapter sets 1 MB as a balanced default that handles typical app payloads in a single frame without forcing chunked-upload frameworks into ~12 KB chunks (which the previous 16 KB default did). For a stricter cap, pin an explicit value (e.g. `16 * 1024` for 16 KB).
 
 **`maxBackpressure`** (default: 1 MB) - the per-connection outbound send buffer, AND the threshold above which `publish` / `send` / `publishBatched` silently skip a subscriber. When a specific subscriber's buffer is over this size, uWS drops that frame *for that subscriber only* while continuing to deliver to every non-backpressured subscriber. This makes `publish` / `send` / `publishBatched` volatile-by-default for slow consumers (the right behavior for cursor positions, typing indicators, presence pings - see "Volatile / fire-and-forget delivery" below). The `drain` hook fires per-connection when the buffer empties again. Lower this if you want subscribers shed sooner; raise it if you prefer to keep the connection queued and absorb temporary slowness. uWS's own default is 64 KB; this adapter sets 1 MB to favor keeping the connection alive under pub/sub spikes.
 

@@ -36,7 +36,8 @@ export function connect(options = {}) {
 		console.warn(
 			'[ws] connect() was called with options, but the connection already exists ' +
 			'(created automatically by on(), status, or ready()). ' +
-			'Your options are ignored. Call connect() before using other client functions.'
+			'Your options are ignored. Call connect() before using other client functions.\n' +
+			'  See: https://svti.me/client-connect'
 		);
 	}
 	return ensureConnection(options, true);
@@ -1088,7 +1089,7 @@ function createConnection(options) {
 					return;
 				}
 				if (msg.type === 'subscribe-denied' && typeof msg.topic === 'string' && typeof msg.reason === 'string') {
-					console.warn('[ws] subscribe denied topic=%s reason=%s', msg.topic, msg.reason);
+					console.warn('[ws] subscribe denied topic=%s reason=%s\n  See: https://svti.me/subscribe-denied', msg.topic, msg.reason);
 					denialsStore.set({ topic: msg.topic, reason: msg.reason, ref: msg.ref });
 					return;
 				}
@@ -1423,7 +1424,7 @@ function createConnection(options) {
 			if (debug) console.log('[ws] send ->', data);
 			ws.send(serializeForSend(data));
 		} else if (debug) {
-			console.warn('[ws] send dropped (not connected) - use sendQueued() to queue messages for reconnect:', data);
+			console.warn('[ws] send dropped (not connected) - use sendQueued() to queue messages for reconnect:', data, '\n  See: https://svti.me/send-dropped');
 		}
 	}
 
@@ -1446,7 +1447,7 @@ function createConnection(options) {
 			ws.send(serialized);
 		} else {
 			if (sendQueue.length >= MAX_QUEUE_SIZE) {
-				console.warn('[ws] queue full (' + MAX_QUEUE_SIZE + '), dropping oldest message');
+				console.warn('[ws] queue full (' + MAX_QUEUE_SIZE + '), dropping oldest message\n  See: https://svti.me/client-queue');
 				sendQueue.shift();
 			}
 			if (debug) console.log('[ws] queued ->', data);

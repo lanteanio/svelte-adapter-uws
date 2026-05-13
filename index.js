@@ -282,11 +282,12 @@ export default function (opts = {}) {
 				);
 			}
 			const wsOpts = {
-				// Default raised from 16 KB to 1 MB in next.19. Aligns with
-				// socket.io's default and Cloudflare Workers' WS message
-				// cap, both 1 MB. uWS itself defaults to 16 MB; 16 KB was
-				// excessively conservative and forced chunked-upload
-				// frameworks to use ~12 KB chunks. DoS exposure is bounded
+				// Default raised from 16 KB to 1 MB in next.19. uWS itself
+				// defaults to 16 MB; 16 KB was excessively conservative and
+				// forced chunked-upload frameworks to use ~12 KB chunks
+				// (~9000 chunks for a 100 MB file). 1 MB handles typical app
+				// payloads in a single frame without per-app tuning. DoS
+				// exposure is bounded
 				// by `upgradeAdmission.maxConcurrent` (connection count)
 				// and `maxBackpressure` (per-conn outbound queue, also
 				// 1 MB), so per-frame cost stays predictable. Apps that
@@ -328,7 +329,7 @@ export default function (opts = {}) {
 				// Defends against an adjacent process injecting forged
 				// messages into the worker_threads relay (typically
 				// reachable only post-compromise, hence opt-in).
-				workerRelayHmacSecret: websocket?.workerRelayHmacSecret
+				workerRelayHmacSecret: websocket?.workerRelayHmacSecret,
 				// CSRF defense for the `/__ws/auth` POST endpoint. By
 				// default, the request must carry one of:
 				//   - `x-requested-with: XMLHttpRequest`

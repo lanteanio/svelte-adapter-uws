@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.22] - 2026-05-13
+
+### Fixed
+
+- **Adapter `index.js` parses cleanly on Node ESM (CRITICAL).** Pre-fix, the `wsOpts` object literal was missing a trailing comma after `workerRelayHmacSecret` (added in next.20). Node's parser walked through the intervening JSDoc comment block and threw `SyntaxError: Unexpected identifier 'authPathRequireOrigin'` at module load time, making `import adapter from 'svelte-adapter-uws'` fail to resolve in any production consumer. The adapter's own test suite did not surface this because tests import `testing.js` (a parallel options-merging path that builds the object differently); `index.js` only runs at `vite build` time in a consuming app. Apps stuck on next.21 hit this on first `npm run build` after install. Fix: one-character comma. Apps that did not bump past next.19 are unaffected.
+
 ## [0.5.0-next.21] - 2026-05-10
 
 ### Fixed
@@ -18,7 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Bumped `engines.node` to `>=22.0.0` (was `>=20.0.0`); pinned `uWebSockets.js` to v20.67.0 (was v20.60.0).** uWS v20.67.0 dropped Node 20 support upstream; the adapter follows. Node 22 LTS, Node 24 current, and Node 26 are supported. Picks up real upstream wins from v20.60 to v20.67: backpressure fix (v20.64), Latin-1 string handling (v20.65), faster String args via V8 ValueView (v20.63), zero-cost `getRemoteAddress` / `getRemoteAddressAsText` (v20.66), `getRemotePort` / `getProxiedRemotePort` (v20.61), DeclarativeResponse improvements, and symbol-keyed userData support. See `MIGRATION.md` for the runtime-bump checklist.
-- **Bumped `peerDependencies.@sveltejs/kit` from `^2.0.0` to `^2.59.0`.** Tightens the floor from "any kit 2.x" to a recent stable that picks up the cumulative kit fixes shipped over the last year. The previous range allowed pre-2.5 installs that were missing significant security and SSR fixes; the new floor matches the audit's recommendation. One known transitive advisory persists (`cookie<0.7.0` via `@sveltejs/kit`'s own `^0.6.0` pin) and is unfixable from this side until kit publishes a release that bumps cookie.
 
 ### Security
 
@@ -76,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Default `maxPayloadLength` raised from 16 KB to 1 MB.** The previous default capped a single inbound WebSocket frame at 16 KB, which forced any chunked-upload framework to use ~12 KB chunks (after typical 90% headroom) and produced ~9000-chunk round trips for a 100 MB file. uWS itself defaults to 16 MB; 16 KB was excessively conservative. The new default aligns with `socket.io`'s 1 MB default and Cloudflare Workers' WS message cap (also 1 MB), keeping apps portable to the edge. DoS exposure at the new cap is still bounded: `upgradeAdmission.maxConcurrent` controls concurrent connection count, `maxBackpressure` (also 1 MB) controls per-connection outbound queue size, and uWS handles inbound frames synchronously so per-frame buffer cost is freed quickly. Apps that need a stricter cap can pin via `websocket.maxPayloadLength: 16 * 1024` (or any other value) in `svelte.config.js`. Behavior change in the `next.*` prerelease line; users on the `latest` dist-tag (0.4.x) are unaffected.
+- **Default `maxPayloadLength` raised from 16 KB to 1 MB.** The previous default capped a single inbound WebSocket frame at 16 KB, which forced any chunked-upload framework to use ~12 KB chunks (after typical 90% headroom) and produced ~9000-chunk round trips for a 100 MB file. uWS itself defaults to 16 MB; 16 KB was excessively conservative. 1 MB is a balanced default that handles typical app payloads in a single frame without requiring per-app tuning. DoS exposure at the new cap is still bounded: `upgradeAdmission.maxConcurrent` controls concurrent connection count, `maxBackpressure` (also 1 MB) controls per-connection outbound queue size, and uWS handles inbound frames synchronously so per-frame buffer cost is freed quickly. Apps that need a stricter cap can pin via `websocket.maxPayloadLength: 16 * 1024` (or any other value) in `svelte.config.js`. Behavior change in the `next.*` prerelease line; users on the `latest` dist-tag (0.4.x) are unaffected.
 
   **Other related caps unchanged.** The 8192-byte control-message JSON.parse ceiling (`files/handler.js`), the 256-topic `subscribe-batch` cap, and the matching client-side `SUBSCRIBE_BATCH_MAX_BYTES` (8000) / `SUBSCRIBE_BATCH_MAX_TOPICS` (200) are all about control-message framing, not payload size - subscribe / unsubscribe / hello frames are inherently small JSON. Raising them would just make the JSON.parse-on-every-message scan more expensive without benefit. The `BATCH_FRAME_WARN_BYTES` (256 KB) outbound `publishBatched` warning threshold is about uWS's permessage-deflate compression cost, also independent of inbound frame size. The 1 MB raise is isolated to one axis (incoming frame size); the other caps protect against different things.
 
