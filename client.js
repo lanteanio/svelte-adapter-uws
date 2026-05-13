@@ -1202,6 +1202,15 @@ function createConnection(options) {
 		const count = topicRefCounts.get(topic) || 0;
 		topicRefCounts.set(topic, count + 1);
 		if (count > 0) return; // Already subscribed at WS level
+		// __-prefixed topics are framework broadcast taps, not wire subscriptions:
+		// the plugin or extension that owns the topic manages server-side subscriber
+		// membership directly (via ws.subscribe / platform.subscribe), and the client
+		// only needs the local topicStores entry that onTopic already registered for
+		// inbound dispatch. Skip the wire frame entirely - it would be rejected by
+		// the default INVALID_TOPIC gate anyway, and the round-trip adds nothing.
+		// Excluded from subscribedTopics for the same reason: the reconnect-resubscribe
+		// path must not re-emit a frame the server will deny.
+		if (topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) return;
 		subscribedTopics.add(topic);
 		if (ws?.readyState !== WebSocket.OPEN) return;
 		if (!pendingSubscribes) {
@@ -1246,6 +1255,9 @@ function createConnection(options) {
 			if (key.startsWith(topic + '\0')) eventStores.delete(key);
 		}
 		if (debug) console.log('[ws] unsubscribe ->', topic);
+		// Symmetric to subscribe(): __-prefixed topics never sent a wire subscribe,
+		// so there is no wire-level subscription state for the server to release.
+		if (topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) return;
 		if (ws?.readyState === WebSocket.OPEN) {
 			ws.send(JSON.stringify({ type: 'unsubscribe', topic }));
 		}

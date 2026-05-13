@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.23] - 2026-05-14
+
+### Fixed
+
+- **Client `on()` no longer sends a wire `subscribe` for `__`-prefixed topics.** Next.21's wire-block landed correctly on the server but the bundled plugin clients (`plugins/presence/client.js`, `plugins/replay/client.js`, `plugins/cursor/client.js`, `plugins/groups/client.js`) plus any caller of `on('__realtime')` / `on('__rpc')` were still emitting the wire frame the server now rejects. Every page mount logged one `[ws] subscribe denied topic=__presence:<room> reason=INVALID_TOPIC` per active plugin topic, plus another batch on every reconnect. The denials also landed in the `denials` Readable, polluting any banner UI wired off it.
+
+  Root cause was a conceptual mismatch, not a missed callsite. `__`-prefixed topics are broadcast taps owned by the framework or the plugin that publishes on them: the server-side trust path (`ws.subscribe` direct, or `platform.subscribe`) manages subscriber-set membership, and the client only needs the local `topicStores` entry for inbound dispatch. The wire subscribe was always redundant - pre-next.21 it was a no-op round-trip; post-next.21 it was a guaranteed denial.
+
+  Fix: `subscribe(topic)` and `doUnsubscribe(topic)` in `client.js` skip the wire frame when the topic's first 2 bytes are `__`. The topic is also excluded from `subscribedTopics`, so the reconnect resubscribe-batch path does not re-emit it. Local `topicStores` / `topicRefCounts` / ref-counted cleanup are unchanged - inbound dispatch via `dispatchEvent` continues to route by `topicStores.get(msg.topic)` exactly as before. Server-side wire denial of `__` topics is kept as defense in depth; a hostile or modified client that still tries to send the frame is still rejected. All four bundled plugin clients, the realtime health subscription, and any user code calling `on('__realtime').subscribe(...)` per the documented escape hatch now work without warnings or denial spam.
+
+  Two new tests in `test/client-real.test.js` pin the contract: (a) `on('__presence:room')` followed by `subscribe()` sends zero `subscribe` / `subscribe-batch` frames yet still receives inbound presence frames via dispatch, and (b) a disconnect-reconnect cycle resubscribes user topics in the resubscribe-batch frame but excludes `__realtime`. Apps using only user-space topics see no behavior change.
+
+  **Not fixed by this change**: the `__realtime` health channel published by `svelte-adapter-uws-extensions`'s `redis/pubsub.js` reaches zero clients on releases next.21 / next.22 because nothing server-side ever called `ws.subscribe('__realtime')`. The client-side fix above silences the warning and registers the local store entry, but the publisher-side per-connection subscribe must land in the extensions package for `$health === 'degraded'` to actually flip. Tracked separately.
+
 ## [0.5.0-next.22] - 2026-05-13
 
 ### Fixed

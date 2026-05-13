@@ -1507,6 +1507,82 @@ describe('client.js (real module)', () => {
 			conn.close();
 		});
 
+		it('skips wire subscribe and unsubscribe for __-prefixed topics', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+			ws._sent.length = 0;
+
+			const store = clientModule.on('__presence:room');
+			const unsub = store.subscribe(() => {});
+			await flush();
+
+			const sentSubscribes = ws._sent.filter((s) => {
+				try {
+					const m = JSON.parse(s);
+					return (m.type === 'subscribe' || m.type === 'subscribe-batch') &&
+						(m.topic === '__presence:room' || (Array.isArray(m.topics) && m.topics.includes('__presence:room')));
+				} catch { return false; }
+			});
+			expect(sentSubscribes).toEqual([]);
+
+			ws._receive({ topic: '__presence:room', event: 'presence_state', data: { '1': { id: '1' } } });
+			let received = null;
+			const unsubObserve = store.subscribe((v) => { received = v; });
+			expect(received).toEqual({ topic: '__presence:room', event: 'presence_state', data: { '1': { id: '1' } } });
+			unsubObserve();
+
+			unsub();
+			await flush();
+
+			const sentUnsubs = ws._sent.filter((s) => {
+				try {
+					const m = JSON.parse(s);
+					return m.type === 'unsubscribe' && m.topic === '__presence:room';
+				} catch { return false; }
+			});
+			expect(sentUnsubs).toEqual([]);
+
+			conn.close();
+		});
+
+		it('excludes __-prefixed topics from reconnect resubscribe-batch', async () => {
+			const conn = clientModule.connect({ reconnectInterval: 5, maxReconnectInterval: 5 });
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const userStore = clientModule.on('user-topic');
+			const sysStore = clientModule.on('__realtime');
+			const unsubUser = userStore.subscribe(() => {});
+			const unsubSys = sysStore.subscribe(() => {});
+			await flush();
+
+			ws.readyState = MockWebSocket.CLOSED;
+			ws.onclose?.({ code: 1006 });
+
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			const newWs = MockWebSocket._last;
+			expect(newWs).not.toBe(ws);
+			await flush();
+
+			const subscribeFrames = newWs._sent
+				.map((s) => { try { return JSON.parse(s); } catch { return null; } })
+				.filter((m) => m && (m.type === 'subscribe' || m.type === 'subscribe-batch'));
+
+			const sawUser = subscribeFrames.some((m) =>
+				m.topic === 'user-topic' || (Array.isArray(m.topics) && m.topics.includes('user-topic'))
+			);
+			const sawSys = subscribeFrames.some((m) =>
+				m.topic === '__realtime' || (Array.isArray(m.topics) && m.topics.includes('__realtime'))
+			);
+			expect(sawUser).toBe(true);
+			expect(sawSys).toBe(false);
+
+			unsubUser();
+			unsubSys();
+			conn.close();
+		});
+
 	describe('presence client plugin', () => {
 		/** @type {any} */
 		let presenceFn;
