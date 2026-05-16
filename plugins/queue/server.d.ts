@@ -14,6 +14,15 @@ export interface QueueOptions {
 	maxSize?: number;
 
 	/**
+	 * Reject keys longer than this many characters at `push()` entry.
+	 * Generous for typical queue-key shapes (`user:${userId}`,
+	 * `inbox:${roomId}`). The cap prevents an oversized key from
+	 * anchoring a large internal string in the per-key queue map.
+	 * @default 256
+	 */
+	maxKeyLength?: number;
+
+	/**
 	 * Called when a task is rejected due to `maxSize`.
 	 * Useful for logging or metrics.
 	 */

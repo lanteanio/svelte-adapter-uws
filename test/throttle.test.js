@@ -558,4 +558,55 @@ describe('throttle plugin', () => {
 			expect(platform.published).toHaveLength(3);
 		});
 	});
+
+	describe('maxTopicLength cap', () => {
+		it('throws on invalid maxTopicLength', () => {
+			expect(() => throttle(100, { maxTopicLength: 0 })).toThrow('positive integer');
+			expect(() => throttle(100, { maxTopicLength: -5 })).toThrow('positive integer');
+			expect(() => debounce(100, { maxTopicLength: 1.5 })).toThrow('positive integer');
+		});
+
+		it('throttle: rejects topics longer than the default 256-char cap', () => {
+			const platform = mockPlatform();
+			const t = throttle(100);
+			expect(() => t.publish(platform, 'a'.repeat(257), 'evt', 1))
+				.toThrow('exceeds maxTopicLength 256');
+		});
+
+		it('debounce: rejects topics longer than the default 256-char cap', () => {
+			const platform = mockPlatform();
+			const d = debounce(100);
+			expect(() => d.publish(platform, 'a'.repeat(257), 'evt', 1))
+				.toThrow('exceeds maxTopicLength 256');
+		});
+
+		it('throttle: accepts topic exactly at the cap', () => {
+			const platform = mockPlatform();
+			const t = throttle(100);
+			expect(() => t.publish(platform, 'a'.repeat(256), 'evt', 1)).not.toThrow();
+			expect(platform.published).toHaveLength(1);
+		});
+
+		it('honors a custom maxTopicLength', () => {
+			const platform = mockPlatform();
+			const t = throttle(100, { maxTopicLength: 16 });
+			expect(() => t.publish(platform, 'a'.repeat(16), 'evt', 1)).not.toThrow();
+			expect(() => t.publish(platform, 'a'.repeat(17), 'evt', 1))
+				.toThrow('exceeds maxTopicLength 16');
+		});
+
+		it('rejects empty topic', () => {
+			const platform = mockPlatform();
+			const t = throttle(100);
+			expect(() => t.publish(platform, '', 'evt', 1))
+				.toThrow('topic must be a non-empty string');
+		});
+
+		it('rejects non-string topic', () => {
+			const platform = mockPlatform();
+			const t = throttle(100);
+			expect(() => t.publish(platform, 123, 'evt', 1))
+				.toThrow('topic must be a non-empty string');
+		});
+	});
 });

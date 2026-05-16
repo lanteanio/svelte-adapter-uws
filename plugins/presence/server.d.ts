@@ -18,14 +18,27 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	 * Extract the public presence data from a connection's userData.
 	 * Only the returned fields are broadcast to other clients.
 	 *
-	 * Use this to avoid leaking private fields (session tokens, internal IDs, etc.).
-	 * Defaults to the full userData object.
+	 * Defaults to a recursive denylist that drops `__`-prefixed, `constructor`,
+	 * `prototype`, and any key matching
+	 * `/token|secret|password|auth|session|cookie|jwt|credential/i`. Binary views
+	 * (Buffer, TypedArray, DataView, ArrayBuffer) are substituted with the
+	 * placeholder string `'[bytes: <len>]'` so raw bytes do not land in presence
+	 * frames. Every other field passes through unchanged.
+	 *
+	 * Matches the default behavior of the cluster-aware Redis presence plugin
+	 * (`svelte-adapter-uws-extensions/redis/presence`), so both surfaces broadcast
+	 * the same wire shape from the same upgrade-hook userData.
+	 *
+	 * To override:
+	 * - tighter (allowlist): `select: (ud) => ({ id: ud.id, name: ud.name })`
+	 * - looser (passthrough, pre-this-default behavior): `select: (ud) => ud`
 	 *
 	 * Should return JSON-serializable data (plain objects, arrays, strings,
 	 * numbers, booleans, null) since the result is sent over WebSocket.
 	 *
 	 * @example
 	 * ```js
+	 * // Custom allowlist - useful when you want strict control over what is shared
 	 * select: (userData) => ({ id: userData.id, name: userData.name, avatar: userData.avatar })
 	 * ```
 	 */

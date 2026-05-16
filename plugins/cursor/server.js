@@ -90,6 +90,8 @@ export function createCursor(options = {}) {
 	const select = options.select || ((userData) => userData);
 	const maxConnections = options.maxConnections ?? 1_000_000;
 	const maxTopics = options.maxTopics ?? 1_000_000;
+	const maxTopicLength = options.maxTopicLength ?? 256;
+	const maxDataBytes = options.maxDataBytes ?? 8192;
 
 	if (typeof throttleMs !== 'number' || !Number.isFinite(throttleMs) || throttleMs < 0) {
 		throw new Error('cursor: throttle must be a non-negative number');
@@ -102,6 +104,12 @@ export function createCursor(options = {}) {
 	}
 	if (!Number.isInteger(maxTopics) || maxTopics < 1) {
 		throw new Error('cursor: maxTopics must be a positive integer');
+	}
+	if (!Number.isInteger(maxTopicLength) || maxTopicLength < 1) {
+		throw new Error('cursor: maxTopicLength must be a positive integer');
+	}
+	if (!Number.isInteger(maxDataBytes) || maxDataBytes < 1) {
+		throw new Error('cursor: maxDataBytes must be a positive integer');
 	}
 
 	/** Auto-incrementing connection key. */
@@ -162,6 +170,22 @@ export function createCursor(options = {}) {
 	/** @type {CursorTracker} */
 	const tracker = {
 		update(ws, topic, data, platform) {
+			// Reject malformed topic or oversized payload silently. Cursor
+			// is best-effort fire-and-forget; a misbehaving client (or a
+			// bug producing a giant `data` blob) gets its frame dropped
+			// rather than throwing into the message hook. Legitimate
+			// cursor moves are small ({x, y}-shaped, ~30 bytes) so the
+			// 256/8192 caps are never reached in practice.
+			if (typeof topic !== 'string' || topic.length === 0 || topic.length > maxTopicLength) return;
+			if (data !== undefined && data !== null) {
+				let dataBytes;
+				try {
+					dataBytes = Buffer.byteLength(JSON.stringify(data));
+				} catch {
+					return;
+				}
+				if (dataBytes > maxDataBytes) return;
+			}
 			const state = getWsState(ws);
 			state.topics.add(topic);
 

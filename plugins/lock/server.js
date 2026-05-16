@@ -110,8 +110,16 @@
  */
 export function createLock(options = {}) {
 	const maxKeys = options.maxKeys ?? 1_000_000;
+	const maxKeyLength = options.maxKeyLength ?? 256;
+	const maxWaitersPerKey = options.maxWaitersPerKey ?? 1000;
 	if (!Number.isInteger(maxKeys) || maxKeys < 1) {
 		throw new Error('lock: maxKeys must be a positive integer');
+	}
+	if (!Number.isInteger(maxKeyLength) || maxKeyLength < 1) {
+		throw new Error('lock: maxKeyLength must be a positive integer');
+	}
+	if (!Number.isInteger(maxWaitersPerKey) || maxWaitersPerKey < 1) {
+		throw new Error('lock: maxWaitersPerKey must be a positive integer');
 	}
 
 	/** @type {Map<string, KeyState>} */
@@ -176,6 +184,12 @@ export function createLock(options = {}) {
 		if (typeof key !== 'string' || key.length === 0) {
 			return Promise.reject(new Error('lock: key must be a non-empty string'));
 		}
+		if (key.length > maxKeyLength) {
+			return Promise.reject(new Error(
+				'lock: key length ' + key.length +
+				' exceeds maxKeyLength ' + maxKeyLength
+			));
+		}
 		if (typeof fn !== 'function') {
 			return Promise.reject(new Error('lock: fn must be a function'));
 		}
@@ -204,6 +218,24 @@ export function createLock(options = {}) {
 			// Acquire immediately - no waiters, no holder.
 			state.running = true;
 			return runHead(key, state, fn);
+		}
+
+		// Cap the waiter queue per key. A flood of contenders on a single
+		// hot key (e.g. every authenticated client racing for `lock-${roomId}`
+		// at once) would otherwise grow the queue without bound; the cap
+		// protects memory and turns the failure mode from "OOM" into a
+		// typed rejection the caller can shed.
+		if (state.queue.length >= maxWaitersPerKey) {
+			const err = /** @type {Error & { code: string, key: string, maxWaitersPerKey: number }} */ (
+				new Error(
+					'lock: waiter queue for key \'' + key + '\' exceeded ' +
+					maxWaitersPerKey
+				)
+			);
+			err.code = 'LOCK_QUEUE_FULL';
+			err.key = key;
+			err.maxWaitersPerKey = maxWaitersPerKey;
+			return Promise.reject(err);
 		}
 
 		// Queue up. The caller's promise resolves / rejects when their

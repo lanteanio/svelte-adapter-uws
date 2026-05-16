@@ -485,7 +485,6 @@ Defense-in-depth opt-ins layered on top of `allowedOrigins`. All default to safe
 - **`websocket.authPathRequireOrigin`** (default `true`) - the `/__ws/auth` POST endpoint requires `x-requested-with: XMLHttpRequest`, `Sec-Fetch-Site: same-origin`, or an `Origin` matching `allowedOrigins`. The adapter client always stamps `x-requested-with` so the browser path is unaffected. Set `false` to accept native (non-browser) clients without those headers.
 - **`websocket.compressCredentialedResponses`** (default `false`) - requests carrying `Cookie` or `Authorization` skip dynamic brotli/gzip compression to defend against the [BREACH](https://en.wikipedia.org/wiki/BREACH) attack (compressed length leaks attacker-influenced reflected input alongside a secret). Set `true` only after auditing the page surface for BREACH defenses (random per-response masking, prefix randomization, no secrets reflected with attacker input). Build-time precompressed static files are unaffected.
 - **`websocket.unsafeSameOriginWithoutHostPin`** (default `false`) - when `allowedOrigins: 'same-origin'` is paired with no fronting trust (no `ORIGIN` env, no `HOST_HEADER` env, no native TLS, no `upgrade()` hook), the runtime throws at startup because the same-origin check then compares two attacker-controlled headers (Origin vs Host). Set `true` to restore the previous warn-only behavior. Pin the deployment shape first (`ORIGIN`, `HOST_HEADER`, native TLS, or an `upgrade()` hook).
-- **`websocket.workerRelayHmacSecret`** - when set (must be at least 16 characters), every cross-worker relay envelope carries an HMAC-SHA256 tag computed over the (topic, envelope) pair. Receiving workers re-compute and refuse on mismatch. Defends against an adjacent process injecting forged messages into the `worker_threads` relay (typically reachable only post-compromise). The shared secret must reach every worker via env var or `workerData`. Without the option, behavior is unchanged.
 
 `websocket.allowSystemTopicSubscribe` (default `false`) and `websocket.allowNonAsciiTopics` (default `false`) are documented in [Topic validation](#topic-validation). The Vite plugin mirrors all of these flags; `devSkipOriginCheck` (default `false`) on the plugin disables the dev-mode `allowedOrigins` enforcement for local-only scenarios.
 
@@ -2055,6 +2054,37 @@ export async function subscribe(ws, topic, { platform }) {
 
 Opt-in modules that build on top of the adapter's public API. They don't change any core behavior - if you don't import them, they don't exist. Each plugin ships in its own subdirectory under `plugins/` with separate server and client entry points.
 
+### Authorization model
+
+Every plugin in this directory is an **authorization-free primitive**. None of them know who the caller is, what roles the caller has, or whether the requested action is allowed - they execute whatever the caller passes. Calling `withLock(key, fn)`, `replay.replay(ws, topic, since)`, or `idempotency.handle(key, fn)` is no more an authorization check than calling `Map.set(key, value)` is one.
+
+Your message handler is the gate. Identity is established at connect time by the [`upgrade()` hook](#authentication) and stashed on the socket via `ws.getUserData()`. Your `message()` handler reads that identity, decides whether the action is allowed, and **only then** invokes the plugin:
+
+```js
+// hooks.ws.js
+import { withLock } from 'svelte-adapter-uws/plugins/lock';
+
+export async function message(ws, { data }) {
+  const { topic, action, payload } = JSON.parse(Buffer.from(data).toString());
+  const { userId, role } = ws.getUserData() ?? {};
+
+  // 1. Authentication: did upgrade() reject? If not, ws.getUserData() is non-empty.
+  if (!userId) return;
+
+  // 2. Authorization: this handler decides. The plugin does not.
+  if (action === 'reset-counter' && role !== 'admin') return;
+
+  // 3. Only now is the plugin invoked. withLock has no idea who the caller is.
+  await withLock(`counter:${topic}`, async () => {
+    // ... critical section
+  });
+}
+```
+
+Higher-level frameworks built on this adapter (e.g. [`svelte-realtime`](https://github.com/lanteanio/svelte-realtime)) wrap this pattern: `ctx.user` is the same identity object the `upgrade()` hook returned, and the framework's `_guard` / `live.public()` / `// realtime-allow-public` machinery is the authorization layer at the RPC seam. The plugins below still do not gate anything themselves; the framework's auth lives outside them.
+
+The same pattern applies to every plugin in this section: read identity, decide, then invoke. A plugin that "looks like an auth gate" by virtue of taking a userId-shaped key (e.g. `presence.subscribe(`user:${userId}`)`) is just substituting whatever string the caller hands it - if your handler interpolates `payload.targetUserId` from the wire without checking that the caller owns it, the plugin will happily address a user the caller has no business touching.
+
 ### Middleware
 
 Composable message processing pipeline. Chain functions that run on inbound messages before your handler logic. Each middleware receives a context and a `next` function - call `next()` to continue, skip it to stop the chain.
@@ -2132,6 +2162,8 @@ The context object:
 When you combine SSR with WebSocket live updates, there's a gap between server-side data loading and the moment the client's WebSocket connects. Messages published during that window are lost.
 
 The replay plugin solves this without touching the adapter core. It's opt-in - if you don't import it, it doesn't exist.
+
+> **Authorization:** the replay buffer is identity-blind. It replays whatever messages were captured to whoever asks for them. Your `message()` handler (or your topic-subscribe gate) is the place that decides whether the requesting socket is allowed to see this topic's history. See [Authorization model](#authorization-model).
 
 #### How it works
 
@@ -2263,6 +2295,8 @@ In-process "have I seen this id before?" cache with fixed-window TTL. The natura
 
 The TTL is the deduplication window: an id is considered "fresh" for `ttl` ms after the first claim. Duplicate claims within the window do NOT extend the TTL (semantics match Redis `SET NX EX`, which is the eventual swap target if you outgrow the in-process variant).
 
+> **Authorization:** dedup keys are whatever the caller passes. If your handler builds the id from a wire field without checking ownership (e.g. `id: payload.clientRequestId`), one user can deliberately collide with another user's id and block their next legitimate request. Always derive the dedup key from a trusted identity prefix - e.g. `\`order:${ws.getUserData().userId}:${payload.clientRequestId}\``. See [Authorization model](#authorization-model).
+
 #### Setup
 
 ```js
@@ -2317,6 +2351,8 @@ The pattern composes with idempotency-key headers on form actions and RPCs the s
 ### Presence
 
 Track who's connected to a topic in real time. Handles multi-tab dedup (same user with two tabs open = one presence entry), broadcasts compact join/leave diffs (microtask-batched so multi-event ticks collapse to one frame), and provides a live store on the client.
+
+> **Authorization:** the presence list shows whoever subscribes to the topic - the plugin does not gate topic-subscribe. If a topic should be limited to a subset of users (`team:42` -> only team-42 members), enforce that in your `subscribe` handler or via a [topic gate](#topic-validation). The `select` callback only chooses which fields of `ws.getUserData()` to publish; it does not decide whether the caller is allowed on the topic. See [Authorization model](#authorization-model).
 
 #### Setup
 
@@ -2467,6 +2503,8 @@ If no `key` field is found in the selected data (e.g. no auth), each connection 
 
 Define message schemas per topic so event names and data shapes are validated at publish time. Catches typos and shape mismatches before they reach the wire - instead of silently sending garbage that the client ignores.
 
+> **Authorization:** typed channels validate **shape**, not **identity**. A schema check that the payload has `{id, text, done}` does not prove the caller is allowed to publish on this channel. Gate the publish in your handler before invoking the channel. See [Authorization model](#authorization-model).
+
 #### Setup
 
 ```js
@@ -2555,6 +2593,8 @@ Two modes:
 
 - **`throttle(ms)`** - sends immediately on first call (leading edge), then at most once per interval (trailing edge). Latest value wins within each interval.
 - **`debounce(ms)`** - waits until no calls for the full interval, then sends the latest value. Each new call resets the timer.
+
+> **Authorization:** throttle/debounce shape outbound publish rate, nothing else. The plugin does not check who is publishing or whether they are allowed to. Gate the publish in your handler. See [Authorization model](#authorization-model).
 
 #### Setup
 
@@ -2645,6 +2685,8 @@ Token-bucket rate limiter for inbound WebSocket messages. Protects against spam,
 
 Different from throttle - throttle shapes **outbound** publish rate, rate limiting protects **inbound** against abuse.
 
+> **Authorization:** rate limiting is anti-abuse, not authorization. A bucket-exhaustion check answers "is this caller flooding?", not "is this caller allowed?". Identity-based access checks (role, ownership, tenant) still live in your handler. The two layers compose: gate auth first, then meter. See [Authorization model](#authorization-model).
+
 #### Setup
 
 ```js
@@ -2703,6 +2745,8 @@ With `keyBy: 'ip'` (default), the limiter reads `userData.remoteAddress`, `.ip`,
 ### Cursor (ephemeral state)
 
 Lightweight fire-and-forget broadcasting for transient state - mouse cursors, text selections, drag positions, drawing strokes. Built-in throttle with trailing edge ensures the final position always arrives. Auto-cleanup on disconnect.
+
+> **Authorization:** the cursor plugin broadcasts whatever the caller publishes to whoever is subscribed to the topic. It does not gate topic-subscribe or topic-publish. The `select` callback chooses which fields of the publisher's userData to attach to the broadcast - it does not authorize. If a cursor topic should be limited (e.g. `doc:42` -> only doc-42 collaborators), enforce that in your subscribe/publish handler. See [Authorization model](#authorization-model).
 
 #### Setup
 
@@ -2815,6 +2859,8 @@ The trailing edge ensures you always see where the cursor stopped, even if the u
 
 Per-key async task queue with configurable concurrency and backpressure. With the default `concurrency: 1`, tasks are processed strictly in order per key - useful for sequential operations like collaborative editing, turn-based games, or transaction sequences. With `concurrency > 1`, dequeue order is preserved but tasks run in parallel, so completion order is not guaranteed.
 
+> **Authorization:** the queue serializes tasks by key; it does not decide who is allowed to enqueue under a given key. If your handler builds the queue key from a wire field without checking ownership (e.g. `key: payload.docId`), an unauthorized client can interleave tasks into another tenant's queue and either DoS the owner with high-priority work or starve their queue with low-priority padding. Derive the queue key from a trusted prefix - e.g. `\`doc:${assertedDocId(ctx, payload.docId)}\``. See [Authorization model](#authorization-model).
+
 #### Setup
 
 ```js
@@ -2873,6 +2919,8 @@ Different keys are independent - `push('room-a', ...)` and `push('room-b', ...)`
 Per-key critical-section primitive. Concurrent `withLock(key, fn)` calls on the same key run one at a time in FIFO order; calls on different keys run in parallel. Use this for atomic read-modify-write on user state, "only one in-flight upgrade per resource," or anywhere two concurrent requests racing the same record would corrupt it.
 
 Backed by a per-key FIFO waiter queue: the holder runs `fn` until it settles, then the next waiter is promoted to head. Errors in one caller's `fn` propagate to that caller and do NOT block subsequent waiters.
+
+> **Authorization:** `withLock(key, fn)` serializes whoever calls it under that key. The plugin does not check whether the caller is allowed to mutate the resource the key represents. If your handler interpolates a wire-supplied key, an attacker can grab a lock on a resource they don't own and stall any legitimate owner trying to acquire it (denial of service) - or worse, race ahead of legitimate write paths if your business logic assumes "I hold the lock therefore I have permission to mutate." Derive the lock key from a trusted prefix - e.g. `\`account:${assertedAccountId(ctx, payload.accountId)}\``. See [Authorization model](#authorization-model).
 
 #### Setup
 
@@ -2955,6 +3003,8 @@ In-process key-value store with sliding TTL: every read or `touch()` extends an 
 
 Use this when your auth layer hands you a token (cookie, header, query param) and you need a place to put the resolved session data without re-querying your database on every message. Pair with the `dedup` plugin if you want once-per-window semantics on side effects.
 
+> **Authorization:** the session store maps tokens to data. Producing the token-to-user binding (your auth layer) and validating the token before lookup (your `upgrade()` hook or middleware) are NOT the plugin's job. If your handler calls `sessions.get(payload.token)` with a wire-supplied token without first confirming the caller owns it, an attacker can lift any active token they happen to know and impersonate its owner. The plugin is a cache; the auth check belongs upstream. See [Authorization model](#authorization-model).
+
 #### Setup
 
 ```js
@@ -3030,6 +3080,8 @@ export function message(ws) {
 ### Broadcast groups
 
 Named groups with explicit membership, roles, metadata, and lifecycle hooks. Like topics but with access control - you decide who can join, what role they have, and what happens when the group fills up or closes.
+
+> **Authorization:** the group's `onJoin` hook is **the** place the join decision lives; the plugin itself does not authorize. Returning a role from `onJoin` admits the socket; throwing rejects. If your `onJoin` accepts every caller and only relies on `maxMembers` for backpressure, the group is effectively public - which may be fine, but is your decision, not the plugin's. The "access control" framing above refers to the **mechanism** (membership lookup, roles, slot counts) you can wire up; the policy is yours. See [Authorization model](#authorization-model).
 
 #### Setup
 

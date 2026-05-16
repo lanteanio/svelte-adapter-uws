@@ -109,4 +109,15 @@ export interface LimiterOptions {
 	 * @default 1_000_000
 	 */
 	maxTopics?: number;
+
+	/**
+	 * Reject topics longer than this many characters at `publish()` entry.
+	 * Generous for typical topic shapes (UUIDs are 36, ulids 26, composite
+	 * patterns like `board:${id}:cursor` stay well under). The cap prevents
+	 * an oversized topic from anchoring a large internal string in the
+	 * per-topic timer-state map.
+	 *
+	 * @default 256
+	 */
+	maxTopicLength?: number;
 }

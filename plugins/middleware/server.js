@@ -97,7 +97,12 @@ export function createMiddleware(...fns) {
 				event: message.event,
 				data: message.data,
 				platform,
-				locals: {}
+				// Prototype-less so middleware that writes attacker-influenced
+				// keys (e.g. `ctx.locals[msg.field] = value`) cannot shadow
+				// Object.prototype keys via `__proto__` / `constructor` /
+				// `prototype`. The keys still work as data; the prototype
+				// chain just doesn't carry them.
+				locals: Object.create(null)
 			};
 
 			let index = 0;

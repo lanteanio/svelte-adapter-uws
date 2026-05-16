@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
 import { parentPort } from 'node:worker_threads';
-import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import uWS from 'uWebSockets.js';
 import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
@@ -373,55 +373,6 @@ const app = is_tls
 /** @type {Array<{topic: string, envelope: string}> | null} */
 let relayBatch = null;
 
-// Cross-worker relay HMAC defense. When `WS_OPTIONS.workerRelayHmacSecret`
-// is configured, every relay envelope leaving this worker carries an HMAC
-// tag computed over the JSON-canonical (topic, envelope) pair. The
-// receiving worker re-computes the tag and refuses the envelope on
-// mismatch. Defends against an adjacent process injecting forged messages
-// into the worker_threads relay (typically only reachable post-compromise,
-// hence opt-in not default-on). The shared secret must reach every worker
-// via `workerData` or an env var; the framework cannot generate it on
-// its own without losing cross-worker verifiability.
-const RELAY_HMAC_SECRET = (() => {
-	const v = WS_OPTIONS?.workerRelayHmacSecret;
-	if (v === undefined || v === null) return null;
-	if (typeof v !== 'string' || v.length < 16) {
-		throw new Error('websocket.workerRelayHmacSecret must be a string of at least 16 characters');
-	}
-	return v;
-})();
-
-/**
- * @param {string} topic
- * @param {string} envelope
- * @returns {string} base64-encoded HMAC-SHA256 tag
- */
-function computeRelayMac(topic, envelope) {
-	const h = createHmac('sha256', /** @type {string} */ (RELAY_HMAC_SECRET));
-	h.update(topic);
-	h.update('\0');
-	h.update(envelope);
-	return h.digest('base64');
-}
-
-/**
- * Constant-time HMAC compare. Returns false on length mismatch, decode
- * failure, or any digest mismatch. Never throws.
- * @param {string} expected
- * @param {string} candidate
- */
-function verifyRelayMac(expected, candidate) {
-	if (typeof candidate !== 'string' || candidate.length !== expected.length) return false;
-	try {
-		const a = Buffer.from(expected, 'base64');
-		const b = Buffer.from(candidate, 'base64');
-		if (a.length !== b.length || a.length === 0) return false;
-		return timingSafeEqual(a, b);
-	} catch {
-		return false;
-	}
-}
-
 /**
  * @param {string} topic
  * @param {string} envelope
@@ -436,10 +387,7 @@ function batchRelay(topic, envelope) {
 			relayBatch = null;
 		});
 	}
-	const entry = RELAY_HMAC_SECRET
-		? { topic, envelope, mac: computeRelayMac(topic, envelope) }
-		: { topic, envelope };
-	relayBatch.push(entry);
+	relayBatch.push({ topic, envelope });
 }
 
 // - Platform (exposed to SvelteKit via event.platform) ----------------------
@@ -1501,11 +1449,7 @@ const platform = {
 			for (let i = 0; i < messages.length; i++) {
 				const m = messages[i];
 				if (!m.options || m.options.relay !== false) {
-					const ev = { topic: events[i].topic, env: events[i].env };
-					if (RELAY_HMAC_SECRET) {
-						/** @type {any} */ (ev).mac = computeRelayMac(ev.topic, ev.env);
-					}
-					relayed.push(ev);
+					relayed.push({ topic: events[i].topic, env: events[i].env });
 				}
 			}
 			if (relayed.length > 0) {
@@ -1759,7 +1703,9 @@ function readBody(res, limit, state, contentLength) {
 			initialized = true;
 
 			if (usePrealloc) {
-				const buf = Buffer.allocUnsafe(contentLength);
+				// alloc (zero-fill), not allocUnsafe: prevents heap residue from
+				// leaking via the trailing bytes when offset < contentLength.
+				const buf = Buffer.alloc(contentLength);
 				let offset = 0;
 				let done = false;
 				res.onData((chunk, isLast) => {
@@ -2265,15 +2211,35 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 // - Response writer (with backpressure) -------------------------------------
 
 /**
- * Write response headers inside a cork.
+ * Write response headers inside a cork. Injects a default
+ * `x-content-type-options: nosniff` if the response did not already set
+ * one - the header is safe in every legitimate scenario (it tells the
+ * browser not to MIME-sniff away the server's declared content-type)
+ * and closes a known MIME-confusion vector for any future SSR response
+ * whose author forgets to set the header explicitly. Apps that want to
+ * override (e.g. set to a different X-Content-Type-Options policy) can
+ * just include their own header on the Response - the default-fill
+ * only fires when the response is silent on the matter.
+ *
+ * Other header defaults (Referrer-Policy, X-Frame-Options, CSP) are
+ * intentionally NOT defaulted here. CSP needs app-specific care for
+ * inline-hydration / iframe shapes; X-Frame-Options breaks legitimate
+ * embeds; Referrer-Policy choices vary by app. Those are app-level
+ * decisions and the right tier is `hooks.server.js`.
+ *
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {Response} response
  */
 function writeHeaders(res, response) {
 	res.writeStatus(String(response.status));
+	let hasContentTypeOptions = false;
 	for (const [key, value] of response.headers) {
 		if (key === 'set-cookie' || key === 'content-length') continue;
+		if (key === 'x-content-type-options') hasContentTypeOptions = true;
 		res.writeHeader(key, value);
+	}
+	if (!hasContentTypeOptions) {
+		res.writeHeader('x-content-type-options', 'nosniff');
 	}
 	for (const cookie of response.headers.getSetCookie()) {
 		res.writeHeader('set-cookie', cookie);
@@ -3470,22 +3436,12 @@ export function getDescriptor() {
  * @param {string} topic
  * @param {string} envelope - Pre-serialized JSON envelope
  */
-export function relayPublish(topic, envelope, mac) {
+export function relayPublish(topic, envelope) {
 	assert(typeof topic === 'string', 'relay.topic-type', { topic: typeof topic });
 	assert(typeof envelope === 'string' && envelope.length > 0, 'relay.envelope-type', {
 		envelopeType: typeof envelope,
 		envelopeLen: typeof envelope === 'string' ? envelope.length : null
 	});
-	if (RELAY_HMAC_SECRET) {
-		// Reject silently on missing or mismatched MAC. Logging the topic
-		// would leak the failed attempt to anyone watching the worker
-		// stderr; the assert counter (`relay.mac-fail`) is the audit
-		// trail.
-		if (typeof mac !== 'string' || !verifyRelayMac(computeRelayMac(topic, envelope), mac)) {
-			assert(false, 'relay.mac-fail', { topic, hasMac: typeof mac === 'string' });
-			return;
-		}
-	}
 	app.publish(topic, envelope, false, false);
 }
 
@@ -3508,16 +3464,6 @@ export function relayPublishBatched(events) {
 	assert(typeof events[0].env === 'string', 'relay.batched-env-type', {
 		first: typeof events[0].env
 	});
-
-	if (RELAY_HMAC_SECRET) {
-		for (let i = 0; i < events.length; i++) {
-			const ev = /** @type {any} */ (events[i]);
-			if (typeof ev.mac !== 'string' || !verifyRelayMac(computeRelayMac(ev.topic, ev.env), ev.mac)) {
-				assert(false, 'relay.mac-fail-batched', { topic: ev.topic, idx: i, hasMac: typeof ev.mac === 'string' });
-				return;
-			}
-		}
-	}
 
 	const firstTopic = events[0].topic;
 	let allSameTopic = true;

@@ -47,6 +47,121 @@ describe('createLock', () => {
 			expect(() => createLock({ maxKeys: -1 })).toThrow('maxKeys must be a positive integer');
 			expect(() => createLock({ maxKeys: 1.5 })).toThrow('maxKeys must be a positive integer');
 		});
+
+		it('rejects invalid maxKeyLength', () => {
+			expect(() => createLock({ maxKeyLength: 0 })).toThrow('maxKeyLength must be a positive integer');
+			expect(() => createLock({ maxKeyLength: -1 })).toThrow('maxKeyLength must be a positive integer');
+			expect(() => createLock({ maxKeyLength: 1.5 })).toThrow('maxKeyLength must be a positive integer');
+		});
+
+		it('rejects invalid maxWaitersPerKey', () => {
+			expect(() => createLock({ maxWaitersPerKey: 0 })).toThrow('maxWaitersPerKey must be a positive integer');
+			expect(() => createLock({ maxWaitersPerKey: -1 })).toThrow('maxWaitersPerKey must be a positive integer');
+			expect(() => createLock({ maxWaitersPerKey: 1.5 })).toThrow('maxWaitersPerKey must be a positive integer');
+		});
+	});
+
+	describe('maxWaitersPerKey cap', () => {
+		it('rejects new waiters past the configured cap with LOCK_QUEUE_FULL', async () => {
+			const locks = createLock({ maxWaitersPerKey: 3 });
+			const heldD = deferred();
+			// Acquire holds the lock; subsequent calls queue.
+			const held = locks.withLock('hot', () => heldD.promise);
+			// Three waiters fit.
+			const w1 = locks.withLock('hot', () => 'w1');
+			const w2 = locks.withLock('hot', () => 'w2');
+			const w3 = locks.withLock('hot', () => 'w3');
+			// Fourth waiter is rejected.
+			let err;
+			try { await locks.withLock('hot', () => 'never'); } catch (e) { err = e; }
+			expect(err).toBeDefined();
+			expect(err.code).toBe('LOCK_QUEUE_FULL');
+			expect(err.key).toBe('hot');
+			expect(err.maxWaitersPerKey).toBe(3);
+
+			heldD.resolve('held');
+			expect(await held).toBe('held');
+			expect(await w1).toBe('w1');
+			expect(await w2).toBe('w2');
+			expect(await w3).toBe('w3');
+		});
+
+		it('default cap is 1000', async () => {
+			const locks = createLock();
+			const heldD = deferred();
+			const held = locks.withLock('k', () => heldD.promise);
+			// Queue 1000 waiters - all should fit.
+			const waiters = [];
+			for (let i = 0; i < 1000; i++) {
+				waiters.push(locks.withLock('k', () => i));
+			}
+			// Waiter 1001 is rejected.
+			await expect(locks.withLock('k', () => 'never'))
+				.rejects.toThrow('exceeded 1000');
+
+			heldD.resolve('done');
+			await held;
+			// All queued waiters should resolve.
+			const settled = await Promise.allSettled(waiters);
+			expect(settled.every((s) => s.status === 'fulfilled')).toBe(true);
+		});
+
+		it('different keys have independent waiter caps', async () => {
+			const locks = createLock({ maxWaitersPerKey: 2 });
+			const aD = deferred();
+			const bD = deferred();
+			const aHeld = locks.withLock('a', () => aD.promise);
+			const bHeld = locks.withLock('b', () => bD.promise);
+			// Two waiters per key.
+			const aw1 = locks.withLock('a', () => 'aw1');
+			const aw2 = locks.withLock('a', () => 'aw2');
+			const bw1 = locks.withLock('b', () => 'bw1');
+			const bw2 = locks.withLock('b', () => 'bw2');
+			// Third on each rejected.
+			await expect(locks.withLock('a', () => 'never')).rejects.toMatchObject({ code: 'LOCK_QUEUE_FULL' });
+			await expect(locks.withLock('b', () => 'never')).rejects.toMatchObject({ code: 'LOCK_QUEUE_FULL' });
+
+			aD.resolve(); bD.resolve();
+			await Promise.all([aHeld, bHeld, aw1, aw2, bw1, bw2]);
+		});
+
+		it('does not affect the initial-acquirer path (no waiter created)', async () => {
+			const locks = createLock({ maxWaitersPerKey: 1 });
+			// Any number of sequential withLock calls on an idle key should
+			// succeed: each call acquires immediately and finishes before
+			// the next one is enqueued.
+			for (let i = 0; i < 10; i++) {
+				expect(await locks.withLock('k', () => i)).toBe(i);
+			}
+		});
+	});
+
+	describe('maxKeyLength cap', () => {
+		it('rejects keys longer than the default 256-char cap', async () => {
+			const locks = createLock();
+			const tooLong = 'a'.repeat(257);
+			await expect(locks.withLock(tooLong, () => 'never'))
+				.rejects.toThrow('exceeds maxKeyLength 256');
+		});
+
+		it('accepts keys exactly at the cap', async () => {
+			const locks = createLock();
+			const justFits = 'a'.repeat(256);
+			expect(await locks.withLock(justFits, () => 'ok')).toBe('ok');
+		});
+
+		it('honors a custom maxKeyLength', async () => {
+			const locks = createLock({ maxKeyLength: 32 });
+			expect(await locks.withLock('a'.repeat(32), () => 'ok')).toBe('ok');
+			await expect(locks.withLock('a'.repeat(33), () => 'never'))
+				.rejects.toThrow('exceeds maxKeyLength 32');
+		});
+
+		it('error names the actual key length so callers can log the offender', async () => {
+			const locks = createLock();
+			await expect(locks.withLock('a'.repeat(500), () => 'x'))
+				.rejects.toThrow('key length 500');
+		});
 	});
 
 	describe('maxKeys cap', () => {

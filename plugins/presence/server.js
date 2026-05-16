@@ -36,8 +36,20 @@ const TOPIC_PREFIX = '__presence:';
  *   presence entry. If the field is missing from the data, each connection is tracked separately.
  * @property {(userData: any) => Record<string, any>} [select] - Function to extract the public
  *   presence data from the connection's userData (whatever your `upgrade` handler returned).
- *   Only the selected fields are broadcast to other clients. Defaults to the full userData.
- *   Use this to avoid leaking private fields like session tokens.
+ *   Only the selected fields are broadcast to other clients. Defaults to a recursive
+ *   denylist that drops `__`-prefixed, `constructor`, `prototype`, and any key matching
+ *   `/token|secret|password|auth|session|cookie|jwt|credential/i`. Binary views (Buffer,
+ *   TypedArray, DataView, ArrayBuffer) are substituted with `'[bytes: <len>]'` so raw
+ *   bytes do not land in presence frames. Every other field passes through.
+ *
+ *   This matches the default behavior of the cluster-aware Redis presence plugin
+ *   (`svelte-adapter-uws-extensions/redis/presence`), so the two surfaces broadcast
+ *   the same wire shape from the same upgrade-hook userData.
+ *
+ *   To override:
+ *   - tighter (allowlist): `select: (ud) => ({ id: ud.id, name: ud.name })`
+ *   - looser (passthrough, pre-this-default behavior): `select: (ud) => ud`
+ *
  *   Should return JSON-serializable data (plain objects, arrays, strings, numbers,
  *   booleans, null) since the result is sent over WebSocket.
  * @property {number} [heartbeat=0] - Interval in milliseconds between heartbeat broadcasts.
@@ -182,9 +194,64 @@ function deepEqual(a, b, seen) {
 	return true;
 }
 
+/**
+ * Match userData keys that look like auth / session credentials. Used by the
+ * default `select` to drop those keys before broadcast. Mirrors the regex
+ * in svelte-adapter-uws-extensions/shared/sensitive.js so the in-memory and
+ * Redis-backed presence plugins use the same default safety net.
+ *
+ * Intentionally excludes the bare substring "key" because legitimate id-like
+ * fields often contain it (apiKey-id, primaryKey, etc.). For tighter control,
+ * pass an explicit `select` function.
+ */
+const PRESENCE_SENSITIVE_RE = /token|secret|password|auth|session|cookie|jwt|credential/i;
+
+/**
+ * Default `select`: recursively drop internal-looking and credential-looking
+ * keys, substitute binary views with a `'[bytes: <len>]'` placeholder, and
+ * pass everything else through. Matches the denylist behavior of the Redis
+ * presence plugin's default. Apps that want the old full-userData passthrough
+ * back can restate it: `select: (ud) => ud`. Apps that want a tighter strict
+ * allowlist pass their own: `select: (ud) => ({ id: ud.id })`.
+ *
+ * Cycle-safe via a per-call WeakSet so a userData object that holds a
+ * back-reference to itself does not blow the stack.
+ *
+ * @param {unknown} obj
+ * @param {WeakSet<object>} [ancestors]
+ */
+function defaultPresenceSelect(obj, ancestors) {
+	if (!obj || typeof obj !== 'object') {
+		// Primitive / null / undefined - wrap as empty plain object so the
+		// downstream "must return a plain object" check passes. The plugin
+		// then falls back to the auto-generated __conn:N key for dedup.
+		return ancestors === undefined ? {} : obj;
+	}
+	if (ArrayBuffer.isView(obj) || obj instanceof ArrayBuffer) {
+		const len = /** @type {{ byteLength: number }} */ (obj).byteLength;
+		return '[bytes: ' + len + ']';
+	}
+	if (!ancestors) ancestors = new WeakSet();
+	if (ancestors.has(obj)) return undefined;
+	ancestors.add(obj);
+	let result;
+	if (Array.isArray(obj)) {
+		result = obj.map((v) => defaultPresenceSelect(v, ancestors));
+	} else {
+		result = {};
+		for (const k of Object.keys(obj)) {
+			if (k.startsWith('__') || k === 'constructor' || k === 'prototype' || PRESENCE_SENSITIVE_RE.test(k)) continue;
+			const v = obj[k];
+			result[k] = (v && typeof v === 'object') ? defaultPresenceSelect(v, ancestors) : v;
+		}
+	}
+	ancestors.delete(obj);
+	return result;
+}
+
 export function createPresence(options = {}) {
 	const keyField = options.key || 'id';
-	const select = options.select || ((userData) => userData);
+	const select = options.select || defaultPresenceSelect;
 	const heartbeatMs = options.heartbeat || 0;
 	const maxConnections = options.maxConnections ?? 1_000_000;
 	const maxTopics = options.maxTopics ?? 1_000_000;

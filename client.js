@@ -638,6 +638,11 @@ export function classifyCloseCode(code) {
  * Pure: no I/O, no globals. Pass a deterministic `randFactor` for
  * reproducible assertions in tests.
  *
+ * The default `Math.random()` is the correct primitive here: this value
+ * is reconnect-backoff jitter, used to spread retries across a fleet so a
+ * server restart does not hit a thundering-herd. Not security-relevant -
+ * the randFactor never crosses a trust boundary.
+ *
  * @param {number} base       base interval in ms (e.g. 3000)
  * @param {number} maxDelay   cap in ms (e.g. 300000)
  * @param {number} attempt    zero-based attempt counter

@@ -47,6 +47,29 @@ export interface CursorOptions<UserData = unknown, UserInfo = unknown> {
 	 * @default 1_000_000
 	 */
 	maxTopics?: number;
+
+	/**
+	 * Reject cursor `update()` calls whose `topic` string is longer than
+	 * this many characters. Generous for typical cursor-topic shapes
+	 * (`board:${boardId}:cursor`, etc.). The cap prevents an oversized
+	 * topic from anchoring a large internal string in the per-topic
+	 * cursor state map.
+	 *
+	 * @default 256
+	 */
+	maxTopicLength?: number;
+
+	/**
+	 * Reject cursor `update()` calls whose JSON-encoded `data` payload
+	 * exceeds this many bytes. Cursor positions are by definition small
+	 * ({x, y}-shaped, ~30 bytes); a payload above the cap is a sign of
+	 * either misuse (cursor used as a general-purpose broadcast channel)
+	 * or a misbehaving / hostile client. Rejection is silent so a single
+	 * bad frame does not throw into the message hook.
+	 *
+	 * @default 8192 (8 KB)
+	 */
+	maxDataBytes?: number;
 }
 
 export interface CursorEntry<UserInfo = unknown, Data = unknown> {

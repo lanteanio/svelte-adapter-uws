@@ -17,9 +17,22 @@ export interface DedupOptions {
 	 * Soft cap on retained ids. When the map grows past 110% of this
 	 * cap, expired entries are pruned in a single pass; if still over
 	 * cap, the oldest insertion-order entries are evicted regardless.
-	 * Default 10000.
+	 *
+	 * @default 10000
 	 */
 	maxEntries?: number;
+
+	/**
+	 * Reject ids longer than this many characters at `claim()` /
+	 * `has()` / `delete()` entry. Generous for typical id shapes
+	 * (UUIDs are 36, ulids 26, base64 nonces under 64). The cap
+	 * prevents a single oversized id from anchoring a large internal
+	 * string for `ttl` ms - with `maxEntries: 10000`, an uncapped
+	 * 1 MB id pins 10 GB until the TTL elapses.
+	 *
+	 * @default 256
+	 */
+	maxIdLength?: number;
 }
 
 export interface Dedup {

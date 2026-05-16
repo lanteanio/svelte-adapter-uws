@@ -776,6 +776,173 @@ describe('presence plugin - server', () => {
 		});
 	});
 
+	describe('default select strips known-sensitive fields (denylist)', () => {
+		it('drops token / secret / password / auth / session / cookie / jwt / credential keys', () => {
+			const p = createPresence({ key: 'id' });
+			const ws = mockWs({
+				id: '1',
+				name: 'Alice',
+				color: 'red',
+				sessionToken: 'bearer-abc',
+				PASSWORD: 'hunter2',
+				apiSecret: 'shh',
+				authHeader: 'Basic xxx',
+				csrfCookie: 'c',
+				idToken: 'jwt-xyz',
+				userCredential: 'pkcs',
+				role: 'admin'
+			});
+
+			p.join(ws, 'room', platform);
+			p.flushDiffs();
+
+			const stateData = platform.sent[0].data['1'];
+			// id/name/color/role pass through (denylist allows non-matching keys)
+			expect(stateData.id).toBe('1');
+			expect(stateData.name).toBe('Alice');
+			expect(stateData.color).toBe('red');
+			expect(stateData.role).toBe('admin');
+			// sensitive keys are stripped
+			expect(stateData.sessionToken).toBeUndefined();
+			expect(stateData.PASSWORD).toBeUndefined();
+			expect(stateData.apiSecret).toBeUndefined();
+			expect(stateData.authHeader).toBeUndefined();
+			expect(stateData.csrfCookie).toBeUndefined();
+			expect(stateData.idToken).toBeUndefined();
+			expect(stateData.userCredential).toBeUndefined();
+		});
+
+		it('drops __-prefixed keys (defense against proto pollution + internal markers)', () => {
+			const p = createPresence({ key: 'id' });
+			const ws = mockWs({
+				id: '1',
+				name: 'Alice',
+				__subscriptions: new Set(['room']),
+				__remoteAddress: '203.0.113.1'
+			});
+
+			p.join(ws, 'room', platform);
+
+			const stateData = platform.sent[0].data['1'];
+			expect(stateData.id).toBe('1');
+			expect(stateData.name).toBe('Alice');
+			expect(stateData.__subscriptions).toBeUndefined();
+			expect(stateData.__remoteAddress).toBeUndefined();
+		});
+
+		it('drops constructor and prototype as own properties', () => {
+			const p = createPresence({ key: 'id' });
+			const ws = mockWs({
+				id: '1',
+				name: 'Alice',
+				constructor: 'evil',
+				prototype: 'also evil'
+			});
+
+			p.join(ws, 'room', platform);
+
+			const stateData = platform.sent[0].data['1'];
+			expect(Object.prototype.hasOwnProperty.call(stateData, 'constructor')).toBe(false);
+			expect(Object.prototype.hasOwnProperty.call(stateData, 'prototype')).toBe(false);
+			expect(stateData.id).toBe('1');
+			expect(stateData.name).toBe('Alice');
+		});
+
+		it('strips sensitive keys recursively (nested objects)', () => {
+			const p = createPresence({ key: 'id' });
+			const ws = mockWs({
+				id: '1',
+				name: 'Alice',
+				profile: {
+					avatar: 'a.png',
+					sessionToken: 'inner-bearer',
+					nested: { password: 'inner-secret', visible: 'ok' }
+				}
+			});
+
+			p.join(ws, 'room', platform);
+
+			const stateData = platform.sent[0].data['1'];
+			expect(stateData.profile.avatar).toBe('a.png');
+			expect(stateData.profile.sessionToken).toBeUndefined();
+			expect(stateData.profile.nested.password).toBeUndefined();
+			expect(stateData.profile.nested.visible).toBe('ok');
+		});
+
+		it('substitutes binary views with a length placeholder', () => {
+			const p = createPresence({ key: 'id' });
+			const ws = mockWs({
+				id: '1',
+				name: 'Alice',
+				avatar: Buffer.from([0xde, 0xad, 0xbe, 0xef])
+			});
+
+			p.join(ws, 'room', platform);
+
+			const stateData = platform.sent[0].data['1'];
+			expect(stateData.avatar).toBe('[bytes: 4]');
+		});
+
+		it('walks arrays element-by-element', () => {
+			const p = createPresence({ key: 'id' });
+			const ws = mockWs({
+				id: '1',
+				name: 'Alice',
+				tags: ['admin', { name: 'role', token: 'strip-me' }, 'beta']
+			});
+
+			p.join(ws, 'room', platform);
+
+			const stateData = platform.sent[0].data['1'];
+			expect(stateData.tags).toEqual(['admin', { name: 'role' }, 'beta']);
+		});
+
+		it('does not blow the stack on cyclic userData', () => {
+			const p = createPresence({ key: 'id' });
+			const ud = { id: '1', name: 'Alice' };
+			ud.self = ud;
+			const ws = mockWs(ud);
+
+			expect(() => p.join(ws, 'room', platform)).not.toThrow();
+			const stateData = platform.sent[0].data['1'];
+			expect(stateData.id).toBe('1');
+			expect(stateData.name).toBe('Alice');
+		});
+
+		it('explicit select still wins - default does not interfere', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id, color: ud.color })
+			});
+			const ws = mockWs({ id: '1', name: 'Alice', color: 'red', sessionToken: 'bypassed-by-explicit' });
+
+			p.join(ws, 'room', platform);
+
+			// Explicit select: returns only what the user asked for, regardless of denylist
+			expect(platform.sent[0].data['1']).toEqual({ id: '1', color: 'red' });
+		});
+
+		it('returns a plain object when userData is empty', () => {
+			const p = createPresence();
+			const ws = mockWs({});
+
+			expect(() => p.join(ws, 'room', platform)).not.toThrow();
+			const state = platform.sent[0].data;
+			const onlyKey = Object.keys(state)[0];
+			expect(onlyKey.startsWith('__conn:')).toBe(true);
+			expect(state[onlyKey]).toEqual({});
+		});
+
+		it('opt-back-in pattern: select: (ud) => ud restores pre-this-default passthrough', () => {
+			const p = createPresence({ key: 'id', select: (ud) => ud });
+			const ws = mockWs({ id: '1', name: 'Alice', sessionToken: 'now-leaks' });
+
+			p.join(ws, 'room', platform);
+
+			expect(platform.sent[0].data['1'].sessionToken).toBe('now-leaks');
+		});
+	});
+
 	describe('heartbeat', () => {
 		afterEach(() => {
 			vi.useRealTimers();

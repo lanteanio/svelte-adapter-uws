@@ -319,17 +319,6 @@ export default function (opts = {}) {
 				// topics back to a human. Apps that legitimately use
 				// non-ASCII topic names can opt back in.
 				allowNonAsciiTopics: websocket?.allowNonAsciiTopics === true,
-				// Cross-worker relay HMAC defense. When set to a string of
-				// at least 16 characters, every relay envelope leaving
-				// this worker carries an HMAC-SHA256 tag and the
-				// receiving worker refuses any envelope whose tag does
-				// not match. The secret must reach every worker (env
-				// var, workerData, etc.) - the framework cannot
-				// auto-generate a value that is shared across workers.
-				// Defends against an adjacent process injecting forged
-				// messages into the worker_threads relay (typically
-				// reachable only post-compromise, hence opt-in).
-				workerRelayHmacSecret: websocket?.workerRelayHmacSecret,
 				// CSRF defense for the `/__ws/auth` POST endpoint. By
 				// default, the request must carry one of:
 				//   - `x-requested-with: XMLHttpRequest`

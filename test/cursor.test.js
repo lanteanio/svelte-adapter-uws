@@ -679,5 +679,90 @@ describe('cursor plugin - server', () => {
 			expect(c.list('b').length).toBe(1);
 			expect(c.list('c').length).toBe(1);
 		});
+
+		it('rejects invalid maxTopicLength / maxDataBytes at construction', () => {
+			expect(() => createCursor({ maxTopicLength: 0 })).toThrow('maxTopicLength must be a positive integer');
+			expect(() => createCursor({ maxTopicLength: -1 })).toThrow('maxTopicLength must be a positive integer');
+			expect(() => createCursor({ maxDataBytes: 0 })).toThrow('maxDataBytes must be a positive integer');
+			expect(() => createCursor({ maxDataBytes: -1 })).toThrow('maxDataBytes must be a positive integer');
+		});
+	});
+
+	describe('topic + payload caps', () => {
+		it('silently drops updates whose topic exceeds the default 256-char cap', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const p = mockPlatform();
+			const ws = mockWs({ id: 'A' });
+			c.update(ws, 'a'.repeat(257), { x: 1 }, p);
+			expect(p.published).toHaveLength(0);
+			expect(c.list('a'.repeat(257))).toEqual([]);
+		});
+
+		it('accepts topic exactly at the cap', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const p = mockPlatform();
+			const ws = mockWs({ id: 'A' });
+			c.update(ws, 'a'.repeat(256), { x: 1 }, p);
+			expect(p.published).toHaveLength(1);
+		});
+
+		it('silently drops updates whose JSON-encoded data exceeds the default 8 KB cap', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const p = mockPlatform();
+			const ws = mockWs({ id: 'A' });
+			// 9 KB payload exceeds 8 KB cap.
+			const tooBig = { payload: 'x'.repeat(9 * 1024) };
+			c.update(ws, 'topic', tooBig, p);
+			expect(p.published).toHaveLength(0);
+		});
+
+		it('accepts data exactly at the cap', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const p = mockPlatform();
+			const ws = mockWs({ id: 'A' });
+			// Build payload exactly at the cap. JSON wrapping adds ~14 bytes
+			// for { "payload": "..." } so the inner string is 8192 - ~14.
+			const fits = { payload: 'x'.repeat(8192 - 16) };
+			c.update(ws, 'topic', fits, p);
+			expect(p.published).toHaveLength(1);
+		});
+
+		it('honors custom maxTopicLength and maxDataBytes', () => {
+			const c = createCursor({ throttle: 0, maxTopicLength: 16, maxDataBytes: 64, select: (ud) => ({ id: ud.id }) });
+			const p = mockPlatform();
+			const ws = mockWs({ id: 'A' });
+			c.update(ws, 'a'.repeat(17), { x: 1 }, p);
+			expect(p.published).toHaveLength(0);
+			c.update(ws, 'short', { payload: 'x'.repeat(80) }, p);
+			expect(p.published).toHaveLength(0);
+			c.update(ws, 'short', { x: 1 }, p);
+			expect(p.published).toHaveLength(1);
+		});
+
+		it('drops updates whose data is unserializable (BigInt / circular)', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const p = mockPlatform();
+			const ws = mockWs({ id: 'A' });
+			c.update(ws, 'topic', { big: BigInt(42) }, p);
+			expect(p.published).toHaveLength(0);
+		});
+
+		it('accepts undefined/null data (no JSON.stringify needed)', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const p = mockPlatform();
+			const ws = mockWs({ id: 'A' });
+			c.update(ws, 'topic', null, p);
+			expect(p.published).toHaveLength(1);
+		});
+
+		it('drops empty or non-string topic', () => {
+			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const p = mockPlatform();
+			const ws = mockWs({ id: 'A' });
+			c.update(ws, '', { x: 1 }, p);
+			c.update(ws, /** @type {any} */ (123), { x: 1 }, p);
+			c.update(ws, /** @type {any} */ (null), { x: 1 }, p);
+			expect(p.published).toHaveLength(0);
+		});
 	});
 });

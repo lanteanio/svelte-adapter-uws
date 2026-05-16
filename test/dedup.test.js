@@ -44,12 +44,46 @@ describe('createDedup', () => {
 			expect(() => createDedup({ ttl: 1000, maxEntries: 1.5 })).toThrow('positive integer');
 		});
 
+		it('throws when maxIdLength is invalid', () => {
+			expect(() => createDedup({ ttl: 1000, maxIdLength: 0 })).toThrow('positive integer');
+			expect(() => createDedup({ ttl: 1000, maxIdLength: -1 })).toThrow('positive integer');
+			expect(() => createDedup({ ttl: 1000, maxIdLength: 1.5 })).toThrow('positive integer');
+		});
+
 		it('throws when id is empty or non-string', () => {
 			const d = createDedup({ ttl: 1000 });
 			expect(() => d.claim('')).toThrow('non-empty string');
 			expect(() => d.claim(undefined)).toThrow('non-empty string');
 			expect(() => d.has(123)).toThrow('non-empty string');
 			expect(() => d.delete(null)).toThrow('non-empty string');
+		});
+
+		describe('maxIdLength cap', () => {
+			it('rejects ids longer than the default 256-char cap', () => {
+				const d = createDedup({ ttl: 1000 });
+				const tooLong = 'a'.repeat(257);
+				expect(() => d.claim(tooLong)).toThrow('exceeds maxIdLength 256');
+				expect(() => d.has(tooLong)).toThrow('exceeds maxIdLength 256');
+				expect(() => d.delete(tooLong)).toThrow('exceeds maxIdLength 256');
+			});
+
+			it('accepts ids exactly at the cap', () => {
+				const d = createDedup({ ttl: 1000 });
+				const justFits = 'a'.repeat(256);
+				expect(d.claim(justFits)).toBe(true);
+				expect(d.has(justFits)).toBe(true);
+			});
+
+			it('honors a custom maxIdLength', () => {
+				const d = createDedup({ ttl: 1000, maxIdLength: 64 });
+				expect(d.claim('a'.repeat(64))).toBe(true);
+				expect(() => d.claim('a'.repeat(65))).toThrow('exceeds maxIdLength 64');
+			});
+
+			it('error names the actual id length so callers can log the offender', () => {
+				const d = createDedup({ ttl: 1000 });
+				expect(() => d.claim('a'.repeat(300))).toThrow('id length 300');
+			});
 		});
 	});
 

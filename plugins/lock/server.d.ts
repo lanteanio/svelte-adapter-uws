@@ -129,6 +129,43 @@ export interface LockOptions {
 	 * @default 1_000_000
 	 */
 	maxKeys?: number;
+
+	/**
+	 * Reject keys longer than this many characters at `withLock()` entry.
+	 * Generous for typical lock-key shapes (`user:${userId}`,
+	 * `resource:${resourceId}`, composite namespaces). The cap prevents
+	 * a single oversized key from anchoring a large internal string in
+	 * the per-key waiter map.
+	 *
+	 * @default 256
+	 */
+	maxKeyLength?: number;
+
+	/**
+	 * Cap on the number of queued waiters per key. When a flood of
+	 * contenders piles up on a single hot key (e.g. every authenticated
+	 * client racing for `lock-${roomId}` at once), the queue would
+	 * otherwise grow without bound. Past this cap, `withLock(key, fn)`
+	 * rejects synchronously with a `LockQueueFullError` (`code:
+	 * 'LOCK_QUEUE_FULL'`, `.key`, `.maxWaitersPerKey`). The currently-
+	 * holding caller and any waiters already queued continue normally;
+	 * only NEW arrivals are shed.
+	 *
+	 * @default 1000
+	 */
+	maxWaitersPerKey?: number;
+}
+
+/**
+ * Error thrown into a `withLock` caller's promise when the queued
+ * waiter count for a key has reached `maxWaitersPerKey`. The caller
+ * should shed the request (return a 503, retry later) rather than
+ * blocking the contention chain further.
+ */
+export interface LockQueueFullError extends Error {
+	code: 'LOCK_QUEUE_FULL';
+	key: string;
+	maxWaitersPerKey: number;
 }
 
 /**

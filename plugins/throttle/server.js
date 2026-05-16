@@ -103,6 +103,45 @@ function resolveMaxTopics(options, name) {
 }
 
 /**
+ * Resolve `maxTopicLength` from a possibly-omitted options bag and validate.
+ * Default cap is 256 characters - enough for any realistic topic name
+ * shape (UUIDs are 36, ulids 26, common patterns like `chat:${userId}` or
+ * `board:${boardId}:cursor` stay well under). Caps protect against an
+ * unbounded-key cardinality leak where a single oversized topic anchors
+ * a large internal string in the timer-state map.
+ *
+ * @param {{ maxTopicLength?: number } | undefined} options
+ * @param {string} name
+ * @returns {number}
+ */
+function resolveMaxTopicLength(options, name) {
+	const value = options && options.maxTopicLength !== undefined ? options.maxTopicLength : 256;
+	if (!Number.isInteger(value) || value < 1) {
+		throw new Error(`${name}: maxTopicLength must be a positive integer`);
+	}
+	return value;
+}
+
+/**
+ * Validate a user-supplied topic at publish time. Rejects non-strings,
+ * empty strings, and strings longer than the configured cap.
+ *
+ * @param {unknown} topic
+ * @param {number} maxTopicLength
+ * @param {string} name
+ */
+function validateTopic(topic, maxTopicLength, name) {
+	if (typeof topic !== 'string' || topic.length === 0) {
+		throw new Error(`${name}: topic must be a non-empty string`);
+	}
+	if (topic.length > maxTopicLength) {
+		throw new Error(
+			`${name}: topic length ${topic.length} exceeds maxTopicLength ${maxTopicLength}`
+		);
+	}
+}
+
+/**
  * Insert a topic state, dropping the oldest insertion-order entry when
  * the map is at cap. The dropped entry's pending payload is published
  * synchronously so the value is not silently lost - the caller's
@@ -175,6 +214,7 @@ function evictOldestIfAtCap(topics, maxTopics) {
 export function throttle(interval, options) {
 	validateInterval(interval, 'throttle');
 	const maxTopics = resolveMaxTopics(options, 'throttle');
+	const maxTopicLength = resolveMaxTopicLength(options, 'throttle');
 
 	/** @type {Map<string, { timer: any, pending: { platform: any, event: string, data: any } | null }>} */
 	const topics = new Map();
@@ -183,6 +223,7 @@ export function throttle(interval, options) {
 		interval,
 
 		publish(platform, topic, event, data) {
+			validateTopic(topic, maxTopicLength, 'throttle');
 			let state = topics.get(topic);
 			if (!state) {
 				evictOldestIfAtCap(topics, maxTopics);
@@ -256,6 +297,7 @@ export function throttle(interval, options) {
 export function debounce(interval, options) {
 	validateInterval(interval, 'debounce');
 	const maxTopics = resolveMaxTopics(options, 'debounce');
+	const maxTopicLength = resolveMaxTopicLength(options, 'debounce');
 
 	/** @type {Map<string, { timer: any, pending: { platform: any, event: string, data: any } | null }>} */
 	const topics = new Map();
@@ -264,6 +306,7 @@ export function debounce(interval, options) {
 		interval,
 
 		publish(platform, topic, event, data) {
+			validateTopic(topic, maxTopicLength, 'debounce');
 			let state = topics.get(topic);
 			if (!state) {
 				evictOldestIfAtCap(topics, maxTopics);

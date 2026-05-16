@@ -420,22 +420,6 @@ export interface WebSocketOptions {
 	 * @default false
 	 */
 	unsafeSameOriginWithoutHostPin?: boolean;
-
-	/**
-	 * Opt-in HMAC over the cross-worker relay envelope. When set, must
-	 * be at least 16 characters and must be the same value across every
-	 * worker that relays to / from this one. Producer side computes an
-	 * HMAC-SHA256 tag over the `(topic, envelope)` pair; consumer side
-	 * re-computes and refuses on mismatch.
-	 *
-	 * Defends against an adjacent process injecting forged messages into
-	 * the `worker_threads` relay (typically reachable only post-
-	 * compromise). The shared secret must reach every worker via env
-	 * var or `workerData`.
-	 *
-	 * Without this option set, behavior is unchanged.
-	 */
-	workerRelayHmacSecret?: string;
 }
 
 // - User's WebSocket handler module exports ---------------------------------

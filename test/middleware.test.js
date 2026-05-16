@@ -168,7 +168,32 @@ describe('middleware plugin', () => {
 			);
 
 			const result = await m.run(mockWs(), msg(), platform);
-			expect(result.locals).toEqual({ userId: '42', role: 'admin' });
+			expect(result.locals.userId).toBe('42');
+			expect(result.locals.role).toBe('admin');
+		});
+
+		it('ctx.locals has no prototype - cannot be poisoned via __proto__ key', async () => {
+			let observed;
+			const m = createMiddleware(
+				(ctx, next) => {
+					// A middleware that copies in attacker-influenced data
+					// could try to set `__proto__` as an own property. With
+					// a plain {} this would mutate Object.prototype. With
+					// Object.create(null), it sets a normal own property.
+					ctx.locals['__proto__'] = { polluted: true };
+					observed = ctx.locals;
+					return next();
+				}
+			);
+			await m.run(mockWs(), msg(), platform);
+
+			// Verify ctx.locals is a null-prototype object.
+			expect(Object.getPrototypeOf(observed)).toBe(null);
+			// Attempting to set __proto__ on a null-prototype object writes
+			// it as an own property rather than mutating the prototype chain.
+			expect(Object.prototype.hasOwnProperty.call(observed, '__proto__')).toBe(true);
+			// Sanity: Object.prototype was not polluted.
+			expect(/** @type {any} */ ({}).polluted).toBeUndefined();
 		});
 
 		it('middleware can replace ctx.topic and ctx.event', async () => {

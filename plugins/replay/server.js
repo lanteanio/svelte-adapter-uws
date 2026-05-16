@@ -230,6 +230,15 @@ export function createReplay(options = {}) {
 		},
 
 		since(topic, since) {
+			// Reject malformed since values defensively. The plugin is a
+			// building block; the host app is supposed to authorize the
+			// caller before invoking this (see plugin README). But a
+			// negative / NaN / non-integer `since` would currently make
+			// readSince return the entire buffer (`entry.seq > -1` is
+			// always true for the in-memory backend), so an authorized
+			// "resume from N" would degrade to "dump everything" when the
+			// caller is buggy. Treat invalid as "no data."
+			if (!Number.isInteger(since) || since < 0) return [];
 			touchTopic(topic);
 			const state = topics.get(topic);
 			if (!state) return [];
@@ -237,6 +246,13 @@ export function createReplay(options = {}) {
 		},
 
 		replay(ws, topic, sinceSeq, platform, reqId) {
+			// Same input gate as `since`: a malformed sinceSeq would dump
+			// the entire ring buffer to the caller. Send an empty `end`
+			// marker so the protocol response shape is preserved.
+			if (!Number.isInteger(sinceSeq) || sinceSeq < 0) {
+				platform.send(ws, TOPIC_PREFIX + topic, 'end', reqId != null ? { reqId } : null);
+				return;
+			}
 			touchTopic(topic);
 			const state = topics.get(topic);
 			if (!state) {

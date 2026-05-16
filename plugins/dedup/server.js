@@ -29,6 +29,14 @@
  *   pruned in a single pass; if the map is still over cap (i.e. all
  *   entries are still inside their windows), the oldest insertion-
  *   order entries are evicted regardless.
+ * @property {number} [maxIdLength=256] - Reject ids longer than this many
+ *   characters at `claim()` / `has()` / `delete()` entry. Defaults to
+ *   256, which is generous for typical message-id / request-id shapes
+ *   (UUIDs are 36, ulids 26, base64-encoded random nonces under 64).
+ *   The cap prevents a single oversized id from anchoring a large
+ *   internal string for `ttl` ms - with `maxEntries: 10000`, an
+ *   uncapped 1 MB id pins 10 GB until the TTL elapses. Pass a larger
+ *   number if your application actually uses long composite ids.
  */
 
 /**
@@ -79,12 +87,15 @@ export function createDedup(options) {
 	if (!options || typeof options !== 'object') {
 		throw new Error('dedup: options object is required');
 	}
-	const { ttl, maxEntries = 10000 } = options;
+	const { ttl, maxEntries = 10000, maxIdLength = 256 } = options;
 	if (typeof ttl !== 'number' || !Number.isFinite(ttl) || ttl <= 0) {
 		throw new Error('dedup: ttl must be a positive finite number');
 	}
 	if (!Number.isInteger(maxEntries) || maxEntries <= 0) {
 		throw new Error('dedup: maxEntries must be a positive integer');
+	}
+	if (!Number.isInteger(maxIdLength) || maxIdLength <= 0) {
+		throw new Error('dedup: maxIdLength must be a positive integer');
 	}
 
 	/**
@@ -111,6 +122,12 @@ export function createDedup(options) {
 	function validateId(id) {
 		if (typeof id !== 'string' || id.length === 0) {
 			throw new Error('dedup: id must be a non-empty string');
+		}
+		if (id.length > maxIdLength) {
+			throw new Error(
+				'dedup: id length ' + id.length +
+				' exceeds maxIdLength ' + maxIdLength
+			);
 		}
 	}
 

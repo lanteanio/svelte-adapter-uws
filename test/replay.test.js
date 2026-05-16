@@ -479,4 +479,62 @@ describe('replay plugin - server', () => {
 			expect(r.since('test', 999)).toHaveLength(1);
 		});
 	});
+
+	describe('sinceSeq input validation (defense-in-depth)', () => {
+		beforeEach(() => {
+			// Fill a small buffer so a buggy "dump everything" path would
+			// return non-empty results.
+			for (let i = 0; i < 5; i++) replay.publish(mockPlatform, 'chat', 'msg', { i });
+		});
+
+		it('since() rejects negative sinceSeq (returns [] instead of dumping the buffer)', () => {
+			expect(replay.since('chat', -1)).toEqual([]);
+			expect(replay.since('chat', -100)).toEqual([]);
+			expect(replay.since('chat', Number.NEGATIVE_INFINITY)).toEqual([]);
+		});
+
+		it('since() rejects NaN / non-finite sinceSeq', () => {
+			expect(replay.since('chat', NaN)).toEqual([]);
+			expect(replay.since('chat', Infinity)).toEqual([]);
+		});
+
+		it('since() rejects non-integer sinceSeq (fractional)', () => {
+			expect(replay.since('chat', 1.5)).toEqual([]);
+		});
+
+		it('since() rejects non-number sinceSeq', () => {
+			expect(replay.since('chat', /** @type {any} */ ('0'))).toEqual([]);
+			expect(replay.since('chat', /** @type {any} */ (null))).toEqual([]);
+			expect(replay.since('chat', /** @type {any} */ (undefined))).toEqual([]);
+		});
+
+		it('since() still accepts 0 (resume from start)', () => {
+			expect(replay.since('chat', 0)).toHaveLength(5);
+		});
+
+		it('replay() with negative sinceSeq sends only an end marker (no buffer dump)', () => {
+			const ws = {};
+			replay.replay(ws, 'chat', -1, mockPlatform, 'req1');
+			const replayFrames = mockPlatform.sent.filter((s) => s.topic === '__replay:chat');
+			// Only the end marker; zero 'msg' frames.
+			expect(replayFrames.filter((f) => f.event === 'msg')).toHaveLength(0);
+			const end = replayFrames.find((f) => f.event === 'end');
+			expect(end).toBeDefined();
+			expect(end.data).toEqual({ reqId: 'req1' });
+		});
+
+		it('replay() with NaN sinceSeq sends only end marker', () => {
+			const ws = {};
+			replay.replay(ws, 'chat', NaN, mockPlatform, 'req2');
+			const msgFrames = mockPlatform.sent.filter((s) => s.topic === '__replay:chat' && s.event === 'msg');
+			expect(msgFrames).toHaveLength(0);
+		});
+
+		it('replay() with 0 still resumes from start', () => {
+			const ws = {};
+			replay.replay(ws, 'chat', 0, mockPlatform, 'req3');
+			const msgFrames = mockPlatform.sent.filter((s) => s.topic === '__replay:chat' && s.event === 'msg');
+			expect(msgFrames).toHaveLength(5);
+		});
+	});
 });

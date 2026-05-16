@@ -17,6 +17,10 @@
  * @property {number} [maxSize=1_000_000] - Maximum waiting (not-yet-started) tasks per key.
  *   When exceeded, `push()` rejects and `onDrop` is called (if provided). Pass
  *   `Infinity` to disable the cap (not recommended at uWS scale).
+ * @property {number} [maxKeyLength=256] - Reject keys longer than this many
+ *   characters at `push()` entry. Defaults to 256, which is generous for typical
+ *   queue-key shapes (`user:${userId}`, `inbox:${roomId}`). Caps prevent an
+ *   oversized key from anchoring a large internal string in the per-key queue map.
  * @property {(dropped: { key: string, task: Function }) => void} [onDrop] -
  *   Called when a task is rejected due to `maxSize`. Useful for logging or metrics.
  */
@@ -66,6 +70,7 @@
 export function createQueue(options = {}) {
 	const concurrency = options.concurrency ?? 1;
 	const maxSize = options.maxSize ?? 1_000_000;
+	const maxKeyLength = options.maxKeyLength ?? 256;
 	const onDrop = options.onDrop ?? null;
 
 	if (!Number.isInteger(concurrency) || concurrency < 1) {
@@ -73,6 +78,9 @@ export function createQueue(options = {}) {
 	}
 	if (typeof maxSize !== 'number' || (!Number.isFinite(maxSize) && maxSize !== Infinity) || maxSize < 1) {
 		throw new Error('queue: maxSize must be a positive number or Infinity');
+	}
+	if (!Number.isInteger(maxKeyLength) || maxKeyLength < 1) {
+		throw new Error('queue: maxKeyLength must be a positive integer');
 	}
 	if (onDrop != null && typeof onDrop !== 'function') {
 		throw new Error('queue: onDrop must be a function');
@@ -133,6 +141,12 @@ export function createQueue(options = {}) {
 		push(key, task) {
 			if (typeof key !== 'string') {
 				return Promise.reject(new Error('queue: key must be a string'));
+			}
+			if (key.length > maxKeyLength) {
+				return Promise.reject(new Error(
+					'queue: key length ' + key.length +
+					' exceeds maxKeyLength ' + maxKeyLength
+				));
 			}
 			if (typeof task !== 'function') {
 				return Promise.reject(new Error('queue: task must be a function'));

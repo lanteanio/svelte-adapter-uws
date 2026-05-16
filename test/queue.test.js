@@ -51,6 +51,40 @@ describe('queue plugin', () => {
 		it('throws on non-function onDrop', () => {
 			expect(() => createQueue({ onDrop: 'bad' })).toThrow('function');
 		});
+
+		it('throws on invalid maxKeyLength', () => {
+			expect(() => createQueue({ maxKeyLength: 0 })).toThrow('maxKeyLength must be a positive integer');
+			expect(() => createQueue({ maxKeyLength: -1 })).toThrow('maxKeyLength must be a positive integer');
+			expect(() => createQueue({ maxKeyLength: 1.5 })).toThrow('maxKeyLength must be a positive integer');
+		});
+	});
+
+	describe('maxKeyLength cap', () => {
+		it('rejects keys longer than the default 256-char cap', async () => {
+			const q = createQueue();
+			const tooLong = 'a'.repeat(257);
+			await expect(q.push(tooLong, () => 'never'))
+				.rejects.toThrow('exceeds maxKeyLength 256');
+		});
+
+		it('accepts keys exactly at the cap', async () => {
+			const q = createQueue();
+			const justFits = 'a'.repeat(256);
+			expect(await q.push(justFits, () => 'ok')).toBe('ok');
+		});
+
+		it('honors a custom maxKeyLength', async () => {
+			const q = createQueue({ maxKeyLength: 16 });
+			expect(await q.push('a'.repeat(16), () => 'ok')).toBe('ok');
+			await expect(q.push('a'.repeat(17), () => 'never'))
+				.rejects.toThrow('exceeds maxKeyLength 16');
+		});
+
+		it('error names the actual key length', async () => {
+			const q = createQueue();
+			await expect(q.push('a'.repeat(800), () => 'x'))
+				.rejects.toThrow('key length 800');
+		});
 	});
 
 	describe('push - basic', () => {
