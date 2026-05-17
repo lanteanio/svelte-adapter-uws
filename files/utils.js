@@ -375,17 +375,26 @@ export function computeTopPublishers(stats, intervalSec, thresholds) {
 // Object.keys / JSON.stringify / spread on userData skip these slots
 // so they do not leak into client serializations.
 //
-// The symbols are exported from this module so handler.js, vite.js,
-// and testing.js share the same identity. Each Symbol() call creates
-// a unique value, so the adapter's slot is unreachable from user code
-// that does not import this module.
+// The symbols use Symbol.for(...) so handler.js, vite.js, and testing.js
+// (and downstream consumers like svelte-adapter-uws-extensions/redis/registry)
+// all resolve to the SAME global symbol regardless of whether utils.js
+// was bundled into a build artifact or loaded from node_modules at runtime.
+// Plain `Symbol(description)` would create a new unique value per file
+// instance, and a bundler that duplicates utils.js (vite's SSR output
+// bundles handler.js + utils.js into build/) would produce two distinct
+// symbols for the same conceptual slot - the handler would stamp under
+// one symbol and a runtime-loaded extension (e.g. the cluster registry)
+// would read under the other, silently dropping every cross-module lookup.
+// The trade-off is that user code that calls Symbol.for('adapter-uws.ws.*')
+// can now reach these slots; that is a deliberate accept since the
+// alternative was a silent cluster-routing break in production.
 
-export const WS_SUBSCRIPTIONS = Symbol('adapter-uws.ws.subscriptions');
-export const WS_COALESCED = Symbol('adapter-uws.ws.coalesced');
-export const WS_SESSION_ID = Symbol('adapter-uws.ws.session-id');
-export const WS_PENDING_REQUESTS = Symbol('adapter-uws.ws.pending-requests');
-export const WS_STATS = Symbol('adapter-uws.ws.stats');
-export const WS_PLATFORM = Symbol('adapter-uws.ws.platform');
+export const WS_SUBSCRIPTIONS = Symbol.for('adapter-uws.ws.subscriptions');
+export const WS_COALESCED = Symbol.for('adapter-uws.ws.coalesced');
+export const WS_SESSION_ID = Symbol.for('adapter-uws.ws.session-id');
+export const WS_PENDING_REQUESTS = Symbol.for('adapter-uws.ws.pending-requests');
+export const WS_STATS = Symbol.for('adapter-uws.ws.stats');
+export const WS_PLATFORM = Symbol.for('adapter-uws.ws.platform');
 /**
  * Set of capabilities the connected client has advertised via a
  * `{type:'hello', caps: [...]}` frame. Read by `platform.publishBatched`
@@ -393,7 +402,7 @@ export const WS_PLATFORM = Symbol('adapter-uws.ws.platform');
  * to N individual frames for that connection. Empty / undefined is
  * the safe default - assume the client has no opt-in features.
  */
-export const WS_CAPS = Symbol('adapter-uws.ws.caps');
+export const WS_CAPS = Symbol.for('adapter-uws.ws.caps');
 
 // - Bounded-by-default capacity caps ---------------------------------------
 // Single source of truth for the per-connection and module-level Map / Set

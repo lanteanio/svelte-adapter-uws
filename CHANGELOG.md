@@ -5,6 +5,14 @@ All notable changes to `svelte-adapter-uws` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.5.1] - 2026-05-17
+
+### Fixed
+
+- **`WS_*` userData slot symbols in `files/utils.js` switched from `Symbol(...)` to `Symbol.for(...)` so handler.js, vite.js, testing.js, and downstream extensions (e.g. `svelte-adapter-uws-extensions/redis/registry`) resolve to the same global symbol regardless of how `utils.js` was loaded.** Pre-fix, each `Symbol('adapter-uws.ws.subscriptions')` call returned a fresh unique value. In a single-module-instance setup (everything imports the same `files/utils.js`) this was fine. But the adapter's build step bundles `handler.js` + `utils.js` into the SvelteKit build artifact (`build/handler.js`), so the bundled `utils.js` is a *different module instance* from the one a runtime extension loads via `node_modules/svelte-adapter-uws/files/utils.js`. Two instances meant two distinct symbols for each slot - the handler stamped subscriptions / session-id / stats under one symbol and a runtime-loaded extension (the cluster registry walks every `ws.getUserData()[WS_SUBSCRIPTIONS]` to rebuild routing tables) read under the other, silently dropping every cross-module lookup. The failure was invisible in single-process dev (only one instance ever loaded) and surfaced only in clustered + extension production where subscription rebuilds returned empty sets. Fix is one-character per export (`Symbol(x)` -> `Symbol.for(x)`) which routes via the V8 global symbol registry and gives identity-by-key across every module instance in the process. Trade-off: user code that calls `Symbol.for('adapter-uws.ws.subscriptions')` can now reach these slots; documented at the top of the symbol block as a deliberate accept since the alternative was a silent cluster-routing break.
+
 ## [0.5.0-next.24] - 2026-05-16
 
 ### Security
