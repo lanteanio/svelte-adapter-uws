@@ -104,7 +104,7 @@ These change observable runtime behavior. Most apps are unaffected; a few will n
 
 ### Default `maxPayloadLength` raised from 16 KB to 1 MB
 
-**What changed.** The default cap on a single inbound WebSocket frame moved from 16 KB to 1 MB. uWS itself defaults to 16 MB; 16 KB was excessively conservative and forced chunked-upload frameworks to use ~12 KB chunks (~9000 chunks for a 100 MB file after typical 90% headroom). Apps that were chunking large payloads to fit under 16 KB will now accept them in fewer chunks (or in a single frame).
+**What changed.** The default cap on a single inbound WebSocket frame moved from 16 KB to 1 MB. The adapter previously matched uWS's own 16 KB default, which was excessively conservative for typical app payloads - it forced chunked-upload frameworks to use ~12 KB chunks (~9000 chunks for a 100 MB file after typical 90% headroom). Apps that were chunking large payloads to fit under 16 KB will now accept them in fewer chunks (or in a single frame).
 
 **How to migrate.** No action needed for most apps. To pin the previous cap, set `websocket.maxPayloadLength: 16 * 1024` in `svelte.config.js`. To pin any other value, set the option to that byte count. DoS protection remains layered: `upgradeAdmission.maxConcurrent` caps connection count, `maxBackpressure` caps per-connection outbound queue size.
 

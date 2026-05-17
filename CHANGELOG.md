@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.1] - 2026-05-17
+### Fixed
+
+- **README, MIGRATION, JSDoc, and inline source comments around `websocket.maxPayloadLength` corrected: uWS's own default is 16 KB, not 16 MB.** Four places stated the false "uWS itself defaults to 16 MB" framing (`README.md` "Backpressure and connection limits" section, `MIGRATION.md` "Default `maxPayloadLength` raised from 16 KB to 1 MB" section, `index.d.ts` JSDoc on the `maxPayloadLength` config option, and the inline comment in `index.js` above the `wsOpts.maxPayloadLength` default). The actual uWS default per `node_modules/uWebSockets.js/index.d.ts` is `16 * 1024`. The adapter previously matched uWS's 16 KB default and raised to 1 MB in 0.5 because 16 KB was excessively conservative for typical app payloads (forced chunked-upload frameworks to use ~12 KB chunks). The corrected framing preserves the 0.5 change narrative without the false uWS-baseline claim. Docs-only change; no runtime behaviour change.
 
 ### Fixed
 

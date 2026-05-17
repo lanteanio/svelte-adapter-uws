@@ -282,16 +282,16 @@ export default function (opts = {}) {
 				);
 			}
 			const wsOpts = {
-				// Default raised from 16 KB to 1 MB in next.19. uWS itself
-				// defaults to 16 MB; 16 KB was excessively conservative and
-				// forced chunked-upload frameworks to use ~12 KB chunks
-				// (~9000 chunks for a 100 MB file). 1 MB handles typical app
+				// Default raised from 16 KB to 1 MB in 0.5. uWS's own
+				// default is also 16 KB, which the adapter previously
+				// matched - that was excessively conservative and forced
+				// chunked-upload frameworks to use ~12 KB chunks (~9000
+				// chunks for a 100 MB file). 1 MB handles typical app
 				// payloads in a single frame without per-app tuning. DoS
-				// exposure is bounded
-				// by `upgradeAdmission.maxConcurrent` (connection count)
-				// and `maxBackpressure` (per-conn outbound queue, also
-				// 1 MB), so per-frame cost stays predictable. Apps that
-				// want a stricter cap can pin via
+				// exposure is bounded by `upgradeAdmission.maxConcurrent`
+				// (connection count) and `maxBackpressure` (per-conn
+				// outbound queue, also 1 MB), so per-frame cost stays
+				// predictable. Apps that want a stricter cap can pin via
 				// `websocket.maxPayloadLength` in svelte.config.js.
 				maxPayloadLength: websocket?.maxPayloadLength ?? 1024 * 1024,
 				idleTimeout: websocket?.idleTimeout ?? 120,

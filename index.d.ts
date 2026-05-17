@@ -144,8 +144,8 @@ export interface WebSocketOptions {
 	/**
 	 * Max message size in bytes. Connections sending larger messages are closed.
 	 * Default 1 MB is balanced for typical app payloads in a single frame; uWS
-	 * itself defaults to 16 MB. Lower this for stricter caps (e.g. `16 * 1024`
-	 * for 16 KB) when payload-size discipline matters.
+	 * itself defaults to 16 KB. Lower this for stricter caps (e.g. `16 * 1024`
+	 * for the uWS-matching 16 KB) when payload-size discipline matters.
 	 * @default 1048576 (1 MB)
 	 */
 	maxPayloadLength?: number;
