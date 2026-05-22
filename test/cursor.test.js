@@ -2,14 +2,25 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createCursor } from '../plugins/cursor/server.js';
 import { mockWs, mockPlatform } from './_helpers.js';
 
+// Helpers to filter the new split-wire-format publish stream. The plugin
+// emits `join` (with user metadata) then `update` / `bulk` (positions
+// only) on the same topic; tests typically only care about one or two
+// of those streams.
+const pubs = (p, event) => p.published.filter((e) => e.event === event);
+const positionEvents = (p) => p.published.filter((e) => e.event === 'update' || e.event === 'bulk');
+
 describe('cursor plugin - server', () => {
 	let cursors;
 	let platform;
 
 	beforeEach(() => {
 		vi.useRealTimers();
+		// All-immediate defaults for assertion convenience: 0/0 = no
+		// throttle, no topic coalescing. Individual tests opt into
+		// throttled behavior explicitly.
 		cursors = createCursor({
-			throttle: 100,
+			throttle: 0,
+			topicThrottle: 0,
 			select: (userData) => ({ id: userData.id, name: userData.name })
 		});
 		platform = mockPlatform();
@@ -20,6 +31,7 @@ describe('cursor plugin - server', () => {
 			expect(typeof cursors.update).toBe('function');
 			expect(typeof cursors.remove).toBe('function');
 			expect(typeof cursors.list).toBe('function');
+			expect(typeof cursors.snapshot).toBe('function');
 			expect(typeof cursors.clear).toBe('function');
 		});
 
@@ -32,167 +44,322 @@ describe('cursor plugin - server', () => {
 			expect(() => createCursor({ throttle: -1 })).toThrow('non-negative');
 		});
 
+		it('throws on negative topicThrottle', () => {
+			expect(() => createCursor({ topicThrottle: -1 })).toThrow('non-negative');
+		});
+
 		it('throws on non-function select', () => {
 			expect(() => createCursor({ select: 'bad' })).toThrow('function');
 		});
 	});
 
-	describe('update - basic', () => {
-		it('first update broadcasts immediately', () => {
+	describe('wire format', () => {
+		it('first update on a topic emits join then update', () => {
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			cursors.update(ws, 'canvas', { x: 10, y: 20 }, platform);
 
-			expect(platform.published).toHaveLength(1);
+			expect(platform.published).toHaveLength(2);
+			expect(platform.published[0].event).toBe('join');
 			expect(platform.published[0].topic).toBe('__cursor:canvas');
-			expect(platform.published[0].event).toBe('update');
 			expect(platform.published[0].data).toEqual({
 				key: expect.any(String),
-				user: { id: '1', name: 'Alice' },
+				user: { id: '1', name: 'Alice' }
+			});
+			expect(platform.published[1].event).toBe('update');
+			expect(platform.published[1].topic).toBe('__cursor:canvas');
+			expect(platform.published[1].data).toEqual({
+				key: platform.published[0].data.key,
 				data: { x: 10, y: 20 }
 			});
 		});
 
-		it('uses select to extract user info', () => {
+		it('subsequent updates on the same topic skip the join event', () => {
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			cursors.update(ws, 'canvas', { x: 0, y: 0 }, platform);
+			platform.reset();
+			cursors.update(ws, 'canvas', { x: 1, y: 1 }, platform);
+
+			expect(platform.published).toHaveLength(1);
+			expect(platform.published[0].event).toBe('update');
+		});
+
+		it('update payload does not carry user metadata', () => {
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			cursors.update(ws, 'canvas', { x: 5, y: 5 }, platform);
+
+			const update = pubs(platform, 'update')[0];
+			expect(update.data).not.toHaveProperty('user');
+			expect(update.data.data).toEqual({ x: 5, y: 5 });
+		});
+
+		it('first update on each topic for the same ws emits its own join', () => {
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			cursors.update(ws, 'canvas-a', { x: 1 }, platform);
+			cursors.update(ws, 'canvas-b', { x: 2 }, platform);
+
+			const joins = pubs(platform, 'join');
+			expect(joins).toHaveLength(2);
+			expect(joins.map((j) => j.topic).sort()).toEqual([
+				'__cursor:canvas-a',
+				'__cursor:canvas-b'
+			]);
+		});
+
+		it('uses select to extract user info on the join event', () => {
 			const c = createCursor({
 				throttle: 0,
+				topicThrottle: 0,
 				select: (ud) => ({ id: ud.id })
 			});
 			const ws = mockWs({ id: '1', name: 'Alice', secret: 'token' });
 			c.update(ws, 'room', { x: 0, y: 0 }, platform);
 
-			expect(platform.published[0].data.user).toEqual({ id: '1' });
-			expect(platform.published[0].data.user.secret).toBeUndefined();
+			const join = pubs(platform, 'join')[0];
+			expect(join.data.user).toEqual({ id: '1' });
+			expect(join.data.user.secret).toBeUndefined();
 		});
 
-		it('without select, broadcasts full userData', () => {
-			const c = createCursor({ throttle: 0 });
+		it('without select, the join event carries full userData', () => {
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', role: 'admin' });
 			c.update(ws, 'room', { x: 5, y: 5 }, platform);
 
-			expect(platform.published[0].data.user).toEqual({ id: '1', role: 'admin' });
+			const join = pubs(platform, 'join')[0];
+			expect(join.data.user).toEqual({ id: '1', role: 'admin' });
 		});
 	});
 
-	describe('update - throttle', () => {
+	describe('per-cursor throttle', () => {
 		it('second update within throttle window is not broadcast immediately', () => {
 			vi.useFakeTimers();
+			const c = createCursor({ throttle: 100, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
 
-			cursors.update(ws, 'canvas', { x: 0, y: 0 }, platform); // immediate
-			expect(platform.published).toHaveLength(1);
-			platform.reset();
+			c.update(ws, 'canvas', { x: 0, y: 0 }, p); // join + update
+			expect(pubs(p, 'update')).toHaveLength(1);
+			p.reset();
 
 			vi.advanceTimersByTime(50); // still within 100ms window
-			cursors.update(ws, 'canvas', { x: 10, y: 10 }, platform);
-			expect(platform.published).toHaveLength(0); // throttled
+			c.update(ws, 'canvas', { x: 10, y: 10 }, p);
+			expect(pubs(p, 'update')).toHaveLength(0); // throttled
 		});
 
 		it('trailing edge fires after throttle window', () => {
 			vi.useFakeTimers();
+			const c = createCursor({ throttle: 100, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
 
-			cursors.update(ws, 'canvas', { x: 0, y: 0 }, platform); // immediate
-			platform.reset();
+			c.update(ws, 'canvas', { x: 0, y: 0 }, p);
+			p.reset();
 
 			vi.advanceTimersByTime(50);
-			cursors.update(ws, 'canvas', { x: 10, y: 10 }, platform); // sets trailing timer
+			c.update(ws, 'canvas', { x: 10, y: 10 }, p); // sets trailing timer
 
 			vi.advanceTimersByTime(50); // timer fires
-			expect(platform.published).toHaveLength(1);
-			expect(platform.published[0].data.data).toEqual({ x: 10, y: 10 });
+			const updates = pubs(p, 'update');
+			expect(updates).toHaveLength(1);
+			expect(updates[0].data.data).toEqual({ x: 10, y: 10 });
 		});
 
 		it('trailing edge sends latest data, not intermediate', () => {
 			vi.useFakeTimers();
+			const c = createCursor({ throttle: 100, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
 
-			cursors.update(ws, 'canvas', { x: 0, y: 0 }, platform); // immediate
-			platform.reset();
+			c.update(ws, 'canvas', { x: 0, y: 0 }, p);
+			p.reset();
 
 			vi.advanceTimersByTime(30);
-			cursors.update(ws, 'canvas', { x: 5, y: 5 }, platform);
+			c.update(ws, 'canvas', { x: 5, y: 5 }, p);
 			vi.advanceTimersByTime(30);
-			cursors.update(ws, 'canvas', { x: 99, y: 99 }, platform);
+			c.update(ws, 'canvas', { x: 99, y: 99 }, p);
 
 			vi.advanceTimersByTime(40); // timer fires
-			expect(platform.published).toHaveLength(1);
-			expect(platform.published[0].data.data).toEqual({ x: 99, y: 99 });
+			const updates = pubs(p, 'update');
+			expect(updates).toHaveLength(1);
+			expect(updates[0].data.data).toEqual({ x: 99, y: 99 });
 		});
 
 		it('update after throttle window passes broadcasts immediately', () => {
 			vi.useFakeTimers();
+			const c = createCursor({ throttle: 100, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
 
-			cursors.update(ws, 'canvas', { x: 0, y: 0 }, platform);
-			platform.reset();
+			c.update(ws, 'canvas', { x: 0, y: 0 }, p);
+			p.reset();
 
 			vi.advanceTimersByTime(100);
-			cursors.update(ws, 'canvas', { x: 50, y: 50 }, platform);
-			expect(platform.published).toHaveLength(1); // immediate, new window
+			c.update(ws, 'canvas', { x: 50, y: 50 }, p);
+			expect(pubs(p, 'update')).toHaveLength(1);
 		});
 
 		it('throttle: 0 broadcasts every update', () => {
-			const c = createCursor({ throttle: 0 });
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
 
-			c.update(ws, 'canvas', { x: 0, y: 0 }, platform);
-			c.update(ws, 'canvas', { x: 1, y: 1 }, platform);
-			c.update(ws, 'canvas', { x: 2, y: 2 }, platform);
+			c.update(ws, 'canvas', { x: 0, y: 0 }, p);
+			c.update(ws, 'canvas', { x: 1, y: 1 }, p);
+			c.update(ws, 'canvas', { x: 2, y: 2 }, p);
 
-			expect(platform.published).toHaveLength(3);
+			expect(pubs(p, 'update')).toHaveLength(3);
+		});
+	});
+
+	describe('topicThrottle (per-topic coalescing)', () => {
+		it('single mover within window: emits one update via leading edge', () => {
+			vi.useFakeTimers();
+			const c = createCursor({ throttle: 0, topicThrottle: 16 });
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
+
+			c.update(ws, 'canvas', { x: 0 }, p); // leading edge
+			expect(pubs(p, 'update')).toHaveLength(1);
+			expect(pubs(p, 'bulk')).toHaveLength(0);
+		});
+
+		it('two movers in the same window emit a single bulk on trailing edge', () => {
+			vi.useFakeTimers();
+			const c = createCursor({ throttle: 0, topicThrottle: 16 });
+			const wsA = mockWs({ id: 'A' });
+			const wsB = mockWs({ id: 'B' });
+			const p = mockPlatform();
+
+			// First mover: leading-edge coalesce fires immediately.
+			c.update(wsA, 'canvas', { x: 1 }, p);
+			expect(pubs(p, 'update')).toHaveLength(1);
+			expect(pubs(p, 'bulk')).toHaveLength(0);
+			p.reset();
+
+			// Same window: second mover enters dirty set; no immediate flush.
+			vi.advanceTimersByTime(5);
+			c.update(wsB, 'canvas', { x: 2 }, p);
+			expect(positionEvents(p)).toHaveLength(0);
+
+			// Window expires: trailing flush emits bulk for both pending entries.
+			// (wsB pending; wsA already flushed on its leading edge.)
+			vi.advanceTimersByTime(11);
+			// Trailing flush has only wsB pending, so it goes out as an update.
+			expect(pubs(p, 'update')).toHaveLength(1);
+			expect(pubs(p, 'update')[0].data).toEqual({ key: expect.any(String), data: { x: 2 } });
+		});
+
+		it('multiple movers in a coalesce window: trailing flush emits bulk', () => {
+			vi.useFakeTimers();
+			const c = createCursor({ throttle: 0, topicThrottle: 16 });
+			const wsA = mockWs({ id: 'A' });
+			const wsB = mockWs({ id: 'B' });
+			const wsC = mockWs({ id: 'C' });
+			const p = mockPlatform();
+
+			// First mover leading-edges through.
+			c.update(wsA, 'canvas', { x: 1 }, p);
+			p.reset();
+
+			// B and C land in the same coalesce window.
+			vi.advanceTimersByTime(2);
+			c.update(wsB, 'canvas', { x: 2 }, p);
+			vi.advanceTimersByTime(2);
+			c.update(wsC, 'canvas', { x: 3 }, p);
+			expect(positionEvents(p)).toHaveLength(0); // joins already broadcast separately
+
+			vi.advanceTimersByTime(14);
+			const bulks = pubs(p, 'bulk');
+			expect(bulks).toHaveLength(1);
+			expect(bulks[0].data).toHaveLength(2);
+			const keys = bulks[0].data.map((e) => e.key);
+			expect(new Set(keys).size).toBe(2);
+		});
+
+		it('topicThrottle: 0 disables coalescing - every broadcast goes out', () => {
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
+			const wsA = mockWs({ id: 'A' });
+			const wsB = mockWs({ id: 'B' });
+			const p = mockPlatform();
+
+			c.update(wsA, 'canvas', { x: 1 }, p);
+			c.update(wsB, 'canvas', { x: 2 }, p);
+			c.update(wsA, 'canvas', { x: 11 }, p);
+
+			expect(pubs(p, 'update')).toHaveLength(3);
+			expect(pubs(p, 'bulk')).toHaveLength(0);
 		});
 	});
 
 	describe('update - multiple topics', () => {
 		it('same ws can have cursor state on different topics', () => {
-			const c = createCursor({ throttle: 0 });
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
 
-			c.update(ws, 'canvas-a', { x: 1 }, platform);
-			c.update(ws, 'canvas-b', { x: 2 }, platform);
+			c.update(ws, 'canvas-a', { x: 1 }, p);
+			c.update(ws, 'canvas-b', { x: 2 }, p);
 
-			expect(platform.published).toHaveLength(2);
-			expect(platform.published[0].topic).toBe('__cursor:canvas-a');
-			expect(platform.published[1].topic).toBe('__cursor:canvas-b');
+			const updates = pubs(p, 'update');
+			expect(updates).toHaveLength(2);
+			expect(updates.map((u) => u.topic).sort()).toEqual([
+				'__cursor:canvas-a',
+				'__cursor:canvas-b'
+			]);
 		});
 
 		it('throttle is per-user per-topic', () => {
 			vi.useFakeTimers();
+			const c = createCursor({ throttle: 100, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
 
-			cursors.update(ws, 'canvas-a', { x: 0 }, platform);
-			cursors.update(ws, 'canvas-b', { x: 0 }, platform);
-			expect(platform.published).toHaveLength(2); // both immediate (different topics)
+			c.update(ws, 'canvas-a', { x: 0 }, p);
+			c.update(ws, 'canvas-b', { x: 0 }, p);
+			expect(pubs(p, 'update')).toHaveLength(2); // both immediate (different topics)
 		});
 
 		it('different connections have independent throttle', () => {
 			vi.useFakeTimers();
+			const c = createCursor({ throttle: 100, topicThrottle: 0 });
 			const ws1 = mockWs({ id: '1', name: 'Alice' });
 			const ws2 = mockWs({ id: '2', name: 'Bob' });
+			const p = mockPlatform();
 
-			cursors.update(ws1, 'canvas', { x: 0 }, platform);
-			cursors.update(ws2, 'canvas', { x: 0 }, platform);
-			expect(platform.published).toHaveLength(2); // both immediate (different users)
+			c.update(ws1, 'canvas', { x: 0 }, p);
+			c.update(ws2, 'canvas', { x: 0 }, p);
+			expect(pubs(p, 'update')).toHaveLength(2); // both immediate (different users)
 		});
 	});
 
 	describe('remove', () => {
 		it('removes ws from all topics and broadcasts removal', () => {
-			const c = createCursor({ throttle: 0 });
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
 
-			c.update(ws, 'canvas-a', { x: 1 }, platform);
-			c.update(ws, 'canvas-b', { x: 2 }, platform);
-			platform.reset();
+			c.update(ws, 'canvas-a', { x: 1 }, p);
+			c.update(ws, 'canvas-b', { x: 2 }, p);
+			p.reset();
 
-			c.remove(ws, platform);
+			c.remove(ws, p);
 
-			const removes = platform.published.filter(e => e.event === 'remove');
+			const removes = pubs(p, 'remove');
 			expect(removes).toHaveLength(2);
-			expect(removes.map(r => r.topic).sort()).toEqual([
+			expect(removes.map((r) => r.topic).sort()).toEqual([
 				'__cursor:canvas-a',
 				'__cursor:canvas-b'
 			]);
+		});
+
+		it('remove payload contains only the connection key', () => {
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
+			const ws = mockWs({ id: '1' });
+			const p = mockPlatform();
+			c.update(ws, 'canvas', { x: 1 }, p);
+			p.reset();
+			c.remove(ws, p);
+			expect(pubs(p, 'remove')[0].data).toEqual({ key: expect.any(String) });
+			expect(pubs(p, 'remove')[0].data).not.toHaveProperty('user');
 		});
 
 		it('is safe to call for unknown ws', () => {
@@ -202,31 +369,51 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('cleans up empty topic maps', () => {
-			const c = createCursor({ throttle: 0 });
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
 
-			c.update(ws, 'canvas', { x: 1 }, platform);
-			c.remove(ws, platform);
+			c.update(ws, 'canvas', { x: 1 }, p);
+			c.remove(ws, p);
 
 			expect(c.list('canvas')).toEqual([]);
 		});
 
 		it('clears pending trailing-edge timers', () => {
 			vi.useFakeTimers();
+			const c = createCursor({ throttle: 100, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
 
-			cursors.update(ws, 'canvas', { x: 0, y: 0 }, platform); // immediate
-			platform.reset();
+			c.update(ws, 'canvas', { x: 0, y: 0 }, p);
+			p.reset();
 
 			vi.advanceTimersByTime(50);
-			cursors.update(ws, 'canvas', { x: 10, y: 10 }, platform); // sets timer
+			c.update(ws, 'canvas', { x: 10, y: 10 }, p); // sets timer
 
-			cursors.remove(ws, platform); // should clear timer
+			c.remove(ws, p); // should clear timer
 
 			vi.advanceTimersByTime(100);
-			// Only the remove event, no trailing update
-			const updates = platform.published.filter(e => e.event === 'update');
+			const updates = pubs(p, 'update');
 			expect(updates).toHaveLength(0);
+		});
+
+		it('clears pending topic-coalesce timers when last ws leaves', () => {
+			vi.useFakeTimers();
+			const c = createCursor({ throttle: 0, topicThrottle: 50 });
+			const ws = mockWs({ id: '1' });
+			const p = mockPlatform();
+
+			c.update(ws, 'canvas', { x: 1 }, p); // leading edge fires
+			vi.advanceTimersByTime(5);
+			c.update(ws, 'canvas', { x: 2 }, p); // schedules trailing topic-coalesce timer
+			p.reset();
+
+			c.remove(ws, p);
+			vi.advanceTimersByTime(60);
+
+			expect(pubs(p, 'update')).toHaveLength(0);
+			expect(pubs(p, 'bulk')).toHaveLength(0);
 		});
 	});
 
@@ -234,13 +421,15 @@ describe('cursor plugin - server', () => {
 		it('returns current cursor positions for a topic', () => {
 			const c = createCursor({
 				throttle: 0,
+				topicThrottle: 0,
 				select: (ud) => ({ id: ud.id, name: ud.name })
 			});
 			const ws1 = mockWs({ id: '1', name: 'Alice' });
 			const ws2 = mockWs({ id: '2', name: 'Bob' });
+			const p = mockPlatform();
 
-			c.update(ws1, 'canvas', { x: 10, y: 20 }, platform);
-			c.update(ws2, 'canvas', { x: 30, y: 40 }, platform);
+			c.update(ws1, 'canvas', { x: 10, y: 20 }, p);
+			c.update(ws2, 'canvas', { x: 30, y: 40 }, p);
 
 			const list = c.list('canvas');
 			expect(list).toHaveLength(2);
@@ -256,9 +445,10 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('returns copies - mutating list() results does not affect internal state', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id, name: ud.name }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id, name: ud.name }) });
 			const ws = mockWs({ id: '1', name: 'Alice' });
-			c.update(ws, 'canvas', { x: 5, y: 10 }, platform);
+			const p = mockPlatform();
+			c.update(ws, 'canvas', { x: 5, y: 10 }, p);
 
 			const list1 = c.list('canvas');
 			list1[0].user.name = 'Hacked';
@@ -272,9 +462,10 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('handles non-object user and data values without mangling them', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ud.name });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ud.name });
 			const ws = mockWs({ name: 'Alice' });
-			c.update(ws, 'canvas', 42, platform);
+			const p = mockPlatform();
+			c.update(ws, 'canvas', 42, p);
 
 			const list = c.list('canvas');
 			expect(list[0].user).toBe('Alice');
@@ -282,9 +473,10 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('handles null and undefined user and data values', () => {
-			const c = createCursor({ throttle: 0, select: () => null });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: () => null });
 			const ws = mockWs({});
-			c.update(ws, 'canvas', undefined, platform);
+			const p = mockPlatform();
+			c.update(ws, 'canvas', undefined, p);
 
 			const list = c.list('canvas');
 			expect(list[0].user).toBe(null);
@@ -292,9 +484,10 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('handles array data without converting to an object', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ud });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ud });
 			const ws = mockWs({ id: '1' });
-			c.update(ws, 'canvas', [1, 2, 3], platform);
+			const p = mockPlatform();
+			c.update(ws, 'canvas', [1, 2, 3], p);
 
 			const list = c.list('canvas');
 			expect(Array.isArray(list[0].data)).toBe(true);
@@ -304,10 +497,12 @@ describe('cursor plugin - server', () => {
 		it('deeply isolates nested objects from internal state', () => {
 			const c = createCursor({
 				throttle: 0,
+				topicThrottle: 0,
 				select: (ud) => ({ id: ud.id, meta: { color: ud.color } })
 			});
 			const ws = mockWs({ id: '1', color: 'red' });
-			c.update(ws, 'canvas', { pos: { x: 1, y: 2 } }, platform);
+			const p = mockPlatform();
+			c.update(ws, 'canvas', { pos: { x: 1, y: 2 } }, p);
 
 			const list1 = c.list('canvas');
 			list1[0].user.meta.color = 'blue';
@@ -319,9 +514,10 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('does not throw when data contains non-cloneable values', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id, fn: ud.fn }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id, fn: ud.fn }) });
 			const ws = mockWs({ id: '1', fn: () => {} });
-			c.update(ws, 'canvas', { handler: () => {} }, platform);
+			const p = mockPlatform();
+			c.update(ws, 'canvas', { handler: () => {} }, p);
 
 			expect(() => c.list('canvas')).not.toThrow();
 			const list = c.list('canvas');
@@ -331,13 +527,15 @@ describe('cursor plugin - server', () => {
 
 		it('reflects latest stored data even if not yet broadcast', () => {
 			vi.useFakeTimers();
+			const c = createCursor({ throttle: 100, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
 
-			cursors.update(ws, 'canvas', { x: 0 }, platform);
+			c.update(ws, 'canvas', { x: 0 }, p);
 			vi.advanceTimersByTime(50);
-			cursors.update(ws, 'canvas', { x: 99 }, platform); // throttled, not broadcast yet
+			c.update(ws, 'canvas', { x: 99 }, p); // throttled, not broadcast yet
 
-			const list = cursors.list('canvas');
+			const list = c.list('canvas');
 			expect(list[0].data).toEqual({ x: 99 });
 		});
 	});
@@ -347,9 +545,10 @@ describe('cursor plugin - server', () => {
 			expect(typeof cursors.snapshot).toBe('function');
 		});
 
-		it('sends a snapshot event with current positions to the given ws', () => {
+		it('sends catalog + bulk events with current positions to the given ws', () => {
 			const c = createCursor({
 				throttle: 0,
+				topicThrottle: 0,
 				select: (ud) => ({ id: ud.id, name: ud.name })
 			});
 			const ws1 = mockWs({ id: '1', name: 'Alice' });
@@ -363,46 +562,55 @@ describe('cursor plugin - server', () => {
 			const newWs = mockWs({ id: '3', name: 'Carol' });
 			c.snapshot(newWs, 'canvas', p);
 
-			expect(p.sent).toHaveLength(1);
+			expect(p.sent).toHaveLength(2);
 			expect(p.sent[0].ws).toBe(newWs);
 			expect(p.sent[0].topic).toBe('__cursor:canvas');
-			expect(p.sent[0].event).toBe('snapshot');
+			expect(p.sent[0].event).toBe('catalog');
 			expect(Array.isArray(p.sent[0].data)).toBe(true);
 			expect(p.sent[0].data).toHaveLength(2);
+			for (const entry of p.sent[0].data) {
+				expect(entry).toEqual({ key: expect.any(String), user: expect.any(Object) });
+				expect(entry).not.toHaveProperty('data');
+			}
 
-			const keys = p.sent[0].data.map((e) => e.key);
-			expect(new Set(keys).size).toBe(2);
+			expect(p.sent[1].event).toBe('bulk');
+			expect(Array.isArray(p.sent[1].data)).toBe(true);
+			expect(p.sent[1].data).toHaveLength(2);
+			for (const entry of p.sent[1].data) {
+				expect(entry).toEqual({ key: expect.any(String), data: expect.any(Object) });
+				expect(entry).not.toHaveProperty('user');
+			}
 		});
 
-		it('sends correct user and data per entry', () => {
-			const c = createCursor({
-				throttle: 0,
-				select: (ud) => ({ id: ud.id, name: ud.name })
-			});
+		it('catalog and bulk reference the same key set', () => {
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id, name: ud.name }) });
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			const p = mockPlatform();
-
 			c.update(ws, 'room', { x: 5, y: 15 }, p);
 			p.reset();
 
 			const newWs = mockWs({ id: '2', name: 'Bob' });
 			c.snapshot(newWs, 'room', p);
 
-			const entry = p.sent[0].data[0];
-			expect(entry.user).toEqual({ id: '1', name: 'Alice' });
-			expect(entry.data).toEqual({ x: 5, y: 15 });
+			const catalogKeys = p.sent[0].data.map((e) => e.key).sort();
+			const bulkKeys = p.sent[1].data.map((e) => e.key).sort();
+			expect(catalogKeys).toEqual(bulkKeys);
+			expect(p.sent[0].data[0].user).toEqual({ id: '1', name: 'Alice' });
+			expect(p.sent[1].data[0].data).toEqual({ x: 5, y: 15 });
 		});
 
-		it('sends empty snapshot for an unknown topic', () => {
+		it('sends empty catalog + bulk for an unknown topic', () => {
 			const p = mockPlatform();
 			cursors.snapshot(mockWs({ id: '1' }), 'nonexistent', p);
-			expect(p.sent).toHaveLength(1);
-			expect(p.sent[0].event).toBe('snapshot');
+			expect(p.sent).toHaveLength(2);
+			expect(p.sent[0].event).toBe('catalog');
 			expect(p.sent[0].data).toEqual([]);
+			expect(p.sent[1].event).toBe('bulk');
+			expect(p.sent[1].data).toEqual([]);
 		});
 
-		it('sends empty snapshot when the topic has no active cursors', () => {
-			const c = createCursor({ throttle: 0 });
+		it('sends empty catalog + bulk when the topic has no active cursors', () => {
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			const p = mockPlatform();
 
@@ -411,30 +619,30 @@ describe('cursor plugin - server', () => {
 			p.reset();
 
 			c.snapshot(mockWs({ id: '2' }), 'canvas', p);
-			expect(p.sent).toHaveLength(1);
-			expect(p.sent[0].event).toBe('snapshot');
+			expect(p.sent).toHaveLength(2);
 			expect(p.sent[0].data).toEqual([]);
+			expect(p.sent[1].data).toEqual([]);
 		});
 
 		it('reflects the latest stored position even if not yet broadcast', () => {
 			vi.useFakeTimers();
-			const c = createCursor({ throttle: 100 });
+			const c = createCursor({ throttle: 100, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			const p = mockPlatform();
 
-			c.update(ws, 'canvas', { x: 0 }, p); // immediate broadcast
+			c.update(ws, 'canvas', { x: 0 }, p);
 			vi.advanceTimersByTime(50);
-			c.update(ws, 'canvas', { x: 99 }, p); // throttled, stored but not broadcast yet
+			c.update(ws, 'canvas', { x: 99 }, p); // throttled
 			p.reset();
 
 			const newWs = mockWs({ id: '2' });
 			c.snapshot(newWs, 'canvas', p);
 
-			expect(p.sent[0].data[0].data).toEqual({ x: 99 });
+			expect(p.sent[1].data[0].data).toEqual({ x: 99 });
 		});
 
 		it('sends snapshots independently per topic', () => {
-			const c = createCursor({ throttle: 0 });
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			const p = mockPlatform();
 
@@ -445,36 +653,57 @@ describe('cursor plugin - server', () => {
 			const viewer = mockWs({ id: '2' });
 			c.snapshot(viewer, 'canvas-a', p);
 
-			expect(p.sent).toHaveLength(1);
+			expect(p.sent).toHaveLength(2);
 			expect(p.sent[0].topic).toBe('__cursor:canvas-a');
+			expect(p.sent[1].topic).toBe('__cursor:canvas-a');
 		});
 	});
 
 	describe('clear', () => {
 		it('resets all state', () => {
-			const c = createCursor({ throttle: 0 });
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
 
-			c.update(ws, 'canvas', { x: 1 }, platform);
+			c.update(ws, 'canvas', { x: 1 }, p);
 			c.clear();
 
 			expect(c.list('canvas')).toEqual([]);
 		});
 
-		it('clears all pending timers', () => {
+		it('clears all pending per-cursor timers', () => {
 			vi.useFakeTimers();
+			const c = createCursor({ throttle: 100, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
+			const p = mockPlatform();
 
-			cursors.update(ws, 'canvas', { x: 0 }, platform);
-			platform.reset();
+			c.update(ws, 'canvas', { x: 0 }, p);
+			p.reset();
 
 			vi.advanceTimersByTime(50);
-			cursors.update(ws, 'canvas', { x: 10 }, platform); // sets timer
+			c.update(ws, 'canvas', { x: 10 }, p); // sets timer
 
-			cursors.clear();
+			c.clear();
 
 			vi.advanceTimersByTime(100);
-			expect(platform.published).toHaveLength(0); // timer was cleared
+			expect(positionEvents(p)).toHaveLength(0);
+		});
+
+		it('clears all pending topic-coalesce timers', () => {
+			vi.useFakeTimers();
+			const c = createCursor({ throttle: 0, topicThrottle: 50 });
+			const ws = mockWs({ id: '1' });
+			const p = mockPlatform();
+
+			c.update(ws, 'canvas', { x: 0 }, p); // leading edge
+			vi.advanceTimersByTime(5);
+			c.update(ws, 'canvas', { x: 1 }, p); // schedules trailing coalesce
+			p.reset();
+
+			c.clear();
+			vi.advanceTimersByTime(60);
+
+			expect(positionEvents(p)).toHaveLength(0);
 		});
 	});
 
@@ -497,19 +726,19 @@ describe('cursor plugin - server', () => {
 		}
 
 		it('hooks.message handles cursor updates for subscribed clients', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const ws = mockWsSubs({ id: '1' }, ['__cursor:canvas']);
 			const p = mockPlatform();
 
 			const handled = c.hooks.message(ws, { data: encode({ type: 'cursor', topic: 'canvas', data: { x: 5, y: 10 } }), platform: p });
 
 			expect(handled).toBe(true);
-			expect(p.published).toHaveLength(1);
-			expect(p.published[0].event).toBe('update');
+			expect(pubs(p, 'join')).toHaveLength(1);
+			expect(pubs(p, 'update')).toHaveLength(1);
 		});
 
 		it('hooks.message handles cursor-snapshot for subscribed clients', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const ws1 = mockWs({ id: '1' });
 			const p = mockPlatform();
 
@@ -520,12 +749,13 @@ describe('cursor plugin - server', () => {
 			const handled = c.hooks.message(ws2, { data: encode({ type: 'cursor-snapshot', topic: 'canvas' }), platform: p });
 
 			expect(handled).toBe(true);
-			expect(p.sent).toHaveLength(1);
-			expect(p.sent[0].event).toBe('snapshot');
+			expect(p.sent).toHaveLength(2);
+			expect(p.sent[0].event).toBe('catalog');
+			expect(p.sent[1].event).toBe('bulk');
 		});
 
 		it('hooks.message rejects cursor updates from unsubscribed clients', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const ws = mockWsSubs({ id: '1' }, []);
 			const p = mockPlatform();
 
@@ -536,7 +766,7 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('hooks.message rejects cursor-snapshot from unsubscribed clients', () => {
-			const c = createCursor({ throttle: 0 });
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWsSubs({}, ['__cursor:public']);
 			const p = mockPlatform();
 
@@ -547,7 +777,7 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('hooks.message works with manual ws.subscribe() (isSubscribed-based auth)', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const subs = new Set();
 			const ws = {
 				getUserData: () => ({ id: '1' }),
@@ -556,18 +786,19 @@ describe('cursor plugin - server', () => {
 			};
 			const p = mockPlatform();
 
-			// Not subscribed yet - rejected
+			// Not subscribed yet - rejected.
 			const r1 = c.hooks.message(ws, { data: encode({ type: 'cursor', topic: 'canvas', data: { x: 1 } }), platform: p });
 			expect(r1).toBe(true);
 			expect(p.published).toHaveLength(0);
 
-			// Manually subscribe
+			// Manually subscribe.
 			ws.subscribe('__cursor:canvas');
 
-			// Now accepted
+			// Now accepted: join + update fire.
 			const r2 = c.hooks.message(ws, { data: encode({ type: 'cursor', topic: 'canvas', data: { x: 2 } }), platform: p });
 			expect(r2).toBe(true);
-			expect(p.published).toHaveLength(1);
+			expect(pubs(p, 'join')).toHaveLength(1);
+			expect(pubs(p, 'update')).toHaveLength(1);
 		});
 
 		it('hooks.message returns undefined for non-JSON data', () => {
@@ -577,13 +808,13 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('hooks.message surfaces errors from select() instead of swallowing them', () => {
-			const c = createCursor({ throttle: 0, select: () => { throw new Error('select failed'); } });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: () => { throw new Error('select failed'); } });
 			const ws = mockWsSubs({}, ['__cursor:canvas']);
 			expect(() => c.hooks.message(ws, { data: encode({ type: 'cursor', topic: 'canvas', data: { x: 1 } }), platform })).toThrow('select failed');
 		});
 
 		it('hooks.message surfaces errors from platform.publish() instead of swallowing them', () => {
-			const c = createCursor({ throttle: 0 });
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const badPlatform = {
 				...mockPlatform(),
 				publish() { throw new Error('publish failed'); }
@@ -598,7 +829,7 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('hooks.close calls remove', () => {
-			const c = createCursor({ throttle: 0 });
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({ id: '1' });
 			const p = mockPlatform();
 
@@ -614,18 +845,18 @@ describe('cursor plugin - server', () => {
 	describe('throttle leading-edge clears pending timer', () => {
 		it('clears trailing timer when leading edge fires after window passes', () => {
 			vi.useFakeTimers();
-			const c = createCursor({ throttle: 200 });
+			const c = createCursor({ throttle: 200, topicThrottle: 0 });
 			const ws = mockWs({ id: '1' });
 			const p = mockPlatform();
 
 			// T=0: leading edge fires immediately
 			c.update(ws, 'canvas', { x: 0, y: 0 }, p);
-			expect(p.published).toHaveLength(1);
+			expect(pubs(p, 'update')).toHaveLength(1);
 
 			// T=10: within window, schedules trailing timer at T=10+(200-10)=T=200
 			vi.advanceTimersByTime(10);
 			c.update(ws, 'canvas', { x: 1, y: 1 }, p);
-			expect(p.published).toHaveLength(1);
+			expect(pubs(p, 'update')).toHaveLength(1);
 
 			// Jump Date.now() to T=210 WITHOUT advancing timers (timer stays pending)
 			const base = Date.now();
@@ -633,13 +864,13 @@ describe('cursor plugin - server', () => {
 
 			// Update: 210-0 >= 200 -> leading edge, entry.timer exists -> clearTimeout
 			c.update(ws, 'canvas', { x: 2, y: 2 }, p);
-			expect(p.published).toHaveLength(2);
+			expect(pubs(p, 'update')).toHaveLength(2);
 
 			Date.now.mockRestore();
 
 			// Advance timers far past the scheduled time - the cleared timer must not fire
 			vi.advanceTimersByTime(500);
-			expect(p.published).toHaveLength(2);
+			expect(pubs(p, 'update')).toHaveLength(2);
 
 			vi.useRealTimers();
 		});
@@ -652,7 +883,7 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('evicts oldest connection state when at maxConnections', () => {
-			const c = createCursor({ throttle: 0, maxConnections: 2, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, maxConnections: 2, select: (ud) => ({ id: ud.id }) });
 			const p = mockPlatform();
 			const wsA = mockWs({ id: 'A' });
 			const wsB = mockWs({ id: 'B' });
@@ -668,7 +899,7 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('evicts oldest topic when at maxTopics', () => {
-			const c = createCursor({ throttle: 0, maxTopics: 2, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, maxTopics: 2, select: (ud) => ({ id: ud.id }) });
 			const p = mockPlatform();
 			const ws = mockWs({ id: 'A' });
 			c.update(ws, 'a', { x: 1 }, p);
@@ -690,7 +921,7 @@ describe('cursor plugin - server', () => {
 
 	describe('topic + payload caps', () => {
 		it('silently drops updates whose topic exceeds the default 256-char cap', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const p = mockPlatform();
 			const ws = mockWs({ id: 'A' });
 			c.update(ws, 'a'.repeat(257), { x: 1 }, p);
@@ -699,15 +930,15 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('accepts topic exactly at the cap', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const p = mockPlatform();
 			const ws = mockWs({ id: 'A' });
 			c.update(ws, 'a'.repeat(256), { x: 1 }, p);
-			expect(p.published).toHaveLength(1);
+			expect(pubs(p, 'update')).toHaveLength(1);
 		});
 
 		it('silently drops updates whose JSON-encoded data exceeds the default 8 KB cap', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const p = mockPlatform();
 			const ws = mockWs({ id: 'A' });
 			// 9 KB payload exceeds 8 KB cap.
@@ -717,18 +948,18 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('accepts data exactly at the cap', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const p = mockPlatform();
 			const ws = mockWs({ id: 'A' });
 			// Build payload exactly at the cap. JSON wrapping adds ~14 bytes
 			// for { "payload": "..." } so the inner string is 8192 - ~14.
 			const fits = { payload: 'x'.repeat(8192 - 16) };
 			c.update(ws, 'topic', fits, p);
-			expect(p.published).toHaveLength(1);
+			expect(pubs(p, 'update')).toHaveLength(1);
 		});
 
 		it('honors custom maxTopicLength and maxDataBytes', () => {
-			const c = createCursor({ throttle: 0, maxTopicLength: 16, maxDataBytes: 64, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, maxTopicLength: 16, maxDataBytes: 64, select: (ud) => ({ id: ud.id }) });
 			const p = mockPlatform();
 			const ws = mockWs({ id: 'A' });
 			c.update(ws, 'a'.repeat(17), { x: 1 }, p);
@@ -736,11 +967,11 @@ describe('cursor plugin - server', () => {
 			c.update(ws, 'short', { payload: 'x'.repeat(80) }, p);
 			expect(p.published).toHaveLength(0);
 			c.update(ws, 'short', { x: 1 }, p);
-			expect(p.published).toHaveLength(1);
+			expect(pubs(p, 'update')).toHaveLength(1);
 		});
 
 		it('drops updates whose data is unserializable (BigInt / circular)', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const p = mockPlatform();
 			const ws = mockWs({ id: 'A' });
 			c.update(ws, 'topic', { big: BigInt(42) }, p);
@@ -748,15 +979,15 @@ describe('cursor plugin - server', () => {
 		});
 
 		it('accepts undefined/null data (no JSON.stringify needed)', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const p = mockPlatform();
 			const ws = mockWs({ id: 'A' });
 			c.update(ws, 'topic', null, p);
-			expect(p.published).toHaveLength(1);
+			expect(pubs(p, 'update')).toHaveLength(1);
 		});
 
 		it('drops empty or non-string topic', () => {
-			const c = createCursor({ throttle: 0, select: (ud) => ({ id: ud.id }) });
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const p = mockPlatform();
 			const ws = mockWs({ id: 'A' });
 			c.update(ws, '', { x: 1 }, p);

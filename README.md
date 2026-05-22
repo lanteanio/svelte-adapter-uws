@@ -2755,14 +2755,31 @@ Lightweight fire-and-forget broadcasting for transient state - mouse cursors, te
 import { createCursor } from 'svelte-adapter-uws/plugins/cursor';
 
 export const cursors = createCursor({
-  throttle: 50, // at most one broadcast per 50ms per user per topic
+  throttle: 16,       // per-cursor: at most one broadcast per 16ms (~60 Hz)
+  topicThrottle: 16,  // per-topic: coalesce all movers into one frame per 16ms
   select: (userData) => ({ id: userData.id, name: userData.name, color: userData.color })
   // maxConnections: 1_000_000 (default) - hard cap on tracked connections
   // maxTopics:      1_000_000 (default) - hard cap on active topic registry
 });
 ```
 
-The two cap options bound internal Maps that grow with client behaviour. Eviction at cap drops the oldest insertion-order entry; for `maxTopics` the dropped topic's pending throttle timers are cleared first so no callback fires on a deleted entry. In practice eviction is rare because user code is expected to call `remove(ws)` on disconnect (the `cursors.hooks.close` helper does this automatically).
+Both `throttle` and `topicThrottle` default to 16 ms (~60 Hz). For a 120 Hz demo, halve them to 8. To disable per-topic coalescing entirely (every broadcast goes straight out), pass `topicThrottle: 0`. The two cap options bound internal Maps that grow with client behaviour. Eviction at cap drops the oldest insertion-order entry; for `maxTopics` the dropped topic's pending timers (per-cursor and topic-coalesce) are cleared first.
+
+`topicThrottle` is the bandwidth lever for crowded rooms: rather than fan out one frame per cursor per tick, the server emits one `bulk` array per topic per window carrying every cursor that moved in that window. Bandwidth per peer scales with active-mover count, not with mover-count times per-mover rate.
+
+#### Wire shape
+
+Positions live on the `update` / `bulk` channel; user metadata lives on the `catalog` / `join` channel. The split keeps per-frame wire bytes minimal: a position frame is ~16 bytes per cursor (key + coords), and the user object (name, color, avatar, etc.) flows only when a user first appears.
+
+| Event | Payload | Sent by |
+|---|---|---|
+| `catalog` | `[{key, user}, ...]` | `snapshot()` - initial roster to a single new subscriber |
+| `join` | `{key, user}` | first `update()` on a (ws, topic) pair |
+| `update` | `{key, data}` | single-mover position frame |
+| `bulk` | `[{key, data}, ...]` | multi-mover coalesced position frame |
+| `remove` | `{key}` | `remove()` or `hooks.close` |
+
+The cluster-aware [extensions](https://github.com/lanteanio/svelte-adapter-uws-extensions) Redis-backed cursor speaks the same wire format, so the same client bundle works against either backend.
 
 #### Server usage
 
@@ -2802,26 +2819,34 @@ export function close(ws, { platform }) {
 
 ```svelte
 <script>
-  import { cursor } from 'svelte-adapter-uws/plugins/cursor/client';
+  import { cursor, move } from 'svelte-adapter-uws/plugins/cursor/client';
 
   const positions = cursor('canvas');
+
+  function onmousemove(e) {
+    move('canvas', { x: e.clientX, y: e.clientY });
+  }
 </script>
 
-{#each [...$positions] as [key, { user, data }] (key)}
-  <div
-    class="cursor-dot"
-    style="left: {data.x}px; top: {data.y}px; background: {user.color}"
-  >
-    {user.name}
-  </div>
-{/each}
+<div on:mousemove={onmousemove}>
+  {#each [...$positions] as [key, { user, data }] (key)}
+    <div
+      class="cursor-dot"
+      style="left: {data.x}px; top: {data.y}px; background: {user.color}"
+    >
+      {user.name}
+    </div>
+  {/each}
+</div>
 ```
 
-The client store is a `Readable<Map<string, { user, data }>>`. The Map updates when cursors move or disconnect. The store handles `update`, `remove`, `snapshot`, and `bulk` events. The `snapshot` event is authoritative - it replaces all client-side state (used for initial sync and reconnect). The `bulk` event merges entries additively (used by the [extensions repo](https://github.com/lanteanio/svelte-adapter-uws-extensions) topicThrottle feature when flushing coalesced updates).
+`move(topic, data)` is the recommended path for sending cursor updates. Calls are coalesced via `requestAnimationFrame` so even a 1000 Hz high-DPI mouse collapses to at most one send per repaint, matching the server-side `topicThrottle` default. Multi-topic callers do not clobber each other. No-op in non-browser environments.
 
-**Initial sync and reconnect.** The `cursor(topic)` store sends a `{ type: 'cursor-snapshot', topic }` message every time the WebSocket connection opens - both on first connect and on every reconnect. The server calls `cursors.snapshot(ws, topic, platform)` in its `message` handler, which sends a `snapshot` event back with the current cursor state (or an empty array if nobody is active). The client replaces its entire cursor map with the snapshot contents, clearing any stale entries from before the disconnect. Wire `cursors.snapshot()` in your message handler as shown in the server example above.
+The client store is a `Readable<Map<string, { user, data }>>`. The Map updates when cursors move, join, or disconnect. Internally the store merges the `catalog`/`join` stream (user metadata) with the `update`/`bulk` stream (positions); positions whose user has not yet been seen are withheld until the matching join arrives - they appear on the next render once the catalog catches up.
 
-The `cursor()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, cursor entries that haven't received an update within that window are automatically removed. This makes clients self-healing when the server fails to broadcast `remove` events under load:
+**Initial sync and reconnect.** The `cursor(topic)` store sends a `{ type: 'cursor-snapshot', topic }` message every time the WebSocket connection opens - both on first connect and on every reconnect. The server calls `cursors.snapshot(ws, topic, platform)` in its `message` handler, which sends a `catalog` event (roster) followed by a `bulk` event (positions) back to the requesting client. Late joiners see existing cursors immediately. Wire `cursors.snapshot()` in your message handler as shown in the server example above.
+
+The `cursor()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, cursor entries that haven't received a position update within that window are automatically removed. This makes clients self-healing when the server fails to broadcast `remove` events under load:
 
 ```js
 const positions = cursor('canvas', { maxAge: 30_000 });
@@ -2831,28 +2856,34 @@ const positions = cursor('canvas', { maxAge: 30_000 });
 
 | Method | Description |
 |---|---|
-| `cursors.update(ws, topic, data, platform)` | Broadcast position (throttled) |
-| `cursors.remove(ws, platform)` | Remove from all topics, broadcast removal |
-| `cursors.snapshot(ws, topic, platform)` | Send current positions to one connection (initial sync) |
+| `cursors.update(ws, topic, data, platform)` | Broadcast position (per-cursor + per-topic throttled). Emits `join` once per (ws, topic). |
+| `cursors.remove(ws, platform)` | Remove from all topics, broadcast `remove` per topic |
+| `cursors.snapshot(ws, topic, platform)` | Send current positions to one connection as `catalog` + `bulk` (initial sync) |
 | `cursors.list(topic)` | Current positions (for SSR) |
 | `cursors.clear()` | Reset all state and timers |
 
 #### How throttle works
 
-The cursor plugin uses leading edge + trailing edge throttle internally:
+The cursor plugin uses two layers of leading-edge + trailing-edge throttle:
+
+1. **`throttle`** caps how often a single user broadcasts on a single topic.
+2. **`topicThrottle`** caps how often a topic emits a frame at all. Multiple movers in the same window coalesce into one `bulk` array; a single mover in the window emits one `update`.
 
 ```
-t=0    update({x:0})  --> broadcasts immediately (leading edge)
-t=20   update({x:5})  --> stored (within 50ms window)
-t=40   update({x:9})  --> stored (overwrites x:5)
-t=50   [timer fires]  --> broadcasts {x:9} (trailing edge)
+throttle: 16, topicThrottle: 16
+
+t=0    A.update({x:0})         --> 'join' A, 'update' {x:0}        (leading edge of both)
+t=4    B.update({x:0})         --> 'join' B (catalog channel)
+                                   position queued in topic dirty set
+t=8    A.update({x:5})         --> queued (entry-level throttle says wait until t=16)
+t=16   [trailing timer fires]  --> 'bulk' [{key:A, data:{x:5}}, {key:B, data:{x:0}}]
 ```
 
-The trailing edge ensures you always see where the cursor stopped, even if the user stops moving mid-window.
+The trailing edges ensure you always see where each cursor stopped, even when the user stops moving mid-window.
 
 #### Limitations
 
-- **In-memory.** Cursor positions live in the process. In cluster mode, each worker tracks its own connections.
+- **In-memory.** Cursor positions live in the process. In cluster mode, each worker tracks its own connections. For cross-instance cursor sharing use the Redis-backed variant from the [extensions](https://github.com/lanteanio/svelte-adapter-uws-extensions) package.
 - **No persistence.** Positions are lost on restart. This is intentional - cursors are ephemeral.
 
 ### Queue (ordered delivery)

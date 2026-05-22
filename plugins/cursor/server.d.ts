@@ -6,14 +6,33 @@ export interface CursorOptions<UserData = unknown, UserInfo = unknown> {
 	 * Minimum milliseconds between broadcasts per user per topic.
 	 * A trailing-edge timer ensures the final position is always sent.
 	 *
-	 * @default 50
+	 * Lower for high-refresh demos (8 = 120 Hz), higher to conserve
+	 * bandwidth (33 = 30 Hz). Set to 0 to disable.
+	 *
+	 * @default 16 (~60 Hz)
 	 */
 	throttle?: number;
 
 	/**
+	 * Per-topic aggregate coalesce window in ms. Each topic emits at
+	 * most one frame per window, carrying the latest position for every
+	 * cursor that moved (a single `update` when one mover is dirty, a
+	 * `bulk` array otherwise). Bandwidth per peer scales with active-
+	 * mover count, not with mover-count times per-mover rate.
+	 *
+	 * Raise (e.g. 33 = 30 Hz) for high-density rooms where wire bytes
+	 * dominate. Lower (e.g. 8 = 120 Hz) for high-refresh demos. 0
+	 * disables coalescing; per-cursor `throttle` then governs broadcast
+	 * rate.
+	 *
+	 * @default 16 (~60 Hz)
+	 */
+	topicThrottle?: number;
+
+	/**
 	 * Extract user-identifying data from a connection's userData.
-	 * This is broadcast alongside the cursor data so other clients
-	 * know who the cursor belongs to.
+	 * This is announced on the `catalog` / `join` channel when a user
+	 * first appears on a topic, not on every position frame.
 	 *
 	 * Defaults to the full userData object.
 	 *
@@ -41,8 +60,8 @@ export interface CursorOptions<UserData = unknown, UserInfo = unknown> {
 	/**
 	 * Hard cap on the active topic registry. When the cap is reached,
 	 * the oldest insertion-order topic is dropped on the next `update()`
-	 * for a new topic; any pending throttle timers on the dropped topic
-	 * are cleared first.
+	 * for a new topic; any pending throttle and coalesce timers on the
+	 * dropped topic are cleared first.
 	 *
 	 * @default 1_000_000
 	 */
@@ -83,7 +102,12 @@ export interface CursorEntry<UserInfo = unknown, Data = unknown> {
 
 export interface CursorTracker<UserInfo = unknown> {
 	/**
-	 * Broadcast a cursor position update. Throttled per user per topic.
+	 * Broadcast a cursor position update. Throttled per user per topic
+	 * and optionally coalesced per topic via `topicThrottle`.
+	 *
+	 * The first call for a (ws, topic) pair also emits a `join` event
+	 * carrying the user's catalog entry; subsequent calls emit only
+	 * positions (`update` or `bulk`).
 	 *
 	 * Call this from your `message` hook when you receive cursor data.
 	 *
@@ -112,14 +136,16 @@ export interface CursorTracker<UserInfo = unknown> {
 	list(topic: string): CursorEntry<UserInfo>[];
 
 	/**
-	 * Send current cursor positions for a topic to a single connection.
+	 * Send current cursor positions for a topic to a single connection
+	 * as a `catalog` + `bulk` pair (roster, then positions).
 	 *
 	 * Call this from your `message` handler when the client sends a
 	 * `{ type: 'cursor-snapshot', topic }` request. The `cursor()` client
 	 * store sends this automatically on subscribe, so late joiners see
 	 * existing cursors immediately without waiting for the next move event.
 	 *
-	 * Does nothing if the topic has no active cursors.
+	 * Sends an empty `catalog` and `bulk` when the topic has no active
+	 * cursors.
 	 *
 	 * @example
 	 * ```js
@@ -169,7 +195,8 @@ export interface CursorTracker<UserInfo = unknown> {
  * import { createCursor } from 'svelte-adapter-uws/plugins/cursor';
  *
  * export const cursors = createCursor({
- *   throttle: 50,
+ *   throttle: 16,        // 60 Hz per-cursor rate (default)
+ *   topicThrottle: 16,   // 60 Hz per-topic coalescing (default)
  *   select: (userData) => ({ id: userData.id, name: userData.name })
  * });
  * ```

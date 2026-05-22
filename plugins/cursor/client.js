@@ -5,10 +5,23 @@
  * a live Map of cursor positions. The server handles throttling and
  * cleanup; this module keeps the client-side state in sync.
  *
- * When `maxAge` is set, cursor entries that haven't received an update
- * within that window are automatically removed. This makes clients
- * self-healing when the server fails to broadcast a `remove` event
- * (e.g. mass disconnects overwhelming Redis cleanup).
+ * Wire shape (catalog / positions split):
+ *   - `catalog`  [{key, user}]  - roster sent on snapshot to a fresh
+ *                                  subscriber. Replaces local user map.
+ *   - `join`     {key, user}    - new user announced on the topic.
+ *   - `update`   {key, data}    - single-mover position frame.
+ *   - `bulk`     [{key, data}]  - multi-mover coalesced position frame.
+ *   - `remove`   {key}          - user gone (catalog + positions cleared).
+ *
+ * User metadata lives on the catalog channel (catalog + join), positions
+ * live on the update/bulk channel. The merge happens here: the public
+ * Readable yields `Map<key, {user, data}>`, skipping any position whose
+ * user has not yet been seen via catalog/join.
+ *
+ * When `maxAge` is set, cursor entries that haven't received a position
+ * update within that window are automatically removed. This makes
+ * clients self-healing when the server fails to broadcast a `remove`
+ * event (e.g. mass disconnects overwhelming Redis cleanup).
  *
  * @module svelte-adapter-uws/plugins/cursor/client
  */
@@ -26,7 +39,7 @@ const cursorStores = new Map();
  *
  * Returns a readable Svelte store containing a Map of connection keys
  * to `{ user, data }` objects. The Map updates automatically when
- * cursors move or disconnect.
+ * cursors move, join, or disconnect.
  *
  * @template UserInfo, Data
  * @param {string} topic - Topic to track cursors on
@@ -36,22 +49,28 @@ const cursorStores = new Map();
  * @example
  * ```svelte
  * <script>
- *   import { cursor } from 'svelte-adapter-uws/plugins/cursor/client';
+ *   import { cursor, move } from 'svelte-adapter-uws/plugins/cursor/client';
  *
  *   const cursors = cursor('canvas');
+ *
+ *   function onmousemove(e) {
+ *     move('canvas', { x: e.clientX, y: e.clientY });
+ *   }
  * </script>
  *
- * {#each [...$cursors] as [key, { user, data }] (key)}
- *   <div style="left: {data.x}px; top: {data.y}px" class="cursor">
- *     {user.name}
- *   </div>
- * {/each}
+ * <div on:mousemove={onmousemove}>
+ *   {#each [...$cursors] as [key, { user, data }] (key)}
+ *     <div style="left: {data.x}px; top: {data.y}px" class="cursor">
+ *       {user.name}
+ *     </div>
+ *   {/each}
+ * </div>
  * ```
  *
  * @example
  * ```svelte
  * <script>
- *   // Self-healing: cursors expire after 30s without movement
+ *   // Self-healing: cursors expire after 30s without a position update.
  *   const cursors = cursor('canvas', { maxAge: 30_000 });
  * </script>
  * ```
@@ -65,8 +84,10 @@ export function cursor(topic, options) {
 
 	const cursorTopic = TOPIC_PREFIX + topic;
 
-	/** @type {Map<string, { user: any, data: any }>} */
-	let cursorMap = new Map();
+	/** @type {Map<string, any>} */
+	let positionMap = new Map();
+	/** @type {Map<string, any>} */
+	let userMap = new Map();
 	/** @type {Map<string, number>} */
 	const timestamps = new Map();
 	const output = writable(/** @type {Map<string, any>} */ (new Map()));
@@ -78,6 +99,16 @@ export function cursor(topic, options) {
 	let refCount = 0;
 	let cancelled = false;
 
+	function emitOutput() {
+		const merged = new Map();
+		for (const [key, data] of positionMap) {
+			const user = userMap.get(key);
+			if (user === undefined) continue;
+			merged.set(key, { user, data });
+		}
+		output.set(merged);
+	}
+
 	function sweep() {
 		if (!maxAge || maxAge <= 0) return;
 		const cutoff = Date.now() - maxAge;
@@ -85,10 +116,11 @@ export function cursor(topic, options) {
 		for (const [key, ts] of timestamps) {
 			if (ts < cutoff) {
 				timestamps.delete(key);
-				if (cursorMap.delete(key)) changed = true;
+				if (positionMap.delete(key)) changed = true;
+				userMap.delete(key);
 			}
 		}
-		if (changed) output.set(new Map(cursorMap));
+		if (changed) emitOutput();
 	}
 
 	function startListening() {
@@ -97,44 +129,55 @@ export function cursor(topic, options) {
 		sourceUnsub = source.subscribe((event) => {
 			if (event === null) return;
 
-			if (event.event === 'update' && event.data != null) {
-				const { key, user, data } = event.data;
-				cursorMap.set(key, { user, data });
-				timestamps.set(key, Date.now());
-				output.set(new Map(cursorMap));
+			if (event.event === 'catalog' && Array.isArray(event.data)) {
+				userMap = new Map();
+				for (const entry of event.data) {
+					if (entry && typeof entry.key === 'string') {
+						userMap.set(entry.key, entry.user);
+					}
+				}
+				emitOutput();
 				return;
 			}
 
-			if (event.event === 'snapshot' && Array.isArray(event.data)) {
-				cursorMap = new Map();
-				timestamps.clear();
-				const now = Date.now();
-				for (const entry of event.data) {
-					const { key, user, data } = entry;
-					cursorMap.set(key, { user, data });
-					timestamps.set(key, now);
+			if (event.event === 'join' && event.data != null) {
+				const { key, user } = event.data;
+				if (typeof key === 'string') {
+					userMap.set(key, user);
+					emitOutput();
 				}
-				output.set(new Map(cursorMap));
+				return;
+			}
+
+			if (event.event === 'update' && event.data != null) {
+				const { key, data } = event.data;
+				if (typeof key === 'string') {
+					positionMap.set(key, data);
+					timestamps.set(key, Date.now());
+					emitOutput();
+				}
 				return;
 			}
 
 			if (event.event === 'bulk' && Array.isArray(event.data)) {
 				const now = Date.now();
 				for (const entry of event.data) {
-					const { key, user, data } = entry;
-					cursorMap.set(key, { user, data });
-					timestamps.set(key, now);
+					if (entry && typeof entry.key === 'string') {
+						positionMap.set(entry.key, entry.data);
+						timestamps.set(entry.key, now);
+					}
 				}
-				output.set(new Map(cursorMap));
+				emitOutput();
 				return;
 			}
 
 			if (event.event === 'remove' && event.data != null) {
 				const { key } = event.data;
+				if (typeof key !== 'string') return;
 				timestamps.delete(key);
-				if (cursorMap.delete(key)) {
-					output.set(new Map(cursorMap));
-				}
+				const hadPosition = positionMap.delete(key);
+				const hadUser = userMap.delete(key);
+				if (hadPosition || hadUser) emitOutput();
 			}
 		});
 
@@ -166,7 +209,8 @@ export function cursor(topic, options) {
 			clearInterval(sweepTimer);
 			sweepTimer = null;
 		}
-		cursorMap = new Map();
+		positionMap = new Map();
+		userMap = new Map();
 		timestamps.clear();
 		// Push the cleared state to the output store so a new subscriber does
 		// not see ghost cursors from the previous subscription cycle.
@@ -195,4 +239,59 @@ export function cursor(topic, options) {
 	});
 
 	return store;
+}
+
+/**
+ * Internal coalesce buffer for `move()`. One entry per topic; latest-
+ * wins inside a single animation frame. Flushed on the next rAF tick.
+ * @type {Map<string, any>}
+ */
+const movePending = new Map();
+let moveScheduled = false;
+
+// Resolve `requestAnimationFrame` at call time so a polyfill installed
+// after this module imports (or a test harness substitution) is honored.
+function scheduleFrame(cb) {
+	if (typeof requestAnimationFrame !== 'undefined') return requestAnimationFrame(cb);
+	return setTimeout(cb, 16);
+}
+
+/**
+ * Send a cursor move on a topic. Frames are coalesced via
+ * `requestAnimationFrame` so calling `move()` at 1000 Hz (high-DPI
+ * mouse) collapses to at most one send per repaint, matching the
+ * server-side `topicThrottle` default. Multi-topic callers do not
+ * clobber each other.
+ *
+ * No-op in non-browser environments.
+ *
+ * @param {string} topic
+ * @param {any} data
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { move } from 'svelte-adapter-uws/plugins/cursor/client';
+ *
+ *   function onmousemove(e) {
+ *     move('canvas', { x: e.clientX, y: e.clientY });
+ *   }
+ * </script>
+ *
+ * <div on:mousemove={onmousemove}> ... </div>
+ * ```
+ */
+export function move(topic, data) {
+	if (typeof window === 'undefined') return;
+	movePending.set(topic, data);
+	if (moveScheduled) return;
+	moveScheduled = true;
+	scheduleFrame(() => {
+		moveScheduled = false;
+		const conn = connect();
+		for (const [t, d] of movePending) {
+			conn.send({ type: 'cursor', topic: t, data: d });
+		}
+		movePending.clear();
+	});
 }

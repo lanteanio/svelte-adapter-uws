@@ -25,8 +25,9 @@ describe('vite plugin', () => {
 			expect(plugin.name).toBe('svelte-adapter-uws');
 		});
 
-		it('has config hook', () => {
-			expect(typeof plugin.config).toBe('function');
+		it('has configResolved + buildStart hooks (Vite 7 env API)', () => {
+			expect(typeof plugin.configResolved).toBe('function');
+			expect(typeof plugin.buildStart).toBe('function');
 		});
 
 		it('has configureServer hook', () => {
@@ -91,7 +92,8 @@ describe('vite plugin', () => {
 				httpServer: {
 					on: (event, handler) => {
 						if (event === 'upgrade') upgradeHandlers.push(handler);
-					}
+					},
+					once: vi.fn()
 				},
 				middlewares: { use: vi.fn() },
 				config: {
@@ -115,7 +117,7 @@ describe('vite plugin', () => {
 
 			const warnings = [];
 			const server = {
-				httpServer: { on: vi.fn() },
+				httpServer: { on: vi.fn(), once: vi.fn() },
 				middlewares: { use: vi.fn() },
 				config: {
 					root: process.cwd(),
@@ -135,7 +137,7 @@ describe('vite plugin', () => {
 			const warnings = [];
 			const middlewarePaths = [];
 			const server = {
-				httpServer: { on: vi.fn() },
+				httpServer: { on: vi.fn(), once: vi.fn() },
 				middlewares: {
 					use: (pathOrFn, maybeFn) => {
 						if (typeof pathOrFn === 'string') middlewarePaths.push(pathOrFn);
@@ -158,7 +160,7 @@ describe('vite plugin', () => {
 
 			const middlewarePaths = [];
 			const server = {
-				httpServer: { on: vi.fn() },
+				httpServer: { on: vi.fn(), once: vi.fn() },
 				middlewares: {
 					use: (pathOrFn) => {
 						if (typeof pathOrFn === 'string') middlewarePaths.push(pathOrFn);
@@ -193,42 +195,57 @@ describe('vite plugin', () => {
 		});
 	});
 
-	describe('config hook (SSR build)', () => {
-		it('returns rollup input when handler file exists', async () => {
+	describe('SSR build (configResolved + buildStart)', () => {
+		it('emits the ws-handler chunk when handler file exists during the SSR build', async () => {
 			const mod = await import('../vite.js');
 			const plugin = mod.default({ handler: './test/vite.test.js' });
 
-			const result = plugin.config(
-				{ root: process.cwd() },
-				{ isSsrBuild: true }
-			);
+			plugin.configResolved({ root: process.cwd(), build: { ssr: true } });
 
-			expect(result).toBeTruthy();
-			expect(result.build.rollupOptions.input['ws-handler']).toBeTruthy();
+			const emitFile = vi.fn();
+			plugin.buildStart.call({ emitFile, environment: { name: 'ssr' } });
+
+			expect(emitFile).toHaveBeenCalledTimes(1);
+			expect(emitFile).toHaveBeenCalledWith(expect.objectContaining({
+				type: 'chunk',
+				fileName: 'ws-handler.js'
+			}));
 		});
 
-		it('returns undefined for non-SSR builds', async () => {
+		it('does not emit when the build is not an SSR build', async () => {
 			const mod = await import('../vite.js');
 			const plugin = mod.default({ handler: './test/vite.test.js' });
 
-			const result = plugin.config(
-				{ root: process.cwd() },
-				{ isSsrBuild: false }
-			);
+			plugin.configResolved({ root: process.cwd(), build: { ssr: false } });
 
-			expect(result).toBeUndefined();
+			const emitFile = vi.fn();
+			plugin.buildStart.call({ emitFile, environment: { name: 'ssr' } });
+
+			expect(emitFile).not.toHaveBeenCalled();
 		});
 
-		it('returns undefined when no handler file found', async () => {
+		it('does not emit on the client environment of a multi-environment SSR build', async () => {
+			const mod = await import('../vite.js');
+			const plugin = mod.default({ handler: './test/vite.test.js' });
+
+			plugin.configResolved({ root: process.cwd(), build: { ssr: true } });
+
+			const emitFile = vi.fn();
+			plugin.buildStart.call({ emitFile, environment: { name: 'client' } });
+
+			expect(emitFile).not.toHaveBeenCalled();
+		});
+
+		it('does not emit when no handler file is found', async () => {
 			const mod = await import('../vite.js');
 			const plugin = mod.default();
 
-			const result = plugin.config(
-				{ root: '/nonexistent/path' },
-				{ isSsrBuild: true }
-			);
+			plugin.configResolved({ root: '/nonexistent/path', build: { ssr: true } });
 
-			expect(result).toBeUndefined();
+			const emitFile = vi.fn();
+			plugin.buildStart.call({ emitFile, environment: { name: 'ssr' } });
+
+			expect(emitFile).not.toHaveBeenCalled();
 		});
 	});
 });

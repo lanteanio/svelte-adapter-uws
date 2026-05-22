@@ -1968,10 +1968,13 @@ describe('client.js (real module)', () => {
 			const unsubB = storeB.subscribe((m) => snapsB.push(m));
 			await flush();
 
+			// New wire shape: catalog/join carries user, update carries position only.
+			ws._receive({ topic: '__cursor:cursor-live', event: 'join',
+				data: { key: 'u1', user: { name: 'Alice' } } });
 			ws._receive({ topic: '__cursor:cursor-live', event: 'update',
-				data: { key: 'u1', user: { name: 'Alice' }, data: { x: 10, y: 20 } } });
+				data: { key: 'u1', data: { x: 10, y: 20 } } });
 
-			// Both subscribers should see the update
+			// Both subscribers should see the merged entry.
 			const lastA = snapsA[snapsA.length - 1];
 			const lastB = snapsB[snapsB.length - 1];
 			expect(lastA.get('u1')).toEqual({ user: { name: 'Alice' }, data: { x: 10, y: 20 } });
@@ -1979,6 +1982,33 @@ describe('client.js (real module)', () => {
 
 			unsubA();
 			unsubB();
+			conn.close();
+		});
+
+		it('positions without a known user are withheld until catalog/join arrives', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = cursorFn('cursor-late-user');
+			const snapshots = [];
+			const unsub = store.subscribe((m) => snapshots.push(m));
+			await flush();
+
+			// Position arrives first - should not appear in output yet.
+			ws._receive({ topic: '__cursor:cursor-late-user', event: 'update',
+				data: { key: 'u1', data: { x: 1, y: 2 } } });
+			expect(snapshots[snapshots.length - 1].has('u1')).toBe(false);
+
+			// Join arrives - now the entry materializes.
+			ws._receive({ topic: '__cursor:cursor-late-user', event: 'join',
+				data: { key: 'u1', user: { name: 'Late' } } });
+			expect(snapshots[snapshots.length - 1].get('u1')).toEqual({
+				user: { name: 'Late' },
+				data: { x: 1, y: 2 }
+			});
+
+			unsub();
 			conn.close();
 		});
 
@@ -1992,8 +2022,10 @@ describe('client.js (real module)', () => {
 			const unsub = store.subscribe((m) => snapshots.push(m));
 			await flush();
 
+			ws._receive({ topic: '__cursor:cursor-remove', event: 'join',
+				data: { key: 'u1', user: {} } });
 			ws._receive({ topic: '__cursor:cursor-remove', event: 'update',
-				data: { key: 'u1', user: {}, data: { x: 1, y: 2 } } });
+				data: { key: 'u1', data: { x: 1, y: 2 } } });
 			expect(snapshots[snapshots.length - 1].has('u1')).toBe(true);
 
 			ws._receive({ topic: '__cursor:cursor-remove', event: 'remove',
@@ -2004,7 +2036,7 @@ describe('client.js (real module)', () => {
 			conn.close();
 		});
 
-		it('handles bulk snapshot events', async () => {
+		it('handles catalog + bulk snapshot pair from the server', async () => {
 			const conn = clientModule.connect();
 			await flush();
 			const ws = MockWebSocket._last;
@@ -2014,21 +2046,52 @@ describe('client.js (real module)', () => {
 			const unsub = store.subscribe((m) => snapshots.push(m));
 			await flush();
 
-			ws._receive({ topic: '__cursor:cursor-bulk', event: 'snapshot',
+			ws._receive({ topic: '__cursor:cursor-bulk', event: 'catalog',
 				data: [
-					{ key: 'a', user: { name: 'A' }, data: { x: 1, y: 1 } },
-					{ key: 'b', user: { name: 'B' }, data: { x: 2, y: 2 } }
+					{ key: 'a', user: { name: 'A' } },
+					{ key: 'b', user: { name: 'B' } }
+				] });
+			ws._receive({ topic: '__cursor:cursor-bulk', event: 'bulk',
+				data: [
+					{ key: 'a', data: { x: 1, y: 1 } },
+					{ key: 'b', data: { x: 2, y: 2 } }
 				] });
 
 			const last = snapshots[snapshots.length - 1];
 			expect(last.size).toBe(2);
-			expect(last.get('a').data).toEqual({ x: 1, y: 1 });
+			expect(last.get('a')).toEqual({ user: { name: 'A' }, data: { x: 1, y: 1 } });
+			expect(last.get('b')).toEqual({ user: { name: 'B' }, data: { x: 2, y: 2 } });
 
 			unsub();
 			conn.close();
 		});
 
-		it('handles bulk (batched) events', async () => {
+		it('catalog replaces the user map (drops users no longer in roster)', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = cursorFn('cursor-catalog-reset');
+			const snapshots = [];
+			const unsub = store.subscribe((m) => snapshots.push(m));
+			await flush();
+
+			ws._receive({ topic: '__cursor:cursor-catalog-reset', event: 'join',
+				data: { key: 'a', user: { name: 'A' } } });
+			ws._receive({ topic: '__cursor:cursor-catalog-reset', event: 'update',
+				data: { key: 'a', data: { x: 1 } } });
+			expect(snapshots[snapshots.length - 1].has('a')).toBe(true);
+
+			// New catalog without 'a' should hide 'a' from output (its user is gone).
+			ws._receive({ topic: '__cursor:cursor-catalog-reset', event: 'catalog',
+				data: [{ key: 'b', user: { name: 'B' } }] });
+			expect(snapshots[snapshots.length - 1].has('a')).toBe(false);
+
+			unsub();
+			conn.close();
+		});
+
+		it('handles bulk (batched) position events', async () => {
 			const conn = clientModule.connect();
 			await flush();
 			const ws = MockWebSocket._last;
@@ -2038,14 +2101,19 @@ describe('client.js (real module)', () => {
 			const unsub = store.subscribe((m) => snapshots.push(m));
 			await flush();
 
+			ws._receive({ topic: '__cursor:cursor-batch', event: 'join',
+				data: { key: 'a', user: { name: 'A' } } });
+			ws._receive({ topic: '__cursor:cursor-batch', event: 'join',
+				data: { key: 'b', user: { name: 'B' } } });
 			ws._receive({ topic: '__cursor:cursor-batch', event: 'bulk',
 				data: [
-					{ key: 'a', user: { name: 'A' }, data: { x: 10, y: 10 } },
-					{ key: 'b', user: { name: 'B' }, data: { x: 20, y: 20 } }
+					{ key: 'a', data: { x: 10, y: 10 } },
+					{ key: 'b', data: { x: 20, y: 20 } }
 				] });
 
 			const last = snapshots[snapshots.length - 1];
 			expect(last.size).toBe(2);
+			expect(last.get('a').data).toEqual({ x: 10, y: 10 });
 			expect(last.get('b').data).toEqual({ x: 20, y: 20 });
 
 			unsub();
@@ -2081,8 +2149,10 @@ describe('client.js (real module)', () => {
 			const unsub = store.subscribe((m) => snapshots.push(m));
 			await vi.advanceTimersByTimeAsync(0);
 
+			ws._receive({ topic: '__cursor:cursor-maxage', event: 'join',
+				data: { key: 'stale', user: {} } });
 			ws._receive({ topic: '__cursor:cursor-maxage', event: 'update',
-				data: { key: 'stale', user: {}, data: { x: 0, y: 0 } } });
+				data: { key: 'stale', data: { x: 0, y: 0 } } });
 			expect(snapshots[snapshots.length - 1].has('stale')).toBe(true);
 
 			vi.advanceTimersByTime(3000);
@@ -2108,6 +2178,105 @@ describe('client.js (real module)', () => {
 
 			vi.useRealTimers();
 			conn.close();
+		});
+
+		describe('move() helper', () => {
+			/** @type {typeof import('../plugins/cursor/client.js').move} */
+			let moveFn;
+			/** @type {Array<{ cb: () => void }>} */
+			let rafQueue;
+			let prevRaf;
+
+			beforeEach(async () => {
+				const mod = await import('../plugins/cursor/client.js');
+				moveFn = mod.move;
+				rafQueue = [];
+				// Replace requestAnimationFrame with a manual flush queue so
+				// the test can drive the rAF coalescing deterministically.
+				prevRaf = globalThis.requestAnimationFrame;
+				globalThis.requestAnimationFrame = (cb) => {
+					rafQueue.push({ cb });
+					return rafQueue.length;
+				};
+			});
+
+			afterEach(() => {
+				globalThis.requestAnimationFrame = prevRaf;
+			});
+
+			function flushRaf() {
+				const q = rafQueue;
+				rafQueue = [];
+				for (const { cb } of q) cb();
+			}
+
+			function cursorSends(ws) {
+				return ws._sent
+					.map((s) => JSON.parse(s))
+					.filter((m) => m.type === 'cursor');
+			}
+
+			it('coalesces high-rate calls into one send per frame', async () => {
+				const conn = clientModule.connect();
+				await flush();
+				const ws = MockWebSocket._last;
+
+				moveFn('canvas', { x: 1, y: 1 });
+				moveFn('canvas', { x: 2, y: 2 });
+				moveFn('canvas', { x: 3, y: 3 });
+
+				// Before the frame flushes, nothing has been sent.
+				expect(cursorSends(ws)).toHaveLength(0);
+
+				flushRaf();
+
+				// One send carrying the latest position only.
+				const sent = cursorSends(ws);
+				expect(sent).toHaveLength(1);
+				expect(sent[0]).toEqual({ type: 'cursor', topic: 'canvas', data: { x: 3, y: 3 } });
+
+				conn.close();
+			});
+
+			it('sends one message per topic on flush (no cross-topic clobber)', async () => {
+				const conn = clientModule.connect();
+				await flush();
+				const ws = MockWebSocket._last;
+
+				moveFn('canvas-a', { x: 10 });
+				moveFn('canvas-b', { x: 20 });
+				moveFn('canvas-a', { x: 11 });
+
+				flushRaf();
+
+				const sent = cursorSends(ws).sort((a, b) => a.topic.localeCompare(b.topic));
+				expect(sent).toHaveLength(2);
+				expect(sent[0]).toEqual({ type: 'cursor', topic: 'canvas-a', data: { x: 11 } });
+				expect(sent[1]).toEqual({ type: 'cursor', topic: 'canvas-b', data: { x: 20 } });
+
+				conn.close();
+			});
+
+			it('next-frame call schedules another rAF tick', async () => {
+				const conn = clientModule.connect();
+				await flush();
+				const ws = MockWebSocket._last;
+
+				moveFn('canvas', { x: 1 });
+				flushRaf();
+				expect(cursorSends(ws)).toHaveLength(1);
+
+				moveFn('canvas', { x: 2 });
+				// Without a flush, nothing new yet.
+				expect(cursorSends(ws)).toHaveLength(1);
+
+				flushRaf();
+				const sent = cursorSends(ws);
+				expect(sent).toHaveLength(2);
+				expect(sent[1].data).toEqual({ x: 2 });
+
+				conn.close();
+			});
 		});
 	});
 
