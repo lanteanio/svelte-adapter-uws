@@ -443,7 +443,13 @@ export function createPresence(options = {}) {
 			let connTopics = wsTopics.get(ws);
 			if (connTopics && connTopics.has(topic)) return;
 
-			const data = select(ws.getUserData());
+			// Callers typically reach here after an `await` in their own
+			// join flow (auth, loader, RPC handshake). If the socket
+			// closed mid-await `getUserData()` throws; presence is a
+			// best-effort layer, so silently no-op rather than crash.
+			let userData;
+			try { userData = ws.getUserData(); } catch { return; }
+			const data = select(userData);
 			if (!data || typeof data !== 'object') {
 				throw new TypeError(
 					`presence select() must return a plain object, got ${data === null ? 'null' : typeof data}`
@@ -492,8 +498,10 @@ export function createPresence(options = {}) {
 				bufferDiff(topic, 'join', key, data, platform);
 			}
 
-			// Subscribe this ws to the presence channel (server-side, idempotent)
-			ws.subscribe(presenceTopic);
+			// Subscribe this ws to the presence channel (server-side, idempotent).
+			// `platform.send` is closed-ws-safe on the adapter side; the
+			// direct `ws.subscribe` is not - guard locally.
+			try { ws.subscribe(presenceTopic); } catch { return; }
 
 			// Send the full current snapshot to this connection. The joining
 			// user sees the complete state (including themselves) immediately;
@@ -518,7 +526,7 @@ export function createPresence(options = {}) {
 			capturePlatform(platform);
 			const users = topicPresence.get(topic);
 			const presenceTopic = TOPIC_PREFIX + topic;
-			ws.subscribe(presenceTopic);
+			try { ws.subscribe(presenceTopic); } catch { return; }
 			platform.send(ws, presenceTopic, 'presence_state', snapshotState(users));
 		},
 

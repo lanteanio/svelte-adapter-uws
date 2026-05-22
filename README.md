@@ -1274,6 +1274,22 @@ export async function GET({ platform }) {
 
 The returned `Map` is the live module-level instance - read-only, do not mutate. In test mode (`process.env.VITEST` set, or `NODE_ENV === 'test'`) the assert helper additionally throws so test runners surface the failure; in production it logs and counts but does not throw, so a violation inside a uWS callback frame cannot crash the worker.
 
+### `platform.closedWsAborts`
+
+Per-worker count of best-effort uWS operations that aborted because the underlying WebSocket had already closed. Bumped every time `platform.subscribe`, `platform.unsubscribe`, `platform.send`, `platform.sendCoalesced`, `platform.sendTo`, or `platform.request` is called on a `ws` whose native handle has been freed - typically because the caller `await`-ed something (auth, loader, subscribe hook) and the client closed during the wait.
+
+These methods are *closed-WS safe* by contract: they swallow uWS's `Invalid access of closed uWS.WebSocket` exception, return a success-shaped no-op sentinel (`null` for subscribe, `false` for unsubscribe, `2` for send, etc.), and bump this counter. Callers can fire-and-forget without a per-site try/catch.
+
+```js
+export async function GET({ platform }) {
+  return json({ closedWsAborts: platform.closedWsAborts });
+}
+```
+
+A non-zero value is normal under client churn (tab close, network blips, mass reconnect waves). A rapidly-growing value under steady load indicates either pathological client behaviour or that the server's async setup path is too long for its connect rate. In clustered mode, sum across workers for cluster-wide visibility.
+
+Monotonic, per-worker, reset only on process restart.
+
 ### `platform.pressure` and `platform.onPressure(cb)`
 
 Worker-local backpressure signal. The adapter samples once per second (configurable) and reports the most urgent active stress as a single `reason` enum, so user code can degrade with intent instead of generic panic.
@@ -3333,6 +3349,8 @@ Per-worker limitations (acceptable for most apps):
 - `platform.connections`  - returns the count for the local worker only
 - `platform.subscribers(topic)`  - returns the count for the local worker only
 - `platform.sendTo(filter, ...)`  - iterates the local worker's connections only, no cross-worker relay
+- `platform.closedWsAborts`  - per-worker counter; sum across workers for cluster total
+- `platform.assertions`  - per-worker counter Map
 
 ### Docker / multi-process deployments (Linux)
 

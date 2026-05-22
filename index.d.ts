@@ -1202,6 +1202,14 @@ export interface Platform {
 	 * Send a message to a single WebSocket connection.
 	 * Wraps in the same `{ topic, event, data }` envelope as `publish()`.
 	 *
+	 * Returns the uWS send result: `0` = SUCCESS, `1` = BACKPRESSURE
+	 * (queued, will flush on drain), `2` = DROPPED (frame discarded
+	 * because the socket has closed or its queue is over the limit).
+	 *
+	 * Closed-WS safe: if the socket has already closed, returns `2`
+	 * (DROPPED) and bumps `platform.closedWsAborts` rather than
+	 * propagating uWS's "Invalid access" exception.
+	 *
 	 * @example
 	 * ```js
 	 * // In hooks.ws.js - reply to sender:
@@ -1311,6 +1319,36 @@ export interface Platform {
 	readonly connections: number;
 
 	/**
+	 * Per-worker count of best-effort uWS operations that aborted
+	 * because the underlying WebSocket had already closed.
+	 *
+	 * Ws-targeted platform methods (`subscribe`, `unsubscribe`, `send`,
+	 * `sendCoalesced`, `sendTo`, `request`) and the wire-level
+	 * subscribe / subscribe-batch handlers swallow uWS's "Invalid
+	 * access of closed uWS.WebSocket" exception so callers never need
+	 * a per-site try/catch when a socket closes mid-async-setup.
+	 * Each swallow bumps this counter.
+	 *
+	 * A non-zero value is normal under client churn (browser tab close,
+	 * network blips, mass-reconnect waves). A rapidly-growing value
+	 * under steady load indicates either pathological client behaviour
+	 * or that the server's async setup path is too long for its
+	 * connect rate - worth investigating but not, on its own, a bug.
+	 *
+	 * Monotonic, per-worker, reset only on process restart. In
+	 * clustered mode, sum across workers to get the cluster total.
+	 *
+	 * @example
+	 * ```js
+	 * // periodic ops log
+	 * setInterval(() => {
+	 *   console.log('closed-ws aborts:', platform.closedWsAborts);
+	 * }, 60_000);
+	 * ```
+	 */
+	readonly closedWsAborts: number;
+
+	/**
 	 * Number of clients subscribed to a specific topic.
 	 *
 	 * @example
@@ -1387,6 +1425,13 @@ export interface Platform {
 	 * hook may be async (the framework awaits the hook before inspecting
 	 * its return). Callers must `await` the result.
 	 *
+	 * Closed-WS safe: if the socket closes during the awaited hook (or
+	 * before the call, e.g. caller `await`-ed something else first) the
+	 * method silently returns `null` rather than propagating uWS's
+	 * "Invalid access of closed uWS.WebSocket" exception. Each abort
+	 * increments `platform.closedWsAborts`. Callers can fire-and-forget
+	 * without a per-site try/catch.
+	 *
 	 * @example
 	 * ```js
 	 * // In an RPC handler that needs to subscribe the connection
@@ -1456,6 +1501,9 @@ export interface Platform {
 	 * otherwise removes the subscription, decrements `totalSubscriptions`,
 	 * fires `hooks.ws.unsubscribe` (informational, not a gate - mirrors
 	 * the wire-level unsubscribe path), and returns `true`.
+	 *
+	 * Closed-WS safe: returns `false` and bumps `platform.closedWsAborts`
+	 * if the socket has already closed.
 	 */
 	unsubscribe(ws: WebSocket<unknown>, topic: string): boolean;
 

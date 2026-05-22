@@ -150,16 +150,25 @@ export async function createTestServer(options = {}) {
 
 	const closeHookRegisteredT = !!handler.close;
 	let sendToAsyncWarnedT = false;
+	// Mirrors prod's `closedWsAborts`. createTestServer uses real uWS,
+	// so a closed-WS race (subscribe gate awaits something, client
+	// closes during the await, post-await ws.subscribe throws) is
+	// exercisable here exactly like in production. Hardening below
+	// catches the uWS exception, bumps this counter, and returns the
+	// platform's success-shaped no-op sentinel.
+	let closedWsAbortsT = 0;
 	function bumpInT(ws, message) {
 		if (!closeHookRegisteredT) return;
-		const stats = ws.getUserData()[WS_STATS];
+		let stats;
+		try { stats = ws.getUserData()[WS_STATS]; } catch { return; }
 		if (!stats) return;
 		stats.messagesIn++;
 		stats.bytesIn += typeof message === 'string' ? message.length : message.byteLength;
 	}
 	function bumpOutT(ws, payload) {
 		if (!closeHookRegisteredT) return;
-		const stats = ws.getUserData()[WS_STATS];
+		let stats;
+		try { stats = ws.getUserData()[WS_STATS]; } catch { return; }
 		if (!stats) return;
 		stats.messagesOut++;
 		stats.bytesOut += payload.length;
@@ -186,12 +195,15 @@ export async function createTestServer(options = {}) {
 		const delay = chaos.getDelayMs();
 		if (delay > 0) {
 			setTimeout(() => {
-				try { ws.send(payload, false, false); } catch {}
+				try { ws.send(payload, false, false); }
+				catch { closedWsAbortsT++; return; }
 				bumpOutT(ws, payload);
 			}, delay);
 			return 1;
 		}
-		const result = ws.send(payload, false, false);
+		let result;
+		try { result = ws.send(payload, false, false); }
+		catch { closedWsAbortsT++; return 2; }
 		bumpOutT(ws, payload);
 		return result;
 	}
@@ -225,7 +237,10 @@ export async function createTestServer(options = {}) {
 			const msg = envelope(topic, event, data);
 			let count = 0;
 			for (const ws of wsConnections) {
-				const decision = filter(ws.getUserData());
+				let userData;
+				try { userData = ws.getUserData(); }
+				catch { closedWsAbortsT++; continue; }
+				const decision = filter(userData);
 				if (decision && typeof decision.then === 'function') {
 					if (!sendToAsyncWarnedT) {
 						sendToAsyncWarnedT = true;
@@ -247,6 +262,7 @@ export async function createTestServer(options = {}) {
 		},
 		get connections() { return wsConnections.size; },
 		get assertions() { return readAssertionCounts(); },
+		get closedWsAborts() { return closedWsAbortsT; },
 		subscribers(topic) { return app.numSubscribers(topic); },
 		// Mirror production: report a numeric cap and a constant-time
 		// bufferedAmount so test code can exercise the same backpressure-
@@ -264,7 +280,9 @@ export async function createTestServer(options = {}) {
 			// user hook so async hooks gate correctly.
 			// Server-side caller: trust non-ASCII topics (matches platform.subscribe in production).
 			if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
-			const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+			let subs;
+			try { subs = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+			catch { closedWsAbortsT++; return null; }
 			if (!(subs instanceof Set)) return 'INVALID_TOPIC';
 			if (subs.has(topic)) return null;
 			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
@@ -272,7 +290,8 @@ export async function createTestServer(options = {}) {
 			if (denial !== null) return denial;
 			if (subs.has(topic)) return null;
 			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
-			ws.subscribe(topic);
+			try { ws.subscribe(topic); }
+			catch { closedWsAbortsT++; return null; }
 			subs.add(topic);
 			return null;
 		},
@@ -282,9 +301,12 @@ export async function createTestServer(options = {}) {
 			return await runUserSubscribeGateT(ws, topic);
 		},
 		unsubscribe(ws, topic) {
-			const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+			let subs;
+			try { subs = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+			catch { closedWsAbortsT++; return false; }
 			if (!(subs instanceof Set) || !subs.has(topic)) return false;
-			ws.unsubscribe(topic);
+			try { ws.unsubscribe(topic); }
+			catch { closedWsAbortsT++; return false; }
 			subs.delete(topic);
 			handler.unsubscribe?.(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
 			return true;
@@ -370,7 +392,12 @@ export async function createTestServer(options = {}) {
 			app.publish(fanoutTopic, sharedBatchEnv, false, false);
 		},
 		request(ws, event, data, options) {
-			const userData = ws.getUserData();
+			let userData;
+			try { userData = ws.getUserData(); }
+			catch {
+				closedWsAbortsT++;
+				return Promise.reject(new Error('connection closed'));
+			}
 			let pending = userData[WS_PENDING_REQUESTS];
 			if (!pending) {
 				pending = new Map();
@@ -390,7 +417,21 @@ export async function createTestServer(options = {}) {
 				}, timeoutMs);
 				pending.set(ref, { resolve, reject, timer });
 				const payload = JSON.stringify({ type: 'request', ref, event, data: data ?? null });
-				sendOutboundT(ws, payload);
+				// Direct ws.send so we can distinguish "closed WS"
+				// (throws -> reject now) from "backpressure DROPPED"
+				// (returns 2 -> let it time out, matches production
+				// semantics where uWS will not retry on its own).
+				// sendOutboundT exists for chaos-injection; the request
+				// flow takes the bare path and re-uses bumpOutT.
+				try { ws.send(payload, false, false); }
+				catch {
+					closedWsAbortsT++;
+					clearTimeout(timer);
+					pending.delete(ref);
+					reject(new Error('connection closed'));
+					return;
+				}
+				bumpOutT(ws, payload);
 			});
 		},
 		topic(name) {
@@ -623,7 +664,8 @@ export async function createTestServer(options = {}) {
 								sendDeniedT(ws, msg.topic, ref, 'RATE_LIMITED');
 								return;
 							}
-							ws.subscribe(msg.topic);
+							try { ws.subscribe(msg.topic); }
+							catch { closedWsAbortsT++; return; }
 							subs.add(msg.topic);
 							sendSubscribedT(ws, msg.topic, ref);
 							return;
@@ -680,7 +722,8 @@ export async function createTestServer(options = {}) {
 									sendDeniedT(ws, topic, ref, 'RATE_LIMITED');
 									continue;
 								}
-								ws.subscribe(topic);
+								try { ws.subscribe(topic); }
+								catch { closedWsAbortsT++; continue; }
 								udSubs.add(topic);
 								sendSubscribedT(ws, topic, ref);
 							}

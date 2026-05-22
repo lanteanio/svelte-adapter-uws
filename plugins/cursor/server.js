@@ -254,9 +254,17 @@ export function createCursor(options = {}) {
 				const oldest = wsState.keys().next().value;
 				if (oldest !== undefined) wsState.delete(oldest);
 			}
+			let userData = {};
+			if (typeof ws.getUserData === 'function') {
+				// Closed-WS race: caller may reach here after an `await`
+				// that outlasted the socket; getUserData throws on a
+				// freed handle. Fall back to an empty userData rather
+				// than crashing the worker.
+				try { userData = ws.getUserData(); } catch { userData = {}; }
+			}
 			state = {
 				key: String(++connCounter),
-				user: select(typeof ws.getUserData === 'function' ? ws.getUserData() : {}),
+				user: select(userData),
 				topics: new Set()
 			};
 			wsState.set(ws, state);
@@ -377,9 +385,21 @@ export function createCursor(options = {}) {
 	 * Route a broadcast through the per-topic coalesce window when
 	 * `topicThrottle` is enabled, or directly publish when disabled.
 	 *
-	 * Leading-edge synchronous flush preserves the contract that the first
-	 * call on an idle topic publishes immediately (no setTimeout(0) detour).
-	 * Trailing-edge fires via the single tracker-wide `tickTimer`.
+	 * Leading-edge claims the cadence slot synchronously (lastFlush =
+	 * now) but defers the actual flush by one microtask so co-arriving
+	 * broadcasts in the same JS pass batch into a single bulk frame.
+	 * Without the microtask defer, an event-loop pause > topicThrottleMs
+	 * caused the post-pause first cursor to fire alone (single-cursor
+	 * UPDATE) while every other cursor in the same burst queued to the
+	 * trailing tick: under sustained pressure (30K RPCs/sec/worker) this
+	 * fragmented 86% of cursor frames into single-cursor UPDATEs.
+	 * Microtasks run after the current synchronous code completes but
+	 * before the next I/O / setTimeout / event-loop tick, so any
+	 * subsequent broadcast() in the same handler batch adds itself to
+	 * `dirty` before the flush runs.
+	 *
+	 * Trailing-edge fires via the single tracker-wide `tickTimer` for
+	 * broadcasts that land mid-window.
 	 */
 	function broadcast(topic, key, data, platform) {
 		if (topicThrottleMs <= 0) {
@@ -389,7 +409,7 @@ export function createCursor(options = {}) {
 
 		let state = topicFlush.get(topic);
 		if (!state) {
-			state = { dirty: new Map(), lastFlush: 0 };
+			state = { dirty: new Map(), lastFlush: 0, pendingMicroflush: false };
 			topicFlush.set(topic, state);
 		}
 		state.dirty.set(key, { data, platform });
@@ -397,9 +417,18 @@ export function createCursor(options = {}) {
 		const now = Date.now();
 		if (now - state.lastFlush >= topicThrottleMs) {
 			state.lastFlush = now;
-			flushDirty(topic, state.dirty);
-			state.dirty.clear();
 			dirtyTopics.delete(topic);
+			// Schedule once per cycle slot; subsequent broadcasts inside
+			// the same microtask boundary just append to `state.dirty`.
+			if (!state.pendingMicroflush) {
+				state.pendingMicroflush = true;
+				queueMicrotask(() => {
+					state.pendingMicroflush = false;
+					if (state.dirty.size === 0) return;
+					flushDirty(topic, state.dirty);
+					state.dirty.clear();
+				});
+			}
 			return;
 		}
 

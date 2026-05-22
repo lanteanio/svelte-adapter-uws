@@ -211,44 +211,67 @@ describe('cursor plugin - server', () => {
 	});
 
 	describe('topicThrottle (per-topic coalescing)', () => {
-		it('single mover within window: emits one update via leading edge', () => {
+		it('single mover within window: emits one update via microtask-deferred leading edge', async () => {
 			vi.useFakeTimers();
 			const c = createCursor({ throttle: 0, topicThrottle: 16 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			const p = mockPlatform();
 
-			c.update(ws, 'canvas', { x: 0 }, p); // leading edge
+			c.update(ws, 'canvas', { x: 0 }, p); // leading edge schedules microtask
+			// Microtask drains here.
+			await Promise.resolve();
 			expect(pubs(p, 'update')).toHaveLength(1);
 			expect(pubs(p, 'bulk')).toHaveLength(0);
 		});
 
-		it('two movers in the same window emit a single bulk on trailing edge', () => {
+		it('co-arriving movers in the same JS pass batch into a single bulk via microtask defer', async () => {
 			vi.useFakeTimers();
 			const c = createCursor({ throttle: 0, topicThrottle: 16 });
 			const wsA = mockWs({ id: 'A' });
 			const wsB = mockWs({ id: 'B' });
 			const p = mockPlatform();
 
-			// First mover: leading-edge coalesce fires immediately.
+			// Both movers land in the same synchronous JS pass - the
+			// microtask scheduled by A's leading edge has not run yet
+			// when B arrives, so B joins A's dirty bucket.
 			c.update(wsA, 'canvas', { x: 1 }, p);
-			expect(pubs(p, 'update')).toHaveLength(1);
-			expect(pubs(p, 'bulk')).toHaveLength(0);
-			p.reset();
-
-			// Same window: second mover enters dirty set; no immediate flush.
-			vi.advanceTimersByTime(5);
 			c.update(wsB, 'canvas', { x: 2 }, p);
+			// Pre-microtask: nothing has fired yet.
 			expect(positionEvents(p)).toHaveLength(0);
 
-			// Window expires: trailing flush emits bulk for both pending entries.
-			// (wsB pending; wsA already flushed on its leading edge.)
+			// Drain the microtask.
+			await Promise.resolve();
+
+			// One bulk frame, two entries - no fragmented single UPDATE.
+			expect(pubs(p, 'update')).toHaveLength(0);
+			const bulks = pubs(p, 'bulk');
+			expect(bulks).toHaveLength(1);
+			expect(bulks[0].data).toHaveLength(2);
+		});
+
+		it('mid-window mover queues for trailing tick after leading microtask drains', async () => {
+			vi.useFakeTimers();
+			const c = createCursor({ throttle: 0, topicThrottle: 16 });
+			const wsA = mockWs({ id: 'A' });
+			const wsB = mockWs({ id: 'B' });
+			const p = mockPlatform();
+
+			c.update(wsA, 'canvas', { x: 1 }, p);
+			await Promise.resolve(); // drain leading microtask
+			expect(pubs(p, 'update')).toHaveLength(1);
+			p.reset();
+
+			vi.advanceTimersByTime(5);
+			c.update(wsB, 'canvas', { x: 2 }, p); // mid-window: trailing-tick path
+			expect(positionEvents(p)).toHaveLength(0);
+
 			vi.advanceTimersByTime(11);
 			// Trailing flush has only wsB pending, so it goes out as an update.
 			expect(pubs(p, 'update')).toHaveLength(1);
 			expect(pubs(p, 'update')[0].data).toEqual({ key: expect.any(String), data: { x: 2 } });
 		});
 
-		it('multiple movers in a coalesce window: trailing flush emits bulk', () => {
+		it('multiple co-arrivals + mid-window mover: leading microtask + trailing tick', async () => {
 			vi.useFakeTimers();
 			const c = createCursor({ throttle: 0, topicThrottle: 16 });
 			const wsA = mockWs({ id: 'A' });
@@ -256,23 +279,22 @@ describe('cursor plugin - server', () => {
 			const wsC = mockWs({ id: 'C' });
 			const p = mockPlatform();
 
-			// First mover leading-edges through.
+			// A and B co-arrive in the same JS pass - microtask batches them.
 			c.update(wsA, 'canvas', { x: 1 }, p);
+			c.update(wsB, 'canvas', { x: 2 }, p);
+			await Promise.resolve();
+			expect(pubs(p, 'bulk')).toHaveLength(1);
+			expect(pubs(p, 'bulk')[0].data).toHaveLength(2);
 			p.reset();
 
-			// B and C land in the same coalesce window.
-			vi.advanceTimersByTime(2);
-			c.update(wsB, 'canvas', { x: 2 }, p);
-			vi.advanceTimersByTime(2);
+			// C lands mid-window - takes trailing-tick path.
+			vi.advanceTimersByTime(4);
 			c.update(wsC, 'canvas', { x: 3 }, p);
-			expect(positionEvents(p)).toHaveLength(0); // joins already broadcast separately
+			expect(positionEvents(p)).toHaveLength(0);
 
 			vi.advanceTimersByTime(14);
-			const bulks = pubs(p, 'bulk');
-			expect(bulks).toHaveLength(1);
-			expect(bulks[0].data).toHaveLength(2);
-			const keys = bulks[0].data.map((e) => e.key);
-			expect(new Set(keys).size).toBe(2);
+			expect(pubs(p, 'update')).toHaveLength(1);
+			expect(pubs(p, 'update')[0].data).toEqual({ key: expect.any(String), data: { x: 3 } });
 		});
 
 		it('topicThrottle: 0 disables coalescing - every broadcast goes out', () => {
@@ -287,6 +309,47 @@ describe('cursor plugin - server', () => {
 
 			expect(pubs(p, 'update')).toHaveLength(3);
 			expect(pubs(p, 'bulk')).toHaveLength(0);
+		});
+
+		it('event-loop-pause regression: many co-arriving cursors batch into one bulk, not N single UPDATEs', async () => {
+			// Repro of the demo's "1794 single-cursor UPDATEs / 38 BULKs in
+			// 30s" pathology. Under steady incoming load the message
+			// handler doesn't see cursors continuously - it sees bursts
+			// of N broadcasts interleaved with event-loop pauses (V8 GC,
+			// uWS internal work, outbound drain from prior flush). Pre-
+			// fix, every post-pause first cursor leaked out as its own
+			// UPDATE while the rest of the burst queued for the trailing
+			// tick. Post-fix, the microtask defer captures the whole
+			// burst into a single bulk.
+			vi.useFakeTimers();
+			const c = createCursor({ throttle: 0, topicThrottle: 8 });
+			const p = mockPlatform();
+			const BURSTS = 10;
+			const CURSORS_PER_BURST = 50;
+
+			for (let b = 0; b < BURSTS; b++) {
+				// Simulate a pause > topicThrottleMs between bursts so
+				// each burst triggers the leading-edge branch.
+				vi.advanceTimersByTime(12);
+				// All cursors in this burst arrive in one synchronous pass.
+				for (let i = 0; i < CURSORS_PER_BURST; i++) {
+					c.update(mockWs({ id: `c${b}_${i}` }), 'canvas', { x: i }, p);
+				}
+				// Drain the microtask scheduled by the first cursor of
+				// this burst - it batches every co-arrival.
+				await Promise.resolve();
+			}
+
+			const updates = pubs(p, 'update');
+			const bulks = pubs(p, 'bulk');
+			// Zero single-cursor UPDATEs from the leading edge - all
+			// co-arrivals coalesced into bulks.
+			expect(updates.length).toBe(0);
+			// One bulk per burst, each holding the full burst population.
+			expect(bulks.length).toBe(BURSTS);
+			for (const bulk of bulks) {
+				expect(bulk.data.length).toBe(CURSORS_PER_BURST);
+			}
 		});
 
 		it('clear() cancels the pending scheduler tick (no stale flush after reset)', () => {
@@ -349,16 +412,19 @@ describe('cursor plugin - server', () => {
 			expect(c.stats().activeTopicsTotal).toBe(2);
 		});
 
-		it('flushes counter increments on every flush (leading + trailing edge)', () => {
+		it('flushes counter increments on every flush (leading microtask + trailing tick)', async () => {
 			vi.useFakeTimers();
 			const c = createCursor({ throttle: 0, topicThrottle: 100 });
 			const ws = mockWs({ id: '1' });
 			const p = mockPlatform();
 
 			c.update(ws, 'canvas', { x: 1 }, p);
+			// Leading edge schedules a microtask; flush has not run yet.
+			expect(c.stats().flushes).toBe(0);
+			await Promise.resolve();
 			expect(c.stats().flushes).toBe(1);
 
-			c.update(ws, 'canvas', { x: 2 }, p);
+			c.update(ws, 'canvas', { x: 2 }, p); // mid-window: queued for tick
 			expect(c.stats().flushes).toBe(1);
 
 			vi.advanceTimersByTime(100);

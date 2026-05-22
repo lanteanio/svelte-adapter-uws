@@ -421,7 +421,8 @@ const closeHookRegistered = WS_ENABLED && !!wsModule.close;
  */
 function bumpIn(ws, message) {
 	if (!closeHookRegistered) return;
-	const stats = ws.getUserData()[WS_STATS];
+	let stats;
+	try { stats = ws.getUserData()[WS_STATS]; } catch { return; }
 	if (!stats) return;
 	stats.messagesIn++;
 	stats.bytesIn += typeof message === 'string' ? message.length : message.byteLength;
@@ -439,7 +440,8 @@ function bumpIn(ws, message) {
  */
 function bumpOut(ws, payload) {
 	if (!closeHookRegistered) return;
-	const stats = ws.getUserData()[WS_STATS];
+	let stats;
+	try { stats = ws.getUserData()[WS_STATS]; } catch { return; }
 	if (!stats) return;
 	stats.messagesOut++;
 	stats.bytesOut += payload.length;
@@ -489,6 +491,16 @@ function maybeWarnTopicRegistry() {
 
 let publishCountWindow = 0;
 let totalSubscriptions = 0;
+// Count of best-effort operations that aborted because the underlying
+// uWS WebSocket had already closed. The platform contract is that
+// ws-targeted public methods (subscribe / unsubscribe / send /
+// sendCoalesced / request) and internal helpers that may run after an
+// `await` never propagate uWS's "Invalid access of closed
+// uWS.WebSocket" exception to user code - they swallow it, return a
+// no-op sentinel, and bump this counter. Operators can read
+// `platform.closedWsAborts` to detect when mass-connect kernel /
+// backpressure churn is closing sockets mid-async-setup at scale.
+let closedWsAborts = 0;
 
 /**
  * Per-topic publish counters for runaway-publisher detection. Single
@@ -824,7 +836,7 @@ async function runUserSubscribeGate(ws, topic) {
 function sendSubscribed(ws, topic, ref) {
 	if (ref === null) return;
 	const payload = JSON.stringify({ type: 'subscribed', topic, ref });
-	ws.send(payload, false, false);
+	try { ws.send(payload, false, false); } catch { closedWsAborts++; return; }
 	bumpOut(ws, payload);
 }
 
@@ -840,7 +852,7 @@ function sendSubscribed(ws, topic, ref) {
 function sendSubscribeDenied(ws, topic, ref, reason) {
 	if (ref === null) return;
 	const payload = JSON.stringify({ type: 'subscribe-denied', topic, ref, reason });
-	ws.send(payload, false, false);
+	try { ws.send(payload, false, false); } catch { closedWsAborts++; return; }
 	bumpOut(ws, payload);
 }
 
@@ -852,15 +864,29 @@ function sendSubscribeDenied(ws, topic, ref, reason) {
  * @param {import('uWebSockets.js').WebSocket<any>} ws
  */
 function flushCoalescedFor(ws) {
-	const userData = ws.getUserData();
+	let userData;
+	try { userData = ws.getUserData(); }
+	catch { closedWsAborts++; return; }
 	const pending = userData[WS_COALESCED];
 	if (!pending || pending.size === 0) return;
 	assert(pending instanceof Map, 'coalesce.pending-type', null);
+	let aborted = false;
 	drainCoalesced(pending, (msg) => {
+		if (aborted) return 2;
 		assert(typeof msg.topic === 'string', 'coalesce.entry-topic-type', null);
 		assert(typeof msg.event === 'string', 'coalesce.entry-event-type', null);
 		const payload = envelopePrefix(msg.topic, msg.event) + JSON.stringify(msg.data ?? null) + '}';
-		const result = ws.send(payload, false, false);
+		let result;
+		try { result = ws.send(payload, false, false); }
+		catch {
+			// Socket closed mid-drain. There will be no further `drain`
+			// event to retry on, so dropping the rest of the buffer is
+			// the only correct outcome - returning 1 (BACKPRESSURE) lets
+			// drainCoalesced clear the current entry and stop iterating.
+			closedWsAborts++;
+			aborted = true;
+			return 1;
+		}
 		// `result` MUST propagate to drainCoalesced. 0=SUCCESS removes the
 		// entry; 1=BACKPRESSURE removes it and halts the loop; 2=DROPPED
 		// retains the entry for retry on next drain. Don't refactor away
@@ -869,6 +895,7 @@ function flushCoalescedFor(ws) {
 		if (result !== 2) bumpOut(ws, payload);
 		return result;
 	});
+	if (aborted) pending.clear();
 }
 
 /** @type {import('./index.js').Platform} */
@@ -927,7 +954,13 @@ const platform = {
 	send(ws, topic, event, data) {
 		const payload = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
 		assert(payload.length > 0, 'envelope.send-empty', { topic, event });
-		const result = ws.send(payload, false, false);
+		// `ws.send` throws on a freed native handle (callers may reach
+		// here after an `await` that outlasted the socket). Return 2
+		// (DROPPED, the uWS sentinel) so callers can pattern-match
+		// without distinguishing closed from backpressure-dropped.
+		let result;
+		try { result = ws.send(payload, false, false); }
+		catch { closedWsAborts++; return 2; }
 		bumpOut(ws, payload);
 		return result;
 	},
@@ -954,7 +987,9 @@ const platform = {
 	 * on the next drain.
 	 */
 	sendCoalesced(ws, { key, topic, event, data }) {
-		const userData = ws.getUserData();
+		let userData;
+		try { userData = ws.getUserData(); }
+		catch { closedWsAborts++; return; }
 		let pending = userData[WS_COALESCED];
 		if (!pending) {
 			pending = new Map();
@@ -990,7 +1025,15 @@ const platform = {
 		const envelope = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
 		let count = 0;
 		for (const ws of wsConnections) {
-			const decision = filter(ws.getUserData());
+			// uWS's close event fires synchronously and removes from
+			// wsConnections before any user code runs, so under normal
+			// flow every entry here is open. Defensive try/catch covers
+			// pathological cases (e.g. user filter triggers a close via
+			// side effect, or another worker raced through cleanup).
+			let userData;
+			try { userData = ws.getUserData(); }
+			catch { closedWsAborts++; continue; }
+			const decision = filter(userData);
 			if (decision && typeof decision.then === 'function') {
 				if (!sendToAsyncWarned) {
 					sendToAsyncWarned = true;
@@ -1005,7 +1048,8 @@ const platform = {
 				continue;
 			}
 			if (decision) {
-				ws.send(envelope, false, false);
+				try { ws.send(envelope, false, false); }
+				catch { closedWsAborts++; continue; }
 				bumpOut(ws, envelope);
 				count++;
 			}
@@ -1038,6 +1082,30 @@ const platform = {
 	 */
 	get assertions() {
 		return readAssertionCounts();
+	},
+
+	/**
+	 * Per-worker count of best-effort uWS operations that aborted
+	 * because the underlying WebSocket had already closed.
+	 *
+	 * Ws-targeted platform methods (`subscribe`, `unsubscribe`, `send`,
+	 * `sendCoalesced`, `sendTo`, `request`) and the wire-level
+	 * subscribe / subscribe-batch handlers all swallow uWS's "Invalid
+	 * access of closed uWS.WebSocket" exception so callers never need
+	 * a per-site try/catch. Each swallow bumps this counter.
+	 *
+	 * A non-zero value is normal under churn (clients close mid-async-
+	 * setup all the time). A rapidly-growing value under steady load
+	 * indicates either pathological client behaviour or that the
+	 * server's async setup path is too long for its connect rate -
+	 * worth investigating but not, by itself, a bug.
+	 *
+	 * Monotonic, per-worker, reset only on process restart.
+	 *
+	 * @returns {number}
+	 */
+	get closedWsAborts() {
+		return closedWsAborts;
 	},
 
 	/**
@@ -1138,7 +1206,13 @@ const platform = {
 		// non-ASCII topic names (`__signal:Jose`, presence rooms with
 		// localized labels) must not be blocked at the platform layer.
 		if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
-		const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+		// `ws.getUserData()` throws on a freed native handle. RPC and
+		// plugin code paths routinely `await` something else before
+		// reaching here, so the WS may already be closed by the time
+		// this runs. Treat as a silent no-op.
+		let subs;
+		try { subs = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+		catch { closedWsAborts++; return null; }
 		assert(subs instanceof Set, 'subs.shape', null);
 		if (subs.has(topic)) return null;
 		if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
@@ -1150,7 +1224,13 @@ const platform = {
 		// counter bump in that case.
 		if (subs.has(topic)) return null;
 		if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
-		ws.subscribe(topic);
+		// `ws.subscribe()` throws if the socket closed during the await
+		// above. Under mass-connect / backpressure churn this is the
+		// dominant abort mode (10-15% of connections close mid-setup).
+		// Swallow, count, and return success-shaped null so callers can
+		// fire-and-forget without per-site try/catch.
+		try { ws.subscribe(topic); }
+		catch { closedWsAborts++; return null; }
 		subs.add(topic);
 		totalSubscriptions++;
 		return null;
@@ -1227,10 +1307,17 @@ const platform = {
 	 * @returns {boolean} `true` if a subscription was removed
 	 */
 	unsubscribe(ws, topic) {
-		const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+		// Closed sockets get an early-out: there is no subscription
+		// state to remove, no uWS bookkeeping to drop, no informational
+		// hook to fire. The platform contract is "best effort; no throw
+		// on closed WS" - mirrors subscribe / send.
+		let subs;
+		try { subs = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+		catch { closedWsAborts++; return false; }
 		assert(subs instanceof Set, 'subs.shape-unsubscribe', null);
 		if (!subs.has(topic)) return false;
-		ws.unsubscribe(topic);
+		try { ws.unsubscribe(topic); }
+		catch { closedWsAborts++; return false; }
 		subs.delete(topic);
 		totalSubscriptions--;
 		assert(totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions });
@@ -1493,7 +1580,12 @@ const platform = {
 	 * so cleanup is automatic on close - no module-level leak risk.
 	 */
 	request(ws, event, data, options) {
-		const userData = ws.getUserData();
+		let userData;
+		try { userData = ws.getUserData(); }
+		catch {
+			closedWsAborts++;
+			return Promise.reject(new Error('connection closed'));
+		}
 		let pending = userData[WS_PENDING_REQUESTS];
 		if (!pending) {
 			pending = new Map();
@@ -1514,7 +1606,14 @@ const platform = {
 			}, timeoutMs);
 			pending.set(ref, { resolve, reject, timer });
 			const payload = JSON.stringify({ type: 'request', ref, event, data: data ?? null });
-			ws.send(payload, false, false);
+			try { ws.send(payload, false, false); }
+			catch {
+				closedWsAborts++;
+				clearTimeout(timer);
+				pending.delete(ref);
+				reject(new Error('connection closed'));
+				return;
+			}
 			bumpOut(ws, payload);
 		});
 	},
@@ -3093,7 +3192,8 @@ if (WS_ENABLED) {
 						sendSubscribeDenied(ws, msg.topic, ref, 'RATE_LIMITED');
 						return;
 					}
-					try { ws.subscribe(msg.topic); } catch { return; }
+					try { ws.subscribe(msg.topic); }
+					catch { closedWsAborts++; return; }
 					subs.add(msg.topic);
 					totalSubscriptions++;
 					if (wsDebug) console.log('[ws] subscribe topic=%s', msg.topic);
@@ -3171,7 +3271,8 @@ if (WS_ENABLED) {
 							sendSubscribeDenied(ws, topic, ref, 'RATE_LIMITED');
 							continue;
 						}
-						try { ws.subscribe(topic); } catch { continue; }
+						try { ws.subscribe(topic); }
+						catch { closedWsAborts++; continue; }
 						subs.add(topic);
 						totalSubscriptions++;
 						subscribed++;

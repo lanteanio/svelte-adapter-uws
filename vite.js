@@ -398,6 +398,13 @@ export default function uws(options = {}) {
 			// see the documented "no violations" state.
 			return new Map();
 		},
+		get closedWsAborts() {
+			// Dev uses Node's `ws` library, not uWS - sockets do not
+			// throw "Invalid access" when written to after close, so
+			// the closed-WS abort path doesn't exist here. Mirror the
+			// prod surface as a constant zero.
+			return 0;
+		},
 		subscribers(topic) {
 			let count = 0;
 			for (const [, topics] of subscriptions) {

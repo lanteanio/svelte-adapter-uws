@@ -168,7 +168,15 @@ export function createGroup(name, options = {}) {
 			// Publish join BEFORE subscribing so joiner doesn't see own join
 			platform.publish(internalTopic, 'join', { role, count: members.size });
 
-			ws.subscribe(internalTopic);
+			// Callers reach `join` after their own async auth chain; the
+			// socket may have closed in the meantime. Roll back the
+			// member entry instead of letting uWS's "Invalid access"
+			// crash the worker.
+			try { ws.subscribe(internalTopic); }
+			catch {
+				members.delete(ws);
+				return false;
+			}
 
 			// Send current member list to the joiner
 			platform.send(ws, internalTopic, 'members', membersList());
