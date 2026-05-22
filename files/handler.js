@@ -3035,17 +3035,30 @@ if (WS_ENABLED) {
 			// The 8192-byte ceiling is generous enough for subscribe-batch with
 			// many topics (N * 256-char names) while keeping the JSON.parse
 			// guard against truly large user messages.
+			// `msg` is hoisted to outer scope so it can be forwarded to the user
+			// handler in the fall-through delegation below. When the prefix
+			// matched and JSON.parse produced an object that did NOT match any
+			// known control type, the parsed value reaches plugin-layer
+			// dispatchers (e.g. svelte-realtime's `onJsonMessage`) directly, so
+			// they don't re-run TextDecoder + JSON.parse on every frame.
+			/** @type {any} */
+			let msg;
 			if (!isBinary && message.byteLength < 8192 &&
 				(new Uint8Array(message))[3] === 0x79 /* 'y' in {"type" */) {
 				/** @type {any} */
-				let msg;
+				let parsed;
 				try {
-					msg = JSON.parse(textDecoder.decode(message));
+					parsed = JSON.parse(textDecoder.decode(message));
 				} catch {
-					// Not valid JSON - fall through to user handler.
-					wsModule.message?.(ws, { data: message, isBinary, platform: ws.getUserData()[WS_PLATFORM] });
+					parsed = undefined;
+				}
+				if (parsed === null || typeof parsed !== 'object') {
+					// Not a JSON object envelope (parse failed, or parsed to
+					// null / primitive / array). Forward raw bytes only.
+					wsModule.message?.(ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
 					return;
 				}
+				msg = parsed;
 				if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
 					const ref = hasRef(msg.ref) ? msg.ref : null;
 					if (!isValidWireTopic(msg.topic, ALLOW_NON_ASCII_TOPICS)) {
@@ -3230,8 +3243,10 @@ if (WS_ENABLED) {
 					return;
 				}
 			}
-			// Delegate everything else to the user's handler (if provided)
-			wsModule.message?.(ws, { data: message, isBinary, platform: ws.getUserData()[WS_PLATFORM] });
+			// Delegate everything else to the user's handler (if provided).
+			// `msg` is the JSON-parsed envelope when the prefix matched + parsed
+			// to an object + no control type matched; otherwise undefined.
+			wsModule.message?.(ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
 		},
 
 		drain: (ws) => {

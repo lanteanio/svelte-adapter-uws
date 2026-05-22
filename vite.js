@@ -1003,9 +1003,24 @@ export default function uws(options = {}) {
 				// {"topic" have byte[3]='o' - skip JSON.parse for non-control messages.
 				// 8192 bytes matches the production handler ceiling and is large
 				// enough for a subscribe-batch with many topics.
+				//
+				// `msg` is hoisted to outer scope so it can be forwarded to the
+				// user handler in the fall-through delegation below. When the
+				// prefix matched and JSON.parse produced an object that did NOT
+				// match any known control type, the parsed value reaches plugin-
+				// layer dispatchers (e.g. svelte-realtime's `onJsonMessage`)
+				// directly, so they don't re-run TextDecoder + JSON.parse on
+				// every frame.
+					/** @type {any} */
+					let msg;
 					if (!isBinary && buf.byteLength < 8192 && buf[3] === 0x79) {
 						try {
-							const msg = JSON.parse(buf.toString());
+							msg = JSON.parse(buf.toString());
+							// Reject null / primitives / arrays so `msg` only reaches
+							// the user handler as a {type,...} object envelope. Throw
+							// to the catch (which clears `msg`) for a unified fall-
+							// through path with parse failures.
+							if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) throw 0;
 							if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
 								const ref = hasRefValue(msg.ref) ? msg.ref : null;
 								if (!isValidWireTopic(msg.topic, ALLOW_NON_ASCII_TOPICS_V)) {
@@ -1149,14 +1164,20 @@ export default function uws(options = {}) {
 								return;
 							}
 						} catch {
-							// Not JSON - fall through to user handler
+							// Not JSON, not an object envelope, or a known control
+							// type that threw inside its handler. Clear `msg` so the
+							// fall-through delegation sees `msg: undefined` (raw
+							// bytes only).
+							msg = undefined;
 						}
 					}
 
-					// Delegate to user handler
+					// Delegate to user handler. `msg` is the JSON-parsed envelope
+					// when the prefix matched + parsed to an object + no control
+					// type matched; otherwise undefined.
 					await handlerReady;
 					if (userHandlers.message) {
-						userHandlers.message(wrapped, { data: arrayBuffer, isBinary: !!isBinary, platform: wrapped.getUserData()[WS_PLATFORM] });
+						userHandlers.message(wrapped, { data: arrayBuffer, isBinary: !!isBinary, msg, platform: wrapped.getUserData()[WS_PLATFORM] });
 					}
 				});
 

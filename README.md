@@ -699,12 +699,25 @@ export function open(ws, { platform }) {
   ws.subscribe(`user:${userId}`);
 }
 
-// Called when a message is received
+// Called when a message is received.
 // Note: subscribe/unsubscribe messages from the client store are
-// handled automatically BEFORE this function is called
-export function message(ws, { data, isBinary }) {
-  const msg = JSON.parse(Buffer.from(data).toString());
-  console.log('Got message:', msg);
+// handled automatically BEFORE this function is called.
+//
+// `msg` is the JSON-parsed envelope when the adapter parsed the frame
+// for control-message routing but no control type matched (i.e. it
+// looks like `{"type":"<custom>",...}` from a plugin). The adapter
+// already did `TextDecoder + JSON.parse` once during routing, so this
+// avoids a second parse on the dispatch path. `msg` is `undefined`
+// for binary frames, prefix-miss frames, parse failures, or frames
+// that parse to a non-object.
+export function message(ws, { data, isBinary, msg }) {
+  if (msg) {
+    // Already-parsed JSON object envelope - dispatch by msg.type
+    console.log('Got envelope:', msg);
+    return;
+  }
+  // Binary or non-envelope text frame - decode manually
+  console.log('Got raw frame, byteLength:', data.byteLength);
 }
 
 // Called when a client tries to subscribe to a topic (optional)

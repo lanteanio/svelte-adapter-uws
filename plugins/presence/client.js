@@ -15,7 +15,7 @@
 
 const TOPIC_PREFIX = '__presence:';
 
-import { on } from '../../client.js';
+import { on, connect, status } from '../../client.js';
 import { writable } from 'svelte/store';
 
 /** @type {Map<string, { subscribe: (fn: Function) => (() => void) }>} */
@@ -83,9 +83,11 @@ export function presence(topic, options) {
 	const output = writable(/** @type {any[]} */ ([]));
 
 	let sourceUnsub = /** @type {(() => void) | null} */ (null);
+	let statusUnsub = /** @type {(() => void) | null} */ (null);
 	/** @type {ReturnType<typeof setInterval> | null} */
 	let sweepTimer = null;
 	let refCount = 0;
+	let cancelled = false;
 
 	function flush() {
 		output.set([...userMap.values()]);
@@ -105,6 +107,7 @@ export function presence(topic, options) {
 	}
 
 	function startListening() {
+		cancelled = false;
 		// Fresh on() call each time - the underlying writable in client.js
 		// is cleaned up on full unsubscribe, so a stale reference would
 		// silently stop receiving events.
@@ -150,28 +153,66 @@ export function presence(topic, options) {
 				return;
 			}
 
-			if (event.event === 'heartbeat' && Array.isArray(event.data)) {
-				// Server confirms these keys are still active - refresh their
-				// timestamps so maxAge doesn't expire them. Keys not in the
-				// heartbeat are left alone (maxAge will handle them).
+			if (event.event === 'heartbeat') {
 				const now = Date.now();
-				for (const key of event.data) {
-					if (timestamps.has(key)) {
+				let changed = false;
+				if (event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
+					// New shape: `{userKey: data}` map. Refresh existing AND
+					// re-add any entry that aged out between heartbeats. The
+					// older "refresh existing only" branch (below) could not
+					// recover entries the local sweep had already removed -
+					// once an entry aged out, the next heartbeat couldn't
+					// bring it back and the user stayed missing until a
+					// presence_diff or presence_state arrived.
+					for (const [key, data] of Object.entries(event.data)) {
 						timestamps.set(key, now);
+						const prev = userMap.get(key);
+						if (prev !== data) {
+							userMap.set(key, data);
+							changed = true;
+						}
+					}
+				} else if (Array.isArray(event.data)) {
+					// Back-compat: keys-only heartbeat (older server). Refresh
+					// existing entries; cannot recover aged-out ones from this
+					// shape. The presence_diff / presence_state reconciliation
+					// path still corrects missing entries on the next event.
+					for (const key of event.data) {
+						if (timestamps.has(key)) {
+							timestamps.set(key, now);
+						}
 					}
 				}
+				if (changed) flush();
+				return;
 			}
 		});
 
 		if (maxAge > 0) {
 			sweepTimer = setInterval(sweep, Math.max(maxAge / 2, 1000));
 		}
+
+		// Request a presence snapshot every time the socket opens (initial
+		// connect AND reconnects). Without this, a reconnecting client
+		// missed any presence_diff frames that fired during the disconnect
+		// window and its in-memory map stayed at whatever it last knew.
+		// Symmetric to the cursor plugin's `cursor-snapshot` send.
+		statusUnsub = status.subscribe((s) => {
+			if (s === 'open' && !cancelled) {
+				connect().send({ type: 'presence-snapshot', topic });
+			}
+		});
 	}
 
 	function stopListening() {
+		cancelled = true;
 		if (sourceUnsub) {
 			sourceUnsub();
 			sourceUnsub = null;
+		}
+		if (statusUnsub) {
+			statusUnsub();
+			statusUnsub = null;
 		}
 		if (sweepTimer) {
 			clearInterval(sweepTimer);

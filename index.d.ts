@@ -517,6 +517,26 @@ export interface MessageContext {
 	data: ArrayBuffer;
 	/** Whether the message is binary. */
 	isBinary: boolean;
+	/**
+	 * The JSON-parsed envelope, when the adapter parsed the frame for
+	 * control-message routing (subscribe / unsubscribe / hello / resume /
+	 * reply / subscribe-batch) but no control type matched.
+	 *
+	 * Plugin-layer JSON envelope dispatchers (e.g. svelte-realtime's
+	 * `createMessage({ onJsonMessage })`) consume this directly instead of
+	 * re-running `TextDecoder + JSON.parse` on every frame.
+	 *
+	 * `undefined` when:
+	 * - the frame is binary (`isBinary === true`), or
+	 * - the frame did not start with `{"ty` (byte[3] !== 0x79), or
+	 * - the frame was larger than 8 KiB, or
+	 * - `JSON.parse` threw, or
+	 * - the parsed value was not a plain object (null / array / primitive).
+	 *
+	 * The adapter's `websocket.maxPayloadLength` (default 1 MB) is the
+	 * structural ceiling for frame size; this field adds no separate cap.
+	 */
+	msg?: any;
 	/** The platform API - publish, send, topic helpers, etc. */
 	platform: Platform;
 }

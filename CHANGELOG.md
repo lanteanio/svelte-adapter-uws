@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-05-22
+
+### Added
+
+- **`plugins/presence/client.js` now sends a `{type:'presence-snapshot', topic}` text frame on every `status === 'open'` (initial connect + reconnect), symmetric to the existing cursor `cursor-snapshot` send.** Pre-fix, presence had no reconnect-snapshot path: a client whose connection dropped (deploy / network blip / tab resume) missed any `presence_diff` frames during the disconnect window and its in-memory map stayed at whatever it last knew. Global presence accidentally self-healed because most apps call `presence.join('global')` from the `open` hook (which fires on every reconnect); per-board presence did not have an equivalent auto-rejoin. The new frame routes to a server-side handler in `svelte-adapter-uws-extensions@^0.5.3` (`presence.hooks.message`) which re-emits a `presence_state` to the requesting ws via `tracker.sync()`. Without the extensions update the server ignores the frame (no-op), so the client send is safe to ship independently.
+
+### Changed
+
+- **`plugins/presence/client.js` heartbeat handler accepts both `{userKey: data}` map (new) and `[key, ...]` array (legacy) shapes.** Pre-fix, the handler only knew the array branch and could only refresh `existing` entries' timestamps; an entry the client had already swept could never be recovered from a heartbeat alone. The new branch refreshes existing AND re-adds missing entries from the per-user data carried in the map. Triggered by the matching server change in `svelte-adapter-uws-extensions@^0.5.3` (`redis/presence.js` heartbeat tick). Pairs with the new `presence-snapshot` send above so presence is fully self-healing across reconnects and missed heartbeats.
+
+- **`MessageContext` (the second argument to the `message` hook in `hooks.ws.js`) gains an optional `msg` field carrying the JSON-parsed envelope when the adapter already parsed the frame for control-message routing (subscribe / unsubscribe / hello / resume / reply / subscribe-batch) but no control type matched.** Pre-change, the adapter did `TextDecoder + JSON.parse` on every text frame whose 4th byte was `y` (i.e. matching `{"ty`) to check for control envelopes, then threw the parsed value away when none of the known types matched, forwarding only the raw `ArrayBuffer` to the user handler. Plugin-layer dispatchers (`svelte-realtime`'s `onJsonMessage` callback, `cursor.hooks.message` wired through `createMessage({ onUnhandled })`) then re-ran the same parse a second time on the raw bytes. With this change, the parsed value is kept in scope and forwarded as `ctx.msg` on the fall-through delegation, halving the parse cost on the dispatch path. The field is also set to `undefined` (not absent) when the frame is binary, prefix-miss, parse-failure, or parses to a non-object (null / primitive / array), so the context object has a stable hidden-class shape across all message paths. Existing handlers that destructure `{ data, isBinary, platform }` are unaffected (the new field is ignored by destructuring). Same change applied to both production (`files/handler.js`) and dev (`vite.js`) entry points so behaviour matches across modes. Type added to `MessageContext` in `index.d.ts`.
+
 ## [0.5.2] - 2026-05-22
 
 ### Changed

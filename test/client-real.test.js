@@ -1630,6 +1630,83 @@ describe('client.js (real module)', () => {
 
 			conn.close();
 		});
+
+		it('heartbeat as {userKey: data} map refreshes existing AND re-adds aged-out entries', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = presenceFn('presence-hb-map-topic');
+			/** @type {any[]} */
+			let current = [];
+			const unsub = store.subscribe((v) => { current = v; });
+
+			// Seed via initial presence_state.
+			ws._receive({ topic: '__presence:presence-hb-map-topic', event: 'presence_state',
+				data: { '1': { id: '1', name: 'Alice' } } });
+			expect(current).toEqual([{ id: '1', name: 'Alice' }]);
+
+			// Heartbeat with new shape: {userKey: data} map carrying a key
+			// not currently in the map. Pre-fix, this would be a no-op (array
+			// branch could only refresh existing); now it re-adds the missing
+			// entry from the heartbeat's data alone.
+			ws._receive({ topic: '__presence:presence-hb-map-topic', event: 'heartbeat',
+				data: { '1': { id: '1', name: 'Alice' }, '2': { id: '2', name: 'Bob' } } });
+			expect(current).toEqual([{ id: '1', name: 'Alice' }, { id: '2', name: 'Bob' }]);
+
+			unsub();
+			conn.close();
+		});
+
+		it('heartbeat as [keys] array (legacy server) is accepted but cannot re-add missing entries', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = presenceFn('presence-hb-array-topic');
+			/** @type {any[]} */
+			let current = [];
+			const unsub = store.subscribe((v) => { current = v; });
+
+			ws._receive({ topic: '__presence:presence-hb-array-topic', event: 'presence_state',
+				data: { '1': { id: '1', name: 'Alice' } } });
+			expect(current).toEqual([{ id: '1', name: 'Alice' }]);
+
+			// Legacy keys-only shape. The client accepts it without throwing,
+			// but cannot re-add the missing key '2' from this shape (no data
+			// to draw from). Existing entry '1' stays.
+			ws._receive({ topic: '__presence:presence-hb-array-topic', event: 'heartbeat',
+				data: ['1', '2'] });
+			expect(current).toEqual([{ id: '1', name: 'Alice' }]);
+
+			unsub();
+			conn.close();
+		});
+
+		it('sends {type:"presence-snapshot", topic} on status=open (initial connect)', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			const store = presenceFn('presence-snap-topic');
+			const unsub = store.subscribe(() => {});
+
+			// The store's startListening subscribes to `status`; status's
+			// initial value is the current connection state. After `await
+			// flush()` the connection is open, so the subscription callback
+			// fires synchronously with 'open' and the presence-snapshot
+			// frame is sent.
+			await flush();
+			const snapshots = ws._sent
+				.map((s) => JSON.parse(s))
+				.filter((m) => m.type === 'presence-snapshot');
+			expect(snapshots).toEqual([
+				{ type: 'presence-snapshot', topic: 'presence-snap-topic' }
+			]);
+
+			unsub();
+			conn.close();
+		});
 	});
 
 	describe('groups client plugin', () => {

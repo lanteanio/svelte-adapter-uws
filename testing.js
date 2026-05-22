@@ -568,12 +568,27 @@ export async function createTestServer(options = {}) {
 
 		async message(ws, message, isBinary) {
 			bumpInT(ws, message);
-			// Handle subscribe/unsubscribe from client store
+			// Handle subscribe/unsubscribe from client store.
+			//
+			// `msg` is hoisted to outer scope so it can be forwarded to the
+			// user handler in the fall-through delegation below. When the
+			// prefix matched and JSON.parse produced an object that did NOT
+			// match any known control type, the parsed value reaches plugin-
+			// layer dispatchers (e.g. svelte-realtime's `onJsonMessage`)
+			// directly, so they don't re-run TextDecoder + JSON.parse on
+			// every frame. Mirrors handler.js + vite.js.
+			/** @type {any} */
+			let msg;
 			if (!isBinary && message.byteLength < 8192) {
 				const bytes = new Uint8Array(message);
 				if (bytes[3] === 0x79) {
 					try {
-						const msg = JSON.parse(Buffer.from(message).toString());
+						msg = JSON.parse(Buffer.from(message).toString());
+						// Reject null / primitives / arrays so `msg` only reaches
+						// the user handler as a {type,...} object envelope. Throw
+						// to the catch (which clears `msg`) for a unified fall-
+						// through path with parse failures.
+						if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) throw 0;
 						if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
 							const ref = hasRefT(msg.ref) ? msg.ref : null;
 							if (!isValidWireTopic(msg.topic, ALLOW_NON_ASCII_TOPICS_T)) {
@@ -702,7 +717,13 @@ export async function createTestServer(options = {}) {
 							sendOutboundT(ws, '{"type":"resumed"}');
 							return;
 						}
-					} catch {}
+					} catch {
+						// Not JSON, not an object envelope, or a known control
+						// type that threw inside its handler. Clear `msg` so the
+						// fall-through delegation sees `msg: undefined` (raw
+						// bytes only).
+						msg = undefined;
+					}
 				}
 			}
 
@@ -712,7 +733,9 @@ export async function createTestServer(options = {}) {
 			}
 			messageWaiters = [];
 
-			handler.message?.(ws, { data: message, isBinary, platform: ws.getUserData()[WS_PLATFORM] });
+			// `msg` is the JSON-parsed envelope when the prefix matched + parsed
+			// to an object + no control type matched; otherwise undefined.
+			handler.message?.(ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
 		},
 
 		close(ws, code, message) {
