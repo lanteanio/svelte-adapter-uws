@@ -5,10 +5,17 @@
  * a live list of who's connected. The server handles join/leave tracking;
  * this module just keeps the client-side state in sync.
  *
- * When `maxAge` is set, entries that haven't been refreshed (via `list`
- * or `join` events) within that window are automatically removed. This
- * makes clients self-healing when the server fails to broadcast a `leave`
- * event (e.g. mass disconnects overwhelming Redis cleanup).
+ * Defaults to a 90 s `maxAge` sweep: entries that haven't been refreshed
+ * by a heartbeat or presence_diff/state inside the window are removed
+ * from the local map. The in-memory server (and the Redis-backed variant
+ * in svelte-adapter-uws-extensions) emits `{userKey: data}` heartbeats
+ * every 30 s by default, so a still-present user re-appears on the very
+ * next heartbeat - no flicker for live users, and ghost entries from
+ * silent server-side TTL expiry (cluster mass-disconnect, ungraceful
+ * client close) clear within one sweep window.
+ *
+ * Apps that want unbounded retention ("show every user who ever touched
+ * this topic" - admin / audit views) opt out with `maxAge: 0`.
  *
  * @module svelte-adapter-uws/plugins/presence/client
  */
@@ -62,14 +69,19 @@ const presenceStores = new Map();
  * @example
  * ```svelte
  * <script>
- *   // Self-healing: entries expire after 90s without a refresh
- *   const users = presence('room', { maxAge: 90_000 });
+ *   // Opt out of the default 90 s sweep for an admin / audit view.
+ *   const users = presence('room', { maxAge: 0 });
  * </script>
  * ```
  */
 export function presence(topic, options) {
-	const maxAge = options?.maxAge;
-	const cacheKey = maxAge > 0 ? topic + '\0' + maxAge : topic;
+	// Default 90 s sweep matches the extensions Redis presence's default
+	// `ttl: 90` (server-side per-field TTL) and gives the in-memory
+	// server's 30 s default heartbeat a 3x safety margin. Apps that want
+	// "show every user who ever touched this topic" (admin/audit views)
+	// opt out with `maxAge: 0`.
+	const maxAge = options?.maxAge ?? 90000;
+	const cacheKey = topic + '\0' + maxAge;
 
 	const cached = presenceStores.get(cacheKey);
 	if (cached) return cached;

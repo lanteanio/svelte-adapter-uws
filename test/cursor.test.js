@@ -288,6 +288,82 @@ describe('cursor plugin - server', () => {
 			expect(pubs(p, 'update')).toHaveLength(3);
 			expect(pubs(p, 'bulk')).toHaveLength(0);
 		});
+
+		it('clear() cancels the pending scheduler tick (no stale flush after reset)', () => {
+			vi.useFakeTimers();
+			const c = createCursor({ throttle: 0, topicThrottle: 16 });
+			const ws = mockWs({ id: '1' });
+			const p = mockPlatform();
+
+			c.update(ws, 'canvas', { x: 1 }, p);  // leading-edge
+			c.update(ws, 'canvas', { x: 2 }, p);  // queued for tick
+			c.clear();
+
+			vi.advanceTimersByTime(50);
+			// Nothing should have fired post-clear.
+			expect(p.published.filter((m) => m.event === 'update' || m.event === 'bulk').length).toBeLessThanOrEqual(1);
+		});
+
+		it('different topics are independently scheduled (one tick walks dirty topics only)', () => {
+			vi.useFakeTimers();
+			const c = createCursor({ throttle: 0, topicThrottle: 16 });
+			const ws = mockWs({ id: '1' });
+			const p = mockPlatform();
+
+			c.update(ws, 'canvas-a', { x: 1 }, p);  // leading-edge a
+			vi.advanceTimersByTime(5);
+			c.update(ws, 'canvas-b', { x: 1 }, p);  // leading-edge b
+			// Both lead-edge fires went through; subsequent moves in-window
+			// queue per-topic.
+			p.reset();
+			c.update(ws, 'canvas-a', { x: 11 }, p);
+			c.update(ws, 'canvas-b', { x: 22 }, p);
+
+			// canvas-a's deadline lands first (lastFlush=0 vs lastFlush=5).
+			vi.advanceTimersByTime(11);  // canvas-a deadline
+			expect(pubs(p, 'update').some((u) => u.topic === '__cursor:canvas-a')).toBe(true);
+
+			vi.advanceTimersByTime(5);  // canvas-b deadline
+			expect(pubs(p, 'update').some((u) => u.topic === '__cursor:canvas-b')).toBe(true);
+		});
+	});
+
+	describe('stats() scheduler health accessor', () => {
+		it('exposes flushes / drift / dirtyTopics / activeTopics', () => {
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
+			expect(c.stats()).toEqual({
+				flushes: 0,
+				driftMeanMs: 0,
+				driftMaxMs: 0,
+				dirtyTopicsCurrent: 0,
+				activeTopicsTotal: 0
+			});
+		});
+
+		it('activeTopicsTotal increments per touched topic', () => {
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
+			const ws = mockWs({ id: '1' });
+			const p = mockPlatform();
+			c.update(ws, 'a', { x: 1 }, p);
+			c.update(ws, 'b', { x: 1 }, p);
+			expect(c.stats().activeTopicsTotal).toBe(2);
+		});
+
+		it('flushes counter increments on every flush (leading + trailing edge)', () => {
+			vi.useFakeTimers();
+			const c = createCursor({ throttle: 0, topicThrottle: 100 });
+			const ws = mockWs({ id: '1' });
+			const p = mockPlatform();
+
+			c.update(ws, 'canvas', { x: 1 }, p);
+			expect(c.stats().flushes).toBe(1);
+
+			c.update(ws, 'canvas', { x: 2 }, p);
+			expect(c.stats().flushes).toBe(1);
+
+			vi.advanceTimersByTime(100);
+			expect(c.stats().flushes).toBe(2);
+		});
 	});
 
 	describe('update - multiple topics', () => {

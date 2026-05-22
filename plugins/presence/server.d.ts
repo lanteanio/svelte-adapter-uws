@@ -47,18 +47,30 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	/**
 	 * Interval in milliseconds between heartbeat broadcasts.
 	 *
-	 * When set, the server periodically publishes a `heartbeat` event to all
-	 * presence topics containing the list of active user keys. This resets
-	 * the `maxAge` timer on clients, preventing live users from being expired.
+	 * The server periodically publishes a `heartbeat` event to all presence
+	 * topics carrying a `{userKey: data}` map of every active user. This
+	 * refreshes each entry's `maxAge` timer on the client AND re-adds any
+	 * entry the client swept while the user was still present, so live
+	 * users do not flicker out when a `presence_diff` is missed (transient
+	 * network blip, JS thread saturation).
 	 *
-	 * Set this to a value shorter than the client's `maxAge`.
+	 * Set this to a value shorter than the client's `maxAge`. The 30 s
+	 * default fits the 90 s default client `maxAge` with a 3x safety
+	 * margin. Pass `0` to disable heartbeats entirely (apps that do not
+	 * use the `maxAge` self-healing path).
 	 *
-	 * @default 0 (disabled)
+	 * @default 30000
 	 *
 	 * @example
 	 * ```js
-	 * // Server heartbeat every 60s, client maxAge 120s
+	 * // Slower heartbeat (less wire traffic, larger window for ghost entries)
 	 * const presence = createPresence({ heartbeat: 60_000 });
+	 * ```
+	 *
+	 * @example
+	 * ```js
+	 * // Disable heartbeats; client must rely on presence_diff alone
+	 * const presence = createPresence({ heartbeat: 0 });
 	 * ```
 	 */
 	heartbeat?: number;

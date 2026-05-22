@@ -2377,8 +2377,8 @@ import { createPresence } from 'svelte-adapter-uws/plugins/presence';
 
 export const presence = createPresence({
   key: 'id',
-  select: (userData) => ({ id: userData.id, name: userData.name }),
-  heartbeat: 60_000  // optional: needed if clients use maxAge
+  select: (userData) => ({ id: userData.id, name: userData.name })
+  // heartbeat:      30_000 (default) - broadcast every 30s; clients refresh maxAge / re-add aged-out entries
   // maxConnections: 1_000_000 (default) - hard cap on tracked connections
   // maxTopics:      1_000_000 (default) - hard cap on active topic registry
 });
@@ -2450,8 +2450,8 @@ import { createPresence } from 'svelte-adapter-uws/plugins/presence';
 
 const presence = createPresence({
   key: 'id',             // field for multi-tab dedup (default: 'id')
-  select: (userData) => userData,  // extract public fields (default: full userData)
-  heartbeat: 60_000      // broadcast active keys every 60s (default: disabled)
+  select: (userData) => userData,  // extract public fields (default: recursive denylist)
+  heartbeat: 30_000      // broadcast every 30s (default: 30000; pass 0 to disable)
 });
 
 presence.hooks                       // ready-made { subscribe, unsubscribe, close } hooks
@@ -2466,14 +2466,15 @@ presence.clear()                     // reset everything (stops heartbeat timer)
 
 #### Wire format
 
-The plugin emits two frame types on the `__presence:{topic}` channel:
+The plugin emits three frame types on the `__presence:{topic}` channel:
 
 - `{event: 'presence_state', data: {[key]: meta}}` - full snapshot, sent to a single connection on join or sync.
 - `{event: 'presence_diff', data: {joins: {[key]: meta}, leaves: {[key]: meta}}}` - changes, broadcast to all subscribers of the topic.
+- `{event: 'heartbeat', data: {[key]: meta}}` - periodic full-roster refresh, broadcast every `heartbeat` ms (30 s default). Carries a `{userKey: data}` map so a client whose entry aged out of its local `maxAge` sweep can re-add it from the heartbeat alone, without waiting for the next `presence_diff`.
 
 Diffs are buffered in a microtask queue: multiple joins / leaves in the same tick collapse into one diff frame. Within a diff, `leaves` are applied first then `joins`, so an update (same key in both) ends with the user present using the new data. If a key cycles join then leave in the same tick, the diff carries only the latest op (`leave` wins).
 
-`heartbeat` events (when configured) are unchanged: they carry an array of currently-active keys.
+The Redis-backed variant in the [extensions](https://github.com/lanteanio/svelte-adapter-uws-extensions) package emits the same three frame shapes, so the same client bundle works against either backend.
 
 #### Client API
 
@@ -2484,19 +2485,23 @@ const users = presence('room');
 // $users = [{ id: '1', name: 'Alice' }, { id: '2', name: 'Bob' }]
 ```
 
-The `presence()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, entries that haven't been refreshed within that window are automatically removed from the store. This makes clients self-healing when the server fails to broadcast a leaving entry in a `presence_diff` frame under load.
+The client store defaults to a 90 s `maxAge` sweep: entries that haven't been refreshed by a heartbeat or `presence_diff` / `presence_state` inside the window are removed from the local map. With the server's 30 s default heartbeat, still-present users are refreshed three times per window and never flicker; ghost entries left over by silent server-side cleanup (cluster mass-disconnect, ungraceful client close) clear within one sweep window.
 
-**Important:** `maxAge` requires the server-side `heartbeat` option. Without heartbeat, no events arrive between the initial `presence_state` snapshot and eventual leave, so maxAge would expire every user - including ones who are still connected. The heartbeat periodically tells clients which keys are still active, resetting their maxAge timers.
+For admin / audit views that want unbounded retention ("show every user who ever touched this topic"), opt out with `maxAge: 0`:
+
+```js
+const everyoneEver = presence('room', { maxAge: 0 });
+```
+
+To customize the window, set `maxAge` and the matching server `heartbeat` together (rule of thumb: heartbeat is one-third of `maxAge` or less, so a still-present user gets at least two refreshes per sweep window):
 
 ```js
 // Server: heartbeat every 60s
 const presence = createPresence({ key: 'id', heartbeat: 60_000 });
 
-// Client: entries expire after 120s without a heartbeat refresh
-const users = presence('room', { maxAge: 120_000 });
+// Client: entries expire after 180s without a heartbeat refresh
+const users = presence('room', { maxAge: 180_000 });
 ```
-
-Rule of thumb: set `heartbeat` to half (or less) of the client's `maxAge`.
 
 #### How multi-tab dedup works
 

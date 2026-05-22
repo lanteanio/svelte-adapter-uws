@@ -99,6 +99,13 @@ const EVENTS = Object.freeze({
  *   subscribe so late joiners see existing cursors immediately.
  * @property {() => void} clear -
  *   Clear all cursor tracking state and pending timers.
+ * @property {() => { flushes: number, driftMeanMs: number, driftMaxMs: number, dirtyTopicsCurrent: number, activeTopicsTotal: number }} stats -
+ *   Snapshot of scheduler health. `flushes` is the total tick-driven
+ *   flushes; `driftMeanMs` / `driftMaxMs` measure the gap between the
+ *   target deadline and the actual fire time (`> topicThrottle` indicates
+ *   sustained event-loop saturation); `dirtyTopicsCurrent` is topics with
+ *   pending coalesced entries (should hover near zero); `activeTopicsTotal`
+ *   is topics with at least one local cursor.
  */
 
 /**
@@ -193,13 +200,47 @@ export function createCursor(options = {}) {
 	const topics = new Map();
 
 	/**
-	 * Per-topic aggregate throttle state for `topicThrottle` coalescing.
-	 * Dirty entries are keyed by connection key; latest-wins. When the
-	 * coalesce window elapses, `dirty.size === 1` sends a single `update`
-	 * and any other count sends one `bulk` array.
-	 * @type {Map<string, { lastFlush: number, timer: any, dirty: Map<string, { data: any, platform: any }> }>}
+	 * Per-topic aggregate flush state.
+	 *
+	 * - `dirty`: cursors awaiting coalesced flush. Keyed by connection key;
+	 *   latest-wins. When the coalesce window elapses, `dirty.size === 1`
+	 *   sends a single `update`; any other count sends one `bulk` array.
+	 * - `lastFlush`: target-anchored timestamp of the most recent flush.
+	 *   Advanced by `topicThrottleMs` per cycle (not to actual fire time)
+	 *   so a single late tick does not compound drift on subsequent cycles.
+	 *
+	 * @type {Map<string, { dirty: Map<string, { data: any, platform: any }>, lastFlush: number }>}
 	 */
 	const topicFlush = new Map();
+
+	/**
+	 * Topics with at least one pending dirty entry. Bounded by mover count,
+	 * not active-topic count, so the scheduler walks only dirty topics on
+	 * each tick instead of every active one.
+	 * @type {Set<string>}
+	 */
+	const dirtyTopics = new Set();
+
+	/**
+	 * Single tracker-wide timer. Always points at the next earliest topic
+	 * deadline (or null when idle). Replaces the previous per-topic
+	 * setTimeout pattern: N pending timers -> 1 pending timer regardless
+	 * of topic count. Scheduling cost is O(dirty topics), not O(active
+	 * topics).
+	 * @type {ReturnType<typeof setTimeout> | null}
+	 */
+	let tickTimer = null;
+
+	/**
+	 * Drift accounting for `stats()` observability. Mean (target - actual)
+	 * and max over tick-driven flushes. Leading-edge synchronous flushes
+	 * are NOT counted (they fire on the caller's thread, not via the
+	 * scheduler; their drift is structurally zero).
+	 */
+	let driftSum = 0;
+	let driftCount = 0;
+	let driftMax = 0;
+	let flushCount = 0;
 
 	/**
 	 * Get or create ws state and return the connection key + user data.
@@ -224,14 +265,15 @@ export function createCursor(options = {}) {
 	}
 
 	/**
-	 * Drop the topic's coalesce state (clears any pending timer first).
+	 * Drop the topic's coalesce state. The single tracker-wide tickTimer is
+	 * left alone (it self-cancels on the next tick when `dirtyTopics` is
+	 * empty); we just remove this topic from both the flush map and the
+	 * dirty set so the next tick skips it.
 	 * @param {string} topic
 	 */
 	function clearTopicFlush(topic) {
-		const flushState = topicFlush.get(topic);
-		if (!flushState) return;
-		if (flushState.timer) clearTimeout(flushState.timer);
 		topicFlush.delete(topic);
+		dirtyTopics.delete(topic);
 	}
 
 	/**
@@ -262,6 +304,7 @@ export function createCursor(options = {}) {
 	 */
 	function flushDirty(topic, dirty) {
 		if (dirty.size === 0) return;
+		flushCount++;
 		if (dirty.size === 1) {
 			const [k, v] = dirty.entries().next().value;
 			doBroadcast(topic, k, v.data, v.platform);
@@ -279,8 +322,64 @@ export function createCursor(options = {}) {
 	}
 
 	/**
+	 * Scheduler tick. Walks `dirtyTopics`, flushes any topic whose deadline
+	 * (`lastFlush + topicThrottleMs`) has passed, and re-arms `tickTimer`
+	 * for the next earliest pending deadline. Topics whose deadline has
+	 * not yet passed stay in `dirtyTopics` for the next tick.
+	 *
+	 * Target-anchored advance: on flush, `lastFlush` is set to the deadline
+	 * (not the actual fire time) so a single late tick does not compound
+	 * drift on subsequent cycles. If we fell behind by more than one cycle
+	 * (event loop saturation > `topicThrottleMs`), `lastFlush` resets to
+	 * `now` to avoid queueing phantom catch-up fires.
+	 */
+	function tick() {
+		tickTimer = null;
+		const now = Date.now();
+		let nextDeadline = Infinity;
+
+		for (const topic of dirtyTopics) {
+			const state = topicFlush.get(topic);
+			if (!state) { dirtyTopics.delete(topic); continue; }
+			if (state.dirty.size === 0) {
+				dirtyTopics.delete(topic);
+				continue;
+			}
+			const deadline = state.lastFlush + topicThrottleMs;
+			if (deadline <= now) {
+				const drift = now - deadline;
+				driftSum += drift;
+				driftCount++;
+				if (drift > driftMax) driftMax = drift;
+
+				flushDirty(topic, state.dirty);  // increments flushCount internally
+				state.dirty.clear();
+				dirtyTopics.delete(topic);
+
+				state.lastFlush = drift < topicThrottleMs ? deadline : now;
+			} else if (deadline < nextDeadline) {
+				nextDeadline = deadline;
+			}
+		}
+
+		if (nextDeadline !== Infinity) {
+			tickTimer = setTimeout(tick, Math.max(0, nextDeadline - Date.now()));
+		}
+		// else: scheduler idle until next `broadcast()` call.
+	}
+
+	function armTick(delay) {
+		if (tickTimer !== null) return;
+		tickTimer = setTimeout(tick, delay);
+	}
+
+	/**
 	 * Route a broadcast through the per-topic coalesce window when
 	 * `topicThrottle` is enabled, or directly publish when disabled.
+	 *
+	 * Leading-edge synchronous flush preserves the contract that the first
+	 * call on an idle topic publishes immediately (no setTimeout(0) detour).
+	 * Trailing-edge fires via the single tracker-wide `tickTimer`.
 	 */
 	function broadcast(topic, key, data, platform) {
 		if (topicThrottleMs <= 0) {
@@ -290,34 +389,22 @@ export function createCursor(options = {}) {
 
 		let state = topicFlush.get(topic);
 		if (!state) {
-			state = { lastFlush: 0, timer: null, dirty: new Map() };
+			state = { dirty: new Map(), lastFlush: 0 };
 			topicFlush.set(topic, state);
 		}
-
 		state.dirty.set(key, { data, platform });
 
 		const now = Date.now();
 		if (now - state.lastFlush >= topicThrottleMs) {
-			if (state.timer) {
-				clearTimeout(state.timer);
-				state.timer = null;
-			}
 			state.lastFlush = now;
 			flushDirty(topic, state.dirty);
 			state.dirty.clear();
+			dirtyTopics.delete(topic);
 			return;
 		}
 
-		if (!state.timer) {
-			state.timer = setTimeout(() => {
-				const s = topicFlush.get(topic);
-				if (!s) return;
-				s.timer = null;
-				s.lastFlush = Date.now();
-				flushDirty(topic, s.dirty);
-				s.dirty.clear();
-			}, topicThrottleMs - (now - state.lastFlush));
-		}
+		dirtyTopics.add(topic);
+		armTick(Math.max(0, topicThrottleMs - (now - state.lastFlush)));
 	}
 
 	/** @type {CursorTracker} */
@@ -460,13 +547,40 @@ export function createCursor(options = {}) {
 					if (entry.timer) clearTimeout(entry.timer);
 				}
 			}
-			for (const [, state] of topicFlush) {
-				if (state.timer) clearTimeout(state.timer);
-			}
+			if (tickTimer !== null) { clearTimeout(tickTimer); tickTimer = null; }
+			dirtyTopics.clear();
 			topics.clear();
 			topicFlush.clear();
 			wsState.clear();
 			connCounter = 0;
+		},
+
+		/**
+		 * Snapshot of scheduler health. Always available, near-zero cost.
+		 *
+		 * - `flushes`: total tick-driven flushes since tracker creation.
+		 * - `driftMeanMs`: mean (target_deadline - actual_fire_time) across
+		 *   all tick-driven flushes. 0 means perfect cadence; values >
+		 *   `topicThrottle` indicate sustained event-loop saturation or
+		 *   CPU contention.
+		 * - `driftMaxMs`: largest single observed late fire. Useful for
+		 *   spotting one-off GC pauses vs. sustained drift.
+		 * - `dirtyTopicsCurrent`: topics with pending coalesced entries
+		 *   right now. Should hover near zero in healthy operation.
+		 * - `activeTopicsTotal`: topics with at least one local cursor.
+		 *
+		 * Leading-edge synchronous flushes (first call on an idle topic)
+		 * are not counted in drift stats - they fire on the call thread,
+		 * not via the scheduler.
+		 */
+		stats() {
+			return {
+				flushes: flushCount,
+				driftMeanMs: driftCount > 0 ? driftSum / driftCount : 0,
+				driftMaxMs: driftMax,
+				dirtyTopicsCurrent: dirtyTopics.size,
+				activeTopicsTotal: topics.size
+			};
 		},
 
 		hooks: {

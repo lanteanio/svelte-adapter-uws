@@ -965,12 +965,12 @@ describe('presence plugin - server', () => {
 			const heartbeats = platform.published.filter(e => e.event === 'heartbeat');
 			expect(heartbeats).toHaveLength(1);
 			expect(heartbeats[0].topic).toBe('__presence:room');
-			expect(heartbeats[0].data).toEqual(['1']);
+			expect(heartbeats[0].data).toEqual({ '1': { id: '1', name: 'Alice' } });
 
 			p.clear();
 		});
 
-		it('includes all active keys in heartbeat', () => {
+		it('heartbeat payload is a {userKey: data} map of every active user', () => {
 			vi.useFakeTimers();
 			const p = createPresence({
 				key: 'id',
@@ -988,7 +988,10 @@ describe('presence plugin - server', () => {
 
 			const heartbeats = platform.published.filter(e => e.event === 'heartbeat');
 			expect(heartbeats).toHaveLength(1);
-			expect(heartbeats[0].data.sort()).toEqual(['1', '2']);
+			expect(heartbeats[0].data).toEqual({
+				'1': { id: '1', name: 'Alice' },
+				'2': { id: '2', name: 'Bob' }
+			});
 
 			p.clear();
 		});
@@ -1016,11 +1019,12 @@ describe('presence plugin - server', () => {
 			p.clear();
 		});
 
-		it('does not publish heartbeats when heartbeat is 0 or omitted', () => {
+		it('does not publish heartbeats when heartbeat is explicitly 0', () => {
 			vi.useFakeTimers();
 			const p = createPresence({
 				key: 'id',
-				select: (userData) => ({ id: userData.id, name: userData.name })
+				select: (userData) => ({ id: userData.id, name: userData.name }),
+				heartbeat: 0
 			});
 
 			const ws = mockWs({ id: '1', name: 'Alice' });
@@ -1033,6 +1037,33 @@ describe('presence plugin - server', () => {
 			expect(heartbeats).toHaveLength(0);
 
 			p.clear();
+		});
+
+		it('publishes heartbeats at the 30 s default when no `heartbeat` option is passed', () => {
+			vi.useFakeTimers();
+			const p = createPresence({
+				key: 'id',
+				select: (userData) => ({ id: userData.id, name: userData.name })
+			});
+
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			p.join(ws, 'room', platform);
+			platform.reset();
+
+			vi.advanceTimersByTime(29999);
+			expect(platform.published.filter(e => e.event === 'heartbeat')).toHaveLength(0);
+
+			vi.advanceTimersByTime(1);
+			const heartbeats = platform.published.filter(e => e.event === 'heartbeat');
+			expect(heartbeats).toHaveLength(1);
+			expect(heartbeats[0].data).toEqual({ '1': { id: '1', name: 'Alice' } });
+
+			p.clear();
+		});
+
+		it('rejects non-numeric / negative heartbeat at construction', () => {
+			expect(() => createPresence({ heartbeat: -1 })).toThrow('non-negative');
+			expect(() => createPresence({ heartbeat: NaN })).toThrow('non-negative');
 		});
 
 		it('clear() stops the heartbeat timer', () => {
@@ -1073,7 +1104,7 @@ describe('presence plugin - server', () => {
 
 			const heartbeats = platform.published.filter(e => e.event === 'heartbeat');
 			expect(heartbeats).toHaveLength(1);
-			expect(heartbeats[0].data).toEqual(['1']);
+			expect(heartbeats[0].data).toEqual({ '1': { id: '1', name: 'Alice' } });
 
 			p.clear();
 		});

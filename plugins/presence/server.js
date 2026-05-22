@@ -52,11 +52,14 @@ const TOPIC_PREFIX = '__presence:';
  *
  *   Should return JSON-serializable data (plain objects, arrays, strings, numbers,
  *   booleans, null) since the result is sent over WebSocket.
- * @property {number} [heartbeat=0] - Interval in milliseconds between heartbeat broadcasts.
- *   When set, the server periodically publishes a `heartbeat` event to all presence topics
- *   containing the list of active keys. This resets the `maxAge` timer on clients, preventing
- *   live users from being expired. Set this to a value shorter than the client's `maxAge`.
- *   Disabled by default (0 or omitted).
+ * @property {number} [heartbeat=30000] - Interval in milliseconds between heartbeat broadcasts.
+ *   The server periodically publishes a `heartbeat` event to all presence topics carrying a
+ *   `{userKey: data}` map of every active user. This refreshes each entry's `maxAge` timer on
+ *   the client AND re-adds any entry the client swept while the user was still present, so
+ *   live users do not flicker out when a `presence_diff` is missed (e.g. transient network
+ *   blip, JS thread saturation). Set this to a value shorter than the client's `maxAge`
+ *   (default client `maxAge` is 90 s, so 30 s gives a 3x safety margin). Pass `0` to disable
+ *   heartbeats entirely (apps that do not use the `maxAge` self-healing path).
  */
 
 /**
@@ -252,7 +255,15 @@ function defaultPresenceSelect(obj, ancestors) {
 export function createPresence(options = {}) {
 	const keyField = options.key || 'id';
 	const select = options.select || defaultPresenceSelect;
-	const heartbeatMs = options.heartbeat || 0;
+	// Default 30 s heartbeat keeps the client's `maxAge` sweep self-healing:
+	// a still-present user re-appears on the next heartbeat after their
+	// entry ages out of the local map. Apps that want zero heartbeat
+	// traffic (no `maxAge` consumers, or out-of-band liveness) pass
+	// `heartbeat: 0` explicitly to opt out.
+	const heartbeatMs = options.heartbeat ?? 30000;
+	if (typeof heartbeatMs !== 'number' || !Number.isFinite(heartbeatMs) || heartbeatMs < 0) {
+		throw new Error('presence: heartbeat must be a non-negative number');
+	}
 	const maxConnections = options.maxConnections ?? 1_000_000;
 	const maxTopics = options.maxTopics ?? 1_000_000;
 
@@ -373,11 +384,16 @@ export function createPresence(options = {}) {
 		if (heartbeatMs > 0) {
 			heartbeatTimer = setInterval(() => {
 				for (const [topic, users] of topicPresence) {
-					_platform.publish(
-						TOPIC_PREFIX + topic,
-						'heartbeat',
-						[...users.keys()]
-					);
+					// Publish a `{userKey: data}` map (rather than a keys-only
+					// array) so a client whose entry aged out of its local
+					// `maxAge` sweep between heartbeats can re-add it from the
+					// heartbeat alone, without waiting for a presence_diff /
+					// presence_state to reconcile. Matches the Redis-backed
+					// variant in svelte-adapter-uws-extensions.
+					/** @type {Record<string, any>} */
+					const dataMap = {};
+					for (const [userKey, entry] of users) dataMap[userKey] = entry.data;
+					_platform.publish(TOPIC_PREFIX + topic, 'heartbeat', dataMap);
 				}
 			}, heartbeatMs);
 		}
