@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-05-23
+
+### Fixed
+
+- **`plugins/cursor/server.js`: leading-edge synchronous fire path removed; every broadcast now goes through the scheduler tick. Supersedes the 0.5.5 `queueMicrotask` defer, which didn't fix the production fragmentation.** The 0.5.5 fix assumed co-arriving cursors share a single JS task (so a microtask-deferred flush could batch them). In production they don't: uWS dispatches each WS message as its own JS task and N-API drains microtasks at the C++ <-> JS boundary between tasks. A `queueMicrotask`-deferred flush therefore runs BEFORE the next socket's message handler - cross-socket coalescing window is zero. Demo-side smoothness probe on 0.5.5 against the same 1000-cursor load profile still showed ~99% single-cursor UPDATE / ~1% BULK (essentially the pre-fix shape: 3356 UPDATEs vs 12 BULKs in 30 s). The bench shipped with 0.5.5 (`bench/micro-cursor-microtask-defer.mjs`) was misleading because its driver ran all broadcasts in one synchronous loop - the input shape that the microtask defer happens to handle correctly, not the input shape production has.
+
+  **The real fix: always-tick.** Drop the leading-edge fire entirely. Every broadcast appends to `state.dirty`, adds the topic to `dirtyTopics`, and arms the tracker-wide tick timer at `delay = elapsed >= topicThrottleMs ? 0 : topicThrottleMs - elapsed`. `setTimeout(0)` is a libuv timers-phase callback that fires only after the poll phase processes every ready message on every socket - so all broadcasts dispatched in the same loop iteration end up in one flush, regardless of how many task boundaries separate them. The `pendingMicroflush` flag is gone; the `queueMicrotask` call is gone; the leading-edge branch in `broadcast()` is gone. One code path, one timing model.
+
+  **Latency cost.** The first cursor on an idle topic now waits up to `topicThrottleMs` (default 16 ms / one frame budget) before its frame leaves. Below the perceptual floor for cursor at any reasonable cadence target. The cost buys cross-socket coalescing, which is what the demo's 1000-cursor stress profile actually needs.
+
+  **Tests.** New regression test in `test/cursor.test.js` drives broadcasts across `await Promise.resolve()` boundaries (the cross-task shape that would have caught 0.5.5): 50 cursors each in their own microtask-separated task, fire the tick, expect 1 bulk of 50 entries / 0 single-cursor UPDATEs. Multi-cycle saturation regression test (10 cycles x 50 cursors, each cursor its own task) pins the same property across cadence boundaries. Five existing tests updated for the always-tick timing (sync assertions immediately after `c.update(...)` become `vi.advanceTimersByTime(topicThrottleMs); expect(...)` because the tick is now the only flush path).
+
+  **Bench rewrite.** `bench/micro-cursor-microtask-defer.mjs` rewritten to drive cross-task. Now compares all three variants (sync leading-edge / `queueMicrotask` defer / always-tick) under `await Promise.resolve()` separation between every broadcast. Variants A and B leak single-cursor UPDATEs out; variant C does not, and produces bulks at the full per-cycle population.
+
+  **Cross-repo follow-up.** Same correction applies to `svelte-adapter-uws-extensions/redis/cursor.js`: both `broadcast()` and `enqueueInbound()` carry the same shape. Same always-tick rewrite + same `pendingMicroflush` flag removal applies verbatim.
+
 ## [0.5.5] - 2026-05-22
 
 ### Fixed

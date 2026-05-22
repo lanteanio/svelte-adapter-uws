@@ -383,23 +383,30 @@ export function createCursor(options = {}) {
 
 	/**
 	 * Route a broadcast through the per-topic coalesce window when
-	 * `topicThrottle` is enabled, or directly publish when disabled.
+	 * `topicThrottle` is enabled, or publish immediately when disabled.
 	 *
-	 * Leading-edge claims the cadence slot synchronously (lastFlush =
-	 * now) but defers the actual flush by one microtask so co-arriving
-	 * broadcasts in the same JS pass batch into a single bulk frame.
-	 * Without the microtask defer, an event-loop pause > topicThrottleMs
-	 * caused the post-pause first cursor to fire alone (single-cursor
-	 * UPDATE) while every other cursor in the same burst queued to the
-	 * trailing tick: under sustained pressure (30K RPCs/sec/worker) this
-	 * fragmented 86% of cursor frames into single-cursor UPDATEs.
-	 * Microtasks run after the current synchronous code completes but
-	 * before the next I/O / setTimeout / event-loop tick, so any
-	 * subsequent broadcast() in the same handler batch adds itself to
-	 * `dirty` before the flush runs.
+	 * Every broadcast appends to `dirty` and arms (or shares) the
+	 * tracker-wide tick timer. When the cadence window has already
+	 * elapsed since the last flush, the tick is armed at delay 0 so it
+	 * fires on the next event-loop iteration; otherwise it is armed at
+	 * the remaining window time. Either way, the actual fanout happens
+	 * inside `tick()`, never synchronously.
 	 *
-	 * Trailing-edge fires via the single tracker-wide `tickTimer` for
-	 * broadcasts that land mid-window.
+	 * Why no synchronous leading-edge fire: uWS dispatches each WS
+	 * message as its own JS task. Microtasks drain at the C++ <-> JS
+	 * boundary between tasks, so a `queueMicrotask`-deferred flush
+	 * (previous design) runs BEFORE the next socket's message handler -
+	 * cross-socket coalescing window is zero, and every "first message
+	 * of a new cadence slot" from any socket fires alone as a single-
+	 * cursor UPDATE. Going through the tick timer instead schedules a
+	 * macrotask, which is dequeued only after the poll phase processes
+	 * every ready message on every socket. All messages dispatched in
+	 * the same loop iteration end up in one flush.
+	 *
+	 * Latency cost: the first cursor on an idle topic waits up to
+	 * `topicThrottleMs` (one cycle) before its frame leaves. At the
+	 * default 16 ms / 60 Hz this is one frame-budget; at 8 ms / 125 Hz
+	 * it is half a frame. Below the perceptual floor for cursor.
 	 */
 	function broadcast(topic, key, data, platform) {
 		if (topicThrottleMs <= 0) {
@@ -409,31 +416,19 @@ export function createCursor(options = {}) {
 
 		let state = topicFlush.get(topic);
 		if (!state) {
-			state = { dirty: new Map(), lastFlush: 0, pendingMicroflush: false };
+			// Anchor lastFlush one full cycle in the past so the first
+			// broadcast on a fresh topic is treated as "cycle ready" and
+			// schedules the tick at delay 0 with zero drift, rather than
+			// inflating drift stats by Date.now() worth of "lateness".
+			state = { dirty: new Map(), lastFlush: Date.now() - topicThrottleMs };
 			topicFlush.set(topic, state);
 		}
 		state.dirty.set(key, { data, platform });
-
-		const now = Date.now();
-		if (now - state.lastFlush >= topicThrottleMs) {
-			state.lastFlush = now;
-			dirtyTopics.delete(topic);
-			// Schedule once per cycle slot; subsequent broadcasts inside
-			// the same microtask boundary just append to `state.dirty`.
-			if (!state.pendingMicroflush) {
-				state.pendingMicroflush = true;
-				queueMicrotask(() => {
-					state.pendingMicroflush = false;
-					if (state.dirty.size === 0) return;
-					flushDirty(topic, state.dirty);
-					state.dirty.clear();
-				});
-			}
-			return;
-		}
-
 		dirtyTopics.add(topic);
-		armTick(Math.max(0, topicThrottleMs - (now - state.lastFlush)));
+
+		const elapsed = Date.now() - state.lastFlush;
+		const delay = elapsed >= topicThrottleMs ? 0 : topicThrottleMs - elapsed;
+		armTick(delay);
 	}
 
 	/** @type {CursorTracker} */

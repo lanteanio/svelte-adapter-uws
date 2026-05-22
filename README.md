@@ -2898,22 +2898,23 @@ const positions = cursor('canvas', { maxAge: 30_000 });
 
 #### How throttle works
 
-The cursor plugin uses two layers of leading-edge + trailing-edge throttle:
+The cursor plugin uses two layers of throttle:
 
-1. **`throttle`** caps how often a single user broadcasts on a single topic.
-2. **`topicThrottle`** caps how often a topic emits a frame at all. Multiple movers in the same window coalesce into one `bulk` array; a single mover in the window emits one `update`.
+1. **`throttle`** caps how often a single user broadcasts on a single topic. Leading edge fires the first move immediately; subsequent moves within the window are stored and a trailing timer flushes the latest position at the window boundary.
+2. **`topicThrottle`** caps how often a topic emits a frame at all. Every move appends to the topic's dirty set and shares a single tracker-wide timer that fires once per cadence cycle. Multiple movers in the same window coalesce into one `bulk` array; a single mover in the window emits one `update`. There is no synchronous leading-edge fire: every flush goes through the tick, so movers arriving from different sockets (each a separate JS task in production) batch into the same frame regardless of how many task boundaries separate them.
 
 ```
 throttle: 16, topicThrottle: 16
 
-t=0    A.update({x:0})         --> 'join' A, 'update' {x:0}        (leading edge of both)
+t=0    A.update({x:0})         --> 'join' A (catalog channel)
+                                   position queued in topic dirty set
 t=4    B.update({x:0})         --> 'join' B (catalog channel)
                                    position queued in topic dirty set
 t=8    A.update({x:5})         --> queued (entry-level throttle says wait until t=16)
-t=16   [trailing timer fires]  --> 'bulk' [{key:A, data:{x:5}}, {key:B, data:{x:0}}]
+t=16   [tick timer fires]      --> 'bulk' [{key:A, data:{x:5}}, {key:B, data:{x:0}}]
 ```
 
-The trailing edges ensure you always see where each cursor stopped, even when the user stops moving mid-window.
+Latency cost vs. the alternate "fire-the-first-mover-synchronously" design: the first mover on an idle topic waits up to `topicThrottleMs` before its frame leaves. At the default 16 ms (~60 Hz) that's one frame-budget; well below the perceptual floor for cursor. The cost buys cross-socket coalescing - without it, the first mover from each socket fragments out as its own single-cursor `update` because uWS dispatches each WS message as its own JS task and microtasks drain between dispatches.
 
 #### Limitations
 

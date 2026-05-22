@@ -211,45 +211,74 @@ describe('cursor plugin - server', () => {
 	});
 
 	describe('topicThrottle (per-topic coalescing)', () => {
-		it('single mover within window: emits one update via microtask-deferred leading edge', async () => {
+		it('single mover: tick fires on next cadence boundary, emits one update', () => {
 			vi.useFakeTimers();
 			const c = createCursor({ throttle: 0, topicThrottle: 16 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			const p = mockPlatform();
 
-			c.update(ws, 'canvas', { x: 0 }, p); // leading edge schedules microtask
-			// Microtask drains here.
-			await Promise.resolve();
+			c.update(ws, 'canvas', { x: 0 }, p);
+			// Nothing flushes synchronously - the tracker scheduler is now
+			// always-tick (no leading-edge sync path). All flushes go
+			// through the macrotask tick so cross-socket co-arrivals
+			// (each their own JS task in production) batch correctly.
+			expect(positionEvents(p)).toHaveLength(0);
+
+			vi.advanceTimersByTime(16);
 			expect(pubs(p, 'update')).toHaveLength(1);
 			expect(pubs(p, 'bulk')).toHaveLength(0);
 		});
 
-		it('co-arriving movers in the same JS pass batch into a single bulk via microtask defer', async () => {
+		it('co-arriving movers in the same JS pass batch into one bulk on the tick', () => {
 			vi.useFakeTimers();
 			const c = createCursor({ throttle: 0, topicThrottle: 16 });
 			const wsA = mockWs({ id: 'A' });
 			const wsB = mockWs({ id: 'B' });
 			const p = mockPlatform();
 
-			// Both movers land in the same synchronous JS pass - the
-			// microtask scheduled by A's leading edge has not run yet
-			// when B arrives, so B joins A's dirty bucket.
 			c.update(wsA, 'canvas', { x: 1 }, p);
 			c.update(wsB, 'canvas', { x: 2 }, p);
-			// Pre-microtask: nothing has fired yet.
 			expect(positionEvents(p)).toHaveLength(0);
 
-			// Drain the microtask.
-			await Promise.resolve();
-
-			// One bulk frame, two entries - no fragmented single UPDATE.
+			vi.advanceTimersByTime(16);
 			expect(pubs(p, 'update')).toHaveLength(0);
 			const bulks = pubs(p, 'bulk');
 			expect(bulks).toHaveLength(1);
 			expect(bulks[0].data).toHaveLength(2);
 		});
 
-		it('mid-window mover queues for trailing tick after leading microtask drains', async () => {
+		it('cross-task-boundary movers still coalesce into one bulk per cadence cycle', async () => {
+			// THE PRODUCTION SHAPE. uWS dispatches each WS message as its
+			// own JS task, microtasks drain between tasks. Pre-0.5.5 fix
+			// (synchronous flush) and the 0.5.5 microtask-defer attempt
+			// BOTH failed here: each broadcast fired its own UPDATE
+			// because there was no shared task in which to coalesce.
+			// Always-tick (macrotask via setTimeout) batches every
+			// broadcast that lands before the timer fires, regardless of
+			// how many task boundaries separate them.
+			vi.useFakeTimers();
+			const c = createCursor({ throttle: 0, topicThrottle: 16 });
+			const p = mockPlatform();
+			const COUNT = 50;
+
+			for (let i = 0; i < COUNT; i++) {
+				c.update(mockWs({ id: 'c' + i }), 'canvas', { x: i }, p);
+				// Cross a microtask boundary between each broadcast -
+				// this is exactly what uWS does between socket dispatches.
+				await Promise.resolve();
+			}
+
+			expect(positionEvents(p)).toHaveLength(0);
+
+			// Fire the tick.
+			vi.advanceTimersByTime(16);
+			expect(pubs(p, 'update')).toHaveLength(0);
+			const bulks = pubs(p, 'bulk');
+			expect(bulks).toHaveLength(1);
+			expect(bulks[0].data).toHaveLength(COUNT);
+		});
+
+		it('mid-window mover joins the next tick instead of firing alone', () => {
 			vi.useFakeTimers();
 			const c = createCursor({ throttle: 0, topicThrottle: 16 });
 			const wsA = mockWs({ id: 'A' });
@@ -257,44 +286,57 @@ describe('cursor plugin - server', () => {
 			const p = mockPlatform();
 
 			c.update(wsA, 'canvas', { x: 1 }, p);
-			await Promise.resolve(); // drain leading microtask
+			vi.advanceTimersByTime(16);
 			expect(pubs(p, 'update')).toHaveLength(1);
 			p.reset();
 
+			// Mid-window: tick is no longer pending; new broadcast re-arms
+			// for the remaining time in this cycle.
 			vi.advanceTimersByTime(5);
-			c.update(wsB, 'canvas', { x: 2 }, p); // mid-window: trailing-tick path
+			c.update(wsB, 'canvas', { x: 2 }, p);
 			expect(positionEvents(p)).toHaveLength(0);
 
 			vi.advanceTimersByTime(11);
-			// Trailing flush has only wsB pending, so it goes out as an update.
 			expect(pubs(p, 'update')).toHaveLength(1);
 			expect(pubs(p, 'update')[0].data).toEqual({ key: expect.any(String), data: { x: 2 } });
 		});
 
-		it('multiple co-arrivals + mid-window mover: leading microtask + trailing tick', async () => {
+		it('multi-cycle saturation: bursts > topicThrottleMs apart produce one bulk per burst', async () => {
+			// Repro of the demo's "1794 single-cursor UPDATEs / 38 BULKs
+			// in 30s" pathology. Under steady production load the
+			// message handler sees bursts of N broadcasts separated by
+			// event-loop pauses (V8 GC, uWS internal work, outbound
+			// drain). Each broadcast inside a burst arrives as its own
+			// JS task (one per socket). Pre-fix, the first cursor of
+			// each burst fired alone as an UPDATE; post-microtask-fix,
+			// every cursor fired alone because microtasks drain between
+			// tasks. With always-tick, every burst collapses to one
+			// bulk holding the full burst population.
 			vi.useFakeTimers();
-			const c = createCursor({ throttle: 0, topicThrottle: 16 });
-			const wsA = mockWs({ id: 'A' });
-			const wsB = mockWs({ id: 'B' });
-			const wsC = mockWs({ id: 'C' });
+			const c = createCursor({ throttle: 0, topicThrottle: 8 });
 			const p = mockPlatform();
+			const BURSTS = 10;
+			const CURSORS_PER_BURST = 50;
 
-			// A and B co-arrive in the same JS pass - microtask batches them.
-			c.update(wsA, 'canvas', { x: 1 }, p);
-			c.update(wsB, 'canvas', { x: 2 }, p);
-			await Promise.resolve();
-			expect(pubs(p, 'bulk')).toHaveLength(1);
-			expect(pubs(p, 'bulk')[0].data).toHaveLength(2);
-			p.reset();
+			for (let b = 0; b < BURSTS; b++) {
+				// Each burst arrives one task at a time (mimics N sockets
+				// each dispatching their own message in sequence).
+				for (let i = 0; i < CURSORS_PER_BURST; i++) {
+					c.update(mockWs({ id: `c${b}_${i}` }), 'canvas', { x: i }, p);
+					await Promise.resolve();
+				}
+				// Pause between bursts > topicThrottleMs so each burst
+				// starts at a fresh cadence slot.
+				vi.advanceTimersByTime(12);
+			}
 
-			// C lands mid-window - takes trailing-tick path.
-			vi.advanceTimersByTime(4);
-			c.update(wsC, 'canvas', { x: 3 }, p);
-			expect(positionEvents(p)).toHaveLength(0);
-
-			vi.advanceTimersByTime(14);
-			expect(pubs(p, 'update')).toHaveLength(1);
-			expect(pubs(p, 'update')[0].data).toEqual({ key: expect.any(String), data: { x: 3 } });
+			const updates = pubs(p, 'update');
+			const bulks = pubs(p, 'bulk');
+			expect(updates.length).toBe(0);
+			expect(bulks.length).toBe(BURSTS);
+			for (const bulk of bulks) {
+				expect(bulk.data.length).toBe(CURSORS_PER_BURST);
+			}
 		});
 
 		it('topicThrottle: 0 disables coalescing - every broadcast goes out', () => {
@@ -309,47 +351,6 @@ describe('cursor plugin - server', () => {
 
 			expect(pubs(p, 'update')).toHaveLength(3);
 			expect(pubs(p, 'bulk')).toHaveLength(0);
-		});
-
-		it('event-loop-pause regression: many co-arriving cursors batch into one bulk, not N single UPDATEs', async () => {
-			// Repro of the demo's "1794 single-cursor UPDATEs / 38 BULKs in
-			// 30s" pathology. Under steady incoming load the message
-			// handler doesn't see cursors continuously - it sees bursts
-			// of N broadcasts interleaved with event-loop pauses (V8 GC,
-			// uWS internal work, outbound drain from prior flush). Pre-
-			// fix, every post-pause first cursor leaked out as its own
-			// UPDATE while the rest of the burst queued for the trailing
-			// tick. Post-fix, the microtask defer captures the whole
-			// burst into a single bulk.
-			vi.useFakeTimers();
-			const c = createCursor({ throttle: 0, topicThrottle: 8 });
-			const p = mockPlatform();
-			const BURSTS = 10;
-			const CURSORS_PER_BURST = 50;
-
-			for (let b = 0; b < BURSTS; b++) {
-				// Simulate a pause > topicThrottleMs between bursts so
-				// each burst triggers the leading-edge branch.
-				vi.advanceTimersByTime(12);
-				// All cursors in this burst arrive in one synchronous pass.
-				for (let i = 0; i < CURSORS_PER_BURST; i++) {
-					c.update(mockWs({ id: `c${b}_${i}` }), 'canvas', { x: i }, p);
-				}
-				// Drain the microtask scheduled by the first cursor of
-				// this burst - it batches every co-arrival.
-				await Promise.resolve();
-			}
-
-			const updates = pubs(p, 'update');
-			const bulks = pubs(p, 'bulk');
-			// Zero single-cursor UPDATEs from the leading edge - all
-			// co-arrivals coalesced into bulks.
-			expect(updates.length).toBe(0);
-			// One bulk per burst, each holding the full burst population.
-			expect(bulks.length).toBe(BURSTS);
-			for (const bulk of bulks) {
-				expect(bulk.data.length).toBe(CURSORS_PER_BURST);
-			}
 		});
 
 		it('clear() cancels the pending scheduler tick (no stale flush after reset)', () => {
@@ -412,21 +413,19 @@ describe('cursor plugin - server', () => {
 			expect(c.stats().activeTopicsTotal).toBe(2);
 		});
 
-		it('flushes counter increments on every flush (leading microtask + trailing tick)', async () => {
+		it('flushes counter increments on every tick that fans out dirty entries', () => {
 			vi.useFakeTimers();
 			const c = createCursor({ throttle: 0, topicThrottle: 100 });
 			const ws = mockWs({ id: '1' });
 			const p = mockPlatform();
 
 			c.update(ws, 'canvas', { x: 1 }, p);
-			// Leading edge schedules a microtask; flush has not run yet.
 			expect(c.stats().flushes).toBe(0);
-			await Promise.resolve();
+			vi.advanceTimersByTime(100);
 			expect(c.stats().flushes).toBe(1);
 
-			c.update(ws, 'canvas', { x: 2 }, p); // mid-window: queued for tick
+			c.update(ws, 'canvas', { x: 2 }, p);
 			expect(c.stats().flushes).toBe(1);
-
 			vi.advanceTimersByTime(100);
 			expect(c.stats().flushes).toBe(2);
 		});
