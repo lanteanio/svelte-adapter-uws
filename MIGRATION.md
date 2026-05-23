@@ -145,9 +145,9 @@ These change observable runtime behavior. Most apps are unaffected; a few will n
 
 ### Presence plugin wire format switched to a compact diff protocol
 
-**What changed.** The five-event format (`list` / `join` / `updated` / `leave` / `heartbeat`) collapses to two diff-shaped events plus the existing heartbeat: `presence_state` (full snapshot) and `presence_diff` (joins/leaves). Diffs are microtask-batched. Server and client ship in one bundle, so a single-package upgrade is seamless.
+**What changed.** The five-event format (`list` / `join` / `updated` / `leave` / `heartbeat`) collapses to two diff-shaped events plus the existing heartbeat: `state` (full snapshot) and `diff` (joins/leaves). Diffs are microtask-batched. Server and client ship in one bundle, so a single-package upgrade is seamless.
 
-**How to migrate.** No action needed for users of the bundled `presence()` Svelte store on the client. Hand-rolled clients that consume the wire directly need to switch decoders to handle `presence_state` and `presence_diff` events. Stale browser tabs from a previous deploy will see a blank presence list until refresh.
+**How to migrate.** No action needed for users of the bundled `presence()` Svelte store on the client. Hand-rolled clients that consume the wire directly need to switch decoders to handle `state` and `diff` events. Stale browser tabs from a previous deploy will see a blank presence list until refresh.
 
 ### Wire single-subscribe frames consult `subscribeBatch` when only `subscribeBatch` is exported
 

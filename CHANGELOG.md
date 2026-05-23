@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-05-23
+
+### Changed
+
+- **Presence wire events renamed: `presence_state` -> `state`, `presence_diff` -> `diff`.** Breaking for hand-rolled clients that decode the `__presence:{topic}` channel directly; the bundled `presence()` Svelte store is updated in lockstep and unaffected. Every other plugin already uses bare single-word event names scoped to their own `__plugin:` topic (cursor's `catalog`/`join`/`update`/`bulk`/`remove`, groups' `join`/`leave`/`close`, replay's `truncated`), so the rename brings presence in line. Topic prefix already namespaces the channel; event names don't need a second prefix. Tests, JSDoc, `.d.ts` types, README wire-format section, and 0.4-to-0.5 MIGRATION decoder snippet all updated. Cross-repo follow-up in `svelte-adapter-uws-extensions/redis/presence.js` applies the same rename so cluster and single-instance backends still speak one wire shape; Prometheus metric names (`presence_diff_frames_total`, `presence_diff_coalesced_total`) are unchanged - those are Prometheus-side identifiers, not wire events.
+
 ## [0.5.6] - 2026-05-23
 
 ### Fixed

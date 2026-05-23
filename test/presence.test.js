@@ -66,7 +66,7 @@ describe('presence plugin - server', () => {
 	});
 
 	describe('join', () => {
-		it('adds user to presence and sends presence_state snapshot to joining client', () => {
+		it('adds user to presence and sends state snapshot to joining client', () => {
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			presence.join(ws, 'room', platform);
 			presence.flushDiffs();
@@ -74,7 +74,7 @@ describe('presence plugin - server', () => {
 			// Should send full snapshot to the joining client
 			expect(platform.sent).toHaveLength(1);
 			expect(platform.sent[0].topic).toBe('__presence:room');
-			expect(platform.sent[0].event).toBe('presence_state');
+			expect(platform.sent[0].event).toBe('state');
 			expect(platform.sent[0].data).toEqual({
 				'1': { id: '1', name: 'Alice' }
 			});
@@ -83,7 +83,7 @@ describe('presence plugin - server', () => {
 			// subscribed by then, but the client's presence store is
 			// idempotent on receiving its own join.
 			expect(platform.published).toHaveLength(1);
-			expect(platform.published[0].event).toBe('presence_diff');
+			expect(platform.published[0].event).toBe('diff');
 			expect(platform.published[0].data).toEqual({
 				joins: { '1': { id: '1', name: 'Alice' } },
 				leaves: {}
@@ -97,7 +97,7 @@ describe('presence plugin - server', () => {
 			expect(ws.isSubscribed('__presence:room')).toBe(true);
 		});
 
-		it('broadcasts presence_diff for new users', () => {
+		it('broadcasts diff for new users', () => {
 			const ws1 = mockWs({ id: '1', name: 'Alice' });
 			const ws2 = mockWs({ id: '2', name: 'Bob' });
 
@@ -112,7 +112,7 @@ describe('presence plugin - server', () => {
 			expect(platform.published).toHaveLength(1);
 			expect(platform.published[0]).toEqual({
 				topic: '__presence:room',
-				event: 'presence_diff',
+				event: 'diff',
 				data: { joins: { '2': { id: '2', name: 'Bob' } }, leaves: {} }
 			});
 
@@ -121,7 +121,7 @@ describe('presence plugin - server', () => {
 			expect(Object.keys(platform.sent[0].data)).toHaveLength(2);
 		});
 
-		it('coalesces multiple joins in one tick into a single presence_diff', () => {
+		it('coalesces multiple joins in one tick into a single diff', () => {
 			const ws1 = mockWs({ id: '1', name: 'Alice' });
 			const ws2 = mockWs({ id: '2', name: 'Bob' });
 			const ws3 = mockWs({ id: '3', name: 'Carol' });
@@ -131,7 +131,7 @@ describe('presence plugin - server', () => {
 			presence.join(ws3, 'room', platform);
 			presence.flushDiffs();
 
-			const diffs = platform.published.filter(p => p.event === 'presence_diff');
+			const diffs = platform.published.filter(p => p.event === 'diff');
 			expect(diffs).toHaveLength(1);
 			expect(diffs[0].data.joins).toEqual({
 				'1': { id: '1', name: 'Alice' },
@@ -227,7 +227,7 @@ describe('presence plugin - server', () => {
 			expect(presence.count('room')).toBe(1);
 		});
 
-		it('closing last tab publishes presence_diff with leaves', () => {
+		it('closing last tab publishes diff with leaves', () => {
 			const ws1 = mockWs({ id: '1', name: 'Alice' });
 			const ws2 = mockWs({ id: '1', name: 'Alice' });
 
@@ -242,7 +242,7 @@ describe('presence plugin - server', () => {
 
 			// NOW the diff should carry the leave
 			expect(platform.published).toHaveLength(1);
-			expect(platform.published[0].event).toBe('presence_diff');
+			expect(platform.published[0].event).toBe('diff');
 			expect(platform.published[0].data).toEqual({
 				joins: {},
 				leaves: { '1': { id: '1', name: 'Alice' } }
@@ -264,7 +264,7 @@ describe('presence plugin - server', () => {
 			expect(platform.published).toHaveLength(1);
 			expect(platform.published[0]).toEqual({
 				topic: '__presence:room',
-				event: 'presence_diff',
+				event: 'diff',
 				data: { joins: { '1': { id: '1', name: 'Alice Renamed' } }, leaves: {} }
 			});
 
@@ -315,7 +315,7 @@ describe('presence plugin - server', () => {
 			p.flushDiffs();
 
 			expect(platform.published).toHaveLength(1);
-			expect(platform.published[0].event).toBe('presence_diff');
+			expect(platform.published[0].event).toBe('diff');
 			expect(platform.published[0].data.joins['1'].prefs.theme).toBe('dark');
 		});
 
@@ -416,7 +416,7 @@ describe('presence plugin - server', () => {
 			p.join(ws2, 'room', platform);
 			p.flushDiffs();
 			expect(platform.published).toHaveLength(1);
-			expect(platform.published[0].event).toBe('presence_diff');
+			expect(platform.published[0].event).toBe('diff');
 		});
 
 		it('compares Set values by content, not reference', () => {
@@ -449,7 +449,7 @@ describe('presence plugin - server', () => {
 			p.join(ws2, 'room', platform);
 			p.flushDiffs();
 			expect(platform.published).toHaveLength(1);
-			expect(platform.published[0].event).toBe('presence_diff');
+			expect(platform.published[0].event).toBe('diff');
 		});
 
 		it('compares Map values by content, not reference', () => {
@@ -481,7 +481,7 @@ describe('presence plugin - server', () => {
 			expect(presence.count('room-b')).toBe(0);
 		});
 
-		it('broadcasts a presence_diff with leaves for each topic', () => {
+		it('broadcasts a diff with leaves for each topic', () => {
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			presence.join(ws, 'room-a', platform);
 			presence.join(ws, 'room-b', platform);
@@ -491,7 +491,7 @@ describe('presence plugin - server', () => {
 			presence.leave(ws, platform);
 			presence.flushDiffs();
 
-			const diffs = platform.published.filter(e => e.event === 'presence_diff');
+			const diffs = platform.published.filter(e => e.event === 'diff');
 			expect(diffs).toHaveLength(2);
 			expect(diffs.map(d => d.topic).sort()).toEqual([
 				'__presence:room-a',
@@ -522,7 +522,7 @@ describe('presence plugin - server', () => {
 	});
 
 	describe('sync', () => {
-		it('sends presence_state snapshot without joining', () => {
+		it('sends state snapshot without joining', () => {
 			const ws1 = mockWs({ id: '1', name: 'Alice' });
 			const wsObserver = mockWs({ id: 'admin', name: 'Admin' });
 
@@ -533,7 +533,7 @@ describe('presence plugin - server', () => {
 
 			// Should send snapshot to observer
 			expect(platform.sent).toHaveLength(1);
-			expect(platform.sent[0].event).toBe('presence_state');
+			expect(platform.sent[0].event).toBe('state');
 			expect(platform.sent[0].data).toEqual({
 				'1': { id: '1', name: 'Alice' }
 			});
@@ -551,7 +551,7 @@ describe('presence plugin - server', () => {
 			presence.sync(ws, 'nonexistent', platform);
 
 			expect(platform.sent).toHaveLength(1);
-			expect(platform.sent[0].event).toBe('presence_state');
+			expect(platform.sent[0].event).toBe('state');
 			expect(platform.sent[0].data).toEqual({});
 		});
 	});
@@ -644,7 +644,7 @@ describe('presence plugin - server', () => {
 
 			expect(presence.count('room')).toBe(1);
 			expect(platform.sent).toHaveLength(1);
-			expect(platform.sent[0].event).toBe('presence_state');
+			expect(platform.sent[0].event).toBe('state');
 		});
 
 		it('hooks.subscribe sends current snapshot for __presence: topics', () => {
@@ -659,7 +659,7 @@ describe('presence plugin - server', () => {
 			// Should send the snapshot
 			expect(platform.sent).toHaveLength(1);
 			expect(platform.sent[0].topic).toBe('__presence:room');
-			expect(platform.sent[0].event).toBe('presence_state');
+			expect(platform.sent[0].event).toBe('state');
 			expect(platform.sent[0].data).toEqual({
 				'1': { id: '1', name: 'Alice' }
 			});
@@ -676,7 +676,7 @@ describe('presence plugin - server', () => {
 			presence.hooks.subscribe(ws, '__presence:empty', { platform });
 
 			expect(platform.sent).toHaveLength(1);
-			expect(platform.sent[0].event).toBe('presence_state');
+			expect(platform.sent[0].event).toBe('state');
 			expect(platform.sent[0].data).toEqual({});
 		});
 
@@ -702,7 +702,7 @@ describe('presence plugin - server', () => {
 			expect(presence.count('room-a')).toBe(0);
 			expect(presence.count('room-b')).toBe(1);
 			expect(platform.published).toHaveLength(1);
-			expect(platform.published[0].event).toBe('presence_diff');
+			expect(platform.published[0].event).toBe('diff');
 			expect(platform.published[0].topic).toBe('__presence:room-a');
 			expect(platform.published[0].data.leaves['1']).toEqual({ id: '1', name: 'Alice' });
 		});
@@ -732,7 +732,7 @@ describe('presence plugin - server', () => {
 
 			expect(presence.count('room')).toBe(0);
 			expect(platform.published).toHaveLength(1);
-			expect(platform.published[0].event).toBe('presence_diff');
+			expect(platform.published[0].event).toBe('diff');
 			expect(platform.published[0].data.leaves['1']).toEqual({ id: '1', name: 'Alice' });
 		});
 
@@ -1150,13 +1150,13 @@ describe('presence plugin - server', () => {
 			const ws2 = mockWs({ id: '1', s: new Set([1, 2]) });
 			p.join(ws2, 'room', platform);
 			p.flushDiffs();
-			expect(platform.published.filter(e => e.event === 'presence_diff')).toHaveLength(0);
+			expect(platform.published.filter(e => e.event === 'diff')).toHaveLength(0);
 
 			platform.reset();
 			const ws3 = mockWs({ id: '1', s: new Set([1, 3]) });
 			p.join(ws3, 'room', platform);
 			p.flushDiffs();
-			expect(platform.published.filter(e => e.event === 'presence_diff')).toHaveLength(1);
+			expect(platform.published.filter(e => e.event === 'diff')).toHaveLength(1);
 		});
 
 		it('compares Maps correctly', () => {
@@ -1171,13 +1171,13 @@ describe('presence plugin - server', () => {
 			const ws2 = mockWs({ id: '1', m: new Map([['a', 1]]) });
 			p.join(ws2, 'room', platform);
 			p.flushDiffs();
-			expect(platform.published.filter(e => e.event === 'presence_diff')).toHaveLength(0);
+			expect(platform.published.filter(e => e.event === 'diff')).toHaveLength(0);
 
 			platform.reset();
 			const ws3 = mockWs({ id: '1', m: new Map([['a', 2]]) });
 			p.join(ws3, 'room', platform);
 			p.flushDiffs();
-			expect(platform.published.filter(e => e.event === 'presence_diff')).toHaveLength(1);
+			expect(platform.published.filter(e => e.event === 'diff')).toHaveLength(1);
 		});
 
 		it('compares arrays correctly', () => {
@@ -1192,13 +1192,13 @@ describe('presence plugin - server', () => {
 			const ws2 = mockWs({ id: '1', a: [1, 2, 3] });
 			p.join(ws2, 'room', platform);
 			p.flushDiffs();
-			expect(platform.published.filter(e => e.event === 'presence_diff')).toHaveLength(0);
+			expect(platform.published.filter(e => e.event === 'diff')).toHaveLength(0);
 
 			platform.reset();
 			const ws3 = mockWs({ id: '1', a: [1, 2, 4] });
 			p.join(ws3, 'room', platform);
 			p.flushDiffs();
-			expect(platform.published.filter(e => e.event === 'presence_diff')).toHaveLength(1);
+			expect(platform.published.filter(e => e.event === 'diff')).toHaveLength(1);
 		});
 
 		it('handles circular references without infinite loop', () => {
@@ -1217,7 +1217,7 @@ describe('presence plugin - server', () => {
 			const ws2 = mockWs({ id: '1', obj: b });
 			p.join(ws2, 'room', platform);
 			p.flushDiffs();
-			expect(platform.published.filter(e => e.event === 'presence_diff')).toHaveLength(0);
+			expect(platform.published.filter(e => e.event === 'diff')).toHaveLength(0);
 		});
 
 		it('detects mismatched types (array vs object)', () => {
@@ -1232,7 +1232,7 @@ describe('presence plugin - server', () => {
 			const ws2 = mockWs({ id: '1', v: { 0: 1, 1: 2 } });
 			p.join(ws2, 'room', platform);
 			p.flushDiffs();
-			expect(platform.published.filter(e => e.event === 'presence_diff')).toHaveLength(1);
+			expect(platform.published.filter(e => e.event === 'diff')).toHaveLength(1);
 		});
 
 		it('detects Set vs Map mismatches', () => {
@@ -1247,7 +1247,7 @@ describe('presence plugin - server', () => {
 			const ws2 = mockWs({ id: '1', v: new Map([[1, true]]) });
 			p.join(ws2, 'room', platform);
 			p.flushDiffs();
-			expect(platform.published.filter(e => e.event === 'presence_diff')).toHaveLength(1);
+			expect(platform.published.filter(e => e.event === 'diff')).toHaveLength(1);
 		});
 	});
 

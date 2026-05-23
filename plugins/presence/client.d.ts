@@ -7,7 +7,7 @@ import type { Readable } from 'svelte/store';
  * The array updates automatically when users join or leave.
  *
  * Defaults to a 90 s `maxAge` sweep: entries that haven't been refreshed
- * by a heartbeat or presence_diff/state inside the window are removed
+ * by a heartbeat or diff/state inside the window are removed
  * from the local map. The server emits `{userKey: data}` heartbeats
  * every 30 s by default, so still-present users re-appear on the next
  * heartbeat (no flicker). Pass `maxAge: 0` to opt out of the sweep for

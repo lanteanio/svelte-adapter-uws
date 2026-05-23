@@ -6,7 +6,7 @@
  * this module just keeps the client-side state in sync.
  *
  * Defaults to a 90 s `maxAge` sweep: entries that haven't been refreshed
- * by a heartbeat or presence_diff/state inside the window are removed
+ * by a heartbeat or diff/state inside the window are removed
  * from the local map. The in-memory server (and the Redis-backed variant
  * in svelte-adapter-uws-extensions) emits `{userKey: data}` heartbeats
  * every 30 s by default, so a still-present user re-appears on the very
@@ -127,7 +127,7 @@ export function presence(topic, options) {
 		sourceUnsub = source.subscribe((event) => {
 			if (event === null) return;
 
-			if (event.event === 'presence_state' && event.data && typeof event.data === 'object') {
+			if (event.event === 'state' && event.data && typeof event.data === 'object') {
 				userMap = new Map();
 				timestamps.clear();
 				const now = Date.now();
@@ -139,7 +139,7 @@ export function presence(topic, options) {
 				return;
 			}
 
-			if (event.event === 'presence_diff' && event.data && typeof event.data === 'object') {
+			if (event.event === 'diff' && event.data && typeof event.data === 'object') {
 				const { joins, leaves } = event.data;
 				const now = Date.now();
 				let changed = false;
@@ -175,7 +175,7 @@ export function presence(topic, options) {
 					// recover entries the local sweep had already removed -
 					// once an entry aged out, the next heartbeat couldn't
 					// bring it back and the user stayed missing until a
-					// presence_diff or presence_state arrived.
+					// diff or state arrived.
 					for (const [key, data] of Object.entries(event.data)) {
 						timestamps.set(key, now);
 						const prev = userMap.get(key);
@@ -187,7 +187,7 @@ export function presence(topic, options) {
 				} else if (Array.isArray(event.data)) {
 					// Back-compat: keys-only heartbeat (older server). Refresh
 					// existing entries; cannot recover aged-out ones from this
-					// shape. The presence_diff / presence_state reconciliation
+					// shape. The diff / state reconciliation
 					// path still corrects missing entries on the next event.
 					for (const key of event.data) {
 						if (timestamps.has(key)) {
@@ -206,7 +206,7 @@ export function presence(topic, options) {
 
 		// Request a presence snapshot every time the socket opens (initial
 		// connect AND reconnects). Without this, a reconnecting client
-		// missed any presence_diff frames that fired during the disconnect
+		// missed any diff frames that fired during the disconnect
 		// window and its in-memory map stayed at whatever it last knew.
 		// Symmetric to the cursor plugin's `cursor-snapshot` send.
 		statusUnsub = status.subscribe((s) => {

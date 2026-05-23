@@ -51,7 +51,7 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	 * topics carrying a `{userKey: data}` map of every active user. This
 	 * refreshes each entry's `maxAge` timer on the client AND re-adds any
 	 * entry the client swept while the user was still present, so live
-	 * users do not flicker out when a `presence_diff` is missed (transient
+	 * users do not flicker out when a `diff` is missed (transient
 	 * network blip, JS thread saturation).
 	 *
 	 * Set this to a value shorter than the client's `maxAge`. The 30 s
@@ -69,7 +69,7 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	 *
 	 * @example
 	 * ```js
-	 * // Disable heartbeats; client must rely on presence_diff alone
+	 * // Disable heartbeats; client must rely on diff alone
 	 * const presence = createPresence({ heartbeat: 0 });
 	 * ```
 	 */
@@ -105,9 +105,9 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 	 *
 	 * What happens:
 	 * 1. Adds the user to the topic's presence map
-	 * 2. Buffers a `join` entry into the next presence_diff broadcast (microtask-flushed)
+	 * 2. Buffers a `join` entry into the next diff broadcast (microtask-flushed)
 	 * 3. Subscribes this ws to the presence channel
-	 * 4. Sends the full current snapshot (`presence_state`) to this ws
+	 * 4. Sends the full current snapshot (`state`) to this ws
 	 *
 	 * @example
 	 * ```js
@@ -123,7 +123,7 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 	 *
 	 * Call this from your `close` hook. Handles multi-tab correctly:
 	 * if the user has other connections still open, they stay present.
-	 * Only buffers a `leave` entry into the next presence_diff when the
+	 * Only buffers a `leave` entry into the next diff when the
 	 * last connection closes.
 	 *
 	 * @example
@@ -136,7 +136,7 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 	leave(ws: WebSocket<any>, platform: Platform): void;
 
 	/**
-	 * Send the current presence snapshot (`presence_state`) to a connection without joining.
+	 * Send the current presence snapshot (`state`) to a connection without joining.
 	 *
 	 * Use this for observers (admin dashboards, spectators) who want to
 	 * see who's present without being counted as present themselves.
@@ -187,7 +187,7 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 	clear(): void;
 
 	/**
-	 * Drain any buffered `presence_diff` publishes synchronously.
+	 * Drain any buffered `diff` publishes synchronously.
 	 *
 	 * Diffs are normally microtask-batched: multiple joins / leaves in the
 	 * same tick collapse into one broadcast frame. Tests use this to

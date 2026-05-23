@@ -1526,10 +1526,10 @@ describe('client.js (real module)', () => {
 			});
 			expect(sentSubscribes).toEqual([]);
 
-			ws._receive({ topic: '__presence:room', event: 'presence_state', data: { '1': { id: '1' } } });
+			ws._receive({ topic: '__presence:room', event: 'state', data: { '1': { id: '1' } } });
 			let received = null;
 			const unsubObserve = store.subscribe((v) => { received = v; });
-			expect(received).toEqual({ topic: '__presence:room', event: 'presence_state', data: { '1': { id: '1' } } });
+			expect(received).toEqual({ topic: '__presence:room', event: 'state', data: { '1': { id: '1' } } });
 			unsubObserve();
 
 			unsub();
@@ -1603,12 +1603,12 @@ describe('client.js (real module)', () => {
 			const unsub = store.subscribe((v) => { current = v; });
 
 			// Initial state snapshot
-			ws._receive({ topic: '__presence:presence-updated-topic', event: 'presence_state',
+			ws._receive({ topic: '__presence:presence-updated-topic', event: 'state',
 				data: { '1': { id: '1', name: 'Alice' } } });
 			expect(current).toEqual([{ id: '1', name: 'Alice' }]);
 
 			// Server broadcasts updated data for the same key (a 'join' in the diff overwrites)
-			ws._receive({ topic: '__presence:presence-updated-topic', event: 'presence_diff',
+			ws._receive({ topic: '__presence:presence-updated-topic', event: 'diff',
 				data: { joins: { '1': { id: '1', name: 'Alice Renamed' } }, leaves: {} } });
 			expect(current).toEqual([{ id: '1', name: 'Alice Renamed' }]);
 
@@ -1641,8 +1641,8 @@ describe('client.js (real module)', () => {
 			let current = [];
 			const unsub = store.subscribe((v) => { current = v; });
 
-			// Seed via initial presence_state.
-			ws._receive({ topic: '__presence:presence-hb-map-topic', event: 'presence_state',
+			// Seed via initial state.
+			ws._receive({ topic: '__presence:presence-hb-map-topic', event: 'state',
 				data: { '1': { id: '1', name: 'Alice' } } });
 			expect(current).toEqual([{ id: '1', name: 'Alice' }]);
 
@@ -1668,7 +1668,7 @@ describe('client.js (real module)', () => {
 			let current = [];
 			const unsub = store.subscribe((v) => { current = v; });
 
-			ws._receive({ topic: '__presence:presence-hb-array-topic', event: 'presence_state',
+			ws._receive({ topic: '__presence:presence-hb-array-topic', event: 'state',
 				data: { '1': { id: '1', name: 'Alice' } } });
 			expect(current).toEqual([{ id: '1', name: 'Alice' }]);
 
@@ -2375,8 +2375,8 @@ describe('client.js (real module)', () => {
 			let current = [];
 			const unsub = store.subscribe((v) => { current = v; });
 
-			ws._receive({ topic: '__presence:p-join', event: 'presence_state', data: {} });
-			ws._receive({ topic: '__presence:p-join', event: 'presence_diff',
+			ws._receive({ topic: '__presence:p-join', event: 'state', data: {} });
+			ws._receive({ topic: '__presence:p-join', event: 'diff',
 				data: { joins: { '1': { name: 'Alice' } }, leaves: {} } });
 			expect(current).toEqual([{ name: 'Alice' }]);
 
@@ -2393,9 +2393,9 @@ describe('client.js (real module)', () => {
 			let current = [];
 			const unsub = store.subscribe((v) => { current = v; });
 
-			ws._receive({ topic: '__presence:p-join-dup', event: 'presence_state',
+			ws._receive({ topic: '__presence:p-join-dup', event: 'state',
 				data: { '1': { name: 'Alice' } } });
-			ws._receive({ topic: '__presence:p-join-dup', event: 'presence_diff',
+			ws._receive({ topic: '__presence:p-join-dup', event: 'diff',
 				data: { joins: { '1': { name: 'Alice' } }, leaves: {} } });
 			expect(current).toHaveLength(1);
 
@@ -2412,11 +2412,11 @@ describe('client.js (real module)', () => {
 			let current = [];
 			const unsub = store.subscribe((v) => { current = v; });
 
-			ws._receive({ topic: '__presence:p-leave', event: 'presence_state',
+			ws._receive({ topic: '__presence:p-leave', event: 'state',
 				data: { '1': { name: 'Alice' }, '2': { name: 'Bob' } } });
 			expect(current).toHaveLength(2);
 
-			ws._receive({ topic: '__presence:p-leave', event: 'presence_diff',
+			ws._receive({ topic: '__presence:p-leave', event: 'diff',
 				data: { joins: {}, leaves: { '1': { name: 'Alice' } } } });
 			expect(current).toEqual([{ name: 'Bob' }]);
 
@@ -2434,7 +2434,7 @@ describe('client.js (real module)', () => {
 			let current = [];
 			const unsub = store.subscribe((v) => { current = v; });
 
-			ws._receive({ topic: '__presence:p-heartbeat', event: 'presence_state',
+			ws._receive({ topic: '__presence:p-heartbeat', event: 'state',
 				data: { '1': { name: 'Alice' } } });
 			expect(current).toHaveLength(1);
 
@@ -2471,7 +2471,7 @@ describe('client.js (real module)', () => {
 			let current = [];
 			const unsub = store.subscribe((v) => { current = v; });
 
-			ws._receive({ topic: '__presence:presence-sweep', event: 'presence_state',
+			ws._receive({ topic: '__presence:presence-sweep', event: 'state',
 				data: { '1': { id: '1', name: 'Alice' } } });
 			expect(current).toHaveLength(1);
 

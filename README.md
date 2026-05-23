@@ -2476,7 +2476,7 @@ presence.leave(ws, platform)         // remove from all topics (call from close 
 presence.sync(ws, topic, platform)   // send snapshot without joining (for observers)
 presence.list(topic)                 // current user data array
 presence.count(topic)                // unique user count
-presence.flushDiffs()                // drain buffered presence_diff publishes synchronously
+presence.flushDiffs()                // drain buffered diff publishes synchronously
 presence.clear()                     // reset everything (stops heartbeat timer)
 ```
 
@@ -2484,9 +2484,9 @@ presence.clear()                     // reset everything (stops heartbeat timer)
 
 The plugin emits three frame types on the `__presence:{topic}` channel:
 
-- `{event: 'presence_state', data: {[key]: meta}}` - full snapshot, sent to a single connection on join or sync.
-- `{event: 'presence_diff', data: {joins: {[key]: meta}, leaves: {[key]: meta}}}` - changes, broadcast to all subscribers of the topic.
-- `{event: 'heartbeat', data: {[key]: meta}}` - periodic full-roster refresh, broadcast every `heartbeat` ms (30 s default). Carries a `{userKey: data}` map so a client whose entry aged out of its local `maxAge` sweep can re-add it from the heartbeat alone, without waiting for the next `presence_diff`.
+- `{event: 'state', data: {[key]: meta}}` - full snapshot, sent to a single connection on join or sync.
+- `{event: 'diff', data: {joins: {[key]: meta}, leaves: {[key]: meta}}}` - changes, broadcast to all subscribers of the topic.
+- `{event: 'heartbeat', data: {[key]: meta}}` - periodic full-roster refresh, broadcast every `heartbeat` ms (30 s default). Carries a `{userKey: data}` map so a client whose entry aged out of its local `maxAge` sweep can re-add it from the heartbeat alone, without waiting for the next `diff`.
 
 Diffs are buffered in a microtask queue: multiple joins / leaves in the same tick collapse into one diff frame. Within a diff, `leaves` are applied first then `joins`, so an update (same key in both) ends with the user present using the new data. If a key cycles join then leave in the same tick, the diff carries only the latest op (`leave` wins).
 
@@ -2501,7 +2501,7 @@ const users = presence('room');
 // $users = [{ id: '1', name: 'Alice' }, { id: '2', name: 'Bob' }]
 ```
 
-The client store defaults to a 90 s `maxAge` sweep: entries that haven't been refreshed by a heartbeat or `presence_diff` / `presence_state` inside the window are removed from the local map. With the server's 30 s default heartbeat, still-present users are refreshed three times per window and never flicker; ghost entries left over by silent server-side cleanup (cluster mass-disconnect, ungraceful client close) clear within one sweep window.
+The client store defaults to a 90 s `maxAge` sweep: entries that haven't been refreshed by a heartbeat or `diff` / `state` inside the window are removed from the local map. With the server's 30 s default heartbeat, still-present users are refreshed three times per window and never flicker; ghost entries left over by silent server-side cleanup (cluster mass-disconnect, ungraceful client close) clear within one sweep window.
 
 For admin / audit views that want unbounded retention ("show every user who ever touched this topic"), opt out with `maxAge: 0`:
 

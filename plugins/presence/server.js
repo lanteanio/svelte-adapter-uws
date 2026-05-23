@@ -56,7 +56,7 @@ const TOPIC_PREFIX = '__presence:';
  *   The server periodically publishes a `heartbeat` event to all presence topics carrying a
  *   `{userKey: data}` map of every active user. This refreshes each entry's `maxAge` timer on
  *   the client AND re-adds any entry the client swept while the user was still present, so
- *   live users do not flicker out when a `presence_diff` is missed (e.g. transient network
+ *   live users do not flicker out when a `diff` is missed (e.g. transient network
  *   blip, JS thread saturation). Set this to a value shorter than the client's `maxAge`
  *   (default client `maxAge` is 90 s, so 30 s gives a 3x safety margin). Pass `0` to disable
  *   heartbeats entirely (apps that do not use the `maxAge` self-healing path).
@@ -341,13 +341,13 @@ export function createPresence(options = {}) {
 				if (op === 'join') joins[key] = data;
 				else leaves[key] = data;
 			}
-			platform.publish(TOPIC_PREFIX + topic, 'presence_diff', { joins, leaves });
+			platform.publish(TOPIC_PREFIX + topic, 'diff', { joins, leaves });
 		}
 		pendingDiffs.clear();
 	}
 
 	/**
-	 * Build a presence_state snapshot for a topic: {[key]: data}.
+	 * Build a state snapshot for a topic: {[key]: data}.
 	 * @param {Map<string, { data: Record<string, any>, count: number }> | undefined} users
 	 * @returns {Record<string, Record<string, any>>}
 	 */
@@ -387,8 +387,8 @@ export function createPresence(options = {}) {
 					// Publish a `{userKey: data}` map (rather than a keys-only
 					// array) so a client whose entry aged out of its local
 					// `maxAge` sweep between heartbeats can re-add it from the
-					// heartbeat alone, without waiting for a presence_diff /
-					// presence_state to reconcile. Matches the Redis-backed
+					// heartbeat alone, without waiting for a diff /
+					// state to reconcile. Matches the Redis-backed
 					// variant in svelte-adapter-uws-extensions.
 					/** @type {Record<string, any>} */
 					const dataMap = {};
@@ -484,7 +484,7 @@ export function createPresence(options = {}) {
 			if (existing) {
 				// Same user, additional connection (another tab) - bump count.
 				// A data change (e.g. avatar updated in another session) becomes
-				// a `join` entry in the next presence_diff: client overwrites
+				// a `join` entry in the next diff: client overwrites
 				// the existing key with the new data.
 				existing.count++;
 				if (!deepEqual(existing.data, data)) {
@@ -507,7 +507,7 @@ export function createPresence(options = {}) {
 			// user sees the complete state (including themselves) immediately;
 			// any pending diff fan-out reaches them too but is idempotent on
 			// the client (joins[key] = data is a no-op if already set).
-			platform.send(ws, presenceTopic, 'presence_state', snapshotState(users));
+			platform.send(ws, presenceTopic, 'state', snapshotState(users));
 		},
 
 		leave(ws, platform) {
@@ -527,7 +527,7 @@ export function createPresence(options = {}) {
 			const users = topicPresence.get(topic);
 			const presenceTopic = TOPIC_PREFIX + topic;
 			try { ws.subscribe(presenceTopic); } catch { return; }
-			platform.send(ws, presenceTopic, 'presence_state', snapshotState(users));
+			platform.send(ws, presenceTopic, 'state', snapshotState(users));
 		},
 
 		list(topic) {
