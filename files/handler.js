@@ -366,12 +366,24 @@ const app = is_tls
 	: uWS.App();
 
 // - Cross-worker pub/sub relay (batched) ------------------------------------
-// Batch postMessage calls within a single microtask. A SvelteKit action that
-// publishes N events sends one structured-clone across the thread boundary
-// instead of N. No-op in single-process mode (parentPort is null).
+// Batch postMessage calls within a single event-loop iteration. A SvelteKit
+// action that publishes N events sends one structured-clone across the thread
+// boundary instead of N. No-op in single-process mode (parentPort is null).
+//
+// Why `setTimeout(0)` and not `queueMicrotask`: uWS dispatches each WS message
+// as its own JS task, and N-API drains microtasks at the C++/JS boundary
+// between tasks. A microtask-deferred flush fires BEFORE the next socket's
+// handler runs, so cross-socket coalescing is impossible at the microtask
+// level - N publishes from N socket handlers in the same iteration produce N
+// postMessage structured-clones instead of one batched. `setTimeout(0)` lands
+// in libuv's timers phase, which fires only after the poll phase has
+// dispatched every ready socket message in the current iteration. Same
+// structural choice the 0.5.6 cursor always-tick rewrite locked in.
 
 /** @type {Array<{topic: string, envelope: string}> | null} */
 let relayBatch = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let relayTimer = null;
 
 /**
  * @param {string} topic
@@ -380,12 +392,14 @@ let relayBatch = null;
 function batchRelay(topic, envelope) {
 	if (!relayBatch) {
 		relayBatch = [];
-		queueMicrotask(() => {
+		relayTimer = setTimeout(() => {
+			relayTimer = null;
 			if (relayBatch) {
 				parentPort.postMessage({ type: 'publish-batch', messages: relayBatch });
 			}
 			relayBatch = null;
-		});
+		}, 0);
+		if (relayTimer.unref) relayTimer.unref();
 	}
 	relayBatch.push({ topic, envelope });
 }

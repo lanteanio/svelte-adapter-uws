@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-05-23
+
+### Fixed
+
+- **`plugins/presence/server.js` mass-join fragmentation: `bufferDiff` deferred via `setTimeout(0)` instead of `queueMicrotask`.** Mirror surface to the same bug class the 0.5.6 cursor always-tick rewrite fixed for `broadcast` / `enqueueInbound`. The `queueMicrotask`-deferred flush assumed co-arriving `join` / `leave` ops share a JS task so they would all collapse into one diff per topic per iteration. They don't share a task: uWS dispatches each WS message as its own JS task and N-API drains microtasks at the C++/JS boundary between tasks, so the deferred flush ran BEFORE the next socket's handler and every per-message `bufferDiff` produced its own one-entry diff. Triangulated cross-repo via the extensions-side `redis/presence.js` cap probe; the in-memory presence plugin shares the wire shape and the structural bug, so the same fix applies. Post-fix, `bufferDiff` arms a tracker-wide `setTimeout(() => flushDiffs(platform), 0)` on the first dirty entry; subsequent entries in the same iteration accumulate into `pendingDiffs` until the timer fires. `setTimeout(0)` lands in libuv's timers phase, which fires only after the poll phase has dispatched every ready socket message in the current iteration. `diffFlushTimer` handle stored so `clear()` can cancel a pending flush. New cross-task-boundary regression test drives 50 unique joiners across `await Promise.resolve()` boundaries (the exact dispatch shape uWS produces) and asserts they all coalesce into one diff per topic. `flushDiffs()` accessor is unchanged in shape - tests still drain synchronously.
+
+- **`files/handler.js batchRelay`: same `queueMicrotask` -> `setTimeout(0)` swap for the cross-worker postMessage batching.** Each WS-dispatched publish in a multi-process deployment relays through this batch into one structured-clone postMessage to the parent process. Under per-WS dispatch the microtask-deferred flush fired between handlers, so N publishes from N socket handlers became N structured-clones instead of one batched message. Same structural fix: timer handle in `relayTimer`, armed on first entry, drains at the next tick.
+
 ## [0.5.7] - 2026-05-23
 
 ### Changed

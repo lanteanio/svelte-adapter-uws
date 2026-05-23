@@ -302,12 +302,28 @@ export function createPresence(options = {}) {
 
 	/**
 	 * Per-topic pending diff buffer: latest op per key wins. Joins and leaves
-	 * happening on the same key in a tick collapse so the wire only sees the
-	 * net change. Flushed once per microtask via `scheduleDiffFlush`.
+	 * happening on the same key in one event-loop iteration collapse so the
+	 * wire only sees the net change. Flushed once per iteration via
+	 * `setTimeout(() => flushDiffs(platform), 0)` armed when the first dirty
+	 * entry lands.
+	 *
+	 * Why `setTimeout(0)` and not `queueMicrotask`: uWS dispatches each WS
+	 * message as its own JS task, and N-API drains microtasks at the C++/JS
+	 * boundary between tasks. A microtask-deferred flush fires BEFORE the
+	 * next socket's handler runs, so cross-socket coalescing is impossible
+	 * at the microtask level - a mass-join into a populated topic produces
+	 * O(N) one-entry diffs instead of one batched diff. `setTimeout(0)`
+	 * lands in libuv's timers phase, which fires only after the poll phase
+	 * has dispatched every ready socket message in the current iteration -
+	 * so all joins arriving together end up in one flush regardless of how
+	 * many task boundaries separate them. Same structural choice the
+	 * 0.5.6 cursor always-tick rewrite locked in.
+	 *
 	 * @type {Map<string, Map<string, { op: 'join' | 'leave', data: Record<string, any> }>>}
 	 */
 	const pendingDiffs = new Map();
-	let diffFlushScheduled = false;
+	/** @type {ReturnType<typeof setTimeout> | null} */
+	let diffFlushTimer = null;
 
 	/**
 	 * @param {string} topic
@@ -323,15 +339,18 @@ export function createPresence(options = {}) {
 			pendingDiffs.set(topic, entries);
 		}
 		entries.set(key, { op, data });
-		if (!diffFlushScheduled) {
-			diffFlushScheduled = true;
-			queueMicrotask(() => flushDiffs(platform));
+		if (diffFlushTimer === null) {
+			diffFlushTimer = setTimeout(() => flushDiffs(platform), 0);
+			if (diffFlushTimer.unref) diffFlushTimer.unref();
 		}
 	}
 
 	/** @param {import('../../index.js').Platform} platform */
 	function flushDiffs(platform) {
-		diffFlushScheduled = false;
+		if (diffFlushTimer !== null) {
+			clearTimeout(diffFlushTimer);
+			diffFlushTimer = null;
+		}
 		for (const [topic, entries] of pendingDiffs) {
 			/** @type {Record<string, Record<string, any>>} */
 			const joins = {};
@@ -554,21 +573,24 @@ export function createPresence(options = {}) {
 			wsTopics.clear();
 			topicPresence.clear();
 			pendingDiffs.clear();
-			diffFlushScheduled = false;
+			if (diffFlushTimer !== null) {
+				clearTimeout(diffFlushTimer);
+				diffFlushTimer = null;
+			}
 			connCounter = 0;
 		},
 
 		/**
 		 * Drain any buffered diff publishes synchronously. Tests use this
-		 * to assert on the wire output without awaiting the microtask
-		 * queue. Production code generally does not need to call it - the
-		 * microtask flush happens automatically. Useful when a caller
+		 * to assert on the wire output without awaiting the next-tick
+		 * setTimeout flush. Production code generally does not need to call
+		 * it - the tick flush happens automatically. Useful when a caller
 		 * needs presence state visible to other workers before its own
 		 * synchronous block returns (e.g. before responding to an HTTP
 		 * request that just triggered a leave).
 		 */
 		flushDiffs() {
-			if (!diffFlushScheduled || !_platform) return;
+			if (diffFlushTimer === null || !_platform) return;
 			flushDiffs(_platform);
 		},
 

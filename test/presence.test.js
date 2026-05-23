@@ -141,6 +141,36 @@ describe('presence plugin - server', () => {
 			expect(diffs[0].data.leaves).toEqual({});
 		});
 
+		// Pins the structural property the prior queueMicrotask defer got
+		// wrong: uWS dispatches each WS message as its own JS task and N-API
+		// drains microtasks at the C++/JS boundary between tasks, so a
+		// microtask-deferred flush fires BEFORE the next socket's handler runs
+		// and cross-socket coalescing is impossible at the microtask level.
+		// setTimeout(0) lands in libuv's timers phase, which fires only after
+		// the poll phase has dispatched every ready socket message in the
+		// current iteration - so joins arriving in separate JS tasks (the
+		// production shape) still collapse into one diff. Mirrors the
+		// cross-task-boundary regression test for cursor's always-tick (0.5.6).
+		it('cross-task-boundary joins coalesce into one diff per topic', async () => {
+			vi.useFakeTimers();
+			const p = createPresence({
+				key: 'id',
+				select: (u) => ({ id: u.id })
+			});
+			const COUNT = 50;
+			for (let i = 0; i < COUNT; i++) {
+				p.join(mockWs({ id: 'joiner-' + i }), 'room', platform);
+				await Promise.resolve(); // crosses microtask boundary like uWS dispatches
+			}
+			vi.advanceTimersByTime(1);
+
+			const diffs = platform.published.filter((pp) => pp.event === 'diff' && pp.topic === '__presence:room');
+			expect(diffs).toHaveLength(1);
+			expect(Object.keys(diffs[0].data.joins)).toHaveLength(COUNT);
+
+			vi.useRealTimers();
+		});
+
 		it('is idempotent - same ws + topic does nothing', () => {
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			presence.join(ws, 'room', platform);
