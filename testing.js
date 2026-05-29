@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts } from './files/wire.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -208,6 +209,50 @@ export async function createTestServer(options = {}) {
 		return result;
 	}
 
+	/**
+	 * Binary-frame variant of sendOutboundT (isBinary=true). Routes through the
+	 * same chaos chokepoint so drop/slow-drain scenarios apply to `0x03` frames.
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @param {Uint8Array} frame
+	 */
+	function sendOutboundBinaryT(ws, frame) {
+		if (chaos.shouldDropOutbound()) return 0;
+		const delay = chaos.getDelayMs();
+		if (delay > 0) {
+			setTimeout(() => {
+				try { ws.send(frame, true, false); }
+				catch { closedWsAbortsT++; return; }
+				bumpOutT(ws, frame);
+			}, delay);
+			return 1;
+		}
+		let result;
+		try { result = ws.send(frame, true, false); }
+		catch { closedWsAbortsT++; return 2; }
+		bumpOutT(ws, frame);
+		return result;
+	}
+
+	// Binary wire (0x03) capability accounting + topic-id assignment, mirroring
+	// production handler.js so the cap-gated binary publish path is exercised
+	// by createTestServer-based suites. Shared primitives live in ./files/wire.js.
+	const capCountsT = createCapCounts();
+
+	/**
+	 * Per-connection topic-id resolution + lazy `wire-id` announce. Binary
+	 * frames and the announce flow through sendOutboundT so chaos scenarios
+	 * apply to them too.
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @param {any} ud
+	 * @param {string} topic
+	 * @returns {number}
+	 */
+	function ensureWireIdT(ws, ud, topic) {
+		const { id, isNew } = allocWireId(ud, WS_TOPIC_IDS, topic);
+		if (isNew) sendOutboundT(ws, wireIdAnnounce(topic, id));
+		return id;
+	}
+
 	const platform = {
 		publish(topic, event, data, options) {
 			const seq = (options && options.seq === false)
@@ -232,6 +277,61 @@ export async function createTestServer(options = {}) {
 		send(ws, topic, event, data) {
 			const payload = envelope(topic, event, data);
 			return sendOutboundT(ws, payload);
+		},
+		publishWire(topic, event, data, wire, options) {
+			const seq = (options && options.seq === false)
+				? null
+				: nextTopicSeq(topicSeqs, topic);
+			const env = envelope(topic, event, data, seq);
+			const payload = capCountsT.has(wire.capability) ? wire.encode(event, data) : null;
+			if (payload == null) {
+				// No capable client (or codec declined): single C++ fan-out,
+				// identical to platform.publish's fast path.
+				if (chaos.scenario === null) return app.publish(topic, env, false, false);
+				let delivered = false;
+				for (const ws of wsConnections) {
+					if (!ws.isSubscribed(topic)) continue;
+					sendOutboundT(ws, env);
+					delivered = true;
+				}
+				return delivered;
+			}
+			const seqOnWire = seq == null ? 0 : seq;
+			/** @type {Map<number, Uint8Array>} */
+			const frameById = new Map();
+			let delivered = false;
+			for (const ws of wsConnections) {
+				let ud;
+				try { ud = ws.getUserData(); } catch { continue; }
+				const subs = ud[WS_SUBSCRIPTIONS];
+				if (!subs || !subs.has(topic)) continue;
+				const caps = ud[WS_CAPS];
+				if (caps && caps.has(wire.capability)) {
+					const id = ensureWireIdT(ws, ud, topic);
+					let frame = frameById.get(id);
+					if (!frame) {
+						frame = buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload);
+						frameById.set(id, frame);
+					}
+					sendOutboundBinaryT(ws, frame);
+				} else {
+					sendOutboundT(ws, env);
+				}
+				delivered = true;
+			}
+			return delivered;
+		},
+		sendWire(ws, topic, event, data, wire) {
+			let ud;
+			try { ud = ws.getUserData(); } catch { closedWsAbortsT++; return 2; }
+			const caps = ud[WS_CAPS];
+			const payload = (caps && caps.has(wire.capability)) ? wire.encode(event, data) : null;
+			if (payload == null) {
+				return sendOutboundT(ws, envelope(topic, event, data));
+			}
+			const id = ensureWireIdT(ws, ud, topic);
+			const frame = buildBinaryFrame(wire.schemaVersion, id, 0, payload);
+			return sendOutboundBinaryT(ws, frame);
 		},
 		sendTo(filter, topic, event, data) {
 			const msg = envelope(topic, event, data);
@@ -681,7 +781,9 @@ export async function createTestServer(options = {}) {
 							for (let i = 0; i < msg.caps.length; i++) {
 								if (typeof msg.caps[i] === 'string') caps.add(msg.caps[i]);
 							}
-							ws.getUserData()[WS_CAPS] = caps;
+							const helloUd = ws.getUserData();
+							capCountsT.adjust(helloUd[WS_CAPS], caps);
+							helloUd[WS_CAPS] = caps;
 							return;
 						}
 						if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
@@ -809,6 +911,7 @@ export async function createTestServer(options = {}) {
 				}
 				: { code, message, platform: closePlatform, subscriptions: subs };
 			handler.close?.(ws, ctx);
+			capCountsT.adjust(ud[WS_CAPS], null);
 			wsConnections.delete(ws);
 		}
 	});

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.1] - 2026-05-29
+
+### Added
+
+- **Binary wire mode: the `0x03` topic-frame multiplex + the plugin-author wire-codec contract.** A new optional binary transport for high-throughput topics, gated behind the existing capability handshake. JSON stays the default wire for everything; a plugin opts its own topic family in, and app code never changes. New platform methods `platform.publishWire(topic, event, data, wire, options)` and `platform.sendWire(ws, topic, event, data, wire)` send a compact binary frame to subscribers that advertised `wire.capability` in their `hello` frame and the identical JSON envelope to everyone else - from one call. The framework owns the `[0x03][schemaVersion][topicId][seq][payload]` envelope; the plugin's `wire.encode(event, data)` produces only the payload (and may return `null` to fall back to JSON for any single frame). A per-connection topic-id (`WS_TOPIC_IDS` slot) replaces the topic string on the wire and is announced to the client in a `{type:'wire-id'}` control frame. The client side adds `registerWireCodec(prefix, { capability, decode })` (exported from the client), sets `ws.binaryType='arraybuffer'`, and demuxes inbound `0x03` frames through the registered decoder into the same store dispatch the JSON path uses - so the reactive surface is byte-for-byte identical. The wire format is the server's decision (a plugin codec, or `binary: false`); the client never opts out via a URL parameter, and the library reads none. Zero-cost for JSON-only deployments: when no connected client advertises a codec's capability, `publishWire` takes the exact single `app.publish` fan-out `publish()` uses - `platform.publish` itself is unchanged. Old client <-> new server and new client <-> old server both keep working on JSON.
+
+- **Binary cursor frames (`cursor.protocol:2`), on by default.** The cursor plugin declares its built-in binary codec, so `cursor()` / `move()` get the binary win transparently - no API change, no flag. Cursor positions and roster ride a compact codec (length-prefixed string key, big-endian float32 `x`/`y`, JSON `user` for join/catalog) instead of JSON envelopes: a 221-entry coalesced BULK measures **~83% smaller on the wire** and decodes ~4-5x faster than `JSON.parse` (no `JSON.parse` on the cursor receive path at all). Non-`{x, y}`-numeric cursor data (extra fields, non-numeric positions) transparently falls back to JSON per frame, so richer cursor payloads keep working. `createCursor({ binary: false })` forces JSON for every client. The same client bundle decodes correctly against both the in-process and the Redis-backed (extensions) cursor backends.
+
 ## [0.5.8] - 2026-05-23
 
 ### Fixed

@@ -89,6 +89,23 @@ export interface CursorOptions<UserData = unknown, UserInfo = unknown> {
 	 * @default 8192 (8 KB)
 	 */
 	maxDataBytes?: number;
+
+	/**
+	 * Binary wire transport. When `true` (the default), cursor frames are sent
+	 * as compact binary `0x03` frames to clients that negotiated the
+	 * `cursor.protocol:2` capability, and as JSON to everyone else - fully
+	 * transparent, no app-code change, and a ~65-85% wire-size reduction on the
+	 * position hot path. Set `false` to force JSON for every client (e.g. to
+	 * keep DevTools' WS inspector readable). The wire format is the server's
+	 * decision - clients never opt out via a URL parameter.
+	 *
+	 * Non-`{x, y}`-numeric cursor data (extra fields, non-numeric positions)
+	 * transparently falls back to JSON per frame, so richer cursor payloads
+	 * keep working regardless of this flag.
+	 *
+	 * @default true
+	 */
+	binary?: boolean;
 }
 
 export interface CursorEntry<UserInfo = unknown, Data = unknown> {

@@ -1,10 +1,68 @@
 import { writable, derived } from 'svelte/store';
+import { parseBinaryFrame } from './files/wire.js';
 
 /** @type {ReturnType<typeof createConnection> | null} */
 let singleton = null;
 
 /** @type {'explicit' | 'implicit' | ''} */
 let singletonCreatedBy = '';
+
+/**
+ * Client-side binary wire codecs, keyed by topic-name prefix. A plugin (e.g.
+ * the cursor client) registers its decoder + capability here at import time;
+ * the connection then advertises those capabilities in its `hello` frame and
+ * routes inbound `0x03` frames whose resolved topic matches a prefix to the
+ * matching decoder. The decoder returns the same `{ event, data }` the JSON
+ * path would have dispatched, so the reactive surface is identical.
+ * @type {Map<string, { capability: string, decode: (payload: Uint8Array) => ({ event: string, data: any } | null) }>}
+ */
+const wireCodecs = new Map();
+
+/**
+ * Register a binary wire codec for a topic-name prefix. Idempotent per prefix.
+ * Plugins call this at module load (before connect) so the first `hello`
+ * already advertises the capability; if a connection is already open, its
+ * `hello` is re-sent so a lazily-imported plugin still negotiates binary.
+ *
+ * @param {string} prefix - topic-name prefix the codec owns (e.g. '__cursor:')
+ * @param {{ capability: string, decode: (payload: Uint8Array) => ({ event: string, data: any } | null) }} codec
+ */
+export function registerWireCodec(prefix, codec) {
+	wireCodecs.set(prefix, codec);
+	if (singleton && typeof singleton._resendHello === 'function') singleton._resendHello();
+}
+
+/**
+ * Build the `hello` caps array: `'batch'` plus every registered binary wire
+ * capability. A client always advertises what it can decode; the wire format
+ * is the server's decision (a plugin's codec, or `binary: false` to force
+ * JSON). We deliberately do NOT read any URL query parameter to opt out - the
+ * app owns its URL namespace, and a client-side force-JSON knob would let a
+ * connection inflate its own egress.
+ * @returns {string[]}
+ */
+function buildHelloCaps() {
+	const caps = ['batch'];
+	for (const codec of wireCodecs.values()) caps.push(codec.capability);
+	return caps;
+}
+
+/**
+ * Resolve a topic name to its registered wire codec by longest matching prefix.
+ * @param {string} topic
+ * @returns {{ capability: string, decode: (payload: Uint8Array) => ({ event: string, data: any } | null) } | null}
+ */
+function wireCodecForTopic(topic) {
+	let best = null;
+	let bestLen = -1;
+	for (const [prefix, codec] of wireCodecs) {
+		if (topic.startsWith(prefix) && prefix.length > bestLen) {
+			best = codec;
+			bestLen = prefix.length;
+		}
+	}
+	return best;
+}
 
 /**
  * Ensure the singleton connection exists.
@@ -707,6 +765,14 @@ function createConnection(options) {
 	/** @type {Map<string, number>} */
 	const topicRefCounts = new Map();
 
+	// Inverse of the server's per-connection topic-id map: numeric wireId ->
+	// topic name. Populated from `{type:'wire-id'}` control frames; an inbound
+	// `0x03` binary frame carries only the numeric id, resolved here back to the
+	// topic name the store ladder is keyed on. Per-connection: cleared on each
+	// (re)connect since the server reassigns ids fresh on a new connection.
+	/** @type {Map<number, string>} */
+	const wireIdMap = new Map();
+
 	// Highest seq seen per topic. Sent back to the server on reconnect via
 	// the resume frame so the user's resume hook can replay anything we
 	// missed during the disconnect window. Only topics that the server is
@@ -983,6 +1049,14 @@ function createConnection(options) {
 			scheduleReconnect();
 			return;
 		}
+		// Read inbound binary frames as ArrayBuffer (default is Blob, which is
+		// async to read). Cannot regress the realtime upload layer: that layer
+		// only EMITS binary (0x01/0x02) and receives upload results as JSON on
+		// the '__upload' topic - it never reads an inbound binary frame.
+		ws.binaryType = 'arraybuffer';
+		// Topic-ids are per-connection; the server reassigns them on a fresh
+		// connection, so drop any stale id -> name mappings from a prior socket.
+		wireIdMap.clear();
 
 		ws.onopen = () => {
 			attempt = 0;
@@ -992,10 +1066,12 @@ function createConnection(options) {
 			if (debug) console.log('[ws] connected');
 
 			// Advertise client capabilities. Server stores these on the
-			// connection's userData and uses them to gate opt-in wire
-			// features (currently: 'batch' for platform.publishBatched
-			// frames). Old servers ignore the unknown frame type.
-			ws?.send('{"type":"hello","caps":["batch"]}');
+			// connection's userData and uses them to gate opt-in wire features:
+			// 'batch' for publishBatched frames, plus any registered binary wire
+			// codec capabilities (e.g. 'cursor.protocol:2'). A client always
+			// advertises what it can decode; the wire format is the server's
+			// call. Old servers ignore the unknown frame type.
+			ws?.send(JSON.stringify({ type: 'hello', caps: buildHelloCaps() }));
 
 			// If we have a previous session id and any tracked seqs, ask the
 			// server to fill the gap before we resubscribe. The server's
@@ -1057,6 +1133,36 @@ function createConnection(options) {
 		ws.onmessage = (rawEvent) => {
 			lastServerMessage = Date.now();
 			try {
+				// Inbound binary demux, ahead of the JSON path. A 0x03 frame is
+				// a binary topic PAYLOAD: resolve its numeric topic-id to a name,
+				// decode via the registered codec, and feed the SAME
+				// dispatchEvent the JSON path uses so the reactive surface is
+				// byte-for-byte identical (zero JSON.parse on this hot path).
+				// Any other binary frame (the realtime layer's outbound-only
+				// 0x01/0x02, or a malformed frame) is dropped. Binary frames
+				// never fall through to JSON.parse.
+				if (rawEvent.data instanceof ArrayBuffer) {
+					if (rawEvent.data.byteLength > 1048576) {
+						if (debug) console.warn('[ws] binary frame too large, dropped:', rawEvent.data.byteLength, 'bytes');
+						return;
+					}
+					const parsed = parseBinaryFrame(new Uint8Array(rawEvent.data));
+					if (parsed) {
+						const topic = wireIdMap.get(parsed.topicId);
+						if (topic !== undefined) {
+							const codec = wireCodecForTopic(topic);
+							const decoded = codec ? codec.decode(parsed.payload) : null;
+							if (decoded) {
+								const out = { topic, event: decoded.event, data: decoded.data };
+								if (parsed.seq > 0) out.seq = parsed.seq;
+								dispatchEvent(out);
+							}
+						} else if (debug) {
+							console.warn('[ws] 0x03 frame for unknown topicId', parsed.topicId);
+						}
+					}
+					return;
+				}
 				// Reject oversized messages to prevent main-thread blocking
 				if (typeof rawEvent.data === 'string' && rawEvent.data.length > 1048576) {
 					if (debug) console.warn('[ws] message too large, dropped:', rawEvent.data.length, 'bytes');
@@ -1091,6 +1197,15 @@ function createConnection(options) {
 				}
 				if (msg.type === 'subscribed' && typeof msg.topic === 'string') {
 					if (debug) console.log('[ws] subscribed topic=%s ref=%s', msg.topic, msg.ref);
+					return;
+				}
+				if (msg.type === 'wire-id' && typeof msg.topic === 'string' && typeof msg.id === 'number') {
+					// Server announced a binary topic-id assignment. Record the
+					// inverse mapping so a subsequent 0x03 frame's numeric id
+					// resolves to this topic name. Arrives before the first
+					// binary frame for the topic (same socket, ordered).
+					wireIdMap.set(msg.id, msg.topic);
+					if (debug) console.log('[ws] wire-id topic=%s id=%d', msg.topic, msg.id);
 					return;
 				}
 				if (msg.type === 'subscribe-denied' && typeof msg.topic === 'string' && typeof msg.reason === 'string') {
@@ -1562,6 +1677,16 @@ function createConnection(options) {
 		return () => { if (requestHandler === handler) requestHandler = null; };
 	}
 
+	// Re-advertise capabilities on an already-open socket. Called by
+	// registerWireCodec when a binary plugin is imported after connect so its
+	// capability still reaches the server (the common case - import before
+	// connect - is covered by buildHelloCaps() reading the registry at open).
+	function resendHello() {
+		if (ws && ws.readyState === WebSocket.OPEN) {
+			ws.send(JSON.stringify({ type: 'hello', caps: buildHelloCaps() }));
+		}
+	}
+
 	return {
 		events: { subscribe: eventsStore.subscribe },
 		status: { subscribe: statusStore.subscribe },
@@ -1584,6 +1709,7 @@ function createConnection(options) {
 		// mark and back off until it drops below a low-water mark.
 		get bufferedAmount() { return ws?.bufferedAmount ?? 0; },
 		onRequest,
+		_resendHello: resendHello,
 		close
 	};
 }

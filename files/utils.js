@@ -404,6 +404,18 @@ export const WS_PLATFORM = Symbol.for('adapter-uws.ws.platform');
  */
 export const WS_CAPS = Symbol.for('adapter-uws.ws.caps');
 
+/**
+ * Per-connection binary wire-id allocation for `0x03` topic frames:
+ * `{ byName: Map<topicName, number>, next: number }`. Allocated lazily on the
+ * first binary publish to a connection (never for JSON-only connections, so
+ * the common case pays nothing). The id replaces the topic string on the wire;
+ * the server announces each `name -> id` assignment to the client in a
+ * `{type:'wire-id'}` control frame the first time it emits a binary frame for
+ * that topic. Per-connection and reset on reconnect - no cross-reconnect id
+ * stability and no server-side schema registry.
+ */
+export const WS_TOPIC_IDS = Symbol.for('adapter-uws.ws.topic-ids');
+
 // - Bounded-by-default capacity caps ---------------------------------------
 // Single source of truth for the per-connection and module-level Map / Set
 // caps that handler.js, vite.js, and testing.js all enforce. The numbers

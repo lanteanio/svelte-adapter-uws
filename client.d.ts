@@ -640,3 +640,25 @@ export interface WSConnection {
  * ```
  */
 export function connect(options?: ConnectOptions): WSConnection;
+
+/**
+ * Register a client-side binary wire codec for a topic-name prefix. This is a
+ * plugin-author surface, not an app-author one - a plugin (e.g. the cursor
+ * client) calls it at import time. The connection then advertises
+ * `codec.capability` in its `hello` frame and routes inbound binary `0x03`
+ * frames whose resolved topic starts with `prefix` to `codec.decode`, which
+ * must return the same `{ event, data }` the JSON path would have dispatched
+ * (or `null` to drop a malformed frame). Idempotent per prefix. A client
+ * always advertises what it can decode; whether a topic is actually sent as
+ * binary is the server's decision (the plugin's codec, or `binary: false`).
+ *
+ * @param prefix - topic-name prefix the codec owns (e.g. `'__cursor:'`)
+ * @param codec - `{ capability, decode }`
+ */
+export function registerWireCodec(
+	prefix: string,
+	codec: {
+		capability: string;
+		decode: (payload: Uint8Array) => { event: string; data: unknown } | null;
+	}
+): void;

@@ -2815,6 +2815,16 @@ Positions live on the `update` / `bulk` channel; user metadata lives on the `cat
 
 The cluster-aware [extensions](https://github.com/lanteanio/svelte-adapter-uws-extensions) Redis-backed cursor speaks the same wire format, so the same client bundle works against either backend.
 
+#### Binary wire mode
+
+Cursor frames ride a compact **binary wire** by default. The events above are the same; on the wire they are encoded as a binary `0x03` frame instead of a JSON envelope whenever the client supports it. A 221-cursor coalesced `bulk` is **~83% smaller** than the JSON equivalent and decodes ~4-5x faster (no `JSON.parse` on the cursor receive path). This is fully transparent: `cursor()` / `move()` are unchanged, the store still yields `Map<key, { user, data }>`, and the decode happens in the framework before your code sees the event.
+
+- **Capability-gated, never breaking.** The client advertises `cursor.protocol:2` in its `hello` frame; a client that does not (an older build, or one that opted out) receives the JSON frames unchanged. Old client <-> new server and new client <-> old server both keep working.
+- **`binary: false` to disable.** `createCursor({ binary: false })` forces JSON for every client (e.g. to keep DevTools' WS inspector readable). The wire format is the server's decision - the library reads no URL parameter and a client cannot force its own connection back to JSON, so it can't be used to inflate egress.
+- **Positions are `float32`, keys are length-prefixed strings.** Fractional positions (e.g. `clientX - getBoundingClientRect().left`) are carried losslessly enough for cursors (sub-0.01 px at screen scale). Cursor `data` that is not exactly `{ x, y }` numeric - extra fields, non-numeric values - transparently falls back to JSON for that frame, so richer cursor payloads keep working.
+
+Writing your own high-throughput plugin? The same mechanism is available via `platform.publishWire(topic, event, data, wire)` / `platform.sendWire(...)` on the server (where `wire = { capability, schemaVersion, encode(event, data) }` and `encode` returns a `Uint8Array` payload or `null` to fall back to JSON), plus `registerWireCodec(prefix, { capability, decode })` from `svelte-adapter-uws/client` on the client. JSON-only deployments pay nothing - `publishWire` takes the same single broadcast as `publish` when no connected client wants binary.
+
 #### Server usage
 
 Use the `hooks` helper for zero-config cursor handling. The `message` hook handles `cursor` and `cursor-snapshot` messages automatically, and `close` calls `remove()`. The hooks verify that the sender is subscribed to the `__cursor:{topic}` channel before processing - clients that haven't passed the `subscribe` hook for that topic are silently rejected.

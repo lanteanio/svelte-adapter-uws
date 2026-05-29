@@ -319,6 +319,20 @@ export default function uws(options = {}) {
 	const platform = {
 		publish,
 		publishBatched,
+		// Binary wire (publishWire/sendWire) is a production transport
+		// optimization. Dev mode delegates to the JSON publish/send: a
+		// binary-capable client receives JSON text frames, which its cursor
+		// store consumes identically (the binary path is transparent and
+		// optional). This mirrors dev's existing simpler-than-prod posture
+		// (dev also skips per-topic seq stamping). The full binary `0x03` path
+		// ships and is tested in production (files/handler.js) and the test
+		// server (testing.js).
+		publishWire(topic, event, data, _wire, options) {
+			return publish(topic, event, data, options);
+		},
+		sendWire(ws, topic, event, data, _wire) {
+			return send(ws, topic, event, data);
+		},
 		batch(messages) {
 			const results = [];
 			for (let i = 0; i < messages.length; i++) {

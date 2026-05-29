@@ -22,7 +22,8 @@ import { env } from 'ENV';
 import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts } from './wire.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -912,6 +913,40 @@ function flushCoalescedFor(ws) {
 	if (aborted) pending.clear();
 }
 
+// - Binary wire (0x03) capability accounting + topic-id assignment ----------
+// A connection opts into a binary plugin codec by advertising the codec's
+// capability token in its `hello` frame (stored in WS_CAPS). capCounts tracks
+// how many live connections advertised each token, so platform.publishWire
+// takes a zero-cost JSON fast path when no connected client wants binary for a
+// codec - a JSON-only deployment never enters the per-subscriber walk. The
+// id-allocation, announce-frame, and cap-counting primitives are shared with
+// the test / dev platforms via ./wire.js so the id space is identical.
+const capCounts = createCapCounts();
+
+/**
+ * Resolve (allocating on first use) the per-connection binary topic-id for a
+ * topic. On a fresh assignment, announce the `name -> id` mapping to the
+ * client in a `{type:'wire-id'}` control frame so an inbound `0x03` frame's
+ * numeric id resolves back to the topic name. The announce rides the same
+ * socket immediately before the first binary frame for the topic, so ordering
+ * guarantees the client records the mapping first - no ack/frame race.
+ * Per-connection and reset on reconnect (a reconnect is a new connection with
+ * fresh userData).
+ * @param {import('uWebSockets.js').WebSocket<any>} ws
+ * @param {any} ud - ws.getUserData()
+ * @param {string} topic
+ * @returns {number}
+ */
+function ensureWireId(ws, ud, topic) {
+	const { id, isNew } = allocWireId(ud, WS_TOPIC_IDS, topic);
+	if (isNew) {
+		const announce = wireIdAnnounce(topic, id);
+		try { ws.send(announce, false, false); } catch { closedWsAborts++; return id; }
+		bumpOut(ws, announce);
+	}
+	return id;
+}
+
 /** @type {import('./index.js').Platform} */
 const platform = {
 	/**
@@ -976,6 +1011,126 @@ const platform = {
 		try { result = ws.send(payload, false, false); }
 		catch { closedWsAborts++; return 2; }
 		bumpOut(ws, payload);
+		return result;
+	},
+
+	/**
+	 * Publish via a plugin-declared binary wire codec. Binary-capable
+	 * subscribers (those that advertised `wire.capability`) receive a `0x03`
+	 * frame; everyone else receives the identical JSON envelope `publish()`
+	 * would have sent. When no connected client advertises the capability - or
+	 * the codec declines this frame (`encode` returns null) - this takes the
+	 * exact single `app.publish` JSON fan-out with no per-subscriber walk, so a
+	 * JSON-only deployment pays nothing for the binary machinery.
+	 *
+	 * The framework owns the `0x03 | schemaVersion | topicId | seq | payload`
+	 * envelope; the plugin's `encode` produces only the payload. seq is stamped
+	 * once and carried in both the JSON and binary forms so resume keeps working.
+	 *
+	 * @param {string} topic
+	 * @param {string} event
+	 * @param {any} data
+	 * @param {{ capability: string, schemaVersion: number, encode: (event: string, data: any) => (Uint8Array | null) }} wire
+	 * @param {{ seq?: boolean, relay?: boolean }} [options]
+	 * @returns {boolean}
+	 */
+	publishWire(topic, event, data, wire, options) {
+		publishCountWindow++;
+		const seq = (options && options.seq === false)
+			? null
+			: nextTopicSeq(topicSeqs, topic);
+		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
+		assert(envelope.length > 0, 'envelope.empty', { topic, event });
+		let s = topicPublishStats.get(topic);
+		if (!s) {
+			s = { m: 0, b: 0 };
+			topicPublishStats.set(topic, s);
+			maybeWarnTopicRegistry();
+		} else {
+			assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape', { topic });
+		}
+		s.m++;
+		s.b += envelope.length;
+
+		// Encode once - but only when at least one live connection wants binary
+		// for this codec. A null payload (no capable client, or the codec
+		// declined this frame) falls through to the single C++ app.publish
+		// fan-out, byte- and instruction-identical to platform.publish.
+		const payload = capCounts.has(wire.capability) ? wire.encode(event, data) : null;
+		const relayed = !!(parentPort && (!options || options.relay !== false));
+		if (payload == null) {
+			const result = app.publish(topic, envelope, false, false);
+			if (relayed) batchRelay(topic, envelope);
+			return result || relayed;
+		}
+
+		// Mixed-capability fan-out: app.publish cannot vary payload per
+		// recipient, so walk the topic's subscribers and send each the form it
+		// negotiated. The codec payload is shared across recipients; only the
+		// tiny per-connection frame header (topic-id + seq) differs, memoized
+		// per distinct id so the common all-same-id case builds one frame and
+		// reuses it for every binary send.
+		const seqOnWire = seq == null ? 0 : seq;
+		/** @type {Map<number, Uint8Array>} */
+		const frameById = new Map();
+		for (const ws of wsConnections) {
+			let ud;
+			try { ud = ws.getUserData(); } catch { continue; }
+			const subs = ud[WS_SUBSCRIPTIONS];
+			if (!subs || !subs.has(topic)) continue;
+			const caps = ud[WS_CAPS];
+			if (caps && caps.has(wire.capability)) {
+				const id = ensureWireId(ws, ud, topic);
+				let frame = frameById.get(id);
+				if (!frame) {
+					frame = buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload);
+					frameById.set(id, frame);
+				}
+				try { ws.send(frame, true, false); } catch { closedWsAborts++; }
+			} else {
+				try { ws.send(envelope, false, false); } catch { closedWsAborts++; }
+			}
+		}
+		// Cross-worker subscribers receive the JSON envelope (binary is
+		// same-worker only); their worker re-publishes it to them as JSON.
+		if (relayed) batchRelay(topic, envelope);
+		if (wsDebug) {
+			console.log('[ws] publishWire topic=%s event=%s payloadBytes=%d', topic, event, payload.length);
+		}
+		return true;
+	},
+
+	/**
+	 * Single-target send via a plugin-declared binary wire codec. The target
+	 * receives a `0x03` frame when it advertised `wire.capability` and the
+	 * codec can encode this frame; otherwise it receives the JSON envelope
+	 * `send()` would have sent. No seq is stamped (matches `send()`); the
+	 * binary frame carries seq 0 ("no seq"). Used for snapshot/catalog frames.
+	 *
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @param {string} topic
+	 * @param {string} event
+	 * @param {any} data
+	 * @param {{ capability: string, schemaVersion: number, encode: (event: string, data: any) => (Uint8Array | null) }} wire
+	 * @returns {number} uWS send status (0/1/2), or 2 on a freed handle
+	 */
+	sendWire(ws, topic, event, data, wire) {
+		let ud;
+		try { ud = ws.getUserData(); } catch { closedWsAborts++; return 2; }
+		const caps = ud[WS_CAPS];
+		const payload = (caps && caps.has(wire.capability)) ? wire.encode(event, data) : null;
+		if (payload == null) {
+			const json = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
+			let result;
+			try { result = ws.send(json, false, false); } catch { closedWsAborts++; return 2; }
+			bumpOut(ws, json);
+			return result;
+		}
+		const id = ensureWireId(ws, ud, topic);
+		const frame = buildBinaryFrame(wire.schemaVersion, id, 0, payload);
+		let result;
+		try { result = ws.send(frame, true, false); } catch { closedWsAborts++; return 2; }
+		bumpOut(ws, frame);
 		return result;
 	},
 
@@ -3321,7 +3476,12 @@ if (WS_ENABLED) {
 					for (let i = 0; i < msg.caps.length; i++) {
 						if (typeof msg.caps[i] === 'string') caps.add(msg.caps[i]);
 					}
-					ws.getUserData()[WS_CAPS] = caps;
+					const ud = ws.getUserData();
+					// Maintain the live per-capability connection counts so the
+					// binary publish fast path knows whether any client wants
+					// binary. A re-sent hello replaces the prior set; diff it.
+					capCounts.adjust(ud[WS_CAPS], caps);
+					ud[WS_CAPS] = caps;
 					if (wsDebug) console.log('[ws] hello caps=%o', [...caps]);
 					return;
 				}
@@ -3412,6 +3572,9 @@ if (WS_ENABLED) {
 			} finally {
 				totalSubscriptions -= subscriptions.size;
 				assert(totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions });
+				// Release this connection's advertised capabilities from the
+				// live counts so the binary publish fast path stays accurate.
+				capCounts.adjust(userData[WS_CAPS], null);
 				wsConnections.delete(ws);
 				if (wsDebug) console.log('[ws] close code=%d connections=%d', code, wsConnections.size);
 			}

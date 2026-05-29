@@ -1063,6 +1063,58 @@ export interface Platform {
 	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean }): boolean;
 
 	/**
+	 * Publish via a plugin-declared binary wire codec. Subscribers that
+	 * advertised `wire.capability` in their `hello` frame receive a compact
+	 * binary `0x03` frame; everyone else receives the identical JSON envelope
+	 * `publish()` would have sent. App authors never call this - it is the
+	 * plugin-author surface for a high-throughput topic family (the cursor
+	 * plugin is the first beneficiary, gated by `cursor.protocol:2`).
+	 *
+	 * Zero-cost when no connected client wants binary: this takes the same
+	 * single `app.publish` fan-out as `publish()`. The codec's `encode` may
+	 * return `null` for a frame it cannot represent, which transparently falls
+	 * back to JSON for that one frame.
+	 *
+	 * @param topic - Topic string
+	 * @param event - Event name (the codec maps it to an opcode)
+	 * @param data - Payload (passed to `wire.encode`, or JSON-serialized on fallback)
+	 * @param wire - The plugin's wire codec: a negotiated `capability` token, a
+	 *   1-byte `schemaVersion`, and an `encode(event, data)` returning the
+	 *   payload bytes or `null` to fall back to JSON for this frame.
+	 * @param options - Same `relay` / `seq` semantics as `publish()`.
+	 */
+	publishWire(
+		topic: string,
+		event: string,
+		data: unknown,
+		wire: {
+			capability: string;
+			schemaVersion: number;
+			encode: (event: string, data: unknown) => Uint8Array | null;
+		},
+		options?: { relay?: boolean; seq?: boolean }
+	): boolean;
+
+	/**
+	 * Single-target counterpart to `publishWire()`. The connection receives a
+	 * binary `0x03` frame when it advertised `wire.capability` and the codec
+	 * can encode the frame; otherwise the JSON envelope `send()` would have
+	 * sent. No per-topic seq is stamped (matches `send()`). Used for
+	 * snapshot/catalog frames to a single late-joining subscriber.
+	 */
+	sendWire(
+		ws: WebSocket<any>,
+		topic: string,
+		event: string,
+		data: unknown,
+		wire: {
+			capability: string;
+			schemaVersion: number;
+			encode: (event: string, data: unknown) => Uint8Array | null;
+		}
+	): number;
+
+	/**
 	 * Publish multiple messages, returning per-message delivery results.
 	 *
 	 * **NOT wire-level batching.** Under the hood this is a `for` loop

@@ -36,6 +36,8 @@
  * @module svelte-adapter-uws/plugins/cursor
  */
 
+import { encodeCursor, CURSOR_CAPABILITY, CURSOR_SCHEMA_VERSION } from './codec.js';
+
 const TOPIC_PREFIX = '__cursor:';
 
 /** Wire-protocol event names. */
@@ -153,6 +155,14 @@ export function createCursor(options = {}) {
 	const maxTopics = options.maxTopics ?? 1_000_000;
 	const maxTopicLength = options.maxTopicLength ?? 256;
 	const maxDataBytes = options.maxDataBytes ?? 8192;
+
+	// Binary wire is on by default and fully transparent: binary-capable
+	// clients receive compact `0x03` cursor frames, everyone else (and any
+	// platform without the publishWire/sendWire methods, e.g. the unit-test
+	// mock) receives the identical JSON frames. `binary: false` forces JSON.
+	const wireCodec = options.binary === false
+		? null
+		: { capability: CURSOR_CAPABILITY, schemaVersion: CURSOR_SCHEMA_VERSION, encode: encodeCursor };
 
 	if (typeof throttleMs !== 'number' || !Number.isFinite(throttleMs) || throttleMs < 0) {
 		throw new Error('cursor: throttle must be a non-negative number');
@@ -285,12 +295,46 @@ export function createCursor(options = {}) {
 	}
 
 	/**
+	 * Broadcast a cursor wire event. Routes through the binary `publishWire`
+	 * path when a codec is configured AND the platform supports it (production /
+	 * dev / test-server); otherwise falls back to the JSON `publish` - so the
+	 * unit-test mock platform and `binary: false` both keep the exact JSON shape.
+	 * @param {string} fullTopic - the channel name, already TOPIC_PREFIX-scoped
+	 * @param {string} event
+	 * @param {any} data
+	 * @param {import('../../index.js').Platform} platform
+	 */
+	function emit(fullTopic, event, data, platform) {
+		if (wireCodec && typeof platform.publishWire === 'function') {
+			platform.publishWire(fullTopic, event, data, wireCodec);
+		} else {
+			platform.publish(fullTopic, event, data);
+		}
+	}
+
+	/**
+	 * Single-target variant of {@link emit} (snapshot catalog + positions).
+	 * @param {any} ws
+	 * @param {string} fullTopic
+	 * @param {string} event
+	 * @param {any} data
+	 * @param {import('../../index.js').Platform} platform
+	 */
+	function emitTo(ws, fullTopic, event, data, platform) {
+		if (wireCodec && typeof platform.sendWire === 'function') {
+			platform.sendWire(ws, fullTopic, event, data, wireCodec);
+		} else {
+			platform.send(ws, fullTopic, event, data);
+		}
+	}
+
+	/**
 	 * Emit `join` for a (ws, topic) pair the first time the ws moves on
 	 * the topic. Broadcast (not single-target) so existing subscribers
 	 * pick up the new user before any position frames arrive.
 	 */
 	function emitJoin(topic, key, user, platform) {
-		platform.publish(TOPIC_PREFIX + topic, EVENTS.JOIN, { key, user });
+		emit(TOPIC_PREFIX + topic, EVENTS.JOIN, { key, user }, platform);
 	}
 
 	/**
@@ -301,7 +345,7 @@ export function createCursor(options = {}) {
 	 * @param {import('../../index.js').Platform} platform
 	 */
 	function doBroadcast(topic, key, data, platform) {
-		platform.publish(TOPIC_PREFIX + topic, EVENTS.UPDATE, { key, data });
+		emit(TOPIC_PREFIX + topic, EVENTS.UPDATE, { key, data }, platform);
 	}
 
 	/**
@@ -325,7 +369,7 @@ export function createCursor(options = {}) {
 			flushPlatform = v.platform;
 		}
 		if (flushPlatform) {
-			flushPlatform.publish(TOPIC_PREFIX + topic, EVENTS.BULK, entries);
+			emit(TOPIC_PREFIX + topic, EVENTS.BULK, entries, flushPlatform);
 		}
 	}
 
@@ -533,7 +577,7 @@ export function createCursor(options = {}) {
 						const flushState = topicFlush.get(topic);
 						if (flushState) flushState.dirty.delete(state.key);
 					}
-					platform.publish(TOPIC_PREFIX + topic, EVENTS.REMOVE, { key: state.key });
+					emit(TOPIC_PREFIX + topic, EVENTS.REMOVE, { key: state.key }, platform);
 				}
 			}
 
@@ -561,8 +605,8 @@ export function createCursor(options = {}) {
 					positions.push({ key, data: entry.data });
 				}
 			}
-			platform.send(ws, TOPIC_PREFIX + topic, EVENTS.CATALOG, catalog);
-			platform.send(ws, TOPIC_PREFIX + topic, EVENTS.BULK, positions);
+			emitTo(ws, TOPIC_PREFIX + topic, EVENTS.CATALOG, catalog, platform);
+			emitTo(ws, TOPIC_PREFIX + topic, EVENTS.BULK, positions, platform);
 		},
 
 		clear() {

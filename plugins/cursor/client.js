@@ -28,8 +28,17 @@
 
 const TOPIC_PREFIX = '__cursor:';
 
-import { on, connect, status } from '../../client.js';
+import { on, connect, status, registerWireCodec } from '../../client.js';
 import { writable } from 'svelte/store';
+import { decodeCursor, CURSOR_CAPABILITY } from './codec.js';
+
+// Opt this connection into binary cursor frames: advertise the capability in
+// the `hello` frame and route inbound `0x03` frames on `__cursor:` topics
+// through the cursor decoder, which yields the identical { event, data } the
+// JSON path produced - so the store merge logic below is untouched. Registered
+// at module load so the first `hello` already carries the capability. Fully
+// transparent: nothing in the cursor() store knows whether a frame was binary.
+registerWireCodec(TOPIC_PREFIX, { capability: CURSOR_CAPABILITY, decode: decodeCursor });
 
 /** @type {Map<string, ReturnType<typeof cursor>>} */
 const cursorStores = new Map();
