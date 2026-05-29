@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createPresence } from '../plugins/presence/server.js';
+import { encodePresence } from '../plugins/presence/codec.js';
 import { mockWs, mockPlatform } from './_helpers.js';
 
 describe('presence plugin - server', () => {
@@ -1319,5 +1320,219 @@ describe('presence plugin - server', () => {
 			expect(p.count('b')).toBe(1);
 			expect(p.count('c')).toBe(1);
 		});
+	});
+});
+
+/**
+ * A platform that ALSO exposes publishWire / sendWire (production / dev /
+ * test-server shape) so the presence plugin's binary routing fires. Records
+ * which path each call took, so a test can assert binary vs JSON.
+ */
+function binaryMockPlatform() {
+	const p = {
+		published: [],
+		sent: [],
+		publishedWire: [],
+		sentWire: [],
+		publish(topic, event, data) { p.published.push({ topic, event, data }); return true; },
+		send(ws, topic, event, data) { p.sent.push({ ws, topic, event, data }); return 1; },
+		publishWire(topic, event, data, codec, options) { p.publishedWire.push({ topic, event, data, codec, options }); return true; },
+		sendWire(ws, topic, event, data, codec, options) { p.sentWire.push({ ws, topic, event, data, codec, options }); return 1; },
+		reset() { p.published.length = p.sent.length = p.publishedWire.length = p.sentWire.length = 0; }
+	};
+	return p;
+}
+
+const encodeFrame = (obj) => new TextEncoder().encode(JSON.stringify(obj));
+
+describe('presence plugin - binary wire', () => {
+	it('routes state / diff / heartbeat through publishWire / sendWire when the platform supports it', () => {
+		const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id, name: ud.name }), heartbeat: 0 });
+		const platform = binaryMockPlatform();
+		const ws = mockWs({ id: '1', name: 'Alice' });
+
+		presence.join(ws, 'room', platform);
+		presence.flushDiffs();
+
+		// state went out via sendWire (not send), carrying the presence codec.
+		expect(platform.sent).toHaveLength(0);
+		expect(platform.sentWire).toHaveLength(1);
+		expect(platform.sentWire[0].event).toBe('state');
+		expect(platform.sentWire[0].data).toEqual({ '1': { id: '1', name: 'Alice' } });
+		expect(platform.sentWire[0].codec.capability).toBe('presence.protocol:1');
+
+		// diff went out via publishWire (not publish), exactly once.
+		expect(platform.published).toHaveLength(0);
+		expect(platform.publishedWire).toHaveLength(1);
+		expect(platform.publishedWire[0].event).toBe('diff');
+		expect(platform.publishedWire[0].data).toEqual({ joins: { '1': { id: '1', name: 'Alice' } }, leaves: {} });
+	});
+
+	it('emits a heartbeat through publishWire', async () => {
+		vi.useFakeTimers();
+		try {
+			const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id }), heartbeat: 1000 });
+			const platform = binaryMockPlatform();
+			presence.join(mockWs({ id: '1' }), 'room', platform);
+			presence.flushDiffs();
+			platform.reset();
+
+			vi.advanceTimersByTime(1000);
+
+			const beats = platform.publishedWire.filter((m) => m.event === 'heartbeat');
+			expect(beats).toHaveLength(1);
+			expect(beats[0].data).toEqual({ '1': { id: '1' } });
+			expect(beats[0].codec.capability).toBe('presence.protocol:1');
+			presence.clear();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('binary:false forces JSON even on a publishWire-capable platform', () => {
+		const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id }), binary: false });
+		const platform = binaryMockPlatform();
+		presence.join(mockWs({ id: '1' }), 'room', platform);
+		presence.flushDiffs();
+
+		// Everything went the JSON way; the wire methods were never touched.
+		expect(platform.publishedWire).toHaveLength(0);
+		expect(platform.sentWire).toHaveLength(0);
+		expect(platform.sent[0].event).toBe('state');
+		expect(platform.published[0].event).toBe('diff');
+	});
+
+	it('falls back to JSON on a platform without publishWire / sendWire (the mock)', () => {
+		const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id }) });
+		const platform = mockPlatform(); // no publishWire / sendWire
+		presence.join(mockWs({ id: '1' }), 'room', platform);
+		presence.flushDiffs();
+		expect(platform.sent[0].event).toBe('state');
+		expect(platform.published[0].event).toBe('diff');
+	});
+
+	it('opts into compression (compress: true) on its wire calls - presence is low-frequency', () => {
+		// Presence frames are infrequent, so they ask the framework to compress
+		// them (a cheap bandwidth win). The framework only acts on this when a
+		// compressor is configured; the high-frequency cursor path does NOT opt in.
+		const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id }) });
+		const platform = binaryMockPlatform();
+		presence.join(mockWs({ id: '1' }), 'room', platform);   // sends state via sendWire
+		presence.flushDiffs();                                   // broadcasts diff via publishWire
+
+		expect(platform.sentWire.every((m) => m.options && m.options.compress === true)).toBe(true);
+		expect(platform.publishedWire.every((m) => m.options && m.options.compress === true)).toBe(true);
+	});
+
+	it('the binary path never carries denied / credential fields (select runs before encode)', () => {
+		// Default select drops credential-looking keys and substitutes binary views;
+		// the codec only ever sees post-select data, so nothing sensitive can reach
+		// the wire even on the binary path.
+		const presence = createPresence(); // default select (denylist)
+		const platform = binaryMockPlatform();
+		presence.join(mockWs({ id: '1', name: 'Alice', sessionToken: 'secret-abc', avatar: new Uint8Array(8) }), 'room', platform);
+		presence.flushDiffs();
+
+		const state = platform.sentWire.find((m) => m.event === 'state');
+		const entry = state.data['1'];
+		expect('sessionToken' in entry).toBe(false);
+		expect(entry.avatar).toBe('[bytes: 8]');
+		// And the actual encoded bytes carry no credential.
+		const payload = encodePresence(state.event, state.data);
+		expect(Buffer.from(payload).toString('latin1')).not.toContain('secret-abc');
+	});
+
+	it('multi-tab dedup: the encoded roster carries each key once regardless of tab count', () => {
+		const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id, name: ud.name }) });
+		const platform = binaryMockPlatform();
+		// Two connections, same user key '7'.
+		presence.join(mockWs({ id: '7', name: 'Sam' }), 'room', platform);
+		presence.join(mockWs({ id: '7', name: 'Sam' }), 'room', platform);
+		presence.flushDiffs();
+
+		// The second tab is a count bump, not a second roster entry: the wire
+		// carries key '7' exactly once on the state snapshot.
+		const lastState = platform.sentWire.filter((m) => m.event === 'state').at(-1);
+		expect(Object.keys(lastState.data)).toEqual(['7']);
+	});
+});
+
+describe('presence plugin - hooks.message (reconnect snapshot)', () => {
+	it('routes {type:"presence-snapshot", topic} through sync and replies with state', () => {
+		const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id, name: ud.name }) });
+		const platform = binaryMockPlatform();
+
+		// Populate a roster from another connection so there is state to reply with.
+		presence.join(mockWs({ id: '1', name: 'Alice' }), 'room', platform);
+		presence.flushDiffs();
+		platform.reset();
+
+		// A reconnecting observer asks for the snapshot.
+		const ws = mockWs({ id: '2', name: 'Bob' });
+		const handled = presence.hooks.message(ws, { data: encodeFrame({ type: 'presence-snapshot', topic: 'room' }), platform });
+
+		expect(handled).toBe(true);
+		expect(platform.sentWire).toHaveLength(1);
+		expect(platform.sentWire[0].ws).toBe(ws);
+		expect(platform.sentWire[0].event).toBe('state');
+		expect(platform.sentWire[0].data).toEqual({ '1': { id: '1', name: 'Alice' } });
+	});
+
+	it('accepts a pre-parsed envelope via ctx.msg (adapter direct-hook wiring)', () => {
+		// The adapter passes the parsed envelope as `msg` (raw bytes in `data`).
+		const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id }) });
+		const platform = binaryMockPlatform();
+		presence.join(mockWs({ id: '1' }), 'room', platform);
+		presence.flushDiffs();
+		platform.reset();
+
+		const handled = presence.hooks.message(mockWs({ id: '2' }), {
+			data: encodeFrame({ type: 'presence-snapshot', topic: 'room' }),
+			msg: { type: 'presence-snapshot', topic: 'room' },
+			platform
+		});
+		expect(handled).toBe(true);
+		expect(platform.sentWire.filter((m) => m.event === 'state')).toHaveLength(1);
+	});
+
+	it('accepts an already-parsed object as ctx.data (onUnhandled / onJsonMessage wiring)', () => {
+		// svelte-realtime's onJsonMessage and the demo's onUnhandled pass the parsed
+		// object as `data` - the shape that the raw-bytes-only version silently dropped.
+		const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id }) });
+		const platform = binaryMockPlatform();
+		presence.join(mockWs({ id: '1' }), 'room', platform);
+		presence.flushDiffs();
+		platform.reset();
+
+		const handled = presence.hooks.message(mockWs({ id: '2' }), {
+			data: { type: 'presence-snapshot', topic: 'room' },
+			platform
+		});
+		expect(handled).toBe(true);
+		expect(platform.sentWire.filter((m) => m.event === 'state')).toHaveLength(1);
+	});
+
+	it('ignores frames it does not own (returns undefined)', () => {
+		const presence = createPresence();
+		const platform = binaryMockPlatform();
+		const ws = mockWs({ id: '1' });
+
+		expect(presence.hooks.message(ws, { data: encodeFrame({ type: 'cursor', topic: 'room' }), platform })).toBeUndefined();
+		expect(presence.hooks.message(ws, { data: encodeFrame({ type: 'presence-snapshot' }), platform })).toBeUndefined(); // no topic
+		expect(presence.hooks.message(ws, { data: new TextEncoder().encode('not json{'), platform })).toBeUndefined();
+		expect(platform.sentWire).toHaveLength(0);
+		expect(platform.sent).toHaveLength(0);
+	});
+
+	it('replies with JSON state on a platform without sendWire', () => {
+		const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id }) });
+		const platform = mockPlatform();
+		presence.join(mockWs({ id: '1' }), 'room', platform);
+		presence.flushDiffs();
+		platform.reset();
+
+		presence.hooks.message(mockWs({ id: '2' }), { data: encodeFrame({ type: 'presence-snapshot', topic: 'room' }), platform });
+		expect(platform.sent).toHaveLength(1);
+		expect(platform.sent[0].event).toBe('state');
 	});
 });

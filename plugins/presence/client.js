@@ -22,8 +22,24 @@
 
 const TOPIC_PREFIX = '__presence:';
 
-import { on, connect, status } from '../../client.js';
+import { on, connect, status, registerWireCodec } from '../../client.js';
 import { writable } from 'svelte/store';
+import { decodePresence, PRESENCE_CAPABILITY } from './codec.js';
+
+// Opt this connection into binary presence frames: advertise `presence.protocol:1`
+// in the `hello` frame and route inbound `0x03` frames on `__presence:` topics
+// through the presence decoder, which yields the identical { event, data } the
+// JSON path produced - so the store merge logic below is untouched. The codec is
+// stateless (no per-connection dictionary), so there is no `state` factory; the
+// decoder dispatches on the frame's schemaVersion and drops an unknown one.
+// Registered at module load so the first `hello` already carries the capability.
+// Fully transparent: nothing in the presence() store knows whether a frame
+// arrived as a binary `0x03` frame or as JSON.
+registerWireCodec(TOPIC_PREFIX, {
+	capability: PRESENCE_CAPABILITY,
+	capabilities: [PRESENCE_CAPABILITY],
+	decode: decodePresence
+});
 
 /** @type {Map<string, { subscribe: (fn: Function) => (() => void) }>} */
 const presenceStores = new Map();

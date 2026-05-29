@@ -1034,7 +1034,11 @@ const platform = {
 		}
 		s.m++;
 		s.b += envelope.length;
-		const result = app.publish(topic, envelope, false, false);
+		// Compress this text frame when a compressor is configured; opt out per
+		// call with `{ compress: false }` (e.g. a very high-rate text topic where
+		// the per-subscriber deflate CPU would outweigh the bandwidth saving).
+		const compress = WS_COMPRESSION_ON && (!options || options.compress !== false);
+		const result = app.publish(topic, envelope, false, compress);
 		// Relay to other workers via main thread (no-op in single-process mode).
 		// Pass { relay: false } when the message originates from an external
 		// pub/sub source (Redis, Postgres, etc.) that already fans out to
@@ -1057,15 +1061,16 @@ const platform = {
 	 * Send a message to a single WebSocket connection.
 	 * Wraps in the same { topic, event, data } envelope as publish().
 	 */
-	send(ws, topic, event, data) {
+	send(ws, topic, event, data, options) {
 		const payload = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
 		assert(payload.length > 0, 'envelope.send-empty', { topic, event });
+		const compress = WS_COMPRESSION_ON && (!options || options.compress !== false);
 		// `ws.send` throws on a freed native handle (callers may reach
 		// here after an `await` that outlasted the socket). Return 2
 		// (DROPPED, the uWS sentinel) so callers can pattern-match
 		// without distinguishing closed from backpressure-dropped.
 		let result;
-		try { result = ws.send(payload, false, false); }
+		try { result = ws.send(payload, false, compress); }
 		catch { closedWsAborts++; return 2; }
 		bumpOut(ws, payload);
 		return result;
@@ -1088,7 +1093,10 @@ const platform = {
 	 * @param {string} event
 	 * @param {any} data
 	 * @param {{ capability: string, schemaVersion: number, encode: (event: string, data: any) => (Uint8Array | null) }} wire
-	 * @param {{ seq?: boolean, relay?: boolean }} [options]
+	 * @param {{ seq?: boolean, relay?: boolean, compress?: boolean }} [options] -
+	 *   `compress: true` opts this codec's frames (binary and JSON fallback) into
+	 *   permessage-deflate when a compressor is configured; binary frames are
+	 *   uncompressed by default (the cursor hot path leaves it off).
 	 * @returns {boolean}
 	 */
 	publishWire(topic, event, data, wire, options) {
@@ -1111,11 +1119,19 @@ const platform = {
 
 		const relayed = !!(parentPort && (!options || options.relay !== false));
 
+		// Binary codec frames (and this call's JSON-fallback frames) compress only
+		// when the codec/plugin opts in with `{ compress: true }` AND a compressor
+		// is configured. One decision governs the whole call so a plugin's intent
+		// (cursor: off, the 60 Hz hot path; presence: on, a low-frequency roster)
+		// applies to its binary and JSON-fallback frames alike. Off by default
+		// keeps the hot path uncompressed.
+		const compress = WS_COMPRESSION_ON && !!(options && options.compress === true);
+
 		// JSON fast path: no live connection wants binary for this codec. Byte-
 		// and instruction-identical to platform.publish - a JSON-only deployment
 		// never enters the per-subscriber walk or touches the codec at all.
 		if (!capCounts.has(wire.capability)) {
-			const result = app.publish(topic, envelope, false, false);
+			const result = app.publish(topic, envelope, false, compress);
 			if (relayed) batchRelay(topic, envelope);
 			return result || relayed;
 		}
@@ -1141,26 +1157,26 @@ const platform = {
 				if (!subs || !subs.has(topic)) continue;
 				const caps = ud[WS_CAPS];
 				if (!caps || !caps.has(wire.capability)) {
-					try { ws.send(envelope, false, false); } catch { closedWsAborts++; }
+					try { ws.send(envelope, false, compress); } catch { closedWsAborts++; }
 					continue;
 				}
 				const state = ensureWireState(ws, ud, wire);
 				if (state == null) {
 					// Shared encode-once at the codec's baseline schema version.
 					if (!sharedEncoded) { sharedPayload = wire.encode(event, data, null); sharedEncoded = true; }
-					if (sharedPayload == null) { try { ws.send(envelope, false, false); } catch { closedWsAborts++; } continue; }
+					if (sharedPayload == null) { try { ws.send(envelope, false, compress); } catch { closedWsAborts++; } continue; }
 					const id = ensureWireId(ws, ud, topic);
 					let frame = sharedFrameById.get(id);
 					if (!frame) { frame = buildBinaryFrame(wire.schemaVersion, id, seqOnWire, sharedPayload); sharedFrameById.set(id, frame); }
-					try { ws.send(frame, true, false); } catch { closedWsAborts++; }
+					try { ws.send(frame, true, compress); } catch { closedWsAborts++; }
 				} else {
 					// Per-connection encode against this connection's state, stamped
 					// with the schema version that state negotiated.
 					const payload = wire.encode(event, data, state);
-					if (payload == null) { try { ws.send(envelope, false, false); } catch { closedWsAborts++; } continue; }
+					if (payload == null) { try { ws.send(envelope, false, compress); } catch { closedWsAborts++; } continue; }
 					const sv = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
 					const frame = buildBinaryFrame(sv, ensureWireId(ws, ud, topic), seqOnWire, payload);
-					try { ws.send(frame, true, false); } catch { closedWsAborts++; }
+					try { ws.send(frame, true, compress); } catch { closedWsAborts++; }
 				}
 			}
 			if (relayed) batchRelay(topic, envelope);
@@ -1175,7 +1191,7 @@ const platform = {
 		// all-same-id case builds one frame and reuses it for every binary send.
 		const payload = wire.encode(event, data);
 		if (payload == null) {
-			const result = app.publish(topic, envelope, false, false);
+			const result = app.publish(topic, envelope, false, compress);
 			if (relayed) batchRelay(topic, envelope);
 			return result || relayed;
 		}
@@ -1194,9 +1210,9 @@ const platform = {
 					frame = buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload);
 					frameById.set(id, frame);
 				}
-				try { ws.send(frame, true, false); } catch { closedWsAborts++; }
+				try { ws.send(frame, true, compress); } catch { closedWsAborts++; }
 			} else {
-				try { ws.send(envelope, false, false); } catch { closedWsAborts++; }
+				try { ws.send(envelope, false, compress); } catch { closedWsAborts++; }
 			}
 		}
 		// Cross-worker subscribers receive the JSON envelope (binary is
@@ -1220,12 +1236,19 @@ const platform = {
 	 * @param {string} event
 	 * @param {any} data
 	 * @param {{ capability: string, schemaVersion: number, encode: (event: string, data: any) => (Uint8Array | null) }} wire
+	 * @param {{ compress?: boolean }} [options] - `{ compress: true }` opts this
+	 *   low-frequency binary frame into permessage-deflate when a compressor is
+	 *   configured (binary frames are uncompressed by default).
 	 * @returns {number} uWS send status (0/1/2), or 2 on a freed handle
 	 */
-	sendWire(ws, topic, event, data, wire) {
+	sendWire(ws, topic, event, data, wire, options) {
 		let ud;
 		try { ud = ws.getUserData(); } catch { closedWsAborts++; return 2; }
 		const caps = ud[WS_CAPS];
+		// Binary codec frames compress only when the codec/plugin opts in with
+		// `{ compress: true }` AND a compressor is configured. The high-frequency
+		// hot path (cursor) leaves this off; low-frequency frames (presence) opt in.
+		const compress = WS_COMPRESSION_ON && !!(options && options.compress === true);
 		let payload = null;
 		let schemaVersion = wire.schemaVersion;
 		if (caps && caps.has(wire.capability)) {
@@ -1243,14 +1266,14 @@ const platform = {
 		if (payload == null) {
 			const json = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
 			let result;
-			try { result = ws.send(json, false, false); } catch { closedWsAborts++; return 2; }
+			try { result = ws.send(json, false, compress); } catch { closedWsAborts++; return 2; }
 			bumpOut(ws, json);
 			return result;
 		}
 		const id = ensureWireId(ws, ud, topic);
 		const frame = buildBinaryFrame(schemaVersion, id, 0, payload);
 		let result;
-		try { result = ws.send(frame, true, false); } catch { closedWsAborts++; return 2; }
+		try { result = ws.send(frame, true, compress); } catch { closedWsAborts++; return 2; }
 		bumpOut(ws, frame);
 		return result;
 	},
@@ -2050,6 +2073,14 @@ const COMPRESS_MIN_SIZE = 1024;
 // no secrets reflected with attacker input) can opt back in via
 // `websocket.compressCredentialedResponses: true`.
 const COMPRESS_CREDENTIALED = WS_OPTIONS?.compressCredentialedResponses === true;
+// Whether a WebSocket permessage-deflate compressor is configured (any non-DISABLED
+// `websocket.compression`). Used by the platform publish/send methods to resolve
+// the per-message `compress` flag: when this is false (the default), every send
+// stays uncompressed exactly as before. Per-message compression is only ever
+// requested when a compressor actually exists, because passing `compress: true`
+// on a connection with no compressor is not free (measured in
+// bench/ws-compression-cpu.mjs).
+const WS_COMPRESSION_ON = Boolean(WS_OPTIONS && WS_OPTIONS.compression);
 const COMPRESSIBLE_TYPES = new Set([
 	'text/html', 'text/css', 'text/plain', 'text/xml', 'text/javascript',
 	'text/csv', 'text/markdown',

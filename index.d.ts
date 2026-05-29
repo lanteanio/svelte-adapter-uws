@@ -166,9 +166,23 @@ export interface WebSocketOptions {
 	maxBackpressure?: number;
 
 	/**
-	 * Enable per-message deflate compression.
-	 * Pass `true` for `SHARED_COMPRESSOR`, or a uWS compression constant
-	 * (e.g. `uWS.DEDICATED_COMPRESSOR_4KB`) for finer control.
+	 * Enable per-message deflate compression. Pass `true` for `SHARED_COMPRESSOR`,
+	 * or a uWS compression constant (e.g. `uWS.DEDICATED_COMPRESSOR_4KB`) for finer
+	 * control.
+	 *
+	 * Default `false`, which is byte-identical to no compression. When a compressor
+	 * IS configured, compression is applied per frame, not blanket: text frames
+	 * (`publish` / `send`) compress by default, binary codec frames
+	 * (`publishWire` / `sendWire`) are opt-in, the cursor plugin stays uncompressed
+	 * (its 60 Hz hot path), and the presence plugin opts in (low-frequency). Pass
+	 * `{ compress: false }` to `publish` / `send` for a high-frequency, high-fan-out
+	 * text topic: permessage-deflate CPU scales per subscriber (it does not
+	 * compress-once-and-fan-out, even for `SHARED_COMPRESSOR`), so compressing a hot
+	 * broadcast to many subscribers is expensive. Prefer `SHARED_COMPRESSOR` over a
+	 * `DEDICATED_*` compressor on a many-connection server: `DEDICATED_*` keeps a
+	 * sliding window per socket (memory grows with connection count) for a small
+	 * extra compression gain.
+	 *
 	 * @default false
 	 */
 	compression?: boolean | number;
@@ -1050,6 +1064,10 @@ export interface Platform {
 	 *   - `seq: false` skips the per-topic monotonic seq stamp (use for
 	 *     ephemeral or high-cardinality topics where the counter map
 	 *     would grow unbounded).
+	 *   - `compress: false` skips permessage-deflate for this frame. No-op
+	 *     unless `websocket.compression` is configured, where text frames
+	 *     compress by default; pass `false` for a high-frequency,
+	 *     high-fan-out topic (deflate CPU scales per subscriber).
 	 *
 	 * @example
 	 * ```js
@@ -1060,7 +1078,7 @@ export interface Platform {
 	 * }
 	 * ```
 	 */
-	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean }): boolean;
+	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean; compress?: boolean }): boolean;
 
 	/**
 	 * Publish via a plugin-declared binary wire codec. Subscribers that
@@ -1086,7 +1104,11 @@ export interface Platform {
 	 *   passes it to `encode`, and stamps `state.schemaVersion ?? schemaVersion`
 	 *   on the frame. A stateless codec (no `state`) keeps the single
 	 *   encode-once-send-many fan-out; a stateful one is encoded per connection.
-	 * @param options - Same `relay` / `seq` semantics as `publish()`.
+	 * @param options - Same `relay` / `seq` semantics as `publish()`, plus
+	 *   `compress` (binary codec frames are NOT compressed by default; pass
+	 *   `{ compress: true }` to opt a low-frequency codec into permessage-deflate
+	 *   when `websocket.compression` is configured - the cursor hot path leaves
+	 *   it off, presence opts in).
 	 */
 	publishWire(
 		topic: string,
@@ -1101,7 +1123,7 @@ export interface Platform {
 				onDetach?: (ws: WebSocket<any>, state: unknown) => void;
 			};
 		},
-		options?: { relay?: boolean; seq?: boolean }
+		options?: { relay?: boolean; seq?: boolean; compress?: boolean }
 	): boolean;
 
 	/**
@@ -1124,7 +1146,8 @@ export interface Platform {
 				onAttach: (ws: WebSocket<any>) => unknown;
 				onDetach?: (ws: WebSocket<any>, state: unknown) => void;
 			};
-		}
+		},
+		options?: { compress?: boolean }
 	): number;
 
 	/**
@@ -1284,7 +1307,7 @@ export interface Platform {
 	 * }
 	 * ```
 	 */
-	send(ws: WebSocket<any>, topic: string, event: string, data?: unknown): number;
+	send(ws: WebSocket<any>, topic: string, event: string, data?: unknown, options?: { compress?: boolean }): number;
 
 	/**
 	 * Send a message to a single connection with coalesce-by-key semantics.

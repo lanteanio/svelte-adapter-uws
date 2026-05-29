@@ -29,6 +29,8 @@
 
 const TOPIC_PREFIX = '__presence:';
 
+import { encodePresence, PRESENCE_CAPABILITY, PRESENCE_SCHEMA_VERSION } from './codec.js';
+
 /**
  * @typedef {Object} PresenceOptions
  * @property {string} [key='id'] - Field in the selected data that uniquely identifies a user.
@@ -60,6 +62,12 @@ const TOPIC_PREFIX = '__presence:';
  *   blip, JS thread saturation). Set this to a value shorter than the client's `maxAge`
  *   (default client `maxAge` is 90 s, so 30 s gives a 3x safety margin). Pass `0` to disable
  *   heartbeats entirely (apps that do not use the `maxAge` self-healing path).
+ * @property {boolean} [binary=true] - When true (the default), presence frames go
+ *   to binary-capable clients as compact `0x03` frames via the presence codec and
+ *   to everyone else as the identical JSON frames; fully transparent. Set `false`
+ *   to force JSON for every client (e.g. to compare wire sizes, or on a platform
+ *   whose `publishWire`/`sendWire` you do not want exercised). The codec is
+ *   stateless - a roster frame is encoded once and fanned out to all subscribers.
  */
 
 /**
@@ -274,6 +282,55 @@ export function createPresence(options = {}) {
 		throw new Error('presence: maxTopics must be a positive integer');
 	}
 
+	// Binary wire is on by default and fully transparent: a binary-capable client
+	// receives compact `0x03` presence frames, everyone else (and any platform
+	// without the publishWire/sendWire methods, e.g. the unit-test mock) receives
+	// the identical JSON frames. `binary: false` forces JSON for everyone. The
+	// codec is stateless: a roster frame is encoded once and fanned out to all
+	// subscribers (the foundation's encode-once-send-many), the right trade for
+	// presence's infrequent-but-full-roster broadcasts.
+	const wireCodec = options.binary === false
+		? null
+		: { capability: PRESENCE_CAPABILITY, schemaVersion: PRESENCE_SCHEMA_VERSION, encode: encodePresence };
+
+	/**
+	 * Broadcast a presence wire event. Routes through the binary `publishWire`
+	 * path when a codec is configured AND the platform supports it (production /
+	 * dev / test-server); otherwise falls back to the JSON `publish` - so the
+	 * unit-test mock platform and `binary: false` both keep the exact JSON shape.
+	 * @param {string} fullTopic - the channel name, already TOPIC_PREFIX-scoped
+	 * @param {string} event
+	 * @param {any} data
+	 * @param {import('../../index.js').Platform} platform
+	 */
+	function emit(fullTopic, event, data, platform) {
+		if (wireCodec && typeof platform.publishWire === 'function') {
+			// Presence frames are low-frequency (a diff on join/leave; one heartbeat
+			// per interval), so opting into permessage-deflate is a cheap bandwidth
+			// win - the opposite of the 60 Hz cursor hot path, which stays
+			// uncompressed. No-op unless a compressor is configured.
+			platform.publishWire(fullTopic, event, data, wireCodec, { compress: true });
+		} else {
+			platform.publish(fullTopic, event, data);
+		}
+	}
+
+	/**
+	 * Single-target variant of {@link emit} (the `state` snapshot).
+	 * @param {any} ws
+	 * @param {string} fullTopic
+	 * @param {string} event
+	 * @param {any} data
+	 * @param {import('../../index.js').Platform} platform
+	 */
+	function emitTo(ws, fullTopic, event, data, platform) {
+		if (wireCodec && typeof platform.sendWire === 'function') {
+			platform.sendWire(ws, fullTopic, event, data, wireCodec, { compress: true });
+		} else {
+			platform.send(ws, fullTopic, event, data);
+		}
+	}
+
 	// Auto-generated ID counter for connections without a key field
 	let connCounter = 0;
 
@@ -360,7 +417,7 @@ export function createPresence(options = {}) {
 				if (op === 'join') joins[key] = data;
 				else leaves[key] = data;
 			}
-			platform.publish(TOPIC_PREFIX + topic, 'diff', { joins, leaves });
+			emit(TOPIC_PREFIX + topic, 'diff', { joins, leaves }, platform);
 		}
 		pendingDiffs.clear();
 	}
@@ -412,7 +469,7 @@ export function createPresence(options = {}) {
 					/** @type {Record<string, any>} */
 					const dataMap = {};
 					for (const [userKey, entry] of users) dataMap[userKey] = entry.data;
-					_platform.publish(TOPIC_PREFIX + topic, 'heartbeat', dataMap);
+					emit(TOPIC_PREFIX + topic, 'heartbeat', dataMap, _platform);
 				}
 			}, heartbeatMs);
 		}
@@ -526,7 +583,7 @@ export function createPresence(options = {}) {
 			// user sees the complete state (including themselves) immediately;
 			// any pending diff fan-out reaches them too but is idempotent on
 			// the client (joins[key] = data is a no-op if already set).
-			platform.send(ws, presenceTopic, 'state', snapshotState(users));
+			emitTo(ws, presenceTopic, 'state', snapshotState(users), platform);
 		},
 
 		leave(ws, platform) {
@@ -546,7 +603,7 @@ export function createPresence(options = {}) {
 			const users = topicPresence.get(topic);
 			const presenceTopic = TOPIC_PREFIX + topic;
 			try { ws.subscribe(presenceTopic); } catch { return; }
-			platform.send(ws, presenceTopic, 'state', snapshotState(users));
+			emitTo(ws, presenceTopic, 'state', snapshotState(users), platform);
 		},
 
 		list(topic) {
@@ -606,6 +663,37 @@ export function createPresence(options = {}) {
 				if (topic.startsWith('__')) return;
 				const connTopics = wsTopics.get(ws);
 				if (connTopics) leaveTopic(ws, topic, connTopics, platform);
+			},
+			message(ws, { data, msg, platform }) {
+				// Client-initiated reconnect snapshot. The presence client sends
+				// `{type:'presence-snapshot', topic}` on every status==='open'
+				// (initial connect + reconnect); re-emit the current `state` to the
+				// requesting connection via `sync` - the same path a fresh subscribe
+				// takes. Without this, board-scoped presence stayed stale across a
+				// reconnect: the client missed any `diff` during the disconnect
+				// window and its local map kept whatever it last knew.
+				//
+				// The envelope reaches this hook in one of three shapes; resolve
+				// all three so the snapshot fires under every wiring: the adapter's
+				// direct message hook passes the parsed envelope as `msg` (raw bytes
+				// in `data`); an app routing through `onUnhandled` / `onJsonMessage`
+				// passes the already-parsed object as `data`; a caller may also pass
+				// the raw frame bytes as `data`. Returns true when it owns the frame
+				// so an app can chain it with the cursor hook through one message
+				// handler. (The Redis-backed presence variant does the same
+				// `sync`-on-snapshot but reads only a pre-parsed object; this hook is
+				// the superset and is not drop-in identical to it.)
+				let env = (msg && typeof msg === 'object') ? msg : null;
+				if (!env && data && typeof data === 'object' && !(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) {
+					env = data;
+				}
+				if (!env) {
+					try { env = JSON.parse(new TextDecoder().decode(data)); } catch { return; }
+				}
+				if (env && env.type === 'presence-snapshot' && typeof env.topic === 'string') {
+					tracker.sync(ws, env.topic, platform);
+					return true;
+				}
 			},
 			close(ws, { platform }) {
 				tracker.leave(ws, platform);

@@ -395,7 +395,10 @@ adapter({
     // Lower this if you expect many slow consumers.
     maxBackpressure: 1024 * 1024, // default: 1 MB
 
-    // Enable per-message deflate compression
+    // Enable per-message deflate. Default false (byte-identical to no
+    // compression). `true` = SHARED_COMPRESSOR; a uWS constant (e.g.
+    // uWS.DEDICATED_COMPRESSOR_4KB) for finer control. Applied per frame,
+    // not blanket - see "WebSocket compression" below.
     compression: false, // default: false
 
     // Automatically send pings to keep the connection alive
@@ -429,6 +432,8 @@ These options control how the server handles misbehaving or slow clients at the 
 **`maxPayloadLength`** (default: 1 MB) - the maximum size of a single incoming WebSocket message. If a client sends a message larger than this, uWS closes the connection immediately (not just the message - the entire connection is dropped). Set this based on the largest message your application expects to receive. uWS's own default is 16 KB, which the adapter previously matched; the 1 MB default ships now to handle typical app payloads in a single frame without forcing chunked-upload frameworks into ~12 KB chunks (which the previous 16 KB cap did). For a stricter cap, pin an explicit value (e.g. `16 * 1024` for the uWS-matching 16 KB).
 
 **`maxBackpressure`** (default: 1 MB) - the per-connection outbound send buffer, AND the threshold above which `publish` / `send` / `publishBatched` silently skip a subscriber. When a specific subscriber's buffer is over this size, uWS drops that frame *for that subscriber only* while continuing to deliver to every non-backpressured subscriber. This makes `publish` / `send` / `publishBatched` volatile-by-default for slow consumers (the right behavior for cursor positions, typing indicators, presence pings - see "Volatile / fire-and-forget delivery" below). The `drain` hook fires per-connection when the buffer empties again. Lower this if you want subscribers shed sooner; raise it if you prefer to keep the connection queued and absorb temporary slowness. uWS's own default is 64 KB; this adapter sets 1 MB to favor keeping the connection alive under pub/sub spikes.
+
+**`compression`** (default: `false`) - per-message deflate for outbound frames. The default is byte-identical to no compression. Set `true` for `SHARED_COMPRESSOR` (one shared sliding window across all sockets - the right choice for a many-connection server), or pass a uWS constant like `uWS.DEDICATED_COMPRESSOR_4KB` (a per-socket window: slightly better compression for a few high-throughput connections, but memory grows with connection count). When a compressor is configured, compression is applied **per frame, not blanket**: text frames (`publish` / `send`) compress by default, binary codec frames (`publishWire` / `sendWire`) are opt-in, the **cursor** plugin stays uncompressed (its 60 Hz hot path), and the **presence** plugin opts in (low-frequency). This split matters because permessage-deflate CPU scales **per subscriber** - uWS does not compress-once-and-fan-out, even for `SHARED_COMPRESSOR` - so compressing a high-frequency broadcast to many subscribers is expensive (a coalesced cursor frame fanned to 1000 subscribers at 60 Hz can cost more than a full CPU core per topic). For a high-frequency, high-fan-out **text** topic, pass `{ compress: false }` to `publish` / `send` to opt it out. None of this applies until you enable compression.
 
 **`upgradeRateLimit`** (default: 10 per 10s window) - sliding-window rate limit on WebSocket upgrade requests per client IP. Clients exceeding the limit get a `429 Too Many Requests` response. The IP rate map is capped at 10,000 entries with LRU eviction by activity score, so sustained connection floods from many IPs don't cause unbounded memory growth.
 
@@ -2397,6 +2402,7 @@ export const presence = createPresence({
   // heartbeat:      30_000 (default) - broadcast every 30s; clients refresh maxAge / re-add aged-out entries
   // maxConnections: 1_000_000 (default) - hard cap on tracked connections
   // maxTopics:      1_000_000 (default) - hard cap on active topic registry
+  // binary:         true (default) - send compact 0x03 frames to binary-capable clients (presence.protocol:1); false forces JSON for all
 });
 ```
 
@@ -2414,10 +2420,10 @@ export function upgrade({ cookies }) {
   return { id: user.id, name: user.name };
 }
 
-export const { subscribe, unsubscribe, close } = presence.hooks;
+export const { subscribe, unsubscribe, message, close } = presence.hooks;
 ```
 
-The `hooks` object handles everything: `subscribe` calls `join()` for regular topics and sends the current presence snapshot for `__presence:*` topics, `close` calls `leave()`. If you need custom logic (auth gating, topic filtering), wrap the hook:
+The `hooks` object handles everything: `subscribe` calls `join()` for regular topics and sends the current presence snapshot for `__presence:*` topics, `message` answers the client's reconnect/late-join snapshot request (so a reconnecting client re-binds its roster instead of waiting for the next diff), `close` calls `leave()`. Wire `message` in - omitting it leaves board-scoped presence stale across reconnects. If you need custom logic (auth gating, topic filtering), wrap the hook:
 
 ```js
 export function subscribe(ws, topic, ctx) {
@@ -2425,8 +2431,14 @@ export function subscribe(ws, topic, ctx) {
   presence.hooks.subscribe(ws, topic, ctx);
 }
 
-export const { unsubscribe, close } = presence.hooks;
+export const { unsubscribe, message, close } = presence.hooks;
 ```
+
+Like `subscribe`, `message` does not gate topic access - a client can request any topic's roster (the roster carries only `select`-stripped public fields, never credentials). If a topic must be limited to a subset of users, wrap `message` the same way you wrap `subscribe`.
+
+#### Binary wire mode
+
+Presence frames ride a compact **binary wire** for capable clients by default (`presence.protocol:1`): `state` / `diff` / `heartbeat` are encoded as a `0x03` frame instead of a JSON envelope whenever the client supports it, and sent as the identical JSON to everyone else - from one publish. Fully transparent: the `presence()` store decodes back to the same `{ event, data }`. Unlike the cursor wire, the codec is **stateless** (no per-connection dictionary): a presence value is arbitrary user data carried as a length-prefixed JSON string, so the win is the `0x03` framing, not the value bytes - a modest but durable reduction (roughly 2-13% depending on roster size) that holds up under the real uWS permessage-deflate compressors, measured in `bench/ws-compression-ab.mjs`. `createPresence({ binary: false })` forces JSON for every client; a value the codec cannot represent falls back to JSON for that one frame. The same `platform.publishWire` / `registerWireCodec` mechanism documented under the cursor plugin powers it.
 
 Use it on the client:
 

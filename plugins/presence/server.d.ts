@@ -93,6 +93,27 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	 * @default 1_000_000
 	 */
 	maxTopics?: number;
+
+	/**
+	 * Binary wire transport for presence frames.
+	 *
+	 * When `true` (the default), a binary-capable client (one that advertised
+	 * `presence.protocol:1`) receives compact `0x03` frames encoded by the
+	 * presence codec, and every other client - plus any platform without the
+	 * `publishWire`/`sendWire` methods - receives the identical JSON frames.
+	 * Fully transparent: the client `presence()` store decodes binary frames back
+	 * to the same `{ event, data }` the JSON path produced.
+	 *
+	 * The codec is stateless: a roster frame is encoded once and fanned out to
+	 * all subscribers (encode-once-send-many), which suits presence's
+	 * infrequent-but-full-roster broadcasts.
+	 *
+	 * Set `false` to force JSON for every client - useful to compare wire sizes
+	 * or on a platform whose binary methods you do not want exercised.
+	 *
+	 * @default true
+	 */
+	binary?: boolean;
 }
 
 export interface PresenceTracker<Selected extends Record<string, any> = Record<string, any>> {
@@ -206,18 +227,33 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 	 * topics (calls `sync` so the client gets the current snapshot immediately).
 	 * `unsubscribe` removes the user from a single topic's presence when the
 	 * client unsubscribes without disconnecting.
+	 * `message` handles the client's `{type:'presence-snapshot', topic}` reconnect
+	 * frame by re-emitting the current `state` via `sync`; it accepts the envelope
+	 * pre-parsed (`ctx.msg`, or a parsed object in `ctx.data`) or as raw frame
+	 * bytes (`ctx.data`), and returns `true` when it owns the frame (so it can be
+	 * chained with the cursor hook through one message handler) and `undefined`
+	 * otherwise. Wire `message` into your message hook for late-join / reconnect
+	 * snapshots to work (see the destructure example below).
+	 *
+	 * Authorization note: like `subscribe`, `message` does not gate topic access -
+	 * a client can request any topic's roster by sending that topic in the
+	 * snapshot frame (the roster only ever carries `select`-stripped public
+	 * fields, never credentials). If a topic must be limited to a subset of users,
+	 * wrap `message` (or `subscribe`) with your own gate, the same way the
+	 * `subscribe` example does.
 	 * `close` calls `leave` (removes from all topics).
 	 *
 	 * @example
 	 * ```js
 	 * // src/hooks.ws.js
 	 * import { presence } from '$lib/server/presence';
-	 * export const { subscribe, unsubscribe, close } = presence.hooks;
+	 * export const { subscribe, unsubscribe, message, close } = presence.hooks;
 	 * ```
 	 */
 	hooks: {
 		subscribe(ws: WebSocket<any>, topic: string, ctx: { platform: Platform }): void;
 		unsubscribe(ws: WebSocket<any>, topic: string, ctx: { platform: Platform }): void;
+		message(ws: WebSocket<any>, ctx: { data: ArrayBuffer | Uint8Array | Record<string, any>; msg?: any; platform: Platform }): true | void;
 		close(ws: WebSocket<any>, ctx: { platform: Platform }): void;
 	};
 }

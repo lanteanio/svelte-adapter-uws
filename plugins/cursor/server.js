@@ -347,7 +347,10 @@ export function createCursor(options = {}) {
 		if (wireCodec && typeof platform.publishWire === 'function') {
 			platform.publishWire(fullTopic, event, data, wireCodec);
 		} else {
-			platform.publish(fullTopic, event, data);
+			// `compress: false` keeps the 60 Hz cursor hot path uncompressed even on
+			// the JSON fallback (binary: false, or a platform without publishWire) -
+			// per-message deflate CPU scales per subscriber and would dominate here.
+			platform.publish(fullTopic, event, data, { compress: false });
 		}
 	}
 
@@ -363,7 +366,7 @@ export function createCursor(options = {}) {
 		if (wireCodec && typeof platform.sendWire === 'function') {
 			platform.sendWire(ws, fullTopic, event, data, wireCodec);
 		} else {
-			platform.send(ws, fullTopic, event, data);
+			platform.send(ws, fullTopic, event, data, { compress: false });
 		}
 	}
 

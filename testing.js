@@ -310,7 +310,11 @@ export async function createTestServer(options = {}) {
 			}
 			return delivered;
 		},
-		send(ws, topic, event, data) {
+		send(ws, topic, event, data, options) {
+			// `options` (e.g. `{ compress }`) is accepted for Platform-shape parity
+			// with production; the test server configures no compressor, so it is
+			// a no-op here.
+			void options;
 			const payload = envelope(topic, event, data);
 			return sendOutboundT(ws, payload);
 		},
@@ -400,7 +404,8 @@ export async function createTestServer(options = {}) {
 			}
 			return delivered;
 		},
-		sendWire(ws, topic, event, data, wire) {
+		sendWire(ws, topic, event, data, wire, options) {
+			void options; // Platform-shape parity; the test server configures no compressor.
 			let ud;
 			try { ud = ws.getUserData(); } catch { closedWsAbortsT++; return 2; }
 			const caps = ud[WS_CAPS];

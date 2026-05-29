@@ -92,6 +92,22 @@ describe('cursor plugin - server', () => {
 			expect(update.data.data).toEqual({ x: 5, y: 5 });
 		});
 
+		it('cursor broadcasts opt OUT of compression (the 60Hz hot path stays uncompressed)', () => {
+			// Hot-path-safe guarantee: cursor never asks the framework to compress,
+			// on the binary wire (no opt-in) or the JSON fallback (explicit
+			// { compress: false }). A recording mock captures the per-call option.
+			const seen = [];
+			const p = {
+				published: [],
+				publish(topic, event, data, options) { seen.push(options); p.published.push({ topic, event, data }); return true; },
+				send(ws, topic, event, data, options) { seen.push(options); return 1; }
+			};
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			cursors.update(ws, 'canvas', { x: 5, y: 5 }, p); // join + update, synchronous at throttle 0
+			expect(seen.length).toBeGreaterThan(0);
+			expect(seen.every((o) => o && o.compress === false)).toBe(true);
+		});
+
 		it('first update on each topic for the same ws emits its own join', () => {
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			cursors.update(ws, 'canvas-a', { x: 1 }, platform);
