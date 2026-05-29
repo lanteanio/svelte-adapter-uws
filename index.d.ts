@@ -1079,8 +1079,13 @@ export interface Platform {
 	 * @param event - Event name (the codec maps it to an opcode)
 	 * @param data - Payload (passed to `wire.encode`, or JSON-serialized on fallback)
 	 * @param wire - The plugin's wire codec: a negotiated `capability` token, a
-	 *   1-byte `schemaVersion`, and an `encode(event, data)` returning the
-	 *   payload bytes or `null` to fall back to JSON for this frame.
+	 *   1-byte `schemaVersion`, an `encode(event, data, state?)` returning the
+	 *   payload bytes or `null` to fall back to JSON for this frame, and an
+	 *   optional `state` factory (`onAttach(ws)` / `onDetach(ws, state)`) for a
+	 *   stateful codec - the framework creates one state object per connection,
+	 *   passes it to `encode`, and stamps `state.schemaVersion ?? schemaVersion`
+	 *   on the frame. A stateless codec (no `state`) keeps the single
+	 *   encode-once-send-many fan-out; a stateful one is encoded per connection.
 	 * @param options - Same `relay` / `seq` semantics as `publish()`.
 	 */
 	publishWire(
@@ -1090,7 +1095,11 @@ export interface Platform {
 		wire: {
 			capability: string;
 			schemaVersion: number;
-			encode: (event: string, data: unknown) => Uint8Array | null;
+			encode: (event: string, data: unknown, state?: unknown) => Uint8Array | null;
+			state?: {
+				onAttach: (ws: WebSocket<any>) => unknown;
+				onDetach?: (ws: WebSocket<any>, state: unknown) => void;
+			};
 		},
 		options?: { relay?: boolean; seq?: boolean }
 	): boolean;
@@ -1110,7 +1119,11 @@ export interface Platform {
 		wire: {
 			capability: string;
 			schemaVersion: number;
-			encode: (event: string, data: unknown) => Uint8Array | null;
+			encode: (event: string, data: unknown, state?: unknown) => Uint8Array | null;
+			state?: {
+				onAttach: (ws: WebSocket<any>) => unknown;
+				onDetach?: (ws: WebSocket<any>, state: unknown) => void;
+			};
 		}
 	): number;
 

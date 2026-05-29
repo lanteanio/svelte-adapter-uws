@@ -4,7 +4,15 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { buildBinaryFrame } from '../files/wire.js';
-import { encodeCursor, decodeCursor, CURSOR_CAPABILITY } from '../plugins/cursor/codec.js';
+import {
+	encodeCursor,
+	decodeCursor,
+	CursorEncodeDict,
+	CursorDecodeDict,
+	CURSOR_CAPABILITY,
+	CURSOR_CAPABILITY_DICT,
+	CURSOR_SCHEMA_VERSION_DICT
+} from '../plugins/cursor/codec.js';
 
 class MockWebSocket {
 	static CONNECTING = 0;
@@ -37,7 +45,12 @@ globalThis.WebSocket = /** @type {any} */ (MockWebSocket);
 globalThis.window = /** @type {any} */ ({ location: { protocol: 'http:', host: 'localhost:5173' } });
 
 const clientModule = await import('../client.js');
-clientModule.registerWireCodec('__cursor:', { capability: CURSOR_CAPABILITY, decode: decodeCursor });
+clientModule.registerWireCodec('__cursor:', {
+	capability: CURSOR_CAPABILITY,
+	capabilities: [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT],
+	state: { onAttach: () => new CursorDecodeDict() },
+	decode: decodeCursor
+});
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -127,5 +140,41 @@ describe('client inbound binary (0x03) demux', () => {
 		const hello = helloFrame(MockWebSocket._last);
 		expect(hello.caps).toContain('batch');               // batch is not a wire codec
 		expect(hello.caps).toContain(CURSOR_CAPABILITY); // never omitted by a URL param
+	});
+
+	it('advertises every capability a codec can decode (both the full-string and dictionary tokens)', async () => {
+		clientModule.connect({ path: '/ws' });
+		await flush();
+		const hello = helloFrame(MockWebSocket._last);
+		expect(hello.caps).toContain(CURSOR_CAPABILITY);      // cursor.protocol:2
+		expect(hello.caps).toContain(CURSOR_CAPABILITY_DICT); // cursor.protocol:3
+	});
+
+	it('decodes a schemaVersion-2 dictionary frame and resolves a later REF via persisted per-connection state', async () => {
+		const conn = clientModule.connect({ path: '/ws' });
+		await flush();
+		const mock = MockWebSocket._last;
+
+		const seen = [];
+		const unsub = conn.on('__cursor:board').subscribe((v) => seen.push(v));
+
+		mock.deliver(JSON.stringify({ type: 'wire-id', topic: '__cursor:board', id: 1 }));
+
+		// One server-side encoder dictionary produces an ASSIGN frame (key inline)
+		// then a REF frame (key by id). The client must hold its decoder state
+		// across frames for the REF to resolve - the assign frame taught it id->key.
+		const enc = new CursorEncodeDict();
+		const assignFrame = buildBinaryFrame(CURSOR_SCHEMA_VERSION_DICT, 1, 1, encodeCursor('update', { key: '7', data: { x: 10.5, y: 20.5 } }, enc));
+		const refFrame = buildBinaryFrame(CURSOR_SCHEMA_VERSION_DICT, 1, 2, encodeCursor('update', { key: '7', data: { x: 99.5, y: 88.5 } }, enc));
+		// Sanity: the second frame is smaller (no key bytes) - it really is a REF.
+		expect(refFrame.length).toBeLessThan(assignFrame.length);
+
+		mock.deliver(assignFrame.buffer);
+		expect(seen[seen.length - 1]).toEqual({ topic: '__cursor:board', event: 'update', data: { key: '7', data: { x: 10.5, y: 20.5 } } });
+
+		mock.deliver(refFrame.buffer);
+		expect(seen[seen.length - 1]).toEqual({ topic: '__cursor:board', event: 'update', data: { key: '7', data: { x: 99.5, y: 88.5 } } });
+
+		unsub();
 	});
 });

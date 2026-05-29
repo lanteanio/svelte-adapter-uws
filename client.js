@@ -14,7 +14,16 @@ let singletonCreatedBy = '';
  * routes inbound `0x03` frames whose resolved topic matches a prefix to the
  * matching decoder. The decoder returns the same `{ event, data }` the JSON
  * path would have dispatched, so the reactive surface is identical.
- * @type {Map<string, { capability: string, decode: (payload: Uint8Array) => ({ event: string, data: any } | null) }>}
+ *
+ * A codec may advertise more than one capability (`capabilities`) - e.g. a
+ * cursor client that can decode both the full-string and the short-id wire
+ * advertises both tokens so it negotiates the best the server offers while an
+ * older server still sends it the form it knows. A codec may also declare a
+ * per-connection `state` factory (`state.onAttach` / `state.onDetach`) for a
+ * stateful wire (the cursor short-id dictionary, or a future apply-in-place
+ * CRDT codec); the decoder then receives that state plus the frame's
+ * `schemaVersion` so it can dispatch between schema revisions.
+ * @type {Map<string, { capability: string, capabilities?: string[], state?: { onAttach?: () => any, onDetach?: (state: any) => void }, decode: (payload: Uint8Array, state?: any, schemaVersion?: number) => ({ event: string, data: any } | null) }>}
  */
 const wireCodecs = new Map();
 
@@ -25,7 +34,7 @@ const wireCodecs = new Map();
  * `hello` is re-sent so a lazily-imported plugin still negotiates binary.
  *
  * @param {string} prefix - topic-name prefix the codec owns (e.g. '__cursor:')
- * @param {{ capability: string, decode: (payload: Uint8Array) => ({ event: string, data: any } | null) }} codec
+ * @param {{ capability: string, capabilities?: string[], state?: { onAttach?: () => any, onDetach?: (state: any) => void }, decode: (payload: Uint8Array, state?: any, schemaVersion?: number) => ({ event: string, data: any } | null) }} codec
  */
 export function registerWireCodec(prefix, codec) {
 	wireCodecs.set(prefix, codec);
@@ -33,31 +42,35 @@ export function registerWireCodec(prefix, codec) {
 }
 
 /**
- * Build the `hello` caps array: `'batch'` plus every registered binary wire
- * capability. A client always advertises what it can decode; the wire format
- * is the server's decision (a plugin's codec, or `binary: false` to force
- * JSON). We deliberately do NOT read any URL query parameter to opt out - the
- * app owns its URL namespace, and a client-side force-JSON knob would let a
- * connection inflate its own egress.
+ * Build the `hello` caps array: `'batch'` plus every capability every
+ * registered codec can decode. A client always advertises what it can decode;
+ * the wire format is the server's decision (a plugin's codec, or `binary: false`
+ * to force JSON). We deliberately do NOT read any URL query parameter to opt
+ * out - the app owns its URL namespace, and a client-side force-JSON knob would
+ * let a connection inflate its own egress.
  * @returns {string[]}
  */
 function buildHelloCaps() {
 	const caps = ['batch'];
-	for (const codec of wireCodecs.values()) caps.push(codec.capability);
+	for (const codec of wireCodecs.values()) {
+		const tokens = codec.capabilities || [codec.capability];
+		for (let i = 0; i < tokens.length; i++) caps.push(tokens[i]);
+	}
 	return caps;
 }
 
 /**
- * Resolve a topic name to its registered wire codec by longest matching prefix.
+ * Resolve a topic name to its registered wire codec (and its prefix, for
+ * per-connection state keying) by longest matching prefix.
  * @param {string} topic
- * @returns {{ capability: string, decode: (payload: Uint8Array) => ({ event: string, data: any } | null) } | null}
+ * @returns {{ prefix: string, codec: { capability: string, capabilities?: string[], state?: { onAttach?: () => any, onDetach?: (state: any) => void }, decode: (payload: Uint8Array, state?: any, schemaVersion?: number) => ({ event: string, data: any } | null) } } | null}
  */
 function wireCodecForTopic(topic) {
 	let best = null;
 	let bestLen = -1;
 	for (const [prefix, codec] of wireCodecs) {
 		if (topic.startsWith(prefix) && prefix.length > bestLen) {
-			best = codec;
+			best = { prefix, codec };
 			bestLen = prefix.length;
 		}
 	}
@@ -773,6 +786,39 @@ function createConnection(options) {
 	/** @type {Map<number, string>} */
 	const wireIdMap = new Map();
 
+	// Per-connection decoder state for stateful wire codecs (e.g. the cursor
+	// short-id dictionary), keyed by codec prefix. Created lazily on the first
+	// `0x03` frame for a prefix via the codec's `state.onAttach()`, and cleared
+	// (with `state.onDetach()`) on each (re)connect alongside `wireIdMap` since
+	// the server resets its matching encoder state on a fresh connection.
+	/** @type {Map<string, any>} */
+	const wireDecoderStates = new Map();
+
+	// Resolve (lazily creating) the per-connection decoder state for a codec.
+	/** @param {string} prefix @param {{ state?: { onAttach?: () => any } }} codec @returns {any} */
+	function ensureDecoderState(prefix, codec) {
+		if (!codec.state || typeof codec.state.onAttach !== 'function') return null;
+		let st = wireDecoderStates.get(prefix);
+		if (st === undefined) {
+			try { st = codec.state.onAttach(); } catch { st = null; }
+			wireDecoderStates.set(prefix, st);
+		}
+		return st;
+	}
+
+	// Dispose every per-connection decoder state, then clear. Called on each
+	// (re)connect so a reconnect starts from an empty dictionary in lock-step
+	// with the server's reset encoder state.
+	function resetWireDecoderStates() {
+		for (const [prefix, st] of wireDecoderStates) {
+			const codec = wireCodecs.get(prefix);
+			if (codec && codec.state && typeof codec.state.onDetach === 'function') {
+				try { codec.state.onDetach(st); } catch {}
+			}
+		}
+		wireDecoderStates.clear();
+	}
+
 	// Highest seq seen per topic. Sent back to the server on reconnect via
 	// the resume frame so the user's resume hook can replay anything we
 	// missed during the disconnect window. Only topics that the server is
@@ -1056,7 +1102,11 @@ function createConnection(options) {
 		ws.binaryType = 'arraybuffer';
 		// Topic-ids are per-connection; the server reassigns them on a fresh
 		// connection, so drop any stale id -> name mappings from a prior socket.
+		// The stateful codec dictionaries reset in lock-step: the server starts a
+		// fresh encoder dictionary on the new connection, so a stale client
+		// dictionary would resolve ids to the wrong keys.
 		wireIdMap.clear();
+		resetWireDecoderStates();
 
 		ws.onopen = () => {
 			attempt = 0;
@@ -1150,8 +1200,10 @@ function createConnection(options) {
 					if (parsed) {
 						const topic = wireIdMap.get(parsed.topicId);
 						if (topic !== undefined) {
-							const codec = wireCodecForTopic(topic);
-							const decoded = codec ? codec.decode(parsed.payload) : null;
+							const match = wireCodecForTopic(topic);
+							const decoded = match
+								? match.codec.decode(parsed.payload, ensureDecoderState(match.prefix, match.codec), parsed.schemaVersion)
+								: null;
 							if (decoded) {
 								const out = { topic, event: decoded.event, data: decoded.data };
 								if (parsed.seq > 0) out.seq = parsed.seq;

@@ -36,7 +36,8 @@
  * @module svelte-adapter-uws/plugins/cursor
  */
 
-import { encodeCursor, CURSOR_CAPABILITY, CURSOR_SCHEMA_VERSION } from './codec.js';
+import { encodeCursor, CURSOR_CAPABILITY, CURSOR_SCHEMA_VERSION, CURSOR_CAPABILITY_DICT, CursorEncodeDict } from './codec.js';
+import { WS_CAPS } from '../../files/utils.js';
 
 const TOPIC_PREFIX = '__cursor:';
 
@@ -160,9 +161,47 @@ export function createCursor(options = {}) {
 	// clients receive compact `0x03` cursor frames, everyone else (and any
 	// platform without the publishWire/sendWire methods, e.g. the unit-test
 	// mock) receives the identical JSON frames. `binary: false` forces JSON.
+	// Wire transport selection:
+	//   - `binary: false` -> no codec, JSON for everyone.
+	//   - `dictionary: false` -> stateless full-string binary (schemaVersion 1)
+	//     for every binary-capable client, encoded once and fanned out to all
+	//     (the foundation's encode-once-send-many). Use for a single process with
+	//     very high per-topic fan-out, where the per-connection dictionary's
+	//     per-subscriber encode would cost more CPU than the bandwidth is worth.
+	//   - default -> the short-id dictionary (schemaVersion 2) for clients that
+	//     advertised it, full-string (schemaVersion 1) for older binary clients.
+	const useDictionary = options.binary !== false && options.dictionary !== false;
+	const baseCodec = {
+		capability: CURSOR_CAPABILITY,
+		schemaVersion: CURSOR_SCHEMA_VERSION,
+		encode: encodeCursor
+	};
 	const wireCodec = options.binary === false
 		? null
-		: { capability: CURSOR_CAPABILITY, schemaVersion: CURSOR_SCHEMA_VERSION, encode: encodeCursor };
+		: !useDictionary
+			? baseCodec // stateless: full-string binary, encode-once-send-many
+			: {
+				...baseCodec,
+				// Per-connection short-id dictionary state. `onAttach` reads the
+				// connection's negotiated capabilities: a client that advertised
+				// the dictionary capability gets a fresh dictionary (schemaVersion
+				// 2, 1-2 byte keys), and any other binary-capable client returns
+				// null, which the framework treats as the shared full-string
+				// encode (schemaVersion 1) - so an older client keeps the
+				// single-encode fan-out and a byte-for-byte compatible frame. The
+				// choice is fixed for the life of the connection (reset on
+				// reconnect, not on re-hello).
+				state: {
+					onAttach(ws) {
+						let caps;
+						try { caps = ws.getUserData()[WS_CAPS]; } catch { return null; }
+						return caps && caps.has(CURSOR_CAPABILITY_DICT) ? new CursorEncodeDict() : null;
+					},
+					onDetach(ws, state) {
+						if (state && state.byKey) state.byKey.clear();
+					}
+				}
+			};
 
 	if (typeof throttleMs !== 'number' || !Number.isFinite(throttleMs) || throttleMs < 0) {
 		throw new Error('cursor: throttle must be a non-negative number');

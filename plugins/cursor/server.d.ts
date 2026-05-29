@@ -94,7 +94,7 @@ export interface CursorOptions<UserData = unknown, UserInfo = unknown> {
 	 * Binary wire transport. When `true` (the default), cursor frames are sent
 	 * as compact binary `0x03` frames to clients that negotiated the
 	 * `cursor.protocol:2` capability, and as JSON to everyone else - fully
-	 * transparent, no app-code change, and a ~65-85% wire-size reduction on the
+	 * transparent, no app-code change, and a large wire-size reduction on the
 	 * position hot path. Set `false` to force JSON for every client (e.g. to
 	 * keep DevTools' WS inspector readable). The wire format is the server's
 	 * decision - clients never opt out via a URL parameter.
@@ -106,6 +106,27 @@ export interface CursorOptions<UserData = unknown, UserInfo = unknown> {
 	 * @default true
 	 */
 	binary?: boolean;
+
+	/**
+	 * Short-id dictionary wire. When `true` (the default), a client that
+	 * advertised the `cursor.protocol:3` capability receives the compact
+	 * dictionary form: each cursor key is announced once, then referenced by a
+	 * 1-2 byte per-connection id, so the key bytes leave the wire and decode no
+	 * longer allocates a string per entry. Older binary clients keep the
+	 * full-string form transparently.
+	 *
+	 * The dictionary is per-connection stateful, so each capable subscriber's
+	 * frame is encoded independently - the foundation's encode-once-send-many no
+	 * longer applies to those recipients. A warm dictionary encode is far cheaper
+	 * than a full-string encode, so this is a net win (cheaper CPU and smaller
+	 * frames) for typical per-process fan-out; only a single process with very
+	 * high per-topic subscriber counts (hundreds-plus on one worker) pays more
+	 * CPU than the bandwidth is worth. Set `false` there to keep the full-string
+	 * binary wire with its single shared encode. Ignored when `binary` is `false`.
+	 *
+	 * @default true
+	 */
+	dictionary?: boolean;
 }
 
 export interface CursorEntry<UserInfo = unknown, Data = unknown> {

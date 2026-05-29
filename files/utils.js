@@ -416,6 +416,19 @@ export const WS_CAPS = Symbol.for('adapter-uws.ws.caps');
  */
 export const WS_TOPIC_IDS = Symbol.for('adapter-uws.ws.topic-ids');
 
+/**
+ * Per-connection per-codec wire state for stateful binary codecs:
+ * `Map<capability, { state, detach }>`. A codec that declares a `wire.state`
+ * factory (e.g. the cursor short-id dictionary, or a future apply-in-place
+ * CRDT codec) gets one `state` object per connection, created lazily by
+ * `wire.state.onAttach(ws)` on the first binary frame to that connection and
+ * disposed by `wire.state.onDetach(ws, state)` on close. JSON-only and
+ * stateless-codec connections never allocate this slot. The decision a codec
+ * makes in `onAttach` (e.g. which schema version this connection negotiated)
+ * is fixed for the life of the connection - reset on reconnect, not re-hello.
+ */
+export const WS_WIRE_STATE = Symbol.for('adapter-uws.ws.wire-state');
+
 // - Bounded-by-default capacity caps ---------------------------------------
 // Single source of truth for the per-connection and module-level Map / Set
 // caps that handler.js, vite.js, and testing.js all enforce. The numbers

@@ -30,15 +30,25 @@ const TOPIC_PREFIX = '__cursor:';
 
 import { on, connect, status, registerWireCodec } from '../../client.js';
 import { writable } from 'svelte/store';
-import { decodeCursor, CURSOR_CAPABILITY } from './codec.js';
+import { decodeCursor, CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CursorDecodeDict } from './codec.js';
 
-// Opt this connection into binary cursor frames: advertise the capability in
-// the `hello` frame and route inbound `0x03` frames on `__cursor:` topics
-// through the cursor decoder, which yields the identical { event, data } the
-// JSON path produced - so the store merge logic below is untouched. Registered
-// at module load so the first `hello` already carries the capability. Fully
-// transparent: nothing in the cursor() store knows whether a frame was binary.
-registerWireCodec(TOPIC_PREFIX, { capability: CURSOR_CAPABILITY, decode: decodeCursor });
+// Opt this connection into binary cursor frames: advertise both the full-string
+// and the short-id dictionary capabilities in the `hello` frame and route
+// inbound `0x03` frames on `__cursor:` topics through the cursor decoder, which
+// yields the identical { event, data } the JSON path produced - so the store
+// merge logic below is untouched. Advertising both tokens lets a new server send
+// the compact dictionary form while an older server still sends the full-string
+// form this client also decodes. The decoder dispatches on the frame's
+// schemaVersion; the per-connection `state` is the short-id dictionary (id ->
+// key), reset on reconnect by the connection. Registered at module load so the
+// first `hello` already carries both capabilities. Fully transparent: nothing in
+// the cursor() store knows whether a frame was binary or which schema it used.
+registerWireCodec(TOPIC_PREFIX, {
+	capability: CURSOR_CAPABILITY,
+	capabilities: [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT],
+	state: { onAttach: () => new CursorDecodeDict() },
+	decode: decodeCursor
+});
 
 /** @type {Map<string, ReturnType<typeof cursor>>} */
 const cursorStores = new Map();

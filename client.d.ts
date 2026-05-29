@@ -652,13 +652,32 @@ export function connect(options?: ConnectOptions): WSConnection;
  * always advertises what it can decode; whether a topic is actually sent as
  * binary is the server's decision (the plugin's codec, or `binary: false`).
  *
+ * A codec may advertise more than one capability via `capabilities` (e.g. a
+ * cursor client that decodes both the full-string and the short-id dictionary
+ * wire advertises both tokens, negotiating the best the server offers while an
+ * older server still sends the form it knows). A codec may also declare a
+ * per-connection `state` factory (`state.onAttach` / `state.onDetach`) for a
+ * stateful wire (the cursor short-id dictionary); `decode` then receives that
+ * per-connection state and the frame's `schemaVersion` so it can resolve
+ * references and dispatch between schema revisions. The state is reset on every
+ * (re)connect, in lock-step with the server's matching encoder state.
+ *
  * @param prefix - topic-name prefix the codec owns (e.g. `'__cursor:'`)
- * @param codec - `{ capability, decode }`
+ * @param codec - `{ capability, capabilities?, state?, decode }`
  */
 export function registerWireCodec(
 	prefix: string,
 	codec: {
 		capability: string;
-		decode: (payload: Uint8Array) => { event: string; data: unknown } | null;
+		capabilities?: string[];
+		state?: {
+			onAttach?: () => unknown;
+			onDetach?: (state: unknown) => void;
+		};
+		decode: (
+			payload: Uint8Array,
+			state?: unknown,
+			schemaVersion?: number
+		) => { event: string; data: unknown } | null;
 	}
 ): void;

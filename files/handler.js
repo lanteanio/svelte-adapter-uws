@@ -22,7 +22,7 @@ import { env } from 'ENV';
 import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts } from './wire.js';
 
 /* global ENV_PREFIX */
@@ -947,6 +947,63 @@ function ensureWireId(ws, ud, topic) {
 	return id;
 }
 
+/**
+ * Resolve (allocating on first use) the per-connection state object for a
+ * stateful wire codec, stored under the codec's capability in the
+ * `WS_WIRE_STATE` slot. The codec's `wire.state.onAttach(ws)` factory runs once
+ * per (connection, capability) - the decision it makes (e.g. which schema
+ * version this connection negotiated, read from its `WS_CAPS`) is then fixed for
+ * the life of the connection. A factory that throws or returns null degrades
+ * that connection to JSON for the frame rather than crashing the publish.
+ * Returns null for a stateless codec (no `wire.state`) or on attach failure.
+ * @param {import('uWebSockets.js').WebSocket<any>} ws
+ * @param {any} ud - ws.getUserData()
+ * @param {{ capability: string, state?: { onAttach: (ws: any) => any, onDetach?: (ws: any, state: any) => void } }} wire
+ * @returns {any}
+ */
+function ensureWireState(ws, ud, wire) {
+	if (!wire.state) return null;
+	let m = ud[WS_WIRE_STATE];
+	if (!m) {
+		m = new Map();
+		ud[WS_WIRE_STATE] = m;
+	}
+	let entry = m.get(wire.capability);
+	if (entry === undefined) {
+		let state = null;
+		try {
+			state = wire.state.onAttach(ws);
+		} catch (err) {
+			if (wsDebug) console.error('[ws] wire.state.onAttach threw for', wire.capability, err);
+			state = null;
+		}
+		entry = { state, detach: wire.state.onDetach };
+		m.set(wire.capability, entry);
+	}
+	return entry.state;
+}
+
+/**
+ * Dispose every per-connection wire-codec state on close. Mirrors the
+ * `capCounts.adjust(..., null)` release: a codec that holds resources (or just
+ * wants its dictionary freed promptly) gets its `onDetach(ws, state)` called
+ * exactly once. Safe to call when no stateful codec ever ran.
+ * @param {import('uWebSockets.js').WebSocket<any>} ws
+ * @param {any} ud - ws.getUserData()
+ */
+function detachWireStates(ws, ud) {
+	const m = ud[WS_WIRE_STATE];
+	if (!m) return;
+	for (const entry of m.values()) {
+		if (entry && typeof entry.detach === 'function') {
+			try { entry.detach(ws, entry.state); } catch (err) {
+				if (wsDebug) console.error('[ws] wire.state.onDetach threw', err);
+			}
+		}
+	}
+	m.clear();
+}
+
 /** @type {import('./index.js').Platform} */
 const platform = {
 	/**
@@ -1052,25 +1109,76 @@ const platform = {
 		s.m++;
 		s.b += envelope.length;
 
-		// Encode once - but only when at least one live connection wants binary
-		// for this codec. A null payload (no capable client, or the codec
-		// declined this frame) falls through to the single C++ app.publish
-		// fan-out, byte- and instruction-identical to platform.publish.
-		const payload = capCounts.has(wire.capability) ? wire.encode(event, data) : null;
 		const relayed = !!(parentPort && (!options || options.relay !== false));
-		if (payload == null) {
+
+		// JSON fast path: no live connection wants binary for this codec. Byte-
+		// and instruction-identical to platform.publish - a JSON-only deployment
+		// never enters the per-subscriber walk or touches the codec at all.
+		if (!capCounts.has(wire.capability)) {
 			const result = app.publish(topic, envelope, false, false);
 			if (relayed) batchRelay(topic, envelope);
 			return result || relayed;
 		}
 
-		// Mixed-capability fan-out: app.publish cannot vary payload per
-		// recipient, so walk the topic's subscribers and send each the form it
-		// negotiated. The codec payload is shared across recipients; only the
-		// tiny per-connection frame header (topic-id + seq) differs, memoized
-		// per distinct id so the common all-same-id case builds one frame and
-		// reuses it for every binary send.
 		const seqOnWire = seq == null ? 0 : seq;
+
+		// Stateful codec (per-connection dictionary / apply-state): the encoded
+		// payload depends on the recipient's state, so encode-once-send-many no
+		// longer holds for the binary recipients - each capable connection is
+		// encoded against its own state. Connections whose onAttach returned null
+		// (e.g. an older client that negotiated the stateless schema) share one
+		// encode at `wire.schemaVersion`, memoized by topic-id, so a mixed room
+		// keeps the single-encode fan-out for those clients.
+		if (wire.state) {
+			let sharedPayload;
+			let sharedEncoded = false;
+			/** @type {Map<number, Uint8Array>} */
+			const sharedFrameById = new Map();
+			for (const ws of wsConnections) {
+				let ud;
+				try { ud = ws.getUserData(); } catch { continue; }
+				const subs = ud[WS_SUBSCRIPTIONS];
+				if (!subs || !subs.has(topic)) continue;
+				const caps = ud[WS_CAPS];
+				if (!caps || !caps.has(wire.capability)) {
+					try { ws.send(envelope, false, false); } catch { closedWsAborts++; }
+					continue;
+				}
+				const state = ensureWireState(ws, ud, wire);
+				if (state == null) {
+					// Shared encode-once at the codec's baseline schema version.
+					if (!sharedEncoded) { sharedPayload = wire.encode(event, data, null); sharedEncoded = true; }
+					if (sharedPayload == null) { try { ws.send(envelope, false, false); } catch { closedWsAborts++; } continue; }
+					const id = ensureWireId(ws, ud, topic);
+					let frame = sharedFrameById.get(id);
+					if (!frame) { frame = buildBinaryFrame(wire.schemaVersion, id, seqOnWire, sharedPayload); sharedFrameById.set(id, frame); }
+					try { ws.send(frame, true, false); } catch { closedWsAborts++; }
+				} else {
+					// Per-connection encode against this connection's state, stamped
+					// with the schema version that state negotiated.
+					const payload = wire.encode(event, data, state);
+					if (payload == null) { try { ws.send(envelope, false, false); } catch { closedWsAborts++; } continue; }
+					const sv = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
+					const frame = buildBinaryFrame(sv, ensureWireId(ws, ud, topic), seqOnWire, payload);
+					try { ws.send(frame, true, false); } catch { closedWsAborts++; }
+				}
+			}
+			if (relayed) batchRelay(topic, envelope);
+			return true;
+		}
+
+		// Stateless codec: encode once, send many. A null payload (the codec
+		// declined this frame) falls through to the single C++ app.publish
+		// fan-out, instruction-identical to platform.publish. The codec payload
+		// is shared across recipients; only the tiny per-connection frame header
+		// (topic-id + seq) differs, memoized per distinct id so the common
+		// all-same-id case builds one frame and reuses it for every binary send.
+		const payload = wire.encode(event, data);
+		if (payload == null) {
+			const result = app.publish(topic, envelope, false, false);
+			if (relayed) batchRelay(topic, envelope);
+			return result || relayed;
+		}
 		/** @type {Map<number, Uint8Array>} */
 		const frameById = new Map();
 		for (const ws of wsConnections) {
@@ -1118,7 +1226,20 @@ const platform = {
 		let ud;
 		try { ud = ws.getUserData(); } catch { closedWsAborts++; return 2; }
 		const caps = ud[WS_CAPS];
-		const payload = (caps && caps.has(wire.capability)) ? wire.encode(event, data) : null;
+		let payload = null;
+		let schemaVersion = wire.schemaVersion;
+		if (caps && caps.has(wire.capability)) {
+			if (wire.state) {
+				// Share the connection's codec state with publishWire so a
+				// snapshot CATALOG interns ids the following BULK (and every
+				// later broadcast) references against the same dictionary.
+				const state = ensureWireState(ws, ud, wire);
+				payload = wire.encode(event, data, state);
+				if (state != null && typeof state.schemaVersion === 'number') schemaVersion = state.schemaVersion;
+			} else {
+				payload = wire.encode(event, data);
+			}
+		}
 		if (payload == null) {
 			const json = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
 			let result;
@@ -1127,7 +1248,7 @@ const platform = {
 			return result;
 		}
 		const id = ensureWireId(ws, ud, topic);
-		const frame = buildBinaryFrame(wire.schemaVersion, id, 0, payload);
+		const frame = buildBinaryFrame(schemaVersion, id, 0, payload);
 		let result;
 		try { result = ws.send(frame, true, false); } catch { closedWsAborts++; return 2; }
 		bumpOut(ws, frame);
@@ -3575,6 +3696,9 @@ if (WS_ENABLED) {
 				// Release this connection's advertised capabilities from the
 				// live counts so the binary publish fast path stays accurate.
 				capCounts.adjust(userData[WS_CAPS], null);
+				// Dispose any per-connection wire-codec state (e.g. the cursor
+				// short-id dictionary) so a long-lived server frees it promptly.
+				detachWireStates(ws, userData);
 				wsConnections.delete(ws);
 				if (wsDebug) console.log('[ws] close code=%d connections=%d', code, wsConnections.size);
 			}

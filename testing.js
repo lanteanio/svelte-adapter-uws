@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts } from './files/wire.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
@@ -253,6 +253,42 @@ export async function createTestServer(options = {}) {
 		return id;
 	}
 
+	/**
+	 * Per-connection wire-codec state resolution, mirroring handler.js so the
+	 * stateful binary path (e.g. the cursor short-id dictionary) is exercised by
+	 * createTestServer-based suites. Returns null for a stateless codec or on
+	 * attach failure.
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @param {any} ud
+	 * @param {{ capability: string, state?: { onAttach: (ws: any) => any, onDetach?: (ws: any, state: any) => void } }} wire
+	 * @returns {any}
+	 */
+	function ensureWireStateT(ws, ud, wire) {
+		if (!wire.state) return null;
+		let m = ud[WS_WIRE_STATE];
+		if (!m) { m = new Map(); ud[WS_WIRE_STATE] = m; }
+		let entry = m.get(wire.capability);
+		if (entry === undefined) {
+			let state = null;
+			try { state = wire.state.onAttach(ws); } catch { state = null; }
+			entry = { state, detach: wire.state.onDetach };
+			m.set(wire.capability, entry);
+		}
+		return entry.state;
+	}
+
+	/** @param {import('uWebSockets.js').WebSocket<any>} ws @param {any} ud */
+	function detachWireStatesT(ws, ud) {
+		const m = ud[WS_WIRE_STATE];
+		if (!m) return;
+		for (const entry of m.values()) {
+			if (entry && typeof entry.detach === 'function') {
+				try { entry.detach(ws, entry.state); } catch {}
+			}
+		}
+		m.clear();
+	}
+
 	const platform = {
 		publish(topic, event, data, options) {
 			const seq = (options && options.seq === false)
@@ -283,10 +319,8 @@ export async function createTestServer(options = {}) {
 				? null
 				: nextTopicSeq(topicSeqs, topic);
 			const env = envelope(topic, event, data, seq);
-			const payload = capCountsT.has(wire.capability) ? wire.encode(event, data) : null;
-			if (payload == null) {
-				// No capable client (or codec declined): single C++ fan-out,
-				// identical to platform.publish's fast path.
+			// JSON fast path: no capable client.
+			if (!capCountsT.has(wire.capability)) {
 				if (chaos.scenario === null) return app.publish(topic, env, false, false);
 				let delivered = false;
 				for (const ws of wsConnections) {
@@ -297,6 +331,51 @@ export async function createTestServer(options = {}) {
 				return delivered;
 			}
 			const seqOnWire = seq == null ? 0 : seq;
+			// Stateful codec: per-connection encode (null-state connections share
+			// one encode-once frame, memoized by topic-id). Mirrors handler.js.
+			if (wire.state) {
+				let sharedPayload;
+				let sharedEncoded = false;
+				/** @type {Map<number, Uint8Array>} */
+				const sharedFrameById = new Map();
+				let delivered = false;
+				for (const ws of wsConnections) {
+					let ud;
+					try { ud = ws.getUserData(); } catch { continue; }
+					const subs = ud[WS_SUBSCRIPTIONS];
+					if (!subs || !subs.has(topic)) continue;
+					const caps = ud[WS_CAPS];
+					if (!caps || !caps.has(wire.capability)) { sendOutboundT(ws, env); delivered = true; continue; }
+					const state = ensureWireStateT(ws, ud, wire);
+					if (state == null) {
+						if (!sharedEncoded) { sharedPayload = wire.encode(event, data, null); sharedEncoded = true; }
+						if (sharedPayload == null) { sendOutboundT(ws, env); delivered = true; continue; }
+						const id = ensureWireIdT(ws, ud, topic);
+						let frame = sharedFrameById.get(id);
+						if (!frame) { frame = buildBinaryFrame(wire.schemaVersion, id, seqOnWire, sharedPayload); sharedFrameById.set(id, frame); }
+						sendOutboundBinaryT(ws, frame);
+					} else {
+						const payload = wire.encode(event, data, state);
+						if (payload == null) { sendOutboundT(ws, env); delivered = true; continue; }
+						const sv = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
+						sendOutboundBinaryT(ws, buildBinaryFrame(sv, ensureWireIdT(ws, ud, topic), seqOnWire, payload));
+					}
+					delivered = true;
+				}
+				return delivered;
+			}
+			// Stateless codec: encode once, send many.
+			const payload = wire.encode(event, data);
+			if (payload == null) {
+				if (chaos.scenario === null) return app.publish(topic, env, false, false);
+				let delivered = false;
+				for (const ws of wsConnections) {
+					if (!ws.isSubscribed(topic)) continue;
+					sendOutboundT(ws, env);
+					delivered = true;
+				}
+				return delivered;
+			}
 			/** @type {Map<number, Uint8Array>} */
 			const frameById = new Map();
 			let delivered = false;
@@ -325,12 +404,22 @@ export async function createTestServer(options = {}) {
 			let ud;
 			try { ud = ws.getUserData(); } catch { closedWsAbortsT++; return 2; }
 			const caps = ud[WS_CAPS];
-			const payload = (caps && caps.has(wire.capability)) ? wire.encode(event, data) : null;
+			let payload = null;
+			let schemaVersion = wire.schemaVersion;
+			if (caps && caps.has(wire.capability)) {
+				if (wire.state) {
+					const state = ensureWireStateT(ws, ud, wire);
+					payload = wire.encode(event, data, state);
+					if (state != null && typeof state.schemaVersion === 'number') schemaVersion = state.schemaVersion;
+				} else {
+					payload = wire.encode(event, data);
+				}
+			}
 			if (payload == null) {
 				return sendOutboundT(ws, envelope(topic, event, data));
 			}
 			const id = ensureWireIdT(ws, ud, topic);
-			const frame = buildBinaryFrame(wire.schemaVersion, id, 0, payload);
+			const frame = buildBinaryFrame(schemaVersion, id, 0, payload);
 			return sendOutboundBinaryT(ws, frame);
 		},
 		sendTo(filter, topic, event, data) {
@@ -910,9 +999,18 @@ export async function createTestServer(options = {}) {
 					bytesOut: stats.bytesOut
 				}
 				: { code, message, platform: closePlatform, subscriptions: subs };
-			handler.close?.(ws, ctx);
-			capCountsT.adjust(ud[WS_CAPS], null);
-			wsConnections.delete(ws);
+			// Mirror production handler.js: run the close hook inside try/finally
+			// so the per-connection cleanup (cap counts, wire-codec state, the
+			// connection set) always runs even if the user's close hook throws -
+			// otherwise a leaked cap count would wedge a codec's JSON fast path on
+			// and a stateful codec's per-connection state would never be freed.
+			try {
+				handler.close?.(ws, ctx);
+			} finally {
+				capCountsT.adjust(ud[WS_CAPS], null);
+				detachWireStatesT(ws, ud);
+				wsConnections.delete(ws);
+			}
 		}
 	});
 

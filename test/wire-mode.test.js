@@ -8,7 +8,14 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { ByteWriter, ByteReader, parseBinaryFrame } from '../files/wire.js';
-import { decodeCursor, CURSOR_CAPABILITY } from '../plugins/cursor/codec.js';
+import {
+	decodeCursor,
+	CursorDecodeDict,
+	CURSOR_CAPABILITY,
+	CURSOR_CAPABILITY_DICT,
+	CURSOR_SCHEMA_VERSION,
+	CURSOR_SCHEMA_VERSION_DICT
+} from '../plugins/cursor/codec.js';
 import { createCursor } from '../plugins/cursor/server.js';
 
 let uWS;
@@ -212,5 +219,168 @@ describeUWS('binary wire mechanism (0x03 + publishWire)', () => {
 		expect(b.frames.some((f) => f.binary)).toBe(false);
 
 		a.ws.close(); b.ws.close();
+	});
+
+	// Decode a client's binary cursor frames in arrival order through one
+	// decoder dictionary (schemaVersion 2) or statelessly (schemaVersion 1),
+	// exactly as the real client's per-connection, shared-by-prefix decoder
+	// state would. Returns the decoded { event, data } sequence.
+	function decodeCursorStream(client) {
+		const dict = new CursorDecodeDict();
+		const out = [];
+		for (const f of client.frames) {
+			if (!f.binary || !f.parsed) continue;
+			const decoded = decodeCursor(f.parsed.payload, dict, f.parsed.schemaVersion);
+			if (decoded) out.push({ sv: f.parsed.schemaVersion, ...decoded });
+		}
+		return out;
+	}
+
+	it('negotiation matrix: dict client gets schemaVersion 2, old binary client gets 1, no-caps gets JSON - from one publish', async () => {
+		const cursors = createCursor({ throttle: 0, topicThrottle: 0 });
+		server = await createTestServer({
+			handler: {
+				async message(ws, ctx) {
+					const { msg, platform } = ctx;
+					if (msg && msg.type === 'join-board') { await platform.subscribe(ws, '__cursor:board'); return; }
+					if (cursors.hooks.message(ws, ctx)) return;
+				},
+				close: cursors.hooks.close
+			}
+		});
+		const dictClient = await connectClient(server.wsUrl, [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT]); // new client
+		const v1Client = await connectClient(server.wsUrl, [CURSOR_CAPABILITY]);                          // old binary client
+		const jsonClient = await connectClient(server.wsUrl);                                             // no caps
+		const mover = await connectClient(server.wsUrl, [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT]);
+
+		for (const c of [dictClient, v1Client, jsonClient, mover]) c.send({ type: 'join-board' });
+		await sleep(80);
+		mover.send({ type: 'cursor', topic: 'board', data: { x: 100.5, y: 200.25 } });
+		await sleep(80);
+
+		// Dict client: every binary frame is schemaVersion 2; the stream decodes
+		// (join then update) to the mover's key against one dictionary.
+		const dictStream = decodeCursorStream(dictClient);
+		expect(dictClient.frames.some((f) => f.binary)).toBe(true);
+		expect(dictClient.frames.filter((f) => f.binary).every((f) => f.parsed.schemaVersion === CURSOR_SCHEMA_VERSION_DICT)).toBe(true);
+		const dictUpdate = dictStream.find((e) => e.event === 'update');
+		expect(dictUpdate).toBeTruthy();
+		expect(dictUpdate.data.data.x).toBeCloseTo(100.5, 2);
+		const moverKey = dictUpdate.data.key;
+		expect(typeof moverKey).toBe('string');
+
+		// Old binary client: every binary frame is schemaVersion 1 (full-string).
+		const v1Stream = decodeCursorStream(v1Client);
+		expect(v1Client.frames.some((f) => f.binary)).toBe(true);
+		expect(v1Client.frames.filter((f) => f.binary).every((f) => f.parsed.schemaVersion === CURSOR_SCHEMA_VERSION)).toBe(true);
+		expect(v1Stream.find((e) => e.event === 'update')?.data.key).toBe(moverKey);
+
+		// No-caps client: JSON only, never a binary frame.
+		expect(jsonClient.frames.some((f) => f.binary)).toBe(false);
+		const jsonUpdate = await jsonClient.waitFor((f) => !f.binary && f.parsed?.event === 'update' && f.parsed.topic === '__cursor:board');
+		expect(jsonUpdate.parsed.data.data).toEqual({ x: 100.5, y: 200.25 });
+
+		dictClient.ws.close(); v1Client.ws.close(); jsonClient.ws.close(); mover.ws.close();
+	});
+
+	it('shares one short-id dictionary across cursor topics on a connection (assign on the first, ref on the rest)', async () => {
+		const cursors = createCursor({ throttle: 0, topicThrottle: 0 });
+		server = await createTestServer({
+			handler: {
+				async message(ws, ctx) {
+					const { msg, platform } = ctx;
+					if (msg && msg.type === 'join' && typeof msg.board === 'string') { await platform.subscribe(ws, '__cursor:' + msg.board); return; }
+					if (cursors.hooks.message(ws, ctx)) return;
+				},
+				close: cursors.hooks.close
+			}
+		});
+		const sub = await connectClient(server.wsUrl, [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT]);
+		const mover = await connectClient(server.wsUrl, [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT]);
+		for (const board of ['a', 'b']) { sub.send({ type: 'join', board }); mover.send({ type: 'join', board }); }
+		await sleep(80);
+
+		// Same mover (one connection key) moves on both topics. The subscriber's
+		// shared-by-prefix dictionary interns the key once (on whichever topic's
+		// frame lands first) and references it on the other - so decoding both
+		// topics' frames through ONE dictionary resolves every key.
+		mover.send({ type: 'cursor', topic: 'a', data: { x: 1.5, y: 2.5 } });
+		mover.send({ type: 'cursor', topic: 'b', data: { x: 3.5, y: 4.5 } });
+		await sleep(100);
+
+		const stream = decodeCursorStream(sub);
+		const updatesA = stream.filter((e) => e.event === 'update' && e.data.data.x === 1.5);
+		const updatesB = stream.filter((e) => e.event === 'update' && e.data.data.x === 3.5);
+		expect(updatesA.length).toBeGreaterThanOrEqual(1);
+		expect(updatesB.length).toBeGreaterThanOrEqual(1);
+		// Same physical cursor, same resolved key on both topics, no desync/null.
+		expect(updatesA[0].data.key).toBe(updatesB[0].data.key);
+		expect(stream.every((e) => typeof (e.data.key ?? e.data[0]?.key ?? '') === 'string')).toBe(true);
+
+		sub.ws.close(); mover.ws.close();
+	});
+
+	it('disposes per-connection wire-codec state (onDetach) when the connection closes', async () => {
+		let attached = 0;
+		let detached = 0;
+		const STATEFUL = {
+			capability: 'stateful.bin:1',
+			schemaVersion: 1,
+			encode(event, data) {
+				if (event !== 'tick') return null;
+				const w = new ByteWriter();
+				w.u8(0xcd);
+				w.varint(data.n);
+				return w.take();
+			},
+			// A per-connection state object; onDetach must fire exactly once on close
+			// (the close handler runs cleanup in a finally, mirroring production, so
+			// it also fires if a user close hook throws).
+			state: { onAttach: () => { attached++; return { n: 0 }; }, onDetach: () => { detached++; } }
+		};
+		server = await createTestServer({
+			handler: {
+				message(ws, { msg, platform }) { if (msg && msg.type === 'pub') platform.publishWire('room', 'tick', { n: msg.n }, STATEFUL); }
+			}
+		});
+		const a = await connectClient(server.wsUrl, ['stateful.bin:1']);
+		a.send({ type: 'subscribe', topic: 'room', ref: 1 });
+		await a.waitFor((f) => f.parsed?.type === 'subscribed');
+		a.send({ type: 'pub', n: 1 });
+		await a.waitFor((f) => f.binary); // first binary publish allocates the per-connection state via onAttach
+		expect(attached).toBe(1);
+		a.ws.close();
+		await sleep(80);
+		expect(detached).toBe(1); // freed on close
+	});
+
+	it('dictionary:false forces the full-string wire (schemaVersion 1) even for a dictionary-capable client', async () => {
+		const cursors = createCursor({ throttle: 0, topicThrottle: 0, dictionary: false });
+		server = await createTestServer({
+			handler: {
+				async message(ws, ctx) {
+					const { msg, platform } = ctx;
+					if (msg && msg.type === 'join-board') { await platform.subscribe(ws, '__cursor:board'); return; }
+					if (cursors.hooks.message(ws, ctx)) return;
+				},
+				close: cursors.hooks.close
+			}
+		});
+		const dictClient = await connectClient(server.wsUrl, [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT]);
+		const mover = await connectClient(server.wsUrl, [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT]);
+		dictClient.send({ type: 'join-board' }); mover.send({ type: 'join-board' });
+		await sleep(80);
+		mover.send({ type: 'cursor', topic: 'board', data: { x: 5.5, y: 6.5 } });
+		await sleep(80);
+
+		// Even though the client advertised the dictionary capability, the server
+		// opted out, so every binary frame is the full-string schemaVersion 1.
+		const bins = dictClient.frames.filter((f) => f.binary);
+		expect(bins.length).toBeGreaterThan(0);
+		expect(bins.every((f) => f.parsed.schemaVersion === CURSOR_SCHEMA_VERSION)).toBe(true);
+		const update = decodeCursorStream(dictClient).find((e) => e.event === 'update');
+		expect(update.data.data.x).toBeCloseTo(5.5, 2);
+
+		dictClient.ws.close(); mover.ws.close();
 	});
 });
