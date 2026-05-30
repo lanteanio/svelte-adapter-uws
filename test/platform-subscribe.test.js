@@ -962,5 +962,24 @@ describeUWS('platform.checkSubscribe', () => {
 
 			client.close();
 		});
+
+		it('platform.sendTo: accepts a { compress: true } opt-in and still delivers', async () => {
+			const { createTestServer } = await import('../testing.js');
+			server = await createTestServer({});
+			const { ws: client, frames } = await connectClient(server.wsUrl);
+			await new Promise(r => setTimeout(r, 30));
+
+			const before = frames.length;
+			const count = server.platform.sendTo(() => true, 'feed', 'tick', { n: 2 }, { compress: true });
+			await new Promise(r => setTimeout(r, 30));
+
+			expect(count).toBe(1);
+			const newFrames = frames.slice(before).map((f) => JSON.parse(f));
+			const tick = newFrames.find((f) => f.event === 'tick');
+			expect(tick).toBeDefined();
+			expect(tick.data).toEqual({ n: 2 });
+
+			client.close();
+		});
 	});
 });

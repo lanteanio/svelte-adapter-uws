@@ -1251,7 +1251,15 @@ export interface Platform {
 		 */
 		coalesceKey?: string;
 		options?: { relay?: boolean; seq?: boolean };
-	}>): void;
+	}>, options?: {
+		/**
+		 * Compress the batch frame when `websocket.compression` is configured.
+		 * Default `false`: a batched frame mixes event types, so compression is
+		 * opt-in. Applies to the whole batch (the shared-frame fast path and the
+		 * per-event slow-path fallback alike).
+		 */
+		compress?: boolean;
+	}): void;
 
 	/**
 	 * Send a request to a single connection and await its reply.
@@ -1392,7 +1400,7 @@ export interface Platform {
 	 * // platform.publish(`user:${targetUserId}`, 'dm', 'new-message', { message });
 	 * ```
 	 */
-	sendTo(filter: (userData: any) => boolean, topic: string, event: string, data?: unknown): number;
+	sendTo(filter: (userData: any) => boolean, topic: string, event: string, data?: unknown, options?: { compress?: boolean }): number;
 
 	/**
 	 * Number of active WebSocket connections.

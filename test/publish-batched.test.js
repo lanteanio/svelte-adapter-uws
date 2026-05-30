@@ -71,6 +71,30 @@ describeUWS('platform.publishBatched', () => {
 		await waitForClose(ws);
 	});
 
+	it('accepts a { compress: true } batch opt-in and still delivers one frame', async () => {
+		const { createTestServer } = await import('../testing.js');
+		server = await createTestServer();
+
+		const { ws, frames } = await connectAndCollect(server.wsUrl);
+		ws.send(JSON.stringify({ type: 'subscribe', topic: 'feed' }));
+		await new Promise(r => setTimeout(r, 30));
+
+		const before = frames.length;
+		server.platform.publishBatched([
+			{ topic: 'feed', event: 'tick', data: { i: 0 } },
+			{ topic: 'feed', event: 'tick', data: { i: 1 } }
+		], { compress: true });
+		await new Promise(r => setTimeout(r, 30));
+
+		const newFrames = frames.slice(before);
+		expect(newFrames).toHaveLength(1);
+		expect(newFrames[0].parsed.type).toBe('batch');
+		expect(newFrames[0].parsed.events.map(e => e.data.i)).toEqual([0, 1]);
+
+		ws.close();
+		await waitForClose(ws);
+	});
+
 	it('falls back to N individual frames for a non-cap-able client', async () => {
 		const { createTestServer } = await import('../testing.js');
 		server = await createTestServer();

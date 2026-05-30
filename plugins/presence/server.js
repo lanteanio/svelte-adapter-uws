@@ -289,9 +289,7 @@ export function createPresence(options = {}) {
 	// codec is stateless: a roster frame is encoded once and fanned out to all
 	// subscribers (the foundation's encode-once-send-many), the right trade for
 	// presence's infrequent-but-full-roster broadcasts.
-	const wireCodec = options.binary === false
-		? null
-		: { capability: PRESENCE_CAPABILITY, schemaVersion: PRESENCE_SCHEMA_VERSION, encode: encodePresence };
+	const wireCodec = createPresenceWireCodec(options);
 
 	/**
 	 * Broadcast a presence wire event. Routes through the binary `publishWire`
@@ -702,4 +700,18 @@ export function createPresence(options = {}) {
 	};
 
 	return tracker;
+}
+
+/**
+ * Build the presence binary wire codec (`presence.protocol:1`, stateless).
+ * Exported so the cluster-backed variant (`svelte-adapter-uws-extensions`
+ * `redis/presence`) builds the IDENTICAL codec from one definition - no drift.
+ * `null` when `binary: false` (JSON for everyone). Stateless: one encode is fanned
+ * out to all subscribers (encode-once-send-many).
+ * @param {{ binary?: boolean }} [options]
+ */
+export function createPresenceWireCodec(options = {}) {
+	return options.binary === false
+		? null
+		: { capability: PRESENCE_CAPABILITY, schemaVersion: PRESENCE_SCHEMA_VERSION, encode: encodePresence };
 }

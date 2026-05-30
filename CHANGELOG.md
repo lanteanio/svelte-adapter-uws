@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.5] - 2026-05-30
+
+### Added
+
+- **`createCursorWireCodec(options)` and `createPresenceWireCodec(options)`, exported from `svelte-adapter-uws/plugins/cursor` and `svelte-adapter-uws/plugins/presence`.** Each builds the plugin's binary wire codec - the `cursor.protocol:2` full-string / `cursor.protocol:3` short-id dictionary codec, and the stateless `presence.protocol:1` roster codec - without creating a tracker, returning `null` when `binary: false`. The bundled `createCursor` / `createPresence` now build their codec through these factories, so a single codec definition is the source of truth for the wire. A cluster-backed cursor or presence backend (the Redis extensions in `svelte-adapter-uws-extensions`) imports the same factory and hands the result straight to `platform.publishWire` / `platform.sendWire`, so the clustered backend speaks a byte-for-byte identical wire to the in-memory plugin instead of carrying a parallel copy that could drift. The per-connection short-id dictionary state lives in the framework (`publishWire` runs the per-subscriber encode against it), so a caller never manages it. Pure refactor for in-process apps: the in-memory wire is unchanged and the full suite stays green.
+
+### Changed
+
+- **`websocket.compression` now reaches the last three send paths that previously always bypassed it: `sendTo`, `publishBatched`, and the cross-worker relay hop.** `0.6.0-next.4` made `compression` a real per-frame option for `publish` / `send` / `publishWire` / `sendWire` but left these three hardwired to uncompressed (called out as a known limitation in that release). They now resolve a per-frame `compress` flag like the rest: `sendTo(filter, topic, event, data, { compress: true })` and `publishBatched(messages, { compress: true })` are opt-in (a `sendTo` frame targets a filtered subset and a batched frame mixes event types, so uncompressed stays the safe default), and a relayed `publish` / `publishBatched` now carries the originating worker's compress intent across the worker boundary, re-gated by the receiving worker's own compression setting so a worker with compression off never deflates a relayed frame. Default behavior is byte-identical to before: with `compression: false` (the default) every flag resolves to false and nothing is compressed. The `options` argument was added to `publishBatched` and `sendTo` in the platform types.
+
 ## [0.6.0-next.4] - 2026-05-29
 
 ### Fixed

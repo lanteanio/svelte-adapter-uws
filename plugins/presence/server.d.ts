@@ -274,3 +274,25 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 export function createPresence<UserData = unknown, Selected extends Record<string, any> = Record<string, any>>(
 	options?: PresenceOptions<UserData, Selected>
 ): PresenceTracker<Selected>;
+
+/**
+ * Build the presence binary wire codec (`presence.protocol:1`, stateless)
+ * without creating a tracker.
+ *
+ * Exported so a cluster-backed presence backend (e.g.
+ * `svelte-adapter-uws-extensions/redis/presence`) builds the IDENTICAL codec
+ * from one definition - the in-memory and cluster presence backends never drift
+ * on the wire. Hand the result to `platform.publishWire` / `platform.sendWire`.
+ *
+ * Returns `null` when `binary: false` (JSON for every client). The codec is
+ * stateless: one roster frame is encoded once and fanned out to all subscribers.
+ *
+ * @param options - Only `binary` is read.
+ */
+export function createPresenceWireCodec(
+	options?: Pick<PresenceOptions, 'binary'>
+): {
+	capability: string;
+	schemaVersion: number;
+	encode: (event: string, data: unknown, state?: unknown) => Uint8Array | null;
+} | null;

@@ -242,3 +242,32 @@ export interface CursorTracker<UserInfo = unknown> {
 export function createCursor<UserData = unknown, UserInfo = unknown>(
 	options?: CursorOptions<UserData, UserInfo>
 ): CursorTracker<UserInfo>;
+
+/**
+ * Build the cursor binary wire codec (`cursor.protocol:2` full-string /
+ * `cursor.protocol:3` short-id dictionary) without creating a tracker.
+ *
+ * Exported so a cluster-backed cursor backend (e.g.
+ * `svelte-adapter-uws-extensions/redis/cursor`) builds the IDENTICAL codec from
+ * one definition - the in-memory and cluster cursor backends never drift on the
+ * wire. Hand the result to `platform.publishWire` / `platform.sendWire`; the
+ * per-connection short-id dictionary state lives in the framework, so the caller
+ * does not manage it.
+ *
+ * Returns `null` when `binary: false` (JSON for every client). With
+ * `dictionary: false` the codec is the stateless full-string form
+ * (`schemaVersion` 1), encoded once and fanned out to all subscribers.
+ *
+ * @param options - Only `binary` and `dictionary` are read.
+ */
+export function createCursorWireCodec(
+	options?: Pick<CursorOptions, 'binary' | 'dictionary'>
+): {
+	capability: string;
+	schemaVersion: number;
+	encode: (event: string, data: unknown, state?: unknown) => Uint8Array | null;
+	state?: {
+		onAttach: (ws: any) => unknown;
+		onDetach?: (ws: any, state: unknown) => void;
+	};
+} | null;

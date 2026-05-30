@@ -427,7 +427,8 @@ export async function createTestServer(options = {}) {
 			const frame = buildBinaryFrame(schemaVersion, id, 0, payload);
 			return sendOutboundBinaryT(ws, frame);
 		},
-		sendTo(filter, topic, event, data) {
+		sendTo(filter, topic, event, data, options) {
+			void options; // Platform-shape parity; the test server configures no compressor.
 			const msg = envelope(topic, event, data);
 			let count = 0;
 			for (const ws of wsConnections) {
@@ -508,7 +509,8 @@ export async function createTestServer(options = {}) {
 		batch(messages) {
 			return messages.map(({ topic, event, data }) => platform.publish(topic, event, data));
 		},
-		publishBatched(messages) {
+		publishBatched(messages, options) {
+			void options; // Platform-shape parity; the test server configures no compressor.
 			if (!Array.isArray(messages) || messages.length === 0) return;
 			messages = collapseByCoalesceKey(messages);
 			if (messages.length === 0) return;

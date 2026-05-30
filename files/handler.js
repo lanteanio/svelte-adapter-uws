@@ -389,8 +389,11 @@ let relayTimer = null;
 /**
  * @param {string} topic
  * @param {string} envelope
+ * @param {boolean} [compress] - Per-frame compress intent carried across the
+ *   worker boundary so a relayed frame compresses on the receiving worker the
+ *   same way it did locally. Absent (e.g. publishWire callers) -> uncompressed.
  */
-function batchRelay(topic, envelope) {
+function batchRelay(topic, envelope, compress) {
 	if (!relayBatch) {
 		relayBatch = [];
 		relayTimer = setTimeout(() => {
@@ -402,7 +405,7 @@ function batchRelay(topic, envelope) {
 		}, 0);
 		if (relayTimer.unref) relayTimer.unref();
 	}
-	relayBatch.push({ topic, envelope });
+	relayBatch.push({ topic, envelope, compress });
 }
 
 // - Platform (exposed to SvelteKit via event.platform) ----------------------
@@ -1045,7 +1048,7 @@ const platform = {
 		// every process - relaying would cause duplicate delivery.
 		const relayed = !!(parentPort && (!options || options.relay !== false));
 		if (relayed) {
-			batchRelay(topic, envelope);
+			batchRelay(topic, envelope, compress);
 		}
 		if (wsDebug) {
 			console.log('[ws] publish topic=%s event=%s bytes=%d delivered=%s',
@@ -1334,8 +1337,13 @@ const platform = {
 	 *
 	 * Returns the number of connections the message was sent to.
 	 */
-	sendTo(filter, topic, event, data) {
+	sendTo(filter, topic, event, data, options) {
 		const envelope = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
+		// Opt-in compression (default off): sendTo frames target a filtered
+		// recipient set and are often one-off, so the safe default is
+		// uncompressed. Pass { compress: true } to deflate for a large fan-out.
+		// No-op while websocket.compression is off (the default).
+		const compress = WS_COMPRESSION_ON && !!(options && options.compress === true);
 		let count = 0;
 		for (const ws of wsConnections) {
 			// uWS's close event fires synchronously and removes from
@@ -1361,7 +1369,7 @@ const platform = {
 				continue;
 			}
 			if (decision) {
-				try { ws.send(envelope, false, false); }
+				try { ws.send(envelope, false, compress); }
 				catch { closedWsAborts++; continue; }
 				bumpOut(ws, envelope);
 				count++;
@@ -1731,8 +1739,15 @@ const platform = {
 	 * @param {Array<{ topic: string, event: string, data?: unknown, options?: { relay?: boolean, seq?: boolean } }>} messages
 	 * @returns {void}
 	 */
-	publishBatched(messages) {
+	publishBatched(messages, options) {
 		if (!Array.isArray(messages) || messages.length === 0) return;
+
+		// Opt-in compression for the whole batch (default off). A batched frame
+		// mixes event types, so the safe default is uncompressed; pass
+		// { compress: true } to deflate. Applied uniformly to the fast (shared
+		// frame) AND slow (per-event) paths so the two are consistent. No-op
+		// while websocket.compression is off (the default).
+		const compressOptIn = !!(options && options.compress === true);
 
 		// Coalesce-by-key dedup runs first. Events that carry a
 		// `coalesceKey` collapse so only the latest value per key
@@ -1806,7 +1821,7 @@ const platform = {
 		if ((!allSameTopic && !allSeeAll) || !everyoneCapable) {
 			for (let i = 0; i < messages.length; i++) {
 				const m = messages[i];
-				platform.publish(m.topic, m.event, m.data, m.options);
+				platform.publish(m.topic, m.event, m.data, { ...m.options, compress: compressOptIn });
 			}
 			return;
 		}
@@ -1853,7 +1868,7 @@ const platform = {
 				}
 			}
 			if (relayed.length > 0) {
-				parentPort.postMessage({ type: 'publish-batched', events: relayed });
+				parentPort.postMessage({ type: 'publish-batched', events: relayed, compress: compressOptIn });
 			}
 		}
 
@@ -1871,7 +1886,7 @@ const platform = {
 		// is subscribed to every batch topic in the all-see-all case
 		// (single-topic is the trivial sub-case).
 		const fanoutTopic = allSameTopic ? firstTopic : messages[0].topic;
-		const result = app.publish(fanoutTopic, sharedBatchEnv, false, false);
+		const result = app.publish(fanoutTopic, sharedBatchEnv, false, WS_COMPRESSION_ON && compressOptIn);
 
 		if (wsDebug) {
 			console.log('[ws] publishBatched events=%d single-topic=%s fanoutTopic=%s delivered=%s',
@@ -3883,14 +3898,16 @@ export function getDescriptor() {
  * Called by the main thread's relay when another worker publishes.
  * @param {string} topic
  * @param {string} envelope - Pre-serialized JSON envelope
+ * @param {boolean} [compress] - Compress intent carried from the originating
+ *   worker; re-gated by this worker's WS_COMPRESSION_ON. Absent -> uncompressed.
  */
-export function relayPublish(topic, envelope) {
+export function relayPublish(topic, envelope, compress) {
 	assert(typeof topic === 'string', 'relay.topic-type', { topic: typeof topic });
 	assert(typeof envelope === 'string' && envelope.length > 0, 'relay.envelope-type', {
 		envelopeType: typeof envelope,
 		envelopeLen: typeof envelope === 'string' ? envelope.length : null
 	});
-	app.publish(topic, envelope, false, false);
+	app.publish(topic, envelope, false, WS_COMPRESSION_ON && compress === true);
 }
 
 /**
@@ -3903,8 +3920,10 @@ export function relayPublish(topic, envelope) {
  * re-stamp and never re-relay.
  *
  * @param {Array<{ topic: string, env: string }>} events
+ * @param {boolean} [compress] - Batch-level compress intent from the originating
+ *   worker; re-gated by this worker's WS_COMPRESSION_ON. Absent -> uncompressed.
  */
-export function relayPublishBatched(events) {
+export function relayPublishBatched(events, compress) {
 	if (!Array.isArray(events) || events.length === 0) return;
 	assert(typeof events[0].topic === 'string', 'relay.batched-topic-type', {
 		first: typeof events[0].topic
@@ -3952,7 +3971,7 @@ export function relayPublishBatched(events) {
 		// cap-able subs on this worker would have seen if the
 		// originator had taken its slow path too.
 		for (let i = 0; i < events.length; i++) {
-			app.publish(events[i].topic, events[i].env, false, false);
+			app.publish(events[i].topic, events[i].env, false, WS_COMPRESSION_ON && compress === true);
 		}
 		return;
 	}
@@ -3962,5 +3981,5 @@ export function relayPublishBatched(events) {
 	for (let i = 0; i < events.length; i++) slice[i] = events[i].env;
 	const sharedBatchEnv = wrapBatchEnvelope(slice);
 	const fanoutTopic = allSameTopic ? firstTopic : events[0].topic;
-	app.publish(fanoutTopic, sharedBatchEnv, false, false);
+	app.publish(fanoutTopic, sharedBatchEnv, false, WS_COMPRESSION_ON && compress === true);
 }
