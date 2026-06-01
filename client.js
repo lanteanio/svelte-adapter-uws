@@ -33,8 +33,18 @@ const wireCodecs = new Map();
  * already advertises the capability; if a connection is already open, its
  * `hello` is re-sent so a lazily-imported plugin still negotiates binary.
  *
+ * A codec marked `sink: true` applies each frame in place inside `decode`
+ * (e.g. into a local document replica) and drives its own reactive surface;
+ * its `decode` return value is ignored and no store event is dispatched. The
+ * default (`sink` absent/false) codec returns `{ event, data }` for the shared
+ * store ladder. Because a sink dispatches no store event, the framework does
+ * NOT track `lastSeenSeqs` for a sink codec's topic, so a sink codec that needs
+ * resume must recover its own state (e.g. a CRDT codec resyncs via a
+ * state-vector diff, not seq replay). `decode` receives the frame's `seq` as a
+ * fourth argument for codecs that want it.
+ *
  * @param {string} prefix - topic-name prefix the codec owns (e.g. '__cursor:')
- * @param {{ capability: string, capabilities?: string[], state?: { onAttach?: () => any, onDetach?: (state: any) => void }, decode: (payload: Uint8Array, state?: any, schemaVersion?: number) => ({ event: string, data: any } | null) }} codec
+ * @param {{ capability: string, capabilities?: string[], sink?: boolean, state?: { onAttach?: () => any, onDetach?: (state: any) => void }, decode: (payload: Uint8Array, state?: any, schemaVersion?: number, seq?: number) => ({ event: string, data: any } | null | void) }} codec
  */
 export function registerWireCodec(prefix, codec) {
 	wireCodecs.set(prefix, codec);
@@ -63,7 +73,7 @@ function buildHelloCaps() {
  * Resolve a topic name to its registered wire codec (and its prefix, for
  * per-connection state keying) by longest matching prefix.
  * @param {string} topic
- * @returns {{ prefix: string, codec: { capability: string, capabilities?: string[], state?: { onAttach?: () => any, onDetach?: (state: any) => void }, decode: (payload: Uint8Array, state?: any, schemaVersion?: number) => ({ event: string, data: any } | null) } } | null}
+ * @returns {{ prefix: string, codec: { capability: string, capabilities?: string[], sink?: boolean, state?: { onAttach?: () => any, onDetach?: (state: any) => void }, decode: (payload: Uint8Array, state?: any, schemaVersion?: number, seq?: number) => ({ event: string, data: any } | null | void) } } | null}
  */
 function wireCodecForTopic(topic) {
 	let best = null;
@@ -1202,9 +1212,15 @@ function createConnection(options) {
 						if (topic !== undefined) {
 							const match = wireCodecForTopic(topic);
 							const decoded = match
-								? match.codec.decode(parsed.payload, ensureDecoderState(match.prefix, match.codec), parsed.schemaVersion)
+								? match.codec.decode(parsed.payload, ensureDecoderState(match.prefix, match.codec), parsed.schemaVersion, parsed.seq)
 								: null;
-							if (decoded) {
+							// A sink codec applies the frame in place inside decode (e.g.
+							// into a local document replica) and drives its own reactive
+							// surface, so there is no store event to dispatch even when
+							// decode returns a value. A normal codec returns { event, data }
+							// for the shared store ladder; a null return from a normal codec
+							// is a decode miss (unknown opcode/version) and the frame drops.
+							if (decoded && !match.codec.sink) {
 								const out = { topic, event: decoded.event, data: decoded.data };
 								if (parsed.seq > 0) out.seq = parsed.seq;
 								dispatchEvent(out);

@@ -233,6 +233,17 @@ export function createCursor(options = {}) {
 	const dirtyTopics = new Set();
 
 	/**
+	 * Per-(subscriber, topic) viewport rect, recorded from the inbound
+	 * `cursor-viewport` frame. Outer key is the subscriber's `wsState` key;
+	 * inner key is the topic. Read by per-subscriber viewport culling, which
+	 * never culls a subscriber that has not reported a rect (a non-reporter is
+	 * treated as whole-board). Torn down with the subscriber in `remove()` /
+	 * `clear()`, exactly like the other per-subscriber state.
+	 * @type {Map<string, Map<string, { x: number, y: number, w: number, h: number, zoom: number }>>}
+	 */
+	const subViewport = new Map();
+
+	/**
 	 * Single tracker-wide timer. Always points at the next earliest topic
 	 * deadline (or null when idle). Replaces the previous per-topic
 	 * setTimeout pattern: N pending timers -> 1 pending timer regardless
@@ -263,7 +274,13 @@ export function createCursor(options = {}) {
 		if (!state) {
 			if (wsState.size >= maxConnections) {
 				const oldest = wsState.keys().next().value;
-				if (oldest !== undefined) wsState.delete(oldest);
+				if (oldest !== undefined) {
+					// Tear down the evicted connection's viewport too, keyed by
+					// its state key, so subViewport can never outgrow wsState.
+					const evicted = wsState.get(oldest);
+					if (evicted) subViewport.delete(evicted.key);
+					wsState.delete(oldest);
+				}
 			}
 			let userData = {};
 			if (typeof ws.getUserData === 'function') {
@@ -585,6 +602,7 @@ export function createCursor(options = {}) {
 				}
 			}
 
+			subViewport.delete(state.key);
 			wsState.delete(ws);
 		},
 
@@ -613,6 +631,50 @@ export function createCursor(options = {}) {
 			emitTo(ws, TOPIC_PREFIX + topic, EVENTS.BULK, positions, platform);
 		},
 
+		/**
+		 * Record this subscriber's viewport rect for a topic, from the inbound
+		 * `cursor-viewport` frame. The rect bounds which cursors the subscriber
+		 * receives once viewport culling is enabled; a subscriber that never
+		 * reports one is treated as whole-board and is never culled. Best-effort:
+		 * a malformed rect (missing or non-finite `x`/`y`/`w`/`h`) is dropped
+		 * silently, mirroring the oversized-data drop on the update path. `zoom`
+		 * is optional and defaults to 1.
+		 * @param {any} ws
+		 * @param {string} topic
+		 * @param {any} rect
+		 */
+		viewport(ws, topic, rect) {
+			if (!rect || typeof rect !== 'object') return;
+			const { x, y, w, h } = rect;
+			const zoom = rect.zoom === undefined ? 1 : rect.zoom;
+			if (![x, y, w, h, zoom].every((n) => typeof n === 'number' && Number.isFinite(n))) return;
+			// A viewport has positive dimensions; a zero/negative w/h/zoom (an
+			// unmounted or collapsed element) is degenerate. Drop it so the
+			// subscriber stays "whole-board" (never culled) rather than recording
+			// a rect culling would later resolve to an empty slice. x/y may be
+			// negative (board coordinates).
+			if (w <= 0 || h <= 0 || zoom <= 0) return;
+			const state = getWsState(ws);
+			let byTopic = subViewport.get(state.key);
+			if (!byTopic) { byTopic = new Map(); subViewport.set(state.key, byTopic); }
+			byTopic.set(topic, { x, y, w, h, zoom });
+		},
+
+		/**
+		 * The last viewport rect this subscriber reported for a topic, or `null`
+		 * if it never reported one. The `null` return is the per-subscriber
+		 * opt-in that makes culling safe by construction. Read by viewport
+		 * culling; does not create `wsState`.
+		 * @param {any} ws
+		 * @param {string} topic
+		 * @returns {{ x: number, y: number, w: number, h: number, zoom: number } | null}
+		 */
+		viewportFor(ws, topic) {
+			const state = wsState.get(ws);
+			if (!state) return null;
+			return subViewport.get(state.key)?.get(topic) ?? null;
+		},
+
 		clear() {
 			for (const [, topicMap] of topics) {
 				for (const [, entry] of topicMap) {
@@ -623,6 +685,7 @@ export function createCursor(options = {}) {
 			dirtyTopics.clear();
 			topics.clear();
 			topicFlush.clear();
+			subViewport.clear();
 			wsState.clear();
 			connCounter = 0;
 		},
@@ -651,7 +714,8 @@ export function createCursor(options = {}) {
 				driftMeanMs: driftCount > 0 ? driftSum / driftCount : 0,
 				driftMaxMs: driftMax,
 				dirtyTopicsCurrent: dirtyTopics.size,
-				activeTopicsTotal: topics.size
+				activeTopicsTotal: topics.size,
+				viewportsReported: subViewport.size
 			};
 		},
 
@@ -667,6 +731,11 @@ export function createCursor(options = {}) {
 				if (parsed.type === 'cursor-snapshot' && typeof parsed.topic === 'string') {
 					if (typeof ws.isSubscribed === 'function' && !ws.isSubscribed(TOPIC_PREFIX + parsed.topic)) return true;
 					tracker.snapshot(ws, parsed.topic, platform);
+					return true;
+				}
+				if (parsed.type === 'cursor-viewport' && typeof parsed.topic === 'string') {
+					if (typeof ws.isSubscribed === 'function' && !ws.isSubscribed(TOPIC_PREFIX + parsed.topic)) return true;
+					tracker.viewport(ws, parsed.topic, parsed.rect);
 					return true;
 				}
 			},

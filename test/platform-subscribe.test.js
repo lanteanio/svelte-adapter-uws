@@ -983,3 +983,71 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 	});
 });
+
+describeUWS('platform.forEachSubscriber', () => {
+	afterEach(async () => {
+		await server?.close();
+		server = null;
+	});
+
+	it('walks exactly the sockets subscribed to a topic, passing (ws, userData)', async () => {
+		const { createTestServer } = await import('../testing.js');
+		const opened = [];
+		server = await createTestServer({ handler: { open(ws) { opened.push(ws); } } });
+
+		const a = await connectClient(server.wsUrl);
+		const b = await connectClient(server.wsUrl);
+		await new Promise((r) => setTimeout(r, 40));
+		expect(opened.length).toBe(2);
+		const [wsA, wsB] = opened;
+
+		await server.platform.subscribe(wsA, 'room:1');
+		await server.platform.subscribe(wsB, 'room:1');
+		await server.platform.subscribe(wsB, 'room:2');
+
+		// room:1 -> both sockets, each invoked once with (ws, userData).
+		const seen1 = new Set();
+		let pairOk = true;
+		server.platform.forEachSubscriber('room:1', (ws, ud) => {
+			seen1.add(ws);
+			if (!ud || typeof ud !== 'object') pairOk = false;
+		});
+		expect(seen1).toEqual(new Set([wsA, wsB]));
+		expect(pairOk).toBe(true);
+
+		// room:2 -> only the second socket.
+		const seen2 = [];
+		server.platform.forEachSubscriber('room:2', (ws) => seen2.push(ws));
+		expect(seen2).toEqual([wsB]);
+
+		// A topic with no subscribers visits nobody (the fn never runs).
+		const seen3 = [];
+		server.platform.forEachSubscriber('room:none', (ws) => seen3.push(ws));
+		expect(seen3).toEqual([]);
+
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it('stops visiting a socket after it unsubscribes', async () => {
+		const { createTestServer } = await import('../testing.js');
+		const opened = [];
+		server = await createTestServer({ handler: { open(ws) { opened.push(ws); } } });
+
+		const c = await connectClient(server.wsUrl);
+		await new Promise((r) => setTimeout(r, 40));
+		const ws = opened[0];
+		await server.platform.subscribe(ws, 'room:x');
+
+		let count = 0;
+		server.platform.forEachSubscriber('room:x', () => count++);
+		expect(count).toBe(1);
+
+		server.platform.unsubscribe(ws, 'room:x');
+		count = 0;
+		server.platform.forEachSubscriber('room:x', () => count++);
+		expect(count).toBe(0);
+
+		c.ws.close();
+	});
+});

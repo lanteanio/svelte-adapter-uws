@@ -68,6 +68,13 @@ import { encodePresence, PRESENCE_CAPABILITY, PRESENCE_SCHEMA_VERSION } from './
  *   to force JSON for every client (e.g. to compare wire sizes, or on a platform
  *   whose `publishWire`/`sendWire` you do not want exercised). The codec is
  *   stateless - a roster frame is encoded once and fanned out to all subscribers.
+ * @property {string[]} [transient] - Dynamic field names (set via `update()`)
+ *   that are broadcast live but NEVER included in the `state` snapshot or the
+ *   heartbeat roster. A (re)joining or swept-then-readded client therefore never
+ *   inherits a possibly-stale transient value - a disconnected typer leaves no
+ *   stuck indicator. Typical: `['typing', 'selection']`. Identity fields (from
+ *   `select`) and durable `update()` fields not listed here ride the snapshot
+ *   normally. Default: none (every `update()` field is durable).
  */
 
 /**
@@ -81,6 +88,14 @@ import { encodePresence, PRESENCE_CAPABILITY, PRESENCE_SCHEMA_VERSION } from './
  *   Send the current presence list to a single connection without joining.
  *   Use this for admin dashboards or observers who want to see presence
  *   without being present themselves.
+ * @property {(ws: any, topic: string, fields: Record<string, any>, platform: import('../../index.js').Platform) => void} update -
+ *   Set dynamic fields on the present user (typing, selection, a lock map), as a
+ *   field-level delta: only fields whose value changed are merged into the user
+ *   and broadcast in the next `diff` under `updates[key]`. The update applies to
+ *   the user (per dedup key), so any of a multi-tab user's connections may call
+ *   it. A connection that is not present on the topic is a silent no-op. Fields
+ *   named in the `transient` option are broadcast live but excluded from the
+ *   snapshot. No-op if no field actually changed.
  * @property {(topic: string) => Record<string, any>[]} list -
  *   Get the current presence list for a topic. Use in load() functions or API routes.
  *   Returns deep copies (via structuredClone) when data is JSON-serializable.
@@ -291,6 +306,38 @@ export function createPresence(options = {}) {
 	// presence's infrequent-but-full-roster broadcasts.
 	const wireCodec = createPresenceWireCodec(options);
 
+	// Fields tagged transient are broadcast live (in `update` diffs to the
+	// subscribers connected at the moment they change) but are EXCLUDED from the
+	// `state` snapshot and the heartbeat roster, so a (re)joining or
+	// swept-then-readded client never inherits a possibly-stale transient value -
+	// a disconnected typer leaves no stuck indicator. Identity fields (from
+	// `select`) are unaffected. Dynamic fields set via `update()` that are NOT
+	// tagged transient are durable and ride the snapshot like identity fields.
+	const transientFields = new Set(
+		Array.isArray(options.transient)
+			? options.transient.filter((f) => typeof f === 'string')
+			: []
+	);
+
+	/**
+	 * The public presence value for a user: the identity `data` (from `select`)
+	 * merged with the user's durable dynamic `fields` (from `update()`), with
+	 * transient fields stripped. Used by every snapshot-shaped path (`state`,
+	 * heartbeat, the `join` roster at flush) so a (re)joiner never sees a
+	 * transient value. The no-`fields` user (the overwhelming common case)
+	 * returns `entry.data` with zero copy.
+	 * @param {{ data: Record<string, any>, fields: Record<string, any> | null }} entry
+	 * @returns {Record<string, any>}
+	 */
+	function publicData(entry) {
+		if (!entry.fields) return entry.data;
+		const out = { ...entry.data };
+		for (const k of Object.keys(entry.fields)) {
+			if (!transientFields.has(k)) out[k] = entry.fields[k];
+		}
+		return out;
+	}
+
 	/**
 	 * Broadcast a presence wire event. Routes through the binary `publishWire`
 	 * path when a codec is configured AND the platform supports it (production /
@@ -349,9 +396,12 @@ export function createPresence(options = {}) {
 	const wsTopics = new Map();
 
 	/**
-	 * Per-topic presence: Map<key, { data, count }>.
+	 * Per-topic presence: Map<key, { data, fields, count }>.
 	 * count > 1 means multiple connections share the same key (multi-tab).
-	 * @type {Map<string, Map<string, { data: Record<string, any>, count: number }>>}
+	 * `data` is the identity (from `select`); `fields` (lazily allocated, `null`
+	 * until the first `update()`) holds the dynamic fields set via `update()`
+	 * (typing, selection, locks). `publicData()` merges the two minus transient.
+	 * @type {Map<string, Map<string, { data: Record<string, any>, fields: Record<string, any> | null, count: number }>>}
 	 */
 	const topicPresence = new Map();
 
@@ -374,17 +424,32 @@ export function createPresence(options = {}) {
 	 * many task boundaries separate them. Same structural choice the
 	 * 0.5.6 cursor always-tick rewrite locked in.
 	 *
-	 * @type {Map<string, Map<string, { op: 'join' | 'leave', data: Record<string, any> }>>}
+	 * Per-key entry shape by op (latest net change per key per flush):
+	 *   join   -> { op: 'join' }            - flush reads the live `publicData`
+	 *   leave  -> { op: 'leave', data }     - entry is gone by flush, so the
+	 *                                          leave roster value is snapshotted
+	 *   update -> { op: 'update', changed } - accumulated changed dynamic fields
+	 * @type {Map<string, Map<string, { op: 'join' | 'leave' | 'update', data?: Record<string, any>, changed?: Record<string, any> }>>}
 	 */
 	const pendingDiffs = new Map();
 	/** @type {ReturnType<typeof setTimeout> | null} */
 	let diffFlushTimer = null;
 
+	/** @param {import('../../index.js').Platform} platform */
+	function armDiffTimer(platform) {
+		if (diffFlushTimer === null) {
+			diffFlushTimer = setTimeout(() => flushDiffs(platform), 0);
+			if (diffFlushTimer.unref) diffFlushTimer.unref();
+		}
+	}
+
 	/**
+	 * Buffer a join/leave for the next flush. Latest op wins per key, so a
+	 * join-then-leave (or leave-then-join) in one flush collapses to the net op.
 	 * @param {string} topic
 	 * @param {'join' | 'leave'} op
 	 * @param {string} key
-	 * @param {Record<string, any>} data
+	 * @param {Record<string, any>} data - the leave roster snapshot (ignored for join, which reads live at flush)
 	 * @param {import('../../index.js').Platform} platform
 	 */
 	function bufferDiff(topic, op, key, data, platform) {
@@ -393,11 +458,37 @@ export function createPresence(options = {}) {
 			entries = new Map();
 			pendingDiffs.set(topic, entries);
 		}
-		entries.set(key, { op, data });
-		if (diffFlushTimer === null) {
-			diffFlushTimer = setTimeout(() => flushDiffs(platform), 0);
-			if (diffFlushTimer.unref) diffFlushTimer.unref();
+		entries.set(key, op === 'leave' ? { op: 'leave', data } : { op: 'join' });
+		armDiffTimer(platform);
+	}
+
+	/**
+	 * Buffer a field-level update for the next flush, collapsing against any
+	 * op already pending for the key:
+	 *   - pending leave  -> drop (the user left this flush; the update is moot)
+	 *   - pending join   -> drop (the join roster already carries the durable
+	 *     fields via `publicData`; a transient change is correctly excluded)
+	 *   - pending update -> accumulate the changed fields
+	 * @param {string} topic
+	 * @param {string} key
+	 * @param {Record<string, any>} changed
+	 * @param {import('../../index.js').Platform} platform
+	 */
+	function bufferUpdate(topic, key, changed, platform) {
+		let entries = pendingDiffs.get(topic);
+		if (!entries) {
+			entries = new Map();
+			pendingDiffs.set(topic, entries);
 		}
+		const prev = entries.get(key);
+		if (prev) {
+			if (prev.op === 'leave' || prev.op === 'join') return;
+			Object.assign(prev.changed, changed);
+			armDiffTimer(platform);
+			return;
+		}
+		entries.set(key, { op: 'update', changed: { ...changed } });
+		armDiffTimer(platform);
 	}
 
 	/** @param {import('../../index.js').Platform} platform */
@@ -411,11 +502,29 @@ export function createPresence(options = {}) {
 			const joins = {};
 			/** @type {Record<string, Record<string, any>>} */
 			const leaves = {};
-			for (const [key, { op, data }] of entries) {
-				if (op === 'join') joins[key] = data;
-				else leaves[key] = data;
+			/** @type {Record<string, Record<string, any>> | null} */
+			let updates = null;
+			const users = topicPresence.get(topic);
+			for (const [key, e] of entries) {
+				if (e.op === 'join') {
+					// Read the live entry so the join roster carries the latest
+					// durable fields; the user is still present (a leave would have
+					// superseded the join).
+					const live = users && users.get(key);
+					if (live) joins[key] = publicData(live);
+				} else if (e.op === 'leave') {
+					leaves[key] = /** @type {Record<string, any>} */ (e.data);
+				} else {
+					if (!updates) updates = {};
+					updates[key] = /** @type {Record<string, any>} */ (e.changed);
+				}
 			}
-			emit(TOPIC_PREFIX + topic, 'diff', { joins, leaves }, platform);
+			// Keep the common diff shape `{ joins, leaves }` byte-identical when
+			// no field-level update is pending, so a deployment that never calls
+			// update() sees an unchanged wire (and the binary codec encodes it as
+			// before). `updates` is additive: an old client ignores it.
+			const diff = updates ? { joins, leaves, updates } : { joins, leaves };
+			emit(TOPIC_PREFIX + topic, 'diff', diff, platform);
 		}
 		pendingDiffs.clear();
 	}
@@ -429,7 +538,7 @@ export function createPresence(options = {}) {
 		/** @type {Record<string, Record<string, any>>} */
 		const state = {};
 		if (!users) return state;
-		for (const [k, entry] of users) state[k] = entry.data;
+		for (const [k, entry] of users) state[k] = publicData(entry);
 		return state;
 	}
 
@@ -466,7 +575,7 @@ export function createPresence(options = {}) {
 					// variant in svelte-adapter-uws-extensions.
 					/** @type {Record<string, any>} */
 					const dataMap = {};
-					for (const [userKey, entry] of users) dataMap[userKey] = entry.data;
+					for (const [userKey, entry] of users) dataMap[userKey] = publicData(entry);
 					emit(TOPIC_PREFIX + topic, 'heartbeat', dataMap, _platform);
 				}
 			}, heartbeatMs);
@@ -494,7 +603,7 @@ export function createPresence(options = {}) {
 
 		existing.count--;
 		if (existing.count <= 0) {
-			const data = existing.data;
+			const data = publicData(existing);
 			users.delete(entry.key);
 			if (users.size === 0) {
 				topicPresence.delete(topic);
@@ -567,8 +676,10 @@ export function createPresence(options = {}) {
 				}
 			} else {
 				// New user on this topic - record the join in the next diff so
-				// other subscribers see them appear.
-				users.set(key, { data, count: 1 });
+				// other subscribers see them appear. `fields` is lazily allocated
+				// on the first update(), so a presence deployment that never calls
+				// update() pays no per-user allocation.
+				users.set(key, { data, fields: null, count: 1 });
 				bufferDiff(topic, 'join', key, data, platform);
 			}
 
@@ -602,6 +713,41 @@ export function createPresence(options = {}) {
 			const presenceTopic = TOPIC_PREFIX + topic;
 			try { ws.subscribe(presenceTopic); } catch { return; }
 			emitTo(ws, presenceTopic, 'state', snapshotState(users), platform);
+		},
+
+		update(ws, topic, fields, platform) {
+			capturePlatform(platform);
+			if (topic.startsWith('__')) return;
+			if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return;
+			// Resolve the user this connection represents on the topic. A
+			// connection that is not present (never joined, or the socket closed
+			// mid-await) is a silent no-op - presence is best-effort. The update
+			// applies to the user (per dedup key), so any of a multi-tab user's
+			// connections can set the field and every observer sees one change.
+			const connTopics = wsTopics.get(ws);
+			const connEntry = connTopics && connTopics.get(topic);
+			if (!connEntry) return;
+			const users = topicPresence.get(topic);
+			const entry = users && users.get(connEntry.key);
+			if (!entry) return;
+			if (!entry.fields) entry.fields = {};
+			// Per-field change detection: only fields whose value actually changed
+			// are merged and broadcast (the field-level delta). deepEqual so an
+			// object field (a selection range) set to an equal value does not
+			// spuriously re-broadcast.
+			/** @type {Record<string, any>} */
+			const changed = {};
+			let any = false;
+			for (const k of Object.keys(fields)) {
+				const v = fields[k];
+				if (!deepEqual(entry.fields[k], v)) {
+					entry.fields[k] = v;
+					changed[k] = v;
+					any = true;
+				}
+			}
+			if (!any) return;
+			bufferUpdate(topic, connEntry.key, changed, platform);
 		},
 
 		list(topic) {

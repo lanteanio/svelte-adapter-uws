@@ -34,6 +34,18 @@ describe('presence binary wire (presence.protocol:1)', () => {
 			.toEqual({ event: 'diff', data: { joins: { '3': { id: '3', name: 'Cara' } }, leaves: { '2': { id: '2', name: 'Bob' } } } });
 	});
 
+	it('falls back to JSON for an update-bearing diff (the field-level `updates` is JSON-only)', () => {
+		// The binary DIFF op is `{joins, leaves}` by schema 1, so a diff carrying a
+		// field-level `updates` map returns null (JSON fallback) - `updates` is
+		// never silently dropped. A binary-capable client merges it from the JSON
+		// frame the same way.
+		expect(encodePresence('diff', { joins: {}, leaves: {}, updates: { '1': { typing: true } } })).toBeNull();
+		// A pure join/leave diff (even with an empty/absent updates) still encodes
+		// binary - the common case is unchanged.
+		expect(encodePresence('diff', { joins: { '1': { id: '1' } }, leaves: {} })).not.toBeNull();
+		expect(encodePresence('diff', { joins: { '1': { id: '1' } }, leaves: {}, updates: {} })).not.toBeNull();
+	});
+
 	it('carries leave DATA losslessly (not keys-only): the binary diff is a 1:1 of the JSON diff', () => {
 		// The client only reads Object.keys(leaves), but the wire stays byte-for-byte
 		// equal to the JSON path so no field silently differs by transport.

@@ -194,13 +194,38 @@ export interface CursorTracker<UserInfo = unknown> {
 	 */
 	snapshot(ws: WebSocket<any>, topic: string, platform: Platform): void;
 
+	/**
+	 * Record a subscriber's viewport rect for a topic, from the inbound
+	 * `cursor-viewport` frame (handled automatically by `hooks.message`).
+	 * The rect bounds which cursors the subscriber receives once viewport
+	 * culling is enabled; a subscriber that never reports one is treated as
+	 * whole-board and is never culled. A malformed rect (missing or
+	 * non-finite `x`/`y`/`w`/`h`) is dropped silently; `zoom` defaults to 1.
+	 */
+	viewport(
+		ws: WebSocket<any>,
+		topic: string,
+		rect: { x: number; y: number; w: number; h: number; zoom?: number }
+	): void;
+
+	/**
+	 * The last viewport rect this subscriber reported for a topic, or `null`
+	 * if it never reported one. The `null` return is the per-subscriber opt-in
+	 * that makes culling safe by construction. Read by viewport culling.
+	 */
+	viewportFor(
+		ws: WebSocket<any>,
+		topic: string
+	): { x: number; y: number; w: number; h: number; zoom: number } | null;
+
 	/** Clear all cursor tracking state and pending timers. */
 	clear(): void;
 
 	/**
 	 * Ready-made WebSocket hooks for cursor tracking.
 	 *
-	 * `message` handles `cursor` and `cursor-snapshot` messages automatically.
+	 * `message` handles `cursor`, `cursor-snapshot`, and `cursor-viewport`
+	 * messages automatically.
 	 * Returns `true` when the message was handled (use this to skip your own
 	 * message handler). `close` calls `remove()`.
 	 *

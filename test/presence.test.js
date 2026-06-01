@@ -1536,3 +1536,156 @@ describe('presence plugin - hooks.message (reconnect snapshot)', () => {
 		expect(platform.sent[0].event).toBe('state');
 	});
 });
+
+describe('presence plugin - field-level update + transient', () => {
+	let presence;
+	let platform;
+
+	beforeEach(() => {
+		presence = createPresence({
+			key: 'id',
+			select: (ud) => ({ id: ud.id, name: ud.name }),
+			transient: ['typing', 'selection'],
+			heartbeat: 0
+		});
+		platform = mockPlatform();
+	});
+
+	const lastDiff = () => {
+		const diffs = platform.published.filter((e) => e.event === 'diff');
+		return diffs.length ? diffs[diffs.length - 1].data : null;
+	};
+
+	it('exposes update() on the tracker', () => {
+		expect(typeof presence.update).toBe('function');
+	});
+
+	it('emits a field-level diff carrying only the changed field', () => {
+		const ws = mockWs({ id: '1', name: 'Alice' });
+		presence.join(ws, 'room', platform);
+		presence.flushDiffs();
+		platform.reset();
+
+		presence.update(ws, 'room', { typing: true }, platform);
+		presence.flushDiffs();
+
+		expect(platform.published).toHaveLength(1);
+		expect(platform.published[0]).toEqual({
+			topic: '__presence:room',
+			event: 'diff',
+			data: { joins: {}, leaves: {}, updates: { '1': { typing: true } } }
+		});
+	});
+
+	it('no-ops when the field value is unchanged', () => {
+		const ws = mockWs({ id: '1', name: 'Alice' });
+		presence.join(ws, 'room', platform);
+		presence.flushDiffs();
+		presence.update(ws, 'room', { typing: true }, platform);
+		presence.flushDiffs();
+		platform.reset();
+
+		presence.update(ws, 'room', { typing: true }, platform); // same value
+		presence.flushDiffs();
+		expect(platform.published).toHaveLength(0);
+	});
+
+	it('no-ops for a connection not present on the topic', () => {
+		const ws = mockWs({ id: '1', name: 'Alice' }); // never joined
+		presence.update(ws, 'room', { typing: true }, platform);
+		presence.flushDiffs();
+		expect(platform.published).toHaveLength(0);
+	});
+
+	it('coalesces multiple updates in one tick into one diff (union of changed fields)', () => {
+		const ws = mockWs({ id: '1', name: 'Alice' });
+		presence.join(ws, 'room', platform);
+		presence.flushDiffs();
+		platform.reset();
+
+		presence.update(ws, 'room', { typing: true }, platform);
+		presence.update(ws, 'room', { selection: { start: 1, end: 5 } }, platform);
+		presence.flushDiffs();
+
+		expect(platform.published).toHaveLength(1);
+		expect(lastDiff().updates).toEqual({ '1': { typing: true, selection: { start: 1, end: 5 } } });
+	});
+
+	it('collapses an update into a same-tick join (one join diff, transient excluded, no updates)', () => {
+		const ws = mockWs({ id: '1', name: 'Alice' });
+		presence.join(ws, 'room', platform);
+		presence.update(ws, 'room', { typing: true }, platform); // same tick as the join
+		presence.flushDiffs();
+
+		const diff = lastDiff();
+		expect(diff.joins).toEqual({ '1': { id: '1', name: 'Alice' } }); // no typing in the join
+		expect(diff.updates).toBeUndefined();
+	});
+
+	it('drops an update that collapses with a same-tick leave', () => {
+		const ws = mockWs({ id: '1', name: 'Alice' });
+		presence.join(ws, 'room', platform);
+		presence.flushDiffs();
+		platform.reset();
+
+		presence.update(ws, 'room', { typing: true }, platform);
+		presence.leave(ws, platform); // same tick
+		presence.flushDiffs();
+
+		const diff = lastDiff();
+		expect(diff.updates).toBeUndefined();
+		expect(diff.leaves).toEqual({ '1': { id: '1', name: 'Alice' } });
+	});
+
+	it('excludes a transient field from the state snapshot a new subscriber receives', () => {
+		const ws1 = mockWs({ id: '1', name: 'Alice' });
+		presence.join(ws1, 'room', platform);
+		presence.flushDiffs();
+		presence.update(ws1, 'room', { typing: true }, platform);
+		presence.flushDiffs();
+		platform.reset();
+
+		const observer = mockWs({ id: '9', name: 'Obs' });
+		presence.sync(observer, 'room', platform);
+		const state = platform.sent.find((s) => s.event === 'state').data;
+		expect(state['1']).toEqual({ id: '1', name: 'Alice' }); // NO typing
+	});
+
+	it('includes a non-transient update field in the state snapshot (durable)', () => {
+		const p = createPresence({ key: 'id', select: (ud) => ({ id: ud.id }), transient: ['typing'], heartbeat: 0 });
+		const plat = mockPlatform();
+		const ws = mockWs({ id: '1' });
+		p.join(ws, 'room', plat);
+		p.flushDiffs();
+		p.update(ws, 'room', { status: 'away' }, plat); // not transient
+		p.flushDiffs();
+		plat.reset();
+
+		const obs = mockWs({ id: '9' });
+		p.sync(obs, 'room', plat);
+		const state = plat.sent.find((s) => s.event === 'state').data;
+		expect(state['1']).toEqual({ id: '1', status: 'away' }); // durable field present
+	});
+
+	it('a pure join/leave deployment is unaffected: the diff stays { joins, leaves }', () => {
+		const ws = mockWs({ id: '1', name: 'Alice' });
+		presence.join(ws, 'room', platform);
+		presence.flushDiffs();
+		expect(lastDiff()).toEqual({ joins: { '1': { id: '1', name: 'Alice' } }, leaves: {} });
+		expect('updates' in lastDiff()).toBe(false);
+	});
+
+	it('an update applies to the user, so a second tab sees it (per dedup key)', () => {
+		const tabA = mockWs({ id: '1', name: 'Alice' });
+		const tabB = mockWs({ id: '1', name: 'Alice' }); // same user, second tab
+		presence.join(tabA, 'room', platform);
+		presence.join(tabB, 'room', platform);
+		presence.flushDiffs();
+		platform.reset();
+
+		// Either tab can set the field; it targets the shared per-key user.
+		presence.update(tabB, 'room', { typing: true }, platform);
+		presence.flushDiffs();
+		expect(lastDiff().updates).toEqual({ '1': { typing: true } });
+	});
+});

@@ -156,7 +156,7 @@ export function presence(topic, options) {
 			}
 
 			if (event.event === 'diff' && event.data && typeof event.data === 'object') {
-				const { joins, leaves } = event.data;
+				const { joins, leaves, updates } = event.data;
 				const now = Date.now();
 				let changed = false;
 				// Apply leaves first so a leave-then-rejoin in the same diff
@@ -175,6 +175,22 @@ export function presence(topic, options) {
 							userMap.set(key, data);
 							changed = true;
 						}
+					}
+				}
+				// Field-level updates: merge only the changed fields into the
+				// existing user (typing, selection, a lock map). An update for a
+				// user we have not seen - missed its join / state - is dropped; it
+				// reconciles on the next state / heartbeat. A new object is set so
+				// downstream identity checks see the change. Old servers never send
+				// `updates`; an old client ignores it (the field is inert).
+				if (updates && typeof updates === 'object') {
+					for (const [key, fields] of Object.entries(updates)) {
+						if (!fields || typeof fields !== 'object') continue;
+						const prev = userMap.get(key);
+						if (prev === undefined) continue;
+						userMap.set(key, { ...prev, ...fields });
+						timestamps.set(key, now);
+						changed = true;
 					}
 				}
 				if (changed) flush();

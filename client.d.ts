@@ -662,14 +662,27 @@ export function connect(options?: ConnectOptions): WSConnection;
  * references and dispatch between schema revisions. The state is reset on every
  * (re)connect, in lock-step with the server's matching encoder state.
  *
+ * A codec marked `sink: true` applies each frame in place inside `decode` (e.g.
+ * into a local document replica that drives its own reactive surface) rather
+ * than returning a store event. Its `decode` return value is ignored and no
+ * `{ event, data }` is dispatched, so a frame that mutated local state never
+ * also fans out as a store update. The default codec (`sink` absent) returns
+ * `{ event, data }` for the shared store ladder; a `null` return there is a
+ * decode miss that drops the frame. Because a sink dispatches no store event,
+ * the framework does NOT track `lastSeenSeqs` for a sink codec's topic, so a
+ * sink codec that needs resume must recover its own state (e.g. a CRDT codec
+ * resyncs via a state-vector diff, not seq replay). `decode` receives the
+ * frame's `seq` as a fourth argument for codecs that want it.
+ *
  * @param prefix - topic-name prefix the codec owns (e.g. `'__cursor:'`)
- * @param codec - `{ capability, capabilities?, state?, decode }`
+ * @param codec - `{ capability, capabilities?, sink?, state?, decode }`
  */
 export function registerWireCodec(
 	prefix: string,
 	codec: {
 		capability: string;
 		capabilities?: string[];
+		sink?: boolean;
 		state?: {
 			onAttach?: () => unknown;
 			onDetach?: (state: unknown) => void;
@@ -677,7 +690,8 @@ export function registerWireCodec(
 		decode: (
 			payload: Uint8Array,
 			state?: unknown,
-			schemaVersion?: number
-		) => { event: string; data: unknown } | null;
+			schemaVersion?: number,
+			seq?: number
+		) => { event: string; data: unknown } | null | void;
 	}
 ): void;

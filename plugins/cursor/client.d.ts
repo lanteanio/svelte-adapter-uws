@@ -52,3 +52,27 @@ export function cursor<UserInfo = unknown, Data = unknown>(
  * No-op in non-browser environments.
  */
 export function move(topic: string, data: unknown): void;
+
+/**
+ * Report this subscriber's viewport on a topic so the server can cull cursors
+ * outside the visible region (once viewport culling is enabled server-side).
+ * Reporting is per-subscriber and opt-in: a subscriber that never reports a
+ * viewport is treated as whole-board and is never culled. Frames are coalesced
+ * via `requestAnimationFrame` (one send per repaint); multi-topic callers do
+ * not clobber each other.
+ *
+ * No-op in non-browser environments and for an unresolvable source.
+ *
+ * @param topic
+ * @param source a scroll-container element (the visible content region is read
+ *   from `scrollLeft` / `scrollTop` / `clientWidth` / `clientHeight`), an
+ *   explicit `{ x, y, w, h, zoom? }` rect (for a virtualized canvas with its
+ *   own transform), or a getter returning either.
+ */
+export function reportViewport(
+	topic: string,
+	source:
+		| Element
+		| { x: number; y: number; w: number; h: number; zoom?: number }
+		| (() => Element | { x: number; y: number; w: number; h: number; zoom?: number } | null | undefined)
+): void;

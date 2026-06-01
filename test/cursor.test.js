@@ -416,7 +416,8 @@ describe('cursor plugin - server', () => {
 				driftMeanMs: 0,
 				driftMaxMs: 0,
 				dirtyTopicsCurrent: 0,
-				activeTopicsTotal: 0
+				activeTopicsTotal: 0,
+				viewportsReported: 0
 			});
 		});
 
@@ -1152,5 +1153,127 @@ describe('cursor plugin - server', () => {
 			c.update(ws, /** @type {any} */ (null), { x: 1 }, p);
 			expect(p.published).toHaveLength(0);
 		});
+	});
+});
+
+describe('cursor plugin - viewport ingress', () => {
+	let cursors;
+	let platform;
+	const enc = (obj) => new TextEncoder().encode(JSON.stringify(obj));
+
+	beforeEach(() => {
+		vi.useRealTimers();
+		cursors = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
+		platform = mockPlatform();
+	});
+
+	it('exposes viewport / viewportFor on the tracker', () => {
+		expect(typeof cursors.viewport).toBe('function');
+		expect(typeof cursors.viewportFor).toBe('function');
+	});
+
+	it('records a reported viewport rect and reads it back via viewportFor', () => {
+		const ws = mockWs({ id: 'A' });
+		cursors.viewport(ws, 'board', { x: 100, y: 200, w: 1920, h: 1080, zoom: 1 });
+		expect(cursors.viewportFor(ws, 'board')).toEqual({ x: 100, y: 200, w: 1920, h: 1080, zoom: 1 });
+	});
+
+	it('defaults zoom to 1 when omitted', () => {
+		const ws = mockWs({ id: 'A' });
+		cursors.viewport(ws, 'board', { x: 0, y: 0, w: 800, h: 600 });
+		expect(cursors.viewportFor(ws, 'board')).toEqual({ x: 0, y: 0, w: 800, h: 600, zoom: 1 });
+	});
+
+	it('viewportFor returns null for a subscriber that never reported (the never-cull opt-in)', () => {
+		const ws = mockWs({ id: 'A' });
+		expect(cursors.viewportFor(ws, 'board')).toBeNull();
+	});
+
+	it('drops a malformed rect silently (missing field, non-number, non-object)', () => {
+		const ws = mockWs({ id: 'A' });
+		cursors.viewport(ws, 'board', { x: 1, y: 2, w: 3 });          // missing h
+		cursors.viewport(ws, 'board', { x: 1, y: 2, w: 3, h: 'nope' }); // non-number
+		cursors.viewport(ws, 'board', null);                            // non-object
+		expect(cursors.viewportFor(ws, 'board')).toBeNull();
+	});
+
+	it('drops a degenerate zero / negative-size rect (stays whole-board, never culled)', () => {
+		const ws = mockWs({ id: 'A' });
+		cursors.viewport(ws, 'board', { x: 0, y: 0, w: 0, h: 100 });             // zero width
+		cursors.viewport(ws, 'board', { x: 0, y: 0, w: 100, h: -5 });            // negative height
+		cursors.viewport(ws, 'board', { x: 0, y: 0, w: 100, h: 100, zoom: 0 });  // zero zoom
+		expect(cursors.viewportFor(ws, 'board')).toBeNull();
+	});
+
+	it('tears down an evicted subscriber viewport at the maxConnections cap (no subViewport leak)', () => {
+		const c = createCursor({ throttle: 0, topicThrottle: 0, maxConnections: 1, select: (ud) => ({ id: ud.id }) });
+		const a = mockWs({ id: 'A' });
+		c.viewport(a, 'board', { x: 0, y: 0, w: 10, h: 10 });
+		expect(c.viewportFor(a, 'board')).not.toBeNull();
+		expect(c.stats().viewportsReported).toBe(1);
+
+		// A second pure viewer trips the cap (1) and evicts A's wsState; A's
+		// subViewport entry must be torn down with it.
+		const b = mockWs({ id: 'B' });
+		c.viewport(b, 'board', { x: 0, y: 0, w: 10, h: 10 });
+		expect(c.viewportFor(a, 'board')).toBeNull();
+		expect(c.stats().viewportsReported).toBe(1); // only B, not A + B
+	});
+
+	it('hooks.message routes a cursor-viewport frame for a subscribed ws', () => {
+		const ws = mockWs({ id: 'A' });
+		ws.subscribe('__cursor:board');
+		const handled = cursors.hooks.message(ws, {
+			data: enc({ type: 'cursor-viewport', topic: 'board', rect: { x: 10, y: 20, w: 640, h: 480, zoom: 2 } }),
+			platform
+		});
+		expect(handled).toBe(true);
+		expect(cursors.viewportFor(ws, 'board')).toEqual({ x: 10, y: 20, w: 640, h: 480, zoom: 2 });
+	});
+
+	it('hooks.message claims but does not record a cursor-viewport frame from an unsubscribed ws', () => {
+		const ws = mockWs({ id: 'A' }); // not subscribed to __cursor:board
+		const handled = cursors.hooks.message(ws, {
+			data: enc({ type: 'cursor-viewport', topic: 'board', rect: { x: 10, y: 20, w: 640, h: 480 } }),
+			platform
+		});
+		expect(handled).toBe(true);                          // claimed, so the app handler skips it
+		expect(cursors.viewportFor(ws, 'board')).toBeNull(); // but the rect is not recorded
+	});
+
+	it('a viewport frame broadcasts nothing', () => {
+		const ws = mockWs({ id: 'A' });
+		ws.subscribe('__cursor:board');
+		cursors.hooks.message(ws, {
+			data: enc({ type: 'cursor-viewport', topic: 'board', rect: { x: 0, y: 0, w: 1, h: 1 } }),
+			platform
+		});
+		expect(platform.published).toHaveLength(0);
+		expect(platform.sent).toHaveLength(0);
+	});
+
+	it('remove(ws) tears down the subscriber viewport', () => {
+		const ws = mockWs({ id: 'A' });
+		cursors.viewport(ws, 'board', { x: 0, y: 0, w: 10, h: 10 });
+		expect(cursors.viewportFor(ws, 'board')).not.toBeNull();
+		cursors.remove(ws, platform);
+		expect(cursors.viewportFor(ws, 'board')).toBeNull();
+	});
+
+	it('clear() tears down all subscriber viewports', () => {
+		const ws = mockWs({ id: 'A' });
+		cursors.viewport(ws, 'board', { x: 0, y: 0, w: 10, h: 10 });
+		cursors.clear();
+		expect(cursors.viewportFor(ws, 'board')).toBeNull();
+	});
+
+	it('stats().viewportsReported counts distinct reporting subscribers', () => {
+		const a = mockWs({ id: 'A' });
+		const b = mockWs({ id: 'B' });
+		expect(cursors.stats().viewportsReported).toBe(0);
+		cursors.viewport(a, 'board', { x: 0, y: 0, w: 1, h: 1 });
+		cursors.viewport(b, 'board', { x: 0, y: 0, w: 1, h: 1 });
+		cursors.viewport(a, 'other', { x: 0, y: 0, w: 1, h: 1 }); // same subscriber, second topic
+		expect(cursors.stats().viewportsReported).toBe(2);
 	});
 });

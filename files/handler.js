@@ -1437,6 +1437,38 @@ const platform = {
 	},
 
 	/**
+	 * Invoke `fn(ws, userData)` once for every connection currently
+	 * subscribed to `topic`, on THIS instance. Where `subscribers(topic)`
+	 * returns a count, this yields the sockets themselves so a plugin can
+	 * make a per-subscriber decision the shared `publish` fan-out cannot:
+	 * send a culled / per-viewport slice, skip a back-pressured consumer,
+	 * or vary the payload per recipient.
+	 *
+	 * Cost is O(connections) and is paid only by the caller, so reserve it
+	 * for topics that genuinely need per-subscriber treatment (a high-fan-
+	 * out cursor topic with viewport culling); the zero-config publish path
+	 * never calls it. The walk is synchronous and matches the subscriber
+	 * walk `publishBatched` already performs; pair it with `platform.send`
+	 * (closed-WS safe) and `platform.bufferedAmount` inside `fn`.
+	 *
+	 * Cluster note: each instance holds only its own connections, so this
+	 * walks the local subscriber set. A topic whose subscribers span
+	 * instances is handled per-instance - the same locality the Redis-
+	 * backed cursor / presence variants already rely on.
+	 *
+	 * @param {string} topic
+	 * @param {(ws: import('uWebSockets.js').WebSocket<any>, userData: any) => void} fn
+	 * @returns {void}
+	 */
+	forEachSubscriber(topic, fn) {
+		for (const ws of wsConnections) {
+			const ud = ws.getUserData();
+			const subs = ud[WS_SUBSCRIPTIONS];
+			if (subs && subs.has(topic)) fn(ws, ud);
+		}
+	},
+
+	/**
 	 * The configured maximum size, in bytes, of a single inbound WebSocket
 	 * frame. Frames larger than this are rejected by uWS at the protocol
 	 * level (the connection is closed). Read this from server-side code

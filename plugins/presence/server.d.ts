@@ -114,6 +114,23 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	 * @default true
 	 */
 	binary?: boolean;
+
+	/**
+	 * Dynamic field names (set via {@link PresenceTracker.update}) that are
+	 * broadcast live but NEVER included in the `state` snapshot or the heartbeat
+	 * roster. A (re)joining or swept-then-readded client therefore never inherits
+	 * a possibly-stale transient value - a disconnected typer leaves no stuck
+	 * indicator. Identity fields (from `select`) and durable `update()` fields not
+	 * listed here ride the snapshot normally.
+	 *
+	 * @example
+	 * ```js
+	 * const presence = createPresence({ transient: ['typing', 'selection'] });
+	 * ```
+	 *
+	 * @default [] // every update() field is durable
+	 */
+	transient?: string[];
 }
 
 export interface PresenceTracker<Selected extends Record<string, any> = Record<string, any>> {
@@ -173,6 +190,30 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 	 * ```
 	 */
 	sync(ws: WebSocket<any>, topic: string, platform: Platform): void;
+
+	/**
+	 * Set dynamic fields on the present user as a field-level delta.
+	 *
+	 * Only fields whose value actually changed are merged into the user and
+	 * broadcast in the next `diff` under `updates[key]` - so a typing toggle
+	 * sends `{ typing: true }`, not the whole user object. The update applies to
+	 * the user (per dedup key), so any of a multi-tab user's connections may call
+	 * it and every observer sees one change. A connection that is not present on
+	 * the topic is a silent no-op, and an update where no field changed is a
+	 * no-op.
+	 *
+	 * Fields listed in the `transient` option are broadcast live to currently
+	 * connected subscribers but excluded from the `state` snapshot and heartbeat,
+	 * so a reconnecting client never inherits a stale value. Other `update()`
+	 * fields are durable and ride the snapshot.
+	 *
+	 * @example
+	 * ```js
+	 * // a typing indicator that self-heals on reconnect (with `transient: ['typing']`)
+	 * presence.update(ws, 'room', { typing: true }, platform);
+	 * ```
+	 */
+	update(ws: WebSocket<any>, topic: string, fields: Record<string, any>, platform: Platform): void;
 
 	/**
 	 * Get the current presence list for a topic.

@@ -459,6 +459,16 @@ export async function createTestServer(options = {}) {
 		get assertions() { return readAssertionCounts(); },
 		get closedWsAborts() { return closedWsAbortsT; },
 		subscribers(topic) { return app.numSubscribers(topic); },
+		// Mirror production handler.js: walk the local subscriber set so
+		// per-subscriber culling / backpressure paths are exercised by
+		// createTestServer-based suites.
+		forEachSubscriber(topic, fn) {
+			for (const ws of wsConnections) {
+				const ud = ws.getUserData();
+				const subs = ud[WS_SUBSCRIPTIONS];
+				if (subs && subs.has(topic)) fn(ws, ud);
+			}
+		},
 		// Mirror production: report a numeric cap and a constant-time
 		// bufferedAmount so test code can exercise the same backpressure-
 		// aware branches it uses in production.

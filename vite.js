@@ -426,6 +426,18 @@ export default function uws(options = {}) {
 			}
 			return count;
 		},
+		// Mirror production's per-subscriber walk over the ws -> Set<topic>
+		// map that also backs subscribers(). Passes (ws, userData) so dev
+		// exercises the same culling / backpressure call shape as prod.
+		// getUserData() is called unguarded, matching production handler.js and
+		// the dev subscribe/unsubscribe paths above (the `ws` library does not
+		// throw on a closed socket, so no guard is needed or wanted here).
+		forEachSubscriber(topic, fn) {
+			for (const [ws, topics] of subscriptions) {
+				if (!topics.has(topic)) continue;
+				fn(ws, /** @type {any} */ (ws).getUserData());
+			}
+		},
 		// Dev mode runs over the `ws` library which does not enforce a
 		// per-frame cap; report the production default (1 MB) so app code
 		// that branches on `platform.maxPayloadLength` sees a consistent

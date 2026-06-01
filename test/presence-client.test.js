@@ -132,4 +132,39 @@ describe('presence client inbound binary (0x03)', () => {
 		expect(last.data).toEqual(roster);
 		unsub();
 	});
+
+	it('merges a field-level update diff into the existing user', async () => {
+		clientModule.connect({ path: '/ws' });
+		await flush();
+		const mock = MockWebSocket._last;
+
+		const seen = [];
+		const users = presenceMod.presence('room-merge', { maxAge: 0 });
+		const unsub = users.subscribe((v) => seen.push(v));
+		await flush();
+
+		// Seed a user via a state frame, then send a field-level update carrying
+		// only the changed field.
+		mock.deliver(JSON.stringify({ topic: '__presence:room-merge', event: 'state', data: { '1': { id: '1', name: 'Alice' } } }));
+		mock.deliver(JSON.stringify({ topic: '__presence:room-merge', event: 'diff', data: { joins: {}, leaves: {}, updates: { '1': { typing: true } } } }));
+
+		expect(seen[seen.length - 1]).toEqual([{ id: '1', name: 'Alice', typing: true }]);
+		unsub();
+	});
+
+	it('drops a field-level update for an unknown user (reconciles on next state)', async () => {
+		clientModule.connect({ path: '/ws' });
+		await flush();
+		const mock = MockWebSocket._last;
+
+		const seen = [];
+		const users = presenceMod.presence('room-unknown', { maxAge: 0 });
+		const unsub = users.subscribe((v) => seen.push(v));
+		await flush();
+
+		mock.deliver(JSON.stringify({ topic: '__presence:room-unknown', event: 'diff', data: { joins: {}, leaves: {}, updates: { '99': { typing: true } } } }));
+
+		expect(seen[seen.length - 1]).toEqual([]);
+		unsub();
+	});
 });

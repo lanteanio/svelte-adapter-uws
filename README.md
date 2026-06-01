@@ -1260,6 +1260,20 @@ export async function GET({ platform, params }) {
 }
 ```
 
+### `platform.forEachSubscriber(topic, fn)`
+
+Where `subscribers(topic)` returns a count, `forEachSubscriber(topic, fn)` yields the sockets themselves - it invokes `fn(ws, userData)` once for every connection on this instance subscribed to `topic`. Use it when a single shared `publish` cannot express the fan-out: send each subscriber a different slice (per-viewport cursor culling), skip a back-pressured consumer, or vary the payload per recipient.
+
+```js
+// Backpressure-aware per-subscriber cursor fan-out:
+platform.forEachSubscriber(`__cursor:${board}`, (ws) => {
+  if (platform.bufferedAmount(ws) > maxQueued) return; // skip a slow consumer; it catches up next flush
+  platform.send(ws, `__cursor:${board}`, 'bulk', sliceFor(ws));
+});
+```
+
+The walk is O(connections) and synchronous, and is paid only by the caller, so reserve it for the topics that genuinely need per-subscriber treatment; the zero-config `publish` path never calls it. Pair it with `platform.send` (closed-WS safe) and `platform.bufferedAmount` inside `fn`. In clustered mode each instance holds only its own connections, so the walk is per-instance - the same locality the Redis-backed cursor / presence variants rely on.
+
 ### `platform.assertions`
 
 Per-category counter of framework invariant violations. The adapter ships internal hard-asserts at ~30 invariant sites (envelope build, WebSocket lifecycle, subscription bookkeeping, cross-worker IPC payloads, server-initiated request entry shape, sendCoalesced state). When one fires, the counter for that category increments and a structured `[adapter-uws/assert]` line is logged.
@@ -2539,6 +2553,34 @@ If Alice's data changes between connections (for example she updates her avatar 
 
 If no `key` field is found in the selected data (e.g. no auth), each connection is tracked separately.
 
+#### Field-level updates and transient fields
+
+`presence.update(ws, topic, fields, platform)` sets dynamic fields on the present user as a field-level delta - only fields whose value actually changed are merged into the user and broadcast in the next `diff` under `updates[key]`. A typing toggle sends `{ typing: true }`, not the whole user object. The update applies to the user (per dedup key), so any of a multi-tab user's connections may call it and every observer sees one change. A connection that is not present on the topic, or an update where nothing changed, is a no-op.
+
+```js
+// server
+presence.update(ws, 'room', { typing: true }, platform);
+```
+
+```svelte
+<!-- client: the field is merged into the existing user object -->
+{#each $users as u (u.id)}
+  <span>{u.name}{#if u.typing} is typing…{/if}</span>
+{/each}
+```
+
+Fields named in the `transient` option are broadcast live to the subscribers connected at the moment they change, but are **excluded from the `state` snapshot and the heartbeat roster**. So a (re)joining or swept-then-readded client never inherits a possibly-stale transient value - a disconnected typer leaves no stuck indicator. Identity fields (from `select`) and durable `update()` fields not listed in `transient` ride the snapshot normally.
+
+```js
+const presence = createPresence({
+  key: 'id',
+  select: (ud) => ({ id: ud.id, name: ud.name }),
+  transient: ['typing', 'selection'] // live-only; never in the snapshot
+});
+```
+
+The wire stays additive: a deployment that never calls `update()` sends the exact `{ joins, leaves }` diff as before, and an old client ignores the `updates` field. (The field-level `updates` map rides the JSON form; pure join/leave diffs keep the binary wire.)
+
 #### Limitations
 
 - **In-memory only.** Same as replay - server restart clears presence. On restart, clients reconnect and re-subscribe, so the list rebuilds within seconds.
@@ -2840,7 +2882,7 @@ There are two binary wire forms, negotiated per connection by capability:
 - **`binary: false` to disable, `dictionary: false` to keep the full-string wire.** `createCursor({ binary: false })` forces JSON for every client (e.g. to keep DevTools' WS inspector readable). `createCursor({ dictionary: false })` keeps binary but uses the full-string form for everyone, encoded once and fanned out to all subscribers. The dictionary is per-connection stateful, so each capable subscriber's frame is encoded independently; a warm dictionary encode is much cheaper than a full-string encode, so the default is a net win (cheaper CPU and smaller frames) for typical per-process fan-out - reach for `dictionary: false` only on a single process serving very high per-topic subscriber counts (hundreds-plus on one worker), where the per-subscriber encode would cost more CPU than the bandwidth saving is worth. The wire format is the server's decision; the library reads no URL parameter and a client cannot force its own connection back to JSON.
 - **Positions are `float32`, keys are strings.** Fractional positions (e.g. `clientX - getBoundingClientRect().left`) are carried losslessly enough for cursors (sub-0.01 px at screen scale). Cursor `data` that is not exactly `{ x, y }` numeric - extra fields, non-numeric values - transparently falls back to JSON for that frame, so richer cursor payloads keep working.
 
-Writing your own high-throughput plugin? The same mechanism is available via `platform.publishWire(topic, event, data, wire)` / `platform.sendWire(...)` on the server (where `wire = { capability, schemaVersion, encode(event, data, state?), state? }` and `encode` returns a `Uint8Array` payload or `null` to fall back to JSON), plus `registerWireCodec(prefix, { capability, capabilities?, state?, decode })` from `svelte-adapter-uws/client` on the client. The optional `wire.state` slot gives the codec one object per connection (`onAttach(ws)` / `onDetach(ws, state)`) for a stateful wire like the cursor dictionary; the per-connection `state` is reset on reconnect. JSON-only deployments pay nothing - `publishWire` takes the same single broadcast as `publish` when no connected client wants binary.
+Writing your own high-throughput plugin? The same mechanism is available via `platform.publishWire(topic, event, data, wire)` / `platform.sendWire(...)` on the server (where `wire = { capability, schemaVersion, encode(event, data, state?), state? }` and `encode` returns a `Uint8Array` payload or `null` to fall back to JSON), plus `registerWireCodec(prefix, { capability, capabilities?, sink?, state?, decode })` from `svelte-adapter-uws/client` on the client. The optional `wire.state` slot gives the codec one object per connection (`onAttach(ws)` / `onDetach(ws, state)`) for a stateful wire like the cursor dictionary; the per-connection `state` is reset on reconnect. A codec marked `sink: true` applies each frame in place inside `decode` (e.g. into a local document replica that drives its own reactive surface) instead of returning a `{ event, data }` store event - its return is ignored and nothing is dispatched, so a frame that mutated local state never also fans out as a store update. JSON-only deployments pay nothing - `publishWire` takes the same single broadcast as `publish` when no connected client wants binary.
 
 #### Server usage
 
@@ -2902,6 +2944,24 @@ export function close(ws, { platform }) {
 ```
 
 `move(topic, data)` is the recommended path for sending cursor updates. Calls are coalesced via `requestAnimationFrame` so even a 1000 Hz high-DPI mouse collapses to at most one send per repaint, matching the server-side `topicThrottle` default. Multi-topic callers do not clobber each other. No-op in non-browser environments.
+
+**Reporting a viewport (for cursor culling).** `reportViewport(topic, source)` tells the server which region of the board this subscriber is looking at, so it can later cull cursors outside the visible region. Pass a scroll-container element (the visible content region is read from its `scrollLeft` / `scrollTop` / `clientWidth` / `clientHeight`), an explicit `{ x, y, w, h, zoom? }` rect (for a virtualized canvas with its own transform), or a getter returning either. Frames are `requestAnimationFrame`-coalesced like `move()`, and no-op in non-browser environments.
+
+```svelte
+<script>
+  import { cursor, move, reportViewport } from 'svelte-adapter-uws/plugins/cursor/client';
+  let board;
+  const cursors = cursor('board');
+</script>
+
+<div bind:this={board}
+     onscroll={() => reportViewport('board', board)}
+     onpointermove={(e) => move('board', { x: e.clientX, y: e.clientY })}>
+  ...
+</div>
+```
+
+Reporting is **per-subscriber and opt-in**: a subscriber that never reports a viewport is treated as whole-board and is never culled, so this can never blank a board by accident. The server records the latest rect per `(subscriber, topic)`; the matching server-side viewport culling that consumes it is a separate feature. On the server, `cursors.hooks.message` handles the `cursor-viewport` frame automatically alongside `cursor` and `cursor-snapshot`; `cursors.viewportFor(ws, topic)` reads the recorded rect (or `null` if the subscriber never reported one).
 
 The client store is a `Readable<Map<string, { user, data }>>`. The Map updates when cursors move, join, or disconnect. Internally the store merges the `catalog`/`join` stream (user metadata) with the `update`/`bulk` stream (positions); positions whose user has not yet been seen are withheld until the matching join arrives - they appear on the next render once the catalog catches up.
 

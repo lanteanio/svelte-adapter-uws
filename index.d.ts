@@ -1457,6 +1457,38 @@ export interface Platform {
 	subscribers(topic: string): number;
 
 	/**
+	 * Invoke `fn(ws, userData)` once for every connection currently
+	 * subscribed to `topic`, on this instance. Where `subscribers(topic)`
+	 * returns a count, this yields the sockets themselves so a plugin can
+	 * make a per-subscriber decision the shared `publish` fan-out cannot:
+	 * send a culled / per-viewport slice, skip a back-pressured consumer,
+	 * or vary the payload per recipient.
+	 *
+	 * Cost is O(connections) and is paid only by the caller, so reserve it
+	 * for topics that genuinely need per-subscriber treatment (a high-
+	 * fan-out cursor topic with viewport culling); the zero-config publish
+	 * path never calls it. Pair it with `send` (closed-WS safe) and
+	 * `bufferedAmount` inside `fn`.
+	 *
+	 * Cluster note: each instance holds only its own connections, so this
+	 * walks the local subscriber set; a topic whose subscribers span
+	 * instances is handled per-instance.
+	 *
+	 * @example
+	 * ```js
+	 * // Backpressure-aware per-subscriber cursor fan-out:
+	 * platform.forEachSubscriber(`__cursor:${board}`, (ws) => {
+	 *   if (platform.bufferedAmount(ws) > maxQueued) return; // skip slow consumer
+	 *   platform.send(ws, topic, 'bulk', sliceFor(ws));
+	 * });
+	 * ```
+	 */
+	forEachSubscriber(
+		topic: string,
+		fn: (ws: WebSocket<unknown>, userData: any) => void
+	): void;
+
+	/**
 	 * The configured maximum size, in bytes, of a single inbound
 	 * WebSocket frame. Frames larger than this are rejected by uWS at the
 	 * protocol level (the connection is closed). Read this from server-

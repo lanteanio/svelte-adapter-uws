@@ -130,6 +130,12 @@ export function encodePresence(event, data) {
 			}
 			case 'diff': {
 				if (data === null || typeof data !== 'object' || Array.isArray(data)) return null;
+				// A field-level `updates` map is carried only by the JSON form (the
+				// binary DIFF op is `{joins, leaves}` by schema 1). Fall back to JSON
+				// for an update-bearing diff so `updates` is never silently dropped;
+				// a binary-capable client merges it from the JSON frame the same way.
+				// Pure join/leave diffs (the overwhelming common case) stay binary.
+				if (data.updates != null && typeof data.updates === 'object' && Object.keys(data.updates).length > 0) return null;
 				const joins = data.joins == null ? {} : data.joins;
 				const leaves = data.leaves == null ? {} : data.leaves;
 				// A diff whose joins/leaves are present but not plain objects is

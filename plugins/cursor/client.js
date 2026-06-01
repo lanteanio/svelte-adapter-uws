@@ -314,3 +314,87 @@ export function move(topic, data) {
 		movePending.clear();
 	});
 }
+
+/**
+ * Internal coalesce buffer for `reportViewport()`. One rect per topic;
+ * latest-wins inside a single animation frame.
+ * @type {Map<string, { x: number, y: number, w: number, h: number, zoom: number }>}
+ */
+const viewportPending = new Map();
+let viewportScheduled = false;
+
+/**
+ * Resolve a viewport source to a `{ x, y, w, h, zoom }` rect in the board's
+ * coordinate space. Accepts:
+ *   - a scroll-container element: the visible content region is
+ *     `{ x: scrollLeft, y: scrollTop, w: clientWidth, h: clientHeight, zoom: 1 }`.
+ *   - an explicit rect object `{ x, y, w, h, zoom? }` (a virtualized canvas with
+ *     its own transform computes this itself).
+ *   - a getter returning either of the above.
+ * Returns `null` for an unresolvable / malformed source.
+ * @param {any} source
+ */
+function resolveViewportRect(source) {
+	if (typeof source === 'function') source = source();
+	if (!source || typeof source !== 'object') return null;
+	if (typeof source.clientWidth === 'number' && typeof source.clientHeight === 'number') {
+		const w = source.clientWidth;
+		const h = source.clientHeight;
+		// An unmounted / collapsed / pre-layout element reports 0x0; do not send
+		// a degenerate viewport for it.
+		if (w <= 0 || h <= 0) return null;
+		return { x: source.scrollLeft || 0, y: source.scrollTop || 0, w, h, zoom: 1 };
+	}
+	const { x, y, w, h } = source;
+	const zoom = source.zoom === undefined ? 1 : source.zoom;
+	if (![x, y, w, h, zoom].every((n) => typeof n === 'number' && Number.isFinite(n))) return null;
+	if (w <= 0 || h <= 0 || zoom <= 0) return null;
+	return { x, y, w, h, zoom };
+}
+
+/**
+ * Report this subscriber's viewport on a topic so the server can cull cursors
+ * outside the visible region (once viewport culling is enabled server-side).
+ * Reporting is per-subscriber and opt-in: a subscriber that never reports a
+ * viewport is treated as whole-board and is never culled. Frames are coalesced
+ * via `requestAnimationFrame` so a scroll burst collapses to one send per
+ * repaint; multi-topic callers do not clobber each other.
+ *
+ * No-op in non-browser environments and for an unresolvable source.
+ *
+ * @param {string} topic
+ * @param {Element | { x: number, y: number, w: number, h: number, zoom?: number } | (() => any)} source
+ *   a scroll-container element, an explicit `{ x, y, w, h, zoom? }` rect, or a
+ *   getter returning either.
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { cursor, move, reportViewport } from 'svelte-adapter-uws/plugins/cursor/client';
+ *   let board;
+ *   const cursors = cursor('board');
+ * </script>
+ *
+ * <div bind:this={board}
+ *      onscroll={() => reportViewport('board', board)}
+ *      onpointermove={(e) => move('board', { x: e.clientX, y: e.clientY })}>
+ *   ...
+ * </div>
+ * ```
+ */
+export function reportViewport(topic, source) {
+	if (typeof window === 'undefined') return;
+	const rect = resolveViewportRect(source);
+	if (!rect) return;
+	viewportPending.set(topic, rect);
+	if (viewportScheduled) return;
+	viewportScheduled = true;
+	scheduleFrame(() => {
+		viewportScheduled = false;
+		const conn = connect();
+		for (const [t, r] of viewportPending) {
+			conn.send({ type: 'cursor-viewport', topic: t, rect: r });
+		}
+		viewportPending.clear();
+	});
+}
