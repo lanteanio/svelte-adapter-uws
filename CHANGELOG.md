@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Added a dependency-free `npm run check` (`scripts/check-types.js`, wired into `pretest`) that fails the build if any `exports` subpath stops resolving, a `types` condition is not a `.d.ts`, or a packaged file falls outside the `files` allowlist. No runtime or public API change.
+
 ## [0.6.0-next.6] - 2026-06-01
 
 ### Added

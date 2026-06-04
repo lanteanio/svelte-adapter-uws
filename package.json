@@ -124,6 +124,8 @@
     "MIGRATION.md"
   ],
   "scripts": {
+    "check": "node scripts/check-types.js",
+    "pretest": "npm run check",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "npx playwright test --config test/e2e/playwright.config.js",
