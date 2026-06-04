@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createCursor } from '../plugins/cursor/server.js';
-import { mockWs, mockPlatform } from './_helpers.js';
+import { mockWs, mockPlatform, mockWalkPlatform } from './_helpers.js';
 
 // Helpers to filter the new split-wire-format publish stream. The plugin
 // emits `join` (with user metadata) then `update` / `bulk` (positions
@@ -417,7 +417,10 @@ describe('cursor plugin - server', () => {
 				driftMaxMs: 0,
 				dirtyTopicsCurrent: 0,
 				activeTopicsTotal: 0,
-				viewportsReported: 0
+				viewportsReported: 0,
+				perSubscriberFlushes: 0,
+				bpSkips: 0,
+				culledEntriesDropped: 0
 			});
 		});
 
@@ -1275,5 +1278,480 @@ describe('cursor plugin - viewport ingress', () => {
 		cursors.viewport(b, 'board', { x: 0, y: 0, w: 1, h: 1 });
 		cursors.viewport(a, 'other', { x: 0, y: 0, w: 1, h: 1 }); // same subscriber, second topic
 		expect(cursors.stats().viewportsReported).toBe(2);
+	});
+});
+
+describe('cursor plugin - backpressure (per-subscriber drop)', () => {
+	const CURSOR = '__cursor:board';
+
+	function setup(bpOptions = { enabled: true }) {
+		const c = createCursor({
+			throttle: 0,
+			topicThrottle: 0,
+			backpressure: bpOptions,
+			select: (ud) => ({ id: ud.id })
+		});
+		const p = mockWalkPlatform();
+		return { c, p };
+	}
+
+	it('validates backpressure.maxBufferedBytes', () => {
+		expect(() => createCursor({ backpressure: { enabled: true, maxBufferedBytes: 0 } })).toThrow('positive integer');
+		expect(() => createCursor({ backpressure: { enabled: true, maxBufferedBytes: 1.5 } })).toThrow('positive integer');
+		expect(() => createCursor({ backpressure: { enabled: true, maxBufferedBytes: -1 } })).toThrow('positive integer');
+		expect(() => createCursor({ backpressure: { enabled: true } })).not.toThrow(); // default cap
+	});
+
+	it('accepts the boolean shorthand and rejects a half-set or mistyped object', () => {
+		expect(() => createCursor({ backpressure: true })).not.toThrow();
+		expect(() => createCursor({ viewport: true })).not.toThrow();
+		// tuning key without enabled is almost certainly a forgotten enabled:true
+		expect(() => createCursor({ backpressure: { maxBufferedBytes: 4096 } })).toThrow('enabled');
+		expect(() => createCursor({ viewport: { padding: 512 } })).toThrow('enabled');
+		// non-boolean, non-object
+		expect(() => createCursor({ viewport: 1 })).toThrow('true or an options object');
+		expect(() => createCursor({ backpressure: 'x' })).toThrow('true or an options object');
+	});
+
+	it('viewport: true / backpressure: true actually engage the walk', () => {
+		const c = createCursor({ throttle: 0, topicThrottle: 0, backpressure: true, select: (ud) => ({ id: ud.id }) });
+		const p = mockWalkPlatform();
+		const a = mockWs({ id: 'A' });
+		p.addSubscriber(a, CURSOR);
+		c.update(a, 'board', { x: 1, y: 1 }, p);
+		expect(c.stats().perSubscriberFlushes).toBe(1); // shorthand enabled backpressure -> walk
+	});
+
+	it('routes through the per-subscriber walk (sends), not the shared frame, for positions', () => {
+		const { c, p } = setup();
+		const a = mockWs({ id: 'A' });
+		const b = mockWs({ id: 'B' });
+		p.addSubscriber(a, CURSOR);
+		p.addSubscriber(b, CURSOR);
+
+		c.update(a, 'board', { x: 1, y: 2 }, p);
+
+		// join is still a shared-frame broadcast; positions go per-subscriber.
+		expect(p.published.map((e) => e.event)).toEqual(['join']);
+		const updates = p.sent.filter((e) => e.event === 'update');
+		expect(updates).toHaveLength(2); // delivered to both subscribers individually
+		expect(updates.every((e) => e.data.data).valueOf()).toBeTruthy();
+		expect(c.stats().perSubscriberFlushes).toBe(1);
+		expect(c.stats().bpSkips).toBe(0);
+	});
+
+	it('skips a subscriber over the cap and lets it catch up on the next flush', () => {
+		const { c, p } = setup({ enabled: true, maxBufferedBytes: 1024 });
+		const a = mockWs({ id: 'A' });
+		const slow = mockWs({ id: 'S' });
+		p.addSubscriber(a, CURSOR);
+		p.addSubscriber(slow, CURSOR);
+		p.setBuffered(slow, 4096); // over the 1 KiB cap
+
+		c.update(a, 'board', { x: 1, y: 1 }, p);
+		expect(p.sentTo(slow)).toHaveLength(0); // skipped
+		expect(p.sentTo(a)).toHaveLength(1); // healthy subscriber unaffected
+		expect(c.stats().bpSkips).toBe(1);
+
+		// Next flush, the slow consumer has drained below the cap: it receives
+		// the LATEST position, not a replay of the skipped frame.
+		p.reset();
+		p.setBuffered(slow, 0);
+		c.update(a, 'board', { x: 9, y: 9 }, p);
+		const got = p.sentTo(slow);
+		expect(got).toHaveLength(1);
+		expect(got[0].data.data).toEqual({ x: 9, y: 9 });
+		expect(c.stats().bpSkips).toBe(1); // no new skip
+	});
+
+	it('a closed/unknown ws reads bufferedAmount 0 and is never falsely skipped', () => {
+		const { c, p } = setup({ enabled: true, maxBufferedBytes: 1024 });
+		const a = mockWs({ id: 'A' });
+		p.addSubscriber(a, CURSOR); // never setBuffered -> reads 0
+		c.update(a, 'board', { x: 1, y: 1 }, p);
+		expect(p.sentTo(a)).toHaveLength(1);
+		expect(c.stats().bpSkips).toBe(0);
+	});
+
+	it('coalesces multiple movers into one per-subscriber bulk under topicThrottle', () => {
+		vi.useFakeTimers();
+		const c = createCursor({ throttle: 0, topicThrottle: 16, backpressure: { enabled: true }, select: (ud) => ({ id: ud.id }) });
+		const p = mockWalkPlatform();
+		const a = mockWs({ id: 'A' });
+		const b = mockWs({ id: 'B' });
+		const viewer = mockWs({ id: 'V' });
+		[a, b, viewer].forEach((ws) => p.addSubscriber(ws, CURSOR));
+
+		c.update(a, 'board', { x: 1, y: 1 }, p);
+		c.update(b, 'board', { x: 2, y: 2 }, p);
+		expect(p.sent.filter((e) => e.event === 'bulk' || e.event === 'update')).toHaveLength(0); // nothing before the tick
+
+		vi.advanceTimersByTime(16);
+		const bulks = p.sent.filter((e) => e.event === 'bulk');
+		expect(bulks).toHaveLength(3); // one bulk per subscriber
+		expect(bulks[0].data).toHaveLength(2); // both movers coalesced
+		vi.useRealTimers();
+	});
+
+	it('degrades to the shared frame on a platform without forEachSubscriber (no throw)', () => {
+		const c = createCursor({ throttle: 0, topicThrottle: 0, backpressure: { enabled: true }, select: (ud) => ({ id: ud.id }) });
+		const p = mockPlatform(); // minimal: no forEachSubscriber / bufferedAmount
+		const a = mockWs({ id: 'A' });
+		expect(() => c.update(a, 'board', { x: 1, y: 1 }, p)).not.toThrow();
+		// fell back to the shared publish fan-out (join + update on published[])
+		expect(p.published.map((e) => e.event)).toEqual(['join', 'update']);
+		expect(p.sent).toHaveLength(0);
+	});
+
+	it('does not touch the per-subscriber primitives when backpressure is disabled', () => {
+		const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
+		const p = mockWalkPlatform();
+		const forEachSpy = vi.spyOn(p, 'forEachSubscriber');
+		const bufferedSpy = vi.spyOn(p, 'bufferedAmount');
+		const a = mockWs({ id: 'A' });
+		p.addSubscriber(a, CURSOR);
+
+		c.update(a, 'board', { x: 1, y: 1 }, p);
+
+		expect(forEachSpy).not.toHaveBeenCalled();
+		expect(bufferedSpy).not.toHaveBeenCalled();
+		// zero-config path: positions on the shared frame, nothing per-subscriber
+		expect(p.published.map((e) => e.event)).toEqual(['join', 'update']);
+		expect(c.stats().perSubscriberFlushes).toBe(0);
+	});
+
+	it('keeps two trackers in one process isolated (factory-closure scratch)', () => {
+		const { c: c1, p: p1 } = setup();
+		const { c: c2, p: p2 } = setup();
+		const a = mockWs({ id: 'A' });
+		const b = mockWs({ id: 'B' });
+		p1.addSubscriber(a, CURSOR);
+		p2.addSubscriber(b, CURSOR);
+
+		c1.update(a, 'board', { x: 11, y: 11 }, p1);
+		c2.update(b, 'board', { x: 22, y: 22 }, p2);
+
+		expect(p1.sentTo(a)[0].data.data).toEqual({ x: 11, y: 11 });
+		expect(p2.sentTo(b)[0].data.data).toEqual({ x: 22, y: 22 });
+		expect(p1.sentTo(b)).toHaveLength(0);
+		expect(p2.sentTo(a)).toHaveLength(0);
+	});
+
+	it('delivers to every healthy subscriber and skips only the over-cap ones', () => {
+		const { c, p } = setup({ enabled: true, maxBufferedBytes: 1024 });
+		const mover = mockWs({ id: 'M' });
+		const healthy = [mockWs({ id: 'H1' }), mockWs({ id: 'H2' }), mockWs({ id: 'H3' })];
+		const slow = [mockWs({ id: 'S1' }), mockWs({ id: 'S2' })];
+		[mover, ...healthy, ...slow].forEach((ws) => p.addSubscriber(ws, CURSOR));
+		slow.forEach((ws) => p.setBuffered(ws, 99999));
+
+		c.update(mover, 'board', { x: 7, y: 7 }, p);
+
+		// mover + 3 healthy receive; 2 slow skipped.
+		expect(p.sent.filter((e) => e.event === 'update')).toHaveLength(4);
+		slow.forEach((ws) => expect(p.sentTo(ws)).toHaveLength(0));
+		expect(c.stats().bpSkips).toBe(2);
+		expect(c.stats().perSubscriberFlushes).toBe(1);
+	});
+});
+
+describe('cursor plugin - viewport culling', () => {
+	const CURSOR = '__cursor:board';
+
+	function viewportTracker(extra = {}) {
+		return createCursor({
+			throttle: 0,
+			topicThrottle: 0,
+			viewport: { enabled: true },
+			select: (ud) => ({ id: ud.id }),
+			...extra
+		});
+	}
+
+	// Positions delivered to a subscriber, as a sorted "x,y" set, across both
+	// the single-mover `update` and coalesced `bulk` wire shapes.
+	function deliveredPositions(p, ws) {
+		const out = [];
+		for (const e of p.sentTo(ws)) {
+			if (e.event === 'update') out.push(`${e.data.data.x},${e.data.data.y}`);
+			else if (e.event === 'bulk') for (const it of e.data) out.push(`${it.data.x},${it.data.y}`);
+		}
+		return out.sort();
+	}
+
+	it('validates viewport.padding / viewport.cell and position', () => {
+		expect(() => createCursor({ viewport: { enabled: true, padding: -1 } })).toThrow('non-negative');
+		expect(() => createCursor({ viewport: { enabled: true, cell: 0 } })).toThrow('positive');
+		expect(() => createCursor({ viewport: { enabled: true, cell: -5 } })).toThrow('positive');
+		expect(() => createCursor({ position: 'bad' })).toThrow('function');
+		expect(() => createCursor({ viewport: { enabled: true } })).not.toThrow();
+	});
+
+	it('keeps the shared fast path when viewport is enabled but nobody reports a rect', () => {
+		const c = viewportTracker();
+		const p = mockWalkPlatform();
+		const viewer = mockWs({ id: 'V' }); // never reports a rect
+		p.addSubscriber(viewer, CURSOR);
+
+		c.update(mockWs({ id: 'M' }), 'board', { x: 99999, y: 99999 }, p);
+
+		// Zero reporters -> one shared publish, not an O(connections) walk.
+		expect(p.published.map((e) => e.event)).toEqual(['join', 'update']);
+		expect(p.sent).toHaveLength(0);
+		expect(c.stats().perSubscriberFlushes).toBe(0);
+	});
+
+	it('never culls a non-reporting subscriber even when the walk is active', () => {
+		const c = viewportTracker();
+		const p = mockWalkPlatform();
+		const reporter = mockWs({ id: 'R' });
+		const nonReporter = mockWs({ id: 'N' });
+		p.addSubscriber(reporter, CURSOR);
+		p.addSubscriber(nonReporter, CURSOR);
+		// The reporter's rect flips the topic onto the per-subscriber walk.
+		c.viewport(reporter, 'board', { x: 0, y: 0, w: 10, h: 10, zoom: 1 });
+
+		c.update(mockWs({ id: 'M' }), 'board', { x: 99999, y: 99999 }, p);
+
+		expect(deliveredPositions(p, reporter)).toEqual([]); // culled (far outside)
+		expect(deliveredPositions(p, nonReporter)).toEqual(['99999,99999']); // whole-board, never culled
+		expect(c.stats().perSubscriberFlushes).toBe(1);
+	});
+
+	it('returns to the shared fast path after the last reporter leaves', () => {
+		const c = viewportTracker();
+		const p = mockWalkPlatform();
+		const reporter = mockWs({ id: 'R' });
+		p.addSubscriber(reporter, CURSOR);
+		c.viewport(reporter, 'board', { x: 0, y: 0, w: 10, h: 10, zoom: 1 });
+		c.update(mockWs({ id: 'M' }), 'board', { x: 5, y: 5 }, p);
+		expect(c.stats().perSubscriberFlushes).toBe(1); // walked while a reporter existed
+
+		c.remove(reporter, p); // last reporter gone -> reporter count back to 0
+		p.reset();
+		const viewer = mockWs({ id: 'V2' });
+		p.addSubscriber(viewer, CURSOR);
+		c.update(mockWs({ id: 'M2' }), 'board', { x: 6, y: 6 }, p);
+		// Back on the shared frame.
+		expect(p.published.map((e) => e.event)).toContain('update');
+		expect(p.sent).toHaveLength(0);
+		expect(c.stats().perSubscriberFlushes).toBe(1); // unchanged - no walk this flush
+	});
+
+	it('culls movers outside a reporter viewport, keeping the padding band', () => {
+		const c = viewportTracker(); // default padding 256
+		const p = mockWalkPlatform();
+		const viewer = mockWs({ id: 'V' });
+		p.addSubscriber(viewer, CURSOR);
+		c.viewport(viewer, 'board', { x: 0, y: 0, w: 1000, h: 1000, zoom: 1 });
+
+		c.update(mockWs({ id: 'near' }), 'board', { x: 500, y: 500 }, p); // inside
+		c.update(mockWs({ id: 'band' }), 'board', { x: 1100, y: 500 }, p); // in 256 padding band
+		c.update(mockWs({ id: 'far' }), 'board', { x: 2000, y: 500 }, p); // beyond padding
+
+		expect(deliveredPositions(p, viewer)).toEqual(['1100,500', '500,500']);
+		expect(c.stats().culledEntriesDropped).toBe(1); // the far mover, withheld from V
+	});
+
+	it('widens the overscan for a zoomed-out subscriber', () => {
+		const c = viewportTracker(); // padding 256
+		const p = mockWalkPlatform();
+		const z1 = mockWs({ id: 'Z1' });
+		const zHalf = mockWs({ id: 'ZH' });
+		p.addSubscriber(z1, CURSOR);
+		p.addSubscriber(zHalf, CURSOR);
+		c.viewport(z1, 'board', { x: 0, y: 0, w: 1000, h: 1000, zoom: 1 }); // band -> 1256
+		c.viewport(zHalf, 'board', { x: 0, y: 0, w: 1000, h: 1000, zoom: 0.5 }); // pad 512 -> 1512
+
+		c.update(mockWs({ id: 'M' }), 'board', { x: 1400, y: 500 }, p);
+
+		expect(deliveredPositions(p, z1)).toEqual([]); // 1400 > 1256, culled
+		expect(deliveredPositions(p, zHalf)).toEqual(['1400,500']); // 1400 < 1512, delivered
+	});
+
+	it('delivers a coordinate-less frame to every subscriber (null-pos always visible)', () => {
+		const c = viewportTracker();
+		const p = mockWalkPlatform();
+		const viewer = mockWs({ id: 'V' });
+		p.addSubscriber(viewer, CURSOR);
+		c.viewport(viewer, 'board', { x: 0, y: 0, w: 1, h: 1, zoom: 1 }); // excludes ~everything
+
+		c.update(mockWs({ id: 'M' }), 'board', { stroke: 'abc' }, p); // no x/y -> position null
+
+		expect(p.sentTo(viewer).filter((e) => e.event === 'update')).toHaveLength(1);
+		expect(c.stats().culledEntriesDropped).toBe(0); // a null-pos entry is never "dropped"
+	});
+
+	it('a position extractor that throws degrades that entry to always-delivered', () => {
+		const c = viewportTracker({ position: () => { throw new Error('boom'); } });
+		const p = mockWalkPlatform();
+		const viewer = mockWs({ id: 'V' });
+		p.addSubscriber(viewer, CURSOR);
+		c.viewport(viewer, 'board', { x: 0, y: 0, w: 1, h: 1, zoom: 1 });
+
+		expect(() => c.update(mockWs({ id: 'M' }), 'board', { x: 5, y: 5 }, p)).not.toThrow();
+		expect(p.sentTo(viewer).filter((e) => e.event === 'update')).toHaveLength(1);
+	});
+
+	it('sends a single visible mover as update and several as bulk, none as nothing', () => {
+		vi.useFakeTimers();
+		const c = createCursor({ throttle: 0, topicThrottle: 16, viewport: { enabled: true }, select: (ud) => ({ id: ud.id }) });
+		const p = mockWalkPlatform();
+		const one = mockWs({ id: 'one' }); // viewport holds exactly one mover
+		const many = mockWs({ id: 'many' }); // holds several
+		const none = mockWs({ id: 'none' }); // holds zero
+		[one, many, none].forEach((ws) => p.addSubscriber(ws, CURSOR));
+		c.viewport(one, 'board', { x: 0, y: 0, w: 10, h: 10, zoom: 1 });
+		c.viewport(many, 'board', { x: 0, y: 0, w: 1000, h: 1000, zoom: 1 });
+		c.viewport(none, 'board', { x: 50000, y: 50000, w: 10, h: 10, zoom: 1 });
+
+		c.update(mockWs({ id: 'a' }), 'board', { x: 5, y: 5 }, p);
+		c.update(mockWs({ id: 'b' }), 'board', { x: 400, y: 400 }, p);
+		c.update(mockWs({ id: 'd' }), 'board', { x: 700, y: 700 }, p);
+		vi.advanceTimersByTime(16);
+
+		expect(p.sentTo(one).map((e) => e.event)).toEqual(['update']); // just (5,5)
+		const manyEv = p.sentTo(many);
+		expect(manyEv).toHaveLength(1);
+		expect(manyEv[0].event).toBe('bulk');
+		expect(manyEv[0].data).toHaveLength(3);
+		expect(p.sentTo(none)).toHaveLength(0); // empty slice -> no frame
+		vi.useRealTimers();
+	});
+
+	// Grid positions and a viewport rect; the visible set is whatever a flat
+	// bounds test yields, independent of whether the index was built.
+	function gridScenario(c, p, count) {
+		const viewer = mockWs({ id: 'V' });
+		p.addSubscriber(viewer, CURSOR);
+		c.viewport(viewer, 'board', { x: 0, y: 0, w: 2000, h: 2000, zoom: 1 });
+		const pad = 256;
+		const expected = [];
+		for (let i = 0; i < count; i++) {
+			const x = (i * 137) % 4000; // spread across and beyond the rect
+			const y = (i * 251) % 4000;
+			c.update(mockWs({ id: 'm' + i }), 'board', { x, y }, p);
+			if (x >= -pad && x <= 2000 + pad && y >= -pad && y <= 2000 + pad) expected.push(`${x},${y}`);
+		}
+		return { viewer, expected: expected.sort() };
+	}
+
+	it('direct path (below crossover) matches a brute-force bounds test', () => {
+		vi.useFakeTimers();
+		const c = createCursor({ throttle: 0, topicThrottle: 16, viewport: { enabled: true }, select: (ud) => ({ id: ud.id }) });
+		const p = mockWalkPlatform();
+		const { viewer, expected } = gridScenario(c, p, 20); // < 64 -> direct
+		vi.advanceTimersByTime(16);
+		expect(deliveredPositions(p, viewer)).toEqual(expected);
+		vi.useRealTimers();
+	});
+
+	it('indexed path (above crossover) matches the same brute-force bounds test', () => {
+		vi.useFakeTimers();
+		const c = createCursor({ throttle: 0, topicThrottle: 16, viewport: { enabled: true }, select: (ud) => ({ id: ud.id }) });
+		const p = mockWalkPlatform();
+		const { viewer, expected } = gridScenario(c, p, 600); // > 512 -> indexed
+		vi.advanceTimersByTime(16);
+		expect(deliveredPositions(p, viewer)).toEqual(expected);
+		vi.useRealTimers();
+	});
+
+	it('delivers everything (no blank board) for a degenerate wide viewport (deliver-all clamp)', () => {
+		vi.useFakeTimers();
+		const c = createCursor({ throttle: 0, topicThrottle: 16, viewport: { enabled: true }, select: (ud) => ({ id: ud.id }) });
+		const p = mockWalkPlatform();
+		const viewer = mockWs({ id: 'V' });
+		p.addSubscriber(viewer, CURSOR);
+		// A huge rect spans far more cells than there are movers -> clamp to all.
+		c.viewport(viewer, 'board', { x: 0, y: 0, w: 100000, h: 100000, zoom: 1 });
+		const COUNT = 600; // > 512 -> indexed path where the clamp lives
+		for (let i = 0; i < COUNT; i++) c.update(mockWs({ id: 'm' + i }), 'board', { x: i, y: i }, p);
+		// A mover far outside the rect a precise cull would drop: the clamp must
+		// still deliver it (over-deliver to bound cost), proving no blank board.
+		c.update(mockWs({ id: 'far' }), 'board', { x: 9999999, y: 9999999 }, p);
+		vi.advanceTimersByTime(16);
+		const bulks = p.sentTo(viewer).filter((e) => e.event === 'bulk');
+		expect(bulks).toHaveLength(1);
+		expect(bulks[0].data).toHaveLength(COUNT + 1); // all delivered, incl. the far one
+		vi.useRealTimers();
+	});
+
+	it('coalesces cross-task-boundary movers into one culled bulk', async () => {
+		vi.useFakeTimers();
+		const c = createCursor({ throttle: 0, topicThrottle: 16, viewport: { enabled: true }, select: (ud) => ({ id: ud.id }) });
+		const p = mockWalkPlatform();
+		const viewer = mockWs({ id: 'V' });
+		p.addSubscriber(viewer, CURSOR);
+		c.viewport(viewer, 'board', { x: 0, y: 0, w: 1000, h: 1000, zoom: 1 });
+
+		// Half inside the rect, half far outside, each across a microtask boundary.
+		for (let i = 0; i < 10; i++) {
+			const inside = i % 2 === 0;
+			c.update(mockWs({ id: 'm' + i }), 'board', { x: inside ? 100 + i : 90000, y: 100 }, p);
+			await Promise.resolve();
+		}
+		vi.advanceTimersByTime(16);
+		const bulks = p.sentTo(viewer).filter((e) => e.event === 'bulk');
+		expect(bulks).toHaveLength(1);
+		expect(bulks[0].data).toHaveLength(5); // only the 5 inside survive the cull
+		vi.useRealTimers();
+	});
+
+	it('broadcasts remove to every subscriber, even one culling that cursor', () => {
+		const c = viewportTracker();
+		const p = mockWalkPlatform();
+		const viewer = mockWs({ id: 'V' });
+		const mover = mockWs({ id: 'M' });
+		p.addSubscriber(viewer, CURSOR);
+		c.viewport(viewer, 'board', { x: 0, y: 0, w: 1, h: 1, zoom: 1 }); // excludes the mover
+		c.update(mover, 'board', { x: 9000, y: 9000 }, p);
+
+		c.remove(mover, p);
+		// remove is a shared-frame broadcast (never culled), so it reaches everyone.
+		expect(p.published.filter((e) => e.event === 'remove')).toHaveLength(1);
+	});
+
+	it('composes with backpressure: an over-cap reporter is skipped before culling', () => {
+		const c = createCursor({
+			throttle: 0, topicThrottle: 0,
+			viewport: { enabled: true },
+			backpressure: { enabled: true, maxBufferedBytes: 1024 },
+			select: (ud) => ({ id: ud.id })
+		});
+		const p = mockWalkPlatform();
+		const healthy = mockWs({ id: 'H' });
+		const slow = mockWs({ id: 'S' });
+		[healthy, slow].forEach((ws) => p.addSubscriber(ws, CURSOR));
+		c.viewport(healthy, 'board', { x: 0, y: 0, w: 1000, h: 1000, zoom: 1 });
+		c.viewport(slow, 'board', { x: 0, y: 0, w: 1000, h: 1000, zoom: 1 });
+		p.setBuffered(slow, 99999);
+
+		c.update(mockWs({ id: 'M' }), 'board', { x: 500, y: 500 }, p);
+
+		expect(deliveredPositions(p, healthy)).toEqual(['500,500']);
+		expect(p.sentTo(slow)).toHaveLength(0);
+		expect(c.stats().bpSkips).toBe(1);
+	});
+
+	it('tears down per-flush scratch and viewports on clear(); the tracker still works after', () => {
+		const c = viewportTracker();
+		const p = mockWalkPlatform();
+		const viewer = mockWs({ id: 'V' });
+		p.addSubscriber(viewer, CURSOR);
+		c.viewport(viewer, 'board', { x: 0, y: 0, w: 1000, h: 1000, zoom: 1 });
+		c.update(mockWs({ id: 'M' }), 'board', { x: 100, y: 100 }, p);
+		expect(c.stats().viewportsReported).toBe(1);
+
+		c.clear();
+		expect(c.stats().viewportsReported).toBe(0);
+		expect(c.viewportFor(viewer, 'board')).toBeNull();
+
+		// Re-arm and flush again - scratch was reset, not corrupted.
+		const v2 = mockWs({ id: 'V2' });
+		p.addSubscriber(v2, CURSOR);
+		p.reset();
+		c.viewport(v2, 'board', { x: 0, y: 0, w: 1000, h: 1000, zoom: 1 });
+		c.update(mockWs({ id: 'M2' }), 'board', { x: 200, y: 200 }, p);
+		expect(deliveredPositions(p, v2)).toEqual(['200,200']);
 	});
 });

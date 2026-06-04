@@ -51,6 +51,30 @@ const EVENTS = Object.freeze({
 });
 
 /**
+ * Mover count past which a flush builds the transient spatial index instead of
+ * scanning every entry per subscriber. Below it, a flat bounds test over every
+ * mover is cheaper: a cell probe is a Map lookup (several times the cost of an
+ * inline bounds compare) and a viewport always walks a fixed cell span, so the
+ * index only repays its per-cell probes once the per-subscriber mover scan it
+ * replaces is large. The bench/30 sweep puts the crossover near here for the
+ * default cell/padding; the index then earns a multiple-x CPU win at the
+ * thousands-of-simultaneous-movers tail.
+ */
+const INDEX_CROSSOVER = 512;
+
+/**
+ * Pack a grid cell coordinate pair into one numeric key. Covers +-32k cells per
+ * axis (at the default 256-unit cell, +-8.3M board units); a board beyond that
+ * range sets a larger `cell`. A key collision can only over-deliver - every
+ * pulled entry is re-tested against the exact bounds - never blank a region.
+ * @param {number} cx
+ * @param {number} cy
+ */
+function packCell(cx, cy) {
+	return ((cx & 0xffff) << 16) | (cy & 0xffff);
+}
+
+/**
  * @typedef {Object} CursorOptions
  * @property {number} [throttle=16] - Minimum milliseconds between broadcasts
  *   per user per topic. A trailing-edge timer fires to ensure the final
@@ -157,6 +181,54 @@ export function createCursor(options = {}) {
 	const maxTopicLength = options.maxTopicLength ?? 256;
 	const maxDataBytes = options.maxDataBytes ?? 8192;
 
+	// Backpressure-aware per-subscriber drop (opt-in). When enabled, a topic's
+	// flush switches from the shared-frame fan-out to a per-subscriber walk that
+	// skips any subscriber whose queued bytes exceed `maxBufferedBytes` for the
+	// current flush. Cursors are latest-value, so a skipped subscriber catches up
+	// on the next flush with the latest coalesced positions - it renders one
+	// cadence later, never accumulating a backlog. A stalled consumer's write
+	// queue can therefore never exceed the cap plus one flush of cursor bytes.
+	// Off by default: the zero-config path keeps the shared-frame fan-out and
+	// pays nothing.
+	// `viewport: true` / `backpressure: true` are shorthand for `{ enabled: true }`
+	// with defaults, so the zero-knob path is one token. A bare object with tuning
+	// keys but no `enabled` is almost certainly a forgotten `enabled: true`, so it
+	// throws below rather than silently culling nothing.
+	const bp = options.backpressure === true ? { enabled: true } : (options.backpressure || {});
+	const vp = options.viewport === true ? { enabled: true } : (options.viewport || {});
+
+	const bpEnabled = bp.enabled === true;
+	const bpMaxBufferedBytes = bp.maxBufferedBytes ?? 1024 * 1024;
+
+	// Viewport culling (opt-in). When enabled, the per-subscriber walk sends each
+	// reporting subscriber only the moving cursors inside its last reported
+	// viewport rect (plus a padding overscan). A subscriber that never reports a
+	// rect is treated as whole-board and is never culled - the per-subscriber
+	// opt-in that makes culling safe by construction. The reported rect is in the
+	// board's own coordinate space (the client reports the visible board region),
+	// so its width/height bound the visible area directly; only the overscan is
+	// widened by 1/zoom when zoomed out so it stays roughly constant on screen.
+	const viewportEnabled = vp.enabled === true;
+	const viewportPadding = vp.padding ?? 256;
+	const viewportCell = vp.cell ?? 256;
+
+	// Read {x, y} out of the app's cursor `data` for culling. The default reads
+	// finite `data.x` / `data.y`; an app whose payload nests coordinates
+	// elsewhere overrides it. Returning null (or throwing) opts a single frame
+	// out of culling - it is delivered to every subscriber - so a coordinate-less
+	// or malformed frame is never silently culled to nothing.
+	const position = typeof options.position === 'function'
+		? options.position
+		: (data) =>
+				data && typeof data.x === 'number' && typeof data.y === 'number'
+					&& Number.isFinite(data.x) && Number.isFinite(data.y)
+					? { x: data.x, y: data.y }
+					: null;
+
+	// Single boolean the flush hot path branches on. When false, the flush takes
+	// the unchanged shared-frame path; when true it takes the per-subscriber walk.
+	const perSubscriberWalk = bpEnabled || viewportEnabled;
+
 	// Binary wire codec (cursor.protocol:2 full-string / :3 short-id dict), built
 	// by the shared createCursorWireCodec factory so the cluster-backed variant
 	// (svelte-adapter-uws-extensions redis/cursor) builds the identical codec.
@@ -185,6 +257,39 @@ export function createCursor(options = {}) {
 	}
 	if (!Number.isInteger(maxDataBytes) || maxDataBytes < 1) {
 		throw new Error('cursor: maxDataBytes must be a positive integer');
+	}
+	for (const name of ['viewport', 'backpressure']) {
+		const val = options[name];
+		if (val !== undefined && val !== null && typeof val !== 'boolean' && typeof val !== 'object') {
+			throw new Error(`cursor: ${name} must be true or an options object`);
+		}
+	}
+	if (bp.maxBufferedBytes !== undefined && bp.enabled === undefined) {
+		throw new Error('cursor: backpressure.maxBufferedBytes is set but backpressure.enabled is not - did you mean { enabled: true }?');
+	}
+	if (
+		bp.maxBufferedBytes !== undefined &&
+		(!Number.isInteger(bpMaxBufferedBytes) || bpMaxBufferedBytes < 1)
+	) {
+		throw new Error('cursor: backpressure.maxBufferedBytes must be a positive integer');
+	}
+	if (options.position !== undefined && typeof options.position !== 'function') {
+		throw new Error('cursor: position must be a function');
+	}
+	if ((vp.padding !== undefined || vp.cell !== undefined) && vp.enabled === undefined) {
+		throw new Error('cursor: viewport.padding/cell is set but viewport.enabled is not - did you mean { enabled: true }?');
+	}
+	if (
+		vp.padding !== undefined &&
+		(typeof viewportPadding !== 'number' || !Number.isFinite(viewportPadding) || viewportPadding < 0)
+	) {
+		throw new Error('cursor: viewport.padding must be a non-negative number');
+	}
+	if (
+		vp.cell !== undefined &&
+		(typeof viewportCell !== 'number' || !Number.isFinite(viewportCell) || viewportCell <= 0)
+	) {
+		throw new Error('cursor: viewport.cell must be a positive number');
 	}
 
 	/** Auto-incrementing connection key. */
@@ -244,6 +349,39 @@ export function createCursor(options = {}) {
 	const subViewport = new Map();
 
 	/**
+	 * Count of distinct subscribers currently reporting a viewport per topic.
+	 * Lets a viewport-enabled topic with zero reporters keep the shared-frame
+	 * fan-out instead of paying the O(connections) per-subscriber walk for the
+	 * same bytes - so enabling culling globally costs nothing on topics whose
+	 * clients have not (or never) reported. Maintained alongside `subViewport`:
+	 * incremented when a `(subscriber, topic)` rect is first recorded, decremented
+	 * when the subscriber is removed or evicted, cleared in `clear()`.
+	 * @type {Map<string, number>}
+	 */
+	const topicReporters = new Map();
+
+	/** Record that a subscriber started reporting a viewport for a topic. */
+	function addReporter(topic) {
+		topicReporters.set(topic, (topicReporters.get(topic) || 0) + 1);
+	}
+	/** Record that a subscriber stopped reporting a viewport for a topic. */
+	function dropReporter(topic) {
+		const n = topicReporters.get(topic);
+		if (n === undefined) return;
+		if (n <= 1) topicReporters.delete(topic);
+		else topicReporters.set(topic, n - 1);
+	}
+	/**
+	 * Whether a flush for `topic` must take the per-subscriber walk: always when
+	 * backpressure is on (it needs per-socket queue checks), and when culling is
+	 * on only once at least one subscriber has reported a viewport for the topic.
+	 * @param {string} topic
+	 */
+	function topicNeedsWalk(topic) {
+		return bpEnabled || topicReporters.get(topic) > 0;
+	}
+
+	/**
 	 * Single tracker-wide timer. Always points at the next earliest topic
 	 * deadline (or null when idle). Replaces the previous per-topic
 	 * setTimeout pattern: N pending timers -> 1 pending timer regardless
@@ -265,6 +403,57 @@ export function createCursor(options = {}) {
 	let flushCount = 0;
 
 	/**
+	 * Per-subscriber-walk observability (lifetime counters, like `flushCount`).
+	 * `perSubscriberFlushes` is how many flushes took the per-subscriber walk
+	 * rather than the shared frame; `bpSkips` is how often the backpressure cap
+	 * bit. Counts only - no topic names, keys, or coordinates.
+	 */
+	let perSubscriberFlushes = 0;
+	let bpSkips = 0;
+	let culledEntriesDropped = 0;
+
+	/**
+	 * Per-flush scratch, reused every flush so the per-subscriber walk allocates
+	 * no new collections per flush. Factory-closure scoped (one set per tracker)
+	 * so two trackers in one process never alias each other's scratch.
+	 *
+	 * - `flushItems`: the single materialization of a flush's dirty entries,
+	 *   `[{ key, data }, ...]`, shared (read-only) across that flush's subscribers.
+	 * - `immediateOne`: a one-entry view used by the `topicThrottle: 0` immediate
+	 *   path so it can route through the same walk as the coalesced path.
+	 * - `inDeliver`: re-entrancy guard. The in-memory send is synchronous and
+	 *   never re-enters delivery, but a nested call would corrupt `flushItems`;
+	 *   it degrades to the shared-frame path instead.
+	 * @type {Array<{ key: string, data: any }>}
+	 */
+	const flushItems = [];
+	/**
+	 * Viewport-culling scratch, parallel to `flushItems` and reused every flush.
+	 * `flushPos[i]` is item i's resolved `{ x, y }` (or null when the position
+	 * extractor could not place it - such an item is always delivered).
+	 * `alwaysVisible` holds the indices of those null-position items.
+	 * `flushCells` is the transient spatial index (packed cell key -> item
+	 * indices), built only past INDEX_CROSSOVER and emptied back into `cellPool`
+	 * after the walk so a dense flush recycles its bucket arrays. `cullOut` is
+	 * the per-subscriber slice handed to the wire.
+	 * @type {Array<{ x: number, y: number } | null>}
+	 */
+	const flushPos = [];
+	/** @type {number[]} */
+	const alwaysVisible = [];
+	/** @type {Map<number, number[]>} */
+	const flushCells = new Map();
+	/** @type {number[][]} */
+	const cellPool = [];
+	/** @type {Array<{ key: string, data: any }>} */
+	const cullOut = [];
+	/** Reused padded-bounds object so the per-subscriber cull allocates nothing. */
+	const bounds = { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+	/** @type {Map<string, { data: any, platform: any }>} */
+	const immediateOne = new Map();
+	let inDeliver = false;
+
+	/**
 	 * Get or create ws state and return the connection key + user data.
 	 * @param {any} ws
 	 * @returns {{ key: string, user: any, topics: Set<string> }}
@@ -278,7 +467,11 @@ export function createCursor(options = {}) {
 					// Tear down the evicted connection's viewport too, keyed by
 					// its state key, so subViewport can never outgrow wsState.
 					const evicted = wsState.get(oldest);
-					if (evicted) subViewport.delete(evicted.key);
+					if (evicted) {
+						const byTopic = subViewport.get(evicted.key);
+						if (byTopic) for (const t of byTopic.keys()) dropReporter(t);
+						subViewport.delete(evicted.key);
+					}
 					wsState.delete(oldest);
 				}
 			}
@@ -372,12 +565,30 @@ export function createCursor(options = {}) {
 	/**
 	 * Flush all coalesced entries for a topic. One entry -> `update`,
 	 * many entries -> single `bulk` array.
+	 *
+	 * When a per-subscriber reducer is enabled the flush switches to a walk
+	 * over the topic's subscribers (see {@link deliverFlush}); otherwise it
+	 * takes the unchanged shared-frame path so the zero-config deployment keeps
+	 * the single fan-out and pays nothing.
 	 * @param {string} topic
 	 * @param {Map<string, { data: any, platform: any }>} dirty
 	 */
 	function flushDirty(topic, dirty) {
 		if (dirty.size === 0) return;
 		flushCount++;
+		if (perSubscriberWalk && topicNeedsWalk(topic)) {
+			let platform = null;
+			for (const v of dirty.values()) { platform = v.platform; break; }
+			if (!platform) return;
+			if (typeof platform.forEachSubscriber === 'function') {
+				deliverFlush(topic, dirty, platform);
+			} else {
+				// Minimal or older host without the per-subscriber primitive:
+				// degrade to the shared frame rather than throw.
+				legacyEmit(topic, dirty, platform);
+			}
+			return;
+		}
 		if (dirty.size === 1) {
 			const [k, v] = dirty.entries().next().value;
 			doBroadcast(topic, k, v.data, v.platform);
@@ -392,6 +603,206 @@ export function createCursor(options = {}) {
 		if (flushPlatform) {
 			emit(TOPIC_PREFIX + topic, EVENTS.BULK, entries, flushPlatform);
 		}
+	}
+
+	/**
+	 * Per-subscriber flush walk. Used when a per-subscriber reducer (backpressure)
+	 * is enabled. Materializes the flush's entries once into shared scratch, then
+	 * walks the topic's subscribers via `platform.forEachSubscriber`, skipping any
+	 * whose queued bytes exceed the backpressure cap, and sends each survivor the
+	 * frame via the per-target `emitTo` (which keeps the binary-wire / JSON split
+	 * and swallows the closed-WS race). A single-entry frame is an `update`,
+	 * multiple is a `bulk` - byte-identical to the shared-frame path, so an
+	 * existing client merges a thinned stream exactly as it merges a normal one.
+	 * @param {string} topic
+	 * @param {Map<string, { data: any, platform: any }>} dirty
+	 * @param {import('../../index.js').Platform} platform
+	 */
+	function deliverFlush(topic, dirty, platform) {
+		// Re-entrancy guard: a nested delivery would corrupt the shared scratch.
+		if (inDeliver) { legacyEmit(topic, dirty, platform); return; }
+		inDeliver = true;
+		try {
+			flushItems.length = 0;
+			if (viewportEnabled) { flushPos.length = 0; alwaysVisible.length = 0; }
+			for (const [k, v] of dirty) {
+				flushItems.push({ key: k, data: v.data });
+				if (viewportEnabled) {
+					let pos = null;
+					// A buggy or slow app extractor must not crash the flush.
+					try { pos = position(v.data); } catch { pos = null; }
+					if (pos && (typeof pos.x !== 'number' || typeof pos.y !== 'number'
+						|| !Number.isFinite(pos.x) || !Number.isFinite(pos.y))) {
+						pos = null;
+					}
+					flushPos.push(pos);
+					if (pos === null) alwaysVisible.push(flushItems.length - 1);
+				}
+			}
+			const n = flushItems.length;
+			if (n === 0) return;
+			const fullTopic = TOPIC_PREFIX + topic;
+			const indexed = viewportEnabled && n >= INDEX_CROSSOVER;
+			if (indexed) buildFlushCells(n);
+			platform.forEachSubscriber(fullTopic, (ws) => {
+				if (bpEnabled && platform.bufferedAmount(ws) > bpMaxBufferedBytes) {
+					bpSkips++;
+					return;
+				}
+				let slice = flushItems;
+				if (viewportEnabled) {
+					const rect = lookupViewport(ws, topic);
+					// A non-reporter (null rect) is whole-board and never culled.
+					if (rect !== null) slice = indexed ? cullIndexed(rect) : cullDirect(rect);
+				}
+				const len = slice.length;
+				// Count entries withheld by the cull, including when the whole
+				// slice is culled away (an empty frame is not sent at all).
+				if (slice !== flushItems) culledEntriesDropped += n - len;
+				if (len === 0) return; // nothing visible to this subscriber this flush
+				if (len === 1) {
+					emitTo(ws, fullTopic, EVENTS.UPDATE, slice[0], platform);
+				} else {
+					emitTo(ws, fullTopic, EVENTS.BULK, slice, platform);
+				}
+			});
+			perSubscriberFlushes++;
+			if (indexed) releaseFlushCells();
+		} finally {
+			inDeliver = false;
+		}
+	}
+
+	/**
+	 * Read a subscriber's last reported viewport rect for a topic, or null if it
+	 * never reported one. The null return is the per-subscriber opt-in that keeps
+	 * culling safe by construction. Does not create `wsState`.
+	 * @param {any} ws
+	 * @param {string} topic
+	 * @returns {{ x: number, y: number, w: number, h: number, zoom: number } | null}
+	 */
+	function lookupViewport(ws, topic) {
+		const state = wsState.get(ws);
+		if (!state) return null;
+		const byTopic = subViewport.get(state.key);
+		return byTopic ? (byTopic.get(topic) ?? null) : null;
+	}
+
+	/**
+	 * Build the transient spatial index over this flush's positioned movers.
+	 * Bucket arrays are drawn from `cellPool` and returned by
+	 * {@link releaseFlushCells} after the walk, so a dense flush recycles them.
+	 * @param {number} n - flushItems.length
+	 */
+	function buildFlushCells(n) {
+		releaseFlushCells();
+		for (let i = 0; i < n; i++) {
+			const pos = flushPos[i];
+			if (pos === null) continue; // null-pos delivered via alwaysVisible
+			const ck = packCell(Math.floor(pos.x / viewportCell), Math.floor(pos.y / viewportCell));
+			let bucket = flushCells.get(ck);
+			if (!bucket) {
+				bucket = cellPool.pop() || [];
+				bucket.length = 0;
+				flushCells.set(ck, bucket);
+			}
+			bucket.push(i);
+		}
+	}
+
+	/** Return this flush's bucket arrays to the pool and empty the index. */
+	function releaseFlushCells() {
+		for (const bucket of flushCells.values()) cellPool.push(bucket);
+		flushCells.clear();
+	}
+
+	/**
+	 * Resolve a reported rect's padded board bounds. Width/height are board
+	 * units already (the client reports the visible board region), so only the
+	 * overscan is widened by 1/zoom when zoomed out, keeping it roughly constant
+	 * on screen. Writes into the shared `bounds` object to avoid per-call alloc.
+	 * @param {{ x: number, y: number, w: number, h: number, zoom: number }} rect
+	 */
+	function rectBounds(rect) {
+		const pad = rect.zoom < 1 ? viewportPadding / rect.zoom : viewportPadding;
+		bounds.minX = rect.x - pad;
+		bounds.minY = rect.y - pad;
+		bounds.maxX = rect.x + rect.w + pad;
+		bounds.maxY = rect.y + rect.h + pad;
+		return bounds;
+	}
+
+	/**
+	 * Flat bounds test over every mover this flush. Used below INDEX_CROSSOVER,
+	 * where the dirty set is small enough that building an index does not pay.
+	 * @param {{ x: number, y: number, w: number, h: number, zoom: number }} rect
+	 * @returns {Array<{ key: string, data: any }>}
+	 */
+	function cullDirect(rect) {
+		const b = rectBounds(rect);
+		cullOut.length = 0;
+		for (let i = 0; i < flushItems.length; i++) {
+			const pos = flushPos[i];
+			if (pos === null) { cullOut.push(flushItems[i]); continue; }
+			if (pos.x >= b.minX && pos.x <= b.maxX && pos.y >= b.minY && pos.y <= b.maxY) {
+				cullOut.push(flushItems[i]);
+			}
+		}
+		return cullOut;
+	}
+
+	/**
+	 * Spatial-index cull: walk only the cells the viewport covers and bounds-test
+	 * their movers. Per-subscriber cost is O(visible cells + movers in them), not
+	 * O(all movers). A viewport spanning more cells than the flush has movers
+	 * sees ~the whole board, so it delivers everything (the deliver-all clamp),
+	 * bounding worst-case cost at O(movers).
+	 * @param {{ x: number, y: number, w: number, h: number, zoom: number }} rect
+	 * @returns {Array<{ key: string, data: any }>}
+	 */
+	function cullIndexed(rect) {
+		const b = rectBounds(rect);
+		const cx0 = Math.floor(b.minX / viewportCell);
+		const cy0 = Math.floor(b.minY / viewportCell);
+		const cx1 = Math.floor(b.maxX / viewportCell);
+		const cy1 = Math.floor(b.maxY / viewportCell);
+		if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) > flushItems.length) return flushItems;
+		cullOut.length = 0;
+		for (let a = 0; a < alwaysVisible.length; a++) cullOut.push(flushItems[alwaysVisible[a]]);
+		for (let cy = cy0; cy <= cy1; cy++) {
+			for (let cx = cx0; cx <= cx1; cx++) {
+				const bucket = flushCells.get(packCell(cx, cy));
+				if (!bucket) continue;
+				for (let bi = 0; bi < bucket.length; bi++) {
+					const i = bucket[bi];
+					const pos = flushPos[i];
+					if (pos.x >= b.minX && pos.x <= b.maxX && pos.y >= b.minY && pos.y <= b.maxY) {
+						cullOut.push(flushItems[i]);
+					}
+				}
+			}
+		}
+		return cullOut;
+	}
+
+	/**
+	 * Shared-frame fallback used when a per-subscriber reducer is enabled but the
+	 * platform does not expose `forEachSubscriber` (a minimal or older host, or
+	 * the unit-test mock). Reproduces today's shared-frame shape so enabling an
+	 * option on such a host degrades to no reduction rather than throwing.
+	 * @param {string} topic
+	 * @param {Map<string, { data: any, platform: any }>} dirty
+	 * @param {import('../../index.js').Platform} platform
+	 */
+	function legacyEmit(topic, dirty, platform) {
+		if (dirty.size === 1) {
+			const [k, v] = dirty.entries().next().value;
+			doBroadcast(topic, k, v.data, platform);
+			return;
+		}
+		const entries = [];
+		for (const [k, v] of dirty) entries.push({ key: k, data: v.data });
+		emit(TOPIC_PREFIX + topic, EVENTS.BULK, entries, platform);
 	}
 
 	/**
@@ -475,7 +886,17 @@ export function createCursor(options = {}) {
 	 */
 	function broadcast(topic, key, data, platform) {
 		if (topicThrottleMs <= 0) {
-			doBroadcast(topic, key, data, platform);
+			// The immediate path bypasses the coalesce window entirely, so the
+			// per-subscriber walk must engage here too or backpressure/culling
+			// silently no-op for `topicThrottle: 0` apps. Route a single mover
+			// through the same walk via a one-entry view.
+			if (perSubscriberWalk && topicNeedsWalk(topic) && typeof platform.forEachSubscriber === 'function') {
+				immediateOne.clear();
+				immediateOne.set(key, { data, platform });
+				deliverFlush(topic, immediateOne, platform);
+			} else {
+				doBroadcast(topic, key, data, platform);
+			}
 			return;
 		}
 
@@ -602,6 +1023,8 @@ export function createCursor(options = {}) {
 				}
 			}
 
+			const byTopic = subViewport.get(state.key);
+			if (byTopic) for (const t of byTopic.keys()) dropReporter(t);
 			subViewport.delete(state.key);
 			wsState.delete(ws);
 		},
@@ -657,6 +1080,9 @@ export function createCursor(options = {}) {
 			const state = getWsState(ws);
 			let byTopic = subViewport.get(state.key);
 			if (!byTopic) { byTopic = new Map(); subViewport.set(state.key, byTopic); }
+			// First rect this subscriber reports for the topic flips it onto the
+			// per-subscriber walk; a re-report of an existing topic does not.
+			if (!byTopic.has(topic)) addReporter(topic);
 			byTopic.set(topic, { x, y, w, h, zoom });
 		},
 
@@ -670,9 +1096,7 @@ export function createCursor(options = {}) {
 		 * @returns {{ x: number, y: number, w: number, h: number, zoom: number } | null}
 		 */
 		viewportFor(ws, topic) {
-			const state = wsState.get(ws);
-			if (!state) return null;
-			return subViewport.get(state.key)?.get(topic) ?? null;
+			return lookupViewport(ws, topic);
 		},
 
 		clear() {
@@ -686,8 +1110,20 @@ export function createCursor(options = {}) {
 			topics.clear();
 			topicFlush.clear();
 			subViewport.clear();
+			topicReporters.clear();
 			wsState.clear();
 			connCounter = 0;
+			// Release per-flush scratch so a reset reclaims the last flush's
+			// references (the lifetime stats counters are intentionally left
+			// alone, matching `flushCount`).
+			flushItems.length = 0;
+			flushPos.length = 0;
+			alwaysVisible.length = 0;
+			cullOut.length = 0;
+			cellPool.length = 0;
+			flushCells.clear();
+			immediateOne.clear();
+			inDeliver = false;
 		},
 
 		/**
@@ -715,7 +1151,10 @@ export function createCursor(options = {}) {
 				driftMaxMs: driftMax,
 				dirtyTopicsCurrent: dirtyTopics.size,
 				activeTopicsTotal: topics.size,
-				viewportsReported: subViewport.size
+				viewportsReported: subViewport.size,
+				perSubscriberFlushes,
+				bpSkips,
+				culledEntriesDropped
 			};
 		},
 

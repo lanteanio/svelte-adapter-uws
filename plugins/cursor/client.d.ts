@@ -16,30 +16,47 @@ export interface CursorPosition<UserInfo = unknown, Data = unknown> {
  * streams; entries are emitted only after both user and position are
  * known.
  *
+ * Pass a `viewport` source to opt this subscriber into server-side culling: the
+ * store reports the visible region automatically (on scroll, resize, zoom, and
+ * late mount) while subscribed, so you write no `reportViewport` wiring yourself.
+ *
  * @example
  * ```svelte
  * <script>
  *   import { cursor, move } from 'svelte-adapter-uws/plugins/cursor/client';
  *
- *   const cursors = cursor('canvas');
- *
- *   function onmousemove(e) {
- *     move('canvas', { x: e.clientX, y: e.clientY });
- *   }
+ *   let board;
+ *   // Auto-reports board's visible region; omit `viewport` to see all cursors.
+ *   const cursors = cursor('canvas', { viewport: () => board });
  * </script>
  *
- * <div on:mousemove={onmousemove}>
+ * <div bind:this={board}
+ *      onpointermove={(e) => move('canvas', { x: e.clientX + board.scrollLeft, y: e.clientY + board.scrollTop })}>
  *   {#each [...$cursors] as [key, { user, data }] (key)}
- *     <div style="left: {data.x}px; top: {data.y}px">
- *       {user.name}
- *     </div>
+ *     <div style="left: {data.x}px; top: {data.y}px">{user.name}</div>
  *   {/each}
  * </div>
  * ```
  */
 export function cursor<UserInfo = unknown, Data = unknown>(
 	topic: string,
-	options?: { maxAge?: number }
+	options?: {
+		/** Drop a cursor that has not updated within this many ms. */
+		maxAge?: number;
+		/**
+		 * Opt into server-side viewport culling. Pass a scroll-container element,
+		 * an explicit `{ x, y, w, h, zoom? }` rect, or a getter returning either
+		 * (a getter handles a late-bound `bind:this` element). While subscribed,
+		 * the store reports the resolved region whenever it changes - covering
+		 * scroll, resize, zoom, and mount with no manual wiring. The reported rect
+		 * and your `move()` coordinates must share one coordinate space (the
+		 * board's). Omit it and the subscriber sees all cursors (never culled).
+		 */
+		viewport?:
+			| Element
+			| { x: number; y: number; w: number; h: number; zoom?: number }
+			| (() => Element | { x: number; y: number; w: number; h: number; zoom?: number } | null | undefined);
+	}
 ): Readable<Map<string, CursorPosition<UserInfo, Data>>>;
 
 /**

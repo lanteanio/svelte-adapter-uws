@@ -99,7 +99,12 @@ export function cursor(topic, options) {
 	const cacheKey = maxAge > 0 ? topic + '\0' + maxAge : topic;
 
 	const cached = cursorStores.get(cacheKey);
-	if (cached) return cached;
+	if (cached) {
+		// A later caller can supply the viewport source the first did not (e.g. a
+		// board-owner component mounting after a plain reader). Last writer wins.
+		if (options?.viewport) cached._setViewportSource(options.viewport);
+		return cached;
+	}
 
 	const cursorTopic = TOPIC_PREFIX + topic;
 
@@ -117,6 +122,42 @@ export function cursor(topic, options) {
 	let sweepTimer = null;
 	let refCount = 0;
 	let cancelled = false;
+
+	// Optional viewport auto-reporting. When a `viewport` source is given, the
+	// store polls it on each animation frame while subscribed and calls
+	// `reportViewport` only when the resolved rect actually changes - so scroll /
+	// resize / zoom / late mount are all covered with no per-app wiring and no
+	// redundant sends. Plain `cursor(topic)` usage never starts the poll.
+	let viewportSource = options?.viewport ?? null;
+	/** @type {ReturnType<typeof scheduleFrame> | null} */
+	let viewportRaf = null;
+	let viewportLastSig = '';
+
+	function startViewportPoll() {
+		if (typeof window === 'undefined' || !viewportSource || viewportRaf !== null) return;
+		const tick = () => {
+			const rect = resolveViewportRect(viewportSource);
+			if (rect) {
+				const sig = rect.x + ',' + rect.y + ',' + rect.w + ',' + rect.h + ',' + rect.zoom;
+				if (sig !== viewportLastSig) {
+					viewportLastSig = sig;
+					// The poll IS the rAF cadence, so send the frame directly rather
+					// than routing through reportViewport's own rAF-coalesce hop.
+					try { connect().send({ type: 'cursor-viewport', topic, rect }); } catch { /* not connected yet */ }
+				}
+			}
+			// Keep polling even when unresolved (a getter whose element is not yet
+			// bound) so a late mount starts reporting automatically.
+			viewportRaf = scheduleFrame(tick);
+		};
+		viewportRaf = scheduleFrame(tick);
+	}
+
+	function stopViewportPoll() {
+		cancelFrame(viewportRaf);
+		viewportRaf = null;
+		viewportLastSig = '';
+	}
 
 	function emitOutput() {
 		const merged = new Map();
@@ -210,8 +251,13 @@ export function cursor(topic, options) {
 		statusUnsub = status.subscribe((s) => {
 			if (s === 'open' && !cancelled) {
 				connect().send({ type: 'cursor-snapshot', topic });
+				// Re-establish the viewport after a (re)connect so a reconnecting
+				// tab is not culled to an empty slice before its next report.
+				viewportLastSig = '';
 			}
 		});
+
+		startViewportPoll();
 	}
 
 	function stopListening() {
@@ -228,6 +274,7 @@ export function cursor(topic, options) {
 			clearInterval(sweepTimer);
 			sweepTimer = null;
 		}
+		stopViewportPoll();
 		positionMap = new Map();
 		userMap = new Map();
 		timestamps.clear();
@@ -247,6 +294,15 @@ export function cursor(topic, options) {
 					cursorStores.delete(cacheKey);
 				}
 			};
+		},
+		/**
+		 * @internal Adopt a viewport source supplied by a later `cursor()` call,
+		 * starting the poll if the store is already subscribed.
+		 */
+		_setViewportSource(src) {
+			viewportSource = src;
+			viewportLastSig = '';
+			if (refCount > 0) startViewportPoll();
 		}
 	};
 
@@ -273,6 +329,12 @@ let moveScheduled = false;
 function scheduleFrame(cb) {
 	if (typeof requestAnimationFrame !== 'undefined') return requestAnimationFrame(cb);
 	return setTimeout(cb, 16);
+}
+
+function cancelFrame(handle) {
+	if (handle == null) return;
+	if (typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(handle);
+	else clearTimeout(handle);
 }
 
 /**
@@ -360,6 +422,14 @@ function resolveViewportRect(source) {
  * via `requestAnimationFrame` so a scroll burst collapses to one send per
  * repaint; multi-topic callers do not clobber each other.
  *
+ * Most apps do not call this directly - pass `{ viewport }` to `cursor()` and
+ * the store reports automatically. Use this for a source `cursor()` cannot
+ * observe (e.g. a custom transform you recompute yourself).
+ *
+ * The reported rect and your `move()` data must share one coordinate space (the
+ * board's): a scroll container reports `scrollLeft`/`scrollTop` board offsets,
+ * so send board coordinates (`clientX + scrollLeft`), not raw screen `clientX`.
+ *
  * No-op in non-browser environments and for an unresolvable source.
  *
  * @param {string} topic
@@ -370,16 +440,10 @@ function resolveViewportRect(source) {
  * @example
  * ```svelte
  * <script>
- *   import { cursor, move, reportViewport } from 'svelte-adapter-uws/plugins/cursor/client';
- *   let board;
- *   const cursors = cursor('board');
+ *   import { reportViewport } from 'svelte-adapter-uws/plugins/cursor/client';
+ *   // A virtualized canvas with its own pan/zoom transform:
+ *   $effect(() => reportViewport('board', { x: panX, y: panY, w: viewW, h: viewH, zoom }));
  * </script>
- *
- * <div bind:this={board}
- *      onscroll={() => reportViewport('board', board)}
- *      onpointermove={(e) => move('board', { x: e.clientX, y: e.clientY })}>
- *   ...
- * </div>
  * ```
  */
 export function reportViewport(topic, source) {

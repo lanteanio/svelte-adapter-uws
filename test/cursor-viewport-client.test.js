@@ -134,4 +134,60 @@ describe('cursor client reportViewport', () => {
 
 		expect(viewportFrames(mock, before)).toHaveLength(0);
 	});
+
+	it('cursor(topic, { viewport }) auto-reports on change only, and stops on teardown', async () => {
+		clientModule.connect({ path: '/ws' });
+		await flush();
+		const mock = MockWebSocket._last;
+		const before = mock._sent.length;
+
+		let rect = { x: 0, y: 0, w: 100, h: 100, zoom: 1 };
+		const unsub = cursorClient.cursor('autoboard', { viewport: () => rect }).subscribe(() => {});
+		await flush();
+
+		// First resolved rect is reported.
+		let frames = viewportFrames(mock, before).filter((f) => f.topic === 'autoboard');
+		expect(frames).toHaveLength(1);
+		expect(frames[0].rect).toEqual({ x: 0, y: 0, w: 100, h: 100, zoom: 1 });
+
+		// Unchanged rect across frames -> no redundant send.
+		let mid = mock._sent.length;
+		await flush();
+		expect(viewportFrames(mock, mid).filter((f) => f.topic === 'autoboard')).toHaveLength(0);
+
+		// Changed rect -> exactly one new frame.
+		rect = { x: 40, y: 50, w: 100, h: 100, zoom: 1 };
+		await flush();
+		frames = viewportFrames(mock, mid).filter((f) => f.topic === 'autoboard');
+		expect(frames).toHaveLength(1);
+		expect(frames[0].rect).toEqual({ x: 40, y: 50, w: 100, h: 100, zoom: 1 });
+
+		// Teardown stops the poll.
+		unsub();
+		const end = mock._sent.length;
+		rect = { x: 900, y: 900, w: 100, h: 100, zoom: 1 };
+		await flush();
+		expect(viewportFrames(mock, end).filter((f) => f.topic === 'autoboard')).toHaveLength(0);
+	});
+
+	it('cursor(topic, { viewport: () => el }) waits for a late-bound element', async () => {
+		clientModule.connect({ path: '/ws' });
+		await flush();
+		const mock = MockWebSocket._last;
+		const before = mock._sent.length;
+
+		let el = null; // not yet bound (Svelte binds after mount)
+		const unsub = cursorClient.cursor('lateboard', { viewport: () => el }).subscribe(() => {});
+		await flush();
+		expect(viewportFrames(mock, before).filter((f) => f.topic === 'lateboard')).toHaveLength(0);
+
+		// Element binds later -> the running poll reports it without re-wiring.
+		el = { scrollLeft: 10, scrollTop: 20, clientWidth: 800, clientHeight: 600 };
+		await flush();
+		const frames = viewportFrames(mock, before).filter((f) => f.topic === 'lateboard');
+		expect(frames).toHaveLength(1);
+		expect(frames[0].rect).toEqual({ x: 10, y: 20, w: 800, h: 600, zoom: 1 });
+
+		unsub();
+	});
 });
