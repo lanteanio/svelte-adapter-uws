@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.8] - 2026-06-05
+
+### Added
+
+- **Cursor jitter filter (`minMove`).** Opt-in cursor-volume reducer alongside viewport culling and backpressure, at ingest rather than fan-out: `cursors.update` drops a move when it has not moved at least `minMove` (Chebyshev distance, in the units `position` returns) from the **last broadcast** position, so a burst of sub-threshold wobble around a point is never fanned out (the threshold is measured against what the subscriber last saw, not the last stored value, so a slow drift still delivers every `minMove` units). When movement then stops, a debounced settle delivers the final resting position once - even if it is within `minMove` of the last broadcast - so a still cursor is never left stranded at a stale point; an exact repeat stays dropped because the settle sends nothing when the rest position is unchanged. Reuses the `position` extractor shipped for culling (a non-finite or unextractable coordinate is always delivered, never silently filtered) and keeps the dropped frame as the latest value, so `list()`/`snapshot()` (SSR, late joiners) see the true current position. `cursors.stats()` gains `jitterDropped` to confirm the filter is firing. Off by default (`0`) for parity with viewport culling and backpressure and because the right threshold depends on the app's coordinate scale; `minMove: 1` drops exact-repeat integer-pixel frames at no visual cost, `2`-`4` suppresses high-DPI sub-pixel wobble. No wire change; the zero-config path pays nothing (the filter and its `position` call run only when `minMove > 0`).
+
 ## [0.6.0-next.7] - 2026-06-04
 
 ### Added

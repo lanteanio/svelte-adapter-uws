@@ -2855,12 +2855,13 @@ Both `throttle` and `topicThrottle` default to 16 ms (~60 Hz). For a 120 Hz demo
 
 `topicThrottle` is the bandwidth lever for crowded rooms: rather than fan out one frame per cursor per tick, the server emits one `bulk` array per topic per window carrying every cursor that moved in that window. Bandwidth per peer scales with active-mover count, not with mover-count times per-mover rate.
 
-#### Viewport culling and backpressure (opt-in, per-subscriber)
+#### Cutting cursor volume (opt-in reducers)
 
-`topicThrottle` shrinks the frame; on a large board you can also shrink _who_ each frame goes to. Two opt-in reducers switch a topic's flush from the shared C++ fan-out to a per-subscriber walk:
+`topicThrottle` shrinks each frame; three opt-in reducers cut volume further - one at ingest, two at fan-out:
 
 ```js
 export const cursors = createCursor({
+  minMove: 1,           // jitter filter: drop a move smaller than 1 unit (here: exact repeats)
   viewport: true,       // viewport culling, defaults (shorthand for { enabled: true })
   backpressure: true    // backpressure drop, default 1 MiB cap
   // viewport: { enabled: true, padding: 256, cell: 256 } to tune
@@ -2869,7 +2870,9 @@ export const cursors = createCursor({
 });
 ```
 
-`viewport: true` / `backpressure: true` are shorthand for `{ enabled: true }`; setting a tuning key (`padding`, `cell`, `maxBufferedBytes`) without `enabled` throws rather than silently doing nothing.
+All three default off and are independent. `viewport: true` / `backpressure: true` are shorthand for `{ enabled: true }`; setting a tuning key (`padding`, `cell`, `maxBufferedBytes`) without `enabled` throws rather than silently doing nothing.
+
+**Jitter filter (`minMove`)** drops a cursor move at ingest - before it reaches the flush - when it hasn't moved at least `minMove` (Chebyshev distance, in the units `position` returns) from the **last broadcast** position, so a burst of wobble around a point is never fanned out. When movement then stops, a debounced settle delivers the final resting position once - even if it is within `minMove` of the last broadcast - so a still cursor is never left stranded at a stale point (an exact repeat stays dropped: the settle sends nothing when the rest position is unchanged). It is off by default (`0`); for integer-pixel cursor data `minMove: 1` drops exact-repeat frames at no visual cost, and `2`-`4` suppresses sub-pixel wobble from high-DPI input. Pick the value for your coordinate scale (1 board unit can be many on-screen pixels when zoomed in), which is why there is no default. A dropped frame is still kept as the latest value, so `list()` / `snapshot()` (SSR, late joiners) see the true current position.
 
 **Viewport culling** pairs with the client's `cursor(topic, { viewport })` (see Client usage below). A subscriber that reports its visible region receives only the cursors moving inside it (widened by `padding`, in board units, so a cursor just off-screen is already present when the user pans toward it; the overscan grows with `1 / zoom` when zoomed out). A subscriber that never reports a viewport is treated as **whole-board and is never culled** - culling is opt-in per subscriber and can never blank a board. On a spread-out board this cuts per-subscriber cursor traffic by roughly the ratio of the whole board to one viewport (tens of x in practice). `position` returning `null` (or throwing) opts a single frame out of culling - it is delivered to everyone - so a coordinate-less frame is never culled to nothing.
 
@@ -2877,9 +2880,9 @@ export const cursors = createCursor({
 
 **Backpressure** reads each subscriber's queued bytes (`platform.bufferedAmount`) and skips one whose queue exceeds `maxBufferedBytes` for the current flush. Cursors are latest-value, so a skipped subscriber catches up on the next flush with the latest coalesced positions - it renders one cadence later, never a backlog - and a stalled consumer's write queue can never exceed the cap plus one flush of cursor bytes. It is independent of culling: enable it alone to get the memory bound without viewport reporting.
 
-Both reducers use a per-subscriber walk (`O(connections)` per flush), so enable them on high-fan-out topics. Culling pays for the walk lazily: a viewport-enabled topic stays on the shared C++ fan-out until at least one of its subscribers reports a viewport, so enabling it globally costs nothing on topics whose clients never report. The reducers also assume a non-zero `topicThrottle` (the default) - with `topicThrottle: 0` every individual update triggers a full walk, defeating the coalescing the walk relies on.
+The two fan-out reducers (culling and backpressure) use a per-subscriber walk (`O(connections)` per flush), so enable them on high-fan-out topics; the jitter filter has no such cost (it drops at ingest). Culling pays for the walk lazily: a viewport-enabled topic stays on the shared C++ fan-out until at least one of its subscribers reports a viewport, so enabling it globally costs nothing on topics whose clients never report. These two also assume a non-zero `topicThrottle` (the default) - with `topicThrottle: 0` every individual update triggers a full walk, defeating the coalescing the walk relies on.
 
-**Is it working?** `cursors.stats()` exposes `viewportsReported`, `perSubscriberFlushes`, `bpSkips`, and `culledEntriesDropped`. If culling seems to do nothing, read them in order: `viewportsReported === 0` means no client is reporting a viewport (you forgot `cursor(topic, { viewport })`, or the element is unmounted); `viewportsReported > 0` but `culledEntriesDropped === 0` means clients report but nothing is being culled - usually a coordinate-space mismatch (see above) or a `position` extractor returning `null` for your data shape. `remove` (a cursor leaving) is always broadcast to everyone, so a departing cursor is never stuck on a culled screen.
+**Is it working?** `cursors.stats()` exposes `viewportsReported`, `perSubscriberFlushes`, `bpSkips`, `culledEntriesDropped`, and `jitterDropped` (moves the `minMove` filter dropped at ingest; `0` unless `minMove > 0`). If culling seems to do nothing, read them in order: `viewportsReported === 0` means no client is reporting a viewport (you forgot `cursor(topic, { viewport })`, or the element is unmounted); `viewportsReported > 0` but `culledEntriesDropped === 0` means clients report but nothing is being culled - usually a coordinate-space mismatch (see above) or a `position` extractor returning `null` for your data shape. `remove` (a cursor leaving) is always broadcast to everyone, so a departing cursor is never stuck on a culled screen.
 
 #### Wire shape
 
@@ -2989,9 +2992,9 @@ export function close(ws, { platform }) {
 </div>
 ```
 
-Note the `move()` data is in **board coordinates** (`clientX + scrollLeft`), matching the reported rect's space - see the coordinate-space note in [Viewport culling](#viewport-culling-and-backpressure-opt-in-per-subscriber). The `viewport` source can be a scroll-container element, an explicit `{ x, y, w, h, zoom? }` rect (virtualized canvas), or a getter returning either. For an advanced case the lower-level `reportViewport(topic, source)` is also exported.
+Note the `move()` data is in **board coordinates** (`clientX + scrollLeft`), matching the reported rect's space - see the coordinate-space note in [Viewport culling](#cutting-cursor-volume-opt-in-reducers). The `viewport` source can be a scroll-container element, an explicit `{ x, y, w, h, zoom? }` rect (virtualized canvas), or a getter returning either. For an advanced case the lower-level `reportViewport(topic, source)` is also exported.
 
-Reporting is **per-subscriber and opt-in**: a subscriber that never reports a viewport is treated as whole-board and is never culled, so this can never blank a board by accident. The server records the latest rect per `(subscriber, topic)`; turn on [viewport culling](#viewport-culling-and-backpressure-opt-in-per-subscriber) (`viewport: true`) so the server sends each reporter only the cursors inside its rect. On the server, `cursors.hooks.message` handles the `cursor-viewport` frame automatically alongside `cursor` and `cursor-snapshot`; `cursors.viewportFor(ws, topic)` reads the recorded rect (or `null` if the subscriber never reported one).
+Reporting is **per-subscriber and opt-in**: a subscriber that never reports a viewport is treated as whole-board and is never culled, so this can never blank a board by accident. The server records the latest rect per `(subscriber, topic)`; turn on [viewport culling](#cutting-cursor-volume-opt-in-reducers) (`viewport: true`) so the server sends each reporter only the cursors inside its rect. On the server, `cursors.hooks.message` handles the `cursor-viewport` frame automatically alongside `cursor` and `cursor-snapshot`; `cursors.viewportFor(ws, topic)` reads the recorded rect (or `null` if the subscriber never reported one).
 
 The client store is a `Readable<Map<string, { user, data }>>`. The Map updates when cursors move, join, or disconnect. Internally the store merges the `catalog`/`join` stream (user metadata) with the `update`/`bulk` stream (positions); positions whose user has not yet been seen are withheld until the matching join arrives - they appear on the next render once the catalog catches up.
 

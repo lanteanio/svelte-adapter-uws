@@ -169,6 +169,26 @@ export interface CursorOptions<UserData = unknown, UserInfo = unknown> {
 	position?: (data: unknown) => { x: number; y: number } | null;
 
 	/**
+	 * Jitter filter (opt-in). Drop a cursor move at ingest when it has not moved
+	 * at least this far (Chebyshev distance, in the units `position` returns) from
+	 * the last broadcast position, so sub-threshold wobble around a point is never
+	 * fanned out. When movement then stops, a debounced settle delivers the final
+	 * resting position once - even if it is within `minMove` of the last broadcast -
+	 * so a still cursor is never left stranded at a stale point (an exact repeat
+	 * stays dropped: the settle sends nothing when the rest position is unchanged).
+	 * A dropped move is still kept as the latest value, so `list()` / `snapshot()`
+	 * see the true current position. `0` (default) disables it.
+	 *
+	 * For integer-pixel cursor data, `minMove: 1` drops exact-repeat frames at no
+	 * visual cost; raise to `2`-`4` to suppress sub-pixel wobble from high-DPI
+	 * input. The right value depends on your coordinate scale (1 board unit can be
+	 * many on-screen pixels when zoomed in), which is why it is off by default.
+	 *
+	 * @default 0
+	 */
+	minMove?: number;
+
+	/**
 	 * Viewport culling (opt-in). When enabled, the per-subscriber walk sends each
 	 * reporting subscriber only the moving cursors inside its last reported
 	 * viewport rect (plus a padding overscan). A subscriber that never reports a
@@ -310,6 +330,8 @@ export interface CursorTracker<UserInfo = unknown> {
 	 * - `bpSkips`: cumulative subscribers skipped by the backpressure cap.
 	 * - `culledEntriesDropped`: cumulative entries withheld by viewport culling;
 	 *   divided by `perSubscriberFlushes` it approximates entries saved per flush.
+	 * - `jitterDropped`: cumulative moves the `minMove` jitter filter dropped at
+	 *   ingest. Zero unless `minMove > 0`; confirms the filter is firing.
 	 */
 	stats(): {
 		flushes: number;
@@ -321,6 +343,7 @@ export interface CursorTracker<UserInfo = unknown> {
 		perSubscriberFlushes: number;
 		bpSkips: number;
 		culledEntriesDropped: number;
+		jitterDropped: number;
 	};
 
 	/**

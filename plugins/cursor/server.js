@@ -225,6 +225,41 @@ export function createCursor(options = {}) {
 					? { x: data.x, y: data.y }
 					: null;
 
+	// Extract a finite {x, y} for the jitter filter. Mirrors the finiteness guard
+	// the cull path applies to a custom extractor (the default extractor already
+	// guards finiteness); a non-finite or unextractable coordinate yields null,
+	// which the jitter filter treats as "always deliver" rather than letting a NaN
+	// comparison silently fail open. Only called when minMove > 0.
+	const finitePosition = (data) => {
+		let p = null;
+		try { p = position(data); } catch { p = null; }
+		if (p && (typeof p.x !== 'number' || typeof p.y !== 'number'
+			|| !Number.isFinite(p.x) || !Number.isFinite(p.y))) p = null;
+		return p;
+	};
+
+	// Jitter filter (opt-in). Drop a cursor move at ingest when it has not moved at
+	// least `minMove` (Chebyshev distance) from the LAST BROADCAST position, so a
+	// burst of sub-threshold wobble around a point is never fanned out. The distance
+	// is in the units `position` returns and is measured against what the subscriber
+	// last actually saw (not the last stored value), so a slow drift still delivers
+	// every `minMove` units. When movement then stops, a debounced settle delivers
+	// the final resting position once - even if it is within `minMove` of the last
+	// broadcast - so a still cursor is never left stranded at a stale point; an exact
+	// repeat stays dropped because the settle sends nothing when the rest position
+	// equals the last broadcast. 0 (default) disables it. For integer-pixel cursor
+	// data, `minMove: 1` drops exact-repeat frames at no visual cost; raise to 2-4 to
+	// suppress sub-pixel wobble from high-DPI input. Off by default for parity with
+	// viewport culling and backpressure and because the right threshold depends on the
+	// app's coordinate scale (1 board unit can be many on-screen pixels when zoomed in).
+	const minMove = options.minMove ?? 0;
+
+	// Debounce delay before the jitter filter flushes a settled cursor's final
+	// position. Tracks the per-cursor throttle cadence (the rate the app already
+	// accepts); falls back to one ~60 Hz frame when throttling is off. Only used
+	// when minMove > 0.
+	const settleMs = throttleMs > 0 ? throttleMs : 16;
+
 	// Single boolean the flush hot path branches on. When false, the flush takes
 	// the unchanged shared-frame path; when true it takes the per-subscriber walk.
 	const perSubscriberWalk = bpEnabled || viewportEnabled;
@@ -276,6 +311,9 @@ export function createCursor(options = {}) {
 	if (options.position !== undefined && typeof options.position !== 'function') {
 		throw new Error('cursor: position must be a function');
 	}
+	if (typeof minMove !== 'number' || !Number.isFinite(minMove) || minMove < 0) {
+		throw new Error('cursor: minMove must be a non-negative number');
+	}
 	if ((vp.padding !== undefined || vp.cell !== undefined) && vp.enabled === undefined) {
 		throw new Error('cursor: viewport.padding/cell is set but viewport.enabled is not - did you mean { enabled: true }?');
 	}
@@ -311,7 +349,7 @@ export function createCursor(options = {}) {
 	 * and the post-disconnect cleanup. Capped at `maxTopics` - oldest
 	 * insertion-order topic evicted on new insert at cap. Each evicted
 	 * topic's pending throttle and coalesce timers are cleared first.
-	 * @type {Map<string, Map<string, { user: any, data: any, lastBroadcast: number, timer: any }>>}
+	 * @type {Map<string, Map<string, { user: any, data: any, lastBroadcast: number, timer: any, lastSentPos?: { x: number, y: number }, settleTimer?: any }>>}
 	 */
 	const topics = new Map();
 
@@ -411,6 +449,10 @@ export function createCursor(options = {}) {
 	let perSubscriberFlushes = 0;
 	let bpSkips = 0;
 	let culledEntriesDropped = 0;
+	// Lifetime count of moves the jitter filter dropped at ingest (minMove). Lets
+	// an operator confirm the filter is firing, the way bpSkips/culledEntriesDropped
+	// do for the fan-out reducers. Count only - no keys or coordinates.
+	let jitterDropped = 0;
 
 	/**
 	 * Per-flush scratch, reused every flush so the per-subscriber walk allocates
@@ -949,6 +991,7 @@ export function createCursor(options = {}) {
 						if (oldMap) {
 							for (const e of oldMap.values()) {
 								if (e.timer) clearTimeout(e.timer);
+								if (e.settleTimer) clearTimeout(e.settleTimer);
 							}
 						}
 						topics.delete(oldest);
@@ -971,6 +1014,50 @@ export function createCursor(options = {}) {
 				topicMap.set(state.key, entry);
 			}
 
+			// Jitter filter: drop a sub-threshold wobble before it reaches the
+			// flush. Measured against the last BROADCAST position (`lastSentPos`,
+			// set only on a real broadcast below) so repeated small moves never
+			// accumulate into a delivered jump. A dropped move stays as entry.data
+			// (so list()/snapshot() see the true position) and arms a debounced
+			// settle timer so the final resting position is delivered once movement
+			// stops - the cursor is never left stranded at a stale point. pos === null
+			// (no usable coordinate) always passes through.
+			let pos = null;
+			if (minMove > 0) {
+				// Re-arm point for the debounced settle: clear any pending timer; a
+				// drop below re-arms it, a real broadcast leaves it cleared.
+				if (entry.settleTimer) { clearTimeout(entry.settleTimer); entry.settleTimer = null; }
+				pos = finitePosition(data);
+				if (
+					pos && entry.lastSentPos &&
+					Math.max(Math.abs(pos.x - entry.lastSentPos.x), Math.abs(pos.y - entry.lastSentPos.y)) < minMove
+				) {
+					entry.data = data; // keep latest for a real move later + snapshot
+					jitterDropped++;
+					// Deliver the settled position once movement quiesces (debounced:
+					// each drop re-armed the timer above). Skipped while a trailing
+					// throttle broadcast is pending - that already sends the latest
+					// entry.data at the window end. On fire, send only if the rest
+					// position differs from the last broadcast, so an exact repeat
+					// (minMove: 1) stays dropped.
+					if (!entry.timer) {
+						const key = state.key;
+						entry.settleTimer = setTimeout(() => {
+							const e = topicMap.get(key);
+							if (!e) return;
+							e.settleTimer = null;
+							const p = finitePosition(e.data);
+							if (p && (!e.lastSentPos || p.x !== e.lastSentPos.x || p.y !== e.lastSentPos.y)) {
+								e.lastBroadcast = Date.now();
+								e.lastSentPos = p;
+								broadcast(topic, key, e.data, platform);
+							}
+						}, settleMs);
+					}
+					return;
+				}
+			}
+
 			// Always store latest data
 			entry.data = data;
 			entry.user = state.user;
@@ -982,6 +1069,7 @@ export function createCursor(options = {}) {
 					entry.timer = null;
 				}
 				entry.lastBroadcast = now;
+				if (pos) entry.lastSentPos = pos;
 				broadcast(topic, state.key, data, platform);
 				return;
 			}
@@ -994,6 +1082,12 @@ export function createCursor(options = {}) {
 					if (e) {
 						e.lastBroadcast = Date.now();
 						e.timer = null;
+						// Record the position actually broadcast (the latest stored
+						// data, which may be newer than this call's), never a dropped one.
+						if (minMove > 0) {
+							const p = finitePosition(e.data);
+							if (p) e.lastSentPos = p;
+						}
 						broadcast(topic, key, e.data, platform);
 					}
 				}, throttleMs - (now - entry.lastBroadcast));
@@ -1011,6 +1105,7 @@ export function createCursor(options = {}) {
 				const entry = topicMap.get(state.key);
 				if (entry) {
 					if (entry.timer) clearTimeout(entry.timer);
+					if (entry.settleTimer) clearTimeout(entry.settleTimer);
 					topicMap.delete(state.key);
 					if (topicMap.size === 0) {
 						topics.delete(topic);
@@ -1103,6 +1198,7 @@ export function createCursor(options = {}) {
 			for (const [, topicMap] of topics) {
 				for (const [, entry] of topicMap) {
 					if (entry.timer) clearTimeout(entry.timer);
+					if (entry.settleTimer) clearTimeout(entry.settleTimer);
 				}
 			}
 			if (tickTimer !== null) { clearTimeout(tickTimer); tickTimer = null; }
@@ -1154,7 +1250,8 @@ export function createCursor(options = {}) {
 				viewportsReported: subViewport.size,
 				perSubscriberFlushes,
 				bpSkips,
-				culledEntriesDropped
+				culledEntriesDropped,
+				jitterDropped
 			};
 		},
 
