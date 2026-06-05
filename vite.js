@@ -2,7 +2,8 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './files/wire.js';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -1112,6 +1113,21 @@ export default function uws(options = {}) {
 										if (typeof msg.caps[i] === 'string') caps.add(msg.caps[i]);
 									}
 									ud[WS_CAPS] = caps;
+									// Opt-in arm for internal flow control, mirroring
+									// the production handler. Only the first hello
+									// allocates the slot and emits the first window;
+									// absence of the cap keeps the immediate send
+									// path byte-identical.
+									if (caps.has('lease') && !ud[WS_LEASE]) {
+										const gate = createLeaseState({ requestCount: DEFAULT_GRANT.requestCount, ttlMs: DEFAULT_GRANT.ttlMs });
+										gate.grant();
+										ud[WS_LEASE] = { gate, saturation: gate.pressureValue() };
+										ws.send('{"type":"lease-ok"}');
+										bumpOutV(ud, '{"type":"lease-ok"}');
+										const frame = leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs);
+										ws.send(frame);
+										bumpOutV(ud, frame);
+									}
 								}
 								return;
 							}
@@ -1196,6 +1212,18 @@ export default function uws(options = {}) {
 								bumpOutV(userData, '{"type":"resumed"}');
 								return;
 							}
+							if (msg.type === 'request-n') {
+								const ud = /** @type {any} */ (ws).__userData;
+								const slot = ud && ud[WS_LEASE];
+								if (slot) {
+									slot.gate.requestN(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs);
+									const frame = leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs);
+									ws.send(frame);
+									bumpOutV(ud, frame);
+									slot.saturation = slot.gate.pressureValue();
+								}
+								return;
+							}
 						} catch {
 							// Not JSON, not an object envelope, or a known control
 							// type that threw inside its handler. Clear `msg` so the
@@ -1244,6 +1272,7 @@ export default function uws(options = {}) {
 						}
 						: { code, message: reasonAB, platform: closePlatform, subscriptions: subs };
 					userHandlers.close?.(wrapped, ctx);
+					if (ud[WS_LEASE]) ud[WS_LEASE] = undefined;
 					connections.delete(ws);
 					subscriptions.delete(ws);
 					wsWrappers.delete(ws);

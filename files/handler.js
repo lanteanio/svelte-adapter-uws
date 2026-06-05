@@ -22,8 +22,8 @@ import { env } from 'ENV';
 import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
-import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts } from './wire.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, DEFAULT_GRANT } from './wire.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -509,6 +509,12 @@ function maybeWarnTopicRegistry() {
 
 let publishCountWindow = 0;
 let totalSubscriptions = 0;
+// Worst per-connection send-gate saturation reading observed since the last
+// sample. The 1 Hz sampler folds this into the worker pressure snapshot's
+// `value` and decays it, so a single spike lifts the worker value for a tick
+// without sticking. Stays 0 on a worker where no connection has opted into
+// internal flow control.
+let leaseSaturationPeak = 0;
 // Count of best-effort operations that aborted because the underlying
 // uWS WebSocket had already closed. The platform contract is that
 // ws-targeted public methods (subscribe / unsubscribe / send /
@@ -537,6 +543,7 @@ const topicPublishStats = new Map();
 /**
  * @typedef {{
  *   active: boolean,
+ *   value: number,
  *   subscriberRatio: number,
  *   publishRate: number,
  *   memoryMB: number,
@@ -548,6 +555,7 @@ const topicPublishStats = new Map();
 /** @type {PressureSnapshot} */
 const pressureSnapshot = {
 	active: false,
+	value: 0,
 	subscriberRatio: 0,
 	publishRate: 0,
 	memoryMB: 0,
@@ -641,7 +649,22 @@ function samplePressure(thresholds) {
 		thresholds
 	);
 
+	// Fold a worker-global 0..1 saturation scalar into `value`. Each active
+	// threshold contributes its sample's distance toward the threshold
+	// (worst-of), clamped to 0..1; a fully healthy worker reads 0. The worst
+	// per-connection send-gate reading observed since the last sample is
+	// folded in worst-of too, so a saturated opted-in connection lifts the
+	// worker value even while the global counters look calm. The peak is then
+	// decayed so a single spike does not stick across samples.
+	const value = samplePressureValue(
+		{ heapUsedRatio, publishRate, subscriberRatio },
+		thresholds,
+		leaseSaturationPeak
+	);
+	leaseSaturationPeak *= 0.5;
+
 	const transitioned = reason !== pressureSnapshot.reason;
+	pressureSnapshot.value = value;
 	pressureSnapshot.subscriberRatio = subscriberRatio;
 	pressureSnapshot.publishRate = publishRate;
 	pressureSnapshot.memoryMB = memoryMB;
@@ -693,6 +716,24 @@ function samplePressure(thresholds) {
 			}
 		}
 	}
+}
+
+/**
+ * Size the next send-gate window for an opted-in connection. Derived from the
+ * same inputs that drive pressure: heap headroom and subscriber load narrow
+ * the window so a tightening worker hands out smaller windows. Zero-config
+ * defaults; never user exposed. Always floors to a window large enough that a
+ * connection makes forward progress.
+ *
+ * @returns {{ count: number, ttlMs: number }}
+ */
+function grantSizeFor() {
+	const mem = process.memoryUsage();
+	const heapRatio = mem.heapTotal > 0 ? mem.heapUsed / mem.heapTotal : 0;
+	const conns = wsConnections.size || 1;
+	const subRatio = totalSubscriptions / conns;
+	const count = leaseGrantSize({ heapRatio, subscriberRatio: subRatio });
+	return { count, ttlMs: DEFAULT_GRANT.ttlMs };
 }
 
 /**
@@ -3681,6 +3722,32 @@ if (WS_ENABLED) {
 					// binary. A re-sent hello replaces the prior set; diff it.
 					capCounts.adjust(ud[WS_CAPS], caps);
 					ud[WS_CAPS] = caps;
+					// Opt-in arm for internal flow control. Presence of the cap
+					// turns the connection window-managed; absence keeps the
+					// immediate send path byte-identical. Only the first hello
+					// allocates the slot and emits the first window so a
+					// re-sent hello (lazy-plugin re-advertise) does not reset it.
+					if (caps.has('lease') && !ud[WS_LEASE]) {
+						// The server is grant-and-observe, not enforcing: it sizes
+						// and hands out windows the client paces itself against, and
+						// reads pressureValue() for the worker saturation scalar. It
+						// never consumes a permit (no tryAcquire here) - the same
+						// state machine's acquire/enqueue surface is the CLIENT's,
+						// where the flood risk lives and the pacing is enforced.
+						const g = grantSizeFor();
+						const window = createLeaseState({ requestCount: g.count, ttlMs: g.ttlMs });
+						window.grant();
+						ud[WS_LEASE] = { gate: window, saturation: window.pressureValue() };
+						// Echo that the capability is honoured, then hand out
+						// the first window. Additive: old clients never sent the
+						// cap so never receive these.
+						const echo = '{"type":"lease-ok"}';
+						ws.send(echo, false, false);
+						bumpOut(ws, echo);
+						const frame = leaseGrantFrame(g.count, g.ttlMs);
+						ws.send(frame, false, false);
+						bumpOut(ws, frame);
+					}
 					if (wsDebug) console.log('[ws] hello caps=%o', [...caps]);
 					return;
 				}
@@ -3714,6 +3781,23 @@ if (WS_ENABLED) {
 					ws.send('{"type":"resumed"}', false, false);
 					bumpOut(ws, '{"type":"resumed"}');
 					if (wsDebug) console.log('[ws] resume sessionId=%s', msg.sessionId);
+					return;
+				}
+				if (msg.type === 'request-n') {
+					// Window-replenish request from an opted-in connection.
+					// Re-grant from the current worker posture and hand the
+					// client a fresh window. Connections that never opted in
+					// have no slot; the request is a no-op for them.
+					const slot = ws.getUserData()[WS_LEASE];
+					if (slot) {
+						const g = grantSizeFor();
+						slot.gate.requestN(g.count, g.ttlMs);
+						const frame = leaseGrantFrame(g.count, g.ttlMs);
+						ws.send(frame, false, false);
+						bumpOut(ws, frame);
+						slot.saturation = slot.gate.pressureValue();
+						if (slot.saturation > leaseSaturationPeak) leaseSaturationPeak = slot.saturation;
+					}
 					return;
 				}
 			}
@@ -3777,6 +3861,9 @@ if (WS_ENABLED) {
 				// Dispose any per-connection wire-codec state (e.g. the cursor
 				// short-id dictionary) so a long-lived server frees it promptly.
 				detachWireStates(ws, userData);
+				// Free the per-connection send-gate slot (only present when the
+				// connection opted into internal flow control).
+				if (userData[WS_LEASE]) userData[WS_LEASE] = undefined;
 				wsConnections.delete(ws);
 				if (wsDebug) console.log('[ws] close code=%d connections=%d', code, wsConnections.size);
 			}

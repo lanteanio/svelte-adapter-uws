@@ -1,5 +1,5 @@
 import { writable, derived } from 'svelte/store';
-import { parseBinaryFrame } from './files/wire.js';
+import { parseBinaryFrame, requestNFrame } from './files/wire.js';
 
 /** @type {ReturnType<typeof createConnection> | null} */
 let singleton = null;
@@ -61,7 +61,7 @@ export function registerWireCodec(prefix, codec) {
  * @returns {string[]}
  */
 function buildHelloCaps() {
-	const caps = ['batch'];
+	const caps = ['batch', 'lease'];
 	for (const codec of wireCodecs.values()) {
 		const tokens = codec.capabilities || [codec.capability];
 		for (let i = 0; i < tokens.length; i++) caps.push(tokens[i]);
@@ -891,6 +891,80 @@ function createConnection(options) {
 	/** @type {import('svelte/store').Writable<{ topic: string, reason: string, ref: number | string } | null>} */
 	const denialsStore = writable(null);
 
+	// - Internal flow-control window (client mirror) -----------------------
+	// Off until the server echoes acceptance. While off, every send takes the
+	// immediate path unchanged (zero-config byte-identical). Once on, a
+	// flow-controlled send consumes one permit from the current window; with
+	// no permit it queues up to a bound, and the connection reports degraded
+	// to the realtime layer. The window is replenished by asking the server
+	// for more at a low-water mark. The deadline is absolute (set when the
+	// window arrives) and compared against the wall clock; never decremented.
+	let _flowActive = false;
+	let _flowAvail = 0;
+	let _flowExpiresAt = 0;
+	const _FLOW_LOW_WATER = 64;
+	const _FLOW_REQUEST_N = 256;
+	const _FLOW_MAX_QUEUE = 256;
+	/** @type {Array<() => void>} */
+	const _flowQueue = [];
+	let _flowDegraded = false;
+	// Latched true once a replenish has been requested for the current window so
+	// a low/queued window asks for more exactly once, not on every send. Cleared
+	// when a fresh window is applied. Without this a sustained sub-low-water run
+	// in a single window would emit one request-n per send, amplifying control
+	// frames on the very connection the window exists to protect.
+	let _flowReplenishSent = false;
+	/** @type {((d: boolean) => void) | null} */
+	let _onFlowDegraded = null;
+
+	function _flowFresh() {
+		return _flowAvail > 0 && Date.now() < _flowExpiresAt;
+	}
+	function _setFlowDegraded(d) {
+		if (d === _flowDegraded) return;
+		_flowDegraded = d;
+		if (_onFlowDegraded) _onFlowDegraded(d);
+	}
+	function _maybeReplenish() {
+		if (!_flowActive) return;
+		if (_flowReplenishSent) return; // at most one request per window
+		if (_flowQueue.length > 0 || !_flowFresh() || _flowAvail <= _FLOW_LOW_WATER) {
+			_flowReplenishSent = true;
+			if (ws && ws.readyState === WebSocket.OPEN) {
+				ws.send(requestNFrame(_FLOW_REQUEST_N));
+			}
+		}
+	}
+	// Gate one flow-controlled send. Returns true if it went out immediately.
+	function _flowSend(doSend) {
+		if (!_flowActive) { doSend(); return true; }
+		if (_flowFresh()) { _flowAvail--; doSend(); _maybeReplenish(); return true; }
+		if (_flowQueue.length < _FLOW_MAX_QUEUE) {
+			_flowQueue.push(doSend);
+			_setFlowDegraded(true);
+			_maybeReplenish();
+			return false;
+		}
+		// Bounded queue full: drop quietly, surface only as degraded.
+		_setFlowDegraded(true);
+		return false;
+	}
+	// Apply a fresh window and drain the queue in FIFO order.
+	function _applyFlowWindow(count, ttlMs) {
+		_flowActive = true;
+		_flowExpiresAt = Date.now() + ttlMs;
+		_flowAvail = count;
+		// A fresh window clears the replenish latch so the next low-water
+		// crossing can ask for more again.
+		_flowReplenishSent = false;
+		while (_flowAvail > 0 && _flowQueue.length > 0) {
+			const doSend = _flowQueue.shift();
+			_flowAvail--;
+			if (doSend) doSend();
+		}
+		if (_flowQueue.length === 0) _setFlowDegraded(false);
+	}
+
 	// Wire-frame ceilings for subscribe-batch chunking. Match the server's
 	// control-message limits: 8192 byte parse ceiling and 256-topic batch
 	// cap. The envelope-bytes prelude leaves room for the {type, ref}
@@ -942,15 +1016,20 @@ function createConnection(options) {
 		pendingSubscribes = null;
 		if (!batch || batch.length === 0) return;
 		if (!ws || ws.readyState !== WebSocket.OPEN) return;
+		// Route the flow-controlled SUBSCRIBE through the window. Topics
+		// already live in subscribedTopics, so a queued subscribe still
+		// resubscribes on the next window or reconnect; nothing is lost and
+		// nothing throws. When the window is inactive (zero-config) this is
+		// an immediate send, byte-identical to before.
 		if (batch.length === 1) {
 			const topic = batch[0];
 			if (debug) console.log('[ws] subscribe ->', topic);
-			ws.send(JSON.stringify({ type: 'subscribe', topic, ref: nextSubscribeRef++ }));
+			_flowSend(() => ws.send(JSON.stringify({ type: 'subscribe', topic, ref: nextSubscribeRef++ })));
 			return;
 		}
 		for (const chunk of chunkTopicsForBatch(batch)) {
 			if (debug) console.log('[ws] subscribe-batch ->', chunk);
-			ws.send(JSON.stringify({ type: 'subscribe-batch', topics: chunk, ref: nextSubscribeRef++ }));
+			_flowSend(() => ws.send(JSON.stringify({ type: 'subscribe-batch', topics: chunk, ref: nextSubscribeRef++ })));
 		}
 	}
 
@@ -1261,6 +1340,20 @@ function createConnection(options) {
 				}
 				if (msg.type === 'resumed') {
 					if (debug) console.log('[ws] resumed');
+					return;
+				}
+				if (msg.type === 'lease-ok') {
+					// Server honours internal flow control. Turn the client
+					// window on; the first window frame follows. Absorbed here
+					// so it never reaches the app surface.
+					_flowActive = true;
+					return;
+				}
+				if (msg.type === 'lease' && typeof msg.count === 'number' && typeof msg.ttlMs === 'number') {
+					// Fresh window from the server. Apply it and drain any
+					// queued flow-controlled sends. Absorbed here; never
+					// reaches the app surface.
+					_applyFlowWindow(msg.count, msg.ttlMs);
 					return;
 				}
 				if (msg.type === 'subscribed' && typeof msg.topic === 'string') {
@@ -1778,6 +1871,16 @@ function createConnection(options) {
 		get bufferedAmount() { return ws?.bufferedAmount ?? 0; },
 		onRequest,
 		_resendHello: resendHello,
+		// Internal-only subscription to the connection's flow-control health.
+		// A boolean (degraded yes/no) is the only thing that crosses this
+		// accessor - no window count, deadline, or any internal accounting
+		// value. The realtime layer folds it into realtime.health. Emits the
+		// current value on subscribe; returns an unsubscribe.
+		_onLeaseDegraded(cb) {
+			_onFlowDegraded = typeof cb === 'function' ? cb : null;
+			if (_onFlowDegraded) _onFlowDegraded(_flowDegraded);
+			return () => { _onFlowDegraded = null; };
+		},
 		close
 	};
 }

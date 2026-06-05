@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
-import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts } from './files/wire.js';
+import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './files/wire.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -890,6 +890,22 @@ export async function createTestServer(options = {}) {
 							const helloUd = ws.getUserData();
 							capCountsT.adjust(helloUd[WS_CAPS], caps);
 							helloUd[WS_CAPS] = caps;
+							// Opt-in arm for internal flow control, mirroring the
+							// production handler. Only the first hello allocates
+							// the slot and emits the first window; absence of the
+							// cap keeps the immediate send path byte-identical.
+							// Grant-and-observe like production: hand out a window
+							// and read the saturation scalar, never consume a permit
+							// here (the client paces itself). The harness pins the
+							// static default window so the wire transcript is stable;
+							// production sizes it from live worker posture.
+							if (caps.has('lease') && !helloUd[WS_LEASE]) {
+								const window = createLeaseState({ requestCount: DEFAULT_GRANT.requestCount, ttlMs: DEFAULT_GRANT.ttlMs });
+								window.grant();
+								helloUd[WS_LEASE] = { gate: window, saturation: window.pressureValue() };
+								sendOutboundT(ws, '{"type":"lease-ok"}');
+								sendOutboundT(ws, leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs));
+							}
 							return;
 						}
 						if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
@@ -968,6 +984,15 @@ export async function createTestServer(options = {}) {
 							sendOutboundT(ws, '{"type":"resumed"}');
 							return;
 						}
+						if (msg.type === 'request-n') {
+							const slot = ws.getUserData()[WS_LEASE];
+							if (slot) {
+								slot.gate.requestN(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs);
+								sendOutboundT(ws, leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs));
+								slot.saturation = slot.gate.pressureValue();
+							}
+							return;
+						}
 					} catch {
 						// Not JSON, not an object envelope, or a known control
 						// type that threw inside its handler. Clear `msg` so the
@@ -1026,6 +1051,7 @@ export async function createTestServer(options = {}) {
 			} finally {
 				capCountsT.adjust(ud[WS_CAPS], null);
 				detachWireStatesT(ws, ud);
+				if (ud[WS_LEASE]) ud[WS_LEASE] = undefined;
 				wsConnections.delete(ws);
 			}
 		}

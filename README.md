@@ -1317,6 +1317,7 @@ Worker-local backpressure signal. The adapter samples once per second (configura
 platform.pressure
 // {
 //   active: false,
+//   value: 0,                 // 0..1 saturation scalar (0 idle, 1 saturated)
 //   subscriberRatio: 12.4,    // total subscriptions / connections, on this worker
 //   publishRate: 240,         // platform.publish() calls/sec, last sample
 //   memoryMB: 128,            // process.memoryUsage().rss in MB
@@ -1324,7 +1325,7 @@ platform.pressure
 // }
 ```
 
-Reading `platform.pressure` is a property access - safe in hot paths, no I/O. Use it for synchronous shed decisions in request handlers:
+`value` folds the worst of the threshold signals and per-connection send-pressure into one number, so `platform.pressure.value > 0.8` is a coarse load gauge when you do not need to branch on the specific `reason`. Reading `platform.pressure` is a property access - safe in hot paths, no I/O. Use it for synchronous shed decisions in request handlers:
 
 ```js
 // src/routes/api/heavy-write/+server.js

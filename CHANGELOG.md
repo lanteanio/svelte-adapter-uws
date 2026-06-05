@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.10] - 2026-06-05
+
+### Added
+
+- **`platform.pressure` gains a `value` field: a single `0..1` saturation scalar (`0` idle, `1` saturated).** It folds the worst of the existing threshold signals (publish rate, subscriber ratio, memory) with the worst per-connection outbound send-pressure, so `platform.pressure.value > 0.8` is a coarse "is the server under load" gauge you can read without inspecting individual reasons. The `reason` enum is unchanged (`NONE | PUBLISH_RATE | SUBSCRIBERS | MEMORY`).
+
+### Changed
+
+- **Connections now flow-control their own outbound work, bounding a slow consumer's queue without any configuration.** When a client opts in at the handshake, the server hands it a windowed send budget sized from live server pressure and replenishes it as work drains; the client paces its flow-controlled sends against that window and, under sustained pressure, surfaces `degraded` health instead of growing an unbounded send queue. The mechanism is entirely internal adapter-to-adapter - no budgets, deadlines, or counts ever reach the application surface, and the pressure `reason` enum gains no new value. A connection that does not opt in takes the byte-identical immediate send path as before, verified by a no-regression bench on the non-flow-controlled publish/single-target hot path.
+
 ## [0.6.0-next.9] - 2026-06-05
 
 ### Changed

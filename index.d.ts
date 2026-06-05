@@ -962,6 +962,15 @@ export interface PressureSnapshot {
 	/** `true` when `reason !== 'NONE'`. Convenience flag for boolean checks. */
 	readonly active: boolean;
 	/**
+	 * Worker-global saturation in `0..1`. `0` is idle, `1` is saturated;
+	 * higher always means more pressure. It is the worst-of the active
+	 * threshold signals' distance toward their thresholds, folded with the
+	 * worst per-connection internal flow-control reading. Use it for a coarse
+	 * "how loaded is this worker" gauge (e.g. `value > 0.8` for a high-load
+	 * guard); `reason` still names the most urgent specific signal.
+	 */
+	readonly value: number;
+	/**
 	 * Average subscriptions per connection on this worker
 	 * (`totalSubscriptions / connections`). `0` when the worker has no
 	 * connections.

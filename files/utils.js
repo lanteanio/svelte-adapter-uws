@@ -429,6 +429,17 @@ export const WS_TOPIC_IDS = Symbol.for('adapter-uws.ws.topic-ids');
  */
 export const WS_WIRE_STATE = Symbol.for('adapter-uws.ws.wire-state');
 
+/**
+ * Per-connection send-gate state for connections that have opted into
+ * internal flow control (by advertising the matching capability token):
+ * `{ gate, saturation }`. `gate` is the state machine from
+ * `createLeaseState`; `saturation` is the connection's latest 0..1 reading
+ * the 1 Hz sampler folds into the worker pressure snapshot. Allocated lazily,
+ * only when a connection advertises the capability - a connection that never
+ * advertises it never gets this slot and runs exactly the immediate send path.
+ */
+export const WS_LEASE = Symbol.for('adapter-uws.ws.lease');
+
 // - Bounded-by-default capacity caps ---------------------------------------
 // Single source of truth for the per-connection and module-level Map / Set
 // caps that handler.js, vite.js, and testing.js all enforce. The numbers
