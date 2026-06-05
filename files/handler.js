@@ -22,7 +22,7 @@ import { env } from 'ENV';
 import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, negotiateRejection, resolveWaitingRoom, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, DEFAULT_GRANT } from './wire.js';
 
 /* global ENV_PREFIX */
@@ -3072,6 +3072,12 @@ if (WS_ENABLED) {
 	const admission = createUpgradeAdmission(wsOptions.upgradeAdmission);
 	const ADMISSION_PER_TICK_BUDGET = wsOptions.upgradeAdmission?.perTickBudget ?? 0;
 
+	// Content-negotiated rejection for over-capacity upgrades. Resolved once
+	// here (or null when off); when null the gate emits today's bare 503.
+	// On by default whenever the gate can reject (`maxConcurrent > 0`); the
+	// escape is `waitingRoom: false`.
+	const WAITING_ROOM = resolveWaitingRoom(wsOptions.upgradeAdmission);
+
 	// Single 60-second interval for all periodic cache maintenance.
 	// Keeps timer overhead to one wakeup per minute regardless of how many
 	// caches exist. Add future periodic tasks here rather than creating
@@ -3255,6 +3261,87 @@ if (WS_ENABLED) {
 		console.log(`WebSocket auth endpoint registered at ${authPath}`);
 	}
 
+	// - Waiting-room poll + holding page ----------------------------------
+	// Registered whenever the waiting room is enabled (a sibling of the
+	// authenticate block, not nested inside it, so the poll endpoint exists
+	// regardless of whether an authenticate hook is present). Both routes are
+	// read-only: the poll probes capacity via `admission.hasCapacity()` and
+	// never calls `tryAcquire()`, so polling can never consume a gate slot.
+	if (WAITING_ROOM !== null) {
+		// Rolling poll counter: count polls seen in the current poll-interval
+		// window. Cheap (one int plus a window marker), decayed by comparing
+		// the shared 1s clock to the window start. Not a per-client structure,
+		// so it cannot itself become a DoS vector.
+		let pollWindowStart = cachedNow;
+		let pollWindowCount = 0;
+		let pollPrevCount = 0;
+		const POLL_WINDOW_MS = WAITING_ROOM.pollIntervalMs;
+
+		function recordPoll() {
+			const now = cachedNow;
+			const elapsed = now - pollWindowStart;
+			if (elapsed >= POLL_WINDOW_MS) {
+				// Carry one window back for a smoother depth across the
+				// boundary, then roll.
+				pollPrevCount = elapsed >= 2 * POLL_WINDOW_MS ? 0 : pollWindowCount;
+				pollWindowCount = 0;
+				pollWindowStart = now;
+			}
+			pollWindowCount++;
+		}
+
+		function currentQueueDepth() {
+			// Polls observed in the trailing window (current plus faded bucket).
+			const elapsed = cachedNow - pollWindowStart;
+			if (elapsed >= 2 * POLL_WINDOW_MS) return pollWindowCount;
+			const faded = pollPrevCount * (1 - Math.min(elapsed, POLL_WINDOW_MS) / POLL_WINDOW_MS);
+			return pollWindowCount + Math.round(faded);
+		}
+
+		app.get(WAITING_ROOM.admitCheckPath, (res) => {
+			res.onAborted(() => {});
+			recordPoll();
+			if (admission.hasCapacity()) {
+				res.cork(() => {
+					res.writeStatus('200 OK');
+					res.writeHeader('content-type', 'application/json');
+					res.writeHeader('cache-control', 'no-store');
+					res.end('{"admit":true}');
+				});
+				return;
+			}
+			const queueDepth = currentQueueDepth();
+			const estimatedSeconds = WAITING_ROOM.estimateSeconds(queueDepth);
+			const pollAfterMs = WAITING_ROOM.pollIntervalMs;
+			// 202 (not 503) so the poll itself is never treated as a failed or
+			// rate-limited upgrade, holds no socket, and is distinguishable in
+			// logs.
+			res.cork(() => {
+				res.writeStatus('202 Accepted');
+				res.writeHeader('content-type', 'application/json');
+				res.writeHeader('cache-control', 'no-store');
+				res.end(
+					'{"admit":false,"queueDepth":' + queueDepth +
+					',"estimatedSeconds":' + estimatedSeconds +
+					',"pollAfterMs":' + pollAfterMs + '}'
+				);
+			});
+		});
+
+		// Direct navigation to the configured path renders the same page the
+		// gate serves on rejection, seeded from the live poll counter.
+		app.get(WAITING_ROOM.path, (res) => {
+			res.onAborted(() => {});
+			const body = WAITING_ROOM.renderPage(currentQueueDepth());
+			res.cork(() => {
+				res.writeStatus('200 OK');
+				res.writeHeader('content-type', 'text/html; charset=utf-8');
+				res.writeHeader('cache-control', 'no-store');
+				res.end(body);
+			});
+		});
+	}
+
 	app.ws(WS_PATH, {
 		// Handle HTTP -> WebSocket upgrade with user-provided auth
 		upgrade: (res, req, context) => {
@@ -3263,9 +3350,39 @@ if (WS_ENABLED) {
 			// walk, no IP decode, no origin check - so a connection storm
 			// is shed before it consumes per-request CPU.
 			if (!admission.tryAcquire()) {
+				if (WAITING_ROOM === null) {
+					// `waitingRoom: false` (or maxConcurrent unset): the exact
+					// bare 503 - same status, single content-type header, same
+					// body, no Retry-After.
+					res.cork(() => {
+						res.writeStatus('503 Service Unavailable');
+						res.writeHeader('content-type', 'text/plain');
+						res.end('Server is at upgrade capacity, please retry');
+					});
+					return;
+				}
+
+				// One header read, no full walk on the reject path.
+				const accept = req.getHeader('accept');
+				if (negotiateRejection(accept) === 'html') {
+					// Browser navigation: serve the self-polling holding page.
+					const body = WAITING_ROOM.renderPage();
+					res.cork(() => {
+						res.writeStatus('200 OK');
+						res.writeHeader('content-type', 'text/html; charset=utf-8');
+						res.writeHeader('cache-control', 'no-store');
+						res.end(body);
+					});
+					return;
+				}
+
+				// WebSocket upgrade / library client (Accept lacks text/html):
+				// keep the 503, refined only with a jittered Retry-After.
+				const retryAfter = WAITING_ROOM.jitteredRetryAfter();
 				res.cork(() => {
 					res.writeStatus('503 Service Unavailable');
 					res.writeHeader('content-type', 'text/plain');
+					res.writeHeader('retry-after', String(retryAfter));
 					res.end('Server is at upgrade capacity, please retry');
 				});
 				return;

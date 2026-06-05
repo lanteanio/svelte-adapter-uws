@@ -441,6 +441,7 @@ These options control how the server handles misbehaving or slow clients at the 
 
 - `maxConcurrent` caps how many upgrades may be in flight at once. Crossed requests get a fast `503 Service Unavailable` before any per-request work, so a connection storm can be shed without spending CPU on TLS, header parsing, or cookie decoding. Set this just above your steady-state in-flight count to act as a circuit breaker.
 - `perTickBudget` caps how many actual `res.upgrade()` calls run per Node.js event-loop tick. Once the budget is spent, subsequent calls are deferred via `setImmediate` so the loop is not starved by 10K synchronous handshakes from one I/O batch. Pre-upgrade work (rate limit, origin check, hook dispatch) still runs in the original tick; only the hand-off to the C++ upgrade path is paced. Start with `64` and adjust based on your peak burst envelope.
+- `waitingRoom` upgrades the over-capacity rejection from a bare `503` to a content-negotiated waiting room: a browser navigation gets a self-polling HTML holding page that auto-reloads when capacity frees, while a WebSocket upgrade or non-HTML client keeps a `503` with a jittered `Retry-After`. On by default once `maxConcurrent > 0`; set `waitingRoom: false` for the exact bare `503`. The page polls a read-only `/__admit-check` endpoint (`202` with a queue-depth/ETA body while full, `200` when capacity exists) that consumes no gate slot. Tune with `waitingRoom: { path, admitCheckPath, retryAfterSeconds, pollIntervalMs, template }`.
 
 ```js
 adapter({

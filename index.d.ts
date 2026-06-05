@@ -263,6 +263,27 @@ export interface WebSocketOptions {
 	upgradeAdmission?: {
 		maxConcurrent?: number;
 		perTickBudget?: number;
+		/**
+		 * Content-negotiated response when an upgrade is refused at capacity.
+		 * Defaults to ON whenever `maxConcurrent` is set: browser navigations
+		 * get a self-polling holding page that reloads when a slot frees;
+		 * WebSocket upgrades and non-browser HTTP clients keep `503` with a
+		 * jittered `Retry-After`. Set `false` to force the bare `503` for
+		 * every client (today's behaviour). When `maxConcurrent` is unset the
+		 * gate never rejects, so the waiting room never engages.
+		 */
+		waitingRoom?: false | {
+			/** Holding-page route the adapter serves. Default `'/__waiting-room'`. */
+			path?: string;
+			/** Poll endpoint the page hits. Default `'/__admit-check'`. */
+			admitCheckPath?: string;
+			/** Base seconds for the jittered Retry-After. Default derived from `pollIntervalMs`. */
+			retryAfterSeconds?: number;
+			/** Page poll cadence in ms. Default `2000`. */
+			pollIntervalMs?: number;
+			/** Override the built-in page. Receives the live queue context. */
+			template?: (ctx: WaitingRoomContext) => string;
+		};
 	};
 
 	/**
@@ -466,6 +487,23 @@ export interface AuthenticateCookies {
 	getAll(): Record<string, string>;
 	set(name: string, value: string, options?: CookieSerializeOptions): void;
 	delete(name: string, options?: Pick<CookieSerializeOptions, 'path' | 'domain'>): void;
+}
+
+/**
+ * Live context passed to a custom `waitingRoom.template`. All numeric fields
+ * are UX estimates surfaced for the holding page, never an admission input.
+ */
+export interface WaitingRoomContext {
+	/** Polls seen in the last poll interval (a UX estimate, not an admission input). */
+	queueDepth: number;
+	/** Rolling drain-rate estimate in seconds (a UX estimate). */
+	estimatedSeconds: number;
+	/** Configured page poll cadence in ms. */
+	pollIntervalMs: number;
+	/** Configured base for the jittered Retry-After in seconds. */
+	retryAfterSeconds: number;
+	/** The poll endpoint path the page should fetch. */
+	admitCheckPath: string;
 }
 
 /**

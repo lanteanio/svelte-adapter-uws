@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.11] - 2026-06-05
+
+### Added
+
+- **`upgradeAdmission.waitingRoom`: turn the over-capacity `503` into a content-negotiated waiting room.** When the upgrade gate is at capacity (`maxConcurrent` set), a browser navigation now gets a small self-polling HTML holding page that auto-reloads the moment capacity frees, while a WebSocket upgrade or a non-HTML client keeps a `503` - refined with a jittered `Retry-After` header. On by default whenever `maxConcurrent > 0`; opt out with `waitingRoom: false` for the exact bare `503` of before. The page polls a read-only `/__admit-check` endpoint that returns `202` with a queue-depth/ETA body while full and `200` when capacity exists, consuming no gate slot (the poll can never itself be rejected). Configure the routes, poll cadence, `Retry-After` base, and page template via `waitingRoom: { path, admitCheckPath, retryAfterSeconds, pollIntervalMs, template }`. HTTP-upgrade path only - no WebSocket frame or existing-connection behavior changes.
+
 ## [0.6.0-next.10] - 2026-06-05
 
 ### Added

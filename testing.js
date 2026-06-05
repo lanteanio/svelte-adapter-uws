@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, resolveWaitingRoom, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './files/wire.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
@@ -66,6 +66,11 @@ export async function createTestServer(options = {}) {
 	// the actual `res.upgrade()` call. Off when both knobs are 0/unset.
 	const admission = createUpgradeAdmission(upgradeAdmission);
 	const ADMISSION_PER_TICK_BUDGET = upgradeAdmission?.perTickBudget || 0;
+
+	// Content-negotiated rejection for over-capacity upgrades. Mirrors the
+	// production handler exactly: resolved once (or null when off); null keeps
+	// today's bare 503. On by default whenever the gate can reject.
+	const WAITING_ROOM = resolveWaitingRoom(upgradeAdmission);
 
 	/** @param {unknown} ref @returns {ref is number | string} */
 	function hasRefT(ref) { return typeof ref === 'number' || typeof ref === 'string'; }
@@ -688,9 +693,35 @@ export async function createTestServer(options = {}) {
 			// Crossed requests get a fast 503 before any per-request work,
 			// matching handler.js's wiring exactly.
 			if (!admission.tryAcquire()) {
+				if (WAITING_ROOM === null) {
+					// `waitingRoom: false` (or maxConcurrent unset): the exact
+					// bare 503 - no Retry-After. Matches production byte-for-byte.
+					res.cork(() => {
+						res.writeStatus('503 Service Unavailable');
+						res.writeHeader('content-type', 'text/plain');
+						res.end('Server is at upgrade capacity, please retry');
+					});
+					return;
+				}
+
+				// One header read, no full walk on the reject path.
+				const accept = req.getHeader('accept');
+				if (negotiateRejection(accept) === 'html') {
+					const body = WAITING_ROOM.renderPage();
+					res.cork(() => {
+						res.writeStatus('200 OK');
+						res.writeHeader('content-type', 'text/html; charset=utf-8');
+						res.writeHeader('cache-control', 'no-store');
+						res.end(body);
+					});
+					return;
+				}
+
+				const retryAfter = WAITING_ROOM.jitteredRetryAfter();
 				res.cork(() => {
 					res.writeStatus('503 Service Unavailable');
 					res.writeHeader('content-type', 'text/plain');
+					res.writeHeader('retry-after', String(retryAfter));
 					res.end('Server is at upgrade capacity, please retry');
 				});
 				return;
@@ -1056,6 +1087,72 @@ export async function createTestServer(options = {}) {
 			}
 		}
 	});
+
+	// Waiting-room poll + holding page. Mirrors the production handler routes:
+	// read-only, registered whenever the waiting room is enabled, and the poll
+	// probes capacity via `admission.hasCapacity()` without consuming a slot.
+	if (WAITING_ROOM !== null) {
+		let pollWindowStart = Date.now();
+		let pollWindowCount = 0;
+		let pollPrevCount = 0;
+		const POLL_WINDOW_MS = WAITING_ROOM.pollIntervalMs;
+
+		function recordPoll() {
+			const now = Date.now();
+			const elapsed = now - pollWindowStart;
+			if (elapsed >= POLL_WINDOW_MS) {
+				pollPrevCount = elapsed >= 2 * POLL_WINDOW_MS ? 0 : pollWindowCount;
+				pollWindowCount = 0;
+				pollWindowStart = now;
+			}
+			pollWindowCount++;
+		}
+
+		function currentQueueDepth() {
+			const elapsed = Date.now() - pollWindowStart;
+			if (elapsed >= 2 * POLL_WINDOW_MS) return pollWindowCount;
+			const faded = pollPrevCount * (1 - Math.min(elapsed, POLL_WINDOW_MS) / POLL_WINDOW_MS);
+			return pollWindowCount + Math.round(faded);
+		}
+
+		app.get(WAITING_ROOM.admitCheckPath, (res) => {
+			res.onAborted(() => {});
+			recordPoll();
+			if (admission.hasCapacity()) {
+				res.cork(() => {
+					res.writeStatus('200 OK');
+					res.writeHeader('content-type', 'application/json');
+					res.writeHeader('cache-control', 'no-store');
+					res.end('{"admit":true}');
+				});
+				return;
+			}
+			const queueDepth = currentQueueDepth();
+			const estimatedSeconds = WAITING_ROOM.estimateSeconds(queueDepth);
+			const pollAfterMs = WAITING_ROOM.pollIntervalMs;
+			res.cork(() => {
+				res.writeStatus('202 Accepted');
+				res.writeHeader('content-type', 'application/json');
+				res.writeHeader('cache-control', 'no-store');
+				res.end(
+					'{"admit":false,"queueDepth":' + queueDepth +
+					',"estimatedSeconds":' + estimatedSeconds +
+					',"pollAfterMs":' + pollAfterMs + '}'
+				);
+			});
+		});
+
+		app.get(WAITING_ROOM.path, (res) => {
+			res.onAborted(() => {});
+			const body = WAITING_ROOM.renderPage(currentQueueDepth());
+			res.cork(() => {
+				res.writeStatus('200 OK');
+				res.writeHeader('content-type', 'text/html; charset=utf-8');
+				res.writeHeader('cache-control', 'no-store');
+				res.end(body);
+			});
+		});
+	}
 
 	return new Promise((resolve, reject) => {
 		app.listen(port, async (listenSocket) => {
