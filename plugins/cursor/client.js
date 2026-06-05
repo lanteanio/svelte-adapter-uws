@@ -31,6 +31,7 @@ const TOPIC_PREFIX = '__cursor:';
 import { on, connect, status, registerWireCodec } from '../../client.js';
 import { writable } from 'svelte/store';
 import { decodeCursor, CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CursorDecodeDict } from './codec.js';
+import { applyEvent, mergeOutput, sweepExpired } from './decode.js';
 
 // Opt this connection into binary cursor frames: advertise both the full-string
 // and the short-id dictionary capabilities in the `hello` frame and route
@@ -108,12 +109,13 @@ export function cursor(topic, options) {
 
 	const cursorTopic = TOPIC_PREFIX + topic;
 
-	/** @type {Map<string, any>} */
-	let positionMap = new Map();
-	/** @type {Map<string, any>} */
-	let userMap = new Map();
-	/** @type {Map<string, number>} */
-	const timestamps = new Map();
+	// The catalog/join/update/bulk/remove merge, the output build, and the sweep
+	// live in ./decode.js as pure functions over this `state`; the store here
+	// owns subscription, the writable, and viewport reporting. Keeping the same
+	// `state` object across a (re)subscribe cycle (clearing in place rather than
+	// reassigning) keeps every closure below pointing at the live Maps.
+	/** @type {import('./decode.js').CursorState} */
+	const state = { positionMap: new Map(), userMap: new Map(), timestamps: new Map() };
 	const output = writable(/** @type {Map<string, any>} */ (new Map()));
 
 	let sourceUnsub = /** @type {(() => void) | null} */ (null);
@@ -160,85 +162,18 @@ export function cursor(topic, options) {
 	}
 
 	function emitOutput() {
-		const merged = new Map();
-		for (const [key, data] of positionMap) {
-			const user = userMap.get(key);
-			if (user === undefined) continue;
-			merged.set(key, { user, data });
-		}
-		output.set(merged);
+		output.set(mergeOutput(state));
 	}
 
 	function sweep() {
-		if (!maxAge || maxAge <= 0) return;
-		const cutoff = Date.now() - maxAge;
-		let changed = false;
-		for (const [key, ts] of timestamps) {
-			if (ts < cutoff) {
-				timestamps.delete(key);
-				if (positionMap.delete(key)) changed = true;
-				userMap.delete(key);
-			}
-		}
-		if (changed) emitOutput();
+		if (sweepExpired(state, maxAge)) emitOutput();
 	}
 
 	function startListening() {
 		cancelled = false;
 		const source = on(cursorTopic);
 		sourceUnsub = source.subscribe((event) => {
-			if (event === null) return;
-
-			if (event.event === 'catalog' && Array.isArray(event.data)) {
-				userMap = new Map();
-				for (const entry of event.data) {
-					if (entry && typeof entry.key === 'string') {
-						userMap.set(entry.key, entry.user);
-					}
-				}
-				emitOutput();
-				return;
-			}
-
-			if (event.event === 'join' && event.data != null) {
-				const { key, user } = event.data;
-				if (typeof key === 'string') {
-					userMap.set(key, user);
-					emitOutput();
-				}
-				return;
-			}
-
-			if (event.event === 'update' && event.data != null) {
-				const { key, data } = event.data;
-				if (typeof key === 'string') {
-					positionMap.set(key, data);
-					timestamps.set(key, Date.now());
-					emitOutput();
-				}
-				return;
-			}
-
-			if (event.event === 'bulk' && Array.isArray(event.data)) {
-				const now = Date.now();
-				for (const entry of event.data) {
-					if (entry && typeof entry.key === 'string') {
-						positionMap.set(entry.key, entry.data);
-						timestamps.set(entry.key, now);
-					}
-				}
-				emitOutput();
-				return;
-			}
-
-			if (event.event === 'remove' && event.data != null) {
-				const { key } = event.data;
-				if (typeof key !== 'string') return;
-				timestamps.delete(key);
-				const hadPosition = positionMap.delete(key);
-				const hadUser = userMap.delete(key);
-				if (hadPosition || hadUser) emitOutput();
-			}
+			if (applyEvent(state, event)) emitOutput();
 		});
 
 		if (maxAge > 0) {
@@ -275,9 +210,9 @@ export function cursor(topic, options) {
 			sweepTimer = null;
 		}
 		stopViewportPoll();
-		positionMap = new Map();
-		userMap = new Map();
-		timestamps.clear();
+		state.positionMap.clear();
+		state.userMap.clear();
+		state.timestamps.clear();
 		// Push the cleared state to the output store so a new subscriber does
 		// not see ghost cursors from the previous subscription cycle.
 		output.set(new Map());

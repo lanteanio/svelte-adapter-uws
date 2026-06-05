@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.9] - 2026-06-05
+
+### Changed
+
+- Extracted the client-side cursor-store merge into `plugins/cursor/decode.js` (`applyEvent`, `mergeOutput`, `sweepExpired`) as pure functions over an explicit `{ positionMap, userMap, timestamps }` state. `plugins/cursor/client.js` now imports them instead of inlining the catalog/join/update/bulk/remove arms, the output build, and the maxAge sweep, so the merge is a single definition. Behavior-preserving refactor: no API, wire, or option change, and the full cursor suite stays green (a new `test/cursor-decode.test.js` pins the merge semantics for a fixed frame sequence). `decode.js` is an internal module (not a new package export); it consumes the already-decoded `{ event, data }` shape that the JSON path dispatches and `plugins/cursor/codec.js#decodeCursor` produces for a binary frame, so transport makes no difference to it.
+
 ## [0.6.0-next.8] - 2026-06-05
 
 ### Added
