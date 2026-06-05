@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, resolveWaitingRoom, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, resolveWaitingRoom, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './files/wire.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
@@ -52,7 +52,7 @@ function envelope(topic, event, data, seq) {
  * @returns {Promise<import('./testing.js').TestServer>}
  */
 export async function createTestServer(options = {}) {
-	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission } = options;
+	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, protection } = options;
 	// Mirror production: block client-initiated subscribes to `__`-prefixed
 	// system topics by default. Tests that intentionally exercise system
 	// channels can opt in with `allowSystemTopicSubscribe: true`.
@@ -71,6 +71,34 @@ export async function createTestServer(options = {}) {
 	// production handler exactly: resolved once (or null when off); null keeps
 	// today's bare 503. On by default whenever the gate can reject.
 	const WAITING_ROOM = resolveWaitingRoom(upgradeAdmission);
+
+	// Graduated protection posture, mirroring the production handler. Absent or
+	// `'normal'` leaves the posture inert so the reject path, pressure reason,
+	// and poll response stay byte-identical to a server that never sets it.
+	// `'auto'` resolves from pressure; `'elevated'`/`'siege'` pin the level.
+	const PROTECTION_T = protection || 'normal';
+	const activePostureT = (PROTECTION_T === 'normal' || PROTECTION_T === 'auto')
+		? (PROTECTION_T === 'auto'
+			? createPosture({
+				admission,
+				getThresholds: () => ({ memoryHeapUsedRatio: 0.85, sampleIntervalMs: 1000 })
+			})
+			: null)
+		: createPosture({
+			admission,
+			getThresholds: () => ({ memoryHeapUsedRatio: 0.85, sampleIntervalMs: 1000 }),
+			pin: PROTECTION_T
+		});
+	// Test-only override: `platform.__setProtection(level)` moves the live level
+	// on a running server (the mutation path; `get protection()` stays
+	// read-only). Takes precedence over the posture's own level so a test can
+	// drive a transition under an already-open connection. `null` clears it.
+	/** @type {'normal' | 'elevated' | 'siege' | null} */
+	let forcedLevelT = null;
+	const postureLevelT = () => {
+		if (forcedLevelT !== null) return forcedLevelT;
+		return activePostureT !== null ? activePostureT.level : 'normal';
+	};
 
 	/** @param {unknown} ref @returns {ref is number | string} */
 	function hasRefT(ref) { return typeof ref === 'number' || typeof ref === 'string'; }
@@ -662,6 +690,46 @@ export async function createTestServer(options = {}) {
 		 * continuous chaos state, so an active drop-outbound or
 		 * ipc-reorder survives a flap.
 		 */
+		/**
+		 * Live protection posture: `'normal'`, `'elevated'`, or `'siege'`.
+		 * Mirrors the production platform getter; read-only.
+		 */
+		get protection() {
+			return postureLevelT();
+		},
+		/**
+		 * Minimal pressure snapshot mirroring production's shape. This
+		 * harness has no live sampler, so the base reason is always `'NONE'`
+		 * (an idle worker); the protection posture layers `'CAPACITY'` on
+		 * top exactly as the production sampler does. Enough for tests that
+		 * assert on `pressure.reason` under a pinned posture.
+		 */
+		get pressure() {
+			const reason = applyCapacityReason('NONE', postureLevelT());
+			return {
+				active: reason !== 'NONE',
+				value: 0,
+				subscriberRatio: 0,
+				publishRate: 0,
+				memoryMB: 0,
+				reason,
+				topPublishers: []
+			};
+		},
+		/**
+		 * Test-only seam: move the live protection level on a running
+		 * server (parallel to `__chaos`). `get protection()` stays
+		 * read-only; this is the mutation path used to drive a transition
+		 * under an already-open connection. Pass `null` to clear the
+		 * override and fall back to the posture's own level.
+		 *
+		 * @param {'normal' | 'elevated' | 'siege' | null} level
+		 */
+		__setProtection(level) {
+			forcedLevelT = (level === 'normal' || level === 'elevated' || level === 'siege')
+				? level
+				: null;
+		},
 		__chaos(cfg) {
 			if (cfg && cfg.scenario === 'worker-flap') {
 				const code = typeof cfg.code === 'number' ? cfg.code : 1012;
@@ -689,10 +757,13 @@ export async function createTestServer(options = {}) {
 		sendPingsAutomatically: true,
 
 		upgrade(res, req, context) {
-			// Pre-upgrade soft filter: cap concurrent in-flight upgrades.
-			// Crossed requests get a fast 503 before any per-request work,
-			// matching handler.js's wiring exactly.
-			if (!admission.tryAcquire()) {
+			// Serve an at-capacity upgrade refusal without consuming a gate slot.
+			// Shared by the gate-full reject and the siege short-circuit so both
+			// content-negotiate identically. Mirrors the production handler: a
+			// browser navigation gets the holding page, everything else keeps the
+			// 503 + a posture-widened jittered Retry-After (0.5 at normal is
+			// today's exact band).
+			const serveUpgradeRefusal = () => {
 				if (WAITING_ROOM === null) {
 					// `waitingRoom: false` (or maxConcurrent unset): the exact
 					// bare 503 - no Retry-After. Matches production byte-for-byte.
@@ -717,13 +788,33 @@ export async function createTestServer(options = {}) {
 					return;
 				}
 
-				const retryAfter = WAITING_ROOM.jitteredRetryAfter();
+				const lvl = postureLevelT();
+				const spread = lvl === 'siege' ? 1.5 : lvl === 'elevated' ? 1.0 : 0.5;
+				const retryAfter = WAITING_ROOM.jitteredRetryAfter(spread);
 				res.cork(() => {
 					res.writeStatus('503 Service Unavailable');
 					res.writeHeader('content-type', 'text/plain');
 					res.writeHeader('retry-after', String(retryAfter));
 					res.end('Server is at upgrade capacity, please retry');
 				});
+			};
+
+			// Siege refuses every NEW upgrade at static-serve cost even while the
+			// gate has free slots - no slot is acquired, so an existing connection
+			// is never touched. Counted as an over-capacity reject so an auto
+			// posture stays escalated.
+			if (postureLevelT() === 'siege') {
+				if (activePostureT !== null) activePostureT.recordCapacityReject();
+				serveUpgradeRefusal();
+				return;
+			}
+
+			// Pre-upgrade soft filter: cap concurrent in-flight upgrades.
+			// Crossed requests get a fast 503 before any per-request work,
+			// matching handler.js's wiring exactly.
+			if (!admission.tryAcquire()) {
+				if (activePostureT !== null) activePostureT.recordCapacityReject();
+				serveUpgradeRefusal();
 				return;
 			}
 			let inFlightReleased = false;
@@ -1118,7 +1209,9 @@ export async function createTestServer(options = {}) {
 		app.get(WAITING_ROOM.admitCheckPath, (res) => {
 			res.onAborted(() => {});
 			recordPoll();
-			if (admission.hasCapacity()) {
+			// Siege always reports busy, even with free slots; normal/elevated
+			// keep `hasCapacity()` as the source of truth. Mirrors production.
+			if (postureLevelT() !== 'siege' && admission.hasCapacity()) {
 				res.cork(() => {
 					res.writeStatus('200 OK');
 					res.writeHeader('content-type', 'application/json');
@@ -1129,7 +1222,9 @@ export async function createTestServer(options = {}) {
 			}
 			const queueDepth = currentQueueDepth();
 			const estimatedSeconds = WAITING_ROOM.estimateSeconds(queueDepth);
-			const pollAfterMs = WAITING_ROOM.pollIntervalMs;
+			const pollAfterMs = postureLevelT() === 'siege'
+				? WAITING_ROOM.pollIntervalMs * 2
+				: WAITING_ROOM.pollIntervalMs;
 			res.cork(() => {
 				res.writeStatus('202 Accepted');
 				res.writeHeader('content-type', 'application/json');

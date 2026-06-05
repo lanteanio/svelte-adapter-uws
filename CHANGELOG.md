@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.12] - 2026-06-05
+
+### Added
+
+- **`protection`: a graduated admission posture (`normal` / `elevated` / `siege`, or `auto`) that escalates the upgrade stance under load and relaxes on recovery.** `auto` reads the existing `platform.pressure` signal (no new sampler) and moves through the levels with hysteresis - escalate fast, relax slow, so it cannot flap: `normal -> elevated` after a sustained active-pressure dwell, `elevated -> siege` only when over-capacity upgrade rejects run at twice the gate's admit rate, and downward only after a longer quiet dwell. Each level drives the admission waiting room: `elevated` widens the `Retry-After` jitter, `siege` refuses every new upgrade (holding page / 503) and makes `/__admit-check` always poll-again. Existing connections are never dropped at any level. `platform.protection` exposes the live level; pin `'elevated'` / `'siege'` for incident response. The pressure `reason` enum gains `CAPACITY` (precedence `MEMORY > CAPACITY > PUBLISH_RATE > SUBSCRIBERS`), surfaced when posture is engaged; no other reason is added. Default `'normal'` is a true no-op - the reject path, pressure, and poll responses are byte-identical to before.
+
 ## [0.6.0-next.11] - 2026-06-05
 
 ### Added

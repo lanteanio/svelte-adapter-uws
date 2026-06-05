@@ -287,6 +287,28 @@ export interface WebSocketOptions {
 	};
 
 	/**
+	 * Graduated protection posture over the live `platform.pressure` signal,
+	 * governing only the admission of NEW upgrades - existing connections are
+	 * never affected at any level.
+	 *
+	 * - `'normal'` (default): today's behaviour. The posture machine is inert
+	 *   and adds no work to the hot path.
+	 * - `'auto'`: the adapter escalates under sustained pressure and relaxes on
+	 *   recovery (escalate fast, relax slow). `normal -> elevated` on sustained
+	 *   `pressure.active`; `elevated -> siege` when over-capacity upgrade
+	 *   rejects run at twice the gate's admit rate; downward needs a longer
+	 *   quiet dwell.
+	 * - `'elevated'` / `'siege'`: pin a level for incident response or testing.
+	 *
+	 * At `'elevated'` the waiting room widens its `Retry-After` jitter. At
+	 * `'siege'` new upgrades are refused at static-serve cost and
+	 * `/__admit-check` always reports busy. Requires
+	 * `upgradeAdmission.maxConcurrent` to be set for the gate to have anything
+	 * to coordinate; `'auto'` is inert without a ceiling.
+	 */
+	protection?: 'normal' | 'elevated' | 'siege' | 'auto';
+
+	/**
 	 * Backpressure-signal thresholds for `platform.pressure` and
 	 * `platform.onPressure(cb)`. The adapter samples the worker once per
 	 * `sampleIntervalMs` and reports the most urgent active signal.
@@ -1019,10 +1041,12 @@ export interface PressureSnapshot {
 	/** Resident-set size in megabytes (`process.memoryUsage().rss`). */
 	readonly memoryMB: number;
 	/**
-	 * Most urgent active signal, by fixed precedence:
-	 * `MEMORY > PUBLISH_RATE > SUBSCRIBERS > NONE`.
+	 * Most urgent active signal. Precedence is fixed:
+	 * `MEMORY > CAPACITY > PUBLISH_RATE > SUBSCRIBERS > NONE`. `'CAPACITY'`
+	 * appears only when the protection posture is engaged (`elevated`/`siege`)
+	 * and outranks every signal except `MEMORY`.
 	 */
-	readonly reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY';
+	readonly reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CAPACITY';
 	/**
 	 * Top 5 topics by message rate during the last sample window, sorted
 	 * descending by `messagesPerSec`. Each entry is
@@ -1690,8 +1714,9 @@ export interface Platform {
 	 * is a property access; no I/O or computation per read.
 	 *
 	 * `reason` is the most urgent active signal. Precedence is fixed:
-	 * `MEMORY > PUBLISH_RATE > SUBSCRIBERS`. A worker under multiple
-	 * stresses reports the highest-priority one.
+	 * `MEMORY > CAPACITY > PUBLISH_RATE > SUBSCRIBERS`. A worker under multiple
+	 * stresses reports the highest-priority one. `'CAPACITY'` appears only when
+	 * the protection posture is engaged (see `protection`).
 	 *
 	 * @example
 	 * ```js
@@ -1706,6 +1731,18 @@ export interface Platform {
 	 * ```
 	 */
 	readonly pressure: PressureSnapshot;
+
+	/**
+	 * Live protection posture: `'normal'`, `'elevated'`, or `'siege'`. Resolves
+	 * the operator's `WebSocketOptions.protection` setting against the current
+	 * pressure (when set to `'auto'`); a pinned value reads back as itself, and
+	 * an absent setting reads `'normal'`. Reading is a property access. Governs
+	 * only NEW-upgrade admission; existing connections are never affected.
+	 *
+	 * Use it in hook code to tighten an extension's behaviour under load, e.g.
+	 * require a capability cookie only when `platform.protection !== 'normal'`.
+	 */
+	readonly protection: 'normal' | 'elevated' | 'siege';
 
 	/**
 	 * Register a callback fired on each pressure-state transition (when

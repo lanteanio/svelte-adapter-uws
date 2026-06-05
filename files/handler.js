@@ -22,7 +22,7 @@ import { env } from 'ENV';
 import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, negotiateRejection, resolveWaitingRoom, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, negotiateRejection, resolveWaitingRoom, applyCapacityReason, createPosture, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, DEFAULT_GRANT } from './wire.js';
 
 /* global ENV_PREFIX */
@@ -547,7 +547,7 @@ const topicPublishStats = new Map();
  *   subscriberRatio: number,
  *   publishRate: number,
  *   memoryMB: number,
- *   reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY',
+ *   reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CAPACITY',
  *   topPublishers: TopicPublishRate[]
  * }} PressureSnapshot
  */
@@ -596,6 +596,17 @@ function warnLargeBatchFrame(size) {
 
 /** @type {ReturnType<typeof setInterval> | null} */
 let pressureTimer = null;
+
+/**
+ * Module-level holder for the live protection posture. Null until the upgrade
+ * handler instantiates one (it needs the closure-local admission gate and the
+ * resolved gate ceiling). samplePressure ticks it; the platform getter reads
+ * its level. Stays null - and every read is a cheap null check - in the
+ * zero-config deployment that never engages a protection posture.
+ *
+ * @type {ReturnType<typeof createPosture> | null}
+ */
+let activePosture = null;
 
 /**
  * Default pressure thresholds. Designed to be safe rather than tight: the
@@ -648,6 +659,13 @@ function samplePressure(thresholds) {
 		{ heapUsedRatio, publishRate, subscriberRatio },
 		thresholds
 	);
+	// Layer the protection posture's CAPACITY reason on top of the pure
+	// pressure reason. When no posture is engaged this is byte-identical to
+	// the base reason. The level read here is the one the gate enforced during
+	// the window just measured; the posture advances for the NEXT sample below.
+	const effectiveReason = activePosture !== null
+		? applyCapacityReason(reason, activePosture.level)
+		: reason;
 
 	// Fold a worker-global 0..1 saturation scalar into `value`. Each active
 	// threshold contributes its sample's distance toward the threshold
@@ -663,14 +681,24 @@ function samplePressure(thresholds) {
 	);
 	leaseSaturationPeak *= 0.5;
 
-	const transitioned = reason !== pressureSnapshot.reason;
+	const transitioned = effectiveReason !== pressureSnapshot.reason;
 	pressureSnapshot.value = value;
 	pressureSnapshot.subscriberRatio = subscriberRatio;
 	pressureSnapshot.publishRate = publishRate;
 	pressureSnapshot.memoryMB = memoryMB;
-	pressureSnapshot.reason = reason;
-	pressureSnapshot.active = reason !== 'NONE';
+	pressureSnapshot.reason = effectiveReason;
+	pressureSnapshot.active = effectiveReason !== 'NONE';
 	pressureSnapshot.topPublishers = topPublishers;
+
+	// Advance the posture once per sample, AFTER folding the snapshot - the
+	// level just read drove this sample's reason; the tick decides the next.
+	// Rides the existing pressure timer, so no new timer is introduced. The
+	// posture must read the BASE pressure signal, not the CAPACITY-layered one:
+	// once the level is engaged, `effectiveReason` is forced to CAPACITY every
+	// sample, so feeding the layered activity back would mean the relaxation
+	// dwell never sees a calm sample and the level could never relax. The base
+	// `reason` is the true load signal that drives both directions.
+	if (activePosture !== null) activePosture.tick({ active: reason !== 'NONE' });
 
 	if (transitioned) {
 		for (const cb of pressureListeners) {
@@ -2023,8 +2051,10 @@ const platform = {
 	 * Live snapshot of worker-local backpressure signals.
 	 *
 	 * `reason` is one of `'NONE'`, `'PUBLISH_RATE'`, `'SUBSCRIBERS'`,
-	 * `'MEMORY'`. Precedence is fixed (MEMORY > PUBLISH_RATE > SUBSCRIBERS),
-	 * so a worker under multiple stresses reports the most urgent one.
+	 * `'MEMORY'`, `'CAPACITY'`. Precedence is fixed
+	 * (MEMORY > CAPACITY > PUBLISH_RATE > SUBSCRIBERS), so a worker under
+	 * multiple stresses reports the most urgent one. `'CAPACITY'` appears only
+	 * when the protection posture is engaged (`elevated`/`siege`).
 	 *
 	 * Sampled by a coarse 1 Hz timer. Reading the snapshot is a property
 	 * access; no I/O or computation per read. Use `onPressure` for
@@ -2032,6 +2062,17 @@ const platform = {
 	 */
 	get pressure() {
 		return pressureSnapshot;
+	},
+
+	/**
+	 * Live protection posture: `'normal'`, `'elevated'`, or `'siege'`. Resolves
+	 * the operator's `protection` setting against the current pressure; a pinned
+	 * value reads back as itself, and an absent setting reads `'normal'`.
+	 * Reading is a property access. Governs only NEW-upgrade admission; existing
+	 * connections are never affected at any level.
+	 */
+	get protection() {
+		return activePosture !== null ? activePosture.level : 'normal';
 	},
 
 	/**
@@ -3078,6 +3119,23 @@ if (WS_ENABLED) {
 	// escape is `waitingRoom: false`.
 	const WAITING_ROOM = resolveWaitingRoom(wsOptions.upgradeAdmission);
 
+	// Graduated protection posture over the 1 Hz pressure signal. Opt-in via
+	// the `protection` option; absent or `'normal'` leaves `activePosture` null,
+	// so the reject path, the pressure snapshot, and the poll response stay
+	// byte-identical to a deployment that never sets it. `'auto'` resolves the
+	// level from pressure; `'elevated'`/`'siege'` pin it for incident response.
+	// The posture is module-ticked from `samplePressure` (no new timer) but
+	// instantiated here because it reads the closure-local admission gate.
+	const PROTECTION_MODE = wsOptions.protection || 'normal';
+	const postureLevel = () => (activePosture !== null ? activePosture.level : 'normal');
+	activePosture = (PROTECTION_MODE === 'normal')
+		? null
+		: createPosture({
+			admission,
+			getThresholds: () => resolvePressureThresholds(wsOptions.pressure),
+			pin: PROTECTION_MODE === 'auto' ? undefined : PROTECTION_MODE
+		});
+
 	// Single 60-second interval for all periodic cache maintenance.
 	// Keeps timer overhead to one wakeup per minute regardless of how many
 	// caches exist. Add future periodic tasks here rather than creating
@@ -3301,7 +3359,12 @@ if (WS_ENABLED) {
 		app.get(WAITING_ROOM.admitCheckPath, (res) => {
 			res.onAborted(() => {});
 			recordPoll();
-			if (admission.hasCapacity()) {
+			// Siege never admits a reload into a full gate: it always reports
+			// busy, even while the live gate has free slots. At normal/elevated
+			// `hasCapacity()` stays the source of truth, so the poll only ever
+			// ADDS the siege always-202 gate - it never admits a client the
+			// real gate would reject.
+			if (postureLevel() !== 'siege' && admission.hasCapacity()) {
 				res.cork(() => {
 					res.writeStatus('200 OK');
 					res.writeHeader('content-type', 'application/json');
@@ -3312,7 +3375,11 @@ if (WS_ENABLED) {
 			}
 			const queueDepth = currentQueueDepth();
 			const estimatedSeconds = WAITING_ROOM.estimateSeconds(queueDepth);
-			const pollAfterMs = WAITING_ROOM.pollIntervalMs;
+			// Widen the poll cadence under siege so a packed room thins its own
+			// retry rate; normal/elevated keep today's interval.
+			const pollAfterMs = postureLevel() === 'siege'
+				? WAITING_ROOM.pollIntervalMs * 2
+				: WAITING_ROOM.pollIntervalMs;
 			// 202 (not 503) so the poll itself is never treated as a failed or
 			// rate-limited upgrade, holds no socket, and is distinguishable in
 			// logs.
@@ -3345,11 +3412,14 @@ if (WS_ENABLED) {
 	app.ws(WS_PATH, {
 		// Handle HTTP -> WebSocket upgrade with user-provided auth
 		upgrade: (res, req, context) => {
-			// Pre-upgrade soft filter: cap on concurrent upgrades currently
-			// being processed. The cheapest possible rejection - no header
-			// walk, no IP decode, no origin check - so a connection storm
-			// is shed before it consumes per-request CPU.
-			if (!admission.tryAcquire()) {
+			// Serve an at-capacity upgrade refusal without ever consuming a
+			// gate slot. Shared by the gate-full reject and the siege
+			// short-circuit so both content-negotiate identically: a browser
+			// navigation gets the self-polling holding page (it holds no
+			// socket), everything else keeps the `503` + jittered
+			// `Retry-After`. The jitter band widens as the posture rises
+			// (`0.5` at normal reproduces today's exact band).
+			const serveUpgradeRefusal = () => {
 				if (WAITING_ROOM === null) {
 					// `waitingRoom: false` (or maxConcurrent unset): the exact
 					// bare 503 - same status, single content-type header, same
@@ -3377,14 +3447,38 @@ if (WS_ENABLED) {
 				}
 
 				// WebSocket upgrade / library client (Accept lacks text/html):
-				// keep the 503, refined only with a jittered Retry-After.
-				const retryAfter = WAITING_ROOM.jitteredRetryAfter();
+				// keep the 503, refined with a posture-widened jittered
+				// Retry-After. At normal the spread is today's exact 0.5.
+				const lvl = postureLevel();
+				const spread = lvl === 'siege' ? 1.5 : lvl === 'elevated' ? 1.0 : 0.5;
+				const retryAfter = WAITING_ROOM.jitteredRetryAfter(spread);
 				res.cork(() => {
 					res.writeStatus('503 Service Unavailable');
 					res.writeHeader('content-type', 'text/plain');
 					res.writeHeader('retry-after', String(retryAfter));
 					res.end('Server is at upgrade capacity, please retry');
 				});
+			};
+
+			// Siege refuses every NEW upgrade at static-serve cost, even
+			// while the gate has free slots - no slot is acquired, so an
+			// existing connection is never touched. Counted as an
+			// over-capacity reject so an auto posture stays escalated.
+			if (postureLevel() === 'siege') {
+				if (activePosture !== null) activePosture.recordCapacityReject();
+				serveUpgradeRefusal();
+				return;
+			}
+
+			// Pre-upgrade soft filter: cap on concurrent upgrades currently
+			// being processed. The cheapest possible rejection - no header
+			// walk, no IP decode, no origin check - so a connection storm
+			// is shed before it consumes per-request CPU.
+			if (!admission.tryAcquire()) {
+				// Count the over-capacity reject (and only this one) so the
+				// posture's rolling reject rate reflects true gate pressure.
+				if (activePosture !== null) activePosture.recordCapacityReject();
+				serveUpgradeRefusal();
 				return;
 			}
 			let inFlightReleased = false;
@@ -3432,6 +3526,10 @@ if (WS_ENABLED) {
 				const elapsed = now - rateEntry.windowStart;
 				const estimate = rateEntry.prev * (1 - elapsed / UPGRADE_WINDOW_MS) + rateEntry.curr;
 				if (estimate >= UPGRADE_MAX_PER_WINDOW) {
+					// Per-IP rate-limit reject. Reported on its own counter, never
+					// the over-capacity one, so an attack-driven 429 storm can
+					// never escalate the protection posture toward siege.
+					if (activePosture !== null) activePosture.recordRateLimitReject();
 					res.cork(() => {
 						res.writeStatus('429 Too Many Requests');
 						res.writeHeader('content-type', 'text/plain');

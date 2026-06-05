@@ -453,6 +453,13 @@ adapter({
 
 The two layers are independent: each works without the other. Both default to `0` (disabled) so the upgrade path stays unchanged unless you opt in.
 
+**`protection`** (default: `'normal'`) - a graduated admission posture layered over `upgradeAdmission`. `'auto'` escalates under sustained pressure and relaxes on recovery, with hysteresis so it cannot flap (escalate fast, relax slow); `'normal'` / `'elevated'` / `'siege'` pin a level for incident response.
+
+- `elevated` widens the waiting-room `Retry-After` jitter (and tightens any loaded per-IP / capability-cookie extensions).
+- `siege` refuses every new upgrade (the waiting-room holding page or a `503`) and makes `/__admit-check` always poll-again. Existing connections are never touched at any level.
+
+`platform.protection` reads the live level. While a posture is engaged, `platform.pressure.reason` can surface `CAPACITY` (precedence `MEMORY > CAPACITY > PUBLISH_RATE > SUBSCRIBERS`). Default `'normal'` is a true no-op - the reject path and pressure are byte-identical to before.
+
 #### Layered admission: upgrade-path + message-path
 
 `upgradeAdmission` operates at the WebSocket handshake. It sheds connection attempts before TLS work and before any per-request CPU is spent. That is the right primitive when the threat is "too many clients are trying to connect" - a connection flood, a thundering herd after a deploy, a runaway client retry loop.

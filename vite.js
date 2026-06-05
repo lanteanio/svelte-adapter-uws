@@ -366,6 +366,12 @@ export default function uws(options = {}) {
 				topPublishers: []
 			};
 		},
+		get protection() {
+			// Dev never engages upgrade admission control, so the protection
+			// posture is always inert. A constant `'normal'` mirrors the
+			// production getter's resolved value with no work.
+			return 'normal';
+		},
 		onPressure(_cb) { return () => {}; },
 		onPublishRate(_cb) { return () => {}; },
 		async subscribe(ws, topic) {

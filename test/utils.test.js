@@ -2816,6 +2816,8 @@ describe('public re-exports from svelte-adapter-uws/testing', () => {
 			'computePressureReason',
 			'computeTopPublishers',
 			'createUpgradeAdmission',
+			'createPosture',
+			'applyCapacityReason',
 			'isOriginAllowed'
 		];
 		for (const name of internal) {
