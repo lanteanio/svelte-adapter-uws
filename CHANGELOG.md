@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.13] - 2026-06-06
+
+### Added
+
+- **Resume now carries a per-topic epoch so a reconnecting client that points at a seq space which has since reset is cold-rehydrated instead of being served a fresh seq space as if it were contiguous.** The per-topic `subscribed` ack gains an `epoch` field (the current generation of that topic's seq space); the client tracks it per topic and presents it back, alongside its `lastSeenSeqs`, as `lastSeenEpochs` on resume. The resume hook receives `ctx.lastSeenEpochs` and a new `platform.topicEpoch(topic)` accessor: compare them per topic and gap-fill on a match, or re-read from the source of truth on a mismatch (a process restart resets the in-memory counters, so the generation differs). Strictly additive - an old client omits the epoch and resumes exactly as before (missing is treated as a match), and an unchanged single-worker deployment emits the byte-identical `{"type":"resumed"}` ack. In a single worker the in-memory counters all reset together on a restart, so every topic shares one per-process generation; the per-topic wire shape lets a backend with its own per-topic seq authority vary the value independently without a wire change. The `epoch` field is best-effort: if a backend's `topicEpoch(topic)` accessor throws, the ack still goes out with the per-process generation as a fallback, and the throw is never charged to the closed-socket abort counter.
+
 ## [0.6.0-next.12] - 2026-06-05
 
 ### Added

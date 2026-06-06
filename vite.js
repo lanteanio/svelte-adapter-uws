@@ -2,7 +2,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, PROCESS_EPOCH, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 import { createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './files/wire.js';
 
 /**
@@ -461,6 +461,18 @@ export default function uws(options = {}) {
 		},
 		topic(name) {
 			return createScopedTopic(publish, name);
+		},
+		/**
+		 * Current generation of a topic's seq space, mirroring production.
+		 * Single dev process: every topic shares the one process generation,
+		 * so a resume hook compares this to the client's presented epoch to
+		 * gap-fill on a match or cold-rehydrate on a mismatch.
+		 * @param {string} name
+		 * @returns {number}
+		 */
+		topicEpoch(name) {
+			void name;
+			return PROCESS_EPOCH;
 		}
 	};
 
@@ -561,7 +573,12 @@ export default function uws(options = {}) {
 	 */
 	function sendSubscribedV(ws, topic, ref) {
 		if (ref === null) return;
-		const payload = JSON.stringify({ type: 'subscribed', topic, ref });
+		// Mirror production: carry the topic's current generation on the ack so
+		// a later resume can detect a reset seq space. The dev process shares
+		// the one process-generation value across every topic via the dev
+		// platform's topicEpoch.
+		const epoch = typeof platform.topicEpoch === 'function' ? platform.topicEpoch(topic) : PROCESS_EPOCH;
+		const payload = JSON.stringify({ type: 'subscribed', topic, ref, epoch });
 		ws.send(payload);
 		bumpOutV(/** @type {any} */ (ws).__userData, payload);
 	}
@@ -1199,6 +1216,14 @@ export default function uws(options = {}) {
 							}
 							if (msg.type === 'resume' && typeof msg.sessionId === 'string' &&
 								msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
+								// Mirror production: forward the per-topic epochs the
+								// client presented (raw, parallel to lastSeenSeqs) so
+								// the hook can compare each to platform.topicEpoch and
+								// choose gap-fill or cold-rehydrate. Absent for an old
+								// client; the hook then treats every topic as a match.
+								const lastSeenEpochs = (msg.lastSeenEpochs && typeof msg.lastSeenEpochs === 'object')
+									? msg.lastSeenEpochs
+									: undefined;
 								if (userHandlers.resume) {
 									try {
 										// Mirror production: await the user hook so
@@ -1208,6 +1233,7 @@ export default function uws(options = {}) {
 										await userHandlers.resume(wrapped, {
 											sessionId: msg.sessionId,
 											lastSeenSeqs: msg.lastSeenSeqs,
+											lastSeenEpochs,
 											platform: wrapped.getUserData()[WS_PLATFORM]
 										});
 									} catch (err) {

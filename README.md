@@ -788,11 +788,34 @@ Without a `resume` hook the protocol is still safe: the server acks the resume f
 
 The session id is per-process and per-connection. It does not persist across server restarts; a client presenting a session id the server has never seen receives the same `resumed` ack and falls through.
 
+#### Detecting a reset seq space (per-topic epoch)
+
+The in-memory seq counters live in process memory and restart at 1 on every server boot. A client that reconnects to a freshly restarted process and presents an old `lastSeenSeqs[topic]` would, if gap-filled naively, be served a brand-new seq space as if it were a continuation - silently skipping or duplicating state. To detect this, each `subscribed` ack carries an `epoch`: the current generation of that topic's seq space. The client tracks it per topic and presents it back as `lastSeenEpochs` (parallel to `lastSeenSeqs`) on resume.
+
+In your `resume` hook, compare each presented epoch to the live one via `platform.topicEpoch(topic)`:
+
+```js
+export function resume(ws, { lastSeenSeqs, lastSeenEpochs, platform }) {
+  for (const [topic, sinceSeq] of Object.entries(lastSeenSeqs)) {
+    const presented = lastSeenEpochs?.[topic];
+    if (presented !== undefined && presented !== platform.topicEpoch(topic)) {
+      // The seq space reset since the client last saw it. Re-read this topic
+      // from the source of truth instead of replaying a reset space against a
+      // stale offset (e.g. signal a cold-rehydrate on '__replay:' + topic).
+      continue;
+    }
+    replay.replay(ws, topic, sinceSeq, platform); // match: gap-fill as usual
+  }
+}
+```
+
+The epoch is strictly additive. An old client omits it (and an old server omits the ack field); a missing epoch is treated as a match, so resume behaves exactly as before. In a single worker every topic shares the one per-process generation, so a restart cold-rehydrates every tracked topic at once - correct, since the whole in-memory seq map reset together.
+
 ### Subscribe acknowledgements
 
 When the client subscribes, it includes a numeric `ref` so the server can ack with the result:
 
-- `{"type":"subscribed", topic, ref}` - subscription accepted.
+- `{"type":"subscribed", topic, ref, epoch}` - subscription accepted. `epoch` is the current generation of the topic's seq space (see [Detecting a reset seq space](#detecting-a-reset-seq-space-per-topic-epoch)); old clients ignore it.
 - `{"type":"subscribe-denied", topic, ref, reason}` - subscription rejected. `reason` is one of the canonical codes `'UNAUTHENTICATED'`, `'FORBIDDEN'`, `'INVALID_TOPIC'`, `'RATE_LIMITED'`, or any custom string the server's `subscribe` hook returned.
 
 The denial is surfaced on the client through the `denials` store. Show it as a banner, route to a login page, anything you like:

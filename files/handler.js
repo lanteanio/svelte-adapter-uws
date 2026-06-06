@@ -22,7 +22,7 @@ import { env } from 'ENV';
 import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, negotiateRejection, resolveWaitingRoom, applyCapacityReason, createPosture, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, PROCESS_EPOCH, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, negotiateRejection, resolveWaitingRoom, applyCapacityReason, createPosture, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, DEFAULT_GRANT } from './wire.js';
 
 /* global ENV_PREFIX */
@@ -916,13 +916,32 @@ async function runUserSubscribeGate(ws, topic) {
  * with its subscribe op. No frame goes out for ref-less subscribes
  * (old clients) so backward compatibility is preserved.
  *
+ * Carries the topic's current seq-space generation as `epoch` so a later
+ * resume can tell whether the seq space it last saw still exists. The
+ * value comes from the per-connection platform's `topicEpoch(topic)`: a
+ * single worker returns the one per-process generation for every topic,
+ * while a backend with its own per-topic seq authority (a shared store)
+ * returns that topic's stored generation - so the same wire field carries
+ * the right value per deployment with no wire change. The extra key is
+ * additive: an old client ignores it and behaves exactly as before.
+ *
  * @param {import('uWebSockets.js').WebSocket<any>} ws
  * @param {string} topic
  * @param {number | string | null} ref
  */
 function sendSubscribed(ws, topic, ref) {
 	if (ref === null) return;
-	const payload = JSON.stringify({ type: 'subscribed', topic, ref });
+	// epoch is an additive best-effort field. A throw in the live topicEpoch
+	// delegate (a per-topic store authority can be wired here in a cluster)
+	// must not block the ack or be charged to closedWsAborts - that counter is
+	// strictly for a closed-socket send failure. Fall back to PROCESS_EPOCH and
+	// still send the ack.
+	let epoch = PROCESS_EPOCH;
+	try {
+		const p = ws.getUserData()[WS_PLATFORM];
+		if (p && typeof p.topicEpoch === 'function') epoch = p.topicEpoch(topic);
+	} catch { epoch = PROCESS_EPOCH; }
+	const payload = JSON.stringify({ type: 'subscribed', topic, ref, epoch });
 	try { ws.send(payload, false, false); } catch { closedWsAborts++; return; }
 	bumpOut(ws, payload);
 }
@@ -2113,6 +2132,26 @@ const platform = {
 	 */
 	topic(name) {
 		return createScopedTopic(platform.publish, name);
+	},
+
+	/**
+	 * Current generation of a topic's seq space. The value a reconnecting
+	 * client presents on resume is compared against this to decide whether
+	 * its old per-topic offset is still valid (gap-fill) or points into a
+	 * seq space that has since reset (cold-rehydrate).
+	 *
+	 * In a single worker the seq counters live in process memory and all
+	 * reset together on a restart, so every topic shares the one
+	 * per-process generation. A backend with its own per-topic seq
+	 * authority (a shared store) overrides this with a per-topic value of
+	 * the same shape.
+	 *
+	 * @param {string} topic
+	 * @returns {number}
+	 */
+	topicEpoch(topic) {
+		void topic;
+		return PROCESS_EPOCH;
 	}
 };
 
@@ -3974,6 +4013,17 @@ if (WS_ENABLED) {
 					// for each topic). The hook is optional - if unset, we still
 					// ack so the client can switch to live mode.
 					assert(ws.getUserData()[WS_PLATFORM], 'ws.platform-missing-in-resume', null);
+					// Per-topic generation the client last saw, parallel to
+					// lastSeenSeqs and keyed the same. Additive: an old client
+					// omits it, and the hook then treats every topic as a match
+					// (gap-fill as before). Forwarded raw so the hook compares
+					// each topic's presented epoch to the live one
+					// (`platform.topicEpoch(topic)`) and chooses gap-fill on a
+					// match or cold-rehydrate on a mismatch - never serving a
+					// seq space that has since reset as if it were contiguous.
+					const lastSeenEpochs = (msg.lastSeenEpochs && typeof msg.lastSeenEpochs === 'object')
+						? msg.lastSeenEpochs
+						: undefined;
 					if (wsModule.resume) {
 						try {
 							// Await the hook so per-topic replay flushes
@@ -3987,6 +4037,7 @@ if (WS_ENABLED) {
 							await wsModule.resume(ws, {
 								sessionId: msg.sessionId,
 								lastSeenSeqs: msg.lastSeenSeqs,
+								lastSeenEpochs,
 								platform: ws.getUserData()[WS_PLATFORM]
 							});
 						} catch (err) {

@@ -837,6 +837,17 @@ function createConnection(options) {
 	/** @type {Map<string, number>} */
 	const lastSeenSeqs = new Map();
 
+	// Process generation the server last reported per topic, learned from the
+	// subscribe ack. Sent back on resume so the server can tell whether the seq
+	// space we last saw still exists; a mismatch means the server reset that
+	// topic and we must re-read it from scratch rather than trust our old
+	// offset. Topics without a recorded epoch (subscribed before the server
+	// reported one, or an old server that sends none) are simply absent, and
+	// the server treats absence as a match - the gap-fill path stays
+	// byte-identical for an unchanged deployment.
+	/** @type {Map<string, number>} */
+	const lastSeenEpochs = new Map();
+
 	// sessionStorage key for the previous connection's session id. Scoped
 	// by ws path so two clients on different endpoints in the same tab do
 	// not collide. Read in-place rather than cached so private-mode tabs
@@ -1223,8 +1234,22 @@ function createConnection(options) {
 			if (prevSessionId && lastSeenSeqs.size > 0) {
 				const seqs = {};
 				for (const [topic, seq] of lastSeenSeqs) seqs[topic] = seq;
+				// Per-topic epoch we last saw for each tracked topic. Topics
+				// without a recorded epoch are simply absent, and the server
+				// treats absence as a match - so the gap-fill path stays
+				// byte-identical to before for an unchanged deployment. We send
+				// the epochs key only when we have at least one, so a client
+				// that never saw an epoch emits the exact legacy resume frame.
+				const epochs = {};
+				let haveEpochs = false;
+				for (const [topic, epoch] of lastSeenEpochs) {
+					if (lastSeenSeqs.has(topic)) { epochs[topic] = epoch; haveEpochs = true; }
+				}
 				if (debug) console.log('[ws] resume sessionId=%s seqs=%o', prevSessionId, seqs);
-				ws?.send(JSON.stringify({ type: 'resume', sessionId: prevSessionId, lastSeenSeqs: seqs }));
+				const frame = haveEpochs
+					? { type: 'resume', sessionId: prevSessionId, lastSeenSeqs: seqs, lastSeenEpochs: epochs }
+					: { type: 'resume', sessionId: prevSessionId, lastSeenSeqs: seqs };
+				ws?.send(JSON.stringify(frame));
 			}
 
 			// Batch resubscriptions into subscribe-batch messages. Chunking
@@ -1261,6 +1286,19 @@ function createConnection(options) {
 			if (typeof msg.seq === 'number') {
 				const prev = lastSeenSeqs.get(msg.topic);
 				if (prev === undefined || msg.seq > prev) lastSeenSeqs.set(msg.topic, msg.seq);
+			} else if ((msg.event === 'truncated' || msg.event === 'rehydrate') &&
+				typeof msg.topic === 'string' && msg.topic.charCodeAt(0) === 95 &&
+				msg.topic.charCodeAt(1) === 95 && msg.topic.startsWith('__replay:')) {
+				// The server signalled that this topic's seq space reset since we
+				// last saw it (a process restart or a per-topic authority bump).
+				// Drop our stale per-topic offset and recorded epoch so the next
+				// live frame re-seeds lastSeenSeqs from scratch, and so a
+				// subsequent reconnect does not present an offset into a space
+				// that no longer exists. The frame still dispatches to the store
+				// ladder below for any higher-level consumer of the marker.
+				const baseTopic = msg.topic.slice('__replay:'.length);
+				lastSeenSeqs.delete(baseTopic);
+				lastSeenEpochs.delete(baseTopic);
 			}
 			eventsStore.set(wsEvent);
 			const tStore = topicStores.get(msg.topic);
@@ -1357,7 +1395,11 @@ function createConnection(options) {
 					return;
 				}
 				if (msg.type === 'subscribed' && typeof msg.topic === 'string') {
-					if (debug) console.log('[ws] subscribed topic=%s ref=%s', msg.topic, msg.ref);
+					// Record the per-topic generation the server reported so we
+					// can present it back on resume. Old servers omit it; the
+					// map entry is simply absent and resume treats it as a match.
+					if (typeof msg.epoch === 'number') lastSeenEpochs.set(msg.topic, msg.epoch);
+					if (debug) console.log('[ws] subscribed topic=%s ref=%s epoch=%s', msg.topic, msg.ref, msg.epoch);
 					return;
 				}
 				if (msg.type === 'wire-id' && typeof msg.topic === 'string' && typeof msg.id === 'number') {

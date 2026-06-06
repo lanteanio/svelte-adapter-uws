@@ -707,6 +707,17 @@ export interface ResumeContext {
 	 * `(topic, sinceSeq)` to your replay buffer.
 	 */
 	lastSeenSeqs: Record<string, number>;
+	/**
+	 * Generation the client last saw per topic, keyed the same as
+	 * `lastSeenSeqs`. Compare each to `platform.topicEpoch(topic)`: on a
+	 * match the client's offset is valid and you gap-fill as usual; on a
+	 * mismatch the topic's seq space reset since the client last saw it
+	 * (a restart, or a per-topic authority bump), so re-read it from the
+	 * source of truth instead of replaying a reset space against a stale
+	 * offset. Absent (the field omitted on the wire) for a client that
+	 * never received an epoch; absence is treated as a match.
+	 */
+	lastSeenEpochs?: Record<string, number>;
 	/** The platform API - publish, send, topic helpers, etc. */
 	platform: Platform;
 }
@@ -1841,6 +1852,20 @@ export interface Platform {
 	 * ```
 	 */
 	topic(topic: string): TopicHelper;
+
+	/**
+	 * Current generation of a topic's seq space. A reconnecting client
+	 * presents the epoch it last saw per topic (alongside its `lastSeenSeqs`);
+	 * compare each to this value in your `resume` hook to decide whether the
+	 * client's offset is still valid (gap-fill) or points into a seq space
+	 * that has since reset (cold-rehydrate).
+	 *
+	 * In a single worker the seq counters live in process memory and all
+	 * reset together on a restart, so every topic shares the one per-process
+	 * generation. A backend with its own per-topic seq authority (a shared
+	 * store) reports a per-topic value of the same shape.
+	 */
+	topicEpoch(topic: string): number;
 }
 
 export interface TopicHelper {

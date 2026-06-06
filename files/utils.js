@@ -182,6 +182,30 @@ export function drainCoalesced(pending, send) {
 }
 
 /**
+ * Per-process generation for the in-memory per-topic seq space.
+ *
+ * Stamped once at module init and constant for the life of the worker. It
+ * changes only across a process restart - which is exactly when the in-memory
+ * seq counters (the map a publisher mutates via `nextTopicSeq`) reset to 1. A
+ * reconnecting client presents the generation it last saw; a server that
+ * presents a different one is serving a freshly reset seq space, and the
+ * client must re-read from scratch instead of trusting its old offsets.
+ *
+ * A single worker shares this one value across every topic. A backend whose
+ * seq authority can reset per topic independently (a separate store) overrides
+ * the carried value per topic without changing the wire shape.
+ *
+ * Seeded from the wall clock at init so two boots almost never collide; the
+ * low-order millisecond bits are enough to distinguish consecutive restarts,
+ * and the value only ever has to differ from the immediately-previous boot for
+ * the mismatch detection to fire. Never persisted - a fresh process is, by
+ * definition, a fresh seq space.
+ *
+ * @type {number}
+ */
+export const PROCESS_EPOCH = Date.now();
+
+/**
  * Allocate the next monotonic sequence number for a topic, mutating
  * `seqMap` in place. The first call for a topic returns 1; subsequent
  * calls return the previous value plus one. Each topic has an

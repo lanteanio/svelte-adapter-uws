@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, resolveWaitingRoom, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { nextTopicSeq, PROCESS_EPOCH, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, resolveWaitingRoom, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './files/wire.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
@@ -148,7 +148,18 @@ export async function createTestServer(options = {}) {
 	/** @param {any} ws @param {string} topic @param {number | string | null} ref */
 	function sendSubscribedT(ws, topic, ref) {
 		if (ref === null) return;
-		const payload = JSON.stringify({ type: 'subscribed', topic, ref });
+		// Mirror the production handler: carry the topic's current generation
+		// on the ack, read from the per-connection platform's topicEpoch so a
+		// test that overrides it (modeling a per-topic store authority) is
+		// exercised. Single worker returns the one process-generation value.
+		// A throw in the topicEpoch delegate falls back to PROCESS_EPOCH and
+		// still sends the ack; it is not a closed-socket abort.
+		let epoch = PROCESS_EPOCH;
+		try {
+			const p = ws.getUserData()[WS_PLATFORM];
+			if (p && typeof p.topicEpoch === 'function') epoch = p.topicEpoch(topic);
+		} catch { epoch = PROCESS_EPOCH; }
+		const payload = JSON.stringify({ type: 'subscribed', topic, ref, epoch });
 		sendOutboundT(ws, payload);
 	}
 	/** @param {any} ws @param {string} topic @param {number | string | null} ref @param {string} reason */
@@ -677,6 +688,20 @@ export async function createTestServer(options = {}) {
 			return createScopedTopic(platform.publish, name);
 		},
 		/**
+		 * Current generation of a topic's seq space, mirroring the production
+		 * platform. Single worker: every topic shares the one process
+		 * generation, so a resume hook comparing this to the client's
+		 * presented epoch gap-fills on a match and cold-rehydrates on a
+		 * mismatch (a value the live process never issued, e.g. after a
+		 * restart).
+		 * @param {string} topic
+		 * @returns {number}
+		 */
+		topicEpoch(topic) {
+			void topic;
+			return PROCESS_EPOCH;
+		},
+		/**
 		 * Activate or clear a chaos / fault-injection scenario. See
 		 * `createChaosState` in `files/utils.js` for the supported shapes.
 		 * Pass `null` to reset; the harness returns to its zero-overhead
@@ -1088,6 +1113,14 @@ export async function createTestServer(options = {}) {
 						}
 						if (msg.type === 'resume' && typeof msg.sessionId === 'string' &&
 							msg.lastSeenSeqs && typeof msg.lastSeenSeqs === 'object') {
+							// Mirror production: forward the per-topic epochs the
+							// client presented (raw, parallel to lastSeenSeqs) so
+							// the hook can compare each to platform.topicEpoch and
+							// choose gap-fill or cold-rehydrate. Absent for an old
+							// client; the hook then treats every topic as a match.
+							const lastSeenEpochs = (msg.lastSeenEpochs && typeof msg.lastSeenEpochs === 'object')
+								? msg.lastSeenEpochs
+								: undefined;
 							if (handler.resume) {
 								try {
 									// Mirror production: await the user hook so
@@ -1097,6 +1130,7 @@ export async function createTestServer(options = {}) {
 									await handler.resume(ws, {
 										sessionId: msg.sessionId,
 										lastSeenSeqs: msg.lastSeenSeqs,
+										lastSeenEpochs,
 										platform: ws.getUserData()[WS_PLATFORM]
 									});
 								} catch (err) {
