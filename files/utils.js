@@ -1,3 +1,5 @@
+import { now, wallEpoch, randomFloat, randomUuid, setTimer, clearTimer, setImmediateTimer } from './runtime.js';
+
 // - MIME types ------------------------------------------------------------------
 
 export const mimes = {
@@ -139,9 +141,9 @@ export function writeChunkWithBackpressure(res, value, timeoutMs = 30000) {
 		ok = res.write(value);
 		if (!ok) {
 			drainPromise = new Promise((resolve) => {
-				const timer = setTimeout(() => resolve(false), timeoutMs);
+				const timer = setTimer(() => resolve(false), timeoutMs);
 				res.onWritable(() => {
-					clearTimeout(timer);
+					clearTimer(timer);
 					resolve(true);
 					return true;
 				});
@@ -203,7 +205,7 @@ export function drainCoalesced(pending, send) {
  *
  * @type {number}
  */
-export const PROCESS_EPOCH = Date.now();
+export const PROCESS_EPOCH = wallEpoch();
 
 /**
  * Allocate the next monotonic sequence number for a topic, mutating
@@ -222,6 +224,46 @@ export function nextTopicSeq(seqMap, topic) {
 	const next = (seqMap.get(topic) ?? 0) + 1;
 	seqMap.set(topic, next);
 	return next;
+}
+
+/**
+ * Build a hybrid logical clock the platform projects as `platform.hlc()`.
+ *
+ * Each returned stamp is `{ wall, logical, nodeId }`:
+ *
+ * - `wall` is a NON-DECREASING wall-clock value in epoch milliseconds, read
+ *   from the injectable runtime clock. When the clock advances, `wall` moves
+ *   up and `logical` resets to `0`. When two stamps land in the same
+ *   millisecond, or the clock steps backward, `wall` holds its previous value
+ *   and `logical` increments instead. The `(wall, logical)` pair is therefore
+ *   strictly increasing across calls even when the underlying clock is coarse
+ *   or briefly regresses.
+ * - `logical` is the same-millisecond / backward-step tiebreaker.
+ * - `nodeId` is a short, stable per-process identity assigned once from the
+ *   injectable runtime RNG (so a seeded harness reproduces it). In clustered
+ *   mode it is effectively the worker identity.
+ *
+ * The returned function is intentionally cheap, but it is meant to be called
+ * only when an event needs a causal stamp - not on every publish.
+ *
+ * @returns {() => { wall: number, logical: number, nodeId: string }}
+ */
+export function createHlc() {
+	const nodeId = randomUuid().slice(0, 8);
+	let lastWall = 0;
+	let logical = 0;
+	return function hlc() {
+		const w = now();
+		if (w > lastWall) {
+			lastWall = w;
+			logical = 0;
+		} else {
+			// Same millisecond or a backward clock step: hold the wall value
+			// and advance the tiebreaker so the pair still increases.
+			logical += 1;
+		}
+		return { wall: lastWall, logical, nodeId };
+	};
 }
 
 /**
@@ -728,18 +770,37 @@ export function resolveRequestId(value) {
  *   event-loop tick. Once the budget is spent, subsequent calls are
  *   deferred via `setImmediate` so the loop is not starved by 10K
  *   synchronous handshakes from one I/O batch.
+ * - `cursorLane.fraction` reserves a fraction of `maxConcurrent` for a
+ *   deprioritised cursor-only upgrade lane (the worker's second
+ *   WebSocket). A cursor upgrade is admitted only while both the main
+ *   ceiling has room and the cursor sub-budget has room, so a flood of
+ *   cursor reconnects can never starve main-WS admission. Unset (or
+ *   `maxConcurrent` unset) keeps the second counter at zero and the main
+ *   lane byte-identical.
  *
  * The returned object owns the counters and queue; one instance per
  * uWS app. Pure factory: no module-state capture, no globals - all
  * state lives in the closure so multiple instances do not interfere
  * (relevant for testing.js / vite.js parity in future work).
  *
- * @param {{ maxConcurrent?: number, perTickBudget?: number }} [opts]
+ * @param {{ maxConcurrent?: number, perTickBudget?: number, cursorLane?: { fraction?: number } }} [opts]
  */
 export function createUpgradeAdmission(opts) {
 	const maxConcurrent = (opts && opts.maxConcurrent) || 0;
 	const perTickBudget = (opts && opts.perTickBudget) || 0;
+	// Cursor-lane sub-budget: a fraction of the main ceiling reserved for the
+	// deprioritised cursor-only upgrade lane. Only meaningful when the gate has
+	// a ceiling to carve from; with no ceiling the lane stays at zero and the
+	// main lane is untouched. The floor of 1 keeps a configured lane usable even
+	// for a small ceiling.
+	const cursorFraction = (opts && opts.cursorLane && typeof opts.cursorLane.fraction === 'number' && opts.cursorLane.fraction > 0)
+		? Math.min(1, opts.cursorLane.fraction)
+		: 0.25;
+	const cursorMaxConcurrent = (maxConcurrent > 0 && opts && opts.cursorLane)
+		? Math.max(1, Math.floor(maxConcurrent * cursorFraction))
+		: 0;
 	let inFlight = 0;
+	let cursorInFlight = 0;
 	let perTickCount = 0;
 	/** @type {Array<() => void>} */
 	const deferred = [];
@@ -755,7 +816,7 @@ export function createUpgradeAdmission(opts) {
 		}
 		if (deferred.length > 0) {
 			drainScheduled = true;
-			setImmediate(drain);
+			setImmediateTimer(drain);
 		}
 	}
 
@@ -767,10 +828,42 @@ export function createUpgradeAdmission(opts) {
 			return true;
 		},
 		release() { inFlight--; },
+		/**
+		 * Acquire a slot for a cursor-only upgrade (the worker's second
+		 * WebSocket). All-or-nothing, mirroring `tryAcquire()`: admitted only
+		 * when both the main ceiling has room AND the cursor sub-budget has
+		 * room. On success it consumes one slot from each counter and the
+		 * caller is responsible for `releaseCursorInFlight()`. The main lane's
+		 * `tryAcquire()` is never gated by the cursor sub-budget, so the cursor
+		 * lane is sheddable without ever starving the main lane.
+		 *
+		 * @returns {boolean}
+		 */
+		tryAcquireCursor() {
+			if (maxConcurrent > 0 && inFlight >= maxConcurrent) return false;
+			if (cursorInFlight >= cursorMaxConcurrent) return false;
+			inFlight++;
+			cursorInFlight++;
+			return true;
+		},
+		/**
+		 * Release a slot taken by `tryAcquireCursor()`: decrements both the
+		 * main in-flight counter and the cursor sub-budget counter, keeping the
+		 * two in step so the cursor lane cannot leak across an aborted or
+		 * timed-out cursor upgrade.
+		 */
+		releaseCursorInFlight() { inFlight--; cursorInFlight--; },
 		/** Live snapshot, primarily for tests / introspection. */
 		get inFlight() { return inFlight; },
 		/** Configured concurrent-upgrade ceiling (`0` when the gate is open). */
 		get maxConcurrent() { return maxConcurrent; },
+		/** Live count of cursor-lane upgrades in flight. */
+		get cursorInFlight() { return cursorInFlight; },
+		/**
+		 * Reserved cursor-lane ceiling (`0` when the lane is disabled - no
+		 * `cursorLane` option or no main ceiling to carve from).
+		 */
+		get cursorMaxConcurrent() { return cursorMaxConcurrent; },
 		/**
 		 * Read-only: `true` if a `tryAcquire()` would currently succeed.
 		 * Acquires nothing and mutates no counter, so a capacity probe can
@@ -799,7 +892,7 @@ export function createUpgradeAdmission(opts) {
 			deferred.push(fn);
 			if (!drainScheduled) {
 				drainScheduled = true;
-				setImmediate(drain);
+				setImmediateTimer(drain);
 			}
 			return false;
 		}
@@ -823,6 +916,33 @@ export function negotiateRejection(accept) {
 	// Case-insensitive substring is sufficient: branch to HTML only when the
 	// client explicitly lists text/html, which browser navigations always do.
 	return accept.toLowerCase().indexOf('text/html') !== -1 ? 'html' : 'retry';
+}
+
+/**
+ * The Sec-WebSocket-Protocol token the cursor-only upgrade lane is keyed on.
+ * The worker's second (cursor) WebSocket sets this subprotocol; the upgrade
+ * handler reads it to route the upgrade through the deprioritised cursor lane.
+ * The token is read only; the server still echoes the negotiated subprotocol
+ * back to the client unchanged.
+ */
+export const CURSOR_LANE_SUBPROTOCOL = 'svelte-realtime-cursor';
+
+/**
+ * `true` when the comma-separated `Sec-WebSocket-Protocol` request header lists
+ * the cursor-lane token. Pure and uWS-free so the token parsing is unit-testable
+ * and isolated from the upgrade hot path. Trims each offered token so the common
+ * `"a, b"` spacing matches.
+ *
+ * @param {string | undefined | null} secProtocol the raw request header value
+ * @returns {boolean}
+ */
+export function isCursorLaneUpgrade(secProtocol) {
+	if (typeof secProtocol !== 'string' || secProtocol.length === 0) return false;
+	const offered = secProtocol.split(',');
+	for (let i = 0; i < offered.length; i++) {
+		if (offered[i].trim() === CURSOR_LANE_SUBPROTOCOL) return true;
+	}
+	return false;
 }
 
 /**
@@ -864,8 +984,8 @@ export function buildWaitingRoomPage(ctx) {
 		'var base=' + pollIntervalMs + ';' +
 		'var q=document.getElementById("q");' +
 		'var eta=document.getElementById("eta");' +
-		'function jitter(ms){return ms+Math.floor(Math.random()*ms*0.5);}' +
-		'function tick(delay){setTimeout(poll,delay);}' +
+		'function jitter(ms){return ms+Math.floor(Math.random()*ms*0.5);}' + // determinism-allow: browser-side script text in the holding page, not a server primitive
+		'function tick(delay){setTimeout(poll,delay);}' + // determinism-allow: browser-side script text in the holding page, not a server primitive
 		'function poll(){' +
 		'fetch(url,{headers:{accept:"application/json"},cache:"no-store"})' +
 		'.then(function(r){return r.json().then(function(b){return {s:r.status,b:b};});})' +
@@ -930,7 +1050,7 @@ export function resolveWaitingRoom(upgradeAdmission) {
 		 */
 		jitteredRetryAfter(spread) {
 			const s = typeof spread === 'number' && spread > 0 ? spread : 0.5;
-			return retryAfterSeconds + Math.floor(Math.random() * retryAfterSeconds * s);
+			return retryAfterSeconds + Math.floor(randomFloat() * retryAfterSeconds * s);
 		},
 		/**
 		 * Rolling drain estimate surfaced for UX only - never an admission

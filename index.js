@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUuid } from './files/runtime.js';
 import { rollup } from 'rollup';
 import { nodeResolve } from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
@@ -437,7 +437,7 @@ export default function (opts = {}) {
 					// reads the header).
 					if (globalThis.__uws_dev_platform) {
 						const clone = Object.create(globalThis.__uws_dev_platform);
-						clone.requestId = randomUUID();
+						clone.requestId = randomUuid();
 						return clone;
 					}
 

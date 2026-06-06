@@ -2,6 +2,7 @@ import process from 'node:process';
 import { isMainThread, parentPort, threadId, Worker, workerData } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { env } from 'ENV';
+import { monotonicNow, setTimer, setIntervalTimer, clearTimer } from './runtime.js';
 
 const host = env('HOST', '0.0.0.0');
 const port_raw = env('PORT', '3000');
@@ -98,11 +99,11 @@ if (is_primary) {
 	const HEARTBEAT_INTERVAL_MS = 10000;
 	const HEARTBEAT_TIMEOUT_MS = 30000;
 
-	setInterval(() => {
+	setIntervalTimer(() => {
 		if (shutting_down) return;
-		const now = Date.now();
+		const t = monotonicNow();
 		for (const [worker, meta] of workers) {
-			if (meta.lastHeartbeat > 0 && now - meta.lastHeartbeat > HEARTBEAT_TIMEOUT_MS) {
+			if (meta.lastHeartbeat > 0 && t - meta.lastHeartbeat > HEARTBEAT_TIMEOUT_MS) {
 				console.error(
 					`[primary] Worker ${worker.threadId} unresponsive ` +
 					`(no heartbeat ack in ${HEARTBEAT_TIMEOUT_MS}ms), terminating...`
@@ -126,13 +127,13 @@ if (is_primary) {
 			const meta = workers.get(worker);
 			if (msg.type === 'descriptor' && cluster_mode === 'acceptor') {
 				meta.descriptor = msg.descriptor;
-				meta.lastHeartbeat = Date.now();
+				meta.lastHeartbeat = monotonicNow();
 				acceptorApp.addChildAppDescriptor(msg.descriptor);
 				console.log(`Worker thread ${worker.threadId} registered`);
 				// Worker started successfully - reset backoff and attempt counter
 				restart_delay = 0;
 				restart_attempts = 0;
-				for (const t of restart_timers) clearTimeout(t);
+				for (const t of restart_timers) clearTimer(t);
 				restart_timers.clear();
 				// Start (or resume) listening once a worker is ready to handle requests
 				if (!listening) {
@@ -149,14 +150,14 @@ if (is_primary) {
 					});
 				}
 			} else if (msg.type === 'ready' && cluster_mode === 'reuseport') {
-				meta.lastHeartbeat = Date.now();
+				meta.lastHeartbeat = monotonicNow();
 				console.log(`Worker thread ${worker.threadId} listening on :${port}`);
 				restart_delay = 0;
 				restart_attempts = 0;
-				for (const t of restart_timers) clearTimeout(t);
+				for (const t of restart_timers) clearTimer(t);
 				restart_timers.clear();
 			} else if (msg.type === 'heartbeat-ack') {
-				if (meta) meta.lastHeartbeat = Date.now();
+				if (meta) meta.lastHeartbeat = monotonicNow();
 			} else if (msg.type === 'publish') {
 				// Single relay (legacy / non-batched path)
 				for (const [w] of workers) {
@@ -210,7 +211,7 @@ if (is_primary) {
 				}
 				restart_delay = restart_delay ? Math.min(restart_delay * 2, RESTART_DELAY_MAX) : 100;
 				console.log(`Worker thread ${worker.threadId} exited with code ${code}, restarting in ${restart_delay}ms... (attempt ${restart_attempts}/${RESTART_MAX_ATTEMPTS})`);
-				const timer = setTimeout(() => {
+				const timer = setTimer(() => {
 				restart_timers.delete(timer);
 				if (shutting_down) return;
 				spawn_worker();
@@ -237,7 +238,7 @@ if (is_primary) {
 		console.log(`Primary received ${reason}, shutting down ${workers.size} workers...`);
 
 		// Cancel all pending worker restarts so we don't spawn during shutdown
-		for (const t of restart_timers) clearTimeout(t);
+		for (const t of restart_timers) clearTimer(t);
 		restart_timers.clear();
 
 		// Step 1: Keep accepting connections until the load balancer has
@@ -245,7 +246,7 @@ if (is_primary) {
 		// SHUTDOWN_DELAY_MS=0 (default) skips this and is correct for non-k8s deploys.
 		if (shutdown_delay > 0) {
 			console.log(`[primary] Waiting ${shutdown_delay}ms for load balancer drain...`);
-			await new Promise((resolve) => setTimeout(resolve, shutdown_delay));
+			await new Promise((resolve) => setTimer(resolve, shutdown_delay));
 		}
 
 		// Step 2: Stop accepting new connections (acceptor mode only)
@@ -260,7 +261,7 @@ if (is_primary) {
 		}
 
 		// Force terminate after timeout
-		setTimeout(() => {
+		setTimer(() => {
 			for (const [worker] of workers) worker.terminate();
 			process.exit(0);
 		}, shutdown_timeout * 1000).unref();
@@ -322,7 +323,7 @@ if (is_primary) {
 		// primary tells us to shutdown  - the primary already waited its own delay).
 		if (shutdown_delay > 0 && (reason === 'SIGTERM' || reason === 'SIGINT')) {
 			console.log(`${prefix}Waiting ${shutdown_delay}ms for load balancer drain...`);
-			await new Promise((resolve) => setTimeout(resolve, shutdown_delay));
+			await new Promise((resolve) => setTimer(resolve, shutdown_delay));
 		}
 
 		// Awaiting `shutdown()` lets the hooks.ws `shutdown` hook flush app
@@ -332,7 +333,7 @@ if (is_primary) {
 		await shutdown();
 		await Promise.race([
 			drain(),
-			new Promise((resolve) => setTimeout(resolve, shutdown_timeout * 1000).unref())
+			new Promise((resolve) => setTimer(resolve, shutdown_timeout * 1000).unref())
 		]);
 		// Emit after drain so handlers can safely close DB pools etc.
 		// @ts-expect-error custom events cannot be typed

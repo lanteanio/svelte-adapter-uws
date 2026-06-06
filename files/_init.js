@@ -29,14 +29,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
-import { performance } from 'node:perf_hooks';
+import { monotonicNow } from './runtime.js';
 import { Server } from 'SERVER';
 import { manifest, base } from 'MANIFEST';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const asset_dir = `${__dirname}/client${base}`;
 
-const _t_init = performance.now();
+const _t_init = monotonicNow();
 
 /** @type {import('@sveltejs/kit').Server} */
 export const server = new Server(manifest);
@@ -46,4 +46,4 @@ await server.init({
 	read: (file) => /** @type {ReadableStream} */ (Readable.toWeb(fs.createReadStream(`${asset_dir}/${file}`)))
 });
 
-console.log(`SvelteKit server initialized in ${(performance.now() - _t_init).toFixed(1)}ms`);
+console.log(`SvelteKit server initialized in ${(monotonicNow() - _t_init).toFixed(1)}ms`);

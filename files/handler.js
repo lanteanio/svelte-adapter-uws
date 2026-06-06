@@ -2,10 +2,8 @@ import 'SHIMS';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { performance } from 'node:perf_hooks';
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
 import { parentPort } from 'node:worker_threads';
-import { randomUUID } from 'node:crypto';
 import uWS from 'uWebSockets.js';
 import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
@@ -22,8 +20,9 @@ import { env } from 'ENV';
 import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, PROCESS_EPOCH, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, negotiateRejection, resolveWaitingRoom, applyCapacityReason, createPosture, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, PROCESS_EPOCH, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, applyCapacityReason, createPosture, resolveRequestId, assert, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, DEFAULT_GRANT } from './wire.js';
+import { now, monotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -159,14 +158,15 @@ const prerenderedDirStyle = new Set();
 const textDecoder = new TextDecoder();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Both values update together so the rate limiter and static handler share
-// a single timer wakeup instead of two, and Date.now() is never called on
-// the hot path for static file serving or per-upgrade rate checks.
-let cachedNow = Date.now();
-let cachedDateHeader = new Date(cachedNow).toUTCString();
-setInterval(() => {
-	cachedNow = Date.now();
-	cachedDateHeader = new Date(cachedNow).toUTCString();
+// The HTTP Date header string is rebuilt once per second from the runtime
+// clock so the static handler never formats a fresh timestamp per response.
+// The wall-clock value itself comes from the injectable runtime module's
+// now(), which is already the ~1s-cached read - the rate limiter and per-
+// upgrade checks read it directly, so this timer only refreshes the header
+// string. Unref'd so it never holds the loop open.
+let cachedDateHeader = new Date(now()).toUTCString(); // determinism-allow: formats the runtime clock value, not a clock read
+setIntervalTimer(() => {
+	cachedDateHeader = new Date(now()).toUTCString(); // determinism-allow: formats the runtime clock value, not a clock read
 }, 1000).unref();
 
 /**
@@ -280,10 +280,10 @@ function cacheDir(dir, urlPrefix, immutable) {
 const clientDir = path.join(__dirname, 'client');
 const prerenderedDir = path.join(__dirname, 'prerendered');
 
-const _t_static = performance.now();
+const _t_static = monotonicNow();
 cacheDir(path.join(clientDir, base), base, true);
 cacheDir(path.join(prerenderedDir, base), base, false);
-console.log(`Static files indexed in ${(performance.now() - _t_static).toFixed(1)}ms (${staticCache.size} entries)`);
+console.log(`Static files indexed in ${(monotonicNow() - _t_static).toFixed(1)}ms (${staticCache.size} entries)`);
 
 // - TLS config (must be before origin warning) ------------------------------
 
@@ -361,7 +361,7 @@ function resolveClientIp(rawIp, headers) {
 
 // - uWS App -----------------------------------------------------------------
 
-const _t_app = performance.now();
+const _t_app = monotonicNow();
 const app = is_tls
 	? uWS.SSLApp({ cert_file_name: ssl_cert, key_file_name: ssl_key })
 	: uWS.App();
@@ -396,7 +396,7 @@ let relayTimer = null;
 function batchRelay(topic, envelope, compress) {
 	if (!relayBatch) {
 		relayBatch = [];
-		relayTimer = setTimeout(() => {
+		relayTimer = setTimer(() => {
 			relayTimer = null;
 			if (relayBatch) {
 				parentPort.postMessage({ type: 'publish-batch', messages: relayBatch });
@@ -585,9 +585,9 @@ const lastPublishWarnAt = new Map();
 const BATCH_FRAME_WARN_BYTES = 256 * 1024;
 let lastBatchOversizeWarnAt = 0;
 function warnLargeBatchFrame(size) {
-	const now = Date.now();
-	if (now - lastBatchOversizeWarnAt < 60000) return;
-	lastBatchOversizeWarnAt = now;
+	const t = now();
+	if (t - lastBatchOversizeWarnAt < 60000) return;
+	lastBatchOversizeWarnAt = t;
 	console.warn('[ws] publishBatched frame is ' + size + ' bytes (>' + BATCH_FRAME_WARN_BYTES +
 		'). Large frames may trip per-message-deflate and surprise CPU budgets. ' +
 		'Consider chunking the batch into multiple publishBatched calls.' +
@@ -724,10 +724,10 @@ function samplePressure(thresholds) {
 			// runaway does not flood the log. Suppressed entirely when
 			// the user has registered an onPublishRate callback - they
 			// own the surface at that point.
-			const now = Date.now();
+			const t = now();
 			for (const e of overThreshold) {
 				const last = lastPublishWarnAt.get(e.topic) || 0;
-				if (now - last < 60_000) continue;
+				if (t - last < 60_000) continue;
 				// FIFO-evict the oldest entry once at cap. Pure dedup
 				// state, so dropping the oldest just resets the warn
 				// throttle for that topic on its next over-threshold
@@ -736,7 +736,7 @@ function samplePressure(thresholds) {
 					const oldest = lastPublishWarnAt.keys().next().value;
 					if (oldest !== undefined) lastPublishWarnAt.delete(oldest);
 				}
-				lastPublishWarnAt.set(e.topic, now);
+				lastPublishWarnAt.set(e.topic, t);
 				console.warn(
 					'[ws] runaway publisher topic=%s msg/s=%d bytes/s=%d\n  See: https://svti.me/pressure',
 					e.topic, Math.round(e.messagesPerSec), Math.round(e.bytesPerSec)
@@ -788,14 +788,14 @@ function resolvePressureThresholds(opts) {
  */
 function startPressureSampling(opts) {
 	const thresholds = resolvePressureThresholds(opts);
-	if (pressureTimer) clearInterval(pressureTimer);
-	pressureTimer = setInterval(() => samplePressure(thresholds), thresholds.sampleIntervalMs);
+	if (pressureTimer) clearIntervalTimer(pressureTimer);
+	pressureTimer = setIntervalTimer(() => samplePressure(thresholds), thresholds.sampleIntervalMs);
 	if (typeof pressureTimer.unref === 'function') pressureTimer.unref();
 }
 
 function stopPressureSampling() {
 	if (pressureTimer) {
-		clearInterval(pressureTimer);
+		clearIntervalTimer(pressureTimer);
 		pressureTimer = null;
 	}
 }
@@ -1094,6 +1094,12 @@ function detachWireStates(ws, ud) {
 	}
 	m.clear();
 }
+
+// The hybrid logical clock the platform projects as `platform.hlc()`. One
+// per-process instance; its wall component is non-decreasing and a logical
+// tiebreaker disambiguates same-millisecond and backward-step reads. Read only
+// when an event needs a causal stamp, never on the per-publish hot path.
+const readHlc = createHlc();
 
 /** @type {import('./index.js').Platform} */
 const platform = {
@@ -2049,7 +2055,7 @@ const platform = {
 		const ref = nextRequestRef++;
 		const timeoutMs = (options && options.timeoutMs) || 5000;
 		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
+			const timer = setTimer(() => {
 				if (pending.delete(ref)) reject(new Error('request timed out'));
 			}, timeoutMs);
 			pending.set(ref, { resolve, reject, timer });
@@ -2057,7 +2063,7 @@ const platform = {
 			try { ws.send(payload, false, false); }
 			catch {
 				closedWsAborts++;
-				clearTimeout(timer);
+				clearTimer(timer);
 				pending.delete(ref);
 				reject(new Error('connection closed'));
 				return;
@@ -2152,7 +2158,26 @@ const platform = {
 	topicEpoch(topic) {
 		void topic;
 		return PROCESS_EPOCH;
-	}
+	},
+
+	// Clock and RNG exposed through the same injectable runtime module the
+	// adapter itself reads, so plugins and app code share one swappable source
+	// a controlled harness can seed. Plain references to the imported helpers;
+	// per-connection/request platform clones inherit them via the prototype.
+	now: now,
+	monotonic: monotonicNow,
+	random: {
+		float: randomFloat,
+		u32: randomU32,
+		uuid: randomUuid,
+		bytes: randomBytes
+	},
+	// Causal stamp for events that must order consistently across workers
+	// (or across a coarse / briefly-backward wall clock). Reads the injectable
+	// runtime clock for its wall component and keeps it non-decreasing with a
+	// logical tiebreaker. Only called when an event needs a stamp, so the
+	// per-publish hot path stays untouched.
+	hlc: readHlc
 };
 
 // - Origin construction -----------------------------------------------------
@@ -2650,7 +2675,7 @@ async function handleSSR(res, method, url, headers, remoteAddress, state) {
 		// logging. Object.create keeps the live-getters intact via the
 		// prototype chain - a flat spread would freeze `connections` and
 		// `pressure` to their snapshot value at clone time.
-		const requestId = resolveRequestId(headers['x-request-id']) || randomUUID();
+		const requestId = resolveRequestId(headers['x-request-id']) || randomUuid();
 		const requestPlatform = Object.create(platform);
 		requestPlatform.requestId = requestId;
 
@@ -3179,15 +3204,15 @@ if (WS_ENABLED) {
 	// Keeps timer overhead to one wakeup per minute regardless of how many
 	// caches exist. Add future periodic tasks here rather than creating
 	// additional intervals.
-	setInterval(() => {
+	setIntervalTimer(() => {
 		// 1. Purge rate-limit entries whose entire two-window history has expired,
 		//    then evict the least active entries if the map exceeds the cap.
 		//    Two windows must elapse with no activity before an entry is stale  -
 		//    after one window the previous slot still contributes to the estimate.
 		if (UPGRADE_MAX_PER_WINDOW > 0) {
-			const now = cachedNow;
+			const t = now();
 			for (const [ip, entry] of upgradeRateMap) {
-				if (now - entry.windowStart >= 2 * UPGRADE_WINDOW_MS) upgradeRateMap.delete(ip);
+				if (t - entry.windowStart >= 2 * UPGRADE_WINDOW_MS) upgradeRateMap.delete(ip);
 			}
 			if (upgradeRateMap.size > MAX_RATE_ENTRIES) {
 				const sorted = [...upgradeRateMap.entries()].sort(
@@ -3278,7 +3303,7 @@ if (WS_ENABLED) {
 
 			const cookies = createCookies(authHeaders['cookie']);
 
-			const authRequestId = resolveRequestId(authHeaders['x-request-id']) || randomUUID();
+			const authRequestId = resolveRequestId(authHeaders['x-request-id']) || randomUuid();
 			const authPlatform = Object.create(platform);
 			authPlatform.requestId = authRequestId;
 
@@ -3369,27 +3394,27 @@ if (WS_ENABLED) {
 		// window. Cheap (one int plus a window marker), decayed by comparing
 		// the shared 1s clock to the window start. Not a per-client structure,
 		// so it cannot itself become a DoS vector.
-		let pollWindowStart = cachedNow;
+		let pollWindowStart = now();
 		let pollWindowCount = 0;
 		let pollPrevCount = 0;
 		const POLL_WINDOW_MS = WAITING_ROOM.pollIntervalMs;
 
 		function recordPoll() {
-			const now = cachedNow;
-			const elapsed = now - pollWindowStart;
+			const t = now();
+			const elapsed = t - pollWindowStart;
 			if (elapsed >= POLL_WINDOW_MS) {
 				// Carry one window back for a smoother depth across the
 				// boundary, then roll.
 				pollPrevCount = elapsed >= 2 * POLL_WINDOW_MS ? 0 : pollWindowCount;
 				pollWindowCount = 0;
-				pollWindowStart = now;
+				pollWindowStart = t;
 			}
 			pollWindowCount++;
 		}
 
 		function currentQueueDepth() {
 			// Polls observed in the trailing window (current plus faded bucket).
-			const elapsed = cachedNow - pollWindowStart;
+			const elapsed = now() - pollWindowStart;
 			if (elapsed >= 2 * POLL_WINDOW_MS) return pollWindowCount;
 			const faded = pollPrevCount * (1 - Math.min(elapsed, POLL_WINDOW_MS) / POLL_WINDOW_MS);
 			return pollWindowCount + Math.round(faded);
@@ -3451,15 +3476,25 @@ if (WS_ENABLED) {
 	app.ws(WS_PATH, {
 		// Handle HTTP -> WebSocket upgrade with user-provided auth
 		upgrade: (res, req, context) => {
+			// Cursor-only upgrade lane (the worker's second WebSocket). Read the
+			// requested subprotocol and route the upgrade through the reserved
+			// cursor sub-budget only when a lane is configured; an unconfigured
+			// deployment never reads the header for lane purposes and never
+			// branches on the lane, so the main path is unchanged.
+			const cursorLaneEnabled = admission.cursorMaxConcurrent > 0;
+			const isCursor = cursorLaneEnabled && isCursorLaneUpgrade(req.getHeader('sec-websocket-protocol'));
+
 			// Serve an at-capacity upgrade refusal without ever consuming a
 			// gate slot. Shared by the gate-full reject and the siege
 			// short-circuit so both content-negotiate identically: a browser
 			// navigation gets the self-polling holding page (it holds no
 			// socket), everything else keeps the `503` + jittered
 			// `Retry-After`. The jitter band widens as the posture rises
-			// (`0.5` at normal reproduces today's exact band).
+			// (`0.5` at normal reproduces today's exact band). A cursor-lane
+			// upgrade is never a browser navigation, so it always gets the bare
+			// `503` - never the holding page - and skips the Accept negotiation.
 			const serveUpgradeRefusal = () => {
-				if (WAITING_ROOM === null) {
+				if (WAITING_ROOM === null || isCursor) {
 					// `waitingRoom: false` (or maxConcurrent unset): the exact
 					// bare 503 - same status, single content-type header, same
 					// body, no Retry-After.
@@ -3512,8 +3547,12 @@ if (WS_ENABLED) {
 			// Pre-upgrade soft filter: cap on concurrent upgrades currently
 			// being processed. The cheapest possible rejection - no header
 			// walk, no IP decode, no origin check - so a connection storm
-			// is shed before it consumes per-request CPU.
-			if (!admission.tryAcquire()) {
+			// is shed before it consumes per-request CPU. A cursor-lane
+			// upgrade is admitted through its reserved sub-budget so it can
+			// never starve main-WS admission; a saturated cursor lane is real
+			// capacity pressure, so it counts as an over-capacity reject too.
+			const acquired = isCursor ? admission.tryAcquireCursor() : admission.tryAcquire();
+			if (!acquired) {
 				// Count the over-capacity reject (and only this one) so the
 				// posture's rolling reject rate reflects true gate pressure.
 				if (activePosture !== null) activePosture.recordCapacityReject();
@@ -3524,7 +3563,8 @@ if (WS_ENABLED) {
 			function releaseInFlight() {
 				if (inFlightReleased) return;
 				inFlightReleased = true;
-				admission.release();
+				if (isCursor) admission.releaseCursorInFlight();
+				else admission.release();
 			}
 
 			// Read everything synchronously - uWS req is stack-allocated
@@ -3542,27 +3582,27 @@ if (WS_ENABLED) {
 			// Sliding window prevents a client from doubling their effective rate by
 			// placing requests at the boundary between two fixed windows.
 			if (UPGRADE_MAX_PER_WINDOW > 0) {
-				const now = cachedNow;
+				const t = now();
 				let rateEntry = upgradeRateMap.get(clientIp);
 				if (!rateEntry) {
-					rateEntry = { prev: 0, curr: 0, windowStart: now };
+					rateEntry = { prev: 0, curr: 0, windowStart: t };
 					upgradeRateMap.set(clientIp, rateEntry);
 				} else {
-					const elapsed = now - rateEntry.windowStart;
+					const elapsed = t - rateEntry.windowStart;
 					if (elapsed >= 2 * UPGRADE_WINDOW_MS) {
 						rateEntry.prev = 0;
 						rateEntry.curr = 0;
-						rateEntry.windowStart = now;
+						rateEntry.windowStart = t;
 					} else if (elapsed >= UPGRADE_WINDOW_MS) {
 						rateEntry.prev = rateEntry.curr;
 						rateEntry.curr = 0;
-						rateEntry.windowStart = now;
+						rateEntry.windowStart = t;
 					}
 				}
 				// Sliding estimate: the previous window's count fades out linearly as
 				// the current window progresses. At 0% elapsed, prev counts fully.
 				// At 100% elapsed, prev contributes nothing and we rotate next time.
-				const elapsed = now - rateEntry.windowStart;
+				const elapsed = t - rateEntry.windowStart;
 				const estimate = rateEntry.prev * (1 - elapsed / UPGRADE_WINDOW_MS) + rateEntry.curr;
 				if (estimate >= UPGRADE_MAX_PER_WINDOW) {
 					// Per-IP rate-limit reject. Reported on its own counter, never
@@ -3611,7 +3651,7 @@ if (WS_ENABLED) {
 			// userData slot (uWebSockets.js strips Symbol keys when handing
 			// userData to the WS binding). The `open` hook promotes this
 			// string into the Symbol-keyed per-connection platform clone.
-			const wsRequestId = resolveRequestId(headers['x-request-id']) || randomUUID();
+			const wsRequestId = resolveRequestId(headers['x-request-id']) || randomUuid();
 
 			// No user upgrade handler - accept synchronously (no microtask yield,
 			// no cookie parsing). Inject remoteAddress so plugins/ratelimit can
@@ -3649,7 +3689,7 @@ if (WS_ENABLED) {
 			let timedOut = false;
 			let timer;
 			if (wsOptions.upgradeTimeout > 0) {
-				timer = setTimeout(() => {
+				timer = setTimer(() => {
 					timedOut = true;
 					if (!aborted) {
 						res.cork(() => {
@@ -3664,7 +3704,7 @@ if (WS_ENABLED) {
 
 			Promise.resolve(wsModule.upgrade({ headers, cookies, url, remoteAddress: clientIp, requestId: wsRequestId }))
 				.then((result) => {
-					clearTimeout(timer);
+					clearTimer(timer);
 					if (aborted || timedOut) return;
 					if (result === false) {
 						res.cork(() => {
@@ -3732,7 +3772,7 @@ if (WS_ENABLED) {
 					});
 				})
 				.catch((err) => {
-					clearTimeout(timer);
+					clearTimer(timer);
 					console.error('WebSocket upgrade error:', err);
 					if (!aborted && !timedOut) {
 						res.cork(() => {
@@ -3764,14 +3804,14 @@ if (WS_ENABLED) {
 			// Stamp a fresh session id and announce it. The client stores it
 			// in sessionStorage and presents it back via { type: 'resume' }
 			// after a reconnect so the user's resume hook can fill the gap.
-			const sessionId = randomUUID();
+			const sessionId = randomUuid();
 			userData[WS_SESSION_ID] = sessionId;
 			// Per-connection traffic stats are only allocated when the user
 			// has a `close` hook to receive them - keeps userData lean for
 			// stats-uninterested apps.
 			if (closeHookRegistered) {
 				userData[WS_STATS] = {
-					openedAt: Date.now(),
+					openedAt: monotonicNow(),
 					messagesIn: 0,
 					messagesOut: 0,
 					bytesIn: 0,
@@ -3955,7 +3995,7 @@ if (WS_ENABLED) {
 						assert(typeof entry.resolve === 'function', 'request.entry-resolve-shape', { ref: msg.ref });
 						assert(typeof entry.reject === 'function', 'request.entry-reject-shape', { ref: msg.ref });
 						pending.delete(msg.ref);
-						clearTimeout(entry.timer);
+						clearTimer(entry.timer);
 						if (typeof msg.error === 'string') entry.reject(new Error(msg.error));
 						else entry.resolve(msg.data);
 					}
@@ -4092,7 +4132,7 @@ if (WS_ENABLED) {
 			const pending = userData[WS_PENDING_REQUESTS];
 			if (pending && pending.size > 0) {
 				for (const entry of pending.values()) {
-					clearTimeout(entry.timer);
+					clearTimer(entry.timer);
 					try { entry.reject(new Error('connection closed')); } catch {}
 				}
 				pending.clear();
@@ -4109,7 +4149,7 @@ if (WS_ENABLED) {
 					platform: closePlatform,
 					subscriptions,
 					id: userData[WS_SESSION_ID],
-					duration: Date.now() - stats.openedAt,
+					duration: monotonicNow() - stats.openedAt,
 					messagesIn: stats.messagesIn,
 					messagesOut: stats.messagesOut,
 					bytesIn: stats.bytesIn,
@@ -4213,7 +4253,7 @@ export async function start(host, port) {
 		app.listen(host, port, (socket) => {
 			if (socket) {
 				listenSocket = socket;
-				const startup = (performance.now() - _t_app).toFixed(0);
+				const startup = (monotonicNow() - _t_app).toFixed(0);
 				console.log(`Listening on ${is_tls ? 'https' : 'http'}://${host}:${port} (ready in ${startup}ms)`);
 				resolve();
 			} else {

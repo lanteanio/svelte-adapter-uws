@@ -1,13 +1,21 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRateLimit } from '../plugins/ratelimit/server.js';
-import { mockWs } from './_helpers.js';
+import { mockWs, installFakeRuntimeClock, releaseRuntimeClock } from './_helpers.js';
 
 describe('ratelimit plugin', () => {
 	let limiter;
 
 	beforeEach(() => {
 		vi.restoreAllMocks();
+		// The limiter reads wall time through the injectable runtime clock; bind
+		// it to the global Date.now() so the tests that pin time with
+		// vi.spyOn(Date, 'now') move the limiter's clock too.
+		installFakeRuntimeClock();
 		limiter = createRateLimit({ points: 5, interval: 1000 });
+	});
+
+	afterEach(() => {
+		releaseRuntimeClock();
 	});
 
 	describe('createRateLimit', () => {

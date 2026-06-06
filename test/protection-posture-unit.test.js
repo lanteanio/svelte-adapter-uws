@@ -264,6 +264,30 @@ describe('createPosture reject accounting', () => {
 		expect(typeof posture.rejectedPerSecond).toBe('number');
 		expect(Number.isInteger(posture.rejectedPerSecond)).toBe(true);
 	});
+
+	it('counts a saturated cursor-lane reject as over-capacity pressure, not a rate-limit reject', () => {
+		// Drive the real gate to a saturated cursor sub-budget, then record the
+		// reject the way the upgrade handler does on the cursor reject path: a
+		// cursor-lane reject is genuine capacity pressure, so it feeds the
+		// over-capacity counter (which can escalate an auto posture) and never
+		// the rate-limit counter (which is deliberately inert for escalation).
+		const admission = createUpgradeAdmission({ maxConcurrent: 4, cursorLane: { fraction: 0.25 } });
+		const posture = createPosture({ admission, getThresholds });
+		expect(admission.cursorMaxConcurrent).toBe(1);
+		expect(admission.tryAcquireCursor()).toBe(true); // sub-budget now full
+		// A second cursor upgrade is refused even though the main lane has room.
+		expect(admission.tryAcquireCursor()).toBe(false);
+		// The handler records this refusal on the capacity site.
+		posture.recordCapacityReject();
+		expect(posture.rejectedPerSecond).toBe(1);
+
+		// Confirm it climbs the over-capacity escalation, not the inert 429 path:
+		// a 429 storm of the same size leaves the rolling capacity rate at the
+		// reject already counted, never higher.
+		const before = posture.rejectedPerSecond;
+		for (let j = 0; j < 50; j++) posture.recordRateLimitReject();
+		expect(posture.rejectedPerSecond).toBe(before);
+	});
 });
 
 describe('createPosture pinning', () => {

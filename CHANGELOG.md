@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.14] - 2026-06-07
+
+### Added
+
+- **`upgradeAdmission.cursorLane`: a sheddable, deprioritised upgrade lane for a cursor-only second WebSocket, so a flood of cursor connects can never starve the main WebSocket admission.** When `maxConcurrent` is set, `cursorLane: { fraction }` reserves a fraction of the gate (default `0.25`, at least one slot) for upgrades that request the `svelte-realtime-cursor` subprotocol. A cursor upgrade is admitted only while both the main ceiling and the cursor sub-budget have room; the main lane's own admission never waits on the cursor sub-budget. The cursor lane is refused first and, under `siege`, refused entirely - always with a bare `503` (never the holding page, since the cursor connection is not a browser). The full cursor budget stays available at both `normal` and `elevated`. A saturated cursor lane counts as genuine capacity pressure, so it can still let an `auto` posture escalate. The server keeps echoing the negotiated subprotocol back to the client unchanged. Strictly additive: omit `cursorLane` and the second counter never increments - admission is byte-identical to before.
+
+- **An injectable clock/RNG/timer runtime, surfaced as `platform.now()` / `platform.monotonic()` / `platform.hlc()` / `platform.random`.** Every wall-clock read, monotonic timer, PRNG, UUID, and timer in the adapter (runtime, plugins, and the browser client) now routes through one swappable runtime module; its default binds the native primitives with no measurable hot-path cost (a micro-benchmark gates `now()` under single-digit-percent overhead). `platform.now()` is the cached wall clock, `platform.monotonic()` a clock-step-immune duration source, `platform.random` a `{ float, u32, uuid, bytes }` generator, and `platform.hlc()` a hybrid logical clock (`{ wall, logical, nodeId }` with a non-decreasing wall and a same-millisecond tiebreaker). The browser client gets the same surface via a browser-backed runtime (Web Crypto + global timers, no Node built-ins). A dependency-free `scripts/check-determinism.js` check, wired into `pretest`, keeps raw native time/RNG/timer calls out of the routed source. Strictly additive and zero-config; an existing deployment is unaffected.
+
 ## [0.6.0-next.13] - 2026-06-06
 
 ### Added

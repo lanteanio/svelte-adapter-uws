@@ -38,6 +38,7 @@
 
 import { encodeCursor, CURSOR_CAPABILITY, CURSOR_SCHEMA_VERSION, CURSOR_CAPABILITY_DICT, CursorEncodeDict } from './codec.js';
 import { WS_CAPS } from '../../files/utils.js';
+import { monotonicNow, setTimer, clearTimer } from '../../files/runtime.js';
 
 const TOPIC_PREFIX = '__cursor:';
 
@@ -861,7 +862,7 @@ export function createCursor(options = {}) {
 	 */
 	function tick() {
 		tickTimer = null;
-		const now = Date.now();
+		const now = monotonicNow();
 		let nextDeadline = Infinity;
 
 		for (const topic of dirtyTopics) {
@@ -889,14 +890,14 @@ export function createCursor(options = {}) {
 		}
 
 		if (nextDeadline !== Infinity) {
-			tickTimer = setTimeout(tick, Math.max(0, nextDeadline - Date.now()));
+			tickTimer = setTimer(tick, Math.max(0, nextDeadline - monotonicNow()));
 		}
 		// else: scheduler idle until next `broadcast()` call.
 	}
 
 	function armTick(delay) {
 		if (tickTimer !== null) return;
-		tickTimer = setTimeout(tick, delay);
+		tickTimer = setTimer(tick, delay);
 	}
 
 	/**
@@ -947,14 +948,14 @@ export function createCursor(options = {}) {
 			// Anchor lastFlush one full cycle in the past so the first
 			// broadcast on a fresh topic is treated as "cycle ready" and
 			// schedules the tick at delay 0 with zero drift, rather than
-			// inflating drift stats by Date.now() worth of "lateness".
-			state = { dirty: new Map(), lastFlush: Date.now() - topicThrottleMs };
+			// inflating drift stats by a full clock value worth of "lateness".
+			state = { dirty: new Map(), lastFlush: monotonicNow() - topicThrottleMs };
 			topicFlush.set(topic, state);
 		}
 		state.dirty.set(key, { data, platform });
 		dirtyTopics.add(topic);
 
-		const elapsed = Date.now() - state.lastFlush;
+		const elapsed = monotonicNow() - state.lastFlush;
 		const delay = elapsed >= topicThrottleMs ? 0 : topicThrottleMs - elapsed;
 		armTick(delay);
 	}
@@ -990,8 +991,8 @@ export function createCursor(options = {}) {
 						const oldMap = topics.get(oldest);
 						if (oldMap) {
 							for (const e of oldMap.values()) {
-								if (e.timer) clearTimeout(e.timer);
-								if (e.settleTimer) clearTimeout(e.settleTimer);
+								if (e.timer) clearTimer(e.timer);
+								if (e.settleTimer) clearTimer(e.settleTimer);
 							}
 						}
 						topics.delete(oldest);
@@ -1007,7 +1008,7 @@ export function createCursor(options = {}) {
 			}
 
 			let entry = topicMap.get(state.key);
-			const now = Date.now();
+			const now = monotonicNow();
 
 			if (!entry) {
 				entry = { user: state.user, data, lastBroadcast: 0, timer: null };
@@ -1026,7 +1027,7 @@ export function createCursor(options = {}) {
 			if (minMove > 0) {
 				// Re-arm point for the debounced settle: clear any pending timer; a
 				// drop below re-arms it, a real broadcast leaves it cleared.
-				if (entry.settleTimer) { clearTimeout(entry.settleTimer); entry.settleTimer = null; }
+				if (entry.settleTimer) { clearTimer(entry.settleTimer); entry.settleTimer = null; }
 				pos = finitePosition(data);
 				if (
 					pos && entry.lastSentPos &&
@@ -1042,13 +1043,13 @@ export function createCursor(options = {}) {
 					// (minMove: 1) stays dropped.
 					if (!entry.timer) {
 						const key = state.key;
-						entry.settleTimer = setTimeout(() => {
+						entry.settleTimer = setTimer(() => {
 							const e = topicMap.get(key);
 							if (!e) return;
 							e.settleTimer = null;
 							const p = finitePosition(e.data);
 							if (p && (!e.lastSentPos || p.x !== e.lastSentPos.x || p.y !== e.lastSentPos.y)) {
-								e.lastBroadcast = Date.now();
+								e.lastBroadcast = monotonicNow();
 								e.lastSentPos = p;
 								broadcast(topic, key, e.data, platform);
 							}
@@ -1065,7 +1066,7 @@ export function createCursor(options = {}) {
 			// Leading edge: broadcast immediately if throttle window passed
 			if (now - entry.lastBroadcast >= throttleMs) {
 				if (entry.timer) {
-					clearTimeout(entry.timer);
+					clearTimer(entry.timer);
 					entry.timer = null;
 				}
 				entry.lastBroadcast = now;
@@ -1077,10 +1078,10 @@ export function createCursor(options = {}) {
 			// Trailing edge: schedule a broadcast for the end of the window
 			if (!entry.timer) {
 				const key = state.key;
-				entry.timer = setTimeout(() => {
+				entry.timer = setTimer(() => {
 					const e = topicMap.get(key);
 					if (e) {
-						e.lastBroadcast = Date.now();
+						e.lastBroadcast = monotonicNow();
 						e.timer = null;
 						// Record the position actually broadcast (the latest stored
 						// data, which may be newer than this call's), never a dropped one.
@@ -1104,8 +1105,8 @@ export function createCursor(options = {}) {
 
 				const entry = topicMap.get(state.key);
 				if (entry) {
-					if (entry.timer) clearTimeout(entry.timer);
-					if (entry.settleTimer) clearTimeout(entry.settleTimer);
+					if (entry.timer) clearTimer(entry.timer);
+					if (entry.settleTimer) clearTimer(entry.settleTimer);
 					topicMap.delete(state.key);
 					if (topicMap.size === 0) {
 						topics.delete(topic);
@@ -1197,11 +1198,11 @@ export function createCursor(options = {}) {
 		clear() {
 			for (const [, topicMap] of topics) {
 				for (const [, entry] of topicMap) {
-					if (entry.timer) clearTimeout(entry.timer);
-					if (entry.settleTimer) clearTimeout(entry.settleTimer);
+					if (entry.timer) clearTimer(entry.timer);
+					if (entry.settleTimer) clearTimer(entry.settleTimer);
 				}
 			}
-			if (tickTimer !== null) { clearTimeout(tickTimer); tickTimer = null; }
+			if (tickTimer !== null) { clearTimer(tickTimer); tickTimer = null; }
 			dirtyTopics.clear();
 			topics.clear();
 			topicFlush.clear();

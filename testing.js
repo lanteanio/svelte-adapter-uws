@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, PROCESS_EPOCH, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, resolveWaitingRoom, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { nextTopicSeq, PROCESS_EPOCH, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './files/wire.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
@@ -782,14 +782,20 @@ export async function createTestServer(options = {}) {
 		sendPingsAutomatically: true,
 
 		upgrade(res, req, context) {
+			// Cursor-only upgrade lane (the worker's second WebSocket).
+			// Mirrors the production handler: route through the reserved
+			// cursor sub-budget only when a lane is configured.
+			const cursorLaneEnabled = admission.cursorMaxConcurrent > 0;
+			const isCursor = cursorLaneEnabled && isCursorLaneUpgrade(req.getHeader('sec-websocket-protocol'));
+
 			// Serve an at-capacity upgrade refusal without consuming a gate slot.
 			// Shared by the gate-full reject and the siege short-circuit so both
 			// content-negotiate identically. Mirrors the production handler: a
 			// browser navigation gets the holding page, everything else keeps the
 			// 503 + a posture-widened jittered Retry-After (0.5 at normal is
-			// today's exact band).
+			// today's exact band). A cursor-lane upgrade always gets the bare 503.
 			const serveUpgradeRefusal = () => {
-				if (WAITING_ROOM === null) {
+				if (WAITING_ROOM === null || isCursor) {
 					// `waitingRoom: false` (or maxConcurrent unset): the exact
 					// bare 503 - no Retry-After. Matches production byte-for-byte.
 					res.cork(() => {
@@ -836,8 +842,12 @@ export async function createTestServer(options = {}) {
 
 			// Pre-upgrade soft filter: cap concurrent in-flight upgrades.
 			// Crossed requests get a fast 503 before any per-request work,
-			// matching handler.js's wiring exactly.
-			if (!admission.tryAcquire()) {
+			// matching handler.js's wiring exactly. A cursor-lane upgrade is
+			// admitted through its reserved sub-budget so it cannot starve
+			// main-WS admission; a saturated cursor lane still counts as an
+			// over-capacity reject.
+			const acquired = isCursor ? admission.tryAcquireCursor() : admission.tryAcquire();
+			if (!acquired) {
 				if (activePostureT !== null) activePostureT.recordCapacityReject();
 				serveUpgradeRefusal();
 				return;
@@ -846,7 +856,8 @@ export async function createTestServer(options = {}) {
 			function releaseInFlight() {
 				if (inFlightReleased) return;
 				inFlightReleased = true;
-				admission.release();
+				if (isCursor) admission.releaseCursorInFlight();
+				else admission.release();
 			}
 
 			const headers = {};

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { installFakeRuntimeClock, releaseRuntimeClock } from './_helpers.js';
 
 // - Mock WebSocket -----------------------------------------------------------
 
@@ -2217,6 +2218,11 @@ describe('client.js (real module)', () => {
 
 		it('maxAge sweeps stale cursor entries', async () => {
 			vi.useFakeTimers();
+			// The cursor store stamps and sweeps entry timestamps through the
+			// shared decode helpers, which default to the injectable runtime
+			// clock; bind it to the faked Date.now() so advancing time ages the
+			// entries past maxAge.
+			installFakeRuntimeClock();
 			const conn = clientModule.connect();
 			await vi.advanceTimersByTimeAsync(0);
 			const ws = MockWebSocket._last;
@@ -2236,6 +2242,7 @@ describe('client.js (real module)', () => {
 			expect(snapshots[snapshots.length - 1].has('stale')).toBe(false);
 
 			unsub();
+			releaseRuntimeClock();
 			vi.useRealTimers();
 			conn.close();
 		});

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createCursor } from '../plugins/cursor/server.js';
-import { mockWs, mockPlatform, mockWalkPlatform } from './_helpers.js';
+import { mockWs, mockPlatform, mockWalkPlatform, installFakeRuntimeClock, releaseRuntimeClock } from './_helpers.js';
 
 // Helpers to filter the new split-wire-format publish stream. The plugin
 // emits `join` (with user metadata) then `update` / `bulk` (positions
@@ -15,6 +15,11 @@ describe('cursor plugin - server', () => {
 
 	beforeEach(() => {
 		vi.useRealTimers();
+		// The cursor scheduler reads duration time through the injectable
+		// runtime clock; bind it to the global Date.now() so a test that drives
+		// time with vi.useFakeTimers()/advanceTimersByTime() moves the
+		// scheduler's clock too (under real timers this is the real clock).
+		installFakeRuntimeClock();
 		// All-immediate defaults for assertion convenience: 0/0 = no
 		// throttle, no topic coalescing. Individual tests opt into
 		// throttled behavior explicitly.
@@ -24,6 +29,10 @@ describe('cursor plugin - server', () => {
 			select: (userData) => ({ id: userData.id, name: userData.name })
 		});
 		platform = mockPlatform();
+	});
+
+	afterEach(() => {
+		releaseRuntimeClock();
 	});
 
 	describe('createCursor', () => {
@@ -1285,6 +1294,12 @@ describe('cursor plugin - viewport ingress', () => {
 describe('cursor plugin - backpressure (per-subscriber drop)', () => {
 	const CURSOR = '__cursor:board';
 
+	// The coalescing scheduler reads duration time through the injectable runtime
+	// clock; bind it to the global Date.now() so the tick deadline math follows a
+	// faked clock (and the real clock when these tests do not fake timers).
+	beforeEach(() => installFakeRuntimeClock());
+	afterEach(() => releaseRuntimeClock());
+
 	function setup(bpOptions = { enabled: true }) {
 		const c = createCursor({
 			throttle: 0,
@@ -1458,6 +1473,12 @@ describe('cursor plugin - backpressure (per-subscriber drop)', () => {
 
 describe('cursor plugin - viewport culling', () => {
 	const CURSOR = '__cursor:board';
+
+	// The coalescing scheduler reads duration time through the injectable runtime
+	// clock; bind it to the global Date.now() so the tick deadline math follows a
+	// faked clock (and the real clock when these tests do not fake timers).
+	beforeEach(() => installFakeRuntimeClock());
+	afterEach(() => releaseRuntimeClock());
 
 	function viewportTracker(extra = {}) {
 		return createCursor({
@@ -1761,9 +1782,10 @@ describe('cursor plugin - jitter filter (minMove)', () => {
 	// Fake timers for the whole block: a sub-threshold drop arms a debounced
 	// settle timer (settleMs = throttle, or 16 when throttle is 0) and these tests
 	// assert exactly when it fires. Freezing the clock also keeps a dropped frame's
-	// settle from leaking past the test.
-	beforeEach(() => vi.useFakeTimers());
-	afterEach(() => vi.useRealTimers());
+	// settle from leaking past the test. The settle math reads duration time
+	// through the injectable runtime clock, so bind it to the faked Date.now().
+	beforeEach(() => { vi.useFakeTimers(); installFakeRuntimeClock(); });
+	afterEach(() => { releaseRuntimeClock(); vi.useRealTimers(); });
 
 	const CURSOR = '__cursor:board';
 

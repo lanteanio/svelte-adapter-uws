@@ -19,6 +19,7 @@
  */
 
 import { on, connect, ready } from '../../client.js';
+import { microtask } from '../../client-runtime.js';
 import { writable } from 'svelte/store';
 
 const TOPIC_PREFIX = '__replay:';
@@ -128,7 +129,7 @@ export function onReplay(topic, options) {
 				replayDone = true;
 				// Clean up the replay subscription - no longer needed
 				if (replayUnsub) {
-					queueMicrotask(() => {
+					microtask(() => {
 						replayUnsub?.();
 						replayUnsub = null;
 					});

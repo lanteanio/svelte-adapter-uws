@@ -7,6 +7,29 @@
  * without spinning up a real server.
  */
 
+import { setRuntimeEnv, resetRuntimeEnv } from '../files/runtime.js';
+
+/**
+ * Point the injectable runtime clock at the global `Date.now()` for the
+ * duration of a test that scripts time. The plugin servers read wall and
+ * duration time through the runtime module rather than the global, so a test
+ * that advances time with `vi.useFakeTimers()` / `vi.advanceTimersByTime()` or
+ * pins it with `vi.spyOn(Date, 'now')` must route those movements into the
+ * runtime clock. Both helpers move the global `Date.now`, so binding both the
+ * wall (`now`) and duration (`monotonic`) readers to it makes the runtime clock
+ * follow the scripted time at full precision (the production default is the
+ * ~1s-cached read, which a synchronous test cannot advance). Call in a
+ * `beforeEach` and pair with {@link releaseRuntimeClock} in `afterEach`.
+ */
+export function installFakeRuntimeClock() {
+	setRuntimeEnv({ clock: { now: () => Date.now(), monotonic: () => Date.now() } });
+}
+
+/** Restore the native runtime clock. Pair with {@link installFakeRuntimeClock}. */
+export function releaseRuntimeClock() {
+	resetRuntimeEnv();
+}
+
 /**
  * Create a mock WebSocket that mimics the uWS / vite wrapper API.
  *

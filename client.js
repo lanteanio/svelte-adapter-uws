@@ -1,5 +1,6 @@
 import { writable, derived } from 'svelte/store';
 import { parseBinaryFrame, requestNFrame } from './files/wire.js';
+import { now, randomFloat, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask } from './client-runtime.js';
 
 /** @type {ReturnType<typeof createConnection> | null} */
 let singleton = null;
@@ -290,7 +291,7 @@ export function ready() {
 		function cleanup() {
 			if (settled) return;
 			settled = true;
-			queueMicrotask(() => {
+			microtask(() => {
 				statusUnsub?.();
 				permaUnsub?.();
 			});
@@ -403,20 +404,20 @@ export function crud(topic, initial = [], options = {}) {
 	let list = [...initial];
 	/** @type {Map<string, number>} */
 	const timestamps = new Map();
-	const now = Date.now();
+	const seededAt = now();
 	for (const item of initial) {
-		timestamps.set(keyOf(item), now);
+		timestamps.set(keyOf(item), seededAt);
 	}
 
 	const output = writable(list);
 	/** @type {(() => void) | null} */
 	let sourceUnsub = null;
-	/** @type {ReturnType<typeof setInterval> | null} */
+	/** @type {ReturnType<typeof setIntervalTimer> | null} */
 	let sweepTimer = null;
 	let subCount = 0;
 
 	function sweep() {
-		const cutoff = Date.now() - /** @type {number} */ (maxAge);
+		const cutoff = now() - /** @type {number} */ (maxAge);
 		let changed = false;
 		for (const [id, ts] of timestamps) {
 			if (ts < cutoff) {
@@ -437,21 +438,21 @@ export function crud(topic, initial = [], options = {}) {
 			if (data == null || typeof data !== 'object') return;
 			const id = keyOf(data);
 			if (evt === 'deleted') timestamps.delete(id);
-			else timestamps.set(id, Date.now());
+			else timestamps.set(id, now());
 			list = applyCrudReducer(list, evt, data, arrayCrudStorage, reducerOpts);
 			output.set(list);
 		});
-		sweepTimer = setInterval(sweep, Math.max(maxAge / 2, 1000));
+		sweepTimer = setIntervalTimer(sweep, Math.max(maxAge / 2, 1000));
 	}
 
 	function stop() {
 		if (sourceUnsub) { sourceUnsub(); sourceUnsub = null; }
-		if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
+		if (sweepTimer) { clearIntervalTimer(sweepTimer); sweepTimer = null; }
 		list = [...initial];
-		const now = Date.now();
+		const seededAt = now();
 		timestamps.clear();
 		for (const item of initial) {
-			timestamps.set(keyOf(item), now);
+			timestamps.set(keyOf(item), seededAt);
 		}
 		output.set(list);
 	}
@@ -508,20 +509,20 @@ export function lookup(topic, initial = [], options = {}) {
 	let map = { ...initialMap };
 	/** @type {Map<string, number>} */
 	const timestamps = new Map();
-	const now = Date.now();
+	const seededAt = now();
 	for (const id in initialMap) {
-		timestamps.set(id, now);
+		timestamps.set(id, seededAt);
 	}
 
 	const output = writable(map);
 	/** @type {(() => void) | null} */
 	let sourceUnsub = null;
-	/** @type {ReturnType<typeof setInterval> | null} */
+	/** @type {ReturnType<typeof setIntervalTimer> | null} */
 	let sweepTimer = null;
 	let subCount = 0;
 
 	function sweep() {
-		const cutoff = Date.now() - /** @type {number} */ (maxAge);
+		const cutoff = now() - /** @type {number} */ (maxAge);
 		let changed = false;
 		for (const [id, ts] of timestamps) {
 			if (ts < cutoff) {
@@ -544,7 +545,7 @@ export function lookup(topic, initial = [], options = {}) {
 			if (data == null || typeof data !== 'object') return;
 			const id = keyOf(data);
 			if (evt === 'deleted') timestamps.delete(id);
-			else timestamps.set(id, Date.now());
+			else timestamps.set(id, now());
 			const next = applyCrudReducer(map, evt, data, recordCrudStorage, reducerOpts);
 			if (next === map) return;
 			map = next;
@@ -552,17 +553,17 @@ export function lookup(topic, initial = [], options = {}) {
 		});
 		// Sweep at half the maxAge interval for responsive cleanup
 		// without burning cycles on very short intervals
-		sweepTimer = setInterval(sweep, Math.max(maxAge / 2, 1000));
+		sweepTimer = setIntervalTimer(sweep, Math.max(maxAge / 2, 1000));
 	}
 
 	function stop() {
 		if (sourceUnsub) { sourceUnsub(); sourceUnsub = null; }
-		if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
+		if (sweepTimer) { clearIntervalTimer(sweepTimer); sweepTimer = null; }
 		map = { ...initialMap };
-		const now = Date.now();
+		const seededAt = now();
 		timestamps.clear();
 		for (const id in initialMap) {
-			timestamps.set(id, now);
+			timestamps.set(id, seededAt);
 		}
 		output.set(map);
 	}
@@ -638,8 +639,8 @@ export function once(topic, event, options) {
 		function cleanup() {
 			if (settled) return;
 			settled = true;
-			if (timer) clearTimeout(timer);
-			queueMicrotask(() => unsub());
+			if (timer) clearTimer(timer);
+			microtask(() => unsub());
 		}
 
 		const unsub = store.subscribe((data) => {
@@ -652,7 +653,7 @@ export function once(topic, event, options) {
 			}
 		});
 		if (timeout !== undefined) {
-			timer = setTimeout(() => {
+			timer = setTimer(() => {
 				cleanup();
 				reject(new Error(`once('${topic}'${event ? `, '${event}'` : ''}) timed out after ${timeout}ms`));
 			}, timeout);
@@ -716,21 +717,23 @@ export function classifyCloseCode(code) {
  * cap by attempt 6) and gentle enough that a brief restart resolves
  * before the user notices.
  *
- * Pure: no I/O, no globals. Pass a deterministic `randFactor` for
- * reproducible assertions in tests.
+ * Pure given an explicit `randFactor`: no I/O, no globals. Pass a fixed
+ * value for reproducible assertions in tests.
  *
- * The default `Math.random()` is the correct primitive here: this value
- * is reconnect-backoff jitter, used to spread retries across a fleet so a
+ * The default `randFactor` is the runtime float source: this value is
+ * reconnect-backoff jitter, used to spread retries across a fleet so a
  * server restart does not hit a thundering-herd. Not security-relevant -
- * the randFactor never crosses a trust boundary.
+ * the randFactor never crosses a trust boundary - so the runtime source is
+ * the right primitive; routing it through the runtime also lets a seeded
+ * harness reproduce the reconnect schedule exactly.
  *
  * @param {number} base       base interval in ms (e.g. 3000)
  * @param {number} maxDelay   cap in ms (e.g. 300000)
  * @param {number} attempt    zero-based attempt counter
- * @param {number} [randFactor]  random factor in [0, 1); defaults to Math.random()
+ * @param {number} [randFactor]  random factor in [0, 1); defaults to randomFloat()
  * @returns {number}
  */
-export function nextReconnectDelay(base, maxDelay, attempt, randFactor = Math.random()) {
+export function nextReconnectDelay(base, maxDelay, attempt, randFactor = randomFloat()) {
 	const capped = Math.min(base * Math.pow(2.2, attempt), maxDelay);
 	return capped * (0.75 + randFactor * 0.5);
 }
@@ -758,9 +761,9 @@ function createConnection(options) {
 	/** @type {WebSocket | null} */
 	let ws = null;
 
-	/** @type {ReturnType<typeof setTimeout> | null} */
+	/** @type {ReturnType<typeof setTimer> | null} */
 	let reconnectTimer = null;
-	/** @type {ReturnType<typeof setInterval> | null} */
+	/** @type {ReturnType<typeof setIntervalTimer> | null} */
 	let activityTimer = null;
 
 	/** @type {Promise<boolean> | null} deduped in-flight auth preflight */
@@ -777,7 +780,7 @@ function createConnection(options) {
 	let hiddenDisconnect = false;
 	// Timestamp of the last message received from the server. Used to detect
 	// zombie connections  - cases where onclose was suppressed by browser throttling.
-	let lastServerMessage = Date.now();
+	let lastServerMessage = now();
 	// 2.5x the server's 120s idle timeout. If the server has been completely
 	// silent for this long while the socket appears open, it is likely a zombie.
 	const SERVER_TIMEOUT_MS = 150000;
@@ -929,7 +932,7 @@ function createConnection(options) {
 	let _onFlowDegraded = null;
 
 	function _flowFresh() {
-		return _flowAvail > 0 && Date.now() < _flowExpiresAt;
+		return _flowAvail > 0 && now() < _flowExpiresAt;
 	}
 	function _setFlowDegraded(d) {
 		if (d === _flowDegraded) return;
@@ -963,7 +966,7 @@ function createConnection(options) {
 	// Apply a fresh window and drain the queue in FIFO order.
 	function _applyFlowWindow(count, ttlMs) {
 		_flowActive = true;
-		_flowExpiresAt = Date.now() + ttlMs;
+		_flowExpiresAt = now() + ttlMs;
 		_flowAvail = count;
 		// A fresh window clears the replenish latch so the next low-water
 		// crossing can ask for more again.
@@ -1210,7 +1213,7 @@ function createConnection(options) {
 
 		ws.onopen = () => {
 			attempt = 0;
-			lastServerMessage = Date.now();
+			lastServerMessage = now();
 			failureStore.set(null);
 			setStatusOpen();
 			if (debug) console.log('[ws] connected');
@@ -1308,7 +1311,7 @@ function createConnection(options) {
 		}
 
 		ws.onmessage = (rawEvent) => {
-			lastServerMessage = Date.now();
+			lastServerMessage = now();
 			try {
 				// Inbound binary demux, ahead of the JSON path. A 0x03 frame is
 				// a binary topic PAYLOAD: resolve its numeric topic-id to a name,
@@ -1504,7 +1507,7 @@ function createConnection(options) {
 		}
 		const delay = nextReconnectDelay(reconnectInterval, maxReconnectInterval, attempt);
 		attempt++;
-		reconnectTimer = setTimeout(() => {
+		reconnectTimer = setTimer(() => {
 			reconnectTimer = null;
 			doConnect();
 		}, delay);
@@ -1538,7 +1541,7 @@ function createConnection(options) {
 		if (ws?.readyState !== WebSocket.OPEN) return;
 		if (!pendingSubscribes) {
 			pendingSubscribes = [];
-			queueMicrotask(flushPendingSubscribes);
+			microtask(flushPendingSubscribes);
 		}
 		pendingSubscribes.push(topic);
 	}
@@ -1649,7 +1652,7 @@ function createConnection(options) {
 			// that never mount). Safe: if another wrapper for the same topic has
 			// an active subscriber, topicRefCounts will be non-empty and we skip.
 			const ownStore = store;
-			queueMicrotask(() => {
+			microtask(() => {
 				if (subs === 0 && !topicRefCounts.has(topic) && topicStores.get(topic) === ownStore) {
 					topicStores.delete(topic);
 				}
@@ -1698,7 +1701,7 @@ function createConnection(options) {
 			store = writable(null);
 			eventStores.set(key, store);
 			const ownStore = store;
-			queueMicrotask(() => {
+			microtask(() => {
 				if (subs === 0 && !topicRefCounts.has(topic) && eventStores.get(key) === ownStore) {
 					eventStores.delete(key);
 				}
@@ -1800,11 +1803,11 @@ function createConnection(options) {
 		intentionallyClosed = true;
 		permaClosedStore.set(true);
 		if (reconnectTimer) {
-			clearTimeout(reconnectTimer);
+			clearTimer(reconnectTimer);
 			reconnectTimer = null;
 		}
 		if (activityTimer) {
-			clearInterval(activityTimer);
+			clearIntervalTimer(activityTimer);
 			activityTimer = null;
 		}
 		if (visibilityHandler && typeof document !== 'undefined') {
@@ -1853,7 +1856,7 @@ function createConnection(options) {
 			hiddenDisconnect = false;
 			attempt = 0;
 			if (reconnectTimer) {
-				clearTimeout(reconnectTimer);
+				clearTimer(reconnectTimer);
 				reconnectTimer = null;
 			}
 			doConnect();
@@ -1867,9 +1870,9 @@ function createConnection(options) {
 	// on mobile after wake from sleep). Force a close so onclose fires and the
 	// normal reconnect path takes over.
 	if (typeof window !== 'undefined') {
-		activityTimer = setInterval(() => {
-			if (ws?.readyState === WebSocket.OPEN && Date.now() - lastServerMessage > SERVER_TIMEOUT_MS) {
-				if (debug) console.log('[ws] server silent for', Date.now() - lastServerMessage, 'ms, reconnecting');
+		activityTimer = setIntervalTimer(() => {
+			if (ws?.readyState === WebSocket.OPEN && now() - lastServerMessage > SERVER_TIMEOUT_MS) {
+				if (debug) console.log('[ws] server silent for', now() - lastServerMessage, 'ms, reconnecting');
 				ws.close();
 			}
 		}, 30000);

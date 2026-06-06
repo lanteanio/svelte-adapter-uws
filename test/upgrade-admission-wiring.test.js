@@ -18,18 +18,30 @@ const describeUWS = uWS ? describe : describe.skip;
 
 let server;
 
-async function attemptUpgrade(url) {
+// Open a single upgrade. `subprotocol` sets Sec-WebSocket-Protocol so a test
+// can route the upgrade through the cursor lane; omit it for an ordinary
+// main-lane upgrade.
+async function attemptUpgrade(url, subprotocol, headers) {
 	const { WebSocket } = await import('ws');
 	return await new Promise((resolve) => {
-		const ws = new WebSocket(url);
-		const result = { opened: false, status: null, ws: null };
+		const ws = new WebSocket(url, subprotocol || undefined, headers ? { headers } : undefined);
+		const result = { opened: false, status: null, body: '', headers: null, ws: null };
 		ws.on('open', () => { result.opened = true; result.ws = ws; resolve(result); });
-		ws.on('unexpected-response', (_req, res) => { result.status = res.statusCode; resolve(result); });
+		ws.on('unexpected-response', (_req, res) => {
+			result.status = res.statusCode;
+			result.headers = res.headers;
+			const chunks = [];
+			res.on('data', (c) => chunks.push(c));
+			res.on('end', () => { result.body = Buffer.concat(chunks).toString('utf8'); resolve(result); });
+			res.on('error', () => { result.body = Buffer.concat(chunks).toString('utf8'); resolve(result); });
+		});
 		ws.on('error', () => {
 			if (result.status === null && !result.opened) resolve(result);
 		});
 	});
 }
+
+const CURSOR_SUBPROTOCOL = 'svelte-realtime-cursor';
 
 describeUWS('upgrade-admission wiring on createTestServer', () => {
 	afterEach(async () => {
@@ -147,6 +159,105 @@ describeUWS('upgrade-admission wiring on createTestServer', () => {
 		// A fresh quiet attempt must succeed - if release() were buggy and
 		// in-flight stuck above max, we would shed with 503 here too.
 		const fresh = await attemptUpgrade(server.wsUrl);
+		expect(fresh.opened).toBe(true);
+		fresh.ws?.close();
+	});
+});
+
+describeUWS('cursor-lane admission on createTestServer', () => {
+	afterEach(async () => {
+		await server?.close();
+		server = null;
+	});
+
+	it('treats a cursor-subprotocol upgrade as ordinary when the lane is disabled', async () => {
+		const { createTestServer } = await import('../testing.js');
+		// No cursorLane configured: the subprotocol carries no lane meaning, the
+		// upgrade goes through the main path like any other.
+		server = await createTestServer({ upgradeAdmission: { maxConcurrent: 4 } });
+
+		const r = await attemptUpgrade(server.wsUrl, CURSOR_SUBPROTOCOL);
+		expect(r.opened).toBe(true);
+		r.ws?.close();
+	});
+
+	it('sheds a cursor upgrade with 503 when the cursor sub-budget is saturated while the main lane still admits', async () => {
+		const { createTestServer } = await import('../testing.js');
+		// maxConcurrent 8 with a 0.25 fraction reserves 2 cursor slots. Hold each
+		// upgrade in flight via a slow hook so a burst contends.
+		server = await createTestServer({
+			upgradeAdmission: { maxConcurrent: 8, cursorLane: { fraction: 0.25 } },
+			handler: {
+				upgrade: async () => { await new Promise((r) => setTimeout(r, 80)); return {}; }
+			}
+		});
+
+		// A burst of cursor upgrades. Only two cursor slots exist, so the surplus
+		// must shed with 503 even though the main ceiling (8) is far from full.
+		const cursorResults = await Promise.all(
+			Array.from({ length: 8 }, () => attemptUpgrade(server.wsUrl, CURSOR_SUBPROTOCOL))
+		);
+		const cursorShed = cursorResults.filter((r) => r.status === 503);
+		expect(cursorShed.length).toBeGreaterThan(0);
+		// The cursor reject is a bare 503, never the holding page.
+		for (const r of cursorShed) {
+			expect(r.body).toBe('Server is at upgrade capacity, please retry');
+		}
+
+		// While cursor upgrades shed, a main-lane upgrade in the same window is
+		// still admitted - the cursor lane never starves the main lane.
+		const main = await attemptUpgrade(server.wsUrl);
+		expect(main.opened).toBe(true);
+		main.ws?.close();
+
+		for (const r of cursorResults) r.ws?.close();
+	});
+
+	it('refuses a cursor upgrade with a bare 503 under a pinned siege (never the holding page) while main is also refused', async () => {
+		const { createTestServer } = await import('../testing.js');
+		server = await createTestServer({
+			upgradeAdmission: { maxConcurrent: 50, cursorLane: { fraction: 0.25 } },
+			protection: 'siege'
+		});
+
+		// Even with an HTML Accept (which would steer a normal browser upgrade to
+		// the holding page), a cursor upgrade under siege must still get the bare
+		// 503, never the 200 page - a worker is never a browser, so the cursor
+		// lane never renders HTML.
+		const cursor = await attemptUpgrade(server.wsUrl, CURSOR_SUBPROTOCOL, { Accept: 'text/html' });
+		expect(cursor.opened).toBe(false);
+		expect(cursor.status).toBe(503);
+		expect(cursor.body).toBe('Server is at upgrade capacity, please retry');
+
+		// The main lane is also refused under siege.
+		const main = await attemptUpgrade(server.wsUrl);
+		expect(main.opened).toBe(false);
+	});
+
+	it('does not leak cursor-lane slots across a 401 rejection (a freed sub-budget admits later cursor upgrades)', async () => {
+		const { createTestServer } = await import('../testing.js');
+		// One cursor slot. A hook that rejects the first cursor upgrade must
+		// release the cursor slot so the next cursor upgrade is admitted.
+		let calls = 0;
+		server = await createTestServer({
+			upgradeAdmission: { maxConcurrent: 4, cursorLane: { fraction: 0.25 } },
+			handler: {
+				upgrade: async () => {
+					calls++;
+					if (calls === 1) return false; // 401: the cursor slot must be freed
+					return {};
+				}
+			}
+		});
+
+		const rejected = await attemptUpgrade(server.wsUrl, CURSOR_SUBPROTOCOL);
+		expect(rejected.status).toBe(401);
+
+		// Let the release settle, then a fresh cursor upgrade must succeed - if
+		// the 401 path had not released the cursor slot, the single-slot lane
+		// would now be permanently full.
+		await new Promise((r) => setTimeout(r, 30));
+		const fresh = await attemptUpgrade(server.wsUrl, CURSOR_SUBPROTOCOL);
 		expect(fresh.opened).toBe(true);
 		fresh.ws?.close();
 	});

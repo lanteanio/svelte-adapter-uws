@@ -23,6 +23,7 @@
 const TOPIC_PREFIX = '__presence:';
 
 import { on, connect, status, registerWireCodec } from '../../client.js';
+import { now, setIntervalTimer, clearIntervalTimer, microtask } from '../../client-runtime.js';
 import { writable } from 'svelte/store';
 import { decodePresence, PRESENCE_CAPABILITY } from './codec.js';
 
@@ -112,7 +113,7 @@ export function presence(topic, options) {
 
 	let sourceUnsub = /** @type {(() => void) | null} */ (null);
 	let statusUnsub = /** @type {(() => void) | null} */ (null);
-	/** @type {ReturnType<typeof setInterval> | null} */
+	/** @type {ReturnType<typeof setIntervalTimer> | null} */
 	let sweepTimer = null;
 	let refCount = 0;
 	let cancelled = false;
@@ -123,7 +124,7 @@ export function presence(topic, options) {
 
 	function sweep() {
 		if (!maxAge || maxAge <= 0) return;
-		const cutoff = Date.now() - maxAge;
+		const cutoff = now() - maxAge;
 		let changed = false;
 		for (const [key, ts] of timestamps) {
 			if (ts < cutoff) {
@@ -146,10 +147,10 @@ export function presence(topic, options) {
 			if (event.event === 'state' && event.data && typeof event.data === 'object') {
 				userMap = new Map();
 				timestamps.clear();
-				const now = Date.now();
+				const ts = now();
 				for (const [key, data] of Object.entries(event.data)) {
 					userMap.set(key, data);
-					timestamps.set(key, now);
+					timestamps.set(key, ts);
 				}
 				flush();
 				return;
@@ -157,7 +158,7 @@ export function presence(topic, options) {
 
 			if (event.event === 'diff' && event.data && typeof event.data === 'object') {
 				const { joins, leaves, updates } = event.data;
-				const now = Date.now();
+				const ts = now();
 				let changed = false;
 				// Apply leaves first so a leave-then-rejoin in the same diff
 				// (rare) ends with the user present.
@@ -169,7 +170,7 @@ export function presence(topic, options) {
 				}
 				if (joins && typeof joins === 'object') {
 					for (const [key, data] of Object.entries(joins)) {
-						timestamps.set(key, now);
+						timestamps.set(key, ts);
 						const prev = userMap.get(key);
 						if (prev !== data) {
 							userMap.set(key, data);
@@ -189,7 +190,7 @@ export function presence(topic, options) {
 						const prev = userMap.get(key);
 						if (prev === undefined) continue;
 						userMap.set(key, { ...prev, ...fields });
-						timestamps.set(key, now);
+						timestamps.set(key, ts);
 						changed = true;
 					}
 				}
@@ -198,7 +199,7 @@ export function presence(topic, options) {
 			}
 
 			if (event.event === 'heartbeat') {
-				const now = Date.now();
+				const ts = now();
 				let changed = false;
 				if (event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
 					// New shape: `{userKey: data}` map. Refresh existing AND
@@ -209,7 +210,7 @@ export function presence(topic, options) {
 					// bring it back and the user stayed missing until a
 					// diff or state arrived.
 					for (const [key, data] of Object.entries(event.data)) {
-						timestamps.set(key, now);
+						timestamps.set(key, ts);
 						const prev = userMap.get(key);
 						if (prev !== data) {
 							userMap.set(key, data);
@@ -223,7 +224,7 @@ export function presence(topic, options) {
 					// path still corrects missing entries on the next event.
 					for (const key of event.data) {
 						if (timestamps.has(key)) {
-							timestamps.set(key, now);
+							timestamps.set(key, ts);
 						}
 					}
 				}
@@ -233,7 +234,7 @@ export function presence(topic, options) {
 		});
 
 		if (maxAge > 0) {
-			sweepTimer = setInterval(sweep, Math.max(maxAge / 2, 1000));
+			sweepTimer = setIntervalTimer(sweep, Math.max(maxAge / 2, 1000));
 		}
 
 		// Request a presence snapshot every time the socket opens (initial
@@ -259,7 +260,7 @@ export function presence(topic, options) {
 			statusUnsub = null;
 		}
 		if (sweepTimer) {
-			clearInterval(sweepTimer);
+			clearIntervalTimer(sweepTimer);
 			sweepTimer = null;
 		}
 		userMap = new Map();
@@ -286,7 +287,7 @@ export function presence(topic, options) {
 	// If nothing subscribes before the next microtask, remove the cache entry.
 	// This bounds memory use when code creates presence stores for many distinct
 	// topics and then drops them without ever subscribing.
-	queueMicrotask(() => {
+	microtask(() => {
 		if (refCount === 0) presenceStores.delete(cacheKey);
 	});
 

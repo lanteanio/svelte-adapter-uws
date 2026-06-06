@@ -1,6 +1,6 @@
 {
   "name": "svelte-adapter-uws",
-  "version": "0.6.0-next.13",
+  "version": "0.6.0-next.14",
   "publishConfig": {
     "tag": "next"
   },
@@ -115,6 +115,7 @@
     "testing.d.ts",
     "client.js",
     "client.d.ts",
+    "client-runtime.js",
     "vite.js",
     "vite.d.ts",
     "files",
@@ -124,7 +125,7 @@
     "MIGRATION.md"
   ],
   "scripts": {
-    "check": "node scripts/check-types.js",
+    "check": "node scripts/check-types.js && node scripts/check-determinism.js",
     "pretest": "npm run check",
     "test": "vitest run",
     "test:watch": "vitest",

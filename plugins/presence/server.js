@@ -30,6 +30,7 @@
 const TOPIC_PREFIX = '__presence:';
 
 import { encodePresence, PRESENCE_CAPABILITY, PRESENCE_SCHEMA_VERSION } from './codec.js';
+import { setTimer, clearTimer, setIntervalTimer, clearIntervalTimer } from '../../files/runtime.js';
 
 /**
  * @typedef {Object} PresenceOptions
@@ -438,7 +439,7 @@ export function createPresence(options = {}) {
 	/** @param {import('../../index.js').Platform} platform */
 	function armDiffTimer(platform) {
 		if (diffFlushTimer === null) {
-			diffFlushTimer = setTimeout(() => flushDiffs(platform), 0);
+			diffFlushTimer = setTimer(() => flushDiffs(platform), 0);
 			if (diffFlushTimer.unref) diffFlushTimer.unref();
 		}
 	}
@@ -494,7 +495,7 @@ export function createPresence(options = {}) {
 	/** @param {import('../../index.js').Platform} platform */
 	function flushDiffs(platform) {
 		if (diffFlushTimer !== null) {
-			clearTimeout(diffFlushTimer);
+			clearTimer(diffFlushTimer);
 			diffFlushTimer = null;
 		}
 		for (const [topic, entries] of pendingDiffs) {
@@ -565,7 +566,7 @@ export function createPresence(options = {}) {
 		if (_platform) return;
 		_platform = platform;
 		if (heartbeatMs > 0) {
-			heartbeatTimer = setInterval(() => {
+			heartbeatTimer = setIntervalTimer(() => {
 				for (const [topic, users] of topicPresence) {
 					// Publish a `{userKey: data}` map (rather than a keys-only
 					// array) so a client whose entry aged out of its local
@@ -767,7 +768,7 @@ export function createPresence(options = {}) {
 
 		clear() {
 			if (heartbeatTimer) {
-				clearInterval(heartbeatTimer);
+				clearIntervalTimer(heartbeatTimer);
 				heartbeatTimer = null;
 			}
 			_platform = null;
@@ -775,7 +776,7 @@ export function createPresence(options = {}) {
 			topicPresence.clear();
 			pendingDiffs.clear();
 			if (diffFlushTimer !== null) {
-				clearTimeout(diffFlushTimer);
+				clearTimer(diffFlushTimer);
 				diffFlushTimer = null;
 			}
 			connCounter = 0;

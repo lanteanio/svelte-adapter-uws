@@ -149,7 +149,7 @@ export function createCookies(cookieHeader) {
 		delete(name, options = {}) {
 			api.set(name, '', {
 				...options,
-				expires: new Date(0),
+				expires: new Date(0), // determinism-allow: fixed Unix-epoch sentinel that forces immediate cookie deletion, not a wall-clock read
 				maxAge: 0
 			});
 			delete parsed[name];

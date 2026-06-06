@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createDedup } from '../plugins/dedup/server.js';
+import { installFakeRuntimeClock, releaseRuntimeClock } from './_helpers.js';
 
 describe('createDedup', () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
+		installFakeRuntimeClock();
 	});
 	afterEach(() => {
+		releaseRuntimeClock();
 		vi.useRealTimers();
 	});
 

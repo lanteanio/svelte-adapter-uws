@@ -11,6 +11,7 @@
  */
 
 import { on } from '../../client.js';
+import { microtask } from '../../client-runtime.js';
 import { writable } from 'svelte/store';
 
 const TOPIC_PREFIX = '__group:';
@@ -141,7 +142,7 @@ export function group(name) {
 	// If nothing subscribes before the next microtask, remove the cache entry.
 	// This bounds memory use when code creates group stores for many distinct
 	// names and then drops them without ever subscribing.
-	queueMicrotask(() => {
+	microtask(() => {
 		if (refCount === 0) groupStores.delete(name);
 	});
 

@@ -19,6 +19,8 @@
  * @module svelte-adapter-uws/plugins/dedup
  */
 
+import { now } from '../../files/runtime.js';
+
 /**
  * @typedef {Object} DedupOptions
  * @property {number} ttl - Deduplication window in milliseconds. An id
@@ -108,9 +110,9 @@ export function createDedup(options) {
 
 	function pruneIfFull() {
 		if (seen.size <= maxEntries * 1.1) return;
-		const now = Date.now();
+		const t = now();
 		for (const [id, expiresAt] of seen) {
-			if (expiresAt <= now) seen.delete(id);
+			if (expiresAt <= t) seen.delete(id);
 		}
 		while (seen.size > maxEntries) {
 			const oldest = seen.keys().next().value;
@@ -134,13 +136,13 @@ export function createDedup(options) {
 	return {
 		claim(id) {
 			validateId(id);
-			const now = Date.now();
+			const t = now();
 			const prev = seen.get(id);
-			if (prev !== undefined && prev > now) return false;
+			if (prev !== undefined && prev > t) return false;
 			// Re-insert (delete + set) so insertion order tracks last-claim
 			// time for the LRU-ish hard eviction path.
 			if (prev !== undefined) seen.delete(id);
-			seen.set(id, now + ttl);
+			seen.set(id, t + ttl);
 			pruneIfFull();
 			return true;
 		},
@@ -148,7 +150,7 @@ export function createDedup(options) {
 			validateId(id);
 			const expiresAt = seen.get(id);
 			if (expiresAt === undefined) return false;
-			if (expiresAt <= Date.now()) {
+			if (expiresAt <= now()) {
 				seen.delete(id);
 				return false;
 			}
@@ -158,7 +160,7 @@ export function createDedup(options) {
 			validateId(id);
 			const expiresAt = seen.get(id);
 			if (expiresAt === undefined) return false;
-			const wasLive = expiresAt > Date.now();
+			const wasLive = expiresAt > now();
 			seen.delete(id);
 			return wasLive;
 		},

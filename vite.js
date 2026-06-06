@@ -2,8 +2,9 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, PROCESS_EPOCH, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, createHlc, PROCESS_EPOCH, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 import { createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './files/wire.js';
+import { now, monotonicNow, randomFloat, randomU32, randomUuid, randomBytes } from './files/runtime.js';
 
 /**
  * Vite plugin that provides WebSocket support during development.
@@ -309,6 +310,12 @@ export default function uws(options = {}) {
 		});
 	}
 
+	// Dev-mode hybrid logical clock, mirroring production via the one shared
+	// factory. Same {wall, logical, nodeId} shape and non-decreasing wall +
+	// logical tiebreaker rule, sourced from the same injectable runtime module
+	// so dev and prod share one swappable clock and RNG a harness can seed.
+	const devHlc = createHlc();
+
 	// Dev-mode platform - same API shape as production. Every primitive on
 	// the production base platform must exist here too, even when dev
 	// degrades it to a no-op or zero-valued snapshot. Downstream wrappers
@@ -473,7 +480,22 @@ export default function uws(options = {}) {
 		topicEpoch(name) {
 			void name;
 			return PROCESS_EPOCH;
-		}
+		},
+
+		// Clock and RNG, mirroring production. Both surfaces read through the
+		// same injectable runtime module, so dev and prod share one swappable
+		// source a controlled harness can seed.
+		now: now,
+		monotonic: monotonicNow,
+		random: {
+			float: randomFloat,
+			u32: randomU32,
+			uuid: randomUuid,
+			bytes: randomBytes
+		},
+		// Causal stamp, mirroring production. Only read when an event needs a
+		// causal stamp, so the per-publish hot path is untouched in dev too.
+		hlc: devHlc
 	};
 
 	// Expose platform globally so hooks/load functions can access it in dev

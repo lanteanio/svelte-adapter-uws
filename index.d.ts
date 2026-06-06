@@ -264,6 +264,21 @@ export interface WebSocketOptions {
 		maxConcurrent?: number;
 		perTickBudget?: number;
 		/**
+		 * Reserve a fraction of `maxConcurrent` for a deprioritised cursor-only
+		 * upgrade lane (the worker's second WebSocket). A cursor upgrade is
+		 * admitted only while both the main ceiling and this sub-budget have
+		 * room, so a flood of cursor reconnects can never starve main-WS
+		 * admission. The cursor lane is refused first and refused entirely under
+		 * siege (a bare `503`, never the holding page - a worker is never a
+		 * browser). Default `fraction` is `0.25`. Omit `cursorLane` to disable
+		 * the lane: the second counter never increments and the main lane is
+		 * byte-identical.
+		 */
+		cursorLane?: {
+			/** Fraction of `maxConcurrent` reserved for the cursor lane. Default `0.25`. */
+			fraction?: number;
+		};
+		/**
 		 * Content-negotiated response when an upgrade is refused at capacity.
 		 * Defaults to ON whenever `maxConcurrent` is set: browser navigations
 		 * get a self-polling holding page that reloads when a slot frees;
@@ -1866,6 +1881,54 @@ export interface Platform {
 	 * store) reports a per-topic value of the same shape.
 	 */
 	topicEpoch(topic: string): number;
+
+	/**
+	 * Current wall-clock time in milliseconds since the epoch, read through the
+	 * adapter's injectable runtime so plugins and app code share one swappable
+	 * clock a controlled harness can seed. Coarsely cached (about 1 Hz), so it
+	 * is for timestamps and throttle windows rather than sub-millisecond timing.
+	 */
+	now(): number;
+
+	/**
+	 * Strictly-forward monotonic time in milliseconds, immune to wall-clock
+	 * steps. Use for measuring durations; pair two reads and subtract.
+	 */
+	monotonic(): number;
+
+	/**
+	 * A hybrid logical clock stamp for events that must order consistently
+	 * across workers (or across a coarse / briefly-backward wall clock).
+	 *
+	 * - `wall` is a non-decreasing wall-clock value in epoch milliseconds,
+	 *   sourced from the injectable runtime clock. It never moves backward:
+	 *   a same-millisecond or backward clock read holds the previous value.
+	 * - `logical` is a tiebreaker that resets to `0` whenever `wall` advances
+	 *   and increments when two stamps share a millisecond, so the
+	 *   `(wall, logical)` pair is a strict per-process ordering.
+	 * - `nodeId` is a short, stable per-process identity assigned once at
+	 *   init from the injectable runtime RNG (a seeded harness reproduces it);
+	 *   in clustered mode it is effectively the worker identity.
+	 *
+	 * Call only when an event needs a causal stamp - it is intentionally off
+	 * the per-publish hot path.
+	 */
+	hlc(): { wall: number; logical: number; nodeId: string };
+
+	/**
+	 * Random source read through the adapter's injectable runtime, so a seeded
+	 * harness can make values reproducible while production uses the native RNG.
+	 */
+	random: {
+		/** A float in `[0, 1)`, the `Math.random()` contract. */
+		float(): number;
+		/** An unsigned 32-bit integer. */
+		u32(): number;
+		/** A RFC 4122 v4 UUID string. */
+		uuid(): string;
+		/** `n` random bytes. */
+		bytes(n: number): Uint8Array;
+	};
 }
 
 export interface TopicHelper {

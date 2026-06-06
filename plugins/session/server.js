@@ -13,10 +13,12 @@
  * @module svelte-adapter-uws/plugins/session
  */
 
+import { now } from '../../files/runtime.js';
+
 /**
  * @typedef {Object} SessionOptions
  * @property {number} ttl - Time to live in milliseconds. Each get/touch
- *   extends an entry's expiry to `Date.now() + ttl`. Must be positive.
+ *   extends an entry's expiry to the current time plus `ttl`. Must be positive.
  * @property {number} [maxEntries=10000] - Soft cap on retained entries.
  *   When the map grows past 110% of this cap, expired entries are
  *   pruned in a single pass; if the map is still over cap after
@@ -98,9 +100,9 @@ export function createSession(options) {
 
 	function pruneIfFull() {
 		if (entries.size <= maxEntries * 1.1) return;
-		const now = Date.now();
+		const t = now();
 		for (const [token, entry] of entries) {
-			if (entry.expiresAt <= now) entries.delete(token);
+			if (entry.expiresAt <= t) entries.delete(token);
 		}
 		// Hard cap: if still over, evict oldest insertion-order entries.
 		while (entries.size > maxEntries) {
@@ -117,19 +119,19 @@ export function createSession(options) {
 			}
 			const entry = entries.get(token);
 			if (!entry) return null;
-			const now = Date.now();
-			if (entry.expiresAt <= now) {
+			const t = now();
+			if (entry.expiresAt <= t) {
 				entries.delete(token);
 				return null;
 			}
-			entry.expiresAt = now + ttl;
+			entry.expiresAt = t + ttl;
 			return entry.data;
 		},
 		set(token, data) {
 			if (typeof token !== 'string' || token.length === 0) {
 				throw new Error('session: token must be a non-empty string');
 			}
-			const expiresAt = Date.now() + ttl;
+			const expiresAt = now() + ttl;
 			// Re-insert to refresh insertion order for LRU-ish eviction
 			// when the map is over cap with no expired entries to prune.
 			if (entries.has(token)) entries.delete(token);
@@ -142,7 +144,7 @@ export function createSession(options) {
 			}
 			const entry = entries.get(token);
 			if (!entry) return false;
-			const wasLive = entry.expiresAt > Date.now();
+			const wasLive = entry.expiresAt > now();
 			entries.delete(token);
 			return wasLive;
 		},
@@ -152,12 +154,12 @@ export function createSession(options) {
 			}
 			const entry = entries.get(token);
 			if (!entry) return false;
-			const now = Date.now();
-			if (entry.expiresAt <= now) {
+			const t = now();
+			if (entry.expiresAt <= t) {
 				entries.delete(token);
 				return false;
 			}
-			entry.expiresAt = now + ttl;
+			entry.expiresAt = t + ttl;
 			return true;
 		},
 		size() {

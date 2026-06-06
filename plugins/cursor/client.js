@@ -29,6 +29,7 @@
 const TOPIC_PREFIX = '__cursor:';
 
 import { on, connect, status, registerWireCodec } from '../../client.js';
+import { setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask } from '../../client-runtime.js';
 import { writable } from 'svelte/store';
 import { decodeCursor, CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CursorDecodeDict } from './codec.js';
 import { applyEvent, mergeOutput, sweepExpired } from './decode.js';
@@ -120,7 +121,7 @@ export function cursor(topic, options) {
 
 	let sourceUnsub = /** @type {(() => void) | null} */ (null);
 	let statusUnsub = /** @type {(() => void) | null} */ (null);
-	/** @type {ReturnType<typeof setInterval> | null} */
+	/** @type {ReturnType<typeof setIntervalTimer> | null} */
 	let sweepTimer = null;
 	let refCount = 0;
 	let cancelled = false;
@@ -177,7 +178,7 @@ export function cursor(topic, options) {
 		});
 
 		if (maxAge > 0) {
-			sweepTimer = setInterval(sweep, Math.max(maxAge / 2, 1000));
+			sweepTimer = setIntervalTimer(sweep, Math.max(maxAge / 2, 1000));
 		}
 
 		// Request a snapshot of existing cursor positions every time the socket
@@ -206,7 +207,7 @@ export function cursor(topic, options) {
 			statusUnsub = null;
 		}
 		if (sweepTimer) {
-			clearInterval(sweepTimer);
+			clearIntervalTimer(sweepTimer);
 			sweepTimer = null;
 		}
 		stopViewportPoll();
@@ -244,7 +245,7 @@ export function cursor(topic, options) {
 	cursorStores.set(cacheKey, store);
 
 	// If nothing subscribes before the next microtask, remove the cache entry.
-	queueMicrotask(() => {
+	microtask(() => {
 		if (refCount === 0) cursorStores.delete(cacheKey);
 	});
 
@@ -263,13 +264,13 @@ let moveScheduled = false;
 // after this module imports (or a test harness substitution) is honored.
 function scheduleFrame(cb) {
 	if (typeof requestAnimationFrame !== 'undefined') return requestAnimationFrame(cb);
-	return setTimeout(cb, 16);
+	return setTimer(cb, 16);
 }
 
 function cancelFrame(handle) {
 	if (handle == null) return;
 	if (typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(handle);
-	else clearTimeout(handle);
+	else clearTimer(handle);
 }
 
 /**

@@ -19,6 +19,8 @@
  * @module svelte-adapter-uws/plugins/throttle
  */
 
+import { setTimer, clearTimer } from '../../files/runtime.js';
+
 /**
  * Send pending data for a topic and clean up its timer.
  * @param {Map<string, any>} topics
@@ -27,7 +29,7 @@
 function flushOne(topics, topic) {
 	const state = topics.get(topic);
 	if (!state) return;
-	if (state.timer) clearTimeout(state.timer);
+	if (state.timer) clearTimer(state.timer);
 	if (state.pending) {
 		const p = state.pending;
 		p.platform.publish(topic, p.event, p.data);
@@ -41,7 +43,7 @@ function flushOne(topics, topic) {
  */
 function flushAll(topics) {
 	for (const [t, state] of topics) {
-		if (state.timer) clearTimeout(state.timer);
+		if (state.timer) clearTimer(state.timer);
 		if (state.pending) {
 			const p = state.pending;
 			p.platform.publish(t, p.event, p.data);
@@ -58,7 +60,7 @@ function flushAll(topics) {
 function cancelOne(topics, topic) {
 	const state = topics.get(topic);
 	if (!state) return;
-	if (state.timer) clearTimeout(state.timer);
+	if (state.timer) clearTimer(state.timer);
 	topics.delete(topic);
 }
 
@@ -68,7 +70,7 @@ function cancelOne(topics, topic) {
  */
 function cancelAll(topics) {
 	for (const [, state] of topics) {
-		if (state.timer) clearTimeout(state.timer);
+		if (state.timer) clearTimer(state.timer);
 	}
 	topics.clear();
 }
@@ -157,7 +159,7 @@ function evictOldestIfAtCap(topics, maxTopics) {
 	if (oldestKey === undefined) return;
 	const state = topics.get(oldestKey);
 	if (state) {
-		if (state.timer) clearTimeout(state.timer);
+		if (state.timer) clearTimer(state.timer);
 		if (state.pending) {
 			const p = state.pending;
 			try { p.platform.publish(oldestKey, p.event, p.data); } catch {}
@@ -235,12 +237,12 @@ export function throttle(interval, options) {
 				// Idle: send immediately (leading edge), start cooldown
 				platform.publish(topic, event, data);
 				state.pending = null;
-				state.timer = setTimeout(function tick() {
+				state.timer = setTimer(function tick() {
 					if (state.pending) {
 						const p = state.pending;
 						state.pending = null;
 						p.platform.publish(topic, p.event, p.data);
-						state.timer = setTimeout(tick, interval);
+						state.timer = setTimer(tick, interval);
 					} else {
 						state.timer = null;
 						topics.delete(topic);
@@ -316,8 +318,8 @@ export function debounce(interval, options) {
 
 			// Always overwrite pending and restart timer
 			state.pending = { platform, event, data };
-			if (state.timer) clearTimeout(state.timer);
-			state.timer = setTimeout(() => {
+			if (state.timer) clearTimer(state.timer);
+			state.timer = setTimer(() => {
 				const p = state.pending;
 				if (p) {
 					p.platform.publish(topic, p.event, p.data);

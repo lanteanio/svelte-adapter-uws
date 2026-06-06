@@ -21,6 +21,8 @@
  * @module svelte-adapter-uws/plugins/cursor/decode
  */
 
+import { now as runtimeNow } from '../../files/runtime.js';
+
 /**
  * @typedef {object} CursorState
  * @property {Map<string, any>} positionMap key -> latest position data.
@@ -42,12 +44,12 @@
  *
  * @param {CursorState} state
  * @param {{ event: string, data: any } | null} event decoded frame
- * @param {number} [now] timestamp stamped onto positions; defaults to
- *   `Date.now()` so production behavior matches the inline merge and a test
- *   can pin time for a deterministic characterization.
+ * @param {number} [now] timestamp stamped onto positions; defaults to the
+ *   injectable runtime clock so production behavior matches the inline merge
+ *   and a seeded harness can pin time for a deterministic characterization.
  * @returns {boolean} whether the caller should re-emit the merged output
  */
-export function applyEvent(state, event, now = Date.now()) {
+export function applyEvent(state, event, now = runtimeNow()) {
 	if (event === null) return false;
 	const { positionMap, userMap, timestamps } = state;
 
@@ -132,10 +134,10 @@ export function mergeOutput(state) {
  *
  * @param {CursorState} state
  * @param {number} maxAge expiry window in ms
- * @param {number} [now] current time; defaults to `Date.now()`.
+ * @param {number} [now] current time; defaults to the injectable runtime clock.
  * @returns {boolean} whether a position was removed
  */
-export function sweepExpired(state, maxAge, now = Date.now()) {
+export function sweepExpired(state, maxAge, now = runtimeNow()) {
 	if (!maxAge || maxAge <= 0) return false;
 	const { positionMap, userMap, timestamps } = state;
 	const cutoff = now - maxAge;

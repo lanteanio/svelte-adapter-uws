@@ -16,6 +16,8 @@
  * @module svelte-adapter-uws/plugins/lock
  */
 
+import { setTimer, clearTimer } from '../../files/runtime.js';
+
 /**
  * @typedef {Object} WithLockOptions
  * @property {number} [maxWaitMs] - When set, the caller is rejected with
@@ -158,7 +160,7 @@ export function createLock(options = {}) {
 			const waiter = /** @type {Waiter} */ (state.queue.shift());
 			if (waiter.cancelled) continue;
 			if (waiter.timer != null) {
-				clearTimeout(waiter.timer);
+				clearTimer(waiter.timer);
 				waiter.timer = null;
 			}
 			// Promote: run waiter as the new head, plumb its result back
@@ -244,7 +246,7 @@ export function createLock(options = {}) {
 			/** @type {Waiter} */
 			const waiter = { fn, resolve, reject, timer: null, cancelled: false };
 			if (maxWaitMs != null) {
-				waiter.timer = setTimeout(() => {
+				waiter.timer = setTimer(() => {
 					if (waiter.cancelled) return;
 					waiter.cancelled = true;
 					waiter.timer = null;
@@ -284,7 +286,7 @@ export function createLock(options = {}) {
 					if (waiter.cancelled) continue;
 					waiter.cancelled = true;
 					if (waiter.timer != null) {
-						clearTimeout(waiter.timer);
+						clearTimer(waiter.timer);
 						waiter.timer = null;
 					}
 					const err = /** @type {Error & { code: string }} */ (

@@ -20,6 +20,8 @@ import {
 	isAuthOriginAccepted,
 	describeUnsafeSameOriginConfig,
 	createUpgradeAdmission,
+	isCursorLaneUpgrade,
+	CURSOR_LANE_SUBPROTOCOL,
 	resolveRequestId,
 	createChaosState,
 	assert,
@@ -2369,6 +2371,138 @@ describe('createUpgradeAdmission', () => {
 			expect(a.tryAcquire()).toBe(true);
 			expect(a.inFlight).toBe(2);
 		});
+	});
+
+	describe('cursor lane', () => {
+		it('disabled by default: no cursorLane option leaves the sub-budget at zero', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 4 });
+			expect(a.cursorMaxConcurrent).toBe(0);
+			expect(a.cursorInFlight).toBe(0);
+			// With the lane disabled the caller routes cursor upgrades through the
+			// main tryAcquire() (the upgrade hook gates the cursor path behind
+			// cursorMaxConcurrent > 0), and the main lane is untouched.
+			expect(a.tryAcquire()).toBe(true);
+			expect(a.tryAcquire()).toBe(true);
+			expect(a.inFlight).toBe(2);
+			expect(a.cursorInFlight).toBe(0);
+		});
+
+		it('reserves floor(maxConcurrent * 0.25) by default when cursorLane is set', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 8, cursorLane: {} });
+			expect(a.cursorMaxConcurrent).toBe(2);
+		});
+
+		it('honours a custom fraction', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 10, cursorLane: { fraction: 0.5 } });
+			expect(a.cursorMaxConcurrent).toBe(5);
+		});
+
+		it('floors a configured lane to at least one slot', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 2, cursorLane: { fraction: 0.1 } });
+			expect(a.cursorMaxConcurrent).toBe(1);
+		});
+
+		it('stays disabled when there is no main ceiling to carve from', () => {
+			const a = createUpgradeAdmission({ cursorLane: { fraction: 0.5 } });
+			expect(a.cursorMaxConcurrent).toBe(0);
+		});
+
+		it('admits a cursor upgrade while the sub-budget has room', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 8, cursorLane: { fraction: 0.25 } });
+			expect(a.tryAcquireCursor()).toBe(true);
+			expect(a.tryAcquireCursor()).toBe(true);
+			expect(a.cursorInFlight).toBe(2);
+			expect(a.inFlight).toBe(2);
+		});
+
+		it('rejects a cursor upgrade once the sub-budget is full even though the main lane has room', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 8, cursorLane: { fraction: 0.25 } });
+			expect(a.tryAcquireCursor()).toBe(true);
+			expect(a.tryAcquireCursor()).toBe(true);
+			// Sub-budget (2) saturated; main lane (8) still has six free slots.
+			expect(a.tryAcquireCursor()).toBe(false);
+			expect(a.cursorInFlight).toBe(2);
+			// The main lane is unaffected by the cursor sub-budget.
+			expect(a.tryAcquire()).toBe(true);
+			expect(a.inFlight).toBe(3);
+		});
+
+		it('rejects a cursor upgrade once the main lane is full even though the sub-budget has room', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 2, cursorLane: { fraction: 0.5 } });
+			// cursorMaxConcurrent is 1, but fill the main lane with main-lane
+			// acquires first so the sub-budget still has room.
+			expect(a.cursorMaxConcurrent).toBe(1);
+			expect(a.tryAcquire()).toBe(true);
+			expect(a.tryAcquire()).toBe(true);
+			expect(a.inFlight).toBe(2);
+			// Main lane full -> cursor acquire is refused before touching the
+			// sub-budget, and the sub-budget counter does not move.
+			expect(a.tryAcquireCursor()).toBe(false);
+			expect(a.cursorInFlight).toBe(0);
+		});
+
+		it('releaseCursorInFlight decrements both counters and frees the sub-budget', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 8, cursorLane: { fraction: 0.25 } });
+			expect(a.tryAcquireCursor()).toBe(true);
+			expect(a.tryAcquireCursor()).toBe(true);
+			expect(a.tryAcquireCursor()).toBe(false);
+			a.releaseCursorInFlight();
+			expect(a.cursorInFlight).toBe(1);
+			expect(a.inFlight).toBe(1);
+			// A freed sub-budget slot admits the next cursor upgrade.
+			expect(a.tryAcquireCursor()).toBe(true);
+			expect(a.cursorInFlight).toBe(2);
+			expect(a.inFlight).toBe(2);
+		});
+
+		it('keeps the two counters in step across a mixed acquire / release sequence', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 6, cursorLane: { fraction: 0.5 } });
+			// cursorMaxConcurrent is 3.
+			expect(a.tryAcquire()).toBe(true);          // main: 1, cursor: 0
+			expect(a.tryAcquireCursor()).toBe(true);    // main: 2, cursor: 1
+			expect(a.tryAcquireCursor()).toBe(true);    // main: 3, cursor: 2
+			expect(a.inFlight).toBe(3);
+			expect(a.cursorInFlight).toBe(2);
+			a.release();                                // main lane release: main 2, cursor 2
+			expect(a.inFlight).toBe(2);
+			expect(a.cursorInFlight).toBe(2);
+			a.releaseCursorInFlight();                  // cursor release: main 1, cursor 1
+			expect(a.inFlight).toBe(1);
+			expect(a.cursorInFlight).toBe(1);
+		});
+	});
+});
+
+// - isCursorLaneUpgrade -----------------------------------------------------
+
+describe('isCursorLaneUpgrade', () => {
+	it('matches the lone cursor-lane token', () => {
+		expect(isCursorLaneUpgrade(CURSOR_LANE_SUBPROTOCOL)).toBe(true);
+	});
+
+	it('matches the cursor-lane token in a comma-separated list', () => {
+		expect(isCursorLaneUpgrade('foo, ' + CURSOR_LANE_SUBPROTOCOL + ', bar')).toBe(true);
+	});
+
+	it('trims surrounding whitespace around each offered token', () => {
+		expect(isCursorLaneUpgrade('  ' + CURSOR_LANE_SUBPROTOCOL + '  ')).toBe(true);
+	});
+
+	it('does not match a different subprotocol', () => {
+		expect(isCursorLaneUpgrade('some-other-protocol')).toBe(false);
+	});
+
+	it('does not match a token that merely contains the string', () => {
+		expect(isCursorLaneUpgrade(CURSOR_LANE_SUBPROTOCOL + '-extended')).toBe(false);
+	});
+
+	it('returns false for an empty string', () => {
+		expect(isCursorLaneUpgrade('')).toBe(false);
+	});
+
+	it('returns false for undefined or null', () => {
+		expect(isCursorLaneUpgrade(undefined)).toBe(false);
+		expect(isCursorLaneUpgrade(null)).toBe(false);
 	});
 });
 

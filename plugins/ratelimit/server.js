@@ -12,6 +12,8 @@
  * @module svelte-adapter-uws/plugins/ratelimit
  */
 
+import { now } from '../../files/runtime.js';
+
 /**
  * @typedef {Object} RateLimitOptions
  * @property {number} points - Tokens available per interval. Must be a positive integer.
@@ -135,10 +137,10 @@ export function createRateLimit(options) {
 	}
 
 	/** Lazy cleanup when the map grows large. */
-	function cleanup(now) {
+	function cleanup(t) {
 		if (buckets.size <= 1000) return;
 		for (const [key, bucket] of buckets) {
-			if (bucket.resetAt <= now && bucket.bannedUntil <= now) {
+			if (bucket.resetAt <= t && bucket.bannedUntil <= t) {
 				buckets.delete(key);
 			}
 		}
@@ -150,9 +152,9 @@ export function createRateLimit(options) {
 				throw new Error('ratelimit: cost must be a non-negative finite number');
 			}
 			const key = resolveKey(ws);
-			const now = Date.now();
+			const t = now();
 
-			cleanup(now);
+			cleanup(t);
 
 			let bucket = buckets.get(key);
 			if (!bucket) {
@@ -166,19 +168,19 @@ export function createRateLimit(options) {
 					const oldest = buckets.keys().next().value;
 					if (oldest !== undefined) buckets.delete(oldest);
 				}
-				bucket = { points, resetAt: now + interval, bannedUntil: 0 };
+				bucket = { points, resetAt: t + interval, bannedUntil: 0 };
 				buckets.set(key, bucket);
 			}
 
 			// Check ban
-			if (bucket.bannedUntil > now) {
-				return { allowed: false, remaining: 0, resetMs: bucket.bannedUntil - now };
+			if (bucket.bannedUntil > t) {
+				return { allowed: false, remaining: 0, resetMs: bucket.bannedUntil - t };
 			}
 
 			// Refill if interval elapsed
-			if (bucket.resetAt <= now) {
+			if (bucket.resetAt <= t) {
 				bucket.points = points;
-				bucket.resetAt = now + interval;
+				bucket.resetAt = t + interval;
 			}
 
 			// Try to consume
@@ -187,20 +189,20 @@ export function createRateLimit(options) {
 				return {
 					allowed: true,
 					remaining: bucket.points,
-					resetMs: bucket.resetAt - now
+					resetMs: bucket.resetAt - t
 				};
 			}
 
 			// Exhausted - auto-ban if configured
 			if (blockDuration > 0) {
-				bucket.bannedUntil = now + blockDuration;
+				bucket.bannedUntil = t + blockDuration;
 				return { allowed: false, remaining: 0, resetMs: blockDuration };
 			}
 
 			return {
 				allowed: false,
 				remaining: Math.max(0, bucket.points),
-				resetMs: bucket.resetAt - now
+				resetMs: bucket.resetAt - t
 			};
 		},
 
@@ -210,13 +212,13 @@ export function createRateLimit(options) {
 
 		ban(key, duration) {
 			const dur = duration ?? (blockDuration || 60000);
-			const now = Date.now();
+			const t = now();
 			let bucket = buckets.get(key);
 			if (!bucket) {
-				bucket = { points: 0, resetAt: now + interval, bannedUntil: 0 };
+				bucket = { points: 0, resetAt: t + interval, bannedUntil: 0 };
 				buckets.set(key, bucket);
 			}
-			bucket.bannedUntil = now + dur;
+			bucket.bannedUntil = t + dur;
 		},
 
 		unban(key) {
