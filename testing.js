@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { now, monotonicNow, setTimer, clearTimer, randomUuid } from './files/runtime.js';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, PROCESS_EPOCH, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { nextTopicSeq, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './files/wire.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
@@ -154,11 +154,11 @@ export async function createTestServer(options = {}) {
 		// exercised. Single worker returns the one process-generation value.
 		// A throw in the topicEpoch delegate falls back to PROCESS_EPOCH and
 		// still sends the ack; it is not a closed-socket abort.
-		let epoch = PROCESS_EPOCH;
+		let epoch = processEpoch();
 		try {
 			const p = ws.getUserData()[WS_PLATFORM];
 			if (p && typeof p.topicEpoch === 'function') epoch = p.topicEpoch(topic);
-		} catch { epoch = PROCESS_EPOCH; }
+		} catch { epoch = processEpoch(); }
 		const payload = JSON.stringify({ type: 'subscribed', topic, ref, epoch });
 		sendOutboundT(ws, payload);
 	}
@@ -169,17 +169,23 @@ export async function createTestServer(options = {}) {
 		sendOutboundT(ws, payload);
 	}
 
-	let uWS;
-	try {
-		uWS = (await import('uWebSockets.js')).default;
-	} catch {
-		throw new Error(
-			'createTestServer requires uWebSockets.js to be installed.\n' +
-			'  npm install uNetworking/uWebSockets.js#v20.60.0'
-		);
+	// The simulator injects an in-memory app + a uWS helper bundle via the
+	// internal __app / __uws options so the same dispatch runs over the virtual
+	// clock. The default path constructs a real uWebSockets.js server exactly as
+	// before, so existing createTestServer callers are unaffected.
+	let uWS = options.__uws;
+	if (!uWS) {
+		try {
+			uWS = (await import('uWebSockets.js')).default;
+		} catch {
+			throw new Error(
+				'createTestServer requires uWebSockets.js to be installed.\n' +
+				'  npm install uNetworking/uWebSockets.js#v20.60.0'
+			);
+		}
 	}
 
-	const app = uWS.App();
+	const app = options.__app || uWS.App();
 
 	/** @type {Set<import('uWebSockets.js').WebSocket<any>>} */
 	const wsConnections = new Set();
@@ -239,7 +245,7 @@ export async function createTestServer(options = {}) {
 		if (chaos.shouldDropOutbound()) return 0;
 		const delay = chaos.getDelayMs();
 		if (delay > 0) {
-			setTimeout(() => {
+			setTimer(() => {
 				try { ws.send(payload, false, false); }
 				catch { closedWsAbortsT++; return; }
 				bumpOutT(ws, payload);
@@ -263,7 +269,7 @@ export async function createTestServer(options = {}) {
 		if (chaos.shouldDropOutbound()) return 0;
 		const delay = chaos.getDelayMs();
 		if (delay > 0) {
-			setTimeout(() => {
+			setTimer(() => {
 				try { ws.send(frame, true, false); }
 				catch { closedWsAbortsT++; return; }
 				bumpOutT(ws, frame);
@@ -662,7 +668,7 @@ export async function createTestServer(options = {}) {
 			const ref = nextRequestRefT++;
 			const timeoutMs = (options && options.timeoutMs) || 5000;
 			return new Promise((resolve, reject) => {
-				const timer = setTimeout(() => {
+				const timer = setTimer(() => {
 					if (pending.delete(ref)) reject(new Error('request timed out'));
 				}, timeoutMs);
 				pending.set(ref, { resolve, reject, timer });
@@ -676,7 +682,7 @@ export async function createTestServer(options = {}) {
 				try { ws.send(payload, false, false); }
 				catch {
 					closedWsAbortsT++;
-					clearTimeout(timer);
+					clearTimer(timer);
 					pending.delete(ref);
 					reject(new Error('connection closed'));
 					return;
@@ -699,7 +705,7 @@ export async function createTestServer(options = {}) {
 		 */
 		topicEpoch(topic) {
 			void topic;
-			return PROCESS_EPOCH;
+			return processEpoch();
 		},
 		/**
 		 * Activate or clear a chaos / fault-injection scenario. See
@@ -869,7 +875,7 @@ export async function createTestServer(options = {}) {
 			const url = query ? req.getUrl() + '?' + query : req.getUrl();
 			const rawIp = new TextDecoder().decode(res.getRemoteAddressAsText());
 
-			const wsRequestId = resolveRequestId(headers['x-request-id']) || randomUUID();
+			const wsRequestId = resolveRequestId(headers['x-request-id']) || randomUuid();
 
 			if (!handler.upgrade) {
 				let fastPathAborted = false;
@@ -952,11 +958,11 @@ export async function createTestServer(options = {}) {
 			wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
 			userData[WS_PLATFORM] = wsPlatform;
 			delete userData[WS_REQUEST_ID_KEY];
-			const sessionId = randomUUID();
+			const sessionId = randomUuid();
 			userData[WS_SESSION_ID] = sessionId;
 			if (closeHookRegisteredT) {
 				userData[WS_STATS] = {
-					openedAt: Date.now(),
+					openedAt: monotonicNow(),
 					messagesIn: 0,
 					messagesOut: 0,
 					bytesIn: 0,
@@ -1116,7 +1122,7 @@ export async function createTestServer(options = {}) {
 							const entry = pending?.get(msg.ref);
 							if (entry) {
 								pending.delete(msg.ref);
-								clearTimeout(entry.timer);
+								clearTimer(entry.timer);
 								if (typeof msg.error === 'string') entry.reject(new Error(msg.error));
 								else entry.resolve(msg.data);
 							}
@@ -1171,7 +1177,7 @@ export async function createTestServer(options = {}) {
 			}
 
 			for (const waiter of messageWaiters) {
-				clearTimeout(waiter.timer);
+				clearTimer(waiter.timer);
 				waiter.resolve({ data: Buffer.from(message).toString(), isBinary });
 			}
 			messageWaiters = [];
@@ -1187,7 +1193,7 @@ export async function createTestServer(options = {}) {
 			const pending = ud[WS_PENDING_REQUESTS];
 			if (pending && pending.size > 0) {
 				for (const entry of pending.values()) {
-					clearTimeout(entry.timer);
+					clearTimer(entry.timer);
 					try { entry.reject(new Error('connection closed')); } catch {}
 				}
 				pending.clear();
@@ -1201,7 +1207,7 @@ export async function createTestServer(options = {}) {
 					platform: closePlatform,
 					subscriptions: subs,
 					id: ud[WS_SESSION_ID],
-					duration: Date.now() - stats.openedAt,
+					duration: monotonicNow() - stats.openedAt,
 					messagesIn: stats.messagesIn,
 					messagesOut: stats.messagesOut,
 					bytesIn: stats.bytesIn,
@@ -1228,24 +1234,24 @@ export async function createTestServer(options = {}) {
 	// read-only, registered whenever the waiting room is enabled, and the poll
 	// probes capacity via `admission.hasCapacity()` without consuming a slot.
 	if (WAITING_ROOM !== null) {
-		let pollWindowStart = Date.now();
+		let pollWindowStart = now();
 		let pollWindowCount = 0;
 		let pollPrevCount = 0;
 		const POLL_WINDOW_MS = WAITING_ROOM.pollIntervalMs;
 
 		function recordPoll() {
-			const now = Date.now();
-			const elapsed = now - pollWindowStart;
+			const t = now();
+			const elapsed = t - pollWindowStart;
 			if (elapsed >= POLL_WINDOW_MS) {
 				pollPrevCount = elapsed >= 2 * POLL_WINDOW_MS ? 0 : pollWindowCount;
 				pollWindowCount = 0;
-				pollWindowStart = now;
+				pollWindowStart = t;
 			}
 			pollWindowCount++;
 		}
 
 		function currentQueueDepth() {
-			const elapsed = Date.now() - pollWindowStart;
+			const elapsed = now() - pollWindowStart;
 			if (elapsed >= 2 * POLL_WINDOW_MS) return pollWindowCount;
 			const faded = pollPrevCount * (1 - Math.min(elapsed, POLL_WINDOW_MS) / POLL_WINDOW_MS);
 			return pollWindowCount + Math.round(faded);
@@ -1335,23 +1341,23 @@ export async function createTestServer(options = {}) {
 				},
 				waitForConnection(timeout = 5000) {
 					return new Promise((resolve, reject) => {
-						const timer = setTimeout(
+						const timer = setTimer(
 							() => reject(new Error('waitForConnection timed out')),
 							timeout
 						);
-						connectionWaiters.push(() => { clearTimeout(timer); resolve(undefined); });
+						connectionWaiters.push(() => { clearTimer(timer); resolve(undefined); });
 					});
 				},
 				waitForMessage(timeout = 5000) {
 					return new Promise((resolve, reject) => {
-						const timer = setTimeout(
+						const timer = setTimer(
 							() => {
 								messageWaiters = messageWaiters.filter(w => w.timer !== timer);
 								reject(new Error('waitForMessage timed out'));
 							},
 							timeout
 						);
-						messageWaiters.push({ resolve(v) { clearTimeout(timer); resolve(v); }, timer });
+						messageWaiters.push({ resolve(v) { clearTimer(timer); resolve(v); }, timer });
 					});
 				}
 			});

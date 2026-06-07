@@ -48,6 +48,7 @@ const ENFORCED = new Set([
 	'files/cookies.js',
 	'index.js',
 	'client.js',
+	'testing.js',
 	'plugins/cursor/server.js',
 	'plugins/cursor/decode.js',
 	'plugins/cursor/client.js',

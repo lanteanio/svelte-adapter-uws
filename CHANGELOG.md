@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.17] - 2026-06-07
+
+### Added
+
+- **`svelte-adapter-uws/sim`: a deterministic simulation harness that drives the real wire dispatch over an in-memory server under a virtual clock and a seeded fault model, so a seed plus a commit is the entire bug report.** `runSim(config?)` connects in-memory clients to an in-memory app, scripts subscribe/publish traffic, and runs framework dispatch under a discrete-event scheduler that models the event loop's microtask -> timers -> check phase boundary (a `setTimeout(0)` lands in a later timers phase, never collapsed into the microtask drain, so the publish/relay coalescers batch exactly as in production). A seeded PRNG backs every clock, RNG, UUID, and timer through the injectable runtime, and a seeded fault engine applies drop / delay / reorder / duplicate / corrupt per wire frame - so the seed fully determines the run. `runSimMany({ seeds, base })` sweeps seeds; `replaySim(result)` re-runs and self-gates that the same invariant violations and structural state reproduce bit-for-bit. The harness runs the same `createTestServer` dispatch that runs over real `uWebSockets.js`, so there is no second implementation to drift; `createTestServer` gained an internal injected-app path and its timers/clock/UUID now route through the runtime seam (behaviour is unchanged for existing callers, and the default path still constructs a real server). After every step a subscription-bookkeeping invariant checks that each connection's fan-out subscription set agrees with its counted set. Dev/test infrastructure - it ships in the package but pulls in no new runtime dependency.
+
 ## [0.6.0-next.16] - 2026-06-07
 
 ### Security

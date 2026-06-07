@@ -186,7 +186,7 @@ export function drainCoalesced(pending, send) {
 /**
  * Per-process generation for the in-memory per-topic seq space.
  *
- * Stamped once at module init and constant for the life of the worker. It
+ * Latched once, on first read, and constant for the life of the worker. It
  * changes only across a process restart - which is exactly when the in-memory
  * seq counters (the map a publisher mutates via `nextTopicSeq`) reset to 1. A
  * reconnecting client presents the generation it last saw; a server that
@@ -197,15 +197,24 @@ export function drainCoalesced(pending, send) {
  * seq authority can reset per topic independently (a separate store) overrides
  * the carried value per topic without changing the wire shape.
  *
- * Seeded from the wall clock at init so two boots almost never collide; the
+ * Read through the seam's wall clock so two boots almost never collide; the
  * low-order millisecond bits are enough to distinguish consecutive restarts,
  * and the value only ever has to differ from the immediately-previous boot for
  * the mismatch detection to fire. Never persisted - a fresh process is, by
- * definition, a fresh seq space.
+ * definition, a fresh seq space. Latching on first read (rather than at module
+ * import) lets a controlled simulation that has installed a virtual clock latch a
+ * reproducible value after `resetProcessEpoch()`.
  *
- * @type {number}
+ * @returns {number}
  */
-export const PROCESS_EPOCH = wallEpoch();
+let _processEpoch;
+export function processEpoch() {
+	if (_processEpoch === undefined) _processEpoch = wallEpoch();
+	return _processEpoch;
+}
+
+/** Clear the latched generation so the next read re-latches. Simulation use only. */
+export function resetProcessEpoch() { _processEpoch = undefined; }
 
 /**
  * Allocate the next monotonic sequence number for a topic, mutating

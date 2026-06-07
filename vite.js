@@ -2,7 +2,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, createHlc, PROCESS_EPOCH, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 import { createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './files/wire.js';
 import { now, monotonicNow, randomFloat, randomU32, randomUuid, randomBytes } from './files/runtime.js';
 
@@ -479,7 +479,7 @@ export default function uws(options = {}) {
 		 */
 		topicEpoch(name) {
 			void name;
-			return PROCESS_EPOCH;
+			return processEpoch();
 		},
 
 		// Clock and RNG, mirroring production. Both surfaces read through the
@@ -599,7 +599,7 @@ export default function uws(options = {}) {
 		// a later resume can detect a reset seq space. The dev process shares
 		// the one process-generation value across every topic via the dev
 		// platform's topicEpoch.
-		const epoch = typeof platform.topicEpoch === 'function' ? platform.topicEpoch(topic) : PROCESS_EPOCH;
+		const epoch = typeof platform.topicEpoch === 'function' ? platform.topicEpoch(topic) : processEpoch();
 		const payload = JSON.stringify({ type: 'subscribed', topic, ref, epoch });
 		ws.send(payload);
 		bumpOutV(/** @type {any} */ (ws).__userData, payload);

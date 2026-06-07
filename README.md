@@ -4302,6 +4302,33 @@ redis.__chaos(null);
 
 Composes across transports: `makeChaosClient(pgClient, 'query')`, `makeChaosClient(natsClient, 'publish')`, etc. Zero new adapter surface; downstream extensions that need cross-wire fault injection own their own wrappers.
 
+### Deterministic simulation
+
+`createTestServer` runs your handler against a real server with real timing. When you need to reproduce a rare interleaving exactly - a drop that only matters when it races a subscribe, an ordering that only breaks under reorder - reach for `svelte-adapter-uws/sim`. It drives the **same** wire dispatch over an in-memory server under a virtual clock and a seeded fault model, so a seed reproduces a run bit-for-bit: a seed plus a commit is the entire bug report.
+
+```js
+import { runSim, replaySim } from 'svelte-adapter-uws/sim';
+
+const result = await runSim({
+  seed: 'my-seed',
+  clients: 4,
+  topics: ['room'],
+  faults: { drop: 0.2, reorder: 0.6, maxJitterMs: 30 },
+  handler: {
+    subscribe(ws, topic) { return topic.startsWith('admin:') ? 'FORBIDDEN' : null; }
+  }
+});
+
+result.invariantViolations; // [] when bookkeeping stayed sound under the faults
+result.clientFrames;        // each client's decoded frames, in delivery order
+
+// Re-run the exact same seed and assert the outcome reproduces bit-for-bit.
+const replay = await replaySim(result);
+replay.reproduced; // true
+```
+
+The scheduler models the event loop's microtask -> timers -> check phase boundary, so a `setTimeout(0)` lands in a later timers phase rather than collapsing into the microtask drain - the publish/relay coalescers batch exactly as they do in production. A seeded PRNG backs every clock, RNG, UUID, and timer, and the fault engine applies `drop` / `delayMs` / `reorder` / `duplicate` / `corrupt` per wire frame. Pass a `scenario(api, { clients, topics })` function to script your own client traffic, or omit it for the default connect/subscribe/publish exercise. `runSimMany({ seeds, base })` sweeps a range of seeds. It is dev/test infrastructure - no new runtime dependency.
+
 ---
 
 ## Related projects

@@ -1,6 +1,6 @@
 {
   "name": "svelte-adapter-uws",
-  "version": "0.6.0-next.16",
+  "version": "0.6.0-next.17",
   "publishConfig": {
     "tag": "next"
   },
@@ -36,6 +36,10 @@
     "./testing": {
       "types": "./testing.d.ts",
       "default": "./testing.js"
+    },
+    "./sim": {
+      "types": "./sim.d.ts",
+      "default": "./sim.js"
     },
     "./safe-url": {
       "types": "./safe-url.d.ts",
@@ -117,6 +121,8 @@
     "upgrade-response.js",
     "testing.js",
     "testing.d.ts",
+    "sim.js",
+    "sim.d.ts",
     "client.js",
     "client.d.ts",
     "client-runtime.js",
