@@ -585,6 +585,40 @@ describe('presence plugin - server', () => {
 			expect(platform.sent[0].event).toBe('state');
 			expect(platform.sent[0].data).toEqual({});
 		});
+
+		it('keeps an observer subscribed after a co-resident participant role leaves (dual-role teardown)', () => {
+			// One socket is BOTH a participant (join) and a sync-observer (sync) of
+			// the same topic. Dropping the participant role must NOT evict the
+			// observer's tap subscription - otherwise its roster freezes with the
+			// departed user still shown.
+			const dual = mockWs({ id: 'dual', name: 'Dual' });
+			presence.join(dual, 'room', platform);
+			presence.sync(dual, 'room', platform);
+			expect(dual.isSubscribed('__presence:room')).toBe(true);
+
+			// Leave the participant role (the real-topic unsubscribe path).
+			presence.hooks.unsubscribe(dual, 'room', { platform });
+
+			// Still subscribed as an observer -> still receives roster diffs.
+			expect(dual.isSubscribed('__presence:room')).toBe(true);
+			expect(presence.count('room')).toBe(0); // participant role is gone
+		});
+
+		it('denies a presence-snapshot for a topic the client cannot subscribe to (authz, no roster leak)', async () => {
+			const ws1 = mockWs({ id: '1', name: 'Alice' });
+			presence.join(ws1, 'room', platform);
+
+			const attacker = mockWs({ id: 'a' });
+			const denyPlatform = { ...mockPlatform(), checkSubscribe: async (_ws, topic) => (topic === 'room' ? 'FORBIDDEN' : null) };
+			await presence.sync(attacker, 'room', denyPlatform);
+
+			expect(attacker.isSubscribed('__presence:room')).toBe(false); // not subscribed
+			expect(denyPlatform.sent).toHaveLength(0); // roster not leaked
+
+			// An authorized topic still works.
+			await presence.sync(attacker, 'lobby', denyPlatform);
+			expect(attacker.isSubscribed('__presence:lobby')).toBe(true);
+		});
 	});
 
 	describe('list / count', () => {

@@ -407,6 +407,16 @@ export function createPresence(options = {}) {
 	const topicPresence = new Map();
 
 	/**
+	 * Sync-observer interest: Map<ws, Set<topic>>. A socket becomes an observer
+	 * of a topic via the presence-snapshot handshake (`sync`), independently of
+	 * any participant role (`join`). Tracked so a participant leaving a topic does
+	 * not tear down the wire subscription a co-resident observer still needs; the
+	 * observer is released on socket close. Mirrors the Redis presence variant.
+	 * @type {Map<any, Set<string>>}
+	 */
+	const syncObservers = new Map();
+
+	/**
 	 * Per-topic pending diff buffer: latest op per key wins. Joins and leaves
 	 * happening on the same key in one event-loop iteration collapse so the
 	 * wire only sees the net change. Flushed once per iteration via
@@ -611,7 +621,13 @@ export function createPresence(options = {}) {
 			}
 			bufferDiff(topic, 'leave', entry.key, data, platform);
 		}
-		try { ws.unsubscribe(TOPIC_PREFIX + topic); } catch { /* ws already closed */ }
+		// Release the wire subscription only if this socket is not ALSO a
+		// sync-observer of the topic: a participant leaving must not evict a
+		// co-resident observer role (whose roster would then freeze). The observer
+		// is released on socket close (see leave()).
+		if (!syncObservers.get(ws)?.has(topic)) {
+			try { ws.unsubscribe(TOPIC_PREFIX + topic); } catch { /* ws already closed */ }
+		}
 	}
 
 	/** @type {PresenceTracker} */
@@ -699,20 +715,54 @@ export function createPresence(options = {}) {
 		leave(ws, platform) {
 			capturePlatform(platform);
 			const connTopics = wsTopics.get(ws);
-			if (!connTopics) return;
-
-			for (const [topic] of connTopics) {
-				leaveTopic(ws, topic, connTopics, platform);
+			if (connTopics) {
+				for (const [topic] of connTopics) {
+					leaveTopic(ws, topic, connTopics, platform);
+				}
+				wsTopics.delete(ws);
 			}
 
-			wsTopics.delete(ws);
+			// Release any sync-observer subscriptions held by this socket. leave()
+			// runs on socket close, so the unsubscribe is belt-and-suspenders (uWS
+			// drops a closing socket from every topic); the map entry must be
+			// cleared to avoid a leak. An observer-only socket (no participant
+			// topics) is handled here too.
+			const observed = syncObservers.get(ws);
+			if (observed) {
+				for (const topic of observed) {
+					try { ws.unsubscribe(TOPIC_PREFIX + topic); } catch { /* closed */ }
+				}
+				syncObservers.delete(ws);
+			}
 		},
 
-		sync(ws, topic, platform) {
+		async sync(ws, topic, platform) {
 			capturePlatform(platform);
+			// Authorize against the REAL topic before granting tap-channel
+			// membership: the presence-snapshot message is otherwise an
+			// un-authorized path to subscribe to __presence:{topic} and read its
+			// roster, around the wire-level `__`-subscribe block. Gate it on the
+			// same check a wire-subscribe to `topic` would run. Optional-chained
+			// (checkSubscribe was added to the platform later); the snapshot is
+			// low-frequency (once per (re)connect) so the await is off the hot path.
+			if (platform && typeof platform.checkSubscribe === 'function') {
+				let denial;
+				try { denial = await platform.checkSubscribe(ws, topic); } catch { return; }
+				if (denial) return;
+			}
 			const users = topicPresence.get(topic);
 			const presenceTopic = TOPIC_PREFIX + topic;
-			try { ws.subscribe(presenceTopic); } catch { return; }
+			// Record the observer interest BEFORE subscribing so leaveTopic knows
+			// the socket still wants the channel even after its participant role
+			// (if any) leaves.
+			let observed = syncObservers.get(ws);
+			if (!observed) { observed = new Set(); syncObservers.set(ws, observed); }
+			observed.add(topic);
+			try { ws.subscribe(presenceTopic); } catch {
+				observed.delete(topic);
+				if (observed.size === 0) syncObservers.delete(ws);
+				return;
+			}
 			emitTo(ws, presenceTopic, 'state', snapshotState(users), platform);
 		},
 

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.16] - 2026-06-07
+
+### Security
+
+- **Presence and cursor snapshot handshakes now authorize against the underlying topic before joining the tap channel.** The `presence-snapshot` / `cursor-snapshot` messages are the server-side path by which a socket joins the `__presence:` / `__cursor:` broadcast channel (the client deliberately never wire-subscribes a `__` topic). That path previously granted membership - and emitted the current roster / positions - with no authorization, so a client could read a tap channel for a topic it was not allowed to subscribe to (a bypass of the wire-level `__`-subscribe block added earlier). The handshake now runs `platform.checkSubscribe(ws, topic)` (the same check a wire-subscribe runs) and drops a denied request without subscribing or emitting. High-frequency cursor `update` / `viewport` frames keep their synchronous `isSubscribed` gate - they require a prior authorized snapshot - so the hot path is unchanged.
+
+### Fixed
+
+- **In-memory cursor sync no longer silently no-ops in the zero-config server.** The cursor plugin gated its message hook on the socket being subscribed to `__cursor:{topic}` but never subscribed it (and the client does not wire-subscribe `__` topics), so `cursor()` / `move()` reached nobody. The plugin now owns membership: the `cursor-snapshot` handshake subscribes the socket (after the authorization above), mirroring the presence plugin, so cursor sync works with `createMessage({ onUnhandled: cursor.hooks.message })` out of the box.
+
+- **Presence no longer freezes a sync-observer's roster when a co-resident participant leaves.** A single socket can be both a participant (`presence.join`) and a sync-observer (`presence-snapshot`) of the same topic; leaving the participant role unconditionally unsubscribed the socket from `__presence:{topic}`, so the observer stopped receiving the leave diff and later heartbeats. Membership teardown now peels one role at a time and releases the wire subscription only when no role remains.
+
 ## [0.6.0-next.15] - 2026-06-07
 
 ### Added

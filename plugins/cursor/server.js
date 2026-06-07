@@ -1136,7 +1136,25 @@ export function createCursor(options = {}) {
 			return result;
 		},
 
-		snapshot(ws, topic, platform) {
+		async snapshot(ws, topic, platform) {
+			// The snapshot handshake is the membership-establishing path for this
+			// tap channel: the client never wire-subscribes a `__`-prefixed topic
+			// (the wire gate blocks that), so the plugin subscribes the socket
+			// server-side here. Gate that on the REAL topic's authorization first -
+			// the same check a wire-subscribe to `topic` would run - so a client
+			// cannot join `__cursor:{topic}` for a topic it is not allowed to
+			// subscribe to (closing the message-triggered path around the wire-level
+			// `__`-subscribe block). checkSubscribe is async and was added to the
+			// platform later, so it is optional-chained; the handshake is
+			// low-frequency (once per (re)connect) so the await is off the hot path.
+			// Subsequent `cursor` / `cursor-viewport` frames require this established
+			// membership via the isSubscribed gate in hooks.message.
+			if (platform && typeof platform.checkSubscribe === 'function') {
+				let denial;
+				try { denial = await platform.checkSubscribe(ws, topic); } catch { return; }
+				if (denial) return;
+			}
+			try { ws.subscribe(TOPIC_PREFIX + topic); } catch { return; }
 			const topicMap = topics.get(topic);
 			const catalog = [];
 			const positions = [];
@@ -1266,7 +1284,10 @@ export function createCursor(options = {}) {
 					return true;
 				}
 				if (parsed.type === 'cursor-snapshot' && typeof parsed.topic === 'string') {
-					if (typeof ws.isSubscribed === 'function' && !ws.isSubscribed(TOPIC_PREFIX + parsed.topic)) return true;
+					// No isSubscribed gate here: the snapshot IS the authorized
+					// membership-establishing handshake (it runs checkSubscribe and
+					// subscribes the socket). It is async; run it fire-and-forget
+					// (it self-contains its errors) so the message hook stays sync.
 					tracker.snapshot(ws, parsed.topic, platform);
 					return true;
 				}

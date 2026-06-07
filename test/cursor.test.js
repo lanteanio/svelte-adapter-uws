@@ -908,7 +908,7 @@ describe('cursor plugin - server', () => {
 			expect(pubs(p, 'update')).toHaveLength(1);
 		});
 
-		it('hooks.message handles cursor-snapshot for subscribed clients', () => {
+		it('hooks.message handles cursor-snapshot and subscribes the socket (zero-config)', () => {
 			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const ws1 = mockWs({ id: '1' });
 			const p = mockPlatform();
@@ -916,13 +916,36 @@ describe('cursor plugin - server', () => {
 			c.update(ws1, 'canvas', { x: 1 }, p);
 			p.reset();
 
-			const ws2 = mockWsSubs({ id: '2' }, ['__cursor:canvas']);
+			// A fresh socket sends cursor-snapshot. The plugin owns membership: it
+			// subscribes the socket to the tap channel (the client never
+			// wire-subscribes a __ topic), then sends the catalog + bulk. This is
+			// the regression guard for "cursor sync silently no-ops zero-config".
+			const ws2 = mockWs({ id: '2' });
 			const handled = c.hooks.message(ws2, { data: encode({ type: 'cursor-snapshot', topic: 'canvas' }), platform: p });
 
 			expect(handled).toBe(true);
+			expect(ws2.isSubscribed('__cursor:canvas')).toBe(true); // now actually subscribed
 			expect(p.sent).toHaveLength(2);
 			expect(p.sent[0].event).toBe('catalog');
 			expect(p.sent[1].event).toBe('bulk');
+		});
+
+		it('cursor-snapshot is denied for a topic the client cannot subscribe to (authz, no leak)', async () => {
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
+			const writer = mockWs({ id: 'w' });
+			// checkSubscribe gates the snapshot on the REAL topic's authorization.
+			const p = { ...mockPlatform(), checkSubscribe: async (_ws, topic) => (topic === 'secret' ? 'FORBIDDEN' : null) };
+			c.update(writer, 'secret', { x: 9 }, p);
+			p.reset();
+
+			const attacker = mockWs({ id: 'a' });
+			await c.snapshot(attacker, 'secret', p); // denied
+			expect(attacker.isSubscribed('__cursor:secret')).toBe(false); // not subscribed
+			expect(p.sent).toHaveLength(0); // roster/positions not leaked
+
+			// ...but an authorized topic still works.
+			await c.snapshot(attacker, 'public', p);
+			expect(attacker.isSubscribed('__cursor:public')).toBe(true);
 		});
 
 		it('hooks.message rejects cursor updates from unsubscribed clients', () => {
@@ -934,17 +957,6 @@ describe('cursor plugin - server', () => {
 
 			expect(handled).toBe(true);
 			expect(p.published).toHaveLength(0);
-		});
-
-		it('hooks.message rejects cursor-snapshot from unsubscribed clients', () => {
-			const c = createCursor({ throttle: 0, topicThrottle: 0 });
-			const ws = mockWsSubs({}, ['__cursor:public']);
-			const p = mockPlatform();
-
-			const handled = c.hooks.message(ws, { data: encode({ type: 'cursor-snapshot', topic: 'secret' }), platform: p });
-
-			expect(handled).toBe(true);
-			expect(p.sent).toHaveLength(0);
 		});
 
 		it('hooks.message works with manual ws.subscribe() (isSubscribed-based auth)', () => {
