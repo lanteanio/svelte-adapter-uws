@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.15] - 2026-06-07
+
+### Added
+
+- **`svelte-adapter-uws/safe-url` (`isSafeUrl` / `checkUrl` / `checkUrlResolved`): an SSRF-defence URL validator for server-side handlers that fetch a user-supplied URL.** A handler that fetches an attacker-controlled URL (an outbound webhook, a link-preview, an avatar-from-URL import) can be steered back inside the trust boundary - the cloud instance-metadata endpoint (`169.254.169.254`), a loopback admin panel, an RFC1918 service. `isSafeUrl(url)` answers "is it safe to fetch this" with one boolean in a zero-config strict default: it rejects non-http(s) schemes and blocks loopback, the unspecified address, IPv4 link-local, the cloud-metadata targets, RFC1918, IPv6 ULA, and IPv6 link-local, defeating the IP-obfuscation evasions a naive string match misses (decimal/octal/hex/short-form IPv4, IPv4-mapped/compatible IPv6, userinfo smuggling, trailing-dot/case) by reading the parsed `URL.hostname`. `checkUrl(url, options)` returns `{ safe, reason }` and supports `mode` (`strict` / `allowlist` / `off`); the async `checkUrlResolved(url, { resolve })` closes the DNS-rebinding gap with a caller-supplied resolver. Pure, dependency-free, isomorphic. This is the single canonical copy for the ecosystem: `svelte-adapter-uws-extensions/safe-url` re-exports it and `svelte-realtime` imports it directly, so there is no duplicated SSRF logic to drift. (It previously lived only in the extensions package; that export is unchanged.)
+
 ## [0.6.0-next.14] - 2026-06-07
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "name": "svelte-adapter-uws",
-  "version": "0.6.0-next.14",
+  "version": "0.6.0-next.15",
   "publishConfig": {
     "tag": "next"
   },
@@ -36,6 +36,10 @@
     "./testing": {
       "types": "./testing.d.ts",
       "default": "./testing.js"
+    },
+    "./safe-url": {
+      "types": "./safe-url.d.ts",
+      "default": "./safe-url.js"
     },
     "./plugins/replay": {
       "types": "./plugins/replay/server.d.ts",
@@ -118,6 +122,8 @@
     "client-runtime.js",
     "vite.js",
     "vite.d.ts",
+    "safe-url.js",
+    "safe-url.d.ts",
     "files",
     "plugins",
     "LICENSE",
