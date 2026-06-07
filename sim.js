@@ -13,7 +13,16 @@ import { createTestServer } from './testing.js';
 import { WS_SUBSCRIPTIONS, resetProcessEpoch } from './files/utils.js';
 import { createClusterRelay, createClusterBus, createSupervisor, clusterFinalState, checkNoMisdelivery } from './files/sim-cluster.js';
 
-export { createScheduler, createSeededRng, createFaultEngine, createInMemoryApp, DEFAULT_SEED, FIXED_EPOCH };
+// Building blocks for composing a custom multi-instance runner over the SAME
+// virtual clock and seam (e.g. a redis/postgres-backed sim in a downstream
+// package): the seam install/teardown, the per-process epoch latch, and the
+// in-memory uWS helper bundle, alongside the scheduler / rng / fault-engine /
+// app factories. createTestServer is exported from svelte-adapter-uws/testing.
+export {
+	createScheduler, createSeededRng, createFaultEngine, createInMemoryApp,
+	createInMemoryUwsHelpers, setRuntimeEnv, resetRuntimeEnv, resetProcessEpoch,
+	DEFAULT_SEED, FIXED_EPOCH
+};
 
 /**
  * Subscription-bookkeeping invariant: a connection's subscription set (the one

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.19] - 2026-06-07
+
+### Added
+
+- **`svelte-adapter-uws/sim` now re-exports the composition primitives a downstream package needs to build a custom multi-instance runner over the same virtual clock.** `setRuntimeEnv` / `resetRuntimeEnv` (install and tear down the runtime seam), `resetProcessEpoch` (re-latch the per-process seq-space generation), and `createInMemoryUwsHelpers` (the in-memory uWS helper bundle `createTestServer` needs alongside the in-memory app) are now public alongside the already-exported `createScheduler` / `createSeededRng` / `createFaultEngine` / `createInMemoryApp`. This lets an external harness - for example a redis or postgres-backed simulation in another package - drive the same `createTestServer` dispatch over the in-memory app on one shared scheduler, installing the seam on its own runtime module too, without re-implementing the runner. Purely additive: no behaviour change, and `runSim` / `runSimMany` / `replaySim` are unaffected.
+
 ## [0.6.0-next.18] - 2026-06-07
 
 ### Added

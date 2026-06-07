@@ -170,5 +170,38 @@ export function createScheduler(opts?: { startEpoch?: number; tz?: string }): an
 export function createFaultEngine(opts: { rng: SeededRng; faults?: SimFaults }): { plan(payload: string | Uint8Array): Array<{ delayMs: number; payload: string | Uint8Array }>; active: boolean };
 export function createInMemoryApp(opts: { scheduler: any; faultEngine: any; port?: number }): InMemoryApp;
 
+/** The runtime-seam env that `createScheduler(...).buildEnv(rng)` produces. */
+export interface RuntimeEnv {
+	clock: { now(): number; monotonic(): number; wallEpoch(): number };
+	rng: { float(): number; u32(): number; uuid(): string; bytes(n: number): Uint8Array };
+	timers: {
+		set(cb: Function, ms?: number, ...args: any[]): any;
+		setInterval(cb: Function, ms?: number, ...args: any[]): any;
+		setImmediate(cb: Function, ...args: any[]): any;
+		clear(handle: any): void;
+		clearInterval(handle: any): void;
+		queueMicrotask(cb: Function): void;
+	};
+	tz?: string;
+}
+
+/** The uWS helper bundle createTestServer needs alongside the in-memory app. */
+export interface InMemoryUwsHelpers {
+	App(): InMemoryApp;
+	SSLApp(): InMemoryApp;
+	us_socket_local_port(): number;
+	us_listen_socket_close(): void;
+	SHARED_COMPRESSOR: number;
+	DISABLED: number;
+}
+
+// Composition primitives: install/teardown the runtime seam, re-latch the
+// per-process epoch, and build the uWS helper bundle - so a downstream package
+// can drive createTestServer over the in-memory app on the same virtual clock.
+export function setRuntimeEnv(env: Partial<RuntimeEnv>, opts?: { force?: boolean }): void;
+export function resetRuntimeEnv(): void;
+export function resetProcessEpoch(): void;
+export function createInMemoryUwsHelpers(app: InMemoryApp): InMemoryUwsHelpers;
+
 export const DEFAULT_SEED: string;
 export const FIXED_EPOCH: number;
