@@ -90,9 +90,13 @@ export function createInMemoryApp(opts) {
 			_simId: id,
 			_topics: topics,
 			getUserData() { return userData; },
-			send(message, isBinary = false, _compress = false) {
+			send(message, isBinary = false, _compress = false, _routingTopic) {
 				if (closed) throw new Error('Invalid access of closed uWS.WebSocket');
-				channelSend(message, (payload) => clientSide.deliver(payload, !!isBinary));
+				// _routingTopic is the topic a publish fanned out on (set by app.publish);
+				// undefined for a direct send. It rides through the fault-gated channel so
+				// the client can be checked for misdelivery against the UNcorrupted routing
+				// key rather than the (corruptible) decoded envelope body.
+				channelSend(message, (payload) => clientSide.deliver(payload, !!isBinary, _routingTopic));
 				return SEND_SUCCESS;
 			},
 			subscribe(topic) { if (closed) throw new Error('Invalid access of closed uWS.WebSocket'); topics.add(topic); return true; },
@@ -196,8 +200,8 @@ export function createInMemoryApp(opts) {
 		let closeInfo = null;
 
 		const clientSide = {
-			deliver(payload, isBinary) {
-				const frame = { payload, isBinary };
+			deliver(payload, isBinary, routingTopic) {
+				const frame = { payload, isBinary, routingTopic };
 				received.push(frame);
 				for (const h of messageHandlers) h(frame);
 			},
@@ -275,7 +279,7 @@ export function createInMemoryApp(opts) {
 		publish(topic, message, isBinary = false, _compress = false) {
 			let delivered = false;
 			for (const ws of connections) {
-				if (ws._topics.has(topic)) { ws.send(message, isBinary, false); delivered = true; }
+				if (ws._topics.has(topic)) { ws.send(message, isBinary, false, topic); delivered = true; }
 			}
 			return delivered;
 		},

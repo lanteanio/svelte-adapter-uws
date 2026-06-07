@@ -11,6 +11,7 @@ import { createInMemoryApp, createInMemoryUwsHelpers } from './files/sim-inmemor
 import { setRuntimeEnv, resetRuntimeEnv } from './files/runtime.js';
 import { createTestServer } from './testing.js';
 import { WS_SUBSCRIPTIONS, resetProcessEpoch } from './files/utils.js';
+import { createClusterRelay, createClusterBus, createSupervisor, clusterFinalState, checkNoMisdelivery } from './files/sim-cluster.js';
 
 export { createScheduler, createSeededRng, createFaultEngine, createInMemoryApp, DEFAULT_SEED, FIXED_EPOCH };
 
@@ -105,6 +106,9 @@ async function defaultScenario(api, opts) {
  * @returns {Promise<any>} a SimResult
  */
 export async function runSim(config = {}) {
+	// Multi-worker runs take the cluster path; the single-worker body below is left
+	// byte-identical so every existing sim is unaffected.
+	if (Number.isInteger(config.workers) && config.workers > 1) return runClusterSim(config);
 	const seed = config.seed ?? DEFAULT_SEED;
 	const clients = config.clients ?? 2;
 	const topics = config.topics ?? ['room'];
@@ -211,6 +215,289 @@ export async function runSim(config = {}) {
 }
 
 /**
+ * The default multi-worker scenario: connect `clients` clients on every worker,
+ * subscribe each to every topic, then publish a few events per topic FROM worker 0
+ * so the relay carries them to subscribers on the other workers. Advancing between
+ * phases lets the relay batch + the cross-worker delivery settle.
+ */
+async function defaultClusterScenario(api, opts) {
+	for (let w = 0; w < opts.workers; w++) {
+		for (let i = 0; i < opts.clients; i++) api.worker(w).connect();
+	}
+	await api.advance();
+	for (let w = 0; w < opts.workers; w++) {
+		for (const c of api.worker(w).clients()) for (const t of opts.topics) c.subscribe(t);
+	}
+	await api.advance();
+	for (const t of opts.topics) for (let n = 0; n < 3; n++) api.worker(0).publish(t, 'tick', { n });
+	await api.advance();
+}
+
+/**
+ * Run one multi-worker simulation. N createTestServer instances share ONE virtual
+ * clock and ONE seam env; a fault-gated relay bus + a restart-budget supervisor
+ * model the production primary (files/index.js) and the cross-worker relay
+ * (files/handler.js), neither of which is drivable in-sim. The seam + the per-cohort
+ * process epoch are established ONCE before any worker is built and torn down once.
+ *
+ * @param {object} config see runSim, plus `workers`, `clusterMode`
+ *   ('reuseport' | 'acceptor'), and `relayFaults` (the IPC-bus fault spec).
+ * @returns {Promise<any>} a multi-worker SimResult
+ */
+async function runClusterSim(config) {
+	const seed = config.seed ?? DEFAULT_SEED;
+	const workersN = config.workers;
+	const clients = config.clients ?? 2;
+	const topics = config.topics ?? ['room'];
+	const maxSteps = config.steps ?? 100000;
+	const startEpoch = config.startEpoch ?? FIXED_EPOCH;
+	const mode = config.clusterMode === 'acceptor' ? 'acceptor' : 'reuseport';
+
+	// The global seam stream (uuid / random for framework code, shared by all
+	// workers). Per-worker ws faults and the relay bus draw from their OWN derived
+	// streams so a fault-config change never perturbs the seam's uuid stream.
+	const rng = createSeededRng(seed);
+	const scheduler = createScheduler({ startEpoch, tz: config.tz });
+	const relayRng = createSeededRng(seed + ':relay');
+	const busMetrics = { forwarded: 0, delivered: 0, dropped: 0 };
+	const bus = createClusterBus({
+		faultEngine: createFaultEngine({ rng: relayRng, faults: config.relayFaults || {} }),
+		metrics: busMetrics
+	});
+
+	setRuntimeEnv(scheduler.buildEnv(rng), { force: true });
+	resetProcessEpoch();
+	try {
+		/** @type {Array<{ category: string, context: any }>} */
+		const violations = [];
+		const seen = new Set();
+		/** @type {Map<number, { id: number, app: any, server: any, relay: any, epoch: number, clients: any[] }>} */
+		const workers = new Map();
+		// Every client ever opened, tagged by its worker at connect time. A respawn
+		// replaces workers.get(id) with a fresh (empty) wobj, so this accumulates the
+		// terminated worker's facades across restarts: clusterFrames intentionally
+		// retains that pre-restart delivery history, while finalState reads the current
+		// (possibly fresh) worker via the workers map.
+		/** @type {Array<{ workerId: number, facade: any, subTopics: Set<string> }>} */
+		const allClients = [];
+		/** @type {any[]} */
+		const fatals = [];
+		let listenPaused = false;
+
+		function recordViolation(v) {
+			if (!v) return;
+			const key = v.category + ':' + JSON.stringify(v.context);
+			if (!seen.has(key)) { seen.add(key); violations.push(v); }
+		}
+		function checkInvariants() {
+			for (const w of workers.values()) recordViolation(checkSubscriptionBookkeeping(w.app));
+		}
+
+		async function makeWorker(id) {
+			const wRng = createSeededRng(seed + ':ws:' + id);
+			const wFaultEngine = createFaultEngine({ rng: wRng, faults: config.faults || {} });
+			const app = createInMemoryApp({ scheduler, faultEngine: wFaultEngine });
+			const uws = createInMemoryUwsHelpers(app);
+			const relay = createClusterRelay({ workerId: id, bus });
+			const server = await createTestServer({
+				handler: config.handler || {},
+				allowSystemTopicSubscribe: config.allowSystemTopicSubscribe === true,
+				allowNonAsciiTopics: config.allowNonAsciiTopics === true,
+				upgradeAdmission: config.upgradeAdmission,
+				protection: config.protection,
+				__app: app,
+				__uws: uws,
+				__onPublish: relay.onPublish
+			});
+			// Per-worker topic generation, re-latched from the virtual clock on each
+			// (re)spawn so a restarted worker presents a fresh generation - modeling
+			// production's per-worker processEpoch. The +id tie-breaks the initial
+			// cohort (all spawned at startEpoch); a respawn re-latches from the advanced
+			// clock, which can in principle coincide with a live worker's generation,
+			// exactly as two production boots in the same millisecond can.
+			const epoch = scheduler.now() + id;
+			server.platform.topicEpoch = (t) => { void t; return epoch; };
+			bus.register(id, server.platform.__relayReceive);
+			const wobj = { id, app, server, relay, epoch, clients: [] };
+			workers.set(id, wobj);
+			return wobj;
+		}
+
+		// Worker ids whose respawn should fail (a worker that crashes on init); used
+		// to drive the restart-budget-exhausted outcome via flapWorker(id, { recover:false }).
+		const crashLooping = new Set();
+
+		const supervisor = createSupervisor({
+			mode,
+			hooks: {
+				terminate(id) {
+					const w = workers.get(id);
+					if (!w) return;
+					w.relay.abandon();
+					bus.unregister(id);
+					bus.cancelFor(id);
+					// Close every live connection on the worker (the worker-flap
+					// one-shot), the in-sim analog of the worker thread dying.
+					try { w.server.platform.__chaos({ scenario: 'worker-flap', code: 1012, reason: 'worker restart' }); } catch {}
+				},
+				async spawn(id) {
+					if (crashLooping.has(id)) throw new Error('worker crashed on init');
+					await makeWorker(id);
+				},
+				onFatal(entry) { fatals.push(entry); },
+				onListenPause(p) { listenPaused = p; }
+			}
+		});
+
+		// Build the cohort. The seam + epoch are already latched, so all initial
+		// workers share startEpoch (+id for distinctness).
+		for (let id = 0; id < workersN; id++) {
+			const w = await makeWorker(id);
+			supervisor.addWorker(id);
+			supervisor.markReady(id);
+			void w;
+		}
+
+		let totalSteps = 0;
+		const api = {
+			rng,
+			now: () => scheduler.now(),
+			workersCount: workersN,
+			worker(id) {
+				return {
+					connect: (opts) => {
+						const w = workers.get(id);
+						if (!w) return null;
+						const facade = w.app.connect(opts);
+						const subTopics = new Set();
+						const origSub = facade.subscribe.bind(facade);
+						facade.subscribe = (topic, ref) => { subTopics.add(topic); return origSub(topic, ref); };
+						w.clients.push(facade);
+						allClients.push({ workerId: id, facade, subTopics });
+						return facade;
+					},
+					clients: () => (workers.get(id) ? workers.get(id).clients.slice() : []),
+					publish: (topic, event, data, opts) => {
+						const w = workers.get(id);
+						return w ? w.server.platform.publish(topic, event, data, opts) : false;
+					},
+					publishBatched: (messages, opts) => {
+						const w = workers.get(id);
+						return w ? w.server.platform.publishBatched(messages, opts) : undefined;
+					}
+				};
+			},
+			flapWorker: (id, opts) => {
+				// recover:false models a worker that crashes on every restart - it
+				// never re-readies, so the budget marches to exhaustion.
+				if (opts && opts.recover === false) crashLooping.add(id);
+				supervisor.flap(id);
+			},
+			wedgeWorker: (id) => supervisor.wedge(id),
+			async advance(rounds) {
+				totalSteps += await scheduler.run({ maxSteps: rounds ?? maxSteps, onStep: checkInvariants });
+			},
+			async advanceTime(ms) {
+				// Pull the virtual clock forward by `ms` even when only unref'd timers
+				// (the heartbeat interval) are pending, so time-driven supervisor
+				// behaviour - wedged-worker detection at HEARTBEAT_TIMEOUT_MS - is
+				// observable in an otherwise idle cohort. A refed wake keeps the run
+				// loop advancing; everything due in the window fires along the way.
+				scheduler._scheduleTimer(() => {}, Math.max(0, ms | 0), [], false);
+				totalSteps += await scheduler.run({ maxSteps, onStep: checkInvariants });
+			}
+		};
+
+		const scenario = config.scenario || defaultClusterScenario;
+		await scenario(api, { clients, topics, workers: workersN });
+		// Drain to quiescence so every relay batch + in-flight delivery + restart
+		// timer settles before the snapshot.
+		totalSteps += await scheduler.run({ maxSteps, onStep: checkInvariants });
+		checkInvariants();
+
+		// Quiescent no-misdelivery check: every data frame a client received names a
+		// topic it actually subscribed to (catches a relay routing leak).
+		const byWorker = new Map();
+		for (const id of workers.keys()) byWorker.set(id, []);
+		for (const c of allClients) {
+			if (!byWorker.has(c.workerId)) byWorker.set(c.workerId, []);
+			// Raw frames carry the uncorrupted routingTopic the check needs (the decoded
+			// body topic can be mangled by the corrupt fault).
+			byWorker.get(c.workerId).push({ subscribed: c.subTopics, frames: c.facade.frames() });
+		}
+		recordViolation(checkNoMisdelivery([...byWorker].map(([id, cl]) => ({ id, clients: cl }))));
+
+		// Build the deterministic, sorted result aggregates.
+		const workerSummaries = [...workers.values()].map((w) => ({
+			id: w.id,
+			snapshot: snapshot(w.app),
+			framesDelivered: w.clients.reduce((s, c) => s + c.frames().length, 0)
+		}));
+		const finalState = clusterFinalState(workerSummaries);
+		const clusterFrames = [...byWorker]
+			.map(([id]) => id)
+			.sort((a, b) => a - b)
+			.map((id) => ({
+				worker: id,
+				clients: allClients.filter((c) => c.workerId === id).map((c) => c.facade.json())
+			}));
+		const totalFrames = allClients.reduce((s, c) => s + c.facade.frames().length, 0);
+
+		supervisor.shutdown();
+		for (const w of workers.values()) { try { await w.server.close(); } catch {} }
+		totalSteps += await scheduler.run({ maxSteps, onStep: checkInvariants });
+
+		return {
+			seed,
+			gitCommit: config.gitCommit ?? (typeof process !== 'undefined' ? process.env.GIT_COMMIT : null) ?? null,
+			config: {
+				workers: workersN,
+				clusterMode: mode,
+				clients,
+				topics,
+				steps: maxSteps,
+				faults: config.faults || {},
+				relayFaults: config.relayFaults || {},
+				tz: config.tz ?? null,
+				startEpoch,
+				allowSystemTopicSubscribe: config.allowSystemTopicSubscribe === true,
+				allowNonAsciiTopics: config.allowNonAsciiTopics === true
+			},
+			steps: totalSteps,
+			virtualTimeMs: scheduler.now() - startEpoch,
+			invariantViolations: violations,
+			fatals,
+			schedulerUncaught: scheduler.uncaught.map((u) => String(u.error && u.error.message || u.error)),
+			metrics: {
+				workers: workersN,
+				clients: allClients.length,
+				framesDelivered: totalFrames,
+				relay: { forwarded: busMetrics.forwarded, delivered: busMetrics.delivered, dropped: busMetrics.dropped },
+				restarts: supervisor.metrics.restarts,
+				flaps: supervisor.metrics.flaps,
+				wedges: supervisor.metrics.wedges,
+				// Live ready workers at quiescence. A concurrent recovering flap can leave
+				// the cohort below `workers` (a recovery clears the shared restart-timer set,
+				// cancelling a sibling's pending respawn - faithful to the production primary's
+				// single restart budget), so this surfaces a silent deficit that `restarts`
+				// (which counts only fired respawns) would not.
+				workersLive: supervisor.liveReady(),
+				listenPaused
+			},
+			clusterFrames,
+			clientFrames: allClients.map((c) => c.facade.json()),
+			finalState,
+			_handler: config.handler,
+			_scenario: config.scenario,
+			_seedConfig: config
+		};
+	} finally {
+		resetRuntimeEnv();
+		resetProcessEpoch();
+	}
+}
+
+/**
  * Run many simulations. Accepts either an array of full configs, or
  * `{ seeds, base }` to run `base` once per seed.
  *
@@ -248,6 +535,18 @@ export async function replaySim(reproducer) {
 	const result = await runSim(cfg);
 	const sameViolations = JSON.stringify(result.invariantViolations) === JSON.stringify(reproducer.invariantViolations);
 	const sameState = JSON.stringify(result.finalState) === JSON.stringify(reproducer.finalState);
-	result.reproduced = sameViolations && sameState;
+	// fatals (restart-budget outcomes) and, for a multi-worker run, the per-worker
+	// delivered frames are part of the reproduced gate: a relay or supervisor whose
+	// outcome drifts across runs flips `reproduced` to false. Single-worker results
+	// carry fatals:[] and no clusterFrames, so this stays a no-op there.
+	const sameFatals = JSON.stringify(result.fatals ?? []) === JSON.stringify(reproducer.fatals ?? []);
+	const sameCluster = JSON.stringify(result.clusterFrames ?? null) === JSON.stringify(reproducer.clusterFrames ?? null);
+	// metrics (relay accounting, restart/flap/wedge counts, live workers, listen pause)
+	// and the virtual end-time are run-determining outputs that a no-subscriber or
+	// relay-only drift can move without touching any client frame - so the gate covers
+	// them too. metrics has a fixed key order in both paths, so JSON.stringify is stable.
+	const sameMetrics = JSON.stringify(result.metrics) === JSON.stringify(reproducer.metrics);
+	const sameVirtualTime = result.virtualTimeMs === reproducer.virtualTimeMs;
+	result.reproduced = sameViolations && sameState && sameFatals && sameCluster && sameMetrics && sameVirtualTime;
 	return result;
 }

@@ -187,6 +187,13 @@ export async function createTestServer(options = {}) {
 
 	const app = options.__app || uWS.App();
 
+	// Sim-only relay observer. The multi-worker simulator injects this to capture
+	// each originating publish (its already-built envelope + stamped seq) for the
+	// cross-worker relay model, exactly where production's handler.js hands the
+	// envelope to batchRelay. Null on every normal createTestServer path, so the
+	// default dispatch pays nothing.
+	const onPublishT = typeof options.__onPublish === 'function' ? options.__onPublish : null;
+
 	/** @type {Set<import('uWebSockets.js').WebSocket<any>>} */
 	const wsConnections = new Set();
 
@@ -345,6 +352,11 @@ export async function createTestServer(options = {}) {
 				? null
 				: nextTopicSeq(topicSeqs, topic);
 			const msg = envelope(topic, event, data, seq);
+			// Relay the already-built envelope to other workers (sim), mirroring
+			// handler.js's `relayed = parentPort && options.relay !== false` gate.
+			if (onPublishT && !(options && options.relay === false)) {
+				onPublishT({ kind: 'publish', topic, envelope: msg, seq, compress: !!(options && options.compress) });
+			}
 			// Fast path: hand fan-out to uWS's C++ TopicTree. Chaos cannot
 			// intercept C++ dispatch, so when a scenario is active we
 			// degrade to a JS-side fanout that consults the chaos state
@@ -373,6 +385,12 @@ export async function createTestServer(options = {}) {
 				? null
 				: nextTopicSeq(topicSeqs, topic);
 			const env = envelope(topic, event, data, seq);
+			// Cross-worker subscribers receive the JSON envelope only (binary frames
+			// are same-worker), so the relay carries `env`, never a 0x03 frame -
+			// mirroring handler.js publishWire's relay path.
+			if (onPublishT && !(options && options.relay === false)) {
+				onPublishT({ kind: 'publish', topic, envelope: env, seq, compress: false });
+			}
 			// JSON fast path: no capable client.
 			if (!capCountsT.has(wire.capability)) {
 				if (chaos.scenario === null) return app.publish(topic, env, false, false);
@@ -621,6 +639,19 @@ export async function createTestServer(options = {}) {
 					: nextTopicSeq(topicSeqs, m.topic);
 				events[i] = { topic: m.topic, env: envelope(m.topic, m.event, m.data, seq) };
 			}
+			// Fast-path batch relay (sim): forward the stamped events as one IPC frame,
+			// mirroring handler.js's `publish-batched`. Per-message `relay: false` is
+			// excluded from the relayed list (a frame from an external pub/sub source
+			// already fans out to every process) while local fan-out keeps every event.
+			// The slow-path fallback above relays per event through platform.publish.
+			if (onPublishT) {
+				const relayed = [];
+				for (let i = 0; i < events.length; i++) {
+					const o = messages[i].options;
+					if (!o || o.relay !== false) relayed.push({ topic: events[i].topic, env: events[i].env });
+				}
+				if (relayed.length > 0) onPublishT({ kind: 'publishBatched', events: relayed, compress: false });
+			}
 			const slice = new Array(events.length);
 			for (let i = 0; i < events.length; i++) slice[i] = events[i].env;
 			const sharedBatchEnv = wrapBatchEnvelope(slice);
@@ -778,6 +809,75 @@ export async function createTestServer(options = {}) {
 				return;
 			}
 			chaos.set(cfg);
+		},
+		/**
+		 * Sim-only: inject a relayed frame from another worker, mirroring the
+		 * production handler's relayPublish / relayPublishBatched. The originating
+		 * worker already stamped the per-topic seq into each envelope, so this
+		 * re-publishes the pre-built envelope(s) via the app's fan-out with NO
+		 * re-stamp and NO re-relay (it never re-enters platform.publish, so the
+		 * cross-worker delivery cannot loop). The publishBatched path re-runs the
+		 * allSeeAll / everyoneCapable detection against THIS server's own
+		 * subscriber + capability set, so a worker with a different cap profile can
+		 * take the slow path even when the originator took the fast path. The in-memory
+		 * app models no compressor, so a carried `compress` intent is intentionally a
+		 * no-op here (it is threaded through the relay only for IPC-frame-shape parity).
+		 *
+		 * @param {{ kind?: string, topic?: string, envelope?: string, compress?: boolean,
+		 *   events?: Array<{ topic: string, env: string }> }} frame
+		 */
+		__relayReceive(frame) {
+			if (!frame) return;
+			if (frame.kind === 'publishBatched') {
+				const events = frame.events;
+				if (!Array.isArray(events) || events.length === 0) return;
+				if (typeof events[0].topic !== 'string' || typeof events[0].env !== 'string') return;
+				const firstTopic = events[0].topic;
+				let allSameTopic = true;
+				for (let i = 1; i < events.length; i++) {
+					if (events[i].topic !== firstTopic) { allSameTopic = false; break; }
+				}
+				let allSeeAll = true;
+				let everyoneCapable = true;
+				let batchTopics = null;
+				if (!allSameTopic) {
+					batchTopics = new Set();
+					for (let i = 0; i < events.length; i++) batchTopics.add(events[i].topic);
+				}
+				for (const ws of wsConnections) {
+					let ud;
+					try { ud = ws.getUserData(); } catch { continue; }
+					const subs = ud[WS_SUBSCRIPTIONS];
+					if (!subs || subs.size === 0) continue;
+					let touchesAny = false;
+					if (allSameTopic) {
+						touchesAny = subs.has(firstTopic);
+					} else {
+						let touchesAll = true;
+						for (const t of batchTopics) {
+							if (subs.has(t)) touchesAny = true;
+							else touchesAll = false;
+						}
+						if (touchesAny && !touchesAll) { allSeeAll = false; break; }
+					}
+					if (!touchesAny) continue;
+					const caps = ud[WS_CAPS];
+					if (!caps || !caps.has('batch')) { everyoneCapable = false; break; }
+				}
+				if ((!allSameTopic && !allSeeAll) || !everyoneCapable) {
+					for (let i = 0; i < events.length; i++) app.publish(events[i].topic, events[i].env, false, false);
+					return;
+				}
+				const relaySlice = new Array(events.length);
+				for (let i = 0; i < events.length; i++) relaySlice[i] = events[i].env;
+				const sharedBatchEnv = wrapBatchEnvelope(relaySlice);
+				const fanoutTopic = allSameTopic ? firstTopic : events[0].topic;
+				app.publish(fanoutTopic, sharedBatchEnv, false, false);
+				return;
+			}
+			if (typeof frame.topic === 'string' && typeof frame.envelope === 'string' && frame.envelope.length > 0) {
+				app.publish(frame.topic, frame.envelope, false, false);
+			}
 		}
 	};
 	let nextRequestRefT = 1;

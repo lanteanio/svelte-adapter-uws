@@ -45,6 +45,30 @@ export interface SimApi {
 	advance(rounds?: number): Promise<void>;
 }
 
+/** One worker's handle within a multi-worker scenario. */
+export interface SimWorkerApi {
+	connect(opts?: { headers?: Record<string, string>; query?: string }): SimClientFacade | null;
+	clients(): SimClientFacade[];
+	publish(topic: string, event: string, data?: unknown, options?: unknown): boolean;
+	publishBatched(messages: unknown[], options?: unknown): void;
+}
+
+/** The api passed to a multi-worker scenario (runSim with `workers` > 1). */
+export interface SimClusterApi {
+	rng: SeededRng;
+	now(): number;
+	workersCount: number;
+	worker(id: number): SimWorkerApi;
+	/** Restart a worker (close its connections, then respawn under the budget). Pass
+	 *  `{ recover: false }` to model a worker that crashes on every restart. */
+	flapWorker(id: number, opts?: { recover?: boolean }): void;
+	/** Stop a worker acking heartbeats so the supervisor terminates it after the timeout. */
+	wedgeWorker(id: number): void;
+	advance(rounds?: number): Promise<void>;
+	/** Advance the virtual clock by `ms`, firing time-driven supervisor behaviour. */
+	advanceTime(ms: number): Promise<void>;
+}
+
 export interface SimConfig {
 	/** Seed string; the same seed reproduces the run bit-for-bit. */
 	seed?: string;
@@ -53,10 +77,19 @@ export interface SimConfig {
 	/** Max scheduler rounds per drive call. */
 	steps?: number;
 	faults?: SimFaults;
+	/** Number of workers to model. Omitted or 1 runs the single-worker path
+	 *  (byte-identical to a non-cluster run); > 1 builds a cluster cohort. */
+	workers?: number;
+	/** Cluster topology when `workers` > 1. Defaults to 'reuseport'. */
+	clusterMode?: 'reuseport' | 'acceptor';
+	/** Fault spec applied to the cross-worker relay (IPC) channel, independent of
+	 *  the per-worker `faults` (the client wire channel). Multi-worker only. */
+	relayFaults?: SimFaults;
 	/** The WS handler hooks under test (open/message/subscribe/etc.). */
 	handler?: Record<string, any>;
-	/** Scripts client actions; defaults to connect+subscribe+publish. */
-	scenario?: (api: SimApi, opts: { clients: number; topics: string[] }) => void | Promise<void>;
+	/** Scripts client actions; defaults to connect+subscribe+publish. A multi-worker
+	 *  scenario receives the cluster api and a `workers` count. */
+	scenario?: (api: SimApi & SimClusterApi, opts: { clients: number; topics: string[]; workers?: number }) => void | Promise<void>;
 	tz?: string;
 	startEpoch?: number;
 	/** Pins the source for a cross-process reproducer; the CI/caller supplies it. */
@@ -68,23 +101,44 @@ export interface SimConfig {
 	protection?: 'normal' | 'auto' | 'elevated' | 'siege';
 }
 
+/** A single-server structural snapshot (the single-worker finalState). */
+export interface SimSnapshot {
+	connections: Array<{ id: number; subscribed: string[]; bookkeeping: string[] | null }>;
+	topicCounts: Record<string, number>;
+	openConnections: number;
+}
+
+/** The multi-worker finalState aggregate (one snapshot per worker, sorted by id). */
+export interface SimClusterFinalState {
+	workers: Array<{ id: number } & SimSnapshot>;
+	framesDelivered: Array<{ worker: number; frames: number }>;
+}
+
+/** A reproducible supervisor outcome (e.g. a worker that died after N restarts). */
+export interface SimFatal {
+	worker: number;
+	reason: string;
+	attempts: number;
+	schedule: number[];
+}
+
 export interface SimResult {
 	seed: string;
 	gitCommit: string | null;
-	config: { clients: number; topics: string[]; steps: number; faults: SimFaults; tz: string | null; startEpoch: number; allowSystemTopicSubscribe: boolean; allowNonAsciiTopics: boolean };
+	/** Multi-worker runs additionally carry `workers`, `clusterMode`, `relayFaults`. */
+	config: { clients: number; topics: string[]; steps: number; faults: SimFaults; tz: string | null; startEpoch: number; allowSystemTopicSubscribe: boolean; allowNonAsciiTopics: boolean; workers?: number; clusterMode?: 'reuseport' | 'acceptor'; relayFaults?: SimFaults };
 	steps: number;
 	virtualTimeMs: number;
 	invariantViolations: Array<{ category: string; context: any }>;
-	fatals: Array<{ category: string; context: any }>;
+	fatals: SimFatal[];
 	schedulerUncaught: string[];
-	metrics: { clients: number; framesDelivered: number };
+	/** Multi-worker runs extend metrics with workers/relay/restarts/flaps/wedges/workersLive/listenPaused. */
+	metrics: { clients: number; framesDelivered: number; workers?: number; relay?: { forwarded: number; delivered: number; dropped: number }; restarts?: number; flaps?: number; wedges?: number; workersLive?: number; listenPaused?: boolean };
 	clientFrames: any[][];
-	finalState: {
-		connections: Array<{ id: number; subscribed: string[]; bookkeeping: string[] | null }>;
-		topicCounts: Record<string, number>;
-		openConnections: number;
-	};
-	/** True only on a replaySim result whose violations + state matched the reproducer. */
+	/** Per-worker client frames (multi-worker only), sorted by worker id. */
+	clusterFrames?: Array<{ worker: number; clients: any[][] }>;
+	finalState: SimSnapshot | SimClusterFinalState;
+	/** True only on a replaySim result whose violations + state + fatals + cluster frames matched the reproducer. */
 	reproduced?: boolean;
 }
 

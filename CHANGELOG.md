@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.18] - 2026-06-07
+
+### Added
+
+- **`svelte-adapter-uws/sim`: `runSim({ workers })` extends the deterministic simulator to a multi-worker cluster, so a seed reproduces a clustered interleaving - cross-worker delivery, the restart-budget supervisor, and worker-flap outcomes - bit-for-bit.** With `workers > 1` the runner builds N in-memory servers over one shared virtual clock and models the production cluster the single-worker harness could not reach. The cross-worker pub/sub relay is modeled end to end: a worker's publish coalesces into a batch, crosses a fault-gated in-memory bus, and re-publishes on every other worker with no seq re-stamp and no re-relay - covering both the single-publish path and the wire-batched path (the latter re-running its fan-out detection against the receiving worker's own subscriber and capability set, and honouring per-message `relay: false`). The restart-budget supervisor is modeled too: heartbeat-driven wedged-worker detection, exponential-backoff restarts, and a reproducible `restart-budget-exhausted` outcome when a worker crash-loops (surfaced on `result.fatals`). A `relayFaults` spec applies drop / delay / reorder / duplicate / corrupt to the cross-worker channel independently of the per-worker wire faults; `clusterMode: 'reuseport' | 'acceptor'` selects the topology (acceptor adds the all-workers-down listen pause). `api.worker(i)`, `flapWorker`, `wedgeWorker`, and `advanceTime` script a multi-worker scenario, and a quiescent no-misdelivery invariant (checked against the uncorrupted routing key, so it is immune to the corrupt fault) runs per worker. `replaySim` self-gates that the same per-worker frames, restart outcomes, metrics, and virtual end-time reproduce. `workers` defaults to 1, which is byte-identical to a single-worker run. The relay is modeled at the platform level via a sim-only injection seam on `createTestServer` (off on every normal path); production `handler.js` / `index.js` are untouched. Dev/test infrastructure - it ships in the package but pulls in no new runtime dependency.
+
 ## [0.6.0-next.17] - 2026-06-07
 
 ### Added
