@@ -11,6 +11,7 @@ import { createInMemoryApp, createInMemoryUwsHelpers } from './files/sim-inmemor
 import { setRuntimeEnv, resetRuntimeEnv } from './files/runtime.js';
 import { createTestServer } from './testing.js';
 import { WS_SUBSCRIPTIONS, resetProcessEpoch } from './files/utils.js';
+import { checkSubscriptionBookkeeping } from './files/invariants.js';
 import { createClusterRelay, createClusterBus, createSupervisor, clusterFinalState, checkNoMisdelivery } from './files/sim-cluster.js';
 
 // Building blocks for composing a custom multi-instance runner over the SAME
@@ -25,30 +26,41 @@ export {
 };
 
 /**
- * Subscription-bookkeeping invariant: a connection's subscription set (the one
- * fan-out reads) must agree with its WS_SUBSCRIPTIONS bookkeeping set (the one
- * counted against the cap). The dispatch maintains the two in lockstep, so in
- * this single-dispatch model the check is a regression guard against a code path
- * that mutates one without the other (a missing subscribe, a dropped Set type),
- * not a model of an independent transport that silently caps or drops a
- * subscription. Pure function of a snapshot-able state; returns the first
- * violation. The richer cross-checked invariant set is a later addition.
+ * Build the plain state snapshot the shared invariant predicates read from the
+ * live in-memory app. Structure only: per-connection subscribed set (the one
+ * fan-out reads) and bookkeeping set (the one counted against the cap), keyed by
+ * the connection's sim id. `bookkeeping` is `null` when the userData slot is not
+ * a Set, so the shape check in `checkSubscriptionBookkeeping` fires identically.
+ *
+ * @param {ReturnType<typeof createInMemoryApp>} app
+ * @returns {import('./files/invariants.js').StateSnapshot}
+ */
+function buildInvariantSnapshot(app) {
+	const connections = [];
+	for (const ws of app._connections) {
+		const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+		connections.push({
+			id: ws._simId,
+			subscribed: [...ws._topics],
+			bookkeeping: subs instanceof Set ? [...subs] : null
+		});
+	}
+	return { connections };
+}
+
+/**
+ * Run the subscription-bookkeeping invariant against the live app via the
+ * shared predicate. A connection's subscription set must agree with its
+ * WS_SUBSCRIPTIONS bookkeeping set; the dispatch maintains the two in lockstep,
+ * so in this single-dispatch model the check is a regression guard against a
+ * code path that mutates one without the other (a missing subscribe, a dropped
+ * Set type), not a model of a transport that silently caps a subscription.
  *
  * @param {ReturnType<typeof createInMemoryApp>} app
  * @returns {{ category: string, context: any } | null}
  */
-function checkSubscriptionBookkeeping(app) {
-	for (const ws of app._connections) {
-		const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
-		if (!(subs instanceof Set)) return { category: 'subs.shape', context: { ws: ws._simId } };
-		if (subs.size !== ws._topics.size) {
-			return { category: 'subs.bookkeeping', context: { ws: ws._simId, bookkeeping: subs.size, subscribed: ws._topics.size } };
-		}
-		for (const t of subs) {
-			if (!ws._topics.has(t)) return { category: 'subs.bookkeeping.missing', context: { ws: ws._simId, topic: t } };
-		}
-	}
-	return null;
+function checkAppSubscriptionBookkeeping(app) {
+	return checkSubscriptionBookkeeping(buildInvariantSnapshot(app));
 }
 
 /**
@@ -151,7 +163,7 @@ export async function runSim(config = {}) {
 		const violations = [];
 		const seen = new Set();
 		function checkInvariants() {
-			const v = checkSubscriptionBookkeeping(app);
+			const v = checkAppSubscriptionBookkeeping(app);
 			if (v) {
 				const key = v.category + ':' + JSON.stringify(v.context);
 				if (!seen.has(key)) { seen.add(key); violations.push(v); }
@@ -299,7 +311,7 @@ async function runClusterSim(config) {
 			if (!seen.has(key)) { seen.add(key); violations.push(v); }
 		}
 		function checkInvariants() {
-			for (const w of workers.values()) recordViolation(checkSubscriptionBookkeeping(w.app));
+			for (const w of workers.values()) recordViolation(checkAppSubscriptionBookkeeping(w.app));
 		}
 
 		async function makeWorker(id) {

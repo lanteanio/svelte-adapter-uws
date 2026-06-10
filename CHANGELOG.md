@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.20] - 2026-06-10
+
+### Added
+
+- **A CRDT document wire codec that rides the existing `0x03` binary frame.** `svelte-adapter-uws/plugins/crdt` exports `createCrdtWireCodec()` - hand it to `platform.publishWire` / `platform.sendWire` and a subscriber that negotiated the `crdt.protocol:1` capability receives a compact `0x03` frame carrying opaque CRDT update bytes with opcode discrimination (`update` / `snapshot` / `sync-request`); everyone else transparently receives the identical JSON frame, so a non-capable client keeps working with no update lost. The companion `svelte-adapter-uws/plugins/crdt/client` registers the decoder as a `sink` (it applies each frame in place and dispatches no store event) and exposes `onCrdtFrame(handler)` to observe the decoded `{ op, bytes, schemaVersion, seq }` as it is applied. The codec is intentionally library-agnostic: it frames the update bytes verbatim and never interprets them, and it is built from one definition shared with the cluster-backed CRDT backend so the in-memory and cluster wires never drift. Purely additive: no behaviour change for any existing plugin or transport.
+
+- **A hard-tier framework assertion (`fatal`), a shared invariant-predicate module, and an in-process consistency auditor.** A new `fatal(cond, category, context)` sits next to `assert` as the hard tier for genuinely unrecoverable worker state: it shares the same `platform.assertions` counter Map (one namespace; the structured log carries `severity: 'fatal'`), and in production schedules a DEFERRED worker termination with exit code 78 after the current callback frame unwinds - distinct from the supervisor's config-error exit so ops can tell a crash-on-bad-state apart from a crash-on-bad-config. In test mode it throws; the deferred exit is injectable via `setFatalSink` so a simulation harness captures fatals instead of exiting. The shared invariant predicates (`files/invariants.js`) run against a plain, structure-only state snapshot (no payload bytes, no user data) and are now the single source of truth imported by both the simulator and the new auditor (`files/auditor.js`), which runs them on a slow, unref'd, RNG-jittered background timer (default 5s) over a bounded round-robin window, NEVER on the hot path. The simulator's existing subscription-bookkeeping check now delegates to the shared predicate with no change in the violations it reports. Purely additive infrastructure.
+
+### Changed
+
+- **The cross-worker relay's structural guards (`relay.topic-type`, `relay.envelope-type`) are now hard-tier.** A non-string topic or an empty/non-string envelope arriving from a sibling worker means the framework's own relay serialization is structurally broken and would misroute or send garbage to every local subscriber and, transitively, cluster-wide; that is not recoverable by dropping one frame, so it now escalates from a soft log to a deferred worker restart (exit code 78). Well-formed relay traffic is unaffected.
+
 ## [0.6.0-next.19] - 2026-06-07
 
 ### Added

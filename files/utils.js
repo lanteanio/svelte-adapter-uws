@@ -1,4 +1,4 @@
-import { now, wallEpoch, randomFloat, randomUuid, setTimer, clearTimer, setImmediateTimer } from './runtime.js';
+import { now, wallEpoch, randomFloat, randomUuid, setTimer, clearTimer, setImmediateTimer, microtask } from './runtime.js';
 
 // - MIME types ------------------------------------------------------------------
 
@@ -1505,24 +1505,49 @@ export function createChaosState(opts) {
 // (e.g. `'relay.topic-type'`, `'ws.platform-missing'`); extension authors
 // adopt a package prefix to avoid collisions (`'redis.*'`, `'realtime.*'`).
 //
-// Behaviour is asymmetric between production and test:
-// - In production, assert() logs + increments the counter, but does NOT
-//   throw. A throw inside a uWS C++ callback frame can corrupt the worker's
-//   binding state; the structured log + the queryable counter are enough
-//   for ops to detect a regression and file an issue.
-// - In test mode (`process.env.VITEST` set, or `NODE_ENV === 'test'`),
-//   assert() throws so the runner fails loudly. The counter still
-//   increments so test code can assert on it.
-//
-// devAssert is dev-time only: it throws in dev and test, and is a complete
-// no-op in production. Use it for cosmetic / DX-shape checks where the
-// runtime cost of the comparison is unwelcome in production.
+// Three tiers, distinguished by termination semantics (not by env):
+// - assert() is the SOFT tier. In production it logs + increments the counter
+//   but does NOT throw - a throw inside a uWS C++ callback frame can corrupt
+//   the worker's binding state; the structured log + the queryable counter are
+//   enough for ops to detect a regression and file an issue. In test mode
+//   (`process.env.VITEST` set, or `NODE_ENV === 'test'`), assert() throws so
+//   the runner fails loudly. The counter still increments either way.
+// - fatal() is the HARD tier, for genuinely unrecoverable state. It shares the
+//   same counter Map (one namespace; the severity rides the structured log,
+//   labelled `severity: 'fatal'`), and in production schedules a DEFERRED
+//   worker termination with exit code 78 AFTER the current callback frame
+//   unwinds (a synchronous exit inside a uWS C++ callback risks the same
+//   binding-state corruption assert() guards against). In test mode it throws
+//   instead of exiting so the runner sees it without dying. The exit is
+//   injectable via setFatalSink so the simulator captures fatals.
+// - devAssert is dev-time only: it throws in dev and test, and is a complete
+//   no-op in production. Use it for cosmetic / DX-shape checks where the
+//   runtime cost of the comparison is unwelcome in production.
 
 const assertionCounts = new Map();
 
 const isTestEnv = process.env.VITEST !== undefined ||
 	process.env.NODE_ENV === 'test';
 const isProdEnv = process.env.NODE_ENV === 'production';
+
+// Per-call test-mode check for the hard tier. `assert`/`devAssert` keep their
+// module-load snapshot (their behaviour is unchanged); `fatal` re-reads the env
+// each call so a test can exercise the production deferred-exit branch by
+// flipping the env without re-importing the module, and so the simulator (which
+// installs a capturing sink) reaches the sink instead of throwing.
+function isTestEnvNow() {
+	return process.env.VITEST !== undefined || process.env.NODE_ENV === 'test';
+}
+
+// Process exit code for a hard-tier invariant violation. Distinct from the
+// supervisor's config-error exit (1) and a graceful shutdown (0) so ops can
+// tell a crash-on-bad-state apart from a crash-on-bad-config in restart logs.
+const FATAL_EXIT_CODE = 78;
+
+// Injectable sink for the hard-tier termination. Defaults to the real
+// process.exit. The simulator swaps this so a fatal is captured instead of
+// killing the harness; tests swap it to assert the exit was scheduled.
+let fatalSink = { exit: (code) => process.exit(code) };
 
 /**
  * Always-on framework invariant assertion. On violation: increments
@@ -1553,6 +1578,68 @@ export function assert(cond, category, context) {
 		// JSON.stringify can fail on circular context; fall back to bare log
 		console.error('[adapter-uws/assert]', category);
 	}
+}
+
+/**
+ * Hard-tier framework invariant, for genuinely unrecoverable worker state.
+ * On violation: increments the SAME `assertionCounts` map as `assert` (one
+ * namespace; the severity rides the structured log as `severity: 'fatal'`),
+ * logs a `[adapter-uws/fatal]` line, and - in production only - schedules a
+ * DEFERRED worker termination with exit code 78. The termination is deferred
+ * to a microtask so the current callback frame (often a uWS C++ callback)
+ * unwinds before the process goes down; a synchronous exit there risks the
+ * same binding-state corruption `assert` already avoids. In test mode it
+ * throws instead of exiting so the runner sees the failure without dying.
+ *
+ * Hot-path safe: the success branch is one comparison, JIT-folded.
+ *
+ * @param {unknown} cond - any truthy expression
+ * @param {string} category - dot-prefixed namespace (e.g. `'relay.topic-type'`)
+ * @param {object} [context] - free-form context payload for logs / error
+ */
+export function fatal(cond, category, context) {
+	if (cond) return;
+	assertionCounts.set(category, (assertionCounts.get(category) || 0) + 1);
+	try {
+		console.error('[adapter-uws/fatal]', JSON.stringify({
+			category,
+			context: context ?? null,
+			severity: 'fatal'
+		}));
+	} catch {
+		console.error('[adapter-uws/fatal]', category);
+	}
+	if (isTestEnvNow()) {
+		const err = new Error('adapter-uws fatal: ' + category);
+		// @ts-ignore augment with context for test diagnostics
+		err.context = context ?? null;
+		throw err;
+	}
+	// Production: defer the termination so the current callback frame completes
+	// first. The metric + log above have already flushed.
+	microtask(() => { fatalSink.exit(FATAL_EXIT_CODE); });
+}
+
+/**
+ * Install a custom hard-tier termination sink. The simulator uses this to
+ * capture fatals into its result set instead of exiting the harness; tests
+ * use it to assert an exit was scheduled without killing the runner. Never
+ * call this from production code.
+ *
+ * @param {{ exit(code: number): void }} sink
+ */
+export function setFatalSink(sink) {
+	if (!sink || typeof sink.exit !== 'function') {
+		throw new Error('setFatalSink: sink must expose an exit(code) function');
+	}
+	fatalSink = sink;
+}
+
+/**
+ * Restore the default termination sink (`process.exit`). Test/sim teardown.
+ */
+export function resetFatalSink() {
+	fatalSink = { exit: (code) => process.exit(code) };
 }
 
 /**
@@ -1600,4 +1687,5 @@ export function readAssertionCounts() {
  */
 export function _resetAssertionCountsForTest() {
 	assertionCounts.clear();
+	resetFatalSink();
 }
