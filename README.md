@@ -3097,11 +3097,32 @@ const handle = cursor('board:42', {
   rendering: 'auto',          // 'auto' | 'main' (forces main thread, adds handle.store) | 'worker' (throws if unsupported)
   gpu: 'auto',                // 'auto' | 'canvas2d' | 'webgl2' | 'webgpu' (reserved; throws until it ships)
   gpuThreshold: 500,          // in-view count where 'auto' promotes to the GPU backend
+  smooth: true,               // render-in-the-past interpolation for remote cursors (see below)
   mainThreadFeed: { rate: 10 }, // opt-in thinned position feed back to the main thread
   maxAge: 30_000,             // same self-healing sweep as the store
   viewport: () => board       // same sources as the store path; defaults to the canvas element
 });
 ```
+
+#### Smooth remote cursors (`smooth`)
+
+Without smoothing, remote cursors paint exactly where the last wire frame put them - at typical coalesced rates that is visibly steppy, and one dropped frame freezes a cursor until the next one lands. `smooth: true` switches remote rendering to buffered playback: each cursor keeps a short history of server-stamped samples, and every render frame paints the position interpolated between the two samples that straddle a render time held a small, self-tuning delay behind the newest data. A single dropped frame becomes invisible (there is still a real pair of samples around the render time), and motion between wire frames is filled in at full display rate.
+
+The trade is stated once and plainly: **remote cursors render `interpolationMs` behind their newest known position - a larger delay survives more dropped frames but trails further behind.** The `'auto'` default tracks twice the measured update interval, so a stream already arriving at display rate collapses toward the 32ms floor and pays almost nothing, while a coarse stream widens itself just enough. Your own pointer is unaffected (it is drawn by the OS, not the canvas), and the `mainThreadFeed` keeps shipping raw wire positions - smoothing changes pixels, never data.
+
+```js
+cursor('board:42', { canvas, smooth: true });                  // tuned defaults
+cursor('board:42', {
+  canvas,
+  smooth: {
+    interpolationMs: 'auto', // or a fixed ms: the render-in-the-past delay
+    extrapolateMs: 250,      // dead-reckoning cap when the buffer runs dry
+    snapGapMs: 500           // sample gap snapped (a view re-entry, an idle resume), not smeared
+  }
+});
+```
+
+Under the hood this negotiates one extra capability (`cursor.protocol:4`): the server stamps each position frame with its wall clock (one byte per frame steady-state, delta-coded), the snapshot reply leads with a `time` event that seeds a per-socket server-clock estimator, and the worker (or the main-thread fallback - same code, same visuals) samples each cursor's ring at the estimated server time minus the delay. Old servers and old clients keep working: without the capability the interpolator runs on arrival times, which still smooths but breathes with network jitter.
 
 `handle.feed` (present only with `mainThreadFeed`) is a `Readable<Map<key, { user, data, colorRGBA }>>` sampled at the feed rate in board coordinates - for the leader badge, the minimap, the "3 people here" pill - not a second rendering path: at 500 in-view cursors a feed tick costs the main thread ~30 microseconds. Apps that genuinely need full reactive cursor data alongside their own canvas use `rendering: 'main'` and read `handle.store`.
 
@@ -3115,7 +3136,7 @@ One canvas renders one topic at a time, and a canvas whose surface was transferr
 |---|---|
 | `cursors.update(ws, topic, data, platform)` | Broadcast position (per-cursor + per-topic throttled). Emits `join` once per (ws, topic). |
 | `cursors.remove(ws, platform)` | Remove from all topics, broadcast `remove` per topic |
-| `cursors.snapshot(ws, topic, platform)` | Send current positions to one connection as `catalog` + `bulk` (initial sync) |
+| `cursors.snapshot(ws, topic, platform)` | Send current positions to one connection as `time` + `catalog` + `bulk` (initial sync; `time` seeds the smoothing clock) |
 | `cursors.list(topic)` | Current positions (for SSR) |
 | `cursors.viewport(ws, topic, rect)` | Record a subscriber's viewport rect (called for you by `hooks.message` on a `cursor-viewport` frame) |
 | `cursors.viewportFor(ws, topic)` | The subscriber's last reported rect, or `null` if it never reported one |

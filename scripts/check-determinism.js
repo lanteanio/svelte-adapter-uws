@@ -62,6 +62,8 @@ const ENFORCED = new Set([
 	'plugins/cursor/render/canvas2d.js',
 	'plugins/cursor/render/webgl2.js',
 	'plugins/cursor/render/webgpu.js',
+	'plugins/smooth/clock.js',
+	'plugins/smooth/interpolate.js',
 	'plugins/throttle/server.js',
 	'plugins/presence/server.js',
 	'plugins/presence/client.js',

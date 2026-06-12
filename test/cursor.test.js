@@ -733,21 +733,26 @@ describe('cursor plugin - server', () => {
 			const newWs = mockWs({ id: '3', name: 'Carol' });
 			c.snapshot(newWs, 'canvas', p);
 
-			expect(p.sent).toHaveLength(2);
+			// The reply leads with the server time event (the smoothing clock
+			// seed), then the roster, then the positions.
+			expect(p.sent).toHaveLength(3);
 			expect(p.sent[0].ws).toBe(newWs);
 			expect(p.sent[0].topic).toBe('__cursor:canvas');
-			expect(p.sent[0].event).toBe('catalog');
-			expect(Array.isArray(p.sent[0].data)).toBe(true);
-			expect(p.sent[0].data).toHaveLength(2);
-			for (const entry of p.sent[0].data) {
+			expect(p.sent[0].event).toBe('time');
+			expect(typeof p.sent[0].data.t).toBe('number');
+
+			expect(p.sent[1].event).toBe('catalog');
+			expect(Array.isArray(p.sent[1].data)).toBe(true);
+			expect(p.sent[1].data).toHaveLength(2);
+			for (const entry of p.sent[1].data) {
 				expect(entry).toEqual({ key: expect.any(String), user: expect.any(Object) });
 				expect(entry).not.toHaveProperty('data');
 			}
 
-			expect(p.sent[1].event).toBe('bulk');
-			expect(Array.isArray(p.sent[1].data)).toBe(true);
-			expect(p.sent[1].data).toHaveLength(2);
-			for (const entry of p.sent[1].data) {
+			expect(p.sent[2].event).toBe('bulk');
+			expect(Array.isArray(p.sent[2].data)).toBe(true);
+			expect(p.sent[2].data).toHaveLength(2);
+			for (const entry of p.sent[2].data) {
 				expect(entry).toEqual({ key: expect.any(String), data: expect.any(Object) });
 				expect(entry).not.toHaveProperty('user');
 			}
@@ -763,21 +768,22 @@ describe('cursor plugin - server', () => {
 			const newWs = mockWs({ id: '2', name: 'Bob' });
 			c.snapshot(newWs, 'room', p);
 
-			const catalogKeys = p.sent[0].data.map((e) => e.key).sort();
-			const bulkKeys = p.sent[1].data.map((e) => e.key).sort();
+			const catalogKeys = p.sent[1].data.map((e) => e.key).sort();
+			const bulkKeys = p.sent[2].data.map((e) => e.key).sort();
 			expect(catalogKeys).toEqual(bulkKeys);
-			expect(p.sent[0].data[0].user).toEqual({ id: '1', name: 'Alice' });
-			expect(p.sent[1].data[0].data).toEqual({ x: 5, y: 15 });
+			expect(p.sent[1].data[0].user).toEqual({ id: '1', name: 'Alice' });
+			expect(p.sent[2].data[0].data).toEqual({ x: 5, y: 15 });
 		});
 
 		it('sends empty catalog + bulk for an unknown topic', () => {
 			const p = mockPlatform();
 			cursors.snapshot(mockWs({ id: '1' }), 'nonexistent', p);
-			expect(p.sent).toHaveLength(2);
-			expect(p.sent[0].event).toBe('catalog');
-			expect(p.sent[0].data).toEqual([]);
-			expect(p.sent[1].event).toBe('bulk');
+			expect(p.sent).toHaveLength(3);
+			expect(p.sent[0].event).toBe('time');
+			expect(p.sent[1].event).toBe('catalog');
 			expect(p.sent[1].data).toEqual([]);
+			expect(p.sent[2].event).toBe('bulk');
+			expect(p.sent[2].data).toEqual([]);
 		});
 
 		it('sends empty catalog + bulk when the topic has no active cursors', () => {
@@ -790,9 +796,9 @@ describe('cursor plugin - server', () => {
 			p.reset();
 
 			c.snapshot(mockWs({ id: '2' }), 'canvas', p);
-			expect(p.sent).toHaveLength(2);
-			expect(p.sent[0].data).toEqual([]);
+			expect(p.sent).toHaveLength(3);
 			expect(p.sent[1].data).toEqual([]);
+			expect(p.sent[2].data).toEqual([]);
 		});
 
 		it('reflects the latest stored position even if not yet broadcast', () => {
@@ -809,7 +815,7 @@ describe('cursor plugin - server', () => {
 			const newWs = mockWs({ id: '2' });
 			c.snapshot(newWs, 'canvas', p);
 
-			expect(p.sent[1].data[0].data).toEqual({ x: 99 });
+			expect(p.sent[2].data[0].data).toEqual({ x: 99 });
 		});
 
 		it('sends snapshots independently per topic', () => {
@@ -824,9 +830,10 @@ describe('cursor plugin - server', () => {
 			const viewer = mockWs({ id: '2' });
 			c.snapshot(viewer, 'canvas-a', p);
 
-			expect(p.sent).toHaveLength(2);
+			expect(p.sent).toHaveLength(3);
 			expect(p.sent[0].topic).toBe('__cursor:canvas-a');
 			expect(p.sent[1].topic).toBe('__cursor:canvas-a');
+			expect(p.sent[2].topic).toBe('__cursor:canvas-a');
 		});
 	});
 
@@ -925,9 +932,10 @@ describe('cursor plugin - server', () => {
 
 			expect(handled).toBe(true);
 			expect(ws2.isSubscribed('__cursor:canvas')).toBe(true); // now actually subscribed
-			expect(p.sent).toHaveLength(2);
-			expect(p.sent[0].event).toBe('catalog');
-			expect(p.sent[1].event).toBe('bulk');
+			expect(p.sent).toHaveLength(3);
+			expect(p.sent[0].event).toBe('time');
+			expect(p.sent[1].event).toBe('catalog');
+			expect(p.sent[2].event).toBe('bulk');
 		});
 
 		it('cursor-snapshot is denied for a topic the client cannot subscribe to (authz, no leak)', async () => {

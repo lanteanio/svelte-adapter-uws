@@ -53,10 +53,11 @@
  * @module svelte-adapter-uws/plugins/cursor/cursor-worker
  */
 
-import { now, setTimer, clearTimer, setIntervalTimer, clearIntervalTimer, nextReconnectDelay } from '../../client-runtime.js';
+import { now, monotonicNow, setTimer, clearTimer, setIntervalTimer, clearIntervalTimer, nextReconnectDelay } from '../../client-runtime.js';
 import { parseBinaryFrame } from '../../files/wire.js';
-import { decodeCursor, CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CursorDecodeDict } from './codec.js';
+import { decodeCursor, CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CursorDecodeDict } from './codec.js';
 import { applyEvent, sweepExpired } from './decode.js';
+import { createSmoother, SAMPLE_EMPTY } from '../smooth/interpolate.js';
 import { selectRenderer, hashColor } from './render/index.js';
 
 /**
@@ -108,6 +109,16 @@ export function attachCursorWorker(scope) {
 	let renderOpts = { gpu: 'auto', gpuThreshold: 500, devicePixelRatio: 1 };
 	let maxAge = 0;
 	let feedRate = 0;
+	/** @type {{ delayMs: 'auto' | number, extrapolateMs: number, snapGapMs: number } | null} */
+	let smoothCfg = null;
+	/** @type {ReturnType<typeof createSmoother> | null} */
+	let smoother = null;
+	// Monotonic send time of the last snapshot request, pairing the server's
+	// time reply into a measurable round trip for the clock estimator.
+	let snapshotSentMono = -1;
+	// Caller-owned scratch the interpolator samples into - per-frame
+	// allocation-free by construction.
+	const samplePoint = { x: 0, y: 0 };
 
 	/** @type {any} */
 	let renderer = null;
@@ -144,6 +155,12 @@ export function attachCursorWorker(scope) {
 
 	function applyDecoded(decoded) {
 		if (!decoded) return;
+		if (smoother) {
+			// The time reply is paired with the snapshot request that provoked
+			// it (a measurable round trip); every other event is a one-way
+			// ingest that appends ring samples and clock samples.
+			smoother.ingest(decoded, monotonicNow(), decoded.event === 'time' && snapshotSentMono >= 0 ? snapshotSentMono : undefined);
+		}
 		if (applyEvent(state, decoded)) markDirty();
 		// Roster deltas always flow to the main thread: they are low-rate
 		// (catalog on snapshot, join/remove per user) and the main thread
@@ -199,9 +216,13 @@ export function attachCursorWorker(scope) {
 	function connect() {
 		if (phase !== 'running') return;
 		// Fresh per-connection wire state, in lock-step with the server's new
-		// encoder dictionary and topic-id space.
+		// encoder dictionary and topic-id space. The smoother resets with it:
+		// a reconnect may land on a different machine with a different wall
+		// clock, so neither the offset estimate nor ring samples on the old
+		// axis may survive (the snapshot reply repopulates positions).
 		wireIdMap.clear();
 		decodeDict = new CursorDecodeDict();
+		if (smoother) smoother.reset();
 		let sock;
 		try {
 			sock = new WebSocket(url, [CURSOR_SUBPROTOCOL]);
@@ -215,10 +236,20 @@ export function attachCursorWorker(scope) {
 			if (phase !== 'running' || ws !== sock) return;
 			attempt = 0;
 			lastServerMessage = now();
-			sock.send(JSON.stringify({ type: 'hello', caps: [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT] }));
+			// The time capability is advertised only when this pipeline smooths:
+			// it buys stamped position frames (one extra byte steady-state) that
+			// a non-smoothing canvas would pay for and never read.
+			sock.send(JSON.stringify({
+				type: 'hello',
+				caps: smoother
+					? [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME]
+					: [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT]
+			}));
 			// The snapshot request doubles as the subscription handshake; the
 			// reply rebuilds the roster, so local state never goes stale across
-			// a reconnect.
+			// a reconnect. Its send time anchors the server's time reply into a
+			// round trip the clock estimator can bound from both sides.
+			snapshotSentMono = monotonicNow();
 			sock.send(JSON.stringify({ type: 'cursor-snapshot', topic }));
 			// Re-establish the viewport so a reconnecting worker is not culled
 			// to a stale slice (or whole-board fanout) until the next pan.
@@ -272,9 +303,19 @@ export function attachCursorWorker(scope) {
 	const pool = [];
 	const visible = [];
 
-	function buildVisible() {
+	/**
+	 * Rebuild the visible slot list from the position map. With `sampled`
+	 * true (the smoothing render path) each position is resolved through the
+	 * interpolator at the frame's render time; the raw path (`sampled` false:
+	 * non-smoothing pipelines, and the feed, which ships wire positions by
+	 * contract) reads the merged positions directly. Culling always runs on
+	 * the coordinates that will be painted.
+	 * @param {boolean} sampled
+	 */
+	function buildVisible(sampled) {
 		visible.length = 0;
 		if (!rect) return;
+		const renderTime = sampled ? smoother.beginFrame(monotonicNow()) : 0;
 		const zoom = rect.zoom || 1;
 		// Pad by one dot radius in board units so a cursor sliding off the
 		// edge disappears at its rim, not its center.
@@ -287,8 +328,12 @@ export function attachCursorWorker(scope) {
 			if (!state.userMap.has(key)) continue;
 			if (configHidden.has(key)) continue;
 			if (data === null || typeof data !== 'object') continue;
-			const x = data.x, y = data.y;
+			let x = data.x, y = data.y;
 			if (typeof x !== 'number' || typeof y !== 'number') continue;
+			if (sampled && smoother.sampleInto(key, renderTime, samplePoint) !== SAMPLE_EMPTY) {
+				x = samplePoint.x;
+				y = samplePoint.y;
+			}
 			if (x < minX || x > maxX || y < minY || y > maxY) continue;
 			let slot = pool[n];
 			if (slot === undefined) { slot = { x: 0, y: 0, bx: 0, by: 0, colorRGBA: 0, hidden: false, key: '' }; pool[n] = slot; }
@@ -318,11 +363,16 @@ export function attachCursorWorker(scope) {
 
 	function frame() {
 		frameHandle = scheduleFrame(frame);
-		if (!dirty) return;
+		// The dirty gate keeps an idle board near-free. Smoothing widens it:
+		// while any ring holds un-played motion (buffered samples ahead of the
+		// render time, live extrapolation) the loop must keep painting frames
+		// no new wire data produced - then the gate closes again once every
+		// entity settles.
+		if (!dirty && !(smoother !== null && smoother.motionPending)) return;
 		const r = ensureRenderer();
 		if (!r) return;
 		dirty = false;
-		buildVisible();
+		buildVisible(smoother !== null);
 		lastVisibleCount = visible.length;
 		r.render(visible, visible.length);
 	}
@@ -330,7 +380,9 @@ export function attachCursorWorker(scope) {
 	// - feed -
 
 	function postFeed() {
-		buildVisible();
+		// The feed ships raw wire positions by contract - smoothing changes
+		// pixels, never the data surface - so this build never samples.
+		buildVisible(false);
 		const n = visible.length;
 		const keys = new Array(n);
 		const positions = new Float32Array(n * 2);
@@ -367,6 +419,8 @@ export function attachCursorWorker(scope) {
 		state.positionMap.clear();
 		state.userMap.clear();
 		state.timestamps.clear();
+		if (smoother) { smoother.reset(); smoother = null; }
+		snapshotSentMono = -1;
 		lastVisibleCount = 0;
 		// Leave the surface blank rather than frozen on the last frame: a
 		// paused overlay showing stale cursors reads as a live board.
@@ -379,6 +433,7 @@ export function attachCursorWorker(scope) {
 
 	function startRuntime() {
 		phase = 'running';
+		smoother = smoothCfg ? createSmoother(smoothCfg) : null;
 		connect();
 		zombieTimer = setIntervalTimer(() => {
 			if (ws && ws.readyState === 1 && now() - lastServerMessage > SERVER_TIMEOUT_MS) {
@@ -388,7 +443,12 @@ export function attachCursorWorker(scope) {
 		}, ZOMBIE_CHECK_MS);
 		if (maxAge > 0) {
 			sweepTimer = setIntervalTimer(() => {
-				if (sweepExpired(state, maxAge)) markDirty();
+				if (sweepExpired(state, maxAge)) {
+					markDirty();
+					// Expiry leaves no remove event behind; drop the swept
+					// keys' sample history with the same cadence.
+					if (smoother) smoother.compact(state.positionMap);
+				}
 			}, Math.max(maxAge / 2, 1000));
 		}
 		if (feedRate > 0) {
@@ -423,6 +483,14 @@ export function attachCursorWorker(scope) {
 			url = String(msg.url);
 			maxAge = typeof msg.maxAge === 'number' ? msg.maxAge : 0;
 			feedRate = typeof msg.feedRate === 'number' && msg.feedRate > 0 ? msg.feedRate : 0;
+			// The main thread validates and resolves the smoothing knobs; the
+			// worker still defends each field so a malformed init degrades to
+			// the tuned defaults instead of a broken interpolator.
+			smoothCfg = (msg.smooth && typeof msg.smooth === 'object') ? {
+				delayMs: msg.smooth.delayMs === 'auto' || typeof msg.smooth.delayMs === 'number' ? msg.smooth.delayMs : 'auto',
+				extrapolateMs: typeof msg.smooth.extrapolateMs === 'number' ? msg.smooth.extrapolateMs : 250,
+				snapGapMs: typeof msg.smooth.snapGapMs === 'number' ? msg.smooth.snapGapMs : 500
+			} : null;
 			renderOpts = {
 				gpu: msg.gpu === undefined ? 'auto' : msg.gpu,
 				gpuThreshold: msg.gpuThreshold === undefined ? 500 : msg.gpuThreshold,
@@ -500,7 +568,16 @@ export function attachCursorWorker(scope) {
 				get users() { return state.userMap.size; },
 				get wireIds() { return wireIdMap.size; },
 				get hasRect() { return rect !== null; },
-				get lastVisible() { return lastVisibleCount; }
+				get lastVisible() { return lastVisibleCount; },
+				get smoothing() { return smoother !== null; },
+				get smoothRings() { return smoother === null ? 0 : smoother.size; },
+				get smoothDelayMs() { return smoother === null ? 0 : smoother.delay; },
+				get smoothMotionPending() { return smoother !== null && smoother.motionPending; },
+				get clockOffsetMs() {
+					if (smoother === null) return 0;
+					const o = smoother.clock.offset();
+					return o === null ? 0 : o;
+				}
 			},
 			configurable: true
 		});
@@ -515,7 +592,8 @@ export function attachCursorWorker(scope) {
 		get _wireIds() { return wireIdMap; },
 		get _ws() { return ws; },
 		get _renderer() { return renderer; },
-		get _rect() { return rect; }
+		get _rect() { return rect; },
+		get _smoother() { return smoother; }
 	};
 }
 

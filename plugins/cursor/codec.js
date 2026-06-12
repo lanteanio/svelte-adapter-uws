@@ -22,6 +22,21 @@
  *     (the key string travels once); after that the frame carries a 1-2 byte id
  *     and the decoder resolves it from a cached id->key map - no per-entry
  *     string decode, and the key bytes leave the wire entirely.
+ *   - schemaVersion 3 (`cursor.protocol:4`): the short-id wire plus a server
+ *     wall-clock stamp on every position frame, written between the op byte
+ *     and the first keyref:
+ *
+ *       UPDATE  [op][t:varint][keyref][x:f32][y:f32]
+ *       BULK    [op][t:varint][count:varint]({keyref}{x:f32}{y:f32})*
+ *
+ *     The stamp is delta-coded against the connection's previous stamp (the
+ *     first stamp after a (re)connect is the absolute epoch-ms value; every
+ *     later one is the non-negative delta), so the steady-state cost is one
+ *     byte per frame. Both dictionaries track `lastT` in lock-step - same
+ *     per-connection, in-order, reset-on-reconnect, untouched-on-JSON-fallback
+ *     discipline as the key dictionary. Roster ops (join/catalog/remove) carry
+ *     no stamp. The stamp is what client-side interpolation reconstructs its
+ *     server time axis from; a client that never smooths simply ignores it.
  *
  * The short-id keyref is a single varint `v`:
  *   - `v == 0` KEY-ASSIGN: followed by `varint(id)` then the key string. Binds
@@ -82,6 +97,18 @@ export const CURSOR_CAPABILITY_DICT = 'cursor.protocol:3';
 
 /** 1-byte in-frame schema version for the short-id dictionary wire. */
 export const CURSOR_SCHEMA_VERSION_DICT = 2;
+
+/**
+ * Additive capability advertised alongside the dictionary capability by a
+ * client that can also decode the time-stamped wire (schemaVersion 3). The
+ * server stamps position frames only for connections carrying this token AND
+ * the dictionary token; everyone else keeps receiving their negotiated form,
+ * so no client is ever sent a frame it would mis-decode.
+ */
+export const CURSOR_CAPABILITY_TIME = 'cursor.protocol:4';
+
+/** 1-byte in-frame schema version for the time-stamped dictionary wire. */
+export const CURSOR_SCHEMA_VERSION_TIME = 3;
 
 const OP_UPDATE = 1;
 const OP_BULK = 2;
@@ -196,16 +223,35 @@ export class CursorEncodeDict {
 }
 
 /**
- * Per-connection decoder dictionary for the schemaVersion-2 cursor wire.
- * Inverse of {@link CursorEncodeDict}: resolves a keyref back to its key,
- * caching `id -> key` so a REF costs one `Map.get` and no per-entry string
- * decode (the decode-cost win). Reset on reconnect.
+ * Per-connection encoder dictionary for the schemaVersion-3 time-stamped
+ * cursor wire: the short-id dictionary plus the delta-coded stamp state and
+ * the injected time source the stamps are read from. The time source is
+ * injected (never imported) so this module stays runtime-free and bundles
+ * for the browser; the server factory binds it to its own clock seam.
+ */
+export class CursorTimeEncodeDict extends CursorEncodeDict {
+	/** @param {() => number} timeSource @param {number} [maxEntries] */
+	constructor(timeSource, maxEntries = DEFAULT_MAX_ENTRIES) {
+		super(maxEntries);
+		this.schemaVersion = CURSOR_SCHEMA_VERSION_TIME;
+		this.timeSource = timeSource;
+		this.lastT = -1;
+	}
+}
+
+/**
+ * Per-connection decoder dictionary for the schemaVersion-2 and -3 cursor
+ * wires. Inverse of {@link CursorEncodeDict}: resolves a keyref back to its
+ * key, caching `id -> key` so a REF costs one `Map.get` and no per-entry
+ * string decode (the decode-cost win). `lastT` mirrors the encoder's
+ * delta-coded stamp state for schemaVersion-3 frames. Reset on reconnect.
  */
 export class CursorDecodeDict {
 	constructor() {
 		this.schemaVersion = CURSOR_SCHEMA_VERSION_DICT;
 		/** @type {Map<number, string>} */
 		this.byId = new Map();
+		this.lastT = -1;
 	}
 
 	/**
@@ -242,6 +288,41 @@ function readKeyRef(r, dict) {
 }
 
 /**
+ * Write the delta-coded server stamp for a position frame. The first stamp a
+ * fresh dictionary writes is the absolute epoch-ms value; every later one is
+ * the non-negative delta against `lastT` (a backward wall step writes 0 and
+ * holds, so both sides stay non-decreasing and in lock-step). Runs only after
+ * the frame is fully validated - a JSON fallback never reaches this point, so
+ * the stamp state, like the key dictionary, is untouched on fallback.
+ * @param {ByteWriter} w @param {CursorTimeEncodeDict} dict
+ */
+function writeStamp(w, dict) {
+	let t = dict.timeSource();
+	if (typeof t !== 'number' || !Number.isFinite(t) || t < 0) t = dict.lastT < 0 ? 0 : dict.lastT;
+	t = Math.floor(t);
+	if (dict.lastT < 0) {
+		w.varint(t);
+		dict.lastT = t;
+		return;
+	}
+	let d = t - dict.lastT;
+	if (d < 0) d = 0;
+	w.varint(d);
+	dict.lastT += d;
+}
+
+/** @param {ByteReader} r @param {CursorDecodeDict} dict @returns {number} */
+function readStamp(r, dict) {
+	const v = r.varint();
+	if (dict.lastT < 0) {
+		dict.lastT = v;
+		return v;
+	}
+	dict.lastT += v;
+	return dict.lastT;
+}
+
+/**
  * Encode a cursor wire event into a codec payload.
  *
  * @param {string} event - one of 'update' | 'bulk' | 'remove' | 'join' | 'catalog'
@@ -252,7 +333,9 @@ function readKeyRef(r, dict) {
  * @returns {Uint8Array | null} payload bytes, or null to fall back to JSON
  */
 export function encodeCursor(event, data, state) {
-	const dict = (state != null && state.schemaVersion === CURSOR_SCHEMA_VERSION_DICT) ? state : null;
+	const sv = state != null ? state.schemaVersion : 0;
+	const dict = (sv === CURSOR_SCHEMA_VERSION_DICT || sv === CURSOR_SCHEMA_VERSION_TIME) ? state : null;
+	const stamped = sv === CURSOR_SCHEMA_VERSION_TIME;
 	try {
 		// Advance the per-frame clock before any key is interned so eviction can
 		// distinguish ids assigned this frame from older ones.
@@ -262,6 +345,7 @@ export function encodeCursor(event, data, state) {
 				if (!data || typeof data.key !== 'string' || !isXY(data.data)) return null;
 				const w = new ByteWriter(24);
 				w.u8(OP_UPDATE);
+				if (stamped) writeStamp(w, dict);
 				writeKeyRef(w, data.key, dict);
 				w.f32(data.data.x);
 				w.f32(data.data.y);
@@ -277,6 +361,7 @@ export function encodeCursor(event, data, state) {
 				}
 				const w = new ByteWriter(16 + data.length * 16);
 				w.u8(OP_BULK);
+				if (stamped) writeStamp(w, dict);
 				w.varint(data.length);
 				for (let i = 0; i < data.length; i++) {
 					const e = data[i];
@@ -337,37 +422,45 @@ export function encodeCursor(event, data, state) {
  * Decode a cursor codec payload back into the `{ event, data }` shape the JSON
  * path would have dispatched. Returns null on an unknown opcode, an unknown
  * schema version, a dictionary desync, or a truncated / malformed frame (the
- * frame is then dropped; cursor is best-effort).
+ * frame is then dropped; cursor is best-effort). A schemaVersion-3 position
+ * frame additionally carries its server stamp as `t` on the returned object -
+ * an additive field consumers that never smooth simply ignore.
  *
  * @param {Uint8Array} payload - codec bytes (frame header already stripped)
  * @param {CursorDecodeDict} [state] - per-connection dictionary, required for
- *   schemaVersion 2 and ignored for schemaVersion 1.
+ *   schemaVersion 2 and 3 and ignored for schemaVersion 1.
  * @param {number} [schemaVersion] - the frame's 1-byte schema version. Defaults
  *   to the full-string wire so the shipped single-arg call site stays correct.
- * @returns {{ event: string, data: any } | null}
+ * @returns {{ event: string, data: any, t?: number } | null}
  */
 export function decodeCursor(payload, state, schemaVersion = CURSOR_SCHEMA_VERSION) {
-	if (schemaVersion !== CURSOR_SCHEMA_VERSION && schemaVersion !== CURSOR_SCHEMA_VERSION_DICT) {
+	if (schemaVersion !== CURSOR_SCHEMA_VERSION
+		&& schemaVersion !== CURSOR_SCHEMA_VERSION_DICT
+		&& schemaVersion !== CURSOR_SCHEMA_VERSION_TIME) {
 		return null; // unknown schema: drop rather than mis-decode
 	}
-	const dict = schemaVersion === CURSOR_SCHEMA_VERSION_DICT
-		? (state != null && state.schemaVersion === CURSOR_SCHEMA_VERSION_DICT ? state : null)
-		: null;
-	// A v2 frame with no decoder dictionary cannot resolve its refs - drop it
-	// rather than read the keyref varints as full-string lengths.
-	if (schemaVersion === CURSOR_SCHEMA_VERSION_DICT && !dict) return null;
+	const needsDict = schemaVersion !== CURSOR_SCHEMA_VERSION;
+	const dict = needsDict && state != null && state.byId instanceof Map ? state : null;
+	// A dictionaried frame with no decoder dictionary cannot resolve its refs -
+	// drop it rather than read the keyref varints as full-string lengths.
+	if (needsDict && !dict) return null;
+	const stamped = schemaVersion === CURSOR_SCHEMA_VERSION_TIME;
 	try {
 		const r = new ByteReader(payload);
 		const op = r.u8();
 		switch (op) {
 			case OP_UPDATE: {
+				const t = stamped ? readStamp(r, dict) : undefined;
 				const key = readKeyRef(r, dict);
 				if (key === null) return null;
 				const x = r.f32();
 				const y = r.f32();
-				return { event: 'update', data: { key, data: { x, y } } };
+				const out = { event: 'update', data: { key, data: { x, y } } };
+				if (t !== undefined) out.t = t;
+				return out;
 			}
 			case OP_BULK: {
+				const t = stamped ? readStamp(r, dict) : undefined;
 				const count = r.varint();
 				const arr = new Array(count);
 				for (let i = 0; i < count; i++) {
@@ -377,7 +470,9 @@ export function decodeCursor(payload, state, schemaVersion = CURSOR_SCHEMA_VERSI
 					const y = r.f32();
 					arr[i] = { key, data: { x, y } };
 				}
-				return { event: 'bulk', data: arr };
+				const out = { event: 'bulk', data: arr };
+				if (t !== undefined) out.t = t;
+				return out;
 			}
 			case OP_REMOVE: {
 				const key = readKeyRef(r, dict);

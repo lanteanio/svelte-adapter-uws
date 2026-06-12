@@ -29,10 +29,11 @@
 const TOPIC_PREFIX = '__cursor:';
 
 import { on, connect, status, registerWireCodec } from '../../client.js';
-import { setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask } from '../../client-runtime.js';
+import { monotonicNow, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask } from '../../client-runtime.js';
 import { writable } from 'svelte/store';
-import { decodeCursor, CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CursorDecodeDict } from './codec.js';
+import { decodeCursor, CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CursorDecodeDict } from './codec.js';
 import { applyEvent, mergeOutput, sweepExpired } from './decode.js';
+import { createSmoother, SAMPLE_EMPTY } from '../smooth/interpolate.js';
 import { selectRenderer, hashColor } from './render/index.js';
 
 // Opt this connection into binary cursor frames: advertise both the full-string
@@ -52,6 +53,67 @@ registerWireCodec(TOPIC_PREFIX, {
 	state: { onAttach: () => new CursorDecodeDict() },
 	decode: decodeCursor
 });
+
+// The time capability is advertised lazily, the first time a smoothing
+// pipeline needs server-stamped frames on the MAIN connection (the dedicated
+// worker socket manages its own hello): re-registering the codec with the
+// extended token list triggers a hello re-send, and the per-prefix decoder
+// dictionary survives the swap, so a live connection upgrades without a
+// desync. A connection whose server-side cursor codec state was already
+// attached keeps its negotiated schema until the next reconnect (the
+// attach-once contract); smoothing degrades to the arrival-time axis until
+// then. Never advertised by default: stamped frames cost one extra byte
+// steady-state, and a client that never smooths would pay it for nothing.
+let timeCapAdvertised = false;
+function advertiseTimeCap() {
+	if (timeCapAdvertised) return;
+	timeCapAdvertised = true;
+	registerWireCodec(TOPIC_PREFIX, {
+		capability: CURSOR_CAPABILITY,
+		capabilities: [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME],
+		state: { onAttach: () => new CursorDecodeDict() },
+		decode: decodeCursor
+	});
+}
+
+/**
+ * Resolve and validate the `smooth` option into the interpolator's knob
+ * object, throwing on the main thread for anything malformed (deferring to
+ * the worker's first frame would surface as an opaque worker error).
+ * `true` selects the tuned defaults; the object form exposes three knobs:
+ *
+ *   - `interpolationMs`: how far in the past remote cursors render. Larger
+ *     survives more dropped frames but trails further behind; `'auto'`
+ *     (default) tracks twice the measured update interval, so a fast LAN
+ *     collapses toward the 32ms floor and a coarse stream widens itself.
+ *   - `extrapolateMs`: hard cap on dead-reckoning when the buffer runs dry
+ *     (default 250).
+ *   - `snapGapMs`: sample gap treated as a discontinuity and snapped, not
+ *     smeared (default 500) - view re-entry, idle resume, teleports.
+ *
+ * @param {any} raw
+ * @returns {{ delayMs: 'auto' | number, extrapolateMs: number, snapGapMs: number } | null}
+ */
+function resolveSmoothOptions(raw) {
+	if (raw === undefined || raw === null || raw === false) return null;
+	if (raw === true) return { delayMs: 'auto', extrapolateMs: 250, snapGapMs: 500 };
+	if (typeof raw !== 'object') {
+		throw new Error('cursor: smooth must be true or an options object, got ' + JSON.stringify(raw));
+	}
+	const delayMs = raw.interpolationMs === undefined ? 'auto' : raw.interpolationMs;
+	if (delayMs !== 'auto' && !(typeof delayMs === 'number' && Number.isFinite(delayMs) && delayMs >= 0)) {
+		throw new Error('cursor: smooth.interpolationMs must be \'auto\' or a non-negative number');
+	}
+	const extrapolateMs = raw.extrapolateMs === undefined ? 250 : raw.extrapolateMs;
+	if (!(typeof extrapolateMs === 'number' && Number.isFinite(extrapolateMs) && extrapolateMs >= 0)) {
+		throw new Error('cursor: smooth.extrapolateMs must be a non-negative number');
+	}
+	const snapGapMs = raw.snapGapMs === undefined ? 500 : raw.snapGapMs;
+	if (!(typeof snapGapMs === 'number' && Number.isFinite(snapGapMs) && snapGapMs > 0)) {
+		throw new Error('cursor: smooth.snapGapMs must be a positive number');
+	}
+	return { delayMs, extrapolateMs, snapGapMs };
+}
 
 /** @type {Map<string, ReturnType<typeof cursor>>} */
 const cursorStores = new Map();
@@ -104,6 +166,11 @@ export function cursor(topic, options) {
 	// worker when the browser allows it. The no-canvas path below is
 	// byte-for-byte the store the plugin always returned.
 	if (options && options.canvas) return cursorOnCanvas(topic, options);
+	if (options && options.smooth) {
+		// The plain store has no render loop to play interpolated motion
+		// through - it ships raw wire positions at wire rate by contract.
+		throw new Error('cursor: smooth requires { canvas } (render-time interpolation needs a render loop; the plain cursor() store ships raw wire positions)');
+	}
 	const maxAge = options?.maxAge;
 	const cacheKey = maxAge > 0 ? topic + '\0' + maxAge : topic;
 
@@ -503,6 +570,11 @@ function cursorOnCanvas(topic, options) {
 	const maxAge = typeof options.maxAge === 'number' ? options.maxAge : 0;
 	const feedRate = options.mainThreadFeed === true ? 10
 		: (options.mainThreadFeed && typeof options.mainThreadFeed.rate === 'number' ? options.mainThreadFeed.rate : 0);
+	// Resolved smoothing knobs, or null when off. Validated here on the main
+	// thread like the gpu mode; the resolved plain object rides the worker
+	// init message and feeds the fallback's interpolator identically, so the
+	// worker/fallback split paints the same motion for the same frames.
+	const smooth = resolveSmoothOptions(options.smooth);
 
 	// SSR: an inert handle so `$effect(() => cursor(t, { canvas }).mount())`
 	// is safe in universal components (effects only run in the browser, but
@@ -618,7 +690,8 @@ function cursorOnCanvas(topic, options) {
 			gpuThreshold,
 			devicePixelRatio: window.devicePixelRatio || 1,
 			maxAge,
-			feedRate
+			feedRate,
+			smooth
 		};
 		if (!host.canvasSent) {
 			init.canvas = host.off;
@@ -696,9 +769,37 @@ function cursorOnCanvas(topic, options) {
 			lastCount: 0,
 			raf: null,
 			feedTimer: null,
-			unsub: null
+			unsub: null,
+			tapUnsub: null,
+			statusUnsub: null
 		};
 		fallback = fb;
+
+		// Smoothing on the fallback taps the raw per-event stream BESIDE the
+		// store (the store's subscriber sees merged Maps, which lose per-frame
+		// timing): ring samples and clock samples come from the events, the
+		// painted set still comes from the merged store, so worker and
+		// fallback paint identical motion for the same frame sequence. The
+		// time capability is (re-)advertised first so a fresh connection
+		// negotiates stamped frames before the snapshot handshake attaches
+		// the server-side codec state.
+		let smoother = null;
+		const fbSample = { x: 0, y: 0 };
+		let fbCompactCountdown = 512;
+		if (smooth) {
+			advertiseTimeCap();
+			smoother = createSmoother(smooth);
+			fb.tapUnsub = on(TOPIC_PREFIX + topic).subscribe((event) => {
+				smoother.ingest(event, monotonicNow());
+			});
+			// A reconnect may land on a different machine with a different
+			// wall clock: forget the offset estimate and the old axis's ring
+			// samples; the store's snapshot re-request repopulates positions
+			// and the time reply re-seeds the clock.
+			fb.statusUnsub = status.subscribe((s) => {
+				if (s === 'open') smoother.reset();
+			});
+		}
 		fb.unsub = source.subscribe((map) => {
 			fb.merged = map;
 			fb.dirty = true;
@@ -730,11 +831,14 @@ function cursorOnCanvas(topic, options) {
 			const dpr = window.devicePixelRatio || 1;
 			const sig = rect.x + ',' + rect.y + ',' + rect.w + ',' + rect.h + ',' + zoom + ',' + dpr;
 			if (sig !== fb.rectSig) { fb.rectSig = sig; fb.dirty = true; }
-			if (!fb.dirty) return;
+			// Same widened gate as the worker loop: keep painting while any
+			// ring holds un-played motion, close again once everything settles.
+			if (!fb.dirty && !(smoother !== null && smoother.motionPending)) return;
 			fb.dirty = false;
 			fb.renderer = selectRenderer(canvas, { gpu, gpuThreshold, devicePixelRatio: dpr, lastCount: fb.lastCount }, fb.renderer);
 			fb.renderer.resize(rect.w * zoom, rect.h * zoom, dpr);
 			visible.length = 0;
+			const renderTime = smoother !== null ? smoother.beginFrame(monotonicNow()) : 0;
 			const pad = 8 / zoom;
 			const minX = rect.x - pad, maxX = rect.x + rect.w + pad;
 			const minY = rect.y - pad, maxY = rect.y + rect.h + pad;
@@ -742,8 +846,12 @@ function cursorOnCanvas(topic, options) {
 				if (fb.hidden.has(key)) continue;
 				const data = entry.data;
 				if (data === null || typeof data !== 'object') continue;
-				const x = data.x, y = data.y;
+				let x = data.x, y = data.y;
 				if (typeof x !== 'number' || typeof y !== 'number') continue;
+				if (smoother !== null && smoother.sampleInto(key, renderTime, fbSample) !== SAMPLE_EMPTY) {
+					x = fbSample.x;
+					y = fbSample.y;
+				}
 				if (x < minX || x > maxX || y < minY || y > maxY) continue;
 				const override = fb.colors.get(key);
 				visible.push({
@@ -755,6 +863,12 @@ function cursorOnCanvas(topic, options) {
 			}
 			fb.lastCount = visible.length;
 			fb.renderer.render(visible, visible.length);
+			// Expiry sweeps keys out of the merged Map without a remove event;
+			// drop their sample history at a low cadence rather than per frame.
+			if (smoother !== null && --fbCompactCountdown <= 0) {
+				fbCompactCountdown = 512;
+				smoother.compact(fb.merged);
+			}
 		};
 		fb.raf = scheduleFrame(frame);
 
@@ -786,6 +900,9 @@ function cursorOnCanvas(topic, options) {
 		return function teardown() {
 			if (--refCount > 0) return;
 			if (fb.unsub) fb.unsub();
+			if (fb.tapUnsub) fb.tapUnsub();
+			if (fb.statusUnsub) fb.statusUnsub();
+			if (smoother !== null) smoother.reset();
 			cancelFrame(fb.raf);
 			if (fb.feedTimer !== null) clearIntervalTimer(fb.feedTimer);
 			if (fb.renderer) { fb.renderer.dispose(); fb.renderer = null; }

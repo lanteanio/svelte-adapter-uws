@@ -36,9 +36,9 @@
  * @module svelte-adapter-uws/plugins/cursor
  */
 
-import { encodeCursor, CURSOR_CAPABILITY, CURSOR_SCHEMA_VERSION, CURSOR_CAPABILITY_DICT, CursorEncodeDict } from './codec.js';
+import { encodeCursor, CURSOR_CAPABILITY, CURSOR_SCHEMA_VERSION, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CursorEncodeDict, CursorTimeEncodeDict } from './codec.js';
 import { WS_CAPS, trackedSubscribe } from '../../files/utils.js';
-import { monotonicNow, setTimer, clearTimer } from '../../files/runtime.js';
+import { monotonicNow, wallEpoch, setTimer, clearTimer } from '../../files/runtime.js';
 
 const TOPIC_PREFIX = '__cursor:';
 
@@ -48,7 +48,8 @@ const EVENTS = Object.freeze({
 	JOIN: 'join',
 	UPDATE: 'update',
 	BULK: 'bulk',
-	REMOVE: 'remove'
+	REMOVE: 'remove',
+	TIME: 'time'
 });
 
 /**
@@ -1159,6 +1160,12 @@ export function createCursor(options = {}) {
 			// publishWire frame, whose per-subscriber walk reads the
 			// connection's subscription registry rather than asking uWS.
 			if (!trackedSubscribe(ws, TOPIC_PREFIX + topic)) return;
+			// Server time first, so the requester's clock estimator is seeded
+			// before the first stamped position frame and the request/reply
+			// round trip is measurable. Rides the codec's JSON fallback (the
+			// codec declines the event), so it is an additive envelope an
+			// older client's merge ignores as an unknown event.
+			emitTo(ws, TOPIC_PREFIX + topic, EVENTS.TIME, { t: wallEpoch() }, platform);
 			const topicMap = topics.get(topic);
 			const catalog = [];
 			const positions = [];
@@ -1343,18 +1350,23 @@ export function createCursorWireCodec(options = {}) {
 				...baseCodec,
 				// Per-connection short-id dictionary state. `onAttach` reads the
 				// connection's negotiated capabilities: a client that advertised
-				// the dictionary capability gets a fresh dictionary (schemaVersion
-				// 2, 1-2 byte keys), and any other binary-capable client returns
-				// null, which the framework treats as the shared full-string
-				// encode (schemaVersion 1) - so an older client keeps the
-				// single-encode fan-out and a byte-for-byte compatible frame. The
-				// choice is fixed for the life of the connection (reset on
-				// reconnect, not on re-hello).
+				// the time capability on top of the dictionary gets the stamped
+				// dictionary (schemaVersion 3, position frames carry the server
+				// wall clock for client-side interpolation); a dictionary-only
+				// client gets the plain dictionary (schemaVersion 2); any other
+				// binary-capable client returns null, which the framework treats
+				// as the shared full-string encode (schemaVersion 1) - so an
+				// older client keeps the single-encode fan-out and a
+				// byte-for-byte compatible frame. The choice is fixed for the
+				// life of the connection (reset on reconnect, not on re-hello).
 				state: {
 					onAttach(ws) {
 						let caps;
 						try { caps = ws.getUserData()[WS_CAPS]; } catch { return null; }
-						return caps && caps.has(CURSOR_CAPABILITY_DICT) ? new CursorEncodeDict() : null;
+						if (!caps || !caps.has(CURSOR_CAPABILITY_DICT)) return null;
+						return caps.has(CURSOR_CAPABILITY_TIME)
+							? new CursorTimeEncodeDict(wallEpoch)
+							: new CursorEncodeDict();
 					},
 					onDetach(ws, state) {
 						if (state && state.byKey) state.byKey.clear();

@@ -129,9 +129,28 @@ export interface CursorCanvasOptions extends CursorStoreOptions {
 	 * incidental reactive needs of worker mode (a leader badge, a minimap).
 	 * `true` samples at 10 Hz; `{ rate }` picks the frequency. Off by
 	 * default: the point of worker mode is that the main thread reads
-	 * nothing from the cursor stream.
+	 * nothing from the cursor stream. The feed always ships raw wire
+	 * positions - smoothing changes pixels, never the data surface.
 	 */
 	mainThreadFeed?: boolean | { rate?: number };
+	/**
+	 * Render-in-the-past interpolation for remote cursors. `true` selects
+	 * the tuned defaults; the object form exposes the knobs. Remote cursors
+	 * render `interpolationMs` behind their newest known position, so a
+	 * dropped or late frame is invisible (there is almost always a real
+	 * pair of samples around the render time) at the cost of that small
+	 * trailing delay. `'auto'` (default) tracks twice the measured update
+	 * interval and collapses toward a 32ms floor when updates arrive at
+	 * display rate. `extrapolateMs` caps dead-reckoning when the buffer
+	 * runs dry (default 250); `snapGapMs` is the sample gap treated as a
+	 * discontinuity and snapped rather than smeared (default 500). Requires
+	 * a canvas (the plain store has no render loop). Off by default.
+	 */
+	smooth?: boolean | {
+		interpolationMs?: 'auto' | number;
+		extrapolateMs?: number;
+		snapGapMs?: number;
+	};
 }
 
 /**

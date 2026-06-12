@@ -1310,6 +1310,10 @@ function createConnection(options) {
 							if (decoded && !match.codec.sink) {
 								const out = { topic, event: decoded.event, data: decoded.data };
 								if (parsed.seq > 0) out.seq = parsed.seq;
+								// Additive codec metadata (e.g. the cursor wire's server
+								// stamp): rides the dispatched event for consumers that
+								// want it; the store merge ignores it.
+								if (decoded.t !== undefined) out.t = decoded.t;
 								dispatchEvent(out);
 							}
 						} else if (debug) {
