@@ -14,7 +14,7 @@
 //   - applyCapacityReason: the no-op normal pass-through, the CAPACITY surface at
 //     elevated/siege, and the MEMORY precedence.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
 	createPosture,
 	applyCapacityReason,
@@ -312,6 +312,104 @@ describe('createPosture pinning', () => {
 	it('treats an absent pin as auto resolution from the live signal', () => {
 		const posture = createPosture({ admission: makeGate(), getThresholds });
 		expect(posture.level).toBe('normal');
+		tickActive(posture, 5, true);
+		expect(posture.level).toBe('elevated');
+	});
+});
+
+// - transition observer ------------------------------------------------------
+
+describe('createPosture onTransition', () => {
+	const makeGate = () => createUpgradeAdmission({ maxConcurrent: 2 });
+	const getThresholds = () => ({ memoryHeapUsedRatio: 0.85, sampleIntervalMs: 1000 });
+
+	it('fires once per level change with the settled from/to pair, in order', () => {
+		const transitions = [];
+		const posture = createPosture({
+			admission: makeGate(),
+			getThresholds,
+			onTransition: (from, to) => transitions.push([from, to])
+		});
+
+		// Full cycle: escalate to elevated, on to siege, then relax back down
+		// through the asymmetric dwells.
+		tickActive(posture, 5, true);
+		expect(transitions).toEqual([['normal', 'elevated']]);
+
+		tickWithCapacityRejects(posture, 10, 4);
+		expect(transitions).toEqual([['normal', 'elevated'], ['elevated', 'siege']]);
+
+		tickActive(posture, 10, false);
+		expect(transitions[2]).toEqual(['siege', 'elevated']);
+		tickActive(posture, 10, false);
+		expect(transitions[3]).toEqual(['elevated', 'normal']);
+		expect(transitions.length).toBe(4);
+	});
+
+	it('does not fire on ticks that leave the level unchanged', () => {
+		const transitions = [];
+		const posture = createPosture({
+			admission: makeGate(),
+			getThresholds,
+			onTransition: (from, to) => transitions.push([from, to])
+		});
+		// Below the escalation dwell: active samples, no level change.
+		tickActive(posture, 4, true);
+		// And a calm stream at normal changes nothing either.
+		tickActive(posture, 20, false);
+		expect(transitions).toEqual([]);
+	});
+
+	it('reads the new level from the observer (the machine has settled first)', () => {
+		let seen = null;
+		const posture = createPosture({
+			admission: makeGate(),
+			getThresholds,
+			onTransition: (from, to) => { seen = { from, to, live: posture.level }; }
+		});
+		tickActive(posture, 5, true);
+		expect(seen).toEqual({ from: 'normal', to: 'elevated', live: 'elevated' });
+	});
+
+	it('never fires on a pinned machine', () => {
+		const transitions = [];
+		const posture = createPosture({
+			admission: makeGate(),
+			getThresholds,
+			pin: 'siege',
+			onTransition: (from, to) => transitions.push([from, to])
+		});
+		tickActive(posture, 50, false);
+		tickWithCapacityRejects(posture, 30, 10);
+		expect(posture.level).toBe('siege');
+		expect(transitions).toEqual([]);
+	});
+
+	it('contains a throwing observer: the machine still escalates and keeps ticking', () => {
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const posture = createPosture({
+				admission: makeGate(),
+				getThresholds,
+				onTransition: () => { throw new Error('observer boom'); }
+			});
+			tickActive(posture, 5, true);
+			expect(posture.level).toBe('elevated');
+			// The machine survives the throw and keeps resolving levels.
+			tickActive(posture, 10, false);
+			expect(posture.level).toBe('normal');
+			expect(errSpy).toHaveBeenCalled();
+		} finally {
+			errSpy.mockRestore();
+		}
+	});
+
+	it('ignores a non-function onTransition', () => {
+		const posture = createPosture({
+			admission: makeGate(),
+			getThresholds,
+			onTransition: 'not a function'
+		});
 		tickActive(posture, 5, true);
 		expect(posture.level).toBe('elevated');
 	});

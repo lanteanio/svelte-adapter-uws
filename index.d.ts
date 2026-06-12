@@ -324,6 +324,55 @@ export interface WebSocketOptions {
 	protection?: 'normal' | 'elevated' | 'siege' | 'auto';
 
 	/**
+	 * Prometheus-style registry for admission and posture observability.
+	 * Off by default; when set, the adapter registers and emits:
+	 *
+	 * - `upgrade_admitted_total` - upgrades accepted (counter).
+	 * - `upgrade_rejected_total{reason}` - upgrades rejected before open
+	 *   (counter). Reasons: `siege`, `over_capacity`, `cursor_lane`,
+	 *   `ip_rate_limit`, `bad_origin`, `auth_timeout`, `auth_rejected`,
+	 *   `hook_error`.
+	 * - `upgrade_inflight` - upgrades between admission and open (gauge,
+	 *   sampled once per pressure interval).
+	 * - `waiting_room_queue_depth` - clients polling the waiting room
+	 *   (gauge, sampled; `0` when the room is off).
+	 * - `protection_posture_state` - `0` normal / `1` elevated / `2` siege
+	 *   (gauge, sampled).
+	 * - `protection_posture_transitions_total{from,to}` - posture level
+	 *   changes (counter).
+	 *
+	 * Accept-path cost is one unlabelled counter increment per admitted
+	 * upgrade; rejection branches add one labelled increment each; gauges
+	 * ride the existing pressure sampler. With the option unset every site
+	 * is a single undefined check. Metric names are unprefixed - pass a
+	 * registry built with `createMetrics({ prefix })` to namespace them.
+	 * No client identity (IP, session) ever appears in a label.
+	 *
+	 * The two counters record server decisions, not client behaviour: a
+	 * client that disconnects mid-upgrade is counted in neither, so their
+	 * sum can read below a load balancer's attempt count under flappy
+	 * clients. Instrument failures are contained - a registry that throws
+	 * on emit logs once and is silenced, never disturbing the upgrade path
+	 * or the sampler - while a registry that throws during instrument
+	 * creation fails at startup, loudly.
+	 *
+	 * @example
+	 * ```js
+	 * import { createMetrics } from 'svelte-adapter-uws-extensions/prometheus';
+	 *
+	 * const metrics = createMetrics();
+	 * adapter({
+	 *   websocket: {
+	 *     upgradeAdmission: { maxConcurrent: 1000 },
+	 *     protection: 'auto',
+	 *     metrics
+	 *   }
+	 * });
+	 * ```
+	 */
+	metrics?: MetricsRegistry;
+
+	/**
 	 * Backpressure-signal thresholds for `platform.pressure` and
 	 * `platform.onPressure(cb)`. The adapter samples the worker once per
 	 * `sampleIntervalMs` and reports the most urgent active signal.
@@ -541,6 +590,26 @@ export interface WaitingRoomContext {
 	retryAfterSeconds: number;
 	/** The poll endpoint path the page should fetch. */
 	admitCheckPath: string;
+}
+
+/**
+ * Minimal registry contract for the `metrics` option: the subset of a
+ * Prometheus-style registry the adapter calls. The `createMetrics()` registry
+ * from `svelte-adapter-uws-extensions/prometheus` satisfies it as-is (and
+ * owns naming concerns like a global prefix); any object with the same shape
+ * works. Registration must be idempotent per name if the registry is shared
+ * across consumers.
+ */
+export interface MetricsRegistry {
+	counter(
+		name: string,
+		help: string,
+		labelNames?: string[]
+	): { inc(labels?: Record<string, string>): void };
+	gauge(
+		name: string,
+		help: string
+	): { set(value: number): void };
 }
 
 /**

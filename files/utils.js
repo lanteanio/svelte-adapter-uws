@@ -443,13 +443,18 @@ export function applyCapacityReason(reason, protection) {
  * @param {{
  *   admission: { maxConcurrent: number },
  *   getThresholds: () => { sampleIntervalMs?: number },
- *   pin?: 'normal' | 'elevated' | 'siege'
+ *   pin?: 'normal' | 'elevated' | 'siege',
+ *   onTransition?: (from: 'normal' | 'elevated' | 'siege', to: 'normal' | 'elevated' | 'siege') => void
  * }} cfg
  *   admission: the live admission gate; its `maxConcurrent` is the per-sample
  *     admit ceiling and the basis for the over-capacity escalation threshold.
  *   getThresholds: resolver for the live pressure thresholds (read lazily so the
  *     posture always reflects the gate's current settings).
  *   pin: when set, freezes the level; `.tick` then only runs the reject decay.
+ *   onTransition: observer fired once per level change, after the machine has
+ *     settled on the new level. A pinned machine never changes level, so it
+ *     never fires. Exceptions are contained; a throwing observer cannot wedge
+ *     the machine.
  * @returns {{
  *   readonly level: 'normal' | 'elevated' | 'siege',
  *   readonly rejectedPerSecond: number,
@@ -469,6 +474,7 @@ export function createPosture(cfg) {
 	const pin = cfg.pin === 'normal' || cfg.pin === 'elevated' || cfg.pin === 'siege'
 		? cfg.pin
 		: null;
+	const onTransition = typeof cfg.onTransition === 'function' ? cfg.onTransition : null;
 
 	let level = pin !== null ? pin : 'normal';
 	// Single decayed integer. Counts ONLY the maxConcurrent reject (the true
@@ -542,6 +548,8 @@ export function createPosture(cfg) {
 			// A pinned level freezes the machine; only the decay above runs.
 			if (pin !== null) return;
 
+			const prev = level;
+
 			const active = snapshot != null && snapshot.active === true;
 			// Escalation tracks this sample's FRESH over-capacity rejects against
 			// the per-sample ceiling, so the threshold means exactly what it says:
@@ -579,6 +587,17 @@ export function createPosture(cfg) {
 					level = 'elevated';
 					quietRun = 0;
 					overCapRun = 0;
+				}
+			}
+
+			// Notify after the machine has settled so the observer reads a
+			// consistent level. Contained: an observer failure must never
+			// stall the posture (it guards the upgrade path).
+			if (level !== prev && onTransition !== null) {
+				try {
+					onTransition(prev, level);
+				} catch (err) {
+					console.error('[ws] posture transition observer threw:', err);
 				}
 			}
 		}
@@ -1091,6 +1110,90 @@ export function resolveWaitingRoom(upgradeAdmission) {
 			return template ? template(ctx) : buildWaitingRoomPage(ctx);
 		}
 	};
+}
+
+/**
+ * Rolling two-window poll counter behind the waiting room's queue-depth
+ * estimate. `record(t)` counts a poll into the current window, rolling the
+ * window once `windowMs` has elapsed; `depth(t)` reads the estimate without
+ * recording. Both take the caller's clock reading instead of reading a clock,
+ * so the math is pure and decays correctly from ANY call site - in particular
+ * a periodic sampler that keeps reading after the last poll arrived: a window
+ * nothing has rolled fades to zero instead of freezing at its final count.
+ * Cheap by construction (two ints and a window marker, never per-client
+ * state), so it cannot itself become a DoS vector.
+ *
+ * @param {number} windowMs
+ * @returns {{ record(t: number): void, depth(t: number): number }}
+ */
+export function createPollCounter(windowMs) {
+	// Both windows start fully stale so depth() reads 0 until the first poll.
+	let windowStart = -Infinity;
+	let count = 0;
+	let prevCount = 0;
+
+	return {
+		record(t) {
+			const elapsed = t - windowStart;
+			if (elapsed >= windowMs) {
+				// Carry one window back for a smoother depth across the
+				// boundary, then roll.
+				prevCount = elapsed >= 2 * windowMs ? 0 : count;
+				count = 0;
+				windowStart = t;
+			}
+			count++;
+		},
+		depth(t) {
+			const elapsed = t - windowStart;
+			// Nothing has polled for two full windows: the room is empty.
+			if (elapsed >= 2 * windowMs) return 0;
+			if (elapsed >= windowMs) {
+				// No poll has rolled the window for a full interval, so the
+				// current bucket is itself the fading one and nothing is
+				// newer.
+				return Math.round(count * (1 - (elapsed - windowMs) / windowMs));
+			}
+			return count + Math.round(prevCount * (1 - elapsed / windowMs));
+		}
+	};
+}
+
+/**
+ * Wrap a metric instrument so an emit can never throw into the caller. The
+ * admission and pressure paths emit from inside uWS native callbacks and
+ * timer callbacks, where an exception would skip the HTTP response, leak an
+ * in-flight admission slot, or kill the sampler. A registry is operator
+ * config - trusted like the upgrade hook, and contained like it. The first
+ * failure logs; repeats from the same instrument are silent so a broken
+ * registry cannot flood the log once per rejection. Registration is
+ * deliberately NOT contained: a registry that throws while creating an
+ * instrument fails at startup, loudly, which is the right failure mode for
+ * configuration.
+ *
+ * @param {{ [method: string]: any } | null | undefined} instrument
+ * @returns {any}
+ */
+export function containMetricInstrument(instrument) {
+	if (instrument == null) return undefined;
+	let warned = false;
+	/** @param {Function} fn */
+	const contain = (fn) => function (/** @type {any} */ a, /** @type {any} */ b) {
+		try {
+			fn.call(instrument, a, b);
+		} catch (err) {
+			if (!warned) {
+				warned = true;
+				console.error('[ws] metrics instrument threw; suppressing further errors from it:', err);
+			}
+		}
+	};
+	/** @type {any} */
+	const wrapped = {};
+	for (const method of ['inc', 'dec', 'set', 'observe']) {
+		if (typeof instrument[method] === 'function') wrapped[method] = contain(instrument[method]);
+	}
+	return wrapped;
 }
 
 /**

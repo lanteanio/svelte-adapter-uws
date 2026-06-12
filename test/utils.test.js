@@ -20,6 +20,8 @@ import {
 	isAuthOriginAccepted,
 	describeUnsafeSameOriginConfig,
 	createUpgradeAdmission,
+	createPollCounter,
+	containMetricInstrument,
 	isCursorLaneUpgrade,
 	CURSOR_LANE_SUBPROTOCOL,
 	resolveRequestId,
@@ -2251,6 +2253,93 @@ describe('isOriginAllowed', () => {
 			const ctx = { ...baseCtx, allowedOrigins: 'whatever' };
 			expect(isOriginAllowed('https://example.com', { host: 'example.com' }, ctx)).toBe(false);
 		});
+	});
+});
+
+// - createPollCounter --------------------------------------------------------
+
+describe('createPollCounter', () => {
+	const W = 1000;
+
+	it('reads zero before any poll', () => {
+		const c = createPollCounter(W);
+		expect(c.depth(0)).toBe(0);
+		expect(c.depth(123456)).toBe(0);
+	});
+
+	it('counts polls within the current window', () => {
+		const c = createPollCounter(W);
+		for (let i = 0; i < 5; i++) c.record(100 + i);
+		expect(c.depth(500)).toBe(5);
+	});
+
+	it('fades the previous window across a roll', () => {
+		const c = createPollCounter(W);
+		for (let i = 0; i < 10; i++) c.record(i);
+		// The first poll of the next window rolls; the old bucket fades in.
+		c.record(W);
+		expect(c.depth(W)).toBe(11);
+		expect(c.depth(W + W / 2)).toBe(1 + 5);
+		expect(c.depth(2 * W - 1)).toBe(1);
+	});
+
+	it('decays a stale window to zero when polling stops', () => {
+		// The sampler keeps reading after the last poll: the unrolled window
+		// must fade out rather than freeze at its final count.
+		const c = createPollCounter(W);
+		for (let i = 0; i < 30; i++) c.record(i);
+		expect(c.depth(500)).toBe(30);
+		expect(c.depth(W + W / 2)).toBe(15);
+		expect(c.depth(2 * W)).toBe(0);
+		expect(c.depth(10 * W)).toBe(0);
+	});
+
+	it('drops a fully stale previous window on roll', () => {
+		const c = createPollCounter(W);
+		c.record(0);
+		// More than two windows later: the old count must not fade back in.
+		c.record(2.5 * W);
+		expect(c.depth(2.5 * W)).toBe(1);
+	});
+});
+
+// - containMetricInstrument --------------------------------------------------
+
+describe('containMetricInstrument', () => {
+	it('passes null and undefined through as undefined', () => {
+		expect(containMetricInstrument(null)).toBeUndefined();
+		expect(containMetricInstrument(undefined)).toBeUndefined();
+	});
+
+	it('proxies the instrument methods with their arguments', () => {
+		const calls = [];
+		const wrapped = containMetricInstrument({
+			inc(labels) { calls.push(['inc', labels]); },
+			set(value) { calls.push(['set', value]); }
+		});
+		wrapped.inc({ reason: 'siege' });
+		wrapped.set(2);
+		expect(calls).toEqual([['inc', { reason: 'siege' }], ['set', 2]]);
+	});
+
+	it('only exposes the methods the instrument has', () => {
+		const wrapped = containMetricInstrument({ inc() {} });
+		expect(typeof wrapped.inc).toBe('function');
+		expect(wrapped.set).toBeUndefined();
+	});
+
+	it('contains a throwing emit and warns exactly once', () => {
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const wrapped = containMetricInstrument({
+				inc() { throw new Error('registry boom'); }
+			});
+			expect(() => wrapped.inc({ reason: 'siege' })).not.toThrow();
+			expect(() => wrapped.inc({ reason: 'siege' })).not.toThrow();
+			expect(errSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			errSpy.mockRestore();
+		}
 	});
 });
 

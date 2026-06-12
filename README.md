@@ -461,6 +461,32 @@ The two layers are independent: each works without the other. Both default to `0
 
 `platform.protection` reads the live level. While a posture is engaged, `platform.pressure.reason` can surface `CAPACITY` (precedence `MEMORY > CAPACITY > PUBLISH_RATE > SUBSCRIBERS`). Default `'normal'` is a true no-op - the reject path and pressure are byte-identical to before.
 
+**`metrics`** (default: off) - a Prometheus-style registry that makes the whole admission stack chartable. Pass any registry with positional `counter(name, help, labelNames?)` / `gauge(name, help)` factories - the `createMetrics()` registry from [`svelte-adapter-uws-extensions/prometheus`](https://github.com/lanteanio/svelte-adapter-uws-extensions) fits as-is and owns naming concerns like a global prefix.
+
+```js
+import { createMetrics } from 'svelte-adapter-uws-extensions/prometheus';
+
+const metrics = createMetrics();
+adapter({
+  websocket: {
+    upgradeAdmission: { maxConcurrent: 1000, perTickBudget: 64 },
+    protection: 'auto',
+    metrics
+  }
+});
+```
+
+| Metric | Type | What it charts |
+| --- | --- | --- |
+| `upgrade_admitted_total` | counter | Upgrades accepted (the `res.upgrade()` actually ran). |
+| `upgrade_rejected_total{reason}` | counter | Upgrades rejected before open. Reasons: `siege`, `over_capacity`, `cursor_lane`, `ip_rate_limit`, `bad_origin`, `auth_timeout`, `auth_rejected`, `hook_error`. |
+| `upgrade_inflight` | gauge | Upgrades currently between admission and open (sampled once per pressure interval). |
+| `waiting_room_queue_depth` | gauge | Clients currently polling the waiting room (sampled; `0` with the room off). |
+| `protection_posture_state` | gauge | The live posture: `0` normal, `1` elevated, `2` siege (sampled). |
+| `protection_posture_transitions_total{from,to}` | counter | Posture level changes - chart it next to the rejected reasons for an incident timeline. |
+
+Each posture change also logs one `[ws] protection posture <from> -> <to>` line with the rolling reject rate and the base pressure reason at the moment of transition. Costs when enabled: one unlabelled counter increment per accepted upgrade, one labelled increment per rejection, and three gauge writes per pressure sample; when off, every site is a single undefined check. The counters record server decisions, not client behaviour - a client that disconnects mid-upgrade is counted in neither, so admitted + rejected can read below a load balancer's attempt count under flappy clients. Instrument failures are contained (a registry that throws on emit logs once and is silenced; one that throws at instrument creation fails at startup, loudly). No client identity (IP, session) ever appears in a label - the per-IP picture lives in the extensions per-IP bucket's own `upgrade_bucket_*` counters, and capability-cookie failures in its `capability_cookie_misses_total{reason}` (an app hook that rejects on a cookie miss surfaces here as `auth_rejected`).
+
 #### Layered admission: upgrade-path + message-path
 
 `upgradeAdmission` operates at the WebSocket handshake. It sheds connection attempts before TLS work and before any per-request CPU is spent. That is the right primitive when the threat is "too many clients are trying to connect" - a connection flood, a thundering herd after a deploy, a runaway client retry loop.
@@ -4180,7 +4206,7 @@ server = await createTestServer({
 });
 ```
 
-`upgradeAdmission` is the same `{ maxConcurrent, perTickBudget }` shape the production handler accepts via `adapter({ websocket: { upgradeAdmission: ... } })`. Passing it to `createTestServer` lets you assert admission shedding (503 responses on the upgrade path) end-to-end without booting a full SvelteKit app.
+`upgradeAdmission` is the same `{ maxConcurrent, perTickBudget }` shape the production handler accepts via `adapter({ websocket: { upgradeAdmission: ... } })`. Passing it to `createTestServer` lets you assert admission shedding (503 responses on the upgrade path) end-to-end without booting a full SvelteKit app. `protection` and `metrics` mirror the production options the same way: the harness emits `upgrade_admitted_total` and `upgrade_rejected_total{reason}` at the branches it mirrors (`siege`, `over_capacity`, `cursor_lane`, `auth_rejected`, `hook_error`), so a test can assert the admission counters with a recording registry. The sampled gauges and the `ip_rate_limit` / `bad_origin` / `auth_timeout` reasons are production-only - the harness runs no pressure sampler, no per-IP limiter, no origin check, and no upgrade timeout.
 
 #### Curated helper re-exports from `svelte-adapter-uws/testing`
 

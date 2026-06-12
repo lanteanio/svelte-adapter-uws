@@ -20,7 +20,7 @@ import { env } from 'ENV';
 import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, DEFAULT_GRANT } from './wire.js';
 import { now, monotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 
@@ -609,6 +609,28 @@ let pressureTimer = null;
 let activePosture = null;
 
 /**
+ * Module-level holder for the admission-gauge sampling hook, mirroring
+ * `activePosture`: assigned by the handler factory (it reads closure-local
+ * state), called by `samplePressure` so the gauges ride the existing 1 Hz
+ * timer instead of owning one. Stays null - one cheap null check per sample -
+ * when no metrics registry is configured.
+ *
+ * @type {(() => void) | null}
+ */
+let metricsSampleHook = null;
+
+/**
+ * Base (un-layered) pressure reason from the most recent sample. The posture
+ * transition log reports this rather than `pressureSnapshot.reason`: once a
+ * level is engaged, the snapshot reason is forced to CAPACITY, so a relax
+ * line would self-contradict ("relaxed because of pressure"). The base reason
+ * is the signal the machine actually ticked on.
+ *
+ * @type {string}
+ */
+let lastBasePressureReason = 'NONE';
+
+/**
  * Default pressure thresholds. Designed to be safe rather than tight: the
  * goal is "no false positives in the steady state of a healthy small app,"
  * not "perfectly tuned for sustained five-figure publish rates." Override
@@ -659,6 +681,7 @@ function samplePressure(thresholds) {
 		{ heapUsedRatio, publishRate, subscriberRatio },
 		thresholds
 	);
+	lastBasePressureReason = reason;
 	// Layer the protection posture's CAPACITY reason on top of the pure
 	// pressure reason. When no posture is engaged this is byte-identical to
 	// the base reason. The level read here is the one the gate enforced during
@@ -699,6 +722,10 @@ function samplePressure(thresholds) {
 	// dwell never sees a calm sample and the level could never relax. The base
 	// `reason` is the true load signal that drives both directions.
 	if (activePosture !== null) activePosture.tick({ active: reason !== 'NONE' });
+
+	// Sample the admission gauges on the same cadence. Null unless a metrics
+	// registry is configured, so the zero-config sampler is unchanged.
+	if (metricsSampleHook !== null) metricsSampleHook();
 
 	if (transitioned) {
 		for (const cb of pressureListeners) {
@@ -3183,6 +3210,35 @@ if (WS_ENABLED) {
 	// escape is `waitingRoom: false`.
 	const WAITING_ROOM = resolveWaitingRoom(wsOptions.upgradeAdmission);
 
+	// Admission observability. Opt-in via the `metrics` option - any registry
+	// shaped like the extensions `createMetrics()` (positional counter/gauge
+	// factories). Instruments resolve once here; every emit is optional-chained,
+	// so the disabled path costs one undefined check per site and the accept
+	// path allocates nothing (the admitted counter takes no label object).
+	const METRICS = wsOptions.metrics;
+	const mUpgradeAdmitted = containMetricInstrument(METRICS?.counter(
+		'upgrade_admitted_total', 'WebSocket upgrades accepted'
+	));
+	const mUpgradeRejected = containMetricInstrument(METRICS?.counter(
+		'upgrade_rejected_total', 'WebSocket upgrades rejected before open', ['reason']
+	));
+	const mPostureTransitions = containMetricInstrument(METRICS?.counter(
+		'protection_posture_transitions_total', 'Protection posture level changes', ['from', 'to']
+	));
+	const gPostureState = containMetricInstrument(METRICS?.gauge(
+		'protection_posture_state', 'Current protection posture (0 normal, 1 elevated, 2 siege)'
+	));
+	const gUpgradeInflight = containMetricInstrument(METRICS?.gauge(
+		'upgrade_inflight', 'Upgrades currently in flight between admission and open'
+	));
+	const gQueueDepth = containMetricInstrument(METRICS?.gauge(
+		'waiting_room_queue_depth', 'Clients currently polling the waiting room'
+	));
+	// The depth probe is closure-local to the waiting-room block below; this
+	// holder lets the sampling hook read it without widening that scope.
+	/** @type {(() => number) | null} */
+	let queueDepthProbe = null;
+
 	// Graduated protection posture over the 1 Hz pressure signal. Opt-in via
 	// the `protection` option; absent or `'normal'` leaves `activePosture` null,
 	// so the reject path, the pressure snapshot, and the poll response stay
@@ -3197,8 +3253,30 @@ if (WS_ENABLED) {
 		: createPosture({
 			admission,
 			getThresholds: () => resolvePressureThresholds(wsOptions.pressure),
-			pin: PROTECTION_MODE === 'auto' ? undefined : PROTECTION_MODE
+			pin: PROTECTION_MODE === 'auto' ? undefined : PROTECTION_MODE,
+			// One log line per level change - the operator's incident
+			// timeline. Dwell-gated by the machine, so it can never flood.
+			// No client identity in the line: rate and reason only.
+			onTransition: (from, to) => {
+				mPostureTransitions?.inc({ from, to });
+				console.warn(
+					'[ws] protection posture %s -> %s rejected/s=%d pressure=%s',
+					from, to,
+					activePosture !== null ? activePosture.rejectedPerSecond : 0,
+					lastBasePressureReason
+				);
+			}
 		});
+
+	// Gauge sampling rides the existing 1 Hz pressure timer - no new timer.
+	// Always assigned (hook or null) so a factory re-run replaces any previous
+	// hook and a stale closure can never outlive its server.
+	metricsSampleHook = METRICS == null ? null : () => {
+		const lvl = postureLevel();
+		gPostureState?.set(lvl === 'siege' ? 2 : lvl === 'elevated' ? 1 : 0);
+		gUpgradeInflight?.set(admission.inFlight);
+		gQueueDepth?.set(queueDepthProbe !== null ? queueDepthProbe() : 0);
+	};
 
 	// Single 60-second interval for all periodic cache maintenance.
 	// Keeps timer overhead to one wakeup per minute regardless of how many
@@ -3390,39 +3468,16 @@ if (WS_ENABLED) {
 	// read-only: the poll probes capacity via `admission.hasCapacity()` and
 	// never calls `tryAcquire()`, so polling can never consume a gate slot.
 	if (WAITING_ROOM !== null) {
-		// Rolling poll counter: count polls seen in the current poll-interval
-		// window. Cheap (one int plus a window marker), decayed by comparing
-		// the shared 1s clock to the window start. Not a per-client structure,
-		// so it cannot itself become a DoS vector.
-		let pollWindowStart = now();
-		let pollWindowCount = 0;
-		let pollPrevCount = 0;
-		const POLL_WINDOW_MS = WAITING_ROOM.pollIntervalMs;
-
-		function recordPoll() {
-			const t = now();
-			const elapsed = t - pollWindowStart;
-			if (elapsed >= POLL_WINDOW_MS) {
-				// Carry one window back for a smoother depth across the
-				// boundary, then roll.
-				pollPrevCount = elapsed >= 2 * POLL_WINDOW_MS ? 0 : pollWindowCount;
-				pollWindowCount = 0;
-				pollWindowStart = t;
-			}
-			pollWindowCount++;
-		}
-
-		function currentQueueDepth() {
-			// Polls observed in the trailing window (current plus faded bucket).
-			const elapsed = now() - pollWindowStart;
-			if (elapsed >= 2 * POLL_WINDOW_MS) return pollWindowCount;
-			const faded = pollPrevCount * (1 - Math.min(elapsed, POLL_WINDOW_MS) / POLL_WINDOW_MS);
-			return pollWindowCount + Math.round(faded);
-		}
+		// Rolling poll counter behind the queue-depth estimate. The pure
+		// window math lives in utils.js so the sampler's timer-driven reads
+		// decay identically to the poll endpoint's own reads.
+		const pollCounter = createPollCounter(WAITING_ROOM.pollIntervalMs);
+		const currentQueueDepth = () => pollCounter.depth(now());
+		queueDepthProbe = currentQueueDepth;
 
 		app.get(WAITING_ROOM.admitCheckPath, (res) => {
 			res.onAborted(() => {});
-			recordPoll();
+			pollCounter.record(now());
 			// Siege never admits a reload into a full gate: it always reports
 			// busy, even while the live gate has free slots. At normal/elevated
 			// `hasCapacity()` stays the source of truth, so the poll only ever
@@ -3540,6 +3595,7 @@ if (WS_ENABLED) {
 			// over-capacity reject so an auto posture stays escalated.
 			if (postureLevel() === 'siege') {
 				if (activePosture !== null) activePosture.recordCapacityReject();
+				mUpgradeRejected?.inc({ reason: 'siege' });
 				serveUpgradeRefusal();
 				return;
 			}
@@ -3556,6 +3612,7 @@ if (WS_ENABLED) {
 				// Count the over-capacity reject (and only this one) so the
 				// posture's rolling reject rate reflects true gate pressure.
 				if (activePosture !== null) activePosture.recordCapacityReject();
+				mUpgradeRejected?.inc({ reason: isCursor ? 'cursor_lane' : 'over_capacity' });
 				serveUpgradeRefusal();
 				return;
 			}
@@ -3609,6 +3666,7 @@ if (WS_ENABLED) {
 					// the over-capacity one, so an attack-driven 429 storm can
 					// never escalate the protection posture toward siege.
 					if (activePosture !== null) activePosture.recordRateLimitReject();
+					mUpgradeRejected?.inc({ reason: 'ip_rate_limit' });
 					res.cork(() => {
 						res.writeStatus('429 Too Many Requests');
 						res.writeHeader('content-type', 'text/plain');
@@ -3636,6 +3694,7 @@ if (WS_ENABLED) {
 				isTls: is_tls,
 				hasUpgradeHook: !!wsModule.upgrade
 			})) {
+				mUpgradeRejected?.inc({ reason: 'bad_origin' });
 				res.cork(() => {
 					res.writeStatus('403 Forbidden');
 					res.writeHeader('content-type', 'text/plain');
@@ -3669,6 +3728,7 @@ if (WS_ENABLED) {
 					res.cork(() => {
 						res.upgrade({ remoteAddress: clientIp, [WS_REQUEST_ID_KEY]: wsRequestId }, secKey, secProtocol, secExtensions, context);
 					});
+					mUpgradeAdmitted?.inc();
 					releaseInFlight();
 				});
 				return;
@@ -3692,6 +3752,7 @@ if (WS_ENABLED) {
 				timer = setTimer(() => {
 					timedOut = true;
 					if (!aborted) {
+						mUpgradeRejected?.inc({ reason: 'auth_timeout' });
 						res.cork(() => {
 							res.writeStatus('504 Gateway Timeout');
 							res.writeHeader('content-type', 'text/plain');
@@ -3702,11 +3763,22 @@ if (WS_ENABLED) {
 				}, wsOptions.upgradeTimeout * 1000);
 			}
 
-			Promise.resolve(wsModule.upgrade({ headers, cookies, url, remoteAddress: clientIp, requestId: wsRequestId }))
+			// A synchronous throw must take the same path as an async rejection:
+			// without the wrap it would escape the upgrade callback before the
+			// catch below exists, serving no response and leaking the in-flight
+			// slot (releaseInFlight would never run).
+			let upgradeHookResult;
+			try {
+				upgradeHookResult = wsModule.upgrade({ headers, cookies, url, remoteAddress: clientIp, requestId: wsRequestId });
+			} catch (err) {
+				upgradeHookResult = Promise.reject(err);
+			}
+			Promise.resolve(upgradeHookResult)
 				.then((result) => {
 					clearTimer(timer);
 					if (aborted || timedOut) return;
 					if (result === false) {
+						mUpgradeRejected?.inc({ reason: 'auth_rejected' });
 						res.cork(() => {
 							res.writeStatus('401 Unauthorized');
 							res.writeHeader('content-type', 'text/plain');
@@ -3768,6 +3840,7 @@ if (WS_ENABLED) {
 								context
 							);
 						});
+						mUpgradeAdmitted?.inc();
 						releaseInFlight();
 					});
 				})
@@ -3775,6 +3848,7 @@ if (WS_ENABLED) {
 					clearTimer(timer);
 					console.error('WebSocket upgrade error:', err);
 					if (!aborted && !timedOut) {
+						mUpgradeRejected?.inc({ reason: 'hook_error' });
 						res.cork(() => {
 							res.writeStatus('500 Internal Server Error');
 							res.writeHeader('content-type', 'text/plain');

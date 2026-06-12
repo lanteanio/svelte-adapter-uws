@@ -1,6 +1,6 @@
 import { now, monotonicNow, setTimer, clearTimer, randomUuid } from './files/runtime.js';
 import { parseCookies } from './files/cookies.js';
-import { nextTopicSeq, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
+import { nextTopicSeq, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './files/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './files/wire.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
@@ -52,7 +52,7 @@ function envelope(topic, event, data, seq) {
  * @returns {Promise<import('./testing.js').TestServer>}
  */
 export async function createTestServer(options = {}) {
-	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, protection } = options;
+	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, protection, metrics } = options;
 	// Mirror production: block client-initiated subscribes to `__`-prefixed
 	// system topics by default. Tests that intentionally exercise system
 	// channels can opt in with `allowSystemTopicSubscribe: true`.
@@ -71,6 +71,13 @@ export async function createTestServer(options = {}) {
 	// production handler exactly: resolved once (or null when off); null keeps
 	// today's bare 503. On by default whenever the gate can reject.
 	const WAITING_ROOM = resolveWaitingRoom(upgradeAdmission);
+
+	// Admission counters, mirroring the production handler at the upgrade
+	// branches this harness mirrors (same names, same reasons). The sampled
+	// gauges and the per-IP/origin reasons are production-only: the harness
+	// runs no pressure sampler, no per-IP limiter, and no origin check.
+	const mUpgradeAdmittedT = containMetricInstrument(metrics?.counter('upgrade_admitted_total', 'WebSocket upgrades accepted'));
+	const mUpgradeRejectedT = containMetricInstrument(metrics?.counter('upgrade_rejected_total', 'WebSocket upgrades rejected before open', ['reason']));
 
 	// Graduated protection posture, mirroring the production handler. Absent or
 	// `'normal'` leaves the posture inert so the reject path, pressure reason,
@@ -942,6 +949,7 @@ export async function createTestServer(options = {}) {
 			// posture stays escalated.
 			if (postureLevelT() === 'siege') {
 				if (activePostureT !== null) activePostureT.recordCapacityReject();
+				mUpgradeRejectedT?.inc({ reason: 'siege' });
 				serveUpgradeRefusal();
 				return;
 			}
@@ -955,6 +963,7 @@ export async function createTestServer(options = {}) {
 			const acquired = isCursor ? admission.tryAcquireCursor() : admission.tryAcquire();
 			if (!acquired) {
 				if (activePostureT !== null) activePostureT.recordCapacityReject();
+				mUpgradeRejectedT?.inc({ reason: isCursor ? 'cursor_lane' : 'over_capacity' });
 				serveUpgradeRefusal();
 				return;
 			}
@@ -987,6 +996,7 @@ export async function createTestServer(options = {}) {
 					res.cork(() => {
 						res.upgrade({ remoteAddress: rawIp, [WS_REQUEST_ID_KEY]: wsRequestId }, secKey, secProtocol, secExtensions, context);
 					});
+					mUpgradeAdmittedT?.inc();
 					releaseInFlight();
 				});
 				return;
@@ -996,10 +1006,21 @@ export async function createTestServer(options = {}) {
 			res.onAborted(() => { aborted = true; releaseInFlight(); });
 
 			const cookies = parseCookies(headers['cookie']);
-			Promise.resolve(handler.upgrade({ headers, cookies, url, remoteAddress: rawIp, requestId: wsRequestId }))
+			// A synchronous throw must take the same path as an async rejection:
+			// without the wrap it would escape the upgrade callback before the
+			// catch below exists, serving no response and leaking the in-flight
+			// slot (releaseInFlight would never run).
+			let upgradeHookResult;
+			try {
+				upgradeHookResult = handler.upgrade({ headers, cookies, url, remoteAddress: rawIp, requestId: wsRequestId });
+			} catch (err) {
+				upgradeHookResult = Promise.reject(err);
+			}
+			Promise.resolve(upgradeHookResult)
 				.then((result) => {
 					if (aborted) { releaseInFlight(); return; }
 					if (result === false) {
+						mUpgradeRejectedT?.inc({ reason: 'auth_rejected' });
 						res.cork(() => {
 							res.writeStatus('401 Unauthorized');
 							res.writeHeader('content-type', 'text/plain');
@@ -1032,11 +1053,13 @@ export async function createTestServer(options = {}) {
 							}
 							res.upgrade(userData, secKey, secProtocol, secExtensions, context);
 						});
+						mUpgradeAdmittedT?.inc();
 						releaseInFlight();
 					});
 				})
 				.catch((err) => {
 					if (!aborted) {
+						mUpgradeRejectedT?.inc({ reason: 'hook_error' });
 						res.cork(() => {
 							res.writeStatus('500 Internal Server Error');
 							res.writeHeader('content-type', 'text/plain');
@@ -1334,32 +1357,14 @@ export async function createTestServer(options = {}) {
 	// read-only, registered whenever the waiting room is enabled, and the poll
 	// probes capacity via `admission.hasCapacity()` without consuming a slot.
 	if (WAITING_ROOM !== null) {
-		let pollWindowStart = now();
-		let pollWindowCount = 0;
-		let pollPrevCount = 0;
-		const POLL_WINDOW_MS = WAITING_ROOM.pollIntervalMs;
-
-		function recordPoll() {
-			const t = now();
-			const elapsed = t - pollWindowStart;
-			if (elapsed >= POLL_WINDOW_MS) {
-				pollPrevCount = elapsed >= 2 * POLL_WINDOW_MS ? 0 : pollWindowCount;
-				pollWindowCount = 0;
-				pollWindowStart = t;
-			}
-			pollWindowCount++;
-		}
-
-		function currentQueueDepth() {
-			const elapsed = now() - pollWindowStart;
-			if (elapsed >= 2 * POLL_WINDOW_MS) return pollWindowCount;
-			const faded = pollPrevCount * (1 - Math.min(elapsed, POLL_WINDOW_MS) / POLL_WINDOW_MS);
-			return pollWindowCount + Math.round(faded);
-		}
+		// The same pure window math the production handler uses, so stale
+		// windows decay identically in both.
+		const pollCounter = createPollCounter(WAITING_ROOM.pollIntervalMs);
+		const currentQueueDepth = () => pollCounter.depth(now());
 
 		app.get(WAITING_ROOM.admitCheckPath, (res) => {
 			res.onAborted(() => {});
-			recordPoll();
+			pollCounter.record(now());
 			// Siege always reports busy, even with free slots; normal/elevated
 			// keep `hasCapacity()` as the source of truth. Mirrors production.
 			if (postureLevelT() !== 'siege' && admission.hasCapacity()) {

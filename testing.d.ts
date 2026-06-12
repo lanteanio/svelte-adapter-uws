@@ -1,5 +1,5 @@
 import type { WebSocket } from 'uWebSockets.js';
-import type { Platform, WebSocketHandler, UpgradeContext } from './index.js';
+import type { MetricsRegistry, Platform, WebSocketHandler, UpgradeContext } from './index.js';
 
 export interface TestServerOptions {
 	/** Port to listen on. Defaults to 0 (random available port). */
@@ -29,6 +29,24 @@ export interface TestServerOptions {
 		maxConcurrent?: number;
 		perTickBudget?: number;
 	};
+	/**
+	 * Protection posture, mirroring the production handler's `protection`
+	 * option: `'elevated'`/`'siege'` pin a level (siege refuses every new
+	 * upgrade), `'auto'` resolves from the gate. A running server can be
+	 * moved between levels with the test-only `platform.__setProtection()`.
+	 */
+	protection?: 'normal' | 'elevated' | 'siege' | 'auto';
+	/**
+	 * Prometheus-style registry, mirroring the production handler's
+	 * `metrics` option at the upgrade branches this harness mirrors:
+	 * `upgrade_admitted_total` and `upgrade_rejected_total` with reasons
+	 * `siege`, `over_capacity`, `cursor_lane`, `auth_rejected` and
+	 * `hook_error`. The sampled gauges and the `ip_rate_limit`,
+	 * `bad_origin` and `auth_timeout` reasons are production-only - the
+	 * harness runs no pressure sampler, no per-IP limiter, no origin
+	 * check, and no upgrade timeout.
+	 */
+	metrics?: MetricsRegistry;
 }
 
 /**

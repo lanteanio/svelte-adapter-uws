@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.21] - 2026-06-12
+
+### Added
+
+- **Admission and posture observability via a new `websocket.metrics` option.** Pass a Prometheus-style registry (the extensions `createMetrics()` fits as-is) and the adapter registers and emits six instruments covering the whole admission stack: `upgrade_admitted_total`, `upgrade_rejected_total{reason}` (reasons `siege`, `over_capacity`, `cursor_lane`, `ip_rate_limit`, `bad_origin`, `auth_timeout`, `auth_rejected`, `hook_error`), `upgrade_inflight`, `waiting_room_queue_depth`, `protection_posture_state` (0/1/2), and `protection_posture_transitions_total{from,to}`. The gauges ride the existing pressure sampler (no new timer); the accept path adds one unlabelled counter increment when enabled and a single undefined check when off; no client identity ever appears in a label; the counters record server decisions, so a client that disconnects mid-upgrade is counted in neither. Instrument failures are contained - a registry that throws on emit logs once and is silenced, never disturbing a response, an admission slot, or the sampler, while a registry that throws at instrument creation fails at startup, loudly. Each posture change additionally logs one `[ws] protection posture <from> -> <to>` line with the rolling reject rate and the base pressure reason that drove the machine, registry or not. `createPosture` gained an optional `onTransition(from, to)` observer (fired after the machine settles, exception-contained, never fired by a pinned level). `createTestServer` mirrors the two counters at the upgrade branches it mirrors and accepts the same `metrics` option, so admission counters are assertable in integration tests; a new `bench/admission-upgrade-overhead.mjs` bounds the accept-path overhead with and without a registry.
+
+### Fixed
+
+- **A synchronously-throwing `upgrade` hook no longer leaks its admission slot.** The hook call site only handled rejected promises; a hook that threw before returning escaped the upgrade callback without serving a response and without releasing the in-flight admission slot, so repeated synchronous hook failures could pin `upgradeAdmission.maxConcurrent` shut until restart. A synchronous throw now takes the same path as an async rejection: a `500`, the slot released, and (with metrics enabled) an `upgrade_rejected_total{reason="hook_error"}` increment. Same fix in the production handler and the `createTestServer` mirror.
+- **`TestServerOptions` now declares the `protection` option** that `createTestServer` has accepted since the posture shipped; previously TypeScript users had to cast to pass it.
+- **The waiting-room queue-depth estimate no longer freezes at its last count after polling stops.** The rolling two-window poll counter only decayed when a new poll rolled the window, so a reader with no poll in front of it - the holding page served by a direct navigation, and the new `waiting_room_queue_depth` gauge - kept reporting the final window's count indefinitely after the room emptied. The window math (now shared between the production handler and `createTestServer` as `createPollCounter`) fades an un-rolled window to zero over one interval and reads zero after two.
+
 ## [0.6.0-next.20] - 2026-06-10
 
 ### Added
