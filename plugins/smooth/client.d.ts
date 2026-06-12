@@ -1,0 +1,99 @@
+import type { SmoothApply } from './server.js';
+
+export interface SmoothChannelTransport<Command = any> {
+	/**
+	 * Transmit a command batch. A lossy fire-and-forget send is the intended
+	 * carrier: command loss is recovered by reconciliation, never by
+	 * retransmission.
+	 */
+	sendCommand(batch: Array<{ id: number; cmd: Command }>): void;
+	/**
+	 * Request the authoritative catalog: the resolved topic name, the server
+	 * time stamp (the clock seed), the caller's own entity key, its ack
+	 * watermark, and every entity's state. Runs on every connection 'open'
+	 * and once per overflow recovery.
+	 */
+	sync(): Promise<{
+		topic?: string;
+		t?: number;
+		you?: string;
+		ack?: number;
+		states?: Array<{ key: string; state: any }>;
+	} | null | undefined>;
+}
+
+export interface SmoothChannelOptions<State = any, Command = any> {
+	/** The shared simulation step (the same module the server applies). */
+	apply: SmoothApply<State, Command>;
+	/** The local entity's starting state. */
+	initial: State;
+	/** The injected transport (generated send paths, or a harness script). */
+	transport: SmoothChannelTransport<Command>;
+	/** Divergence measure for reconciliation corrections; defaults to the
+	 * Euclidean distance between the states' `x`/`y`. */
+	computeError?: (before: State, after: State) => number;
+	/** Divergence at or below this snaps silently; above it the correction
+	 * eases over `smoothTimeMs` (default 1). */
+	errorThreshold?: number;
+	/** Correction easing window in ms; 0 = always snap (default 100). */
+	smoothTimeMs?: number;
+	/** Un-acked command count bound; beyond it prediction is killed pending
+	 * recovery (default 256). */
+	windowCap?: number;
+	/** Un-acked command age bound in ms (default 3000). */
+	windowMaxAgeMs?: number;
+	/** How far in the past remote entities render; `'auto'` (default) tracks
+	 * twice the measured update interval. */
+	interpolationMs?: 'auto' | number;
+	/** Hard cap on dead-reckoning when the remote buffer runs dry (default 250). */
+	extrapolateMs?: number;
+	/** Remote sample gap treated as a discontinuity and snapped (default 500). */
+	snapGapMs?: number;
+	/** Maximum command flushes per second (default 60 - one per frame). */
+	cmdRate?: number;
+}
+
+export interface SmoothChannel<State = any, Command = any> {
+	/** Submit one command: predicted locally this frame, transmitted on the
+	 * next flush, reconciled when its acknowledgement returns. */
+	command(cmd: Command): number;
+	/** Attach the per-frame consumer and start the render loop. `local` is
+	 * the rendered local state (prediction plus any decaying correction);
+	 * `remote` maps entity keys to interpolated states. */
+	onFrame(cb: (local: State, remote: Map<string, State>) => void): void;
+	/** Observe prediction-killed transitions (overflow and recovery). */
+	onOverflow(cb: (overflowed: boolean) => void): void;
+	/** Re-request the authoritative catalog (also runs on every 'open'). */
+	resync(): void;
+	/** The estimated server wall-clock time - the stamp source for commands
+	 * and compensated actions. */
+	now(): number;
+	/** The caller's own entity key, once the sync reply announced it. */
+	readonly self: string | null;
+	/** The current prediction (simulation truth, no easing offset). */
+	readonly predicted: State;
+	/** Commands awaiting acknowledgement. */
+	readonly windowSize: number;
+	/** True while prediction is killed pending recovery. */
+	readonly overflowed: boolean;
+	/** The applied interpolation delay (ms) - diagnostics. */
+	readonly delay: number;
+	/** The applied clock offset (ms), or null - diagnostics. */
+	readonly clockOffset: number | null;
+	/** The resolved wire topic, or null before the first sync reply. */
+	readonly topic: string | null;
+	destroy(): void;
+}
+
+/**
+ * Create the client-side channel for one smoothed topic: prediction for the
+ * local entity, render-in-the-past interpolation for remote entities, and
+ * the wire glue between them. Importing this module opts the connection into
+ * binary smooth frames (`smooth.protocol:1` rides the first hello). Options
+ * are validated eagerly; the wire topic is announced by the first sync reply
+ * (the topic resolves server-side), so the inbound tap binds on the first
+ * successful sync while commands flow immediately.
+ */
+export function createSmoothChannel<State = any, Command = any>(
+	options: SmoothChannelOptions<State, Command>
+): SmoothChannel<State, Command>;

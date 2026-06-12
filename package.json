@@ -1,6 +1,6 @@
 {
   "name": "svelte-adapter-uws",
-  "version": "0.6.0-next.23",
+  "version": "0.6.0-next.24",
   "publishConfig": {
     "tag": "next"
   },
@@ -120,6 +120,14 @@
     "./plugins/crdt/client": {
       "types": "./plugins/crdt/client.d.ts",
       "default": "./plugins/crdt/client.js"
+    },
+    "./plugins/smooth": {
+      "types": "./plugins/smooth/server.d.ts",
+      "default": "./plugins/smooth/server.js"
+    },
+    "./plugins/smooth/client": {
+      "types": "./plugins/smooth/client.d.ts",
+      "default": "./plugins/smooth/client.js"
     }
   },
   "types": "./index.d.ts",

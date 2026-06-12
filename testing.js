@@ -305,23 +305,30 @@ export async function createTestServer(options = {}) {
 	/**
 	 * Per-connection topic-id resolution + lazy `wire-id` announce. Binary
 	 * frames and the announce flow through sendOutboundT so chaos scenarios
-	 * apply to them too.
+	 * apply to them too. Mirrors handler.js: returns -1 when the announce was
+	 * dropped by backpressure (send result 2) - the client never learns the
+	 * mapping, so callers send the JSON envelope for the current frame and
+	 * poison the capability. A result of 0 (enqueued, or a chaos drop) is NOT
+	 * a drop here; only 2 signals failure.
 	 * @param {import('uWebSockets.js').WebSocket<any>} ws
 	 * @param {any} ud
 	 * @param {string} topic
-	 * @returns {number}
+	 * @returns {number} the topic id, or -1 when the announce was dropped
 	 */
 	function ensureWireIdT(ws, ud, topic) {
 		const { id, isNew } = allocWireId(ud, WS_TOPIC_IDS, topic);
-		if (isNew) sendOutboundT(ws, wireIdAnnounce(topic, id));
+		if (isNew) {
+			const result = sendOutboundT(ws, wireIdAnnounce(topic, id));
+			if (result === 2) return -1;
+		}
 		return id;
 	}
 
 	/**
 	 * Per-connection wire-codec state resolution, mirroring handler.js so the
 	 * stateful binary path (e.g. the cursor short-id dictionary) is exercised by
-	 * createTestServer-based suites. Returns null for a stateless codec or on
-	 * attach failure.
+	 * createTestServer-based suites. Returns null for a stateless codec, on
+	 * attach failure, or for a poisoned capability (see poisonWireStateT).
 	 * @param {import('uWebSockets.js').WebSocket<any>} ws
 	 * @param {any} ud
 	 * @param {{ capability: string, state?: { onAttach: (ws: any) => any, onDetach?: (ws: any, state: any) => void } }} wire
@@ -339,6 +346,46 @@ export async function createTestServer(options = {}) {
 			m.set(wire.capability, entry);
 		}
 		return entry.state;
+	}
+
+	/**
+	 * True when this connection's wire for a capability was degraded to JSON
+	 * by poisonWireStateT. Mirrors handler.js.
+	 * @param {any} ud
+	 * @param {string} capability
+	 * @returns {boolean}
+	 */
+	function wireStatePoisonedT(ud, capability) {
+		const m = ud[WS_WIRE_STATE];
+		if (!m) return false;
+		const entry = m.get(capability);
+		return entry !== undefined && entry.poisoned === true;
+	}
+
+	/**
+	 * Permanently degrade this connection's wire for one capability to JSON
+	 * (until reconnect), mirroring handler.js. A stateful codec mutates its
+	 * per-connection encoder state DURING encode, so a frame dropped by
+	 * backpressure (send result 2) leaves the client decoder desynced with no
+	 * in-band resync - JSON is the recovery tier because the shared envelope
+	 * carries full keys and absolute values. Disposes the codec's state via
+	 * its onDetach exactly once (the sentinel carries no detach, so the
+	 * close-time sweep skips it), then installs a poisoned entry so
+	 * ensureWireStateT returns null and every publish/send path routes the
+	 * capability to the JSON envelope.
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @param {any} ud
+	 * @param {string} capability
+	 */
+	function poisonWireStateT(ws, ud, capability) {
+		let m = ud[WS_WIRE_STATE];
+		if (!m) { m = new Map(); ud[WS_WIRE_STATE] = m; }
+		const entry = m.get(capability);
+		if (entry !== undefined && entry.poisoned === true) return;
+		if (entry && typeof entry.detach === 'function') {
+			try { entry.detach(ws, entry.state); } catch {}
+		}
+		m.set(capability, { state: null, detach: undefined, poisoned: true });
 	}
 
 	/** @param {import('uWebSockets.js').WebSocket<any>} ws @param {any} ud */
@@ -394,12 +441,18 @@ export async function createTestServer(options = {}) {
 			const env = envelope(topic, event, data, seq);
 			// Cross-worker subscribers receive the JSON envelope only (binary frames
 			// are same-worker), so the relay carries `env`, never a 0x03 frame -
-			// mirroring handler.js publishWire's relay path.
+			// mirroring handler.js publishWire's relay path. The relay fires once
+			// per publish regardless of sender exclusion: the excluded socket only
+			// exists on this instance.
 			if (onPublishT && !(options && options.relay === false)) {
 				onPublishT({ kind: 'publish', topic, envelope: env, seq, compress: false });
 			}
+			// Sender exclusion, mirroring handler.js: the single C++ app.publish
+			// fan-out cannot skip a socket, so an excluding publish always takes
+			// the per-subscriber walk.
+			const excludeWs = (options && options.excludeWs) || null;
 			// JSON fast path: no capable client.
-			if (!capCountsT.has(wire.capability)) {
+			if (excludeWs === null && !capCountsT.has(wire.capability)) {
 				if (chaos.scenario === null) return app.publish(topic, env, false, false);
 				let delivered = false;
 				for (const ws of wsConnections) {
@@ -419,6 +472,7 @@ export async function createTestServer(options = {}) {
 				const sharedFrameById = new Map();
 				let delivered = false;
 				for (const ws of wsConnections) {
+					if (ws === excludeWs) continue;
 					let ud;
 					try { ud = ws.getUserData(); } catch { continue; }
 					const subs = ud[WS_SUBSCRIPTIONS];
@@ -427,17 +481,42 @@ export async function createTestServer(options = {}) {
 					if (!caps || !caps.has(wire.capability)) { sendOutboundT(ws, env); delivered = true; continue; }
 					const state = ensureWireStateT(ws, ud, wire);
 					if (state == null) {
+						// A poisoned capability is served exactly like a caps-less
+						// connection: the shared JSON envelope, never binary.
+						if (wireStatePoisonedT(ud, wire.capability)) { sendOutboundT(ws, env); delivered = true; continue; }
 						if (!sharedEncoded) { sharedPayload = wire.encode(event, data, null); sharedEncoded = true; }
 						if (sharedPayload == null) { sendOutboundT(ws, env); delivered = true; continue; }
 						const id = ensureWireIdT(ws, ud, topic);
+						if (id === -1) {
+							// Dropped wire-id announce: JSON for this frame + poison.
+							poisonWireStateT(ws, ud, wire.capability);
+							sendOutboundT(ws, env);
+							delivered = true;
+							continue;
+						}
 						let frame = sharedFrameById.get(id);
 						if (!frame) { frame = buildBinaryFrame(wire.schemaVersion, id, seqOnWire, sharedPayload); sharedFrameById.set(id, frame); }
+						// A dropped shared frame needs no poisoning: the payload
+						// carries no per-connection state.
 						sendOutboundBinaryT(ws, frame);
 					} else {
 						const payload = wire.encode(event, data, state);
 						if (payload == null) { sendOutboundT(ws, env); delivered = true; continue; }
 						const sv = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
-						sendOutboundBinaryT(ws, buildBinaryFrame(sv, ensureWireIdT(ws, ud, topic), seqOnWire, payload));
+						const id = ensureWireIdT(ws, ud, topic);
+						if (id === -1) {
+							// Dropped wire-id announce: JSON for this frame + poison.
+							poisonWireStateT(ws, ud, wire.capability);
+							sendOutboundT(ws, env);
+							delivered = true;
+							continue;
+						}
+						const result = sendOutboundBinaryT(ws, buildBinaryFrame(sv, id, seqOnWire, payload));
+						// 2 = dropped past maxBackpressure (0 = enqueued or a chaos
+						// drop, NOT a drop here). The encode above already mutated
+						// this connection's dictionary for the dropped frame, so
+						// degrade the capability to JSON until reconnect.
+						if (result === 2) poisonWireStateT(ws, ud, wire.capability);
 					}
 					delivered = true;
 				}
@@ -446,10 +525,25 @@ export async function createTestServer(options = {}) {
 			// Stateless codec: encode once, send many.
 			const payload = wire.encode(event, data);
 			if (payload == null) {
-				if (chaos.scenario === null) return app.publish(topic, env, false, false);
+				if (excludeWs === null) {
+					if (chaos.scenario === null) return app.publish(topic, env, false, false);
+					let delivered = false;
+					for (const ws of wsConnections) {
+						if (!ws.isSubscribed(topic)) continue;
+						sendOutboundT(ws, env);
+						delivered = true;
+					}
+					return delivered;
+				}
+				// Declined frame with sender exclusion: per-subscriber JSON walk,
+				// skipping the excluded socket. Mirrors handler.js.
 				let delivered = false;
 				for (const ws of wsConnections) {
-					if (!ws.isSubscribed(topic)) continue;
+					if (ws === excludeWs) continue;
+					let ud;
+					try { ud = ws.getUserData(); } catch { continue; }
+					const subs = ud[WS_SUBSCRIPTIONS];
+					if (!subs || !subs.has(topic)) continue;
 					sendOutboundT(ws, env);
 					delivered = true;
 				}
@@ -459,13 +553,25 @@ export async function createTestServer(options = {}) {
 			const frameById = new Map();
 			let delivered = false;
 			for (const ws of wsConnections) {
+				if (ws === excludeWs) continue;
 				let ud;
 				try { ud = ws.getUserData(); } catch { continue; }
 				const subs = ud[WS_SUBSCRIPTIONS];
 				if (!subs || !subs.has(topic)) continue;
 				const caps = ud[WS_CAPS];
-				if (caps && caps.has(wire.capability)) {
+				if (caps && caps.has(wire.capability) && !wireStatePoisonedT(ud, wire.capability)) {
 					const id = ensureWireIdT(ws, ud, topic);
+					if (id === -1) {
+						// Dropped wire-id announce: the topic-id mapping is itself
+						// per-connection state the client now permanently lacks.
+						// JSON for this frame + poison. A dropped binary FRAME
+						// below needs no such handling - the shared payload
+						// carries no per-connection state.
+						poisonWireStateT(ws, ud, wire.capability);
+						sendOutboundT(ws, env);
+						delivered = true;
+						continue;
+					}
 					let frame = frameById.get(id);
 					if (!frame) {
 						frame = buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload);
@@ -486,7 +592,9 @@ export async function createTestServer(options = {}) {
 			const caps = ud[WS_CAPS];
 			let payload = null;
 			let schemaVersion = wire.schemaVersion;
-			if (caps && caps.has(wire.capability)) {
+			// A poisoned capability is served exactly like a caps-less
+			// connection: the JSON envelope, never binary. Mirrors handler.js.
+			if (caps && caps.has(wire.capability) && !wireStatePoisonedT(ud, wire.capability)) {
 				if (wire.state) {
 					const state = ensureWireStateT(ws, ud, wire);
 					payload = wire.encode(event, data, state);
@@ -499,8 +607,19 @@ export async function createTestServer(options = {}) {
 				return sendOutboundT(ws, envelope(topic, event, data));
 			}
 			const id = ensureWireIdT(ws, ud, topic);
+			if (id === -1) {
+				// Dropped wire-id announce: JSON for this frame + poison.
+				poisonWireStateT(ws, ud, wire.capability);
+				return sendOutboundT(ws, envelope(topic, event, data));
+			}
 			const frame = buildBinaryFrame(schemaVersion, id, 0, payload);
-			return sendOutboundBinaryT(ws, frame);
+			const result = sendOutboundBinaryT(ws, frame);
+			// 2 = dropped past maxBackpressure. A stateful encode already mutated
+			// this connection's dictionary for the dropped frame - degrade the
+			// capability to JSON until reconnect. Stateless payloads carry no
+			// per-connection state, so no poisoning.
+			if (result === 2 && wire.state) poisonWireStateT(ws, ud, wire.capability);
+			return result;
 		},
 		sendTo(filter, topic, event, data, options) {
 			void options; // Platform-shape parity; the test server configures no compressor.

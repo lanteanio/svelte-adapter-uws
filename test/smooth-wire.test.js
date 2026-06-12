@@ -138,12 +138,13 @@ describe('snapshot time seed', () => {
 		const platform = mockPlatform();
 		const ws = mockWs();
 		await cursors.snapshot(ws, 'board', platform);
-		expect(platform.sent).toHaveLength(3);
+		expect(platform.sent).toHaveLength(4);
 		expect(platform.sent[0].event).toBe('time');
 		expect(platform.sent[0].topic).toBe('__cursor:board');
 		expect(typeof platform.sent[0].data.t).toBe('number');
 		expect(Number.isFinite(platform.sent[0].data.t)).toBe(true);
-		expect(platform.sent[1].event).toBe('catalog');
-		expect(platform.sent[2].event).toBe('bulk');
+		expect(platform.sent[1].event).toBe('you');
+		expect(platform.sent[2].event).toBe('catalog');
+		expect(platform.sent[3].event).toBe('bulk');
 	});
 });

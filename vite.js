@@ -110,13 +110,20 @@ export default function uws(options = {}) {
 	 * @param {string} topic
 	 * @param {string} event
 	 * @param {unknown} [data]
-	 * @param {{ relay?: boolean }} [_options] - Accepted for API parity with production; ignored in dev (single-process).
+	 * @param {{ relay?: boolean, excludeWs?: object }} [options] - `relay` is
+	 *   accepted for API parity with production and ignored in dev
+	 *   (single-process). `excludeWs` withholds delivery from that one
+	 *   connection - matched as either the uWS-shaped wrapper handlers
+	 *   receive or the underlying raw socket - mirroring the production
+	 *   sender-exclusion contract.
 	 * @returns {boolean}
 	 */
-	function publish(topic, event, data, _options) {
+	function publish(topic, event, data, options) {
 		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + '}';
+		const excludeWs = (options && options.excludeWs) || null;
 		let sent = false;
 		for (const [ws, topics] of subscriptions) {
+			if (excludeWs !== null && (ws === excludeWs || wsWrappers.get(ws) === excludeWs)) continue;
 			if (topics.has(topic) && ws.readyState === 1) {
 				ws.send(envelope);
 				sent = true;
@@ -335,7 +342,8 @@ export default function uws(options = {}) {
 		// optional). This mirrors dev's existing simpler-than-prod posture
 		// (dev also skips per-topic seq stamping). The full binary `0x03` path
 		// ships and is tested in production (files/handler.js) and the test
-		// server (testing.js).
+		// server (testing.js). Publish options flow through unchanged, so
+		// sender exclusion (`excludeWs`) behaves identically in dev.
 		publishWire(topic, event, data, _wire, options) {
 			return publish(topic, event, data, options);
 		},

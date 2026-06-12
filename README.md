@@ -3057,6 +3057,21 @@ Reporting is **per-subscriber and opt-in**: a subscriber that never reports a vi
 
 The client store is a `Readable<Map<string, { user, data }>>`. The Map updates when cursors move, join, or disconnect. Internally the store merges the `catalog`/`join` stream (user metadata) with the `update`/`bulk` stream (positions); positions whose user has not yet been seen are withheld until the matching join arrives - they appear on the next render once the catalog catches up.
 
+**Which entry is mine?** The store's `self` readable carries this connection's own roster key (`null` until the server assigns one): the server sends it single-target as a `you` event in every snapshot reply and once before the connection's first `join` broadcast on the topic, so it is known as soon as the store syncs - or, for a connection that never snapshots, as soon as it first `move()`s. Compare it against the Map's keys to badge or skip the local user's own cursor:
+
+```svelte
+<script>
+  const cursors = cursor('board');
+  const me = cursors.self;
+</script>
+
+{#each [...$cursors] as [key, { user, data }] (key)}
+  {#if key !== $me}
+    <div class="cursor" style="left:{data.x}px; top:{data.y}px">{user.name}</div>
+  {/if}
+{/each}
+```
+
 **Initial sync and reconnect.** The `cursor(topic)` store sends a `{ type: 'cursor-snapshot', topic }` message every time the WebSocket connection opens - both on first connect and on every reconnect. The server calls `cursors.snapshot(ws, topic, platform)` in its `message` handler, which sends a `catalog` event (roster) followed by a `bulk` event (positions) back to the requesting client. Late joiners see existing cursors immediately. Wire `cursors.snapshot()` in your message handler as shown in the server example above.
 
 The `cursor()` function accepts an optional second argument with a `maxAge` option (in milliseconds). When set, cursor entries that haven't received a position update within that window are automatically removed. This makes clients self-healing when the server fails to broadcast `remove` events under load:
@@ -3099,10 +3114,13 @@ const handle = cursor('board:42', {
   gpuThreshold: 500,          // in-view count where 'auto' promotes to the GPU backend
   smooth: true,               // render-in-the-past interpolation for remote cursors (see below)
   mainThreadFeed: { rate: 10 }, // opt-in thinned position feed back to the main thread
+  hideSelf: true,             // exclude the viewer's own cursor from the canvas (and the feed)
   maxAge: 30_000,             // same self-healing sweep as the store
   viewport: () => board       // same sources as the store path; defaults to the canvas element
 });
 ```
+
+`hideSelf` keeps the canvas from painting a trailing echo of the local pointer (the OS cursor already marks it). The filter key is this connection's server-assigned roster key - exposed as `handle.self`, `null` until the first `move()` on the topic triggers the server's single-target `you` event - and it always comes from the main connection: the worker's own socket has a different key and never self-filters from it. Remote cursors are unaffected, and the underlying data (`handle.store`, the plain store) stays complete - `hideSelf` filters pixels, never data.
 
 #### Smooth remote cursors (`smooth`)
 
@@ -3134,9 +3152,9 @@ One canvas renders one topic at a time, and a canvas whose surface was transferr
 
 | Method | Description |
 |---|---|
-| `cursors.update(ws, topic, data, platform)` | Broadcast position (per-cursor + per-topic throttled). Emits `join` once per (ws, topic). |
+| `cursors.update(ws, topic, data, platform)` | Broadcast position (per-cursor + per-topic throttled). The first call per (ws, topic) sends the mover its own roster key (single-target `you`), then broadcasts `join`. |
 | `cursors.remove(ws, platform)` | Remove from all topics, broadcast `remove` per topic |
-| `cursors.snapshot(ws, topic, platform)` | Send current positions to one connection as `time` + `catalog` + `bulk` (initial sync; `time` seeds the smoothing clock) |
+| `cursors.snapshot(ws, topic, platform)` | Send current positions to one connection as `time` + `you` + `catalog` + `bulk` (initial sync; `time` seeds the smoothing clock, `you` is the requester's own roster key) |
 | `cursors.list(topic)` | Current positions (for SSR) |
 | `cursors.viewport(ws, topic, rect)` | Record a subscriber's viewport rect (called for you by `hooks.message` on a `cursor-viewport` frame) |
 | `cursors.viewportFor(ws, topic)` | The subscriber's last reported rect, or `null` if it never reported one |
@@ -3167,6 +3185,36 @@ Latency cost vs. the alternate "fire-the-first-mover-synchronously" design: the 
 
 - **In-memory.** Cursor positions live in the process. In cluster mode, each worker tracks its own connections. For cross-instance cursor sharing use the Redis-backed variant from the [extensions](https://github.com/lanteanio/svelte-adapter-uws-extensions) package.
 - **No persistence.** Positions are lost on restart. This is intentional - cursors are ephemeral.
+
+### Smooth (prediction and reconciliation)
+
+The building blocks for server-authoritative entities whose owners predict their own input client-side: a dragged shape, an avatar, a game character. The high-level surface lives in [svelte-realtime](https://github.com/lanteanio/svelte-realtime)'s `live.smooth()`; the adapter ships the primitives for apps composing their own wire.
+
+```js
+// Server: the authoritative command processor + the binary codec.
+import { createSmoothAuthority, createSmoothWireCodec, SMOOTH_TOPIC_PREFIX } from 'svelte-adapter-uws/plugins/smooth';
+
+const authority = createSmoothAuthority({ apply });   // apply: (state, command, ctx) => state
+const codec = createSmoothWireCodec();
+
+// Per tick (the caller owns the cadence):
+const { updates, acks, idle } = authority.drain();
+for (const u of updates) platform.publishWire(topic, 'update', { key: u.key, data: u.state }, codec, { excludeWs: u.ws });
+for (const a of acks) platform.sendWire(a.ws, topic, 'ack', { id: a.id, state: a.state, t: Date.now() }, codec);
+```
+
+```js
+// Client: the channel composes prediction, interpolation, and the wire glue.
+import { createSmoothChannel } from 'svelte-adapter-uws/plugins/smooth/client';
+
+const channel = createSmoothChannel({ apply, initial, transport: { sendCommand, sync } });
+channel.onFrame((local, remote) => paint(local, remote));
+channel.command({ dx: 4, dy: 0 });   // applied locally this frame, reconciled on ack
+```
+
+The contract that makes it correct: clients send COMMANDS, never state; the server applies them through the same `apply` function the client predicts with and acknowledges each owner with the resulting state; the client rebases on every acknowledgement and replays its un-acknowledged tail. Corrections below `errorThreshold` snap silently, larger ones ease over `smoothTimeMs` while the simulation itself adopts the truth immediately. One-shot side effects in `apply` guard on `ctx.firstTime`; randomness draws from `ctx.rng` (reseeded per command id, so prediction, replay, and the server draw identically). If acknowledgements stop past the window bounds, prediction is killed - the entity renders the last authoritative state and recovers through a full-state sync - rather than allowed to run away.
+
+The pure cores (`plugins/smooth/predict.js`, `random.js`, `interpolate.js`, `clock.js`) take every time reading as an argument, so the same code runs in a worker, on the main thread, and under a deterministic simulation harness unchanged. Replaying a 5-command window costs ~85ns (`bench/35-smooth-replay-ab.mjs`); the steady-state loop allocates nothing beyond the by-contract window entries.
 
 ### Queue (ordered delivery)
 

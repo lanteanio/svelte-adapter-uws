@@ -132,6 +132,14 @@ export function attachCursorWorker(scope) {
 	const configColors = new Map();
 	/** @type {Set<string>} keys hidden from render AND feed */
 	const configHidden = new Set();
+	// Exclude the viewer's own cursor from render and feed. Both pieces come
+	// from the main thread: the flag rides init, the key rides config
+	// messages. This socket's own `you` event is deliberately never adopted -
+	// the worker's second connection has its own roster key, distinct from
+	// the main connection that sends the user's moves.
+	let hideSelf = false;
+	/** @type {string | null} */
+	let selfKey = null;
 
 	// - socket state -
 	/** @type {WebSocket | null} */
@@ -327,6 +335,7 @@ export function attachCursorWorker(scope) {
 			// Same rule as the store merge: no roster entry, not visible yet.
 			if (!state.userMap.has(key)) continue;
 			if (configHidden.has(key)) continue;
+			if (hideSelf && key === selfKey) continue;
 			if (data === null || typeof data !== 'object') continue;
 			let x = data.x, y = data.y;
 			if (typeof x !== 'number' || typeof y !== 'number') continue;
@@ -470,12 +479,14 @@ export function attachCursorWorker(scope) {
 			if (nextTopic !== topic) {
 				// Keys are per-topic; stale display config must not leak onto
 				// a new board's key space. The main thread re-resolves config
-				// once the new roster lands. The viewport rect is also per-board:
-				// keeping it would cull and transform the new topic against the
-				// old board's coordinates until the next report, so render
-				// nothing until the pump's first rect for this board arrives.
+				// once the new roster lands (the self filter key rides along).
+				// The viewport rect is also per-board: keeping it would cull
+				// and transform the new topic against the old board's
+				// coordinates until the next report, so render nothing until
+				// the pump's first rect for this board arrives.
 				configColors.clear();
 				configHidden.clear();
+				selfKey = null;
 				rect = null;
 			}
 			topic = nextTopic;
@@ -491,6 +502,7 @@ export function attachCursorWorker(scope) {
 				extrapolateMs: typeof msg.smooth.extrapolateMs === 'number' ? msg.smooth.extrapolateMs : 250,
 				snapGapMs: typeof msg.smooth.snapGapMs === 'number' ? msg.smooth.snapGapMs : 500
 			} : null;
+			hideSelf = msg.hideSelf === true;
 			renderOpts = {
 				gpu: msg.gpu === undefined ? 'auto' : msg.gpu,
 				gpuThreshold: msg.gpuThreshold === undefined ? 500 : msg.gpuThreshold,
@@ -532,6 +544,10 @@ export function attachCursorWorker(scope) {
 					if (typeof key === 'string') configHidden.add(key);
 				}
 			}
+			// The main connection's roster key for this user. An absent field
+			// (an older main thread) leaves the current value alone; an
+			// explicit null clears it.
+			if (msg.selfKey === null || typeof msg.selfKey === 'string') selfKey = msg.selfKey;
 			markDirty();
 			return;
 		}

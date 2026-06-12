@@ -129,6 +129,48 @@ describe('handle shape and caching', () => {
 		expect(() => cursorClient.cursor(freshTopic(), { canvas: makeCanvas(), gpu: 'cuda' })).toThrow(/unknown gpu mode/);
 		expect(() => cursorClient.cursor(freshTopic(), { canvas: makeCanvas(), rendering: 'gpu' })).toThrow(/unknown rendering mode/);
 	});
+
+	it('rejects a non-boolean hideSelf at call time', () => {
+		expect(() => cursorClient.cursor(freshTopic(), { canvas: makeCanvas(), hideSelf: 'yes' })).toThrow(/hideSelf must be a boolean/);
+	});
+});
+
+describe('self identity', () => {
+	it("captures the main connection's 'you' into the plain store's self readable", async () => {
+		const topic = freshTopic();
+		const store = cursorClient.cursor(topic);
+		const seen = [];
+		const unsub = store.self.subscribe((v) => seen.push(v));
+		expect(seen).toEqual([null]); // null until the server assigns a key
+		await flush();
+
+		MockWebSocket._last.emit({ topic: '__cursor:' + topic, event: 'you', data: { key: 'k9' } });
+		expect(seen[seen.length - 1]).toBe('k9');
+		unsub();
+	});
+
+	it('passes hideSelf through init and ships the self key to the worker when it lands', async () => {
+		const canvas = makeCanvas();
+		const topic = freshTopic();
+		const handle = cursorClient.cursor(topic, { canvas, hideSelf: true });
+		expect(handle.self).toBe(null);
+		const teardown = handle.mount();
+		await flush();
+
+		const worker = MockWorker.instances[0];
+		expect(initsOf(worker)[0].msg.hideSelf).toBe(true);
+		// The post-init config push runs before the key is known.
+		const before = ofType(worker, 'config');
+		expect(before[before.length - 1].msg.selfKey).toBe(null);
+
+		MockWebSocket._last.emit({ topic: '__cursor:' + topic, event: 'you', data: { key: 'k7' } });
+		await flush();
+		expect(handle.self).toBe('k7');
+		const after = ofType(worker, 'config');
+		expect(after.length).toBeGreaterThan(before.length);
+		expect(after[after.length - 1].msg.selfKey).toBe('k7');
+		teardown();
+	});
 });
 
 describe('worker mount', () => {
@@ -332,6 +374,30 @@ describe('main-thread fallback', () => {
 		// dpr 2: view coords scale into device pixels inside the renderer.
 		expect(arcs[arcs.length - 1].slice(1, 3)).toEqual([80, 100]);
 		expect(get(handle.store).get('u1')).toEqual({ user: { name: 'Ada' }, data: { x: 40, y: 50 } });
+		teardown();
+	});
+
+	it('hideSelf excludes the local cursor from the fallback paint but not from the store', async () => {
+		const canvas = makeCanvas();
+		const topic = freshTopic();
+		const handle = cursorClient.cursor(topic, { canvas, rendering: 'main', hideSelf: true });
+		const teardown = handle.mount();
+		await flush();
+
+		const mock = MockWebSocket._last;
+		mock.emit({ topic: '__cursor:' + topic, event: 'you', data: { key: 'me' } });
+		mock.emit({ topic: '__cursor:' + topic, event: 'catalog', data: [{ key: 'me', user: {} }, { key: 'other', user: {} }] });
+		mock.emit({ topic: '__cursor:' + topic, event: 'bulk', data: [{ key: 'me', data: { x: 10, y: 10 } }, { key: 'other', data: { x: 40, y: 50 } }] });
+		await flush(30);
+
+		const arcs = canvas.ctx.ops.filter((o) => o[0] === 'arc');
+		expect(arcs.length).toBeGreaterThanOrEqual(1);
+		// Only the remote cursor painted (dpr 2 scales view coords); the local
+		// cursor at (10,10) -> (20,20) never reached the renderer.
+		expect(arcs.every((a) => a[1] === 80 && a[2] === 100)).toBe(true);
+		// The data surface stays complete - hideSelf filters pixels, not data.
+		expect(get(handle.store).has('me')).toBe(true);
+		expect(handle.self).toBe('me');
 		teardown();
 	});
 

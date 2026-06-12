@@ -734,25 +734,30 @@ describe('cursor plugin - server', () => {
 			c.snapshot(newWs, 'canvas', p);
 
 			// The reply leads with the server time event (the smoothing clock
-			// seed), then the roster, then the positions.
-			expect(p.sent).toHaveLength(3);
+			// seed), then the requester's own roster key, then the roster,
+			// then the positions.
+			expect(p.sent).toHaveLength(4);
 			expect(p.sent[0].ws).toBe(newWs);
 			expect(p.sent[0].topic).toBe('__cursor:canvas');
 			expect(p.sent[0].event).toBe('time');
 			expect(typeof p.sent[0].data.t).toBe('number');
 
-			expect(p.sent[1].event).toBe('catalog');
-			expect(Array.isArray(p.sent[1].data)).toBe(true);
-			expect(p.sent[1].data).toHaveLength(2);
-			for (const entry of p.sent[1].data) {
+			expect(p.sent[1].ws).toBe(newWs);
+			expect(p.sent[1].event).toBe('you');
+			expect(p.sent[1].data).toEqual({ key: expect.any(String) });
+
+			expect(p.sent[2].event).toBe('catalog');
+			expect(Array.isArray(p.sent[2].data)).toBe(true);
+			expect(p.sent[2].data).toHaveLength(2);
+			for (const entry of p.sent[2].data) {
 				expect(entry).toEqual({ key: expect.any(String), user: expect.any(Object) });
 				expect(entry).not.toHaveProperty('data');
 			}
 
-			expect(p.sent[2].event).toBe('bulk');
-			expect(Array.isArray(p.sent[2].data)).toBe(true);
-			expect(p.sent[2].data).toHaveLength(2);
-			for (const entry of p.sent[2].data) {
+			expect(p.sent[3].event).toBe('bulk');
+			expect(Array.isArray(p.sent[3].data)).toBe(true);
+			expect(p.sent[3].data).toHaveLength(2);
+			for (const entry of p.sent[3].data) {
 				expect(entry).toEqual({ key: expect.any(String), data: expect.any(Object) });
 				expect(entry).not.toHaveProperty('user');
 			}
@@ -768,22 +773,23 @@ describe('cursor plugin - server', () => {
 			const newWs = mockWs({ id: '2', name: 'Bob' });
 			c.snapshot(newWs, 'room', p);
 
-			const catalogKeys = p.sent[1].data.map((e) => e.key).sort();
-			const bulkKeys = p.sent[2].data.map((e) => e.key).sort();
+			const catalogKeys = p.sent[2].data.map((e) => e.key).sort();
+			const bulkKeys = p.sent[3].data.map((e) => e.key).sort();
 			expect(catalogKeys).toEqual(bulkKeys);
-			expect(p.sent[1].data[0].user).toEqual({ id: '1', name: 'Alice' });
-			expect(p.sent[2].data[0].data).toEqual({ x: 5, y: 15 });
+			expect(p.sent[2].data[0].user).toEqual({ id: '1', name: 'Alice' });
+			expect(p.sent[3].data[0].data).toEqual({ x: 5, y: 15 });
 		});
 
 		it('sends empty catalog + bulk for an unknown topic', () => {
 			const p = mockPlatform();
 			cursors.snapshot(mockWs({ id: '1' }), 'nonexistent', p);
-			expect(p.sent).toHaveLength(3);
+			expect(p.sent).toHaveLength(4);
 			expect(p.sent[0].event).toBe('time');
-			expect(p.sent[1].event).toBe('catalog');
-			expect(p.sent[1].data).toEqual([]);
-			expect(p.sent[2].event).toBe('bulk');
+			expect(p.sent[1].event).toBe('you');
+			expect(p.sent[2].event).toBe('catalog');
 			expect(p.sent[2].data).toEqual([]);
+			expect(p.sent[3].event).toBe('bulk');
+			expect(p.sent[3].data).toEqual([]);
 		});
 
 		it('sends empty catalog + bulk when the topic has no active cursors', () => {
@@ -796,9 +802,9 @@ describe('cursor plugin - server', () => {
 			p.reset();
 
 			c.snapshot(mockWs({ id: '2' }), 'canvas', p);
-			expect(p.sent).toHaveLength(3);
-			expect(p.sent[1].data).toEqual([]);
+			expect(p.sent).toHaveLength(4);
 			expect(p.sent[2].data).toEqual([]);
+			expect(p.sent[3].data).toEqual([]);
 		});
 
 		it('reflects the latest stored position even if not yet broadcast', () => {
@@ -815,7 +821,7 @@ describe('cursor plugin - server', () => {
 			const newWs = mockWs({ id: '2' });
 			c.snapshot(newWs, 'canvas', p);
 
-			expect(p.sent[2].data[0].data).toEqual({ x: 99 });
+			expect(p.sent[3].data[0].data).toEqual({ x: 99 });
 		});
 
 		it('sends snapshots independently per topic', () => {
@@ -830,10 +836,11 @@ describe('cursor plugin - server', () => {
 			const viewer = mockWs({ id: '2' });
 			c.snapshot(viewer, 'canvas-a', p);
 
-			expect(p.sent).toHaveLength(3);
+			expect(p.sent).toHaveLength(4);
 			expect(p.sent[0].topic).toBe('__cursor:canvas-a');
 			expect(p.sent[1].topic).toBe('__cursor:canvas-a');
 			expect(p.sent[2].topic).toBe('__cursor:canvas-a');
+			expect(p.sent[3].topic).toBe('__cursor:canvas-a');
 		});
 	});
 
@@ -932,10 +939,11 @@ describe('cursor plugin - server', () => {
 
 			expect(handled).toBe(true);
 			expect(ws2.isSubscribed('__cursor:canvas')).toBe(true); // now actually subscribed
-			expect(p.sent).toHaveLength(3);
+			expect(p.sent).toHaveLength(4);
 			expect(p.sent[0].event).toBe('time');
-			expect(p.sent[1].event).toBe('catalog');
-			expect(p.sent[2].event).toBe('bulk');
+			expect(p.sent[1].event).toBe('you');
+			expect(p.sent[2].event).toBe('catalog');
+			expect(p.sent[3].event).toBe('bulk');
 		});
 
 		it('cursor-snapshot is denied for a topic the client cannot subscribe to (authz, no leak)', async () => {
@@ -1386,7 +1394,9 @@ describe('cursor plugin - backpressure (per-subscriber drop)', () => {
 
 		c.update(a, 'board', { x: 1, y: 1 }, p);
 		expect(p.sentTo(slow)).toHaveLength(0); // skipped
-		expect(p.sentTo(a)).toHaveLength(1); // healthy subscriber unaffected
+		// healthy subscriber unaffected (its own first move also hands it its
+		// roster key as the single-target 'you' event)
+		expect(p.sentTo(a).map((e) => e.event)).toEqual(['you', 'update']);
 		expect(c.stats().bpSkips).toBe(1);
 
 		// Next flush, the slow consumer has drained below the cap: it receives
@@ -1405,7 +1415,7 @@ describe('cursor plugin - backpressure (per-subscriber drop)', () => {
 		const a = mockWs({ id: 'A' });
 		p.addSubscriber(a, CURSOR); // never setBuffered -> reads 0
 		c.update(a, 'board', { x: 1, y: 1 }, p);
-		expect(p.sentTo(a)).toHaveLength(1);
+		expect(p.sentTo(a).filter((e) => e.event === 'update')).toHaveLength(1);
 		expect(c.stats().bpSkips).toBe(0);
 	});
 
@@ -1434,9 +1444,10 @@ describe('cursor plugin - backpressure (per-subscriber drop)', () => {
 		const p = mockPlatform(); // minimal: no forEachSubscriber / bufferedAmount
 		const a = mockWs({ id: 'A' });
 		expect(() => c.update(a, 'board', { x: 1, y: 1 }, p)).not.toThrow();
-		// fell back to the shared publish fan-out (join + update on published[])
+		// fell back to the shared publish fan-out (join + update on published[]);
+		// only the mover's single-target 'you' goes through send.
 		expect(p.published.map((e) => e.event)).toEqual(['join', 'update']);
-		expect(p.sent).toHaveLength(0);
+		expect(p.sent.map((e) => e.event)).toEqual(['you']);
 	});
 
 	it('does not touch the per-subscriber primitives when backpressure is disabled', () => {
@@ -1467,8 +1478,9 @@ describe('cursor plugin - backpressure (per-subscriber drop)', () => {
 		c1.update(a, 'board', { x: 11, y: 11 }, p1);
 		c2.update(b, 'board', { x: 22, y: 22 }, p2);
 
-		expect(p1.sentTo(a)[0].data.data).toEqual({ x: 11, y: 11 });
-		expect(p2.sentTo(b)[0].data.data).toEqual({ x: 22, y: 22 });
+		const updatesTo = (p, ws) => p.sentTo(ws).filter((e) => e.event === 'update');
+		expect(updatesTo(p1, a)[0].data.data).toEqual({ x: 11, y: 11 });
+		expect(updatesTo(p2, b)[0].data.data).toEqual({ x: 22, y: 22 });
 		expect(p1.sentTo(b)).toHaveLength(0);
 		expect(p2.sentTo(a)).toHaveLength(0);
 	});
@@ -1538,8 +1550,9 @@ describe('cursor plugin - viewport culling', () => {
 		c.update(mockWs({ id: 'M' }), 'board', { x: 99999, y: 99999 }, p);
 
 		// Zero reporters -> one shared publish, not an O(connections) walk.
+		// The mover's single-target 'you' is the only send.
 		expect(p.published.map((e) => e.event)).toEqual(['join', 'update']);
-		expect(p.sent).toHaveLength(0);
+		expect(p.sent.map((e) => e.event)).toEqual(['you']);
 		expect(c.stats().perSubscriberFlushes).toBe(0);
 	});
 
@@ -1574,9 +1587,9 @@ describe('cursor plugin - viewport culling', () => {
 		const viewer = mockWs({ id: 'V2' });
 		p.addSubscriber(viewer, CURSOR);
 		c.update(mockWs({ id: 'M2' }), 'board', { x: 6, y: 6 }, p);
-		// Back on the shared frame.
+		// Back on the shared frame; only the mover's 'you' goes through send.
 		expect(p.published.map((e) => e.event)).toContain('update');
-		expect(p.sent).toHaveLength(0);
+		expect(p.sent.map((e) => e.event)).toEqual(['you']);
 		expect(c.stats().perSubscriberFlushes).toBe(1); // unchanged - no walk this flush
 	});
 

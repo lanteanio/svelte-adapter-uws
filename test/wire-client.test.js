@@ -93,7 +93,8 @@ describe('client inbound binary (0x03) demux', () => {
 		expect(last).toEqual({
 			topic: '__cursor:board',
 			event: 'update',
-			data: { key: '7', data: { x: 10.5, y: 20.5 } }
+			data: { key: '7', data: { x: 10.5, y: 20.5 } },
+			seq: 42
 		});
 		unsub();
 	});
@@ -170,10 +171,10 @@ describe('client inbound binary (0x03) demux', () => {
 		expect(refFrame.length).toBeLessThan(assignFrame.length);
 
 		mock.deliver(assignFrame.buffer);
-		expect(seen[seen.length - 1]).toEqual({ topic: '__cursor:board', event: 'update', data: { key: '7', data: { x: 10.5, y: 20.5 } } });
+		expect(seen[seen.length - 1]).toEqual({ topic: '__cursor:board', event: 'update', data: { key: '7', data: { x: 10.5, y: 20.5 } }, seq: 1 });
 
 		mock.deliver(refFrame.buffer);
-		expect(seen[seen.length - 1]).toEqual({ topic: '__cursor:board', event: 'update', data: { key: '7', data: { x: 99.5, y: 88.5 } } });
+		expect(seen[seen.length - 1]).toEqual({ topic: '__cursor:board', event: 'update', data: { key: '7', data: { x: 99.5, y: 88.5 } }, seq: 2 });
 
 		unsub();
 	});

@@ -10,6 +10,18 @@
  * uses platform.publish() and platform.send().
  *
  * Wire shape (channel `__cursor:{topic}`):
+ *   - `time`     {t}                 - server wall clock, sent to a single
+ *                                      connection as the first snapshot()
+ *                                      reply event. Seeds the client-side
+ *                                      clock estimator; JSON-only (the
+ *                                      binary codec declines it).
+ *   - `you`      {key}               - the receiving connection's own
+ *                                      roster key. Sent to that connection
+ *                                      alone: once before its first `join`
+ *                                      broadcast on the topic, and in every
+ *                                      snapshot() reply between `time` and
+ *                                      `catalog`. JSON-only (the binary
+ *                                      codec declines it).
  *   - `catalog`  [{key, user}, ...]  - sent on snapshot() to a single
  *                                      newly-attaching subscriber.
  *   - `join`     {key, user}         - emitted once per (ws, topic) the
@@ -49,7 +61,8 @@ const EVENTS = Object.freeze({
 	UPDATE: 'update',
 	BULK: 'bulk',
 	REMOVE: 'remove',
-	TIME: 'time'
+	TIME: 'time',
+	YOU: 'you'
 });
 
 /**
@@ -121,11 +134,13 @@ function packCell(cx, cy) {
  *   Returns deep copies (via structuredClone) when data is JSON-serializable.
  *   Falls back to shared references for non-cloneable data.
  * @property {(ws: any, topic: string, platform: import('../../index.js').Platform) => void} snapshot -
- *   Send current cursor positions for a topic to a single connection as
- *   a `catalog` + `bulk` pair (roster, then positions). Call from your
- *   `message` handler when the client sends `{type: 'cursor-snapshot',
- *   topic}`. The `cursor()` client store sends this automatically on
- *   subscribe so late joiners see existing cursors immediately.
+ *   Send current cursor positions for a topic to a single connection as a
+ *   `time` + `you` + `catalog` + `bulk` sequence (server clock seed, the
+ *   requester's own roster key, the roster, then positions). Call from
+ *   your `message` handler when the client sends `{type:
+ *   'cursor-snapshot', topic}`. The `cursor()` client store sends this
+ *   automatically on subscribe so late joiners see existing cursors
+ *   immediately.
  * @property {() => void} clear -
  *   Clear all cursor tracking state and pending timers.
  * @property {() => { flushes: number, driftMeanMs: number, driftMaxMs: number, dirtyTopicsCurrent: number, activeTopicsTotal: number }} stats -
@@ -1005,6 +1020,15 @@ export function createCursor(options = {}) {
 			}
 
 			if (isFirstOnTopic) {
+				// Tell the mover which roster key is its own BEFORE the join
+				// broadcast announces that key to everyone (the mover included),
+				// so the client can attribute the join - and every later frame -
+				// to itself. Single-target and additive: the binary codec
+				// declines the event, so it rides the JSON fallback even on a
+				// binary-capable connection, and an older client's merge ignores
+				// it as an unknown event. `state.topics` is the once-per-(ws,
+				// topic) gate, the same one that gates the join itself.
+				emitTo(ws, TOPIC_PREFIX + topic, EVENTS.YOU, { key: state.key }, platform);
 				emitJoin(topic, state.key, state.user, platform);
 			}
 
@@ -1166,6 +1190,14 @@ export function createCursor(options = {}) {
 			// codec declines the event), so it is an additive envelope an
 			// older client's merge ignores as an unknown event.
 			emitTo(ws, TOPIC_PREFIX + topic, EVENTS.TIME, { t: wallEpoch() }, platform);
+			// The requester's own roster key, ahead of the roster it appears in
+			// (or will appear in on its first move). getWsState only allocates
+			// the connection key - the join broadcast still keys off
+			// `state.topics` on the first move - so a pure viewer is never
+			// announced to others by snapshotting. Snapshot-then-move keeps one
+			// identity: the key handed out here is the key the later join
+			// broadcasts.
+			emitTo(ws, TOPIC_PREFIX + topic, EVENTS.YOU, { key: getWsState(ws).key }, platform);
 			const topicMap = topics.get(topic);
 			const catalog = [];
 			const positions = [];

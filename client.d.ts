@@ -108,6 +108,12 @@ export interface WSEvent<T = unknown> {
 	 * cluster-wide source of truth (e.g. Redis Lua INCR).
 	 */
 	seq?: number;
+	/**
+	 * Server wall-clock stamp reconstructed by a binary topic codec (the
+	 * stamped cursor and smooth wires). The time axis interpolation ingests;
+	 * absent on JSON frames and on codecs that carry no stamp.
+	 */
+	t?: number;
 }
 
 // - Scannable store ----------------------------------------------------------

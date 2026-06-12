@@ -6,6 +6,14 @@
  * cleanup; this module keeps the client-side state in sync.
  *
  * Wire shape (catalog / positions split):
+ *   - `time`     {t}            - server wall clock, first event of every
+ *                                  snapshot reply (smoothing clock seed).
+ *   - `you`      {key}          - this connection's own roster key, sent
+ *                                  single-target: in every snapshot reply
+ *                                  and once before this connection's first
+ *                                  join broadcast on the topic. Captured
+ *                                  into the per-topic self identity; never
+ *                                  merged into the cursor Map.
  *   - `catalog`  [{key, user}]  - roster sent on snapshot to a fresh
  *                                  subscriber. Replaces local user map.
  *   - `join`     {key, user}    - new user announced on the topic.
@@ -117,6 +125,77 @@ function resolveSmoothOptions(raw) {
 
 /** @type {Map<string, ReturnType<typeof cursor>>} */
 const cursorStores = new Map();
+
+/**
+ * Per-topic self-identity capture. The server tells each connection which
+ * roster key is its own via the single-target `you` event - in every
+ * snapshot reply and once before the connection's first join broadcast on
+ * the topic. One channel per topic serves every consumer (the plain store's
+ * `self` readable, the canvas handle's `self` getter, the `hideSelf` render
+ * filter), ref-counted like the topic stores: the event listener detaches
+ * when the last consumer releases. {@link move} pins one permanent reference
+ * for any topic it ever sends on, so the once-per-connection `you` that the
+ * first move triggers is captured even when nothing else is listening yet
+ * (the canvas worker path never attaches the main connection to the cursor
+ * channel). The render worker's own socket also receives a `you`, naming the
+ * WORKER connection's key - that one is deliberately ignored; only the main
+ * connection (the one that sends the user's moves) carries the user's
+ * identity.
+ * @type {Map<string, { key: string | null, store: import('svelte/store').Writable<string | null>, refs: number, unsub: (() => void) | null }>}
+ */
+const selfChannels = new Map();
+
+/** Start (or share) the `you` capture for a topic. Pair with {@link releaseSelf}. */
+function acquireSelf(topic) {
+	let ch = selfChannels.get(topic);
+	if (!ch) {
+		ch = { key: null, store: writable(null), refs: 0, unsub: null };
+		selfChannels.set(topic, ch);
+	}
+	if (ch.refs++ === 0) {
+		ch.unsub = on(TOPIC_PREFIX + topic).subscribe((event) => {
+			if (!event || event.event !== 'you' || event.data == null) return;
+			const key = event.data.key;
+			if (typeof key !== 'string' || key === ch.key) return;
+			// A reconnect mints a fresh connection key; last writer wins, so
+			// the identity follows the live connection.
+			ch.key = key;
+			ch.store.set(key);
+		});
+	}
+	return ch;
+}
+
+/** Release one reference on a topic's `you` capture. */
+function releaseSelf(topic) {
+	const ch = selfChannels.get(topic);
+	if (!ch || --ch.refs > 0) return;
+	if (ch.unsub) {
+		ch.unsub();
+		ch.unsub = null;
+	}
+	selfChannels.delete(topic);
+}
+
+/**
+ * A readable over a topic's self identity: `null` until the server has
+ * assigned this connection a roster key on the topic. Subscribing holds one
+ * reference on the capture channel; unsubscribing releases it.
+ * @param {string} topic
+ * @returns {import('svelte/store').Readable<string | null>}
+ */
+function selfReadable(topic) {
+	return {
+		subscribe(fn) {
+			const ch = acquireSelf(topic);
+			const unsub = ch.store.subscribe(fn);
+			return () => {
+				unsub();
+				releaseSelf(topic);
+			};
+		}
+	};
+}
 
 /**
  * Get a reactive store of cursor positions on a topic.
@@ -246,6 +325,12 @@ export function cursor(topic, options) {
 
 	function startListening() {
 		cancelled = false;
+		// Hold the self-identity capture for the whole listening window: the
+		// snapshot this store requests below replies with the single-target
+		// `you` event, and it must be captured even when nothing has
+		// subscribed the `self` readable yet (a late `self` reader would
+		// otherwise miss the one reply).
+		acquireSelf(topic);
 		const source = on(cursorTopic);
 		sourceUnsub = source.subscribe((event) => {
 			if (applyEvent(state, event)) emitOutput();
@@ -272,6 +357,7 @@ export function cursor(topic, options) {
 
 	function stopListening() {
 		cancelled = true;
+		releaseSelf(topic);
 		if (sourceUnsub) {
 			sourceUnsub();
 			sourceUnsub = null;
@@ -306,6 +392,15 @@ export function cursor(topic, options) {
 			};
 		},
 		/**
+		 * This connection's own roster key on the topic - `null` until the
+		 * server has assigned one (the snapshot reply carries it, so it is
+		 * known as soon as the store syncs; the first `move()` on the topic
+		 * triggers it for a connection that never snapshots). Compare against
+		 * the merged Map's keys to find - or skip - the local user's own
+		 * cursor.
+		 */
+		self: selfReadable(topic),
+		/**
 		 * @internal Adopt a viewport source supplied by a later `cursor()` call,
 		 * starting the poll if the store is already subscribed.
 		 */
@@ -333,6 +428,17 @@ export function cursor(topic, options) {
  */
 const movePending = new Map();
 let moveScheduled = false;
+
+/**
+ * Topics `move()` has pinned a self-identity capture for. The server answers
+ * the first move on a topic with the once-per-connection `you` event, and in
+ * canvas-worker mode nothing else on the main connection is listening - so
+ * the capture must be live before the first frame leaves. One permanent
+ * reference per moved-on topic; bounded by the topics this client actually
+ * moves on.
+ * @type {Set<string>}
+ */
+const movedTopics = new Set();
 
 // Resolve `requestAnimationFrame` at call time so a polyfill installed
 // after this module imports (or a test harness substitution) is honored.
@@ -374,6 +480,10 @@ function cancelFrame(handle) {
  */
 export function move(topic, data) {
 	if (typeof window === 'undefined') return;
+	if (!movedTopics.has(topic)) {
+		movedTopics.add(topic);
+		acquireSelf(topic);
+	}
 	movePending.set(topic, data);
 	if (moveScheduled) return;
 	moveScheduled = true;
@@ -567,6 +677,12 @@ function cursorOnCanvas(topic, options) {
 		throw new Error('cursor: unknown gpu mode ' + JSON.stringify(gpu));
 	}
 	const gpuThreshold = options.gpuThreshold === undefined ? 500 : options.gpuThreshold;
+	const hideSelf = options.hideSelf === undefined ? false : options.hideSelf;
+	if (typeof hideSelf !== 'boolean') {
+		// Fail on the main thread like the gpu mode; deferring to the worker
+		// would surface as an opaque worker error.
+		throw new Error('cursor: hideSelf must be a boolean, got ' + JSON.stringify(options.hideSelf));
+	}
 	const maxAge = typeof options.maxAge === 'number' ? options.maxAge : 0;
 	const feedRate = options.mainThreadFeed === true ? 10
 		: (options.mainThreadFeed && typeof options.mainThreadFeed.rate === 'number' ? options.mainThreadFeed.rate : 0);
@@ -581,13 +697,15 @@ function cursorOnCanvas(topic, options) {
 	// a stray server call must not throw).
 	if (typeof window === 'undefined' || !canvasHosts) {
 		const inert = writable(new Map());
+		const inertSelf = writable(null);
 		return {
 			mount: () => () => {},
 			viewport: () => {},
 			configure: () => {},
 			destroy: () => {},
+			self: null,
 			...(feedRate > 0 ? { feed: { subscribe: inert.subscribe } } : {}),
-			...(rendering === 'main' ? { store: { subscribe: inert.subscribe } } : {})
+			...(rendering === 'main' ? { store: { subscribe: inert.subscribe, self: { subscribe: inertSelf.subscribe } } } : {})
 		};
 	}
 
@@ -607,6 +725,15 @@ function cursorOnCanvas(topic, options) {
 	let everMounted = false;
 	let viewportSource = options.viewport ?? null;
 	const cfg = { colorOf: null, hide: null };
+	// This connection's own roster key on the topic. Seeded from any capture
+	// another consumer (or an earlier move()) already holds, tracked live
+	// while mounted, retained across unmounts. Always sourced from the MAIN
+	// connection - the render worker's own socket has a different key and is
+	// never consulted.
+	/** @type {string | null} */
+	let selfKey = selfChannels.get(topic)?.key ?? null;
+	/** @type {(() => void) | null} */
+	let selfUnsub = null;
 	/** @type {Map<string, any>} latest roster (worker mode: pushed; fallback: derived) */
 	let roster = new Map();
 	const feedStore = feedRate > 0 ? writable(new Map()) : null;
@@ -641,15 +768,48 @@ function cursorOnCanvas(topic, options) {
 	}
 
 	function pushConfig() {
-		if (!cfg.colorOf && !cfg.hide) return;
+		if (!cfg.colorOf && !cfg.hide && !hideSelf) return;
 		const resolved = resolveDisplayConfig(roster, cfg);
 		if (host.worker && initSent) {
-			host.worker.postMessage({ type: 'config', colors: resolved.colors, hidden: resolved.hidden });
+			// The self filter key always crosses from here, never from the
+			// worker's own socket: the worker's second connection has its own
+			// roster key, distinct from the main connection that sends the
+			// user's moves.
+			host.worker.postMessage({
+				type: 'config',
+				colors: resolved.colors,
+				hidden: resolved.hidden,
+				selfKey: hideSelf ? selfKey : null
+			});
 		}
 		if (fallback) {
 			fallback.colors = new Map(resolved.colors);
 			fallback.hidden = new Set(resolved.hidden);
 			fallback.dirty = true;
+		}
+	}
+
+	/**
+	 * Track the topic's self identity while mounted. The key can land after
+	 * mount (the first move triggers it): when it does, the worker gets a
+	 * fresh config push carrying the filter key and the fallback repaints.
+	 */
+	function watchSelf() {
+		if (selfUnsub) return;
+		selfUnsub = selfReadable(topic).subscribe((key) => {
+			if (key === selfKey) return;
+			selfKey = key;
+			if (hideSelf) {
+				pushConfig();
+				if (fallback) fallback.dirty = true;
+			}
+		});
+	}
+
+	function unwatchSelf() {
+		if (selfUnsub) {
+			selfUnsub();
+			selfUnsub = null;
 		}
 	}
 
@@ -691,7 +851,8 @@ function cursorOnCanvas(topic, options) {
 			devicePixelRatio: window.devicePixelRatio || 1,
 			maxAge,
 			feedRate,
-			smooth
+			smooth,
+			hideSelf
 		};
 		if (!host.canvasSent) {
 			init.canvas = host.off;
@@ -743,6 +904,7 @@ function cursorOnCanvas(topic, options) {
 		return function teardown() {
 			if (--refCount > 0) return;
 			stopPump();
+			unwatchSelf();
 			if (statusUnsub) { statusUnsub(); statusUnsub = null; }
 			if (host.worker && initSent) host.worker.postMessage({ type: 'pause' });
 			initSent = false;
@@ -843,6 +1005,9 @@ function cursorOnCanvas(topic, options) {
 			const minX = rect.x - pad, maxX = rect.x + rect.w + pad;
 			const minY = rect.y - pad, maxY = rect.y + rect.h + pad;
 			for (const [key, entry] of fb.merged) {
+				// Same exclusion the worker applies in its visible-set build: the
+				// viewer's own cursor is filtered out of render and feed alike.
+				if (hideSelf && key === selfKey) continue;
 				if (fb.hidden.has(key)) continue;
 				const data = entry.data;
 				if (data === null || typeof data !== 'object') continue;
@@ -880,6 +1045,7 @@ function cursorOnCanvas(topic, options) {
 					const zoom = rect.zoom || 1;
 					const pad = 8 / zoom;
 					for (const [key, entry] of fb.merged) {
+						if (hideSelf && key === selfKey) continue;
 						if (fb.hidden.has(key)) continue;
 						const data = entry.data;
 						if (!data || typeof data.x !== 'number' || typeof data.y !== 'number') continue;
@@ -899,6 +1065,7 @@ function cursorOnCanvas(topic, options) {
 
 		return function teardown() {
 			if (--refCount > 0) return;
+			unwatchSelf();
 			if (fb.unsub) fb.unsub();
 			if (fb.tapUnsub) fb.tapUnsub();
 			if (fb.statusUnsub) fb.statusUnsub();
@@ -952,7 +1119,18 @@ function cursorOnCanvas(topic, options) {
 			}
 			const useWorker = workerViable && rendering !== 'main';
 			activeTeardown = useWorker ? mountWorker() : mountFallback();
+			watchSelf();
 			return teardownOnce();
+		},
+
+		/**
+		 * This connection's own roster key on the topic, or `null` until the
+		 * server has assigned one (the first `move()` on the topic triggers
+		 * it; a plain store's snapshot also carries it). Tracked while
+		 * mounted; the last known key is retained across unmounts.
+		 */
+		get self() {
+			return selfKey;
 		},
 
 		/**

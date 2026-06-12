@@ -56,6 +56,19 @@ export function message(ws, ctx) {
 			platform.send(ws, 'test-topic', 'corked', msg.payload);
 		});
 	}
+	if (msg.type === 'publish-except-me') {
+		// Sender-excluded publish through the wire path. The codec declines
+		// every frame, so each subscriber receives the plain JSON envelope -
+		// except the sender, which the exclusion withholds it from on every
+		// platform implementation. `exclude: false` is the unexcluded control.
+		platform.publishWire(
+			msg.topic || 'test-topic',
+			msg.event || 'poke',
+			msg.payload,
+			{ capability: 'fixture.unused:1', schemaVersion: 1, encode: () => null },
+			msg.exclude === false ? undefined : { excludeWs: ws }
+		);
+	}
 }
 
 export function close(ws, ctx) {

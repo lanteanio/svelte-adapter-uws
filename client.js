@@ -1252,6 +1252,12 @@ function createConnection(options) {
 		function dispatchEvent(msg) {
 			/** @type {import('./client.js').WSEvent} */
 			const wsEvent = { topic: msg.topic, event: msg.event, data: msg.data };
+			// Additive frame metadata rides the dispatched envelope: `t` is a
+			// codec-reconstructed server stamp (the time axis interpolation
+			// ingests), `seq` the per-topic sequence. Consumers that never read
+			// them are unaffected - the store merges ignore extra fields.
+			if (typeof msg.t === 'number') wsEvent.t = msg.t;
+			if (typeof msg.seq === 'number') wsEvent.seq = msg.seq;
 			if (debug) console.log('[ws] <-', msg.topic, msg.event, msg.data);
 			if (typeof msg.seq === 'number') {
 				const prev = lastSeenSeqs.get(msg.topic);

@@ -1274,7 +1274,10 @@ export interface Platform {
 	 *   `compress` (binary codec frames are NOT compressed by default; pass
 	 *   `{ compress: true }` to opt a low-frequency codec into permessage-deflate
 	 *   when `websocket.compression` is configured - the cursor hot path leaves
-	 *   it off, presence opts in).
+	 *   it off, presence opts in) and `excludeWs` (sender exclusion for echo
+	 *   suppression: the frame is never delivered to that socket on any path -
+	 *   binary, JSON fallback, or JSON fast path; the cross-instance relay
+	 *   still fires, since the excluded socket only exists locally).
 	 */
 	publishWire(
 		topic: string,
@@ -1289,7 +1292,13 @@ export interface Platform {
 				onDetach?: (ws: WebSocket<any>, state: unknown) => void;
 			};
 		},
-		options?: { relay?: boolean; seq?: boolean; compress?: boolean }
+		options?: {
+			relay?: boolean;
+			seq?: boolean;
+			compress?: boolean;
+			/** Never delivered to this socket; exclusion is local to this instance. */
+			excludeWs?: WebSocket<any>;
+		}
 	): boolean;
 
 	/**

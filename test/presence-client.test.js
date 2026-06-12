@@ -75,7 +75,7 @@ describe('presence client inbound binary (0x03)', () => {
 		const roster = { '1': { id: '1', name: 'Alice' }, '2': { id: '2', name: 'Bob' } };
 		mock.deliver(buildBinaryFrame(PRESENCE_SCHEMA_VERSION, 1, 3, encodePresence('state', roster)).buffer);
 
-		expect(seen[seen.length - 1]).toEqual({ topic: '__presence:room', event: 'state', data: roster });
+		expect(seen[seen.length - 1]).toEqual({ topic: '__presence:room', event: 'state', data: roster, seq: 3 });
 		unsub();
 	});
 
@@ -91,7 +91,7 @@ describe('presence client inbound binary (0x03)', () => {
 		const diff = { joins: { '3': { id: '3', name: 'Cara' } }, leaves: { '2': { id: '2', name: 'Bob' } } };
 		mock.deliver(buildBinaryFrame(PRESENCE_SCHEMA_VERSION, 1, 4, encodePresence('diff', diff)).buffer);
 
-		expect(seen[seen.length - 1]).toEqual({ topic: '__presence:room', event: 'diff', data: diff });
+		expect(seen[seen.length - 1]).toEqual({ topic: '__presence:room', event: 'diff', data: diff, seq: 4 });
 		unsub();
 	});
 

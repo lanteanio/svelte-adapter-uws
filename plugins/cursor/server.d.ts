@@ -237,9 +237,10 @@ export interface CursorTracker<UserInfo = unknown> {
 	 * Broadcast a cursor position update. Throttled per user per topic
 	 * and optionally coalesced per topic via `topicThrottle`.
 	 *
-	 * The first call for a (ws, topic) pair also emits a `join` event
-	 * carrying the user's catalog entry; subsequent calls emit only
-	 * positions (`update` or `bulk`).
+	 * The first call for a (ws, topic) pair also sends the mover its own
+	 * roster key as a single-target `you` event and then broadcasts a
+	 * `join` event carrying the user's catalog entry; subsequent calls
+	 * emit only positions (`update` or `bulk`).
 	 *
 	 * Call this from your `message` hook when you receive cursor data.
 	 *
@@ -269,7 +270,8 @@ export interface CursorTracker<UserInfo = unknown> {
 
 	/**
 	 * Send current cursor positions for a topic to a single connection
-	 * as a `catalog` + `bulk` pair (roster, then positions).
+	 * as a `time` + `you` + `catalog` + `bulk` sequence (server clock
+	 * seed, the requester's own roster key, the roster, then positions).
 	 *
 	 * Call this from your `message` handler when the client sends a
 	 * `{ type: 'cursor-snapshot', topic }` request. The `cursor()` client

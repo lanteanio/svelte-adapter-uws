@@ -15,6 +15,22 @@ export type ViewportSource =
 	| { x: number; y: number; w: number; h: number; zoom?: number }
 	| (() => Element | { x: number; y: number; w: number; h: number; zoom?: number } | null | undefined);
 
+/**
+ * The readable returned by the plain `cursor()` form: the merged cursor Map
+ * plus this connection's self identity on the topic.
+ */
+export interface CursorStore<UserInfo = unknown, Data = unknown>
+	extends Readable<Map<string, CursorPosition<UserInfo, Data>>> {
+	/**
+	 * This connection's own roster key on the topic - `null` until the server
+	 * has assigned one. The snapshot reply carries it, so it is known as soon
+	 * as the store syncs; the first `move()` on the topic triggers it for a
+	 * connection that never snapshots. Compare against the merged Map's keys
+	 * to find - or skip - the local user's own cursor.
+	 */
+	self: Readable<string | null>;
+}
+
 /** One entry of the thinned main-thread feed: the classic store's
  * `{ user, data }` join plus the resolved display color. */
 export interface CursorFeedEntry<UserInfo = unknown> {
@@ -71,6 +87,13 @@ export interface CursorHandle<UserInfo = unknown> {
 	 */
 	destroy(): void;
 	/**
+	 * This connection's own roster key on the handle's topic, or `null` until
+	 * the server has assigned one (the first `move()` on the topic triggers
+	 * it; a plain store's snapshot also carries it). Tracked while mounted;
+	 * the last known key is retained across unmounts.
+	 */
+	readonly self: string | null;
+	/**
 	 * Present only when `mainThreadFeed` is enabled: the thinned, rate-capped
 	 * position feed (board coordinates, in-view and non-hidden cursors only),
 	 * updated at the feed rate rather than the wire rate.
@@ -80,7 +103,7 @@ export interface CursorHandle<UserInfo = unknown> {
 	 * Present only with `rendering: 'main'`: the classic reactive store, for
 	 * apps that draw on their own canvas AND need cursor data reactively.
 	 */
-	store?: Readable<Map<string, CursorPosition<UserInfo>>>;
+	store?: CursorStore<UserInfo>;
 }
 
 /** Options shared by both `cursor()` forms. */
@@ -151,6 +174,16 @@ export interface CursorCanvasOptions extends CursorStoreOptions {
 		extrapolateMs?: number;
 		snapGapMs?: number;
 	};
+	/**
+	 * Exclude the viewer's own cursor from the canvas (and the optional
+	 * `mainThreadFeed`), for boards where the OS pointer already marks the
+	 * local position and a painted echo of it would trail behind. The filter
+	 * key is this connection's server-assigned roster key (see
+	 * `CursorHandle.self`), learned from the first `move()` on the topic -
+	 * until then nothing is filtered, which is correct: the connection has no
+	 * cursor on the board yet. Remote cursors are unaffected. Off by default.
+	 */
+	hideSelf?: boolean;
 }
 
 /**
@@ -159,7 +192,9 @@ export interface CursorCanvasOptions extends CursorStoreOptions {
  * Returns a `Readable<Map<string, CursorPosition>>` that updates
  * automatically when cursors move, join, or disconnect. Internally merges
  * the `catalog` (user metadata) and `update`/`bulk` (positions) streams;
- * entries are emitted only after both user and position are known.
+ * entries are emitted only after both user and position are known. The
+ * store's `self` readable carries this connection's own roster key (`null`
+ * until the server assigns one), so an app can mark or skip its own entry.
  *
  * @example
  * ```svelte
@@ -207,7 +242,7 @@ export function cursor<UserInfo = unknown, Data = unknown>(
 export function cursor<UserInfo = unknown, Data = unknown>(
 	topic: string,
 	options?: CursorStoreOptions
-): Readable<Map<string, CursorPosition<UserInfo, Data>>>;
+): CursorStore<UserInfo, Data>;
 
 /**
  * Send a cursor move on a topic. Frames are coalesced via

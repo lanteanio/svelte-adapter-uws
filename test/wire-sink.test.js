@@ -124,7 +124,7 @@ describe('client inbound binary (0x03) sink-codec demux', () => {
 
 		expect(plainApplied).toEqual([[5, 6, 7]]);
 		const last = seen[seen.length - 1];
-		expect(last).toEqual({ topic: '__plain:doc', event: 'applied', data: { len: 3 } });
+		expect(last).toEqual({ topic: '__plain:doc', event: 'applied', data: { len: 3 }, seq: 11 });
 		unsub();
 	});
 

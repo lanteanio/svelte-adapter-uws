@@ -75,6 +75,13 @@
  */
 
 import { ByteWriter, ByteReader } from '../../files/wire.js';
+import {
+	KeyEncodeDict,
+	KeyDecodeDict,
+	writeDeltaStamp,
+	readDeltaStamp,
+	DEFAULT_MAX_ENTRIES
+} from '../../files/keydict.js';
 
 /**
  * Negotiated capability for the full-string-key cursor wire (schemaVersion 1).
@@ -116,19 +123,18 @@ const OP_REMOVE = 3;
 const OP_JOIN = 4;
 const OP_CATALOG = 5;
 
-/** Default id-space size: 16-bit ids, evicted least-recently-used at the cap. */
-const DEFAULT_MAX_ENTRIES = 65536;
-
 /**
- * True when `d` is exactly a `{ x, y }` pair of finite numbers and nothing
- * else - the only shape the binary position encoding is lossless for. Extra
- * fields or non-numeric coords fall back to JSON so no data is silently lost.
+ * True when `d` is exactly a `{ x, y }` pair of finite numbers that survive
+ * the float32 wire format - the only shape the binary position encoding is
+ * lossless-enough for. Extra fields or non-numeric coords fall back to JSON
+ * so no data is silently lost, and a magnitude past float32 range (which
+ * would narrow to Infinity on the wire) falls back the same way.
  * @param {any} d
  */
 function isXY(d) {
 	if (d === null || typeof d !== 'object') return false;
-	if (typeof d.x !== 'number' || !Number.isFinite(d.x)) return false;
-	if (typeof d.y !== 'number' || !Number.isFinite(d.y)) return false;
+	if (typeof d.x !== 'number' || !Number.isFinite(Math.fround(d.x))) return false;
+	if (typeof d.y !== 'number' || !Number.isFinite(Math.fround(d.y))) return false;
 	// Reject anything carrying fields beyond x/y so they are not dropped.
 	for (const k in d) {
 		if (k !== 'x' && k !== 'y') return false;
@@ -137,88 +143,17 @@ function isXY(d) {
 }
 
 /**
- * Per-connection encoder dictionary for the schemaVersion-2 cursor wire. Maps
- * each cursor key to a small integer id so a frame carries a 1-2 byte id rather
- * than the full key string on every entry. A key is announced inline (KEY-ASSIGN)
- * the first time it appears on a connection; after that the frame references the
- * id only.
- *
- * Eviction: ids live in a 16-bit space (`maxEntries`, default 65536). The dict
- * grows until the cap, then a new key reclaims the least-recently-used entry
- * whose last use predates the current frame (so an id assigned earlier in the
- * same frame is never reused by a later entry in that frame) and takes its id;
- * the decoder re-syncs from the KEY-ASSIGN that carries the reused id. A key
- * that still cannot get an id (a single frame referencing > maxEntries distinct
- * keys) falls back to a full-string INLINE keyref. There is no free-on-remove:
- * a REMOVE leaves the id bound, so a re-appearing cursor reuses it with no new
- * assign, and LRU reclaims genuinely departed ids at the cap. State is
- * per-connection and discarded when the connection closes.
+ * Per-connection encoder dictionary for the schemaVersion-2 cursor wire: the
+ * shared short-id dictionary (see files/keydict.js for the keyref encoding
+ * and the LRU eviction discipline) stamped with the cursor schema version.
+ * State is per-connection and discarded when the connection closes; a REMOVE
+ * leaves the id bound so a re-appearing cursor reuses it with no new assign.
  */
-export class CursorEncodeDict {
+export class CursorEncodeDict extends KeyEncodeDict {
 	/** @param {number} [maxEntries] */
 	constructor(maxEntries = DEFAULT_MAX_ENTRIES) {
+		super(maxEntries);
 		this.schemaVersion = CURSOR_SCHEMA_VERSION_DICT;
-		this.maxEntries = maxEntries;
-		/** @type {Map<string, { id: number, lastUsed: number }>} */
-		this.byKey = new Map();
-		this.nextId = 0;
-		// Monotonic per-frame counter. `beginFrame()` advances it; an entry's
-		// `lastUsed` records the frame it was last referenced, so eviction can
-		// skip ids touched in the current frame.
-		this.clock = 0;
-	}
-
-	/** Advance the per-frame clock. Call once at the start of each encode. */
-	beginFrame() {
-		this.clock++;
-	}
-
-	/**
-	 * Write a keyref for `key`: a REF (`varint(id + 2)`) when the key is already
-	 * interned, otherwise a KEY-ASSIGN (`varint(0)`, `varint(id)`, key string)
-	 * after allocating an id - or an INLINE (`varint(1)`, key string) when the
-	 * id space is exhausted for this frame.
-	 * @param {ByteWriter} w
-	 * @param {string} key
-	 */
-	writeKey(w, key) {
-		const entry = this.byKey.get(key);
-		if (entry !== undefined) {
-			entry.lastUsed = this.clock;
-			w.varint(entry.id + 2);
-			return;
-		}
-		const id = this._alloc();
-		if (id < 0) {
-			w.varint(1);
-			w.str(key);
-			return;
-		}
-		this.byKey.set(key, { id, lastUsed: this.clock });
-		w.varint(0);
-		w.varint(id);
-		w.str(key);
-	}
-
-	/** @returns {number} a usable id, or -1 when none can be freed this frame. */
-	_alloc() {
-		if (this.nextId < this.maxEntries) return this.nextId++;
-		// At cap: reclaim the least-recently-used id whose last use predates the
-		// current frame, so a key this frame just assigned is never evicted by a
-		// later key in the same frame.
-		let victimKey;
-		let victimUsed = Infinity;
-		let victimId = -1;
-		for (const [k, e] of this.byKey) {
-			if (e.lastUsed < this.clock && e.lastUsed < victimUsed) {
-				victimUsed = e.lastUsed;
-				victimKey = k;
-				victimId = e.id;
-			}
-		}
-		if (victimId < 0) return -1;
-		this.byKey.delete(victimKey);
-		return victimId;
 	}
 }
 
@@ -241,37 +176,17 @@ export class CursorTimeEncodeDict extends CursorEncodeDict {
 
 /**
  * Per-connection decoder dictionary for the schemaVersion-2 and -3 cursor
- * wires. Inverse of {@link CursorEncodeDict}: resolves a keyref back to its
- * key, caching `id -> key` so a REF costs one `Map.get` and no per-entry
- * string decode (the decode-cost win). `lastT` mirrors the encoder's
- * delta-coded stamp state for schemaVersion-3 frames. Reset on reconnect.
+ * wires. Inverse of {@link CursorEncodeDict} via the shared decode dictionary
+ * (files/keydict.js): resolves a keyref back to its key, caching `id -> key`
+ * so a REF costs one `Map.get` and no per-entry string decode (the
+ * decode-cost win). `lastT` mirrors the encoder's delta-coded stamp state for
+ * schemaVersion-3 frames. Reset on reconnect.
  */
-export class CursorDecodeDict {
+export class CursorDecodeDict extends KeyDecodeDict {
 	constructor() {
+		super();
 		this.schemaVersion = CURSOR_SCHEMA_VERSION_DICT;
-		/** @type {Map<number, string>} */
-		this.byId = new Map();
 		this.lastT = -1;
-	}
-
-	/**
-	 * Read a keyref and resolve it to a key, recording any KEY-ASSIGN binding.
-	 * Returns null when a REF cannot be resolved (a desync the caller turns into
-	 * a dropped frame).
-	 * @param {ByteReader} r
-	 * @returns {string | null}
-	 */
-	readKey(r) {
-		const v = r.varint();
-		if (v === 0) {
-			const id = r.varint();
-			const key = r.str();
-			this.byId.set(id, key);
-			return key;
-		}
-		if (v === 1) return r.str();
-		const key = this.byId.get(v - 2);
-		return key === undefined ? null : key;
 	}
 }
 
@@ -287,40 +202,11 @@ function readKeyRef(r, dict) {
 	return r.str();
 }
 
-/**
- * Write the delta-coded server stamp for a position frame. The first stamp a
- * fresh dictionary writes is the absolute epoch-ms value; every later one is
- * the non-negative delta against `lastT` (a backward wall step writes 0 and
- * holds, so both sides stay non-decreasing and in lock-step). Runs only after
- * the frame is fully validated - a JSON fallback never reaches this point, so
- * the stamp state, like the key dictionary, is untouched on fallback.
- * @param {ByteWriter} w @param {CursorTimeEncodeDict} dict
- */
-function writeStamp(w, dict) {
-	let t = dict.timeSource();
-	if (typeof t !== 'number' || !Number.isFinite(t) || t < 0) t = dict.lastT < 0 ? 0 : dict.lastT;
-	t = Math.floor(t);
-	if (dict.lastT < 0) {
-		w.varint(t);
-		dict.lastT = t;
-		return;
-	}
-	let d = t - dict.lastT;
-	if (d < 0) d = 0;
-	w.varint(d);
-	dict.lastT += d;
-}
-
-/** @param {ByteReader} r @param {CursorDecodeDict} dict @returns {number} */
-function readStamp(r, dict) {
-	const v = r.varint();
-	if (dict.lastT < 0) {
-		dict.lastT = v;
-		return v;
-	}
-	dict.lastT += v;
-	return dict.lastT;
-}
+// The delta-coded stamp discipline (absolute first, non-negative deltas in
+// lock-step, untouched on JSON fallback) is shared with the other stamped
+// codecs - see files/keydict.js.
+const writeStamp = writeDeltaStamp;
+const readStamp = readDeltaStamp;
 
 /**
  * Encode a cursor wire event into a codec payload.
