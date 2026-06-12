@@ -668,6 +668,51 @@ export function computeTopPublishers(stats, intervalSec, thresholds) {
 // alternative was a silent cluster-routing break in production.
 
 export const WS_SUBSCRIPTIONS = Symbol.for('adapter-uws.ws.subscriptions');
+
+/**
+ * Subscribe a socket the way the wire-level subscribe path does: the uWS
+ * native call PLUS the connection's subscription registry. The registry is
+ * what `platform.publishWire`'s per-subscriber walk delivers by (native
+ * membership is not enumerable from JS), so a plugin that subscribes a
+ * socket natively but skips the registry silently excludes that socket from
+ * every stateful-codec binary publish on the topic. Plugins establishing
+ * server-side membership (a snapshot handshake, a presence join) must use
+ * this instead of raw `ws.subscribe`.
+ *
+ * Returns false when the socket is already closed (uWS throws on access).
+ *
+ * @param {any} ws
+ * @param {string} topic
+ * @returns {boolean}
+ */
+export function trackedSubscribe(ws, topic) {
+	try { ws.subscribe(topic); } catch { return false; }
+	try {
+		const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+		if (subs) subs.add(topic);
+	} catch { /* socket died between the calls; close cleanup owns the registry */ }
+	return true;
+}
+
+/**
+ * Unsubscribe counterpart of {@link trackedSubscribe}: native unsubscribe
+ * plus registry removal, so the per-subscriber binary walk stops delivering
+ * the moment native membership ends.
+ *
+ * @param {any} ws
+ * @param {string} topic
+ * @returns {boolean} false when the socket was already closed
+ */
+export function trackedUnsubscribe(ws, topic) {
+	let ok = true;
+	try { ws.unsubscribe(topic); } catch { ok = false; }
+	try {
+		const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+		if (subs) subs.delete(topic);
+	} catch { /* socket died; close cleanup owns the registry */ }
+	return ok;
+}
+
 export const WS_COALESCED = Symbol.for('adapter-uws.ws.coalesced');
 export const WS_SESSION_ID = Symbol.for('adapter-uws.ws.session-id');
 export const WS_PENDING_REQUESTS = Symbol.for('adapter-uws.ws.pending-requests');

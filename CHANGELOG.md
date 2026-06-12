@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0-next.21] - 2026-06-12
+## [0.6.0-next.22] - 2026-06-12
+
+### Added
+
+- **Canvas rendering for cursors: `cursor(topic, { canvas })` moves the whole ingest-decode-merge-paint pipeline into a dedicated worker.** Hand the existing `cursor()` call a canvas element and it returns a handle instead of a store: `mount()` (returns its teardown, so `$effect(() => cursor(t, { canvas }).mount())` is the complete lifecycle), `viewport(source)`, `configure({ colorOf, hide })`, and `destroy()`. The worker owns a second WebSocket subscribed only to the cursor topic (identified with the `svelte-realtime-cursor` subprotocol so the admission gate's cursor lane can route and shed it), decodes binary cursor frames off the main thread, tracks the viewport source (reporting the rect on its own socket for server-side culling and culling its own paint), reconnects on its own backoff with the same liveness recycling as the main connection, and paints through a density-aware renderer: Canvas2D below `gpuThreshold` (default 500) in-view cursors, automatic promotion to an instanced WebGL2 backend above it (one draw call per frame at any count; a canvas's context type is permanent, so promotion keeps the target's 2d context as a presenter and blits an internal surface - never a backend thrash). `rendering: 'main'` forces main-thread rendering and exposes `handle.store` (the classic reactive Map); `rendering: 'worker'` refuses to silently degrade. On browsers without the worker pipeline the same call renders on the main thread through the same backends with identical output. The opt-in `mainThreadFeed` posts a thinned, rate-capped position feed back as `handle.feed` (board coordinates, transferred buffers, roster-joined; ~30 microseconds of main-thread work per tick at 500 in-view cursors). Unmounting pauses the worker and a remount on the same canvas resumes it, same or different topic; `FinalizationRegistry` reaps the worker when the canvas element is collected. The classic no-canvas store path is byte-for-byte unchanged.
+- **`trackedSubscribe` / `trackedUnsubscribe` in `files/utils.js`:** subscribe/unsubscribe a socket the way the wire-level path does - the native uWS call plus the connection's subscription registry. Plugins establishing server-side membership must use these (cursor, presence, and groups now do); the registry is what `platform.publishWire`'s per-subscriber walk delivers by.
+- **The vite dev WebSocket server now echoes a client's offered subprotocol**, matching the production upgrade's pass-through, so clients that dial with one (the cursor render worker) complete their handshake in dev.
+- **The vite plugin extends `server.fs.allow` with its own package directory**, so the cursor worker's module chunk (a raw `?worker_file` request that does not get the known-module bypass regular imports get) serves in dev under linked installs instead of 403ing.
+
+### Fixed
+
+- **Sockets subscribed server-side by a plugin now receive stateful-codec binary publishes.** `platform.publishWire`'s per-subscriber walk delivers by the connection's subscription registry, but the cursor snapshot handshake and presence join/sync subscribed sockets natively only - so the moment any binary-capable client subscribed a topic, every snapshot-joined cursor subscriber and every presence member silently received nothing from that topic's binary publishes (JSON-only deployments were unaffected). Membership now registers through `trackedSubscribe`/`trackedUnsubscribe` at every cursor, presence, and groups site, with symmetric removal on presence leave paths. One accounting consequence, intentionally kept: plugin-established memberships now count toward the per-connection wire-subscription cap, since they consume the same per-socket resources.
+- **Browser production builds that bundle the cursor plugin client no longer fail on node-only imports.** `plugins/cursor/decode.js` read its clock through the node-side runtime module (which imports node builtins); it now reads the browser runtime seam, which binds to the identical primitives under node, so tests and the characterization suite are unchanged.
+- **Renderer surfaces follow a changing device pixel ratio.** A monitor move or browser zoom changes `devicePixelRatio` mid-session; the viewport pump now carries the current value to the worker and the main-thread fallback re-reads it every frame, so the canvas rescales instead of painting at the stale density.
+
+### Changed
+
+- **The reconnect backoff curve (`nextReconnectDelay`) moved to `client-runtime.js`** - the worker-safe module every socket owner can import - and is re-exported from `client.js`, so the public surface is unchanged.
 
 ### Added
 

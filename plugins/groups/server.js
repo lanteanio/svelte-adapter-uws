@@ -5,8 +5,9 @@
  * hooks. Like topics but with access control - you decide who can join,
  * who can publish, and what happens when the group fills up or closes.
  *
- * Zero impact on the adapter core - this is a standalone module that
- * uses ws.subscribe(), ws.unsubscribe(), platform.publish(), and
+ * Zero impact on the adapter core - this module only uses the tracked
+ * subscribe/unsubscribe helpers (native membership plus the subscription
+ * registry the binary publish walk delivers by), platform.publish(), and
  * platform.send().
  *
  * MULTI-TENANT NOTE
@@ -21,6 +22,8 @@
  *
  * @module svelte-adapter-uws/plugins/groups
  */
+
+import { trackedSubscribe, trackedUnsubscribe } from '../../files/utils.js';
 
 const TOPIC_PREFIX = '__group:';
 
@@ -171,9 +174,9 @@ export function createGroup(name, options = {}) {
 			// Callers reach `join` after their own async auth chain; the
 			// socket may have closed in the meantime. Roll back the
 			// member entry instead of letting uWS's "Invalid access"
-			// crash the worker.
-			try { ws.subscribe(internalTopic); }
-			catch {
+			// crash the worker. Tracked: membership joins the subscription
+			// registry so a future binary wire path delivers to members.
+			if (!trackedSubscribe(ws, internalTopic)) {
 				members.delete(ws);
 				return false;
 			}
@@ -190,7 +193,7 @@ export function createGroup(name, options = {}) {
 			if (!entry) return;
 
 			members.delete(ws);
-			try { ws.unsubscribe(internalTopic); } catch (_) {}
+			trackedUnsubscribe(ws, internalTopic);
 
 			platform.publish(internalTopic, 'leave', { role: entry.role, count: members.size });
 
@@ -244,7 +247,7 @@ export function createGroup(name, options = {}) {
 			platform.publish(internalTopic, 'close', null);
 
 			for (const [ws] of members) {
-				try { ws.unsubscribe(internalTopic); } catch (_) {}
+				trackedUnsubscribe(ws, internalTopic);
 			}
 
 			members.clear();

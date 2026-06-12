@@ -3065,6 +3065,50 @@ The `cursor()` function accepts an optional second argument with a `maxAge` opti
 const positions = cursor('canvas', { maxAge: 30_000 });
 ```
 
+#### Canvas rendering (worker offload)
+
+At high cursor density the DOM `{#each}` above stops being the bottleneck you can fix: every frame still lands on the main thread, gets parsed there, and re-renders through reactivity. Hand `cursor()` a canvas instead and the entire ingest-decode-merge-paint pipeline moves into a dedicated worker that owns its own WebSocket (subscribed only to the cursor topic) and the canvas's transferred drawing surface. The main thread reads nothing from the cursor stream - at any density.
+
+```svelte
+<script>
+  import { cursor, move } from 'svelte-adapter-uws/plugins/cursor/client';
+  let canvas = $state();
+  $effect(() => cursor('board:42', { canvas }).mount());
+</script>
+
+<canvas bind:this={canvas} class="cursor-layer"></canvas>
+<div onpointermove={(e) => move('board:42', { x: e.clientX, y: e.clientY })}> ... </div>
+```
+
+That is the whole zero-config path. `mount()` returns its teardown, so the `$effect` one-liner is the complete lifecycle; unmounting pauses the pipeline (socket closed, state cleared) and a remount on the same canvas resumes it, same or different topic. `move()` is unchanged - sending stays on the main thread (pointer events only exist there); only receiving and rendering move off it. On a browser without the worker pipeline (no `OffscreenCanvas`, an old Safari) the identical call renders on the main thread through the same renderer backends: same visuals, lower ceiling, no API difference, no thrown error.
+
+What the worker does for you:
+
+- **Decodes off the main thread.** Binary cursor frames decode 15-18x faster than `JSON.parse`, and even that cost now happens where it cannot drop an app frame.
+- **Renders through a density-aware backend.** Canvas2D below 500 in-view cursors (zero GPU setup for quiet boards), automatic promotion to an instanced WebGL2 renderer at the threshold - one draw call per frame at any count. Crossing back down never thrashes backends.
+- **Culls and reports the viewport.** The worker tracks your `viewport` source (or the canvas element itself), paints only the in-view subset, and reports the rect on its own socket so [server-side culling](#cutting-cursor-volume-opt-in-reducers) also shrinks the wire.
+- **Reconnects independently.** The cursor socket has its own backoff and liveness check; a cursor-stream hiccup never disturbs your main connection, and vice versa.
+
+Options, all opt-in:
+
+```js
+const handle = cursor('board:42', {
+  canvas,
+  rendering: 'auto',          // 'auto' | 'main' (forces main thread, adds handle.store) | 'worker' (throws if unsupported)
+  gpu: 'auto',                // 'auto' | 'canvas2d' | 'webgl2' | 'webgpu' (reserved; throws until it ships)
+  gpuThreshold: 500,          // in-view count where 'auto' promotes to the GPU backend
+  mainThreadFeed: { rate: 10 }, // opt-in thinned position feed back to the main thread
+  maxAge: 30_000,             // same self-healing sweep as the store
+  viewport: () => board       // same sources as the store path; defaults to the canvas element
+});
+```
+
+`handle.feed` (present only with `mainThreadFeed`) is a `Readable<Map<key, { user, data, colorRGBA }>>` sampled at the feed rate in board coordinates - for the leader badge, the minimap, the "3 people here" pill - not a second rendering path: at 500 in-view cursors a feed tick costs the main thread ~30 microseconds. Apps that genuinely need full reactive cursor data alongside their own canvas use `rendering: 'main'` and read `handle.store`.
+
+`handle.configure({ colorOf, hide })` sets display config: the callbacks run on the main thread against the live roster (and re-run as users join), and only the resolved per-key results cross to the worker. `colorOf(user)` returns a hex string or packed RGBA integer; anything else keeps the deterministic default palette. A user hidden by `hide` disappears from the canvas and the feed.
+
+One canvas renders one topic at a time, and a canvas whose surface was transferred belongs to its worker for the element's lifetime - `handle.destroy()` is terminal (leaving the board for good); for component lifecycles rely on the `mount()` teardown. The worker identifies its socket with the `svelte-realtime-cursor` subprotocol, so deployments running the admission gate's cursor lane shed cursor sockets before main connections under load.
+
 #### Server API
 
 | Method | Description |

@@ -1,6 +1,6 @@
 import { writable, derived } from 'svelte/store';
 import { parseBinaryFrame, requestNFrame } from './files/wire.js';
-import { now, randomFloat, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask } from './client-runtime.js';
+import { now, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask, nextReconnectDelay } from './client-runtime.js';
 
 /** @type {ReturnType<typeof createConnection> | null} */
 let singleton = null;
@@ -700,43 +700,10 @@ export function classifyCloseCode(code) {
 	return 'RETRY';
 }
 
-/**
- * Compute the next reconnect delay using exponential backoff with
- * proportional jitter.
- *
- * The capped delay is `min(base * 2.2^attempt, maxDelay)`. A random factor
- * in `[0.75, 1.25]` is then applied multiplicatively, so the final delay
- * spans +/- 25% of the capped value. Multiplicative jitter keeps spread
- * meaningful at high attempt counts: with 10K clients all reconnecting
- * after a server restart, additive +/- 500ms jitter clusters reconnects
- * inside a 1 second window; proportional jitter spreads them across
- * a window proportional to the current backoff.
- *
- * The 2.2 exponent with a 5 minute cap is aggressive enough to back off
- * fast under sustained server pain (the default 3 second base hits the
- * cap by attempt 6) and gentle enough that a brief restart resolves
- * before the user notices.
- *
- * Pure given an explicit `randFactor`: no I/O, no globals. Pass a fixed
- * value for reproducible assertions in tests.
- *
- * The default `randFactor` is the runtime float source: this value is
- * reconnect-backoff jitter, used to spread retries across a fleet so a
- * server restart does not hit a thundering-herd. Not security-relevant -
- * the randFactor never crosses a trust boundary - so the runtime source is
- * the right primitive; routing it through the runtime also lets a seeded
- * harness reproduce the reconnect schedule exactly.
- *
- * @param {number} base       base interval in ms (e.g. 3000)
- * @param {number} maxDelay   cap in ms (e.g. 300000)
- * @param {number} attempt    zero-based attempt counter
- * @param {number} [randFactor]  random factor in [0, 1); defaults to randomFloat()
- * @returns {number}
- */
-export function nextReconnectDelay(base, maxDelay, attempt, randFactor = randomFloat()) {
-	const capped = Math.min(base * Math.pow(2.2, attempt), maxDelay);
-	return capped * (0.75 + randFactor * 0.5);
-}
+// Reconnect backoff curve. Defined in client-runtime.js (the worker-safe
+// module every socket owner can import); re-exported here so the public
+// surface of this module is unchanged.
+export { nextReconnectDelay };
 
 /**
  * @param {import('./client.js').ConnectOptions} options
@@ -1916,6 +1883,12 @@ function createConnection(options) {
 		get bufferedAmount() { return ws?.bufferedAmount ?? 0; },
 		onRequest,
 		_resendHello: resendHello,
+		// Internal: the resolved WebSocket URL this connection dials. A plugin
+		// that opens its own dedicated socket (the cursor render worker) must
+		// reach the same endpoint the main connection negotiated - including a
+		// custom `url` / `path` option - so the derivation is exposed here
+		// rather than re-derived from window.location in the plugin.
+		_url: getUrl,
 		// Internal-only subscription to the connection's flow-control health.
 		// A boolean (degraded yes/no) is the only thing that crosses this
 		// accessor - no window count, deadline, or any internal accounting

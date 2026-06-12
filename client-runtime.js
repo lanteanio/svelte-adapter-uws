@@ -82,6 +82,45 @@ export const clearIntervalTimer = (h) => current.timers.clearInterval(h);
 export const microtask = (cb) => current.timers.queueMicrotask(cb);
 export const effectiveTimeZone = () => current.tz;
 
+/**
+ * Compute the next reconnect delay using exponential backoff with
+ * proportional jitter.
+ *
+ * The capped delay is `min(base * 2.2^attempt, maxDelay)`. A random factor
+ * in `[0.75, 1.25]` is then applied multiplicatively, so the final delay
+ * spans +/- 25% of the capped value. Multiplicative jitter keeps spread
+ * meaningful at high attempt counts: with 10K clients all reconnecting
+ * after a server restart, additive +/- 500ms jitter clusters reconnects
+ * inside a 1 second window; proportional jitter spreads them across
+ * a window proportional to the current backoff.
+ *
+ * The 2.2 exponent with a 5 minute cap is aggressive enough to back off
+ * fast under sustained server pain (the default 3 second base hits the
+ * cap by attempt 6) and gentle enough that a brief restart resolves
+ * before the user notices.
+ *
+ * Pure given an explicit `randFactor`: no I/O, no globals. Pass a fixed
+ * value for reproducible assertions in tests.
+ *
+ * Lives here (not client.js) because every socket owner shares one curve -
+ * the main connection and any dedicated secondary socket - and this module
+ * is the only client module such a socket owner can import without dragging
+ * the whole connection surface (and Svelte) into its bundle. The default
+ * `randFactor` is the runtime float source: backoff jitter spreads retries
+ * across a fleet, never crosses a trust boundary, and routing it through
+ * the runtime lets a seeded harness reproduce the reconnect schedule.
+ *
+ * @param {number} base       base interval in ms (e.g. 3000)
+ * @param {number} maxDelay   cap in ms (e.g. 300000)
+ * @param {number} attempt    zero-based attempt counter
+ * @param {number} [randFactor]  random factor in [0, 1); defaults to randomFloat()
+ * @returns {number}
+ */
+export function nextReconnectDelay(base, maxDelay, attempt, randFactor = randomFloat()) {
+	const capped = Math.min(base * Math.pow(2.2, attempt), maxDelay);
+	return capped * (0.75 + randFactor * 0.5);
+}
+
 // Install a virtual environment (the simulator/test harness only). Refuses under
 // a node production build unless explicitly forced, so a stray call can never
 // swap the clock under a live deployment; in a real browser there is no process

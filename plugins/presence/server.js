@@ -31,6 +31,7 @@ const TOPIC_PREFIX = '__presence:';
 
 import { encodePresence, PRESENCE_CAPABILITY, PRESENCE_SCHEMA_VERSION } from './codec.js';
 import { setTimer, clearTimer, setIntervalTimer, clearIntervalTimer } from '../../files/runtime.js';
+import { trackedSubscribe, trackedUnsubscribe } from '../../files/utils.js';
 
 /**
  * @typedef {Object} PresenceOptions
@@ -626,7 +627,7 @@ export function createPresence(options = {}) {
 		// co-resident observer role (whose roster would then freeze). The observer
 		// is released on socket close (see leave()).
 		if (!syncObservers.get(ws)?.has(topic)) {
-			try { ws.unsubscribe(TOPIC_PREFIX + topic); } catch { /* ws already closed */ }
+			trackedUnsubscribe(ws, TOPIC_PREFIX + topic);
 		}
 	}
 
@@ -700,10 +701,11 @@ export function createPresence(options = {}) {
 				bufferDiff(topic, 'join', key, data, platform);
 			}
 
-			// Subscribe this ws to the presence channel (server-side, idempotent).
-			// `platform.send` is closed-ws-safe on the adapter side; the
-			// direct `ws.subscribe` is not - guard locally.
-			try { ws.subscribe(presenceTopic); } catch { return; }
+			// Subscribe this ws to the presence channel (server-side, idempotent,
+			// registry-tracked so the binary publishWire walk delivers to it).
+			// `platform.send` is closed-ws-safe on the adapter side; the direct
+			// socket access is not - trackedSubscribe guards it.
+			if (!trackedSubscribe(ws, presenceTopic)) return;
 
 			// Send the full current snapshot to this connection. The joining
 			// user sees the complete state (including themselves) immediately;
@@ -730,7 +732,7 @@ export function createPresence(options = {}) {
 			const observed = syncObservers.get(ws);
 			if (observed) {
 				for (const topic of observed) {
-					try { ws.unsubscribe(TOPIC_PREFIX + topic); } catch { /* closed */ }
+					trackedUnsubscribe(ws, TOPIC_PREFIX + topic);
 				}
 				syncObservers.delete(ws);
 			}
@@ -758,7 +760,7 @@ export function createPresence(options = {}) {
 			let observed = syncObservers.get(ws);
 			if (!observed) { observed = new Set(); syncObservers.set(ws, observed); }
 			observed.add(topic);
-			try { ws.subscribe(presenceTopic); } catch {
+			if (!trackedSubscribe(ws, presenceTopic)) {
 				observed.delete(topic);
 				if (observed.size === 0) syncObservers.delete(ws);
 				return;

@@ -14,12 +14,12 @@ export default defineConfig({
 	projects: [
 		{
 			name: 'dev',
-			testMatch: 'dev.spec.js',
+			testMatch: ['dev.spec.js', 'cursor-worker.spec.js'],
 			use: { baseURL: `http://localhost:${DEV_PORT}` }
 		},
 		{
 			name: 'prod',
-			testMatch: 'prod.spec.js',
+			testMatch: ['prod.spec.js', 'cursor-worker.spec.js'],
 			use: { baseURL: `http://localhost:${PROD_PORT}` }
 		}
 	]

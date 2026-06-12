@@ -21,7 +21,12 @@
  * @module svelte-adapter-uws/plugins/cursor/decode
  */
 
-import { now as runtimeNow } from '../../files/runtime.js';
+// The BROWSER runtime seam: this module runs on the main thread and inside
+// the render worker, and it must bundle for the browser (the node-side
+// runtime module imports node builtins that break a production vite build).
+// Under node (tests, SSR passes that never call the merge) the same seam
+// binds to the identical primitives.
+import { now as runtimeNow } from '../../client-runtime.js';
 
 /**
  * @typedef {object} CursorState

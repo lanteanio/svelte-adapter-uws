@@ -37,7 +37,7 @@
  */
 
 import { encodeCursor, CURSOR_CAPABILITY, CURSOR_SCHEMA_VERSION, CURSOR_CAPABILITY_DICT, CursorEncodeDict } from './codec.js';
-import { WS_CAPS } from '../../files/utils.js';
+import { WS_CAPS, trackedSubscribe } from '../../files/utils.js';
 import { monotonicNow, setTimer, clearTimer } from '../../files/runtime.js';
 
 const TOPIC_PREFIX = '__cursor:';
@@ -1154,7 +1154,11 @@ export function createCursor(options = {}) {
 				try { denial = await platform.checkSubscribe(ws, topic); } catch { return; }
 				if (denial) return;
 			}
-			try { ws.subscribe(TOPIC_PREFIX + topic); } catch { return; }
+			// Tracked: the native subscribe alone would deliver JSON publishes
+			// (uWS fans those out itself) but silently miss every binary
+			// publishWire frame, whose per-subscriber walk reads the
+			// connection's subscription registry rather than asking uWS.
+			if (!trackedSubscribe(ws, TOPIC_PREFIX + topic)) return;
 			const topicMap = topics.get(topic);
 			const catalog = [];
 			const positions = [];

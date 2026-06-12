@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './files/cookies.js';
@@ -688,6 +689,25 @@ export default function uws(options = {}) {
 
 	return {
 		name: 'svelte-adapter-uws',
+		config() {
+			return {
+				server: {
+					fs: {
+						// The cursor render worker loads as its own module-worker
+						// entry (a `?worker_file` request). Vite's fs allow-list
+						// check runs on that raw request WITHOUT the known-module
+						// bypass regular page imports get, so when this package is
+						// installed via a link (file:/workspace dev setups) the
+						// worker chunk 403s in dev and cursors silently stay on
+						// the last painted frame. Allowing the package's own
+						// directory keeps the zero-config promise for linked
+						// installs; for a regular node_modules install the path
+						// is already allowed and this is a no-op.
+						allow: [path.dirname(fileURLToPath(import.meta.url))]
+					}
+				}
+			};
+		},
 		configResolved(resolved) {
 			// Capture the handler path once the resolved Vite config is
 			// available. SvelteKit runs Vite 7's environment API with
@@ -756,7 +776,21 @@ export default function uws(options = {}) {
 				);
 			}
 
-			wss = new WebSocketServer({ noServer: true });
+			wss = new WebSocketServer({
+				noServer: true,
+				// Echo the client's offered subprotocol. The production upgrade
+				// passes Sec-WebSocket-Protocol straight through, and a client
+				// that offered one (the cursor render worker dials with the
+				// cursor-lane token) hard-fails its handshake when the echo is
+				// missing - so dev must answer the same way or worker-rendered
+				// cursors only work in production builds. With no offered
+				// protocols this returns false and the header is simply omitted
+				// (normal clients unaffected).
+				handleProtocols: (protocols) => {
+					const first = protocols.values().next().value;
+					return first === undefined ? false : first;
+				}
+			});
 			viteServer = server;
 			const root = server.config.root;
 

@@ -1,3 +1,11 @@
+import { createCursor } from 'svelte-adapter-uws/plugins/cursor';
+
+const cursors = createCursor({
+	throttle: 0,
+	topicThrottle: 16,
+	select: (userData) => ({ name: userData.token || 'anon' })
+});
+
 export function upgrade({ headers, cookies, url }) {
 	const token = cookies?.token;
 	if (token === 'reject') return false;
@@ -23,7 +31,11 @@ export function open(ws, { platform }) {
 	t.decrement(1);
 }
 
-export function message(ws, { data, platform }) {
+export function message(ws, ctx) {
+	// Cursor frames (cursor / cursor-snapshot / cursor-viewport) are claimed
+	// by the plugin; everything else falls through to the echo handlers.
+	if (cursors.hooks.message(ws, ctx)) return;
+	const { data, platform } = ctx;
 	const msg = JSON.parse(Buffer.from(data).toString());
 	if (msg.type === 'echo') {
 		platform.send(ws, 'test-topic', 'echo', msg.payload);
@@ -46,6 +58,7 @@ export function message(ws, { data, platform }) {
 	}
 }
 
-export function close(ws, { code, platform }) {
-	platform.publish('test-topic', 'disconnected', { code });
+export function close(ws, ctx) {
+	cursors.hooks.close(ws, ctx);
+	ctx.platform.publish('test-topic', 'disconnected', { code: ctx.code });
 }
