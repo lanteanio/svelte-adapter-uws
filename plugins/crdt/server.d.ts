@@ -76,3 +76,6 @@ export const CRDT_CAPABILITY: string;
 
 /** 1-byte in-frame schema version for the CRDT wire. */
 export const CRDT_SCHEMA_VERSION: number;
+
+/** The reserved topic-name prefix CRDT frames ride on (`__crdt:`). */
+export const CRDT_TOPIC_PREFIX: string;

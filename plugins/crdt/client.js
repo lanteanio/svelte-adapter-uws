@@ -24,9 +24,9 @@
  */
 
 import { registerWireCodec } from '../../client.js';
-import { decodeCrdt, CRDT_CAPABILITY } from './codec.js';
+import { decodeCrdt, CRDT_CAPABILITY, CRDT_TOPIC_PREFIX } from './codec.js';
 
-const TOPIC_PREFIX = '__crdt:';
+const TOPIC_PREFIX = CRDT_TOPIC_PREFIX;
 
 /**
  * Registered frame handlers. Each receives every decoded CRDT frame as the sink
@@ -34,20 +34,21 @@ const TOPIC_PREFIX = '__crdt:';
  * local replica; until then the set is empty and a frame is decoded and dropped
  * (a no-op apply), which is the correct behavior for a client that carries the
  * capability but mounts no document.
- * @type {Set<(frame: { op: string, bytes: Uint8Array, schemaVersion: number, seq: number }) => void>}
+ * @type {Set<(frame: { op: string, bytes: Uint8Array, schemaVersion: number, seq: number, topic: string }) => void>}
  */
 const frameHandlers = new Set();
 
 /**
  * Subscribe to decoded CRDT frames as they are applied in place. The handler
- * receives `{ op, bytes, schemaVersion, seq }` for each inbound CRDT `0x03`
- * frame, where `op` is `'update' | 'snapshot' | 'sync-request'` and `bytes` is
- * the opaque CRDT blob. A handler that throws is isolated so one bad consumer
- * cannot drop a frame for another.
+ * receives `{ op, bytes, schemaVersion, seq, topic }` for each inbound CRDT
+ * `0x03` frame, where `op` is `'update' | 'snapshot' | 'sync-request'`, `bytes`
+ * is the opaque CRDT blob, and `topic` is the resolved topic name so a handler
+ * serving several documents routes the frame to the right replica. A handler
+ * that throws is isolated so one bad consumer cannot drop a frame for another.
  *
  * Returns an unsubscribe function.
  *
- * @param {(frame: { op: string, bytes: Uint8Array, schemaVersion: number, seq: number }) => void} handler
+ * @param {(frame: { op: string, bytes: Uint8Array, schemaVersion: number, seq: number, topic: string }) => void} handler
  * @returns {() => void}
  */
 export function onCrdtFrame(handler) {
@@ -64,17 +65,19 @@ export function onCrdtFrame(handler) {
  * dispatches no store event. A decode miss (unknown opcode / schema, truncated
  * frame) yields no handler call and is silently dropped - a CRDT reconciles on
  * the next frame. The frame's `seq` is passed through so a handler that wants to
- * track received order can, without the framework tracking it.
+ * track received order can, without the framework tracking it; the resolved
+ * `topic` is passed through so a multi-document handler can route the frame.
  *
  * @param {Uint8Array} payload
  * @param {any} state - unused at the codec layer (the replica holds the state)
  * @param {number} schemaVersion
  * @param {number} seq
+ * @param {string} [topic]
  */
-function applyCrdtFrame(payload, state, schemaVersion, seq) {
+function applyCrdtFrame(payload, state, schemaVersion, seq, topic) {
 	const decoded = decodeCrdt(payload, state, schemaVersion);
 	if (!decoded) return; // decode miss: drop, reconcile on the next frame
-	const frame = { op: decoded.data.op, bytes: decoded.data.bytes, schemaVersion, seq };
+	const frame = { op: decoded.data.op, bytes: decoded.data.bytes, schemaVersion, seq, topic: topic || '' };
 	for (const handler of frameHandlers) {
 		try { handler(frame); } catch { /* one bad consumer must not drop the frame for others */ }
 	}

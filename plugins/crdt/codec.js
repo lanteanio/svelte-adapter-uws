@@ -53,6 +53,14 @@ import { WS_CAPS } from '../../files/utils.js';
 /** Negotiated capability for the CRDT binary wire. Bumped only for an incompatible schema. */
 export const CRDT_CAPABILITY = 'crdt.protocol:1';
 
+/**
+ * The reserved topic-name prefix CRDT frames ride on. One definition for both
+ * sides: the client registers its sink codec on it, the server publishes its
+ * document topics under it (reserved-prefix topics never ride the client's
+ * own subscribe frames; membership is server-side `platform.subscribe`).
+ */
+export const CRDT_TOPIC_PREFIX = '__crdt:';
+
 /** 1-byte in-frame schema version for the CRDT wire. */
 export const CRDT_SCHEMA_VERSION = 1;
 

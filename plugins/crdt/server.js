@@ -29,5 +29,6 @@ export {
 	decodeCrdt,
 	connectionAcceptsCrdtBinary,
 	CRDT_CAPABILITY,
-	CRDT_SCHEMA_VERSION
+	CRDT_SCHEMA_VERSION,
+	CRDT_TOPIC_PREFIX
 } from './codec.js';

@@ -54,6 +54,8 @@ const ENFORCED = new Set([
 	'plugins/crdt/codec.js',
 	'plugins/crdt/server.js',
 	'plugins/crdt/client.js',
+	'plugins/crdt/replica.js',
+	'plugins/crdt/channel.js',
 	'plugins/cursor/server.js',
 	'plugins/cursor/decode.js',
 	'plugins/cursor/client.js',

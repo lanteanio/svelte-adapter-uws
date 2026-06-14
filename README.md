@@ -3216,6 +3216,54 @@ The contract that makes it correct: clients send COMMANDS, never state; the serv
 
 The pure cores (`plugins/smooth/predict.js`, `random.js`, `interpolate.js`, `clock.js`) take every time reading as an argument, so the same code runs in a worker, on the main thread, and under a deterministic simulation harness unchanged. Replaying a 5-command window costs ~85ns (`bench/35-smooth-replay-ab.mjs`); the steady-state loop allocates nothing beyond the by-contract window entries.
 
+### CRDT documents (replicas, sync, persistence)
+
+The building blocks for conflict-free shared documents: every participant holds a local replica, concurrent edits merge to the same value everywhere without a transform step, and reconnect/offline recovery is one idempotent state-vector exchange. The high-level surface lives in [svelte-realtime](https://github.com/lanteanio/svelte-realtime)'s `live.doc()` / `live.map()` / `live.array()`; the adapter ships the primitives for apps composing their own wire. Built on [yjs](https://github.com/yjs/yjs) (a regular dependency, loaded only when these subpaths are imported); Yjs types never appear on the public surface - documents are opaque bytes to everything but these two modules.
+
+```js
+// Server: the per-topic authoritative replica set + the persistence schedule.
+import { createCrdtAuthority, normalizeCrdtAccess } from 'svelte-adapter-uws/plugins/crdt/replica';
+import { createCrdtWireCodec, CRDT_TOPIC_PREFIX } from 'svelte-adapter-uws/plugins/crdt';
+
+const authority = createCrdtAuthority({
+  persist: {
+    load: (topic) => db.loadSnapshot(topic),          // once per cold topic; concurrent joins coalesce
+    store: (topic, bytes) => db.saveSnapshot(topic, bytes)  // debounced, compacted, flushed on empty
+  }
+});
+const codec = createCrdtWireCodec();
+
+// A joiner syncs: reference the replica, answer with exactly what it lacks.
+await authority.acquire(topic);
+const reply = {
+  diff: authority.diff(topic, clientStateVector),   // the missing structs (full state for a new client)
+  sv: authority.stateVector(topic)                  // so the client can upload what the SERVER lacks
+};
+
+// An inbound edit: merge, then fan the same bytes out (excluding the sender).
+const bytes = authority.applyUpdate(topic, updateBytes);
+if (bytes) platform.publishWire(CRDT_TOPIC_PREFIX + topic, 'crdt', { op: 'update', bytes: Array.from(bytes) }, codec, { excludeWs: sender });
+
+// The last leaver: the final store runs before the replica unloads.
+authority.release(topic);
+```
+
+```js
+// Client: the channel owns the local replica and the recovery loop.
+import { createCrdtChannel } from 'svelte-adapter-uws/plugins/crdt/channel';
+
+const channel = createCrdtChannel({ transport: { sendUpdate, sync, close } });
+const cards = channel.map('cards');
+cards.onChange((keys) => render(keys));
+cards.set('c1', { title: 'hello' });   // applies locally now, merges everywhere
+```
+
+The properties that make it correct: the merge is commutative and idempotent, so apply order never matters and replaying overlap is a no-op - which collapses every recovery path (reconnect, offline, a frame lost to backpressure) into the same two-way exchange: the client sends its state vector, applies the server's diff, and uploads `encodeStateAsUpdate(localDoc, serverVector)`. The local replica IS the offline queue; there is no frame bookkeeping to lose. A dependency gap after any apply (the fingerprint of a lost frame, whatever dropped it) schedules a debounced resync through the same exchange. Persistence is never on the message path: the authority captures a consistent full-state snapshot and writes it on a debounce/max-wait/compaction schedule, with the final store gating the unload so a dirty replica is never destroyed - and stores for one topic are chained so they can never race each other out of order.
+
+`normalizeCrdtAccess` is the one definition of the `{read, write, comment}` access record both layers share: a boolean widens to all three rights, a partial record defaults missing rights to false. The `comment` right is carried and cached in full but no comment producer exists yet - the server cannot structurally verify that a client-tagged update touches only comment marks until the rich-text marks layer lands, and trusting the tag would be a write bypass, so the right activates with that layer.
+
+Single-edit merge measures ~2us, a 500-edit offline flush applies in ~0.4ms, and full-state compaction at a 100-entry document costs ~51us (`bench/micro-crdt-apply.mjs`).
+
 ### Queue (ordered delivery)
 
 Per-key async task queue with configurable concurrency and backpressure. With the default `concurrency: 1`, tasks are processed strictly in order per key - useful for sequential operations like collaborative editing, turn-based games, or transaction sequences. With `concurrency > 1`, dequeue order is preserved but tasks run in parallel, so completion order is not guaranteed.

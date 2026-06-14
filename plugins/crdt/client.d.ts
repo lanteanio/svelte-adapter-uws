@@ -11,12 +11,18 @@ export interface CrdtFrame {
 	schemaVersion: number;
 	/** The frame's per-topic seq, or 0 for "no seq". */
 	seq: number;
+	/**
+	 * The resolved topic name the frame arrived on (e.g. `__crdt:board:42`), or
+	 * `''` when delivered through a path that did not resolve one. A handler
+	 * serving several documents routes the frame by this.
+	 */
+	topic: string;
 }
 
 /**
  * Subscribe to decoded CRDT frames as they are applied in place by the sink
- * codec. The handler receives `{ op, bytes, schemaVersion, seq }` for each
- * inbound CRDT `0x03` frame; `bytes` is the opaque CRDT blob, handed back
+ * codec. The handler receives `{ op, bytes, schemaVersion, seq, topic }` for
+ * each inbound CRDT `0x03` frame; `bytes` is the opaque CRDT blob, handed back
  * verbatim for a local replica to apply. A handler that throws is isolated so
  * one bad consumer cannot drop the frame for another.
  *

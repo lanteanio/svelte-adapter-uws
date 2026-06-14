@@ -678,7 +678,8 @@ export function connect(options?: ConnectOptions): WSConnection;
  * the framework does NOT track `lastSeenSeqs` for a sink codec's topic, so a
  * sink codec that needs resume must recover its own state (e.g. a CRDT codec
  * resyncs via a state-vector diff, not seq replay). `decode` receives the
- * frame's `seq` as a fourth argument for codecs that want it.
+ * frame's `seq` as a fourth argument and the resolved topic name as a fifth,
+ * for codecs that want them (a multi-document sink routes frames by topic).
  *
  * @param prefix - topic-name prefix the codec owns (e.g. `'__cursor:'`)
  * @param codec - `{ capability, capabilities?, sink?, state?, decode }`
@@ -697,7 +698,8 @@ export function registerWireCodec(
 			payload: Uint8Array,
 			state?: unknown,
 			schemaVersion?: number,
-			seq?: number
+			seq?: number,
+			topic?: string
 		) => { event: string; data: unknown } | null | void;
 	}
 ): void;

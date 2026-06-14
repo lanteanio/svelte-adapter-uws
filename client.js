@@ -24,7 +24,7 @@ let singletonCreatedBy = '';
  * stateful wire (the cursor short-id dictionary, or a future apply-in-place
  * CRDT codec); the decoder then receives that state plus the frame's
  * `schemaVersion` so it can dispatch between schema revisions.
- * @type {Map<string, { capability: string, capabilities?: string[], state?: { onAttach?: () => any, onDetach?: (state: any) => void }, decode: (payload: Uint8Array, state?: any, schemaVersion?: number) => ({ event: string, data: any } | null) }>}
+ * @type {Map<string, { capability: string, capabilities?: string[], state?: { onAttach?: () => any, onDetach?: (state: any) => void }, decode: (payload: Uint8Array, state?: any, schemaVersion?: number, seq?: number, topic?: string) => ({ event: string, data: any } | null) }>}
  */
 const wireCodecs = new Map();
 
@@ -42,10 +42,11 @@ const wireCodecs = new Map();
  * NOT track `lastSeenSeqs` for a sink codec's topic, so a sink codec that needs
  * resume must recover its own state (e.g. a CRDT codec resyncs via a
  * state-vector diff, not seq replay). `decode` receives the frame's `seq` as a
- * fourth argument for codecs that want it.
+ * fourth argument and the resolved topic name as a fifth, for codecs that want
+ * them (a multi-document sink routes frames by topic).
  *
  * @param {string} prefix - topic-name prefix the codec owns (e.g. '__cursor:')
- * @param {{ capability: string, capabilities?: string[], sink?: boolean, state?: { onAttach?: () => any, onDetach?: (state: any) => void }, decode: (payload: Uint8Array, state?: any, schemaVersion?: number, seq?: number) => ({ event: string, data: any } | null | void) }} codec
+ * @param {{ capability: string, capabilities?: string[], sink?: boolean, state?: { onAttach?: () => any, onDetach?: (state: any) => void }, decode: (payload: Uint8Array, state?: any, schemaVersion?: number, seq?: number, topic?: string) => ({ event: string, data: any } | null | void) }} codec
  */
 export function registerWireCodec(prefix, codec) {
 	wireCodecs.set(prefix, codec);
@@ -74,7 +75,7 @@ function buildHelloCaps() {
  * Resolve a topic name to its registered wire codec (and its prefix, for
  * per-connection state keying) by longest matching prefix.
  * @param {string} topic
- * @returns {{ prefix: string, codec: { capability: string, capabilities?: string[], sink?: boolean, state?: { onAttach?: () => any, onDetach?: (state: any) => void }, decode: (payload: Uint8Array, state?: any, schemaVersion?: number, seq?: number) => ({ event: string, data: any } | null | void) } } | null}
+ * @returns {{ prefix: string, codec: { capability: string, capabilities?: string[], sink?: boolean, state?: { onAttach?: () => any, onDetach?: (state: any) => void }, decode: (payload: Uint8Array, state?: any, schemaVersion?: number, seq?: number, topic?: string) => ({ event: string, data: any } | null | void) } } | null}
  */
 function wireCodecForTopic(topic) {
 	let best = null;
@@ -1304,8 +1305,12 @@ function createConnection(options) {
 						const topic = wireIdMap.get(parsed.topicId);
 						if (topic !== undefined) {
 							const match = wireCodecForTopic(topic);
+							// The resolved topic name rides as the fifth decode argument so a
+							// sink codec that serves several documents on one prefix can route
+							// the frame to the right replica; per-PREFIX decoder state cannot
+							// carry that. Non-sink codecs ignore it.
 							const decoded = match
-								? match.codec.decode(parsed.payload, ensureDecoderState(match.prefix, match.codec), parsed.schemaVersion, parsed.seq)
+								? match.codec.decode(parsed.payload, ensureDecoderState(match.prefix, match.codec), parsed.schemaVersion, parsed.seq, topic)
 								: null;
 							// A sink codec applies the frame in place inside decode (e.g.
 							// into a local document replica) and drives its own reactive
