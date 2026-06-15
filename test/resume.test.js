@@ -61,7 +61,7 @@ describeUWS('session resume protocol', () => {
 	});
 
 	it('sends a welcome envelope with a session id on open', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const client = await connectAndCapture(server.wsUrl);
@@ -72,7 +72,7 @@ describeUWS('session resume protocol', () => {
 	});
 
 	it('issues a fresh session id per connection', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const a = await connectAndCapture(server.wsUrl);
@@ -86,7 +86,7 @@ describeUWS('session resume protocol', () => {
 	});
 
 	it('dispatches the resume hook with sessionId and lastSeenSeqs', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const captured = [];
 		server = await createTestServer({
 			handler: {
@@ -112,7 +112,7 @@ describeUWS('session resume protocol', () => {
 	});
 
 	it('still acks resume when no resume hook is wired', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const client = await connectAndCapture(server.wsUrl);
@@ -129,7 +129,7 @@ describeUWS('session resume protocol', () => {
 	});
 
 	it('ignores malformed resume frames', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let called = false;
 		server = await createTestServer({
 			handler: {
@@ -153,7 +153,7 @@ describeUWS('session resume protocol', () => {
 	});
 
 	it('survives a resume hook that throws', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
 			handler: {
 				resume() { throw new Error('boom'); }
@@ -181,7 +181,7 @@ describeUWS('session resume protocol', () => {
 		// gap-fill arrived. Assert ordering: every __replay:* frame
 		// dispatched from inside the user resume hook must appear on the
 		// wire BEFORE the resumed ack.
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
 			handler: {
 				async resume(ws, ctx) {
@@ -220,7 +220,7 @@ describeUWS('per-topic epoch on subscribe and resume', () => {
 	});
 
 	it('includes a per-topic epoch on the subscribe ack', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const client = await connectAndCapture(server.wsUrl);
@@ -241,7 +241,7 @@ describeUWS('per-topic epoch on subscribe and resume', () => {
 	});
 
 	it('keeps the same epoch across two subscribes to one topic in one process', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const a = await connectAndCapture(server.wsUrl);
@@ -263,7 +263,7 @@ describeUWS('per-topic epoch on subscribe and resume', () => {
 	});
 
 	it('forwards the client-presented per-topic epochs to the resume hook', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const captured = [];
 		server = await createTestServer({
 			handler: {
@@ -289,7 +289,7 @@ describeUWS('per-topic epoch on subscribe and resume', () => {
 	});
 
 	it('gap-fills a topic whose presented epoch matches the current epoch', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		// Capture the live epoch from the subscribe ack, then resume with it.
 		// The resume hook gap-fills only when the presented epoch matches; the
 		// test asserts the resume hook saw a match and emitted gap-fill frames.
@@ -338,7 +338,7 @@ describeUWS('per-topic epoch on subscribe and resume', () => {
 	});
 
 	it('cold-rehydrates a topic whose presented epoch is stale (simulated restart)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		// The presented epoch is a value the live server never issued, modeling
 		// a client that reconnected to a process which restarted (its in-memory
 		// seq space reset). The hook must not gap-fill against the new seq space.
@@ -383,7 +383,7 @@ describeUWS('per-topic epoch on subscribe and resume', () => {
 	});
 
 	it('acks an old client that presents no epochs exactly as before', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const captured = [];
 		server = await createTestServer({
 			handler: {
@@ -415,7 +415,7 @@ describeUWS('per-topic epoch on subscribe and resume', () => {
 	});
 
 	it('decides each topic independently when one epoch is stale and one is fresh', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const decisions = [];
 		server = await createTestServer({
 			handler: {
@@ -477,7 +477,7 @@ describeUWS('per-topic epoch on subscribe and resume', () => {
 	});
 
 	it('still acks (and does not count an abort) when topicEpoch throws', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 		// epoch is an additive best-effort field. A throwing topicEpoch must
 		// fall back to the process generation and still deliver the ack; it is

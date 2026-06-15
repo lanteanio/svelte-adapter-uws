@@ -1,7 +1,8 @@
 // Mechanical regression guard for dev/prod platform parity.
 //
-// Parses the `const platform = { ... }` ObjectExpression in files/handler.js
-// (production) and vite.js (dev) and asserts every key on the production
+// Parses the `const platform = { ... }` ObjectExpression in
+// src/runtime/handler/platform.js (production) and src/vite.js (dev) and
+// asserts every key on the production
 // base platform exists on the dev base platform. New primitives that land
 // on prod must be mirrored on dev or this test fails with a list of the
 // missing keys.
@@ -73,8 +74,8 @@ function platformKeys(filepath) {
 
 describe('platform dev/prod parity', () => {
 	it('every key on the production base platform exists on the dev base platform', () => {
-		const prod = platformKeys(path.join(ROOT, 'files/handler/platform.js'));
-		const dev = platformKeys(path.join(ROOT, 'vite.js'));
+		const prod = platformKeys(path.join(ROOT, 'src/runtime/handler/platform.js'));
+		const dev = platformKeys(path.join(ROOT, 'src/vite.js'));
 
 		// Sanity check: both sides have a non-trivial platform surface. If
 		// either is empty the AST walker found the wrong object.
@@ -84,10 +85,10 @@ describe('platform dev/prod parity', () => {
 		const missing = [...prod].filter((k) => !dev.has(k));
 		expect(
 			missing,
-			'dev platform in vite.js is missing ' + missing.length + ' key(s) present on the production platform in files/handler.js: ' +
+			'dev platform in src/vite.js is missing ' + missing.length + ' key(s) present on the production platform in src/runtime/handler/platform.js: ' +
 			JSON.stringify(missing) + '. ' +
 			'When a primitive lands on prod, mirror it on dev (degrade to a no-op or zero-valued shape if needed). ' +
-			'See the parity-contract comment block above the dev platform definition in vite.js.'
+			'See the parity-contract comment block above the dev platform definition in src/vite.js.'
 		).toEqual([]);
 	});
 });

@@ -5,13 +5,13 @@
 // dictionary to pair (unlike the cursor dictionary wire).
 
 import { describe, it, expect } from 'vitest';
-import { ByteWriter, buildBinaryFrame } from '../files/wire.js';
+import { ByteWriter, buildBinaryFrame } from '../src/runtime/wire.js';
 import {
 	encodePresence,
 	decodePresence,
 	PRESENCE_CAPABILITY,
 	PRESENCE_SCHEMA_VERSION
-} from '../plugins/presence/codec.js';
+} from '../src/plugins/presence/codec.js';
 
 const SV = PRESENCE_SCHEMA_VERSION;
 

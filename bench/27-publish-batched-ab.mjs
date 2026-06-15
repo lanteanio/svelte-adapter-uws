@@ -22,7 +22,7 @@
 // literally A/B testing wire-batched vs frame-per-event for the same
 // fanout shape.
 
-import { createTestServer } from '../testing.js';
+import { createTestServer } from '../src/testing.js';
 import { WebSocket } from 'ws';
 
 const PROFILE_ARG = process.argv[2] || 'all';

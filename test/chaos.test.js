@@ -42,7 +42,7 @@ describeUWS('chaos / fault-injection harness on createTestServer', () => {
 	});
 
 	it('drop-outbound with rate 1 silences platform.publish for subscribers', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -64,7 +64,7 @@ describeUWS('chaos / fault-injection harness on createTestServer', () => {
 	});
 
 	it('drop-outbound with rate 0 leaves all publishes intact', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -87,7 +87,7 @@ describeUWS('chaos / fault-injection harness on createTestServer', () => {
 	});
 
 	it('drop-outbound: dropRate gates platform.send', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -114,7 +114,7 @@ describeUWS('chaos / fault-injection harness on createTestServer', () => {
 	});
 
 	it('slow-drain delays delivery by the configured ms', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -142,7 +142,7 @@ describeUWS('chaos / fault-injection harness on createTestServer', () => {
 	});
 
 	it('reset() restores the fast-path fanout (delivery resumes immediately)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -167,14 +167,14 @@ describeUWS('chaos / fault-injection harness on createTestServer', () => {
 	});
 
 	it('rejects unknown scenarios', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		expect(() => server.platform.__chaos({ scenario: 'mystery' })).toThrow();
 	});
 
 	it('drop-outbound also affects subscribe acks', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -194,7 +194,7 @@ describeUWS('chaos / fault-injection harness on createTestServer', () => {
 	});
 
 	it('ipc-reorder validates maxJitterMs', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		expect(() => server.platform.__chaos({ scenario: 'ipc-reorder', maxJitterMs: -1 }))
@@ -208,7 +208,7 @@ describeUWS('chaos / fault-injection harness on createTestServer', () => {
 	});
 
 	it('ipc-reorder reorders publishes within the jitter window', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -242,7 +242,7 @@ describeUWS('chaos / fault-injection harness on createTestServer', () => {
 	});
 
 	it('worker-flap closes all live connections with default code 1012', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const a = await connectAndCollect(server.wsUrl);
@@ -270,7 +270,7 @@ describeUWS('chaos / fault-injection harness on createTestServer', () => {
 	});
 
 	it('worker-flap accepts custom code and reason', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const a = await connectAndCollect(server.wsUrl);
@@ -284,7 +284,7 @@ describeUWS('chaos / fault-injection harness on createTestServer', () => {
 	});
 
 	it('worker-flap leaves continuous chaos state intact', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		// Set drop-outbound, then trigger a flap. After the flap the
@@ -308,7 +308,7 @@ describeUWS('chaos / fault-injection harness on createTestServer', () => {
 	});
 
 	it('worker-flap with no live connections is a no-op', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 		expect(server.platform.connections).toBe(0);
 		expect(() => server.platform.__chaos({ scenario: 'worker-flap' })).not.toThrow();

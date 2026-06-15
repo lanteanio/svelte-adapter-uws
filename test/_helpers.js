@@ -7,7 +7,7 @@
  * without spinning up a real server.
  */
 
-import { setRuntimeEnv, resetRuntimeEnv } from '../files/runtime.js';
+import { setRuntimeEnv, resetRuntimeEnv } from '../src/runtime/runtime.js';
 
 /**
  * Point the injectable runtime clock at the global `Date.now()` for the

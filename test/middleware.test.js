@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { createMiddleware } from '../plugins/middleware/server.js';
+import { createMiddleware } from '../src/plugins/middleware/server.js';
 import { mockWs, mockPlatform } from './_helpers.js';
 
 function msg(topic = 'chat', event = 'message', data = {}) {

@@ -250,7 +250,7 @@ describe('client store patterns', () => {
 		/** @type {(base: number, maxDelay: number, attempt: number, randFactor?: number) => number} */
 		let nextReconnectDelay;
 		beforeAll(async () => {
-			({ nextReconnectDelay } = await import('../client.js'));
+			({ nextReconnectDelay } = await import('../src/client.js'));
 		});
 
 		it('returns base * (0.75..1.25) on the first attempt', () => {

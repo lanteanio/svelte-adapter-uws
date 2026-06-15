@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createSharedRandom } from '../plugins/smooth/random.js';
+import { createSharedRandom } from '../src/plugins/smooth/random.js';
 
 // The generator is pure integer arithmetic over an explicit seed - no clocks,
 // no global state - so every assertion here is exact.

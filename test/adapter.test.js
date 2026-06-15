@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { upgradeResponse } from '../upgrade-response.js';
+import { upgradeResponse } from '../src/upgrade-response.js';
 
 // We can't run the full adapter (it needs SvelteKit's builder),
 // but we can test the validation logic and option handling.

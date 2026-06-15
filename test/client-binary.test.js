@@ -51,7 +51,7 @@ globalThis.window = /** @type {any} */ ({
 	location: { protocol: 'http:', host: 'localhost:5173' }
 });
 
-const clientModule = await import('../client.js');
+const clientModule = await import('../src/client.js');
 
 function flush() { return new Promise((r) => setTimeout(r, 0)); }
 

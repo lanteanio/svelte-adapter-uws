@@ -32,7 +32,7 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('starts on a random port and exposes urls', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 		expect(server.port).toBeGreaterThan(0);
 		expect(server.url).toBe(`http://localhost:${server.port}`);
@@ -40,13 +40,13 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('uses custom wsPath', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({ wsPath: '/live' });
 		expect(server.wsUrl).toBe(`ws://localhost:${server.port}/live`);
 	});
 
 	it('tracks connections via platform.connections', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 		expect(server.platform.connections).toBe(0);
 
@@ -59,7 +59,7 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('calls upgrade handler and rejects with false', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
 			handler: {
 				upgrade() { return false; }
@@ -79,7 +79,7 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('passes cookies and url to upgrade handler', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let captured;
 		server = await createTestServer({
 			handler: {
@@ -100,7 +100,7 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('handles subscribe/unsubscribe protocol', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const events = [];
 		server = await createTestServer({
 			handler: {
@@ -125,7 +125,7 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('subscribe handler can deny topics', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
 			handler: {
 				subscribe(ws, topic) {
@@ -146,7 +146,7 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('handles subscribe-batch', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const ws = await connectClient(server.wsUrl);
@@ -161,7 +161,7 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('publishes messages to subscribers', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const ws = await connectClient(server.wsUrl);
@@ -181,7 +181,7 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('topic helper publishes CRUD events', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const ws = await connectClient(server.wsUrl);
@@ -207,7 +207,7 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('calls open and close handlers', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const events = [];
 		server = await createTestServer({
 			handler: {
@@ -225,7 +225,7 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('delegates non-control messages to message handler', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const received = [];
 		server = await createTestServer({
 			handler: {
@@ -246,7 +246,7 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('sendTo filters by userData', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
 			handler: {
 				upgrade({ headers }) {
@@ -278,7 +278,7 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('provides subscriptions set in close context', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let closeSubs;
 		server = await createTestServer({
 			handler: {
@@ -298,19 +298,19 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('waitForConnection times out', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 		await expect(server.waitForConnection(50)).rejects.toThrow('timed out');
 	});
 
 	it('waitForMessage times out', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 		await expect(server.waitForMessage(50)).rejects.toThrow('timed out');
 	});
 
 	it('close() cleans up all connections', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { WebSocket } = await import('ws');
@@ -323,7 +323,7 @@ describeUWS('createTestServer', () => {
 	});
 
 	it('exposes platform.assertions as a Map', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({});
 		expect(server.platform.assertions).toBeInstanceOf(Map);
 	});

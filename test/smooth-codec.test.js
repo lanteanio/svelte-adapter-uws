@@ -7,9 +7,9 @@ import {
 	SMOOTH_CAPABILITY,
 	SMOOTH_TOPIC_PREFIX,
 	SMOOTH_SCHEMA_VERSION
-} from '../plugins/smooth/codec.js';
-import { createSmoothWireCodec } from '../plugins/smooth/server.js';
-import { WS_CAPS } from '../files/utils.js';
+} from '../src/plugins/smooth/codec.js';
+import { createSmoothWireCodec } from '../src/plugins/smooth/server.js';
+import { WS_CAPS } from '../src/runtime/utils.js';
 import { mockWs } from './_helpers.js';
 
 /** A scripted time source: returns the next value on each call. */

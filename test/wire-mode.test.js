@@ -7,7 +7,7 @@
 // path, and the real cursor codec end-to-end.
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { ByteWriter, ByteReader, parseBinaryFrame } from '../files/wire.js';
+import { ByteWriter, ByteReader, parseBinaryFrame } from '../src/runtime/wire.js';
 import {
 	decodeCursor,
 	CursorDecodeDict,
@@ -15,8 +15,8 @@ import {
 	CURSOR_CAPABILITY_DICT,
 	CURSOR_SCHEMA_VERSION,
 	CURSOR_SCHEMA_VERSION_DICT
-} from '../plugins/cursor/codec.js';
-import { createCursor } from '../plugins/cursor/server.js';
+} from '../src/plugins/cursor/codec.js';
+import { createCursor } from '../src/plugins/cursor/server.js';
 
 let uWS;
 try {
@@ -26,7 +26,7 @@ try {
 }
 const describeUWS = uWS ? describe : describe.skip;
 // Imported only when uWS is present (testing.js statically imports uWS).
-const { createTestServer } = uWS ? await import('../testing.js') : {};
+const { createTestServer } = uWS ? await import('../src/testing.js') : {};
 
 // A tiny test codec exercising the framework mechanism independent of cursor.
 const TEST_CAP = 'test.bin:1';

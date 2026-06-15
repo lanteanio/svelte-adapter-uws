@@ -94,7 +94,7 @@ describeUWS('admission metrics on createTestServer', () => {
 	});
 
 	it('counts every accepted upgrade on upgrade_admitted_total', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const metrics = recordingRegistry();
 		server = await createTestServer({ metrics });
 
@@ -109,7 +109,7 @@ describeUWS('admission metrics on createTestServer', () => {
 	});
 
 	it('counts gate sheds as over_capacity and accounts for every attempt', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const metrics = recordingRegistry();
 		server = await createTestServer({
 			upgradeAdmission: { maxConcurrent: 2, perTickBudget: 1 },
@@ -136,7 +136,7 @@ describeUWS('admission metrics on createTestServer', () => {
 	});
 
 	it('counts a siege refusal under its own reason, not over_capacity', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const metrics = recordingRegistry();
 		server = await createTestServer({
 			upgradeAdmission: { maxConcurrent: 50 },
@@ -153,7 +153,7 @@ describeUWS('admission metrics on createTestServer', () => {
 	});
 
 	it('counts a saturated cursor lane as cursor_lane while the main lane admits', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const metrics = recordingRegistry();
 		server = await createTestServer({
 			upgradeAdmission: { maxConcurrent: 8, cursorLane: { fraction: 0.25 } },
@@ -176,7 +176,7 @@ describeUWS('admission metrics on createTestServer', () => {
 	});
 
 	it('counts an upgrade hook refusal as auth_rejected', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const metrics = recordingRegistry();
 		server = await createTestServer({
 			handler: { upgrade: () => false },
@@ -191,7 +191,7 @@ describeUWS('admission metrics on createTestServer', () => {
 	});
 
 	it('counts a throwing upgrade hook as hook_error and never leaks the slot', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const metrics = recordingRegistry();
 		let call = 0;
 		server = await createTestServer({
@@ -224,7 +224,7 @@ describeUWS('admission metrics on createTestServer', () => {
 	});
 
 	it('contains a registry whose emits throw: responses, slots, and the log all survive', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
 			server = await createTestServer({
@@ -263,7 +263,7 @@ describeUWS('admission metrics on createTestServer', () => {
 	});
 
 	it('runs exactly as before when no registry is configured', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
 			upgradeAdmission: { maxConcurrent: 2 },
 			protection: 'siege'

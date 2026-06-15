@@ -31,7 +31,7 @@ describeUWS('platform.maxPayloadLength', () => {
 	});
 
 	it('reports a numeric value (the test server default of 1 MB)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 		expect(typeof server.platform.maxPayloadLength).toBe('number');
 		expect(server.platform.maxPayloadLength).toBe(1024 * 1024);
@@ -39,7 +39,7 @@ describeUWS('platform.maxPayloadLength', () => {
 
 	it('the value is a snapshot of the configured cap, not a live channel for changes', async () => {
 		// Reading twice returns the same value; nothing else mutates it.
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 		const a = server.platform.maxPayloadLength;
 		const b = server.platform.maxPayloadLength;
@@ -54,7 +54,7 @@ describeUWS('platform.bufferedAmount', () => {
 	});
 
 	it('returns 0 for a freshly-opened connection that has not been written to', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		server = await createTestServer({
 			handler: { open(ws) { capturedWs = ws; } }
@@ -71,7 +71,7 @@ describeUWS('platform.bufferedAmount', () => {
 	it('returns a non-negative number after publishing to a subscriber', async () => {
 		// Real-world value depends on kernel scheduling; the contract is
 		// "non-negative number, never throws" - pin both.
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		server = await createTestServer({
 			handler: { open(ws) { capturedWs = ws; } }
@@ -99,7 +99,7 @@ describeUWS('platform.bufferedAmount', () => {
 		// Defensive contract: server-side code may race with close.
 		// `try { ws.getBufferedAmount() } catch { return 0 }` keeps the
 		// caller from having to wrap every read. Pin the no-throw behavior.
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		server = await createTestServer({
 			handler: { open(ws) { capturedWs = ws; } }

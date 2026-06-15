@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createChannel } from '../plugins/channels/server.js';
+import { createChannel } from '../src/plugins/channels/server.js';
 import { mockPlatform } from './_helpers.js';
 
 describe('channels plugin - server', () => {

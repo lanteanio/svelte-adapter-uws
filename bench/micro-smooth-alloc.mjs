@@ -13,7 +13,7 @@
 //
 // Run with:  node --expose-gc bench/micro-smooth-alloc.mjs
 
-import { createSmoother } from '../plugins/smooth/interpolate.js';
+import { createSmoother } from '../src/plugins/smooth/interpolate.js';
 
 if (typeof globalThis.gc !== 'function') {
 	console.error('run with --expose-gc');

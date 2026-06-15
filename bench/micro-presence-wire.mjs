@@ -21,8 +21,8 @@
 // Pure JS, no uWS, no real WS. < 1 s.
 
 import { performance } from 'node:perf_hooks';
-import { buildBinaryFrame } from '../files/wire.js';
-import { encodePresence, decodePresence, PRESENCE_SCHEMA_VERSION } from '../plugins/presence/codec.js';
+import { buildBinaryFrame } from '../src/runtime/wire.js';
+import { encodePresence, decodePresence, PRESENCE_SCHEMA_VERSION } from '../src/plugins/presence/codec.js';
 
 // NOTE: this bench measures RAW (uncompressed) wire bytes + codec CPU only. For
 // the bytes that actually cross the wire under uWS permessage-deflate (SHARED /

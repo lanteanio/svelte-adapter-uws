@@ -245,9 +245,9 @@ Type-only changes, internal refactors, niche edge cases. No action required for 
 
 ### Per-connection adapter scratch state moved to Symbol-keyed slots
 
-**What changed.** `__subscriptions` and `__coalesced` previously sat directly on user-visible `getUserData()`. They now live under `WS_SUBSCRIPTIONS` and `WS_COALESCED` symbols exported from `files/utils.js`. The user-facing `CloseContext.subscriptions` shape is unchanged.
+**What changed.** `__subscriptions` and `__coalesced` previously sat directly on user-visible `getUserData()`. They now live under `WS_SUBSCRIPTIONS` and `WS_COALESCED` symbols exported from `src/runtime/utils.js`. The user-facing `CloseContext.subscriptions` shape is unchanged.
 
-**How to migrate.** If your `upgrade()` hook returned an object containing a `__subscriptions` or `__coalesced` key, those keys will no longer collide with the adapter; you keep your own values. If your code read the adapter's internals via `getUserData().__subscriptions`, switch to `import { WS_SUBSCRIPTIONS } from 'svelte-adapter-uws/files/utils.js'` and read `getUserData()[WS_SUBSCRIPTIONS]`.
+**How to migrate.** If your `upgrade()` hook returned an object containing a `__subscriptions` or `__coalesced` key, those keys will no longer collide with the adapter; you keep your own values. If your code read the adapter's internals via `getUserData().__subscriptions`, switch to `import { WS_SUBSCRIPTIONS } from 'svelte-adapter-uws/src/runtime/utils.js'` and read `getUserData()[WS_SUBSCRIPTIONS]`.
 
 ---
 

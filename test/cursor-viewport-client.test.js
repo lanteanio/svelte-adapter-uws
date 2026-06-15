@@ -34,8 +34,8 @@ globalThis.window = /** @type {any} */ ({ location: { protocol: 'http:', host: '
 // Deterministic rAF so the coalesced flush fires on the next macrotask.
 globalThis.requestAnimationFrame = /** @type {any} */ ((cb) => setTimeout(cb, 0));
 
-const clientModule = await import('../client.js');
-const cursorClient = await import('../plugins/cursor/client.js');
+const clientModule = await import('../src/client.js');
+const cursorClient = await import('../src/plugins/cursor/client.js');
 
 const flush = () => new Promise((r) => setTimeout(r, 5));
 function viewportFrames(mock, from) {

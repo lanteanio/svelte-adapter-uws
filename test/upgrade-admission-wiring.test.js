@@ -50,7 +50,7 @@ describeUWS('upgrade-admission wiring on createTestServer', () => {
 	});
 
 	it('accepts every connection when admission is disabled (default)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const results = await Promise.all(
@@ -63,7 +63,7 @@ describeUWS('upgrade-admission wiring on createTestServer', () => {
 	});
 
 	it('sheds with 503 when concurrent in-flight exceeds maxConcurrent (no upgrade hook)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		// Slow the synchronous upgrade enough to keep multiple in flight
 		// at once so tryAcquire actually contends. With no user upgrade
 		// handler the upgrade is otherwise instantaneous.
@@ -93,7 +93,7 @@ describeUWS('upgrade-admission wiring on createTestServer', () => {
 	});
 
 	it('sheds with 503 against a slow user upgrade hook (in-flight stays held while async)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
 			upgradeAdmission: { maxConcurrent: 2 },
 			handler: {
@@ -124,7 +124,7 @@ describeUWS('upgrade-admission wiring on createTestServer', () => {
 	});
 
 	it('shed responses use the documented status text', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
 			upgradeAdmission: { maxConcurrent: 1 },
 			handler: {
@@ -144,7 +144,7 @@ describeUWS('upgrade-admission wiring on createTestServer', () => {
 	});
 
 	it('releases the in-flight slot after the upgrade completes (no permanent capacity loss)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
 			upgradeAdmission: { maxConcurrent: 1 }
 		});
@@ -171,7 +171,7 @@ describeUWS('cursor-lane admission on createTestServer', () => {
 	});
 
 	it('treats a cursor-subprotocol upgrade as ordinary when the lane is disabled', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		// No cursorLane configured: the subprotocol carries no lane meaning, the
 		// upgrade goes through the main path like any other.
 		server = await createTestServer({ upgradeAdmission: { maxConcurrent: 4 } });
@@ -182,7 +182,7 @@ describeUWS('cursor-lane admission on createTestServer', () => {
 	});
 
 	it('sheds a cursor upgrade with 503 when the cursor sub-budget is saturated while the main lane still admits', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		// maxConcurrent 8 with a 0.25 fraction reserves 2 cursor slots. Hold each
 		// upgrade in flight via a slow hook so a burst contends.
 		server = await createTestServer({
@@ -214,7 +214,7 @@ describeUWS('cursor-lane admission on createTestServer', () => {
 	});
 
 	it('refuses a cursor upgrade with a bare 503 under a pinned siege (never the holding page) while main is also refused', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
 			upgradeAdmission: { maxConcurrent: 50, cursorLane: { fraction: 0.25 } },
 			protection: 'siege'
@@ -235,7 +235,7 @@ describeUWS('cursor-lane admission on createTestServer', () => {
 	});
 
 	it('does not leak cursor-lane slots across a 401 rejection (a freed sub-budget admits later cursor upgrades)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		// One cursor slot. A hook that rejects the first cursor upgrade must
 		// release the cursor slot so the next cursor upgrade is admitted.
 		let calls = 0;

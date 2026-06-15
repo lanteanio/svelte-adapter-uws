@@ -18,7 +18,7 @@
 // network property. Deterministic, repeatable, runs in seconds.
 
 import { performance } from 'node:perf_hooks';
-import { createPredictor } from '../plugins/smooth/predict.js';
+import { createPredictor } from '../src/plugins/smooth/predict.js';
 
 const DEPTHS = [1, 5, 30, 256];
 const CYCLES = 20000;

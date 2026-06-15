@@ -6,11 +6,11 @@
 // never off the 'you' its own second socket receives.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { createCursor } from '../plugins/cursor/server.js';
-import { encodeCursor, CursorEncodeDict, CursorTimeEncodeDict } from '../plugins/cursor/codec.js';
-import { applyEvent, mergeOutput } from '../plugins/cursor/decode.js';
-import { attachCursorWorker } from '../plugins/cursor/cursor-worker.js';
-import { setRuntimeEnv, resetRuntimeEnv } from '../client-runtime.js';
+import { createCursor } from '../src/plugins/cursor/server.js';
+import { encodeCursor, CursorEncodeDict, CursorTimeEncodeDict } from '../src/plugins/cursor/codec.js';
+import { applyEvent, mergeOutput } from '../src/plugins/cursor/decode.js';
+import { attachCursorWorker } from '../src/plugins/cursor/cursor-worker.js';
+import { setRuntimeEnv, resetRuntimeEnv } from '../src/client-runtime.js';
 import { mockWs, mockPlatform, installFakeRuntimeClock, releaseRuntimeClock } from './_helpers.js';
 
 describe('cursor plugin - self identity (server)', () => {

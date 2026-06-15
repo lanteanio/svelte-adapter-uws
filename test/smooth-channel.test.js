@@ -43,10 +43,10 @@ globalThis.window = /** @type {any} */ ({ location: { protocol: 'http:', host: '
 globalThis.requestAnimationFrame = /** @type {any} */ ((cb) => setTimeout(cb, 0));
 globalThis.cancelAnimationFrame = /** @type {any} */ ((h) => clearTimeout(h));
 
-const clientModule = await import('../client.js');
-const { createSmoothChannel } = await import('../plugins/smooth/client.js');
-const { SmoothEncodeDict, encodeSmooth, SMOOTH_SCHEMA_VERSION } = await import('../plugins/smooth/codec.js');
-const { buildBinaryFrame } = await import('../files/wire.js');
+const clientModule = await import('../src/client.js');
+const { createSmoothChannel } = await import('../src/plugins/smooth/client.js');
+const { SmoothEncodeDict, encodeSmooth, SMOOTH_SCHEMA_VERSION } = await import('../src/plugins/smooth/codec.js');
+const { buildBinaryFrame } = await import('../src/runtime/wire.js');
 
 const flush = (ms = 15) => new Promise((r) => setTimeout(r, ms));
 

@@ -4,8 +4,8 @@
 // path would. Mirrors the cursor harness in wire-client.test.js.
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { buildBinaryFrame } from '../files/wire.js';
-import { encodePresence, PRESENCE_CAPABILITY, PRESENCE_SCHEMA_VERSION } from '../plugins/presence/codec.js';
+import { buildBinaryFrame } from '../src/runtime/wire.js';
+import { encodePresence, PRESENCE_CAPABILITY, PRESENCE_SCHEMA_VERSION } from '../src/plugins/presence/codec.js';
 
 class MockWebSocket {
 	static CONNECTING = 0;
@@ -36,10 +36,10 @@ class MockWebSocket {
 globalThis.WebSocket = /** @type {any} */ (MockWebSocket);
 globalThis.window = /** @type {any} */ ({ location: { protocol: 'http:', host: 'localhost:5173' } });
 
-const clientModule = await import('../client.js');
+const clientModule = await import('../src/client.js');
 // Import the REAL presence client module: its module-load registerWireCodec call
 // is what we are exercising (a typo there would not advertise the capability).
-const presenceMod = await import('../plugins/presence/client.js');
+const presenceMod = await import('../src/plugins/presence/client.js');
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 

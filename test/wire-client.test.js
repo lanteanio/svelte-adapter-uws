@@ -3,7 +3,7 @@
 // announce -> wireIdMap, and decode -> dispatchEvent into the store ladder.
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { buildBinaryFrame } from '../files/wire.js';
+import { buildBinaryFrame } from '../src/runtime/wire.js';
 import {
 	encodeCursor,
 	decodeCursor,
@@ -12,7 +12,7 @@ import {
 	CURSOR_CAPABILITY,
 	CURSOR_CAPABILITY_DICT,
 	CURSOR_SCHEMA_VERSION_DICT
-} from '../plugins/cursor/codec.js';
+} from '../src/plugins/cursor/codec.js';
 
 class MockWebSocket {
 	static CONNECTING = 0;
@@ -44,7 +44,7 @@ class MockWebSocket {
 globalThis.WebSocket = /** @type {any} */ (MockWebSocket);
 globalThis.window = /** @type {any} */ ({ location: { protocol: 'http:', host: 'localhost:5173' } });
 
-const clientModule = await import('../client.js');
+const clientModule = await import('../src/client.js');
 clientModule.registerWireCodec('__cursor:', {
 	capability: CURSOR_CAPABILITY,
 	capabilities: [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT],

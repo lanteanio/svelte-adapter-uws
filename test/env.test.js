@@ -15,7 +15,7 @@ describe('env()', () => {
 	});
 
 	/**
-	 * Mirrors the env() function from files/env.js.
+	 * Mirrors the env() function from src/runtime/env.js.
 	 * @param {string} prefix
 	 * @param {string} name
 	 * @param {any} fallback
@@ -61,7 +61,7 @@ describe('ENV_PREFIX validation', () => {
 	]);
 
 	/**
-	 * Mirrors the startup validation in files/env.js.
+	 * Mirrors the startup validation in src/runtime/env.js.
 	 * @param {string} prefix
 	 * @param {Record<string, string>} testEnv
 	 * @returns {string[]} unexpected var names

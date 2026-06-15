@@ -38,8 +38,8 @@ run(
 	` --temp-directory "${e2eTmpDir}"` +
 	` --reporter=text` +
 	` --src .` +
-	` --include="client.js"` +
-	` --include="vite.js"` +
-	` --include="files/**"` +
-	` --include="plugins/**"`
+	` --include="src/client.js"` +
+	` --include="src/vite.js"` +
+	` --include="src/runtime/**"` +
+	` --include="src/plugins/**"`
 );

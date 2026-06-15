@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { runSim, runSimMany, replaySim, FIXED_EPOCH } from '../sim.js';
+import { runSim, runSimMany, replaySim, FIXED_EPOCH } from '../src/sim.js';
 
 describe('runSim - smoke (zero config)', () => {
 	it('delivers published events to subscribed clients with no invariant violations', async () => {

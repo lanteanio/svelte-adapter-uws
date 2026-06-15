@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { createReplay } from '../plugins/replay/server.js';
+import { createReplay } from '../src/plugins/replay/server.js';
 
 describe('replay plugin - server', () => {
 	/** @type {ReturnType<typeof createReplay>} */

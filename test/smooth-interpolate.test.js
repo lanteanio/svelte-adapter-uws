@@ -5,7 +5,7 @@ import {
 	SAMPLE_EMPTY,
 	SAMPLE_ACTIVE,
 	SAMPLE_SETTLED
-} from '../plugins/smooth/interpolate.js';
+} from '../src/plugins/smooth/interpolate.js';
 
 // Pure modules: time is always an argument, so nothing here needs fake
 // timers or the runtime clock.

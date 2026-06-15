@@ -21,7 +21,7 @@
 // < 100 ms.
 
 import { performance } from 'node:perf_hooks';
-import { createCursor } from '../plugins/cursor/server.js';
+import { createCursor } from '../src/plugins/cursor/server.js';
 
 function mockWs(userData) {
 	return { getUserData: () => userData };

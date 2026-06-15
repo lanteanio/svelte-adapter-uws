@@ -7,7 +7,7 @@
 // regression in either side surfaces here.
 
 import { describe, it, expect } from 'vitest';
-import { applyEvent, mergeOutput, sweepExpired } from '../plugins/cursor/decode.js';
+import { applyEvent, mergeOutput, sweepExpired } from '../src/plugins/cursor/decode.js';
 
 function newState() {
 	return { positionMap: new Map(), userMap: new Map(), timestamps: new Map() };

@@ -147,7 +147,7 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 
 	describe('content negotiation on a rejected upgrade', () => {
 		it('serves a 200 HTML holding page to a browser navigation (Accept text/html)', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			const held = makeHeldGate();
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 1, waitingRoom: { admitCheckPath: '/__admit-check' } },
@@ -172,7 +172,7 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 		});
 
 		it('keeps a 503 with a jittered Retry-After for a non-HTML client', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			const base = 10;
 			const held = makeHeldGate();
 			server = await createTestServer({
@@ -203,7 +203,7 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 
 	describe('opt-out preserves the original bare 503', () => {
 		it('serves the exact bare 503 with no Retry-After when waitingRoom is false', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			const held = makeHeldGate();
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 1, waitingRoom: false },
@@ -231,7 +231,7 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 
 	describe('zero-config default-on', () => {
 		it('engages the waiting room with maxConcurrent set and waitingRoom omitted', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			const held = makeHeldGate();
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 1 },
@@ -252,7 +252,7 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 		});
 
 		it('refines the non-HTML refusal with a Retry-After under zero config', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			const held = makeHeldGate();
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 1 },
@@ -275,7 +275,7 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 
 	describe('admit-check poll endpoint', () => {
 		it('returns 202 admit:false with queue context while the gate is full', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			const held = makeHeldGate();
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 1 },
@@ -301,7 +301,7 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 		});
 
 		it('returns 200 admit:true when the gate has capacity', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 1 }
 			});
@@ -314,7 +314,7 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 		});
 
 		it('does not consume a gate slot when polled (capacity unchanged)', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			const held = makeHeldGate();
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 1 },
@@ -351,7 +351,7 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 
 	describe('no rejection path means no waiting room', () => {
 		it('never engages the waiting room when maxConcurrent is unset', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer();
 
 			// The gate never rejects, so even a browser-Accept burst opens.
@@ -366,7 +366,7 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 
 	describe('existing connections are untouched', () => {
 		it('leaves an open connection alive when a later upgrade is rejected', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			let closedCode = null;
 			// passFirst lets the first upgrade complete cleanly (its slot frees on
 			// handshake); every later upgrade parks, pinning the single-slot gate

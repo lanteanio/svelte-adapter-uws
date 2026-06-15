@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { createPresence } from '../plugins/presence/server.js';
-import { encodePresence } from '../plugins/presence/codec.js';
+import { createPresence } from '../src/plugins/presence/server.js';
+import { encodePresence } from '../src/plugins/presence/codec.js';
 import { mockWs, mockPlatform } from './_helpers.js';
 
 describe('presence plugin - server', () => {

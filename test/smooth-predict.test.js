@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { createPredictor } from '../plugins/smooth/predict.js';
-import { createSharedRandom } from '../plugins/smooth/random.js';
-import { createSeededRng } from '../sim.js';
+import { createPredictor } from '../src/plugins/smooth/predict.js';
+import { createSharedRandom } from '../src/plugins/smooth/random.js';
+import { createSeededRng } from '../src/sim.js';
 
 // The predictor is pure: every time reading is a caller-supplied monotonic
 // millisecond argument, so nothing here needs fake timers.

@@ -20,7 +20,7 @@ import {
 	applyCapacityReason,
 	createUpgradeAdmission,
 	computePressureReason
-} from '../files/utils.js';
+} from '../src/runtime/utils.js';
 
 // A pressure snapshot shaped like the live one the sampler folds. `active`
 // is the only field the posture machine reads on tick.

@@ -26,7 +26,7 @@
 // seeded PRNG; runs in well under a second.
 
 import { performance } from 'node:perf_hooks';
-import { createCursor } from '../plugins/cursor/server.js';
+import { createCursor } from '../src/plugins/cursor/server.js';
 
 const CURSOR = '__cursor:board';
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));

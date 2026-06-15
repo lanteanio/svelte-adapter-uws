@@ -59,8 +59,8 @@ globalThis.OffscreenCanvas = /** @type {any} */ (MockOffscreen);
 globalThis.window = /** @type {any} */ ({ location: { protocol: 'http:', host: 'localhost:5173' }, devicePixelRatio: 2 });
 globalThis.requestAnimationFrame = /** @type {any} */ ((cb) => setTimeout(cb, 0));
 
-const clientModule = await import('../client.js');
-const cursorClient = await import('../plugins/cursor/client.js');
+const clientModule = await import('../src/client.js');
+const cursorClient = await import('../src/plugins/cursor/client.js');
 
 const flush = (ms = 10) => new Promise((r) => setTimeout(r, ms));
 

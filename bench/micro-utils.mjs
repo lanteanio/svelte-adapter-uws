@@ -1,6 +1,6 @@
 // Microbenchmark: A/B test the cost of moving esc() / isValidWireTopic /
 // createScopedTopic from local copies (handler.js, vite.js, testing.js)
-// to imported helpers in files/utils.js.
+// to imported helpers in src/runtime/utils.js.
 //
 // Each benchmark runs N alternating rounds: one round of local, one round
 // of imported, repeated. Alternation controls for system-state drift.
@@ -25,7 +25,7 @@ import {
 	esc as escImported,
 	isValidWireTopic as isValidWireTopicImported,
 	createScopedTopic as createScopedTopicImported
-} from '../files/utils.js';
+} from '../src/runtime/utils.js';
 
 const ITERATIONS = parseInt(process.argv[2] || '5000000', 10);
 const ROUNDS = parseInt(process.argv[3] || '10', 10);

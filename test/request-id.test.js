@@ -33,7 +33,7 @@ describeUWS('platform.requestId on WebSocket connections', () => {
 	});
 
 	it('exposes a fresh UUID on platform.requestId when no header is sent', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let captured;
 		server = await createTestServer({
 			handler: {
@@ -53,7 +53,7 @@ describeUWS('platform.requestId on WebSocket connections', () => {
 	});
 
 	it('honours an X-Request-ID header on the upgrade request', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let captured;
 		server = await createTestServer({
 			handler: {
@@ -71,7 +71,7 @@ describeUWS('platform.requestId on WebSocket connections', () => {
 	});
 
 	it('falls back to a UUID when X-Request-ID is malformed', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let captured;
 		server = await createTestServer({
 			handler: {
@@ -91,7 +91,7 @@ describeUWS('platform.requestId on WebSocket connections', () => {
 	});
 
 	it('threads the same requestId through subscribe / message / close hooks', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const seen = [];
 		server = await createTestServer({
 			handler: {
@@ -121,7 +121,7 @@ describeUWS('platform.requestId on WebSocket connections', () => {
 	});
 
 	it('exposes platform.publish (and other methods) on the per-connection clone', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let captured;
 		server = await createTestServer({
 			handler: {
@@ -142,7 +142,7 @@ describeUWS('platform.requestId on WebSocket connections', () => {
 	});
 
 	it('gives every connection its own requestId', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const ids = [];
 		server = await createTestServer({
 			handler: {
@@ -164,7 +164,7 @@ describeUWS('platform.requestId on WebSocket connections', () => {
 	});
 
 	it('passes the requestId into the upgrade hook context', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let upgradeCtx;
 		let openCtx;
 		server = await createTestServer({

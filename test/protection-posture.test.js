@@ -154,13 +154,13 @@ describeUWS('protection posture coupling on createTestServer', () => {
 
 	describe('zero config is a no-op', () => {
 		it('leaves platform.protection at normal when protection is absent', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({ upgradeAdmission: { maxConcurrent: 1 } });
 			expect(server.platform.protection).toBe('normal');
 		});
 
 		it('serves the identical jittered 503 envelope the waiting room serves today', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			const base = 10;
 			const held = makeHeldGate();
 			// protection absent: the reject path must match today's contract exactly.
@@ -186,7 +186,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 		});
 
 		it('keeps the bare 503 byte-for-byte when the waiting room is opted out', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			const held = makeHeldGate();
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 1, waitingRoom: false },
@@ -209,7 +209,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 		});
 
 		it('reports no capacity reason while the posture stays normal', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({ upgradeAdmission: { maxConcurrent: 1 } });
 			// A healthy idle worker is not under capacity pressure.
 			expect(server.platform.protection).toBe('normal');
@@ -219,7 +219,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 
 	describe('platform.protection reflects a pinned level', () => {
 		it('reads siege when protection is pinned to siege', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 1 },
 				protection: 'siege'
@@ -228,7 +228,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 		});
 
 		it('reads elevated when protection is pinned to elevated', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 1 },
 				protection: 'elevated'
@@ -237,7 +237,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 		});
 
 		it('surfaces CAPACITY on the pressure reason once protection is engaged', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 1 },
 				protection: 'elevated'
@@ -250,7 +250,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 
 	describe('siege drives the waiting room hard', () => {
 		it('serves the holding page or refuses every new browser upgrade under a pinned siege', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 50 },
 				protection: 'siege'
@@ -266,7 +266,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 		});
 
 		it('returns 202 from admit-check at siege even while the gate has free slots', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 50 },
 				protection: 'siege'
@@ -281,7 +281,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 		});
 
 		it('refuses a non-HTML upgrade with a 503 under a pinned siege', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 50 },
 				protection: 'siege'
@@ -298,7 +298,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 
 	describe('elevated widens the Retry-After jitter', () => {
 		it('lifts the refusal Retry-After above the normal envelope at elevated', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			const base = 10;
 			const held = makeHeldGate();
 			// Elevated does not refuse new upgrades on its own - it widens the
@@ -337,7 +337,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 
 	describe('normal leaves the waiting room behavior unchanged', () => {
 		it('serves the 200 holding page to a browser navigation exactly as today', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			const held = makeHeldGate();
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 1 },
@@ -356,7 +356,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 		});
 
 		it('returns 200 admit:true from admit-check when the gate is idle at normal', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 1 },
 				protection: 'normal'
@@ -369,7 +369,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 
 	describe('existing connections survive a posture change', () => {
 		it('leaves an open connection alive when the level moves to siege under it', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			let closedCode = null;
 			const held = makeHeldGate({ passFirst: 1 });
 			// Start at normal so the first upgrade opens a live socket, then move
@@ -410,7 +410,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 		});
 
 		it('keeps a live connection open while admit-check is polled after siege engages', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			const held = makeHeldGate({ passFirst: 1 });
 			// Open a live socket at normal, then engage siege beneath it.
 			server = await createTestServer({

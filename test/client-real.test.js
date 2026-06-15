@@ -45,7 +45,7 @@ globalThis.window = /** @type {any} */ ({
 });
 
 // Import the real module - vitest.config.js aliases 'svelte/store'
-const clientModule = await import('../client.js');
+const clientModule = await import('../src/client.js');
 
 // - Helpers ------------------------------------------------------------------
 
@@ -1242,7 +1242,7 @@ describe('client.js (real module)', () => {
 		let onReplayFn;
 
 		beforeEach(async () => {
-			const mod = await import('../plugins/replay/client.js');
+			const mod = await import('../src/plugins/replay/client.js');
 			onReplayFn = mod.onReplay;
 		});
 
@@ -1589,7 +1589,7 @@ describe('client.js (real module)', () => {
 		let presenceFn;
 
 		beforeEach(async () => {
-			const mod = await import('../plugins/presence/client.js');
+			const mod = await import('../src/plugins/presence/client.js');
 			presenceFn = mod.presence;
 		});
 
@@ -1711,11 +1711,11 @@ describe('client.js (real module)', () => {
 	});
 
 	describe('groups client plugin', () => {
-		/** @type {typeof import('../plugins/groups/client.js').group} */
+		/** @type {typeof import('../src/plugins/groups/client.js').group} */
 		let groupFn;
 
 		beforeEach(async () => {
-			const mod = await import('../plugins/groups/client.js');
+			const mod = await import('../src/plugins/groups/client.js');
 			groupFn = mod.group;
 		});
 
@@ -1974,11 +1974,11 @@ describe('client.js (real module)', () => {
 	});
 
 	describe('cursor client plugin', () => {
-		/** @type {typeof import('../plugins/cursor/client.js').cursor} */
+		/** @type {typeof import('../src/plugins/cursor/client.js').cursor} */
 		let cursorFn;
 
 		beforeEach(async () => {
-			const mod = await import('../plugins/cursor/client.js');
+			const mod = await import('../src/plugins/cursor/client.js');
 			cursorFn = mod.cursor;
 		});
 
@@ -2265,14 +2265,14 @@ describe('client.js (real module)', () => {
 		});
 
 		describe('move() helper', () => {
-			/** @type {typeof import('../plugins/cursor/client.js').move} */
+			/** @type {typeof import('../src/plugins/cursor/client.js').move} */
 			let moveFn;
 			/** @type {Array<{ cb: () => void }>} */
 			let rafQueue;
 			let prevRaf;
 
 			beforeEach(async () => {
-				const mod = await import('../plugins/cursor/client.js');
+				const mod = await import('../src/plugins/cursor/client.js');
 				moveFn = mod.move;
 				rafQueue = [];
 				// Replace requestAnimationFrame with a manual flush queue so
@@ -2369,7 +2369,7 @@ describe('client.js (real module)', () => {
 		let presenceFn;
 
 		beforeEach(async () => {
-			const mod = await import('../plugins/presence/client.js');
+			const mod = await import('../src/plugins/presence/client.js');
 			presenceFn = mod.presence;
 		});
 
@@ -2464,7 +2464,7 @@ describe('client.js (real module)', () => {
 		let presenceFn;
 
 		beforeEach(async () => {
-			const mod = await import('../plugins/presence/client.js');
+			const mod = await import('../src/plugins/presence/client.js');
 			presenceFn = mod.presence;
 		});
 
@@ -2512,7 +2512,7 @@ describe('client.js (real module)', () => {
 		let onReplayFn;
 
 		beforeEach(async () => {
-			const mod = await import('../plugins/replay/client.js');
+			const mod = await import('../src/plugins/replay/client.js');
 			onReplayFn = mod.onReplay;
 		});
 

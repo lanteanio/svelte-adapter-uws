@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createDedup } from '../plugins/dedup/server.js';
+import { createDedup } from '../src/plugins/dedup/server.js';
 import { installFakeRuntimeClock, releaseRuntimeClock } from './_helpers.js';
 
 describe('createDedup', () => {

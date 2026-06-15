@@ -58,7 +58,7 @@ async function captureClosedServerWs(handler) {
 		};
 	});
 
-	const { createTestServer } = await import('../testing.js');
+	const { createTestServer } = await import('../src/testing.js');
 	server = await createTestServer({
 		handler: {
 			...handler,
@@ -98,7 +98,7 @@ describeUWS('closed-WS race: platform methods do not throw on freed sockets', ()
 	});
 
 	it('platform.subscribe handles WS that closes DURING the async hook gate', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let captured = null;
 		let releaseGate;
 		const gateHeld = new Promise((resolve) => { releaseGate = resolve; });
@@ -158,7 +158,7 @@ describeUWS('closed-WS race: platform methods do not throw on freed sockets', ()
 		// (the JS-side userData object survives the native handle), so
 		// the bump fires from the actual `ws.unsubscribe()` call. That
 		// only runs when the subscription was present at close time.
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let captured = null;
 		server = await createTestServer({
 			handler: { open(ws) { captured = ws; } }

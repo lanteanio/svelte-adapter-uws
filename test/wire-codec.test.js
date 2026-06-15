@@ -1,5 +1,5 @@
 // Unit tests for the binary wire foundation: the framework frame envelope
-// (files/wire.js) and the cursor payload codec (plugins/cursor/codec.js).
+// (src/runtime/wire.js) and the cursor payload codec (plugins/cursor/codec.js).
 // Pure - no server, no sockets.
 
 import { describe, it, expect } from 'vitest';
@@ -12,13 +12,13 @@ import {
 	wireIdAnnounce,
 	createCapCounts,
 	WIRE_BINARY_TAG
-} from '../files/wire.js';
+} from '../src/runtime/wire.js';
 import {
 	encodeCursor,
 	decodeCursor,
 	CURSOR_CAPABILITY,
 	CURSOR_SCHEMA_VERSION
-} from '../plugins/cursor/codec.js';
+} from '../src/plugins/cursor/codec.js';
 
 describe('ByteWriter / ByteReader', () => {
 	it('round-trips unsigned varints across byte boundaries', () => {

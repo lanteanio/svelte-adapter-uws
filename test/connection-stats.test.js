@@ -33,7 +33,7 @@ describeUWS('per-connection stats on close', () => {
 	});
 
 	it('passes id, duration, and traffic counters to the close hook', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let captured;
 		server = await createTestServer({
 			handler: {
@@ -64,7 +64,7 @@ describeUWS('per-connection stats on close', () => {
 	});
 
 	it('counts platform.send but not platform.publish in messagesOut', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let captured;
 		server = await createTestServer({
 			handler: {
@@ -95,7 +95,7 @@ describeUWS('per-connection stats on close', () => {
 	});
 
 	it('omits stats fields when no close hook is registered', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		// No handler -> no close hook -> stats not initialised.
 		server = await createTestServer();
 
@@ -113,7 +113,7 @@ describeUWS('per-connection stats on close', () => {
 	});
 
 	it('messagesIn reflects multiple client messages', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let captured;
 		server = await createTestServer({
 			handler: {
@@ -135,7 +135,7 @@ describeUWS('per-connection stats on close', () => {
 	});
 
 	it('duration roughly matches connection lifetime', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let captured;
 		server = await createTestServer({
 			handler: {

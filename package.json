@@ -18,144 +18,129 @@
   "type": "module",
   "exports": {
     ".": {
-      "types": "./index.d.ts",
-      "default": "./index.js"
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
     },
     "./upgrade-response": {
-      "types": "./index.d.ts",
-      "default": "./upgrade-response.js"
+      "types": "./src/index.d.ts",
+      "default": "./src/upgrade-response.js"
     },
     "./client": {
-      "types": "./client.d.ts",
-      "default": "./client.js"
+      "types": "./src/client.d.ts",
+      "default": "./src/client.js"
     },
     "./vite": {
-      "types": "./vite.d.ts",
-      "default": "./vite.js"
+      "types": "./src/vite.d.ts",
+      "default": "./src/vite.js"
     },
     "./testing": {
-      "types": "./testing.d.ts",
-      "default": "./testing.js"
+      "types": "./src/testing.d.ts",
+      "default": "./src/testing.js"
     },
     "./sim": {
-      "types": "./sim.d.ts",
-      "default": "./sim.js"
+      "types": "./src/sim.d.ts",
+      "default": "./src/sim.js"
     },
     "./safe-url": {
-      "types": "./safe-url.d.ts",
-      "default": "./safe-url.js"
+      "types": "./src/safe-url.d.ts",
+      "default": "./src/safe-url.js"
     },
     "./plugins/replay": {
-      "types": "./plugins/replay/server.d.ts",
-      "default": "./plugins/replay/server.js"
+      "types": "./src/plugins/replay/server.d.ts",
+      "default": "./src/plugins/replay/server.js"
     },
     "./plugins/replay/client": {
-      "types": "./plugins/replay/client.d.ts",
-      "default": "./plugins/replay/client.js"
+      "types": "./src/plugins/replay/client.d.ts",
+      "default": "./src/plugins/replay/client.js"
     },
     "./plugins/presence": {
-      "types": "./plugins/presence/server.d.ts",
-      "default": "./plugins/presence/server.js"
+      "types": "./src/plugins/presence/server.d.ts",
+      "default": "./src/plugins/presence/server.js"
     },
     "./plugins/presence/client": {
-      "types": "./plugins/presence/client.d.ts",
-      "default": "./plugins/presence/client.js"
+      "types": "./src/plugins/presence/client.d.ts",
+      "default": "./src/plugins/presence/client.js"
     },
     "./plugins/channels": {
-      "types": "./plugins/channels/server.d.ts",
-      "default": "./plugins/channels/server.js"
+      "types": "./src/plugins/channels/server.d.ts",
+      "default": "./src/plugins/channels/server.js"
     },
     "./plugins/channels/client": {
-      "types": "./plugins/channels/client.d.ts",
-      "default": "./plugins/channels/client.js"
+      "types": "./src/plugins/channels/client.d.ts",
+      "default": "./src/plugins/channels/client.js"
     },
     "./plugins/throttle": {
-      "types": "./plugins/throttle/server.d.ts",
-      "default": "./plugins/throttle/server.js"
+      "types": "./src/plugins/throttle/server.d.ts",
+      "default": "./src/plugins/throttle/server.js"
     },
     "./plugins/ratelimit": {
-      "types": "./plugins/ratelimit/server.d.ts",
-      "default": "./plugins/ratelimit/server.js"
+      "types": "./src/plugins/ratelimit/server.d.ts",
+      "default": "./src/plugins/ratelimit/server.js"
     },
     "./plugins/cursor": {
-      "types": "./plugins/cursor/server.d.ts",
-      "default": "./plugins/cursor/server.js"
+      "types": "./src/plugins/cursor/server.d.ts",
+      "default": "./src/plugins/cursor/server.js"
     },
     "./plugins/cursor/client": {
-      "types": "./plugins/cursor/client.d.ts",
-      "default": "./plugins/cursor/client.js"
+      "types": "./src/plugins/cursor/client.d.ts",
+      "default": "./src/plugins/cursor/client.js"
     },
     "./plugins/middleware": {
-      "types": "./plugins/middleware/server.d.ts",
-      "default": "./plugins/middleware/server.js"
+      "types": "./src/plugins/middleware/server.d.ts",
+      "default": "./src/plugins/middleware/server.js"
     },
     "./plugins/queue": {
-      "types": "./plugins/queue/server.d.ts",
-      "default": "./plugins/queue/server.js"
+      "types": "./src/plugins/queue/server.d.ts",
+      "default": "./src/plugins/queue/server.js"
     },
     "./plugins/groups": {
-      "types": "./plugins/groups/server.d.ts",
-      "default": "./plugins/groups/server.js"
+      "types": "./src/plugins/groups/server.d.ts",
+      "default": "./src/plugins/groups/server.js"
     },
     "./plugins/groups/client": {
-      "types": "./plugins/groups/client.d.ts",
-      "default": "./plugins/groups/client.js"
+      "types": "./src/plugins/groups/client.d.ts",
+      "default": "./src/plugins/groups/client.js"
     },
     "./plugins/lock": {
-      "types": "./plugins/lock/server.d.ts",
-      "default": "./plugins/lock/server.js"
+      "types": "./src/plugins/lock/server.d.ts",
+      "default": "./src/plugins/lock/server.js"
     },
     "./plugins/session": {
-      "types": "./plugins/session/server.d.ts",
-      "default": "./plugins/session/server.js"
+      "types": "./src/plugins/session/server.d.ts",
+      "default": "./src/plugins/session/server.js"
     },
     "./plugins/dedup": {
-      "types": "./plugins/dedup/server.d.ts",
-      "default": "./plugins/dedup/server.js"
+      "types": "./src/plugins/dedup/server.d.ts",
+      "default": "./src/plugins/dedup/server.js"
     },
     "./plugins/crdt": {
-      "types": "./plugins/crdt/server.d.ts",
-      "default": "./plugins/crdt/server.js"
+      "types": "./src/plugins/crdt/server.d.ts",
+      "default": "./src/plugins/crdt/server.js"
     },
     "./plugins/crdt/client": {
-      "types": "./plugins/crdt/client.d.ts",
-      "default": "./plugins/crdt/client.js"
+      "types": "./src/plugins/crdt/client.d.ts",
+      "default": "./src/plugins/crdt/client.js"
     },
     "./plugins/crdt/replica": {
-      "types": "./plugins/crdt/replica.d.ts",
-      "default": "./plugins/crdt/replica.js"
+      "types": "./src/plugins/crdt/replica.d.ts",
+      "default": "./src/plugins/crdt/replica.js"
     },
     "./plugins/crdt/channel": {
-      "types": "./plugins/crdt/channel.d.ts",
-      "default": "./plugins/crdt/channel.js"
+      "types": "./src/plugins/crdt/channel.d.ts",
+      "default": "./src/plugins/crdt/channel.js"
     },
     "./plugins/smooth": {
-      "types": "./plugins/smooth/server.d.ts",
-      "default": "./plugins/smooth/server.js"
+      "types": "./src/plugins/smooth/server.d.ts",
+      "default": "./src/plugins/smooth/server.js"
     },
     "./plugins/smooth/client": {
-      "types": "./plugins/smooth/client.d.ts",
-      "default": "./plugins/smooth/client.js"
+      "types": "./src/plugins/smooth/client.d.ts",
+      "default": "./src/plugins/smooth/client.js"
     }
   },
-  "types": "./index.d.ts",
+  "types": "./src/index.d.ts",
   "files": [
-    "index.js",
-    "index.d.ts",
-    "upgrade-response.js",
-    "testing.js",
-    "testing.d.ts",
-    "sim.js",
-    "sim.d.ts",
-    "client.js",
-    "client.d.ts",
-    "client-runtime.js",
-    "vite.js",
-    "vite.d.ts",
-    "safe-url.js",
-    "safe-url.d.ts",
-    "files",
-    "plugins",
+    "src",
     "LICENSE",
     "README.md",
     "MIGRATION.md"

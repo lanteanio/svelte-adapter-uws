@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createSession } from '../plugins/session/server.js';
+import { createSession } from '../src/plugins/session/server.js';
 import { installFakeRuntimeClock, releaseRuntimeClock } from './_helpers.js';
 
 describe('createSession', () => {

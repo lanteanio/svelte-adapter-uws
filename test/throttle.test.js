@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { throttle, debounce } from '../plugins/throttle/server.js';
+import { throttle, debounce } from '../src/plugins/throttle/server.js';
 import { mockPlatform } from './_helpers.js';
 
 describe('throttle plugin', () => {

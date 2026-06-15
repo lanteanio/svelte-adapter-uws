@@ -17,7 +17,7 @@
 //
 // Run with:  node --expose-gc bench/micro-smooth-replay-alloc.mjs
 
-import { createPredictor } from '../plugins/smooth/predict.js';
+import { createPredictor } from '../src/plugins/smooth/predict.js';
 
 if (typeof globalThis.gc !== 'function') {
 	console.error('run with --expose-gc');

@@ -12,7 +12,7 @@
 // Run: node bench/admission-upgrade-overhead.mjs    (~10-30 s)
 
 import { WebSocket } from 'ws';
-import { createTestServer } from '../testing.js';
+import { createTestServer } from '../src/testing.js';
 
 const CYCLES = parseInt(process.env.CYCLES || '4000');
 const LANES = parseInt(process.env.LANES || '50');

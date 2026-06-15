@@ -1,5 +1,5 @@
 // Microbenchmark: the overhead of reading the clock and arming/clearing a timer
-// through the injectable runtime environment (files/runtime.js) versus calling
+// through the injectable runtime environment (src/runtime/runtime.js) versus calling
 // the native primitives directly.
 //
 // The named helpers are one-line reads over a frozen, never-swapped environment
@@ -13,7 +13,7 @@
 // Defaults: 50,000,000 now() iters, 5,000,000 timer iters, 15 rounds.
 
 import { performance } from 'node:perf_hooks';
-import { now, setTimer, clearTimer } from '../files/runtime.js';
+import { now, setTimer, clearTimer } from '../src/runtime/runtime.js';
 
 const NOW_ITERS = parseInt(process.argv[2] || '50000000', 10);
 const TIMER_ITERS = parseInt(process.argv[3] || '5000000', 10);

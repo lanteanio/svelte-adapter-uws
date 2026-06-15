@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { createHlc } from '../files/utils.js';
-import { setRuntimeEnv, resetRuntimeEnv } from '../files/runtime.js';
+import { createHlc } from '../src/runtime/utils.js';
+import { setRuntimeEnv, resetRuntimeEnv } from '../src/runtime/runtime.js';
 
 // The hybrid logical clock the platform projects as `platform.hlc()`. These
 // drive its wall component through a controlled runtime clock so the

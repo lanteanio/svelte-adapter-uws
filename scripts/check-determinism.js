@@ -11,9 +11,10 @@
  * Modes:
  *   - default: WARN. Prints a per-file summary of raw call sites and exits 0, so
  *     the guard can land before every call site is routed through the module.
- *   - a file listed in ENFORCED must be clean: a raw call in it FAILS (exit 1).
- *     ENFORCED grows as each area is migrated, turning the warning into a
- *     ratchet that cannot regress.
+ *   - a framework source file under src/ must be clean: a raw call in it FAILS
+ *     (exit 1). Enforcement is a subtree prefix (see ENFORCE_EXCEPT), so a
+ *     relocated or newly added module is covered automatically - a ratchet that
+ *     cannot regress.
  *   - `--strict`: treat every finding as an error (the end state, once the whole
  *     surface is migrated).
  *   - `--verbose`: list every finding, not just per-file counts.
@@ -32,89 +33,25 @@ const strict = process.argv.includes('--strict');
 const verbose = process.argv.includes('--verbose');
 
 // The only files permitted to touch the native primitives: the runtime module
-// is the single binding point. Matched by basename so the per-repo path (files/
+// is the single binding point. Matched by basename so the per-repo path (src/runtime/
 // vs shared/) does not matter.
 const ALLOW_FILES = new Set(['runtime.js', 'client-runtime.js']);
 
-// Files already routed through the runtime module that MUST stay clean. A raw
-// primitive reappearing in one of these fails the build. Populated per area as
-// call sites are migrated.
-const ENFORCED = new Set([
-	// e.g. 'files/runtime.js' is covered by ALLOW_FILES; migrated areas listed here.
-	'files/handler.js',
-	'files/handler/state.js',
-	'files/handler/http-helpers.js',
-	'files/handler/state-pool.js',
-	'files/handler/envelope-cache.js',
-	'files/handler/relay.js',
-	'files/handler/hlc.js',
-	'files/handler/config.js',
-	'files/handler/static-assets.js',
-	'files/handler/pressure-metrics.js',
-	'files/handler/subscribe-hooks.js',
-	'files/handler/wire-state.js',
-	'files/handler/platform.js',
-	'files/handler/ssr.js',
-	'files/handler/lifecycle.js',
-	'files/handler/request.js',
-	'files/ws-handler-bridge.js',
-	'files/manifest-bridge.js',
-	'files/index.js',
-	'files/utils.js',
-	'files/utils/mime.js',
-	'files/utils/cookies-string.js',
-	'files/utils/parse.js',
-	'files/utils/backpressure.js',
-	'files/utils/epoch.js',
-	'files/utils/pressure.js',
-	'files/utils/ws-symbols.js',
-	'files/utils/caps.js',
-	'files/utils/request-id.js',
-	'files/utils/upgrade-admission.js',
-	'files/utils/metrics.js',
-	'files/utils/topic.js',
-	'files/utils/origin.js',
-	'files/utils/chaos.js',
-	'files/utils/assertions.js',
-	'files/_init.js',
-	'files/cookies.js',
-	'files/invariants.js',
-	'files/auditor.js',
-	'index.js',
-	'client.js',
-	'testing.js',
-	'plugins/crdt/codec.js',
-	'plugins/crdt/server.js',
-	'plugins/crdt/client.js',
-	'plugins/crdt/replica.js',
-	'plugins/crdt/channel.js',
-	'plugins/cursor/server.js',
-	'plugins/cursor/decode.js',
-	'plugins/cursor/client.js',
-	'plugins/cursor/cursor-worker.js',
-	'plugins/cursor/render/index.js',
-	'plugins/cursor/render/canvas2d.js',
-	'plugins/cursor/render/webgl2.js',
-	'plugins/cursor/render/webgpu.js',
-	'plugins/smooth/clock.js',
-	'plugins/smooth/interpolate.js',
-	'plugins/smooth/random.js',
-	'plugins/smooth/predict.js',
-	'plugins/smooth/codec.js',
-	'plugins/smooth/server.js',
-	'plugins/smooth/client.js',
-	'files/keydict.js',
-	'plugins/throttle/server.js',
-	'plugins/presence/server.js',
-	'plugins/presence/client.js',
-	'plugins/session/server.js',
-	'plugins/dedup/server.js',
-	'plugins/lock/server.js',
-	'plugins/ratelimit/server.js',
-	'plugins/groups/server.js',
-	'plugins/groups/client.js',
-	'plugins/replay/client.js'
+// Enforcement is a subtree prefix: every framework source file under src/ must
+// stay clean (the runtime module in ALLOW_FILES is exempt by basename, and so
+// is any dev-only file in ENFORCE_EXCEPT). The ratchet is structural - a
+// relocated or newly added module under src/ is enforced automatically, with no
+// per-file list to maintain.
+const ENFORCE_EXCEPT = new Set([
+	// The Vite dev plugin builds the dev-server platform, which is never replayed
+	// by the deterministic harness, so its init-time timers and per-request UUIDs
+	// are legitimate raw calls.
+	'src/vite.js'
 ]);
+
+function isEnforced(rel) {
+	return rel.startsWith('src/') && !ENFORCE_EXCEPT.has(rel);
+}
 
 // Path segments that are never framework runtime source.
 const SKIP_SEGMENTS = new Set([
@@ -203,7 +140,7 @@ const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 console.log(`check-determinism: ${pkg.name}@${pkg.version}`);
 console.log(`  ${files.length} framework source file(s) scanned, ${all.length} raw native-primitive call site(s) found.`);
 
-const errors = all.filter((f) => strict || ENFORCED.has(f.rel));
+const errors = all.filter((f) => strict || isEnforced(f.rel));
 const warnings = all.filter((f) => !errors.includes(f));
 
 // Per-file summary so pretest output stays bounded; --verbose lists each site.

@@ -14,13 +14,13 @@
 // against the bandwidth it buys back. Pure JS, no uWS, no real WS. < 1 s.
 
 import { performance } from 'node:perf_hooks';
-import { buildBinaryFrame } from '../files/wire.js';
+import { buildBinaryFrame } from '../src/runtime/wire.js';
 import {
 	encodeCursor,
 	CursorEncodeDict,
 	CURSOR_SCHEMA_VERSION,
 	CURSOR_SCHEMA_VERSION_DICT
-} from '../plugins/cursor/codec.js';
+} from '../src/plugins/cursor/codec.js';
 
 function median(xs) {
 	const s = [...xs].sort((a, b) => a - b);

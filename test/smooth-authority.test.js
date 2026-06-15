@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { createSmoothAuthority } from '../plugins/smooth/server.js';
-import { createSharedRandom } from '../plugins/smooth/random.js';
+import { createSmoothAuthority } from '../src/plugins/smooth/server.js';
+import { createSharedRandom } from '../src/plugins/smooth/random.js';
 import { mockWs } from './_helpers.js';
 
 // The authority is pure with respect to time and transport: the caller owns

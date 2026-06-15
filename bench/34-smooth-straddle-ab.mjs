@@ -15,7 +15,7 @@
 // network property. Deterministic, repeatable, runs in < 1 s.
 
 import { performance } from 'node:perf_hooks';
-import { createSmoother } from '../plugins/smooth/interpolate.js';
+import { createSmoother } from '../src/plugins/smooth/interpolate.js';
 
 const COUNTS = [50, 200, 500, 1000];
 const FRAMES = 2000;

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
-import { parseCookies, serializeCookie, createCookies } from '../files/cookies.js';
+import { parseCookies, serializeCookie, createCookies } from '../src/runtime/cookies.js';
 import {
 	mimeLookup,
 	splitCookiesString,
@@ -30,7 +30,7 @@ import {
 	devAssert,
 	readAssertionCounts,
 	_resetAssertionCountsForTest
-} from '../files/utils.js';
+} from '../src/runtime/utils.js';
 
 // - parse_as_bytes ---------------------------------------------------------
 
@@ -157,7 +157,7 @@ describe('splitCookiesString', () => {
 	});
 });
 
-// - Cookie parsing (imported from files/cookies.js) ------------------------
+// - Cookie parsing (imported from src/runtime/cookies.js) ------------------------
 
 describe('parseCookies', () => {
 	it('returns empty object for falsy input', () => {
@@ -727,7 +727,7 @@ describe('classifyCloseCode', () => {
 	let classifyCloseCode;
 
 	beforeAll(async () => {
-		({ classifyCloseCode } = await import('../client.js'));
+		({ classifyCloseCode } = await import('../src/client.js'));
 	});
 
 	it('classifies 1008 (policy violation) as TERMINAL', () => {
@@ -1027,9 +1027,9 @@ describe('SSR dedup Vary exclusion', () => {
 });
 
 // - parseRange behavior -------------------------------------------------------
-// Inline copy of parseRange from files/handler.js.
+// Inline copy of parseRange from src/runtime/handler.js.
 
-// Inline copy of parseRange from files/handler.js.
+// Inline copy of parseRange from src/runtime/handler.js.
 // Returns { start, end } for a valid range, null for unsatisfiable, false for syntax error.
 function parseRange(header, fileSize) {
 	if (!header.startsWith('bytes=')) return false;
@@ -2994,8 +2994,8 @@ describe('collapseByCoalesceKey', () => {
 
 describe('public re-exports from svelte-adapter-uws/testing', () => {
 	it('re-exports the curated wire-protocol helpers, behavior helpers, and userData slots', async () => {
-		const testing = await import('../testing.js');
-		const utils = await import('../files/utils.js');
+		const testing = await import('../src/testing.js');
+		const utils = await import('../src/runtime/utils.js');
 		const expected = [
 			// Wire-protocol helpers
 			'esc',
@@ -3024,7 +3024,7 @@ describe('public re-exports from svelte-adapter-uws/testing', () => {
 	});
 
 	it('does not expose production-internal helpers via ./testing', async () => {
-		const testing = await import('../testing.js');
+		const testing = await import('../src/testing.js');
 		// Sanity check that we are NOT promoting the production-internal
 		// surface inadvertently. If one of these starts being legitimately
 		// useful in tests, move it to the curated list above with intent.
@@ -3288,7 +3288,7 @@ describe('describeUnsafeSameOriginConfig', () => {
 });
 
 // - BREACH defense: credentialed requests skip dynamic compression ----------
-// Inline copy of the credential-detection predicate from files/handler.js.
+// Inline copy of the credential-detection predicate from src/runtime/handler.js.
 // The handler computes `respAcceptEncoding`, which is later passed to
 // writeResponse(); writeResponse() compresses only when its
 // `acceptEncoding` argument is truthy. Suppressing the value to '' for

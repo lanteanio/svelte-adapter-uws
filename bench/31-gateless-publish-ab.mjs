@@ -22,7 +22,7 @@
 // the send path takes the gate-less fork. We measure delivered messages/second
 // (fanout) and single-target sends/second.
 
-import { createTestServer } from '../testing.js';
+import { createTestServer } from '../src/testing.js';
 import { WebSocket } from 'ws';
 
 const PROFILE_ARG = process.argv[2] || 'all';

@@ -7,9 +7,9 @@
 // contract, and the reconnect reset.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { attachCursorWorker } from '../plugins/cursor/cursor-worker.js';
-import { setRuntimeEnv, resetRuntimeEnv } from '../client-runtime.js';
-import { buildBinaryFrame } from '../files/wire.js';
+import { attachCursorWorker } from '../src/plugins/cursor/cursor-worker.js';
+import { setRuntimeEnv, resetRuntimeEnv } from '../src/client-runtime.js';
+import { buildBinaryFrame } from '../src/runtime/wire.js';
 import {
 	encodeCursor,
 	CursorTimeEncodeDict,
@@ -17,7 +17,7 @@ import {
 	CURSOR_CAPABILITY_DICT,
 	CURSOR_CAPABILITY_TIME,
 	CURSOR_SCHEMA_VERSION_TIME
-} from '../plugins/cursor/codec.js';
+} from '../src/plugins/cursor/codec.js';
 
 let sockets;
 

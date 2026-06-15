@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { createCursor } from '../plugins/cursor/server.js';
+import { createCursor } from '../src/plugins/cursor/server.js';
 import { mockWs, mockPlatform, mockWalkPlatform, installFakeRuntimeClock, releaseRuntimeClock } from './_helpers.js';
 
 // Helpers to filter the new split-wire-format publish stream. The plugin

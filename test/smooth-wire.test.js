@@ -10,9 +10,9 @@ import {
 	CURSOR_CAPABILITY,
 	CURSOR_CAPABILITY_DICT,
 	CURSOR_CAPABILITY_TIME
-} from '../plugins/cursor/codec.js';
-import { createCursor, createCursorWireCodec } from '../plugins/cursor/server.js';
-import { WS_CAPS } from '../files/utils.js';
+} from '../src/plugins/cursor/codec.js';
+import { createCursor, createCursorWireCodec } from '../src/plugins/cursor/server.js';
+import { WS_CAPS } from '../src/runtime/utils.js';
 import { mockWs, mockPlatform } from './_helpers.js';
 
 /** A scripted time source: returns the next value on each call. */

@@ -4,7 +4,7 @@
 // encode and that connection's client-side decode would.
 
 import { describe, it, expect } from 'vitest';
-import { buildBinaryFrame } from '../files/wire.js';
+import { buildBinaryFrame } from '../src/runtime/wire.js';
 import {
 	encodeCursor,
 	decodeCursor,
@@ -14,7 +14,7 @@ import {
 	CURSOR_SCHEMA_VERSION,
 	CURSOR_CAPABILITY_DICT,
 	CURSOR_SCHEMA_VERSION_DICT
-} from '../plugins/cursor/codec.js';
+} from '../src/plugins/cursor/codec.js';
 
 const SV = CURSOR_SCHEMA_VERSION_DICT;
 

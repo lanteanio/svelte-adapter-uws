@@ -2,7 +2,7 @@
 // and the 0..1 pressure scalar it feeds.
 //
 // Two layers:
-//   1. Pure state-machine + scalar helpers from files/wire.js (no server, no
+//   1. Pure state-machine + scalar helpers from src/runtime/wire.js (no server, no
 //      sockets) - absolute-time expiry, per-request decrement, bounded queue
 //      plus refusal, re-grant drains the queue, and the saturation scalar
 //      direction at both ends.
@@ -19,7 +19,7 @@ import {
 	leaseGrantSize,
 	samplePressureValue,
 	parseBinaryFrame
-} from '../files/wire.js';
+} from '../src/runtime/wire.js';
 
 // ---------------------------------------------------------------------------
 // Pure state machine
@@ -334,7 +334,7 @@ try {
 	uWS = null;
 }
 const describeUWS = uWS ? describe : describe.skip;
-const { createTestServer } = uWS ? await import('../testing.js') : {};
+const { createTestServer } = uWS ? await import('../src/testing.js') : {};
 
 const GATE_CAP = 'lease';
 

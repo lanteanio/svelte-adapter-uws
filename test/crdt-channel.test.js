@@ -47,11 +47,11 @@ class MockWebSocket {
 globalThis.WebSocket = /** @type {any} */ (MockWebSocket);
 globalThis.window = /** @type {any} */ ({ location: { protocol: 'http:', host: 'localhost:5173' } });
 
-const clientModule = await import('../client.js');
-const { createCrdtChannel } = await import('../plugins/crdt/channel.js');
-const { encodeCrdt, CRDT_SCHEMA_VERSION } = await import('../plugins/crdt/codec.js');
-const { CRDT_TOPIC_PREFIX } = await import('../plugins/crdt/client.js');
-const { buildBinaryFrame } = await import('../files/wire.js');
+const clientModule = await import('../src/client.js');
+const { createCrdtChannel } = await import('../src/plugins/crdt/channel.js');
+const { encodeCrdt, CRDT_SCHEMA_VERSION } = await import('../src/plugins/crdt/codec.js');
+const { CRDT_TOPIC_PREFIX } = await import('../src/plugins/crdt/client.js');
+const { buildBinaryFrame } = await import('../src/runtime/wire.js');
 
 const flush = (ms = 15) => new Promise((r) => setTimeout(r, ms));
 

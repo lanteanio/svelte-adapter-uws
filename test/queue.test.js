@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { createQueue } from '../plugins/queue/server.js';
+import { createQueue } from '../src/plugins/queue/server.js';
 
 /** Helper: create a task that resolves after a delay with a value. */
 function delayed(ms, value) {

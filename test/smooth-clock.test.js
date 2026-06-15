@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createServerClock } from '../plugins/smooth/clock.js';
+import { createServerClock } from '../src/plugins/smooth/clock.js';
 
 // The estimator is pure (every time reading is an argument), so these tests
 // script monotonic time directly - no fake timers, no runtime clock.

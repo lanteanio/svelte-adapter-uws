@@ -8,7 +8,7 @@
 // DOES dispatch; that contrast is what proves the flag, not the decode shape.
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { buildBinaryFrame } from '../files/wire.js';
+import { buildBinaryFrame } from '../src/runtime/wire.js';
 
 class MockWebSocket {
 	static CONNECTING = 0;
@@ -39,7 +39,7 @@ class MockWebSocket {
 globalThis.WebSocket = /** @type {any} */ (MockWebSocket);
 globalThis.window = /** @type {any} */ ({ location: { protocol: 'http:', host: 'localhost:5173' } });
 
-const clientModule = await import('../client.js');
+const clientModule = await import('../src/client.js');
 
 // A sink codec: decode records the raw payload bytes (proving it ran and
 // "applied in place") and returns a truthy value. The truthy return is

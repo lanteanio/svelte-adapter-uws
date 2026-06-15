@@ -39,7 +39,7 @@ describeUWS('platform.subscribe / platform.unsubscribe', () => {
 	});
 
 	it('platform.subscribe runs the user subscribe hook and gates the actual subscription', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		const hookCalls = [];
 
@@ -75,7 +75,7 @@ describeUWS('platform.subscribe / platform.unsubscribe', () => {
 	});
 
 	it('platform.subscribe is idempotent and does not re-run the hook on second call for same topic', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		let hookCallCount = 0;
 
@@ -102,7 +102,7 @@ describeUWS('platform.subscribe / platform.unsubscribe', () => {
 	});
 
 	it('platform.subscribe rejects malformed topics with INVALID_TOPIC and does not call the hook', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		let hookCallCount = 0;
 
@@ -124,7 +124,7 @@ describeUWS('platform.subscribe / platform.unsubscribe', () => {
 	});
 
 	it('platform.subscribe wires the connection into the publish broadcast path', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 
 		server = await createTestServer({
@@ -148,7 +148,7 @@ describeUWS('platform.subscribe / platform.unsubscribe', () => {
 	});
 
 	it('platform.unsubscribe removes the subscription and fires the unsubscribe hook', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		const unsubscribeCalls = [];
 
@@ -183,7 +183,7 @@ describeUWS('platform.subscribe / platform.unsubscribe', () => {
 		// single-subscribe path consulted only the per-topic hook. This
 		// test pins the fix: batch hook is consulted with [topic] when
 		// subscribe is not exported.
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		const batchCalls = [];
 
@@ -215,7 +215,7 @@ describeUWS('platform.subscribe / platform.unsubscribe', () => {
 	});
 
 	it('subscribeBatch decision wins when both hooks are exported', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		let perTopicCalls = 0;
 
@@ -241,7 +241,7 @@ describeUWS('platform.subscribe / platform.unsubscribe', () => {
 	});
 
 	it('fail-closed: throwing subscribe hook returns INTERNAL_ERROR, no subscription created', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 
 		server = await createTestServer({
@@ -261,7 +261,7 @@ describeUWS('platform.subscribe / platform.unsubscribe', () => {
 	});
 
 	it('fail-closed: throwing subscribeBatch hook denies every topic with INTERNAL_ERROR', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 
 		server = await createTestServer({
@@ -288,7 +288,7 @@ describeUWS('platform.subscribe / platform.unsubscribe', () => {
 		// contract: hook fires exactly once per (ws, topic) regardless of
 		// how the subscribe arrived, ONLY when routed through the wire
 		// frame OR platform.subscribe.
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		let hookCallCount = 0;
 
@@ -323,7 +323,7 @@ describeUWS('platform.checkSubscribe', () => {
 	});
 
 	it('returns null when no hooks are exported', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		server = await createTestServer({ handler: { open(ws) { capturedWs = ws; } } });
 		const { ws: client } = await connectClient(server.wsUrl);
@@ -335,7 +335,7 @@ describeUWS('platform.checkSubscribe', () => {
 	});
 
 	it('returns null when subscribe hook returns undefined / true', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		server = await createTestServer({
 			handler: {
@@ -353,7 +353,7 @@ describeUWS('platform.checkSubscribe', () => {
 	});
 
 	it('returns FORBIDDEN when subscribe hook returns false', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		server = await createTestServer({
 			handler: {
@@ -370,7 +370,7 @@ describeUWS('platform.checkSubscribe', () => {
 	});
 
 	it('returns the verbatim string when subscribe hook returns a string', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		server = await createTestServer({
 			handler: {
@@ -387,7 +387,7 @@ describeUWS('platform.checkSubscribe', () => {
 	});
 
 	it('does not subscribe the connection (purely a gate, no state mutation)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		server = await createTestServer({ handler: { open(ws) { capturedWs = ws; } } });
 		const { ws: client } = await connectClient(server.wsUrl);
@@ -400,7 +400,7 @@ describeUWS('platform.checkSubscribe', () => {
 	});
 
 	it('returns INVALID_TOPIC for malformed topics without invoking the hook', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		let hookCalls = 0;
 		server = await createTestServer({
@@ -419,7 +419,7 @@ describeUWS('platform.checkSubscribe', () => {
 	});
 
 	it('routes through subscribeBatch when only subscribeBatch is exported', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		server = await createTestServer({
 			handler: {
@@ -443,7 +443,7 @@ describeUWS('platform.checkSubscribe', () => {
 	});
 
 	it('returns null when subscribeBatch returns {} (topic absent from denial map)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		server = await createTestServer({
 			handler: {
@@ -460,7 +460,7 @@ describeUWS('platform.checkSubscribe', () => {
 	});
 
 	it('subscribeBatch decision wins when both hooks are exported', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		let perTopicCalls = 0;
 		server = await createTestServer({
@@ -484,7 +484,7 @@ describeUWS('platform.checkSubscribe', () => {
 	});
 
 	it('fail-closed: throwing subscribe hook returns INTERNAL_ERROR', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		server = await createTestServer({
 			handler: {
@@ -501,7 +501,7 @@ describeUWS('platform.checkSubscribe', () => {
 	});
 
 	it('fail-closed: throwing subscribeBatch hook returns INTERNAL_ERROR', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		server = await createTestServer({
 			handler: {
@@ -522,7 +522,7 @@ describeUWS('platform.checkSubscribe', () => {
 		// regardless of which entry point invoked it. If the wire-level
 		// path and platform.checkSubscribe ever diverge, an attacker could
 		// pick the more permissive surface to slip past auth.
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let capturedWs = null;
 		server = await createTestServer({
 			handler: {
@@ -579,7 +579,7 @@ describeUWS('platform.checkSubscribe', () => {
 	// pre-fix code with the wrong shape; they pin the await behaviour.
 	describe('async hook denial pinning', () => {
 		it('platform.subscribe: async () => false denies with FORBIDDEN', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			let capturedWs = null;
 			server = await createTestServer({
 				handler: {
@@ -597,7 +597,7 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 
 		it('platform.subscribe: async () => "CUSTOM" denies with CUSTOM', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			let capturedWs = null;
 			server = await createTestServer({
 				handler: {
@@ -615,7 +615,7 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 
 		it('platform.subscribe: async () => { throw } denies with INTERNAL_ERROR', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			let capturedWs = null;
 			server = await createTestServer({
 				handler: {
@@ -633,7 +633,7 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 
 		it('platform.subscribe: async () => true allows', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			let capturedWs = null;
 			server = await createTestServer({
 				handler: {
@@ -651,7 +651,7 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 
 		it('platform.subscribe: subscribeBatch async returning {topic:false} denies', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			let capturedWs = null;
 			server = await createTestServer({
 				handler: {
@@ -675,7 +675,7 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 
 		it('platform.subscribe: subscribeBatch async throwing denies all with INTERNAL_ERROR', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			let capturedWs = null;
 			server = await createTestServer({
 				handler: {
@@ -692,7 +692,7 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 
 		it('wire subscribe frame: async () => false denies on the wire too', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({
 				handler: {
 					subscribe: async () => false
@@ -718,7 +718,7 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 
 		it('wire subscribe-batch frame: async hook denies per-topic correctly', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({
 				handler: {
 					subscribeBatch: async (_ws, topics) => {
@@ -749,7 +749,7 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 
 		it('wire subscribe frame: async per-topic fallback when no batch hook is exported', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({
 				handler: {
 					subscribe: async (_ws, topic) => topic === 'admin' ? false : true
@@ -778,7 +778,7 @@ describeUWS('platform.checkSubscribe', () => {
 			// Pre-fix bug: caller did `if (denial) ...` against a Promise,
 			// always taking the truthy branch. The fix awaits before the
 			// truthiness check.
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			let capturedWs = null;
 			server = await createTestServer({
 				handler: {
@@ -799,7 +799,7 @@ describeUWS('platform.checkSubscribe', () => {
 			// pre-fix bug: !Promise === false, so async-deny filters became
 			// async-allow filters. The fix detects Promise return, logs once,
 			// and treats the connection as not matching.
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({});
 			const { ws: client, frames } = await connectClient(server.wsUrl);
 			await new Promise(r => setTimeout(r, 30));
@@ -820,7 +820,7 @@ describeUWS('platform.checkSubscribe', () => {
 		// every `live.signal()` to that user. Default-block is the fix;
 		// apps can opt back in via websocket.allowSystemTopicSubscribe.
 		it('wire subscribe to __signal: topic is denied with INVALID_TOPIC by default', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({});
 			const { ws: client, frames } = await connectClient(server.wsUrl);
 			await new Promise(r => setTimeout(r, 30));
@@ -840,7 +840,7 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 
 		it('wire subscribe to __rpc / __presence / __group / __replay / __realtime are all denied by default', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({});
 			const { ws: client, frames } = await connectClient(server.wsUrl);
 			await new Promise(r => setTimeout(r, 30));
@@ -864,7 +864,7 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 
 		it('wire subscribe-batch denies __ topics per-entry; non-reserved topics still allowed', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({});
 			const { ws: client, frames } = await connectClient(server.wsUrl);
 			await new Promise(r => setTimeout(r, 30));
@@ -895,7 +895,7 @@ describeUWS('platform.checkSubscribe', () => {
 			// The block is a top-level wire-protocol guard; it must not pass
 			// through to the user's subscribe hook (where a logging side
 			// effect or DB lookup might cost something attacker-controlled).
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			let hookCalls = 0;
 			server = await createTestServer({
 				handler: { subscribe(_ws, _topic) { hookCalls++; return undefined; } }
@@ -912,7 +912,7 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 
 		it('opt-in: allowSystemTopicSubscribe:true permits wire __ subscribes', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({ allowSystemTopicSubscribe: true });
 			const { ws: client, frames } = await connectClient(server.wsUrl);
 			await new Promise(r => setTimeout(r, 30));
@@ -932,7 +932,7 @@ describeUWS('platform.checkSubscribe', () => {
 			// enableSignals -> platform.subscribe(ws, '__signal:userId') is
 			// the expected pattern. The wire-side subscribe gate must not
 			// regress that for server-initiated subscribes.
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			let capturedWs = null;
 			server = await createTestServer({
 				handler: { open(ws) { capturedWs = ws; } }
@@ -947,7 +947,7 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 
 		it('platform.sendTo: sync filter still works and sends to matching connections', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({});
 			const { ws: client, frames } = await connectClient(server.wsUrl);
 			await new Promise(r => setTimeout(r, 30));
@@ -964,7 +964,7 @@ describeUWS('platform.checkSubscribe', () => {
 		});
 
 		it('platform.sendTo: accepts a { compress: true } opt-in and still delivers', async () => {
-			const { createTestServer } = await import('../testing.js');
+			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({});
 			const { ws: client, frames } = await connectClient(server.wsUrl);
 			await new Promise(r => setTimeout(r, 30));
@@ -991,7 +991,7 @@ describeUWS('platform.forEachSubscriber', () => {
 	});
 
 	it('walks exactly the sockets subscribed to a topic, passing (ws, userData)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const opened = [];
 		server = await createTestServer({ handler: { open(ws) { opened.push(ws); } } });
 
@@ -1030,7 +1030,7 @@ describeUWS('platform.forEachSubscriber', () => {
 	});
 
 	it('stops visiting a socket after it unsubscribes', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const opened = [];
 		server = await createTestServer({ handler: { open(ws) { opened.push(ws); } } });
 

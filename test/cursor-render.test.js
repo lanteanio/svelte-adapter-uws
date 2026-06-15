@@ -7,10 +7,10 @@
 // faithfully - it is the reason the presenter architecture exists.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { Canvas2DRenderer } from '../plugins/cursor/render/canvas2d.js';
-import { WebGL2Renderer } from '../plugins/cursor/render/webgl2.js';
-import { WebGPURenderer } from '../plugins/cursor/render/webgpu.js';
-import { selectRenderer, hasWebGL2, hashColor, _resetBackendProbes } from '../plugins/cursor/render/index.js';
+import { Canvas2DRenderer } from '../src/plugins/cursor/render/canvas2d.js';
+import { WebGL2Renderer } from '../src/plugins/cursor/render/webgl2.js';
+import { WebGPURenderer } from '../src/plugins/cursor/render/webgpu.js';
+import { selectRenderer, hasWebGL2, hashColor, _resetBackendProbes } from '../src/plugins/cursor/render/index.js';
 
 function mock2dCtx() {
 	const ctx = {

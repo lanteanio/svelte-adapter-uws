@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { createGroup } from '../plugins/groups/server.js';
+import { createGroup } from '../src/plugins/groups/server.js';
 import { mockWs, mockPlatform } from './_helpers.js';
 
 describe('groups plugin - server', () => {

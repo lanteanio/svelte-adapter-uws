@@ -10,9 +10,9 @@
 // imposes.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { attachCursorWorker, CURSOR_SUBPROTOCOL } from '../plugins/cursor/cursor-worker.js';
-import { CURSOR_LANE_SUBPROTOCOL } from '../files/utils.js';
-import { buildBinaryFrame } from '../files/wire.js';
+import { attachCursorWorker, CURSOR_SUBPROTOCOL } from '../src/plugins/cursor/cursor-worker.js';
+import { CURSOR_LANE_SUBPROTOCOL } from '../src/runtime/utils.js';
+import { buildBinaryFrame } from '../src/runtime/wire.js';
 import {
 	encodeCursor,
 	CursorEncodeDict,
@@ -20,7 +20,7 @@ import {
 	CURSOR_CAPABILITY_DICT,
 	CURSOR_SCHEMA_VERSION,
 	CURSOR_SCHEMA_VERSION_DICT
-} from '../plugins/cursor/codec.js';
+} from '../src/plugins/cursor/codec.js';
 
 let sockets;
 

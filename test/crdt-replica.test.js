@@ -8,7 +8,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as Y from 'yjs';
-import { createCrdtAuthority, normalizeCrdtAccess } from '../plugins/crdt/replica.js';
+import { createCrdtAuthority, normalizeCrdtAccess } from '../src/plugins/crdt/replica.js';
 import { installFakeRuntimeClock, releaseRuntimeClock } from './_helpers.js';
 
 /** Drain pending microtasks (promise chains between scripted timer steps). */

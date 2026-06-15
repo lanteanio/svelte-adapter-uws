@@ -13,8 +13,8 @@
 // snapshot / join / leave / move frames to the plugins.
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { createCursor } from '../plugins/cursor/server.js';
-import { createPresence } from '../plugins/presence/server.js';
+import { createCursor } from '../src/plugins/cursor/server.js';
+import { createPresence } from '../src/plugins/presence/server.js';
 
 let uWS;
 try {
@@ -56,7 +56,7 @@ describeUWS('cursor + presence tap channels over a real uWS server', () => {
 	});
 
 	async function startServer() {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id, name: ud.name }) });
 		const cursor = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id, name: ud.name }) });
 		clients = [];

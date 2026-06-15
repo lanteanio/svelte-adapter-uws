@@ -15,14 +15,14 @@
 
 import uWS from 'uWebSockets.js';
 import { WebSocket } from 'ws';
-import { buildBinaryFrame } from '../files/wire.js';
+import { buildBinaryFrame } from '../src/runtime/wire.js';
 import {
 	encodeCursor,
 	CursorEncodeDict,
 	CURSOR_SCHEMA_VERSION,
 	CURSOR_SCHEMA_VERSION_DICT
-} from '../plugins/cursor/codec.js';
-import { encodePresence, PRESENCE_SCHEMA_VERSION } from '../plugins/presence/codec.js';
+} from '../src/plugins/cursor/codec.js';
+import { encodePresence, PRESENCE_SCHEMA_VERSION } from '../src/plugins/presence/codec.js';
 
 const PORT = parseInt(process.env.PORT || '9100');
 const TARGET_BYTES = 8_000_000; // raw bytes streamed per measurement -> sets K

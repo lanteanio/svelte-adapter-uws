@@ -16,14 +16,14 @@ import {
 	buildBinaryFrame,
 	parseBinaryFrame,
 	WIRE_BINARY_TAG
-} from '../files/wire.js';
+} from '../src/runtime/wire.js';
 import {
 	encodeCrdt,
 	decodeCrdt,
 	createCrdtWireCodec,
 	CRDT_CAPABILITY,
 	CRDT_SCHEMA_VERSION
-} from '../plugins/crdt/codec.js';
+} from '../src/plugins/crdt/codec.js';
 
 const SV = CRDT_SCHEMA_VERSION;
 
@@ -194,8 +194,8 @@ class MockWebSocket {
 globalThis.WebSocket = /** @type {any} */ (MockWebSocket);
 globalThis.window = /** @type {any} */ ({ location: { protocol: 'http:', host: 'localhost:5173' } });
 
-const clientModule = await import('../client.js');
-const crdtClient = await import('../plugins/crdt/client.js');
+const clientModule = await import('../src/client.js');
+const crdtClient = await import('../src/plugins/crdt/client.js');
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 function helloFrame(mock) {

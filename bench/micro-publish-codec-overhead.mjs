@@ -16,9 +16,9 @@
 // Pure JS, no uWS, no real WS. Deterministic, < 1 s.
 
 import { performance } from 'node:perf_hooks';
-import { completeEnvelope, esc } from '../files/utils.js';
-import { buildBinaryFrame, createCapCounts } from '../files/wire.js';
-import { encodeCursor, CURSOR_SCHEMA_VERSION, CURSOR_CAPABILITY } from '../plugins/cursor/codec.js';
+import { completeEnvelope, esc } from '../src/runtime/utils.js';
+import { buildBinaryFrame, createCapCounts } from '../src/runtime/wire.js';
+import { encodeCursor, CURSOR_SCHEMA_VERSION, CURSOR_CAPABILITY } from '../src/plugins/cursor/codec.js';
 
 function median(xs) {
 	const s = [...xs].sort((a, b) => a - b);

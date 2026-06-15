@@ -13,7 +13,7 @@
 // Deterministic, < 1 s.
 
 import { performance } from 'node:perf_hooks';
-import { buildBinaryFrame, parseBinaryFrame } from '../files/wire.js';
+import { buildBinaryFrame, parseBinaryFrame } from '../src/runtime/wire.js';
 import {
 	encodeCursor,
 	decodeCursor,
@@ -21,7 +21,7 @@ import {
 	CursorDecodeDict,
 	CURSOR_SCHEMA_VERSION,
 	CURSOR_SCHEMA_VERSION_DICT
-} from '../plugins/cursor/codec.js';
+} from '../src/plugins/cursor/codec.js';
 
 function median(xs) {
 	const s = [...xs].sort((a, b) => a - b);

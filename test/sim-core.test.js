@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask, setRuntimeEnv, resetRuntimeEnv, now as runtimeNow } from '../files/runtime.js';
-import { createSeededRng, createScheduler, createFaultEngine, FIXED_EPOCH } from '../files/sim-core.js';
+import { setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask, setRuntimeEnv, resetRuntimeEnv, now as runtimeNow } from '../src/runtime/runtime.js';
+import { createSeededRng, createScheduler, createFaultEngine, FIXED_EPOCH } from '../src/runtime/sim-core.js';
 
 afterEach(() => resetRuntimeEnv());
 

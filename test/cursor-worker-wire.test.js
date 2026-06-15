@@ -13,9 +13,9 @@
 //   - a server with `binary: false` keeps the worker correct on pure JSON.
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { attachCursorWorker } from '../plugins/cursor/cursor-worker.js';
-import { createCursor } from '../plugins/cursor/server.js';
-import { parseBinaryFrame } from '../files/wire.js';
+import { attachCursorWorker } from '../src/plugins/cursor/cursor-worker.js';
+import { createCursor } from '../src/plugins/cursor/server.js';
+import { parseBinaryFrame } from '../src/runtime/wire.js';
 import {
 	decodeCursor,
 	CursorDecodeDict,
@@ -23,7 +23,7 @@ import {
 	CURSOR_CAPABILITY_DICT,
 	CURSOR_CAPABILITY_TIME,
 	CURSOR_SCHEMA_VERSION_TIME
-} from '../plugins/cursor/codec.js';
+} from '../src/plugins/cursor/codec.js';
 
 let uWS;
 try {
@@ -32,7 +32,7 @@ try {
 	uWS = null;
 }
 const describeUWS = uWS ? describe : describe.skip;
-const { createTestServer } = uWS ? await import('../testing.js') : {};
+const { createTestServer } = uWS ? await import('../src/testing.js') : {};
 
 let server;
 let controllers;

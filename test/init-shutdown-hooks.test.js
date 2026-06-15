@@ -38,7 +38,7 @@ describeUWS('hooks.ws.init', () => {
 	});
 
 	it('fires once after the listen socket is bound, with { platform } in the context', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const initCalls = [];
 
 		server = await createTestServer({
@@ -52,14 +52,14 @@ describeUWS('hooks.ws.init', () => {
 	});
 
 	it('does not fire if the user did not export init', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		// No init export - createTestServer should resolve normally.
 		server = await createTestServer({ handler: {} });
 		expect(server.platform).toBeDefined();
 	});
 
 	it('async init is awaited before createTestServer resolves', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let initCompleted = false;
 
 		const startTime = Date.now();
@@ -78,7 +78,7 @@ describeUWS('hooks.ws.init', () => {
 	});
 
 	it('throwing init rejects the createTestServer promise (boot failure is loud)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 
 		await expect(createTestServer({
 			handler: { init() { throw new Error('boot kaboom'); } }
@@ -86,7 +86,7 @@ describeUWS('hooks.ws.init', () => {
 	});
 
 	it('init can call platform.publish; the platform is fully wired before init runs', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let publishedFromInit = null;
 
 		server = await createTestServer({
@@ -102,7 +102,7 @@ describeUWS('hooks.ws.init', () => {
 	});
 
 	it('init fires before any open hook (kernel-queued connections wait for init to resolve)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const callOrder = [];
 
 		server = await createTestServer({
@@ -134,7 +134,7 @@ describeUWS('hooks.ws.shutdown', () => {
 	});
 
 	it('fires once during server close, with { platform } in the context', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const shutdownCalls = [];
 
 		server = await createTestServer({
@@ -152,7 +152,7 @@ describeUWS('hooks.ws.shutdown', () => {
 	});
 
 	it('async shutdown is awaited before close() resolves', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let shutdownCompleted = false;
 
 		server = await createTestServer({
@@ -173,7 +173,7 @@ describeUWS('hooks.ws.shutdown', () => {
 	});
 
 	it('throwing shutdown is logged and ignored (server still closes)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 
 		server = await createTestServer({
 			handler: {
@@ -187,7 +187,7 @@ describeUWS('hooks.ws.shutdown', () => {
 	});
 
 	it('shutdown fires before existing connections are kicked', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		let connectionsAtShutdown = -1;
 
 		server = await createTestServer({
@@ -218,7 +218,7 @@ describeUWS('init / shutdown lifecycle ordering', () => {
 	});
 
 	it('init runs before shutdown, and shutdown is fired exactly once even if close is called concurrently', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		const order = [];
 
 		server = await createTestServer({

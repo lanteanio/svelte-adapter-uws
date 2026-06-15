@@ -21,9 +21,9 @@
 
 import uWS from 'uWebSockets.js';
 import { WebSocket } from 'ws';
-import { buildBinaryFrame } from '../files/wire.js';
-import { encodeCursor, CURSOR_SCHEMA_VERSION } from '../plugins/cursor/codec.js';
-import { encodePresence, PRESENCE_SCHEMA_VERSION } from '../plugins/presence/codec.js';
+import { buildBinaryFrame } from '../src/runtime/wire.js';
+import { encodeCursor, CURSOR_SCHEMA_VERSION } from '../src/plugins/cursor/codec.js';
+import { encodePresence, PRESENCE_SCHEMA_VERSION } from '../src/plugins/presence/codec.js';
 
 const PORT = parseInt(process.env.PORT || '9120');
 

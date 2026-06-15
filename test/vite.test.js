@@ -3,12 +3,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 describe('vite plugin', () => {
 	describe('module loading', () => {
 		it('imports without requiring ws at the top level', async () => {
-			const mod = await import('../vite.js');
+			const mod = await import('../src/vite.js');
 			expect(typeof mod.default).toBe('function');
 		});
 
 		it('exports uwsDev as deprecated alias', async () => {
-			const mod = await import('../vite.js');
+			const mod = await import('../src/vite.js');
 			expect(mod.uwsDev).toBe(mod.default);
 		});
 	});
@@ -17,7 +17,7 @@ describe('vite plugin', () => {
 		let plugin;
 
 		beforeEach(async () => {
-			const mod = await import('../vite.js');
+			const mod = await import('../src/vite.js');
 			plugin = mod.default();
 		});
 
@@ -41,7 +41,7 @@ describe('vite plugin', () => {
 
 	describe('configureServer', () => {
 		it('warns and returns early in middleware mode (no httpServer)', async () => {
-			const mod = await import('../vite.js');
+			const mod = await import('../src/vite.js');
 			const plugin = mod.default();
 
 			const warnings = [];
@@ -63,7 +63,7 @@ describe('vite plugin', () => {
 			vi.doMock('ws', () => { throw new Error('Cannot find package'); });
 
 			// Re-import to pick up the mock
-			const { default: uws } = await import('../vite.js?ws-missing');
+			const { default: uws } = await import('../src/vite.js?ws-missing');
 			const plugin = uws();
 
 			const warnings = [];
@@ -83,7 +83,7 @@ describe('vite plugin', () => {
 		});
 
 		it('sets up WebSocket server when ws is available', async () => {
-			const mod = await import('../vite.js');
+			const mod = await import('../src/vite.js');
 			const plugin = mod.default();
 
 			const warnings = [];
@@ -112,7 +112,7 @@ describe('vite plugin', () => {
 		});
 
 		it('warns when ws path collides with HMR path', async () => {
-			const mod = await import('../vite.js');
+			const mod = await import('../src/vite.js');
 			const plugin = mod.default({ path: '/__hmr' });
 
 			const warnings = [];
@@ -131,7 +131,7 @@ describe('vite plugin', () => {
 		});
 
 		it('mounts the authenticate middleware at /__ws/auth', async () => {
-			const mod = await import('../vite.js');
+			const mod = await import('../src/vite.js');
 			const plugin = mod.default();
 
 			const warnings = [];
@@ -155,7 +155,7 @@ describe('vite plugin', () => {
 		});
 
 		it('mounts the authenticate middleware at a custom path', async () => {
-			const mod = await import('../vite.js');
+			const mod = await import('../src/vite.js');
 			const plugin = mod.default({ authPath: '/api/ws-auth' });
 
 			const middlewarePaths = [];
@@ -182,7 +182,7 @@ describe('vite plugin', () => {
 		it('includes unsubscribe in handler extraction', async () => {
 			// The applyHandlers function is internal, but we can verify
 			// the plugin passes through all hooks by checking the module shape
-			const mod = await import('../vite.js');
+			const mod = await import('../src/vite.js');
 			const plugin = mod.default({ handler: './test/vite.test.js' });
 
 			// handleHotUpdate compares all handler references including unsubscribe.
@@ -197,7 +197,7 @@ describe('vite plugin', () => {
 
 	describe('SSR build (configResolved + buildStart)', () => {
 		it('emits the ws-handler chunk when handler file exists during the SSR build', async () => {
-			const mod = await import('../vite.js');
+			const mod = await import('../src/vite.js');
 			const plugin = mod.default({ handler: './test/vite.test.js' });
 
 			plugin.configResolved({ root: process.cwd(), build: { ssr: true } });
@@ -213,7 +213,7 @@ describe('vite plugin', () => {
 		});
 
 		it('does not emit when the build is not an SSR build', async () => {
-			const mod = await import('../vite.js');
+			const mod = await import('../src/vite.js');
 			const plugin = mod.default({ handler: './test/vite.test.js' });
 
 			plugin.configResolved({ root: process.cwd(), build: { ssr: false } });
@@ -225,7 +225,7 @@ describe('vite plugin', () => {
 		});
 
 		it('does not emit on the client environment of a multi-environment SSR build', async () => {
-			const mod = await import('../vite.js');
+			const mod = await import('../src/vite.js');
 			const plugin = mod.default({ handler: './test/vite.test.js' });
 
 			plugin.configResolved({ root: process.cwd(), build: { ssr: true } });
@@ -237,7 +237,7 @@ describe('vite plugin', () => {
 		});
 
 		it('does not emit when no handler file is found', async () => {
-			const mod = await import('../vite.js');
+			const mod = await import('../src/vite.js');
 			const plugin = mod.default();
 
 			plugin.configResolved({ root: '/nonexistent/path', build: { ssr: true } });

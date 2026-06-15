@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createLock } from '../plugins/lock/server.js';
+import { createLock } from '../src/plugins/lock/server.js';
 
 /**
  * Build a deferred promise + resolvers for ordering tests.

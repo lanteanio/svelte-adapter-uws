@@ -1,6 +1,6 @@
 // Microbenchmark: A/B test the cost of moving the WebSocket Origin
 // validation from an inline 4-level-nested ladder in handler.js to a
-// single helper call (isOriginAllowed in files/utils.js).
+// single helper call (isOriginAllowed in src/runtime/utils.js).
 //
 // Same alternating-round methodology as bench/micro-utils.mjs:
 // each variant runs N iterations per round, R rounds, alternating;
@@ -14,7 +14,7 @@
 //   node bench/micro-origin.mjs [iterations] [rounds]
 // Defaults: 5_000_000 iterations, 10 rounds.
 
-import { isOriginAllowed as extracted } from '../files/utils.js';
+import { isOriginAllowed as extracted } from '../src/runtime/utils.js';
 
 const ITERATIONS = parseInt(process.argv[2] || '5000000', 10);
 const ROUNDS = parseInt(process.argv[3] || '10', 10);

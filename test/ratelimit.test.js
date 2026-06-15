@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { createRateLimit } from '../plugins/ratelimit/server.js';
+import { createRateLimit } from '../src/plugins/ratelimit/server.js';
 import { mockWs, installFakeRuntimeClock, releaseRuntimeClock } from './_helpers.js';
 
 describe('ratelimit plugin', () => {

@@ -1,5 +1,5 @@
 // Backpressure degradation of the stateful binary wire, against the real
-// createTestServer platform (the testing.js mirror of files/handler.js).
+// createTestServer platform (the testing.js mirror of src/runtime/handler.js).
 //
 // A stateful codec mutates its per-connection encoder dictionary DURING
 // encode (interns keys, advances the delta-stamp baseline), then sends. uWS
@@ -18,10 +18,10 @@
 // capability accounting live and to prove neighbor isolation.
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { createSmoothWireCodec, SMOOTH_TOPIC_PREFIX, SMOOTH_CAPABILITY } from '../plugins/smooth/server.js';
-import { SmoothDecodeDict, decodeSmooth } from '../plugins/smooth/codec.js';
-import { parseBinaryFrame } from '../files/wire.js';
-import { trackedSubscribe, WS_SUBSCRIPTIONS, WS_CAPS } from '../files/utils.js';
+import { createSmoothWireCodec, SMOOTH_TOPIC_PREFIX, SMOOTH_CAPABILITY } from '../src/plugins/smooth/server.js';
+import { SmoothDecodeDict, decodeSmooth } from '../src/plugins/smooth/codec.js';
+import { parseBinaryFrame } from '../src/runtime/wire.js';
+import { trackedSubscribe, WS_SUBSCRIPTIONS, WS_CAPS } from '../src/runtime/utils.js';
 
 let uWS;
 try {
@@ -30,7 +30,7 @@ try {
 	uWS = null;
 }
 const describeUWS = uWS ? describe : describe.skip;
-const { createTestServer } = uWS ? await import('../testing.js') : {};
+const { createTestServer } = uWS ? await import('../src/testing.js') : {};
 
 const TOPIC = SMOOTH_TOPIC_PREFIX + 'degrade';
 

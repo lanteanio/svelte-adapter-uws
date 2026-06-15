@@ -6,7 +6,7 @@ import {
 	resetFatalSink,
 	readAssertionCounts,
 	_resetAssertionCountsForTest
-} from '../files/utils.js';
+} from '../src/runtime/utils.js';
 
 describe('fatal', () => {
 	beforeEach(() => {

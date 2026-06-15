@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createConsistencyAuditor } from '../files/auditor.js';
-import { checkSubscriptionBookkeeping } from '../files/invariants.js';
+import { createConsistencyAuditor } from '../src/runtime/auditor.js';
+import { checkSubscriptionBookkeeping } from '../src/runtime/invariants.js';
 
 // A snapshot factory that always reports the same (possibly broken) state, so a
 // seeded violation surfaces deterministically. `total` keeps the round-robin

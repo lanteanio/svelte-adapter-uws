@@ -46,7 +46,7 @@ describeUWS('platform.publishBatched', () => {
 	});
 
 	it('emits one batch frame to a cap-able subscriber on a single topic', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -72,7 +72,7 @@ describeUWS('platform.publishBatched', () => {
 	});
 
 	it('accepts a { compress: true } batch opt-in and still delivers one frame', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -96,7 +96,7 @@ describeUWS('platform.publishBatched', () => {
 	});
 
 	it('falls back to N individual frames for a non-cap-able client', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		// Connect WITHOUT sending the hello frame -> server treats us as
@@ -124,7 +124,7 @@ describeUWS('platform.publishBatched', () => {
 	});
 
 	it('emits one batch frame per subscriber when all subscribers see all events', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const a = await connectAndCollect(server.wsUrl);
@@ -164,7 +164,7 @@ describeUWS('platform.publishBatched', () => {
 	});
 
 	it('falls back to per-event publish when subscriber views differ (slow path)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const a = await connectAndCollect(server.wsUrl);
@@ -206,7 +206,7 @@ describeUWS('platform.publishBatched', () => {
 	});
 
 	it('sends nothing to subscribers with no overlap with the batch topics', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -226,7 +226,7 @@ describeUWS('platform.publishBatched', () => {
 	});
 
 	it('stamps per-event seq independently of the batch wrapper', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -254,7 +254,7 @@ describeUWS('platform.publishBatched', () => {
 	});
 
 	it('honours per-event {seq: false} to skip seq stamping', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -278,7 +278,7 @@ describeUWS('platform.publishBatched', () => {
 	});
 
 	it('is a no-op for empty / non-array input', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -298,7 +298,7 @@ describeUWS('platform.publishBatched', () => {
 	});
 
 	it('falls back to publish-loop when any interested subscriber lacks the batch cap', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const a = await connectAndCollect(server.wsUrl);            // cap-able
@@ -334,7 +334,7 @@ describeUWS('platform.publishBatched', () => {
 	});
 
 	it('honours coalesceKey to drop earlier same-key events (latest wins)', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -362,7 +362,7 @@ describeUWS('platform.publishBatched', () => {
 	});
 
 	it('mixes coalesced and non-coalesced events in one batch', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -393,7 +393,7 @@ describeUWS('platform.publishBatched', () => {
 	});
 
 	it('preserves submitted order across topics within one frame', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -431,7 +431,7 @@ describeUWS('client capability handshake', () => {
 	});
 
 	it('stores caps from a hello frame on the connection', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { ws, frames } = await connectAndCollect(server.wsUrl);
@@ -453,7 +453,7 @@ describeUWS('client capability handshake', () => {
 	});
 
 	it('ignores non-string entries in the caps array', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const { WebSocket } = await import('ws');

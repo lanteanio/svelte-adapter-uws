@@ -17,7 +17,7 @@ import {
 	setRuntimeEnv,
 	resetRuntimeEnv,
 	getRuntimeEnv
-} from '../files/runtime.js';
+} from '../src/runtime/runtime.js';
 
 // Every test that swaps the active environment must restore the native one,
 // otherwise a leaked virtual clock would poison the rest of the suite.

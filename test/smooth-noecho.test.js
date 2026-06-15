@@ -1,5 +1,5 @@
 // Sender exclusion on publishWire against a REAL uWS server (createTestServer,
-// which runs the testing.js platform mirror of files/handler.js): a publish
+// which runs the testing.js platform mirror of src/runtime/handler.js): a publish
 // carrying { excludeWs } must never deliver that frame to that socket, on the
 // binary path, on the per-connection JSON fallback, and on the declined-frame
 // fallback - while every other subscriber still receives the frame and the
@@ -11,10 +11,10 @@
 // like a plugin's snapshot handshake does.
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { createSmoothWireCodec, SMOOTH_TOPIC_PREFIX, SMOOTH_CAPABILITY } from '../plugins/smooth/server.js';
-import { SmoothDecodeDict, decodeSmooth } from '../plugins/smooth/codec.js';
-import { parseBinaryFrame } from '../files/wire.js';
-import { trackedSubscribe } from '../files/utils.js';
+import { createSmoothWireCodec, SMOOTH_TOPIC_PREFIX, SMOOTH_CAPABILITY } from '../src/plugins/smooth/server.js';
+import { SmoothDecodeDict, decodeSmooth } from '../src/plugins/smooth/codec.js';
+import { parseBinaryFrame } from '../src/runtime/wire.js';
+import { trackedSubscribe } from '../src/runtime/utils.js';
 
 let uWS;
 try {
@@ -23,7 +23,7 @@ try {
 	uWS = null;
 }
 const describeUWS = uWS ? describe : describe.skip;
-const { createTestServer } = uWS ? await import('../testing.js') : {};
+const { createTestServer } = uWS ? await import('../src/testing.js') : {};
 
 const TOPIC = SMOOTH_TOPIC_PREFIX + 'test';
 

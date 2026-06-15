@@ -60,7 +60,7 @@ describeUWS('platform.request push-with-reply', () => {
 	});
 
 	it('resolves with the client reply data', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const client = await connectAndCapture(server.wsUrl);
@@ -85,7 +85,7 @@ describeUWS('platform.request push-with-reply', () => {
 	});
 
 	it('rejects with "request timed out" when the client never replies', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const client = await connectAndCapture(server.wsUrl);
@@ -100,7 +100,7 @@ describeUWS('platform.request push-with-reply', () => {
 	});
 
 	it('rejects with "connection closed" when the ws closes mid-request', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const client = await connectAndCapture(server.wsUrl);
@@ -115,7 +115,7 @@ describeUWS('platform.request push-with-reply', () => {
 	});
 
 	it('rejects with the error message when the client sends an error reply', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const client = await connectAndCapture(server.wsUrl);
@@ -136,7 +136,7 @@ describeUWS('platform.request push-with-reply', () => {
 	});
 
 	it('handles concurrent requests without crossing wires', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const client = await connectAndCapture(server.wsUrl);
@@ -164,7 +164,7 @@ describeUWS('platform.request push-with-reply', () => {
 	});
 
 	it('does not let a reply on one connection resolve a request on another', async () => {
-		const { createTestServer } = await import('../testing.js');
+		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();
 
 		const a = await connectAndCapture(server.wsUrl);
