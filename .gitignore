@@ -1,6 +1,7 @@
 node_modules
 build
 coverage
+bench/_tmp_static
 .env
 .env.*
 .DS_Store

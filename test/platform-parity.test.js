@@ -73,7 +73,7 @@ function platformKeys(filepath) {
 
 describe('platform dev/prod parity', () => {
 	it('every key on the production base platform exists on the dev base platform', () => {
-		const prod = platformKeys(path.join(ROOT, 'files/handler.js'));
+		const prod = platformKeys(path.join(ROOT, 'files/handler/platform.js'));
 		const dev = platformKeys(path.join(ROOT, 'vite.js'));
 
 		// Sanity check: both sides have a non-trivial platform surface. If
