@@ -12,7 +12,7 @@ import { setRuntimeEnv, resetRuntimeEnv } from './runtime/runtime.js';
 import { createTestServer } from './testing.js';
 import { WS_SUBSCRIPTIONS, resetProcessEpoch } from './runtime/utils.js';
 import { checkSubscriptionBookkeeping } from './runtime/invariants.js';
-import { createClusterRelay, createClusterBus, createSupervisor, clusterFinalState, checkNoMisdelivery } from './runtime/sim-cluster.js';
+import { createClusterRelay, createClusterBus, createSupervisor, clusterFinalState, checkNoMisdelivery, checkStateConvergence } from './runtime/sim-cluster.js';
 
 // Building blocks for composing a custom multi-instance runner over the SAME
 // virtual clock and seam (e.g. a redis/postgres-backed sim in a downstream
@@ -447,6 +447,13 @@ async function runClusterSim(config) {
 			byWorker.get(c.workerId).push({ subscribed: c.subTopics, frames: c.facade.frames() });
 		}
 		recordViolation(checkNoMisdelivery([...byWorker].map(([id, cl]) => ({ id, clients: cl }))));
+
+		// Quiescent cross-worker convergence check: workers that subscribe to a shared
+		// topic should have received the same originator-stamped seq run for it, so
+		// their per-topic delivered-seq projections hash identically. Only meaningful
+		// once every relay delivery has settled (not per step, where a mid-flight
+		// worker legitimately trails), so it runs here over the same byWorker grouping.
+		recordViolation(checkStateConvergence([...byWorker].map(([id, cl]) => ({ id, clients: cl }))));
 
 		// Build the deterministic, sorted result aggregates.
 		const workerSummaries = [...workers.values()].map((w) => ({

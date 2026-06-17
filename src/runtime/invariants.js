@@ -147,3 +147,68 @@ export function runInvariants(snap, predicates = defaultInvariants) {
 	}
 	return out;
 }
+
+// - Structural state hash ----------------------------------------------------
+
+// FNV-1a 32-bit string fold. Module-private and deliberately duplicated (the few
+// lines are trivial) rather than imported from the simulation core, so this
+// module keeps its dependency-free, safe-to-import-anywhere posture: pulling in
+// the sim core would drag its native-event-loop graph and its determinism
+// exemptions behind a pure-predicate file. Fully deterministic - charCodeAt +
+// Math.imul over a fixed string, no clock/RNG/locale input.
+/** @param {number} h @param {string} str @returns {number} */
+function fnvStr(h, str) {
+	for (let i = 0; i < str.length; i++) {
+		h ^= str.charCodeAt(i);
+		h = Math.imul(h, 16777619);
+	}
+	return h >>> 0;
+}
+
+const FNV_OFFSET = 2166136261 >>> 0;
+
+/**
+ * Fold a structure-only state projection into a single unsigned 32-bit integer
+ * that is stable across runs and processes and order-independent over its input.
+ *
+ * INPUT CONTRACT: `{ topicSeqs }` where `topicSeqs` is a `Record<string, number>`
+ * mapping a topic string to the highest non-negative `seq` that topic was
+ * observed at. It is a PLAIN, already-extracted object - this module never learns
+ * the in-memory app shape; the caller does the extraction. Any other property on
+ * the input object is ignored, so two inputs that agree on `topicSeqs` hash
+ * identically regardless of what else they carry.
+ *
+ * PRIVACY (structure only): the returned value carries no recoverable
+ * identifiers. Topic strings are folded into the hash but never appear verbatim
+ * in the integer; nothing else is read. No payload bytes, no event names, no data
+ * values, no presence data, no connection/user keys, no ws ids, no subscriber
+ * counts contribute.
+ *
+ * ORDERING: insertion order must not change the result. Each `[topic, seq]` entry
+ * is reduced to a per-entry FNV digest folding the topic STRING and the integer
+ * seq (rendered with `String(seq)`, with a `:` separator so a topic/seq boundary
+ * cannot collide). The per-entry digests are combined with unsigned 32-bit
+ * modular addition, which is commutative and associative, so any iteration order
+ * yields the same accumulator. The accumulator starts from a count-seeded base so
+ * a state with the same digests but a different number of topics (e.g. one extra
+ * zero-seq topic) cannot collide.
+ *
+ * This is a structural divergence DETECTOR, not a cryptographic commitment: a
+ * 32-bit fold has a birthday bound, but a real divergence almost always moves a
+ * seq integer, which moves that entry's digest. A later consumer can widen to 64
+ * bits if collision risk ever matters.
+ *
+ * @param {{ topicSeqs?: Record<string, number> }} projection
+ * @returns {number} unsigned 32-bit hash
+ */
+export function computeStateHash(projection) {
+	const topicSeqs = (projection && projection.topicSeqs) || {};
+	const topics = Object.keys(topicSeqs);
+	let acc = fnvStr(FNV_OFFSET, 't:' + topics.length);
+	for (const topic of topics) {
+		let e = fnvStr(FNV_OFFSET, topic);
+		e = fnvStr(e, ':' + String(topicSeqs[topic]));
+		acc = (acc + e) >>> 0;
+	}
+	return acc >>> 0;
+}

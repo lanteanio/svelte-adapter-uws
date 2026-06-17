@@ -14,6 +14,7 @@
 // the run. No raw event-loop primitives are touched here.
 
 import { setTimer, setIntervalTimer, clearTimer, monotonicNow } from './runtime.js';
+import { computeStateHash } from './invariants.js';
 
 // The supervisor constants, verbatim from src/runtime/index.js so the modeled budget
 // matches production exactly. The plan references the code; the code never
@@ -403,6 +404,127 @@ export function checkNoMisdelivery(workers) {
 		}
 	}
 	return null;
+}
+
+/**
+ * Cross-worker state-convergence invariant. The relay replicates each originating
+ * publish to every subscribing worker carrying the SAME per-topic sequence number
+ * stamped INSIDE the envelope body by the originator. So every worker that has a
+ * subscriber to a topic should end with the same delivered-seq run for it, and a
+ * compact per-topic max-seq projection of two such workers should hash identically.
+ * A worker whose projection hash differs received a different seq run - a relay
+ * that dropped, duplicated, or misordered one worker's stream below the others.
+ *
+ * It reads the seq from the DELIVERED frame bodies, not any server-side seq map:
+ * the originator stamps the seq once and the relay replicates it by delivery, so a
+ * receiving worker's own seq map never advances (it re-publishes the pre-stamped
+ * envelope). Reading delivered frames is what makes the cross-worker comparison
+ * meaningful. Each worker projects `topicSeqs[routingTopic] = max(seq)` over its
+ * clients' decoded frames, grouped on the UNcorrupted routing key (so the corrupt
+ * fault, which mangles the body but never the routing, cannot move the projection;
+ * a frame whose body fails to decode or carries no numeric seq simply does not
+ * advance its topic's max). Only workers with a non-empty projection participate,
+ * and they are bucketed by their exact topic set, so a publisher-only worker with
+ * no subscriber to the projected topics is never compared against subscribers.
+ *
+ * Within a bucket of workers sharing the same topic set, the per-worker hashes are
+ * grouped by value; a bucket with more than one distinct hash is a divergence. The
+ * minority group (fewest workers; on a tie, the group holding the numerically
+ * largest worker id, so the pick is deterministic) is reported as the offender.
+ * The violation context lists the bucket topic set verbatim for diagnosability -
+ * the same structured-log posture as the no-misdelivery check above and the
+ * cluster snapshot, since the context is diagnostic data, not the privacy-bearing
+ * hash. Returns the first divergence or null.
+ *
+ * @param {Array<{ id: number, clients: Array<{ frames?: Array<{ routingTopic?: string | null, payload?: string | Uint8Array }>, json?: () => any[] }> }>} workers
+ * @returns {{ category: string, context: any } | null}
+ */
+export function checkStateConvergence(workers) {
+	// Per worker: project the delivered per-topic max seq and hash it.
+	/** @type {Array<{ id: number, topics: string[], hash: number }>} */
+	const projected = [];
+	for (const w of workers) {
+		/** @type {Record<string, number>} */
+		const topicSeqs = {};
+		for (const c of w.clients) {
+			const frames = c.frames || [];
+			const decoded = typeof c.json === 'function' ? c.json() : null;
+			for (let fi = 0; fi < frames.length; fi++) {
+				const f = frames[fi];
+				if (!f || f.routingTopic == null) continue; // only a topic publish carries a routing key
+				const body = decoded ? decoded[fi] : decodeFrameBody(f);
+				if (!body || typeof body.seq !== 'number') continue; // corrupt body or no seq: no advance
+				const t = f.routingTopic;
+				if (!(t in topicSeqs) || body.seq > topicSeqs[t]) topicSeqs[t] = body.seq;
+			}
+		}
+		const topics = Object.keys(topicSeqs).sort();
+		if (topics.length === 0) continue; // no delivered seq run: this worker does not participate
+		projected.push({ id: w.id, topics, hash: computeStateHash({ topicSeqs }) });
+	}
+
+	// Bucket participating workers by their exact topic set, then look for a bucket
+	// carrying more than one distinct hash. The bucket key is the JSON of the sorted
+	// topic list (unambiguous - no delimiter a topic could itself contain), and the
+	// list is carried alongside so the violation context uses it directly.
+	/** @type {Map<string, { topics: string[], members: Array<{ id: number, hash: number }> }>} */
+	const buckets = new Map();
+	for (const p of projected) {
+		const key = JSON.stringify(p.topics);
+		let bucket = buckets.get(key);
+		if (!bucket) { bucket = { topics: p.topics, members: [] }; buckets.set(key, bucket); }
+		bucket.members.push({ id: p.id, hash: p.hash });
+	}
+	for (const { topics, members } of buckets.values()) {
+		/** @type {Map<number, number[]>} hash -> worker ids */
+		const byHash = new Map();
+		for (const m of members) {
+			let ids = byHash.get(m.hash);
+			if (!ids) { ids = []; byHash.set(m.hash, ids); }
+			ids.push(m.id);
+		}
+		if (byHash.size <= 1) continue; // converged within this bucket
+
+		// Canonical group order: largest group first (the convergent majority), and
+		// on a group-size tie the group holding the numerically-largest worker id
+		// sorts LAST. So `majority` (the expected reference) is the first group and
+		// `minority` (the reported offender) is the last; they are always distinct
+		// groups because byHash carries more than one. A perfect even split has no
+		// true majority, but this still names one deterministic offender group.
+		const groups = [...byHash].map(([hash, ids]) => {
+			const sorted = ids.slice().sort((a, b) => a - b);
+			return { hash, ids: sorted, max: sorted[sorted.length - 1] };
+		});
+		groups.sort((a, b) => (b.ids.length - a.ids.length) || (a.max - b.max));
+		const majority = groups[0];
+		const minority = groups[groups.length - 1];
+		return {
+			category: 'cluster.state-divergence',
+			context: {
+				topics,
+				expectedHash: majority.hash,
+				divergentHash: minority.hash,
+				workers: minority.ids
+			}
+		};
+	}
+	return null;
+}
+
+/**
+ * Decode a delivered frame's JSON envelope body, mirroring the in-memory client
+ * facade's `json()` (a non-JSON / corrupt frame becomes null). Used only when a
+ * caller passes raw frames without a paired decoder. Pure - no clock/RNG.
+ * @param {{ payload?: string | Uint8Array }} f
+ * @returns {any}
+ */
+function decodeFrameBody(f) {
+	const p = f && f.payload;
+	if (p == null) return null;
+	let text;
+	if (typeof p === 'string') text = p;
+	else { try { text = new TextDecoder().decode(p); } catch { return null; } }
+	try { return JSON.parse(text); } catch { return null; }
 }
 
 export { RESTART_MAX_ATTEMPTS, RESTART_DELAY_MAX, HEARTBEAT_INTERVAL_MS, HEARTBEAT_TIMEOUT_MS };

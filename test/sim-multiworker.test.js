@@ -1,5 +1,22 @@
 import { describe, it, expect } from 'vitest';
 import { runSim, runSimMany, replaySim, FIXED_EPOCH } from '../src/sim.js';
+import { computeStateHash } from '../src/runtime/invariants.js';
+import { checkStateConvergence } from '../src/runtime/sim-cluster.js';
+
+// Build a synthetic worker cohort for the convergence predicate: each worker gets
+// one client whose delivered frames carry the given per-topic seq (the wire body
+// shape the in-memory relay emits), tagged with the uncorrupted routingTopic.
+function cohort(workerSeqs) {
+	return workerSeqs.map(({ id, seqs }) => ({
+		id,
+		clients: [{
+			frames: Object.keys(seqs).map((topic) => ({
+				routingTopic: topic,
+				payload: JSON.stringify({ topic, event: 'tick', data: null, seq: seqs[topic] })
+			}))
+		}]
+	}));
+}
 
 // Helper: flatten a worker's per-client decoded frames into one array.
 const flat = (clusterFrames, worker) => clusterFrames[worker].clients.flat().filter(Boolean);
@@ -134,7 +151,12 @@ describe('runSim multi-worker - faults preserve invariants', () => {
 			faults: { drop: 0.2, reorder: 0.5, maxJitterMs: 25 },
 			relayFaults: { drop: 0.25, reorder: 0.6, duplicate: 0.2, corrupt: 0.1, maxJitterMs: 30 }
 		});
-		expect(r.invariantViolations).toEqual([]);
+		// Per-worker bookkeeping must stay intact under every relay fault. A dropped
+		// relay frame legitimately leaves one worker's delivered-seq run below the
+		// others (a real cross-worker divergence the convergence check reports), so
+		// that category is expected here; the bookkeeping invariants must not fire.
+		const bookkeeping = r.invariantViolations.filter((v) => v.category !== 'cluster.state-divergence');
+		expect(bookkeeping).toEqual([]);
 		expect(r.schedulerUncaught).toEqual([]);
 	});
 
@@ -264,5 +286,169 @@ describe('runSimMany multi-worker', () => {
 			expect(r.invariantViolations).toEqual([]);
 			expect((await replaySim(r)).reproduced).toBe(true);
 		}
+	});
+});
+
+describe('computeStateHash', () => {
+	it('is byte-stable: the same projection hashes identically twice and is unsigned 32-bit', () => {
+		const a = computeStateHash({ topicSeqs: { room: 3, lobby: 1 } });
+		const b = computeStateHash({ topicSeqs: { room: 3, lobby: 1 } });
+		expect(b).toBe(a);
+		expect(typeof a).toBe('number');
+		expect(a >>> 0).toBe(a);   // unsigned 32-bit integer (no sign bit, no fraction)
+	});
+
+	it('is order-independent: a different insertion order yields the same hash', () => {
+		const forward = { topicSeqs: { a: 1, b: 2, c: 3 } };
+		const reverse = { topicSeqs: {} };
+		reverse.topicSeqs.c = 3;
+		reverse.topicSeqs.b = 2;
+		reverse.topicSeqs.a = 1;
+		expect(computeStateHash(reverse)).toBe(computeStateHash(forward));
+	});
+
+	it('reads only topicSeqs: excluded fields never change the hash', () => {
+		const base = computeStateHash({ topicSeqs: { room: 3 } });
+		const noisy = computeStateHash({
+			topicSeqs: { room: 3 },
+			// none of these structure-excluded fields may contribute
+			payload: 'hello',
+			event: 'tick',
+			data: { x: 1 },
+			connectionId: 'ws-42',
+			subscriberCount: 99,
+			presence: { user: 'kevin' }
+		});
+		expect(noisy).toBe(base);
+	});
+
+	it('two independently-built equal projections hash equal', () => {
+		const one = {};
+		one.room = 3; one.lobby = 5;
+		const two = {};
+		two.lobby = 5; two.room = 3;
+		expect(computeStateHash({ topicSeqs: two })).toBe(computeStateHash({ topicSeqs: one }));
+	});
+
+	it('any single change moves the hash (seq, added topic, renamed topic)', () => {
+		const base = computeStateHash({ topicSeqs: { room: 3 } });
+		expect(computeStateHash({ topicSeqs: { room: 4 } })).not.toBe(base);             // changed seq
+		expect(computeStateHash({ topicSeqs: { room: 3, lobby: 0 } })).not.toBe(base);   // extra zero-seq topic
+		expect(computeStateHash({ topicSeqs: { area: 3 } })).not.toBe(base);             // renamed topic
+	});
+
+	it('empty projection is a stable value distinct from any single-entry hash, and seq 0 differs from an absent topic', () => {
+		const empty = computeStateHash({ topicSeqs: {} });
+		expect(empty).toBe(computeStateHash({ topicSeqs: {} }));   // stable
+		expect(empty).not.toBe(computeStateHash({ topicSeqs: { room: 0 } }));   // count-base differs
+		// a present zero-seq topic is not the same state as an absent one
+		expect(computeStateHash({ topicSeqs: { room: 0 } })).not.toBe(computeStateHash({ topicSeqs: {} }));
+	});
+});
+
+describe('checkStateConvergence predicate', () => {
+	it('returns null when every worker received the same stamped seq run', () => {
+		const v = checkStateConvergence(cohort([
+			{ id: 0, seqs: { room: 3 } },
+			{ id: 1, seqs: { room: 3 } },
+			{ id: 2, seqs: { room: 3 } }
+		]));
+		expect(v).toBeNull();
+	});
+
+	it('flags the minority worker whose seq run trails the majority', () => {
+		const v = checkStateConvergence(cohort([
+			{ id: 0, seqs: { room: 3 } },
+			{ id: 1, seqs: { room: 3 } },
+			{ id: 2, seqs: { room: 2 } }   // received one fewer
+		]));
+		expect(v).not.toBeNull();
+		expect(v.category).toBe('cluster.state-divergence');
+		expect(v.context.topics).toEqual(['room']);
+		expect(v.context.workers).toEqual([2]);
+		expect(v.context.expectedHash).not.toBe(v.context.divergentHash);
+	});
+
+	it('ignores a worker with no delivered seq run (it does not participate)', () => {
+		// worker 2 received nothing for the topic; it must not be compared against subscribers.
+		const v = checkStateConvergence([
+			...cohort([{ id: 0, seqs: { room: 3 } }, { id: 1, seqs: { room: 3 } }]),
+			{ id: 2, clients: [{ frames: [] }] }
+		]);
+		expect(v).toBeNull();
+	});
+
+	it('does not let a corrupt (undecodable) frame body change the projection', () => {
+		// worker 2 received the seq-3 frame plus a later corrupt frame for the same
+		// topic; the corrupt body cannot decode, so its max stays 3 and it converges.
+		const v = checkStateConvergence([
+			...cohort([{ id: 0, seqs: { room: 3 } }, { id: 1, seqs: { room: 3 } }]),
+			{ id: 2, clients: [{ frames: [
+				{ routingTopic: 'room', payload: JSON.stringify({ topic: 'room', event: 'tick', data: null, seq: 3 }) },
+				{ routingTopic: 'room', payload: '{"topic":"room","ev' }   // truncated/corrupt body
+			] }] }
+		]);
+		expect(v).toBeNull();
+	});
+
+	it('names one deterministic offender group on a perfect even split', () => {
+		const v = checkStateConvergence(cohort([
+			{ id: 0, seqs: { room: 3 } },
+			{ id: 1, seqs: { room: 3 } },
+			{ id: 2, seqs: { room: 2 } },
+			{ id: 3, seqs: { room: 2 } }
+		]));
+		expect(v).not.toBeNull();
+		// 2-2 split: the offender is the group holding the numerically-largest id.
+		expect(v.context.workers).toEqual([2, 3]);
+		expect(v.context.expectedHash).not.toBe(v.context.divergentHash);
+	});
+});
+
+describe('runSim multi-worker - state-convergence detection', () => {
+	// A scenario where every worker subscribes to a shared topic and worker 0
+	// publishes a run of three events, so each subscribing worker should receive the
+	// same stamped seq run. A seeded relay drop makes exactly one worker miss one of
+	// those frames, so its delivered-seq run trails - a reproducible divergence.
+	const sharedScenario = async (api) => {
+		for (let w = 0; w < 3; w++) api.worker(w).connect();
+		await api.advance();
+		for (let w = 0; w < 3; w++) for (const c of api.worker(w).clients()) c.subscribe('room');
+		await api.advance();
+		for (let n = 0; n < 3; n++) api.worker(0).publish('room', 'tick', { n });
+		await api.advance();
+	};
+	// Seed + drop rate chosen empirically against the actual seeded relay stream so
+	// exactly one subscribing worker misses one of the three stamped frames.
+	const divergeConfig = { workers: 3, seed: 'div-3', relayFaults: { drop: 0.2 }, scenario: sharedScenario };
+
+	it('detects a dropped-frame seq divergence and the violation reproduces bit-for-bit', async () => {
+		const r = await runSim(divergeConfig);
+		const divs = r.invariantViolations.filter((v) => v.category === 'cluster.state-divergence');
+		expect(divs.length).toBe(1);
+		expect(divs[0].context.topics).toEqual(['room']);
+		expect(divs[0].context.workers).toEqual([2]);   // the worker that missed a frame
+		expect(divs[0].context.expectedHash).not.toBe(divs[0].context.divergentHash);
+		// the new violation flows through invariantViolations, which replaySim compares.
+		expect((await replaySim(r)).reproduced).toBe(true);
+	});
+
+	it('reports the same minority worker on every run (divergence is a function of the seed)', async () => {
+		const minorities = [];
+		for (let i = 0; i < 3; i++) {
+			const r = await runSim(divergeConfig);
+			const d = r.invariantViolations.find((v) => v.category === 'cluster.state-divergence');
+			minorities.push(d ? d.context.workers : null);
+		}
+		expect(minorities[1]).toEqual(minorities[0]);
+		expect(minorities[2]).toEqual(minorities[0]);
+		expect(minorities[0]).toEqual([2]);
+	});
+
+	it('a clean relay (no drop) reports zero divergence - the predicate does not false-positive', async () => {
+		const r = await runSim({ workers: 3, seed: 'div-3', relayFaults: {}, scenario: sharedScenario });
+		const divs = r.invariantViolations.filter((v) => v.category === 'cluster.state-divergence');
+		expect(divs.length).toBe(0);
+		expect((await replaySim(r)).reproduced).toBe(true);
 	});
 });
