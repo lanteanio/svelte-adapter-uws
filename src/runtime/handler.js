@@ -25,6 +25,8 @@ import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createL
 import { now, monotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq } from './handler/state.js';
 import { computeStateHash } from './invariants.js';
+import { createConsistencyAuditor } from './auditor.js';
+import { buildConnectionAuditSnapshot } from './audit-snapshot.js';
 import { PayloadTooLargeError, METHODS, send400, send413, send500 } from './handler/http-helpers.js';
 import { acquireState, releaseState } from './handler/state-pool.js';
 import { ENVELOPE_CACHE_MAX, envelopePrefix } from './handler/envelope-cache.js';
@@ -426,6 +428,48 @@ if (WS_ENABLED) {
 			}
 		});
 	}
+
+	// - Per-worker consistency auditor ------------------------------------
+	// A background check that runs the shared invariant predicates against a
+	// BOUNDED, structure-only snapshot of live connection state on a slow,
+	// seam-jittered, unref'd timer. It NEVER runs on the hot path: publish /
+	// send / subscribe / close pay nothing; the only cost is the bookkeeping
+	// they already do. Unlike the state-hash reporter above this is NOT gated on
+	// parentPort - it is a per-worker safety net that must run single-process AND
+	// clustered alike. Default on (5000ms); set `consistencyAuditIntervalMs: 0`
+	// to disable entirely (no timer scheduled, zero cost). A violation logs +
+	// increments the assertion counter (the soft tier); only a `subs.shape`
+	// corruption that PERSISTS across two consecutive audits of the same window
+	// escalates to the hard tier (a deferred worker restart), so a healthy or
+	// transient state is never killed.
+	const CONSISTENCY_AUDIT_INTERVAL_MS = wsOptions.consistencyAuditIntervalMs ?? 5000;
+	if (CONSISTENCY_AUDIT_INTERVAL_MS > 0) {
+		// Build a bounded snapshot over the round-robin window the factory requests.
+		// The builder iterates the connection Set ONCE with a skip-counter and only
+		// allocates the window, so the cost is fixed per tick regardless of how many
+		// connections the worker holds. `counters.totalSubscriptions` is read at call
+		// time (not captured), so the cap accountant reflects the live value.
+		const buildAuditSnapshot = ({ offset, limit }) => buildConnectionAuditSnapshot({
+			connections: wsConnections,
+			subscriptionsKey: WS_SUBSCRIPTIONS,
+			sessionIdKey: WS_SESSION_ID,
+			totalSubscriptions: counters.totalSubscriptions,
+			offset,
+			limit
+		});
+		// Soft by default; only `subs.shape` (a per-connection subscription slot
+		// that is not a Set) escalates, and only when it persists across two audits.
+		const auditor = createConsistencyAuditor({
+			snapshot: buildAuditSnapshot,
+			assert,
+			fatal,
+			hardCategories: ['subs.shape'],
+			intervalMs: CONSISTENCY_AUDIT_INTERVAL_MS
+		});
+		counters.consistencyAuditor = auditor;
+		auditor.start();
+	}
+
 	// The depth probe is closure-local to the waiting-room block below; this
 	// holder lets the sampling hook read it without widening that scope.
 	/** @type {(() => number) | null} */
@@ -1056,7 +1100,10 @@ if (WS_ENABLED) {
 			// Used to populate CloseContext.subscriptions for the user's close handler,
 			// enabling deterministic cleanup of per-subscription server state.
 			const userData = ws.getUserData();
-			assert(!userData[WS_PLATFORM], 'ws.platform-double-init', null);
+			// A platform slot already set on a fresh open is unrecoverable structural
+			// corruption: a re-entrant or duplicate open on the same handle. Continuing
+			// would overwrite live per-connection state, so escalate to the hard tier.
+			fatal(!userData[WS_PLATFORM], 'ws.platform-double-init', null);
 			userData[WS_SUBSCRIPTIONS] = new Set();
 			// Promote the upgrade-time requestId (carried as a string slot
 			// because Symbol keys do not survive res.upgrade) into a
@@ -1093,7 +1140,10 @@ if (WS_ENABLED) {
 		},
 
 		message: async (ws, message, isBinary) => {
-			assert(ws.getUserData()[WS_PLATFORM], 'ws.platform-missing-in-message', null);
+			// A message on a connection with no platform slot means open never ran or
+			// the slot was clobbered - unrecoverable. One truthiness check (the property
+			// read happens regardless), so the hot path is unchanged.
+			fatal(ws.getUserData()[WS_PLATFORM], 'ws.platform-missing-in-message', null);
 			bumpIn(ws, message);
 			// Built-in: handle subscribe/unsubscribe from the client store.
 			// Control messages are JSON text: {"type":"subscribe","topic":"..."}
@@ -1138,7 +1188,10 @@ if (WS_ENABLED) {
 						return;
 					}
 					const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
-					assert(subs instanceof Set, 'subs.shape', null);
+					// The subscription slot is assigned a Set once at open and never
+					// reassigned; a non-Set here is unrecoverable heap/dispatch corruption.
+					// One instanceof guard, identical in cost to the assert it replaces.
+					fatal(subs instanceof Set, 'subs.shape', null);
 					const isNew = !subs.has(msg.topic);
 					if (isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
 						sendSubscribeDenied(ws, msg.topic, ref, 'RATE_LIMITED');

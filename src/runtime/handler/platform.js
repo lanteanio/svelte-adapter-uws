@@ -1,6 +1,6 @@
 import { wsModule } from '../ws-handler-bridge.js';
 import { parentPort } from 'node:worker_threads';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_SUBSCRIPTIONS, assert, collapseByCoalesceKey, completeEnvelope, createScopedTopic, isValidWireTopic, nextTopicSeq, processEpoch, readAssertionCounts, wrapBatchEnvelope } from '../utils.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_SUBSCRIPTIONS, assert, fatal, collapseByCoalesceKey, completeEnvelope, createScopedTopic, isValidWireTopic, nextTopicSeq, processEpoch, readAssertionCounts, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
 import { capCounts, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, topicPublishStats, topicSeqs, wsConnections } from './state.js';
@@ -30,7 +30,10 @@ export const platform = {
 		// {seq:false}-only topic never enters the convergence comparison.
 		if (seq !== null) maxSeenSeq.set(topic, seq);
 		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
-		assert(envelope.length > 0, 'envelope.empty', { topic, event });
+		// A zero-length frame at a send site would broadcast garbage to every
+		// subscriber - unrecoverable framing corruption. One length guard, identical
+		// in cost to the assert it replaces.
+		fatal(envelope.length > 0, 'envelope.empty', { topic, event });
 		// Per-topic counter for runaway-publisher detection. Allocates
 		// one entry per topic on first publish, then mutates two int
 		// fields in place forever. Sampler drains and resets at 1 Hz.
@@ -131,7 +134,10 @@ export const platform = {
 		// Track the highest observed seq for this topic (see platform.publish).
 		if (seq !== null) maxSeenSeq.set(topic, seq);
 		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
-		assert(envelope.length > 0, 'envelope.empty', { topic, event });
+		// A zero-length frame at a send site would broadcast garbage to every
+		// subscriber - unrecoverable framing corruption. One length guard, identical
+		// in cost to the assert it replaces.
+		fatal(envelope.length > 0, 'envelope.empty', { topic, event });
 		let s = topicPublishStats.get(topic);
 		if (!s) {
 			s = { m: 0, b: 0 };
@@ -678,7 +684,11 @@ export const platform = {
 		let subs;
 		try { subs = ws.getUserData()[WS_SUBSCRIPTIONS]; }
 		catch { counters.closedWsAborts++; return null; }
-		assert(subs instanceof Set, 'subs.shape', null);
+		// The subscription slot is assigned a Set once at open and never reassigned;
+		// a non-Set here is unrecoverable heap/dispatch corruption. One instanceof
+		// guard, identical in cost to the assert it replaces. A freed handle is
+		// caught above and returns early, so this only runs on a live connection.
+		fatal(subs instanceof Set, 'subs.shape', null);
 		if (subs.has(topic)) return null;
 		if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
 		const denial = await runUserSubscribeGate(ws, topic);

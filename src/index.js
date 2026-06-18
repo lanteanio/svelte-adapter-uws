@@ -314,6 +314,16 @@ export default function (opts = {}) {
 				// worker is a separate primary env switch
 				// (`RESTART_ON_STATE_DIVERGENCE`), default off.
 				stateHashIntervalMs: websocket?.stateHashIntervalMs ?? 0,
+				// Interval (ms) for the per-worker consistency auditor. Default
+				// 5000; 0 disables it (no timer scheduled, zero cost). On a slow,
+				// jittered, unref'd timer each worker runs the shared invariant
+				// predicates against a bounded structure-only snapshot of its live
+				// connections. A violation logs + increments the assertion counter
+				// (soft); only a subscription-slot type corruption that persists
+				// across two audits escalates to a worker restart. Off the hot
+				// path - publish/send/subscribe/close pay nothing. Runs
+				// single-process AND clustered (a per-worker safety net).
+				consistencyAuditIntervalMs: websocket?.consistencyAuditIntervalMs ?? 5000,
 				// Wire-level subscribes to '__'-prefixed system topics
 				// (e.g. '__signal:userId', '__rpc', plugin '__presence:*'
 				// '__group:*' '__replay:*') are reserved for internal

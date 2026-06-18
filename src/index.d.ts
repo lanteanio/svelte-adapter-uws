@@ -399,6 +399,37 @@ export interface WebSocketOptions {
 	stateHashIntervalMs?: number;
 
 	/**
+	 * Interval in milliseconds for the per-worker consistency auditor - a
+	 * background safety net that runs the framework's structural invariant
+	 * predicates against a bounded, structure-only snapshot of the worker's live
+	 * connections on a slow, jittered, unref'd timer.
+	 *
+	 * It runs OFF the hot path: publish, send, subscribe, and close pay nothing;
+	 * the only cost is reading state the worker already maintains, on a timer
+	 * that never holds the event loop open. The snapshot is bounded - a fixed
+	 * slice of connections per tick, walked round-robin - so a worker with a
+	 * million connections audits a constant amount of work each tick regardless
+	 * of population, and the snapshot carries no payloads, no topic strings, and
+	 * no client identity beyond the per-connection session id used as a log
+	 * label.
+	 *
+	 * A detected violation logs a structured `[adapter-uws/assert]` line and
+	 * increments the queryable `platform.assertions` counter (the soft tier) - it
+	 * never terminates the worker. The single exception is a subscription slot
+	 * that has become a non-`Set` (heap or dispatch corruption that cannot heal):
+	 * if it persists across two consecutive audits, it escalates to a deferred
+	 * worker restart (exit code 78). A healthy or transient state is never killed.
+	 *
+	 * On by default at `5000` (5s). Set to `0` to disable entirely - no timer is
+	 * scheduled and the path costs nothing. Unlike `stateHashIntervalMs`, this
+	 * runs in single-process AND clustered deployments alike (it is a per-worker
+	 * net, not a cross-worker comparison).
+	 *
+	 * @default 5000
+	 */
+	consistencyAuditIntervalMs?: number;
+
+	/**
 	 * Backpressure-signal thresholds for `platform.pressure` and
 	 * `platform.onPressure(cb)`. The adapter samples the worker once per
 	 * `sampleIntervalMs` and reports the most urgent active signal.

@@ -126,5 +126,11 @@ export const counters = {
 	// Base (un-layered) pressure reason from the most recent sample (for the posture transition log).
 	lastBasePressureReason: 'NONE',
 	// In-flight SSR request count, for drain().
-	inFlightCount: 0
+	inFlightCount: 0,
+	// The per-worker consistency auditor instance (null until the handler installs
+	// one; null when disabled by interval 0). Lives on the holder so the install
+	// site (handler.js) and the shutdown site (lifecycle.js) - distinct modules -
+	// share the SAME reference. Mutated in place, never reassigned away, per the
+	// holder-property pattern this module's header documents.
+	consistencyAuditor: null
 };

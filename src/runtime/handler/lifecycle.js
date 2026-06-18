@@ -100,6 +100,9 @@ export async function shutdown() {
 		listenSocket = null;
 	}
 	stopPressureSampling();
+	// Stop the per-worker consistency auditor timer (no-op when it was never
+	// installed - the interval-0 / not-yet-started case).
+	counters.consistencyAuditor?.stop();
 	for (const ws of wsConnections) {
 		ws.close(1001, 'Server shutting down');
 	}

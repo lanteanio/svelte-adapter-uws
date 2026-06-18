@@ -3725,6 +3725,30 @@ CLUSTER_WORKERS=auto RESTART_ON_STATE_DIVERGENCE=1 node build
 
 Divergence between workers in the built-in relay indicates a framework or plugin bug and is worth reporting. Note that topics fed from an *external* pub/sub source (passed with `{ relay: false }`) are stamped with a per-process sequence and are deliberately excluded from this comparison - the guarantee is scoped to the in-process relay.
 
+### Per-worker consistency auditor
+
+Each worker runs a background consistency auditor that checks the framework's structural invariants - for example, that every connection's subscription bookkeeping is internally consistent - against a snapshot of its live connections. It is **on by default** and zero-config; it exists to turn a silent state-corruption bug into a loud, logged signal.
+
+It is built to be safe and cheap:
+
+- **Off the hot path.** Publish, send, subscribe, and close pay nothing. The auditor reads state the worker already maintains, on a slow, jittered, unref'd timer that never holds the event loop open.
+- **Bounded.** It audits a fixed slice of connections per tick, walked round-robin, so a worker with a million connections does a constant amount of work each tick regardless of how many connections it holds.
+- **Structure-only.** The snapshot carries no payloads, no topic strings, and no client identity beyond the per-connection session id used as a log label.
+- **Soft by default.** A detected violation logs a `[adapter-uws/assert]` line and increments the queryable [`platform.assertions`](#platformassertions) counter; it does **not** terminate the worker. The single exception is a subscription slot that has become corrupt (a non-`Set`, which cannot heal): if it persists across two consecutive audits, it escalates to a deferred worker restart (exit code 78), the same code the cross-worker divergence restart uses.
+
+The cadence is configurable, and `0` disables the auditor entirely:
+
+```js
+// svelte.config.js
+adapter({
+  websocket: {
+    consistencyAuditIntervalMs: 5000 // default; 0 disables the auditor (no timer, zero cost)
+  }
+})
+```
+
+Unlike the state-divergence reporter, the auditor runs in single-process **and** clustered deployments alike - it is a per-worker net, not a cross-worker comparison.
+
 ### Docker / multi-process deployments (Linux)
 
 On Linux, `SO_REUSEPORT` is set on every `app.listen()` call - including single-process mode. This means multiple independent `node build` processes can bind to the same port without any adapter-level clustering. The kernel distributes connections across them.

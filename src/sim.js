@@ -12,6 +12,7 @@ import { setRuntimeEnv, resetRuntimeEnv } from './runtime/runtime.js';
 import { createTestServer } from './testing.js';
 import { WS_SUBSCRIPTIONS, resetProcessEpoch } from './runtime/utils.js';
 import { checkSubscriptionBookkeeping } from './runtime/invariants.js';
+import { createConsistencyAuditor } from './runtime/auditor.js';
 import { createClusterRelay, createClusterBus, createSupervisor, clusterFinalState, checkNoMisdelivery, checkStateConvergence } from './runtime/sim-cluster.js';
 
 // Building blocks for composing a custom multi-instance runner over the SAME
@@ -49,18 +50,35 @@ function buildInvariantSnapshot(app) {
 }
 
 /**
- * Run the subscription-bookkeeping invariant against the live app via the
- * shared predicate. A connection's subscription set must agree with its
- * WS_SUBSCRIPTIONS bookkeeping set; the dispatch maintains the two in lockstep,
- * so in this single-dispatch model the check is a regression guard against a
- * code path that mutates one without the other (a missing subscribe, a dropped
- * Set type), not a model of a transport that silently caps a subscription.
+ * Build a consistency auditor that drives the SAME shared predicate the live
+ * worker runs, against the live in-memory app, so the simulator and production
+ * share one invariant path (no separate inline check). The auditor's `snapshot`
+ * returns the full connections-only shape from `buildInvariantSnapshot` (no
+ * `total`, so the round-robin window stays at offset 0 and every step sees every
+ * connection - the sim is not bounded the way a million-connection worker is).
  *
- * @param {ReturnType<typeof createInMemoryApp>} app
- * @returns {{ category: string, context: any } | null}
+ * Predicate set is the single `checkSubscriptionBookkeeping` the sim has always
+ * run - NOT `defaultInvariants` - because the snapshot supplies neither
+ * `totalSubscriptions` nor `topicCounts`, so the extra predicates would have no
+ * inputs and switching to them would silently change the recorded violation set.
+ *
+ * Sinks are sim-LOCAL non-throwing capture functions, NOT the assertions.js
+ * sinks: under vitest assertions.js `assert`/`fatal` THROW, which would abort the
+ * scheduler mid-step. The auditor's `runOnce()` return value (the Violation[])
+ * is the sim's input; the sim owns de-dup. No `hardCategories` - the sim never
+ * escalates (its job is to surface violations, and a hard escalation would need a
+ * result field the SimResult shape does not carry).
+ *
+ * @param {() => ReturnType<typeof createInMemoryApp>} getApp
+ * @returns {{ runOnce(): Array<{ category: string, context: any }> }}
  */
-function checkAppSubscriptionBookkeeping(app) {
-	return checkSubscriptionBookkeeping(buildInvariantSnapshot(app));
+function createSimAuditor(getApp) {
+	return createConsistencyAuditor({
+		snapshot: () => buildInvariantSnapshot(getApp()),
+		assert: () => {},
+		fatal: () => {},
+		predicates: [checkSubscriptionBookkeeping]
+	});
 }
 
 /**
@@ -162,9 +180,9 @@ export async function runSim(config = {}) {
 		/** @type {Array<{ category: string, context: any }>} */
 		const violations = [];
 		const seen = new Set();
+		const auditor = createSimAuditor(() => app);
 		function checkInvariants() {
-			const v = checkAppSubscriptionBookkeeping(app);
-			if (v) {
+			for (const v of auditor.runOnce()) {
 				const key = v.category + ':' + JSON.stringify(v.context);
 				if (!seen.has(key)) { seen.add(key); violations.push(v); }
 			}
@@ -292,7 +310,7 @@ async function runClusterSim(config) {
 		/** @type {Array<{ category: string, context: any }>} */
 		const violations = [];
 		const seen = new Set();
-		/** @type {Map<number, { id: number, app: any, server: any, relay: any, epoch: number, clients: any[] }>} */
+		/** @type {Map<number, { id: number, app: any, server: any, relay: any, epoch: number, clients: any[], auditor: { runOnce(): any[] } }>} */
 		const workers = new Map();
 		// Every client ever opened, tagged by its worker at connect time. A respawn
 		// replaces workers.get(id) with a fresh (empty) wobj, so this accumulates the
@@ -311,7 +329,7 @@ async function runClusterSim(config) {
 			if (!seen.has(key)) { seen.add(key); violations.push(v); }
 		}
 		function checkInvariants() {
-			for (const w of workers.values()) recordViolation(checkAppSubscriptionBookkeeping(w.app));
+			for (const w of workers.values()) for (const v of w.auditor.runOnce()) recordViolation(v);
 		}
 
 		async function makeWorker(id) {
@@ -339,7 +357,7 @@ async function runClusterSim(config) {
 			const epoch = scheduler.now() + id;
 			server.platform.topicEpoch = (t) => { void t; return epoch; };
 			bus.register(id, server.platform.__relayReceive);
-			const wobj = { id, app, server, relay, epoch, clients: [] };
+			const wobj = { id, app, server, relay, epoch, clients: [], auditor: createSimAuditor(() => app) };
 			workers.set(id, wobj);
 			return wobj;
 		}
