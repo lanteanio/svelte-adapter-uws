@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cross-worker state-divergence detection for the built-in relay (clustered mode).** The relay carries every published message to every worker, so under healthy operation all workers agree on the highest sequence number delivered per topic. Setting `websocket.stateHashIntervalMs` (default `0`, off) has each worker periodically fold a structure-only projection of its delivered-sequence map into a single 32-bit hash and report it to the primary; the primary buckets the reports by its own monotonic clock (a worker's clock skew never matters), and once every live worker has reported it compares them. A disagreement at rest - a relay frame that reached some workers but not another - is logged as a `state-divergence` event (epoch, per-thread hash, majority/minority split) and, when a `metrics` registry is configured, increments the new `state_divergence_total{role}` counter. Only the integer hash and the worker's thread id cross the thread boundary: no topic strings, no payloads, no client identity. Observe-only by default; the new `RESTART_ON_STATE_DIVERGENCE=1` environment variable additionally has the primary terminate a diverged (minority) worker so it restarts and re-converges (default off - terminating a worker is disruptive and the right response is usually operator judgement). Single-process deployments and the `stateHashIntervalMs: 0` default schedule no timer and pay nothing. Topics fed from an external pub/sub source (`{ relay: false }`) carry a per-process sequence and are deliberately excluded from the comparison - the guarantee is scoped to the in-process relay. Reuses the structural state hash the deterministic simulator already ships.
+
 ## [0.6.0-next.25] - 2026-06-13
 
 ### Added

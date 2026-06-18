@@ -3,6 +3,7 @@ import { isMainThread, parentPort, threadId, Worker, workerData } from 'node:wor
 import { fileURLToPath } from 'node:url';
 import { env } from 'ENV';
 import { monotonicNow, setTimer, setIntervalTimer, clearTimer } from './runtime.js';
+import { createStateHashDetector } from './state-hash-detector.js';
 
 const host = env('HOST', '0.0.0.0');
 const port_raw = env('PORT', '3000');
@@ -19,6 +20,18 @@ const port = parseIntEnv('PORT', port_raw, 0);
 const shutdown_timeout = parseIntEnv('SHUTDOWN_TIMEOUT', env('SHUTDOWN_TIMEOUT', '30'), 0);
 const shutdown_delay = parseIntEnv('SHUTDOWN_DELAY_MS', env('SHUTDOWN_DELAY_MS', '0'), 0);
 const cluster_workers = env('CLUSTER_WORKERS', '');
+
+// Cross-worker state-hash divergence ACTION gate. The primary owns
+// worker.terminate() and never sees the per-build websocket options, so the
+// restart action is threaded as a primary-level env var (consistent with the
+// other cluster knobs above). Default off: a detected divergence is logged and
+// counted (via a notice the worker increments) but no worker is auto-killed.
+const restart_on_state_divergence = env('RESTART_ON_STATE_DIVERGENCE', '') === '1';
+// Optional primary override for the epoch-bucket width used to group worker hash
+// reports. Unset (0) derives it from each worker's advertised reporting interval
+// (twice the interval, so one fixed-period round from every worker lands in one
+// bucket); set it only to tune the bucketing without rebuilding the workers.
+const state_hash_epoch_ms = parseIntEnv('STATE_HASH_EPOCH_MS', env('STATE_HASH_EPOCH_MS', '0'), 0);
 
 const is_primary = cluster_workers && isMainThread;
 
@@ -79,6 +92,14 @@ if (is_primary) {
 
 	/** @type {Map<import('node:worker_threads').Worker, WorkerMeta>} */
 	const workers = new Map();
+
+	// Cross-worker state-hash divergence detector. Buckets the workers' periodic
+	// hash reports by a primary-assigned monotonic epoch and judges a bucket once
+	// every live worker has reported into it. Inert until workers actually report
+	// (which they only do when stateHashIntervalMs is configured), so an
+	// unconfigured cluster never pays for it beyond an empty Map.
+	const stateHashDetector = createStateHashDetector({ epochMs: state_hash_epoch_ms > 0 ? state_hash_epoch_ms : 60000, monotonicNow });
+
 	let shutting_down = false;
 	let listening = false;
 	let listen_socket = null;
@@ -166,9 +187,11 @@ if (is_primary) {
 			} else if (msg.type === 'publish-batch') {
 				// Batched relay: one postMessage per microtask from the publishing worker.
 				// Forward each message individually so receiving workers use the same
-				// single-message 'publish' path in their relayPublish handler.
-				for (const { topic, envelope, compress } of msg.messages) {
-					const relay = { type: 'publish', topic, envelope, compress };
+				// single-message 'publish' path in their relayPublish handler. The
+				// stamped seq rides along so the receiver can advance its
+				// delivered-seq tracker without re-parsing the envelope.
+				for (const { topic, envelope, compress, seq } of msg.messages) {
+					const relay = { type: 'publish', topic, envelope, compress, seq };
 					for (const [w] of workers) {
 						if (w !== worker) w.postMessage(relay);
 					}
@@ -181,6 +204,59 @@ if (is_primary) {
 				for (const [w] of workers) {
 					if (w !== worker) w.postMessage(msg);
 				}
+			} else if (msg.type === 'state-hash') {
+				// A worker's periodic structure-only state hash. Stamp it with the
+				// primary's own epoch (dodges worker wall-clock skew) and compare
+				// once every live worker has reported into that epoch. Only the
+				// integer hash + thread id crossed the boundary - no topic strings,
+				// no payloads.
+				if (meta) meta.lastHeartbeat = monotonicNow();
+				// Live = a worker that has confirmed itself alive at least once;
+				// a still-starting worker (lastHeartbeat 0) cannot stall the
+				// comparison or be judged a phantom minority.
+				const liveThreadIds = [];
+				for (const [w, m] of workers) if (m.lastHeartbeat > 0) liveThreadIds.push(w.threadId);
+				// Bucket width: an explicit primary override, else twice the worker's
+				// advertised reporting interval so one fixed-period round from every
+				// worker lands in one bucket (the reporter jitters only its first fire).
+				const epochMs = state_hash_epoch_ms > 0
+					? state_hash_epoch_ms
+					: 2 * (msg.intervalMs > 0 ? msg.intervalMs : 30000);
+				const divergence = stateHashDetector.record(msg.threadId, msg.hash, liveThreadIds, epochMs);
+				if (divergence) {
+					const minoritySet = new Set(divergence.minorityThreadIds);
+					// One structured log line: the operator's divergence signal.
+					// Event name + epoch + per-thread hash + the majority/minority
+					// split; no topic strings, no payloads (the hash is structure
+					// only). This is the PRIMARY signal; the metric is supplementary
+					// (it round-trips through a worker and can under-count if the
+					// divergent worker is the one that died).
+					console.error(
+						'[primary] state-divergence epoch=%d majorityHash=%d minority=%o hashes=%o',
+						divergence.epoch, divergence.majorityHash, divergence.minorityThreadIds, divergence.hashesByThread
+					);
+					// Notice each live worker so it increments its own registry
+					// counter with its role (the primary holds no registry over the
+					// thread boundary). Epoch-deduped at the detector, so one
+					// increment per role per divergent epoch.
+					for (const [w] of workers) {
+						const role = minoritySet.has(w.threadId) ? 'minority' : 'majority';
+						w.postMessage({ type: 'state-divergence', epoch: divergence.epoch, role });
+					}
+					// Action gate (default OFF): only when explicitly enabled does
+					// the primary terminate the minority worker(s); the existing
+					// exit handler respawns them under the restart budget so they
+					// reconnect and re-converge. Off = log + metric only, never
+					// auto-kill.
+					if (restart_on_state_divergence) {
+						for (const [w] of workers) {
+							if (minoritySet.has(w.threadId)) {
+								console.error('[primary] terminating minority worker %d to re-converge (RESTART_ON_STATE_DIVERGENCE=1)', w.threadId);
+								w.terminate();
+							}
+						}
+					}
+				}
 			}
 		});
 
@@ -189,6 +265,10 @@ if (is_primary) {
 			if (cluster_mode === 'acceptor' && meta?.descriptor) {
 				try { acceptorApp.removeChildAppDescriptor(meta.descriptor); } catch {}
 			}
+			// Drop this worker's pending presence from any open state-hash bucket
+			// so its absence never stalls a comparison and a stale report cannot
+			// be judged a phantom divergence.
+			stateHashDetector.forget(worker.threadId);
 			workers.delete(worker);
 			if (!shutting_down) {
 				// In acceptor mode, stop accepting when all workers are down so
@@ -300,7 +380,7 @@ if (is_primary) {
 			if (msg.type === 'shutdown') {
 				graceful_shutdown('shutdown');
 			} else if (msg.type === 'publish') {
-				relayPublish(msg.topic, msg.envelope, msg.compress);
+				relayPublish(msg.topic, msg.envelope, msg.compress, msg.seq);
 			} else if (msg.type === 'publish-batched') {
 				relayPublishBatched(msg.events, msg.compress);
 			} else if (msg.type === 'heartbeat') {

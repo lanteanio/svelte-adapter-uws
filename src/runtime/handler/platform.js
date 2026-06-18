@@ -3,7 +3,7 @@ import { parentPort } from 'node:worker_threads';
 import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_SUBSCRIPTIONS, assert, collapseByCoalesceKey, completeEnvelope, createScopedTopic, isValidWireTopic, nextTopicSeq, processEpoch, readAssertionCounts, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
-import { capCounts, counters, pressureListeners, pressureSnapshot, publishRateListeners, topicPublishStats, topicSeqs, wsConnections } from './state.js';
+import { capCounts, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, topicPublishStats, topicSeqs, wsConnections } from './state.js';
 import { app, wsDebug, WS_COMPRESSION_ON } from './config.js';
 import { envelopePrefix } from './envelope-cache.js';
 import { batchRelay } from './relay.js';
@@ -24,6 +24,11 @@ export const platform = {
 		const seq = (options && options.seq === false)
 			? null
 			: nextTopicSeq(topicSeqs, topic);
+		// Record the highest seq this worker has observed for the topic. The
+		// freshly stamped seq is the new max (nextTopicSeq is monotonic), so this
+		// is a bare set with no compare. Skipped when stamping is off so a
+		// {seq:false}-only topic never enters the convergence comparison.
+		if (seq !== null) maxSeenSeq.set(topic, seq);
 		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
 		assert(envelope.length > 0, 'envelope.empty', { topic, event });
 		// Per-topic counter for runaway-publisher detection. Allocates
@@ -53,7 +58,10 @@ export const platform = {
 		// every process - relaying would cause duplicate delivery.
 		const relayed = !!(parentPort && (!options || options.relay !== false));
 		if (relayed) {
-			batchRelay(topic, envelope, compress);
+			// Carry the stamped seq as explicit relay-frame metadata so the
+			// receiving worker advances its delivered-seq tracker without
+			// re-parsing the envelope string.
+			batchRelay(topic, envelope, compress, seq);
 		}
 		if (wsDebug) {
 			console.log('[ws] publish topic=%s event=%s bytes=%d delivered=%s',
@@ -120,6 +128,8 @@ export const platform = {
 		const seq = (options && options.seq === false)
 			? null
 			: nextTopicSeq(topicSeqs, topic);
+		// Track the highest observed seq for this topic (see platform.publish).
+		if (seq !== null) maxSeenSeq.set(topic, seq);
 		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
 		assert(envelope.length > 0, 'envelope.empty', { topic, event });
 		let s = topicPublishStats.get(topic);
@@ -154,7 +164,7 @@ export const platform = {
 		// never enters the per-subscriber walk or touches the codec at all.
 		if (excludeWs === null && !capCounts.has(wire.capability)) {
 			const result = app.publish(topic, envelope, false, compress);
-			if (relayed) batchRelay(topic, envelope);
+			if (relayed) batchRelay(topic, envelope, undefined, seq);
 			return result || relayed;
 		}
 
@@ -238,7 +248,7 @@ export const platform = {
 					if (result === 2) poisonWireState(ws, ud, wire.capability);
 				}
 			}
-			if (relayed) batchRelay(topic, envelope);
+			if (relayed) batchRelay(topic, envelope, undefined, seq);
 			return true;
 		}
 
@@ -252,7 +262,7 @@ export const platform = {
 		if (payload == null) {
 			if (excludeWs === null) {
 				const result = app.publish(topic, envelope, false, compress);
-				if (relayed) batchRelay(topic, envelope);
+				if (relayed) batchRelay(topic, envelope, undefined, seq);
 				return result || relayed;
 			}
 			// Declined frame with sender exclusion: the same JSON envelope the
@@ -267,7 +277,7 @@ export const platform = {
 				if (!subs || !subs.has(topic)) continue;
 				try { ws.send(envelope, false, compress); delivered = true; } catch { counters.closedWsAborts++; }
 			}
-			if (relayed) batchRelay(topic, envelope);
+			if (relayed) batchRelay(topic, envelope, undefined, seq);
 			return delivered || relayed;
 		}
 		/** @type {Map<number, Uint8Array>} */
@@ -304,7 +314,7 @@ export const platform = {
 		}
 		// Cross-worker subscribers receive the JSON envelope (binary is
 		// same-worker only); their worker re-publishes it to them as JSON.
-		if (relayed) batchRelay(topic, envelope);
+		if (relayed) batchRelay(topic, envelope, undefined, seq);
 		if (wsDebug) {
 			console.log('[ws] publishWire topic=%s event=%s payloadBytes=%d', topic, event, payload.length);
 		}
@@ -965,7 +975,7 @@ export const platform = {
 		// fanout to uWS's C++ TopicTree via app.publish. In all-see-all
 		// every interested subscriber is subscribed to every batch
 		// topic, so dispatching on any one of them reaches them all.
-		/** @type {Array<{ topic: string, env: string }>} */
+		/** @type {Array<{ topic: string, env: string, seq: number | null }>} */
 		const events = new Array(messages.length);
 		for (let i = 0; i < messages.length; i++) {
 			const m = messages[i];
@@ -973,8 +983,10 @@ export const platform = {
 			const seq = (m.options && m.options.seq === false)
 				? null
 				: nextTopicSeq(topicSeqs, m.topic);
+			// Track the highest observed seq per topic (see platform.publish).
+			if (seq !== null) maxSeenSeq.set(m.topic, seq);
 			const env = completeEnvelope(envelopePrefix(m.topic, m.event), m.data, seq);
-			events[i] = { topic: m.topic, env };
+			events[i] = { topic: m.topic, env, seq };
 			let s = topicPublishStats.get(m.topic);
 			if (!s) {
 				s = { m: 0, b: 0 };
@@ -998,7 +1010,9 @@ export const platform = {
 			for (let i = 0; i < messages.length; i++) {
 				const m = messages[i];
 				if (!m.options || m.options.relay !== false) {
-					relayed.push({ topic: events[i].topic, env: events[i].env });
+					// Carry each event's stamped seq so the receiving worker
+					// advances its delivered-seq tracker without re-parsing.
+					relayed.push({ topic: events[i].topic, env: events[i].env, seq: events[i].seq });
 				}
 			}
 			if (relayed.length > 0) {

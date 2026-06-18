@@ -2,7 +2,7 @@ import uWS from 'uWebSockets.js';
 import { wsModule } from '../ws-handler-bridge.js';
 import { WS_CAPS, WS_SUBSCRIPTIONS, assert, fatal, wrapBatchEnvelope } from '../utils.js';
 import { monotonicNow } from '../runtime.js';
-import { counters, wsConnections } from './state.js';
+import { counters, maxSeenSeq, recordSeen, wsConnections } from './state.js';
 import { app, is_tls, _t_app, WS_COMPRESSION_ON } from './config.js';
 import { platform } from './platform.js';
 import { stopPressureSampling } from './pressure-metrics.js';
@@ -121,8 +121,14 @@ export function getDescriptor() {
  * @param {string} envelope - Pre-serialized JSON envelope
  * @param {boolean} [compress] - Compress intent carried from the originating
  *   worker; re-gated by this worker's WS_COMPRESSION_ON. Absent -> uncompressed.
+ * @param {number | null} [seq] - The originator's stamped per-topic seq, carried
+ *   as explicit metadata. Recorded as this worker's highest observed seq for the
+ *   topic (ungated by whether this worker has a local subscriber), so every
+ *   worker that receives the frame converges to the same value. The monotone-max
+ *   guard in recordSeen handles frames that reorder across the postMessage
+ *   boundary; a non-number (a {seq:false} publish) is ignored.
  */
-export function relayPublish(topic, envelope, compress) {
+export function relayPublish(topic, envelope, compress, seq) {
 	// Hard tier: a non-string topic or an empty/non-string envelope arriving
 	// from a sibling worker (trusted, same codebase) means our own cross-worker
 	// relay serialization is structurally broken - publishing it would misroute
@@ -134,6 +140,7 @@ export function relayPublish(topic, envelope, compress) {
 		envelopeType: typeof envelope,
 		envelopeLen: typeof envelope === 'string' ? envelope.length : null
 	});
+	recordSeen(maxSeenSeq, topic, seq);
 	app.publish(topic, envelope, false, WS_COMPRESSION_ON && compress === true);
 }
 
@@ -146,7 +153,7 @@ export function relayPublish(topic, envelope, compress) {
  * originator and ride along in each per-event envelope; we never
  * re-stamp and never re-relay.
  *
- * @param {Array<{ topic: string, env: string }>} events
+ * @param {Array<{ topic: string, env: string, seq?: number | null }>} events
  * @param {boolean} [compress] - Batch-level compress intent from the originating
  *   worker; re-gated by this worker's WS_COMPRESSION_ON. Absent -> uncompressed.
  */
@@ -158,6 +165,12 @@ export function relayPublishBatched(events, compress) {
 	assert(typeof events[0].env === 'string', 'relay.batched-env-type', {
 		first: typeof events[0].env
 	});
+
+	// Advance this worker's highest observed seq per topic from the carried
+	// metadata, ungated by the fast/slow fan-out decision below and by whether
+	// this worker has a local subscriber, so every worker that receives the
+	// batch converges. recordSeen ignores a non-number seq ({seq:false} events).
+	for (let i = 0; i < events.length; i++) recordSeen(maxSeenSeq, events[i].topic, events[i].seq);
 
 	const firstTopic = events[0].topic;
 	let allSameTopic = true;

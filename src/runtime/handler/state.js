@@ -26,6 +26,45 @@ export const wsConnections = new Set();
 /** Per-topic monotonic broadcast sequence numbers, stamped into each envelope. @type {Map<string, number>} */
 export const topicSeqs = new Map();
 
+/**
+ * Per-topic highest delivered sequence number this worker has OBSERVED, whether
+ * it stamped the publish locally or received the originator's pre-stamped frame
+ * over the cross-worker relay. Unlike `topicSeqs` (which only the publishing
+ * worker advances), every worker that receives a relayed frame advances this for
+ * the topic, so under a reliable in-process relay every worker converges to the
+ * same value per topic. A worker that fell behind (a relay frame delivered to
+ * some workers but not this one) holds a lower value, which a structural hash
+ * over this map surfaces as a cross-worker divergence. A topic only ever
+ * published with seq stamping disabled never enters this map and is excluded
+ * from the comparison.
+ * @type {Map<string, number>}
+ */
+export const maxSeenSeq = new Map();
+
+/**
+ * Record an observed `seq` for `topic` into a max-seen map, keeping the highest.
+ * Used on the relay RECEIVE path, where frames can arrive out of order across
+ * the worker `postMessage` boundary, so the monotone-max guard is required (a
+ * blind overwrite could move the value backward and fabricate a divergence). The
+ * local publish path already holds the freshly stamped (monotonic) seq, so it
+ * sets `maxSeenSeq` directly without this guard. A non-number `seq` (a frame
+ * relayed for a `{ seq: false }` topic) is ignored, so such topics never enter
+ * the map on any worker.
+ *
+ * Pure with respect to inputs other than the supplied map (mirrors
+ * `nextTopicSeq`), so a unit test can pass a fresh map per case.
+ *
+ * @param {Map<string, number>} seenMap
+ * @param {string} topic
+ * @param {number} seq
+ * @returns {void}
+ */
+export function recordSeen(seenMap, topic, seq) {
+	if (typeof seq !== 'number') return;
+	const prev = seenMap.get(topic);
+	if (prev === undefined || seq > prev) seenMap.set(topic, seq);
+}
+
 /** Per-topic publish counters for runaway-publisher detection (sampled + reset each pressure tick). @type {Map<string, { m: number, b: number }>} */
 export const topicPublishStats = new Map();
 

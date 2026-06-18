@@ -304,6 +304,16 @@ export default function (opts = {}) {
 				upgradeRateLimitWindow: websocket?.upgradeRateLimitWindow ?? 10,
 				upgradeAdmission: websocket?.upgradeAdmission,
 				pressure: websocket?.pressure,
+				// Interval (ms) for the clustered cross-worker state-hash
+				// reporter. 0 (default) disables it - no reporter timer is
+				// scheduled and a single-process deployment never runs it.
+				// When > 0 in clustered mode each worker reports a
+				// structure-only hash of its delivered-seq map to the
+				// primary, which logs a `state-divergence` event if the live
+				// workers disagree at rest. The auto-restart of a diverged
+				// worker is a separate primary env switch
+				// (`RESTART_ON_STATE_DIVERGENCE`), default off.
+				stateHashIntervalMs: websocket?.stateHashIntervalMs ?? 0,
 				// Wire-level subscribes to '__'-prefixed system topics
 				// (e.g. '__signal:userId', '__rpc', plugin '__presence:*'
 				// '__group:*' '__replay:*') are reserved for internal

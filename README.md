@@ -484,6 +484,7 @@ adapter({
 | `waiting_room_queue_depth` | gauge | Clients currently polling the waiting room (sampled; `0` with the room off). |
 | `protection_posture_state` | gauge | The live posture: `0` normal, `1` elevated, `2` siege (sampled). |
 | `protection_posture_transitions_total{from,to}` | counter | Posture level changes - chart it next to the rejected reasons for an incident timeline. |
+| `state_divergence_total{role}` | counter | Cross-worker state-hash divergence detections (clustered mode, when [`stateHashIntervalMs`](#cross-worker-state-divergence-detection) is set). `role` is `majority` or `minority`. No topic strings or client identity - the hash is structure-only. |
 
 Each posture change also logs one `[ws] protection posture <from> -> <to>` line with the rolling reject rate and the base pressure reason at the moment of transition. Costs when enabled: one unlabelled counter increment per accepted upgrade, one labelled increment per rejection, and three gauge writes per pressure sample; when off, every site is a single undefined check. The counters record server decisions, not client behaviour - a client that disconnects mid-upgrade is counted in neither, so admitted + rejected can read below a load balancer's attempt count under flappy clients. Instrument failures are contained (a registry that throws on emit logs once and is silenced; one that throws at instrument creation fails at startup, loudly). No client identity (IP, session) ever appears in a label - the per-IP picture lives in the extensions per-IP bucket's own `upgrade_bucket_*` counters, and capability-cookie failures in its `capability_cookie_misses_total{reason}` (an app hook that rejects on a cookie miss surfaces here as `auth_rejected`).
 
@@ -609,6 +610,7 @@ If you set `envPrefix: 'MY_APP_'` in the adapter config, all variables are prefi
 | `SHUTDOWN_TIMEOUT` | `30` | Seconds to wait during graceful shutdown |
 | `CLUSTER_WORKERS` | - | Number of worker threads (or `auto` for CPU count) |
 | `CLUSTER_MODE` | *(auto)* | `reuseport` (Linux default) or `acceptor` (other platforms) |
+| `RESTART_ON_STATE_DIVERGENCE` | - | Set to `1` to terminate a worker the primary detects as diverged (see [Cross-worker state-divergence detection](#cross-worker-state-divergence-detection)). Default: log + metric only |
 | `WS_DEBUG` | - | Set to `1` to enable structured WebSocket debug logging (open, close, subscribe, publish) |
 
 ### Graceful shutdown
@@ -3695,6 +3697,33 @@ Per-worker limitations (acceptable for most apps):
 - `platform.sendTo(filter, ...)`  - iterates the local worker's connections only, no cross-worker relay
 - `platform.closedWsAborts`  - per-worker counter; sum across workers for cluster total
 - `platform.assertions`  - per-worker counter Map
+
+### Cross-worker state-divergence detection
+
+The relay carries each published message to every worker, so under healthy operation every worker has seen the same set of published messages per topic. Optionally, the cluster can watch for the case where it has *not* - a relay frame that reached some workers but not another (a partial fan-out, a frame a worker failed to apply). This shows up as workers disagreeing on the highest sequence number they have delivered for a topic.
+
+Enable it with `stateHashIntervalMs` (clustered mode only):
+
+```js
+// svelte.config.js
+adapter({
+  websocket: {
+    stateHashIntervalMs: 30000 // each worker reports a state hash every ~30s
+  }
+})
+```
+
+When set, each worker periodically folds a structure-only projection of its per-topic delivered-sequence map into a single 32-bit hash and reports it to the primary. The primary buckets the reports by its own clock (so a worker's clock skew never matters), and once every live worker has reported it compares the hashes. If they disagree at rest, the primary logs a `state-divergence` line carrying the epoch, the per-thread hash, and the majority/minority split. **Only the integer hash and the worker's thread id ever cross the thread boundary - no topic strings, no payloads, no client identity.**
+
+This is observe-only by default: a divergence is logged, and (when a [`metrics`](#backpressure-and-connection-limits) registry is configured) the `state_divergence_total` counter is incremented. It never costs anything in single-process mode or when `stateHashIntervalMs` is `0` (the default) - no reporter timer is scheduled.
+
+To have the primary automatically terminate a diverged (minority) worker so it restarts and re-converges, set the `RESTART_ON_STATE_DIVERGENCE=1` environment variable. This is **off by default** - a diverged worker is left running and only logged, because terminating a worker is disruptive and the right response is often operator judgement, not an automatic kill:
+
+```bash
+CLUSTER_WORKERS=auto RESTART_ON_STATE_DIVERGENCE=1 node build
+```
+
+Divergence between workers in the built-in relay indicates a framework or plugin bug and is worth reporting. Note that topics fed from an *external* pub/sub source (passed with `{ relay: false }`) are stamped with a per-process sequence and are deliberately excluded from this comparison - the guarantee is scoped to the in-process relay.
 
 ### Docker / multi-process deployments (Linux)
 

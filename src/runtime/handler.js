@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
-import { parentPort } from 'node:worker_threads';
+import { parentPort, threadId } from 'node:worker_threads';
 import uWS from 'uWebSockets.js';
 import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
@@ -23,7 +23,8 @@ import { parseCookies, createCookies } from './cookies.js';
 import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, DEFAULT_GRANT } from './wire.js';
 import { now, monotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
-import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters } from './handler/state.js';
+import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq } from './handler/state.js';
+import { computeStateHash } from './invariants.js';
 import { PayloadTooLargeError, METHODS, send400, send413, send500 } from './handler/http-helpers.js';
 import { acquireState, releaseState } from './handler/state-pool.js';
 import { ENVELOPE_CACHE_MAX, envelopePrefix } from './handler/envelope-cache.js';
@@ -370,6 +371,61 @@ if (WS_ENABLED) {
 	const gQueueDepth = containMetricInstrument(METRICS?.gauge(
 		'waiting_room_queue_depth', 'Clients currently polling the waiting room'
 	));
+	// Cross-worker state-hash divergence detections. The primary owns the
+	// detector but has no registry over the thread boundary, so it posts a
+	// notice back to the worker(s) and the count is incremented here, where the
+	// registry lives. No client identity / no topic strings (the hash is
+	// structure-only); the optional role label is majority|minority.
+	const mStateDivergence = containMetricInstrument(METRICS?.counter(
+		'state_divergence_total', 'Cross-worker state hash divergence detections', ['role']
+	));
+
+	// - Cross-worker state-hash reporter (clustered mode only) ------------
+	// On a slow, seam-jittered interval each worker folds its delivered-seq map
+	// into one structure-only integer hash and reports it to the primary, which
+	// compares the live workers' hashes per primary-assigned epoch. Only the
+	// integer hash + this worker's thread id cross the boundary - no topic
+	// strings, no payloads (the structure-only contract). Gated on parentPort
+	// (multi-worker only) AND a positive interval (off by default), so a
+	// single-process or unconfigured deployment never schedules the timer and
+	// pays nothing. The timer is unref'd so it never holds the loop open.
+	const STATE_HASH_INTERVAL_MS = wsOptions.stateHashIntervalMs ?? 0;
+	if (parentPort && STATE_HASH_INTERVAL_MS > 0) {
+		const reportStateHash = () => {
+			/** @type {Record<string, number>} */
+			const topicSeqsProjection = {};
+			for (const [t, s] of maxSeenSeq) topicSeqsProjection[t] = s;
+			const hash = computeStateHash({ topicSeqs: topicSeqsProjection });
+			parentPort.postMessage({ type: 'state-hash', hash, threadId, intervalMs: STATE_HASH_INTERVAL_MS });
+		};
+		// Spread the FIRST report by a per-worker jitter (drawn from the
+		// injectable RNG so a seeded harness reproduces it) to avoid a thundering
+		// herd, then report on a FIXED period. A fixed period keeps every worker
+		// on the same cadence, so the primary - which sizes its epoch bucket to
+		// comfortably exceed the period - reliably collects one report from each
+		// worker. Jittering the period itself would let workers drift out of any
+		// shared bucket and a real divergence could go undetected.
+		const firstReportDelay = randomFloat() * STATE_HASH_INTERVAL_MS;
+		const stateHashKickoff = setTimer(() => {
+			reportStateHash();
+			const stateHashTimer = setIntervalTimer(reportStateHash, STATE_HASH_INTERVAL_MS);
+			if (stateHashTimer.unref) stateHashTimer.unref();
+		}, firstReportDelay);
+		if (stateHashKickoff.unref) stateHashKickoff.unref();
+
+		// The primary cannot increment a registry counter across the thread
+		// boundary, so on a detected divergence it posts a notice back and the
+		// worker bumps its own counter here. Epoch-deduped at the primary (it
+		// judges each bucket once), so this is one increment per divergent epoch
+		// per role. An additional listener on parentPort - index.js owns the
+		// publish/heartbeat/shutdown cases; this only handles the divergence
+		// notice, so the two never conflict.
+		parentPort.on('message', (msg) => {
+			if (msg && msg.type === 'state-divergence') {
+				mStateDivergence?.inc({ role: msg.role === 'minority' ? 'minority' : 'majority' });
+			}
+		});
+	}
 	// The depth probe is closure-local to the waiting-room block below; this
 	// holder lets the sampling hook read it without widening that scope.
 	/** @type {(() => number) | null} */
