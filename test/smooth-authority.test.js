@@ -266,7 +266,7 @@ describe('createSmoothAuthority - onMissing and idle', () => {
 
 	it('an empty authority is idle', () => {
 		const a = createSmoothAuthority({ apply: moveApply });
-		expect(a.drain()).toEqual({ updates: [], acks: [], idle: true });
+		expect(a.drain()).toEqual({ updates: [], acks: [], events: [], idle: true });
 	});
 });
 

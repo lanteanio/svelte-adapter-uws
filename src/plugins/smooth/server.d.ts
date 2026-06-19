@@ -12,6 +12,21 @@ export interface SmoothApplyContext {
 	 * replay, and authority. Never call `Math.random()` inside `apply`.
 	 */
 	rng: SharedRandom;
+	/**
+	 * Emit a discrete one-shot event (a shot, a hit) that is NOT part of the
+	 * reconciled continuous state. It fires once - on a command's first
+	 * application - and is automatically suppressed on the client's
+	 * reconciliation replays, so the author sees it exactly once; the authority
+	 * always emits. Returns the event's correlation key: the developer-supplied
+	 * `opts.key`, else `<commandId>:<ordinal>` minted identically on both sides
+	 * so the optimistic and authoritative copies of one event share a key.
+	 * `toAuthor` / `global` / `topic` shape the broadcast fanout downstream.
+	 */
+	emitEvent(
+		type: string,
+		payload?: any,
+		opts?: { key?: string | number; toAuthor?: boolean; global?: boolean; topic?: string }
+	): string | undefined;
 }
 
 /**
@@ -68,8 +83,9 @@ export interface SmoothAuthority<State = any, Command = any> {
 	 * its owner AFTER this returns - subscribers observe a tick atomically.
 	 */
 	drain(): {
-		updates: Array<{ key: string; state: State; ws: any }>;
+		updates: Array<{ key: string; state: State; ws: any; commanded: boolean }>;
 		acks: Array<{ key: string; ws: any; id: number; state: State }>;
+		events: Array<{ type: string; key: string; data: any; id: number; opts: any; ws: any; commanded: boolean }>;
 		idle: boolean;
 	};
 	/** Drop one entity. True when it existed. */

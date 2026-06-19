@@ -94,6 +94,28 @@ export function createSmoothAuthority(options) {
 	const rng = createSharedRandom();
 	const ctx = { firstTime: true, rng };
 
+	// Discrete-event channel. The developer's `apply` may call
+	// `ctx.emitEvent(type, payload, opts?)` to fire a one-shot action (a shot, a
+	// hit) that is NOT part of the reconciled continuous state. The authority
+	// applies each command exactly once (firstTime is always true here), so it
+	// emits unconditionally; the predicting client gates the same call on
+	// `firstTime` so a reconciliation replay never re-fires it. Events accumulate
+	// in this per-tick sink during `apply` and `drain()` moves them into the tick
+	// result tagged with the owning `ws`, then clears it - nothing publishes
+	// mid-drain. The default correlation key is `<commandId>:<ordinal>`, computed
+	// from the SAME command id and per-command emit ordinal on both sides, so the
+	// client's optimistic event and this authoritative copy share a key with zero
+	// coordination (an explicit `opts.key` overrides it).
+	let eventSink = [];
+	let currentId = 0;
+	let eventOrdinal = 0;
+	ctx.emitEvent = (type, data, opts) => {
+		const key = opts && opts.key != null ? String(opts.key) : currentId + ':' + eventOrdinal;
+		eventOrdinal++;
+		eventSink.push({ type: String(type), key, data, id: currentId, opts: opts || null });
+		return key;
+	};
+
 	return {
 		/**
 		 * Bind (or re-bind) an entity to its owning connection, creating it
@@ -167,13 +189,18 @@ export function createSmoothAuthority(options) {
 		 * @returns {{
 		 *   updates: Array<{ key: string, state: any, ws: any, commanded: boolean }>,
 		 *   acks: Array<{ key: string, ws: any, id: number, state: any }>,
+		 *   events: Array<{ type: string, key: string, data: any, id: number, opts: any, ws: any, commanded: boolean }>,
 		 *   idle: boolean
 		 * }} `idle` is true when no entity has queued commands or live
-		 *   `onMissing` motion left - the caller's cue to stop ticking.
+		 *   `onMissing` motion left - the caller's cue to stop ticking. `events`
+		 *   are the discrete one-shot actions emitted via `ctx.emitEvent` this
+		 *   tick, each tagged with its owning `ws` so the broadcast can exclude
+		 *   the author's already-predicted copy.
 		 */
 		drain() {
 			const updates = [];
 			const acks = [];
+			const events = [];
 			let idle = true;
 			for (const [key, e] of entities) {
 				const before = e.state;
@@ -183,9 +210,16 @@ export function createSmoothAuthority(options) {
 					for (let i = 0; i < e.queue.length; i++) {
 						const c = e.queue[i];
 						rng.reseed(c.id);
+						currentId = c.id;
+						eventOrdinal = 0;
 						s = apply(s, c.cmd, ctx);
 						e.lastAckedId = c.id;
 						e.lastCommand = c.cmd;
+						for (let j = 0; j < eventSink.length; j++) {
+							const ev = eventSink[j];
+							events.push({ type: ev.type, key: ev.key, data: ev.data, id: ev.id, opts: ev.opts, ws: e.ws, commanded: true });
+						}
+						eventSink.length = 0;
 					}
 					e.queue.length = 0;
 					e.state = s;
@@ -205,7 +239,7 @@ export function createSmoothAuthority(options) {
 				if (e.state !== before) updates.push({ key, state: e.state, ws: e.ws, commanded });
 				if (e.active || e.queue.length > 0) idle = false;
 			}
-			return { updates, acks, idle };
+			return { updates, acks, events, idle };
 		},
 
 		/**

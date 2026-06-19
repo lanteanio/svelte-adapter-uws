@@ -109,8 +109,31 @@ export function createPredictor(options) {
 	const rng = createSharedRandom();
 	const ctx = { firstTime: true, rng };
 
+	// Discrete one-shot events emitted from `apply` via `ctx.emitEvent`. The
+	// `firstTime` gate IS the replay-suppression: an event fires only on a
+	// command's initial optimistic application, never on a reconciliation replay,
+	// so the shooter sees one muzzle flash and the window reconciling underneath
+	// never re-fires it. (The orthogonal half lives on the authority: its echo of
+	// the owner's own event is author-excluded, so the owner never double-draws
+	// from the broadcast either.) The default correlation key `<commandId>:<ordinal>`
+	// is minted from the SAME command id and per-command emit ordinal the authority
+	// uses, so the optimistic copy and the authoritative echo of one event share a
+	// key with zero coordination (an explicit `opts.key` overrides it).
+	let eventSink = [];
+	let currentId = 0;
+	let eventOrdinal = 0;
+	ctx.emitEvent = (type, data, opts) => {
+		if (!ctx.firstTime) return undefined;
+		const key = opts && opts.key != null ? String(opts.key) : currentId + ':' + eventOrdinal;
+		eventOrdinal++;
+		eventSink.push({ type: String(type), key, data, id: currentId, opts: opts || null });
+		return key;
+	};
+
 	function runApply(state, entry, firstTime) {
 		ctx.firstTime = firstTime;
+		currentId = entry.id;
+		eventOrdinal = 0;
 		rng.reseed(entry.id);
 		return apply(state, entry.cmd, ctx);
 	}
@@ -172,6 +195,22 @@ export function createPredictor(options) {
 			pending.push(entry);
 			predicted = runApply(predicted, entry, true);
 			return id;
+		},
+
+		/**
+		 * Drain the discrete events `apply` emitted during the most recent
+		 * `command()` (its optimistic, first-time application). The caller
+		 * delivers them locally (`origin:'local'`) the same frame the command was
+		 * issued. A reconciliation replay emits nothing (the `firstTime` gate), so
+		 * this only ever carries a single command's optimistic events; it clears
+		 * the queue so the next command starts empty.
+		 * @returns {Array<{ type: string, key: string, data: any, id: number, opts: any }>}
+		 */
+		drainEvents() {
+			if (eventSink.length === 0) return [];
+			const out = eventSink;
+			eventSink = [];
+			return out;
 		},
 
 		/**
@@ -355,6 +394,7 @@ export function createPredictor(options) {
 			errY = 0;
 			errAtMono = -1;
 			overflowed = false;
+			eventSink = [];
 		}
 	};
 }
