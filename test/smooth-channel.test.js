@@ -52,6 +52,12 @@ const flush = (ms = 15) => new Promise((r) => setTimeout(r, ms));
 
 const applyMove = (s, c) => ({ x: s.x + (c.dx || 0), y: s.y + (c.dy || 0) });
 
+/** Fire a 'shot' event on a firing command; move regardless. */
+const fireApply = (s, c, ctx) => {
+	if (c.fire) ctx.emitEvent('shot', { x: s.x, y: s.y, dir: c.dir });
+	return { x: s.x + (c.dx || 0), y: s.y + (c.dy || 0) };
+};
+
 let topicCounter = 0;
 
 /** A scripted transport: canned sync replies, recorded command batches. */
@@ -242,6 +248,190 @@ describe('inbound ingest', () => {
 		MockWebSocket._last.emit({ topic: wire(t), event: 'remove', data: { key: 'other' } });
 		await flush(40);
 		expect(frames[frames.length - 1].has('other')).toBe(false);
+		ch.destroy();
+	});
+});
+
+describe('discrete events (onEvent)', () => {
+	it('delivers an apply event optimistically when the command is issued (origin local)', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t, { apply: fireApply });
+		await flush();
+		const events = [];
+		ch.onEvent((e) => events.push(e));
+		const id = ch.command({ fire: true, dir: 'N', dx: 1 });
+		// Synchronous: the optimistic copy is delivered inside command(), the
+		// same frame it was issued - no flush, no render loop required.
+		expect(events).toEqual([{ type: 'shot', key: '1:0', data: { x: 0, y: 0, dir: 'N' }, id: 1, origin: 'local' }]);
+		expect(id).toBe(1);
+		ch.destroy();
+	});
+
+	it('assigns a fresh ordinal per emit within one command', async () => {
+		const apply = (s, c, ctx) => {
+			ctx.emitEvent('a', { n: 1 });
+			ctx.emitEvent('b', { n: 2 });
+			return s;
+		};
+		const t = makeTransport();
+		const ch = makeChannel(t, { apply });
+		await flush();
+		const keys = [];
+		ch.onEvent((e) => keys.push(e.key));
+		ch.command({});
+		expect(keys).toEqual(['1:0', '1:1']);
+		ch.destroy();
+	});
+
+	it('a command with no consumer does not throw and does not accumulate events', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t, { apply: fireApply });
+		await flush();
+		// Two firing commands before any consumer attaches: their events drain
+		// and are dropped (no consumer), they must NOT leak into the next drain.
+		ch.command({ fire: true });
+		ch.command({ fire: true });
+		const events = [];
+		ch.onEvent((e) => events.push(e));
+		ch.command({ fire: true }); // id 3
+		expect(events).toEqual([{ type: 'shot', key: '3:0', data: { x: 0, y: 0, dir: undefined }, id: 3, origin: 'local' }]);
+		ch.destroy();
+	});
+
+	it('delivers the authority broadcast from the wire (origin server)', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t, { apply: fireApply });
+		await flush();
+		const events = [];
+		ch.onEvent((e) => events.push(e));
+		MockWebSocket._last.emit({ topic: wire(t), event: 'event', data: { type: 'boom', key: '9:0', data: { r: 3 }, id: 9 } });
+		expect(events).toEqual([{ type: 'boom', key: '9:0', data: { r: 3 }, id: 9, origin: 'server' }]);
+		ch.destroy();
+	});
+
+	it('ignores a malformed event frame (no key, no type, non-object)', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t, { apply: fireApply });
+		await flush();
+		const events = [];
+		ch.onEvent((e) => events.push(e));
+		MockWebSocket._last.emit({ topic: wire(t), event: 'event', data: { type: 'boom' } }); // no key
+		MockWebSocket._last.emit({ topic: wire(t), event: 'event', data: { key: '1:0' } }); // no type
+		MockWebSocket._last.emit({ topic: wire(t), event: 'event', data: null });
+		expect(events).toEqual([]);
+		ch.destroy();
+	});
+
+	it('delivers both copies of one event - it does not suppress by key (the consumer correlates)', async () => {
+		// A `toAuthor` event reaches the owner both ways: the optimistic local
+		// copy and the authoritative confirmation, sharing the correlation key.
+		// The channel delivers both, distinguished by origin; suppression is the
+		// authority's author-exclusion decision, not the client's.
+		const t = makeTransport();
+		const ch = makeChannel(t, { apply: fireApply });
+		await flush();
+		const events = [];
+		ch.onEvent((e) => events.push(e));
+		ch.command({ fire: true, dir: 'E' }); // local '1:0'
+		MockWebSocket._last.emit({ topic: wire(t), event: 'event', data: { type: 'shot', key: '1:0', data: { x: 0, y: 0, dir: 'E' }, id: 1 } });
+		expect(events.map((e) => e.origin)).toEqual(['local', 'server']);
+		expect(events[0].key).toBe(events[1].key);
+		ch.destroy();
+	});
+
+	it('destroy() detaches the consumer: a later broadcast is not delivered', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t, { apply: fireApply });
+		await flush();
+		const events = [];
+		ch.onEvent((e) => events.push(e));
+		ch.destroy();
+		MockWebSocket._last.emit({ topic: wire(t), event: 'event', data: { type: 'boom', key: '1:0', data: {}, id: 1 } });
+		expect(events).toEqual([]);
+	});
+
+	it('a command issued from inside the handler keeps the transport batch in id order', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t, { apply: fireApply });
+		await flush();
+		const events = [];
+		let reentered = false;
+		ch.onEvent((e) => {
+			events.push(e);
+			if (e.origin === 'local' && !reentered) {
+				reentered = true;
+				ch.command({ fire: true }); // re-entrant command from the handler
+			}
+		});
+		const id1 = ch.command({ fire: true });
+		expect(id1).toBe(1);
+		// Both commands' optimistic events were delivered, each with its own id.
+		expect(events.map((e) => e.id)).toEqual([1, 2]);
+		await flush(40);
+		// The transport batch is in ascending id order despite the re-entrancy -
+		// the outer command queued before the handler's nested command ran.
+		const batch = t.sent.flat();
+		expect(batch.map((c) => c.id)).toEqual([1, 2]);
+		ch.destroy();
+	});
+
+	it('ignores a server event frame with a non-numeric id (the typed contract is id:number)', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t, { apply: fireApply });
+		await flush();
+		const events = [];
+		ch.onEvent((e) => events.push(e));
+		MockWebSocket._last.emit({ topic: wire(t), event: 'event', data: { type: 'boom', key: '9:0', data: {}, id: '9' } });
+		MockWebSocket._last.emit({ topic: wire(t), event: 'event', data: { type: 'boom', key: '9:0', data: {} } }); // id absent
+		expect(events).toEqual([]);
+		ch.destroy();
+	});
+
+	it('an overflowed command runs no apply and delivers no local event', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t, { apply: fireApply, windowCap: 2 });
+		await flush();
+		const events = [];
+		ch.onEvent((e) => events.push(e));
+		ch.command({ fire: true }); // id 1, predicted
+		ch.command({ fire: true }); // id 2, predicted
+		expect(events).toHaveLength(2);
+		ch.command({ fire: true }); // id 3: window cap hit, prediction killed, no apply
+		expect(ch.overflowed).toBe(true);
+		expect(events).toHaveLength(2); // no origin:'local' event for the killed command
+		ch.destroy();
+	});
+
+	it('drops a one-shot event that landed before the tap bound (no stale replay on bind)', async () => {
+		// A deferred sync so an event frame can land on the wire topic AFTER the
+		// socket opens but BEFORE the sync reply binds the inbound tap.
+		let resolveSync;
+		const name = 'st-prebind-' + topicCounter++;
+		const t = {
+			name,
+			sent: [],
+			syncs: 0,
+			sendCommand(batch) {
+				t.sent.push(batch);
+			},
+			sync() {
+				t.syncs++;
+				return new Promise((res) => {
+					resolveSync = res;
+				});
+			}
+		};
+		const ch = makeChannel(t, { apply: fireApply });
+		const events = [];
+		ch.onEvent((e) => events.push(e));
+		await flush(5); // socket open, sync() called and pending - tap not yet bound
+		MockWebSocket._last.emit({ topic: '__smooth:' + name, event: 'event', data: { type: 'early', key: '1:0', data: {}, id: 1 } });
+		resolveSync({ topic: name, t: Date.now(), you: 'me', ack: 0, states: [] });
+		await flush(5); // sync resolves, binds the tap, replays the store's current value
+		expect(events).toEqual([]); // the pre-bind event is not re-fired on bind
+		// A fresh event after the tap is live IS delivered.
+		MockWebSocket._last.emit({ topic: '__smooth:' + name, event: 'event', data: { type: 'live', key: '2:0', data: {}, id: 2 } });
+		expect(events).toEqual([{ type: 'live', key: '2:0', data: {}, id: 2, origin: 'server' }]);
 		ch.destroy();
 	});
 });

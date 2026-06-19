@@ -53,6 +53,22 @@ export interface SmoothChannelOptions<State = any, Command = any> {
 	cmdRate?: number;
 }
 
+export interface SmoothChannelEvent<Data = any> {
+	/** The event type passed to `ctx.emitEvent(type, ...)`. */
+	type: string;
+	/** The correlation key: `<commandId>:<ordinal>` by default, or an explicit
+	 * `opts.key`. The optimistic and authoritative copies of one event share
+	 * it, so a consumer that receives both can match them. */
+	key: string;
+	/** The payload passed to `ctx.emitEvent(type, data)`. */
+	data: Data;
+	/** The id of the command whose `apply` emitted the event. */
+	id: number;
+	/** `'local'` for the optimistic copy delivered when the command was issued;
+	 * `'server'` for the authority's broadcast. */
+	origin: 'local' | 'server';
+}
+
 export interface SmoothChannel<State = any, Command = any> {
 	/** Submit one command: predicted locally this frame, transmitted on the
 	 * next flush, reconciled when its acknowledgement returns. */
@@ -63,6 +79,13 @@ export interface SmoothChannel<State = any, Command = any> {
 	onFrame(cb: (local: State, remote: Map<string, State>) => void): void;
 	/** Observe prediction-killed transitions (overflow and recovery). */
 	onOverflow(cb: (overflowed: boolean) => void): void;
+	/** Attach the discrete-event consumer for `ctx.emitEvent` fires. `command`
+	 * delivers the events its `apply` emitted with `origin:'local'` (the
+	 * optimistic copy, drawn the frame it was issued); the authority's
+	 * broadcast - other authors' events, and an opt-in `toAuthor` event's own
+	 * confirmation - arrives `origin:'server'`, sharing the correlation key so
+	 * both copies of one event can be matched. One consumer per channel. */
+	onEvent(cb: (event: SmoothChannelEvent) => void): void;
 	/** Re-request the authoritative catalog (also runs on every 'open'). */
 	resync(): void;
 	/** The estimated server wall-clock time - the stamp source for commands

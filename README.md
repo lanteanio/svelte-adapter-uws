@@ -3199,10 +3199,16 @@ import { createSmoothAuthority, createSmoothWireCodec, SMOOTH_TOPIC_PREFIX } fro
 const authority = createSmoothAuthority({ apply });   // apply: (state, command, ctx) => state
 const codec = createSmoothWireCodec();
 
-// Per tick (the caller owns the cadence):
-const { updates, acks, idle } = authority.drain();
-for (const u of updates) platform.publishWire(topic, 'update', { key: u.key, data: u.state }, codec, { excludeWs: u.ws });
-for (const a of acks) platform.sendWire(a.ws, topic, 'ack', { id: a.id, state: a.state, t: Date.now() }, codec);
+// Per tick (the caller owns the cadence). The wire topic is the room name
+// behind the reserved smooth prefix - the same topic the client's tap binds.
+const wireTopic = SMOOTH_TOPIC_PREFIX + room;
+const { updates, acks, events, idle } = authority.drain();
+for (const u of updates) platform.publishWire(wireTopic, 'update', { key: u.key, data: u.state }, codec, { excludeWs: u.ws });
+for (const a of acks) platform.sendWire(a.ws, wireTopic, 'ack', { id: a.id, state: a.state, t: Date.now() }, codec);
+// Discrete one-shot events (ctx.emitEvent): author-excluded by default - the
+// owner drew its own copy optimistically - unless the event opted into toAuthor.
+// The codec declines 'event', so this rides the JSON fallback, which honors excludeWs.
+for (const e of events) platform.publishWire(wireTopic, 'event', { type: e.type, key: e.key, data: e.data, id: e.id }, codec, e.opts && e.opts.toAuthor ? undefined : { excludeWs: e.ws });
 ```
 
 ```js
@@ -3211,10 +3217,13 @@ import { createSmoothChannel } from 'svelte-adapter-uws/plugins/smooth/client';
 
 const channel = createSmoothChannel({ apply, initial, transport: { sendCommand, sync } });
 channel.onFrame((local, remote) => paint(local, remote));
+channel.onEvent((e) => { if (e.type === 'shot') muzzleFlash(e.data); });  // origin:'local' optimistically; 'server' for other authors
 channel.command({ dx: 4, dy: 0 });   // applied locally this frame, reconciled on ack
 ```
 
 The contract that makes it correct: clients send COMMANDS, never state; the server applies them through the same `apply` function the client predicts with and acknowledges each owner with the resulting state; the client rebases on every acknowledgement and replays its un-acknowledged tail. Corrections below `errorThreshold` snap silently, larger ones ease over `smoothTimeMs` while the simulation itself adopts the truth immediately. One-shot side effects in `apply` guard on `ctx.firstTime`; randomness draws from `ctx.rng` (reseeded per command id, so prediction, replay, and the server draw identically). If acknowledgements stop past the window bounds, prediction is killed - the entity renders the last authoritative state and recovers through a full-state sync - rather than allowed to run away.
+
+Discrete one-shot effects - a shot, a hit, a pickup - take the event channel rather than state: `ctx.emitEvent(type, data, opts?)` fires once on a command's optimistic application (the `firstTime` gate suppresses it on every reconciliation replay, so the owner draws one muzzle flash, not one per replay), and `channel.onEvent` delivers it with `origin:'local'` the frame the command was issued. The authority emits the same event with a matching `<commandId>:<ordinal>` key and broadcasts it author-excluded, so other clients receive it with `origin:'server'` while the owner never double-draws its own. An event the owner must also confirm against the server's adjudication (a hit) sets `opts.toAuthor`: it is no longer author-excluded, and the shared key lets the owner correlate the optimistic copy with the authoritative one. The author-exclusion is the fan-out's job, not the client's (the channel never suppresses by key, so one author's `7:0` can never shadow another's): publish each event with `excludeWs` set to its `ws` as shown above, or the owner receives both copies and double-draws. A fan-out that does not honor `excludeWs` - a hand-rolled broadcast, or a cross-instance relay (cluster mode) where exclusion is local to the owning worker - must carry the exclusion itself.
 
 The pure cores (`plugins/smooth/predict.js`, `random.js`, `interpolate.js`, `clock.js`) take every time reading as an argument, so the same code runs in a worker, on the main thread, and under a deterministic simulation harness unchanged. Replaying a 5-command window costs ~85ns (`bench/35-smooth-replay-ab.mjs`); the steady-state loop allocates nothing beyond the by-contract window entries.
 

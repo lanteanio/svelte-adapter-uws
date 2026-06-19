@@ -167,6 +167,11 @@ export function createSmoothChannel(options) {
 	let wireTopic = null;
 	/** @type {(() => void) | null} */
 	let tapUnsub = null;
+	// The inbound tap's subscribe synchronously replays the topic store's
+	// current value; a discrete event that landed before the tap bound would
+	// otherwise fire stale on bind, so server-event delivery is gated until the
+	// tap is live (continuous update/ack/remove frames tolerate the replay).
+	let tapLive = false;
 
 	/** @type {Array<{ id: number, cmd: any }>} */
 	let outQueue = [];
@@ -176,6 +181,8 @@ export function createSmoothChannel(options) {
 	let frameCb = null;
 	/** @type {((overflowed: boolean) => void) | null} */
 	let overflowCb = null;
+	/** @type {((event: { type: string, key: string, data: any, id: number, origin: 'local' | 'server' }) => void) | null} */
+	let eventCb = null;
 	let raf = null;
 
 	const localPoint = { x: 0, y: 0 };
@@ -224,6 +231,24 @@ export function createSmoothChannel(options) {
 			dirty = true;
 			return;
 		}
+		if (ev.event === 'event') {
+			// A discrete event the topic store replays at subscribe time (a
+			// one-shot that landed before the tap bound) is stale: the tap is not
+			// yet live, so it is dropped rather than fired out of its moment.
+			if (!tapLive) return;
+			// The authority's broadcast of a discrete one-shot event. The owner's
+			// own events are author-excluded server-side (their optimistic copy
+			// was delivered locally when the command was issued), so a frame
+			// arriving here is another author's - or, for an opt-in `toAuthor`
+			// event, the owner's authoritative confirmation, carrying the same
+			// `<commandId>:<ordinal>` key the local copy did so the consumer can
+			// correlate the two. Discrete events never enter the smoother or the
+			// remote set; they are delivered once and not replayed.
+			const d = ev.data;
+			if (d === null || typeof d !== 'object' || typeof d.key !== 'string' || typeof d.type !== 'string' || typeof d.id !== 'number') return;
+			if (eventCb) eventCb({ type: d.type, key: d.key, data: d.data, id: d.id, origin: 'server' });
+			return;
+		}
 		// Any other event (the sync-time 'time' seed rides the sync reply
 		// instead; additive future events) feeds the clock path only.
 		smoother.ingest(ev, recvMono);
@@ -250,8 +275,12 @@ export function createSmoothChannel(options) {
 				if (tapUnsub === null && typeof reply.topic === 'string') {
 					// First successful sync names the wire topic; the tap binds
 					// once and survives reconnects (topic stores are name-keyed).
+					// The subscribe replays the store's current value synchronously
+					// while `tapLive` is still false, so any event buffered before
+					// the bind is dropped; it goes live for every later frame.
 					wireTopic = SMOOTH_TOPIC_PREFIX + reply.topic;
 					tapUnsub = on(wireTopic).subscribe(ingest);
+					tapLive = true;
 				}
 				if (typeof reply.you === 'string') selfKey = reply.you;
 				merged.clear();
@@ -371,9 +400,28 @@ export function createSmoothChannel(options) {
 				notifyOverflow(true);
 				resync();
 			}
+			// Queue and schedule the transmit BEFORE delivering local events. A
+			// command issued from inside an onEvent handler then enqueues strictly
+			// after this one, so the transport batch stays in id order - the order
+			// the predictor (and the authority) apply commands in; queuing after
+			// the callback would reverse them and force a reconciliation snap.
 			outQueue.push({ id, cmd });
 			scheduleFlush();
 			dirty = true;
+			// Deliver the discrete events `apply` emitted on this optimistic
+			// application (`origin:'local'`) the same frame the command was
+			// issued. The drain runs unconditionally so the predictor's event
+			// sink starts the next command empty; a killed or overflowed command
+			// runs no apply and drains nothing. The drained array is snapshotted
+			// before any callback fires, and the transmit is already queued, so a
+			// consumer that issues a command from its handler is fully safe.
+			const events = predictor.drainEvents();
+			if (eventCb !== null) {
+				for (let i = 0; i < events.length; i++) {
+					const e = events[i];
+					eventCb({ type: e.type, key: e.key, data: e.data, id: e.id, origin: 'local' });
+				}
+			}
 			return id;
 		},
 
@@ -395,6 +443,24 @@ export function createSmoothChannel(options) {
 		 */
 		onOverflow(cb) {
 			overflowCb = cb;
+		},
+
+		/**
+		 * Attach the discrete-event consumer for `ctx.emitEvent` fires. Each
+		 * `command` delivers the events its `apply` emitted with `origin:'local'`
+		 * (the optimistic copy, drawn the frame the command was issued); the
+		 * authority's broadcast - other authors' events, and an opt-in
+		 * `toAuthor` event's own authoritative confirmation - arrives with
+		 * `origin:'server'`. The optimistic and authoritative copies of one
+		 * event share a `<commandId>:<ordinal>` key, so a consumer that receives
+		 * both can correlate them. One consumer per channel; the reactive
+		 * wrapper above owns fan-out. Events are not buffered - fires before the
+		 * consumer attaches (and server events before the first sync binds the
+		 * tap) are dropped, so attach it before the first command, like onFrame.
+		 * @param {(event: { type: string, key: string, data: any, id: number, origin: 'local' | 'server' }) => void} cb
+		 */
+		onEvent(cb) {
+			eventCb = cb;
 		},
 
 		/** Re-request the authoritative catalog (also runs on every 'open'). */
@@ -462,6 +528,7 @@ export function createSmoothChannel(options) {
 			}
 			frameCb = null;
 			overflowCb = null;
+			eventCb = null;
 			outQueue = [];
 			merged.clear();
 			smoother.reset();
