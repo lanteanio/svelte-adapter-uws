@@ -261,6 +261,11 @@ export function createSmoothChannel(options) {
 
 	let syncInFlight = false;
 	let lastSyncAttemptMono = -Infinity;
+	// Whether the topic advertised lag compensation on its sync reply. Gates the
+	// renderTime stamp on `shoot` so a non-hit-testing topic sends a byte-identical,
+	// stampless shot frame (and so a stale flag never survives a reconnect onto a
+	// topic that has it off - it is re-read from every sync reply).
+	let lcEnabled = false;
 	function resync() {
 		if (destroyed || syncInFlight) return;
 		syncInFlight = true;
@@ -283,6 +288,7 @@ export function createSmoothChannel(options) {
 					tapLive = true;
 				}
 				if (typeof reply.you === 'string') selfKey = reply.you;
+				lcEnabled = reply.lc === 1 || reply.lc === true;
 				merged.clear();
 				// Reset BEFORE seeding: a resync may follow a reconnect onto a
 				// different machine, so the old offset estimate and ring axis
@@ -423,6 +429,30 @@ export function createSmoothChannel(options) {
 				}
 			}
 			return id;
+		},
+
+		/**
+		 * Fire a shot: a fire-and-forget, non-predicted command the server resolves
+		 * against the rewound world (lag compensation). Unlike `command`, it never
+		 * enters the prediction ring - a shot owns no entity state to predict, and its
+		 * outcome (a hit) arrives as an authoritative event, not a reconciliation. It
+		 * stamps the render-time the shooter saw the world at - the synced server clock
+		 * minus the interpolation delay, the same instant remote entities are rendered
+		 * at - so the server rewinds directly to it. The stamp is appended only when
+		 * the topic advertised lag compensation (its `hitTest`), so a topic without it
+		 * sends a byte-identical, stampless frame. Inert if the transport predates the
+		 * shoot path.
+		 * @param {any} cmd
+		 */
+		shoot(cmd) {
+			if (typeof transport.sendShoot !== 'function') return;
+			if (!lcEnabled) {
+				transport.sendShoot({ cmd });
+				return;
+			}
+			const est = smoother.clock.estServerNow(monotonicNow());
+			const serverNow = est === null ? now() : est;
+			transport.sendShoot({ cmd, rt: serverNow - smoother.delay });
 		},
 
 		/**

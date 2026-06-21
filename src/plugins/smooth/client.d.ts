@@ -8,10 +8,19 @@ export interface SmoothChannelTransport<Command = any> {
 	 */
 	sendCommand(batch: Array<{ id: number; cmd: Command }>): void;
 	/**
+	 * Transmit a shot: a fire-and-forget, non-predicted command resolved against
+	 * the server's rewound world. Optional - a transport that predates the shoot
+	 * path omits it, and `channel.shoot` is then inert. The `rt` stamp (the
+	 * shooter's render-time on the synced server axis) is present only when the
+	 * topic advertised lag compensation.
+	 */
+	sendShoot?(payload: { cmd: Command; rt?: number }): void;
+	/**
 	 * Request the authoritative catalog: the resolved topic name, the server
 	 * time stamp (the clock seed), the caller's own entity key, its ack
 	 * watermark, and every entity's state. Runs on every connection 'open'
-	 * and once per overflow recovery.
+	 * and once per overflow recovery. `lc` advertises that the topic runs lag
+	 * compensation (its `hitTest`), the cue for `shoot` to stamp its render-time.
 	 */
 	sync(): Promise<{
 		topic?: string;
@@ -19,6 +28,7 @@ export interface SmoothChannelTransport<Command = any> {
 		you?: string;
 		ack?: number;
 		states?: Array<{ key: string; state: any }>;
+		lc?: 0 | 1;
 	} | null | undefined>;
 }
 
@@ -73,6 +83,12 @@ export interface SmoothChannel<State = any, Command = any> {
 	/** Submit one command: predicted locally this frame, transmitted on the
 	 * next flush, reconciled when its acknowledgement returns. */
 	command(cmd: Command): number;
+	/** Fire a shot: a fire-and-forget, non-predicted command the server resolves
+	 * against the rewound world (lag compensation). Stamps the shooter's
+	 * render-time (synced clock minus interpolation delay) when the topic
+	 * advertised its `hitTest`; the outcome arrives as an authoritative event, not
+	 * a reconciliation. Inert if the transport predates the shoot path. */
+	shoot(cmd: Command): void;
 	/** Attach the per-frame consumer and start the render loop. `local` is
 	 * the rendered local state (prediction plus any decaying correction);
 	 * `remote` maps entity keys to interpolated states. */

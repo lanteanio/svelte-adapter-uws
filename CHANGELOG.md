@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.28] - 2026-06-21
+
+### Added
+
+- **The smooth channel gains `channel.shoot(cmd)`: a fire-and-forget, non-predicted command for server-side lag compensation.** A shot is not movement - it owns no entity state to predict, and its outcome (a hit) is the server's authoritative verdict, not a reconciliation - so it bypasses the prediction ring entirely. `shoot` stamps the render-time the shooter actually saw the world at (the synced server clock minus the interpolation delay, the same instant remote entities are rendered at) and ships it on the shot, so the authority can rewind directly to that instant. The stamp is appended only when the topic advertised lag compensation - a new `lc` flag on the sync reply, set by a `svelte-realtime` topic that declares a `hitTest` - so a topic without it sends a byte-identical, stampless shot frame and the default smooth surface is unchanged. The shot rides a new optional `sendShoot` transport method; a transport that predates it leaves `shoot` inert. Pairs with the `0.6.0-next.27` authority `inject` primitive to drive `svelte-realtime`'s `live.smooth({ hitTest })` server-rewind resolution.
+
 ## [0.6.0-next.27] - 2026-06-21
 
 ### Added

@@ -66,9 +66,13 @@ function makeTransport(overrides = {}) {
 	const t = {
 		name,
 		sent: [],
+		shots: [],
 		syncs: 0,
 		sendCommand(batch) {
 			t.sent.push(batch);
+		},
+		sendShoot(payload) {
+			t.shots.push(payload);
 		},
 		sync() {
 			t.syncs++;
@@ -540,5 +544,51 @@ describe('teardown', () => {
 		await flush(60);
 		expect(t.sent.length).toBe(0);
 		ch.destroy(); // idempotent
+	});
+});
+
+describe('shoot (lag-compensated fire-and-forget)', () => {
+	it('sends a shot through the transport, bypassing the prediction ring and the command batch', async () => {
+		const t = makeTransport({ lc: 1 });
+		const ch = makeChannel(t);
+		await flush();
+		const windowBefore = ch.windowSize;
+		ch.shoot({ fire: true, dir: 0 });
+		await flush();
+		expect(t.shots).toHaveLength(1);
+		expect(t.shots[0].cmd).toEqual({ fire: true, dir: 0 });
+		// No prediction entry, and the shot rides its own send, not the command batch.
+		expect(ch.windowSize).toBe(windowBefore);
+		expect(t.sent).toHaveLength(0);
+	});
+
+	it('stamps a renderTime when the topic advertised lag compensation', async () => {
+		const t = makeTransport({ lc: 1 });
+		const ch = makeChannel(t);
+		await flush();
+		ch.shoot({ fire: true });
+		expect(t.shots).toHaveLength(1);
+		expect(typeof t.shots[0].rt).toBe('number');
+		expect(Number.isFinite(t.shots[0].rt)).toBe(true);
+		// The stamp is render-time: the synced clock minus the interpolation delay.
+		expect(t.shots[0].rt).toBeCloseTo(ch.now() - ch.delay, -2);
+	});
+
+	it('omits the renderTime when lag compensation was not advertised (byte-identical off)', async () => {
+		const t = makeTransport(); // no lc in the sync reply
+		const ch = makeChannel(t);
+		await flush();
+		ch.shoot({ fire: true });
+		expect(t.shots).toHaveLength(1);
+		expect(t.shots[0]).toEqual({ cmd: { fire: true } });
+		expect('rt' in t.shots[0]).toBe(false);
+	});
+
+	it('is inert when the transport predates the shoot path', async () => {
+		const t = makeTransport({ lc: 1 });
+		delete t.sendShoot;
+		const ch = makeChannel(t);
+		await flush();
+		expect(() => ch.shoot({ fire: true })).not.toThrow();
 	});
 });
