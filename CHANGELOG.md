@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.27] - 2026-06-21
+
+### Added
+
+- **The smooth authority can apply a server-initiated command to any entity: `authority.inject(key, cmd)`.** Until now every entity update came from its own owner's command queue, acknowledged back to that owner. A server-authoritative consequence - one entity's action changing another entity's state, like a hit dropping a victim's health - had no clean primitive: enqueueing the change on the victim's own queue would mis-acknowledge the victim (a foreign command id) and author-exclude the victim from its own state-change broadcast. `inject` is that primitive. It applies a synthetic command through the shared `apply` step and emits a non-commanded update: broadcast to all subscribers including the affected entity's owner, with no acknowledgement. The injected command runs on a separate per-entity server queue with a descending server id space, so it never collides with the owner's ascending command ids and never advances the owner's acknowledgement watermark - the owner's client-side prediction is left undisturbed and simply receives the authoritative new state through the normal update broadcast. Injected commands are drained after the entity's own commands in the same tick and the acknowledgement carries the final post-injection state, so an entity that both moves and is changed by the server in one tick reconciles to the truth in a single step with no flicker. Unknown keys are ignored (the target may have left); the return value is the caller's cue to arm the tick. Inert unless a layer calls it; the default command/acknowledge path is byte-identical. Consumed by `svelte-realtime`'s server-side lag-compensation layer for authoritative cross-entity mutation inside a hit handler.
+
 ## [0.6.0-next.26] - 2026-06-19
 
 ### Added
