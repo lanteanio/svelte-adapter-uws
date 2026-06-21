@@ -199,6 +199,7 @@ export function createSmoothChannel(options) {
 				if (typeof d.t === 'number' && Number.isFinite(d.t)) {
 					if (typeof res.sentMono === 'number') smoother.clock.seed(d.t, res.sentMono, recvMono);
 					else smoother.clock.sample(d.t, recvMono);
+					smoother.noteServerStamp(d.t);
 				}
 				if (wasOverflowed && !predictor.overflowed) notifyOverflow(false);
 				dirty = true;
@@ -450,9 +451,22 @@ export function createSmoothChannel(options) {
 				transport.sendShoot({ cmd });
 				return;
 			}
+			// Cold start: until the server clock has a sample, a render-time built from
+			// the raw local wall clock would be arbitrarily skewed (an un-synced laptop
+			// can be seconds off). Suppress the stamp and let the server resolve at
+			// present - an honest miss on a moving target, never a wrong-position hit.
 			const est = smoother.clock.estServerNow(monotonicNow());
-			const serverNow = est === null ? now() : est;
-			transport.sendShoot({ cmd, rt: serverNow - smoother.delay });
+			if (est === null) {
+				transport.sendShoot({ cmd });
+				return;
+			}
+			// Echo the latest absolute server stamp so the server measures the round
+			// trip against its OWN send time (both ends server-authored) - the client
+			// cannot fake a lower latency, only inflate it (bounded + detectable).
+			const ackT = smoother.lastServerT;
+			const rt = est - smoother.delay;
+			if (ackT >= 0) transport.sendShoot({ cmd, rt, ackT });
+			else transport.sendShoot({ cmd, rt });
 		},
 
 		/**

@@ -326,6 +326,30 @@ export function createSmoother(options) {
 			return appliedDelay < 0 ? targetDelay() : appliedDelay;
 		},
 
+		/**
+		 * The latest absolute server-axis stamp this client has observed (the `t`
+		 * the server wrote on the freshest position/ack frame), or -1 before any
+		 * stamped frame. A shot echoes this back so the server can measure the
+		 * round trip against its OWN send time - both ends server-authored - rather
+		 * than trusting a client-derived latency. Refreshed from the broadcast
+		 * firehose, so it stays fresh even for a still (non-commanding) shooter.
+		 */
+		get lastServerT() {
+			return lastStampT;
+		},
+
+		/**
+		 * Note a server stamp seen outside a position frame (an acknowledgement
+		 * carries a fresh server `t` too), so the echoed `lastServerT` reflects the
+		 * freshest server time the client has actually observed - which tightens the
+		 * server's round-trip measurement for a commanding shooter whose own updates
+		 * are echo-suppressed.
+		 * @param {number} t
+		 */
+		noteServerStamp(t) {
+			if (typeof t === 'number' && Number.isFinite(t) && t > lastStampT) lastStampT = t;
+		},
+
 		/** The clock estimator - shared with command stamping. */
 		clock,
 

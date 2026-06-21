@@ -591,4 +591,29 @@ describe('shoot (lag-compensated fire-and-forget)', () => {
 		await flush();
 		expect(() => ch.shoot({ fire: true })).not.toThrow();
 	});
+
+	it('echoes the latest server stamp (ackT) so the server can measure the round trip', async () => {
+		const t = makeTransport({ lc: 1 });
+		const ch = makeChannel(t);
+		await flush();
+		ch.shoot({ fire: true });
+		expect(t.shots).toHaveLength(1);
+		// A server-authored absolute stamp, not a client-derived latency.
+		expect(typeof t.shots[0].ackT).toBe('number');
+		expect(Number.isFinite(t.shots[0].ackT)).toBe(true);
+	});
+
+	it('suppresses the stamp before the clock has synced (cold start)', async () => {
+		// lc is advertised but the sync reply carries no server time, so the clock
+		// never seeds: a render-time built from the raw local wall clock would be
+		// arbitrarily skewed, so the shot must go out stampless (resolve at present).
+		const t = makeTransport({ lc: 1, t: undefined });
+		const ch = makeChannel(t);
+		await flush();
+		ch.shoot({ fire: true });
+		expect(t.shots).toHaveLength(1);
+		expect(t.shots[0]).toEqual({ cmd: { fire: true } });
+		expect('rt' in t.shots[0]).toBe(false);
+		expect('ackT' in t.shots[0]).toBe(false);
+	});
 });

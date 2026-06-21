@@ -14,7 +14,7 @@ export interface SmoothChannelTransport<Command = any> {
 	 * shooter's render-time on the synced server axis) is present only when the
 	 * topic advertised lag compensation.
 	 */
-	sendShoot?(payload: { cmd: Command; rt?: number }): void;
+	sendShoot?(payload: { cmd: Command; rt?: number; ackT?: number }): void;
 	/**
 	 * Request the authoritative catalog: the resolved topic name, the server
 	 * time stamp (the clock seed), the caller's own entity key, its ack

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.29] - 2026-06-21
+
+### Added
+
+- **A shot echoes the latest server stamp (`ackT`) so the server can bound lag-compensation rewind to a latency it measures itself.** A shot already carries the client's render-time; it now also carries `ackT` - the most recent absolute server-clock stamp the client has received (tracked from the broadcast stream, so it stays fresh even for a still, non-commanding shooter). The server measures the round trip as `now - ackT`, where BOTH ends are server-authored wall times, so a client cannot claim a lower latency than the network allows (it can only inflate it, which costs real responsiveness and is detectable). This is the tamper-resistant input the rewind window's width is derived from, replacing any reliance on a client-asserted latency.
+
+### Changed
+
+- **`channel.shoot` suppresses the render-time until the server clock has synced (cold start).** Before the first clock sample a render-time built from the raw local wall clock could be arbitrarily skewed (an un-synced machine can be seconds off), resolving the shot at a wildly wrong instant. The shot now goes out stampless until the clock syncs, so the server resolves it at the present (an honest miss on a moving target, never a wrong-position hit). The `ackT` echo and the render-time are gated on the topic's lag-compensation advert (`lc`), so a non-hit-testing topic's shot frame stays byte-identical.
+
 ## [0.6.0-next.28] - 2026-06-21
 
 ### Added
