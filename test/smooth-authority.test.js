@@ -305,3 +305,86 @@ describe('createSmoothAuthority - removal and catalog', () => {
 		]);
 	});
 });
+
+describe('createSmoothAuthority - inject (ctx.applyTo / server-initiated commands)', () => {
+	/** Apply that handles both client moves and server-injected damage. */
+	const combatApply = (s, c) =>
+		c.damage !== undefined ? { ...s, hp: s.hp - c.damage } : { ...s, x: s.x + (c.dx || 0), y: s.y + (c.dy || 0) };
+
+	it('returns false for an unknown key', () => {
+		const a = createSmoothAuthority({ apply: combatApply });
+		expect(a.inject('nobody', { damage: 10 })).toBe(false);
+	});
+
+	it('applies a server command as a non-commanded update with NO ack (a still victim)', () => {
+		const a = createSmoothAuthority({ apply: combatApply });
+		const ws = mockWs();
+		a.ensure('v', ws, { x: 0, y: 0, hp: 100 });
+		expect(a.inject('v', { damage: 25 })).toBe(true);
+		const tick = a.drain();
+		expect(tick.acks).toEqual([]); // the victim never sent it -> no acknowledgement
+		expect(tick.updates).toHaveLength(1);
+		expect(tick.updates[0]).toMatchObject({ key: 'v', ws, commanded: false }); // owner receives it
+		expect(tick.updates[0].state.hp).toBe(75);
+		expect(a.get('v').state.hp).toBe(75);
+	});
+
+	it('carries the final state in the ack when the victim also commanded this tick, and includes the owner in the update', () => {
+		const a = createSmoothAuthority({ apply: combatApply });
+		const ws = mockWs();
+		a.ensure('v', ws, { x: 0, y: 0, hp: 100 });
+		a.enqueue('v', [{ id: 1, cmd: { dx: 10, dy: 0 } }]); // the victim moves
+		a.inject('v', { damage: 30 }); // and is hit on the same tick
+		const tick = a.drain();
+		expect(tick.acks).toHaveLength(1);
+		expect(tick.acks[0]).toMatchObject({ id: 1, state: { x: 10, y: 0, hp: 70 } }); // move + damage, no flicker
+		expect(tick.updates).toHaveLength(1);
+		expect(tick.updates[0].commanded).toBe(false); // owner included because it was injected into
+		expect(tick.updates[0].state).toEqual({ x: 10, y: 0, hp: 70 });
+	});
+
+	it('routes events emitted inside a server command to the owner (commanded:false)', () => {
+		const apply = (s, c, ctx) => {
+			if (c.damage === undefined) return s;
+			const hp = s.hp - c.damage;
+			if (hp <= 0) ctx.emitEvent('death', { by: 'server' });
+			return { ...s, hp };
+		};
+		const a = createSmoothAuthority({ apply });
+		const ws = mockWs();
+		a.ensure('v', ws, { hp: 10 });
+		a.inject('v', { damage: 99 });
+		const tick = a.drain();
+		expect(tick.events).toHaveLength(1);
+		expect(tick.events[0]).toMatchObject({ type: 'death', ws, commanded: false });
+	});
+
+	it('does not bump lastAckedId (the victim never sent the injected command)', () => {
+		const a = createSmoothAuthority({ apply: combatApply });
+		const ws = mockWs();
+		a.ensure('v', ws, { hp: 100 });
+		a.enqueue('v', [{ id: 7, cmd: { dx: 1, dy: 0 } }]);
+		a.drain();
+		a.inject('v', { damage: 5 });
+		a.drain();
+		expect(a.get('v').lastAckedId).toBe(7); // unchanged by the injection
+	});
+
+	it('drops the oldest injection past the queue cap', () => {
+		const a = createSmoothAuthority({ apply: combatApply, queueCap: 2 });
+		const ws = mockWs();
+		a.ensure('v', ws, { hp: 100 });
+		a.inject('v', { damage: 1 });
+		a.inject('v', { damage: 2 });
+		a.inject('v', { damage: 4 }); // evicts the damage:1
+		const tick = a.drain();
+		expect(tick.updates[0].state.hp).toBe(94); // 100 - 2 - 4
+	});
+
+	it('a tick with neither a command nor an injection is unchanged (OFF path)', () => {
+		const a = createSmoothAuthority({ apply: combatApply });
+		a.ensure('v', mockWs(), { x: 0, y: 0, hp: 100 });
+		const tick = a.drain();
+		expect(tick).toEqual({ updates: [], acks: [], events: [], idle: true });
+	});
+});

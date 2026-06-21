@@ -78,6 +78,14 @@ export interface SmoothAuthority<State = any, Command = any> {
 	/** Queue commands for the next tick; true when anything was queued. */
 	enqueue(key: string, commands: Array<{ id: number; cmd: Command }>): boolean;
 	/**
+	 * Apply a server-initiated command to an entity (e.g. a lag-compensated hit
+	 * applying damage). Runs through the same `apply` on the next `drain()` but
+	 * produces NO acknowledgement and a non-commanded update, so a victim that is
+	 * not commanding still receives the change. True when queued (unknown key =>
+	 * false). The injected command never bumps the entity's ack watermark.
+	 */
+	inject(key: string, cmd: Command): boolean;
+	/**
 	 * Run one authoritative tick. The caller publishes `updates` (excluding
 	 * each entity's owner when echo suppression is on) and sends each ack to
 	 * its owner AFTER this returns - subscribers observe a tick atomically.

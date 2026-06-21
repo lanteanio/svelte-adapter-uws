@@ -109,6 +109,10 @@ export function createSmoothAuthority(options) {
 	let eventSink = [];
 	let currentId = 0;
 	let eventOrdinal = 0;
+	// Server-initiated commands (ctx.applyTo, e.g. a lag-compensated hit applying
+	// damage) use a descending id space so their rng reseed and default event keys
+	// never collide with a client's ascending command ids.
+	let serverId = 0;
 	ctx.emitEvent = (type, data, opts) => {
 		const key = opts && opts.key != null ? String(opts.key) : currentId + ':' + eventOrdinal;
 		eventOrdinal++;
@@ -175,6 +179,32 @@ export function createSmoothAuthority(options) {
 		},
 
 		/**
+		 * Apply a SERVER-INITIATED command to an entity (e.g. a lag-compensated
+		 * hit applying damage to a victim the shooter never commanded). It runs
+		 * through the same pure `apply` on the next `drain()` but - unlike a
+		 * client command - produces NO acknowledgement and a NON-COMMANDED update,
+		 * so the victim (who may not be commanding at all) still receives the
+		 * change. This is the `onMissing` delivery polarity: a server-side mutation
+		 * the owner did not initiate must reach the owner's broadcast. Unknown keys
+		 * are ignored (the victim may have left). Returns true when queued - the
+		 * caller's cue to arm the tick. The injected command gets a descending
+		 * server id so its rng reseed and default event keys never collide with the
+		 * victim's own ascending command ids, and it never bumps `lastAckedId`.
+		 * @param {string} key @param {any} cmd
+		 * @returns {boolean}
+		 */
+		inject(key, cmd) {
+			const e = entities.get(key);
+			if (e === undefined) return false;
+			if (e.serverQueue === undefined) e.serverQueue = [];
+			// Same drop-oldest flood bound as the command queue.
+			if (e.serverQueue.length >= queueCap) e.serverQueue.shift();
+			serverId -= 1;
+			e.serverQueue.push({ id: serverId, cmd });
+			return true;
+		},
+
+		/**
 		 * Run one authoritative tick: drain every entity's queue in order
 		 * through `apply`, advance command-less active entities through
 		 * `onMissing`, and report what changed.
@@ -225,7 +255,6 @@ export function createSmoothAuthority(options) {
 					e.state = s;
 					e.active = true;
 					commanded = true;
-					acks.push({ key, ws: e.ws, id: e.lastAckedId, state: s });
 				} else if (e.active && onMissing) {
 					const s = onMissing(e.state, e.lastCommand);
 					if (s === undefined || s === e.state) {
@@ -236,8 +265,37 @@ export function createSmoothAuthority(options) {
 				} else {
 					e.active = false;
 				}
-				if (e.state !== before) updates.push({ key, state: e.state, ws: e.ws, commanded });
-				if (e.active || e.queue.length > 0) idle = false;
+				// Server-initiated commands (ctx.applyTo) apply after the owner's own
+				// commands so the acknowledgement below carries the final state (no
+				// reconciliation flicker when a victim moves and is hit on the same
+				// tick). They emit events to the owner too (commanded:false) and never
+				// acknowledge: a still victim has no ack, so its update must reach it.
+				let injected = false;
+				if (e.serverQueue !== undefined && e.serverQueue.length > 0) {
+					let s = e.state;
+					for (let i = 0; i < e.serverQueue.length; i++) {
+						const c = e.serverQueue[i];
+						rng.reseed(c.id);
+						currentId = c.id;
+						eventOrdinal = 0;
+						s = apply(s, c.cmd, ctx);
+						for (let j = 0; j < eventSink.length; j++) {
+							const ev = eventSink[j];
+							events.push({ type: ev.type, key: ev.key, data: ev.data, id: ev.id, opts: ev.opts, ws: e.ws, commanded: false });
+						}
+						eventSink.length = 0;
+					}
+					e.serverQueue.length = 0;
+					e.state = s;
+					injected = true;
+				}
+				// The ack carries the FINAL state (including any injection), so the
+				// owner reconciles to the truth in one step. The update is commanded
+				// (owner-excluded) only when the owner commanded AND was not injected
+				// into - an injected, non-commanding victim is delivered its update.
+				if (commanded) acks.push({ key, ws: e.ws, id: e.lastAckedId, state: e.state });
+				if (e.state !== before) updates.push({ key, state: e.state, ws: e.ws, commanded: commanded && !injected });
+				if (e.active || e.queue.length > 0 || injected) idle = false;
 			}
 			return { updates, acks, events, idle };
 		},

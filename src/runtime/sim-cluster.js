@@ -17,8 +17,7 @@ import { setTimer, setIntervalTimer, clearTimer, monotonicNow } from './runtime.
 import { computeStateHash } from './invariants.js';
 
 // The supervisor constants, verbatim from src/runtime/index.js so the modeled budget
-// matches production exactly. The plan references the code; the code never
-// references the plan.
+// matches production exactly.
 const RESTART_DELAY_MAX = 5000;
 const RESTART_MAX_ATTEMPTS = 50;
 const HEARTBEAT_INTERVAL_MS = 10000;
