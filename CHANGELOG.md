@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.30] - 2026-06-22
+
+### Added
+
+- **`plugins/ratelimit`: an optional per-connection `tenant` resolver scopes the bucket key by tenant.** `createRateLimit({ tenant: (ws) => id | null })` joins the returned tenant id to the rate-limit key with a NUL (so it stays unambiguous even when the key is an IPv6 address), so two tenants sharing an IP / connection / custom key get independent buckets. A tenant id containing the NUL delimiter is rejected. `reset` / `ban` / `unban` take a trailing optional tenant id and `clear(tenantId)` drops only that tenant's buckets (no tenant -> clears all). Mirrors the `redis/ratelimit` extension. Omit the resolver and the bucket key, the bucket map, and `clear()` are byte-identical to before.
+
 ## [0.6.0-next.29] - 2026-06-21
 
 ### Added

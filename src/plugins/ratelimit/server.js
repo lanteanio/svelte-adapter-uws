@@ -26,6 +26,13 @@ import { now } from '../../runtime/runtime.js';
  *   - `'ip'` (default): uses `userData.remoteAddress`, `userData.ip`, or `'unknown'`
  *   - `'connection'`: each WebSocket object gets its own independent bucket
  *   - `function`: custom extractor, receives the ws and returns a string key
+ * @property {(ws: any) => (string | null | undefined)} [tenant] - Optional per-connection
+ *   tenant resolver. When set, the bucket key is scoped by the returned tenant id so two
+ *   tenants sharing an IP / connection / custom key get independent buckets and a tenant's
+ *   `reset` / `ban` / `unban` / `clear` touch only that tenant. Mirrors the `redis/ratelimit`
+ *   extension. Return null/undefined for an unscoped connection; omit for a single-tenant
+ *   deploy (byte-identical). The id is joined to the key with a NUL, so it stays unambiguous
+ *   even when the key is an IPv6 address.
  * @property {number} [maxBuckets=1_000_000] - Hard cap on retained buckets. When the
  *   map crosses this size on a new insert, the oldest insertion-order entry is
  *   evicted. The lazy expired-entry sweep at 1000+ entries still runs first; the
@@ -43,11 +50,11 @@ import { now } from '../../runtime/runtime.js';
  * @typedef {Object} RateLimiter
  * @property {(ws: any, cost?: number) => ConsumeResult} consume -
  *   Attempt to consume tokens. Returns the result synchronously.
- * @property {(key: string) => void} reset - Clear the bucket for a key.
- * @property {(key: string, duration?: number) => void} ban -
+ * @property {(key: string, tenant?: string | null) => void} reset - Clear the bucket for a key.
+ * @property {(key: string, duration?: number, tenant?: string | null) => void} ban -
  *   Manually ban a key. Uses `duration` or `blockDuration` or 60 000 ms.
- * @property {(key: string) => void} unban - Remove a ban (bucket stays, tokens unchanged).
- * @property {() => void} clear - Reset all state.
+ * @property {(key: string, tenant?: string | null) => void} unban - Remove a ban (bucket stays, tokens unchanged).
+ * @property {(tenant?: string | null) => void} clear - Reset all state, or only one tenant's buckets when a tenant id is given.
  */
 
 /**
@@ -85,7 +92,7 @@ export function createRateLimit(options) {
 		throw new Error('ratelimit: options object is required');
 	}
 
-	const { points, interval, blockDuration = 0, keyBy = 'ip', maxBuckets = 1_000_000 } = options;
+	const { points, interval, blockDuration = 0, keyBy = 'ip', tenant, maxBuckets = 1_000_000 } = options;
 
 	if (!Number.isInteger(points) || points <= 0) {
 		throw new Error('ratelimit: points must be a positive integer');
@@ -98,6 +105,9 @@ export function createRateLimit(options) {
 	}
 	if (keyBy !== 'ip' && keyBy !== 'connection' && typeof keyBy !== 'function') {
 		throw new Error("ratelimit: keyBy must be 'ip', 'connection', or a function");
+	}
+	if (tenant !== undefined && typeof tenant !== 'function') {
+		throw new Error('ratelimit: tenant must be a function (ws) => id | null');
 	}
 	if (!Number.isInteger(maxBuckets) || maxBuckets < 1) {
 		throw new Error('ratelimit: maxBuckets must be a positive integer');
@@ -136,6 +146,18 @@ export function createRateLimit(options) {
 		return 'unknown';
 	}
 
+	// Scope the bucket key by the connection's tenant (when a `tenant` resolver is set),
+	// FIRST and NUL-delimited so it stays unambiguous even for IPv6 keys. Null -> raw key
+	// (byte-identical single-tenant key space). Mirrors redis/ratelimit's bucketKey. The id
+	// is rejected if it contains the NUL delimiter (the one char that would let two distinct
+	// tenants collide on one bucket); the check short-circuits on the null (default) path.
+	function bucketKey(rawKey, tenantId) {
+		if (tenantId && tenantId.indexOf('\0') !== -1) {
+			throw new Error('ratelimit: tenant id must not contain a NUL byte (it is the bucket-key delimiter)');
+		}
+		return tenantId ? tenantId + '\0' + rawKey : rawKey;
+	}
+
 	/** Lazy cleanup when the map grows large. */
 	function cleanup(t) {
 		if (buckets.size <= 1000) return;
@@ -151,7 +173,7 @@ export function createRateLimit(options) {
 			if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) {
 				throw new Error('ratelimit: cost must be a non-negative finite number');
 			}
-			const key = resolveKey(ws);
+			const key = bucketKey(resolveKey(ws), tenant ? tenant(ws) : null);
 			const t = now();
 
 			cleanup(t);
@@ -206,27 +228,36 @@ export function createRateLimit(options) {
 			};
 		},
 
-		reset(key) {
-			buckets.delete(key);
+		reset(key, tenantId) {
+			buckets.delete(bucketKey(key, tenantId));
 		},
 
-		ban(key, duration) {
+		ban(key, duration, tenantId) {
 			const dur = duration ?? (blockDuration || 60000);
 			const t = now();
-			let bucket = buckets.get(key);
+			const bk = bucketKey(key, tenantId);
+			let bucket = buckets.get(bk);
 			if (!bucket) {
 				bucket = { points: 0, resetAt: t + interval, bannedUntil: 0 };
-				buckets.set(key, bucket);
+				buckets.set(bk, bucket);
 			}
 			bucket.bannedUntil = t + dur;
 		},
 
-		unban(key) {
-			const bucket = buckets.get(key);
+		unban(key, tenantId) {
+			const bucket = buckets.get(bucketKey(key, tenantId));
 			if (bucket) bucket.bannedUntil = 0;
 		},
 
-		clear() {
+		// No tenant -> resets all state. Pass a tenant id to drop only that tenant's buckets.
+		clear(tenantId) {
+			if (tenantId) {
+				const prefix = tenantId + '\0';
+				for (const k of buckets.keys()) {
+					if (k.startsWith(prefix)) buckets.delete(k);
+				}
+				return;
+			}
 			buckets.clear();
 			connCounter = 0;
 		}

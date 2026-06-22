@@ -55,6 +55,51 @@ describe('ratelimit plugin', () => {
 			expect(() => createRateLimit({ points: 1, interval: 100, blockDuration: 0, keyBy: 'connection' })).not.toThrow();
 			expect(() => createRateLimit({ points: 1, interval: 100, keyBy: () => 'custom' })).not.toThrow();
 		});
+
+		it('throws on a non-function tenant resolver', () => {
+			expect(() => createRateLimit({ points: 5, interval: 1000, tenant: 'bad' })).toThrow('tenant must be a function');
+		});
+	});
+
+	describe('tenant scoping', () => {
+		it('gives two tenants on the same key independent buckets', () => {
+			const lim = createRateLimit({ points: 1, interval: 60000, tenant: (ws) => ws.getUserData().org });
+			expect(lim.consume(mockWs({ ip: '9.9.9.9', org: 'a' })).allowed).toBe(true);
+			// B is not exhausted by A's consume - separate bucket.
+			expect(lim.consume(mockWs({ ip: '9.9.9.9', org: 'b' })).allowed).toBe(true);
+			// Each tenant's own bucket (points:1) is now exhausted, independently.
+			expect(lim.consume(mockWs({ ip: '9.9.9.9', org: 'a' })).allowed).toBe(false);
+			expect(lim.consume(mockWs({ ip: '9.9.9.9', org: 'b' })).allowed).toBe(false);
+		});
+
+		it('clear(tenant) drops only that tenant', () => {
+			const lim = createRateLimit({ points: 1, interval: 60000, tenant: (ws) => ws.getUserData().org });
+			lim.consume(mockWs({ ip: '1.1.1.1', org: 'a' })); // A exhausted
+			lim.consume(mockWs({ ip: '1.1.1.1', org: 'b' })); // B exhausted
+			lim.clear('a');
+			expect(lim.consume(mockWs({ ip: '1.1.1.1', org: 'a' })).allowed).toBe(true); // A cleared
+			expect(lim.consume(mockWs({ ip: '1.1.1.1', org: 'b' })).allowed).toBe(false); // B untouched
+		});
+
+		it('reset(key, tenant) targets only the tenant-scoped bucket', () => {
+			const lim = createRateLimit({ points: 1, interval: 60000, tenant: (ws) => ws.getUserData().org });
+			lim.consume(mockWs({ ip: '2.2.2.2', org: 'a' }));
+			lim.consume(mockWs({ ip: '2.2.2.2', org: 'b' }));
+			lim.reset('2.2.2.2', 'a');
+			expect(lim.consume(mockWs({ ip: '2.2.2.2', org: 'a' })).allowed).toBe(true); // A reset
+			expect(lim.consume(mockWs({ ip: '2.2.2.2', org: 'b' })).allowed).toBe(false); // B untouched
+		});
+
+		it('no tenant resolver -> a shared bucket per key (byte-identical)', () => {
+			const lim = createRateLimit({ points: 1, interval: 60000 });
+			expect(lim.consume(mockWs({ ip: '3.3.3.3' })).allowed).toBe(true);
+			expect(lim.consume(mockWs({ ip: '3.3.3.3' })).allowed).toBe(false); // same bucket, exhausted
+		});
+
+		it('rejects a tenant id containing the NUL delimiter (injection-safety)', () => {
+			const lim = createRateLimit({ points: 5, interval: 1000, tenant: () => 'a\0b' });
+			expect(() => lim.consume(mockWs({ ip: '1.2.3.4' }))).toThrow('NUL byte');
+		});
 	});
 
 	describe('consume - basic token bucket', () => {

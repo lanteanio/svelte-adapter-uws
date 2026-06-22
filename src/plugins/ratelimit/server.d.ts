@@ -37,6 +37,16 @@ export interface RateLimitOptions<UserData = unknown> {
 	keyBy?: 'ip' | 'connection' | ((ws: import('uWebSockets.js').WebSocket<UserData>) => string);
 
 	/**
+	 * Optional per-connection tenant resolver. When set, the bucket key is scoped by the
+	 * returned tenant id (joined to the key with a NUL, so it stays unambiguous even for
+	 * IPv6 keys), so two tenants sharing an IP / connection / custom key get independent
+	 * buckets and a tenant's `reset` / `ban` / `unban` / `clear` touch only that tenant.
+	 * Mirrors the `redis/ratelimit` extension. Return null/undefined for an unscoped
+	 * connection; omit for a single-tenant deploy (byte-identical).
+	 */
+	tenant?: (ws: import('uWebSockets.js').WebSocket<UserData>) => string | null | undefined;
+
+	/**
 	 * Hard cap on retained buckets. When the map crosses this size on a
 	 * new insert, the oldest insertion-order entry is evicted. The lazy
 	 * expired-entry sweep at 1000+ entries still runs first; the hard cap
@@ -69,20 +79,20 @@ export interface RateLimiter {
 	 */
 	consume(ws: import('uWebSockets.js').WebSocket<any>, cost?: number): ConsumeResult;
 
-	/** Clear the bucket for a key, allowing fresh requests. */
-	reset(key: string): void;
+	/** Clear the bucket for a key (optionally scoped to a tenant), allowing fresh requests. */
+	reset(key: string, tenant?: string | null): void;
 
 	/**
-	 * Manually ban a key. Uses `duration`, or falls back to `blockDuration`,
-	 * or defaults to 60 000 ms.
+	 * Manually ban a key (optionally scoped to a tenant). Uses `duration`, or falls back
+	 * to `blockDuration`, or defaults to 60 000 ms.
 	 */
-	ban(key: string, duration?: number): void;
+	ban(key: string, duration?: number, tenant?: string | null): void;
 
-	/** Remove a ban. The bucket stays with its current token count. */
-	unban(key: string): void;
+	/** Remove a ban (optionally scoped to a tenant). The bucket stays with its current token count. */
+	unban(key: string, tenant?: string | null): void;
 
-	/** Reset all state (buckets, bans, counters). */
-	clear(): void;
+	/** Reset all state (buckets, bans, counters), or only one tenant's buckets when a tenant id is given. */
+	clear(tenant?: string | null): void;
 }
 
 /**
