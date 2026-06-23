@@ -42,3 +42,19 @@ export function presence<T extends Record<string, any> = Record<string, any>>(
 	topic: string,
 	options?: { maxAge?: number }
 ): Readable<T[]>;
+
+/**
+ * Push field updates for the current user on a topic.
+ *
+ * Sets one or more fields (a typing flag, a selection range, a status) on the
+ * entry this connection represents, merged field by field on the server and
+ * broadcast to observers as a presence `diff`. You must already be present on
+ * the topic (subscribed via `on()` / `crud()`, the same requirement as
+ * `presence()`); a push from a connection that has not joined is a silent no-op.
+ * Whether a field is durable or transient is decided by the server's presence
+ * config, not the caller.
+ *
+ * @param topic - Topic the user is present on
+ * @param fields - Fields to set on this user's entry
+ */
+export function presenceUpdate(topic: string, fields: Record<string, any>): void;

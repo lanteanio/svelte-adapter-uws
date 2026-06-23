@@ -46,6 +46,35 @@ registerWireCodec(TOPIC_PREFIX, {
 const presenceStores = new Map();
 
 /**
+ * Push field updates for the current user on a topic.
+ *
+ * Sets one or more fields (a typing flag, a selection range, a status) on the
+ * entry this connection represents, merged field by field on the server and
+ * broadcast to every observer as a presence `diff`. You must already be present
+ * on the topic (subscribed via `on()` / `crud()`, the same requirement as
+ * `presence()`); a push from a connection that has not joined is a silent no-op.
+ * Only changed fields are broadcast. Whether a field is durable or transient is
+ * decided by the server's presence config, not the caller.
+ *
+ * @param {string} topic - Topic the user is present on
+ * @param {Record<string, any>} fields - Fields to set on this user's entry
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { presence, presenceUpdate } from 'svelte-adapter-uws/plugins/presence/client';
+ *
+ *   const users = presence('doc-1');
+ *   function onType() { presenceUpdate('doc-1', { typing: true }); }
+ * </script>
+ * ```
+ */
+export function presenceUpdate(topic, fields) {
+	if (typeof window === 'undefined') return;
+	connect().send({ type: 'presence-update', topic, fields });
+}
+
+/**
  * Get a reactive store of users present on a topic.
  *
  * Returns a readable Svelte store containing an array of user data objects.

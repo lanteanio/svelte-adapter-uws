@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.32] - 2026-06-23
+
+### Added
+
+- **`presenceUpdate(topic, fields)` on the presence client: push per-user fields (a typing flag, a selection, a status) from the browser.** The presence plugin already broadcast field updates and merged them on receive, but there was no way to SEND them through the plugin - an app had to wire its own RPC. The new client function sends a `presence-update` frame, and the presence plugin's server message hook routes it to the existing `update()` (per-field change detection, durable/transient split, diff broadcast). The server self-gates on membership: a connection that has not joined the topic is a silent no-op, so an unsubscribed socket cannot inject fields. Mirrors the cursor plugin's `move()` send. The receive side and the cluster cross-instance relay were already shipped; this completes the client-to-server field-update loop without an out-of-band RPC.
+
 ## [0.6.0-next.31] - 2026-06-23
 
 ### Added

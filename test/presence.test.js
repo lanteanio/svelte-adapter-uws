@@ -1723,3 +1723,84 @@ describe('presence plugin - field-level update + transient', () => {
 		expect(lastDiff().updates).toEqual({ '1': { typing: true } });
 	});
 });
+
+describe('presence plugin - client presence-update message frame', () => {
+	let presence;
+	let platform;
+
+	beforeEach(() => {
+		presence = createPresence({
+			key: 'id',
+			select: (ud) => ({ id: ud.id, name: ud.name }),
+			transient: ['typing', 'selection'],
+			heartbeat: 0
+		});
+		platform = mockPlatform();
+	});
+
+	const lastDiff = () => {
+		const diffs = platform.published.filter((e) => e.event === 'diff');
+		return diffs.length ? diffs[diffs.length - 1].data : null;
+	};
+
+	it('routes an inbound presence-update frame to update() and broadcasts the field diff', () => {
+		const ws = mockWs({ id: '1', name: 'Alice' });
+		presence.join(ws, 'room', platform);
+		presence.flushDiffs();
+		platform.reset();
+
+		const handled = presence.hooks.message(ws, {
+			data: { type: 'presence-update', topic: 'room', fields: { typing: true } },
+			platform
+		});
+		presence.flushDiffs();
+
+		expect(handled).toBe(true);
+		expect(lastDiff().updates).toEqual({ '1': { typing: true } });
+	});
+
+	it('resolves the frame from raw JSON bytes as well as a parsed object', () => {
+		const ws = mockWs({ id: '1', name: 'Alice' });
+		presence.join(ws, 'room', platform);
+		presence.flushDiffs();
+		platform.reset();
+
+		const bytes = new TextEncoder().encode(
+			JSON.stringify({ type: 'presence-update', topic: 'room', fields: { selection: { start: 1, end: 5 } } })
+		);
+		const handled = presence.hooks.message(ws, { data: bytes, platform });
+		presence.flushDiffs();
+
+		expect(handled).toBe(true);
+		expect(lastDiff().updates).toEqual({ '1': { selection: { start: 1, end: 5 } } });
+	});
+
+	it('claims the frame but is a no-op for a connection that has not joined the topic', () => {
+		const ws = mockWs({ id: '9', name: 'Nomad' }); // never joined
+		const handled = presence.hooks.message(ws, {
+			data: { type: 'presence-update', topic: 'room', fields: { typing: true } },
+			platform
+		});
+		presence.flushDiffs();
+
+		// update() self-gates on membership: the frame is claimed, but no diff fires.
+		expect(handled).toBe(true);
+		expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(0);
+	});
+
+	it('ignores a malformed presence-update frame with no fields', () => {
+		const ws = mockWs({ id: '1', name: 'Alice' });
+		presence.join(ws, 'room', platform);
+		presence.flushDiffs();
+		platform.reset();
+
+		const handled = presence.hooks.message(ws, {
+			data: { type: 'presence-update', topic: 'room' },
+			platform
+		});
+		presence.flushDiffs();
+
+		expect(handled).toBeUndefined();
+		expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(0);
+	});
+});

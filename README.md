@@ -2631,6 +2631,18 @@ presence.update(ws, 'room', { typing: true }, platform);
 {/each}
 ```
 
+A browser can push its own fields directly with `presenceUpdate(topic, fields)` from the presence client - no out-of-band RPC. It sends a `presence-update` frame that the server routes to the same `update()`. The connection must already be present on the topic (subscribed), so a push from a non-member is a silent no-op; whether a field is durable or transient is decided by the server config, not the caller.
+
+```svelte
+<script>
+  import { presence, presenceUpdate } from 'svelte-adapter-uws/plugins/presence/client';
+
+  const users = presence('doc-1');
+  // Toggle a transient typing flag as the user types.
+  function onInput() { presenceUpdate('doc-1', { typing: true }); }
+</script>
+```
+
 Fields named in the `transient` option are broadcast live to the subscribers connected at the moment they change, but are **excluded from the `state` snapshot and the heartbeat roster**. So a (re)joining or swept-then-readded client never inherits a possibly-stale transient value - a disconnected typer leaves no stuck indicator. Identity fields (from `select`) and durable `update()` fields not listed in `transient` ride the snapshot normally.
 
 ```js

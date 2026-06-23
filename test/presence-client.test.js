@@ -114,6 +114,18 @@ describe('presence client inbound binary (0x03)', () => {
 		unsub();
 	});
 
+	it('presenceUpdate() sends a presence-update frame for the current user', async () => {
+		clientModule.connect({ path: '/ws' });
+		await flush();
+		const mock = MockWebSocket._last;
+
+		presenceMod.presenceUpdate('room', { typing: true });
+
+		const updates = mock._sent.filter((s) => typeof s === 'string' && s.includes('presence-update'));
+		expect(updates.length).toBe(1);
+		expect(JSON.parse(updates[0])).toEqual({ type: 'presence-update', topic: 'room', fields: { typing: true } });
+	});
+
 	it('decodes a heartbeat frame as an object map (never an array)', async () => {
 		const conn = clientModule.connect({ path: '/ws' });
 		await flush();

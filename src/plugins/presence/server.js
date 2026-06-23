@@ -891,6 +891,15 @@ export function createPresence(options = {}) {
 					tracker.sync(ws, env.topic, platform);
 					return true;
 				}
+				if (env && env.type === 'presence-update' && typeof env.topic === 'string' && env.fields && typeof env.fields === 'object') {
+					// Client-pushed field update for this connection's user on the
+					// topic (a typing flag, a selection, a status). `update` self-gates
+					// on membership (a connection that has not joined the topic is a
+					// silent no-op) and on field shape, so an unsubscribed socket
+					// cannot inject fields.
+					tracker.update(ws, env.topic, env.fields, platform);
+					return true;
+				}
 			},
 			close(ws, { platform }) {
 				tracker.leave(ws, platform);
