@@ -29,6 +29,13 @@ import { microtask } from '../runtime.js';
 
 const assertionCounts = new Map();
 
+// Optional Prometheus counter, bound via wireAssertionMetrics when the runtime
+// handler is configured with a `metrics` registry. When set, every violation
+// increments it (labelled by category and severity) alongside the in-memory
+// Map; when null the assertion path stays allocation-free past the Map write.
+/** @type {{ inc(labels: { category: string, severity: string }): void } | null} */
+let boundCounter = null;
+
 const isTestEnv = process.env.VITEST !== undefined ||
 	process.env.NODE_ENV === 'test';
 const isProdEnv = process.env.NODE_ENV === 'production';
@@ -52,6 +59,21 @@ const FATAL_EXIT_CODE = 78;
 // killing the harness; tests swap it to assert the exit was scheduled.
 let fatalSink = { exit: (code) => process.exit(code) };
 
+// Shared violation recorder. Bumps the per-category counter Map and, when a
+// Prometheus counter has been wired via wireAssertionMetrics, increments it too
+// (labelled by category and severity). The metric path is best-effort: a
+// throwing registry can never turn an invariant check into a crash.
+/**
+ * @param {string} category
+ * @param {'soft' | 'fatal'} severity
+ */
+function recordViolation(category, severity) {
+	assertionCounts.set(category, (assertionCounts.get(category) || 0) + 1);
+	if (boundCounter) {
+		try { boundCounter.inc({ category, severity }); } catch { /* metrics path is best-effort */ }
+	}
+}
+
 /**
  * Always-on framework invariant assertion. On violation: increments
  * `assertionCounts.get(category)`, logs a structured `console.error`,
@@ -65,7 +87,7 @@ let fatalSink = { exit: (code) => process.exit(code) };
  */
 export function assert(cond, category, context) {
 	if (cond) return;
-	assertionCounts.set(category, (assertionCounts.get(category) || 0) + 1);
+	recordViolation(category, 'soft');
 	if (isTestEnv) {
 		const err = new Error('adapter-uws assert: ' + category);
 		// @ts-ignore augment with context for test diagnostics
@@ -102,7 +124,7 @@ export function assert(cond, category, context) {
  */
 export function fatal(cond, category, context) {
 	if (cond) return;
-	assertionCounts.set(category, (assertionCounts.get(category) || 0) + 1);
+	recordViolation(category, 'fatal');
 	try {
 		console.error('[adapter-uws/fatal]', JSON.stringify({
 			category,
@@ -184,11 +206,37 @@ export function readAssertionCounts() {
 }
 
 /**
+ * Wire the assertion counters into a Prometheus registry. Registers
+ * `framework_assertion_violations_total{category,severity}` as a counter that
+ * both `assert` (severity="soft") and `fatal` (severity="fatal") increment on
+ * every violation alongside the in-memory `assertionCounts` Map. Cardinality is
+ * bounded by the distinct categories declared at the call sites (all
+ * module-level constants, never user-input-driven) times the two severities.
+ *
+ * The runtime handler calls this once when the `metrics` option is supplied.
+ * Calling again replaces the bound counter (most-recent registry wins);
+ * pre-existing in-memory counts are not replayed into the new counter.
+ *
+ * @param {{ counter(name: string, help: string, labelNames?: string[]): { inc(labels?: object): void } }} metrics
+ */
+export function wireAssertionMetrics(metrics) {
+	if (!metrics || typeof metrics.counter !== 'function') {
+		throw new Error('wireAssertionMetrics: metrics registry is required');
+	}
+	boundCounter = metrics.counter(
+		'framework_assertion_violations_total',
+		'Framework production-assertion violations by category and severity',
+		['category', 'severity']
+	);
+}
+
+/**
  * Reset the assertion counter map. Test-only utility - production code
  * should never call this. Exists so unit tests can isolate counters
  * between cases without leaking state across `describe` blocks.
  */
 export function _resetAssertionCountsForTest() {
 	assertionCounts.clear();
+	boundCounter = null;
 	resetFatalSink();
 }

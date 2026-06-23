@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`framework_assertion_violations_total{category,severity}` Prometheus counter.** When a `metrics` registry is configured, the framework's own invariant checks (`assert`, `fatal`) now increment this counter alongside the in-memory `platform.assertions` Map - `severity="soft"` for a recoverable `assert`, `severity="fatal"` for a hard-tier termination - so an ops dashboard can scrape invariant-violation rates without polling the Map. The emit is best-effort (a throwing registry can never turn an invariant check into a crash), label cardinality is bounded by the source-declared categories (never user input), and a deployment with no registry is byte-identical to before.
+
 ## [0.6.0-next.30] - 2026-06-22
 
 ### Added

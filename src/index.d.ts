@@ -340,6 +340,11 @@ export interface WebSocketOptions {
 	 *   (gauge, sampled).
 	 * - `protection_posture_transitions_total{from,to}` - posture level
 	 *   changes (counter).
+	 * - `framework_assertion_violations_total{category,severity}` - framework
+	 *   invariant violations, mirroring the queryable `platform.assertions`
+	 *   Map. `severity` is `soft` (a recoverable `assert`) or `fatal` (a
+	 *   hard-tier termination). Category cardinality is bounded by the
+	 *   source-declared categories (counter).
 	 *
 	 * Accept-path cost is one unlabelled counter increment per admitted
 	 * upgrade; rejection branches add one labelled increment each; gauges
