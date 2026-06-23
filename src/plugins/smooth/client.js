@@ -49,6 +49,13 @@ import { createPredictor } from './predict.js';
 import { createSmoother, SAMPLE_EMPTY } from './interpolate.js';
 import { SMOOTH_CAPABILITY, SMOOTH_TOPIC_PREFIX, SmoothDecodeDict, decodeSmooth } from './codec.js';
 
+// The deterministic generator the predictor seeds per command, re-exported so
+// an app can draw the same reproducible randomness outside `apply` (world
+// generation, spawns, tests) without reaching into the plugin internals. Pure
+// and side-effect-free; for the RNG alone, prefer the lighter
+// `svelte-adapter-uws/plugins/smooth/random` subpath, which pulls in no client.
+export { createSharedRandom } from './random.js';
+
 // Opt this connection into binary smooth frames: registered at module load so
 // the first `hello` already carries the capability (a lazily-added capability
 // would not reach a server whose codec state had already attached - the

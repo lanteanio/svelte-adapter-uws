@@ -1,3 +1,5 @@
+import type { SharedRandom } from './random.js';
+
 /** The apply context: stable across calls, fields swapped per application. */
 export interface SmoothApplyContext {
 	/**
@@ -41,18 +43,11 @@ export type SmoothApply<State = any, Command = any> = (
 	ctx: SmoothApplyContext
 ) => State;
 
-/** A reseedable deterministic generator (see ./random.js). */
-export interface SharedRandom {
-	/** Restart the stream from a new seed. */
-	reseed(seed: number): void;
-	/** A draw in [0, 1). */
-	float(): number;
-	/** A draw over the full unsigned 32-bit range. */
-	u32(): number;
-}
-
-/** Create a reseedable deterministic generator. */
-export function createSharedRandom(seed?: number): SharedRandom;
+// The SharedRandom contract and the createSharedRandom factory live in
+// ./random.js (its own dependency-free subpath); the smooth server surface
+// re-exports them so existing imports keep resolving.
+export type { SharedRandom };
+export { createSharedRandom } from './random.js';
 
 export interface SmoothAuthorityOptions<State = any, Command = any> {
 	/** The shared simulation step. */

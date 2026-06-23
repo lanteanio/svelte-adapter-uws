@@ -1,5 +1,7 @@
 import type { SmoothApply } from './server.js';
 
+export { createSharedRandom, type SharedRandom } from './random.js';
+
 export interface SmoothChannelTransport<Command = any> {
 	/**
 	 * Transmit a command batch. A lossy fire-and-forget send is the intended

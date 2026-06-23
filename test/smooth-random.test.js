@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createSharedRandom } from '../src/plugins/smooth/random.js';
+import { createSharedRandom as createSharedRandomFromServer } from '../src/plugins/smooth/server.js';
 
 // The generator is pure integer arithmetic over an explicit seed - no clocks,
 // no global state - so every assertion here is exact.
@@ -90,5 +91,13 @@ describe('createSharedRandom', () => {
 		const f42 = createSharedRandom(42);
 		expect(f42.float()).toBe(2067236868 / 4294967296);
 		expect(f42.float()).toBe(4231632130 / 4294967296);
+	});
+});
+
+describe('export surface (single source)', () => {
+	it('the smooth server entry re-exports the same createSharedRandom', () => {
+		// The server authority and the dedicated random subpath must resolve to
+		// the one generator, or prediction and authority could drift apart.
+		expect(createSharedRandomFromServer).toBe(createSharedRandom);
 	});
 });
