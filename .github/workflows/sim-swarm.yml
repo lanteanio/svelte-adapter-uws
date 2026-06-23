@@ -1,0 +1,62 @@
+name: sim-swarm
+
+# Deterministic-simulation seed swarm. Runs many seeded interleavings of the
+# in-memory server under the fault engine and fails on any invariant violation,
+# fatal, uncaught scheduler error, or determinism regression. A failing seed
+# string is the entire local reproduce command: runSim({ seed: '<n>' }).
+
+on:
+  # Correctness gate on changes to the runtime, the sim, or its tests.
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'scripts/sim-swarm.js'
+      - 'test/**'
+      - 'package.json'
+  # A deeper nightly sweep that explores far more interleavings than a PR can.
+  # 04:17 UTC: off the top-of-hour stampede.
+  schedule:
+    - cron: '17 4 * * *'
+  # Manual run with a custom seed range / knobs.
+  workflow_dispatch:
+    inputs:
+      count:
+        description: 'Number of seeds'
+        default: '2000'
+      buggify:
+        description: 'Fault enablement (off | on | random)'
+        default: 'random'
+
+# Read-only: this workflow uploads the result as a build artifact and never
+# writes to the repository.
+permissions:
+  contents: read
+
+jobs:
+  swarm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      # A PR runs a fast gate; the nightly schedule runs a deep sweep; a manual
+      # dispatch uses its inputs. The job exits non-zero on any failing seed.
+      - name: Run seed swarm
+        env:
+          GIT_COMMIT: ${{ github.sha }}
+          DST_COUNT: ${{ github.event_name == 'pull_request' && '300' || github.event.inputs.count || '5000' }}
+          DST_BUGGIFY: ${{ github.event.inputs.buggify || 'random' }}
+          DST_CHECK_RATIO: '0.05'
+          DST_OUT: 'sim-swarm-result.json'
+        run: npm run sim:swarm
+      # Always upload, even on failure, so a failing sweep still leaves the
+      # result JSON (with the failing seeds) for inspection.
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-swarm-result
+          path: sim-swarm-result.json
