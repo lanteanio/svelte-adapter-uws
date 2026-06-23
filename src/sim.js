@@ -596,3 +596,160 @@ export async function replaySim(reproducer) {
 	result.reproduced = sameViolations && sameState && sameFatals && sameCluster && sameMetrics && sameVirtualTime;
 	return result;
 }
+
+/**
+ * Deterministic structural fingerprint of a run (the "unseed"): folds the
+ * byte-stable result fields into one 8-hex-char FNV-1a digest. Same seed ->
+ * same fingerprint; if it ever differs for a fixed seed, determinism has
+ * regressed - a cheap canary that needs no full trace diff.
+ *
+ * @param {any} result a SimResult
+ * @returns {string}
+ */
+function runFingerprint(result) {
+	const canonical = JSON.stringify({
+		finalState: result.finalState,
+		invariantViolations: result.invariantViolations,
+		fatals: result.fatals ?? [],
+		clusterFrames: result.clusterFrames ?? null,
+		metrics: result.metrics,
+		virtualTimeMs: result.virtualTimeMs
+	});
+	// FNV-1a 32-bit, the same hash family sim-core uses for seeding. Pure: no
+	// Date / Math.random / timers, so it stays inside the determinism seam.
+	let h = 2166136261 >>> 0;
+	for (let i = 0; i < canonical.length; i++) {
+		h ^= canonical.charCodeAt(i);
+		h = Math.imul(h, 16777619);
+	}
+	return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * The failure oracle for one run: any recorded invariant violation, any
+ * hard-tier fatal, or any uncaught scheduler error. Mirrors the production
+ * assert()/fatal() surface a swarm exists to flush out.
+ * @param {any} result a SimResult
+ */
+function runFailed(result) {
+	return (result.invariantViolations && result.invariantViolations.length > 0)
+		|| (result.fatals && result.fatals.length > 0)
+		|| (result.schedulerUncaught && result.schedulerUncaught.length > 0);
+}
+
+/**
+ * Run a swarm of seeds and aggregate pass/fail plus an exact reproduce key for
+ * each failing seed. The deterministic core behind the CI seed-swarm: it owns
+ * no wall clock and reads no environment (so it stays inside the determinism
+ * seam); a runner script supplies the seed range from the environment and
+ * stamps the wall-clock metadata onto the report it writes.
+ *
+ * Seeds: pass an explicit `seeds` list, or `count` consecutive integer seeds
+ * from `startSeed` (the one-base-int-plus-a-count contract, where the failing
+ * seed string is itself the entire local reproduce command).
+ *
+ * `buggify` is the fault-enablement knob: 'off' (default - each run uses
+ * `base.faults` as given, byte-identical to runSimMany), 'on' (every run layers
+ * `faultProfile` over the base faults), or 'random' (a per-seed seeded coin at
+ * `buggifyProbability`, default 0.25, decides whether that run is faulted - so
+ * one swarm covers both the quiet and the chaotic interleavings, reproducibly).
+ * With no `faultProfile`, 'on'/'random' are no-ops.
+ *
+ * `checkRatio` (in [0,1], default 0) re-runs a deterministically-chosen
+ * fraction of seeds through replaySim and asserts they reproduce; a run that
+ * fails to reproduce is a determinism regression, counted separately from a
+ * normal invariant failure. `onResult(run, index)` fires as each run completes
+ * (a runner uses it to stream progress and print the first reproduce line).
+ *
+ * @param {{
+ *   seeds?: Array<string | number>,
+ *   count?: number,
+ *   startSeed?: number,
+ *   base?: object,
+ *   buggify?: 'off' | 'on' | 'random',
+ *   faultProfile?: object,
+ *   buggifyProbability?: number,
+ *   checkRatio?: number,
+ *   gitCommit?: string,
+ *   onResult?: (run: any, index: number) => void
+ * }} [config]
+ * @returns {Promise<{ summary: any, runs: any[] }>}
+ */
+export async function runSimSwarm(config = {}) {
+	const base = config.base || {};
+	const buggify = config.buggify || 'off';
+	const buggifyProbability = config.buggifyProbability ?? 0.25;
+	const checkRatio = config.checkRatio ?? 0;
+	const faultProfile = config.faultProfile || {};
+
+	let seeds;
+	if (Array.isArray(config.seeds)) {
+		seeds = config.seeds.map(String);
+	} else {
+		const startSeed = Number.isInteger(config.startSeed) ? config.startSeed : 1;
+		const count = Number.isInteger(config.count) ? config.count : 50;
+		seeds = [];
+		for (let i = 0; i < count; i++) seeds.push(String(startSeed + i));
+	}
+
+	const runs = [];
+	const failingSeeds = [];
+	const determinismFailingSeeds = [];
+	let determinismChecks = 0;
+	let gitCommit = config.gitCommit ?? base.gitCommit ?? null;
+
+	for (let i = 0; i < seeds.length; i++) {
+		const seed = seeds[i];
+
+		// Per-seed fault enablement, seeded from the seed so the buggified set is
+		// itself reproducible across swarm runs.
+		let buggified = buggify === 'on';
+		if (buggify === 'random') buggified = createSeededRng(seed + ':buggify').float() < buggifyProbability;
+		const faults = buggified ? { ...(base.faults || {}), ...faultProfile } : (base.faults || {});
+
+		const result = await runSim({ ...base, seed, faults });
+		if (gitCommit === null) gitCommit = result.gitCommit;
+
+		const failed = runFailed(result);
+
+		// Deterministically-chosen determinism re-check (the unseed-check ratio).
+		let reproduced = null;
+		if (checkRatio > 0 && createSeededRng(seed + ':check').float() < checkRatio) {
+			determinismChecks++;
+			reproduced = (await replaySim(result)).reproduced === true;
+			if (!reproduced) determinismFailingSeeds.push(seed);
+		}
+
+		const run = {
+			seed,
+			ok: !failed && reproduced !== false,
+			buggified,
+			fingerprint: runFingerprint(result),
+			violations: (result.invariantViolations || []).length,
+			fatals: (result.fatals || []).length,
+			uncaught: (result.schedulerUncaught || []).length,
+			violationCategories: [...new Set((result.invariantViolations || []).map((v) => v.category))].sort(),
+			reproduced
+		};
+		runs.push(run);
+		if (failed) failingSeeds.push(seed);
+		if (config.onResult) config.onResult(run, i);
+	}
+
+	const determinismFailures = determinismFailingSeeds.length;
+	const summary = {
+		total: seeds.length,
+		passed: runs.filter((r) => r.ok).length,
+		failed: failingSeeds.length,
+		firstFailingSeed: failingSeeds.length ? failingSeeds[0] : null,
+		failingSeeds,
+		buggify,
+		buggified: runs.filter((r) => r.buggified).length,
+		determinismChecks,
+		determinismFailures,
+		determinismFailingSeeds,
+		gitCommit,
+		ok: failingSeeds.length === 0 && determinismFailures === 0
+	};
+	return { summary, runs };
+}

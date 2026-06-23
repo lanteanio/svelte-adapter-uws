@@ -4579,6 +4579,35 @@ replay.reproduced; // true
 
 The scheduler models the event loop's microtask -> timers -> check phase boundary, so a `setTimeout(0)` lands in a later timers phase rather than collapsing into the microtask drain - the publish/relay coalescers batch exactly as they do in production. A seeded PRNG backs every clock, RNG, UUID, and timer, and the fault engine applies `drop` / `delayMs` / `reorder` / `duplicate` / `corrupt` per wire frame. Pass a `scenario(api, { clients, topics })` function to script your own client traffic, or omit it for the default connect/subscribe/publish exercise. `runSimMany({ seeds, base })` sweeps a range of seeds. It is dev/test infrastructure - no new runtime dependency.
 
+#### Seed swarm
+
+`runSimSwarm` runs many seeds and reports pass/fail with an exact reproduce key - the failing seed string is the entire local reproduce command. It owns no wall clock and reads no environment, so it stays deterministic; supply the seed range and let a CI runner stamp the wall-clock metadata.
+
+```js
+import { runSimSwarm } from 'svelte-adapter-uws/sim';
+
+const { summary } = await runSimSwarm({
+  count: 500,                 // 500 consecutive integer seeds...
+  startSeed: 1,               // ...from seed 1 (or pass an explicit `seeds` list)
+  buggify: 'random',          // fault a per-seed seeded subset (off | on | random)
+  faultProfile: { drop: 0.25, reorder: 0.5, maxJitterMs: 30 },
+  checkRatio: 0.05            // replay 5% of seeds and assert they reproduce
+});
+
+summary.ok;               // false if any seed failed or a re-check did not reproduce
+summary.firstFailingSeed; // e.g. '237' - reproduce with runSim({ seed: '237' })
+summary.failingSeeds;     // every failing seed
+```
+
+`buggify` mirrors the FoundationDB knob: `'off'` runs each seed unfaulted, `'on'` layers `faultProfile` on every run, and `'random'` flips a per-seed seeded coin (`buggifyProbability`, default `0.25`) so one swarm covers both quiet and chaotic interleavings reproducibly. `checkRatio` re-runs a deterministically-chosen fraction through `replaySim` so a determinism regression fails the swarm distinctly from an invariant violation. Each run also carries an 8-hex-char structural `fingerprint` (the "unseed"): if it ever changes for a fixed seed, determinism has regressed.
+
+The bundled runner reads the swarm config from the environment, stamps wall-clock metadata, writes a result JSON, and exits non-zero on any failure - the shape a scheduled CI job runs:
+
+```sh
+DST_COUNT=1000 DST_BUGGIFY=random DST_CHECK_RATIO=0.05 GIT_COMMIT=$(git rev-parse HEAD) \
+  npm run sim:swarm        # writes sim-swarm-result.json; exit 1 on a failing seed
+```
+
 ---
 
 ## Related projects

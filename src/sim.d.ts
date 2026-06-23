@@ -146,6 +146,76 @@ export function runSim(config?: SimConfig): Promise<SimResult>;
 export function runSimMany(spec: SimConfig[] | { seeds: string[]; base?: SimConfig }): Promise<SimResult[]>;
 export function replaySim(reproducer: SimResult): Promise<SimResult>;
 
+/** One run's compact outcome within a swarm. The heavy SimResult is discarded;
+ *  the seed reproduces it on demand via runSim. */
+export interface SimSwarmRun {
+	seed: string;
+	/** Clean: no invariant/fatal/uncaught failure, and (if re-checked) it reproduced. */
+	ok: boolean;
+	/** Whether this run had the fault profile enabled (see buggify). */
+	buggified: boolean;
+	/** 8-hex-char structural fingerprint (the "unseed" determinism canary). */
+	fingerprint: string;
+	violations: number;
+	fatals: number;
+	uncaught: number;
+	violationCategories: string[];
+	/** null when this run was not selected for the determinism re-check. */
+	reproduced: boolean | null;
+}
+
+export interface SimSwarmSummary {
+	total: number;
+	/** Runs that were fully clean (ok === true). */
+	passed: number;
+	/** Runs with at least one invariant violation, fatal, or uncaught error. */
+	failed: number;
+	/** The first failing seed - the entire local reproduce command - or null. */
+	firstFailingSeed: string | null;
+	failingSeeds: string[];
+	buggify: 'off' | 'on' | 'random';
+	/** How many runs had the fault profile enabled. */
+	buggified: number;
+	/** How many runs were re-checked for determinism (the checkRatio sample). */
+	determinismChecks: number;
+	/** Re-checked runs that failed to reproduce (a determinism regression). */
+	determinismFailures: number;
+	determinismFailingSeeds: string[];
+	gitCommit: string | null;
+	/** True iff no invariant failures and no determinism regressions. */
+	ok: boolean;
+}
+
+export interface SimSwarmConfig {
+	/** Explicit seed list; takes precedence over count/startSeed. */
+	seeds?: Array<string | number>;
+	/** Number of consecutive integer seeds to run (default 50). */
+	count?: number;
+	/** First integer seed when using `count` (default 1). */
+	startSeed?: number;
+	/** Base SimConfig applied to every run (its `seed`/`faults` are overridden per run). */
+	base?: SimConfig;
+	/** Fault-enablement knob. 'off' (default), 'on' (always layer faultProfile), or
+	 *  'random' (a per-seed seeded coin at buggifyProbability). */
+	buggify?: 'off' | 'on' | 'random';
+	/** The fault profile layered on when a run is buggified. */
+	faultProfile?: SimFaults;
+	/** Probability a run is buggified under buggify:'random' (default 0.25). */
+	buggifyProbability?: number;
+	/** Fraction in [0,1] of runs also replayed to assert determinism (default 0). */
+	checkRatio?: number;
+	gitCommit?: string;
+	/** Called as each run completes; a runner streams progress through it. */
+	onResult?: (run: SimSwarmRun, index: number) => void;
+}
+
+export interface SimSwarmResult {
+	summary: SimSwarmSummary;
+	runs: SimSwarmRun[];
+}
+
+export function runSimSwarm(config?: SimSwarmConfig): Promise<SimSwarmResult>;
+
 // - Building blocks (re-exported for advanced harnesses) ---------------------
 
 export interface SeededRng {

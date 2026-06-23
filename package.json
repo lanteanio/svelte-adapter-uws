@@ -151,7 +151,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "npx playwright test --config test/e2e/playwright.config.js",
-    "test:coverage": "node scripts/coverage.js"
+    "test:coverage": "node scripts/coverage.js",
+    "sim:swarm": "node scripts/sim-swarm.js"
   },
   "engines": {
     "node": ">=22.0.0"
