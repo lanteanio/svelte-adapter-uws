@@ -16,5 +16,7 @@ export * from './utils/upgrade-admission.js';
 export * from './utils/metrics.js';
 export * from './utils/topic.js';
 export * from './utils/origin.js';
+export * from './utils/address.js';
+export * from './utils/static-headers.js';
 export * from './utils/chaos.js';
 export * from './utils/assertions.js';

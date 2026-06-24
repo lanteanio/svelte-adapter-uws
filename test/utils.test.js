@@ -19,6 +19,7 @@ import {
 	isOriginAllowed,
 	isAuthOriginAccepted,
 	describeUnsafeSameOriginConfig,
+	addressScope,
 	createUpgradeAdmission,
 	createPollCounter,
 	containMetricInstrument,
@@ -3344,5 +3345,68 @@ describe('BREACH defense: dynamic compression skipped for credentialed responses
 	it('returns undefined when no accept-encoding header was sent (no compression possible)', () => {
 		expect(deriveAcceptEncodingForResponse({}, false)).toBeUndefined();
 		expect(deriveAcceptEncodingForResponse({ cookie: 'sid=abc' }, false)).toBe('');
+	});
+});
+
+// - addressScope (proxy-collapse heuristic) ----------------------------------
+
+describe('addressScope', () => {
+	it('classifies IPv4 loopback', () => {
+		expect(addressScope('127.0.0.1')).toBe('loopback');
+		expect(addressScope('127.255.255.254')).toBe('loopback');
+	});
+
+	it('classifies RFC1918 private IPv4', () => {
+		expect(addressScope('10.0.0.1')).toBe('private');
+		expect(addressScope('172.16.0.1')).toBe('private');
+		expect(addressScope('172.31.255.255')).toBe('private');
+		expect(addressScope('192.168.1.1')).toBe('private');
+		// docker default bridge gateway - the canonical collapse case
+		expect(addressScope('172.17.0.1')).toBe('private');
+	});
+
+	it('does not over-claim the 172.16/12 range', () => {
+		expect(addressScope('172.15.0.1')).toBe('public');
+		expect(addressScope('172.32.0.1')).toBe('public');
+	});
+
+	it('classifies link-local IPv4', () => {
+		expect(addressScope('169.254.0.1')).toBe('link-local');
+	});
+
+	it('classifies public IPv4', () => {
+		expect(addressScope('8.8.8.8')).toBe('public');
+		expect(addressScope('203.0.113.7')).toBe('public');
+	});
+
+	it('unwraps IPv4-mapped IPv6 and classifies the embedded IPv4', () => {
+		expect(addressScope('::ffff:127.0.0.1')).toBe('loopback');
+		expect(addressScope('::ffff:10.0.0.1')).toBe('private');
+		expect(addressScope('::ffff:172.17.0.1')).toBe('private');
+		expect(addressScope('::ffff:8.8.8.8')).toBe('public');
+	});
+
+	it('classifies IPv6 loopback and unique-local', () => {
+		expect(addressScope('::1')).toBe('loopback');
+		expect(addressScope('fd00::1')).toBe('private'); // fd00::/8
+		expect(addressScope('fc00::1')).toBe('private'); // fc00::/8
+	});
+
+	it('classifies IPv6 link-local and public', () => {
+		expect(addressScope('fe80::1')).toBe('link-local');
+		expect(addressScope('feb0::1')).toBe('link-local');
+		expect(addressScope('2001:db8::1')).toBe('public');
+	});
+
+	it('strips zone ids and brackets', () => {
+		expect(addressScope('fe80::1%eth0')).toBe('link-local');
+		expect(addressScope('[::1]')).toBe('loopback');
+	});
+
+	it('returns unknown for empty / unspecified / malformed input', () => {
+		expect(addressScope('')).toBe('unknown');
+		expect(addressScope('::')).toBe('unknown');
+		expect(addressScope('999.1.1.1')).toBe('unknown');
+		expect(addressScope('not-an-ip')).toBe('unknown');
 	});
 });

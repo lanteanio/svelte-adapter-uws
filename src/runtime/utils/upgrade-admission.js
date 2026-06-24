@@ -247,6 +247,39 @@ export function buildWaitingRoomPage(ctx) {
 }
 
 /**
+ * Substitute the supported `{{token}}` placeholders in an operator-supplied
+ * waiting-room template string. Numeric context values are coerced to integers
+ * and the string value is HTML-escaped, so no token value reaches the page
+ * unescaped; unknown tokens are left intact. A template is a JSON-serializable
+ * string (not a function) so it survives the build-time options serialization
+ * and reaches the production runtime.
+ *
+ * Supported tokens: `{{queueDepth}}`, `{{estimatedSeconds}}`,
+ * `{{pollIntervalMs}}`, `{{retryAfterSeconds}}`, `{{admitCheckPath}}`.
+ *
+ * @param {string} tpl
+ * @param {{ queueDepth: number, estimatedSeconds: number, pollIntervalMs: number, retryAfterSeconds: number, admitCheckPath: string }} ctx
+ * @returns {string}
+ */
+export function renderWaitingRoomTemplate(tpl, ctx) {
+	const htmlEsc = (s) => String(s).replace(/[&<>"']/g, (c) => (
+		c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
+	));
+	/** @type {Record<string, string>} */
+	const values = {
+		queueDepth: String(Math.max(0, Math.floor(Number(ctx && ctx.queueDepth) || 0))),
+		estimatedSeconds: String(Math.max(0, Math.floor(Number(ctx && ctx.estimatedSeconds) || 0))),
+		pollIntervalMs: String(Math.max(250, Math.floor(Number(ctx && ctx.pollIntervalMs) || 2000))),
+		retryAfterSeconds: String(Math.max(1, Math.floor(Number(ctx && ctx.retryAfterSeconds) || 1))),
+		admitCheckPath: htmlEsc((ctx && ctx.admitCheckPath) || '/__admit-check')
+	};
+	return tpl.replace(
+		/\{\{(queueDepth|estimatedSeconds|pollIntervalMs|retryAfterSeconds|admitCheckPath)\}\}/g,
+		(_, k) => values[k]
+	);
+}
+
+/**
  * Resolve the waiting-room configuration once at handler setup. Returns a
  * ready-to-use object (with the rendering and jitter helpers bound to the
  * resolved settings) or `null` when the waiting room is off.
@@ -258,7 +291,7 @@ export function buildWaitingRoomPage(ctx) {
  * waiting room can only engage in a deployment that has opted into admission
  * control (there is nothing to queue for otherwise).
  *
- * @param {{ maxConcurrent?: number, perTickBudget?: number, waitingRoom?: false | { path?: string, admitCheckPath?: string, retryAfterSeconds?: number, pollIntervalMs?: number, template?: (ctx: { queueDepth: number, estimatedSeconds: number, pollIntervalMs: number, retryAfterSeconds: number, admitCheckPath: string }) => string } } | undefined} upgradeAdmission
+ * @param {{ maxConcurrent?: number, perTickBudget?: number, waitingRoom?: false | { path?: string, admitCheckPath?: string, retryAfterSeconds?: number, pollIntervalMs?: number, template?: string } } | undefined} upgradeAdmission
  * @returns {null | { path: string, admitCheckPath: string, pollIntervalMs: number, retryAfterSeconds: number, jitteredRetryAfter(spread?: number): number, estimateSeconds(queueDepth: number): number, renderPage(queueDepth?: number): string }}
  */
 export function resolveWaitingRoom(upgradeAdmission) {
@@ -273,7 +306,13 @@ export function resolveWaitingRoom(upgradeAdmission) {
 		? Math.floor(cfg.pollIntervalMs) : 2000;
 	const retryAfterSeconds = Number.isFinite(cfg.retryAfterSeconds) && cfg.retryAfterSeconds > 0
 		? Math.floor(cfg.retryAfterSeconds) : Math.max(1, Math.round(pollIntervalMs / 1000));
-	const template = typeof cfg.template === 'function' ? cfg.template : null;
+	// Operator override page. A string is the supported, serializable form
+	// (token-substituted via renderWaitingRoomTemplate). A function is still
+	// honoured if one is passed programmatically (e.g. the test harness), but it
+	// cannot survive the build-time options serialization, so the documented
+	// option is a string.
+	const templateStr = typeof cfg.template === 'string' ? cfg.template : null;
+	const templateFn = typeof cfg.template === 'function' ? cfg.template : null;
 
 	return {
 		path,
@@ -322,7 +361,9 @@ export function resolveWaitingRoom(upgradeAdmission) {
 				retryAfterSeconds,
 				admitCheckPath
 			};
-			return template ? template(ctx) : buildWaitingRoomPage(ctx);
+			if (templateStr) return renderWaitingRoomTemplate(templateStr, ctx);
+			if (templateFn) return templateFn(ctx);
+			return buildWaitingRoomPage(ctx);
 		}
 	};
 }

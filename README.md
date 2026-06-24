@@ -435,7 +435,9 @@ These options control how the server handles misbehaving or slow clients at the 
 
 **`compression`** (default: `false`) - per-message deflate for outbound frames. The default is byte-identical to no compression. Set `true` for `SHARED_COMPRESSOR` (one shared sliding window across all sockets - the right choice for a many-connection server), or pass a uWS constant like `uWS.DEDICATED_COMPRESSOR_4KB` (a per-socket window: slightly better compression for a few high-throughput connections, but memory grows with connection count). When a compressor is configured, compression is applied **per frame, not blanket**: text frames (`publish` / `send`) compress by default, binary codec frames (`publishWire` / `sendWire`) are opt-in, the **cursor** plugin stays uncompressed (its 60 Hz hot path), and the **presence** plugin opts in (low-frequency). This split matters because permessage-deflate CPU scales **per subscriber** - uWS does not compress-once-and-fan-out, even for `SHARED_COMPRESSOR` - so compressing a high-frequency broadcast to many subscribers is expensive (a coalesced cursor frame fanned to 1000 subscribers at 60 Hz can cost more than a full CPU core per topic). For a high-frequency, high-fan-out **text** topic, pass `{ compress: false }` to `publish` / `send` to opt it out. None of this applies until you enable compression.
 
-**`upgradeRateLimit`** (default: 10 per 10s window) - sliding-window rate limit on WebSocket upgrade requests per client IP. Clients exceeding the limit get a `429 Too Many Requests` response. The IP rate map is capped at 10,000 entries with LRU eviction by activity score, so sustained connection floods from many IPs don't cause unbounded memory growth.
+**`upgradeRateLimit`** (default: 10 per 10s window) - sliding-window rate limit on WebSocket upgrade requests per client IP. Clients exceeding the limit get a `429 Too Many Requests` response. The IP rate map is capped at 10,000 entries with LRU eviction by activity score, so sustained connection floods from many IPs don't cause unbounded memory growth. Set to `0` to disable.
+
+> **Behind a proxy?** The limit is keyed on the client IP, which is the raw socket address unless you set `ADDRESS_HEADER`. If the server sits behind a reverse proxy, an L4 load balancer, or docker's `userland-proxy` (its default) that rewrites the source address, **every client arrives as the same gateway IP** and the "per-IP" limit silently collapses into a single **global** cap - 10 new connections per 10s for the entire site, trivially tripped by normal traffic or a crawler. The runtime emits a one-time warning the first time it rejects an upgrade keyed on a private/loopback address while `ADDRESS_HEADER` is unset. To restore real per-IP limiting, set `ADDRESS_HEADER=x-forwarded-for` (with [`XFF_DEPTH`](#environment-variables) for the trusted-proxy hop count) so the limiter sees the real client, set docker `userland-proxy: false` so iptables DNAT preserves the source IP, or set `upgradeRateLimit: 0` if you rate-limit upstream. The same applies to the per-message [`plugins/ratelimit`](https://github.com/lanteanio/svelte-adapter-uws-extensions), which keys on the same resolved address.
 
 **`upgradeAdmission`** (default: disabled) - two-layer admission control on the upgrade path, both opt-in:
 
@@ -461,19 +463,29 @@ The two layers are independent: each works without the other. Both default to `0
 
 `platform.protection` reads the live level. While a posture is engaged, `platform.pressure.reason` can surface `CAPACITY` (precedence `MEMORY > CAPACITY > PUBLISH_RATE > SUBSCRIBERS`). Default `'normal'` is a true no-op - the reject path and pressure are byte-identical to before.
 
-**`metrics`** (default: off) - a Prometheus-style registry that makes the whole admission stack chartable. Pass any registry with positional `counter(name, help, labelNames?)` / `gauge(name, help)` factories - the `createMetrics()` registry from [`svelte-adapter-uws-extensions/prometheus`](https://github.com/lanteanio/svelte-adapter-uws-extensions) fits as-is and owns naming concerns like a global prefix.
+**`metrics`** (default: off) - a **module path** whose default export (or a named `metrics` / `registry` export) is a Prometheus-style registry that makes the whole admission stack chartable. Any registry with positional `counter(name, help, labelNames?)` / `gauge(name, help)` factories works - the `createMetrics()` registry from [`svelte-adapter-uws-extensions/prometheus`](https://github.com/lanteanio/svelte-adapter-uws-extensions) fits as-is and owns naming concerns like a global prefix.
+
+It is a module path (like `handler`), not a live object: adapter options are serialized into the build, so a registry constructed inline in `svelte.config.js` never reaches the production runtime. Put the registry in its own module; the adapter bundles it, populates it, and exposes the **same instance** on `platform.metrics`. Scrape it from a route via `platform.metrics` - do not re-import the metrics module from app code, which would create a second, empty copy.
 
 ```js
+// src/lib/server/metrics.js
 import { createMetrics } from 'svelte-adapter-uws-extensions/prometheus';
+export const metrics = createMetrics();
 
-const metrics = createMetrics();
+// svelte.config.js
 adapter({
   websocket: {
     upgradeAdmission: { maxConcurrent: 1000, perTickBudget: 64 },
     protection: 'auto',
-    metrics
+    metrics: './src/lib/server/metrics.js'
   }
 });
+
+// src/routes/metrics/+server.js  (scrape endpoint)
+export const GET = ({ platform }) =>
+  new Response(platform.metrics.serialize(), {
+    headers: { 'content-type': 'text/plain; version=0.0.4' }
+  });
 ```
 
 | Metric | Type | What it charts |
@@ -586,6 +598,26 @@ All static assets (from the `client/` and `prerendered/` output directories) are
 Files with extensions that browsers cannot render inline (`.zip`, `.tar`, `.tgz`, `.exe`, `.dmg`, `.pkg`, `.deb`, `.apk`, `.iso`, `.img`, `.bin`, etc.) automatically receive `Content-Disposition: attachment` so browsers prompt a download dialog instead of attempting to display them.
 
 If `precompress: true` is set in the adapter options, brotli (`.br`) and gzip (`.gz`) precompressed variants are loaded at startup and served when the client's `Accept-Encoding` header includes `br` or `gzip`. Precompressed variants are only used when they are smaller than the original file.
+
+#### Security headers on static assets (`staticHeaders`)
+
+> **Important:** security headers set in `hooks.server.ts` (`handle`) apply to **SSR responses only**. Static and prerendered assets are served from the in-memory fast path that returns *before* SSR is reached, so they never see the `handle` hook. A CSP, HSTS, or `X-Frame-Options` you set in `handle` will be missing on `/llms.txt`, `favicon.ico`, `robots.txt`, `.well-known/*`, and every prerendered page.
+
+Use the top-level `staticHeaders` adapter option to attach app-chosen headers to every static and prerendered response:
+
+```js
+adapter({
+  staticHeaders: {
+    'content-security-policy': "default-src 'self'",
+    'strict-transport-security': 'max-age=63072000; includeSubDomains; preload',
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'strict-origin-when-cross-origin',
+    'permissions-policy': 'geolocation=(), camera=()'
+  }
+})
+```
+
+Keys are case-insensitive and merged once at index time (zero per-request cost). The handler's own transfer / caching / range headers cannot be overridden - `content-type`, `content-encoding`, `content-range`, `content-length`, `date`, `etag`, `cache-control`, `vary`, `accept-ranges` - supplying one logs a build warning and is ignored. Every other header (including overriding the default `x-content-type-options`) is applied. To keep headers identical across SSR and static responses, set the same values in both `handle` and `staticHeaders`.
 
 ---
 

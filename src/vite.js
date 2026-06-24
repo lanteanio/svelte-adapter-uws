@@ -388,6 +388,14 @@ export default function uws(options = {}) {
 			// production getter's resolved value with no work.
 			return 'normal';
 		},
+		get metrics() {
+			// `websocket.metrics` is a build-time module path resolved by the
+			// adapter build; dev mode runs the source directly with no such build
+			// step, so there is no registry to expose. Always `null` in dev,
+			// mirroring the production getter's surface (which is `null` when
+			// `metrics` is unset).
+			return null;
+		},
 		onPressure(_cb) { return () => {}; },
 		onPublishRate(_cb) { return () => {}; },
 		async subscribe(ws, topic) {

@@ -19,8 +19,9 @@ import { env } from 'ENV';
 // import graph; do not move them.
 import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
+import { metricsRegistry } from './metrics-bridge.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, DEFAULT_GRANT } from './wire.js';
 import { now, monotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq } from './handler/state.js';
@@ -50,6 +51,7 @@ import { handleRequest } from './handler/request.js';
 /* global WS_OPTIONS */
 /* global WS_AUTH_PATH */
 /* global HEALTH_CHECK_PATH */
+/* global STATIC_HEADERS */
 
 
 // - Error response helpers ---------------------------------------------------
@@ -91,8 +93,8 @@ setIntervalTimer(() => {
 }, 1000).unref();
 
 
-cacheDir(path.join(clientDir, base), base, true);
-cacheDir(path.join(prerenderedDir, base), base, false);
+cacheDir(path.join(clientDir, base), base, true, STATIC_HEADERS);
+cacheDir(path.join(prerenderedDir, base), base, false, STATIC_HEADERS);
 console.log(`Static files indexed in ${(monotonicNow() - _t_static).toFixed(1)}ms (${staticCache.size} entries)`);
 
 // - TLS config (must be before origin warning) ------------------------------
@@ -336,6 +338,12 @@ if (WS_ENABLED) {
 	const MAX_RATE_ENTRIES = 10000;
 	/** @type {Map<string, { prev: number, curr: number, windowStart: number }>} */
 	const upgradeRateMap = new Map();
+	// One-shot guard for the proxy-collapse advisory below. The per-IP upgrade
+	// limit silently degrades to a single GLOBAL cap when the server sits behind
+	// an address-rewriting proxy (docker userland-proxy, an L4 load balancer, a
+	// non-XFF proxy) and ADDRESS_HEADER is unset: every client then shares one
+	// gateway address, so the rate map has one key for the whole site.
+	let warnedRateLimitProxyCollapse = false;
 
 	// Upgrade admission control. Both layers opt-in via WebSocketOptions
 	// (`upgradeAdmission: { maxConcurrent, perTickBudget }`); zero or unset
@@ -349,12 +357,14 @@ if (WS_ENABLED) {
 	// escape is `waitingRoom: false`.
 	const WAITING_ROOM = resolveWaitingRoom(wsOptions.upgradeAdmission);
 
-	// Admission observability. Opt-in via the `metrics` option - any registry
-	// shaped like the extensions `createMetrics()` (positional counter/gauge
-	// factories). Instruments resolve once here; every emit is optional-chained,
-	// so the disabled path costs one undefined check per site and the accept
-	// path allocates nothing (the admitted counter takes no label object).
-	const METRICS = wsOptions.metrics;
+	// Admission observability. Opt-in via the `metrics` option - a module path
+	// (`websocket.metrics`) whose default export is a registry shaped like the
+	// extensions `createMetrics()` (positional counter/gauge factories). The build
+	// bundles it; the runtime imports it here (via the bridge) and also exposes it
+	// on `platform.metrics` for a scrape route. Instruments resolve once; every
+	// emit is optional-chained, so the disabled path (registry null) costs one
+	// undefined check per site and the accept path allocates nothing.
+	const METRICS = metricsRegistry;
 	const mUpgradeAdmitted = containMetricInstrument(METRICS?.counter(
 		'upgrade_admitted_total', 'WebSocket upgrades accepted'
 	));
@@ -915,6 +925,33 @@ if (WS_ENABLED) {
 						res.writeHeader('content-type', 'text/plain');
 						res.end('Too many upgrade requests');
 					});
+					// Proxy-collapse advisory: this rejection was keyed on a
+					// loopback/private address while no ADDRESS_HEADER is configured,
+					// which is the signature of an address-rewriting proxy collapsing
+					// every client onto one rate-limit bucket (so the per-IP cap is
+					// really a global one). Warn once - this is the exact "intermittent
+					// 429 on /ws under trivial traffic" symptom that is otherwise hard
+					// to attribute. A directly internet-facing server sees real public
+					// client IPs here and never trips this.
+					if (!warnedRateLimitProxyCollapse && !address_header) {
+						const scope = addressScope(clientIp);
+						if (scope === 'loopback' || scope === 'private') {
+							warnedRateLimitProxyCollapse = true;
+							console.warn(
+								`[ws] Rejected a WebSocket upgrade (429) keyed on a ${scope} client address ` +
+								`(${clientIp}) while ADDRESS_HEADER is unset. If this server runs behind a ` +
+								'reverse proxy, load balancer, or docker userland-proxy that rewrites the ' +
+								'source address, every client shares one address and the per-IP ' +
+								'`upgradeRateLimit` becomes a single GLOBAL cap (also true for the ' +
+								'plugins/ratelimit per-message limiter, which keys on the same address). ' +
+								'Restore real client IPs with one of:\n' +
+								'  ADDRESS_HEADER=x-forwarded-for (+ XFF_DEPTH for the trusted-proxy hop count)\n' +
+								'  docker `userland-proxy: false` so iptables DNAT preserves the source IP\n' +
+								'  websocket.upgradeRateLimit: 0 to disable the per-IP limit if you throttle upstream\n' +
+								'  See: https://svti.me/upgrade-ratelimit-proxy'
+							);
+						}
+					}
 					releaseInFlight();
 					return;
 				}

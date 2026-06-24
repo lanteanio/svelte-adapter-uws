@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { manifest, prerendered } from '../manifest-bridge.js';
-import { mimeLookup } from '../utils.js';
+import { mimeLookup, mergeStaticHeaders } from '../utils.js';
 import { monotonicNow } from '../runtime.js';
 import { counters, staticCache, prerenderedDirStyle, decodeCache } from './state.js';
 import { send400 } from './http-helpers.js';
@@ -45,8 +45,12 @@ function walk(dir, fn, prefix = '') {
  * @param {string} dir
  * @param {string} urlPrefix
  * @param {boolean} immutable
+ * @param {Record<string, string> | null} [staticHeaders] - app-configured
+ *   headers merged into every static (and prerendered) response. See
+ *   `mergeStaticHeaders`; reserved transfer/caching headers are never
+ *   overridden.
  */
-export function cacheDir(dir, urlPrefix, immutable) {
+export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null) {
 	walk(dir, (relPath, absPath) => {
 		if (relPath.endsWith('.br') || relPath.endsWith('.gz')) return;
 
@@ -78,7 +82,7 @@ export function cacheDir(dir, urlPrefix, immutable) {
 		}
 
 		/** @type {StaticEntry} */
-		const entry = { buffer, contentType, etag, headers };
+		const entry = { buffer, contentType, etag, headers: mergeStaticHeaders(headers, staticHeaders) };
 
 		if (PRECOMPRESS) {
 			const brPath = absPath + '.br';

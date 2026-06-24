@@ -6,6 +6,7 @@ import { rollup } from 'rollup';
 import { nodeResolve } from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 import json from '@rollup/plugin-json';
+import { normalizeStaticHeaders } from './build-config.js';
 
 const runtimeDir = fileURLToPath(new URL('./runtime', import.meta.url).href);
 
@@ -57,6 +58,11 @@ function detectSetCookieOnUpgrade(source) {
 /** @type {import('./index.js').default} */
 export default function (opts = {}) {
 	const { out = 'build', precompress = true, envPrefix = '', healthCheckPath = '/healthz' } = opts;
+
+	// Validate `staticHeaders` eagerly so a misshaped value fails before any
+	// build work. The reserved-key warning needs builder.log, so it is emitted
+	// inside adapt(); the throw-on-bad-shape path runs here at factory time.
+	const staticHeadersResult = normalizeStaticHeaders(opts.staticHeaders);
 
 	// Normalize websocket config: true -> {}, false/undefined -> null
 	const websocket =
@@ -112,6 +118,73 @@ export default function (opts = {}) {
 				].join('\n\n')
 			);
 
+			// Lazily-initialized esbuild bundler for user-authored server modules
+			// (the ws-handler fallback and the metrics registry). Resolves SvelteKit
+			// aliases ($lib, kit.alias) and the $env / $app virtual modules the same
+			// way the Vite plugin would, so a user module that imports them bundles
+			// correctly. The shared config is built once on first use.
+			/** @type {{ esbuild: any, aliasMap: Record<string,string>, publicPrefix: string, allEnv: Record<string,string>, version: string } | null} */
+			let esbuildCtx = null;
+			/**
+			 * @param {string} entry - path to the user module to bundle
+			 * @param {string} outfile - destination in the build temp dir
+			 */
+			async function esbuildServerModule(entry, outfile) {
+				if (!esbuildCtx) {
+					const esbuild = await import('esbuild');
+					const { loadEnv } = await import('vite');
+					const libDir = path.resolve(builder.config.kit.files?.lib || 'src/lib');
+					const publicPrefix = builder.config.kit.env?.publicPrefix ?? 'PUBLIC_';
+					const allEnv = loadEnv('production', process.cwd(), '');
+					const version = builder.config.kit.version?.name ?? '';
+					const aliasMap = { '$lib': libDir };
+					const kitAliases = builder.config.kit.alias;
+					if (kitAliases) {
+						for (const [key, value] of Object.entries(kitAliases)) {
+							if (!(key in aliasMap)) aliasMap[key] = path.resolve(value);
+						}
+					}
+					esbuildCtx = { esbuild, aliasMap, publicPrefix, allEnv, version };
+				}
+				const { esbuild, aliasMap, publicPrefix, allEnv, version } = esbuildCtx;
+				await esbuild.build({
+					entryPoints: [path.resolve(entry)],
+					bundle: true,
+					format: 'esm',
+					platform: 'node',
+					outfile,
+					alias: aliasMap,
+					packages: 'external',
+					plugins: [{
+						name: 'sveltekit-virtual-modules',
+						setup(build) {
+							build.onResolve({ filter: /^\$(env|app)\// }, (args) => ({
+								path: args.path,
+								namespace: 'sveltekit'
+							}));
+							build.onLoad({ filter: /.*/, namespace: 'sveltekit' }, (args) => {
+								if (args.path === '$app/environment') {
+									return { contents: `export const dev = false;\nexport const building = false;\nexport const version = ${JSON.stringify(version)};` };
+								}
+								const isPublic = args.path.includes('/public');
+								const isStatic = args.path.includes('/static');
+								if (!isStatic) {
+									if (isPublic) {
+										return { contents: `export const env = new Proxy(process.env, { get(t, k) { return typeof k === 'string' && k.startsWith(${JSON.stringify(publicPrefix)}) ? t[k] : undefined; }, ownKeys(t) { return Object.keys(t).filter(k => k.startsWith(${JSON.stringify(publicPrefix)})); }, has(t, k) { return typeof k === 'string' && k.startsWith(${JSON.stringify(publicPrefix)}) && k in t; }, getOwnPropertyDescriptor(t, k) { if (typeof k === 'string' && k.startsWith(${JSON.stringify(publicPrefix)}) && k in t) return { value: t[k], enumerable: true, configurable: true }; return undefined; } });` };
+									}
+									return { contents: 'export const env = process.env;' };
+								}
+								const entries = Object.entries(allEnv).filter(([k]) =>
+									(isPublic ? k.startsWith(publicPrefix) : !k.startsWith(publicPrefix))
+									&& /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(k)
+								);
+								return { contents: entries.map(([k, v]) => `export const ${k} = ${JSON.stringify(v)};`).join('\n') || 'export {};' };
+							});
+						}
+					}]
+				});
+			}
+
 			// Write the WebSocket handler module
 			if (websocket) {
 				// If the Vite plugin was used, ws-handler.js is already in the
@@ -137,59 +210,7 @@ export default function (opts = {}) {
 						// Bundle through esbuild to resolve SvelteKit aliases and handle TS.
 						// This is the fallback path - the Vite plugin is preferred because
 						// it shares modules with the server bundle (no duplication).
-						const esbuild = await import('esbuild');
-						const { loadEnv } = await import('vite');
-						const libDir = path.resolve(builder.config.kit.files?.lib || 'src/lib');
-						const publicPrefix = builder.config.kit.env?.publicPrefix ?? 'PUBLIC_';
-						const allEnv = loadEnv('production', process.cwd(), '');
-						const version = builder.config.kit.version?.name ?? '';
-
-						const aliasMap = { '$lib': libDir };
-						const kitAliases = builder.config.kit.alias;
-						if (kitAliases) {
-							for (const [key, value] of Object.entries(kitAliases)) {
-								if (!(key in aliasMap)) {
-									aliasMap[key] = path.resolve(value);
-								}
-							}
-						}
-
-						await esbuild.build({
-							entryPoints: [path.resolve(handlerFile)],
-							bundle: true,
-							format: 'esm',
-							platform: 'node',
-							outfile: `${tmp}/ws-handler.js`,
-							alias: aliasMap,
-							packages: 'external',
-							plugins: [{
-								name: 'sveltekit-virtual-modules',
-								setup(build) {
-									build.onResolve({ filter: /^\$(env|app)\// }, (args) => ({
-										path: args.path,
-										namespace: 'sveltekit'
-									}));
-									build.onLoad({ filter: /.*/, namespace: 'sveltekit' }, (args) => {
-										if (args.path === '$app/environment') {
-											return { contents: `export const dev = false;\nexport const building = false;\nexport const version = ${JSON.stringify(version)};` };
-										}
-										const isPublic = args.path.includes('/public');
-										const isStatic = args.path.includes('/static');
-										if (!isStatic) {
-											if (isPublic) {
-												return { contents: `export const env = new Proxy(process.env, { get(t, k) { return typeof k === 'string' && k.startsWith(${JSON.stringify(publicPrefix)}) ? t[k] : undefined; }, ownKeys(t) { return Object.keys(t).filter(k => k.startsWith(${JSON.stringify(publicPrefix)})); }, has(t, k) { return typeof k === 'string' && k.startsWith(${JSON.stringify(publicPrefix)}) && k in t; }, getOwnPropertyDescriptor(t, k) { if (typeof k === 'string' && k.startsWith(${JSON.stringify(publicPrefix)}) && k in t) return { value: t[k], enumerable: true, configurable: true }; return undefined; } });` };
-											}
-											return { contents: 'export const env = process.env;' };
-										}
-										const entries = Object.entries(allEnv).filter(([k]) =>
-											(isPublic ? k.startsWith(publicPrefix) : !k.startsWith(publicPrefix))
-											&& /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(k)
-										);
-										return { contents: entries.map(([k, v]) => `export const ${k} = ${JSON.stringify(v)};`).join('\n') || 'export {};' };
-									});
-								}
-							}]
-						});
+						await esbuildServerModule(handlerFile, `${tmp}/ws-handler.js`);
 						builder.log.minor(`WebSocket handler: ${handlerFile} (esbuild fallback)`);
 						builder.log.warn(
 							'Add the Vite plugin to share modules between hooks.ws and the server bundle:\n' +
@@ -207,13 +228,44 @@ export default function (opts = {}) {
 				writeFileSync(`${tmp}/ws-handler.js`, '// No WebSocket handler configured\n');
 			}
 
+			// Metrics registry module. `websocket.metrics` is a module path (like
+			// `handler`): adapter options are serialized into the build, so a live
+			// registry object could never reach the runtime - it must arrive as
+			// bundled code. The generated module re-exports the user's registry as
+			// its default export; the runtime imports it, populates it, and exposes
+			// it on `platform.metrics` for a scrape route to read. A `null` stub is
+			// always written (even with WS off) so the placeholder import resolves.
+			const metricsPath = websocket?.metrics;
+			if (metricsPath && existsSync(`${tmp}/metrics-registry.js`)) {
+				builder.log.minor('Metrics registry: built by Vite plugin');
+			} else if (metricsPath) {
+				// Not '__'-prefixed: the extra-entry discovery loop below only
+				// bundles '__' files, and this is an esbuild source, not a Rollup
+				// entry (its OUTPUT metrics-registry.js is the entry).
+				const metricsEntry = `${tmp}/metrics-entry-src.js`;
+				// Pass the namespace through a function so esbuild does not statically
+				// resolve `.default`/`.metrics`/`.registry` against the user's module
+				// and warn for whichever export form they did not use.
+				writeFileSync(
+					metricsEntry,
+					`import * as m from ${JSON.stringify(path.resolve(metricsPath))};\n` +
+					'const pick = (ns) => ns.default ?? ns.metrics ?? ns.registry ?? null;\n' +
+					'export default pick(m);\n'
+				);
+				await esbuildServerModule(metricsEntry, `${tmp}/metrics-registry.js`);
+				builder.log.minor(`Metrics registry: ${metricsPath}`);
+			} else {
+				writeFileSync(`${tmp}/metrics-registry.js`, 'export default null;\n');
+			}
+
 			const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
 
 			/** @type {Record<string, string>} */
 			const input = {
 				index: `${tmp}/index.js`,
 				manifest: `${tmp}/manifest.js`,
-				'ws-handler': `${tmp}/ws-handler.js`
+				'ws-handler': `${tmp}/ws-handler.js`,
+				'metrics-registry': `${tmp}/metrics-registry.js`
 			};
 
 			if (builder.hasServerInstrumentationFile?.()) {
@@ -281,6 +333,16 @@ export default function (opts = {}) {
 					`websocket.authPath ('${wsAuthPath}') must differ from websocket.path ('${wsPath}').`
 				);
 			}
+			if (websocket?.metrics != null && typeof websocket.metrics !== 'string') {
+				throw new Error(
+					"websocket.metrics must be a module path string (e.g. './src/lib/server/metrics.js') " +
+					'whose default export is your registry. Passing a live registry object no longer works: ' +
+					'adapter options are serialized into the build, so a live object never reached the ' +
+					'production runtime. Move `export const metrics = createMetrics()` into its own module, ' +
+					'point `websocket.metrics` at that path, and read the populated registry at runtime via ' +
+					'`platform.metrics` (e.g. in a /metrics +server.js route). See the README metrics section.'
+				);
+			}
 			const wsOpts = {
 				// Default raised from 16 KB to 1 MB in 0.5. uWS's own
 				// default is also 16 KB, which the adapter previously
@@ -304,6 +366,11 @@ export default function (opts = {}) {
 				upgradeRateLimitWindow: websocket?.upgradeRateLimitWindow ?? 10,
 				upgradeAdmission: websocket?.upgradeAdmission,
 				pressure: websocket?.pressure,
+				// Graduated protection posture ('normal' | 'auto' | 'elevated' |
+				// 'siege'). A plain string enum, so it rides the JSON placeholder
+				// cleanly; the runtime applies the 'normal' default and only builds
+				// the posture machine when this is non-'normal'.
+				protection: websocket?.protection,
 				// Interval (ms) for the clustered cross-worker state-hash
 				// reporter. 0 (default) disables it - no reporter timer is
 				// scheduled and a single-process deployment never runs it.
@@ -402,6 +469,34 @@ export default function (opts = {}) {
 				}
 			}
 
+			// staticHeaders: app-chosen response headers for static and prerendered
+			// assets (CSP, HSTS, X-Frame-Options, ...). These bypass the SvelteKit
+			// `handle` hook, which only runs on the SSR path - so security headers
+			// set there never reach static/prerendered responses. Reserved
+			// transfer/caching headers are stripped (the handler owns them); warn
+			// so a dropped override is never silent.
+			if (staticHeadersResult.dropped.length) {
+				builder.log.warn(
+					`[adapter-uws] staticHeaders ignored: ${staticHeadersResult.dropped.join(', ')}. ` +
+					'These transfer/caching/range headers are managed by the static file ' +
+					'handler and cannot be overridden (content-type, content-encoding, etag, ' +
+					'cache-control, vary, accept-ranges, ...). Every other header is applied.'
+				);
+			}
+
+			// A function waiting-room template cannot be serialized into the build,
+			// so it would be silently dropped. It is now an HTML string with
+			// `{{token}}` placeholders - warn loudly on the old function form.
+			const wrTemplate = websocket?.upgradeAdmission?.waitingRoom;
+			if (wrTemplate && typeof wrTemplate === 'object' && typeof wrTemplate.template === 'function') {
+				builder.log.warn(
+					'[adapter-uws] upgradeAdmission.waitingRoom.template must now be an HTML string ' +
+					'with {{queueDepth}} / {{estimatedSeconds}} / {{pollIntervalMs}} / ' +
+					'{{retryAfterSeconds}} / {{admitCheckPath}} tokens. A function cannot be serialized ' +
+					'into the build and was ignored; the built-in holding page is being used.'
+				);
+			}
+
 			builder.copy(runtimeDir, out, {
 				replace: {
 					ENV: './env.js',
@@ -416,7 +511,9 @@ export default function (opts = {}) {
 					WS_PATH: JSON.stringify(wsPath),
 					WS_OPTIONS: JSON.stringify(wsOpts),
 					WS_AUTH_PATH: JSON.stringify(wsAuthPath),
-					HEALTH_CHECK_PATH: JSON.stringify(healthCheckPath)
+					HEALTH_CHECK_PATH: JSON.stringify(healthCheckPath),
+					STATIC_HEADERS: JSON.stringify(staticHeadersResult.headers),
+					METRICS_REGISTRY: './server/metrics-registry.js'
 				}
 			});
 

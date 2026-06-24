@@ -1,4 +1,5 @@
 import { wsModule } from '../ws-handler-bridge.js';
+import { metricsRegistry } from '../metrics-bridge.js';
 import { parentPort } from 'node:worker_threads';
 import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_SUBSCRIPTIONS, assert, fatal, collapseByCoalesceKey, completeEnvelope, createScopedTopic, isValidWireTopic, nextTopicSeq, processEpoch, readAssertionCounts, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
@@ -1130,6 +1131,19 @@ export const platform = {
 	 */
 	get protection() {
 		return counters.activePosture !== null ? counters.activePosture.level : 'normal';
+	},
+
+	/**
+	 * The metrics registry configured via `websocket.metrics` (a module path
+	 * whose default export is the registry), or `null` when unset. The adapter
+	 * populates it with admission/posture instruments; expose its
+	 * Prometheus-text output from a scrape route, e.g.
+	 * `new Response(platform.metrics.serialize())`. Reading this is how an app
+	 * route reaches the SAME registry instance the runtime writes to - importing
+	 * the metrics module again from app code would create a second, empty copy.
+	 */
+	get metrics() {
+		return metricsRegistry;
 	},
 
 	/**

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.33] - 2026-06-24
+
+### Added
+
+- **`staticHeaders` adapter option: attach security headers to static and prerendered responses.** Headers set in the SvelteKit `handle` hook only reach SSR responses - static assets (`/llms.txt`, `favicon.ico`, `robots.txt`, `.well-known/*`) and prerendered pages are served from an in-memory fast path that returns before SSR, so a CSP, HSTS, `X-Frame-Options`, or `Referrer-Policy` set in `handle` never reached them. `staticHeaders: Record<string, string>` (top-level) is merged into every static and prerendered response once at index time, so there is zero per-request cost. Keys are case-insensitive; the handler's own transfer / caching / range headers (`content-type`, `content-encoding`, `content-range`, `content-length`, `date`, `etag`, `cache-control`, `vary`, `accept-ranges`) cannot be overridden - supplying one logs a build warning and is ignored - while every other header (including the default `x-content-type-options`) is applied.
+- **`platform.metrics`: read the configured metrics registry from a route.** Exposes the same registry instance the adapter populates with admission/posture instruments, so a scrape route can serve its Prometheus text directly (`new Response(platform.metrics.serialize())`) without re-importing the metrics module (which would create a second, empty copy). `null` when `websocket.metrics` is unset.
+- **A one-time boot warning when the per-IP upgrade rate limiter has collapsed into a global cap behind a proxy.** The first time an upgrade is rejected (`429`) keyed on a loopback or private address while `ADDRESS_HEADER` is unset - the signature of an address-rewriting reverse proxy, L4 load balancer, or docker `userland-proxy` that makes every client share one gateway IP - the runtime logs how to restore real per-IP limiting (set `ADDRESS_HEADER`/`XFF_DEPTH`, use docker `userland-proxy: false`, or disable with `upgradeRateLimit: 0`). A directly internet-facing server sees real public client IPs and never trips this. The same proxy interaction (and remedy) is now documented next to `upgradeRateLimit`.
+
+### Changed
+
+- **BREAKING: `websocket.metrics` is now a module path string, not a live registry object.** Adapter options are serialized into the build, so a registry constructed in `svelte.config.js` could never reach the production runtime - the documented inline form was a silent no-op there. Point `metrics` at a module whose default export (or a named `metrics` / `registry` export) is the registry; the adapter bundles it, populates it, and exposes the same instance on `platform.metrics`. Passing a non-string now throws at build with migration guidance. (`createTestServer` still accepts a live registry object for tests.)
+- **BREAKING: `upgradeAdmission.waitingRoom.template` is now an HTML string with `{{tokens}}`, not a function.** A function could not survive options serialization and was silently dropped. Use a string template with `{{queueDepth}}`, `{{estimatedSeconds}}`, `{{pollIntervalMs}}`, `{{retryAfterSeconds}}`, `{{admitCheckPath}}` placeholders (values are HTML-escaped on substitution). A function passed at build now logs a warning; one passed programmatically (e.g. the test harness) is still honored.
+
+### Fixed
+
+- **`websocket.protection` now reaches the production runtime.** The graduated protection posture (`'auto'` / `'elevated'` / `'siege'`) was read by the runtime but never serialized into the build config, so configuring it in `svelte.config.js` was a no-op in production (the posture machine was never built). It is a plain string enum and now rides the build placeholder like every other option.
+- **`websocket.metrics` now reaches the production runtime.** See Changed - the option existed and was consumed by the runtime, but a live registry object could never cross the build-time serialization boundary, so admission/posture metrics were never emitted in production. Now wired via a bundled module path.
+
 ## [0.6.0-next.32] - 2026-06-23
 
 ### Added

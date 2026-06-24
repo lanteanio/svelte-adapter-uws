@@ -82,6 +82,34 @@ export interface AdapterOptions {
 	healthCheckPath?: string | false;
 
 	/**
+	 * Response headers added to every static and prerendered asset
+	 * (`/llms.txt`, `favicon.ico`, `robots.txt`, `.well-known/*`, prerendered
+	 * pages, hashed JS/CSS). These responses are served from an in-memory fast
+	 * path that returns BEFORE SSR, so security headers set in
+	 * `hooks.server.js` `handle` - which only runs on the SSR path - never reach
+	 * them. Use this to put CSP, HSTS, X-Frame-Options, Referrer-Policy,
+	 * Permissions-Policy (and any custom `x-*` header) on static responses.
+	 *
+	 * Keys are case-insensitive. The handler's own transfer / caching / range
+	 * headers cannot be overridden (`content-type`, `content-encoding`, `etag`,
+	 * `cache-control`, `vary`, `accept-ranges`, ...); supplying one logs a
+	 * build warning and is ignored. Merged once at build/index time, so there
+	 * is zero per-request cost.
+	 *
+	 * @example
+	 * ```js
+	 * adapter({
+	 *   staticHeaders: {
+	 *     'strict-transport-security': 'max-age=63072000; includeSubDomains; preload',
+	 *     'x-frame-options': 'DENY',
+	 *     'referrer-policy': 'strict-origin-when-cross-origin'
+	 *   }
+	 * })
+	 * ```
+	 */
+	staticHeaders?: Record<string, string>;
+
+	/**
 	 * Enable WebSocket support.
 	 *
 	 * - `true` - enable with built-in pub/sub handler (**no auth, no per-topic
@@ -219,6 +247,17 @@ export interface WebSocketOptions {
 	 * Maximum number of WebSocket upgrade requests allowed per IP address
 	 * within `upgradeRateLimitWindow` seconds.
 	 * Set to `0` to disable upgrade rate limiting.
+	 *
+	 * The key is the client IP, which is the raw socket address unless
+	 * `ADDRESS_HEADER` is set. Behind a reverse proxy, an L4 load balancer, or
+	 * docker's `userland-proxy` (its default) that rewrites the source address,
+	 * every client arrives as the same gateway IP and this "per-IP" limit
+	 * silently collapses into a single GLOBAL cap. Set
+	 * `ADDRESS_HEADER=x-forwarded-for` (with `XFF_DEPTH`) so the limiter sees the
+	 * real client, set docker `userland-proxy: false` so the source IP is
+	 * preserved, or set this to `0` if you rate-limit upstream. The runtime
+	 * warns once if it rejects an upgrade keyed on a private/loopback address
+	 * while `ADDRESS_HEADER` is unset.
 	 * @default 10
 	 */
 	upgradeRateLimit?: number;
@@ -296,8 +335,23 @@ export interface WebSocketOptions {
 			retryAfterSeconds?: number;
 			/** Page poll cadence in ms. Default `2000`. */
 			pollIntervalMs?: number;
-			/** Override the built-in page. Receives the live queue context. */
-			template?: (ctx: WaitingRoomContext) => string;
+			/**
+			 * Override the built-in holding page with a full HTML document. This is
+			 * a string (not a function): adapter options are serialized into the
+			 * build, so a function could never reach the production runtime. The
+			 * following `{{tokens}}` are substituted with the live, escaped values:
+			 * `{{queueDepth}}`, `{{estimatedSeconds}}`, `{{pollIntervalMs}}`,
+			 * `{{retryAfterSeconds}}`, `{{admitCheckPath}}`. Include your own poll
+			 * script (hitting `{{admitCheckPath}}`) if you want auto-reload; the
+			 * built-in page is recommended for that behaviour.
+			 *
+			 * @example
+			 * ```js
+			 * template: '<!doctype html><title>Hang tight</title>' +
+			 *   '<p>You are number {{queueDepth}} in line (~{{estimatedSeconds}}s).</p>'
+			 * ```
+			 */
+			template?: string;
 		};
 	};
 
@@ -361,21 +415,38 @@ export interface WebSocketOptions {
 	 * or the sampler - while a registry that throws during instrument
 	 * creation fails at startup, loudly.
 	 *
+	 * This is a **module path** (like `handler`), not a live object: adapter
+	 * options are serialized into the build, so a registry constructed in
+	 * `svelte.config.js` could never reach the production runtime. Point it at a
+	 * module whose default export (or a named `metrics` / `registry` export) is
+	 * the registry; the adapter bundles it, populates it, and exposes the SAME
+	 * instance on `platform.metrics`. Scrape it from a route via
+	 * `platform.metrics` - do NOT import the metrics module again from app code,
+	 * which would create a second, empty copy.
+	 *
 	 * @example
 	 * ```js
+	 * // src/lib/server/metrics.js
 	 * import { createMetrics } from 'svelte-adapter-uws-extensions/prometheus';
+	 * export const metrics = createMetrics();
 	 *
-	 * const metrics = createMetrics();
+	 * // svelte.config.js
 	 * adapter({
 	 *   websocket: {
 	 *     upgradeAdmission: { maxConcurrent: 1000 },
 	 *     protection: 'auto',
-	 *     metrics
+	 *     metrics: './src/lib/server/metrics.js'
 	 *   }
 	 * });
+	 *
+	 * // src/routes/metrics/+server.js
+	 * export const GET = ({ platform }) =>
+	 *   new Response(platform.metrics.serialize(), {
+	 *     headers: { 'content-type': 'text/plain; version=0.0.4' }
+	 *   });
 	 * ```
 	 */
-	metrics?: MetricsRegistry;
+	metrics?: string;
 
 	/**
 	 * Interval in milliseconds for the cross-worker state-hash reporter
@@ -672,6 +743,13 @@ export interface MetricsRegistry {
 		name: string,
 		help: string
 	): { set(value: number): void };
+	/**
+	 * Render all metrics in Prometheus text exposition format. Present on the
+	 * `createMetrics()` registry from `svelte-adapter-uws-extensions/prometheus`;
+	 * optional here because the adapter itself only ever calls `counter`/`gauge`.
+	 * Read it from a scrape route via `platform.metrics`.
+	 */
+	serialize?(): string;
 }
 
 /**
@@ -1909,6 +1987,25 @@ export interface Platform {
 	 * require a capability cookie only when `platform.protection !== 'normal'`.
 	 */
 	readonly protection: 'normal' | 'elevated' | 'siege';
+
+	/**
+	 * The metrics registry configured via `WebSocketOptions.metrics` (a module
+	 * path whose default export is the registry), or `null` when unset. This is
+	 * the SAME instance the adapter populates with admission/posture instruments,
+	 * so a scrape route can expose its Prometheus-text output directly. Importing
+	 * the metrics module again from app code would create a second, empty copy -
+	 * read it here instead.
+	 *
+	 * @example
+	 * ```js
+	 * // src/routes/metrics/+server.js
+	 * export const GET = ({ platform }) =>
+	 *   new Response(platform.metrics.serialize(), {
+	 *     headers: { 'content-type': 'text/plain; version=0.0.4' }
+	 *   });
+	 * ```
+	 */
+	readonly metrics: MetricsRegistry | null;
 
 	/**
 	 * Register a callback fired on each pressure-state transition (when
