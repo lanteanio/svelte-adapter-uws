@@ -624,3 +624,37 @@ describe('shoot (lag-compensated fire-and-forget)', () => {
 		expect('ackT' in t.shots[0]).toBe(false);
 	});
 });
+
+describe('stats() telemetry snapshot', () => {
+	it('reflects identity, topic, the reconciliation window, and remote count', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t, { smoothTimeMs: 100 });
+		await flush();
+
+		// After sync: identity + topic bound, clock synced, the 'other' entity merged.
+		let s = ch.stats();
+		expect(s.self).toBe('me');
+		expect(s.topic).toBe(wire(t));
+		expect(s.clockSynced).toBe(true);
+		expect(s.remoteCount).toBeGreaterThanOrEqual(1);
+		expect(s.unacked).toBe(0);
+		expect(s.windowCap).toBe(256);
+		expect(s.overflowed).toBe(false);
+		expect(s.correcting).toBe(false);
+		expect(s.lastDivergence).toBe(0);
+
+		// Issue commands: the un-acked reconciliation window grows.
+		ch.command({ dx: 2 });
+		ch.command({ dx: 3 });
+		expect(ch.stats().unacked).toBe(2);
+
+		// A diverging ack (server contradicts the prediction): window drains, the
+		// last divergence and the active correction surface.
+		MockWebSocket._last.emit({ topic: wire(t), event: 'ack', data: { id: 2, state: { x: 0, y: 0 }, t: Date.now() } });
+		s = ch.stats();
+		expect(s.unacked).toBe(0);
+		expect(s.lastDivergence).toBeGreaterThan(0);
+		expect(s.correcting).toBe(true);
+		ch.destroy();
+	});
+});

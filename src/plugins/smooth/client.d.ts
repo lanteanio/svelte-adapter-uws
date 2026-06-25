@@ -123,7 +123,38 @@ export interface SmoothChannel<State = any, Command = any> {
 	readonly clockOffset: number | null;
 	/** The resolved wire topic, or null before the first sync reply. */
 	readonly topic: string | null;
+	/**
+	 * A one-shot telemetry snapshot of the prediction + interpolation state, for
+	 * a devtools / per-stream inspector. Pull-based (read on a panel refresh tick),
+	 * so it costs nothing when nothing reads it. `monoNow` defaults to the current
+	 * monotonic clock.
+	 */
+	stats(monoNow?: number): SmoothChannelStats;
 	destroy(): void;
+}
+
+/** The shape returned by {@link SmoothChannel.stats}. */
+export interface SmoothChannelStats {
+	/** The caller's own entity key, or null before the sync reply announced it. */
+	self: string | null;
+	/** The resolved wire topic, or null before the first sync reply. */
+	topic: string | null;
+	/** True while prediction is killed pending recovery (window overflow). */
+	overflowed: boolean;
+	/** Commands awaiting acknowledgement (the reconciliation window depth). */
+	unacked: number;
+	/** The window cap; `unacked` nearing it predicts an overflow kill. */
+	windowCap: number;
+	/** The most recent reconciliation error magnitude (0 until the first reconcile). */
+	lastDivergence: number;
+	/** True while a reconciliation correction is still easing in. */
+	correcting: boolean;
+	/** The applied remote render-behind interpolation delay (ms). */
+	interpDelayMs: number;
+	/** Whether the server-clock estimate has a sample yet. */
+	clockSynced: boolean;
+	/** Number of remote entities currently merged. */
+	remoteCount: number;
 }
 
 /**

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.35] - 2026-06-26
+
+### Added
+
+- **`createSmoothChannel(...)` now exposes a `stats(monoNow?)` telemetry snapshot** for a devtools / per-stream inspector. It bundles the channel's prediction + interpolation state in one pull-based read (so it costs nothing when nothing reads it): `self`, `topic`, `overflowed`, `unacked` + `windowCap` (the reconciliation window - `unacked` nearing the cap predicts an overflow kill), `lastDivergence` (the most recent reconciliation error magnitude) + `correcting` (whether a correction is still easing in), `interpDelayMs` (the applied remote render-behind), `clockSynced`, and `remoteCount`. The predictor gained the matching getters (`windowCap`, `lastDivergence`, `correcting`) behind it. No behaviour change to the prediction/interpolation path - `lastDivergence` is recorded as a side effect of the reconciliation it already computed, and resets to 0 on a clean rebase (sync / recovery).
+
 ## [0.6.0-next.34] - 2026-06-25
 
 ### Fixed

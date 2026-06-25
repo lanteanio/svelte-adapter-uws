@@ -483,3 +483,42 @@ describe('createPredictor - convergence under adversarial acking', () => {
 		expect(b.server).toEqual(a.server);
 	});
 });
+
+describe('createPredictor - telemetry getters (devtools)', () => {
+	it('windowCap reports the configured cap', () => {
+		expect(createPredictor({ apply: moveApply, initial: { x: 0, y: 0 } }).windowCap).toBe(256);
+		expect(createPredictor({ apply: moveApply, initial: { x: 0, y: 0 }, windowCap: 8 }).windowCap).toBe(8);
+	});
+
+	it('lastDivergence tracks the most recent reconciliation error magnitude', () => {
+		const p = createPredictor({ apply: moveApply, initial: { x: 0, y: 0 }, smoothTimeMs: 100 });
+		expect(p.lastDivergence).toBe(0); // nothing reconciled yet
+		p.command({ dx: 10, dy: 0 }, 100);
+		p.ack(1, { x: 0, y: 0 }, 1000); // server disagreed by 10
+		expect(p.lastDivergence).toBe(10);
+		// A subsequent matching ack (zero divergence) updates it back to 0.
+		p.command({ dx: 0, dy: 0 }, 1100);
+		p.ack(2, { x: 0, y: 0 }, 1200);
+		expect(p.lastDivergence).toBe(0);
+	});
+
+	it('sync clears lastDivergence (a clean rebase has no error)', () => {
+		const p = createPredictor({ apply: moveApply, initial: { x: 0, y: 0 } });
+		p.command({ dx: 10, dy: 0 }, 100);
+		p.ack(1, { x: 0, y: 0 }, 1000);
+		expect(p.lastDivergence).toBe(10);
+		p.sync({ x: 5, y: 5 }, 1);
+		expect(p.lastDivergence).toBe(0);
+	});
+
+	it('correcting is true only while a correction is easing in', () => {
+		const p = createPredictor({ apply: moveApply, initial: { x: 0, y: 0 }, smoothTimeMs: 100 });
+		expect(p.correcting).toBe(false); // no correction yet
+		p.command({ dx: 10, dy: 0 }, 100);
+		p.ack(1, { x: 0, y: 0 }, 1000); // above-threshold divergence -> correction armed
+		expect(p.correcting).toBe(true);
+		// Drive the decay to completion; once fully landed, correcting clears.
+		p.renderInto(out, 1100);
+		expect(p.correcting).toBe(false);
+	});
+});

@@ -106,6 +106,11 @@ export function createPredictor(options) {
 	let errY = 0;
 	let errAtMono = -1;
 
+	// The most recent reconciliation error magnitude (computeError on the last
+	// acknowledging ack), surfaced for telemetry / devtools. 0 until the first
+	// reconciling ack; reset on sync / reset.
+	let lastDivergence = 0;
+
 	const rng = createSharedRandom();
 	const ctx = { firstTime: true, rng };
 
@@ -242,6 +247,7 @@ export function createPredictor(options) {
 				// to ease - and re-engage prediction for the next command.
 				predicted = state;
 				overflowed = false;
+				lastDivergence = 0;
 				return { divergence: 0, sentMono: undefined };
 			}
 
@@ -260,6 +266,7 @@ export function createPredictor(options) {
 			predicted = next;
 
 			const divergence = computeError(before, next);
+			lastDivergence = divergence;
 			if (divergence > errorThreshold && smoothTimeMs > 0) {
 				// Keep the RENDERED position continuous: the new offset spans
 				// from the previously rendered point (old prediction plus any
@@ -299,6 +306,7 @@ export function createPredictor(options) {
 			errX = 0;
 			errY = 0;
 			errAtMono = -1;
+			lastDivergence = 0;
 			overflowed = false;
 		},
 
@@ -378,6 +386,21 @@ export function createPredictor(options) {
 			return overflowed;
 		},
 
+		/** The un-acked command window cap; exceeding it kills prediction (telemetry). */
+		get windowCap() {
+			return windowCap;
+		},
+
+		/** The most recent reconciliation error magnitude (devtools / telemetry). */
+		get lastDivergence() {
+			return lastDivergence;
+		},
+
+		/** True while a reconciliation correction is still easing in (devtools / telemetry). */
+		get correcting() {
+			return errAtMono >= 0;
+		},
+
 		/**
 		 * Forget state and window but never ids: a reconnect rebases through
 		 * `sync()`, and ids stay unique across the predictor's lifetime.
@@ -393,6 +416,7 @@ export function createPredictor(options) {
 			errX = 0;
 			errY = 0;
 			errAtMono = -1;
+			lastDivergence = 0;
 			overflowed = false;
 			eventSink = [];
 		}

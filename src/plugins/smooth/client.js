@@ -561,6 +561,34 @@ export function createSmoothChannel(options) {
 			return smoother.clock.offset();
 		},
 
+		/**
+		 * A one-shot telemetry snapshot of the channel's prediction + interpolation
+		 * state, for a devtools / per-stream inspector. Pull-based, so it costs
+		 * nothing when nothing reads it - read it on a panel's refresh tick.
+		 * `unacked`/`windowCap` are the reconciliation window (unacked nearing the
+		 * cap predicts an overflow kill); `lastDivergence` is the most recent
+		 * reconciliation error magnitude and `correcting` whether a correction is
+		 * still easing in; `interpDelayMs` is the applied remote render-behind;
+		 * `clockSynced` is whether the server-clock estimate has a sample yet.
+		 * @param {number} [monoNow]
+		 * @returns {{ self: string | null, topic: string | null, overflowed: boolean, unacked: number, windowCap: number, lastDivergence: number, correcting: boolean, interpDelayMs: number, clockSynced: boolean, remoteCount: number }}
+		 */
+		stats(monoNow) {
+			const mono = typeof monoNow === 'number' ? monoNow : monotonicNow();
+			return {
+				self: selfKey,
+				topic: wireTopic,
+				overflowed: predictor.overflowed,
+				unacked: predictor.windowSize,
+				windowCap: predictor.windowCap,
+				lastDivergence: predictor.lastDivergence,
+				correcting: predictor.correcting,
+				interpDelayMs: smoother.delay,
+				clockSynced: smoother.clock.estServerNow(mono) !== null,
+				remoteCount: merged.size
+			};
+		},
+
 		/** The resolved wire topic, or null before the first sync reply. */
 		get topic() {
 			return wireTopic;
