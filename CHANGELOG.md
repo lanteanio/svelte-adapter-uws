@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.34] - 2026-06-25
+
+### Fixed
+
+- **Graceful shutdown now closes WebSocket connections cleanly instead of forcefully, so buffered outbound frames flush and clients receive a `1001 (Going Away)` close frame.** On `SIGTERM`/`SIGINT` the server closed each socket with `ws.close(1001, 'Server shutting down')`, but uWS `close()` is the forceful variant: it takes no arguments (so the `1001` code and reason were silently dropped - no close frame was sent at all) and discards the send buffer, so any frames still queued behind backpressure were lost on an otherwise-graceful deploy. It now uses `ws.end(1001, 'Server shutting down')` - the graceful close that flushes the send buffer and sends a proper close frame with the code - so clients see a clean Going-Away and reconnect to the new instance. Connections are snapshotted before the loop since `end()` synchronously fires the close handler that removes them from the connection set.
+
 ## [0.6.0-next.33] - 2026-06-24
 
 ### Added

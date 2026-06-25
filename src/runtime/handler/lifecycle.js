@@ -78,8 +78,10 @@ export async function start(host, port) {
  *      Async hooks are awaited; throws are logged and ignored (we cannot
  *      refuse to shut down).
  *   2. Close the listen socket - stops accepting new connections.
- *   3. Send `code 1001 (Going Away)` to every WebSocket connection so
- *      clients reconnect to the new instance.
+ *   3. Gracefully `end()` every WebSocket with `code 1001 (Going Away)` so any
+ *      buffered outbound frames flush before the socket closes and the client
+ *      gets a clean close frame, then reconnects to the new instance. (Forceful
+ *      `close()` would drop the send buffer and, taking no args, send no code.)
  *
  * In-flight HTTP requests continue until `drain()` resolves - the caller
  * (index.js) typically races `drain()` against a shutdown timeout.
@@ -103,8 +105,13 @@ export async function shutdown() {
 	// Stop the per-worker consistency auditor timer (no-op when it was never
 	// installed - the interval-0 / not-yet-started case).
 	counters.consistencyAuditor?.stop();
-	for (const ws of wsConnections) {
-		ws.close(1001, 'Server shutting down');
+	// Snapshot first: end() synchronously fires the close handler, which removes
+	// the entry from wsConnections as we iterate. Use end() (graceful) not
+	// close() (forceful) - end() flushes buffered outbound frames and sends a
+	// clean 1001 close frame, while close() drops the send buffer and (taking no
+	// args) sends no close code at all.
+	for (const ws of [...wsConnections]) {
+		ws.end(1001, 'Server shutting down');
 	}
 }
 

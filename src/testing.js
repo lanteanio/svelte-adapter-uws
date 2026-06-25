@@ -1559,7 +1559,16 @@ export async function createTestServer(options = {}) {
 							console.error('[ws] shutdown hook threw:', err);
 						}
 					}
-					for (const ws of wsConnections) ws.close(1001, 'Test server closing');
+					// Mirror production graceful shutdown: end() (graceful) flushes
+					// buffered frames + sends a clean 1001 close frame; close() drops
+					// them and sends no code. Snapshot first - end() fires the close
+					// handler, which mutates wsConnections mid-iteration. Some tests
+					// inject a lightweight fake ws implementing only close(), so fall
+					// back to it when end() is absent.
+					for (const ws of [...wsConnections]) {
+						if (typeof ws.end === 'function') ws.end(1001, 'Test server closing');
+						else ws.close(1001, 'Test server closing');
+					}
 					wsConnections.clear();
 					uWS.us_listen_socket_close(listenSocket);
 				},

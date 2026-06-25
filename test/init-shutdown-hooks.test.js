@@ -209,6 +209,28 @@ describeUWS('hooks.ws.shutdown', () => {
 		expect(connectionsAtShutdown).toBe(1);
 		client.close();
 	});
+
+	it('gracefully ends client connections with a clean 1001 Going Away frame', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer({ handler: {} });
+
+		const client = await connectClient(server.wsUrl);
+		const closeInfo = new Promise((resolve) => {
+			client.on('close', (code, reason) => resolve({ code, reason: reason.toString() }));
+		});
+		// Let the open handler register the connection before we close.
+		await new Promise(r => setTimeout(r, 30));
+
+		await server.close();
+		server = null;
+
+		const { code, reason } = await closeInfo;
+		// A 1001 close frame with the reason proves the connection was ended
+		// gracefully (ws.end). A forceful ws.close() sends no frame, so the
+		// client would observe 1006 (abnormal) with no reason instead.
+		expect(code).toBe(1001);
+		expect(reason).toBe('Test server closing');
+	});
 });
 
 describeUWS('init / shutdown lifecycle ordering', () => {
