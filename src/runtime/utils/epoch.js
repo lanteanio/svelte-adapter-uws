@@ -101,18 +101,26 @@ export function createHlc() {
  * `{topic,event,data}` envelope verbatim. When `seq` is a number the
  * resulting envelope is `{topic,event,data,seq}`.
  *
- * No JSON.stringify on the seq itself: numbers serialize identically
- * via plain string concatenation, saving a stringify call on the
- * publish hot path.
+ * An optional `jitterMs` stamps a `j` field carrying the de-herd WINDOW (not a
+ * pre-rolled offset - one frame fans out to every subscriber, so a single rolled
+ * value would defer them all identically and spread nothing). Each client rolls
+ * its own delay in `[0, j)` before dispatching, so the receivers ramp instead of
+ * spiking. Omitted (`null`/`undefined`) leaves the wire shape unchanged.
+ *
+ * No JSON.stringify on seq/jitter: numbers serialize identically via plain string
+ * concatenation, saving a stringify call on the publish hot path. The no-jitter
+ * tail is byte-identical to the legacy envelope.
  *
  * @param {string} prefix  output of envelopePrefix(topic, event)
  * @param {unknown} data
  * @param {number | null | undefined} seq
+ * @param {number | null | undefined} [jitterMs]  de-herd window in ms
  * @returns {string}
  */
-export function completeEnvelope(prefix, data, seq) {
+export function completeEnvelope(prefix, data, seq, jitterMs) {
 	const body = prefix + JSON.stringify(data ?? null);
-	return seq == null ? body + '}' : body + ',"seq":' + seq + '}';
+	const tail = jitterMs == null ? '}' : ',"j":' + jitterMs + '}';
+	return seq == null ? body + tail : body + ',"seq":' + seq + tail;
 }
 
 /**

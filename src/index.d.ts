@@ -1407,6 +1407,12 @@ export interface Platform {
 	 *     unless `websocket.compression` is configured, where text frames
 	 *     compress by default; pass `false` for a high-frequency,
 	 *     high-fan-out topic (deflate CPU scales per subscriber).
+	 *   - `jitterMs: <ms>` stamps a de-herd window on the frame. Each receiving
+	 *     client rolls its own random delay in `[0, jitterMs)` before handing the
+	 *     frame to its subscribers, so a single broadcast that makes N clients all
+	 *     act (retry, refetch, re-render) ramps across the window instead of
+	 *     spiking at t+0. The outbound fan-out stays one native publish; only the
+	 *     clients' local dispatch is staggered. Omit / `0` = immediate (default).
 	 *
 	 * @example
 	 * ```js
@@ -1417,7 +1423,7 @@ export interface Platform {
 	 * }
 	 * ```
 	 */
-	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean; compress?: boolean }): boolean;
+	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean; compress?: boolean; jitterMs?: number }): boolean;
 
 	/**
 	 * Publish via a plugin-declared binary wire codec. Subscribers that

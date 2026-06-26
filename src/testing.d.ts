@@ -207,9 +207,10 @@ export function esc(s: string): string;
  * brace to a prebuilt envelope prefix. Pairs with the wire shape
  * `{topic, event, data, seq?}`. When `seq` is `null` / `undefined` the
  * field is omitted entirely so the envelope matches the legacy
- * `{topic,event,data}` shape verbatim. Pure.
+ * `{topic,event,data}` shape verbatim. An optional `jitterMs` stamps a `j`
+ * de-herd window the client uses to roll its own dispatch delay. Pure.
  */
-export function completeEnvelope(prefix: string, data: unknown, seq?: number | null): string;
+export function completeEnvelope(prefix: string, data: unknown, seq?: number | null, jitterMs?: number | null): string;
 
 /**
  * Wrap an array of pre-built per-event envelope strings into a single

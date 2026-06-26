@@ -30,7 +30,12 @@ export const platform = {
 		// is a bare set with no compare. Skipped when stamping is off so a
 		// {seq:false}-only topic never enters the convergence comparison.
 		if (seq !== null) maxSeenSeq.set(topic, seq);
-		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
+		// `{ jitterMs }` de-herd window: stamp it on the frame so each client rolls its
+		// own delay before dispatching (spreads N receivers' follow-up actions across
+		// the window). The window is carried verbatim - NOT a server-rolled offset,
+		// which would defer every subscriber of this one frame identically.
+		const jitterMs = (options && typeof options.jitterMs === 'number' && options.jitterMs > 0) ? options.jitterMs : null;
+		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq, jitterMs);
 		// A zero-length frame at a send site would broadcast garbage to every
 		// subscriber - unrecoverable framing corruption. One length guard, identical
 		// in cost to the assert it replaces.

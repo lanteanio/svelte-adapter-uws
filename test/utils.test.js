@@ -427,6 +427,33 @@ describe('envelopePrefix', () => {
 	});
 });
 
+describe('completeEnvelope', () => {
+	const prefix = '{"topic":"chat","event":"created","data":';
+
+	it('no seq, no jitter = legacy {topic,event,data} shape verbatim', () => {
+		expect(completeEnvelope(prefix, { id: 1 })).toBe(prefix + '{"id":1}}');
+	});
+
+	it('stamps seq when provided', () => {
+		expect(completeEnvelope(prefix, { id: 1 }, 42)).toBe(prefix + '{"id":1},"seq":42}');
+	});
+
+	it('stamps the jitter window as j (no server-rolled offset - the raw window)', () => {
+		expect(completeEnvelope(prefix, { id: 1 }, null, 5000)).toBe(prefix + '{"id":1},"j":5000}');
+	});
+
+	it('stamps both seq and j, in that order, as valid JSON', () => {
+		const out = completeEnvelope(prefix, { id: 1 }, 42, 5000);
+		expect(out).toBe(prefix + '{"id":1},"seq":42,"j":5000}');
+		expect(() => JSON.parse(out)).not.toThrow();
+		expect(JSON.parse(out).j).toBe(5000);
+	});
+
+	it('omits j when null (seq present)', () => {
+		expect(completeEnvelope(prefix, 1, 7, null)).toBe(prefix + '1,"seq":7}');
+	});
+});
+
 // - get_origin (PORT_HEADER double-port fix) -------------------------------
 // This function uses module-level env state in handler.js so we test
 // a parameterized version here.

@@ -1205,6 +1205,13 @@ Every published frame is also stamped with a monotonic per-topic `seq` field in 
 platform.publish(`cursor:${userId}`, 'move', pos, { seq: false });
 ```
 
+Pass `{ jitterMs }` to de-herd a thundering-herd broadcast: the frame carries a de-herd WINDOW, and each receiving client rolls its own random delay in `[0, jitterMs)` before dispatching, so a broadcast that makes N clients all react ramps across the window instead of spiking at t+0. The outbound fan-out stays a single native publish - the window is carried verbatim, never a server-rolled offset (which would defer every subscriber identically). Omit / `0` = immediate; the no-jitter frame is byte-identical to before. `svelte-realtime`'s `ctx.publish(..., { jitterMs })` validates the window to a 60s ceiling and the client clamps it again:
+
+```js
+// One reroute event; 50k clients ramp their re-fetch across 5s instead of at once
+platform.publish('route:i95-incident', 'reroute', detour, { jitterMs: 5000 });
+```
+
 ```js
 // src/routes/todos/+page.server.js
 export const actions = {

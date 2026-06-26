@@ -119,7 +119,10 @@ export default function uws(options = {}) {
 	 * @returns {boolean}
 	 */
 	function publish(topic, event, data, options) {
-		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + '}';
+		// Mirror the production `{ jitterMs }` de-herd window stamp (platform.publish):
+		// carry the window so each client rolls its own dispatch delay.
+		const jitterMs = (options && typeof options.jitterMs === 'number' && options.jitterMs > 0) ? options.jitterMs : null;
+		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + (jitterMs == null ? '}' : ',"j":' + jitterMs + '}');
 		const excludeWs = (options && options.excludeWs) || null;
 		let sent = false;
 		for (const [ws, topics] of subscriptions) {

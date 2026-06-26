@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0-next.39] - 2026-06-26
+## [0.6.0-next.40] - 2026-06-26
+
+### Added
+
+- **`platform.publish(topic, event, data, { jitterMs })` - de-herd window for thundering-herd broadcasts.** When one broadcast makes many clients all react at once (retry, refetch, re-render), `jitterMs` stamps a small `j` field on the frame carrying a de-herd WINDOW. Each receiving client rolls its OWN random delay in `[0, jitterMs)` before dispatching, so N clients ramp their follow-up actions across the window instead of spiking at t+0. The outbound fan-out stays a single native `app.publish` (the window is carried verbatim, never a server-rolled offset - which would defer every subscriber identically and spread nothing); the staggering is entirely client-side, so the server holds no per-subscriber timers. Omit / `0` = immediate, and the no-jitter wire frame is byte-identical to before. Consumed by `svelte-realtime`'s `ctx.publish(..., { jitterMs })` (which clamps the window to a 60s ceiling) and the de-herd client dispatch.
 
 ### Added
 
