@@ -652,6 +652,28 @@ export async function createTestServer(options = {}) {
 		get connections() { return wsConnections.size; },
 		get assertions() { return readAssertionCounts(); },
 		get closedWsAborts() { return closedWsAbortsT; },
+		// PII-free transport-layer snapshot, mirroring the production platform.
+		// Scalar pressure signals only (topPublishers is omitted, topic names can
+		// embed ids). svelte-realtime's introspect() composes this under a
+		// `transport` key when present.
+		introspect() {
+			const p = platform.pressure;
+			return {
+				connections: platform.connections,
+				closedWsAborts: platform.closedWsAborts,
+				protection: platform.protection,
+				maxPayloadLength: platform.maxPayloadLength,
+				pressure: {
+					active: p.active,
+					reason: p.reason,
+					value: p.value,
+					subscriberRatio: p.subscriberRatio,
+					publishRate: p.publishRate,
+					memoryMB: p.memoryMB
+				},
+				assertions: Object.fromEntries(platform.assertions)
+			};
+		},
 		subscribers(topic) { return app.numSubscribers(topic); },
 		// Mirror production handler.js: walk the local subscriber set so
 		// per-subscriber culling / backpressure paths are exercised by
@@ -1520,6 +1542,84 @@ export async function createTestServer(options = {}) {
 				res.writeHeader('content-type', 'text/html; charset=utf-8');
 				res.writeHeader('cache-control', 'no-store');
 				res.end(body);
+			});
+		});
+	}
+
+	// Reserved admin / observability route, mirroring handler.js: when the app's
+	// WS handler exports `admin(request)`, mount it at /__realtime/* and bridge
+	// the uWS request to the Web Request/Response contract the handler speaks.
+	// All authorization lives in the app handler; this is pure plumbing. The
+	// mirror buffers the request body fully before constructing the Request
+	// (production streams it); both deliver the same Request to the handler.
+	if (typeof handler.admin === 'function') {
+		app.any('/__realtime/*', (res, req) => {
+			const method = req.getMethod().toUpperCase();
+			const pathname = req.getUrl();
+			const query = req.getQuery();
+			/** @type {Record<string, string>} */
+			const adminHeaders = {};
+			req.forEach((k, v) => { adminHeaders[k] = v; });
+			const adminUrl = query ? `${pathname}?${query}` : pathname;
+			const base = 'http://' + (adminHeaders.host || 'localhost');
+
+			let adminAborted = false;
+			res.onAborted(() => { adminAborted = true; });
+
+			const failAdmin = (status) => {
+				if (adminAborted) return;
+				res.cork(() => {
+					res.writeStatus(String(status));
+					res.writeHeader('content-type', 'application/json');
+					res.writeHeader('cache-control', 'no-store');
+					res.writeHeader('x-content-type-options', 'nosniff');
+					res.end(status === 400 ? '{"error":"bad request"}' : '{"error":"internal error"}');
+				});
+			};
+
+			const writeAdmin = (response) => {
+				Promise.resolve(response.body ? response.arrayBuffer() : null)
+					.then((ab) => {
+						if (adminAborted) return;
+						const body = ab ? Buffer.from(ab) : null;
+						res.cork(() => {
+							res.writeStatus(String(response.status));
+							let hasCTO = false;
+							for (const [k, v] of response.headers) {
+								if (k === 'content-length' || k === 'set-cookie') continue;
+								if (k === 'x-content-type-options') hasCTO = true;
+								res.writeHeader(k, v);
+							}
+							if (!hasCTO) res.writeHeader('x-content-type-options', 'nosniff');
+							for (const c of response.headers.getSetCookie()) res.writeHeader('set-cookie', c);
+							if (body && body.byteLength) res.end(body);
+							else res.endWithoutBody(0);
+						});
+					})
+					.catch(() => failAdmin(500));
+			};
+
+			const runAdmin = (body) => {
+				let request;
+				try {
+					request = new Request(base + adminUrl, { method, headers: adminHeaders, body });
+				} catch { failAdmin(400); return; }
+				Promise.resolve()
+					.then(() => handler.admin(request))
+					.then((response) => {
+						if (adminAborted) return;
+						if (!(response instanceof Response)) { failAdmin(500); return; }
+						writeAdmin(response);
+					})
+					.catch(() => failAdmin(500));
+			};
+
+			if (method === 'GET' || method === 'HEAD') { runAdmin(undefined); return; }
+			/** @type {Buffer[]} */
+			const adminChunks = [];
+			res.onData((chunk, isLast) => {
+				adminChunks.push(Buffer.from(new Uint8Array(chunk)));
+				if (isLast) runAdmin(adminChunks.length ? Buffer.concat(adminChunks) : undefined);
 			});
 		});
 	}

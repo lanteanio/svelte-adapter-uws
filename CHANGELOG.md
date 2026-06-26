@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.36] - 2026-06-26
+
+### Added
+
+- **Reserved `/__realtime/*` admin route: the adapter auto-wires it to the app's `admin(request)` handler.** When the WebSocket handler exports an `admin(request)` function (svelte-realtime's auth-gated observability handler is the canonical one), the adapter mounts it at the reserved `/__realtime/*` prefix - registered before the SSR catch-all so admin traffic never hits page routing - and bridges the uWS request to the framework-agnostic Web `Request` -> `Response` contract the handler speaks (synchronous header/method/url read, a bounded body read under the global `body_size_limit` for non-GET methods, then the response written back in a single corked syscall with a default `x-content-type-options: nosniff`). It is pure transport plumbing: ALL authorization lives in the app handler (the adapter never inspects or short-circuits the auth decision), and a handler that throws, rejects, or returns a non-`Response` yields a generic `500` with no detail leaked to the client. No-op unless the handler exports `admin` - existing apps are unaffected.
+- **`platform.introspect()`: a PII-free transport-layer health snapshot.** Returns this worker's `connections`, `closedWsAborts`, `protection` posture, `maxPayloadLength`, the scalar `pressure` signals (without `topPublishers` - topic names can embed ids), and the framework-invariant `assertions` counters. Counts and enums only - never a topic name, user id, or socket handle. svelte-realtime's `introspect()` composes this under a `transport` key when present, so an app-level admin route surfaces the dispatch snapshot and this transport snapshot from one call; usable standalone behind your own authorization. Mirrored on the dev (Vite) and `createTestServer` platforms.
+
 ## [0.6.0-next.35] - 2026-06-26
 
 ### Added

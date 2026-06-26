@@ -1760,6 +1760,45 @@ export interface Platform {
 	readonly closedWsAborts: number;
 
 	/**
+	 * A PII-free snapshot of this worker's transport-layer health: connection
+	 * count, backpressure posture, protection level, payload cap, and the
+	 * framework-invariant counters. Counts and enums only - never a topic
+	 * name, never a user id, never a socket handle. Pure read (a fresh plain
+	 * object each call), so it is safe to expose behind an auth-gated admin
+	 * route or feed to a dashboard.
+	 *
+	 * The scalar pressure signals are reported but `topPublishers` is omitted
+	 * (topic names can embed ids); read `pressure` directly with your own
+	 * authorization when you need per-topic detail.
+	 *
+	 * svelte-realtime's `introspect()` composes this under a `transport` key
+	 * when present, so an app-level admin route surfaces the dispatch snapshot
+	 * and this transport snapshot from one call.
+	 *
+	 * @example
+	 * ```js
+	 * export function GET({ platform }) {
+	 *   return Response.json(platform.introspect());
+	 * }
+	 * ```
+	 */
+	introspect(): {
+		connections: number;
+		closedWsAborts: number;
+		protection: 'normal' | 'elevated' | 'siege';
+		maxPayloadLength: number;
+		pressure: {
+			active: boolean;
+			reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CAPACITY';
+			value: number;
+			subscriberRatio: number;
+			publishRate: number;
+			memoryMB: number;
+		};
+		assertions: Record<string, number>;
+	};
+
+	/**
 	 * Number of clients subscribed to a specific topic.
 	 *
 	 * @example

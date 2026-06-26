@@ -549,6 +549,51 @@ export const platform = {
 	},
 
 	/**
+	 * A PII-free snapshot of this worker's transport-layer health:
+	 * connection count, backpressure posture, protection level, payload cap,
+	 * and the framework-invariant counters. Counts and enums only - never a
+	 * topic name, never a user id, never a socket handle. Pure read (a fresh
+	 * plain object each call), so it is safe to expose behind an auth-gated
+	 * admin route or feed to a dashboard.
+	 *
+	 * The scalar pressure signals are reported but `topPublishers` is omitted:
+	 * topic names can embed ids, and this snapshot is PII-free by
+	 * construction. An app that wants per-topic detail reads `pressure`
+	 * directly with its own authorization.
+	 *
+	 * svelte-realtime's `introspect()` composes this under a `transport` key
+	 * when the adapter platform provides it, so an app-level admin route
+	 * surfaces the dispatch snapshot and this transport snapshot from one call.
+	 *
+	 * @returns {{
+	 *   connections: number,
+	 *   closedWsAborts: number,
+	 *   protection: 'normal' | 'elevated' | 'siege',
+	 *   maxPayloadLength: number,
+	 *   pressure: { active: boolean, reason: string, value: number, subscriberRatio: number, publishRate: number, memoryMB: number },
+	 *   assertions: Record<string, number>
+	 * }}
+	 */
+	introspect() {
+		const p = pressureSnapshot;
+		return {
+			connections: platform.connections,
+			closedWsAborts: platform.closedWsAborts,
+			protection: platform.protection,
+			maxPayloadLength: platform.maxPayloadLength,
+			pressure: {
+				active: p.active,
+				reason: p.reason,
+				value: p.value,
+				subscriberRatio: p.subscriberRatio,
+				publishRate: p.publishRate,
+				memoryMB: p.memoryMB
+			},
+			assertions: Object.fromEntries(platform.assertions)
+		};
+	},
+
+	/**
 	 * Number of clients subscribed to a specific topic.
 	 */
 	subscribers(topic) {

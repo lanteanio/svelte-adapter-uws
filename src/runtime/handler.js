@@ -43,6 +43,7 @@ import { readBody, handleSSR } from './handler/ssr.js';
 import { requestDone } from './handler/lifecycle.js';
 export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched } from './handler/lifecycle.js';
 import { handleRequest } from './handler/request.js';
+import { handleAdminRequest } from './handler/admin.js';
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -233,7 +234,7 @@ if (WS_ENABLED) {
 		'init', 'shutdown',
 		'open', 'message', 'upgrade', 'close', 'drain',
 		'subscribe', 'subscribeBatch', 'unsubscribe',
-		'authenticate', 'resume'
+		'authenticate', 'resume', 'admin'
 	]);
 	for (const name of Object.keys(wsModule)) {
 		if (!knownWsExports.has(name)) {
@@ -1564,6 +1565,16 @@ if (HEALTH_CHECK_PATH) {
 			res.writeStatus('200 OK').end('OK');
 		});
 	});
+}
+
+// Reserved admin / observability route. When the app's WebSocket handler
+// exports an `admin(request)` function (svelte-realtime's auth-gated
+// introspection handler), mount it at the reserved `/__realtime/*` prefix
+// before the catch-all so admin traffic never hits SSR. All authorization
+// lives in the app handler; the adapter is pure request/response plumbing.
+if (WS_ENABLED && typeof wsModule.admin === 'function') {
+	app.any('/__realtime/*', handleAdminRequest);
+	console.log('Admin route registered at /__realtime/*');
 }
 
 // Register HTTP handler (after WS so the WS route takes priority)

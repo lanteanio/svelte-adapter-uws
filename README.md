@@ -1402,6 +1402,25 @@ A non-zero value is normal under client churn (tab close, network blips, mass re
 
 Monotonic, per-worker, reset only on process restart.
 
+### `platform.introspect()`
+
+A PII-free snapshot of this worker's transport-layer health in one read: `connections`, `closedWsAborts`, the `protection` posture, `maxPayloadLength`, the scalar `pressure` signals (without `topPublishers` - topic names can embed ids), and the `assertions` counters. Counts and enums only - never a topic name, user id, or socket handle. Pure (a fresh plain object each call), so it is safe behind an auth-gated admin route or a scrape interval.
+
+```js
+export function GET({ platform }) {
+  return json(platform.introspect());
+  // { connections: 38, closedWsAborts: 0, protection: 'normal', maxPayloadLength: 1048576,
+  //   pressure: { active: false, reason: 'NONE', value: 0, subscriberRatio: 0, publishRate: 0, memoryMB: 0 },
+  //   assertions: {} }
+}
+```
+
+`svelte-realtime`'s `introspect()` composes this under a `transport` key automatically, so its admin route surfaces the dispatch snapshot and this transport snapshot from one call.
+
+### The reserved `/__realtime/*` admin route
+
+When your WebSocket handler exports an `admin(request)` function - `svelte-realtime`'s auth-gated observability handler is the canonical one - the adapter mounts it at the reserved `/__realtime/*` path, registered **before** the SSR catch-all so admin traffic never hits page routing. The adapter bridges the uWS request to the framework-agnostic Web `Request` -> `Response` contract the handler speaks and writes the response back; it is pure transport plumbing, so **all** authorization lives in your handler (the adapter never inspects or short-circuits the decision). A handler that throws, rejects, or returns a non-`Response` yields a generic `500` with no detail leaked. The route is a no-op unless the handler exports `admin`, so existing apps are unaffected.
+
 ### `platform.pressure` and `platform.onPressure(cb)`
 
 Worker-local backpressure signal. The adapter samples once per second (configurable) and reports the most urgent active stress as a single `reason` enum, so user code can degrade with intent instead of generic panic.

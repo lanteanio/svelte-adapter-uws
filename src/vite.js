@@ -450,6 +450,28 @@ export default function uws(options = {}) {
 			// prod surface as a constant zero.
 			return 0;
 		},
+		introspect() {
+			// PII-free transport snapshot, mirroring the production platform over
+			// the dev getters (which already return zero-valued / inert shapes).
+			// topPublishers is omitted (topic names can embed ids); the dev
+			// pressure getter carries no `value`, so it reads as 0.
+			const p = platform.pressure;
+			return {
+				connections: platform.connections,
+				closedWsAborts: platform.closedWsAborts,
+				protection: platform.protection,
+				maxPayloadLength: platform.maxPayloadLength,
+				pressure: {
+					active: p.active,
+					reason: p.reason,
+					value: p.value ?? 0,
+					subscriberRatio: p.subscriberRatio,
+					publishRate: p.publishRate,
+					memoryMB: p.memoryMB
+				},
+				assertions: Object.fromEntries(platform.assertions)
+			};
+		},
 		subscribers(topic) {
 			let count = 0;
 			for (const [, topics] of subscriptions) {
