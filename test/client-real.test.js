@@ -169,6 +169,29 @@ describe('client.js (real module)', () => {
 			conn.close();
 		});
 
+		it('forwards the de-herd window `j` (and seq) on the dispatched envelope', async () => {
+			// Regression: the de-herd consumer reads `envelope.j`; if dispatchEvent
+			// drops it, client-side jitter never fires. Round-trips through the real
+			// JSON serialize -> onmessage -> dispatchEvent path.
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+			const store = clientModule.on('herd');
+			const events = [];
+			const unsub = store.subscribe((v) => { if (v) events.push(v); });
+			await flush();
+
+			ws._receive({ topic: 'herd', event: 'reroute', data: { id: 1 }, seq: 4, j: 5000 });
+			expect(events[0]).toMatchObject({ topic: 'herd', event: 'reroute', data: { id: 1 }, seq: 4, j: 5000 });
+
+			// A frame without a window carries no spurious `j`.
+			ws._receive({ topic: 'herd', event: 'reroute', data: { id: 2 } });
+			expect(events[1].j).toBeUndefined();
+
+			unsub();
+			conn.close();
+		});
+
 		it('on(topic, event) filters by event name', async () => {
 			const store = clientModule.on('todos', 'created');
 			let value = null;

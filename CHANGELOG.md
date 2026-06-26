@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0-next.40] - 2026-06-26
+## [0.6.0-next.41] - 2026-06-26
+
+### Fixed
+
+- **The client now forwards the de-herd window `j` to topic subscribers, so `publish(..., { jitterMs })` actually staggers.** The inbound dispatch rebuilt the app-facing envelope as `{ topic, event, data }` (plus `seq` / `t`) and dropped the top-level `j` the server stamps, so a de-herd consumer (svelte-realtime's stream / health dispatcher) read `envelope.j === undefined` and never deferred - every client reacted at t+0, defeating `jitterMs`. `j` now rides the dispatched envelope alongside `seq` / `t`. A frame without a window carries no `j`. Regression-tested through the real serialize -> dispatch round trip.
 
 ### Added
 

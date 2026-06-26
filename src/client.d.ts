@@ -114,6 +114,12 @@ export interface WSEvent<T = unknown> {
 	 * absent on JSON frames and on codecs that carry no stamp.
 	 */
 	t?: number;
+	/**
+	 * De-herd window (ms) stamped by `publish(..., { jitterMs })`. A consumer
+	 * that staggers thundering-herd reactions reads this and defers dispatch by a
+	 * local random delay in `[0, j)`; absent on normal publishes.
+	 */
+	j?: number;
 }
 
 // - Scannable store ----------------------------------------------------------

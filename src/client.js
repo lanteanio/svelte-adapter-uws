@@ -1259,6 +1259,11 @@ function createConnection(options) {
 			// them are unaffected - the store merges ignore extra fields.
 			if (typeof msg.t === 'number') wsEvent.t = msg.t;
 			if (typeof msg.seq === 'number') wsEvent.seq = msg.seq;
+			// Forward the de-herd window so a consumer (svelte-realtime's stream /
+			// health de-herd dispatcher) can defer its reaction by a local random
+			// delay. Without this the `j` stamped by `publish({ jitterMs })` is
+			// dropped here and the client never staggers.
+			if (typeof msg.j === 'number') wsEvent.j = msg.j;
 			if (debug) console.log('[ws] <-', msg.topic, msg.event, msg.data);
 			if (typeof msg.seq === 'number') {
 				const prev = lastSeenSeqs.get(msg.topic);
