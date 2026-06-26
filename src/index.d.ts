@@ -76,10 +76,24 @@ export interface AdapterOptions {
 	envPrefix?: string;
 
 	/**
-	 * Health check endpoint path. Set to `false` to disable.
+	 * Liveness probe path. Reports `200` whenever the process is up, including
+	 * during a graceful drain - so a liveness probe never restarts a draining
+	 * instance mid-shutdown. Set to `false` to disable.
 	 * @default '/healthz'
 	 */
 	healthCheckPath?: string | false;
+
+	/**
+	 * Readiness probe path, distinct from the `healthCheckPath` liveness probe.
+	 * Reports `200` when ready and `503` once graceful shutdown has begun, so a
+	 * fronting load balancer stops routing NEW traffic to a draining instance
+	 * while its in-flight requests finish. Keep it separate from
+	 * `healthCheckPath` (a readiness `503` during drain must not trip a liveness
+	 * probe into a restart). Must differ from `healthCheckPath`. Set to `false`
+	 * to disable.
+	 * @default '/readyz'
+	 */
+	readinessCheckPath?: string | false;
 
 	/**
 	 * Response headers added to every static and prerendered asset

@@ -52,7 +52,13 @@ function envelope(topic, event, data, seq) {
  * @returns {Promise<import('./testing.js').TestServer>}
  */
 export async function createTestServer(options = {}) {
-	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, protection, metrics, adminPath = '/__realtime' } = options;
+	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, protection, metrics, adminPath = '/__realtime', readinessCheckPath = '/readyz', healthCheckPath = '/healthz' } = options;
+
+	// Readiness flag, mirroring the production `counters.draining`. Flipped true
+	// at the start of the returned `close()` (graceful shutdown) so the readiness
+	// route reports 503; a test can also flip it directly via
+	// `platform.__setDraining(true)` to assert the route without tearing down.
+	let drainingT = false;
 	// Mirror production: block client-initiated subscribes to `__`-prefixed
 	// system topics by default. Tests that intentionally exercise system
 	// channels can opt in with `allowSystemTopicSubscribe: true`.
@@ -940,6 +946,14 @@ export async function createTestServer(options = {}) {
 				? level
 				: null;
 		},
+		/**
+		 * Test-only seam: flip the readiness flag the readiness route reports on,
+		 * without tearing the server down (the returned `close()` also sets it).
+		 * @param {boolean} value
+		 */
+		__setDraining(value) {
+			drainingT = value === true;
+		},
 		__chaos(cfg) {
 			if (cfg && cfg.scenario === 'worker-flap') {
 				const code = typeof cfg.code === 'number' ? cfg.code : 1012;
@@ -1624,6 +1638,29 @@ export async function createTestServer(options = {}) {
 		});
 	}
 
+	// Liveness route, mirroring handler.js: always 200 while the process is up,
+	// INCLUDING during a drain (a liveness probe must never restart a draining
+	// instance mid-shutdown), so it does NOT consult `drainingT`.
+	if (healthCheckPath !== false) {
+		app.get(healthCheckPath, (res) => {
+			res.onAborted(() => {});
+			res.cork(() => { res.writeStatus('200 OK').end('OK'); });
+		});
+	}
+
+	// Readiness route, mirroring handler.js: 200 'ready' normally, 503 'draining'
+	// once `drainingT` is set (graceful shutdown or the __setDraining seam).
+	if (readinessCheckPath !== false) {
+		app.get(readinessCheckPath, (res) => {
+			res.onAborted(() => {});
+			if (drainingT) {
+				res.cork(() => { res.writeStatus('503 Service Unavailable').end('draining'); });
+			} else {
+				res.cork(() => { res.writeStatus('200 OK').end('ready'); });
+			}
+		});
+	}
+
 	return new Promise((resolve, reject) => {
 		app.listen(port, async (listenSocket) => {
 			if (!listenSocket) return reject(new Error('Failed to listen'));
@@ -1649,6 +1686,10 @@ export async function createTestServer(options = {}) {
 				platform,
 				wsConnections,
 				async close() {
+					// Flip readiness to NOT-ready at the start of graceful shutdown,
+					// mirroring production's `counters.draining = true` - the
+					// readiness route now reports 503 while we drain.
+					drainingT = true;
 					// Fire `shutdown` hook before kicking connections so the
 					// hook sees a healthy platform. Throws are logged-and-
 					// ignored (best-effort, mirrors production).

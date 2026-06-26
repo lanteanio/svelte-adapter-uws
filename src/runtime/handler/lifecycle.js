@@ -88,7 +88,23 @@ export async function start(host, port) {
  *
  * @returns {Promise<void>}
  */
+/**
+ * True once graceful shutdown has begun. The readiness route reports a 503
+ * while draining so a fronting load balancer stops routing NEW traffic to this
+ * instance (it stays live - the process is up - but is no longer ready) while
+ * in-flight requests finish. Liveness (`healthCheckPath`) is unaffected.
+ * @returns {boolean}
+ */
+export function isDraining() {
+	return counters.draining;
+}
+
 export async function shutdown() {
+	// Flip readiness to NOT-ready at the very start of shutdown so the readiness
+	// route reports 503 and a fronting load balancer drains this instance before
+	// its connections are closed below. Idempotent (a second shutdown is a no-op
+	// on this flag). Liveness stays 200 - the process is still up.
+	counters.draining = true;
 	if (WS_ENABLED && typeof wsModule.shutdown === 'function') {
 		try {
 			await wsModule.shutdown({ platform });

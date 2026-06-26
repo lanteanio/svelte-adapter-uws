@@ -127,6 +127,12 @@ export const counters = {
 	lastBasePressureReason: 'NONE',
 	// In-flight SSR request count, for drain().
 	inFlightCount: 0,
+	// True once graceful shutdown has begun. The readiness route reports a 503
+	// while this is set so a fronting load balancer drains this instance (the
+	// process stays live; it is just no longer ready for NEW traffic). Lives on
+	// the holder so the set site (lifecycle.js shutdown) and the read sites
+	// (the readiness route) share the SAME reference across modules.
+	draining: false,
 	// The per-worker consistency auditor instance (null until the handler installs
 	// one; null when disabled by interval 0). Lives on the holder so the install
 	// site (handler.js) and the shutdown site (lifecycle.js) - distinct modules -

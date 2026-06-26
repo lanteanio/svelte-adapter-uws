@@ -12,7 +12,7 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 - **Dynamic response compression** - SSR HTML and API JSON compressed on the fly with brotli or gzip
 - **Backpressure handling** - streaming responses that won't blow up memory
 - **Graceful shutdown** - waits for in-flight requests before exiting
-- **Health check endpoint** - `/healthz` out of the box
+- **Liveness + readiness probes** - `/healthz` (always 200 while up) and `/readyz` (503 during graceful drain) out of the box
 - **Zero-config WebSocket** - just set `websocket: true` and go
 
 **Upgrading from 0.4.x?** See the [migration guide](./MIGRATION.md) for every breaking change between 0.4.x and 0.5.x.
@@ -365,8 +365,13 @@ adapter({
   // Prefix for environment variables (e.g. 'MY_APP_' -> MY_APP_PORT)
   envPrefix: '', // default: ''
 
-  // Health check endpoint (set to false to disable)
+  // Liveness probe - 200 whenever the process is up, including during a drain
+  // (set to false to disable)
   healthCheckPath: '/healthz', // default: '/healthz'
+
+  // Readiness probe - 200 when ready, 503 during graceful shutdown so a load
+  // balancer drains this instance (set to false to disable)
+  readinessCheckPath: '/readyz', // default: '/readyz'
 
   // WebSocket configuration
   websocket: true // or false, or an options object (see below)

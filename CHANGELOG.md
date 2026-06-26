@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.38] - 2026-06-26
+
+### Added
+
+- **`readinessCheckPath`: a readiness probe, distinct from the `/healthz` liveness probe.** It reports `200 ready` normally and `503 draining` once graceful shutdown has begun, so a fronting load balancer stops routing NEW traffic to a draining instance while its in-flight requests finish. Crucially **separate** from `healthCheckPath`: liveness stays `200` throughout the drain, so a Kubernetes liveness probe never restarts a pod mid-shutdown (it would, if a single endpoint served both purposes and returned `503` during the drain). Default `/readyz`; set `false` to disable; must differ from `healthCheckPath` (validated at build time). The drain flag flips at the very start of the graceful-shutdown sequence, before connections are closed, so the load balancer can deregister the instance first.
+
 ## [0.6.0-next.37] - 2026-06-26
 
 ### Added

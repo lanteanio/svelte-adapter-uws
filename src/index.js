@@ -57,7 +57,27 @@ function detectSetCookieOnUpgrade(source) {
 
 /** @type {import('./index.js').default} */
 export default function (opts = {}) {
-	const { out = 'build', precompress = true, envPrefix = '', healthCheckPath = '/healthz' } = opts;
+	const { out = 'build', precompress = true, envPrefix = '', healthCheckPath = '/healthz', readinessCheckPath = '/readyz' } = opts;
+
+	// Readiness probe path (distinct from the `healthCheckPath` liveness probe):
+	// reports 503 once graceful shutdown begins so a load balancer drains the
+	// instance. Default `/readyz`; set `false` to disable. Validated here so a
+	// misconfiguration fails the build rather than silently no-op'ing.
+	if (readinessCheckPath !== false) {
+		if (typeof readinessCheckPath !== 'string' || readinessCheckPath[0] !== '/') {
+			throw new Error(
+				`readinessCheckPath must be an absolute path string starting with '/' ` +
+				`(e.g. '/readyz'), or false to disable the readiness route - ` +
+				`got ${JSON.stringify(readinessCheckPath)}.`
+			);
+		}
+		if (healthCheckPath !== false && readinessCheckPath === healthCheckPath) {
+			throw new Error(
+				`readinessCheckPath ('${readinessCheckPath}') must differ from healthCheckPath ('${healthCheckPath}') - ` +
+				`liveness and readiness are distinct probes (a readiness 503 during drain must not trip a liveness restart).`
+			);
+		}
+	}
 
 	// Validate `staticHeaders` eagerly so a misshaped value fails before any
 	// build work. The reserved-key warning needs builder.log, so it is emitted
@@ -544,6 +564,7 @@ export default function (opts = {}) {
 					WS_OPTIONS: JSON.stringify(wsOpts),
 					WS_AUTH_PATH: JSON.stringify(wsAuthPath),
 					HEALTH_CHECK_PATH: JSON.stringify(healthCheckPath),
+					READINESS_CHECK_PATH: JSON.stringify(readinessCheckPath),
 					STATIC_HEADERS: JSON.stringify(staticHeadersResult.headers),
 					METRICS_REGISTRY: './server/metrics-registry.js'
 				}

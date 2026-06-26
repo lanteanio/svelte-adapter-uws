@@ -40,7 +40,7 @@ import { hasRef, runSubscribeHook, runSubscribeBatchHook, runUserSubscribeGate, 
 import { ensureWireId, ensureWireState, wireStatePoisoned, poisonWireState, detachWireStates } from './handler/wire-state.js';
 import { platform } from './handler/platform.js';
 import { readBody, handleSSR } from './handler/ssr.js';
-import { requestDone } from './handler/lifecycle.js';
+import { requestDone, isDraining } from './handler/lifecycle.js';
 export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched } from './handler/lifecycle.js';
 import { handleRequest } from './handler/request.js';
 import { handleAdminRequest } from './handler/admin.js';
@@ -52,6 +52,7 @@ import { handleAdminRequest } from './handler/admin.js';
 /* global WS_OPTIONS */
 /* global WS_AUTH_PATH */
 /* global HEALTH_CHECK_PATH */
+/* global READINESS_CHECK_PATH */
 /* global STATIC_HEADERS */
 
 
@@ -1558,12 +1559,34 @@ if (WS_ENABLED) {
 	startPressureSampling(wsOptions.pressure);
 }
 
-// Health check endpoint (before catch-all so it never hits SSR)
+// Health check endpoint (before catch-all so it never hits SSR). This is a
+// LIVENESS probe: it reports 200 whenever the process is up, INCLUDING during a
+// graceful drain - so a k8s liveness probe never restarts a pod mid-shutdown.
 if (HEALTH_CHECK_PATH) {
 	app.get(HEALTH_CHECK_PATH, (res) => {
 		res.cork(() => {
 			res.writeStatus('200 OK').end('OK');
 		});
+	});
+}
+
+// Readiness endpoint (before catch-all so it never hits SSR). This is a
+// READINESS probe, distinct from liveness: it reports 200 when ready and 503
+// once graceful shutdown has begun, so a fronting load balancer stops routing
+// NEW traffic to a draining instance while its in-flight requests finish. Keep
+// it separate from `healthCheckPath` so a single endpoint is never used for
+// both purposes (a readiness 503 must NOT trip a liveness probe into a restart).
+if (READINESS_CHECK_PATH) {
+	app.get(READINESS_CHECK_PATH, (res) => {
+		if (isDraining()) {
+			res.cork(() => {
+				res.writeStatus('503 Service Unavailable').end('draining');
+			});
+		} else {
+			res.cork(() => {
+				res.writeStatus('200 OK').end('ready');
+			});
+		}
 	});
 }
 
