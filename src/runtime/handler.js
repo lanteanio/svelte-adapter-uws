@@ -1569,12 +1569,16 @@ if (HEALTH_CHECK_PATH) {
 
 // Reserved admin / observability route. When the app's WebSocket handler
 // exports an `admin(request)` function (svelte-realtime's auth-gated
-// introspection handler), mount it at the reserved `/__realtime/*` prefix
-// before the catch-all so admin traffic never hits SSR. All authorization
-// lives in the app handler; the adapter is pure request/response plumbing.
-if (WS_ENABLED && typeof wsModule.admin === 'function') {
-	app.any('/__realtime/*', handleAdminRequest);
-	console.log('Admin route registered at /__realtime/*');
+// introspection handler), mount it at the configured prefix
+// (`websocket.adminPath`, default `/__realtime`) before the catch-all so admin
+// traffic never hits SSR. `websocket.adminPath: false` disables the auto-mount
+// for apps that mount it themselves (e.g. a SvelteKit `+server.js` route with
+// their own middleware). All authorization lives in the app handler; the
+// adapter is pure request/response plumbing.
+const ADMIN_PATH = (WS_OPTIONS && WS_OPTIONS.adminPath !== undefined) ? WS_OPTIONS.adminPath : '/__realtime';
+if (WS_ENABLED && ADMIN_PATH !== false && typeof wsModule.admin === 'function') {
+	app.any(ADMIN_PATH + '/*', handleAdminRequest);
+	console.log(`Admin route registered at ${ADMIN_PATH}/*`);
 }
 
 // Register HTTP handler (after WS so the WS route takes priority)

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.37] - 2026-06-26
+
+### Added
+
+- **`websocket.adminPath`: relocate or disable the auto-mounted admin route.** The reserved `/__realtime/*` admin route (auto-wired when the WebSocket handler exports `admin`) is now configurable. Set a string to mount it at a different prefix (defense-in-depth, or to avoid colliding with an app route), or `false` to **disable the auto-mount entirely** - for apps that mount the `admin` handler themselves via a SvelteKit `+server.js` route with their own middleware, so there is no second adapter-owned mount point. Default stays `/__realtime`. Validated at build time (must be an absolute path that differs from `path` / `authPath`). The svelte-realtime admin handler is mount-prefix agnostic, so a custom path is set in this one place. The auto-mount remains a no-op unless the handler exports `admin`.
+
 ## [0.6.0-next.36] - 2026-06-26
 
 ### Added

@@ -52,7 +52,7 @@ function envelope(topic, event, data, seq) {
  * @returns {Promise<import('./testing.js').TestServer>}
  */
 export async function createTestServer(options = {}) {
-	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, protection, metrics } = options;
+	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, protection, metrics, adminPath = '/__realtime' } = options;
 	// Mirror production: block client-initiated subscribes to `__`-prefixed
 	// system topics by default. Tests that intentionally exercise system
 	// channels can opt in with `allowSystemTopicSubscribe: true`.
@@ -1552,8 +1552,8 @@ export async function createTestServer(options = {}) {
 	// All authorization lives in the app handler; this is pure plumbing. The
 	// mirror buffers the request body fully before constructing the Request
 	// (production streams it); both deliver the same Request to the handler.
-	if (typeof handler.admin === 'function') {
-		app.any('/__realtime/*', (res, req) => {
+	if (adminPath !== false && typeof handler.admin === 'function') {
+		app.any(adminPath + '/*', (res, req) => {
 			const method = req.getMethod().toUpperCase();
 			const pathname = req.getUrl();
 			const query = req.getQuery();

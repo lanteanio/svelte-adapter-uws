@@ -120,6 +120,32 @@ describeUWS('reserved /__realtime admin route', () => {
 		const res = await fetch(`${server.url}/__realtime/introspect`);
 		expect(res.status).toBe(404);
 	});
+
+	it('mounts at a custom adminPath and not at the default', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer({
+			adminPath: '/__admin',
+			handler: { admin: async () => Response.json({ ok: true }) }
+		});
+		// Reachable at the custom prefix...
+		const custom = await fetch(`${server.url}/__admin/introspect`);
+		expect(custom.status).toBe(200);
+		expect(await custom.json()).toEqual({ ok: true });
+		// ...and NOT at the default prefix (uWS built-in 404, route absent there).
+		const def = await fetch(`${server.url}/__realtime/introspect`);
+		expect(def.status).toBe(404);
+	});
+
+	it('disables the auto-mount entirely with adminPath: false', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer({
+			adminPath: false,
+			handler: { admin: async () => Response.json({ ok: true }) }
+		});
+		// Even though the handler exports admin, no route is mounted.
+		const res = await fetch(`${server.url}/__realtime/introspect`);
+		expect(res.status).toBe(404);
+	});
 });
 
 describeUWS('platform.introspect transport snapshot', () => {

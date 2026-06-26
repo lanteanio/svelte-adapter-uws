@@ -170,6 +170,25 @@ export interface WebSocketOptions {
 	authPath?: string;
 
 	/**
+	 * Prefix for the reserved admin / observability route. When your WebSocket
+	 * handler exports an `admin(request)` function (svelte-realtime's auth-gated
+	 * introspection handler is the canonical one), the adapter auto-mounts it at
+	 * `<adminPath>/*`, registered before the SSR catch-all so it never hits page
+	 * routing. The handler is mount-prefix agnostic, so relocating it is a
+	 * one-place change here.
+	 *
+	 * Set `false` to disable the auto-mount entirely - for apps that mount the
+	 * `admin` handler themselves (e.g. a SvelteKit `+server.js` route with their
+	 * own middleware) and do not want a second, adapter-owned mount point. No
+	 * effect unless the handler exports `admin`.
+	 *
+	 * Must be an absolute path (starting with `/`) that differs from `path` and
+	 * `authPath`.
+	 * @default '/__realtime'
+	 */
+	adminPath?: string | false;
+
+	/**
 	 * Max message size in bytes. Connections sending larger messages are closed.
 	 * Default 1 MB is balanced for typical app payloads in a single frame; uWS
 	 * itself defaults to 16 KB. Lower this for stricter caps (e.g. `16 * 1024`

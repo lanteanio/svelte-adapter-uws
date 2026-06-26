@@ -333,6 +333,35 @@ export default function (opts = {}) {
 					`websocket.authPath ('${wsAuthPath}') must differ from websocket.path ('${wsPath}').`
 				);
 			}
+			// Admin / observability route prefix. The adapter auto-mounts the WS
+			// handler's `admin(request)` export here (before the SSR catch-all)
+			// when it is exported. Default `/__realtime`; set a string to relocate
+			// it; set `false` to disable the auto-mount entirely (e.g. when mounting
+			// it yourself via a SvelteKit `+server.js` route with your own
+			// middleware). The realtime admin handler is mount-prefix agnostic, so a
+			// custom path is configured in this one place.
+			let adminPath = websocket?.adminPath;
+			if (adminPath === undefined || adminPath === null) adminPath = '/__realtime';
+			if (adminPath !== false) {
+				if (typeof adminPath !== 'string' || adminPath[0] !== '/') {
+					throw new Error(
+						`websocket.adminPath must be an absolute path string starting with '/' ` +
+						`(e.g. '/__realtime'), or false to disable the auto-mounted admin route - ` +
+						`got ${JSON.stringify(adminPath)}.`
+					);
+				}
+				adminPath = adminPath.replace(/\/+$/, '');
+				if (adminPath === '') {
+					throw new Error(
+						`websocket.adminPath cannot be '/' or empty - use a non-root prefix like '/__realtime', or false to disable.`
+					);
+				}
+				if (adminPath === wsPath || adminPath === wsAuthPath) {
+					throw new Error(
+						`websocket.adminPath ('${adminPath}') must differ from websocket.path ('${wsPath}') and websocket.authPath ('${wsAuthPath}').`
+					);
+				}
+			}
 			if (websocket?.metrics != null && typeof websocket.metrics !== 'string') {
 				throw new Error(
 					"websocket.metrics must be a module path string (e.g. './src/lib/server/metrics.js') " +
@@ -434,7 +463,10 @@ export default function (opts = {}) {
 				// Apps that have audited this and want the previous
 				// warn-only behavior can set
 				// `unsafeSameOriginWithoutHostPin: true`.
-				unsafeSameOriginWithoutHostPin: websocket?.unsafeSameOriginWithoutHostPin === true
+				unsafeSameOriginWithoutHostPin: websocket?.unsafeSameOriginWithoutHostPin === true,
+				// Admin route prefix (validated above): a normalized path string
+				// (default `/__realtime`) or `false` to disable the auto-mount.
+				adminPath
 			};
 
 			// Scan the bundled WS handler for `upgradeResponse(..., { 'set-cookie': ... })`

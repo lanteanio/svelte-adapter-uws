@@ -1421,6 +1421,20 @@ export function GET({ platform }) {
 
 When your WebSocket handler exports an `admin(request)` function - `svelte-realtime`'s auth-gated observability handler is the canonical one - the adapter mounts it at the reserved `/__realtime/*` path, registered **before** the SSR catch-all so admin traffic never hits page routing. The adapter bridges the uWS request to the framework-agnostic Web `Request` -> `Response` contract the handler speaks and writes the response back; it is pure transport plumbing, so **all** authorization lives in your handler (the adapter never inspects or short-circuits the decision). A handler that throws, rejects, or returns a non-`Response` yields a generic `500` with no detail leaked. The route is a no-op unless the handler exports `admin`, so existing apps are unaffected.
 
+Configure the prefix with `websocket.adminPath`:
+
+```js
+// svelte.config.js
+adapter({
+  websocket: {
+    adminPath: '/__ops'   // relocate it (default '/__realtime')
+    // adminPath: false    // OR disable the auto-mount entirely
+  }
+});
+```
+
+Set a **string** to relocate the route (defense-in-depth, or to avoid colliding with an app route), or **`false`** to disable the auto-mount entirely - for apps that mount the `admin` handler themselves through a SvelteKit `+server.js` route (with their own middleware), so there is no second adapter-owned mount point. It must be an absolute path differing from `websocket.path` and `websocket.authPath`; an invalid value fails the build. The `svelte-realtime` admin handler is mount-prefix agnostic, so the path is configured here in one place.
+
 ### `platform.pressure` and `platform.onPressure(cb)`
 
 Worker-local backpressure signal. The adapter samples once per second (configurable) and reports the most urgent active stress as a single `reason` enum, so user code can degrade with intent instead of generic panic.
