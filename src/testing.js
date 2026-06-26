@@ -875,6 +875,24 @@ export async function createTestServer(options = {}) {
 				bumpOutT(ws, payload);
 			});
 		},
+		// Broadcast-request to every local subscriber of `topic`; partial success
+		// (a timed-out / errored / closed socket -> { ok:false, error }). Mirrors
+		// the production platform.requestTopic.
+		requestTopic(topic, event, data, options) {
+			const timeoutMs = (options && options.timeoutMs) || 5000;
+			const targets = [];
+			for (const ws of wsConnections) {
+				let ud;
+				try { ud = ws.getUserData(); } catch { continue; }
+				const subs = ud[WS_SUBSCRIPTIONS];
+				if (subs && subs.has(topic)) targets.push(ws);
+			}
+			return Promise.all(targets.map((ws) =>
+				platform.request(ws, event, data, { timeoutMs })
+					.then((reply) => ({ ok: true, reply }))
+					.catch((err) => ({ ok: false, error: (err && err.message) ? err.message : String(err) }))
+			));
+		},
 		topic(name) {
 			return createScopedTopic(platform.publish, name);
 		},

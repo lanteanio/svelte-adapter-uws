@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.39] - 2026-06-26
+
+### Added
+
+- **`platform.requestTopic(topic, event, data, options?)`: broadcast-with-reply.** The request/reply analog of `publish` - sends a request to EVERY connection subscribed to `topic` on this instance and resolves with one result per subscriber (`{ ok: true, reply }` or `{ ok: false, error }`). Partial success is the contract: a subscriber that times out, errors, or whose socket closed lands in the array as an error entry and never fails the whole call. `timeoutMs` (default 5000) bounds each request, so run concurrently it is the whole-fan-out budget. Walks this worker's subscriber set (the cross-instance broadcast is the extensions layer). svelte-realtime's `live.push({ topic })` / `live.notify({ topic })` aggregate it. Mirrored on the dev (Vite) and `createTestServer` platforms.
+
 ## [0.6.0-next.38] - 2026-06-26
 
 ### Added

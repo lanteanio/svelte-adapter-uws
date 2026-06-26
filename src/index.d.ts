@@ -1643,6 +1643,31 @@ export interface Platform {
 	): Promise<TReply>;
 
 	/**
+	 * Broadcast a request to EVERY connection subscribed to `topic` on this
+	 * instance and collect their replies - the request/reply analog of
+	 * `publish`. Each subscriber's client `onRequest` handler runs; partial
+	 * success is the contract, so a subscriber that times out, errors, or
+	 * whose socket closed lands in the result as `{ ok: false, error }` and
+	 * never fails the whole call. Returns one entry per subscribed socket.
+	 *
+	 * `timeoutMs` (default 5000) bounds each request; since they run
+	 * concurrently it is effectively the whole-fan-out budget. Walks THIS
+	 * worker's subscriber set (cluster-wide broadcast is the extensions layer).
+	 *
+	 * @example
+	 * ```js
+	 * const results = await platform.requestTopic('room:42', 'ping', {});
+	 * const live = results.filter((r) => r.ok).map((r) => r.reply);
+	 * ```
+	 */
+	requestTopic<TReply = unknown>(
+		topic: string,
+		event: string,
+		data?: unknown,
+		options?: { timeoutMs?: number }
+	): Promise<Array<{ ok: true; reply: TReply } | { ok: false; error: string }>>;
+
+	/**
 	 * Send a message to a single WebSocket connection.
 	 * Wraps in the same `{ topic, event, data }` envelope as `publish()`.
 	 *

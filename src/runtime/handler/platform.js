@@ -1151,6 +1151,46 @@ export const platform = {
 	},
 
 	/**
+	 * Broadcast a request to EVERY connection subscribed to `topic` on this
+	 * instance and collect their replies - the request/reply analog of
+	 * `publish`. Each subscriber's client `onRequest` handler runs and its
+	 * return value (or error) is gathered. Partial success is the contract: a
+	 * subscriber that times out, errors, or whose socket closed lands in the
+	 * result array as `{ ok: false, error }` and never fails the whole call.
+	 *
+	 * Returns one entry per subscribed socket, in iteration order -
+	 * `{ ok: true, reply }` or `{ ok: false, error }`. `timeoutMs` (default
+	 * 5000) bounds each request; since they run concurrently it is effectively
+	 * the whole-fan-out budget.
+	 *
+	 * Single-instance: walks THIS worker's subscriber set. A topic whose
+	 * subscribers span a cluster is handled per-instance (the cross-instance
+	 * broadcast is the extensions layer's job) - the same locality
+	 * `forEachSubscriber` and the Redis-backed primitives already rely on.
+	 *
+	 * @param {string} topic
+	 * @param {string} event
+	 * @param {any} data
+	 * @param {{ timeoutMs?: number }} [options]
+	 * @returns {Promise<Array<{ ok: true, reply: any } | { ok: false, error: string }>>}
+	 */
+	requestTopic(topic, event, data, options) {
+		const timeoutMs = (options && options.timeoutMs) || 5000;
+		const targets = [];
+		for (const ws of wsConnections) {
+			let ud;
+			try { ud = ws.getUserData(); } catch { continue; }
+			const subs = ud[WS_SUBSCRIPTIONS];
+			if (subs && subs.has(topic)) targets.push(ws);
+		}
+		return Promise.all(targets.map((ws) =>
+			platform.request(ws, event, data, { timeoutMs })
+				.then((reply) => ({ ok: true, reply }))
+				.catch((err) => ({ ok: false, error: (err && err.message) ? err.message : String(err) }))
+		));
+	},
+
+	/**
 	 * Live snapshot of worker-local backpressure signals.
 	 *
 	 * `reason` is one of `'NONE'`, `'PUBLISH_RATE'`, `'SUBSCRIBERS'`,

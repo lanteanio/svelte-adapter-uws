@@ -491,6 +491,20 @@ export default function uws(options = {}) {
 				fn(ws, /** @type {any} */ (ws).getUserData());
 			}
 		},
+		// Broadcast-request to every local subscriber of `topic`, mirroring
+		// production platform.requestTopic; partial success per subscriber.
+		requestTopic(topic, event, data, options) {
+			const timeoutMs = (options && options.timeoutMs) || 5000;
+			const targets = [];
+			for (const [ws, topics] of subscriptions) {
+				if (topics.has(topic)) targets.push(ws);
+			}
+			return Promise.all(targets.map((ws) =>
+				request(ws, event, data, { timeoutMs })
+					.then((reply) => ({ ok: true, reply }))
+					.catch((err) => ({ ok: false, error: (err && err.message) ? err.message : String(err) }))
+			));
+		},
 		// Dev mode runs over the `ws` library which does not enforce a
 		// per-frame cap; report the production default (1 MB) so app code
 		// that branches on `platform.maxPayloadLength` sees a consistent

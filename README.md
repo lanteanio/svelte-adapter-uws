@@ -1683,6 +1683,18 @@ platform.publishBatched(positions.map(p => ({
 
 **Two distinct contracts - pick one.** The existing `platform.batch(messages)` is NOT wire-level batching - it is a `for` loop calling `publish()` once per message, so N submitted messages still produce N WebSocket frames per subscribed connection. The cross-worker relay coalesces per microtask, but the client still pays N onmessage dispatches. Use `batch()` when you want per-message return values; use `publishBatched()` when you want one-frame-per-subscriber wire batching.
 
+### `platform.requestTopic(topic, event, data, options?)`
+
+Broadcast-with-reply: the request/reply analog of `publish`. Sends a request to **every** connection subscribed to `topic` on this instance and resolves with one result per subscriber.
+
+```js
+const results = await platform.requestTopic('room:42', 'ping', { at: Date.now() }, { timeoutMs: 1000 });
+// [{ ok: true, reply }, { ok: false, error: 'request timed out' }, ...]
+const live = results.filter((r) => r.ok).map((r) => r.reply);
+```
+
+**Partial success** is the contract: a subscriber that times out, errors, or whose socket closed lands in the array as `{ ok: false, error }` and never fails the whole call. `timeoutMs` (default 5000) bounds each request; since they run concurrently it is effectively the whole-fan-out budget. Walks this worker's subscriber set - a topic whose subscribers span a cluster is handled per-instance (cross-instance broadcast is the extensions layer's job). `svelte-realtime`'s `live.push({ topic })` / `live.notify({ topic })` aggregate this.
+
 ### `platform.requestId`
 
 A correlation id you can thread through structured logs to follow a single request across server hooks, load functions, and downstream services.
