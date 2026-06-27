@@ -1466,6 +1466,18 @@ export interface Platform {
 			capability: string;
 			schemaVersion: number;
 			encode: (event: string, data: unknown, state?: unknown) => Uint8Array | null;
+			/**
+			 * Stateless codec only: route this topic through native cohort fan-out so
+			 * one publish becomes two native fan-outs (the byte-identical binary frame
+			 * to the binary cohort, the JSON envelope to the JSON cohort) instead of a
+			 * per-connection walk. For a high-fan-out topic where every binary
+			 * subscriber receives the IDENTICAL frame - a mega-lobby world snapshot. The
+			 * first shared publish migrates the topic's current subscribers into
+			 * cohorts; later joiners are cohorted at subscribe time. An excluding publish
+			 * (`excludeWs`) or a declined encode falls back to the per-connection walk.
+			 * Register the codec via `registerWireCodec` for the clustered path.
+			 */
+			shared?: boolean;
 			state?: {
 				onAttach: (ws: WebSocket<any>) => unknown;
 				onDetach?: (ws: WebSocket<any>, state: unknown) => void;
@@ -1518,6 +1530,10 @@ export interface Platform {
 		capability: string;
 		schemaVersion: number;
 		encode: (event: string, data: unknown, state?: unknown) => Uint8Array | null;
+		/** Stateless shared codec (see `publishWire`). Registering a `shared: true`
+		 *  codec is what lets the clustered relay re-derive it and run the cohort split
+		 *  on each receiving worker. Same shape the codec carries to `publishWire`. */
+		shared?: boolean;
 		state?: {
 			onAttach: (ws: WebSocket<any>) => unknown;
 			onDetach?: (ws: WebSocket<any>, state: unknown) => void;

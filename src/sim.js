@@ -42,7 +42,11 @@ function buildInvariantSnapshot(app) {
 		const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
 		connections.push({
 			id: ws._simId,
-			subscribed: [...ws._topics],
+			// Cohort topics (`topic\0bin` / `topic\0json`, shared binary fan-out) live in
+			// native membership but NOT in WS_SUBSCRIPTIONS by design, so filter them out
+			// of the fan-out projection or checkSubscriptionBookkeeping would false-fire
+			// (bookkeeping reads WS_SUBSCRIPTIONS). `\0` never appears in a user topic.
+			subscribed: [...ws._topics].filter((t) => !t.includes('\0')),
 			bookkeeping: subs instanceof Set ? [...subs] : null
 		});
 	}
@@ -93,12 +97,16 @@ function snapshot(app) {
 	const topicCounts = {};
 	for (const ws of app._connections) {
 		const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+		// Exclude shared fan-out cohort topics (`topic\0bin` / `topic\0json`) from the
+		// determinism snapshot: they are a transport detail kept out of WS_SUBSCRIPTIONS,
+		// so the logical-topic view stays consistent with the bookkeeping set.
+		const logicalTopics = [...ws._topics].filter((t) => !t.includes('\0'));
 		connections.push({
 			id: ws._simId,
-			subscribed: [...ws._topics].sort(),
+			subscribed: logicalTopics.slice().sort(),
 			bookkeeping: subs instanceof Set ? [...subs].sort() : null
 		});
-		for (const t of ws._topics) topicCounts[t] = (topicCounts[t] || 0) + 1;
+		for (const t of logicalTopics) topicCounts[t] = (topicCounts[t] || 0) + 1;
 	}
 	connections.sort((a, b) => a.id - b.id);
 	// Canonical (sorted) key order so JSON.stringify(finalState) is byte-stable.

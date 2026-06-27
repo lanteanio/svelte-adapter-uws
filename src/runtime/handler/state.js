@@ -69,6 +69,19 @@ export function recordSeen(seenMap, topic, seq) {
 export const topicPublishStats = new Map();
 
 /**
+ * Topics that have been published through a `shared: true` wire codec, mapped to the
+ * codec's capability. A topic enters on its FIRST shared publish (which also
+ * migrates the topic's current subscribers into cohorts); the subscribe path reads
+ * this so a LATER joiner of an already-shared topic is dual-subscribed into the right
+ * cohort at subscribe time, and the close path reads it to release each shared
+ * topic's wire-id reference. Per worker (one process/worker per module instance),
+ * which is all the single-instance fan-out needs: a client only ever talks to its
+ * home worker, so each worker's cohort topics + wire-ids are self-consistent.
+ * @type {Map<string, string>}
+ */
+export const sharedTopics = new Map();
+
+/**
  * Coarse 1 Hz pressure snapshot exposed as platform.pressure. Mutated in place
  * by the sampler; read by the platform getter.
  * @type {{ active: boolean, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CAPACITY', topPublishers: { topic: string, messagesPerSec: number, bytesPerSec: number }[] }}

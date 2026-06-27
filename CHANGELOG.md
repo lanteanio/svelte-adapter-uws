@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.43] - 2026-06-27
+
+### Added
+
+- **`publishWire` shared binary fan-out: a stateless codec marked `shared: true` fans a high-fan-out topic out via native cohort topics instead of a per-connection walk.** For a topic where every binary subscriber receives the IDENTICAL frame - a mega-lobby world snapshot - one publish becomes TWO native `app.publish` calls: the byte-identical `0x03` binary frame to the binary cohort and the JSON envelope to the JSON cohort, with no per-subscriber JS loop. The frame is identical for every binary subscriber because the topic-id is a server-wide shared id (partitioned far above the per-connection id space so the two can never collide in a client's id map), announced when a connection joins the binary cohort. The first shared publish migrates the topic's current subscribers into cohorts; later joiners are cohorted at subscribe time (including via `platform.subscribe` and the `trackedSubscribe` plugin primitive). An excluding publish (`excludeWs`) or a declined encode falls back to the per-connection walk. Cohort membership is a transport detail kept out of the subscription bookkeeping (so the cap accountant, the close hook's `subscriptions`, and the consistency auditor are unaffected). Opt-in via the codec's `shared: true`; every existing codec is unchanged. In a clustered deployment each receiving worker re-derives the registered codec and runs its own cohort split, so register a shared codec via `registerWireCodec` (its type now carries `shared?`). Mirrored on the `createTestServer` platform; a no-op shape on the dev (Vite) platform.
+
 ## [0.6.0-next.42] - 2026-06-27
 
 ### Added

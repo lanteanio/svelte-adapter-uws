@@ -4,7 +4,7 @@ import { parentPort } from 'node:worker_threads';
 import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_SUBSCRIPTIONS, assert, fatal, collapseByCoalesceKey, completeEnvelope, createScopedTopic, isValidWireTopic, nextTopicSeq, processEpoch, readAssertionCounts, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
-import { capCounts, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, topicPublishStats, topicSeqs, wsConnections } from './state.js';
+import { capCounts, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, sharedTopics, topicPublishStats, topicSeqs, wsConnections } from './state.js';
 import { app, wsDebug, WS_COMPRESSION_ON } from './config.js';
 import { envelopePrefix } from './envelope-cache.js';
 import { batchRelay } from './relay.js';
@@ -13,6 +13,8 @@ import { BATCH_FRAME_WARN_BYTES, bumpOut, maybeWarnTopicRegistry, warnLargeBatch
 import { flushCoalescedFor, runUserSubscribeGate } from './subscribe-hooks.js';
 import { ensureWireId, ensureWireState, poisonWireState, wireStatePoisoned } from './wire-state.js';
 import { registerWireCodec as _registerWireCodec, getWireCodec } from './codec-registry.js';
+import { cohortTopics, joinSharedCohort, leaveSharedCohort } from './cohort.js';
+import { getSharedWireId } from './shared-wire-id.js';
 
 /** @type {import('../../index.js').Platform} */
 export const platform = {
@@ -324,6 +326,46 @@ export const platform = {
 			if (relayed) batchRelay(topic, envelope, compressIntent, seq);
 			return delivered || relayed;
 		}
+
+		// Shared binary fan-out: a stateless codec marked `shared: true` fans out via
+		// cohort topics - the byte-identical 0x03 frame to `topic\0bin`, the JSON
+		// envelope to `topic\0json` - so this publish is two native app.publish calls,
+		// not a per-connection walk. Eligible only with no sender exclusion (a single
+		// app.publish cannot skip one socket; an excluding shared publish falls through
+		// to the walk below). The frame is identical for every binary subscriber
+		// because the topic-id is the server-wide shared id, announced when a
+		// connection joined the binary cohort.
+		if (wire.shared && excludeWs === null) {
+			// Lazy migration: the FIRST shared publish to a topic cohorts its current
+			// subscribers (a one-time walk, paid once per topic), then marks the topic
+			// shared so a later joiner is cohorted at subscribe time instead.
+			if (!sharedTopics.has(topic)) {
+				for (const ws of wsConnections) {
+					let ud;
+					try { ud = ws.getUserData(); } catch { continue; }
+					const subs = ud[WS_SUBSCRIPTIONS];
+					if (!subs || !subs.has(topic)) continue;
+					joinSharedCohort(ws, ud, topic, wire.capability);
+				}
+				sharedTopics.set(topic, wire.capability);
+			}
+			const { bin, json } = cohortTopics(topic);
+			// The binary cohort exists only if a capable client joined it (its
+			// announce succeeded); otherwise this shared topic currently has only JSON
+			// subscribers and skips the binary fan-out entirely.
+			const id = getSharedWireId(topic);
+			if (id !== undefined) {
+				app.publish(bin, buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload), true, compress);
+			}
+			app.publish(json, envelope, false, compress);
+			// Cross-worker subscribers: each receiving worker re-derives the shared
+			// codec from its registry (relayPublishWire) and runs ITS OWN cohort split
+			// with its own server-wide id, so the single-instance path needs no
+			// cross-worker id sharing.
+			if (relayed) batchRelay(topic, envelope, compressIntent, seq, relayCap, relayEvent, relayData);
+			return true;
+		}
+
 		/** @type {Map<number, Uint8Array>} */
 		const frameById = new Map();
 		for (const ws of wsConnections) {
@@ -806,6 +848,8 @@ export const platform = {
 		catch { counters.closedWsAborts++; return null; }
 		subs.add(topic);
 		counters.totalSubscriptions++;
+		// Programmatic join of an already-shared topic cohorts the socket too.
+		if (sharedTopics.has(topic)) joinSharedCohort(ws, ws.getUserData(), topic, sharedTopics.get(topic));
 		return null;
 	},
 
@@ -894,6 +938,7 @@ export const platform = {
 		subs.delete(topic);
 		counters.totalSubscriptions--;
 		assert(counters.totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions: counters.totalSubscriptions });
+		if (sharedTopics.has(topic)) leaveSharedCohort(ws, ws.getUserData(), topic);
 		wsModule.unsubscribe?.(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
 		return true;
 	},

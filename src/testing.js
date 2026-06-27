@@ -1,7 +1,8 @@
 import { now, monotonicNow, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
-import { nextTopicSeq, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
+import { nextTopicSeq, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './runtime/wire.js';
+import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -412,6 +413,39 @@ export async function createTestServer(options = {}) {
 		m.clear();
 	}
 
+	// Per-server shared-fan-out topic registry (mirror of handler/state.js
+	// sharedTopics): a topic enters on its first shared publish.
+	const sharedTopicsT = new Map();
+	// Per-server wire-id table (NOT the module singleton), so two test servers in one
+	// process never co-mingle shared ids or refcounts. Production uses one table per
+	// worker (one server per worker), which the module default models.
+	const sharedWireIds = createSharedWireIdTable();
+
+	// Cohort membership for shared binary fan-out (mirror of handler/cohort.js). The
+	// in-memory app models `topic\0bin` / `topic\0json` as distinct exact-string
+	// topics, and models no backpressure, so the announce always lands (no demote).
+	function cohortTopicsT(topic) { return { bin: topic + '\0bin', json: topic + '\0json' }; }
+	function joinCohortT(ws, ud, topic, capability) {
+		const caps = ud[WS_CAPS];
+		const { bin, json } = cohortTopicsT(topic);
+		if (caps && caps.has(capability) && !wireStatePoisonedT(ud, capability)) {
+			const id = sharedWireIds.acquire(topic);
+			sendOutboundT(ws, wireIdAnnounce(topic, id));
+			let cohorts = ud[WS_SHARED_COHORTS];
+			if (!cohorts) { cohorts = new Set(); ud[WS_SHARED_COHORTS] = cohorts; }
+			cohorts.add(topic);
+			ws.subscribe(bin);
+		} else {
+			ws.subscribe(json);
+		}
+	}
+	function leaveCohortT(ws, ud, topic) {
+		const { bin, json } = cohortTopicsT(topic);
+		ws.unsubscribe(bin); ws.unsubscribe(json);
+		const cohorts = ud[WS_SHARED_COHORTS];
+		if (cohorts && cohorts.delete(topic)) sharedWireIds.release(topic);
+	}
+
 	const platform = {
 		publish(topic, event, data, options) {
 			const seq = (options && options.seq === false)
@@ -571,6 +605,37 @@ export async function createTestServer(options = {}) {
 					delivered = true;
 				}
 				return delivered;
+			}
+			// Shared binary fan-out (mirror of handler.js): the first shared publish
+			// migrates current subscribers into cohorts, then the publish is two native
+			// app.publish calls - the 0x03 frame to `topic\0bin`, the envelope to
+			// `topic\0json`. excludeWs falls through to the per-subscriber walk below.
+			if (wire.shared && excludeWs === null) {
+				if (!sharedTopicsT.has(topic)) {
+					for (const ws of wsConnections) {
+						let ud;
+						try { ud = ws.getUserData(); } catch { continue; }
+						const subs = ud[WS_SUBSCRIPTIONS];
+						if (!subs || !subs.has(topic)) continue;
+						joinCohortT(ws, ud, topic, wire.capability);
+					}
+					sharedTopicsT.set(topic, wire.capability);
+				}
+				const { bin, json } = cohortTopicsT(topic);
+				const id = sharedWireIds.get(topic);
+				const frame = id !== undefined ? buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload) : null;
+				if (chaos.scenario === null) {
+					if (frame) app.publish(bin, frame, true, false);
+					app.publish(json, env, false, false);
+				} else {
+					// Chaos cannot intercept the app's C++-style fan-out, so degrade to a
+					// per-recipient walk through the chaos chokepoint, like every other path.
+					for (const ws of wsConnections) {
+						if (frame && ws.isSubscribed(bin)) sendOutboundBinaryT(ws, frame);
+						else if (ws.isSubscribed(json)) sendOutboundT(ws, env);
+					}
+				}
+				return true;
 			}
 			/** @type {Map<number, Uint8Array>} */
 			const frameById = new Map();
@@ -751,6 +816,7 @@ export async function createTestServer(options = {}) {
 			try { ws.subscribe(topic); }
 			catch { closedWsAbortsT++; return null; }
 			subs.add(topic);
+			if (sharedTopicsT.has(topic)) joinCohortT(ws, ws.getUserData(), topic, sharedTopicsT.get(topic));
 			return null;
 		},
 		async checkSubscribe(ws, topic) {
@@ -766,6 +832,7 @@ export async function createTestServer(options = {}) {
 			try { ws.unsubscribe(topic); }
 			catch { closedWsAbortsT++; return false; }
 			subs.delete(topic);
+			if (sharedTopicsT.has(topic)) leaveCohortT(ws, ws.getUserData(), topic);
 			handler.unsubscribe?.(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
 			return true;
 		},
@@ -1373,12 +1440,14 @@ export async function createTestServer(options = {}) {
 							try { ws.subscribe(msg.topic); }
 							catch { closedWsAbortsT++; return; }
 							subs.add(msg.topic);
+							if (sharedTopicsT.has(msg.topic)) joinCohortT(ws, ws.getUserData(), msg.topic, sharedTopicsT.get(msg.topic));
 							sendSubscribedT(ws, msg.topic, ref);
 							return;
 						}
 						if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
 							ws.unsubscribe(msg.topic);
 							ws.getUserData()[WS_SUBSCRIPTIONS]?.delete(msg.topic);
+							if (sharedTopicsT.has(msg.topic)) leaveCohortT(ws, ws.getUserData(), msg.topic);
 							handler.unsubscribe?.(ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
 							return;
 						}
@@ -1449,6 +1518,7 @@ export async function createTestServer(options = {}) {
 								try { ws.subscribe(topic); }
 								catch { closedWsAbortsT++; continue; }
 								udSubs.add(topic);
+								if (sharedTopicsT.has(topic)) joinCohortT(ws, ws.getUserData(), topic, sharedTopicsT.get(topic));
 								sendSubscribedT(ws, topic, ref);
 							}
 							return;
@@ -1560,6 +1630,8 @@ export async function createTestServer(options = {}) {
 			} finally {
 				capCountsT.adjust(ud[WS_CAPS], null);
 				detachWireStatesT(ws, ud);
+				const sc = ud[WS_SHARED_COHORTS];
+				if (sc) { for (const t of sc) sharedWireIds.release(t); }
 				if (ud[WS_LEASE]) ud[WS_LEASE] = undefined;
 				wsConnections.delete(ws);
 			}

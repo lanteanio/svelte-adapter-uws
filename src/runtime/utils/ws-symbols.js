@@ -31,6 +31,29 @@
 
 export const WS_SUBSCRIPTIONS = Symbol.for('adapter-uws.ws.subscriptions');
 
+// Shared-fan-out cohort hooks. trackedSubscribe/Unsubscribe live in utils (the
+// low-level membership primitive), but a subscribe to an already-shared topic must
+// also join the matching cohort (and an unsubscribe must leave it + release the
+// wire-id ref), or a plugin that establishes membership server-side silently misses
+// every cohort-split publish. To avoid a utils -> handler import cycle, the handler
+// installs the join/leave behavior here at boot via setCohortHooks; when unset (no
+// shared codec in play, or the in-process test mirror which drives cohorts through
+// its own per-server paths) the tracked* helpers behave exactly as before.
+/** @type {((ws: any, ud: any, topic: string) => void) | null} */
+let _onCohortJoin = null;
+/** @type {((ws: any, ud: any, topic: string) => void) | null} */
+let _onCohortLeave = null;
+/**
+ * Install the shared-fan-out cohort join/leave behavior for trackedSubscribe /
+ * trackedUnsubscribe. Idempotent (last install wins); pass nulls to clear.
+ * @param {((ws: any, ud: any, topic: string) => void) | null} onJoin
+ * @param {((ws: any, ud: any, topic: string) => void) | null} onLeave
+ */
+export function setCohortHooks(onJoin, onLeave) {
+	_onCohortJoin = onJoin || null;
+	_onCohortLeave = onLeave || null;
+}
+
 /**
  * Subscribe a socket the way the wire-level subscribe path does: the uWS
  * native call PLUS the connection's subscription registry. The registry is
@@ -50,8 +73,11 @@ export const WS_SUBSCRIPTIONS = Symbol.for('adapter-uws.ws.subscriptions');
 export function trackedSubscribe(ws, topic) {
 	try { ws.subscribe(topic); } catch { return false; }
 	try {
-		const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+		const ud = ws.getUserData();
+		const subs = ud[WS_SUBSCRIPTIONS];
 		if (subs) subs.add(topic);
+		// Join the shared fan-out cohort if the topic is already shared.
+		if (_onCohortJoin) _onCohortJoin(ws, ud, topic);
 	} catch { /* socket died between the calls; close cleanup owns the registry */ }
 	return true;
 }
@@ -69,8 +95,12 @@ export function trackedUnsubscribe(ws, topic) {
 	let ok = true;
 	try { ws.unsubscribe(topic); } catch { ok = false; }
 	try {
-		const subs = ws.getUserData()[WS_SUBSCRIPTIONS];
+		const ud = ws.getUserData();
+		const subs = ud[WS_SUBSCRIPTIONS];
 		if (subs) subs.delete(topic);
+		// Leave the shared fan-out cohort (drop both cohort subs + release the wire-id
+		// ref) if the topic is shared, so the socket stops receiving cohort publishes.
+		if (_onCohortLeave) _onCohortLeave(ws, ud, topic);
 	} catch { /* socket died; close cleanup owns the registry */ }
 	return ok;
 }
@@ -113,6 +143,21 @@ export const WS_TOPIC_IDS = Symbol.for('adapter-uws.ws.topic-ids');
  * is fixed for the life of the connection - reset on reconnect, not re-hello.
  */
 export const WS_WIRE_STATE = Symbol.for('adapter-uws.ws.wire-state');
+
+/**
+ * Per-connection `Set<topic>` of the SHARED-codec topics for which this connection
+ * holds a binary-cohort wire-id reference (shared binary fan-out). A topic marked
+ * `shared: true` fans out via cohort uWS topics (`topic\0bin` / `topic\0json`) so
+ * one publish is two native fan-outs instead of a per-connection walk; the cohort
+ * subscriptions are kept OUT of WS_SUBSCRIPTIONS (they are a transport detail, not
+ * logical topics, and would otherwise double-count the cap accountant and leak into
+ * the close hook's `subscriptions`). This slot tracks exactly the topics whose
+ * server-wide wire-id ref must be released when the connection leaves the topic or
+ * closes - the JSON cohort holds no ref, so only binary-cohort membership is here.
+ * Allocated lazily on the first binary-cohort join; absent for every connection that
+ * never joins a shared topic's binary cohort.
+ */
+export const WS_SHARED_COHORTS = Symbol.for('adapter-uws.ws.shared-cohorts');
 
 /**
  * Per-connection send-gate state for connections that have opted into

@@ -21,10 +21,10 @@ import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { metricsRegistry } from './metrics-bridge.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, DEFAULT_GRANT } from './wire.js';
 import { now, monotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
-import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq } from './handler/state.js';
+import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, sharedTopics } from './handler/state.js';
 import { computeStateHash } from './invariants.js';
 import { createConsistencyAuditor } from './auditor.js';
 import { buildConnectionAuditSnapshot } from './audit-snapshot.js';
@@ -38,6 +38,20 @@ import { cacheDir, clientDir, prerenderedDir, _t_static, serveStatic, DECODE_CAC
 import { bumpIn, bumpOut, maybeWarnTopicRegistry, BATCH_FRAME_WARN_BYTES, warnLargeBatchFrame, grantSizeFor, resolvePressureThresholds, startPressureSampling, stopPressureSampling } from './handler/pressure-metrics.js';
 import { hasRef, runSubscribeHook, runSubscribeBatchHook, runUserSubscribeGate, sendSubscribed, sendSubscribeDenied, flushCoalescedFor } from './handler/subscribe-hooks.js';
 import { ensureWireId, ensureWireState, wireStatePoisoned, poisonWireState, detachWireStates } from './handler/wire-state.js';
+import { joinSharedCohort, leaveSharedCohort } from './handler/cohort.js';
+import { releaseSharedWireId } from './handler/shared-wire-id.js';
+import { setCohortHooks } from './utils.js';
+
+// Make the low-level membership primitive (trackedSubscribe / trackedUnsubscribe,
+// used by plugins to establish server-side membership) cohort-aware: a tracked
+// subscribe to an already-shared topic joins its cohort + announces the server-wide
+// id; a tracked unsubscribe leaves the cohort + releases the wire-id ref. Without
+// this, a plugin that server-side-subscribes a socket to a shared topic AFTER it was
+// promoted would be in no cohort and miss every cohort-split publish.
+setCohortHooks(
+	(ws, ud, topic) => { if (sharedTopics.has(topic)) joinSharedCohort(ws, ud, topic, sharedTopics.get(topic)); },
+	(ws, ud, topic) => { if (sharedTopics.has(topic)) leaveSharedCohort(ws, ud, topic); }
+);
 import { platform } from './handler/platform.js';
 import { readBody, handleSSR } from './handler/ssr.js';
 import { requestDone, isDraining } from './handler/lifecycle.js';
@@ -1264,6 +1278,10 @@ if (WS_ENABLED) {
 					catch { counters.closedWsAborts++; return; }
 					subs.add(msg.topic);
 					counters.totalSubscriptions++;
+					// A topic already promoted to shared fan-out cohorts this new joiner
+					// into the right cohort (announcing the server-wide id now) so the
+					// next cohort-split publish reaches it. No-op for an ordinary topic.
+					if (sharedTopics.has(msg.topic)) joinSharedCohort(ws, ws.getUserData(), msg.topic, sharedTopics.get(msg.topic));
 					if (wsDebug) console.log('[ws] subscribe topic=%s', msg.topic);
 					sendSubscribed(ws, msg.topic, ref);
 					return;
@@ -1276,6 +1294,10 @@ if (WS_ENABLED) {
 						counters.totalSubscriptions--;
 						assert(counters.totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions: counters.totalSubscriptions });
 					}
+					// Drop the cohort memberships + release the shared wire-id ref for a
+					// shared topic, so an unsubscribed client stops receiving its
+					// cohort-split publishes. No-op for an ordinary topic.
+					if (sharedTopics.has(msg.topic)) leaveSharedCohort(ws, ws.getUserData(), msg.topic);
 					if (wsDebug) console.log('[ws] unsubscribe topic=%s', msg.topic);
 					wsModule.unsubscribe?.(ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
 					return;
@@ -1344,6 +1366,7 @@ if (WS_ENABLED) {
 						subs.add(topic);
 						counters.totalSubscriptions++;
 						subscribed++;
+						if (sharedTopics.has(topic)) joinSharedCohort(ws, userData, topic, sharedTopics.get(topic));
 						sendSubscribed(ws, topic, ref);
 					}
 					if (wsDebug) console.log('[ws] subscribe-batch count=%d', subscribed);
@@ -1532,6 +1555,11 @@ if (WS_ENABLED) {
 				// Dispose any per-connection wire-codec state (e.g. the cursor
 				// short-id dictionary) so a long-lived server frees it promptly.
 				detachWireStates(ws, userData);
+				// Release each shared-topic wire-id reference this connection held so
+				// the server-wide id table reclaims a topic on its last cohort leave.
+				// uWS drops the cohort subscriptions themselves natively on close.
+				const sharedCohorts = userData[WS_SHARED_COHORTS];
+				if (sharedCohorts) { for (const t of sharedCohorts) releaseSharedWireId(t); }
 				// Free the per-connection send-gate slot (only present when the
 				// connection opted into internal flow control).
 				if (userData[WS_LEASE]) userData[WS_LEASE] = undefined;
