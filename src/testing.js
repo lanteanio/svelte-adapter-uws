@@ -308,6 +308,12 @@ export async function createTestServer(options = {}) {
 	// by createTestServer-based suites. Shared primitives live in ./src/runtime/wire.js.
 	const capCountsT = createCapCounts();
 
+	// Per-server wire-codec registry (capability -> codec), the in-process mirror of
+	// production handler/codec-registry.js. The codec-aware relay re-encode
+	// (relayPublishWire) re-derives a codec here from the capability a relay frame
+	// carried. Local to this server so test servers stay isolated.
+	const byCapabilityT = new Map();
+
 	/**
 	 * Per-connection topic-id resolution + lazy `wire-id` announce. Binary
 	 * frames and the announce flow through sendOutboundT so chaos scenarios
@@ -441,17 +447,28 @@ export async function createTestServer(options = {}) {
 			return sendOutboundT(ws, payload);
 		},
 		publishWire(topic, event, data, wire, options) {
-			const seq = (options && options.seq === false)
-				? null
-				: nextTopicSeq(topicSeqs, topic);
+			// Relay re-encode (mirrors handler.js publishWire): a relayed wire publish
+			// re-encodes binary against THIS server's local connections, stamping the
+			// carried origin seq verbatim (no re-stamp) and never re-relaying
+			// (relay:false suppresses the onPublishT relay below).
+			const isRelay = !!(options && options._isRelay);
+			const seq = isRelay
+				? (typeof options._relaySeq === 'number' ? options._relaySeq : null)
+				: ((options && options.seq === false) ? null : nextTopicSeq(topicSeqs, topic));
 			const env = envelope(topic, event, data, seq);
-			// Cross-worker subscribers receive the JSON envelope only (binary frames
-			// are same-worker), so the relay carries `env`, never a 0x03 frame -
-			// mirroring handler.js publishWire's relay path. The relay fires once
-			// per publish regardless of sender exclusion: the excluded socket only
-			// exists on this instance.
+			// The relay carries the JSON envelope plus, for a registered codec, its
+			// capability + raw payload so the receiving server re-encodes binary
+			// locally (codec-aware relay, mirroring handler.js). An unregistered codec
+			// carries envelope-only. The relay fires once per publish regardless of
+			// sender exclusion: the excluded socket only exists on this instance.
+			const relayCap = (onPublishT && byCapabilityT.has(wire.capability)) ? wire.capability : undefined;
 			if (onPublishT && !(options && options.relay === false)) {
-				onPublishT({ kind: 'publish', topic, envelope: env, seq, compress: false });
+				onPublishT({
+					kind: 'publish', topic, envelope: env, seq, compress: false,
+					capability: relayCap,
+					event: relayCap !== undefined ? event : undefined,
+					data: relayCap !== undefined ? data : undefined
+				});
 			}
 			// Sender exclusion, mirroring handler.js: the single C++ app.publish
 			// fan-out cannot skip a socket, so an excluding publish always takes
@@ -590,6 +607,20 @@ export async function createTestServer(options = {}) {
 				delivered = true;
 			}
 			return delivered;
+		},
+		registerWireCodec(wire) {
+			if (wire && typeof wire.capability === 'string') byCapabilityT.set(wire.capability, wire);
+		},
+		relayPublishWire(topic, event, data, capability, seq, compress) {
+			// Mirror of handler/platform.js relayPublishWire: re-derive the codec from
+			// the relay-carried capability and re-encode binary locally for this
+			// server's binary-capable subscribers, or return false to let the caller
+			// fall back to the JSON envelope.
+			const codec = byCapabilityT.get(capability);
+			if (!codec) return false;
+			if (!capCountsT.has(capability)) return false;
+			platform.publishWire(topic, event, data, codec, { relay: false, _isRelay: true, _relaySeq: seq, compress });
+			return true;
 		},
 		sendWire(ws, topic, event, data, wire, options) {
 			void options; // Platform-shape parity; the test server configures no compressor.
@@ -1004,6 +1035,7 @@ export async function createTestServer(options = {}) {
 		 * no-op here (it is threaded through the relay only for IPC-frame-shape parity).
 		 *
 		 * @param {{ kind?: string, topic?: string, envelope?: string, compress?: boolean,
+		 *   seq?: number | null, capability?: string, event?: string, data?: any,
 		 *   events?: Array<{ topic: string, env: string }> }} frame
 		 */
 		__relayReceive(frame) {
@@ -1056,6 +1088,14 @@ export async function createTestServer(options = {}) {
 				return;
 			}
 			if (typeof frame.topic === 'string' && typeof frame.envelope === 'string' && frame.envelope.length > 0) {
+				// Codec-aware relay (mirrors handler/lifecycle.js relayPublish): when the
+				// origin carried a registered codec's capability, re-encode binary
+				// locally for this server's binary-capable subscribers (stamping the
+				// carried origin seq, never re-relaying); otherwise the JSON envelope.
+				if (frame.capability !== undefined &&
+					platform.relayPublishWire(frame.topic, frame.event, frame.data, frame.capability, frame.seq, frame.compress)) {
+					return;
+				}
 				app.publish(frame.topic, frame.envelope, false, false);
 			}
 		}

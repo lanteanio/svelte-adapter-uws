@@ -190,8 +190,8 @@ if (is_primary) {
 				// single-message 'publish' path in their relayPublish handler. The
 				// stamped seq rides along so the receiver can advance its
 				// delivered-seq tracker without re-parsing the envelope.
-				for (const { topic, envelope, compress, seq } of msg.messages) {
-					const relay = { type: 'publish', topic, envelope, compress, seq };
+				for (const { topic, envelope, compress, seq, capability, event, data } of msg.messages) {
+					const relay = { type: 'publish', topic, envelope, compress, seq, capability, event, data };
 					for (const [w] of workers) {
 						if (w !== worker) w.postMessage(relay);
 					}
@@ -380,7 +380,7 @@ if (is_primary) {
 			if (msg.type === 'shutdown') {
 				graceful_shutdown('shutdown');
 			} else if (msg.type === 'publish') {
-				relayPublish(msg.topic, msg.envelope, msg.compress, msg.seq);
+				relayPublish(msg.topic, msg.envelope, msg.compress, msg.seq, msg.capability, msg.event, msg.data);
 			} else if (msg.type === 'publish-batched') {
 				relayPublishBatched(msg.events, msg.compress);
 			} else if (msg.type === 'heartbeat') {

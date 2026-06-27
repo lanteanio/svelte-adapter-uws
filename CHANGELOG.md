@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.42] - 2026-06-27
+
+### Added
+
+- **Cross-worker subscribers in a clustered deployment now receive the compact binary `0x03` wire frame instead of JSON.** A binary wire publish (cursor positions, presence rosters) is encoded against the publishing worker's own connections and then relayed to sibling workers - which, until now, re-published it as the JSON envelope, so a binary-capable subscriber on a *different* worker than the publisher fell back to the larger JSON frame (on an N-worker box, roughly `(N-1)/N` of binary subscribers). The relay now carries the codec's capability and raw payload alongside the envelope, and each receiving worker re-derives the codec from a per-worker registry and re-encodes binary locally against its own connections - per connection for a stateful codec (the cursor short-id dictionary), once for a stateless one (presence). The origin sequence number rides through unchanged (no re-stamp), the local re-encode never re-relays (no cross-worker loop), and a worker with no binary subscribers for a codec - or no codec registered - keeps the cheaper single JSON fan-out. The bundled cursor and presence plugins register their codec automatically, so this is transparent and on by default; it is perf-only and fully backward-compatible (a single-process deployment, and a publish through an unregistered codec, are byte-identical to before). A relayed frame now also re-gates permessage-deflate on the receiving worker via its own compressor (the cross-worker compression intent was previously dropped).
+- **`platform.registerWireCodec(wire)`: register a plugin-author wire codec for the cross-worker relay.** The cursor and presence plugins call this automatically on first use; a custom codec published through `publishWire` registers under its capability so a clustered deployment can re-encode it binary on a receiving worker (without it, cross-worker subscribers of that codec get the JSON envelope). Idempotent (last registration per capability wins); a no-op in single-process mode and for a codec with no string capability. Mirrored on the dev (Vite) platform as a no-op (dev is single-process) and on the `createTestServer` platform.
+
 ## [0.6.0-next.41] - 2026-06-26
 
 ### Fixed

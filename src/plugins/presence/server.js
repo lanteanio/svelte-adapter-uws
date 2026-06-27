@@ -308,6 +308,21 @@ export function createPresence(options = {}) {
 	// presence's infrequent-but-full-roster broadcasts.
 	const wireCodec = createPresenceWireCodec(options);
 
+	// The platform reaches this plugin only per call (emit/emitTo receive it), never
+	// at construction, so the codec is registered with the platform's wire-codec
+	// registry lazily on first wire use. That lets the cross-worker relay re-derive
+	// the codec and re-encode presence binary for subscribers on other workers,
+	// instead of degrading them to JSON. One registration per platform; a no-op on a
+	// platform without the registry (the unit-test mock) or when binary is off.
+	let wireCodecRegistered = false;
+	function registerWireCodecOnce(platform) {
+		if (wireCodecRegistered || !wireCodec) return;
+		if (typeof platform.registerWireCodec === 'function') {
+			platform.registerWireCodec(wireCodec);
+			wireCodecRegistered = true;
+		}
+	}
+
 	// Fields tagged transient are broadcast live (in `update` diffs to the
 	// subscribers connected at the moment they change) but are EXCLUDED from the
 	// `state` snapshot and the heartbeat roster, so a (re)joining or
@@ -352,6 +367,7 @@ export function createPresence(options = {}) {
 	 */
 	function emit(fullTopic, event, data, platform) {
 		if (wireCodec && typeof platform.publishWire === 'function') {
+			registerWireCodecOnce(platform);
 			// Presence frames are low-frequency (a diff on join/leave; one heartbeat
 			// per interval), so opting into permessage-deflate is a cheap bandwidth
 			// win - the opposite of the 60 Hz cursor hot path, which stays
@@ -372,6 +388,7 @@ export function createPresence(options = {}) {
 	 */
 	function emitTo(ws, fullTopic, event, data, platform) {
 		if (wireCodec && typeof platform.sendWire === 'function') {
+			registerWireCodecOnce(platform);
 			platform.sendWire(ws, fullTopic, event, data, wireCodec, { compress: true });
 		} else {
 			platform.send(ws, fullTopic, event, data);

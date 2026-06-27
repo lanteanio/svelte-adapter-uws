@@ -289,6 +289,21 @@ export function createCursor(options = {}) {
 	// unit-test mock) gets the identical JSON frames.
 	const wireCodec = createCursorWireCodec(options);
 
+	// The platform reaches this plugin only per call (emit/emitTo receive it), never
+	// at construction, so the codec is registered with the platform's wire-codec
+	// registry lazily on first wire use. That lets the cross-worker relay re-derive
+	// the codec and re-encode cursor binary for subscribers on other workers, instead
+	// of degrading them to JSON. One registration per platform; a no-op on a platform
+	// without the registry (the unit-test mock) or when binary is off (null codec).
+	let wireCodecRegistered = false;
+	function registerWireCodecOnce(platform) {
+		if (wireCodecRegistered || !wireCodec) return;
+		if (typeof platform.registerWireCodec === 'function') {
+			platform.registerWireCodec(wireCodec);
+			wireCodecRegistered = true;
+		}
+	}
+
 	if (typeof throttleMs !== 'number' || !Number.isFinite(throttleMs) || throttleMs < 0) {
 		throw new Error('cursor: throttle must be a non-negative number');
 	}
@@ -576,6 +591,7 @@ export function createCursor(options = {}) {
 	 */
 	function emit(fullTopic, event, data, platform) {
 		if (wireCodec && typeof platform.publishWire === 'function') {
+			registerWireCodecOnce(platform);
 			platform.publishWire(fullTopic, event, data, wireCodec);
 		} else {
 			// `compress: false` keeps the 60 Hz cursor hot path uncompressed even on
@@ -595,6 +611,7 @@ export function createCursor(options = {}) {
 	 */
 	function emitTo(ws, fullTopic, event, data, platform) {
 		if (wireCodec && typeof platform.sendWire === 'function') {
+			registerWireCodecOnce(platform);
 			platform.sendWire(ws, fullTopic, event, data, wireCodec);
 		} else {
 			platform.send(ws, fullTopic, event, data, { compress: false });
@@ -1368,6 +1385,15 @@ export function createCursor(options = {}) {
  * @param {{ binary?: boolean, dictionary?: boolean }} [options]
  */
 export function createCursorWireCodec(options = {}) {
+	// Every cursor codec - stateless full-string or stateful short-id dictionary -
+	// shares CURSOR_CAPABILITY: the capability identifies ONE wire contract that any
+	// `cursor.protocol:2` client decodes (a v1 full-string frame is decodable by a
+	// dictionary client - the schema rides in the frame header). The server codec
+	// registry is capability-keyed (last registration wins), so the cross-worker
+	// relay re-encode resolves whichever cursor instance registered last on a worker;
+	// that is correct precisely because all instances under this capability encode
+	// compatibly. Two cursor trackers with divergent `dictionary` options must not
+	// expect per-instance wire formats from the relay - they share the contract.
 	const useDictionary = options.binary !== false && options.dictionary !== false;
 	const baseCodec = {
 		capability: CURSOR_CAPABILITY,

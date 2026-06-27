@@ -12,6 +12,7 @@ import { readHlc } from './hlc.js';
 import { BATCH_FRAME_WARN_BYTES, bumpOut, maybeWarnTopicRegistry, warnLargeBatchFrame } from './pressure-metrics.js';
 import { flushCoalescedFor, runUserSubscribeGate } from './subscribe-hooks.js';
 import { ensureWireId, ensureWireState, poisonWireState, wireStatePoisoned } from './wire-state.js';
+import { registerWireCodec as _registerWireCodec, getWireCodec } from './codec-registry.js';
 
 /** @type {import('../../index.js').Platform} */
 export const platform = {
@@ -133,27 +134,42 @@ export const platform = {
 	 * @returns {boolean}
 	 */
 	publishWire(topic, event, data, wire, options) {
-		counters.publishCountWindow++;
-		const seq = (options && options.seq === false)
-			? null
-			: nextTopicSeq(topicSeqs, topic);
+		// Relay re-encode path: a sibling worker relayed this wire publish, carrying
+		// the codec's capability + raw payload, and this worker re-encodes binary
+		// against its OWN local connection state (relayPublishWire below). The origin
+		// worker already counted the publish, stamped the seq, and recorded it as seen
+		// (relayPublish -> recordSeen), so this path skips ALL origin-side bookkeeping
+		// - the publish-rate counter, the per-topic stats, and the max-seen set - and
+		// stamps the carried origin seq verbatim. This matches the non-wire relay path
+		// (relayPublish -> app.publish), which likewise never re-counts a relayed
+		// frame; counting it on every receiving worker would inflate one logical
+		// publisher into N and trip the runaway-publisher signal.
+		const isRelay = !!(options && options._isRelay);
+		if (!isRelay) counters.publishCountWindow++;
+		const seq = isRelay
+			? (typeof options._relaySeq === 'number' ? options._relaySeq : null)
+			: ((options && options.seq === false) ? null : nextTopicSeq(topicSeqs, topic));
 		// Track the highest observed seq for this topic (see platform.publish).
-		if (seq !== null) maxSeenSeq.set(topic, seq);
+		// Skipped on the relay path: relayPublish already called recordSeen with the
+		// monotone-max guard the reorder-prone cross-worker receive path needs.
+		if (!isRelay && seq !== null) maxSeenSeq.set(topic, seq);
 		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
 		// A zero-length frame at a send site would broadcast garbage to every
 		// subscriber - unrecoverable framing corruption. One length guard, identical
 		// in cost to the assert it replaces.
 		fatal(envelope.length > 0, 'envelope.empty', { topic, event });
-		let s = topicPublishStats.get(topic);
-		if (!s) {
-			s = { m: 0, b: 0 };
-			topicPublishStats.set(topic, s);
-			maybeWarnTopicRegistry();
-		} else {
-			assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape', { topic });
+		if (!isRelay) {
+			let s = topicPublishStats.get(topic);
+			if (!s) {
+				s = { m: 0, b: 0 };
+				topicPublishStats.set(topic, s);
+				maybeWarnTopicRegistry();
+			} else {
+				assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape', { topic });
+			}
+			s.m++;
+			s.b += envelope.length;
 		}
-		s.m++;
-		s.b += envelope.length;
 
 		const relayed = !!(parentPort && (!options || options.relay !== false));
 
@@ -163,7 +179,23 @@ export const platform = {
 		// (cursor: off, the 60 Hz hot path; presence: on, a low-frequency roster)
 		// applies to its binary and JSON-fallback frames alike. Off by default
 		// keeps the hot path uncompressed.
-		const compress = WS_COMPRESSION_ON && !!(options && options.compress === true);
+		const compressIntent = !!(options && options.compress === true);
+		const compress = WS_COMPRESSION_ON && compressIntent;
+
+		// Codec-aware relay carry: a codec registered in the wire-codec registry
+		// (presence, cursor) relays its capability + raw payload across the worker
+		// boundary so a receiving worker with binary subscribers re-encodes binary
+		// locally instead of delivering JSON ((N-1)/N of binary subs on an N-worker
+		// box otherwise get JSON). An unregistered codec (smooth, crdt) relays the
+		// JSON envelope only - exactly today's behavior, no extra IPC payload. The
+		// registry IS the opt-in. Looked up only when actually relaying (clustered),
+		// and the compress intent (not the locally-gated `compress`) rides along so a
+		// re-encoded frame compresses the same way on the receiver, which re-gates by
+		// its own compressor. The two declined-frame paths below relay envelope-only:
+		// a stateless encode that returned null returns null on every worker too.
+		const relayCap = relayed && getWireCodec(wire.capability) ? wire.capability : undefined;
+		const relayEvent = relayCap !== undefined ? event : undefined;
+		const relayData = relayCap !== undefined ? data : undefined;
 
 		// Sender exclusion: when set, this one local socket must never receive
 		// the frame. The single C++ app.publish fan-out cannot skip a socket,
@@ -176,7 +208,7 @@ export const platform = {
 		// never enters the per-subscriber walk or touches the codec at all.
 		if (excludeWs === null && !capCounts.has(wire.capability)) {
 			const result = app.publish(topic, envelope, false, compress);
-			if (relayed) batchRelay(topic, envelope, undefined, seq);
+			if (relayed) batchRelay(topic, envelope, compressIntent, seq, relayCap, relayEvent, relayData);
 			return result || relayed;
 		}
 
@@ -260,7 +292,7 @@ export const platform = {
 					if (result === 2) poisonWireState(ws, ud, wire.capability);
 				}
 			}
-			if (relayed) batchRelay(topic, envelope, undefined, seq);
+			if (relayed) batchRelay(topic, envelope, compressIntent, seq, relayCap, relayEvent, relayData);
 			return true;
 		}
 
@@ -274,7 +306,7 @@ export const platform = {
 		if (payload == null) {
 			if (excludeWs === null) {
 				const result = app.publish(topic, envelope, false, compress);
-				if (relayed) batchRelay(topic, envelope, undefined, seq);
+				if (relayed) batchRelay(topic, envelope, compressIntent, seq);
 				return result || relayed;
 			}
 			// Declined frame with sender exclusion: the same JSON envelope the
@@ -289,7 +321,7 @@ export const platform = {
 				if (!subs || !subs.has(topic)) continue;
 				try { ws.send(envelope, false, compress); delivered = true; } catch { counters.closedWsAborts++; }
 			}
-			if (relayed) batchRelay(topic, envelope, undefined, seq);
+			if (relayed) batchRelay(topic, envelope, compressIntent, seq);
 			return delivered || relayed;
 		}
 		/** @type {Map<number, Uint8Array>} */
@@ -324,13 +356,28 @@ export const platform = {
 				try { ws.send(envelope, false, compress); } catch { counters.closedWsAborts++; }
 			}
 		}
-		// Cross-worker subscribers receive the JSON envelope (binary is
-		// same-worker only); their worker re-publishes it to them as JSON.
-		if (relayed) batchRelay(topic, envelope, undefined, seq);
+		// Cross-worker subscribers with a binary capability for this codec re-encode
+		// it locally on their worker (relayPublishWire); those without the capability,
+		// and workers with no codec registered for it, receive the JSON envelope.
+		if (relayed) batchRelay(topic, envelope, compressIntent, seq, relayCap, relayEvent, relayData);
 		if (wsDebug) {
 			console.log('[ws] publishWire topic=%s event=%s payloadBytes=%d', topic, event, payload.length);
 		}
 		return true;
+	},
+
+	/**
+	 * Register a plugin's wire codec under its capability so the cross-worker relay
+	 * can re-derive it on a receiving worker and re-encode binary locally for that
+	 * worker's binary-capable subscribers (see relayPublishWire). A plugin calls this
+	 * the first time it publishes through a given platform - the platform is passed to
+	 * the plugin per call, not at construction, so registration is lazy rather than at
+	 * setup. Idempotent; the last registration for a capability wins. A no-op for a
+	 * null codec or one with no string capability.
+	 * @param {{ capability: string, schemaVersion: number, encode: Function, state?: any } | null} wire
+	 */
+	registerWireCodec(wire) {
+		_registerWireCodec(wire);
 	},
 
 	/**
@@ -1315,3 +1362,35 @@ export const platform = {
 	// per-publish hot path stays untouched.
 	hlc: readHlc
 };
+
+/**
+ * Codec-aware relay re-encode. A sibling worker relayed a wire publish, carrying
+ * the codec's `capability` and `{ event, data }` alongside the JSON envelope. When
+ * this worker has the codec registered AND a local connection advertises the
+ * capability, re-encode binary locally by re-entering publishWire with the origin's
+ * seq (no re-stamp), `relay: false` (no re-relay loop), and the origin's compress
+ * intent (re-gated by this worker's own compressor). publishWire then fans binary
+ * out to this worker's capable subscribers (per-connection for a stateful codec,
+ * once for a stateless one) and the JSON envelope to the rest.
+ *
+ * Returns false - the caller (relayPublish) then takes the single `app.publish`
+ * JSON fan-out - when no codec is registered for the capability or no local
+ * connection advertises it. The no-local-subscriber worker thus stays on the
+ * cheaper envelope path (today's behavior) instead of entering the per-subscriber
+ * walk just to hand everyone JSON.
+ *
+ * @param {string} topic
+ * @param {string} event
+ * @param {any} data
+ * @param {string} capability
+ * @param {number | null} seq - The origin worker's stamped per-topic seq, carried verbatim.
+ * @param {boolean} [compress] - The origin's compress intent (re-gated locally).
+ * @returns {boolean}
+ */
+export function relayPublishWire(topic, event, data, capability, seq, compress) {
+	const codec = getWireCodec(capability);
+	if (!codec) return false;
+	if (!capCounts.has(capability)) return false;
+	platform.publishWire(topic, event, data, codec, { relay: false, _isRelay: true, _relaySeq: seq, compress });
+	return true;
+}

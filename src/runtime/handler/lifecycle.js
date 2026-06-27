@@ -4,7 +4,7 @@ import { WS_CAPS, WS_SUBSCRIPTIONS, assert, fatal, wrapBatchEnvelope } from '../
 import { monotonicNow } from '../runtime.js';
 import { counters, maxSeenSeq, recordSeen, wsConnections } from './state.js';
 import { app, is_tls, _t_app, WS_COMPRESSION_ON } from './config.js';
-import { platform } from './platform.js';
+import { platform, relayPublishWire } from './platform.js';
 import { stopPressureSampling } from './pressure-metrics.js';
 
 /** @type {Array<() => void>} */
@@ -153,8 +153,18 @@ export function getDescriptor() {
  *   worker that receives the frame converges to the same value. The monotone-max
  *   guard in recordSeen handles frames that reorder across the postMessage
  *   boundary; a non-number (a {seq:false} publish) is ignored.
+ * @param {string} [capability] - When the origin worker published through a wire
+ *   codec registered in its codec registry, the codec's capability + raw payload
+ *   ride along so this worker can re-encode binary locally for its binary-capable
+ *   subscribers. A set `capability` is the sole signal that a re-encode was
+ *   intended. Absent (plain publish, unregistered codec, declined wire frame) ->
+ *   the JSON envelope is used, exactly as before.
+ * @param {string} [event] - The publish event name, for the codec-aware re-encode.
+ * @param {any} [data] - The raw publish payload, for the codec-aware re-encode. May
+ *   be undefined for a codec whose frame carries no payload; carried alongside
+ *   `capability` regardless.
  */
-export function relayPublish(topic, envelope, compress, seq) {
+export function relayPublish(topic, envelope, compress, seq, capability, event, data) {
 	// Hard tier: a non-string topic or an empty/non-string envelope arriving
 	// from a sibling worker (trusted, same codebase) means our own cross-worker
 	// relay serialization is structurally broken - publishing it would misroute
@@ -167,6 +177,24 @@ export function relayPublish(topic, envelope, compress, seq) {
 		envelopeLen: typeof envelope === 'string' ? envelope.length : null
 	});
 	recordSeen(maxSeenSeq, topic, seq);
+	// Codec-aware relay: when the origin worker carried a registered wire codec's
+	// capability alongside the JSON envelope, re-encode binary locally for this
+	// worker's binary-capable subscribers - the (N-1)/N of them that would otherwise
+	// receive the relayed JSON. The carry is registry-gated at the origin, so a set
+	// `capability` always travels with its payload (and only for a codec the origin
+	// found in its registry); the gate keys on `capability` alone, not on `data`,
+	// because a codec may legitimately encode an undefined payload (an event-only or
+	// tick frame) and gating on `data !== undefined` would silently degrade those to
+	// JSON cross-worker. An origin that carries no `capability` (e.g. an older
+	// worker that predates the capability carry) falls through to the envelope.
+	// relayPublishWire itself returns false (envelope
+	// fallback) when no codec is registered for the capability or this worker has no
+	// binary subscriber for it; the local re-encode passes relay:false, so it never
+	// re-relays and cannot loop.
+	if (capability !== undefined &&
+		relayPublishWire(topic, event, data, capability, seq, compress)) {
+		return;
+	}
 	app.publish(topic, envelope, false, WS_COMPRESSION_ON && compress === true);
 }
 

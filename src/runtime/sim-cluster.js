@@ -66,6 +66,13 @@ export function createClusterRelay(opts) {
 			batchTimer = setTimer(flushBatch, 0);
 			if (batchTimer.unref) batchTimer.unref();
 		}
+		// The fault sim models the relay at the JSON-envelope level only: it drops any
+		// codec-aware re-encode fields (capability/event/data) a wire publish carries,
+		// so a receiving worker delivers the envelope, not a re-encoded 0x03 frame.
+		// This is deliberate and conservative - cross-worker convergence is checked on
+		// the per-topic seq embedded in the envelope, which is identical whether a
+		// subscriber receives binary or JSON, so binary re-encode cannot change the
+		// state hash. The end-to-end carry + re-encode is covered by codec-relay.test.js.
 		batch.push({ topic: frame.topic, envelope: frame.envelope, compress: frame.compress });
 	}
 

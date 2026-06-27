@@ -353,6 +353,11 @@ export default function uws(options = {}) {
 		sendWire(ws, topic, event, data, _wire) {
 			return send(ws, topic, event, data);
 		},
+		// The wire-codec registry feeds the production cross-worker relay's binary
+		// re-encode. Dev is single-process with no relay and delegates publishWire to
+		// JSON, so registration has nothing to drive: a no-op keeps the dev/prod
+		// surface in parity (see the contract above) without dead machinery.
+		registerWireCodec(_wire) {},
 		batch(messages) {
 			const results = [];
 			for (let i = 0; i < messages.length; i++) {

@@ -1505,6 +1505,26 @@ export interface Platform {
 	): number;
 
 	/**
+	 * Register a wire codec under its capability so a clustered deployment's
+	 * cross-worker relay can re-derive it on a receiving worker and re-encode binary
+	 * locally for that worker's binary-capable subscribers - without it, subscribers
+	 * on a worker other than the publisher's receive the JSON envelope. The bundled
+	 * cursor and presence plugins register their codec automatically on first use;
+	 * call this only for a custom plugin-author codec you publish through
+	 * `publishWire`. Idempotent (last registration per capability wins); a no-op in
+	 * single-process mode (no relay) and for a codec with no string capability.
+	 */
+	registerWireCodec(wire: {
+		capability: string;
+		schemaVersion: number;
+		encode: (event: string, data: unknown, state?: unknown) => Uint8Array | null;
+		state?: {
+			onAttach: (ws: WebSocket<any>) => unknown;
+			onDetach?: (ws: WebSocket<any>, state: unknown) => void;
+		};
+	}): void;
+
+	/**
 	 * Publish multiple messages, returning per-message delivery results.
 	 *
 	 * **NOT wire-level batching.** Under the hood this is a `for` loop
