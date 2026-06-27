@@ -938,6 +938,8 @@ The adapter uses a JSON envelope format for all pub/sub messages: `{ topic, even
 
 To avoid JSON-parsing every incoming message, the handler uses a byte-prefix discriminator: control messages start with `{"type"` (byte 3 is `y`), while user envelopes start with `{"topic"` (byte 3 is `o`). A single byte comparison skips `JSON.parse` entirely for user messages. Messages over 8 KB are also skipped (generous ceiling for `subscribe-batch` with many topics, well above any realistic control message).
 
+For the complete frame-by-frame wire contract - every control frame, the capability table, the binary `0x03` payload layout, and the resume model - see [PROTOCOL.md](PROTOCOL.md). It is the spec a non-JavaScript client implements against; this section is the at-a-glance summary.
+
 ### Topic validation
 
 Topics submitted by clients are validated before being accepted:

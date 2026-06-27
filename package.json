@@ -1,6 +1,6 @@
 {
 	"name": "svelte-adapter-uws",
-	"version": "0.6.0-next.43",
+	"version": "0.6.0-next.44",
 	"publishConfig": {
 		"tag": "next"
 	},
@@ -147,7 +147,8 @@
 		"src",
 		"LICENSE",
 		"README.md",
-		"MIGRATION.md"
+		"MIGRATION.md",
+		"PROTOCOL.md"
 	],
 	"scripts": {
 		"check": "node scripts/check-types.js && node scripts/check-determinism.js && node scripts/check-slugs.js",

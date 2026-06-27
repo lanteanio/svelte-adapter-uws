@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.44] - 2026-06-27
+
+### Added
+
+- **`PROTOCOL.md`: the wire protocol is now a published, citable spec.** A frame-by-frame reference for the WebSocket wire the adapter and its client speak - every control frame with its exact JSON shape and direction, the data-event envelope, the capability table, the binary `0x03` payload byte layout (with the varint / `f32` / length-prefixed-string primitives), and the `(offset, epoch)` resume model. JSON by default, binary opt-in; the doc is what a non-JavaScript client implements against. It now ships in the package (`files`) and is linked from the README's "Message protocol" section. Labelled "revision 1, as shipped in `0.6.0-next`" and marked stabilizing toward 0.6.0 (additive changes only until then; not yet frozen). Reconciles the wire as actually shipped, including the three cursor codec generations (`cursor.protocol:2`/`:3`/`:4`), and explicitly documents that cluster fan-out (cohort topics, server-wide binary ids, the cross-worker relay) is server-internal and never reaches a client.
+
 ## [0.6.0-next.43] - 2026-06-27
 
 ### Added
