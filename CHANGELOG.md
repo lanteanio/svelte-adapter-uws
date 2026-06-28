@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.45] - 2026-06-28
+
+### Added
+
+- **`anchorRange` / `resolveRange` on the collaborative text facet (`crdt` channel) - position anchors that survive concurrent edits.** A text selection expressed as raw `(start, end)` offsets is wrong the instant another user edits before it. `text.anchorRange(start, end)` encodes the range as opaque bytes (a packed pair of relative positions) that `text.resolveRange(bytes)` maps back to current `{ start, end }` offsets on any converged replica, after arbitrary concurrent inserts and deletes. The start binds right and the end binds left, so an insert exactly at either edge stays outside the range while an insert strictly inside it extends the range to keep covering the original characters; a delete of the anchored text collapses the range to a zero-width caret at the deletion point. `anchorRange` is a read (no write access required); `resolveRange` returns `null` for a malformed blob or a position that cannot resolve against this replica, so a stale anchor drops rather than throws. The CRDT library stays confined to the adapter - the API takes and returns plain numbers and opaque `Uint8Array`, no library types leak. This is the primitive `svelte-realtime` builds CRDT-anchored multiplayer selections on; rides the existing `./plugins/crdt/channel` export (no new entry point).
+
 ## [0.6.0-next.44] - 2026-06-27
 
 ### Added

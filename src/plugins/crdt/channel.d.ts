@@ -72,6 +72,23 @@ export interface CrdtTextFacet {
 	/** Applies locally now, merges everywhere. Throws on a read-only mount. */
 	insert(index: number, content: string): void;
 	delete(index: number, length?: number): void;
+	/**
+	 * Encode a `[start, end)` range as a position anchor that survives concurrent
+	 * edits (a selection highlight stays on the same characters as others edit around
+	 * it). Returns opaque bytes; resolve them with `resolveRange` on any converged
+	 * replica. The start binds right and the end binds left, so an insert exactly at
+	 * either edge stays outside the range and an insert strictly inside it extends the
+	 * range. A read - no write access required.
+	 */
+	anchorRange(start: number, end: number): Uint8Array;
+	/**
+	 * Resolve anchor bytes from `anchorRange` to current `{ start, end }` offsets
+	 * (normalized so `start <= end`), or `null` if the blob is malformed or a position
+	 * cannot be resolved against this replica (a different document, or before the first
+	 * sync). If the anchored text was deleted the range collapses to a zero-width caret
+	 * at the deletion point.
+	 */
+	resolveRange(bytes: Uint8Array): { start: number; end: number } | null;
 	/** Observe changes; read `toString()` for the value. Returns unsubscribe. */
 	onChange(cb: () => void): () => void;
 }

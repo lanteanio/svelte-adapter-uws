@@ -425,6 +425,141 @@ describe('facets', () => {
 		ch.destroy();
 	});
 
+	it('a text range anchor survives a concurrent insert before it (offsets shift, same characters)', async () => {
+		const s = makeServer();
+		const ch = createCrdtChannel({ transport: s.transport });
+		await flush();
+		const t = ch.text('body');
+		t.insert(0, 'hello world');
+		const anchor = t.anchorRange(6, 11); // "world"
+		expect(t.resolveRange(anchor)).toEqual({ start: 6, end: 11 });
+		t.insert(0, 'XX '); // three chars inserted before the range
+		expect(t.resolveRange(anchor)).toEqual({ start: 9, end: 14 });
+		expect(t.toString().slice(9, 14)).toBe('world');
+		ch.destroy();
+	});
+
+	it('a text range anchor survives a delete before it', async () => {
+		const s = makeServer();
+		const ch = createCrdtChannel({ transport: s.transport });
+		await flush();
+		const t = ch.text('body');
+		t.insert(0, 'hello world');
+		const anchor = t.anchorRange(6, 11); // "world"
+		t.delete(0, 6); // remove "hello "
+		const r = t.resolveRange(anchor);
+		expect(t.toString().slice(r.start, r.end)).toBe('world');
+		ch.destroy();
+	});
+
+	it('an interior insert grows the range to keep covering the original characters', async () => {
+		const s = makeServer();
+		const ch = createCrdtChannel({ transport: s.transport });
+		await flush();
+		const t = ch.text('body');
+		t.insert(0, 'ABCD');
+		const anchor = t.anchorRange(1, 3); // "BC"
+		t.insert(2, 'X'); // strictly inside the range, between B and C
+		const r = t.resolveRange(anchor);
+		expect(t.toString().slice(r.start, r.end)).toBe('BXC');
+		ch.destroy();
+	});
+
+	it('an insert exactly at an edge stays outside the range (boundary-stable)', async () => {
+		const s = makeServer();
+		const ch = createCrdtChannel({ transport: s.transport });
+		await flush();
+		const t = ch.text('body');
+		t.insert(0, 'ABCD');
+		const anchor = t.anchorRange(1, 3); // "BC"
+		t.insert(3, 'X'); // exactly at the end edge (after C)
+		const r = t.resolveRange(anchor);
+		expect(t.toString().slice(r.start, r.end)).toBe('BC');
+		ch.destroy();
+	});
+
+	it('collapses the range to a caret when the anchored text is deleted', async () => {
+		const s = makeServer();
+		const ch = createCrdtChannel({ transport: s.transport });
+		await flush();
+		const t = ch.text('body');
+		t.insert(0, 'hello world');
+		const anchor = t.anchorRange(6, 11); // "world"
+		t.delete(6, 5); // delete the anchored text
+		// yjs anchors stay sticky: the range collapses to a zero-width caret at the
+		// deletion point rather than vanishing - sane selection UX (a caret, not a ghost).
+		expect(t.resolveRange(anchor)).toEqual({ start: 6, end: 6 });
+		ch.destroy();
+	});
+
+	it('resolveRange returns null for a malformed or empty blob (fail-safe)', async () => {
+		const s = makeServer();
+		const ch = createCrdtChannel({ transport: s.transport });
+		await flush();
+		const t = ch.text('body');
+		t.insert(0, 'hello');
+		expect(t.resolveRange(new Uint8Array(0))).toBeNull();
+		expect(t.resolveRange(new Uint8Array([0]))).toBeNull();
+		expect(t.resolveRange(/** @type {any} */ ('not-bytes'))).toBeNull();
+		ch.destroy();
+	});
+
+	it('resolveRange returns null (never throws) for a framing-valid blob with a garbage position payload', async () => {
+		const s = makeServer();
+		const ch = createCrdtChannel({ transport: s.transport });
+		await flush();
+		const t = ch.text('body');
+		t.insert(0, 'hello');
+		// 4-byte LE length prefix = 2, then two start bytes + an empty end run: this
+		// passes the framing guard but the inner bytes are not a decodable position, so
+		// the yjs decode would throw. The contract is to drop to null, never throw.
+		const framingValidGarbage = new Uint8Array([2, 0, 0, 0, 0, 0]);
+		expect(() => t.resolveRange(framingValidGarbage)).not.toThrow();
+		expect(t.resolveRange(framingValidGarbage)).toBeNull();
+		// A real anchor truncated to lose its end run (a mid-transmission cut) also drops.
+		const full = t.anchorRange(1, 4);
+		const truncated = full.subarray(0, full.length - 1);
+		expect(() => t.resolveRange(truncated)).not.toThrow();
+		ch.destroy();
+	});
+
+	it('a range anchor survives a concurrent edit from another replica', async () => {
+		const s = makeServer();
+		const chA = createCrdtChannel({ transport: s.transport });
+		await flush();
+		const tA = chA.text('body');
+		tA.insert(0, 'hello world');
+		await flush();
+		const anchor = tA.anchorRange(6, 11); // "world"
+		// A second replica of the same document edits before A's selection.
+		const sB = {
+			transport: {
+				sendUpdate(bytes) { Y.applyUpdate(s.doc, new Uint8Array(bytes)); },
+				sync(sv) {
+					return Promise.resolve({
+						topic: s.name + '-b',
+						access: s.access,
+						diff: Array.from(Y.encodeStateAsUpdate(s.doc, new Uint8Array(sv))),
+						sv: Array.from(Y.encodeStateVector(s.doc))
+					});
+				}
+			}
+		};
+		const chB = createCrdtChannel({ transport: sB.transport });
+		await flush();
+		const tB = chB.text('body');
+		expect(tB.toString()).toBe('hello world');
+		tB.insert(0, 'XX '); // B types before A's selection
+		await flush();
+		chA.resync(); // A pulls B's edit and converges
+		await flush();
+		const r = tA.resolveRange(anchor);
+		expect(tA.toString()).toBe('XX hello world');
+		expect(tA.toString().slice(r.start, r.end)).toBe('world');
+		chA.destroy();
+		chB.destroy();
+	});
+
 	it('two channels over two transports converge through the server', async () => {
 		const s = makeServer();
 		const chA = createCrdtChannel({ transport: s.transport });

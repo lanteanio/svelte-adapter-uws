@@ -59,6 +59,39 @@ const SYNC_RETRY_MS = 1000;
 const PRESYNC_BUFFER_CAP = 256;
 
 /**
+ * Pack two encoded relative positions into one opaque blob (a 4-byte little-endian
+ * length prefix for the first, then the two byte runs). Keeps a range anchor a single
+ * Uint8Array, consistent with the plugin's opaque-bytes surface. The 4-byte prefix
+ * cannot overflow for any real position (an item-based position is a handful of bytes;
+ * even a position into an empty type carrying an inline container name stays well under
+ * 4 GiB), so the length is always exact - no silent wrap.
+ * @param {Uint8Array} startBytes @param {Uint8Array} endBytes @returns {Uint8Array}
+ */
+function packRangeAnchor(startBytes, endBytes) {
+	const out = new Uint8Array(4 + startBytes.length + endBytes.length);
+	const n = startBytes.length;
+	out[0] = n & 0xff;
+	out[1] = (n >>> 8) & 0xff;
+	out[2] = (n >>> 16) & 0xff;
+	out[3] = (n >>> 24) & 0xff;
+	out.set(startBytes, 4);
+	out.set(endBytes, 4 + n);
+	return out;
+}
+
+/**
+ * Reverse of packRangeAnchor. Returns null for a malformed blob so a garbage anchor
+ * resolves to "no selection" rather than throwing.
+ * @param {any} bytes @returns {{ start: Uint8Array, end: Uint8Array } | null}
+ */
+function unpackRangeAnchor(bytes) {
+	if (!(bytes instanceof Uint8Array) || bytes.length < 4) return null;
+	const startLen = (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
+	if (4 + startLen > bytes.length) return null;
+	return { start: bytes.subarray(4, 4 + startLen), end: bytes.subarray(4 + startLen) };
+}
+
+/**
  * Normalize opaque CRDT bytes: a Uint8Array (native) or the JSON `number[]`
  * form. Returns null for anything else so a malformed payload drops instead
  * of corrupting the replica.
@@ -492,6 +525,11 @@ export function createCrdtChannel(options) {
 		text(name = 'root') {
 			facetKind(name, 'text');
 			const t = doc.getText(name);
+			const clampIndex = (i) => {
+				const n = Math.floor(Number(i));
+				if (!Number.isFinite(n) || n < 0) return 0;
+				return n > t.length ? t.length : n;
+			};
 			return {
 				toString() { return t.toString(); },
 				get length() { return t.length; },
@@ -502,6 +540,50 @@ export function createCrdtChannel(options) {
 				delete(index, length = 1) {
 					assertWritable();
 					doc.transact(() => { t.delete(index, length); });
+				},
+				/**
+				 * Encode a [start, end) range as a position anchor that survives concurrent
+				 * edits: a selection highlight stays on the same characters as other users
+				 * insert and delete around it. Returns opaque bytes (a packed pair of yjs
+				 * relative positions); pass them to resolveRange on any converged replica.
+				 * The start binds right and the end binds left, so an insert exactly at
+				 * either edge stays outside the range while an insert strictly inside it
+				 * extends the range to keep covering the original characters. A read - no
+				 * write access required.
+				 * @param {number} start @param {number} end @returns {Uint8Array}
+				 */
+				anchorRange(start, end) {
+					const rs = Y.createRelativePositionFromTypeIndex(t, clampIndex(start), 0);
+					const re = Y.createRelativePositionFromTypeIndex(t, clampIndex(end), -1);
+					return packRangeAnchor(Y.encodeRelativePosition(rs), Y.encodeRelativePosition(re));
+				},
+				/**
+				 * Resolve range anchor bytes (from anchorRange) to current { start, end }
+				 * offsets against this replica's text, normalized so start <= end. Returns
+				 * null if the blob is malformed or a position cannot be resolved against this
+				 * replica (e.g. a different document, or before the first sync), so a stale
+				 * selection drops rather than throws. If the anchored text was deleted the
+				 * range collapses to a zero-width caret at the deletion point (a caret, not a
+				 * ghost) - the natural yjs sticky-anchor behavior.
+				 * @param {Uint8Array} bytes @returns {{ start: number, end: number } | null}
+				 */
+				resolveRange(bytes) {
+					const parts = unpackRangeAnchor(bytes);
+					if (parts === null) return null;
+					// The framing check above validates only the length prefix, not that the
+					// two runs are decodable positions. A truncated / mangled / stale-format
+					// payload makes yjs decode throw, so guard it and drop to null - the
+					// documented fail-safe (never throws on a garbage anchor).
+					try {
+						const as = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(parts.start), doc);
+						const ae = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(parts.end), doc);
+						if (as === null || ae === null) return null;
+						return as.index <= ae.index
+							? { start: as.index, end: ae.index }
+							: { start: ae.index, end: as.index };
+					} catch {
+						return null;
+					}
 				},
 				/** cb fires after each change; read `toString()` for the value. */
 				onChange: makeOnChange(t, () => undefined)
