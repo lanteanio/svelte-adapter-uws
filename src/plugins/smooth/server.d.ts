@@ -138,3 +138,39 @@ export const SMOOTH_SCHEMA_VERSION: number;
 
 /** The internal topic-name prefix smoothed entity topics ride on (`__smooth:`). */
 export const SMOOTH_TOPIC_PREFIX: string;
+
+/**
+ * Build the stateless cell-snapshot wire codec - the stateless twin of the smooth
+ * codec used for spatial cell-topic interest. `shared: true` (no per-connection
+ * state), so a cell topic fans out natively to its subscribers. Encodes an
+ * interpolated entity snapshot with a full key string + absolute stamp so every
+ * subscriber's frame is byte-identical. `binary: false` returns null.
+ */
+export function createCellWireCodec(options?: {
+	binary?: boolean;
+}): {
+	capability: string;
+	schemaVersion: number;
+	encode: (event: string, data: { key: string; data?: any; t?: number }) => Uint8Array | null;
+	shared: true;
+} | null;
+
+/**
+ * Decode a cell-snapshot codec payload back into `{ event, data, t? }` - the same
+ * shape the smooth codec decodes to, so the client ingests cell frames through the
+ * same path. Stateless (no per-connection dictionary). Returns null on an unknown
+ * opcode / schema version or a malformed frame.
+ */
+export function decodeCell(
+	payload: Uint8Array,
+	schemaVersion?: number
+): { event: string; data: any; t?: number } | null;
+
+/** Negotiated capability token for the stateless cell-snapshot wire. */
+export const CELL_CAPABILITY: string;
+
+/** 1-byte in-frame schema version for the cell-snapshot wire. */
+export const CELL_SCHEMA_VERSION: number;
+
+/** The internal topic-name prefix cell-snapshot topics ride on (`__smoothcell:`). */
+export const CELL_TOPIC_PREFIX: string;

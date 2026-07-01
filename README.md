@@ -3813,6 +3813,43 @@ Per-worker limitations (acceptable for most apps):
 - `platform.closedWsAborts`  - per-worker counter; sum across workers for cluster total
 - `platform.assertions`  - per-worker counter Map
 
+### Shared memory across workers, and compute workers
+
+By default every worker is an island - there is no seam to hand them shared state, and every worker listens, so a latency-critical compute loop competes with connection I/O on the same thread. Two options change that.
+
+**`primaryInit`** runs once in the primary thread, before any worker spawns. Use it to allocate cross-worker shared memory - a `SharedArrayBuffer`, SPSC/MPSC rings, a `MessagePort` - that every worker then receives with the same references, no race. Its return value is surfaced to the `init` hook as `workerData`, and is replayed *identically* when a crashed worker respawns (a fresh buffer would be a different world). It is a **module path** (like `metrics`), not a live function: adapter options are serialized into the build, so a function written in `svelte.config.js` could never reach the runtime. The module is bundled as its own isolated entry, so the primary loads only it - never the app graph - and a top-level side effect in `hooks.ws` never runs in the supervisor.
+
+**`workers: { compute }`** splits the `CLUSTER_WORKERS` pool into I/O workers (listen + serve) and `compute` dedicated compute workers that fire `init` (receiving the shared memory via `workerData`) but never bind a listen socket - so a tick loop pays no connection-I/O jitter - all under the same lifecycle (drain, crash-respawn with identical `workerData`, heartbeat, metrics). I/O workers = total - compute.
+
+```js
+// src/lib/server/cluster.js
+export default function primaryInit({ env }) {
+  const world = new SharedArrayBuffer(WORLD_BYTES);
+  return { world };            // -> every worker's init({ workerData }) sees the same buffer
+}
+
+// svelte.config.js
+adapter({
+  websocket: {
+    primaryInit: './src/lib/server/cluster.js',
+    workers: { compute: 2 }    // of CLUSTER_WORKERS total; the rest serve connections
+  }
+});
+
+// src/hooks.ws.js
+export function init({ platform, workerData }) {
+  const view = new Int32Array(workerData.world);  // shared across all workers
+  // ...I/O workers read/write it per request; compute workers drive it on a tick
+}
+```
+
+```bash
+# 12 workers: 10 serve connections, 2 run the shared-memory compute loop
+CLUSTER_WORKERS=12 node build
+```
+
+General-purpose beyond simulations: a cross-worker LRU cache, a shared rate-limit / token-bucket table, shared metric counters, or shared model weights. No effect in single-process mode (`workerData` is `null`); with neither option set, behavior is byte-identical to a cluster without them.
+
 ### Cross-worker state-divergence detection
 
 The relay carries each published message to every worker, so under healthy operation every worker has seen the same set of published messages per topic. Optionally, the cluster can watch for the case where it has *not* - a relay frame that reached some workers but not another (a partial fan-out, a frame a worker failed to apply). This shows up as workers disagreeing on the highest sequence number they have delivered for a topic.

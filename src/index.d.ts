@@ -482,6 +482,75 @@ export interface WebSocketOptions {
 	metrics?: string;
 
 	/**
+	 * Module path to a primary-thread init hook that runs ONCE, in the primary
+	 * thread, before any worker spawns (clustered mode only). Use it to allocate
+	 * cross-worker shared memory - a `SharedArrayBuffer`, SPSC/MPSC rings, a
+	 * `MessagePort` - that every worker then receives, same references, no race.
+	 *
+	 * This is a **module path** (like `metrics`), not a live function: adapter
+	 * options are serialized into the build, so a function written in
+	 * `svelte.config.js` could never reach the production runtime. Point it at a
+	 * module whose default export (or a named `primaryInit` export) is
+	 * `({ env }) => any`. The return value is attached to every worker's
+	 * `workerData` and surfaced to the `init` hook as `workerData`; it is replayed
+	 * IDENTICALLY when a crashed worker is respawned (a fresh buffer would be a
+	 * different world). The module is bundled as its own isolated entry, so the
+	 * primary loads only it - never the app graph - and a top-level side effect in
+	 * `hooks.ws` never runs in the supervisor.
+	 *
+	 * No effect in single-process mode (there is no primary thread and nothing to
+	 * share memory with). Pairs with `workers` for dedicated compute workers.
+	 *
+	 * @example
+	 * ```js
+	 * // src/lib/server/cluster.js
+	 * export default function primaryInit({ env }) {
+	 *   const world = new SharedArrayBuffer(WORLD_BYTES);
+	 *   return { world };   // -> every worker's init({ workerData }) sees the same buffer
+	 * }
+	 *
+	 * // svelte.config.js
+	 * adapter({ websocket: { primaryInit: './src/lib/server/cluster.js', workers: { compute: 2 } } });
+	 *
+	 * // src/hooks.ws.js
+	 * export function init({ platform, workerData }) {
+	 *   const view = new Int32Array(workerData.world);
+	 *   // ...drive the shared world
+	 * }
+	 * ```
+	 */
+	primaryInit?: string;
+
+	/**
+	 * Worker roles for a clustered deployment. Splits the `CLUSTER_WORKERS` pool
+	 * (or `'auto'` = CPU count) into I/O workers (listen + serve connections) and
+	 * dedicated compute workers that NEVER bind a listen socket - so a
+	 * latency-critical tick loop pays no connection-I/O jitter - while staying
+	 * under the same unified lifecycle (drain, crash-respawn with identical
+	 * `workerData`, heartbeat, metrics).
+	 *
+	 * `compute` is how many of the total workers are compute workers; I/O workers
+	 * = total - compute. A compute worker fires the `init` hook (receiving the
+	 * `primaryInit` shared memory via `workerData`) and runs entirely app-driven.
+	 * `compute` must be less than the total worker count.
+	 *
+	 * No effect in single-process mode. Requires `CLUSTER_WORKERS` to be set for
+	 * the cluster to exist at all.
+	 *
+	 * @default { compute: 0 }
+	 * @example
+	 * ```js
+	 * // 12 total workers: 6 serve connections, 6 run the shared-memory sim
+	 * // CLUSTER_WORKERS=12 node build
+	 * adapter({ websocket: { primaryInit: './src/lib/server/cluster.js', workers: { compute: 6 } } });
+	 * ```
+	 */
+	workers?: {
+		/** How many of the `CLUSTER_WORKERS` total are dedicated compute workers (no listen socket). Must be < total. @default 0 */
+		compute?: number;
+	};
+
+	/**
 	 * Interval in milliseconds for the cross-worker state-hash reporter
 	 * (clustered mode only). When greater than `0`, each worker periodically
 	 * folds a structure-only projection of its per-topic delivered-sequence
@@ -1086,8 +1155,16 @@ export interface WebSocketHandler<UserData = unknown> {
 	 *   live.setCronPlatform(platform);
 	 * }
 	 * ```
+	 *
+	 * **`workerData`** is whatever the `websocket.primaryInit` module returned,
+	 * replayed identically to every worker (and every respawn) - the cross-worker
+	 * shared memory (a `SharedArrayBuffer`, rings, a `MessagePort`) seeded once in
+	 * the primary thread before any worker spawned. It is `null` in single-process
+	 * mode and when no `primaryInit` is configured. A dedicated compute worker
+	 * (`websocket.workers.compute`) also fires `init` with `workerData` but never
+	 * binds a listen socket.
 	 */
-	init?: (ctx: { platform: Platform }) => void | Promise<void>;
+	init?: (ctx: { platform: Platform; workerData: any }) => void | Promise<void>;
 
 	/**
 	 * Called once during graceful shutdown, before the listen socket is

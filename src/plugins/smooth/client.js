@@ -48,6 +48,7 @@ import { monotonicNow, now, setTimer, clearTimer } from '../../client-runtime.js
 import { createPredictor } from './predict.js';
 import { createSmoother, SAMPLE_EMPTY } from './interpolate.js';
 import { SMOOTH_CAPABILITY, SMOOTH_TOPIC_PREFIX, SmoothDecodeDict, decodeSmooth } from './codec.js';
+import { CELL_CAPABILITY, CELL_TOPIC_PREFIX, decodeCell } from './cell-codec.js';
 
 // The deterministic generator the predictor seeds per command, re-exported so
 // an app can draw the same reproducible randomness outside `apply` (world
@@ -65,6 +66,32 @@ registerWireCodec(SMOOTH_TOPIC_PREFIX, {
 	capability: SMOOTH_CAPABILITY,
 	state: { onAttach: () => new SmoothDecodeDict() },
 	decode: decodeSmooth
+});
+
+// Spatial cell-topic interest (cells mode). A cells-mode topic delivers remote
+// entities on many dynamic `__smoothcell:<name>#<cx>,<cy>` topics the server
+// subscribes this socket to; a SINK codec receives every such frame (with its
+// resolved topic) through one registration, so a channel never taps a cell topic
+// itself. The sink parses the topic's `<name>` and routes the decoded frame to the
+// channel registered for it, tagged with the cell key so a stale cross-cell remove
+// resolves correctly. Registered at module load so `hello` advertises the
+// capability (the attach-once contract). Stateless (no per-connection dictionary).
+/** @type {Map<string, (decoded: { event: string, data: any, t?: number }, cellKey: string) => void>} */
+const _cellChannels = new Map();
+registerWireCodec(CELL_TOPIC_PREFIX, {
+	capability: CELL_CAPABILITY,
+	sink: true,
+	decode(payload, _state, schemaVersion, _seq, topic) {
+		const decoded = decodeCell(payload, schemaVersion);
+		if (!decoded || typeof topic !== 'string') return;
+		// topic = `<CELL_TOPIC_PREFIX><name>#<cellKey>`; split on the LAST '#' so a
+		// name containing '#' (unusual but legal) still resolves.
+		const rest = topic.slice(CELL_TOPIC_PREFIX.length);
+		const hash = rest.lastIndexOf('#');
+		if (hash < 0) return;
+		const sink = _cellChannels.get(rest.slice(0, hash));
+		if (sink) sink(decoded, rest.slice(hash + 1));
+	}
 });
 
 // Resolve `requestAnimationFrame` at call time so a polyfill installed after
@@ -167,6 +194,13 @@ export function createSmoothChannel(options) {
 	 * latest-value). The local entity never lives here. */
 	const merged = new Map();
 	let selfKey = null;
+	// Cells mode (interest.cells): remote entities arrive on cell topics via the
+	// module sink, not the base wire tap. `cellOf` tracks each remote entity's
+	// current cell so a transition's stale remove-to-old-cell only drops an entity
+	// still in that cell. `smoothName` is the sink registry key (the sync reply's
+	// topic name), set when the topic runs cells mode.
+	const cellOf = new Map();
+	let smoothName = null;
 	let destroyed = false;
 	let dirty = true;
 	let wasOverflowed = false;
@@ -262,6 +296,29 @@ export function createSmoothChannel(options) {
 		smoother.ingest(ev, recvMono);
 	}
 
+	// Cells-mode inbound: a decoded cell frame (update / remove) tagged with the
+	// cell it arrived on. Both feed the SAME merged/smoother path as the base tap's
+	// `ingest`; a remove is cell-scoped so a transition's stale remove-to-old-cell
+	// cannot drop an entity already re-placed in a new cell (its update re-pointed
+	// cellOf first). A self-key update still routes through `ingest` (rebase, no
+	// ghost twin), so the owner's own cell echo never double-renders.
+	function ingestCell(decoded, cellKey) {
+		if (decoded.event === 'update') {
+			const d = decoded.data;
+			if (d === null || typeof d !== 'object' || typeof d.key !== 'string') return;
+			cellOf.set(d.key, cellKey);
+			ingest(decoded);
+			return;
+		}
+		if (decoded.event === 'remove') {
+			const d = decoded.data;
+			if (d === null || typeof d !== 'object' || typeof d.key !== 'string') return;
+			if (cellOf.get(d.key) !== cellKey) return;
+			cellOf.delete(d.key);
+			ingest(decoded);
+		}
+	}
+
 	function notifyOverflow(state) {
 		wasOverflowed = state;
 		if (overflowCb) overflowCb(state);
@@ -297,7 +354,16 @@ export function createSmoothChannel(options) {
 				}
 				if (typeof reply.you === 'string') selfKey = reply.you;
 				lcEnabled = reply.lc === 1 || reply.lc === true;
+				// Cells mode: register this channel's cell-frame sink under its topic
+				// name so the module-level sink routes `__smoothcell:<name>#` frames
+				// here. Idempotent across reconnects (name-keyed).
+				if ((reply.cells === 1 || reply.cells === true) && typeof reply.topic === 'string') {
+					smoothName = reply.topic;
+					cellsEnabled = true;
+					_cellChannels.set(smoothName, ingestCell);
+				}
 				merged.clear();
+				cellOf.clear();
 				// Reset BEFORE seeding: a resync may follow a reconnect onto a
 				// different machine, so the old offset estimate and ring axis
 				// must not survive into the new seed.
@@ -597,6 +663,8 @@ export function createSmoothChannel(options) {
 		destroy() {
 			if (destroyed) return;
 			destroyed = true;
+			if (smoothName !== null && _cellChannels.get(smoothName) === ingestCell) _cellChannels.delete(smoothName);
+			cellOf.clear();
 			if (tapUnsub !== null) tapUnsub();
 			statusUnsub();
 			cancelFrame(raf);

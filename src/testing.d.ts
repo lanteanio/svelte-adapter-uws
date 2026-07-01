@@ -47,6 +47,15 @@ export interface TestServerOptions {
 	 * check, and no upgrade timeout.
 	 */
 	metrics?: MetricsRegistry;
+	/**
+	 * Optional primary-thread init hook, mirroring the production
+	 * `websocket.primaryInit` option (here a live function, since the harness is
+	 * in-process). Runs ONCE before `handler.init`; its return value is surfaced to
+	 * `init` as `workerData`, so a test can assert the cross-worker shared-memory
+	 * contract without spawning real worker threads. Omitted -> `workerData` is
+	 * `null`, matching single-process mode.
+	 */
+	primaryInit?: (ctx: { env: NodeJS.ProcessEnv }) => any;
 }
 
 /**

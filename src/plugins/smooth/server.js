@@ -55,6 +55,11 @@ import { wallEpoch } from '../../runtime/runtime.js';
 // generator serves command-id-seeded draws outside `apply`).
 export { createSharedRandom } from './random.js';
 export { SMOOTH_CAPABILITY, SMOOTH_SCHEMA_VERSION, SMOOTH_TOPIC_PREFIX } from './codec.js';
+// Stateless cell-snapshot wire (spatial cell-topic interest). The stateless twin
+// of the smooth codec: `shared: true`, so a cell topic fans out natively to its
+// subscribers. Consumed by the realtime smooth server (per-cell publish) and the
+// smooth client (decode). See ./cell-codec.js.
+export { createCellWireCodec, decodeCell, CELL_CAPABILITY, CELL_SCHEMA_VERSION, CELL_TOPIC_PREFIX } from './cell-codec.js';
 
 /** Per-entity command queue bound: drop-oldest beyond it. A client that
  * floods faster than the tick drains loses its oldest samples and recovers

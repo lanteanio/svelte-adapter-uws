@@ -53,7 +53,7 @@ function envelope(topic, event, data, seq) {
  * @returns {Promise<import('./testing.js').TestServer>}
  */
 export async function createTestServer(options = {}) {
-	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, protection, metrics, adminPath = '/__realtime', readinessCheckPath = '/readyz', healthCheckPath = '/healthz' } = options;
+	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, protection, metrics, adminPath = '/__realtime', readinessCheckPath = '/readyz', healthCheckPath = '/healthz', primaryInit } = options;
 
 	// Readiness flag, mirroring the production `counters.draining`. Flipped true
 	// at the start of the returned `close()` (graceful shutdown) so the readiness
@@ -1799,10 +1799,16 @@ export async function createTestServer(options = {}) {
 			// Fire the user's `init` hook once the test server is listening,
 			// before resolving createTestServer(). Mirrors production
 			// handler.js semantics: throwing init rejects the createTestServer
-			// promise so test setup failure is loud.
+			// promise so test setup failure is loud. An optional test `primaryInit`
+			// runs once first (mirroring the production primary-thread hook) and its
+			// result is surfaced as `workerData` - null when unset, matching
+			// single-process mode which has no primary thread.
 			if (typeof handler.init === 'function') {
 				try {
-					await handler.init({ platform });
+					const testWorkerData = typeof primaryInit === 'function'
+						? ((await primaryInit({ env: process.env })) ?? null)
+						: null;
+					await handler.init({ platform, workerData: testWorkerData });
 				} catch (err) {
 					try { uWS.us_listen_socket_close(listenSocket); } catch {}
 					return reject(err);

@@ -127,6 +127,75 @@ describeUWS('hooks.ws.init', () => {
 	});
 });
 
+describeUWS('hooks.ws.init workerData / primaryInit', () => {
+	afterEach(async () => {
+		await server?.close();
+		server = null;
+	});
+
+	it('surfaces workerData: null to init when no primaryInit is configured', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		let seen;
+		server = await createTestServer({
+			handler: { init(ctx) { seen = ctx; } }
+		});
+		expect(seen).toHaveProperty('workerData');
+		expect(seen.workerData).toBeNull();
+	});
+
+	it('runs primaryInit once, before init, and surfaces its return value as workerData', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const order = [];
+		let workerDataInInit;
+		const shared = { token: 42 };
+		server = await createTestServer({
+			primaryInit() { order.push('primaryInit'); return shared; },
+			handler: {
+				init({ workerData }) { order.push('init'); workerDataInInit = workerData; }
+			}
+		});
+		expect(order).toEqual(['primaryInit', 'init']);
+		// Surfaced by reference - init sees the exact object primaryInit returned.
+		expect(workerDataInInit).toBe(shared);
+		expect(workerDataInInit.token).toBe(42);
+	});
+
+	it('passes a SharedArrayBuffer through by reference (the cross-worker memory contract)', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const sab = new SharedArrayBuffer(8);
+		new Int32Array(sab)[0] = 7;
+		let received;
+		server = await createTestServer({
+			primaryInit() { return { world: sab }; },
+			handler: { init({ workerData }) { received = workerData.world; } }
+		});
+		// Same backing buffer, not a structured-clone copy.
+		expect(received).toBe(sab);
+		expect(new Int32Array(received)[0]).toBe(7);
+	});
+
+	it('calls primaryInit with an { env } context', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		let ctx;
+		server = await createTestServer({
+			primaryInit(c) { ctx = c; return null; },
+			handler: { init() {} }
+		});
+		expect(ctx).toHaveProperty('env');
+		expect(ctx.env).toBe(process.env);
+	});
+
+	it('surfaces workerData: null when primaryInit returns nothing', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		let workerDataInInit = 'unset';
+		server = await createTestServer({
+			primaryInit() { /* returns undefined */ },
+			handler: { init({ workerData }) { workerDataInInit = workerData; } }
+		});
+		expect(workerDataInInit).toBeNull();
+	});
+});
+
 describeUWS('hooks.ws.shutdown', () => {
 	afterEach(async () => {
 		await server?.close().catch(() => {});

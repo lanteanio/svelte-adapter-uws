@@ -278,6 +278,66 @@ export default function (opts = {}) {
 				writeFileSync(`${tmp}/metrics-registry.js`, 'export default null;\n');
 			}
 
+			// primaryInit module. Like `metrics`, this is a module PATH, not a live
+			// function: adapter options are serialized into the build, so a function
+			// passed in svelte.config.js could never reach the runtime. The module's
+			// default export (or a named `primaryInit` export) runs ONCE in the primary
+			// thread before any worker spawns; its return value is attached to every
+			// worker's `workerData` (replayed identically on respawn) and surfaced to
+			// the `init` hook. Bundled as its own entry so the primary loads only this
+			// module, never the app graph (a top-level side effect in hooks.ws must not
+			// run in the supervisor). A `null` stub is always written so the placeholder
+			// import resolves even when unused.
+			if (websocket?.primaryInit != null && typeof websocket.primaryInit !== 'string') {
+				throw new Error(
+					"websocket.primaryInit must be a module path string (e.g. './src/lib/server/cluster.js') " +
+					'whose default (or named `primaryInit`) export is a function run once in the primary thread ' +
+					'before workers spawn. A live function cannot be passed: adapter options are serialized into ' +
+					'the build, so it would never reach the production runtime.'
+				);
+			}
+			const primaryInitPath = websocket?.primaryInit;
+			if (primaryInitPath && existsSync(`${tmp}/primary-init.js`)) {
+				builder.log.minor('primaryInit: built by Vite plugin');
+			} else if (primaryInitPath) {
+				const primaryInitEntry = `${tmp}/primary-init-src.js`;
+				// Pass the namespace through a pick() so esbuild does not statically
+				// resolve `.default`/`.primaryInit` against the user's module and warn
+				// for whichever export form they did not use.
+				writeFileSync(
+					primaryInitEntry,
+					`import * as m from ${JSON.stringify(path.resolve(primaryInitPath))};\n` +
+					'const pick = (ns) => ns.default ?? ns.primaryInit ?? null;\n' +
+					'export default pick(m);\n'
+				);
+				await esbuildServerModule(primaryInitEntry, `${tmp}/primary-init.js`);
+				builder.log.minor(`primaryInit: ${primaryInitPath}`);
+			} else {
+				writeFileSync(`${tmp}/primary-init.js`, 'export default null;\n');
+			}
+
+			// Worker roles: `websocket.workers.compute` is how many of the cluster's
+			// workers are dedicated compute workers (no listen socket; app-driven via
+			// the primaryInit shared memory). io = total - compute. Serialized into the
+			// primary-visible WORKERS_CONFIG placeholder (plain data - the count - so it
+			// rides the JSON cleanly, unlike primaryInit).
+			let computeWorkers = 0;
+			if (websocket?.workers != null) {
+				const w = websocket.workers;
+				if (typeof w !== 'object' || Array.isArray(w)) {
+					throw new Error('websocket.workers must be an object, e.g. { compute: 2 }.');
+				}
+				if (w.compute != null) {
+					if (!Number.isInteger(w.compute) || w.compute < 0) {
+						throw new Error(
+							`websocket.workers.compute must be a non-negative integer (how many of the ` +
+							`CLUSTER_WORKERS total are compute workers), got ${JSON.stringify(w.compute)}.`
+						);
+					}
+					computeWorkers = w.compute;
+				}
+			}
+
 			const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
 
 			/** @type {Record<string, string>} */
@@ -285,7 +345,8 @@ export default function (opts = {}) {
 				index: `${tmp}/index.js`,
 				manifest: `${tmp}/manifest.js`,
 				'ws-handler': `${tmp}/ws-handler.js`,
-				'metrics-registry': `${tmp}/metrics-registry.js`
+				'metrics-registry': `${tmp}/metrics-registry.js`,
+				'primary-init': `${tmp}/primary-init.js`
 			};
 
 			if (builder.hasServerInstrumentationFile?.()) {
@@ -566,7 +627,9 @@ export default function (opts = {}) {
 					HEALTH_CHECK_PATH: JSON.stringify(healthCheckPath),
 					READINESS_CHECK_PATH: JSON.stringify(readinessCheckPath),
 					STATIC_HEADERS: JSON.stringify(staticHeadersResult.headers),
-					METRICS_REGISTRY: './server/metrics-registry.js'
+					METRICS_REGISTRY: './server/metrics-registry.js',
+					PRIMARY_INIT: './server/primary-init.js',
+					WORKERS_CONFIG: JSON.stringify({ compute: computeWorkers })
 				}
 			});
 

@@ -1,4 +1,5 @@
 import uWS from 'uWebSockets.js';
+import { workerData } from 'node:worker_threads';
 import { wsModule } from '../ws-handler-bridge.js';
 import { WS_CAPS, WS_SUBSCRIPTIONS, assert, fatal, wrapBatchEnvelope } from '../utils.js';
 import { monotonicNow } from '../runtime.js';
@@ -42,30 +43,40 @@ let listenSocket = null;
  *
  * @param {string} host
  * @param {number} port
+ * @param {{ listen?: boolean }} [opts] - `listen: false` fires the `init` hook
+ *   without binding a listen socket. Used by a compute worker (worker roles): it
+ *   runs app boot work over the shared memory from primaryInit but never accepts
+ *   connections. Omitted / `listen: true` is the normal listen-and-init path.
  * @returns {Promise<void>}
  */
-export async function start(host, port) {
-	await new Promise((resolve) => {
-		app.listen(host, port, (socket) => {
-			if (socket) {
-				listenSocket = socket;
-				const startup = (monotonicNow() - _t_app).toFixed(0);
-				console.log(`Listening on ${is_tls ? 'https' : 'http'}://${host}:${port} (ready in ${startup}ms)`);
-				resolve();
-			} else {
-				console.error(`Failed to listen on ${host}:${port}`);
-				process.exit(1);
-			}
+export async function start(host, port, opts) {
+	const doListen = !opts || opts.listen !== false;
+	if (doListen) {
+		await new Promise((resolve) => {
+			app.listen(host, port, (socket) => {
+				if (socket) {
+					listenSocket = socket;
+					const startup = (monotonicNow() - _t_app).toFixed(0);
+					console.log(`Listening on ${is_tls ? 'https' : 'http'}://${host}:${port} (ready in ${startup}ms)`);
+					resolve();
+				} else {
+					console.error(`Failed to listen on ${host}:${port}`);
+					process.exit(1);
+				}
+			});
 		});
-	});
+	}
 
 	// Fire the user's `init` hook (if exported) once per worker, after the
-	// listen socket is bound and before this function resolves. Async hooks
-	// are awaited so callers that `await start(...)` get a fully-ready
-	// signal that includes app-level boot work. A throwing hook re-throws
-	// to the caller - boot failure should be loud.
+	// listen socket is bound (when listening) and before this function resolves.
+	// Async hooks are awaited so callers that `await start(...)` get a fully-ready
+	// signal that includes app-level boot work. A throwing hook re-throws to the
+	// caller - boot failure should be loud. `workerData.app` is the value the app
+	// returned from primaryInit (the cross-worker shared memory), replayed
+	// identically to every worker; null in single-process mode and when no
+	// primaryInit is configured.
 	if (WS_ENABLED && typeof wsModule.init === 'function') {
-		await wsModule.init({ platform });
+		await wsModule.init({ platform, workerData: workerData?.app ?? null });
 	}
 }
 

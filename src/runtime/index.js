@@ -49,6 +49,31 @@ if (is_primary) {
 		process.exit(1);
 	}
 
+	// Worker roles: split the pool into I/O workers (listen + serve) and compute
+	// workers (never listen; driven entirely by the app via shared memory seeded
+	// in primaryInit, so a latency-critical tick pays no I/O jitter). WORKERS_CONFIG
+	// is the serialized `websocket.workers` option; `compute` is how many of the
+	// `num` total workers are compute workers (io = num - compute).
+	const workers_config = WORKERS_CONFIG;
+	const compute_count = Math.max(0, Math.floor(workers_config?.compute ?? 0));
+	if (compute_count >= num) {
+		console.error(`websocket.workers.compute (${compute_count}) must be less than the total worker count (${num}).`);
+		process.exit(1);
+	}
+	const io_count = num - compute_count;
+
+	// primaryInit: run the app's optional primary-thread hook ONCE, before any
+	// worker spawns. Its return value is retained and replayed as the IDENTICAL
+	// `workerData.app` to every worker AND every respawn (a SharedArrayBuffer is
+	// shared by reference through workerData, so all workers - and a crashed
+	// worker's replacement - see the same backing memory). Bundled as its own
+	// isolated entry, so importing it never pulls the app graph into the primary.
+	const { default: primaryInit } = await import('PRIMARY_INIT');
+	let app_worker_data = null;
+	if (typeof primaryInit === 'function') {
+		app_worker_data = (await primaryInit({ env: process.env })) ?? null;
+	}
+
 	// On Linux, uWS sets SO_REUSEPORT by default so each worker can bind
 	// to the same port independently and the kernel distributes connections.
 	// No single-threaded acceptor bottleneck, no single point of failure.
@@ -83,11 +108,15 @@ if (is_primary) {
 			: uWS.App();
 	}
 
-	console.log(`Primary thread starting ${num} workers (${cluster_mode} mode)...`);
+	console.log(
+		`Primary thread starting ${num} workers ` +
+		`(${io_count} io${compute_count ? `, ${compute_count} compute` : ''}, ${cluster_mode} mode)...`
+	);
 
 	/**
-	 * Per-worker metadata.
-	 * @typedef {{ descriptor: any, lastHeartbeat: number }} WorkerMeta
+	 * Per-worker metadata. `role` is the worker's assigned role ('io' | 'compute'),
+	 * retained so a respawn re-creates the SAME role after a crash.
+	 * @typedef {{ descriptor: any, lastHeartbeat: number, role: 'io' | 'compute' }} WorkerMeta
 	 */
 
 	/** @type {Map<import('node:worker_threads').Worker, WorkerMeta>} */
@@ -136,13 +165,17 @@ if (is_primary) {
 		}
 	}, HEARTBEAT_INTERVAL_MS).unref();
 
-	function spawn_worker() {
+	/** @param {'io' | 'compute'} role */
+	function spawn_worker(role) {
 		const worker = new Worker(fileURLToPath(import.meta.url), {
-			workerData: { mode: cluster_mode }
+			// `app` is the retained primaryInit output, replayed identically on every
+			// spawn and respawn so a compute worker's replacement rejoins the same
+			// shared-memory world.
+			workerData: { mode: cluster_mode, role, app: app_worker_data }
 		});
 		// lastHeartbeat starts at 0  - worker is confirmed alive only after the
 		// first 'descriptor' / 'ready' / 'heartbeat-ack' message arrives.
-		workers.set(worker, { descriptor: null, lastHeartbeat: 0 });
+		workers.set(worker, { descriptor: null, lastHeartbeat: 0, role });
 
 		worker.on('message', (msg) => {
 			const meta = workers.get(worker);
@@ -170,9 +203,13 @@ if (is_primary) {
 						}
 					});
 				}
-			} else if (msg.type === 'ready' && cluster_mode === 'reuseport') {
+			} else if (msg.type === 'ready' && (cluster_mode === 'reuseport' || msg.role === 'compute')) {
+				// A reuseport io worker reports 'ready' once it is listening; a compute
+				// worker (any mode) reports 'ready' once its init hook has resolved. Both
+				// mark the worker confirmed-alive and reset the crash-restart backoff.
 				meta.lastHeartbeat = monotonicNow();
-				console.log(`Worker thread ${worker.threadId} listening on :${port}`);
+				if (msg.role === 'compute') console.log(`Compute worker ${worker.threadId} ready`);
+				else console.log(`Worker thread ${worker.threadId} listening on :${port}`);
 				restart_delay = 0;
 				restart_attempts = 0;
 				for (const t of restart_timers) clearTimer(t);
@@ -262,6 +299,10 @@ if (is_primary) {
 
 		worker.on('exit', (code) => {
 			const meta = workers.get(worker);
+			// Retain the dead worker's role so its replacement comes back in the same
+			// role (a compute worker respawns as a compute worker, with the same
+			// replayed workerData.app).
+			const role = meta?.role ?? 'io';
 			if (cluster_mode === 'acceptor' && meta?.descriptor) {
 				try { acceptorApp.removeChildAppDescriptor(meta.descriptor); } catch {}
 			}
@@ -294,7 +335,7 @@ if (is_primary) {
 				const timer = setTimer(() => {
 				restart_timers.delete(timer);
 				if (shutting_down) return;
-				spawn_worker();
+				spawn_worker(role);
 			}, restart_delay);
 			restart_timers.add(timer);
 			}
@@ -309,7 +350,8 @@ if (is_primary) {
 		});
 	}
 
-	for (let i = 0; i < num; i++) spawn_worker();
+	for (let i = 0; i < io_count; i++) spawn_worker('io');
+	for (let i = 0; i < compute_count; i++) spawn_worker('compute');
 
 	/** @param {'SIGINT' | 'SIGTERM'} reason */
 	async function graceful_shutdown(reason) {
@@ -362,15 +404,23 @@ if (is_primary) {
 		// process - which is the right behavior for boot failure.
 		await start(host, port);
 	} else {
-		// Worker thread startup depends on clustering mode
-		if (workerData?.mode === 'reuseport') {
+		// Worker thread startup depends on role, then clustering mode.
+		const role = workerData?.role ?? 'io';
+		if (role === 'compute') {
+			// Compute worker: fire the app's `init` hook (which receives
+			// `workerData.app` - the shared memory seeded in primaryInit) but never
+			// bind a listen socket, so a latency-critical tick pays no connection-I/O
+			// jitter. `ready` is posted once init resolves, in any cluster mode.
+			await start(host, port, { listen: false });
+			parentPort.postMessage({ type: 'ready', role });
+		} else if (workerData?.mode === 'reuseport') {
 			// Reuseport: each worker listens on the shared port directly.
 			// The kernel distributes incoming connections via SO_REUSEPORT.
 			// `init` fires once per worker; `ready` is posted only after
 			// the hook resolves so the primary's worker-ready bookkeeping
 			// matches actual readiness.
 			await start(host, port);
-			parentPort.postMessage({ type: 'ready' });
+			parentPort.postMessage({ type: 'ready', role });
 		} else {
 			// Acceptor: register with the main thread's acceptor app
 			parentPort.postMessage({ type: 'descriptor', descriptor: getDescriptor() });
