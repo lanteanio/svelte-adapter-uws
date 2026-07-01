@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.46] - 2026-07-01
+
 ### Added
 
 - **Stateless cell-snapshot wire codec (`createCellWireCodec`) for spatial cell-topic fan-out.** The smooth wire codec is per-connection stateful (a short-id dictionary), so it cannot fan out natively - each capable connection is encoded against its own dictionary. For a high-population spatial topic, area-of-interest can instead be expressed as SUBSCRIPTION to grid-cell topics; each cell's snapshot is then identical to all its subscribers, so it rides the native cohort fan-out (one encode, the C++ TopicTree does the sends). This codec is that identical-to-all form: stateless (full key strings + absolute stamps, so a frame is self-contained and a new cell subscriber decodes it with no prior state) and `shared: true` (cohort-eligible). Ops are STATE / XY / REMOVE - no ACK (an acknowledgement is per-owner and stays on the stateful self channel). Exposed from `plugins/smooth` as `createCellWireCodec` / `decodeCell` / `CELL_CAPABILITY` / `CELL_TOPIC_PREFIX`; the smooth client registers it as a prefix SINK so a channel receives every `__smoothcell:<name>#<cell>` frame (server-driven subscription) through one registration and ingests it into the same remote-entity path, with a self-key dedup and cell-scoped removes. This is the adapter primitive `svelte-realtime`'s `live.smooth({ interest: { cells: true } })` builds spatial cell-topic interest on; additive and JSON-compatible (a client without the capability gets the JSON envelope on the cell topic).
