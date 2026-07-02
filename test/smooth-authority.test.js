@@ -388,3 +388,65 @@ describe('createSmoothAuthority - inject (ctx.applyTo / server-initiated command
 		expect(tick).toEqual({ updates: [], acks: [], events: [], idle: true });
 	});
 });
+
+describe('createSmoothAuthority - server entities (ensure active + set)', () => {
+	const glide = (s) => ({ x: s.x + 1, y: s.y });
+
+	it('ensure with { active: true } lets onMissing drive an entity that never saw a command', () => {
+		const a = createSmoothAuthority({ apply: moveApply, onMissing: glide });
+		a.ensure('npc', { server: true }, { x: 0, y: 0 }, { active: true });
+		const tick = a.drain();
+		expect(tick.updates).toHaveLength(1);
+		expect(tick.updates[0]).toMatchObject({ key: 'npc', state: { x: 1, y: 0 }, commanded: false });
+		expect(tick.acks).toHaveLength(0); // a server entity never acknowledges
+		expect(tick.idle).toBe(false); // still gliding: the caller keeps ticking
+	});
+
+	it('the default ensure stays inactive (a joined-but-idle client costs no onMissing calls)', () => {
+		const calls = [];
+		const a = createSmoothAuthority({ apply: moveApply, onMissing: (s) => { calls.push(1); return { ...s }; } });
+		a.ensure('k', mockWs(), { x: 0, y: 0 });
+		expect(a.drain()).toEqual({ updates: [], acks: [], events: [], idle: true });
+		expect(calls).toHaveLength(0);
+	});
+
+	it('set replaces the state, wakes onMissing, and leaves the next drain baseline clean', () => {
+		const a = createSmoothAuthority({ apply: moveApply, onMissing: glide });
+		a.ensure('k', mockWs(), { x: 0, y: 0 });
+		// Post-drain server logic teleports the entity; the caller broadcasts it.
+		expect(a.set('k', { x: 100, y: 0 })).toBe(true);
+		expect(a.get('k').state).toEqual({ x: 100, y: 0 });
+		// The next drain treats the set state as the baseline (no duplicate update
+		// for the set itself) and onMissing continues FROM it (woken).
+		const tick = a.drain();
+		expect(tick.updates).toHaveLength(1);
+		expect(tick.updates[0].state).toEqual({ x: 101, y: 0 });
+	});
+
+	it('set on a resting entity re-rests in one tick when onMissing holds position', () => {
+		const a = createSmoothAuthority({ apply: moveApply, onMissing: (s) => s });
+		a.ensure('k', mockWs(), { x: 0, y: 0 });
+		a.set('k', { x: 5, y: 0 });
+		const tick = a.drain(); // onMissing returns the same ref -> rest again
+		expect(tick.updates).toHaveLength(0);
+		expect(tick.idle).toBe(true);
+	});
+
+	it('set on an unknown key is ignored', () => {
+		const a = createSmoothAuthority({ apply: moveApply });
+		expect(a.set('ghost', { x: 1 })).toBe(false);
+	});
+
+	it('set never touches the queue, watermark, or lastCommand', () => {
+		const a = createSmoothAuthority({ apply: moveApply });
+		const ws = mockWs();
+		a.ensure('k', ws, { x: 0, y: 0 });
+		a.enqueue('k', [{ id: 7, cmd: { dx: 1, dy: 0 } }]);
+		a.drain();
+		a.set('k', { x: 50, y: 0 });
+		expect(a.get('k').lastAckedId).toBe(7);
+		a.enqueue('k', [{ id: 8, cmd: { dx: 1, dy: 0 } }]);
+		const tick = a.drain();
+		expect(tick.acks[0]).toMatchObject({ id: 8, state: { x: 51, y: 0 } }); // applies on the SET state
+	});
+});

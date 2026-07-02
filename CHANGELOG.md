@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.47] - 2026-07-02
+
+### Added
+
+- **Smooth authority: server-entity spawn and server-driven state replacement.** `createSmoothAuthority` gains two additive pieces the realtime layer's server world hook builds on. `ensure(key, ws, initialState, { active: true })` creates an entity ACTIVE, so `onMissing` drives it from its first tick without ever seeing a command - the spawn path for genuinely simulated entities (NPCs, scripted movers), which were previously impossible: activity only ever started with a client command, so a never-commanded entity could never move. The default stays inactive and byte-identical (a joined-but-idle client entity costs no `onMissing` calls until its first command; the `onMissing` docs now state the activation contract explicitly). `set(key, state)` REPLACES an entity's authoritative state from server logic - the discontinuous counterpart of `inject`, which routes through `apply`: a teleport, a respawn, a scripted placement. It wakes the entity so `onMissing` continues from the new state, never touches the queue, the ack watermark, or `lastCommand`, and is designed to run post-drain (the caller broadcasts the change for the current tick; the next drain's change-detection baseline is then the already-broadcast state, so nothing double-publishes). Existing call sites are unchanged.
+
 ## [0.6.0-next.46] - 2026-07-01
 
 ### Added

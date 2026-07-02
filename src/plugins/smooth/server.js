@@ -130,14 +130,19 @@ export function createSmoothAuthority(options) {
 		 * Bind (or re-bind) an entity to its owning connection, creating it
 		 * with `initialState` on first sight. A new socket for an existing
 		 * key starts a fresh command stream: the queue drops and the ack
-		 * watermark resets.
+		 * watermark resets. `opts.active` creates the entity ACTIVE, so
+		 * `onMissing` drives it from its first tick without ever seeing a
+		 * command - the server-entity (simulated / NPC) spawn path; the
+		 * default stays false so a joined-but-idle client entity costs no
+		 * onMissing calls until its first command.
 		 * @param {string} key @param {any} ws @param {any} initialState
+		 * @param {{ active?: boolean }} [opts]
 		 * @returns {{ state: any, lastAckedId: number }}
 		 */
-		ensure(key, ws, initialState) {
+		ensure(key, ws, initialState, opts) {
 			let e = entities.get(key);
 			if (e === undefined) {
-				e = { state: initialState, ws, queue: [], lastAckedId: 0, lastCommand: undefined, active: false };
+				e = { state: initialState, ws, queue: [], lastAckedId: 0, lastCommand: undefined, active: opts !== undefined && opts.active === true };
 				entities.set(key, e);
 			} else if (e.ws !== ws) {
 				e.ws = ws;
@@ -206,6 +211,27 @@ export function createSmoothAuthority(options) {
 			if (e.serverQueue.length >= queueCap) e.serverQueue.shift();
 			serverId -= 1;
 			e.serverQueue.push({ id: serverId, cmd });
+			return true;
+		},
+
+		/**
+		 * REPLACE an entity's authoritative state from server logic (a teleport,
+		 * a respawn, a scripted placement) - the discontinuous counterpart of
+		 * `inject`, which routes through `apply`. The entity wakes (`active`), so
+		 * `onMissing` continues from the new state (a resting entity that stays
+		 * at rest re-rests in one tick). The caller owns broadcasting the change
+		 * for THIS tick (it runs post-drain, so the next drain's change-detection
+		 * baseline is the already-broadcast state - no duplicate update). Never
+		 * touches the queue, the ack watermark, or `lastCommand`. Unknown keys
+		 * are ignored (false).
+		 * @param {string} key @param {any} state
+		 * @returns {boolean}
+		 */
+		set(key, state) {
+			const e = entities.get(key);
+			if (e === undefined) return false;
+			e.state = state;
+			e.active = true;
 			return true;
 		},
 

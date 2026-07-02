@@ -54,9 +54,12 @@ export interface SmoothAuthorityOptions<State = any, Command = any> {
 	apply: SmoothApply<State, Command>;
 	/**
 	 * Per-tick continuation for an entity with no queued commands (a
-	 * genuinely simulated entity keeps moving here). Returning the same
+	 * genuinely simulated entity keeps moving here). Runs only for an ACTIVE
+	 * entity: activity starts with the entity's first command, an
+	 * `ensure(..., { active: true })` spawn, or a server `set` - so a
+	 * joined-but-idle client entity costs nothing here. Returning the same
 	 * state reference (or undefined) signals rest; a resting entity stops
-	 * costing ticks until its next command. Omitted = hold position.
+	 * costing ticks until it is next woken. Omitted = hold position.
 	 */
 	onMissing?: (state: State, lastCommand: Command | undefined) => State | undefined;
 	/** Per-entity queue bound; oldest commands drop beyond it (default 1024). */
@@ -68,8 +71,12 @@ export interface SmoothAuthority<State = any, Command = any> {
 	 * Bind (or re-bind) an entity to its owning connection, creating it with
 	 * `initialState` on first sight. A new socket for an existing key starts
 	 * a fresh command stream (queue dropped, ack watermark reset).
+	 * `opts.active` creates the entity ACTIVE so `onMissing` drives it from
+	 * its first tick without ever seeing a command - the server-entity
+	 * (simulated / NPC) spawn path. Default false: a joined-but-idle client
+	 * entity costs no onMissing calls until its first command.
 	 */
-	ensure(key: string, ws: any, initialState: State): { state: State; lastAckedId: number };
+	ensure(key: string, ws: any, initialState: State, opts?: { active?: boolean }): { state: State; lastAckedId: number };
 	/** Queue commands for the next tick; true when anything was queued. */
 	enqueue(key: string, commands: Array<{ id: number; cmd: Command }>): boolean;
 	/**
@@ -80,6 +87,16 @@ export interface SmoothAuthority<State = any, Command = any> {
 	 * false). The injected command never bumps the entity's ack watermark.
 	 */
 	inject(key: string, cmd: Command): boolean;
+	/**
+	 * REPLACE an entity's authoritative state from server logic (a teleport, a
+	 * respawn) - the discontinuous counterpart of `inject`, which routes through
+	 * `apply`. Wakes the entity so `onMissing` continues from the new state. The
+	 * caller owns broadcasting the change for the current tick (it is meant to
+	 * run post-drain; the next drain's change-detection baseline is then the
+	 * already-broadcast state). Never touches the queue, the ack watermark, or
+	 * `lastCommand`. False for an unknown key.
+	 */
+	set(key: string, state: State): boolean;
 	/**
 	 * Run one authoritative tick. The caller publishes `updates` (excluding
 	 * each entity's owner when echo suppression is on) and sends each ack to
