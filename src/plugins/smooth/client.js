@@ -120,6 +120,19 @@ function checkKnob(v, label, min) {
 }
 
 /**
+ * Validate one wire codec pair: undefined means "off" (null), anything else
+ * must carry pack and unpack functions.
+ * @param {any} pair @param {string} label
+ */
+function checkWirePair(pair, label) {
+	if (pair === undefined) return null;
+	if (pair === null || typeof pair !== 'object' || typeof pair.pack !== 'function' || typeof pair.unpack !== 'function') {
+		throw new Error('smooth: ' + label + ' must be { pack(value), unpack(packed) }');
+	}
+	return pair;
+}
+
+/**
  * Create the channel for one smoothed topic.
  *
  * The wire topic is announced by the first sync reply (the topic resolves
@@ -141,8 +154,24 @@ function checkKnob(v, label, min) {
  *   interpolationMs?: 'auto' | number,
  *   extrapolateMs?: number,
  *   snapGapMs?: number,
- *   cmdRate?: number
+ *   cmdRate?: number,
+ *   wire?: {
+ *     state?: { pack: (state: any) => any, unpack: (packed: any) => any },
+ *     command?: { pack: (cmd: any) => any, unpack: (packed: any) => any }
+ *   }
  * }} options
+ *
+ * `wire` declares the topic's wire views - app-owned codec pairs applied at
+ * the wire boundary and nowhere else. `wire.state` packs every state the
+ * server sends (updates, acknowledgements, the sync roster) into a compact
+ * JSON-serializable form and unpacks it back before the predictor and the
+ * interpolation consume it; `wire.command` packs each outgoing command (and
+ * shot) and the server unpacks it before applying. The prediction always
+ * replays the ORIGINAL command objects - packing touches only the transmit
+ * copy. Both pairs must be the same functions the server topic declares
+ * (share the module, like `apply`); with neither, the wire is byte-identical
+ * to before. A state frame whose unpack throws is dropped as malformed; a
+ * command whose pack throws surfaces the error at the `command()` call.
  */
 export function createSmoothChannel(options) {
 	if (options === null || typeof options !== 'object') {
@@ -171,6 +200,15 @@ export function createSmoothChannel(options) {
 	checkKnob(options.extrapolateMs, 'extrapolateMs', 0);
 	checkKnob(options.snapGapMs, 'snapGapMs', 1);
 	checkKnob(options.cmdRate, 'cmdRate', 0);
+	let wireState = null;
+	let wireCommand = null;
+	if (options.wire !== undefined) {
+		if (options.wire === null || typeof options.wire !== 'object') {
+			throw new Error('smooth: wire must be an object with optional state and command codec pairs');
+		}
+		wireState = checkWirePair(options.wire.state, 'wire.state');
+		wireCommand = checkWirePair(options.wire.command, 'wire.command');
+	}
 
 	const cmdRate = options.cmdRate === undefined ? 60 : options.cmdRate;
 	const minFlushMs = cmdRate > 0 ? 1000 / cmdRate : 0;
@@ -235,7 +273,15 @@ export function createSmoothChannel(options) {
 		if (ev.event === 'ack') {
 			const d = ev.data;
 			if (d === null || typeof d !== 'object' || typeof d.id !== 'number') return;
-			const res = predictor.ack(d.id, d.state, recvMono);
+			let ackState = d.state;
+			if (wireState !== null) {
+				try {
+					ackState = wireState.unpack(ackState);
+				} catch {
+					return; // malformed packed state: drop the frame
+				}
+			}
+			const res = predictor.ack(d.id, ackState, recvMono);
 			if (res !== null) {
 				if (typeof d.t === 'number' && Number.isFinite(d.t)) {
 					if (typeof res.sentMono === 'number') smoother.clock.seed(d.t, res.sentMono, recvMono);
@@ -250,6 +296,14 @@ export function createSmoothChannel(options) {
 		if (ev.event === 'update') {
 			const d = ev.data;
 			if (d === null || typeof d !== 'object' || typeof d.key !== 'string') return;
+			let s = d.data;
+			if (wireState !== null) {
+				try {
+					s = wireState.unpack(s);
+				} catch {
+					return; // malformed packed state: drop the frame
+				}
+			}
 			// An own-key update never enters the remote set (no ghost twin).
 			// While commands are in flight the acknowledgement is the
 			// reconciliation carrier and the frame is dropped; with nothing
@@ -257,11 +311,14 @@ export function createSmoothChannel(options) {
 			// server moves command-less entities (onMissing) and those
 			// updates are the owner's only feedback.
 			if (selfKey !== null && d.key === selfKey) {
-				if (predictor.rebase(d.data)) dirty = true;
+				if (predictor.rebase(s)) dirty = true;
 				return;
 			}
-			merged.set(d.key, d.data);
-			smoother.ingest(ev, recvMono);
+			merged.set(d.key, s);
+			// The smoother reads the envelope's data.data; hand it the unpacked
+			// state (a fresh envelope only when a codec is on - the raw path
+			// stays allocation-identical).
+			smoother.ingest(wireState === null ? ev : { event: 'update', data: { key: d.key, data: s }, t: ev.t }, recvMono);
 			dirty = true;
 			return;
 		}
@@ -377,12 +434,20 @@ export function createSmoothChannel(options) {
 				for (let i = 0; i < states.length; i++) {
 					const s = states[i];
 					if (!s || typeof s.key !== 'string') continue;
+					let st = s.state;
+					if (wireState !== null) {
+						try {
+							st = wireState.unpack(st);
+						} catch {
+							continue; // malformed packed state: skip this entry
+						}
+					}
 					if (selfKey !== null && s.key === selfKey) {
-						own = s.state;
+						own = st;
 						continue;
 					}
-					merged.set(s.key, s.state);
-					bulk.push({ key: s.key, data: s.state });
+					merged.set(s.key, st);
+					bulk.push({ key: s.key, data: st });
 				}
 				if (bulk.length > 0) {
 					smoother.ingest({ event: 'bulk', data: bulk, t: typeof reply.t === 'number' ? reply.t : undefined }, recvMono);
@@ -485,7 +550,9 @@ export function createSmoothChannel(options) {
 			// after this one, so the transport batch stays in id order - the order
 			// the predictor (and the authority) apply commands in; queuing after
 			// the callback would reverse them and force a reconciliation snap.
-			outQueue.push({ id, cmd });
+			// The wire view packs only the transmit copy - the predictor replays
+			// the original object.
+			outQueue.push({ id, cmd: wireCommand === null ? cmd : wireCommand.pack(cmd) });
 			scheduleFlush();
 			dirty = true;
 			// Deliver the discrete events `apply` emitted on this optimistic
@@ -520,8 +587,10 @@ export function createSmoothChannel(options) {
 		 */
 		shoot(cmd) {
 			if (typeof transport.sendShoot !== 'function') return;
+			// A shot is a command on the wire: the same wire view packs it.
+			const wcmd = wireCommand === null ? cmd : wireCommand.pack(cmd);
 			if (!lcEnabled) {
-				transport.sendShoot({ cmd });
+				transport.sendShoot({ cmd: wcmd });
 				return;
 			}
 			// Cold start: until the server clock has a sample, a render-time built from
@@ -530,7 +599,7 @@ export function createSmoothChannel(options) {
 			// present - an honest miss on a moving target, never a wrong-position hit.
 			const est = smoother.clock.estServerNow(monotonicNow());
 			if (est === null) {
-				transport.sendShoot({ cmd });
+				transport.sendShoot({ cmd: wcmd });
 				return;
 			}
 			// Echo the latest absolute server stamp so the server measures the round
@@ -538,8 +607,8 @@ export function createSmoothChannel(options) {
 			// cannot fake a lower latency, only inflate it (bounded + detectable).
 			const ackT = smoother.lastServerT;
 			const rt = est - smoother.delay;
-			if (ackT >= 0) transport.sendShoot({ cmd, rt, ackT });
-			else transport.sendShoot({ cmd, rt });
+			if (ackT >= 0) transport.sendShoot({ cmd: wcmd, rt, ackT });
+			else transport.sendShoot({ cmd: wcmd, rt });
 		},
 
 		/**

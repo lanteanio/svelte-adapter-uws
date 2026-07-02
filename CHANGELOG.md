@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.49] - 2026-07-02
+
+### Added
+
+- **Smooth channel wire views (`options.wire`) - app-owned codecs at the wire boundary.** A rich simulation state serializes to kilobytes of verbose JSON, and it changes every tick, so every acknowledgement and every remote update paid that price per entity per tick (the binary framing is compact, but a non-`{x,y}` state rides inside it as a JSON string). `wire.state = { pack, unpack }` declares the state's compact wire form: the channel unpacks every inbound state - updates, acknowledgements, the sync roster - back into the simulation shape before the predictor and the interpolation consume it. `wire.command = { pack, unpack }` is the outbound counterpart: each transmitted command (and shot) is packed, while the prediction always replays the ORIGINAL command objects - packing touches only the transmit copy. The pairs must be the same functions the server topic declares (share the module, like `apply`). A state frame whose unpack throws is dropped as malformed; a command whose pack throws surfaces at the `command()` call. Off by default - without `wire`, the channel is byte-identical to before.
+
 ## [0.6.0-next.48] - 2026-07-02
 
 ### Fixed

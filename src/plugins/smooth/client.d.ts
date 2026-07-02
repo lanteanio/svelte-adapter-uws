@@ -63,6 +63,20 @@ export interface SmoothChannelOptions<State = any, Command = any> {
 	snapGapMs?: number;
 	/** Maximum command flushes per second (default 60 - one per frame). */
 	cmdRate?: number;
+	/**
+	 * The topic's wire views: app-owned codec pairs applied at the wire
+	 * boundary and nowhere else. `state` unpacks every state the server sends
+	 * (updates, acknowledgements, the sync roster) back into the simulation
+	 * shape; `command` packs each outgoing command and shot (the prediction
+	 * always replays the ORIGINAL command objects). Must be the same pairs the
+	 * server topic declares - share the module, like `apply`. A state frame
+	 * whose unpack throws is dropped as malformed. Default: none (the wire
+	 * carries the raw values, byte-identical to before).
+	 */
+	wire?: {
+		state?: { pack: (state: State) => any; unpack: (packed: any) => State };
+		command?: { pack: (cmd: Command) => any; unpack: (packed: any) => Command };
+	};
 }
 
 export interface SmoothChannelEvent<Data = any> {
