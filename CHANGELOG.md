@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.48] - 2026-07-02
+
+### Fixed
+
+- **Display-rate motion for the predicted local entity - the smooth channel's owner no longer smears on fast displays.** The prediction advances one command per simulation tick, so on a display refreshing faster than the tick rate (a 120Hz panel over a 60Hz simulation) the owner's own entity rendered every predicted position twice: a stair-step the eye reads as a velocity-proportional smear while tracking the moving entity. Remote entities never showed it - the interpolation already samples them per display frame; only the local entity lacked between-tick motion. `renderInto` now sweeps each tick's motion across the measured command cadence: at a command's application the rendered position stays exactly where the previous sweep had it and glides to the new prediction over slightly more than one command interval, so every display frame samples forward motion at any refresh rate. Continuity is exact across command boundaries, same-frame catch-up bursts, and reconciliation corrections (an acknowledgement leaves the sweep term unchanged, so the correction offset's continuity guarantee carries over unmodified). The sweep arms only on a tick-like command cadence (gaps up to 100ms) - sporadic commanders snap exactly as before - and clears on sync, rebase, overflow, and reset. Allocation-free on the frame path; the channel's frame loop keeps painting while a sweep is in flight and still goes idle once it lands.
+
 ## [0.6.0-next.47] - 2026-07-02
 
 ### Added

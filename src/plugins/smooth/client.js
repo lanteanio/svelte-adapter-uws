@@ -438,8 +438,8 @@ export function createSmoothChannel(options) {
 			}
 		}
 		const renderTime = smoother.beginFrame(mono);
-		const decayActive = predictor.renderInto(localPoint, mono);
-		if (!dirty && !smoother.motionPending && !decayActive) return;
+		const localMotion = predictor.renderInto(localPoint, mono);
+		if (!dirty && !smoother.motionPending && !localMotion) return;
 		dirty = false;
 		if (frameCb === null) return;
 

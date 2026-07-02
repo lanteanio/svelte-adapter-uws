@@ -30,6 +30,20 @@
  * application, so randomness drawn inside `apply` survives reconciliation
  * (see ./random.js).
  *
+ * The prediction advances one command per simulation tick, but displays
+ * refresh faster than tick rate - a 120Hz panel over a 60Hz simulation
+ * would render every predicted position twice, and that stair-step reads
+ * as a velocity-proportional smear when the eye tracks the moving entity.
+ * `renderInto` therefore sweeps each tick's motion across the measured
+ * command cadence: at a command's application the rendered position stays
+ * where the previous sweep had it and glides to the new prediction over
+ * (slightly more than) one command interval, so a faster display samples
+ * forward motion on every frame. The sweep engages only on a tick-like
+ * cadence (gaps up to 100ms); sporadic commands snap exactly as before.
+ * The window over-estimates the cadence by a quarter so a late command
+ * lands while the previous sweep is still in flight - the remainder folds
+ * into the next sweep and the motion never stalls or overshoots.
+ *
  * The window is bounded by count and by age. Exceeding either bound means
  * the server has effectively gone silent: prediction is KILLED rather than
  * allowed to run away - the window clears, the entity renders the last
@@ -106,6 +120,48 @@ export function createPredictor(options) {
 	let errY = 0;
 	let errAtMono = -1;
 
+	// The render sweep (positional): the motion the latest command applied,
+	// swept across the measured command cadence so a display refreshing
+	// faster than the tick rate samples forward motion on every frame. The
+	// rendered position is `predicted` minus the un-swept remainder of this
+	// delta (plus the error offset above - the two are orthogonal and the
+	// reconciliation continuity proof holds with the sweep term unchanged
+	// across an ack). Armed only while commands arrive at a tick-like
+	// cadence; cleared by anything that moves `predicted` outside the
+	// command stream.
+	let sweepDX = 0;
+	let sweepDY = 0;
+	let sweepAtMono = -1;
+	let sweepMs = 0;
+	let lastApplyMono = -1;
+	let gapEma = -1;
+	// A gap beyond this is not a tick cadence - the move snaps, as it always
+	// did for sporadic commanders.
+	const MAX_SWEEP_GAP_MS = 100;
+	// Same-instant catch-up commands (a slow frame paying its tick debt)
+	// fold into the running sweep without polluting the cadence estimate.
+	const BURST_GAP_MS = 1;
+
+	/** The un-swept fraction of the last tick's motion at `monoNow`,
+	 * clearing the sweep once it has fully landed. */
+	function sweepRemainder(monoNow) {
+		if (sweepAtMono < 0) return 0;
+		const a = (monoNow - sweepAtMono) / sweepMs;
+		if (a >= 1) {
+			sweepAtMono = -1;
+			sweepDX = 0;
+			sweepDY = 0;
+			return 0;
+		}
+		return a <= 0 ? 1 : 1 - a;
+	}
+
+	function clearSweep() {
+		sweepDX = 0;
+		sweepDY = 0;
+		sweepAtMono = -1;
+	}
+
 	// The most recent reconciliation error magnitude (computeError on the last
 	// acknowledging ack), surfaced for telemetry / devtools. 0 until the first
 	// reconciling ack; reset on sync / reset.
@@ -167,6 +223,7 @@ export function createPredictor(options) {
 		errX = 0;
 		errY = 0;
 		errAtMono = -1;
+		clearSweep();
 		overflowed = true;
 	}
 
@@ -196,9 +253,47 @@ export function createPredictor(options) {
 				killPrediction();
 				return id;
 			}
+			// Capture where the sweep is rendering RIGHT NOW, before the
+			// apply moves the prediction: the new sweep starts from this
+			// point, so the rendered position is continuous across the
+			// command boundary and any un-swept remainder folds forward.
+			const prev = predicted;
+			const prevPositional =
+				prev !== null && typeof prev === 'object' && typeof prev.x === 'number';
+			let fromX = 0;
+			let fromY = 0;
+			if (prevPositional) {
+				const rem = sweepRemainder(monoNow);
+				fromX = prev.x - sweepDX * rem;
+				fromY = prev.y - sweepDY * rem;
+			}
 			const entry = { id, cmd, sentMono: monoNow };
 			pending.push(entry);
 			predicted = runApply(predicted, entry, true);
+			const next = predicted;
+			const gap = lastApplyMono >= 0 ? monoNow - lastApplyMono : -1;
+			lastApplyMono = monoNow;
+			if (
+				prevPositional && gap >= 0 && gap <= MAX_SWEEP_GAP_MS &&
+				next !== null && typeof next === 'object' && typeof next.x === 'number'
+			) {
+				if (gap >= BURST_GAP_MS) {
+					gapEma = gapEma < 0 ? gap : gapEma + (gap - gapEma) * 0.2;
+				}
+				const dx = next.x - fromX;
+				const dy = next.y - fromY;
+				if (gapEma >= 0 && (dx !== 0 || dy !== 0)) {
+					sweepDX = dx;
+					sweepDY = dy;
+					sweepAtMono = monoNow;
+					sweepMs = Math.min(125, Math.max(1, gapEma * 1.25));
+				} else {
+					clearSweep();
+				}
+			} else {
+				clearSweep();
+				if (gap > MAX_SWEEP_GAP_MS) gapEma = -1;
+			}
 			return id;
 		},
 
@@ -306,6 +401,9 @@ export function createPredictor(options) {
 			errX = 0;
 			errY = 0;
 			errAtMono = -1;
+			clearSweep();
+			lastApplyMono = -1;
+			gapEma = -1;
 			lastDivergence = 0;
 			overflowed = false;
 		},
@@ -324,6 +422,10 @@ export function createPredictor(options) {
 			if (pending.length > head) return false;
 			base = state;
 			predicted = state;
+			// An adoption outside the command stream moved the prediction
+			// discontinuously; a sweep armed for the old motion would render
+			// a phantom offset against the new basis.
+			clearSweep();
 			return true;
 		},
 
@@ -343,23 +445,25 @@ export function createPredictor(options) {
 
 		/**
 		 * Resolve the rendered position into `out` (caller-owned scratch):
-		 * the predicted coordinates plus the decaying correction offset.
+		 * the predicted coordinates minus the un-swept remainder of the last
+		 * tick's motion, plus the decaying correction offset.
 		 * @param {{ x: number, y: number }} out
 		 * @param {number} monoNow
-		 * @returns {boolean} true while a correction is still decaying (the
-		 *   caller's render loop must keep painting)
+		 * @returns {boolean} true while a sweep is in flight or a correction
+		 *   is still decaying (the caller's render loop must keep painting)
 		 */
 		renderInto(out, monoNow) {
 			const f = decayFraction(monoNow);
+			const rem = sweepRemainder(monoNow);
 			const p = predicted;
 			if (p !== null && typeof p === 'object' && typeof p.x === 'number') {
-				out.x = p.x + errX * f;
-				out.y = p.y + errY * f;
+				out.x = p.x - sweepDX * rem + errX * f;
+				out.y = p.y - sweepDY * rem + errY * f;
 			} else {
 				out.x = NaN;
 				out.y = NaN;
 			}
-			return errAtMono >= 0;
+			return errAtMono >= 0 || sweepAtMono >= 0;
 		},
 
 		/** The current prediction (simulation truth, no visual offset). */
@@ -416,6 +520,9 @@ export function createPredictor(options) {
 			errX = 0;
 			errY = 0;
 			errAtMono = -1;
+			clearSweep();
+			lastApplyMono = -1;
+			gapEma = -1;
 			lastDivergence = 0;
 			overflowed = false;
 			eventSink = [];
