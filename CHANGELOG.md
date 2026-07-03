@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.51] - 2026-07-03
+
+### Added
+
+- **File-descriptor budget preflight and gauges.** Every WebSocket connection holds one descriptor, and the classic 1024 soft limit caps a process at roughly a thousand connections while the CPU sits idle - a ceiling that only surfaces as `EMFILE` during the first connection storm. The server now checks the soft limit once at boot (main thread only; worker threads share one process-wide descriptor table) and logs a one-line warning with the launcher remediation (`ulimit -n` / systemd `LimitNOFILE` / docker `ulimits`) when it is below 8192. With the `metrics` option configured, two new gauges chart the live headroom: `open_fds` (sampled every ~5 pressure intervals - the directory read's cost scales with the count itself) and `fd_soft_limit`. Dependency-free (`/proc/self/limits` with a `process.report` fallback, `/proc/self/fd` or `/dev/fd` for the count) and a silent no-op on platforms without a source.
+- **Suspend detection in the client - a wake from device sleep no longer trusts a stale socket.** A device sleep freezes the monotonic clock while the wall clock keeps counting, so on wake the client compares the two deltas. When the gap exceeds 60 seconds and no server frame has arrived in the last few seconds, a still-OPEN socket is not trusted - the server has usually idle-dropped it without the close frame ever arriving - and the client force-reconnects immediately with a session resume instead of showing frozen data until the silence detector catches up. A socket that provably survived the sleep (a fresh frame already arrived) is left alone. Checked when the tab becomes visible, when it hides, and on the 30-second detector tick, so a lid-close on a visible tab is caught whichever event fires first. Where no monotonic clock source exists the gate is inert.
+
+### Fixed
+
+- **A superseded socket's late close event no longer mutes its replacement.** The socket close handler unconditionally nulled the connection reference, so when a forced close (suspend detection, zombie detection) raced the visibility handler's immediate reconnect, the OLD socket's asynchronous close event landed after the NEW socket was created and wiped it - leaving a connection that was open on the wire but never sent its hello, resume, or resubscribe, with outbound frames queued indefinitely. Every socket's event handlers now act only while that socket is still the current one, so a stale close cannot touch the state of the connection that superseded it.
+
 ## [0.6.0-next.50] - 2026-07-03
 
 ### Added

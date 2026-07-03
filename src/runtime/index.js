@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { env } from 'ENV';
 import { monotonicNow, setTimer, setIntervalTimer, clearTimer } from './runtime.js';
 import { createStateHashDetector } from './state-hash-detector.js';
+import { readFdLimits, fdPreflightWarning } from './utils/fd-limit.js';
 
 const host = env('HOST', '0.0.0.0');
 const port_raw = env('PORT', '3000');
@@ -34,6 +35,16 @@ const restart_on_state_divergence = env('RESTART_ON_STATE_DIVERGENCE', '') === '
 const state_hash_epoch_ms = parseIntEnv('STATE_HASH_EPOCH_MS', env('STATE_HASH_EPOCH_MS', '0'), 0);
 
 const is_primary = cluster_workers && isMainThread;
+
+// Descriptor-budget preflight: fires once per process (main thread only -
+// worker threads share the single process fd table, so per-worker repeats
+// would be noise) when the soft limit is EMFILE-low for a socket server.
+// The probes return null on platforms without a limit source, so this is a
+// silent no-op there.
+if (isMainThread) {
+	const fdWarning = fdPreflightWarning(readFdLimits());
+	if (fdWarning !== null) console.warn(fdWarning);
+}
 
 if (is_primary) {
 	// ── Primary thread: spawn workers, coordinate shutdown ──

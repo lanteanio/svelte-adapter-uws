@@ -1,6 +1,6 @@
 import { writable, derived } from 'svelte/store';
 import { parseBinaryFrame, requestNFrame } from './runtime/wire.js';
-import { now, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask, nextReconnectDelay } from './client-runtime.js';
+import { now, monotonicNow, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask, nextReconnectDelay } from './client-runtime.js';
 
 /** @type {ReturnType<typeof createConnection> | null} */
 let singleton = null;
@@ -752,6 +752,30 @@ function createConnection(options) {
 	// 2.5x the server's 120s idle timeout. If the server has been completely
 	// silent for this long while the socket appears open, it is likely a zombie.
 	const SERVER_TIMEOUT_MS = 150000;
+	// Paired wall/monotonic reference stamps for suspend detection. The
+	// monotonic clock freezes during system sleep while the wall clock keeps
+	// counting, so a wall delta far exceeding the monotonic delta over the
+	// same span reveals a sleep gap the paused timers never saw - one long
+	// enough that the server has likely idle-dropped this socket without a
+	// close frame reaching us. Above the threshold the surviving socket is
+	// not trusted: it is closed so the reconnect + resume path replays what
+	// was missed. Where no monotonic source exists both clocks read the wall
+	// and the gate is inert. The threshold sits below the server's idle
+	// timeout so the cost of a wrong guess is one cheap resumed reconnect,
+	// never a frozen board.
+	const SUSPEND_GAP_MS = 60000;
+	let gapRefWall = now();
+	let gapRefMono = monotonicNow();
+
+	// Sleep-gap excess accumulated since the last reference stamp; re-stamps.
+	function readSuspendGap() {
+		const wall = now();
+		const mono = monotonicNow();
+		const excess = (wall - gapRefWall) - (mono - gapRefMono);
+		gapRefWall = wall;
+		gapRefMono = mono;
+		return excess;
+	}
 
 	/** @type {Set<string>} */
 	const subscribedTopics = new Set();
@@ -1166,6 +1190,14 @@ function createConnection(options) {
 			scheduleReconnect();
 			return;
 		}
+		// Identity capture for the handlers below. A replaced socket's late
+		// events must not touch connection state: a forced close (suspend
+		// detection, zombie detection) can race the visibility handler's
+		// doConnect, and the old socket's onclose would otherwise null out
+		// the fresh socket - leaving it open on the wire but mute (no hello,
+		// no resume, sends queued forever). Each handler acts only while its
+		// socket is still the current one.
+		const sock = ws;
 		// Read inbound binary frames as ArrayBuffer (default is Blob, which is
 		// async to read). Cannot regress the realtime upload layer: that layer
 		// only EMITS binary (0x01/0x02) and receives upload results as JSON on
@@ -1180,6 +1212,7 @@ function createConnection(options) {
 		resetWireDecoderStates();
 
 		ws.onopen = () => {
+			if (ws !== sock) return;
 			attempt = 0;
 			lastServerMessage = now();
 			failureStore.set(null);
@@ -1290,6 +1323,7 @@ function createConnection(options) {
 		}
 
 		ws.onmessage = (rawEvent) => {
+			if (ws !== sock) return;
 			lastServerMessage = now();
 			try {
 				// Inbound binary demux, ahead of the JSON path. A 0x03 frame is
@@ -1433,6 +1467,9 @@ function createConnection(options) {
 		};
 
 		ws.onclose = (event) => {
+			// A replaced socket's close must not null out (or reconnect over)
+			// the socket that superseded it.
+			if (ws !== sock) return;
 			ws = null;
 			if (debug) console.log('[ws] disconnected');
 			lastCloseCode = event?.code || 0;
@@ -1823,10 +1860,24 @@ function createConnection(options) {
 		visibilityHandler = () => {
 			if (document.hidden) {
 				hiddenDisconnect = true;
-				// Tab moved to the background. If the WS is still open, downgrade
-				// to 'suspended' as a UI hint - browsers may close idle backgrounded
-				// sockets so live data is best-effort.
+				// Restart the suspend measurement at hide so only the hidden
+				// span - where a device sleep usually happens - counts at
+				// resume. The read also surfaces a gap accrued while VISIBLE
+				// (lid close on a visible tab, hidden again before the 30s
+				// detector tick could read it): act on it here, or the
+				// re-stamp would silently swallow it.
+				const gapAtHide = readSuspendGap();
+				if (intentionallyClosed || terminalClosed) return;
 				if (ws?.readyState === WebSocket.OPEN) {
+					if (gapAtHide > SUSPEND_GAP_MS && now() - lastServerMessage > 5000) {
+						if (debug) console.log('[ws] suspend gap detected at hide, reconnecting');
+						attempt = 0;
+						ws.close();
+						return;
+					}
+					// Tab moved to the background. Downgrade to 'suspended' as a
+					// UI hint - browsers may close idle backgrounded sockets so
+					// live data is best-effort.
 					statusStore.set('suspended');
 				}
 				return;
@@ -1834,6 +1885,20 @@ function createConnection(options) {
 			// Tab is visible.
 			if (intentionallyClosed || terminalClosed) return;
 			if (ws?.readyState === WebSocket.OPEN) {
+				if (readSuspendGap() > SUSPEND_GAP_MS && now() - lastServerMessage > 5000) {
+					// The device slept through the hide. The socket still reads
+					// OPEN, but the server has likely idle-dropped it with the
+					// close suppressed - trusting it would freeze live data
+					// until the silence detector caught up. Close it; onclose
+					// classifies RETRY and reconnects with a resume. A frame
+					// received in the last few seconds proves the socket
+					// survived the sleep, so that case is trusted as-is.
+					if (debug) console.log('[ws] suspend gap detected on resume, reconnecting');
+					hiddenDisconnect = false;
+					attempt = 0;
+					ws.close();
+					return;
+				}
 				// Connection survived the hide - clear the 'suspended' overlay.
 				statusStore.set('open');
 				hiddenDisconnect = false;
@@ -1858,8 +1923,17 @@ function createConnection(options) {
 	// normal reconnect path takes over.
 	if (typeof window !== 'undefined') {
 		activityTimer = setIntervalTimer(() => {
-			if (ws?.readyState === WebSocket.OPEN && now() - lastServerMessage > SERVER_TIMEOUT_MS) {
-				if (debug) console.log('[ws] server silent for', now() - lastServerMessage, 'ms, reconnecting');
+			// The suspend check catches sleeps the visibility handler never
+			// sees (lid close on a visible tab, OS suspend without a hide):
+			// the first tick after wake reads the whole gap in one delta,
+			// where the silence check alone would ignore sleeps shorter than
+			// the timeout. Read unconditionally so the reference stamps stay
+			// fresh even while disconnected.
+			const suspendGap = readSuspendGap();
+			const silence = now() - lastServerMessage;
+			if (ws?.readyState === WebSocket.OPEN
+				&& (silence > SERVER_TIMEOUT_MS || (suspendGap > SUSPEND_GAP_MS && silence > 5000))) {
+				if (debug) console.log('[ws] server silent for', silence, 'ms (suspend gap', suspendGap, 'ms), reconnecting');
 				ws.close();
 			}
 		}, 30000);

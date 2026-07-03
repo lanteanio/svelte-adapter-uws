@@ -14,6 +14,7 @@ export * from './utils/caps.js';
 export * from './utils/request-id.js';
 export * from './utils/upgrade-admission.js';
 export * from './utils/metrics.js';
+export * from './utils/fd-limit.js';
 export * from './utils/topic.js';
 export * from './utils/origin.js';
 export * from './utils/address.js';

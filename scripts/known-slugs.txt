@@ -15,6 +15,7 @@ client-connect
 client-queue
 cluster-mode
 dev-101-headers
+fd-limit
 pressure
 publish-batched
 send-dropped

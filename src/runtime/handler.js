@@ -21,7 +21,7 @@ import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { metricsRegistry } from './metrics-bridge.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, DEFAULT_GRANT } from './wire.js';
 import { now, monotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, sharedTopics } from './handler/state.js';
@@ -399,6 +399,23 @@ if (WS_ENABLED) {
 	const gQueueDepth = containMetricInstrument(METRICS?.gauge(
 		'waiting_room_queue_depth', 'Clients currently polling the waiting room'
 	));
+	// Descriptor observability. Worker threads share one process-wide fd
+	// table, so any worker's registry reports the whole-process truth. Each
+	// gauge registers only where its source exists (Linux/macOS; null on
+	// Windows). The soft limit is captured once - an external prlimit change
+	// mid-flight is rare enough to ignore.
+	const FD_SOFT_LIMIT = METRICS == null ? null : (readFdLimits()?.soft ?? null);
+	const gOpenFds = METRICS != null && countOpenFds() !== null
+		? containMetricInstrument(METRICS?.gauge(
+			'open_fds', 'File descriptors currently open by the process'
+		))
+		: undefined;
+	const gFdSoftLimit = FD_SOFT_LIMIT !== null && Number.isFinite(FD_SOFT_LIMIT)
+		? containMetricInstrument(METRICS?.gauge(
+			'fd_soft_limit', 'Soft file-descriptor limit; new sockets fail with EMFILE at this count'
+		))
+		: undefined;
+	gFdSoftLimit?.set(FD_SOFT_LIMIT);
 	// Cross-worker state-hash divergence detections. The primary owns the
 	// detector but has no registry over the thread boundary, so it posts a
 	// notice back to the worker(s) and the count is incremented here, where the
@@ -540,11 +557,20 @@ if (WS_ENABLED) {
 	// Gauge sampling rides the existing 1 Hz pressure timer - no new timer.
 	// Always assigned (hook or null) so a factory re-run replaces any previous
 	// hook and a stale closure can never outlive its server.
+	// Counting open fds is a directory read whose cost scales with the count
+	// itself, so it rides every 5th sample (~5s) instead of every tick. Seeded
+	// one below the modulus so the very first sample publishes a value.
+	let fdSampleTick = 4;
 	counters.metricsSampleHook = METRICS == null ? null : () => {
 		const lvl = postureLevel();
 		gPostureState?.set(lvl === 'siege' ? 2 : lvl === 'elevated' ? 1 : 0);
 		gUpgradeInflight?.set(admission.inFlight);
 		gQueueDepth?.set(queueDepthProbe !== null ? queueDepthProbe() : 0);
+		if (gOpenFds !== undefined && ++fdSampleTick >= 5) {
+			fdSampleTick = 0;
+			const openFds = countOpenFds();
+			if (openFds !== null) gOpenFds.set(openFds);
+		}
 	};
 
 	// Single 60-second interval for all periodic cache maintenance.

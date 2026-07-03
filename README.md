@@ -502,6 +502,8 @@ export const GET = ({ platform }) =>
 | `protection_posture_state` | gauge | The live posture: `0` normal, `1` elevated, `2` siege (sampled). |
 | `protection_posture_transitions_total{from,to}` | counter | Posture level changes - chart it next to the rejected reasons for an incident timeline. |
 | `state_divergence_total{role}` | counter | Cross-worker state-hash divergence detections (clustered mode, when [`stateHashIntervalMs`](#cross-worker-state-divergence-detection) is set). `role` is `majority` or `minority`. No topic strings or client identity - the hash is structure-only. |
+| `open_fds` | gauge | File descriptors currently open by the process (sampled every ~5 pressure intervals). Registered only where an fd directory exists (Linux, macOS). Worker threads share one process-wide table, so in clustered mode every worker reports the same whole-process value - aggregate with `max()`, never `sum()`. |
+| `fd_soft_limit` | gauge | The soft file-descriptor limit; new sockets fail with `EMFILE` at this count. Chart `open_fds` against it for connection headroom. Registered only where the limit is readable. Same clustered-mode note as `open_fds`: aggregate with `max()`. |
 | `framework_assertion_violations_total{category,severity}` | counter | Framework invariant violations, mirroring the queryable `platform.assertions` Map. `severity` is `soft` (a recoverable `assert`) or `fatal` (a hard-tier termination). Category cardinality is bounded by the source-declared categories - never user input. |
 
 Each posture change also logs one `[ws] protection posture <from> -> <to>` line with the rolling reject rate and the base pressure reason at the moment of transition. Costs when enabled: one unlabelled counter increment per accepted upgrade, one labelled increment per rejection, and three gauge writes per pressure sample; when off, every site is a single undefined check. The counters record server decisions, not client behaviour - a client that disconnects mid-upgrade is counted in neither, so admitted + rejected can read below a load balancer's attempt count under flappy clients. Instrument failures are contained (a registry that throws on emit logs once and is silenced; one that throws at instrument creation fails at startup, loudly). No client identity (IP, session) ever appears in a label - the per-IP picture lives in the extensions per-IP bucket's own `upgrade_bucket_*` counters, and capability-cookie failures in its `capability_cookie_misses_total{reason}` (an app hook that rejects on a cookie miss surfaces here as `auth_rejected`).
@@ -2154,6 +2156,8 @@ The client handles several edge cases automatically, with no configuration requi
 **Exponential backoff with proportional jitter**: each reconnect attempt waits longer than the previous one. The jitter is +-25% of the base delay (not a fixed +-500ms), so at high attempt counts thousands of clients are spread over a wide window rather than clustering.
 
 **Page visibility reconnect**: when a browser tab resumes from background or a phone is unlocked, the client reconnects immediately instead of waiting for the backoff timer. Browsers often close WebSocket connections silently when a tab is hidden.
+
+**Suspend detection**: a device sleep freezes the monotonic clock while the wall clock keeps counting, so on wake the client compares the two deltas. When the gap exceeds 60 seconds and the socket has not delivered a frame in the last few seconds, a still-open socket is not trusted - the server has usually idle-dropped it without the close frame ever arriving - and the client force-reconnects immediately with a session resume, instead of showing frozen data until the silence detector catches up. A socket that provably survived the sleep (a fresh frame already arrived) is left alone. Checked when the tab becomes visible, when it hides, and on the 30-second detector tick, so a lid-close on a visible tab is caught whichever event fires first.
 
 **Batch resubscription**: on reconnect, all topics are resubscribed in batched `subscribe-batch` messages. Each batch stays under the server's 8 KB control-message ceiling and 256-topic-per-batch cap. For typical apps (under 200 topics with short names) this is a single frame; larger sets are automatically chunked.
 
@@ -3981,6 +3985,8 @@ services:
 ```
 
 Without these changes, each process is limited to 1024 file descriptors (the default). Each WebSocket connection uses one file descriptor, so the default caps you at roughly 1000 concurrent connections per process. The server CPU can be well under 50% and you will still hit this ceiling - the bottleneck is the OS, not uWS or your application code.
+
+The server checks this at boot: when the soft limit is below 8192 it logs a one-line warning with the remediation above, so a low-limit deployment is caught before the first connection storm instead of during it. With the [`metrics`](#backpressure-and-connection-limits) option configured, the `open_fds` and `fd_soft_limit` gauges chart the live headroom.
 
 For a deeper walkthrough, see [Millions of active WebSockets with Node.js](https://unetworkingab.medium.com/millions-of-active-websockets-with-node-js-7dc575746a01) from the uWebSockets.js authors.
 
