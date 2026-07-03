@@ -28,7 +28,10 @@
  * application and false on every replay - guard sounds and other one-shot
  * side effects on it. `ctx.rng` is reseeded from the command id before every
  * application, so randomness drawn inside `apply` survives reconciliation
- * (see ./random.js).
+ * (see ./random.js). `ctx.key` is the predicting entity's own key, read from
+ * the caller's `self` accessor (the authority sets the same key when it
+ * applies the command, so an `apply` that reads it stays deterministic); it
+ * is null until the caller learns its identity.
  *
  * The prediction advances one command per simulation tick, but displays
  * refresh faster than tick rate - a 120Hz panel over a 60Hz simulation
@@ -83,8 +86,9 @@ function positionalError(a, b) {
 
 /**
  * @param {{
- *   apply: (state: any, command: any, ctx: { firstTime: boolean, rng: any }) => any,
+ *   apply: (state: any, command: any, ctx: { firstTime: boolean, rng: any, key: string | null }) => any,
  *   initial: any,
+ *   self?: () => string | null,
  *   computeError?: (before: any, after: any) => number,
  *   errorThreshold?: number,
  *   smoothTimeMs?: number,
@@ -92,10 +96,14 @@ function positionalError(a, b) {
  *   windowMaxAgeMs?: number
  * }} options resolved options - validation belongs to the caller's public
  *   surface. `apply` must treat its inputs as immutable and return the next
- *   state (returning the same reference means "unchanged").
+ *   state (returning the same reference means "unchanged"). `self`, when
+ *   supplied, reports the caller's own entity key (or null before it is
+ *   known); it is read before every application so a late-arriving identity
+ *   reaches `ctx.key` without rewiring.
  */
 export function createPredictor(options) {
 	const apply = options.apply;
+	const self = options.self;
 	const computeError = options.computeError === undefined ? positionalError : options.computeError;
 	const errorThreshold = options.errorThreshold === undefined ? 1 : options.errorThreshold;
 	const smoothTimeMs = options.smoothTimeMs === undefined ? 100 : options.smoothTimeMs;
@@ -168,7 +176,7 @@ export function createPredictor(options) {
 	let lastDivergence = 0;
 
 	const rng = createSharedRandom();
-	const ctx = { firstTime: true, rng };
+	const ctx = { firstTime: true, rng, key: null };
 
 	// Discrete one-shot events emitted from `apply` via `ctx.emitEvent`. The
 	// `firstTime` gate IS the replay-suppression: an event fires only on a
@@ -193,6 +201,7 @@ export function createPredictor(options) {
 
 	function runApply(state, entry, firstTime) {
 		ctx.firstTime = firstTime;
+		ctx.key = self === undefined ? null : self();
 		currentId = entry.id;
 		eventOrdinal = 0;
 		rng.reseed(entry.id);

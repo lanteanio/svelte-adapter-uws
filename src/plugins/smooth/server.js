@@ -26,6 +26,10 @@
  * same id-seeded draw the client makes on prediction and replay, so
  * randomness inside `apply` cannot diverge (see ./random.js). `ctx.firstTime`
  * is always true here: the authority applies a command exactly once.
+ * `ctx.key` names the entity whose command is being applied - the handle an
+ * authoritative side effect attributes to (who fired the shot, whose action
+ * to log). It is the same key the predicting client sees for its own entity,
+ * so an `apply` that reads it stays deterministic across both sides.
  *
  * Re-binding an entity to a new connection (the same identity reconnecting)
  * resets its acknowledgement watermark: command ids belong to the CLIENT
@@ -70,7 +74,7 @@ const DEFAULT_QUEUE_CAP = 1024;
  * Create the authoritative command processor for one smoothed topic.
  *
  * @param {{
- *   apply: (state: any, command: any, ctx: { firstTime: boolean, rng: any }) => any,
+ *   apply: (state: any, command: any, ctx: { firstTime: boolean, rng: any, key: string | null }) => any,
  *   onMissing?: (state: any, lastCommand: any) => any,
  *   queueCap?: number
  * }} options resolved options - validation belongs to the caller's public
@@ -97,7 +101,7 @@ export function createSmoothAuthority(options) {
 	const entities = new Map();
 
 	const rng = createSharedRandom();
-	const ctx = { firstTime: true, rng };
+	const ctx = { firstTime: true, rng, key: null };
 
 	// Discrete-event channel. The developer's `apply` may call
 	// `ctx.emitEvent(type, payload, opts?)` to fire a one-shot action (a shot, a
@@ -264,6 +268,9 @@ export function createSmoothAuthority(options) {
 			const events = [];
 			let idle = true;
 			for (const [key, e] of entities) {
+				// Attribution for this entity's applications (client-commanded and
+				// server-injected alike): `apply` reads it as `ctx.key`.
+				ctx.key = key;
 				const before = e.state;
 				let commanded = false;
 				if (e.queue.length > 0) {

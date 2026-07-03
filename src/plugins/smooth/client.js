@@ -140,7 +140,7 @@ function checkWirePair(pair, label) {
  * commands are path-routed and flow regardless.
  *
  * @param {{
- *   apply: (state: any, command: any, ctx: { firstTime: boolean, rng: any }) => any,
+ *   apply: (state: any, command: any, ctx: { firstTime: boolean, rng: any, key: string | null }) => any,
  *   initial: any,
  *   transport: {
  *     sendCommand: (batch: Array<{ id: number, cmd: any }>) => void,
@@ -213,9 +213,15 @@ export function createSmoothChannel(options) {
 	const cmdRate = options.cmdRate === undefined ? 60 : options.cmdRate;
 	const minFlushMs = cmdRate > 0 ? 1000 / cmdRate : 0;
 
+	// The caller's own entity key, learned from the sync reply. Read live by
+	// the predictor's `self` accessor, so `ctx.key` starts reporting it on the
+	// first application after the reply lands.
+	let selfKey = null;
+
 	const predictor = createPredictor({
 		apply: options.apply,
 		initial: options.initial,
+		self: () => selfKey,
 		computeError: options.computeError,
 		errorThreshold: options.errorThreshold,
 		smoothTimeMs: options.smoothTimeMs,
@@ -231,7 +237,6 @@ export function createSmoothChannel(options) {
 	/** Latest merged remote states (positions interpolate, other fields are
 	 * latest-value). The local entity never lives here. */
 	const merged = new Map();
-	let selfKey = null;
 	// Cells mode (interest.cells): remote entities arrive on cell topics via the
 	// module sink, not the base wire tap. `cellOf` tracks each remote entity's
 	// current cell so a transition's stale remove-to-old-cell only drops an entity

@@ -389,6 +389,42 @@ describe('createSmoothAuthority - inject (ctx.applyTo / server-initiated command
 	});
 });
 
+describe('createSmoothAuthority - ctx.key (attribution)', () => {
+	/** Apply that records the key each application saw. */
+	function keyedApply() {
+		const seen = [];
+		const apply = (s, c, ctx) => {
+			seen.push({ key: ctx.key, n: c.n });
+			return { x: s.x + 1 };
+		};
+		return { apply, seen };
+	}
+
+	it('names the entity whose command is being applied, per entity within one drain', () => {
+		const { apply, seen } = keyedApply();
+		const a = createSmoothAuthority({ apply });
+		a.ensure('alice', mockWs(), { x: 0 });
+		a.ensure('bob', mockWs(), { x: 0 });
+		a.enqueue('alice', [{ id: 1, cmd: { n: 1 } }, { id: 2, cmd: { n: 2 } }]);
+		a.enqueue('bob', [{ id: 1, cmd: { n: 3 } }]);
+		a.drain();
+		expect(seen).toEqual([
+			{ key: 'alice', n: 1 },
+			{ key: 'alice', n: 2 },
+			{ key: 'bob', n: 3 }
+		]);
+	});
+
+	it('server-injected commands see the victim key too', () => {
+		const { apply, seen } = keyedApply();
+		const a = createSmoothAuthority({ apply });
+		a.ensure('victim', mockWs(), { x: 0 });
+		a.inject('victim', { n: 9 });
+		a.drain();
+		expect(seen).toEqual([{ key: 'victim', n: 9 }]);
+	});
+});
+
 describe('createSmoothAuthority - server entities (ensure active + set)', () => {
 	const glide = (s) => ({ x: s.x + 1, y: s.y });
 

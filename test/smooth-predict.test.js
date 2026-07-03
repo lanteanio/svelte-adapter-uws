@@ -522,3 +522,41 @@ describe('createPredictor - telemetry getters (devtools)', () => {
 		expect(p.correcting).toBe(false);
 	});
 });
+
+describe('createPredictor - ctx.key (own identity)', () => {
+	it('reports the self accessor value on first application AND on replays', () => {
+		const seen = [];
+		let me = null;
+		const p = createPredictor({
+			apply: (s, c, ctx) => {
+				seen.push({ key: ctx.key, firstTime: ctx.firstTime });
+				return { x: s.x + c.dx, y: s.y };
+			},
+			initial: { x: 0, y: 0 },
+			self: () => me
+		});
+		// Identity unknown yet: the first prediction sees null.
+		p.command({ dx: 1 }, 100);
+		expect(seen).toEqual([{ key: null, firstTime: true }]);
+		// The sync reply lands mid-window: later applications see the key,
+		// including the replay of the still-unacked tail.
+		me = 'alice';
+		p.command({ dx: 1 }, 116);
+		p.ack(1, { x: 5, y: 0 }, 200); // divergence forces a replay of command 2
+		expect(seen[1]).toEqual({ key: 'alice', firstTime: true });
+		expect(seen[2]).toEqual({ key: 'alice', firstTime: false });
+	});
+
+	it('defaults to null without a self accessor', () => {
+		const seen = [];
+		const p = createPredictor({
+			apply: (s, c, ctx) => {
+				seen.push(ctx.key);
+				return { x: s.x + c.dx, y: s.y };
+			},
+			initial: { x: 0, y: 0 }
+		});
+		p.command({ dx: 1 }, 100);
+		expect(seen).toEqual([null]);
+	});
+});

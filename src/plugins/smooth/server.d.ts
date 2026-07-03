@@ -15,6 +15,16 @@ export interface SmoothApplyContext {
 	 */
 	rng: SharedRandom;
 	/**
+	 * The key of the entity whose command is being applied - the handle an
+	 * authoritative side effect attributes to (who fired the shot, whose
+	 * action to log). The authority sets it for every application
+	 * (client-commanded and server-injected alike); the predicting client
+	 * reports its own entity key, null until the first sync reply announces
+	 * it. Both sides see the same key for the same command, so an `apply`
+	 * that reads it stays deterministic.
+	 */
+	key: string | null;
+	/**
 	 * Emit a discrete one-shot event (a shot, a hit) that is NOT part of the
 	 * reconciled continuous state. It fires once - on a command's first
 	 * application - and is automatically suppressed on the client's

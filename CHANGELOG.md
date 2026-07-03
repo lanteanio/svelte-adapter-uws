@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0-next.49] - 2026-07-02
+## [0.6.0-next.50] - 2026-07-03
+
+### Added
+
+- **`ctx.key` on the smooth apply context - the attribution handle for authoritative side effects.** An `apply` that produces an authoritative side effect (spawning the server's copy of a fired shot, logging a player action) had no way to know WHOSE command it was applying: the state deliberately carries no identity (the channel owns addressing), and threading an identity field through every state would put it on the wire every tick. The authority now sets `ctx.key` to the entity key for every application - client-commanded and server-injected alike - and the predicting client reports its own entity key through the same field (null until the first sync reply announces the identity), so an `apply` that reads it sees the same value on both sides of the same command and stays deterministic. Zero wire cost, additive: an `apply` that never reads `ctx.key` is untouched.
 
 ### Added
 

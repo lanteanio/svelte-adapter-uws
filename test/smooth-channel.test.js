@@ -155,6 +155,24 @@ describe('sync lifecycle', () => {
 		ch.destroy();
 	});
 
+	it('feeds the announced identity to apply as ctx.key (null before the reply)', async () => {
+		const keys = [];
+		const t = makeTransport();
+		const ch = makeChannel(t, {
+			apply: (s, c, ctx) => {
+				keys.push(ctx.key);
+				return { x: s.x + (c.dx || 0), y: s.y };
+			}
+		});
+		// Before the sync reply the identity is unknown.
+		ch.command({ dx: 1 });
+		expect(keys).toEqual([null]);
+		await flush();
+		ch.command({ dx: 1 });
+		expect(keys).toEqual([null, 'me']);
+		ch.destroy();
+	});
+
 	it('adopts the server ack watermark so older acks are ignored', async () => {
 		const t = makeTransport({ ack: 7 });
 		const ch = makeChannel(t);
