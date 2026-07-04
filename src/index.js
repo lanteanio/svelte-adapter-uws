@@ -7,6 +7,7 @@ import { nodeResolve } from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 import json from '@rollup/plugin-json';
 import { normalizeStaticHeaders } from './build-config.js';
+import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
 
 const runtimeDir = fileURLToPath(new URL('./runtime', import.meta.url).href);
 
@@ -99,12 +100,7 @@ export default function (opts = {}) {
 			try {
 				await import('uWebSockets.js');
 			} catch {
-				throw new Error(
-					'Could not load uWebSockets.js. Make sure it is installed:\n' +
-					'  npm install uNetworking/uWebSockets.js#v20.60.0\n\n' +
-					'It is a native addon installed from GitHub (not npm) and may fail ' +
-					'on some platforms. Check the uWebSockets.js README for details.'
-				);
+				throw new Error(uwsLoadErrorMessage(readAdapterPackageJson()));
 			}
 
 			const tmp = builder.getBuildDirectory('adapter-uws');

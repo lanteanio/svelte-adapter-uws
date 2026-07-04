@@ -1323,6 +1323,11 @@ export async function createTestServer(options = {}) {
 						if (aborted) { releaseInFlight(); return; }
 						res.cork(() => {
 							if (responseHeaders) {
+								// Status line first: uWS emits an implicit "200 OK" on
+								// the first writeHeader, and a 200 makes spec-compliant
+								// WebSocket clients reject the handshake. Mirrors the
+								// production handler.js fix.
+								res.writeStatus('101 Switching Protocols');
 								for (const [hk, hv] of Object.entries(responseHeaders)) {
 									if (Array.isArray(hv)) {
 										for (const v of hv) res.writeHeader(hk, v);

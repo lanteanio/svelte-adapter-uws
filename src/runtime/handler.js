@@ -1146,6 +1146,13 @@ if (WS_ENABLED) {
 						if (aborted || timedOut) { releaseInFlight(); return; }
 						res.cork(() => {
 							if (responseHeaders) {
+								// Write the switching-protocols status line BEFORE any
+								// header. uWS emits an implicit "200 OK" on the first
+								// writeHeader, and a 200 makes spec-compliant WebSocket
+								// clients reject the handshake ("Unexpected server
+								// response: 200"). res.upgrade() below tolerates the
+								// pre-written 101 and appends Sec-WebSocket-Accept to it.
+								res.writeStatus('101 Switching Protocols');
 								for (const [hk, hv] of Object.entries(responseHeaders)) {
 									if (Array.isArray(hv)) {
 										for (const v of hv) res.writeHeader(hk, v);

@@ -190,18 +190,19 @@ export function flushCoalescedFor(ws) {
 		try { result = ws.send(payload, false, false); }
 		catch {
 			// Socket closed mid-drain. There will be no further `drain`
-			// event to retry on, so dropping the rest of the buffer is
-			// the only correct outcome - returning 1 (BACKPRESSURE) lets
-			// drainCoalesced clear the current entry and stop iterating.
+			// event to retry on, so dropping the rest of the buffer is the
+			// only correct outcome - returning 0 (enqueued-under-backpressure,
+			// which is drainCoalesced's "stop" signal) clears the current
+			// entry and halts the loop; `pending.clear()` below wipes the rest.
 			counters.closedWsAborts++;
 			aborted = true;
-			return 1;
+			return 0;
 		}
-		// `result` MUST propagate to drainCoalesced. 0=SUCCESS removes the
-		// entry; 1=BACKPRESSURE removes it and halts the loop; 2=DROPPED
-		// retains the entry for retry on next drain. Don't refactor away
-		// the explicit return - a previous refactor did and silently lost
-		// every DROPPED message.
+		// `result` is the raw uWS send status and MUST propagate to
+		// drainCoalesced: 1=sent removes the entry and continues; 0=enqueued-
+		// under-backpressure removes it and halts; 2=dropped retains the entry
+		// for retry on next drain. Don't refactor away the explicit return -
+		// a previous refactor did and silently lost every DROPPED message.
 		if (result !== 2) bumpOut(ws, payload);
 		return result;
 	});

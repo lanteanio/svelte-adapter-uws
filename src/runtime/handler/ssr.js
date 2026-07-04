@@ -5,6 +5,7 @@ import { randomUuid } from '../runtime.js';
 import { PayloadTooLargeError, send413, send500 } from './http-helpers.js';
 import { origin, address_header, xff_depth, body_size_limit, get_origin, WS_COMPRESSION_ON } from './config.js';
 import { platform } from './platform.js';
+import { isDedupBufferable } from './ssr-dedup.js';
 
 // Maximum number of in-flight dedup keys tracked simultaneously.
 const MAX_SSR_DEDUP = 500;
@@ -301,6 +302,17 @@ export async function handleSSR(res, method, url, headers, remoteAddress, state)
 							await writeResponse(res, response, state, respAcceptEncoding);
 							return;
 						}
+					}
+
+					// A never-ending SSE stream (see isDedupBufferable) must not be
+					// buffered: arrayBuffer() on it would await forever, parking this
+					// leader and every concurrent waiter on the same promise.
+					// writeResponse chunk-streams it instead. Every other (finite)
+					// render is buffered and shared below.
+					if (!isDedupBufferable(response)) {
+						resolveShared(null);
+						await writeResponse(res, response, state, respAcceptEncoding);
+						return;
 					}
 
 					// Buffer the body. Responses above the size cap are not shared.

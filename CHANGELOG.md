@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.53] - 2026-07-04
+
+### Fixed
+
+- **Anonymous Server-Sent-Events endpoints no longer hang the SSR renderer.** The response-dedup path that shares one render across concurrent identical anonymous GETs buffered the whole body before deciding shareability - and for an SSE (`text/event-stream`) response, which never ends, that buffering awaited forever, parking the leader and every concurrent waiter on the same request until the socket dropped. Event-stream responses now stream straight through (dedup only ever buffers finite renders), so an unauthenticated SSE route stays responsive.
+- **`upgradeResponse()` custom headers no longer break the WebSocket handshake.** Attaching an extra header to the 101 wrote the header before the upgrade, and uWS emits an implicit `200 OK` on the first header write - so strict clients saw a 200 and rejected the connection ("Unexpected server response: 200"). The switching-protocols status is now written first, so the handshake completes with the header attached.
+- **Coalesced sends no longer stall a healthy socket or over-push a backpressured one.** The coalesce-buffer drain read the uWS send status with two values transposed (it treated "sent clean" as "under pressure" and vice versa), so a healthy connection flushed only one pending key per trigger while a backpressured one kept getting pushed. The drain now follows the real status contract: it flushes every pending key while sends land clean and stops the moment the socket signals backpressure.
+- **The uWebSockets.js install error now names the pinned version.** When the native addon failed to load, the hint hardcoded a version seven tags behind the actual pin, so following it installed a skewed build. The message now derives the exact `npm install` target from the package's own dependency pin and names the real causes (it needs `git` on PATH, and as an optional dependency npm skips it silently on failure - check `npm ls uWebSockets.js`).
+
 ## [0.6.0-next.52] - 2026-07-03
 
 ### Fixed

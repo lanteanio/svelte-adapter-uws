@@ -1568,8 +1568,12 @@ describe('writeChunkWithBackpressure', () => {
 // - drainCoalesced ---------------------------------------------------------
 
 describe('drainCoalesced', () => {
-	const SUCCESS = 0;
-	const BACKPRESSURE = 1;
+	// uWS send-status contract (see platform.js): 1 = sent clean, 0 = enqueued
+	// behind backpressure (accepted, delivered in order, socket now under
+	// pressure), 2 = dropped past maxBackpressure. drainCoalesced continues on a
+	// clean send and stops on backpressure or drop.
+	const SUCCESS = 1;
+	const BACKPRESSURE = 0;
 	const DROPPED = 2;
 
 	function makeSender(results) {

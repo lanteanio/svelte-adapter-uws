@@ -37,11 +37,15 @@ export function writeChunkWithBackpressure(res, value, timeoutMs = 30000) {
 /**
  * Drain a coalesce-by-key buffer.
  *
- * Iterates entries in insertion order and calls `send` for each. Entries
- * whose send result is SUCCESS (0) are removed from the map. The function
- * stops on the first BACKPRESSURE (1) or DROPPED (2) result, leaving the
- * remaining entries (and the one that just hit pressure, in the DROPPED
- * case) for a later flush.
+ * Iterates entries in insertion order and calls `send` for each, using the
+ * uWS send-status contract (see platform.js): 1 = sent clean, 0 = enqueued
+ * behind backpressure (accepted and delivered in order, but the socket is
+ * now under pressure), 2 = dropped past maxBackpressure. A sent (1) or
+ * enqueued (0) entry is removed from the map; a dropped (2) entry is retained
+ * for a later flush. The drain continues while sends land clean and STOPS the
+ * moment the socket signals pressure - the first enqueued-behind-backpressure
+ * (0) or dropped (2) result - so a backpressured socket is never pushed
+ * harder and a healthy one drains all of its pending keys in one pass.
  *
  * Pure: no I/O of its own, no timers, no globals. The caller supplies
  * `send`, which is the only side-effecting boundary, so this is unit-
@@ -53,14 +57,14 @@ export function writeChunkWithBackpressure(res, value, timeoutMs = 30000) {
  *
  * @template T
  * @param {Map<string, T>} pending
- * @param {(value: T) => number} send  0 SUCCESS, 1 BACKPRESSURE, 2 DROPPED
+ * @param {(value: T) => number} send  uWS send status: 1 sent clean, 0 enqueued-under-backpressure, 2 dropped
  */
 export function drainCoalesced(pending, send) {
 	for (const [key, value] of pending) {
 		const result = send(value);
 		if (result === 2) return;
 		pending.delete(key);
-		if (result === 1) return;
+		if (result === 0) return;
 	}
 }
 
