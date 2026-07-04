@@ -1246,6 +1246,15 @@ export default function uws(options = {}) {
 									sendDenied(ws, msg.topic, ref, 'RATE_LIMITED');
 									return;
 								}
+								// Resume-on-subscribe (mirror): gap-fill via the resume hook before
+								// subscribing to live, so __replay frames precede the first live frame.
+								if (msg.recover && typeof msg.recover === 'object' && Number.isInteger(msg.recover.offset) && msg.recover.offset >= 0 && userHandlers.resume) {
+									const _rEpochs = Number.isInteger(msg.recover.epoch) ? { [msg.topic]: msg.recover.epoch } : undefined;
+									try {
+										await userHandlers.resume(wrapped, { sessionId: wrapped.getUserData()[WS_SESSION_ID], lastSeenSeqs: { [msg.topic]: msg.recover.offset }, lastSeenEpochs: _rEpochs, platform: wrapped.getUserData()[WS_PLATFORM] });
+									} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
+									if (subs.has(msg.topic)) { sendSubscribedV(ws, msg.topic, ref); return; }
+								}
 								subscriptions.get(ws)?.add(msg.topic);
 								subs.add(msg.topic);
 								sendSubscribedV(ws, msg.topic, ref);
@@ -1314,6 +1323,28 @@ export default function uws(options = {}) {
 									: null;
 								const udSubs = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS];
 								assert(udSubs instanceof Set, 'subs.shape-batch', null);
+								// Resume-on-subscribe (mirror, batch): gap-fill every recover-tagged topic
+								// that passed the auth gate in one resume-hook call, before the subscribe loop.
+								let _recoverSeqs = null;
+								let _recoverEpochs = null;
+								if (msg.recover && typeof msg.recover === 'object') {
+									for (let i = 0; i < valid.length; i++) {
+										const _t = valid[i];
+										const _denial = batchDenials !== null ? (batchDenials[_t] ?? null) : (perTopicDenials !== null ? perTopicDenials[i] : null);
+										if (_denial !== null) continue;
+										const _rec = msg.recover[_t];
+										if (_rec && typeof _rec === 'object' && Number.isInteger(_rec.offset) && _rec.offset >= 0) {
+											if (_recoverSeqs === null) _recoverSeqs = {};
+											_recoverSeqs[_t] = _rec.offset;
+											if (Number.isInteger(_rec.epoch)) { if (_recoverEpochs === null) _recoverEpochs = {}; _recoverEpochs[_t] = _rec.epoch; }
+										}
+									}
+									if (_recoverSeqs !== null && userHandlers.resume) {
+										try {
+											await userHandlers.resume(wrapped, { sessionId: wrapped.getUserData()[WS_SESSION_ID], lastSeenSeqs: _recoverSeqs, lastSeenEpochs: _recoverEpochs || undefined, platform: wrapped.getUserData()[WS_PLATFORM] });
+										} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
+									}
+								}
 								for (let i = 0; i < valid.length; i++) {
 									const topic = valid[i];
 									const denial = batchDenials !== null

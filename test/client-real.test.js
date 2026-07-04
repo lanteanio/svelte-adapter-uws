@@ -2608,9 +2608,10 @@ describe('client.js (real module)', () => {
 			clientModule.connect().close();
 		});
 
-		it('tracks highest seq per topic from incoming events', async () => {
+		it('tracks highest seq per topic and recovers it on the resubscribe', async () => {
 			vi.useFakeTimers();
-			clientModule.connect();
+			const sa = clientModule.on('a').subscribe(() => {});
+			const sb = clientModule.on('b').subscribe(() => {});
 			await vi.advanceTimersByTimeAsync(0);
 			const ws = MockWebSocket._last;
 			ws._receive({ type: 'welcome', sessionId: 's1' });
@@ -2622,16 +2623,18 @@ describe('client.js (real module)', () => {
 			ws.close();
 			await vi.advanceTimersByTimeAsync(10000);
 			const ws2 = MockWebSocket._last;
-			const resumeFrame = ws2._sent.map(s => JSON.parse(s)).find(m => m.type === 'resume');
-			expect(resumeFrame).toBeTruthy();
-			expect(resumeFrame.sessionId).toBe('s1');
-			expect(resumeFrame.lastSeenSeqs).toEqual({ a: 7, b: 2 });
+			const batch = ws2._sent.map(s => JSON.parse(s)).find(m => m.type === 'subscribe-batch');
+			expect(batch).toBeTruthy();
+			// The highest observed seq per topic rides the resubscribe as recovery
+			// (merged in, not a separate resume frame).
+			expect(batch.recover).toEqual({ a: { offset: 7 }, b: { offset: 2 } });
 
+			sa(); sb();
 			clientModule.connect().close();
 			vi.useRealTimers();
 		});
 
-		it('sends resume frame before subscribe-batch on reconnect', async () => {
+		it('attaches recover to the resubscribe on reconnect (no separate resume frame)', async () => {
 			vi.useFakeTimers();
 			const store = clientModule.on('topic-x');
 			const unsub = store.subscribe(() => {});
@@ -2644,30 +2647,38 @@ describe('client.js (real module)', () => {
 			await vi.advanceTimersByTimeAsync(10000);
 			const ws2 = MockWebSocket._last;
 			const sent = ws2._sent.map(s => JSON.parse(s));
-			const resumeIdx = sent.findIndex(m => m.type === 'resume');
-			const subIdx = sent.findIndex(m => m.type === 'subscribe-batch');
-			expect(resumeIdx).toBeGreaterThanOrEqual(0);
-			expect(subIdx).toBeGreaterThanOrEqual(0);
-			expect(resumeIdx).toBeLessThan(subIdx);
+			// The recovery is merged into the resubscribe; no standalone resume frame.
+			expect(sent.find(m => m.type === 'resume')).toBeUndefined();
+			const batch = sent.find(m => m.type === 'subscribe-batch');
+			expect(batch).toBeTruthy();
+			expect(batch.topics).toContain('topic-x');
+			expect(batch.recover).toEqual({ 'topic-x': { offset: 4 } });
 
 			unsub();
 			clientModule.connect().close();
 			vi.useRealTimers();
 		});
 
-		it('skips resume frame when no seqs have been observed', async () => {
+		it('resubscribes without recover when no seqs have been observed', async () => {
 			vi.useFakeTimers();
-			clientModule.connect();
+			const unsub = clientModule.on('topic-y').subscribe(() => {});
 			await vi.advanceTimersByTimeAsync(0);
 			const ws = MockWebSocket._last;
 			ws._receive({ type: 'welcome', sessionId: 's3' });
+			// No seq observed for topic-y.
 
 			ws.close();
 			await vi.advanceTimersByTimeAsync(10000);
 			const ws2 = MockWebSocket._last;
-			const resumeFrame = ws2._sent.map(s => JSON.parse(s)).find(m => m.type === 'resume');
-			expect(resumeFrame).toBeUndefined();
+			const sent = ws2._sent.map(s => JSON.parse(s));
+			expect(sent.find(m => m.type === 'resume')).toBeUndefined();
+			const batch = sent.find(m => m.type === 'subscribe-batch');
+			expect(batch).toBeTruthy();
+			expect(batch.topics).toContain('topic-y');
+			// No tracked seq -> a plain resubscribe, no recover field.
+			expect(batch.recover).toBeUndefined();
 
+			unsub();
 			clientModule.connect().close();
 			vi.useRealTimers();
 		});

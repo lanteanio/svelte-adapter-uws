@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.55] - 2026-07-05
+
+### Added
+
+- **Resume-on-subscribe - reconnect recovery now rides the resubscribe and scales to any subscription count.** On reconnect the client recovered missed events by sending one `resume` frame listing every subscribed topic's last-seen offset. Above a few hundred topics that single frame exceeds the 8 KiB control-frame parse ceiling and the server drops it wholesale - so a client with many subscriptions silently lost its recovery. The client now attaches the per-topic recovery (`{offset, epoch}`) inline to each `subscribe` / `subscribe-batch` frame instead, so it is chunked with the resubscribe and every frame stays under the ceiling. The server gap-fills each recover-tagged topic (epoch-checked, through the same resume hook the `resume` frame uses) ahead of the first live frame, and skips a topic the auth gate denied. The standalone `resume` frame is still accepted from older or third-party clients. Additive and transparent: a subscribe without `recover` is byte-identical to before, and the whole `resume` frame path is unchanged for servers or clients that still use it. Documented in `PROTOCOL.md` (sections 3.2, 7), where the 8 KiB control-frame ceiling is now also stated as a normative limit.
+
 ## [0.6.0-next.54] - 2026-07-04
 
 ### Added

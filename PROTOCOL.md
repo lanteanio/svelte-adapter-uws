@@ -83,8 +83,8 @@ honour credit-based flow control for a client that advertised `lease`.
 
 | Frame | Dir | Shape |
 |---|---|---|
-| `subscribe` | c->s | `{"type":"subscribe","topic":"<string>","ref":<int>}` |
-| `subscribe-batch` | c->s | `{"type":"subscribe-batch","topics":["<string>", ...],"ref":<int>}` |
+| `subscribe` | c->s | `{"type":"subscribe","topic":"<string>","ref":<int>,"recover"?:{"offset":<int>,"epoch"?:<int>}}` |
+| `subscribe-batch` | c->s | `{"type":"subscribe-batch","topics":["<string>", ...],"ref":<int>,"recover"?:{"<topic>":{"offset":<int>,"epoch"?:<int>}}}` |
 | `unsubscribe` | c->s | `{"type":"unsubscribe","topic":"<string>"}` |
 | `subscribed` | s->c | `{"type":"subscribed","topic":"<string>","ref":<int\|string\|null>,"epoch":<int>}` |
 | `subscribe-denied` | s->c | `{"type":"subscribe-denied","topic":"<string>","ref":<int\|string\|null>,"reason":"<string>"}` |
@@ -102,6 +102,23 @@ honour credit-based flow control for a client that advertised `lease`.
 - `reason` on `subscribe-denied` is an open-ended string. The framework emits
   `INVALID_TOPIC` and `RATE_LIMITED`; an application authorization gate may
   return any other string.
+- `recover` is optional resume-on-subscribe (section 7). On `subscribe` it is a
+  single `{offset, epoch?}`; on `subscribe-batch` it is a map keyed by topic, so
+  the recovery for many topics rides the same already-chunked batch instead of a
+  separate whole-session `resume` frame that would overflow the control-frame
+  ceiling (see below). For each recover-tagged topic the server gap-fills the
+  missed tail ahead of the first live frame, exactly as the `resume` frame does,
+  and omits it entirely for a topic the auth gate denied. A client that omits
+  `recover` (or a server that does not implement it) is byte-identical to a plain
+  subscribe.
+
+**Control-frame size ceiling (normative).** A c->s control frame is parsed as a
+control frame only while its total size is under 8192 bytes; a larger frame is
+passed through as opaque application data and its control semantics are lost. A
+client MUST keep every control frame under this limit - in particular it MUST
+chunk `subscribe-batch` (topics plus any `recover` map) so each frame stays
+below 8192 bytes, rather than relying on the 256-topic cap alone. The reference
+client chunks at 8000 bytes and 200 topics for headroom.
 
 ### 3.3 Data and correlation
 
@@ -347,13 +364,28 @@ On reconnect a client may recover missed events instead of cold-starting. The
 model is a per-topic `(offset, epoch)` pair:
 
 - **offset** - the per-topic sequence number (`seq`) the client last observed,
-  reported per topic in `resume.lastSeenSeqs`.
+  reported per topic (in `subscribe`/`subscribe-batch` `recover`, or in
+  `resume.lastSeenSeqs`).
 - **epoch** - the sequence-space generation for a topic. The server reports the
   current epoch in the `subscribed` ack; the client tracks it and reports it back
-  per topic in the optional `resume.lastSeenEpochs`.
+  per topic (in `recover.epoch`, or in the optional `resume.lastSeenEpochs`).
 
-On `resume`, for each topic the server compares the client's reported epoch to
-the topic's current epoch:
+Two mechanisms carry the same `(offset, epoch)` recovery, and both drive the
+identical per-topic gap-fill:
+
+- **Resume-on-subscribe (the reference client's mechanism).** Each resubscribed
+  topic carries its recovery inline as the `recover` field (section 3.2). The
+  recovery is chunked with the resubscribe, so it scales to any subscription
+  count under the control-frame ceiling. The reference client uses this and sends
+  no separate `resume` frame.
+- **The `resume` frame (retained for compatibility).** A single whole-session
+  frame carrying every topic's offset/epoch at once. The server still accepts it
+  (so an older or third-party client keeps working), but at high subscription
+  counts it overflows the 8 KiB control ceiling (section 3.2) and is dropped
+  wholesale - which is why resume-on-subscribe is preferred.
+
+For each recovered topic (by either mechanism) the server compares the client's
+reported epoch to the topic's current epoch:
 
 - **Epochs match (or the client reported none)** - the offset is meaningful, and
   the server gap-fills the missed tail from its replay buffer (when the topic is
@@ -362,11 +394,14 @@ the topic's current epoch:
   expiry, or a shard move minted a new epoch), so the client's offset belongs to a
   different counter. The server does not gap-fill; it cold-rehydrates that topic.
 
-The server acks the whole resume with `resumed`. `lastSeenEpochs` is omitted
-entirely by a client that has no epochs; the server treats an absent epoch as a
-match (the single-generation legacy behaviour). Epochs are additive - a new
-client against an old server, or an old client against a new server, both degrade
-to offset-only resume without breaking.
+Resume-on-subscribe is acked per topic by the ordinary `subscribed` frame (the
+gap-fill precedes it); the whole-session `resume` frame is acked once with
+`resumed`. The epoch is optional in both: a client that has no epoch for a topic
+omits it, and the server treats an absent epoch as a match (the single-generation
+legacy behaviour). Epochs and recovery are additive - a new client against an old
+server, or an old client against a new server, degrade to offset-only recovery
+(or, for resume-on-subscribe against a server that predates it, to a plain
+resubscribe) without breaking.
 
 Some topic classes (cursors, for example) carry `seq` for uniformity and gap
 *detection* but are not recoverable: a gap triggers a fresh snapshot, not a

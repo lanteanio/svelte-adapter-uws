@@ -1121,6 +1121,51 @@ function createConnection(options) {
 		return out;
 	}
 
+	/**
+	 * Reconnect resubscribe chunker with recovery. Like chunkTopicsForBatch,
+	 * but each chunk also carries a `recover` map of `{ offset, epoch }` for
+	 * every topic in the chunk we hold a tracked seq for, and the recover fields
+	 * count toward the same byte / topic budget so a chunk never overflows the
+	 * control-frame ceiling. That is what lets recovery scale to high
+	 * subscription counts where a single all-topics resume frame would overflow
+	 * it. `recover` is null for a chunk with no recoverable topics (a plain
+	 * resubscribe, byte-identical to before).
+	 * @param {string[]} topics
+	 * @returns {{ topics: string[], recover: Record<string, { offset: number, epoch?: number }> | null }[]}
+	 */
+	function chunkResubscribe(topics) {
+		const out = [];
+		let chunk = [];
+		/** @type {Record<string, { offset: number, epoch?: number }> | null} */
+		let recover = null;
+		let chunkBytes = SUBSCRIBE_BATCH_ENVELOPE_BYTES;
+		for (const t of topics) {
+			let entryBytes = subscribeBatchEncoder.encode(JSON.stringify(t)).length + 1;
+			let entry = null;
+			const offset = lastSeenSeqs.get(t);
+			if (offset !== undefined) {
+				const epoch = lastSeenEpochs.get(t);
+				entry = epoch !== undefined ? { offset, epoch } : { offset };
+				// The recover map's contribution to the frame: `"topic":{...},`.
+				entryBytes += subscribeBatchEncoder.encode(JSON.stringify(t) + ':' + JSON.stringify(entry)).length + 1;
+			}
+			if (chunk.length > 0 && (chunk.length >= SUBSCRIBE_BATCH_MAX_TOPICS || chunkBytes + entryBytes > SUBSCRIBE_BATCH_MAX_BYTES)) {
+				out.push({ topics: chunk, recover });
+				chunk = [];
+				recover = null;
+				chunkBytes = SUBSCRIBE_BATCH_ENVELOPE_BYTES;
+			}
+			chunk.push(t);
+			if (entry !== null) {
+				if (recover === null) recover = {};
+				recover[t] = entry;
+			}
+			chunkBytes += entryBytes;
+		}
+		if (chunk.length > 0) out.push({ topics: chunk, recover });
+		return out;
+	}
+
 	// Initial-mount subscribe coalescer. Multiple subscribe(topic) calls
 	// landing in the same microtask collapse to a single subscribe-batch
 	// frame, so a page mounting N streams triggers the server's
@@ -1346,43 +1391,24 @@ function createConnection(options) {
 			// call. Old servers ignore the unknown frame type.
 			ws?.send(JSON.stringify({ type: 'hello', caps: buildHelloCaps() }));
 
-			// If we have a previous session id and any tracked seqs, ask the
-			// server to fill the gap before we resubscribe. The server's
-			// resume hook is what actually replays; if no hook is wired, the
-			// server just acks with { type: 'resumed' } and we fall through
-			// to subscribe-batch + live mode (same as a cold connect). The
-			// resume frame is sent before subscribe-batch so any replayed
-			// frames arrive ahead of the first live frames.
-			const prevSessionId = storedSessionId();
-			if (prevSessionId && lastSeenSeqs.size > 0) {
-				const seqs = {};
-				for (const [topic, seq] of lastSeenSeqs) seqs[topic] = seq;
-				// Per-topic epoch we last saw for each tracked topic. Topics
-				// without a recorded epoch are simply absent, and the server
-				// treats absence as a match - so the gap-fill path stays
-				// byte-identical to before for an unchanged deployment. We send
-				// the epochs key only when we have at least one, so a client
-				// that never saw an epoch emits the exact legacy resume frame.
-				const epochs = {};
-				let haveEpochs = false;
-				for (const [topic, epoch] of lastSeenEpochs) {
-					if (lastSeenSeqs.has(topic)) { epochs[topic] = epoch; haveEpochs = true; }
-				}
-				if (debug) console.log('[ws] resume sessionId=%s seqs=%o', prevSessionId, seqs);
-				const frame = haveEpochs
-					? { type: 'resume', sessionId: prevSessionId, lastSeenSeqs: seqs, lastSeenEpochs: epochs }
-					: { type: 'resume', sessionId: prevSessionId, lastSeenSeqs: seqs };
-				ws?.send(JSON.stringify(frame));
-			}
-
-			// Batch resubscriptions into subscribe-batch messages. Chunking
-			// rules (8192-byte server parse ceiling, 256-topic batch cap)
-			// live in chunkTopicsForBatch so this path and the
-			// initial-mount microtask flush stay in sync on the limits.
+			// Resubscribe every tracked topic, attaching per-topic recovery
+			// ({ offset, epoch }) for any topic we hold a seq for, so the server
+			// gap-fills the disconnect window as part of the resubscribe. The
+			// recovery rides the already-chunked subscribe-batch (each chunk
+			// stays under the control-frame ceiling), which is what lets it
+			// scale to high subscription counts where a single all-topics resume
+			// frame would overflow the ceiling and be dropped wholesale. A topic
+			// with no tracked seq (a fresh subscribe, or a sink codec) resubscribes
+			// plain. The server replays the missed tail on __replay:{topic} ahead
+			// of the first live frame - the recovery is merged INTO the resubscribe
+			// rather than sent as a separate `resume` frame (which the server still
+			// accepts from older / third-party clients).
 			if (subscribedTopics.size > 0) {
-				for (const chunk of chunkTopicsForBatch([...subscribedTopics])) {
-					if (debug) console.log('[ws] resubscribe-batch ->', chunk);
-					ws?.send(JSON.stringify({ type: 'subscribe-batch', topics: chunk, ref: nextSubscribeRef++ }));
+				for (const { topics, recover } of chunkResubscribe([...subscribedTopics])) {
+					const frame = { type: 'subscribe-batch', topics, ref: nextSubscribeRef++ };
+					if (recover !== null) frame.recover = recover;
+					if (debug) console.log('[ws] resubscribe-batch ->', topics, recover ? '(+recover)' : '');
+					ws?.send(JSON.stringify(frame));
 				}
 			}
 

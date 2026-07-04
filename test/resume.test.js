@@ -499,3 +499,89 @@ describeUWS('per-topic epoch on subscribe and resume', () => {
 		client.ws.close();
 	});
 });
+
+describeUWS('resume-on-subscribe (recover fields)', () => {
+	afterEach(async () => {
+		await server?.close();
+		server = null;
+	});
+
+	it('runs the resume hook for a single subscribe carrying recover, then acks', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const captured = [];
+		const order = [];
+		server = await createTestServer({
+			handler: { resume(_ws, ctx) { captured.push(ctx); order.push('recover'); } }
+		});
+		const client = await connectAndCapture(server.wsUrl);
+		await client.waitFor(f => f.parsed?.type === 'welcome');
+		client.ws.send(JSON.stringify({ type: 'subscribe', topic: 'room:1', ref: 5, recover: { offset: 9, epoch: 2 } }));
+		const ack = await client.waitFor(f => f.parsed?.type === 'subscribed' && f.parsed?.topic === 'room:1');
+		order.push('ack');
+
+		expect(captured).toHaveLength(1);
+		expect(captured[0].lastSeenSeqs).toEqual({ 'room:1': 9 });
+		expect(captured[0].lastSeenEpochs).toEqual({ 'room:1': 2 });
+		expect(ack.parsed.ref).toBe(5);
+		// Gap-fill ran before the ack (the handler awaits the hook, then acks).
+		expect(order).toEqual(['recover', 'ack']);
+
+		client.ws.close();
+	});
+
+	it('omits lastSeenEpochs when recover carries no epoch', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const captured = [];
+		server = await createTestServer({ handler: { resume(_ws, ctx) { captured.push(ctx); } } });
+		const client = await connectAndCapture(server.wsUrl);
+		await client.waitFor(f => f.parsed?.type === 'welcome');
+		client.ws.send(JSON.stringify({ type: 'subscribe', topic: 'room:1', ref: 1, recover: { offset: 4 } }));
+		await client.waitFor(f => f.parsed?.type === 'subscribed');
+		expect(captured[0].lastSeenSeqs).toEqual({ 'room:1': 4 });
+		expect(captured[0].lastSeenEpochs).toBeUndefined();
+		client.ws.close();
+	});
+
+	it('subscribes normally when recover is present but no resume hook is wired', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer();
+		const client = await connectAndCapture(server.wsUrl);
+		await client.waitFor(f => f.parsed?.type === 'welcome');
+		client.ws.send(JSON.stringify({ type: 'subscribe', topic: 'room:1', ref: 3, recover: { offset: 5 } }));
+		const ack = await client.waitFor(f => f.parsed?.type === 'subscribed' && f.parsed?.topic === 'room:1');
+		expect(ack.parsed.ref).toBe(3);
+		client.ws.close();
+	});
+
+	it('gap-fills every recover-tagged topic in a subscribe-batch in ONE hook call', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const captured = [];
+		server = await createTestServer({ handler: { resume(_ws, ctx) { captured.push(ctx); } } });
+		const client = await connectAndCapture(server.wsUrl);
+		await client.waitFor(f => f.parsed?.type === 'welcome');
+		client.ws.send(JSON.stringify({
+			type: 'subscribe-batch',
+			topics: ['a', 'b', 'c'],
+			recover: { a: { offset: 1, epoch: 1 }, c: { offset: 9 } },
+			ref: 1
+		}));
+		await client.waitFor(f => f.parsed?.type === 'subscribed' && f.parsed?.topic === 'c');
+		expect(captured).toHaveLength(1); // one hook call for the whole batch
+		expect(captured[0].lastSeenSeqs).toEqual({ a: 1, c: 9 });
+		expect(captured[0].lastSeenEpochs).toEqual({ a: 1 }); // only 'a' presented an epoch
+		client.ws.close();
+	});
+
+	it('ignores a malformed recover field and subscribes plain', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const captured = [];
+		server = await createTestServer({ handler: { resume(_ws, ctx) { captured.push(ctx); } } });
+		const client = await connectAndCapture(server.wsUrl);
+		await client.waitFor(f => f.parsed?.type === 'welcome');
+		client.ws.send(JSON.stringify({ type: 'subscribe', topic: 'room:1', ref: 1, recover: { offset: -1 } }));
+		const ack = await client.waitFor(f => f.parsed?.type === 'subscribed' && f.parsed?.topic === 'room:1');
+		expect(ack.parsed.ref).toBe(1);
+		expect(captured).toHaveLength(0); // invalid recover -> hook not called
+		client.ws.close();
+	});
+});
