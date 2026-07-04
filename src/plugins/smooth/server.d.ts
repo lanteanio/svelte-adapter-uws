@@ -167,6 +167,43 @@ export const SMOOTH_SCHEMA_VERSION: number;
 export const SMOOTH_TOPIC_PREFIX: string;
 
 /**
+ * Ingress kind for the client->server smooth COMMAND wire (the `0x03` ingress
+ * frame). A consumer (svelte-realtime) registers a route for this kind and the
+ * client binds its command channel under it. Independent of
+ * `SMOOTH_CAPABILITY` (a different direction and codec).
+ */
+export const SMOOTH_COMMAND_CAPABILITY: string;
+
+/** 1-byte in-frame schema version for the smooth command (ingress) wire. */
+export const SMOOTH_COMMAND_SCHEMA_VERSION: number;
+
+/**
+ * Decode a smooth command ingress payload back into the `Array<{ id, cmd }>`
+ * batch the JSON volatile-RPC path would deliver to `authority.enqueue`.
+ * Returns `null` on an unknown schema version or a malformed / truncated frame.
+ */
+export function decodeSmoothCommandBatch(
+	payload: Uint8Array,
+	schemaVersion?: number
+): Array<{ id: number; cmd: unknown }> | null;
+
+/**
+ * Register the server-side handler for a binary ingress `kind` (the core
+ * client->server `0x03` transport seam, re-exported here for consumers that
+ * already load this plugin). `decode` turns a frame payload into the routed
+ * value (return `null`/`undefined` to drop the frame); `route` delivers it; the
+ * optional `state` factory makes one per-binding decoder state.
+ */
+export function registerIngress(
+	kind: string,
+	handler: {
+		decode: (payload: Uint8Array, schemaVersion: number, seq: number, state: unknown) => unknown;
+		route: (ws: unknown, target: unknown, value: unknown, platform: unknown, seq: number) => void;
+		state?: { onAttach?: (ws: unknown) => unknown };
+	}
+): void;
+
+/**
  * Build the stateless cell-snapshot wire codec - the stateless twin of the smooth
  * codec used for spatial cell-topic interest. `shared: true` (no per-connection
  * state), so a cell topic fans out natively to its subscribers. Encodes an

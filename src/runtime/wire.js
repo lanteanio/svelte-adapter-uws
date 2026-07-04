@@ -82,6 +82,13 @@ export class ByteWriter {
 		this.len += 4;
 	}
 
+	/** Write a big-endian float64. @param {number} n */
+	f64(n) {
+		this._ensure(8);
+		this._view.setFloat64(this.len, n, false);
+		this.len += 8;
+	}
+
 	/** Write a length-prefixed (varint byte length) UTF-8 string. @param {string} s */
 	str(s) {
 		const bytes = ENC.encode(s);
@@ -150,6 +157,14 @@ export class ByteReader {
 		if (this.pos + 4 > this._buf.length) throw new RangeError('wire: read past end');
 		const v = this._view.getFloat32(this.pos, false);
 		this.pos += 4;
+		return v;
+	}
+
+	/** @returns {number} big-endian float64 */
+	f64() {
+		if (this.pos + 8 > this._buf.length) throw new RangeError('wire: read past end');
+		const v = this._view.getFloat64(this.pos, false);
+		this.pos += 8;
 		return v;
 	}
 

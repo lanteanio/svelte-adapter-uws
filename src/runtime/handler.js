@@ -23,6 +23,7 @@ import { metricsRegistry } from './metrics-bridge.js';
 import { parseCookies, createCookies } from './cookies.js';
 import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, DEFAULT_GRANT } from './wire.js';
+import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { now, monotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, sharedTopics } from './handler/state.js';
 import { computeStateHash } from './invariants.js';
@@ -1238,6 +1239,20 @@ if (WS_ENABLED) {
 			// read happens regardless), so the hot path is unchanged.
 			fatal(ws.getUserData()[WS_PLATFORM], 'ws.platform-missing-in-message', null);
 			bumpIn(ws, message);
+			// Binary ingress (client->server 0x03): a connection that advertised
+			// `wire.ingress:1` sends id-addressed binary frames the demux decodes
+			// and routes here, ahead of the JSON control block and the app hook.
+			// Only an actual 0x03 frame pays the capability lookup; every other
+			// binary frame (realtime's outbound-only 0x01/0x02 and the 0x00 binary
+			// RPC) reads one leading byte and falls through unchanged.
+			if (isBinary && new Uint8Array(message)[0] === 0x03 /* WIRE_BINARY_TAG, ingress direction */) {
+				const iud = ws.getUserData();
+				const icaps = iud[WS_CAPS];
+				if (icaps !== undefined && icaps.has(WIRE_INGRESS_CAP)) {
+					dispatchIngressFrame(ws, iud, message, iud[WS_PLATFORM]);
+					return;
+				}
+			}
 			// Built-in: handle subscribe/unsubscribe from the client store.
 			// Control messages are JSON text: {"type":"subscribe","topic":"..."}
 			// Byte-prefix check: {"type" has byte[3]='y' (0x79), while user
@@ -1463,6 +1478,15 @@ if (WS_ENABLED) {
 						ws.send(frame, false, false);
 						bumpOut(ws, frame);
 					}
+					// Opt-in confirm for binary ingress. When the client advertised
+					// the ingress cap, echo `ingress-ok` (mirror of lease-ok) so it
+					// knows this server understands ingress and may announce
+					// bindings. Old clients never send the cap, so never receive it.
+					if (caps.has(WIRE_INGRESS_CAP)) {
+						const okFrame = ingressOkFrame();
+						ws.send(okFrame, false, false);
+						bumpOut(ws, okFrame);
+					}
 					if (wsDebug) console.log('[ws] hello caps=%o', [...caps]);
 					return;
 				}
@@ -1524,6 +1548,24 @@ if (WS_ENABLED) {
 						bumpOut(ws, frame);
 						slot.saturation = slot.gate.pressureValue();
 						if (slot.saturation > counters.leaseSaturationPeak) counters.leaseSaturationPeak = slot.saturation;
+					}
+					return;
+				}
+				if (msg.type === 'ingress-bind' && typeof msg.id === 'number' && typeof msg.kind === 'string') {
+					// Client binds a client-allocated ingress id to a decode+route
+					// destination (mirror of the server's `wire-id` announce, reversed).
+					// Resolve the kind to a registered handler; on success store the
+					// binding and ack with `ingress-bound` so the client promotes this
+					// id to binary. An unknown kind gets no binding and no ack - the
+					// client keeps that destination on its JSON fallback, never a
+					// silent drop.
+					const ud = ws.getUserData();
+					if (bindIngress(ud, ws, msg.id, msg.kind, msg.target)) {
+						const boundFrame = ingressBoundFrame(msg.id);
+						ws.send(boundFrame, false, false);
+						bumpOut(ws, boundFrame);
+					} else if (wsDebug) {
+						console.log('[ws] ingress-bind for unregistered kind=%s (kept on JSON fallback)', msg.kind);
 					}
 					return;
 				}

@@ -59,6 +59,12 @@ import { wallEpoch } from '../../runtime/runtime.js';
 // generator serves command-id-seeded draws outside `apply`).
 export { createSharedRandom } from './random.js';
 export { SMOOTH_CAPABILITY, SMOOTH_SCHEMA_VERSION, SMOOTH_TOPIC_PREFIX } from './codec.js';
+// Binary ingress (client->server smooth commands): the decoder + kind/schema a
+// consumer (svelte-realtime) registers a route for, plus the core
+// `registerIngress` seam it registers through. Colocated here because realtime
+// already loads this server plugin dynamically.
+export { decodeSmoothCommandBatch, SMOOTH_COMMAND_CAPABILITY, SMOOTH_COMMAND_SCHEMA_VERSION } from './codec.js';
+export { registerIngress } from '../../runtime/handler/ingress.js';
 // Stateless cell-snapshot wire (spatial cell-topic interest). The stateless twin
 // of the smooth codec: `shared: true`, so a cell topic fans out natively to its
 // subscribers. Consumed by the realtime smooth server (per-cell publish) and the

@@ -27,9 +27,11 @@ before any application code runs:
 - **Text frame, JSON object with a `type` field** - a *control frame* (section 3).
 - **Text frame, JSON object with `topic` + `event`** - a *data-event* frame
   (section 4). It has no `type` field.
-- **Binary frame, leading byte `0x03`** - a *binary topic payload* (section 6).
-  Leading bytes `0x01` / `0x02` are reserved for the upload layer; an unknown
-  leading byte is passed through untouched.
+- **Binary frame, leading byte `0x03`** - a *binary payload frame* (section 6).
+  Server to client it is a *binary topic payload*; client to server it is a
+  *binary ingress payload* (section 6.5), enabled by the `wire.ingress:1`
+  capability. Leading bytes `0x01` / `0x02` are reserved for the upload layer;
+  an unknown leading byte is passed through untouched.
 
 JSON is the default for everything. The binary `0x03` frame is the only non-JSON
 shape, and it is opt-in per connection (section 5). A client that speaks only
@@ -147,6 +149,25 @@ capability. The server grants a window (`lease`); the client replenishes
 (`request-n`); the server re-grants. A client that does not advertise `lease`
 never sees these frames and is never flow-controlled at the protocol layer.
 
+### 3.7 Binary ingress (optional)
+
+| Frame | Dir | Shape |
+|---|---|---|
+| `ingress-ok` | s->c | `{"type":"ingress-ok"}` |
+| `ingress-bind` | c->s | `{"type":"ingress-bind","id":<int>,"kind":"<string>","target":<any>}` |
+| `ingress-bound` | s->c | `{"type":"ingress-bound","id":<int>}` |
+
+Negotiation for client-to-server binary payload frames (section 6.5), active only
+when the client advertised the `wire.ingress:1` capability. `ingress-ok` confirms
+the server understands ingress (mirror of `lease-ok`). The client then binds a
+client-allocated numeric `id` to a decode-and-route destination: `kind` selects a
+server-registered ingress handler, `target` is opaque data that handler
+interprets. The server acks a successful bind with `ingress-bound`; the client
+sends `0x03` ingress frames for that `id` only after the ack. A server that does
+not know the `kind` sends no ack, and the client keeps that destination on its
+JSON path - a message is never silently lost. Ids are connection-scoped and
+re-announced on reconnect (like `wire-id`, reversed).
+
 ---
 
 ## 4. The data-event envelope
@@ -198,7 +219,8 @@ each registered wire codec can decode.
 | `cursor.protocol:4` | yes | 3 | Binary cursor wire, time-stamped short-id dictionary (advertise with `:3`). |
 | `presence.protocol:1` | yes | 1 | Binary presence roster wire. |
 | `crdt.protocol:1` | yes | 1 | Binary CRDT update wire (opaque bytes; JSON fallback when absent). |
-| `smooth.protocol:1` | yes | 1 | Binary smoothed-entity command/state wire. |
+| `smooth.protocol:1` | yes | 1 | Binary smoothed-entity state wire (server to client). |
+| `wire.ingress:1` | yes | n/a | Client-to-server binary payload frames (section 3.7, 6.5). |
 
 Rules:
 
@@ -271,6 +293,7 @@ The framework helpers a plugin codec builds on:
   implementation advances the value with division (not a 32-bit shift), so values
   above 2^31 round-trip exactly - a sequence number is never truncated.
 - **f32** - 4-byte big-endian IEEE-754 single precision.
+- **f64** - 8-byte big-endian IEEE-754 double precision.
 - **str** - a varint byte-length prefix followed by that many UTF-8 bytes (not
   null-terminated).
 
@@ -281,6 +304,40 @@ binary token. Any other connection (no `hello`, missing token, or unknown schema
 version) receives the JSON data-event envelope for the same topic. The two forms
 are interchangeable at the topic level; a deployment can serve binary and JSON
 subscribers of the same topic simultaneously.
+
+### 6.5 Ingress direction (client -> server)
+
+A connection that advertised `wire.ingress:1` (section 3.7) may send the same
+`0x03` frame in the client-to-server direction, to move a hot client input path
+off the JSON control envelope (and off the per-frame `JSON.parse` it costs). The
+layout is identical:
+
+```
+[0x03][schemaVersion:u8][ingressId:varint][seq:varint][payload ...]
+```
+
+The only reinterpretation is the id slot: it carries a client-allocated *ingress
+id*, bound to a destination by an `ingress-bind` frame (section 3.7) and confirmed
+by `ingress-bound` before the first `0x03` ingress frame. `schemaVersion` selects
+the destination codec's payload revision; `seq` is a per-binding monotonic counter
+(`0` allowed); `payload` is the consumer's encoded value, opaque to the framework.
+
+The ingress id space is client-allocated and per-connection (starting at 1), fully
+separate from the server-allocated topic-id space of the egress direction, so the
+two never collide. On reconnect the client re-announces its bindings from a fresh
+`ingress-ok` (the server reset its binding map with the new connection).
+
+Ingress is opt-in and additive: a client that never advertises `wire.ingress:1`,
+or a binding the server never acked, uses the equivalent JSON frame - the two are
+interchangeable and a deployment can serve both on the same destination.
+
+The first consumer is the smoothed-entity command channel (`smooth.command:1`): a
+flush batch of `{id, cmd}` commands encodes as `[count:varint]` then, per command,
+`[idDelta:varint][cmd]`, where `cmd` is encoded with the generic compact value
+codec (a tagged encoding of the JSON value space - null, boolean, integer as a
+zigzag varint, other numbers as f64, string, array, object - matching a
+`JSON.stringify`/`JSON.parse` round trip exactly). The decoded batch is identical
+to what the JSON path delivers.
 
 ---
 

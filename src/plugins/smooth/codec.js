@@ -44,6 +44,7 @@
  */
 
 import { ByteWriter, ByteReader } from '../../runtime/wire.js';
+import { writeValue, readValue } from '../../runtime/wire-value.js';
 import {
 	KeyEncodeDict,
 	KeyDecodeDict,
@@ -69,6 +70,94 @@ export const SMOOTH_TOPIC_PREFIX = '__smooth:';
 
 /** 1-byte in-frame schema version for the smooth wire. */
 export const SMOOTH_SCHEMA_VERSION = 1;
+
+/**
+ * Ingress kind + schema for the client->server smooth COMMAND wire (the `0x03`
+ * ingress frame, orthogonal to the egress topic wire above). A client that
+ * negotiated binary ingress binds a command channel under this kind and sends
+ * each flush batch as a `0x03` frame this schema decodes, removing the
+ * per-flush `JSON.parse` the JSON volatile-RPC envelope costs. Its own number
+ * space, independent of `SMOOTH_SCHEMA_VERSION` (a different direction and
+ * codec).
+ */
+export const SMOOTH_COMMAND_CAPABILITY = 'smooth.command:1';
+
+/** 1-byte in-frame schema version for the smooth command (ingress) wire. */
+export const SMOOTH_COMMAND_SCHEMA_VERSION = 1;
+
+/** Defensive ceiling on the decoded command count (a flush batch is tiny). */
+const SMOOTH_COMMAND_MAX = 4096;
+
+/**
+ * Encode a smooth command flush batch into an ingress `0x03` payload.
+ *
+ * The batch is `Array<{ id, cmd }>` where `cmd` is already the app's
+ * `wire.command.pack` output (or the raw command). Layout:
+ *
+ *   [count:varint] then per entry [idDelta:varint][cmd via wire-value]
+ *
+ * Ids are delta-coded from the previous entry (the first from 0, so its delta
+ * IS its absolute id); the channel transmits commands in strictly ascending id
+ * order, and this drops any non-monotonic or invalid entry so the delta is
+ * always non-negative. `cmd` uses the generic compact value codec, matching the
+ * JSON round trip exactly - so the decoded batch equals what the JSON path
+ * delivers to `authority.enqueue`.
+ *
+ * @param {Array<{ id: number, cmd: any }>} batch
+ * @returns {Uint8Array}
+ */
+export function encodeSmoothCommandBatch(batch) {
+	// Keep only valid, strictly-increasing-id entries. Beyond validation, the
+	// strict-increase filter makes the delta encoding total (never a negative
+	// varint) even if a caller ever violated the id-order invariant.
+	const kept = [];
+	let last = -1;
+	for (let i = 0; i < batch.length; i++) {
+		const c = batch[i];
+		if (!c || typeof c.id !== 'number' || !Number.isInteger(c.id) || c.id <= last) continue;
+		kept.push(c);
+		last = c.id;
+	}
+	const w = new ByteWriter(16 + kept.length * 8);
+	w.varint(kept.length);
+	let prev = 0;
+	for (let i = 0; i < kept.length; i++) {
+		const c = kept[i];
+		w.varint(c.id - prev);
+		prev = c.id;
+		writeValue(w, c.cmd);
+	}
+	return w.take();
+}
+
+/**
+ * Decode an ingress command payload back into the `Array<{ id, cmd }>` batch
+ * the JSON volatile-RPC path would have delivered. Returns null on an unknown
+ * schema version or a truncated / malformed / over-long frame (the frame is
+ * then dropped); an empty batch decodes to `[]`.
+ *
+ * @param {Uint8Array} payload - codec bytes (frame header already stripped)
+ * @param {number} [schemaVersion] - the frame's 1-byte schema version
+ * @returns {Array<{ id: number, cmd: any }> | null}
+ */
+export function decodeSmoothCommandBatch(payload, schemaVersion = SMOOTH_COMMAND_SCHEMA_VERSION) {
+	if (schemaVersion !== SMOOTH_COMMAND_SCHEMA_VERSION) return null;
+	try {
+		const r = new ByteReader(payload);
+		const count = r.varint();
+		if (count > SMOOTH_COMMAND_MAX) return null;
+		const out = new Array(count);
+		let prev = 0;
+		for (let i = 0; i < count; i++) {
+			const id = prev + r.varint();
+			prev = id;
+			out[i] = { id, cmd: readValue(r) };
+		}
+		return out;
+	} catch {
+		return null;
+	}
+}
 
 const OP_STATE = 1;
 const OP_XY = 2;

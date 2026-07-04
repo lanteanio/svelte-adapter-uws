@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './runtime/cookies.js';
 import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './runtime/wire.js';
+import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { now, monotonicNow, randomFloat, randomU32, randomUuid, randomBytes } from './runtime/runtime.js';
 
 /**
@@ -1171,6 +1172,18 @@ export default function uws(options = {}) {
 					const arrayBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 					bumpInV(userData, arrayBuffer);
 
+					// Binary ingress (client->server 0x03), mirroring the production
+					// handler: an ingress-capable connection's id-addressed binary
+					// frames decode and route here ahead of the JSON control block
+					// and the app hook. Only an actual 0x03 frame pays the cap lookup.
+					if (isBinary && buf[0] === 0x03) {
+						const icaps = userData[WS_CAPS];
+						if (icaps !== undefined && icaps.has(WIRE_INGRESS_CAP)) {
+							dispatchIngressFrame(wrapped, userData, buf, userData[WS_PLATFORM]);
+							return;
+						}
+					}
+
 					// Handle subscribe/unsubscribe/subscribe-batch from client store.
 				// Byte-prefix check: {"type" has byte[3]='y' (0x79), user envelopes
 				// {"topic" have byte[3]='o' - skip JSON.parse for non-control messages.
@@ -1266,6 +1279,12 @@ export default function uws(options = {}) {
 										const frame = leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs);
 										ws.send(frame);
 										bumpOutV(ud, frame);
+									}
+									// Opt-in confirm for binary ingress (mirror of lease-ok).
+									if (caps.has(WIRE_INGRESS_CAP)) {
+										const okFrame = ingressOkFrame();
+										ws.send(okFrame);
+										bumpOutV(ud, okFrame);
 									}
 								}
 								return;
@@ -1369,6 +1388,18 @@ export default function uws(options = {}) {
 									ws.send(frame);
 									bumpOutV(ud, frame);
 									slot.saturation = slot.gate.pressureValue();
+								}
+								return;
+							}
+							if (msg.type === 'ingress-bind' && typeof msg.id === 'number' && typeof msg.kind === 'string') {
+								// Client binds a client-allocated ingress id to a
+								// decode+route destination (mirror of the production
+								// handler). Unknown kind -> no bind, no ack, JSON fallback.
+								const bindUd = /** @type {any} */ (ws).__userData;
+								if (bindUd && bindIngress(bindUd, wrapped, msg.id, msg.kind, msg.target)) {
+									const boundFrame = ingressBoundFrame(msg.id);
+									ws.send(boundFrame);
+									bumpOutV(bindUd, boundFrame);
 								}
 								return;
 							}

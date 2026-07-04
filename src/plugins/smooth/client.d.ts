@@ -18,6 +18,16 @@ export interface SmoothChannelTransport<Command = any> {
 	 */
 	sendShoot?(payload: { cmd: Command; rt?: number; ackT?: number }): void;
 	/**
+	 * Optional binary ingress descriptor. When present, the channel binds a
+	 * client->server `0x03` ingress destination for this command channel and, once
+	 * negotiated, transmits each flush batch as a binary frame (removing the
+	 * per-flush server-side JSON.parse) instead of `sendCommand`; it falls back to
+	 * `sendCommand` whenever the binding is not live. Opaque to the channel: the
+	 * consumer that wires the transport (svelte-realtime) supplies the route
+	 * target the server-side handler interprets (e.g. the RPC path + room args).
+	 */
+	ingress?: unknown;
+	/**
 	 * Request the authoritative catalog: the resolved topic name, the server
 	 * time stamp (the clock seed), the caller's own entity key, its ack
 	 * watermark, and every entity's state. Runs on every connection 'open'

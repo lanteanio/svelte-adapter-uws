@@ -1,5 +1,5 @@
 import { writable, derived } from 'svelte/store';
-import { parseBinaryFrame, requestNFrame } from './runtime/wire.js';
+import { parseBinaryFrame, buildBinaryFrame, requestNFrame } from './runtime/wire.js';
 import { now, monotonicNow, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask, nextReconnectDelay } from './client-runtime.js';
 
 /** @type {ReturnType<typeof createConnection> | null} */
@@ -54,6 +54,31 @@ export function registerWireCodec(prefix, codec) {
 }
 
 /**
+ * Bind a client->server binary ingress destination on the singleton
+ * connection. A plugin consumer (e.g. the smooth command channel) calls this
+ * to negotiate an id-addressed `0x03` ingress binding for a `kind` + opaque
+ * `target`; it returns a handle:
+ *
+ *   - `send(schemaVersion, payload)` emits a `0x03` frame when the binding is
+ *     live (returns true; a volatile drop under backpressure also returns
+ *     true), or returns false when the binding is not yet/never live so the
+ *     caller uses its existing JSON fallback - a command is never silently
+ *     lost.
+ *   - `live()` reports whether binary sends are currently accepted.
+ *   - `dispose()` releases the binding.
+ *
+ * The transport is generic (any consumer can encode any payload); the server
+ * decodes and routes by the registered `kind`. Auto-connects, like `on()`.
+ *
+ * @param {string} kind - the binding kind (e.g. `'smooth.command:1'`)
+ * @param {any} target - opaque destination the server-side handler interprets
+ * @returns {{ send: (schemaVersion: number, payload: Uint8Array) => boolean, live: () => boolean, dispose: () => void }}
+ */
+export function bindIngress(kind, target) {
+	return ensureConnection()._bindIngress(kind, target);
+}
+
+/**
  * Build the `hello` caps array: `'batch'` plus every capability every
  * registered codec can decode. A client always advertises what it can decode;
  * the wire format is the server's decision (a plugin's codec, or `binary: false`
@@ -63,7 +88,7 @@ export function registerWireCodec(prefix, codec) {
  * @returns {string[]}
  */
 function buildHelloCaps() {
-	const caps = ['batch', 'lease'];
+	const caps = ['batch', 'lease', 'wire.ingress:1'];
 	for (const codec of wireCodecs.values()) {
 		const tokens = codec.capabilities || [codec.capability];
 		for (let i = 0; i < tokens.length; i++) caps.push(tokens[i]);
@@ -824,6 +849,96 @@ function createConnection(options) {
 		wireDecoderStates.clear();
 	}
 
+	// - Binary ingress (client->server 0x03) --------------------------------
+	//
+	// The reverse of the egress wire-id machinery. A consumer (e.g. the smooth
+	// command channel) binds a destination via `_bindIngress()`; the manager
+	// allocates a client-side per-connection id, announces `id -> destination`
+	// to the server (`{type:'ingress-bind'}`) once the server has confirmed it
+	// speaks ingress (`{type:'ingress-ok'}`), and - after the server acks the
+	// bind (`{type:'ingress-bound'}`) - lets the consumer send `0x03` frames on
+	// that id. Until the bind is live (old server, an unknown kind, or a fresh
+	// reconnect not yet re-announced) the consumer uses its JSON fallback, so a
+	// command is never silently lost. Ids are stable for a binding's life; on
+	// each (re)connect the manager resets `supported`/`bound` and re-announces
+	// every binding from the same ids (the server reset its map with the fresh
+	// connection), mirroring the egress `wireIdMap` reset.
+	let ingressSupported = false;
+	let ingressNextId = 1;
+	/** @type {Map<number, { kind: string, target: any, bound: boolean, seq: number }>} */
+	const ingressBindings = new Map();
+	// Volatile drop threshold for ingress sends: above it a frame is dropped
+	// (recovered by the consumer's own reconciliation) rather than growing the
+	// socket buffer unbounded, matching the JSON volatile path.
+	const INGRESS_BACKPRESSURE_BYTES = 4 * 1024 * 1024;
+
+	function sendIngressAnnounce(id, binding) {
+		if (ws?.readyState !== WebSocket.OPEN) return;
+		ws.send(JSON.stringify({ type: 'ingress-bind', id, kind: binding.kind, target: binding.target }));
+	}
+
+	// Reset ingress negotiation for a fresh socket. Re-announcing happens once
+	// the server's `ingress-ok` confirms support on the new connection.
+	function resetIngress() {
+		ingressSupported = false;
+		for (const b of ingressBindings.values()) { b.bound = false; b.seq = 0; }
+	}
+
+	// Server confirmed it speaks ingress on this connection: announce every
+	// binding now.
+	function onIngressOk() {
+		ingressSupported = true;
+		for (const [id, b] of ingressBindings) sendIngressAnnounce(id, b);
+	}
+
+	// Server acked one binding: the consumer may now send 0x03 frames on it.
+	function onIngressBound(id) {
+		const b = ingressBindings.get(id);
+		if (b) b.bound = true;
+	}
+
+	/**
+	 * Bind an ingress destination for a consumer. Returns a handle whose
+	 * `send(schemaVersion, payload)` emits a `0x03` frame when the binding is
+	 * live (returns true; a volatile drop under backpressure also returns true),
+	 * or returns false when the binding is not live so the caller uses its JSON
+	 * fallback. `live()` reports the current state; `dispose()` drops it.
+	 * @param {string} kind
+	 * @param {any} target
+	 */
+	function bindIngressDest(kind, target) {
+		const id = ingressNextId++;
+		/** @type {{ kind: string, target: any, bound: boolean, seq: number }} */
+		const binding = { kind, target, bound: false, seq: 0 };
+		ingressBindings.set(id, binding);
+		if (ingressSupported) sendIngressAnnounce(id, binding);
+		return {
+			live() {
+				return binding.bound && ws?.readyState === WebSocket.OPEN;
+			},
+			// Re-send the announce if this binding is not yet live. The first
+			// announce (on `ingress-ok`) can lose a race against the server's
+			// lazy load of the destination's ingress handler; a consumer that
+			// reaches a point where the server is known-ready (the smooth channel
+			// after a sync reply) calls this to converge the binding to binary.
+			// A no-op once bound, or before the server confirmed ingress support.
+			reannounce() {
+				if (!binding.bound && ingressSupported) sendIngressAnnounce(id, binding);
+			},
+			/** @param {number} schemaVersion @param {Uint8Array} payload */
+			send(schemaVersion, payload) {
+				if (!binding.bound || ws?.readyState !== WebSocket.OPEN) return false;
+				if ((ws.bufferedAmount ?? 0) > INGRESS_BACKPRESSURE_BYTES) return true;
+				binding.seq++;
+				ws.send(buildBinaryFrame(schemaVersion, id, binding.seq, payload));
+				return true;
+			},
+			dispose() {
+				ingressBindings.delete(id);
+			}
+		};
+	}
+
 	// Highest seq seen per topic. Sent back to the server on reconnect via
 	// the resume frame so the user's resume hook can replay anything we
 	// missed during the disconnect window. Only topics that the server is
@@ -1210,6 +1325,10 @@ function createConnection(options) {
 		// dictionary would resolve ids to the wrong keys.
 		wireIdMap.clear();
 		resetWireDecoderStates();
+		// Ingress ids are stable per binding, but the server reset its binding
+		// map with this fresh connection - clear support/bound so every binding
+		// re-announces once the new connection's `ingress-ok` arrives.
+		resetIngress();
 
 		ws.onopen = () => {
 			if (ws !== sock) return;
@@ -1433,6 +1552,21 @@ function createConnection(options) {
 					// binary frame for the topic (same socket, ordered).
 					wireIdMap.set(msg.id, msg.topic);
 					if (debug) console.log('[ws] wire-id topic=%s id=%d', msg.topic, msg.id);
+					return;
+				}
+				if (msg.type === 'ingress-ok') {
+					// Server speaks binary ingress. Announce every bound
+					// destination now; each is confirmed by an `ingress-bound`.
+					// Absorbed here; never reaches the app surface.
+					onIngressOk();
+					if (debug) console.log('[ws] ingress-ok');
+					return;
+				}
+				if (msg.type === 'ingress-bound' && typeof msg.id === 'number') {
+					// Server armed one ingress binding: promote it to binary so
+					// the consumer's next send goes as a 0x03 frame. Absorbed here.
+					onIngressBound(msg.id);
+					if (debug) console.log('[ws] ingress-bound id=%d', msg.id);
 					return;
 				}
 				if (msg.type === 'subscribe-denied' && typeof msg.topic === 'string' && typeof msg.reason === 'string') {
@@ -1977,6 +2111,12 @@ function createConnection(options) {
 		get bufferedAmount() { return ws?.bufferedAmount ?? 0; },
 		onRequest,
 		_resendHello: resendHello,
+		// Internal: bind a client->server binary ingress destination. A plugin
+		// consumer (e.g. the smooth command channel) calls this to negotiate an
+		// id-addressed `0x03` ingress binding and gets back a handle that sends
+		// binary when the binding is live and reports when it is not (so the
+		// consumer can fall back to its JSON path). See `bindIngressDest`.
+		_bindIngress: bindIngressDest,
 		// Internal: the resolved WebSocket URL this connection dials. A plugin
 		// that opens its own dedicated socket (the cursor render worker) must
 		// reach the same endpoint the main connection negotiated - including a

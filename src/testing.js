@@ -3,6 +3,7 @@ import { parseCookies } from './runtime/cookies.js';
 import { nextTopicSeq, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
+import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -1387,6 +1388,18 @@ export async function createTestServer(options = {}) {
 
 		async message(ws, message, isBinary) {
 			bumpInT(ws, message);
+			// Binary ingress (client->server 0x03), mirroring the production
+			// handler: an ingress-capable connection's id-addressed binary frames
+			// decode and route here ahead of the JSON control block and the app
+			// hook. Only an actual 0x03 frame pays the cap lookup.
+			if (isBinary && new Uint8Array(message)[0] === 0x03) {
+				const iud = ws.getUserData();
+				const icaps = iud[WS_CAPS];
+				if (icaps !== undefined && icaps.has(WIRE_INGRESS_CAP)) {
+					dispatchIngressFrame(ws, iud, message, iud[WS_PLATFORM]);
+					return;
+				}
+			}
 			// Handle subscribe/unsubscribe from client store.
 			//
 			// `msg` is hoisted to outer scope so it can be forwarded to the
@@ -1479,6 +1492,10 @@ export async function createTestServer(options = {}) {
 								helloUd[WS_LEASE] = { gate: window, saturation: window.pressureValue() };
 								sendOutboundT(ws, '{"type":"lease-ok"}');
 								sendOutboundT(ws, leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs));
+							}
+							// Opt-in confirm for binary ingress (mirror of lease-ok).
+							if (caps.has(WIRE_INGRESS_CAP)) {
+								sendOutboundT(ws, ingressOkFrame());
 							}
 							return;
 						}
@@ -1574,6 +1591,16 @@ export async function createTestServer(options = {}) {
 								slot.gate.requestN(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs);
 								sendOutboundT(ws, leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs));
 								slot.saturation = slot.gate.pressureValue();
+							}
+							return;
+						}
+						if (msg.type === 'ingress-bind' && typeof msg.id === 'number' && typeof msg.kind === 'string') {
+							// Client binds a client-allocated ingress id to a
+							// decode+route destination (mirror of the production
+							// handler). Unknown kind -> no bind, no ack, JSON fallback.
+							const bindUd = ws.getUserData();
+							if (bindIngress(bindUd, ws, msg.id, msg.kind, msg.target)) {
+								sendOutboundT(ws, ingressBoundFrame(msg.id));
 							}
 							return;
 						}

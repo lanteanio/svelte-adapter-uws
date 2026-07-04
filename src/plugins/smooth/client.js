@@ -43,11 +43,11 @@
  * @module svelte-adapter-uws/plugins/smooth/client
  */
 
-import { on, status, registerWireCodec } from '../../client.js';
+import { on, status, registerWireCodec, bindIngress } from '../../client.js';
 import { monotonicNow, now, setTimer, clearTimer } from '../../client-runtime.js';
 import { createPredictor } from './predict.js';
 import { createSmoother, SAMPLE_EMPTY } from './interpolate.js';
-import { SMOOTH_CAPABILITY, SMOOTH_TOPIC_PREFIX, SmoothDecodeDict, decodeSmooth } from './codec.js';
+import { SMOOTH_CAPABILITY, SMOOTH_TOPIC_PREFIX, SmoothDecodeDict, decodeSmooth, SMOOTH_COMMAND_CAPABILITY, SMOOTH_COMMAND_SCHEMA_VERSION, encodeSmoothCommandBatch } from './codec.js';
 import { CELL_CAPABILITY, CELL_TOPIC_PREFIX, decodeCell } from './cell-codec.js';
 
 // The deterministic generator the predictor seeds per command, re-exported so
@@ -209,6 +209,16 @@ export function createSmoothChannel(options) {
 		wireState = checkWirePair(options.wire.state, 'wire.state');
 		wireCommand = checkWirePair(options.wire.command, 'wire.command');
 	}
+
+	// Binary ingress: when the transport declares an ingress target (the RPC
+	// command path + its room args), bind it so a flush can transmit the batch
+	// as a `0x03` frame - removing the per-flush JSON.parse the volatile-RPC
+	// envelope costs on the server - instead of the JSON `transport.sendCommand`.
+	// The binding negotiates lazily; until it is live (old server, unknown kind,
+	// or a fresh reconnect not yet re-announced) `flush` uses the JSON fallback,
+	// so commands are always delivered and never silently lost.
+	const ingressTarget = transport.ingress && typeof transport.ingress === 'object' ? transport.ingress : null;
+	const ingressHandle = ingressTarget !== null ? bindIngress(SMOOTH_COMMAND_CAPABILITY, ingressTarget) : null;
 
 	const cmdRate = options.cmdRate === undefined ? 60 : options.cmdRate;
 	const minFlushMs = cmdRate > 0 ? 1000 / cmdRate : 0;
@@ -464,6 +474,11 @@ export function createSmoothChannel(options) {
 				predictor.sync(own === undefined ? options.initial : own, typeof reply.ack === 'number' ? reply.ack : 0);
 				if (wasOverflowed) notifyOverflow(false);
 				dirty = true;
+				// A sync reply proves the server loaded this topic's smooth runtime,
+				// so its ingress command route is now registered. Converge the
+				// ingress binding if the first announce (sent on connect) raced ahead
+				// of that lazy load; a no-op once the binding is already live.
+				if (ingressHandle !== null && !ingressHandle.live()) ingressHandle.reannounce();
 			})
 			.catch(() => {
 				// A failed sync (offline, server restarting) leaves the channel
@@ -478,6 +493,12 @@ export function createSmoothChannel(options) {
 		lastFlushMono = monoNow;
 		const batch = outQueue;
 		outQueue = [];
+		// Binary ingress when the binding is live: encode only then (no wasted
+		// work on the JSON path), and a race to not-live falls back cleanly.
+		if (ingressHandle !== null && ingressHandle.live()) {
+			const payload = encodeSmoothCommandBatch(batch);
+			if (ingressHandle.send(SMOOTH_COMMAND_SCHEMA_VERSION, payload)) return;
+		}
 		transport.sendCommand(batch);
 	}
 
@@ -755,6 +776,7 @@ export function createSmoothChannel(options) {
 			overflowCb = null;
 			eventCb = null;
 			outQueue = [];
+			if (ingressHandle !== null) ingressHandle.dispose();
 			merged.clear();
 			smoother.reset();
 			predictor.reset();

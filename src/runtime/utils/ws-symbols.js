@@ -160,6 +160,20 @@ export const WS_WIRE_STATE = Symbol.for('adapter-uws.ws.wire-state');
 export const WS_SHARED_COHORTS = Symbol.for('adapter-uws.ws.shared-cohorts');
 
 /**
+ * Per-connection inbound binary-ingress bindings for `0x03` client->server
+ * frames: `Map<ingressId, { kind, target, decode, route, state }>`. A client
+ * that advertised `wire.ingress:1` announces `id -> destination` bindings via
+ * `{type:'ingress-bind'}` control frames; each populates one entry here so an
+ * inbound `0x03` ingress frame's numeric id resolves to the registered decoder
+ * and route. Separate from `WS_TOPIC_IDS` (the egress s->c id space) so the two
+ * directions never collide and neither needs a numeric partition. Allocated
+ * lazily on the first successful bind; absent for every connection that never
+ * opts into ingress. Per-connection and reset on reconnect (fresh userData), so
+ * the client re-announces from a fresh id space, exactly like the egress reset.
+ */
+export const WS_INGRESS_BINDINGS = Symbol.for('adapter-uws.ws.ingress-bindings');
+
+/**
  * Per-connection send-gate state for connections that have opted into
  * internal flow control (by advertising the matching capability token):
  * `{ gate, saturation }`. `gate` is the state machine from

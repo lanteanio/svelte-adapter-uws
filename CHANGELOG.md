@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.54] - 2026-07-04
+
+### Added
+
+- **Binary ingress - a client-to-server binary frame for hot input paths.** A connection can now negotiate an id-addressed binary `0x03` frame in the client-to-server direction (the mirror of the existing server-to-client binary topic frame), moving a high-frequency input path off the JSON control envelope and, on the server, off the per-frame `JSON.parse` that envelope costs. A client advertises the `wire.ingress:1` capability; the server confirms with `ingress-ok`; the client binds a client-allocated id to a decode-and-route destination (`ingress-bind`), which the server acks (`ingress-bound`) before the client sends binary. Anything not negotiated - an old server, or a destination the server does not recognize - transparently uses the existing JSON path, so a message is never silently lost. The transport is generic: a consumer registers a decode-and-route handler for a `kind` (`registerIngress`, from `svelte-adapter-uws/plugins/smooth`) and the client binds it (`bindIngress`, from `svelte-adapter-uws/client`); the framework frames, routes, and falls back. The first consumer is the smoothed-entity command channel: its 60 Hz flush batch now rides a binary frame decoded straight to the same authority the JSON command RPC reaches, so the decoded batch is identical. A new generic compact value codec (a tagged binary encoding of the JSON value space, matching a `JSON.stringify`/`JSON.parse` round trip exactly) encodes each command with zero server-side JSON parsing. Fully additive and documented in `PROTOCOL.md` (sections 3.7, 6.5).
+
 ## [0.6.0-next.53] - 2026-07-04
 
 ### Fixed

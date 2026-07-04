@@ -654,6 +654,46 @@ export interface WSConnection {
 export function connect(options?: ConnectOptions): WSConnection;
 
 /**
+ * A live client->server binary ingress binding handle (see {@link bindIngress}).
+ */
+export interface IngressBinding {
+	/**
+	 * Emit a `0x03` ingress frame for this binding. Returns `true` when the frame
+	 * was sent (a volatile drop under backpressure also returns `true`), or
+	 * `false` when the binding is not currently live so the caller must use its
+	 * own fallback transport - a message is never silently lost.
+	 */
+	send(schemaVersion: number, payload: Uint8Array): boolean;
+	/** Whether binary sends are currently accepted. */
+	live(): boolean;
+	/**
+	 * Re-announce this binding if it is not yet live. The first announce can
+	 * lose a race against the server's lazy load of the destination handler; a
+	 * consumer that reaches a known-ready point calls this to converge. A no-op
+	 * once the binding is live.
+	 */
+	reannounce(): void;
+	/** Release the binding. */
+	dispose(): void;
+}
+
+/**
+ * Bind a client->server binary ingress destination on the singleton connection.
+ *
+ * A plugin consumer (e.g. the smooth command channel) negotiates an
+ * id-addressed `0x03` ingress binding for a `kind` plus an opaque `target` the
+ * server-side handler interprets, and gets back a handle whose `send` emits
+ * binary when the binding is live and reports when it is not (so the consumer
+ * falls back to its JSON path). The transport is generic - any consumer can
+ * encode any payload; the server decodes and routes by the registered `kind`.
+ * Auto-connects, like {@link on}.
+ *
+ * @param kind - the binding kind (e.g. `'smooth.command:1'`)
+ * @param target - opaque destination the server-side ingress handler interprets
+ */
+export function bindIngress(kind: string, target: unknown): IngressBinding;
+
+/**
  * Register a client-side binary wire codec for a topic-name prefix. This is a
  * plugin-author surface, not an app-author one - a plugin (e.g. the cursor
  * client) calls it at import time. The connection then advertises
