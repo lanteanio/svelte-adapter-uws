@@ -100,6 +100,74 @@ describe('createPredictor - misprediction and correction', () => {
 		expect(out.x).toBe(9.5);
 	});
 
+	it('a correction after a blackout-sized ack gap snaps the pixels instead of smearing', () => {
+		const p = createPredictor({ apply: moveApply, initial: { x: 0, y: 0 }, smoothTimeMs: 100, snapGapMs: 500 });
+		// A prior ack establishes the cadence, so the next gap is measured from a
+		// real point rather than treated as the unknowable first ack.
+		p.command({ dx: 1, dy: 0 }, 0);
+		p.ack(1, { x: 1, y: 0 }, 200); // in sync; lastAck at 200
+		// The tab backgrounds: the local entity keeps predicting far ahead while
+		// the server, never reached, holds it at x=1. Commands spaced past the
+		// tick cadence so no render sweep is armed (isolates the offset path).
+		p.command({ dx: 50, dy: 0 }, 1400);
+		expect(p.predicted).toEqual({ x: 51, y: 0 });
+		// The ack lands 1200ms after the previous one: a blackout, not a lag error.
+		const r = p.ack(2, { x: 1, y: 0 }, 1400);
+		expect(r.divergence).toBeCloseTo(50);
+		// Simulation snaps to authority as always...
+		expect(p.predicted).toEqual({ x: 1, y: 0 });
+		// ...and so do the pixels - no decaying offset dragging the avatar across
+		// 50 units. renderInto is settled immediately at the authoritative point.
+		expect(p.renderInto(out, 1400)).toBe(false);
+		expect(out.x).toBe(1);
+		expect(out.y).toBe(0);
+		// And no lingering smear a frame later.
+		expect(p.renderInto(out, 1450)).toBe(false);
+		expect(out.x).toBe(1);
+	});
+
+	it('the same correction within a normal ack gap still eases - the gap triggers the snap, not the magnitude', () => {
+		const p = createPredictor({ apply: moveApply, initial: { x: 0, y: 0 }, smoothTimeMs: 100, snapGapMs: 500 });
+		p.command({ dx: 1, dy: 0 }, 0);
+		p.ack(1, { x: 1, y: 0 }, 200); // lastAck at 200
+		// Same 50-unit correction, but the ack lands only 200ms later: an ordinary
+		// lag correction, below snapGapMs. Commands spaced past the sweep cadence.
+		p.command({ dx: 50, dy: 0 }, 400);
+		const r = p.ack(2, { x: 1, y: 0 }, 400);
+		expect(r.divergence).toBeCloseTo(50);
+		expect(p.predicted).toEqual({ x: 1, y: 0 });
+		// Eased: the rendered point stays continuous at the OLD prediction and
+		// decays, exactly as before this hardening.
+		expect(p.renderInto(out, 400)).toBe(true);
+		expect(out.x).toBeCloseTo(51);
+	});
+
+	it('a blackout snap at tick cadence clears the render sweep - no residual undershoot', () => {
+		const p = createPredictor({ apply: moveApply, initial: { x: 0, y: 0 }, smoothTimeMs: 100, snapGapMs: 500 });
+		p.command({ dx: 1, dy: 0 }, 0);
+		p.ack(1, { x: 1, y: 0 }, 16); // in sync; lastAck at 16
+
+		// Commands continue at ~16ms tick cadence through a server blackout (no
+		// acks arrive), so a render sweep is armed and still fresh when the
+		// connection resumes.
+		let mono = 16;
+		let id = 1;
+		for (let i = 0; i < 40; i++) {
+			mono += 16;
+			id = p.command({ dx: 5, dy: 0 }, mono);
+		}
+		// The server, never reached, held the entity at x=1: the ack lands ~640ms
+		// after the previous one (a blackout) with a large correction.
+		const r = p.ack(id, { x: 1, y: 0 }, mono);
+		expect(r.divergence).toBeCloseTo(200);
+		expect(p.predicted).toEqual({ x: 1, y: 0 });
+		// The snap cleared the sweep as well as the offset, so the render is
+		// settled at authority with no one-tick undershoot dragging behind (the
+		// old sweep-left-armed path would report motion still pending here).
+		expect(p.renderInto(out, mono)).toBe(false);
+		expect(out.x).toBe(1);
+	});
+
 	it('honors a computeError override', () => {
 		// A metric that never reports divergence: even a gross positional
 		// disagreement snaps silently.

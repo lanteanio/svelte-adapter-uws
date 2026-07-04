@@ -226,7 +226,11 @@ export function createSmoothChannel(options) {
 		errorThreshold: options.errorThreshold,
 		smoothTimeMs: options.smoothTimeMs,
 		windowCap: options.windowCap,
-		windowMaxAgeMs: options.windowMaxAgeMs
+		windowMaxAgeMs: options.windowMaxAgeMs,
+		// Shared discontinuity threshold: a reconcile after an ack gap wider
+		// than this snaps (blackout/background resume) instead of smearing,
+		// the local mirror of the remote interpolation snap.
+		snapGapMs: options.snapGapMs
 	});
 	const smoother = createSmoother({
 		delayMs: options.interpolationMs === undefined ? 'auto' : options.interpolationMs,

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.52] - 2026-07-03
+
+### Fixed
+
+- **Client prediction snaps a post-blackout correction instead of smearing it.** When the server goes silent past a reconnect-scale gap - a backgrounded tab, a radio stall, a device sleep too brief to trip the prediction-window kill - the local entity keeps predicting, so the first acknowledgement back carries a correction spanning the whole gap. The reconciler used to ease every above-threshold correction over `smoothTimeMs`, which visibly dragged the entity across that distance; it now snaps the pixels when an acknowledgement lands more than `snapGapMs` after the previous one (the same discontinuity threshold the remote interpolation path already uses to snap a wide straddle), while the simulation state snaps as it always did. Steady-state play, where acknowledgements arrive well inside `snapGapMs`, is byte-identical - the snap engages only on the long-gap-plus-real-divergence case that a blackout produces.
+
 ## [0.6.0-next.51] - 2026-07-03
 
 ### Added

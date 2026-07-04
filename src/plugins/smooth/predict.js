@@ -93,7 +93,8 @@ function positionalError(a, b) {
  *   errorThreshold?: number,
  *   smoothTimeMs?: number,
  *   windowCap?: number,
- *   windowMaxAgeMs?: number
+ *   windowMaxAgeMs?: number,
+ *   snapGapMs?: number
  * }} options resolved options - validation belongs to the caller's public
  *   surface. `apply` must treat its inputs as immutable and return the next
  *   state (returning the same reference means "unchanged"). `self`, when
@@ -109,6 +110,12 @@ export function createPredictor(options) {
 	const smoothTimeMs = options.smoothTimeMs === undefined ? 100 : options.smoothTimeMs;
 	const windowCap = options.windowCap === undefined ? 256 : options.windowCap;
 	const windowMaxAgeMs = options.windowMaxAgeMs === undefined ? 3000 : options.windowMaxAgeMs;
+	// An acknowledgement that lands more than this long after the previous one
+	// means the server went quiet (a network blackout or a backgrounded tab)
+	// while the local entity kept predicting. The correction it carries is a
+	// discontinuity, not a lag error to ease across - the same threshold the
+	// remote interpolation path uses to snap a straddle instead of smearing.
+	const snapGapMs = options.snapGapMs === undefined ? 500 : options.snapGapMs;
 
 	/** Last server-acknowledged authoritative state - the replay base. */
 	let base = options.initial;
@@ -117,6 +124,10 @@ export function createPredictor(options) {
 	let lastAckedId = 0;
 	let nextId = 1;
 	let overflowed = false;
+	// The monotonic ms of the last applied acknowledgement, or -1 before the
+	// first. The gap to the next ack tells a blackout correction (snap) apart
+	// from a steady-state lag correction (ease).
+	let lastAckMono = -1;
 
 	/** @type {Array<{ id: number, cmd: any, sentMono: number }>} */
 	let pending = [];
@@ -352,6 +363,7 @@ export function createPredictor(options) {
 				predicted = state;
 				overflowed = false;
 				lastDivergence = 0;
+				lastAckMono = monoNow;
 				return { divergence: 0, sentMono: undefined };
 			}
 
@@ -372,22 +384,45 @@ export function createPredictor(options) {
 			const divergence = computeError(before, next);
 			lastDivergence = divergence;
 			if (divergence > errorThreshold && smoothTimeMs > 0) {
-				// Keep the RENDERED position continuous: the new offset spans
-				// from the previously rendered point (old prediction plus any
-				// still-decaying offset) to the corrected prediction. The
-				// offset is positional by contract - a custom computeError may
-				// flag divergence on a state without coordinates (or a null
-				// state), and that correction snaps instead.
-				const f = decayFraction(monoNow);
-				if (
-					before !== null && typeof before === 'object' && typeof before.x === 'number' &&
-					next !== null && typeof next === 'object' && typeof next.x === 'number'
-				) {
-					errX = before.x + errX * f - next.x;
-					errY = before.y + errY * f - next.y;
-					errAtMono = monoNow;
+				const ackGap = lastAckMono >= 0 ? monoNow - lastAckMono : 0;
+				if (snapGapMs > 0 && ackGap > snapGapMs) {
+					// The server was silent for a blackout-sized span while the
+					// local entity kept predicting, so this correction spans
+					// however far the prediction ran unsupervised. Easing it
+					// would smear the entity across that whole gap over
+					// smoothTimeMs; snap instead (predicted already holds the
+					// corrected state) and drop any decaying offset. This is the
+					// local mirror of the remote path's snapGapMs discontinuity
+					// snap - without it a mid-length background/blackout resume
+					// (shorter than the window-age kill) rubber-bands the avatar.
+					errX = 0;
+					errY = 0;
+					errAtMono = -1;
+					// predicted just moved discontinuously to authority, so a sweep
+					// armed for the pre-gap motion would render a phantom offset
+					// against the relocated basis (the ease path's continuity proof
+					// does not hold once the offset is zeroed). Clear it, as the
+					// other discontinuity handlers (kill, rebase) do.
+					clearSweep();
+				} else {
+					// Keep the RENDERED position continuous: the new offset spans
+					// from the previously rendered point (old prediction plus any
+					// still-decaying offset) to the corrected prediction. The
+					// offset is positional by contract - a custom computeError may
+					// flag divergence on a state without coordinates (or a null
+					// state), and that correction snaps instead.
+					const f = decayFraction(monoNow);
+					if (
+						before !== null && typeof before === 'object' && typeof before.x === 'number' &&
+						next !== null && typeof next === 'object' && typeof next.x === 'number'
+					) {
+						errX = before.x + errX * f - next.x;
+						errY = before.y + errY * f - next.y;
+						errAtMono = monoNow;
+					}
 				}
 			}
+			lastAckMono = monoNow;
 			return { divergence, sentMono };
 		},
 
@@ -415,6 +450,9 @@ export function createPredictor(options) {
 			gapEma = -1;
 			lastDivergence = 0;
 			overflowed = false;
+			// A sync already snapped state to authority; the next ack must not
+			// read the reconnect span as a blackout gap and re-snap a no-op.
+			lastAckMono = -1;
 		},
 
 		/**
@@ -534,6 +572,9 @@ export function createPredictor(options) {
 			gapEma = -1;
 			lastDivergence = 0;
 			overflowed = false;
+			// Same rationale as sync(): a post-reset ack must not read the span
+			// since the pre-reset ack as a blackout gap and spuriously snap.
+			lastAckMono = -1;
 			eventSink = [];
 		}
 	};
