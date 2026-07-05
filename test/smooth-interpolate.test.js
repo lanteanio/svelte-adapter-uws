@@ -4,7 +4,10 @@ import {
 	createSmoother,
 	SAMPLE_EMPTY,
 	SAMPLE_ACTIVE,
-	SAMPLE_SETTLED
+	SAMPLE_SETTLED,
+	FRESH_LIVE,
+	FRESH_COASTING,
+	FRESH_STALE
 } from '../src/plugins/smooth/interpolate.js';
 
 // Pure modules: time is always an argument, so nothing here needs fake
@@ -128,6 +131,34 @@ describe('SampleRing', () => {
 		expect(r.sampleInto(395, out, 250, 9999)).toBe(SAMPLE_ACTIVE);
 		expect(out.x).toBeCloseTo(39.5);
 	});
+
+	it('classifies freshness: live within samples, coasting within the cap, stale past it', () => {
+		const r = new SampleRing();
+		r.push(0, 0, 0);
+		r.push(100, 100, 0); // 1px/ms
+		// Interpolating between real samples: live.
+		r.sampleInto(50, out, 250, 500);
+		expect(out.fresh).toBe(FRESH_LIVE);
+		// Exactly at the newest sample (over === 0): still live.
+		r.sampleInto(100, out, 250, 500);
+		expect(out.fresh).toBe(FRESH_LIVE);
+		// Past the newest but within the 250ms extrapolation cap: coasting.
+		r.sampleInto(200, out, 250, 500);
+		expect(out.fresh).toBe(FRESH_COASTING);
+		// Past the cap (frozen on stale data): stale.
+		r.sampleInto(400, out, 250, 500);
+		expect(out.fresh).toBe(FRESH_STALE);
+	});
+
+	it('reads live on the oldest-hold and straddle branches', () => {
+		const r = new SampleRing();
+		r.push(100, 7, 9);
+		r.push(200, 50, 50);
+		r.sampleInto(40, out, 250, 500); // whole buffer ahead: hold oldest
+		expect(out.fresh).toBe(FRESH_LIVE);
+		r.sampleInto(150, out, 250, 500); // straddle interpolation
+		expect(out.fresh).toBe(FRESH_LIVE);
+	});
 });
 
 describe('createSmoother', () => {
@@ -237,5 +268,62 @@ describe('createSmoother', () => {
 		s.ingest({ event: 'update', data: { key: 5, data: { x: 1, y: 1 } } }, 0);
 		s.ingest({ event: 'time', data: { t: 'soon' } }, 0);
 		expect(s.size).toBe(0);
+	});
+
+	it('resume ease renders from the last-drawn position, then settles on the new basis', () => {
+		const s = createSmoother(opts);
+		s.ingest(update('a', 0, 0, 1000), 0);
+		s.ingest(update('a', 100, 0, 1100), 100);
+		let rt = s.beginFrame(150);
+		s.sampleInto('a', rt, out);
+		const drawn = out.x; // straddle midpoint ~50
+		const snap = s.renderedSnapshot();
+		expect(snap.get('a').x).toBeCloseTo(drawn);
+		// Rebuild on a far-away basis (x=1000) and arm the ease back into it.
+		s.reset();
+		s.ingest(update('a', 1000, 0, 5000), 200);
+		s.armResumeEase(snap, 200);
+		// First eased frame renders at (near) the old drawn position, not the basis.
+		rt = s.beginFrame(250);
+		s.sampleInto('a', rt, out);
+		expect(out.x).toBeCloseTo(drawn, 0);
+		expect(out.x).toBeLessThan(500); // decisively not snapped to 1000
+		// After the ease window elapses on the render-time axis, it reaches the basis.
+		rt = s.beginFrame(4000);
+		s.sampleInto('a', rt, out);
+		expect(out.x).toBeCloseTo(1000, 0);
+	});
+
+	it('resume ease with 0 duration snaps to the new basis (no overlay)', () => {
+		const s = createSmoother(opts);
+		s.ingest(update('a', 0, 0, 1000), 0);
+		s.ingest(update('a', 100, 0, 1100), 100);
+		let rt = s.beginFrame(150);
+		s.sampleInto('a', rt, out);
+		const snap = s.renderedSnapshot();
+		s.reset();
+		s.ingest(update('a', 1000, 0, 5000), 200);
+		s.armResumeEase(snap, 0); // 0 = snap
+		rt = s.beginFrame(250);
+		s.sampleInto('a', rt, out);
+		expect(out.x).toBeCloseTo(1000, 0);
+	});
+
+	it('renderedSnapshot captures only drawn entities; a fresh entity is not eased', () => {
+		const s = createSmoother(opts);
+		s.ingest(update('a', 5, 5, 1000), 0);
+		expect(s.renderedSnapshot().size).toBe(0); // ingested but never drawn
+		let rt = s.beginFrame(50);
+		s.sampleInto('a', rt, out);
+		const snap = s.renderedSnapshot();
+		expect(snap.has('a')).toBe(true);
+		// Rebuild with a brand-new entity 'b' absent from the snapshot: arming
+		// must skip it (nothing to ease from), so it renders at its true basis.
+		s.reset();
+		s.ingest(update('b', 900, 0, 5000), 100);
+		s.armResumeEase(snap, 200);
+		rt = s.beginFrame(150);
+		s.sampleInto('b', rt, out);
+		expect(out.x).toBeCloseTo(900, 0);
 	});
 });

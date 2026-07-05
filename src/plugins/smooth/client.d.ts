@@ -2,6 +2,24 @@ import type { SmoothApply } from './server.js';
 
 export { createSharedRandom, type SharedRandom } from './random.js';
 
+/**
+ * Per-entity freshness the smoother tags onto each remote frame state (see
+ * {@link SMOOTH_FRESHNESS}): `'live'` (position covered by real samples),
+ * `'coasting'` (extrapolated past the newest sample, within the cap), `'stale'`
+ * (extrapolation exhausted - the entity is frozen on stale data, the per-entity
+ * half of a frame stall).
+ */
+export type SmoothFreshness = 'live' | 'coasting' | 'stale';
+
+/**
+ * Symbol key under which each remote frame state carries its {@link SmoothFreshness}.
+ * A Symbol, so it never collides with an app field and stays invisible to JSON
+ * and `for...in`; read `state[SMOOTH_FRESHNESS]` on a remote entity to dim or
+ * flag a coasted / stalled one. Absent on non-positional states (nothing to
+ * interpolate).
+ */
+export const SMOOTH_FRESHNESS: unique symbol;
+
 export interface SmoothChannelTransport<Command = any> {
 	/**
 	 * Transmit a command batch. A lossy fire-and-forget send is the intended
@@ -71,6 +89,19 @@ export interface SmoothChannelOptions<State = any, Command = any> {
 	extrapolateMs?: number;
 	/** Remote sample gap treated as a discontinuity and snapped (default 500). */
 	snapGapMs?: number;
+	/**
+	 * How long the remote world may go without an inbound authority frame - while
+	 * entities are tracked - before the channel reports `stalled` (a blackout on a
+	 * still-open socket, which prediction overflow does not observe). Default 1000.
+	 */
+	stallMs?: number;
+	/**
+	 * How long remote entities take to ease from where they were last drawn into
+	 * their rebuilt positions after a short-gap reconnect / resync, in ms. 0 snaps
+	 * (the previous behavior). A resume after a blackout longer than `snapGapMs`
+	 * always snaps regardless. Default 150.
+	 */
+	resumeEaseMs?: number;
 	/** Maximum command flushes per second (default 60 - one per frame). */
 	cmdRate?: number;
 	/**
@@ -117,10 +148,19 @@ export interface SmoothChannel<State = any, Command = any> {
 	shoot(cmd: Command): void;
 	/** Attach the per-frame consumer and start the render loop. `local` is
 	 * the rendered local state (prediction plus any decaying correction);
-	 * `remote` maps entity keys to interpolated states. */
+	 * `remote` maps entity keys to interpolated states, each positional state
+	 * carrying its {@link SmoothFreshness} under the {@link SMOOTH_FRESHNESS}
+	 * Symbol key. */
 	onFrame(cb: (local: State, remote: Map<string, State>) => void): void;
 	/** Observe prediction-killed transitions (overflow and recovery). */
 	onOverflow(cb: (overflowed: boolean) => void): void;
+	/**
+	 * Observe frame-arrival stall transitions: `true` when the remote world has
+	 * gone quiet for longer than `stallMs` while entities are tracked (a blackout
+	 * on a still-open socket, which `onOverflow` never sees - that watches the
+	 * local command window), `false` when frames resume. One consumer per channel.
+	 */
+	onStall(cb: (stalled: boolean) => void): void;
 	/** Attach the discrete-event consumer for `ctx.emitEvent` fires. `command`
 	 * delivers the events its `apply` emitted with `origin:'local'` (the
 	 * optimistic copy, drawn the frame it was issued); the authority's
@@ -141,6 +181,10 @@ export interface SmoothChannel<State = any, Command = any> {
 	readonly windowSize: number;
 	/** True while prediction is killed pending recovery. */
 	readonly overflowed: boolean;
+	/** True while the remote world is stalled: no inbound authority frame for
+	 * longer than `stallMs` while remote entities are tracked. Clears when frames
+	 * resume; also delivered as transitions through `onStall`. */
+	readonly stalled: boolean;
 	/** The applied interpolation delay (ms) - diagnostics. */
 	readonly delay: number;
 	/** The applied clock offset (ms), or null - diagnostics. */
@@ -165,6 +209,8 @@ export interface SmoothChannelStats {
 	topic: string | null;
 	/** True while prediction is killed pending recovery (window overflow). */
 	overflowed: boolean;
+	/** True while the remote world is stalled (no authority frame past `stallMs`). */
+	stalled: boolean;
 	/** Commands awaiting acknowledgement (the reconciliation window depth). */
 	unacked: number;
 	/** The window cap; `unacked` nearing it predicts an overflow kill. */

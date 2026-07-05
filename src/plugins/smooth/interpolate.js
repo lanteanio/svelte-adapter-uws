@@ -52,6 +52,21 @@ export const SAMPLE_ACTIVE = 1;
 /** The sampled output is at rest until new data arrives. */
 export const SAMPLE_SETTLED = 2;
 
+// Per-entity freshness, written into the sample scratch alongside x/y so the
+// render layer can tell a live position from a coasted or frozen one. The
+// magnitude is `over = renderTime - newestSampleTime`: at or behind the newest
+// sample the position is real (LIVE); past it but within the extrapolation cap
+// the position is dead-reckoned (COASTING); past the cap the entity is frozen
+// where extrapolation left it, no fresh data covering this instant (STALE). The
+// SAMPLE_* status drives the render loop's motion gate; freshness is orthogonal
+// telemetry about data recency and never changes what is painted.
+/** The rendered position is covered by real samples. */
+export const FRESH_LIVE = 0;
+/** The position is extrapolated past the newest sample, within the cap. */
+export const FRESH_COASTING = 1;
+/** Extrapolation is exhausted: the entity is frozen on stale data. */
+export const FRESH_STALE = 2;
+
 /** One entity's position history on the server time axis. */
 export class SampleRing {
 	constructor() {
@@ -60,6 +75,25 @@ export class SampleRing {
 		this.y = new Float64Array(RING_CAP);
 		this.head = 0;
 		this.len = 0;
+		// Resume-ease overlay: a decaying positional offset added on top of the
+		// sampled position so a reconnect resume slides from where the entity was
+		// last drawn to the new authoritative basis instead of popping. `offAt`
+		// is the render-time the offset was armed at (< 0 = inactive); it decays
+		// to zero over `offMs`. `easePending` defers computing the offset until
+		// the first post-resync sample renders the real new position (the caller
+		// only knows the old position, not where the new basis lands this frame).
+		this.offX = 0;
+		this.offY = 0;
+		this.offAt = -1;
+		this.offMs = 0;
+		this.easeFromX = 0;
+		this.easeFromY = 0;
+		this.easePending = false;
+		// The last rendered output (post-offset), so a resume can capture where
+		// each entity was drawn before the rings are rebuilt.
+		this.lastX = 0;
+		this.lastY = 0;
+		this.hasLast = false;
 	}
 
 	/**
@@ -117,6 +151,10 @@ export class SampleRing {
 			const dt = over > extrapolateMs ? extrapolateMs : over;
 			out.x = this.x[ni] + vx * dt;
 			out.y = this.y[ni] + vy * dt;
+			// Freshness is the extrapolation magnitude: exactly at the newest
+			// sample is LIVE, dead-reckoning within the cap is COASTING, past
+			// the cap (resting on stale data) is STALE.
+			out.fresh = over > extrapolateMs ? FRESH_STALE : over > 0 ? FRESH_COASTING : FRESH_LIVE;
 			const moving = (vx !== 0 || vy !== 0) && over < extrapolateMs;
 			return moving ? SAMPLE_ACTIVE : SAMPLE_SETTLED;
 		}
@@ -128,6 +166,7 @@ export class SampleRing {
 			// as the render time advances into the buffer.
 			out.x = this.x[oi];
 			out.y = this.y[oi];
+			out.fresh = FRESH_LIVE;
 			return SAMPLE_ACTIVE;
 		}
 
@@ -150,11 +189,13 @@ export class SampleRing {
 			// entity across the gap (view re-entry, idle resume, teleport).
 			out.x = this.x[upper];
 			out.y = this.y[upper];
+			out.fresh = FRESH_LIVE;
 			return SAMPLE_ACTIVE;
 		}
 		const f = span > 0 ? (renderTime - tl) / span : 1;
 		out.x = this.x[lower] + (this.x[upper] - this.x[lower]) * f;
 		out.y = this.y[lower] + (this.y[upper] - this.y[lower]) * f;
+		out.fresh = FRESH_LIVE;
 		return SAMPLE_ACTIVE;
 	}
 }
@@ -303,8 +344,68 @@ export function createSmoother(options) {
 			const ring = rings.get(key);
 			if (ring === undefined) return SAMPLE_EMPTY;
 			const s = ring.sampleInto(renderTime, out, extrapolateMs, snapGapMs);
+			// Resume ease: on the first sample after an armed resume, compute the
+			// offset from where the entity was last drawn to where the new basis
+			// renders it now, then decay that offset to zero over offMs so the
+			// entity slides into place instead of popping. The offset is a pure
+			// render overlay - the rings and clock already hold the true basis.
+			if (ring.easePending) {
+				ring.offX = ring.easeFromX - out.x;
+				ring.offY = ring.easeFromY - out.y;
+				ring.offAt = renderTime;
+				ring.easePending = false;
+			}
+			if (ring.offAt >= 0) {
+				const f = ring.offMs > 0 ? 1 - (renderTime - ring.offAt) / ring.offMs : 0;
+				if (f <= 0) {
+					ring.offAt = -1;
+				} else {
+					out.x += ring.offX * f;
+					out.y += ring.offY * f;
+					motion = true;
+				}
+			}
+			ring.lastX = out.x;
+			ring.lastY = out.y;
+			ring.hasLast = true;
 			if (s === SAMPLE_ACTIVE) motion = true;
 			return s;
+		},
+
+		/**
+		 * Snapshot each entity's last rendered position (post-ease), for a
+		 * resume that is about to rebuild the rings: the caller captures this
+		 * BEFORE `reset()`, rebuilds on the new basis, then `armResumeEase`s
+		 * back into it. Allocates - called once per resume, never per frame.
+		 * @returns {Map<string, { x: number, y: number }>}
+		 */
+		renderedSnapshot() {
+			const snap = new Map();
+			for (const [key, ring] of rings) {
+				if (ring.hasLast) snap.set(key, { x: ring.lastX, y: ring.lastY });
+			}
+			return snap;
+		},
+
+		/**
+		 * Arm a decaying resume ease on every entity present in both `fromMap`
+		 * (last-rendered positions captured before the rebuild) and the freshly
+		 * rebuilt rings. An entity absent from the new basis is skipped (it left);
+		 * a newly appeared entity is skipped (nothing to ease from). No-op when
+		 * `easeMs <= 0` (snap).
+		 * @param {Map<string, { x: number, y: number }>} fromMap
+		 * @param {number} easeMs
+		 */
+		armResumeEase(fromMap, easeMs) {
+			if (!(easeMs > 0)) return;
+			for (const [key, pos] of fromMap) {
+				const ring = rings.get(key);
+				if (ring === undefined) continue;
+				ring.easeFromX = pos.x;
+				ring.easeFromY = pos.y;
+				ring.easePending = true;
+				ring.offMs = easeMs;
+			}
 		},
 
 		/**

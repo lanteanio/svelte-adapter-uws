@@ -6,7 +6,7 @@
 // are driven through the singleton connection's mocked socket, the same
 // harness shape as cursor-handle.test.js.
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 class MockWebSocket {
 	static CONNECTING = 0;
@@ -44,7 +44,7 @@ globalThis.requestAnimationFrame = /** @type {any} */ ((cb) => setTimeout(cb, 0)
 globalThis.cancelAnimationFrame = /** @type {any} */ ((h) => clearTimeout(h));
 
 const clientModule = await import('../src/client.js');
-const { createSmoothChannel, createSharedRandom: clientCreateSharedRandom } = await import('../src/plugins/smooth/client.js');
+const { createSmoothChannel, createSharedRandom: clientCreateSharedRandom, SMOOTH_FRESHNESS } = await import('../src/plugins/smooth/client.js');
 const { SmoothEncodeDict, encodeSmooth, SMOOTH_SCHEMA_VERSION } = await import('../src/plugins/smooth/codec.js');
 const { buildBinaryFrame } = await import('../src/runtime/wire.js');
 const { createSharedRandom: randomCreateSharedRandom } = await import('../src/plugins/smooth/random.js');
@@ -189,6 +189,121 @@ describe('sync lifecycle', () => {
 		ch.resync();
 		await flush();
 		expect(t.syncs).toBe(2);
+		ch.destroy();
+	});
+});
+
+describe('frame-arrival stall', () => {
+	it('reports stalled after stallMs of no remote frames and clears when they resume', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t, { stallMs: 50 });
+		await flush(); // sync established 'other' and stamped the last-frame time
+		const stalls = [];
+		ch.onStall((s) => stalls.push(s));
+		ch.onFrame(() => {});
+		// No inbound frame for well over stallMs: the world stalls.
+		await flush(120);
+		expect(stalls[0]).toBe(true);
+		expect(ch.stalled).toBe(true);
+		expect(ch.stats().stalled).toBe(true);
+		// A fresh remote frame resumes the world; assert before it could re-stall
+		// (the flush window here is far shorter than stallMs).
+		MockWebSocket._last.emit({ topic: wire(t), event: 'update', data: { key: 'other', data: { x: 6, y: 6 } } });
+		await flush(15);
+		expect(ch.stalled).toBe(false);
+		expect(stalls).toContain(false);
+		ch.destroy();
+	});
+
+	it('does not stall a channel with no remote entities', async () => {
+		const t = makeTransport({ states: [{ key: 'me', state: { x: 0, y: 0 } }] });
+		const ch = makeChannel(t, { stallMs: 20 });
+		await flush();
+		const stalls = [];
+		ch.onStall((s) => stalls.push(s));
+		ch.onFrame(() => {});
+		await flush(60);
+		expect(stalls).toEqual([]); // nothing to stall on
+		ch.destroy();
+	});
+});
+
+describe('remote freshness tag', () => {
+	it('tags each remote frame state with a freshness label', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t);
+		await flush();
+		MockWebSocket._last.emit({ topic: wire(t), event: 'update', data: { key: 'other', data: { x: 5, y: 5 } }, t: Date.now() });
+		let remote = null;
+		ch.onFrame((_local, r) => { remote = r; });
+		await flush(20);
+		const other = remote.get('other');
+		expect(other[SMOOTH_FRESHNESS]).toBeDefined();
+		expect(['live', 'coasting', 'stale']).toContain(other[SMOOTH_FRESHNESS]);
+		ch.destroy();
+	});
+});
+
+describe('suspend-survived light resume', () => {
+	let realDoc;
+	let visHandlers;
+	beforeEach(() => {
+		realDoc = globalThis.document;
+		visHandlers = [];
+		globalThis.document = /** @type {any} */ ({
+			hidden: false,
+			visibilityState: 'visible',
+			addEventListener(type, fn) {
+				if (type === 'visibilitychange') visHandlers.push(fn);
+			},
+			removeEventListener(type, fn) {
+				visHandlers = visHandlers.filter((h) => h !== fn);
+			}
+		});
+	});
+	afterEach(() => {
+		if (realDoc === undefined) delete globalThis.document;
+		else globalThis.document = realDoc;
+	});
+	const fireVisibility = (hidden) => {
+		globalThis.document.hidden = hidden;
+		globalThis.document.visibilityState = hidden ? 'hidden' : 'visible';
+		for (const h of visHandlers.slice()) h();
+	};
+
+	it('a suspended->open transition reconciles in place without dropping live entities', async () => {
+		let syncCount = 0;
+		const name = 'soft-' + topicCounter++;
+		const t = {
+			name,
+			sent: [],
+			sendCommand() {},
+			sync() {
+				syncCount++;
+				// First (fresh) sync carries the full roster; the later soft sync
+				// omits 'other'. A fresh resync would drop it; a soft one keeps it.
+				const states =
+					syncCount === 1
+						? [{ key: 'me', state: { x: 0, y: 0 } }, { key: 'other', state: { x: 5, y: 5 } }]
+						: [{ key: 'me', state: { x: 0, y: 0 } }];
+				return Promise.resolve({ topic: name, t: Date.now(), you: 'me', ack: 0, states });
+			}
+		};
+		const ch = makeChannel(t);
+		await flush();
+		expect(syncCount).toBe(1);
+		let remote = null;
+		ch.onFrame((_local, r) => { remote = r; });
+		await flush(20);
+		expect(remote.has('other')).toBe(true);
+		// Background then foreground while the socket stays open: a soft resume.
+		fireVisibility(true); // -> 'suspended'
+		await flush(5);
+		fireVisibility(false); // -> 'open' with prevStatus 'suspended' => soft
+		await flush(20);
+		expect(syncCount).toBe(2); // soft still syncs
+		// merged was never cleared, so 'other' survives the soft catalog's omission.
+		expect(remote.has('other')).toBe(true);
 		ch.destroy();
 	});
 });

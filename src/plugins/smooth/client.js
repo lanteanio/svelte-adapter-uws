@@ -57,6 +57,16 @@ import { CELL_CAPABILITY, CELL_TOPIC_PREFIX, decodeCell } from './cell-codec.js'
 // `svelte-adapter-uws/plugins/smooth/random` subpath, which pulls in no client.
 export { createSharedRandom } from './random.js';
 
+// Per-entity freshness tag on each remote frame state: a Symbol key, so it never
+// collides with an app field, is invisible to JSON/`for...in`, and survives an
+// object spread. Read `state[SMOOTH_FRESHNESS]` to tell a live remote position
+// (`'live'`) from a dead-reckoned one (`'coasting'`) or a frozen one (`'stale'`,
+// the render-visible half of a frame stall). `Symbol.for` so a duplicated module
+// instance (a bundler resolving the dep twice) still agrees on the one key.
+export const SMOOTH_FRESHNESS = Symbol.for('svelte-adapter-uws.smooth.freshness');
+// Indexed by the numeric FRESH_* the smoother writes into the sample scratch.
+const FRESHNESS_LABEL = ['live', 'coasting', 'stale'];
+
 // Opt this connection into binary smooth frames: registered at module load so
 // the first `hello` already carries the capability (a lazily-added capability
 // would not reach a server whose codec state had already attached - the
@@ -154,6 +164,8 @@ function checkWirePair(pair, label) {
  *   interpolationMs?: 'auto' | number,
  *   extrapolateMs?: number,
  *   snapGapMs?: number,
+ *   stallMs?: number,
+ *   resumeEaseMs?: number,
  *   cmdRate?: number,
  *   wire?: {
  *     state?: { pack: (state: any) => any, unpack: (packed: any) => any },
@@ -199,6 +211,8 @@ export function createSmoothChannel(options) {
 	}
 	checkKnob(options.extrapolateMs, 'extrapolateMs', 0);
 	checkKnob(options.snapGapMs, 'snapGapMs', 1);
+	checkKnob(options.stallMs, 'stallMs', 1);
+	checkKnob(options.resumeEaseMs, 'resumeEaseMs', 0);
 	checkKnob(options.cmdRate, 'cmdRate', 0);
 	let wireState = null;
 	let wireCommand = null;
@@ -222,6 +236,20 @@ export function createSmoothChannel(options) {
 
 	const cmdRate = options.cmdRate === undefined ? 60 : options.cmdRate;
 	const minFlushMs = cmdRate > 0 ? 1000 / cmdRate : 0;
+
+	// Frame-arrival stall: a remote blackout (frames stopped while the socket
+	// stayed up) is invisible today until the entities silently coast to rest.
+	// Past `stallMs` with no inbound authority frame - while remote entities are
+	// tracked - the channel reports `stalled`, the health signal for that gap.
+	const stallMs = options.stallMs === undefined ? 1000 : options.stallMs;
+	// Resume ease: how long the remote entities take to slide from where they
+	// were last drawn to the new basis after a short-gap reconnect / resync.
+	// 0 = snap (the previous behavior). A resume after a blackout longer than
+	// `snapGapMs` always snaps regardless (easing across a blackout would smear).
+	const resumeEaseMs = options.resumeEaseMs === undefined ? 150 : options.resumeEaseMs;
+	// Hoisted so the resync ease-vs-snap decision shares the one threshold the
+	// smoother uses for a straddle discontinuity.
+	const snapGapMs = options.snapGapMs === undefined ? 500 : options.snapGapMs;
 
 	// The caller's own entity key, learned from the sync reply. Read live by
 	// the predictor's `self` accessor, so `ctx.key` starts reporting it on the
@@ -281,6 +309,18 @@ export function createSmoothChannel(options) {
 	let overflowCb = null;
 	/** @type {((event: { type: string, key: string, data: any, id: number, origin: 'local' | 'server' }) => void) | null} */
 	let eventCb = null;
+	/** @type {((stalled: boolean) => void) | null} */
+	let stallCb = null;
+	// Frame-arrival stall: the monotonic time of the last inbound authority
+	// position frame (update/remove/catalog), -1 before the first. The loop
+	// compares against it to raise `stalled` when the remote world goes quiet
+	// while entities are still tracked.
+	let lastFrameAt = -1;
+	let stalled = false;
+	// The previous connection status, so an 'open' that followed 'suspended' (the
+	// socket survived a background pause) takes the light resume path instead of a
+	// full clear+refetch. Null before the first status delivery.
+	let prevStatus = null;
 	let raf = null;
 
 	const localPoint = { x: 0, y: 0 };
@@ -333,6 +373,10 @@ export function createSmoothChannel(options) {
 				if (predictor.rebase(s)) dirty = true;
 				return;
 			}
+			// A remote authority frame arrived: the world is live. Stamp it for the
+			// stall detector (own-key updates above are the local-avatar path and do
+			// not count - a stall is about the REMOTE world going quiet).
+			lastFrameAt = recvMono;
 			merged.set(d.key, s);
 			// The smoother reads the envelope's data.data; hand it the unpacked
 			// state (a fresh envelope only when a codec is on - the raw path
@@ -344,6 +388,7 @@ export function createSmoothChannel(options) {
 		if (ev.event === 'remove') {
 			const d = ev.data;
 			if (d === null || typeof d !== 'object' || typeof d.key !== 'string') return;
+			lastFrameAt = recvMono;
 			merged.delete(d.key);
 			smoother.ingest(ev, recvMono);
 			dirty = true;
@@ -400,6 +445,34 @@ export function createSmoothChannel(options) {
 		if (overflowCb) overflowCb(state);
 	}
 
+	// Parse a sync reply's roster into the merged set plus a bulk ingest batch,
+	// pulling out the caller's own state (never a remote entity). Shared by the
+	// fresh and soft resync paths; unpacks through the wire codec and skips a
+	// malformed entry rather than aborting the whole roster.
+	function applyCatalog(states) {
+		let own;
+		const bulk = [];
+		for (let i = 0; i < states.length; i++) {
+			const s = states[i];
+			if (!s || typeof s.key !== 'string') continue;
+			let st = s.state;
+			if (wireState !== null) {
+				try {
+					st = wireState.unpack(st);
+				} catch {
+					continue; // malformed packed state: skip this entry
+				}
+			}
+			if (selfKey !== null && s.key === selfKey) {
+				own = st;
+				continue;
+			}
+			merged.set(s.key, st);
+			bulk.push({ key: s.key, data: st });
+		}
+		return { own, bulk };
+	}
+
 	let syncInFlight = false;
 	let lastSyncAttemptMono = -Infinity;
 	// Whether the topic advertised lag compensation on its sync reply. Gates the
@@ -407,8 +480,21 @@ export function createSmoothChannel(options) {
 	// stampless shot frame (and so a stale flag never survives a reconnect onto a
 	// topic that has it off - it is re-read from every sync reply).
 	let lcEnabled = false;
-	function resync() {
+	/**
+	 * Re-request the authoritative catalog. `mode` selects the resume shape:
+	 *   - `'soft'` (a 'suspended' -> 'open' transition, socket survived a
+	 *     background pause): the rings/clock stayed valid and frames kept
+	 *     arriving, so reconcile the catalog IN PLACE - no clear, no reset, no
+	 *     pop. Used only for a socket-survived refocus.
+	 *   - `'fresh'` (default: first connect, a reconnect on a new socket,
+	 *     overflow recovery): rebuild the basis, and ease the remote entities
+	 *     from where they were last drawn into the new positions when the world
+	 *     was only briefly absent (snap after a blackout).
+	 * @param {'fresh' | 'soft'} [mode]
+	 */
+	function resync(mode) {
 		if (destroyed || syncInFlight) return;
+		const soft = mode === 'soft';
 		syncInFlight = true;
 		lastSyncAttemptMono = monotonicNow();
 		const sendMono = lastSyncAttemptMono;
@@ -438,40 +524,53 @@ export function createSmoothChannel(options) {
 					cellsEnabled = true;
 					_cellChannels.set(smoothName, ingestCell);
 				}
+				const stampT = typeof reply.t === 'number' && Number.isFinite(reply.t) ? reply.t : undefined;
+				const states = Array.isArray(reply.states) ? reply.states : [];
+				const ack = typeof reply.ack === 'number' ? reply.ack : 0;
+
+				if (soft) {
+					// Light resume: top up the clock and reconcile the roster onto
+					// the still-valid rings without clearing or resetting anything,
+					// so no remote entity pops. Absent-entity removal is deliberately
+					// skipped (a cells-mode catalog is not a full roster; a real
+					// remove or the TTL sweep clears a genuine departure).
+					if (stampT !== undefined) smoother.clock.seed(stampT, sendMono, recvMono);
+					const { own, bulk } = applyCatalog(states);
+					if (bulk.length > 0) smoother.ingest({ event: 'bulk', data: bulk, t: stampT }, recvMono);
+					predictor.sync(own === undefined ? options.initial : own, ack);
+					lastFrameAt = recvMono;
+					if (wasOverflowed) notifyOverflow(false);
+					dirty = true;
+					if (ingressHandle !== null && !ingressHandle.live()) ingressHandle.reannounce();
+					return;
+				}
+
+				// Fresh resume: capture where each remote entity was last drawn
+				// BEFORE the rebuild, but only when the world was briefly absent (a
+				// quick reconnect / a manual resync while frames were flowing). After
+				// a blackout longer than snapGapMs, snap - easing across a blackout
+				// would smear entities over the whole gap, the same call the local
+				// predictor makes on a wide ack gap.
+				let easeFrom = null;
+				if (resumeEaseMs > 0 && merged.size > 0 && lastFrameAt >= 0 && recvMono - lastFrameAt <= snapGapMs) {
+					easeFrom = smoother.renderedSnapshot();
+				}
 				merged.clear();
 				cellOf.clear();
 				// Reset BEFORE seeding: a resync may follow a reconnect onto a
 				// different machine, so the old offset estimate and ring axis
 				// must not survive into the new seed.
 				smoother.reset();
-				if (typeof reply.t === 'number' && Number.isFinite(reply.t)) {
-					smoother.clock.seed(reply.t, sendMono, recvMono);
-				}
-				let own;
-				const states = Array.isArray(reply.states) ? reply.states : [];
-				const bulk = [];
-				for (let i = 0; i < states.length; i++) {
-					const s = states[i];
-					if (!s || typeof s.key !== 'string') continue;
-					let st = s.state;
-					if (wireState !== null) {
-						try {
-							st = wireState.unpack(st);
-						} catch {
-							continue; // malformed packed state: skip this entry
-						}
-					}
-					if (selfKey !== null && s.key === selfKey) {
-						own = st;
-						continue;
-					}
-					merged.set(s.key, st);
-					bulk.push({ key: s.key, data: st });
-				}
+				if (stampT !== undefined) smoother.clock.seed(stampT, sendMono, recvMono);
+				const { own, bulk } = applyCatalog(states);
 				if (bulk.length > 0) {
-					smoother.ingest({ event: 'bulk', data: bulk, t: typeof reply.t === 'number' ? reply.t : undefined }, recvMono);
+					smoother.ingest({ event: 'bulk', data: bulk, t: stampT }, recvMono);
 				}
-				predictor.sync(own === undefined ? options.initial : own, typeof reply.ack === 'number' ? reply.ack : 0);
+				// Arm the ease AFTER the rings exist so each entity eases toward the
+				// position the new basis renders, not a guess made before the rebuild.
+				if (easeFrom !== null) smoother.armResumeEase(easeFrom, resumeEaseMs);
+				predictor.sync(own === undefined ? options.initial : own, ack);
+				lastFrameAt = recvMono;
 				if (wasOverflowed) notifyOverflow(false);
 				dirty = true;
 				// A sync reply proves the server loaded this topic's smooth runtime,
@@ -520,6 +619,19 @@ export function createSmoothChannel(options) {
 		raf = scheduleFrame(loop);
 		const mono = monotonicNow();
 		flush(mono);
+		// Frame-arrival stall: while remote entities are tracked, a gap past
+		// stallMs since the last inbound authority frame means the remote world
+		// went quiet on a still-open socket (a blackout prediction overflow never
+		// sees, because that watches the LOCAL command window). Report the
+		// transition; the per-entity `SMOOTH_FRESHNESS` tag shows which entities.
+		if (lastFrameAt >= 0) {
+			const nextStalled = merged.size > 0 && mono - lastFrameAt > stallMs;
+			if (nextStalled !== stalled) {
+				stalled = nextStalled;
+				if (stallCb) stallCb(nextStalled);
+				dirty = true;
+			}
+		}
 		if (predictor.checkOverflow(mono)) {
 			// The server went silent past the window bound: surface it and
 			// run a recovery sync - retried at a modest cadence while the
@@ -547,7 +659,15 @@ export function createSmoothChannel(options) {
 		for (const [key, state] of merged) {
 			if (state !== null && typeof state === 'object' && typeof state.x === 'number') {
 				const s = smoother.sampleInto(key, renderTime, samplePoint);
-				remote.set(key, s === SAMPLE_EMPTY ? state : { ...state, x: samplePoint.x, y: samplePoint.y });
+				if (s === SAMPLE_EMPTY) {
+					remote.set(key, state);
+				} else {
+					// Tag the freshness the smoother classified for this instant
+					// (live / coasting / stale) onto the frame state via a Symbol
+					// key, so a renderer can dim or flag a coasted entity without a
+					// second per-frame structure.
+					remote.set(key, { ...state, x: samplePoint.x, y: samplePoint.y, [SMOOTH_FRESHNESS]: FRESHNESS_LABEL[samplePoint.fresh] });
+				}
 			} else {
 				remote.set(key, state);
 			}
@@ -556,9 +676,12 @@ export function createSmoothChannel(options) {
 	}
 
 	// The status store delivers the current value on subscribe, so a channel
-	// constructed on an already-open connection syncs immediately.
+	// constructed on an already-open connection syncs immediately. An 'open' that
+	// followed 'suspended' is a socket-survived refocus - take the light resume
+	// path; any other 'open' (first connect, reconnect on a new socket) rebuilds.
 	const statusUnsub = status.subscribe((s) => {
-		if (s === 'open') resync();
+		if (s === 'open') resync(prevStatus === 'suspended' ? 'soft' : 'fresh');
+		prevStatus = s;
 	});
 
 	return {
@@ -662,6 +785,19 @@ export function createSmoothChannel(options) {
 		},
 
 		/**
+		 * Observe frame-arrival stall transitions: `true` when the remote world
+		 * has gone quiet for longer than `stallMs` while entities are tracked (a
+		 * blackout on a still-open socket, which prediction overflow never sees -
+		 * that watches the local command window), `false` when frames resume. The
+		 * app health surface's second input, alongside `onOverflow`. One consumer
+		 * per channel.
+		 * @param {(stalled: boolean) => void} cb
+		 */
+		onStall(cb) {
+			stallCb = cb;
+		},
+
+		/**
 		 * Attach the discrete-event consumer for `ctx.emitEvent` fires. Each
 		 * `command` delivers the events its `apply` emitted with `origin:'local'`
 		 * (the optimistic copy, drawn the frame the command was issued); the
@@ -679,8 +815,12 @@ export function createSmoothChannel(options) {
 			eventCb = cb;
 		},
 
-		/** Re-request the authoritative catalog (also runs on every 'open'). */
-		resync,
+		/** Re-request the authoritative catalog and rebuild on it (also runs on
+		 * every 'open'). Always the fresh rebuild path; the light socket-survived
+		 * resume is internal to the reconnect handling. */
+		resync() {
+			resync('fresh');
+		},
 
 		/**
 		 * The estimated server wall-clock time, for stamping commands and
@@ -716,6 +856,13 @@ export function createSmoothChannel(options) {
 			return predictor.overflowed;
 		},
 
+		/** True while the remote world is stalled: no inbound authority frame for
+		 * longer than `stallMs` while remote entities are tracked. Clears when
+		 * frames resume; also delivered as transitions through `onStall`. */
+		get stalled() {
+			return stalled;
+		},
+
 		/** The applied interpolation delay (ms) - diagnostics. */
 		get delay() {
 			return smoother.delay;
@@ -734,9 +881,10 @@ export function createSmoothChannel(options) {
 		 * cap predicts an overflow kill); `lastDivergence` is the most recent
 		 * reconciliation error magnitude and `correcting` whether a correction is
 		 * still easing in; `interpDelayMs` is the applied remote render-behind;
-		 * `clockSynced` is whether the server-clock estimate has a sample yet.
+		 * `clockSynced` is whether the server-clock estimate has a sample yet;
+		 * `stalled` is whether the remote world has gone quiet past `stallMs`.
 		 * @param {number} [monoNow]
-		 * @returns {{ self: string | null, topic: string | null, overflowed: boolean, unacked: number, windowCap: number, lastDivergence: number, correcting: boolean, interpDelayMs: number, clockSynced: boolean, remoteCount: number }}
+		 * @returns {{ self: string | null, topic: string | null, overflowed: boolean, stalled: boolean, unacked: number, windowCap: number, lastDivergence: number, correcting: boolean, interpDelayMs: number, clockSynced: boolean, remoteCount: number }}
 		 */
 		stats(monoNow) {
 			const mono = typeof monoNow === 'number' ? monoNow : monotonicNow();
@@ -744,6 +892,7 @@ export function createSmoothChannel(options) {
 				self: selfKey,
 				topic: wireTopic,
 				overflowed: predictor.overflowed,
+				stalled,
 				unacked: predictor.windowSize,
 				windowCap: predictor.windowCap,
 				lastDivergence: predictor.lastDivergence,

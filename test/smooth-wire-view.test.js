@@ -146,7 +146,9 @@ describe('state wire view', () => {
 		await flush();
 		expect(ch.predicted).toEqual({ x: 0, y: 0, hp: 100 });
 		expect(local).toEqual({ x: 0, y: 0, hp: 100 });
-		expect(remote.get('other')).toEqual({ x: 5, y: 5, hp: 80 });
+		// toMatchObject: the remote frame state also carries the render layer's
+		// SMOOTH_FRESHNESS symbol tag, orthogonal to the wire view under test.
+		expect(remote.get('other')).toMatchObject({ x: 5, y: 5, hp: 80 });
 		ch.destroy();
 	});
 
@@ -161,7 +163,7 @@ describe('state wire view', () => {
 		MockWebSocket._last.emit({ topic: wire(t), event: 'update', data: { key: 'other', data: [6, 7, 79] } });
 		MockWebSocket._last.emit({ topic: wire(t), event: 'update', data: { key: 'me', data: [40, 40, 60] } });
 		await flush();
-		expect(remote.get('other')).toEqual({ x: 6, y: 7, hp: 79 });
+		expect(remote.get('other')).toMatchObject({ x: 6, y: 7, hp: 79 }); // + SMOOTH_FRESHNESS tag
 		expect(remote.has('me')).toBe(false);
 		// No commands in flight: the own-key update rebases the prediction.
 		expect(ch.predicted).toEqual({ x: 40, y: 40, hp: 60 });
@@ -194,7 +196,7 @@ describe('state wire view', () => {
 		MockWebSocket._last.emit({ topic: wire(t), event: 'ack', data: { id: 1, state: 'garbage', t: Date.now() } });
 		MockWebSocket._last.emit({ topic: wire(t), event: 'update', data: { key: 'other', data: [9, 9, 42] } });
 		await flush();
-		expect(remote.get('other')).toEqual({ x: 9, y: 9, hp: 42 });
+		expect(remote.get('other')).toMatchObject({ x: 9, y: 9, hp: 42 }); // + SMOOTH_FRESHNESS tag
 		ch.destroy();
 	});
 });

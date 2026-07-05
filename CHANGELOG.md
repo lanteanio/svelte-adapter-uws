@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0-next.58] - 2026-07-06
+## [0.6.0-next.59] - 2026-07-06
+
+### Added
+
+- **Frame-arrival stall detection - a blackout on a still-open socket is no longer invisible.** Prediction overflow only watches the LOCAL command window; when the server stops sending REMOTE frames while the socket stays up, the world silently coasts to a halt with no signal. The smooth channel now stamps every inbound authority frame and, while remote entities are tracked, reports `stalled` once the gap exceeds `stallMs` (default 1000), clearing when frames resume. Observe it as transitions through `onStall(cb)`, the synchronous `channel.stalled` getter, or the new `stats().stalled` field - the app health surface's second input alongside `onOverflow`.
+- **Per-entity freshness on every remote frame.** Each interpolated remote state now carries its freshness under the exported `SMOOTH_FRESHNESS` Symbol key: `'live'` (position covered by real samples), `'coasting'` (dead-reckoned past the newest sample, within the extrapolation cap), or `'stale'` (extrapolation exhausted - frozen on stale data, the per-entity half of a stall). A renderer reads `state[SMOOTH_FRESHNESS]` to dim or flag a coasted entity; the Symbol never collides with an app field, stays invisible to JSON, and is absent on non-positional states. No second per-frame structure - the tag rides the existing frame spread.
+- **Eased remote resume - a reconnect no longer pops the world.** A resync used to clear the remote set and reset the smoother, snapping every entity to its rebuilt catalog position. Entities now ease from where they were last drawn into the new basis over `resumeEaseMs` (default 150; 0 restores the snap) with a per-entity decaying offset - but only when the world was briefly absent. After a blackout longer than `snapGapMs` it still snaps, the same call the local predictor makes on a wide ack gap (easing across a blackout would smear entities over the whole gap).
+- **Suspend-survived light resume.** A `'suspended' -> 'open'` transition (a tab refocus where the socket stayed open and frames kept arriving) took the full clear + refetch path, popping the world on every refocus. It now reconciles the catalog in place - no clear, no smoother reset, no ring rebuild - so the rendered world is continuous across a background pause. A genuine reconnect on a new socket is unchanged (full rebuild with the eased resume above).
 
 ### Added
 
