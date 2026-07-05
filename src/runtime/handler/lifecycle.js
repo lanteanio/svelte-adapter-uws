@@ -129,6 +129,11 @@ export async function shutdown() {
 		listenSocket = null;
 	}
 	stopPressureSampling();
+	// Close the posture export socket (no-op when never configured) so the
+	// socket file does not outlive the process and consumers see a clean EOF.
+	counters.postureExporter?.close();
+	counters.postureExporter = null;
+	counters.postureExportHook = null;
 	// Stop the per-worker consistency auditor timer (no-op when it was never
 	// installed - the interval-0 / not-yet-started case).
 	counters.consistencyAuditor?.stop();

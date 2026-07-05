@@ -501,8 +501,8 @@ export function leaseGrantSize(w) {
  * idle reads 0) is testable without a live worker. The caller supplies the
  * readings, the configured thresholds, and the current gate peak.
  *
- * @param {{ heapUsedRatio: number, publishRate: number, subscriberRatio: number }} sample
- * @param {{ memoryHeapUsedRatio: number | false, publishRatePerSec: number | false, subscriberRatio: number | false }} thresholds
+ * @param {{ heapUsedRatio: number, publishRate: number, subscriberRatio: number, psiCpuSome10?: number, psiMemoryFull10?: number, psiIoFull10?: number, cpuThrottledRatio?: number }} sample
+ * @param {{ memoryHeapUsedRatio: number | false, publishRatePerSec: number | false, subscriberRatio: number | false, psiCpuSome?: number | false, psiMemoryFull?: number | false, psiIoFull?: number | false, cpuThrottledRatio?: number | false }} thresholds
  * @param {number} leaseSaturationPeak - worst gate reading since the last sample
  * @returns {number}
  */
@@ -518,6 +518,25 @@ export function samplePressureValue(sample, thresholds, leaseSaturationPeak) {
 	}
 	if (thresholds.subscriberRatio !== false && thresholds.subscriberRatio > 0) {
 		const r = sample.subscriberRatio / thresholds.subscriberRatio;
+		if (r > value) value = r;
+	}
+	// Kernel-sourced signals fold in worst-of like the process-local ones.
+	// Their sample fields are simply absent on hosts without the source, so
+	// the non-Linux path is byte-identical.
+	if (thresholds.psiCpuSome !== undefined && thresholds.psiCpuSome !== false && thresholds.psiCpuSome > 0 && sample.psiCpuSome10 !== undefined) {
+		const r = sample.psiCpuSome10 / thresholds.psiCpuSome;
+		if (r > value) value = r;
+	}
+	if (thresholds.psiMemoryFull !== undefined && thresholds.psiMemoryFull !== false && thresholds.psiMemoryFull > 0 && sample.psiMemoryFull10 !== undefined) {
+		const r = sample.psiMemoryFull10 / thresholds.psiMemoryFull;
+		if (r > value) value = r;
+	}
+	if (thresholds.psiIoFull !== undefined && thresholds.psiIoFull !== false && thresholds.psiIoFull > 0 && sample.psiIoFull10 !== undefined) {
+		const r = sample.psiIoFull10 / thresholds.psiIoFull;
+		if (r > value) value = r;
+	}
+	if (thresholds.cpuThrottledRatio !== undefined && thresholds.cpuThrottledRatio !== false && thresholds.cpuThrottledRatio > 0 && sample.cpuThrottledRatio !== undefined) {
+		const r = sample.cpuThrottledRatio / thresholds.cpuThrottledRatio;
 		if (r > value) value = r;
 	}
 	if (value < 0) value = 0; else if (value > 1) value = 1;

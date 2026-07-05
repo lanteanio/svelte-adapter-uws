@@ -466,7 +466,32 @@ The two layers are independent: each works without the other. Both default to `0
 - `elevated` widens the waiting-room `Retry-After` jitter (and tightens any loaded per-IP / capability-cookie extensions).
 - `siege` refuses every new upgrade (the waiting-room holding page or a `503`) and makes `/__admit-check` always poll-again. Existing connections are never touched at any level.
 
-`platform.protection` reads the live level. While a posture is engaged, `platform.pressure.reason` can surface `CAPACITY` (precedence `MEMORY > CAPACITY > PUBLISH_RATE > SUBSCRIBERS`). Default `'normal'` is a true no-op - the reject path and pressure are byte-identical to before.
+`platform.protection` reads the live level. While a posture is engaged, `platform.pressure.reason` can surface `CAPACITY` (precedence `MEMORY > CAPACITY > CPU_QUOTA > PSI > PUBLISH_RATE > SUBSCRIBERS`). Default `'normal'` is a true no-op - the reject path and pressure are byte-identical to before.
+
+**Kernel pressure sources** (on by default where the host exposes them, invisible elsewhere) - two signals the process-local counters cannot see feed the same pressure surface:
+
+- **PSI stall time** (`/proc/pressure/{cpu,memory,io}`, PSI-enabled Linux kernels): the share of the last 10 seconds tasks spent stalled on a contended resource. Fires the `PSI` reason at `pressure.psiCpuSome` (cpu `some`, default `60`), `pressure.psiMemoryFull` (memory `full` - thrash, which fires meaningfully earlier than an OOM-adjacent heap ratio; default `15`), or `pressure.psiIoFull` (default `50`). Each accepts `false` to disable.
+- **CFS quota throttling** (cgroup `cpu.stat`, v1 and v2 layouts): the fraction of the sample window the container's CPU quota held the whole process suspended. A quota-throttled worker is not merely contended - it is periodically STOPPED, a failure mode PSI `some` can miss - so it fires its own `CPU_QUOTA` reason at `pressure.cpuThrottledRatio` (default `0.25`).
+
+Both sources are probed once at startup: on any host without them (non-Linux, PSI compiled out, no cgroup limits) the sample fields are simply absent and every path is byte-identical to before. The readings ride `platform.pressure.psi` / `platform.pressure.cpuThrottle` and fold into the `platform.pressure.value` saturation scalar worst-of.
+
+**`postureExport`** (default: off) - a local stream socket where an external process follows the live posture without speaking the app's protocol:
+
+```js
+adapter({ websocket: { postureExport: '/run/app/posture.sock' } });
+```
+
+Consumers connect to the unix socket (or a `\\.\pipe\...` named pipe on Windows) and receive newline-delimited JSON - `{"v":1,"posture":"elevated","reason":"PSI","value":0.83,"psi":{...},"cpuThrottle":{...}}` - once on connect, once on every posture/reason transition, and once per pressure sample. The steady 1 Hz cadence doubles as a liveness contract: a consumer that stops receiving lines knows the adapter is gone (killed, frozen, deadlocked) with no extra protocol. Built for an edge-defense daemon or an external watchdog; local-only, read-only (inbound bytes are ignored), and payload-free - posture, reason, and kernel pressure numbers only. The export can never hurt the server it reports on: a failed listen logs once and disables it, serialization is skipped entirely with zero consumers, and a consumer that stops draining is disconnected rather than buffered without bound.
+
+**systemd integration** (automatic under a `Type=notify` unit, a no-op everywhere else) - the runtime detects `NOTIFY_SOCKET` and sends `READY` once the service actually accepts traffic (after the app's `init` hook resolves in single-process mode; on first listen in clustered modes), `STOPPING` when a graceful shutdown begins, and - when `WatchdogSec=` is set - a `WATCHDOG` ping at half the timeout from a main-loop timer, so a frozen event loop stops the pings and systemd applies the unit's recovery action. Notifications go through the `systemd-notify` helper, so give the unit `NotifyAccess=all`:
+
+```ini
+[Service]
+Type=notify
+NotifyAccess=all
+WatchdogSec=30
+ExecStart=/usr/bin/node build/index.js
+```
 
 **`metrics`** (default: off) - a **module path** whose default export (or a named `metrics` / `registry` export) is a Prometheus-style registry that makes the whole admission stack chartable. Any registry with positional `counter(name, help, labelNames?)` / `gauge(name, help)` factories works - the `createMetrics()` registry from [`svelte-adapter-uws-extensions/prometheus`](https://github.com/lanteanio/svelte-adapter-uws-extensions) fits as-is and owns naming concerns like a global prefix.
 

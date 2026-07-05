@@ -5,6 +5,19 @@ import { env } from 'ENV';
 import { monotonicNow, setTimer, setIntervalTimer, clearTimer } from './runtime.js';
 import { createStateHashDetector } from './state-hash-detector.js';
 import { readFdLimits, fdPreflightWarning } from './utils/fd-limit.js';
+import { createSdNotify } from './utils/sd-notify.js';
+
+// systemd readiness + watchdog (auto-detected from NOTIFY_SOCKET; a no-op
+// everywhere else). Only the main thread talks to systemd - it owns the
+// service's MainPID - so every call site below is main-thread-gated.
+const sdNotify = createSdNotify();
+let sd_ready_sent = false;
+function sdReadyOnce() {
+	if (sd_ready_sent || !isMainThread) return;
+	sd_ready_sent = true;
+	sdNotify.ready();
+	sdNotify.armWatchdog();
+}
 
 const host = env('HOST', '0.0.0.0');
 const port_raw = env('PORT', '3000');
@@ -208,6 +221,7 @@ if (is_primary) {
 						if (socket) {
 							listen_socket = socket;
 							console.log(`Acceptor listening on ${is_tls ? 'https' : 'http'}://${host}:${portNum}`);
+							sdReadyOnce();
 						} else {
 							console.error(`Failed to listen on ${host}:${portNum}`);
 							process.exit(1);
@@ -220,7 +234,11 @@ if (is_primary) {
 				// mark the worker confirmed-alive and reset the crash-restart backoff.
 				meta.lastHeartbeat = monotonicNow();
 				if (msg.role === 'compute') console.log(`Compute worker ${worker.threadId} ready`);
-				else console.log(`Worker thread ${worker.threadId} listening on :${port}`);
+				else {
+					console.log(`Worker thread ${worker.threadId} listening on :${port}`);
+					// First listening worker = the service accepts traffic.
+					sdReadyOnce();
+				}
 				restart_delay = 0;
 				restart_attempts = 0;
 				for (const t of restart_timers) clearTimer(t);
@@ -368,6 +386,8 @@ if (is_primary) {
 	async function graceful_shutdown(reason) {
 		if (shutting_down) return;
 		shutting_down = true;
+		sdNotify.stopping();
+		sdNotify.disarmWatchdog();
 		console.log(`Primary received ${reason}, shutting down ${workers.size} workers...`);
 
 		// Cancel all pending worker restarts so we don't spawn during shutdown
@@ -414,6 +434,7 @@ if (is_primary) {
 		// surfaces as an unhandled promise rejection and crashes the
 		// process - which is the right behavior for boot failure.
 		await start(host, port);
+		sdReadyOnce();
 	} else {
 		// Worker thread startup depends on role, then clustering mode.
 		const role = workerData?.role ?? 'io';
@@ -457,6 +478,10 @@ if (is_primary) {
 	async function graceful_shutdown(reason) {
 		if (shutting_down) return;
 		shutting_down = true;
+		if (isMainThread) {
+			sdNotify.stopping();
+			sdNotify.disarmWatchdog();
+		}
 		const prefix = isMainThread ? '' : `[worker ${threadId}] `;
 		console.log(`${prefix}Received ${reason}, shutting down gracefully...`);
 

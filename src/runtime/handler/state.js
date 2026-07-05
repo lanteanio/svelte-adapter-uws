@@ -151,6 +151,10 @@ export const counters = {
 	activePosture: null,
 	// Admission-gauge sampling hook, called by the 1 Hz sampler (null when no metrics registry).
 	metricsSampleHook: null,
+	// Posture-export push hook, called by the 1 Hz sampler (null when no export is configured).
+	postureExportHook: null,
+	// Live posture exporter (null when no export is configured); lifecycle closes it on shutdown.
+	postureExporter: null,
 	// Base (un-layered) pressure reason from the most recent sample (for the posture transition log).
 	lastBasePressureReason: 'NONE',
 	// In-flight SSR request count, for drain().

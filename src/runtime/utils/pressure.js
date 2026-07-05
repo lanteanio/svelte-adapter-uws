@@ -1,20 +1,27 @@
 /**
  * Resolve which pressure signal (if any) is firing for a given sample.
  *
- * Precedence is fixed: MEMORY beats PUBLISH_RATE beats SUBSCRIBERS. Memory
- * is the most urgent signal because the worker is approaching OOM; publish
- * rate is next because CPU saturation cascades fastest; subscriber ratio
- * comes last because heavy fan-out degrades gracefully.
+ * Precedence is fixed: MEMORY beats CPU_QUOTA beats PSI beats PUBLISH_RATE
+ * beats SUBSCRIBERS. Memory is the most urgent signal because the worker is
+ * approaching OOM. CPU_QUOTA comes next: a quota-throttled container is not
+ * merely contended, it is periodically STOPPED by the scheduler - the most
+ * actionable external cause (raise the quota). PSI follows: kernel-observed
+ * stall time is a sharper overload read than any process-local proxy.
+ * Publish rate is next because CPU saturation cascades fastest; subscriber
+ * ratio comes last because heavy fan-out degrades gracefully.
  *
  * Any threshold may be `false` to disable that signal entirely. A signal
  * fires when the corresponding sample value is greater than or equal to
- * its threshold.
+ * its threshold. The kernel-sourced sample fields (`psiCpuSome10`,
+ * `psiMemoryFull10`, `psiIoFull10`, `cpuThrottledRatio`) are simply absent
+ * on hosts without the source, which never fires the comparison - the
+ * non-Linux path is byte-identical.
  *
  * Pure: no I/O, no globals. Suitable for unit tests.
  *
- * @param {{ heapUsedRatio: number, publishRate: number, subscriberRatio: number }} sample
- * @param {{ memoryHeapUsedRatio: number | false, publishRatePerSec: number | false, subscriberRatio: number | false }} thresholds
- * @returns {'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY'}
+ * @param {{ heapUsedRatio: number, publishRate: number, subscriberRatio: number, psiCpuSome10?: number, psiMemoryFull10?: number, psiIoFull10?: number, cpuThrottledRatio?: number }} sample
+ * @param {{ memoryHeapUsedRatio: number | false, publishRatePerSec: number | false, subscriberRatio: number | false, psiCpuSome?: number | false, psiMemoryFull?: number | false, psiIoFull?: number | false, cpuThrottledRatio?: number | false }} thresholds
+ * @returns {'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI'}
  */
 export function computePressureReason(sample, thresholds) {
 	if (
@@ -22,6 +29,23 @@ export function computePressureReason(sample, thresholds) {
 		sample.heapUsedRatio >= thresholds.memoryHeapUsedRatio
 	) {
 		return 'MEMORY';
+	}
+	if (
+		thresholds.cpuThrottledRatio !== undefined && thresholds.cpuThrottledRatio !== false &&
+		sample.cpuThrottledRatio !== undefined &&
+		sample.cpuThrottledRatio >= thresholds.cpuThrottledRatio
+	) {
+		return 'CPU_QUOTA';
+	}
+	if (
+		(thresholds.psiCpuSome !== undefined && thresholds.psiCpuSome !== false &&
+			sample.psiCpuSome10 !== undefined && sample.psiCpuSome10 >= thresholds.psiCpuSome) ||
+		(thresholds.psiMemoryFull !== undefined && thresholds.psiMemoryFull !== false &&
+			sample.psiMemoryFull10 !== undefined && sample.psiMemoryFull10 >= thresholds.psiMemoryFull) ||
+		(thresholds.psiIoFull !== undefined && thresholds.psiIoFull !== false &&
+			sample.psiIoFull10 !== undefined && sample.psiIoFull10 >= thresholds.psiIoFull)
+	) {
+		return 'PSI';
 	}
 	if (
 		thresholds.publishRatePerSec !== false &&
@@ -51,9 +75,9 @@ export function computePressureReason(sample, thresholds) {
  * testable. When the posture is `normal` the base reason passes through
  * untouched, so the zero-config path is byte-identical.
  *
- * @param {'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY'} reason base reason
+ * @param {'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI'} reason base reason
  * @param {'normal' | 'elevated' | 'siege'} protection live posture level
- * @returns {'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CAPACITY'}
+ * @returns {'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI' | 'CAPACITY'}
  */
 export function applyCapacityReason(reason, protection) {
 	if (reason === 'MEMORY') return 'MEMORY';

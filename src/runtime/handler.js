@@ -42,6 +42,7 @@ import { ensureWireId, ensureWireState, wireStatePoisoned, poisonWireState, deta
 import { joinSharedCohort, leaveSharedCohort } from './handler/cohort.js';
 import { releaseSharedWireId } from './handler/shared-wire-id.js';
 import { setCohortHooks } from './utils.js';
+import { startPostureExport } from './utils/posture-export.js';
 
 // Make the low-level membership primitive (trackedSubscribe / trackedUnsubscribe,
 // used by plugins to establish server-side membership) cohort-aware: a tracked
@@ -566,8 +567,38 @@ if (WS_ENABLED) {
 					counters.activePosture !== null ? counters.activePosture.rejectedPerSecond : 0,
 					counters.lastBasePressureReason
 				);
+				// Push the transition to export subscribers immediately - a
+				// defense daemon reacting to a posture change must not wait
+				// out the rest of the sample window.
+				if (counters.postureExportHook !== null) counters.postureExportHook();
 			}
 		});
+
+	// Posture push-export (opt-in): a local stream socket where an external
+	// process (an edge-defense daemon, a watchdog) follows the live posture as
+	// newline-delimited JSON - pushed on connect, on every transition, and on
+	// every 1 Hz sample (the cadence doubles as a liveness signal). Local-only
+	// and payload-free: posture, reason, and kernel pressure numbers.
+	const POSTURE_EXPORT = wsOptions.postureExport;
+	if (POSTURE_EXPORT !== undefined && POSTURE_EXPORT !== false) {
+		const exportPath = typeof POSTURE_EXPORT === 'string' ? POSTURE_EXPORT : POSTURE_EXPORT?.path;
+		if (typeof exportPath !== 'string' || exportPath.length === 0) {
+			throw new Error("websocket.postureExport must be a socket path string or { path } (or omitted)");
+		}
+		const exporter = startPostureExport(exportPath, () => ({
+			v: 1,
+			posture: postureLevel(),
+			reason: pressureSnapshot.reason,
+			value: pressureSnapshot.value,
+			psi: pressureSnapshot.psi ?? null,
+			cpuThrottle: pressureSnapshot.cpuThrottle ?? null
+		}));
+		counters.postureExporter = exporter;
+		counters.postureExportHook = () => exporter.broadcast();
+	} else {
+		counters.postureExporter = null;
+		counters.postureExportHook = null;
+	}
 
 	// Gauge sampling rides the existing 1 Hz pressure timer - no new timer.
 	// Always assigned (hook or null) so a factory re-run replaces any previous

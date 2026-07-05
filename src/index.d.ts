@@ -700,7 +700,69 @@ export interface WebSocketOptions {
 		 * @default 10485760 (10 MB/s)
 		 */
 		topicPublishBytesPerSec?: number | false;
+
+		/**
+		 * Trigger `'PSI'` pressure when the kernel's cpu `some` avg10 stall
+		 * percentage (`/proc/pressure/cpu`) reaches this value - the share of
+		 * the last 10s in which at least one runnable task waited for a CPU.
+		 * Active only on a PSI-enabled Linux kernel; elsewhere the source is
+		 * absent and this signal never fires. Set to `false` to disable.
+		 *
+		 * @default 60
+		 */
+		psiCpuSome?: number | false;
+
+		/**
+		 * Trigger `'PSI'` pressure when the kernel's memory `full` avg10
+		 * stall percentage (`/proc/pressure/memory`) reaches this value -
+		 * time in which every non-idle task stalled on memory at once
+		 * (thrash), which fires meaningfully earlier than an OOM-adjacent
+		 * heap ratio. Set to `false` to disable.
+		 *
+		 * @default 15
+		 */
+		psiMemoryFull?: number | false;
+
+		/**
+		 * Trigger `'PSI'` pressure when the kernel's io `full` avg10 stall
+		 * percentage (`/proc/pressure/io`) reaches this value. Set to
+		 * `false` to disable.
+		 *
+		 * @default 50
+		 */
+		psiIoFull?: number | false;
+
+		/**
+		 * Trigger `'CPU_QUOTA'` pressure when the container's CFS quota held
+		 * the process suspended for at least this fraction of the sample
+		 * window (from cgroup `cpu.stat` throttled-time deltas; v1 and v2
+		 * layouts both supported). A quota-throttled worker is not merely
+		 * contended - it is periodically STOPPED - so this is a distinct,
+		 * higher-precedence signal than PSI. Active only inside a
+		 * quota-limited cgroup. Set to `false` to disable.
+		 *
+		 * @default 0.25
+		 */
+		cpuThrottledRatio?: number | false;
 	};
+
+	/**
+	 * Posture push-export (opt-in): listen on a local stream socket (a unix
+	 * domain socket path, or a `\\.\pipe\...` named pipe on Windows) and push
+	 * the live protection posture as newline-delimited JSON -
+	 * `{"v":1,"posture":"elevated","reason":"PSI","value":0.83,"psi":{...},"cpuThrottle":{...}}` -
+	 * to every connected consumer: once on connect, once on every posture or
+	 * reason transition, and once per 1 Hz pressure sample (the steady cadence
+	 * doubles as a liveness signal - silence means the adapter is gone). Built
+	 * for an external edge-defense daemon or watchdog that wants the app's
+	 * load state without speaking its protocol. Local-only and payload-free.
+	 *
+	 * @example
+	 * ```js
+	 * adapter({ websocket: { postureExport: '/run/app/posture.sock' } });
+	 * ```
+	 */
+	postureExport?: string | { path: string } | false;
 
 	// - Security and policy opt-ins -------------------------------------------
 
@@ -1409,11 +1471,24 @@ export interface PressureSnapshot {
 	readonly memoryMB: number;
 	/**
 	 * Most urgent active signal. Precedence is fixed:
-	 * `MEMORY > CAPACITY > PUBLISH_RATE > SUBSCRIBERS > NONE`. `'CAPACITY'`
-	 * appears only when the protection posture is engaged (`elevated`/`siege`)
-	 * and outranks every signal except `MEMORY`.
+	 * `MEMORY > CAPACITY > CPU_QUOTA > PSI > PUBLISH_RATE > SUBSCRIBERS > NONE`.
+	 * `'CAPACITY'` appears only when the protection posture is engaged
+	 * (`elevated`/`siege`) and outranks every signal except `MEMORY`.
+	 * `'CPU_QUOTA'` (container CFS quota suspending the process) and `'PSI'`
+	 * (kernel stall time) appear only on hosts exposing those sources.
 	 */
-	readonly reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CAPACITY';
+	readonly reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI' | 'CAPACITY';
+	/**
+	 * Kernel stall-time readings (avg10 percentages from `/proc/pressure`),
+	 * or `null` on hosts without PSI.
+	 */
+	readonly psi: { cpuSome10: number, memoryFull10: number, ioFull10: number } | null;
+	/**
+	 * Container CFS-quota throttling over the last sample window, or `null`
+	 * outside a quota-limited cgroup. `throttledRatio` is the fraction of
+	 * the window the whole process sat suspended by the scheduler.
+	 */
+	readonly cpuThrottle: { throttledRatio: number, nrThrottledDelta: number } | null;
 	/**
 	 * Top 5 topics by message rate during the last sample window, sorted
 	 * descending by `messagesPerSec`. Each entry is
@@ -1988,7 +2063,7 @@ export interface Platform {
 		maxPayloadLength: number;
 		pressure: {
 			active: boolean;
-			reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CAPACITY';
+			reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI' | 'CAPACITY';
 			value: number;
 			subscriberRatio: number;
 			publishRate: number;
@@ -2212,9 +2287,11 @@ export interface Platform {
 	 * is a property access; no I/O or computation per read.
 	 *
 	 * `reason` is the most urgent active signal. Precedence is fixed:
-	 * `MEMORY > CAPACITY > PUBLISH_RATE > SUBSCRIBERS`. A worker under multiple
-	 * stresses reports the highest-priority one. `'CAPACITY'` appears only when
-	 * the protection posture is engaged (see `protection`).
+	 * `MEMORY > CAPACITY > CPU_QUOTA > PSI > PUBLISH_RATE > SUBSCRIBERS`. A
+	 * worker under multiple stresses reports the highest-priority one.
+	 * `'CAPACITY'` appears only when the protection posture is engaged (see
+	 * `protection`); `'CPU_QUOTA'` and `'PSI'` only on hosts exposing the
+	 * kernel sources.
 	 *
 	 * @example
 	 * ```js

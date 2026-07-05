@@ -1,8 +1,15 @@
 import { computePressureReason, computeTopPublishers, applyCapacityReason, WS_STATS, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from '../utils.js';
 import { DEFAULT_GRANT, leaseGrantSize, samplePressureValue } from '../wire.js';
 import { now, setIntervalTimer, clearIntervalTimer } from '../runtime.js';
+import { createOsPressureSampler } from '../utils/os-pressure.js';
 import { counters, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt } from './state.js';
 import { closeHookRegistered } from './config.js';
+
+// Kernel pressure sources (PSI + cgroup CPU quota), sampled on the same 1 Hz
+// tick as the process-local counters. Probes once; on hosts without the
+// source (non-Linux, PSI compiled out, no cgroup limits) the sampler returns
+// nulls at zero further cost and the pressure math is byte-identical.
+const osPressure = createOsPressureSampler();
 
 /**
  * Bump the per-connection inbound counters. No-op when no `close` hook
@@ -104,7 +111,21 @@ const DEFAULT_PRESSURE_THRESHOLDS = {
 	// false to disable per-topic tracking entirely; in that case the
 	// hot-path bump is skipped.
 	topicPublishRatePerSec: 5000,
-	topicPublishBytesPerSec: 10 * 1024 * 1024
+	topicPublishBytesPerSec: 10 * 1024 * 1024,
+	// Kernel pressure thresholds, active only where the source exists
+	// (/proc/pressure on a PSI-enabled Linux kernel; cgroup cpu.stat inside
+	// a quota-limited container) - on any other host the sample fields are
+	// absent and these never fire. PSI values are avg10 percentages of
+	// wall time stalled: cpu 'some' 60% means most of the last 10s had at
+	// least one runnable task waiting for a CPU; memory/io use the 'full'
+	// line (everyone stalled at once - thrash / device saturation), which
+	// fires meaningfully earlier than an OOM-adjacent heap ratio.
+	// cpuThrottledRatio is the fraction of the sample window the CFS quota
+	// held the whole process suspended.
+	psiCpuSome: 60,
+	psiMemoryFull: 15,
+	psiIoFull: 50,
+	cpuThrottledRatio: 0.25
 };
 
 /**
@@ -126,6 +147,21 @@ function samplePressure(thresholds) {
 	const heapUsedRatio = mem.heapTotal > 0 ? mem.heapUsed / mem.heapTotal : 0;
 	const memoryMB = mem.rss / (1024 * 1024);
 
+	// Kernel signals for this window. Null per source when unavailable; the
+	// sample fields stay absent then, so every downstream comparison and the
+	// saturation fold skip them without a branch of their own.
+	const os = osPressure.sample(thresholds.sampleIntervalMs);
+	/** @type {{ heapUsedRatio: number, publishRate: number, subscriberRatio: number, psiCpuSome10?: number, psiMemoryFull10?: number, psiIoFull10?: number, cpuThrottledRatio?: number }} */
+	const sampleReadings = { heapUsedRatio, publishRate, subscriberRatio };
+	if (os.psi !== null) {
+		sampleReadings.psiCpuSome10 = os.psi.cpuSome10;
+		sampleReadings.psiMemoryFull10 = os.psi.memoryFull10;
+		sampleReadings.psiIoFull10 = os.psi.ioFull10;
+	}
+	if (os.cpuThrottle !== null) {
+		sampleReadings.cpuThrottledRatio = os.cpuThrottle.throttledRatio;
+	}
+
 	// Drain per-topic counters into per-second rates. The pure helper
 	// reads but does not mutate; we clear the source map after to start
 	// the next window fresh.
@@ -134,10 +170,7 @@ function samplePressure(thresholds) {
 	);
 	topicPublishStats.clear();
 
-	const reason = computePressureReason(
-		{ heapUsedRatio, publishRate, subscriberRatio },
-		thresholds
-	);
+	const reason = computePressureReason(sampleReadings, thresholds);
 	counters.lastBasePressureReason = reason;
 	// Layer the protection posture's CAPACITY reason on top of the pure
 	// pressure reason. When no posture is engaged this is byte-identical to
@@ -155,7 +188,7 @@ function samplePressure(thresholds) {
 	// worker value even while the global counters look calm. The peak is then
 	// decayed so a single spike does not stick across samples.
 	const value = samplePressureValue(
-		{ heapUsedRatio, publishRate, subscriberRatio },
+		sampleReadings,
 		thresholds,
 		counters.leaseSaturationPeak
 	);
@@ -169,6 +202,10 @@ function samplePressure(thresholds) {
 	pressureSnapshot.reason = effectiveReason;
 	pressureSnapshot.active = effectiveReason !== 'NONE';
 	pressureSnapshot.topPublishers = topPublishers;
+	// Kernel readings ride the snapshot (platform.pressure / introspect /
+	// the posture export) as small stable objects; null when unavailable.
+	pressureSnapshot.psi = os.psi;
+	pressureSnapshot.cpuThrottle = os.cpuThrottle;
 
 	// Advance the posture once per sample, AFTER folding the snapshot - the
 	// level just read drove this sample's reason; the tick decides the next.
@@ -183,6 +220,11 @@ function samplePressure(thresholds) {
 	// Sample the admission gauges on the same cadence. Null unless a metrics
 	// registry is configured, so the zero-config sampler is unchanged.
 	if (counters.metricsSampleHook !== null) counters.metricsSampleHook();
+
+	// Push the posture line to export subscribers on the same cadence (the
+	// 1 Hz heartbeat is the export contract: silence means the adapter is
+	// gone). Null unless a posture export is configured.
+	if (counters.postureExportHook !== null) counters.postureExportHook();
 
 	if (transitioned) {
 		for (const cb of pressureListeners) {
