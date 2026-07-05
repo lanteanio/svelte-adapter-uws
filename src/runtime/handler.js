@@ -22,7 +22,7 @@ import * as wsModule from 'WS_HANDLER';
 import { metricsRegistry } from './metrics-bridge.js';
 import { parseCookies, createCookies } from './cookies.js';
 import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
-import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, DEFAULT_GRANT } from './wire.js';
+import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { now, monotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, sharedTopics } from './handler/state.js';
@@ -1253,6 +1253,19 @@ if (WS_ENABLED) {
 					return;
 				}
 			}
+			// Oversized control-shaped frame: a text frame beginning {"type"
+			// (byte[3]='y') at or above the 8192-byte control ceiling never
+			// reaches the control demux below, so it would otherwise fall
+			// through to the app hook with msg undefined - a control frame
+			// lost with no signal. Reject it explicitly (without parsing the
+			// oversized payload) so the client learns its frame overflowed.
+			// Data envelopes ({"topic", byte[3]='o') and other large text
+			// frames are not control-shaped and fall through unchanged.
+			if (!isBinary && message.byteLength >= 8192 &&
+				(new Uint8Array(message))[3] === 0x79 /* 'y' in {"type" */) {
+				ws.send(controlFrameTooLargeFrame(message.byteLength), false, false);
+				return;
+			}
 			// Built-in: handle subscribe/unsubscribe from the client store.
 			// Control messages are JSON text: {"type":"subscribe","topic":"..."}
 			// Byte-prefix check: {"type" has byte[3]='y' (0x79), while user
@@ -1366,9 +1379,17 @@ if (WS_ENABLED) {
 				if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
 					// Sent by the client store on reconnect to resubscribe all topics
 					// in a single message instead of N individual subscribe messages.
-					// Cap at 256 topics  - the client only sends what it was subscribed to.
+					// Cap at 256 topics. Topics past the cap are denied LOUDLY
+					// (BATCH_OVERFLOW), never silently dropped: without the denial a
+					// client that overflowed the cap would wait forever on acks that
+					// never come, with no signal which topics were never subscribed.
 					const topics = msg.topics.slice(0, 256);
 					const ref = hasRef(msg.ref) ? msg.ref : null;
+					for (let i = 256; i < msg.topics.length; i++) {
+						if (typeof msg.topics[i] === 'string') {
+							sendSubscribeDenied(ws, msg.topics[i], ref, 'BATCH_OVERFLOW');
+						}
+					}
 					const userData = ws.getUserData();
 					assert(userData[WS_SUBSCRIPTIONS] instanceof Set, 'subs.shape-batch', null);
 

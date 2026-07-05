@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './runtime/cookies.js';
 import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
-import { createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './runtime/wire.js';
+import { createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { now, monotonicNow, randomFloat, randomU32, randomUuid, randomBytes } from './runtime/runtime.js';
 
@@ -1184,6 +1184,13 @@ export default function uws(options = {}) {
 						}
 					}
 
+					// Oversized control-shaped frame: reject explicitly instead of a
+					// silent fall-through. Mirrors handler.js + testing.js.
+					if (!isBinary && buf.byteLength >= 8192 && buf[3] === 0x79 /* 'y' in {"type" */) {
+						ws.send(controlFrameTooLargeFrame(buf.byteLength));
+						return;
+					}
+
 					// Handle subscribe/unsubscribe/subscribe-batch from client store.
 				// Byte-prefix check: {"type" has byte[3]='y' (0x79), user envelopes
 				// {"topic" have byte[3]='o' - skip JSON.parse for non-control messages.
@@ -1301,9 +1308,16 @@ export default function uws(options = {}) {
 							if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
 								// Sent by the client store on open/reconnect to resubscribe all
 								// topics in one message instead of N individual subscribe frames.
+								// Topics past the 256 cap are denied loudly, never silently
+								// dropped (same rule as the production runtime).
 								const subs = subscriptions.get(ws);
 								const topics = msg.topics.slice(0, 256);
 								const ref = hasRefValue(msg.ref) ? msg.ref : null;
+								for (let i = 256; i < msg.topics.length; i++) {
+									if (typeof msg.topics[i] === 'string') {
+										sendDenied(ws, msg.topics[i], ref, 'BATCH_OVERFLOW');
+									}
+								}
 								const valid = [];
 								for (const topic of topics) {
 									if (!isValidWireTopic(topic, ALLOW_NON_ASCII_TOPICS_V)) {

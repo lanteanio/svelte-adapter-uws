@@ -1600,6 +1600,19 @@ function createConnection(options) {
 					denialsStore.set({ topic: msg.topic, reason: msg.reason, ref: msg.ref });
 					return;
 				}
+				if (msg.type === 'error' && typeof msg.code === 'string') {
+					// A protocol-level error from the server (currently only
+					// CONTROL_FRAME_TOO_LARGE: a control frame this client sent
+					// exceeded the server's control-frame ceiling and was rejected
+					// rather than acted on). Surface it; it never reaches the app.
+					// `size` names the offending frame's byte length - the frame
+					// was rejected without parsing, so the size is the only handle
+					// a developer has on which frame overflowed.
+					console.warn('[ws] protocol error code=%s%s%s', msg.code,
+						typeof msg.limit === 'number' ? ' (limit ' + msg.limit + ' bytes)' : '',
+						typeof msg.size === 'number' ? ' (frame was ' + msg.size + ' bytes)' : '');
+					return;
+				}
 				if (msg.type === 'request' && (typeof msg.ref === 'number' || typeof msg.ref === 'string') && typeof msg.event === 'string') {
 					if (!requestHandler) {
 						if (debug) console.warn('[ws] request received but no handler installed - dropping (server will time out)');

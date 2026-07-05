@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lantean-protocol:revision-1",
+  "title": "The Lantean protocol, revision 1",
+  "description": "JSON Schema for every control frame and the data-event envelope of the Lantean protocol (PROTOCOL.md). Additional properties are permitted everywhere: the protocol is forward-compatible and a peer ignores fields it does not recognize (PROTOCOL.md section 10). A frame is one of the definitions in $defs; correlate control frames by their `type` const.",
+  "oneOf": [
+    { "$ref": "#/$defs/welcome" },
+    { "$ref": "#/$defs/hello" },
+    { "$ref": "#/$defs/lease-ok" },
+    { "$ref": "#/$defs/subscribe" },
+    { "$ref": "#/$defs/subscribe-batch" },
+    { "$ref": "#/$defs/unsubscribe" },
+    { "$ref": "#/$defs/subscribed" },
+    { "$ref": "#/$defs/subscribe-denied" },
+    { "$ref": "#/$defs/batch" },
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/reply" },
+    { "$ref": "#/$defs/wire-id" },
+    { "$ref": "#/$defs/resume" },
+    { "$ref": "#/$defs/resumed" },
+    { "$ref": "#/$defs/lease" },
+    { "$ref": "#/$defs/request-n" },
+    { "$ref": "#/$defs/error" },
+    { "$ref": "#/$defs/ingress-ok" },
+    { "$ref": "#/$defs/ingress-bind" },
+    { "$ref": "#/$defs/ingress-bound" },
+    { "$ref": "#/$defs/data-event" }
+  ],
+  "$defs": {
+    "ref": {
+      "description": "Client-allocated correlation id: a number or a string.",
+      "type": ["integer", "string"]
+    },
+    "recover-one": {
+      "type": "object",
+      "properties": {
+        "offset": { "type": "integer" },
+        "epoch": { "type": "integer" }
+      },
+      "required": ["offset"]
+    },
+    "welcome": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "welcome" },
+        "sessionId": { "type": "string" }
+      },
+      "required": ["type", "sessionId"]
+    },
+    "hello": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "hello" },
+        "caps": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["type", "caps"]
+    },
+    "lease-ok": {
+      "type": "object",
+      "properties": { "type": { "const": "lease-ok" } },
+      "required": ["type"]
+    },
+    "subscribe": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "subscribe" },
+        "topic": { "type": "string" },
+        "ref": { "$ref": "#/$defs/ref" },
+        "recover": { "$ref": "#/$defs/recover-one" }
+      },
+      "required": ["type", "topic"]
+    },
+    "subscribe-batch": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "subscribe-batch" },
+        "topics": { "type": "array", "items": { "type": "string" } },
+        "ref": { "$ref": "#/$defs/ref" },
+        "recover": { "type": "object" }
+      },
+      "required": ["type", "topics"]
+    },
+    "unsubscribe": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "unsubscribe" },
+        "topic": { "type": "string" }
+      },
+      "required": ["type", "topic"]
+    },
+    "subscribed": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "subscribed" },
+        "topic": { "type": "string" },
+        "ref": { "$ref": "#/$defs/ref" },
+        "epoch": { "type": "integer" }
+      },
+      "required": ["type", "topic", "ref", "epoch"]
+    },
+    "subscribe-denied": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "subscribe-denied" },
+        "topic": { "type": "string" },
+        "ref": { "$ref": "#/$defs/ref" },
+        "reason": { "type": "string" }
+      },
+      "required": ["type", "topic", "ref", "reason"]
+    },
+    "batch": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "batch" },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/data-event" } }
+      },
+      "required": ["type", "events"]
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "request" },
+        "ref": { "$ref": "#/$defs/ref" },
+        "event": { "type": "string" },
+        "data": {}
+      },
+      "required": ["type", "ref", "event"]
+    },
+    "reply": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "reply" },
+        "ref": { "$ref": "#/$defs/ref" },
+        "data": {},
+        "error": { "type": "string" }
+      },
+      "required": ["type", "ref"]
+    },
+    "wire-id": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "wire-id" },
+        "topic": { "type": "string" },
+        "id": { "type": "integer" }
+      },
+      "required": ["type", "topic", "id"]
+    },
+    "resume": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "resume" },
+        "sessionId": { "type": "string" },
+        "lastSeenSeqs": { "type": "object" },
+        "lastSeenEpochs": { "type": "object" }
+      },
+      "required": ["type", "sessionId", "lastSeenSeqs"]
+    },
+    "resumed": {
+      "type": "object",
+      "properties": { "type": { "const": "resumed" } },
+      "required": ["type"]
+    },
+    "lease": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "lease" },
+        "count": { "type": "integer" },
+        "ttlMs": { "type": "integer" }
+      },
+      "required": ["type", "count", "ttlMs"]
+    },
+    "request-n": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "request-n" },
+        "n": { "type": "integer" }
+      },
+      "required": ["type", "n"]
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "error" },
+        "code": { "type": "string" },
+        "limit": { "type": "integer" },
+        "size": { "type": "integer" }
+      },
+      "required": ["type", "code"]
+    },
+    "ingress-ok": {
+      "type": "object",
+      "properties": { "type": { "const": "ingress-ok" } },
+      "required": ["type"]
+    },
+    "ingress-bind": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "ingress-bind" },
+        "id": { "type": "integer" },
+        "kind": { "type": "string" },
+        "target": {}
+      },
+      "required": ["type", "id", "kind", "target"]
+    },
+    "ingress-bound": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "ingress-bound" },
+        "id": { "type": "integer" }
+      },
+      "required": ["type", "id"]
+    },
+    "data-event": {
+      "description": "The published-event carrier. No `type` field: identified by `topic` + `event`.",
+      "type": "object",
+      "properties": {
+        "topic": { "type": "string" },
+        "event": { "type": "string" },
+        "data": {},
+        "seq": { "type": "integer" },
+        "j": { "type": "number" }
+      },
+      "required": ["topic", "event"]
+    }
+  }
+}

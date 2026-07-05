@@ -1,0 +1,40 @@
+{
+  "description": "Canonical example frames for the Lantean protocol, revision 1. Each entry is a real frame shape; `def` names the definition in ../protocol.schema.json it must validate against. A third-party implementer can replay these to check an encoder/decoder. Validated in CI (test/protocol-schema.test.js) against both the schema and the reference server.",
+  "frames": [
+    { "def": "welcome", "frame": { "type": "welcome", "sessionId": "7b1c0d2e-2a3b-4c5d-8e9f-0a1b2c3d4e5f" } },
+    { "def": "hello", "frame": { "type": "hello", "caps": ["batch", "lease", "smooth.protocol:1"] } },
+    { "def": "hello", "frame": { "type": "hello", "caps": [] } },
+    { "def": "lease-ok", "frame": { "type": "lease-ok" } },
+    { "def": "subscribe", "frame": { "type": "subscribe", "topic": "arena:1", "ref": 1 } },
+    { "def": "subscribe", "frame": { "type": "subscribe", "topic": "arena:1", "ref": 1, "recover": { "offset": 300, "epoch": 1720094400000 } } },
+    { "def": "subscribe", "frame": { "type": "subscribe", "topic": "chat", "ref": "corr-9" } },
+    { "def": "subscribe-batch", "frame": { "type": "subscribe-batch", "topics": ["a", "b", "c"], "ref": 2 } },
+    { "def": "subscribe-batch", "frame": { "type": "subscribe-batch", "topics": ["a", "b"], "ref": 2, "recover": { "a": { "offset": 10, "epoch": 1720094400000 }, "b": { "offset": 4 } } } },
+    { "def": "unsubscribe", "frame": { "type": "unsubscribe", "topic": "arena:1" } },
+    { "def": "subscribed", "frame": { "type": "subscribed", "topic": "arena:1", "ref": 1, "epoch": 1720094400000 } },
+    { "def": "subscribe-denied", "frame": { "type": "subscribe-denied", "topic": "__lobby", "ref": 1, "reason": "INVALID_TOPIC" } },
+    { "def": "subscribe-denied", "frame": { "type": "subscribe-denied", "topic": "room:9", "ref": 5, "reason": "FORBIDDEN" } },
+    { "def": "batch", "frame": { "type": "batch", "events": [ { "topic": "arena:1", "event": "state", "data": { "tick": 41 }, "seq": 1 }, { "topic": "arena:1", "event": "state", "data": { "tick": 42 }, "seq": 2 } ] } },
+    { "def": "request", "frame": { "type": "request", "ref": 7, "event": "whoami", "data": null } },
+    { "def": "reply", "frame": { "type": "reply", "ref": 7, "data": { "id": "u_42" } } },
+    { "def": "reply", "frame": { "type": "reply", "ref": 7, "error": "not found" } },
+    { "def": "wire-id", "frame": { "type": "wire-id", "topic": "arena:1", "id": 4294967297 } },
+    { "def": "resume", "frame": { "type": "resume", "sessionId": "7b1c0d2e-2a3b-4c5d-8e9f-0a1b2c3d4e5f", "lastSeenSeqs": { "arena:1": 300 }, "lastSeenEpochs": { "arena:1": 1720094400000 } } },
+    { "def": "resumed", "frame": { "type": "resumed" } },
+    { "def": "lease", "frame": { "type": "lease", "count": 64, "ttlMs": 2000 } },
+    { "def": "request-n", "frame": { "type": "request-n", "n": 64 } },
+    { "def": "error", "frame": { "type": "error", "code": "CONTROL_FRAME_TOO_LARGE", "limit": 8192, "size": 9003 } },
+    { "def": "ingress-ok", "frame": { "type": "ingress-ok" } },
+    { "def": "ingress-bind", "frame": { "type": "ingress-bind", "id": 1, "kind": "smooth.command:1", "target": { "topic": "arena:1" } } },
+    { "def": "ingress-bound", "frame": { "type": "ingress-bound", "id": 1 } },
+    { "def": "data-event", "frame": { "topic": "arena:1", "event": "state", "data": { "tick": 41 }, "seq": 1 } },
+    { "def": "data-event", "frame": { "topic": "arena:1", "event": "state", "data": { "tick": 41 }, "seq": 1, "j": 12.5 } },
+    { "def": "data-event", "frame": { "topic": "chat", "event": "message", "data": "hello" } }
+  ],
+  "invalid": [
+    { "reason": "subscribed missing epoch", "frame": { "type": "subscribed", "topic": "a", "ref": 1 } },
+    { "reason": "wire-id id is a string", "frame": { "type": "wire-id", "topic": "a", "id": "1" } },
+    { "reason": "error missing code", "frame": { "type": "error", "limit": 8192 } },
+    { "reason": "data-event missing event", "frame": { "topic": "a", "data": 1 } }
+  ]
+}

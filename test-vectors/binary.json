@@ -1,0 +1,11 @@
+{
+  "description": "A server-to-client 0x03 binary topic frame (PROTOCOL.md section 6.1, appendix A). The topicId is at or above 2^32 because it is a shared-cohort id (section 6.2); a decoder using 32-bit varint shifts reads the wrong value. Decode the varints with division / 64-bit-safe math.",
+  "hexFrame": "03018180808010ac02aabbcc",
+  "decoded": {
+    "tag": 3,
+    "schemaVersion": 1,
+    "topicId": 4294967297,
+    "seq": 300,
+    "payloadHex": "aabbcc"
+  }
+}

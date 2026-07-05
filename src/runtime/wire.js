@@ -547,3 +547,29 @@ export function leaseGrantFrame(count, ttlMs) {
 export function requestNFrame(n) {
 	return '{"type":"request-n","n":' + (n | 0) + '}';
 }
+
+/**
+ * The maximum byte length of a client-to-server control frame. A text frame at
+ * or above this size is never parsed as a control frame (the demux stops at the
+ * ceiling to keep the hot path from JSON-parsing large user payloads).
+ * @type {number}
+ */
+export const CONTROL_FRAME_LIMIT = 8192;
+
+/**
+ * Build the server-to-client frame rejecting an oversized control-shaped
+ * frame: a text frame that begins `{"type` (byte[3] = 'y') but is at or above
+ * CONTROL_FRAME_LIMIT, so it can never be acted on as a control frame. The
+ * server sends this instead of letting the frame fall through silently, so the
+ * client learns its control frame overflowed. `limit` is the ceiling in
+ * bytes; `size` is the offending frame's byte length - the frame was rejected
+ * without being parsed, so no `ref` or `type` can be echoed, and the size is
+ * what lets a developer identify which frame overflowed. Built per rejection;
+ * the path is exceptional, never hot.
+ * @param {number} size
+ * @returns {string}
+ */
+export function controlFrameTooLargeFrame(size) {
+	return '{"type":"error","code":"CONTROL_FRAME_TOO_LARGE","limit":' + CONTROL_FRAME_LIMIT +
+		',"size":' + size + '}';
+}

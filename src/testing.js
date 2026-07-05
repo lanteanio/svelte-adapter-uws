@@ -1,7 +1,7 @@
 import { now, monotonicNow, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { nextTopicSeq, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
-import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, DEFAULT_GRANT } from './runtime/wire.js';
+import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 
@@ -1400,6 +1400,13 @@ export async function createTestServer(options = {}) {
 					return;
 				}
 			}
+			// Oversized control-shaped frame: reject explicitly instead of a
+			// silent fall-through. Mirrors handler.js + vite.js.
+			if (!isBinary && message.byteLength >= 8192 &&
+				new Uint8Array(message)[3] === 0x79 /* 'y' in {"type" */) {
+				ws.send(controlFrameTooLargeFrame(message.byteLength), false, false);
+				return;
+			}
 			// Handle subscribe/unsubscribe from client store.
 			//
 			// `msg` is hoisted to outer scope so it can be forwarded to the
@@ -1510,6 +1517,13 @@ export async function createTestServer(options = {}) {
 						}
 						if (msg.type === 'subscribe-batch' && Array.isArray(msg.topics)) {
 							const ref = hasRefT(msg.ref) ? msg.ref : null;
+							// Topics past the 256 cap are denied loudly, never silently
+							// dropped (same rule as the production runtime).
+							for (let i = 256; i < msg.topics.length; i++) {
+								if (typeof msg.topics[i] === 'string') {
+									sendDeniedT(ws, msg.topics[i], ref, 'BATCH_OVERFLOW');
+								}
+							}
 							const valid = [];
 							for (const topic of msg.topics.slice(0, 256)) {
 								if (!isValidWireTopic(topic, ALLOW_NON_ASCII_TOPICS_T)) {
