@@ -4,7 +4,7 @@ import { parentPort } from 'node:worker_threads';
 import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_SUBSCRIPTIONS, assert, fatal, collapseByCoalesceKey, completeEnvelope, createScopedTopic, isValidWireTopic, nextTopicSeq, processEpoch, readAssertionCounts, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
-import { capCounts, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, sharedTopics, topicPublishStats, topicSeqs, wsConnections } from './state.js';
+import { capCounts, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
 import { app, wsDebug, WS_COMPRESSION_ON } from './config.js';
 import { envelopePrefix } from './envelope-cache.js';
 import { batchRelay } from './relay.js';
@@ -907,6 +907,36 @@ export const platform = {
 		// handler with the strict ASCII-only default.
 		if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
 		return await runUserSubscribeGate(ws, topic);
+	},
+
+	/**
+	 * Turn on wire-subscribe authorization for this process. Once enabled, a
+	 * CLIENT-initiated `subscribe` / `subscribe-batch` frame is honored only
+	 * for a topic the server already authorized for that connection via
+	 * `platform.subscribe` (recorded in the connection's subscription set),
+	 * unless the app exports its own `subscribe` / `subscribeBatch` hook - in
+	 * which case that hook decides, exactly as today. Server-side
+	 * `platform.subscribe` / `platform.checkSubscribe` are the trusted
+	 * authorization path and are never gated by this.
+	 *
+	 * This is the programmatic equivalent of the `websocket.authorizeWireSubscribe`
+	 * config flag, for a framework that owns subscription authorization and
+	 * routes every legitimate subscribe through `platform.subscribe` (e.g.
+	 * svelte-realtime, which resolves and gates each subscription in its stream
+	 * RPC). Enabling it closes the bypass where a client sends a raw subscribe
+	 * frame for a topic it was never granted - a private room, another tenant's
+	 * channel - and receives that topic's fan-out, because the server-side
+	 * guard ran only on the server-initiated subscribe, not the wire frame.
+	 *
+	 * Idempotent and process-wide (the flag lives in shared handler state, so
+	 * one call from any connection's platform reference arms every connection).
+	 * Call once at startup, before connections arrive - e.g. from a framework
+	 * `init({ platform })` hook.
+	 *
+	 * @returns {void}
+	 */
+	authorizeWireSubscribe() {
+		subscribeAuth.enabled = true;
 	},
 
 	/**

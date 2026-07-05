@@ -749,3 +749,16 @@ export function registerWireCodec(
 		) => { event: string; data: unknown } | null | void;
 	}
 ): void;
+
+/**
+ * Mark `topic` as SERVER-MANAGED: the server subscribes the socket itself
+ * (e.g. svelte-realtime's stream RPC runs `platform.subscribe`), so the client
+ * must not also emit its own `subscribe` wire frame for it, and must not
+ * include it in the reconnect resubscribe-batch. Dispatch still flows through
+ * `on(topic)` exactly as normal - only the redundant outbound subscribe frame
+ * is suppressed, the same way the client already handles `__`-prefixed
+ * framework taps. A framework that owns subscription authorization calls this
+ * before attaching the client-side store; app code rarely needs it. Idempotent
+ * and safe to call before the connection exists.
+ */
+export function setTopicManaged(topic: string): void;

@@ -96,6 +96,21 @@ export const pressureSnapshot = {
 	topPublishers: []
 };
 
+/**
+ * Wire-subscribe authorization policy. When `enabled`, a CLIENT-initiated
+ * subscribe / subscribe-batch wire frame is honored only for a topic the
+ * server already authorized for that connection (i.e. a prior
+ * `platform.subscribe`, recorded in the connection's `WS_SUBSCRIPTIONS` set) -
+ * unless the app exports an explicit `subscribe` / `subscribeBatch` hook, which
+ * still decides. Server-initiated `platform.subscribe` / `platform.checkSubscribe`
+ * are unaffected (they are the trusted authorization path). Off by default, so
+ * the adapter's standalone "any client may subscribe to any topic" contract is
+ * unchanged; a framework (svelte-realtime) or an app opts in. A holder object,
+ * not `export let`, so a runtime enable in one module is visible to the wire
+ * handler in another. @type {{ enabled: boolean }}
+ */
+export const subscribeAuth = { enabled: false };
+
 /** platform.onPressure transition callbacks. @type {Set<(snapshot: typeof pressureSnapshot) => void>} */
 export const pressureListeners = new Set();
 

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.57] - 2026-07-05
+
+### Added
+
+- **`websocket.authorizeWireSubscribe` (default off) + `platform.authorizeWireSubscribe()`: opt-in wire-subscribe authorization.** By default the adapter is a primitive - any connected client may subscribe to any (non-`__`, shape-valid) topic - and per-topic authorization is entirely the app's `subscribe` hook. That leaves a gap for a framework that authorizes subscriptions server-side (in an RPC) rather than in a wire hook: a client could send a raw `{type:'subscribe', topic}` frame for a topic it was never granted - a private room, another tenant's channel - and receive its fan-out, because the server-side check ran only on the server-initiated subscribe, not the client's wire frame. With this policy on, a CLIENT-initiated `subscribe` / `subscribe-batch` frame is honored only for a topic the server already authorized for that connection via `platform.subscribe` (recorded in its subscription set) - unless the app exports its own `subscribe` / `subscribeBatch` hook, which then decides every topic exactly as before. Server-side `platform.subscribe` / `platform.checkSubscribe` are the trusted authorization path and are never gated. Off by default (the standalone contract is unchanged); enable via the `svelte.config.js` websocket option, or programmatically at startup with `platform.authorizeWireSubscribe()` (what svelte-realtime calls in its `init` hook). Denials use the existing `subscribe-denied` `FORBIDDEN` reason - no wire-protocol change. Mirrored across the production runtime, the Vite dev server, and the test handler for dev/prod/test parity.
+- **`setTopicManaged(topic)` on the client: attach a topic without a client subscribe frame.** For a framework that subscribes the socket server-side (the server's RPC ran `platform.subscribe`), the client's own `subscribe` frame is redundant, and under wire-subscribe authorization a reconnect resubscribe would race ahead of the server's re-subscribe and be denied. Marking a topic managed makes the client attach its dispatch store WITHOUT emitting a subscribe frame and WITHOUT including the topic in the reconnect resubscribe-batch - exactly the treatment `__`-prefixed framework taps already get. Inbound dispatch through `on(topic)` is unchanged; only the redundant outbound frame is suppressed (a small efficiency win even with the policy off).
+
 ## [0.6.0-next.56] - 2026-07-05
 
 ### Added

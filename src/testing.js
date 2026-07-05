@@ -67,6 +67,12 @@ export async function createTestServer(options = {}) {
 	const ALLOW_SYSTEM_TOPIC_SUBSCRIBE_T = options.allowSystemTopicSubscribe === true;
 	// Mirror production: wire topics default to printable ASCII only.
 	const ALLOW_NON_ASCII_TOPICS_T = options.allowNonAsciiTopics === true;
+	// Mirror production wire-subscribe authorization. `let` so the platform
+	// method `authorizeWireSubscribe()` can arm it at runtime, exactly like the
+	// framework does in production. Seeded from the config option for the
+	// static-config path.
+	let SUBSCRIBE_AUTHZ_T = options.authorizeWireSubscribe === true;
+	const hasUserSubscribeHookT = () => !!(handler.subscribe || handler.subscribeBatch);
 
 	// Same wiring shape as the production handler: a per-instance
 	// admission state instantiated once, consulted at the top of the
@@ -825,6 +831,10 @@ export async function createTestServer(options = {}) {
 			if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
 			return await runUserSubscribeGateT(ws, topic);
 		},
+		authorizeWireSubscribe() {
+			// Mirror production: arm wire-subscribe authorization at runtime.
+			SUBSCRIBE_AUTHZ_T = true;
+		},
 		unsubscribe(ws, topic) {
 			let subs;
 			try { subs = ws.getUserData()[WS_SUBSCRIPTIONS]; }
@@ -1449,6 +1459,13 @@ export async function createTestServer(options = {}) {
 								sendDeniedT(ws, msg.topic, ref, 'RATE_LIMITED');
 								return;
 							}
+							// Wire-subscribe authorization (mirror): a client may only
+							// (re)subscribe to a topic the server already authorized for
+							// this connection, unless the app ships its own subscribe hook.
+							if (SUBSCRIBE_AUTHZ_T && !subs.has(msg.topic) && !hasUserSubscribeHookT()) {
+								sendDeniedT(ws, msg.topic, ref, 'FORBIDDEN');
+								return;
+							}
 							const denial = await runUserSubscribeGateT(ws, msg.topic);
 							if (denial !== null) {
 								sendDeniedT(ws, msg.topic, ref, denial);
@@ -1537,6 +1554,13 @@ export async function createTestServer(options = {}) {
 								}
 								valid.push(topic);
 							}
+							// Wire-subscribe authorization (mirror, batch): pre-deny every valid
+							// topic the server has not already authorized when no app hook is
+							// present; with a hook, that hook decides.
+							const _wireAuthzT = SUBSCRIBE_AUTHZ_T && !hasUserSubscribeHookT();
+							const authzDeniedT = _wireAuthzT
+								? valid.map((t) => !ws.getUserData()[WS_SUBSCRIPTIONS].has(t))
+								: null;
 							const batchDenials = await runSubscribeBatchHookT(ws, valid);
 							const perTopicDenials = batchDenials === null && handler.subscribe
 								? await Promise.all(valid.map((t) => runSubscribeHookT(ws, t)))
@@ -1550,7 +1574,8 @@ export async function createTestServer(options = {}) {
 							if (msg.recover && typeof msg.recover === 'object') {
 								for (let i = 0; i < valid.length; i++) {
 									const _t = valid[i];
-									const _denial = batchDenials !== null ? (batchDenials[_t] ?? null) : (perTopicDenials !== null ? perTopicDenials[i] : null);
+									const _denial = (authzDeniedT !== null && authzDeniedT[i] ? 'FORBIDDEN' : null)
+										?? (batchDenials !== null ? (batchDenials[_t] ?? null) : (perTopicDenials !== null ? perTopicDenials[i] : null));
 									if (_denial !== null) continue;
 									const _rec = msg.recover[_t];
 									if (_rec && typeof _rec === 'object' && Number.isInteger(_rec.offset) && _rec.offset >= 0) {
@@ -1567,9 +1592,10 @@ export async function createTestServer(options = {}) {
 							}
 							for (let i = 0; i < valid.length; i++) {
 								const topic = valid[i];
-								const denial = batchDenials !== null
-									? (batchDenials[topic] ?? null)
-									: (perTopicDenials !== null ? perTopicDenials[i] : null);
+								const denial = (authzDeniedT !== null && authzDeniedT[i] ? 'FORBIDDEN' : null)
+									?? (batchDenials !== null
+										? (batchDenials[topic] ?? null)
+										: (perTopicDenials !== null ? perTopicDenials[i] : null));
 								if (denial !== null) {
 									sendDeniedT(ws, topic, ref, denial);
 									continue;

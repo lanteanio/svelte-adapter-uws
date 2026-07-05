@@ -719,6 +719,28 @@ export interface WebSocketOptions {
 	allowSystemTopicSubscribe?: boolean;
 
 	/**
+	 * Require wire-subscribe authorization. Default `false`: standalone, any
+	 * connected client may subscribe to any (non-`__`, shape-valid) topic - the
+	 * adapter's primitive contract. When `true`, a CLIENT-initiated `subscribe`
+	 * / `subscribe-batch` frame is honored only for a topic the server already
+	 * authorized for that connection via `platform.subscribe` (recorded in its
+	 * subscription set), unless the app exports its own `subscribe` /
+	 * `subscribeBatch` hook - in which case that hook decides every topic.
+	 *
+	 * This closes the bypass where a client names a topic it was never granted
+	 * (a private room, another tenant's channel) and receives its fan-out,
+	 * because the server-side guard ran only on the server-initiated subscribe,
+	 * not the client's wire frame. Server-side `platform.subscribe` /
+	 * `platform.checkSubscribe` are the trusted authorization path and are never
+	 * gated by this. A framework whose subscriptions are all server-initiated
+	 * (svelte-realtime) arms this automatically via
+	 * `platform.authorizeWireSubscribe()`; direct adapter apps set it here.
+	 *
+	 * @default false
+	 */
+	authorizeWireSubscribe?: boolean;
+
+	/**
 	 * Allow non-ASCII characters in wire-submitted topic names. Default
 	 * `false`: only printable ASCII (0x20-0x7E) excluding `"` and `\` is
 	 * accepted, blocking line separators (U+2028/U+2029), bidirectional
@@ -2151,6 +2173,22 @@ export interface Platform {
 	 * ```
 	 */
 	checkSubscribe(ws: WebSocket<unknown>, topic: string): Promise<string | null>;
+
+	/**
+	 * Arm wire-subscribe authorization for this process (the programmatic
+	 * equivalent of the `websocket.authorizeWireSubscribe` option). Once armed,
+	 * a CLIENT-initiated `subscribe` / `subscribe-batch` frame is honored only
+	 * for a topic the server already authorized for that connection via
+	 * `platform.subscribe`, unless the app exports its own `subscribe` /
+	 * `subscribeBatch` hook (which then decides). Server-side `platform.subscribe`
+	 * / `platform.checkSubscribe` are never gated by this.
+	 *
+	 * For a framework that owns subscription authorization and routes every
+	 * legitimate subscribe through `platform.subscribe` (e.g. svelte-realtime,
+	 * which gates each subscription in its stream RPC): call once at startup,
+	 * before connections arrive. Idempotent and process-wide.
+	 */
+	authorizeWireSubscribe(): void;
 
 	/**
 	 * Unsubscribe a connection from a topic from server-side code.

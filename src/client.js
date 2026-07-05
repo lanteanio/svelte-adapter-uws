@@ -29,6 +29,34 @@ let singletonCreatedBy = '';
 const wireCodecs = new Map();
 
 /**
+ * Topics a framework has marked SERVER-MANAGED: the server subscribes the
+ * socket itself (via `platform.subscribe`, e.g. from svelte-realtime's stream
+ * RPC), so the client must NOT emit its own `subscribe` wire frame for them and
+ * must NOT include them in the reconnect resubscribe-batch. Dispatch still
+ * flows through the topic store the same way - only the redundant outbound
+ * subscribe frame is suppressed, exactly as the client already does for
+ * `__`-prefixed framework taps. This keeps the connection quiet (no duplicate
+ * subscribe) and, crucially, avoids a reconnect resubscribe racing ahead of the
+ * server's re-subscribe under wire-subscribe authorization (where the server
+ * would reject a not-yet-authorized topic). Process-global: a topic is managed
+ * for whichever connection subscribes it, which for the singleton client is the
+ * only one.
+ * @type {Set<string>}
+ */
+const managedTopics = new Set();
+
+/**
+ * Mark `topic` as server-managed (see {@link managedTopics}). A framework that
+ * subscribes the socket server-side calls this before attaching the client-side
+ * store, so the store attach does not also send a client subscribe frame. Safe
+ * to call repeatedly (idempotent) and before the connection exists.
+ * @param {string} topic
+ */
+export function setTopicManaged(topic) {
+	managedTopics.add(topic);
+}
+
+/**
  * Register a binary wire codec for a topic-name prefix. Idempotent per prefix.
  * Plugins call this at module load (before connect) so the first `hello`
  * already advertises the capability; if a connection is already open, its
@@ -1733,7 +1761,14 @@ function createConnection(options) {
 		// the default INVALID_TOPIC gate anyway, and the round-trip adds nothing.
 		// Excluded from subscribedTopics for the same reason: the reconnect-resubscribe
 		// path must not re-emit a frame the server will deny.
-		if (topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) return;
+		//
+		// Server-MANAGED topics take the identical path: the server already
+		// subscribed the socket (its stream RPC ran platform.subscribe), so the
+		// client subscribe frame is redundant, and under wire-subscribe
+		// authorization a reconnect resubscribe would race ahead of the server's
+		// re-subscribe and be denied. Same skip: dispatch via the topic store,
+		// never a wire frame, never the resubscribe-batch.
+		if ((topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) || managedTopics.has(topic)) return;
 		subscribedTopics.add(topic);
 		if (ws?.readyState !== WebSocket.OPEN) return;
 		if (!pendingSubscribes) {
@@ -1771,6 +1806,10 @@ function createConnection(options) {
 	 * @param {string} topic
 	 */
 	function doUnsubscribe(topic) {
+		// Managed topics never sent a client subscribe frame and are re-marked on
+		// the next server-driven attach, so drop the mark here to keep the set
+		// bounded across churn of dynamic topics.
+		const wasManaged = managedTopics.delete(topic);
 		subscribedTopics.delete(topic);
 		topicStores.delete(topic);
 		// Clean up topic+event filtered stores for this topic
@@ -1778,9 +1817,10 @@ function createConnection(options) {
 			if (key.startsWith(topic + '\0')) eventStores.delete(key);
 		}
 		if (debug) console.log('[ws] unsubscribe ->', topic);
-		// Symmetric to subscribe(): __-prefixed topics never sent a wire subscribe,
-		// so there is no wire-level subscription state for the server to release.
-		if (topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) return;
+		// Symmetric to subscribe(): __-prefixed and server-managed topics never sent
+		// a wire subscribe, so there is no wire-level subscription state for the
+		// server to release.
+		if ((topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) || wasManaged) return;
 		if (ws?.readyState === WebSocket.OPEN) {
 			ws.send(JSON.stringify({ type: 'unsubscribe', topic }));
 		}

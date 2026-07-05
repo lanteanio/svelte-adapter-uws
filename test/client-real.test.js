@@ -1607,6 +1607,47 @@ describe('client.js (real module)', () => {
 			conn.close();
 		});
 
+		it('excludes server-managed topics from the wire subscribe and the reconnect resubscribe-batch', async () => {
+			const conn = clientModule.connect({ reconnectInterval: 5, maxReconnectInterval: 5 });
+			await flush();
+			const ws = MockWebSocket._last;
+
+			// A framework marks the topic server-managed (it subscribed the socket
+			// itself), then attaches the client-side store.
+			clientModule.setTopicManaged('managed:room-1');
+			const managedStore = clientModule.on('managed:room-1');
+			const unsubManaged = managedStore.subscribe(() => {});
+			await flush();
+
+			const initialSubs = ws._sent
+				.map((s) => { try { return JSON.parse(s); } catch { return null; } })
+				.filter((m) => m && (m.type === 'subscribe' || m.type === 'subscribe-batch'));
+			const sawInitial = initialSubs.some((m) =>
+				m.topic === 'managed:room-1' || (Array.isArray(m.topics) && m.topics.includes('managed:room-1'))
+			);
+			expect(sawInitial).toBe(false);
+
+			// Reconnect: the managed topic must not ride the resubscribe-batch (the
+			// server re-subscribes it via the framework's RPC resume).
+			ws.readyState = MockWebSocket.CLOSED;
+			ws.onclose?.({ code: 1006 });
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			const newWs = MockWebSocket._last;
+			expect(newWs).not.toBe(ws);
+			await flush();
+
+			const reSubs = newWs._sent
+				.map((s) => { try { return JSON.parse(s); } catch { return null; } })
+				.filter((m) => m && (m.type === 'subscribe' || m.type === 'subscribe-batch'));
+			const sawReconnect = reSubs.some((m) =>
+				m.topic === 'managed:room-1' || (Array.isArray(m.topics) && m.topics.includes('managed:room-1'))
+			);
+			expect(sawReconnect).toBe(false);
+
+			unsubManaged();
+			conn.close();
+		});
+
 	describe('presence client plugin', () => {
 		/** @type {any} */
 		let presenceFn;

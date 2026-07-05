@@ -116,6 +116,20 @@ export async function runUserSubscribeGate(ws, topic) {
 }
 
 /**
+ * Whether the app exported an explicit subscribe-authorization hook
+ * (`subscribe` or `subscribeBatch`). Read by the wire-subscribe authorization
+ * gate: with `subscribeAuth.enabled` set, a client subscribe to a topic the
+ * server did not pre-authorize is hard-denied ONLY when no app hook exists - an
+ * app that ships its own gate keeps full control (its hook decides every
+ * topic). Cheap boolean read of the statically-imported handler module.
+ *
+ * @returns {boolean}
+ */
+export function hasUserSubscribeHook() {
+	return !!(wsModule.subscribe || wsModule.subscribeBatch);
+}
+
+/**
  * Send a `subscribed` ack frame to the client when it provided a `ref`
  * with its subscribe op. No frame goes out for ref-less subscribes
  * (old clients) so backward compatibility is preserved.

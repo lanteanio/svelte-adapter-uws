@@ -25,7 +25,7 @@ import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, d
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { now, monotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
-import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, sharedTopics } from './handler/state.js';
+import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, sharedTopics, subscribeAuth } from './handler/state.js';
 import { computeStateHash } from './invariants.js';
 import { createConsistencyAuditor } from './auditor.js';
 import { buildConnectionAuditSnapshot } from './audit-snapshot.js';
@@ -37,7 +37,7 @@ import { readHlc } from './handler/hlc.js';
 import { textDecoder, ssl_cert, ssl_key, is_tls, origin, xff_depth, address_header, protocol_header, host_header, port_header, body_size_limit, resolveClientIp, _t_app, app, wsDebug, closeHookRegistered, get_origin, WS_COMPRESSION_ON } from './handler/config.js';
 import { cacheDir, clientDir, prerenderedDir, _t_static, serveStatic, DECODE_CACHE_MAX, tryPrerendered } from './handler/static-assets.js';
 import { bumpIn, bumpOut, maybeWarnTopicRegistry, BATCH_FRAME_WARN_BYTES, warnLargeBatchFrame, grantSizeFor, resolvePressureThresholds, startPressureSampling, stopPressureSampling } from './handler/pressure-metrics.js';
-import { hasRef, runSubscribeHook, runSubscribeBatchHook, runUserSubscribeGate, sendSubscribed, sendSubscribeDenied, flushCoalescedFor } from './handler/subscribe-hooks.js';
+import { hasRef, runSubscribeHook, runSubscribeBatchHook, runUserSubscribeGate, hasUserSubscribeHook, sendSubscribed, sendSubscribeDenied, flushCoalescedFor } from './handler/subscribe-hooks.js';
 import { ensureWireId, ensureWireState, wireStatePoisoned, poisonWireState, detachWireStates } from './handler/wire-state.js';
 import { joinSharedCohort, leaveSharedCohort } from './handler/cohort.js';
 import { releaseSharedWireId } from './handler/shared-wire-id.js';
@@ -334,6 +334,20 @@ if (WS_ENABLED) {
 	// U+202E, BOM U+FEFF) and keeps the wire trivially log-safe. Apps
 	// that legitimately use non-ASCII topic names can opt in.
 	const ALLOW_NON_ASCII_TOPICS = wsOptions.allowNonAsciiTopics === true;
+
+	// Wire-subscribe authorization. Off by default: standalone, any connected
+	// client may subscribe to any (non-`__`, shape-valid) topic - the adapter's
+	// documented primitive contract. When on, a CLIENT subscribe / subscribe-batch
+	// frame is honored only for a topic the server already authorized for that
+	// connection via `platform.subscribe` (recorded in `WS_SUBSCRIPTIONS`), unless
+	// the app exports its own `subscribe` / `subscribeBatch` hook (which then
+	// decides). This closes the bypass where a client names a topic it was never
+	// granted - a private room, another tenant's channel - and receives its
+	// fan-out, since server-side authorization (a guard / RPC) ran only on the
+	// server-initiated subscribe, not the client's wire frame. A framework whose
+	// subscriptions are all server-initiated (svelte-realtime) turns this on via
+	// `platform.authorizeWireSubscribe()`; a direct adapter app can set it here.
+	if (wsOptions.authorizeWireSubscribe === true) subscribeAuth.enabled = true;
 
 	// Keys that suggest sensitive or personally-identifying data being
 	// stored in userData. userData is accessible to every server-side
@@ -1318,6 +1332,16 @@ if (WS_ENABLED) {
 						sendSubscribeDenied(ws, msg.topic, ref, 'RATE_LIMITED');
 						return;
 					}
+					// Wire-subscribe authorization: a client may (re)subscribe only to a
+					// topic the server already authorized for this connection (already in
+					// `subs` via a prior `platform.subscribe`). A topic the server never
+					// granted is hard-denied here UNLESS the app ships its own subscribe
+					// hook, which then decides via `runUserSubscribeGate` below. `isNew`
+					// is exactly "not already server-authorized on this connection".
+					if (subscribeAuth.enabled && isNew && !hasUserSubscribeHook()) {
+						sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
+						return;
+					}
 					const denial = await runUserSubscribeGate(ws, msg.topic);
 					if (denial !== null) {
 						sendSubscribeDenied(ws, msg.topic, ref, denial);
@@ -1409,6 +1433,17 @@ if (WS_ENABLED) {
 						valid.push(topic);
 					}
 
+					// Wire-subscribe authorization (batch): when on and no app hook is
+					// exported, every valid topic the server has NOT already authorized
+					// for this connection is denied FORBIDDEN before the hook pass. With
+					// an app hook present, authorization is deferred to it (below), same
+					// as the single-subscribe path. `authzDenied` short-circuits the
+					// hook calls for the pre-denied topics.
+					const _wireAuthz = subscribeAuth.enabled && !hasUserSubscribeHook();
+					const authzDenied = _wireAuthz
+						? valid.map((t) => !userData[WS_SUBSCRIPTIONS].has(t))
+						: null;
+
 					// Pass 2: gather denial decisions. If a batch hook is exported,
 					// call it once (typically backed by a single DB auth query) and
 					// use its decisions. Otherwise fall back to the per-topic
@@ -1430,7 +1465,8 @@ if (WS_ENABLED) {
 					if (msg.recover && typeof msg.recover === 'object') {
 						for (let i = 0; i < valid.length; i++) {
 							const _t = valid[i];
-							const _denial = batchDenials !== null ? (batchDenials[_t] ?? null) : (perTopicDenials !== null ? perTopicDenials[i] : null);
+							const _denial = (authzDenied !== null && authzDenied[i] ? 'FORBIDDEN' : null)
+								?? (batchDenials !== null ? (batchDenials[_t] ?? null) : (perTopicDenials !== null ? perTopicDenials[i] : null));
 							if (_denial !== null) continue;
 							const _rec = msg.recover[_t];
 							if (_rec && typeof _rec === 'object' && Number.isInteger(_rec.offset) && _rec.offset >= 0) {
@@ -1449,9 +1485,10 @@ if (WS_ENABLED) {
 					for (let i = 0; i < valid.length; i++) {
 						const topic = valid[i];
 						const subs = userData[WS_SUBSCRIPTIONS];
-						const denial = batchDenials !== null
-							? (batchDenials[topic] ?? null)
-							: (perTopicDenials !== null ? perTopicDenials[i] : null);
+						const denial = (authzDenied !== null && authzDenied[i] ? 'FORBIDDEN' : null)
+							?? (batchDenials !== null
+								? (batchDenials[topic] ?? null)
+								: (perTopicDenials !== null ? perTopicDenials[i] : null));
 						if (denial !== null) {
 							sendSubscribeDenied(ws, topic, ref, denial);
 							continue;

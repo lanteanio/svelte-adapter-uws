@@ -26,6 +26,11 @@ export default function uws(options = {}) {
 	const ALLOW_SYSTEM_TOPIC_SUBSCRIBE_V = options.allowSystemTopicSubscribe === true;
 	// Mirror production: wire topics default to printable ASCII only.
 	const ALLOW_NON_ASCII_TOPICS_V = options.allowNonAsciiTopics === true;
+	// Mirror production wire-subscribe authorization (see handler.js). `let` so
+	// `platform.authorizeWireSubscribe()` can arm it at runtime the way the
+	// framework does; seeded from the config option for the static path.
+	let SUBSCRIBE_AUTHZ_V = options.authorizeWireSubscribe === true;
+	const hasUserSubscribeHookV = () => !!(userHandlers.subscribe || userHandlers.subscribeBatch);
 	// Mirror production CSRF defense for the authenticate POST endpoint.
 	// Same opt-out shape as the production handler: pass
 	// `authPathRequireOrigin: false` to the dev plugin to accept native
@@ -435,6 +440,10 @@ export default function uws(options = {}) {
 			// back to subscribe). No state mutation, no cap check.
 			if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
 			return await runUserSubscribeGateV(ws, topic);
+		},
+		authorizeWireSubscribe() {
+			// Mirror production: arm wire-subscribe authorization at runtime.
+			SUBSCRIBE_AUTHZ_V = true;
 		},
 		unsubscribe(ws, topic) {
 			const ud = ws.getUserData();
@@ -1238,6 +1247,13 @@ export default function uws(options = {}) {
 									sendDenied(ws, msg.topic, ref, 'RATE_LIMITED');
 									return;
 								}
+								// Wire-subscribe authorization (mirror): a client may only
+								// (re)subscribe to a topic the server already authorized for
+								// this connection, unless the app ships its own subscribe hook.
+								if (SUBSCRIBE_AUTHZ_V && isNew && !hasUserSubscribeHookV()) {
+									sendDenied(ws, msg.topic, ref, 'FORBIDDEN');
+									return;
+								}
 								const denial = await runUserSubscribeGateV(wrapped, msg.topic);
 								if (denial !== null) {
 									sendDenied(ws, msg.topic, ref, denial);
@@ -1331,6 +1347,14 @@ export default function uws(options = {}) {
 									}
 									valid.push(topic);
 								}
+								// Wire-subscribe authorization (mirror, batch): pre-deny every
+								// valid topic the server has not already authorized when no app
+								// hook is present; with a hook, that hook decides.
+								const _wireAuthzV = SUBSCRIBE_AUTHZ_V && !hasUserSubscribeHookV();
+								const _authzSubsV = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS];
+								const authzDeniedV = (_wireAuthzV && _authzSubsV)
+									? valid.map((t) => !_authzSubsV.has(t))
+									: null;
 								const batchDenials = await runSubscribeBatchHookV(wrapped, valid);
 								const perTopicDenials = batchDenials === null && userHandlers.subscribe
 									? await Promise.all(valid.map((t) => runSubscribeHookV(wrapped, t)))
@@ -1344,7 +1368,8 @@ export default function uws(options = {}) {
 								if (msg.recover && typeof msg.recover === 'object') {
 									for (let i = 0; i < valid.length; i++) {
 										const _t = valid[i];
-										const _denial = batchDenials !== null ? (batchDenials[_t] ?? null) : (perTopicDenials !== null ? perTopicDenials[i] : null);
+										const _denial = (authzDeniedV !== null && authzDeniedV[i] ? 'FORBIDDEN' : null)
+											?? (batchDenials !== null ? (batchDenials[_t] ?? null) : (perTopicDenials !== null ? perTopicDenials[i] : null));
 										if (_denial !== null) continue;
 										const _rec = msg.recover[_t];
 										if (_rec && typeof _rec === 'object' && Number.isInteger(_rec.offset) && _rec.offset >= 0) {
@@ -1361,9 +1386,10 @@ export default function uws(options = {}) {
 								}
 								for (let i = 0; i < valid.length; i++) {
 									const topic = valid[i];
-									const denial = batchDenials !== null
-										? (batchDenials[topic] ?? null)
-										: (perTopicDenials !== null ? perTopicDenials[i] : null);
+									const denial = (authzDeniedV !== null && authzDeniedV[i] ? 'FORBIDDEN' : null)
+										?? (batchDenials !== null
+											? (batchDenials[topic] ?? null)
+											: (perTopicDenials !== null ? perTopicDenials[i] : null));
 									if (denial !== null) {
 										sendDenied(ws, topic, ref, denial);
 										continue;
