@@ -1,6 +1,6 @@
 {
   "name": "svelte-adapter-uws",
-  "version": "0.6.0-next.59",
+  "version": "0.6.0-next.60",
   "publishConfig": {
     "tag": "next"
   },
@@ -140,6 +140,10 @@
     "./plugins/smooth/random": {
       "types": "./src/plugins/smooth/random.d.ts",
       "default": "./src/plugins/smooth/random.js"
+    },
+    "./plugins/webhooks": {
+      "types": "./src/plugins/webhooks/server.d.ts",
+      "default": "./src/plugins/webhooks/server.js"
     }
   },
   "types": "./src/index.d.ts",

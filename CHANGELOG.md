@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.60] - 2026-07-06
+
+### Added
+
+- **`plugins/webhooks` - a generic outbound-webhook delivery primitive.** The SSRF-gated, DNS-pinned, HMAC-signed HTTP POST engine with jittered-exponential retry now ships as a standalone adapter plugin (`svelte-adapter-uws/plugins/webhooks`), matching the plugin model of `smooth`/`crdt`/`cursor`. `deliverWebhook(config, topic, event, data)` takes a per-webhook config plus one event and returns a terminal `{ ok } | { ok: false, err, attempts }` outcome: it resolves the payload and URL through bounded callbacks, attaches a stable idempotency key (HMAC-keyed when a `secret` is set, a plain content hash otherwise) and an optional `x-webhook-signature` (dual-signed during a `previousSecret` rotation), then delivers with a per-hop SSRF gate + DNS pin (no rebinding window) and retries 5xx/429/network/timeout. Transport-only and framework-free - it never throws, reports nothing, and holds no state, so the caller owns failure reporting and dead-letter capture; every timer and random draw routes through the runtime seam for deterministic backoff. `redactUrl(url)` strips credentials/query for safe logging. This is the reusable home for the delivery engine that previously lived only inside `svelte-realtime`; a future retry-budget / endpoint-ejection layer rides the same config object.
+
 ## [0.6.0-next.59] - 2026-07-06
 
 ### Added
