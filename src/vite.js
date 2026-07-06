@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './runtime/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { now, monotonicNow, randomFloat, randomU32, randomUuid, randomBytes } from './runtime/runtime.js';
@@ -341,6 +341,10 @@ export default function uws(options = {}) {
 	// silently-undefined properties become "Cannot read properties of
 	// undefined (reading 'bind')" on the first message. Missing surface in
 	// dev defeats the dev/prod parity contract.
+	// Per-dev-server LRU cache of scoped topic helpers, bound to this closure's
+	// publish on first platform.topic() call (see createTopicHelperCache).
+	/** @type {((name: string) => ReturnType<typeof createScopedTopic>) | null} */
+	let _topicHelperCache = null;
 	const platform = {
 		publish,
 		publishBatched,
@@ -538,7 +542,8 @@ export default function uws(options = {}) {
 			} catch { return 0; }
 		},
 		topic(name) {
-			return createScopedTopic(publish, name);
+			if (!_topicHelperCache) _topicHelperCache = createTopicHelperCache(publish);
+			return _topicHelperCache(name);
 		},
 		/**
 		 * Current generation of a topic's seq space, mirroring production.

@@ -74,3 +74,41 @@ export function createScopedTopic(publish, name) {
 		decrement: (amount = 1) => publish(name, 'decrement', amount)
 	};
 }
+
+/**
+ * Build a per-publish-binding LRU cache of scoped topic helpers so repeated
+ * `platform.topic(name)` calls reuse one helper object instead of allocating a
+ * fresh 7-closure object every call. Keyed by topic name (one helper bundles all
+ * seven event methods). True LRU: a hit moves the key to most-recent; once the
+ * map exceeds `cap`, the oldest key is evicted. Pure - no clock/RNG/timer, so it
+ * stays determinism-clean.
+ *
+ * MUST be created ONCE per publish binding (the platform singleton, a dev-server
+ * closure, a test server) - never module-global keyed on name alone, or two
+ * servers would hand out helpers bound to the wrong `publish`.
+ *
+ * @param {(topic: string, event: string, data: unknown) => unknown} publish
+ * @param {number} [cap=256]
+ * @returns {(name: string) => ReturnType<typeof createScopedTopic>}
+ */
+export function createTopicHelperCache(publish, cap = 256) {
+	/** @type {Map<string, ReturnType<typeof createScopedTopic>>} */
+	const cache = new Map();
+	return function get(name) {
+		const hit = cache.get(name);
+		if (hit !== undefined) {
+			// Move to most-recent (delete + re-set) so recency drives eviction.
+			cache.delete(name);
+			cache.set(name, hit);
+			return hit;
+		}
+		const helper = createScopedTopic(publish, name);
+		cache.set(name, helper);
+		if (cache.size > cap) {
+			// Evict the oldest (least-recently-used) key.
+			const oldest = cache.keys().next().value;
+			if (oldest !== undefined) cache.delete(oldest);
+		}
+		return helper;
+	};
+}

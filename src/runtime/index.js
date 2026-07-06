@@ -173,6 +173,49 @@ if (is_primary) {
 	const HEARTBEAT_INTERVAL_MS = 10000;
 	const HEARTBEAT_TIMEOUT_MS = 30000;
 
+	// A worker thread holds uWS's raw libuv socket handles, so `worker.terminate()`
+	// on a worker that still holds a uWS App aborts the WHOLE process
+	// (`uv_loop_close() while having open handles`). Instead, ask the worker to
+	// close its App and exit itself (clean); if it does not (a genuine deadlock -
+	// it cannot process the message), SIGKILL the whole process for a clean
+	// orchestrator respawn. The grace is generous: a busy-but-alive worker closes
+	// and exits in well under it, so only a real wedge reaches the SIGKILL.
+	const WORKER_EXIT_GRACE_MS = 5000;
+	/** @type {Set<import('node:worker_threads').Worker>} */
+	const exit_requested = new Set();
+	/** @param {import('node:worker_threads').Worker} worker @param {number} code */
+	function requestWorkerExit(worker, code) {
+		if (exit_requested.has(worker)) return;
+		exit_requested.add(worker);
+		try { worker.postMessage({ type: 'terminate', code }); } catch {}
+		const t = setTimer(() => {
+			if (workers.has(worker)) {
+				console.error(
+					`[primary] Worker ${worker.threadId} did not exit within ${WORKER_EXIT_GRACE_MS}ms; ` +
+					'SIGKILL-ing the process for a clean respawn (a wedged worker cannot self-close, ' +
+					'and worker.terminate() would abort the process).'
+				);
+				process.kill(process.pid, 'SIGKILL');
+			}
+		}, WORKER_EXIT_GRACE_MS);
+		if (t && t.unref) t.unref();
+	}
+	/**
+	 * Terminal primary exit. A main-thread `process.exit()` while worker threads
+	 * still hold uWS Apps aborts the process (same `uv_loop_close` hazard), so with
+	 * any worker still alive we SIGKILL for a clean signal (the orchestrator
+	 * respawns); with no live workers left we exit normally with the code.
+	 * @param {number} code
+	 */
+	function primaryHardExit(code) {
+		if (workers.size > 0) {
+			console.error(`[primary] hard exit with ${workers.size} live worker(s); SIGKILL for a clean teardown (orchestrator respawns).`);
+			process.kill(process.pid, 'SIGKILL');
+		} else {
+			process.exit(code);
+		}
+	}
+
 	setIntervalTimer(() => {
 		if (shutting_down) return;
 		const t = monotonicNow();
@@ -180,9 +223,9 @@ if (is_primary) {
 			if (meta.lastHeartbeat > 0 && t - meta.lastHeartbeat > HEARTBEAT_TIMEOUT_MS) {
 				console.error(
 					`[primary] Worker ${worker.threadId} unresponsive ` +
-					`(no heartbeat ack in ${HEARTBEAT_TIMEOUT_MS}ms), terminating...`
+					`(no heartbeat ack in ${HEARTBEAT_TIMEOUT_MS}ms), asking it to exit...`
 				);
-				worker.terminate();
+				requestWorkerExit(worker, 1);
 			} else {
 				worker.postMessage({ type: 'heartbeat' });
 			}
@@ -203,6 +246,12 @@ if (is_primary) {
 
 		worker.on('message', (msg) => {
 			const meta = workers.get(worker);
+			// Any inbound message proves the worker is alive: advance the heartbeat
+			// clock so a worker saturated with publish/relay traffic (whose
+			// heartbeat-ack queues behind the publishes) is never false-flagged as
+			// unresponsive under sustained fan-out - the false-positive that used to
+			// force-terminate a busy-but-alive worker and abort the whole process.
+			if (meta) meta.lastHeartbeat = monotonicNow();
 			if (msg.type === 'descriptor' && cluster_mode === 'acceptor') {
 				meta.descriptor = msg.descriptor;
 				meta.lastHeartbeat = monotonicNow();
@@ -224,7 +273,7 @@ if (is_primary) {
 							sdReadyOnce();
 						} else {
 							console.error(`Failed to listen on ${host}:${portNum}`);
-							process.exit(1);
+							primaryHardExit(1);
 						}
 					});
 				}
@@ -317,8 +366,8 @@ if (is_primary) {
 					if (restart_on_state_divergence) {
 						for (const [w] of workers) {
 							if (minoritySet.has(w.threadId)) {
-								console.error('[primary] terminating minority worker %d to re-converge (RESTART_ON_STATE_DIVERGENCE=1)', w.threadId);
-								w.terminate();
+								console.error('[primary] asking minority worker %d to exit to re-converge (RESTART_ON_STATE_DIVERGENCE=1)', w.threadId);
+								requestWorkerExit(w, 1);
 							}
 						}
 					}
@@ -340,6 +389,7 @@ if (is_primary) {
 			// be judged a phantom divergence.
 			stateHashDetector.forget(worker.threadId);
 			workers.delete(worker);
+			exit_requested.delete(worker);
 			if (!shutting_down) {
 				// In acceptor mode, stop accepting when all workers are down so
 				// clients get a clean connection-refused instead of an empty app.
@@ -357,7 +407,7 @@ if (is_primary) {
 				restart_attempts++;
 				if (restart_attempts > RESTART_MAX_ATTEMPTS) {
 					console.error(`Worker restart limit reached (${RESTART_MAX_ATTEMPTS}). Exiting.\n  See: https://svti.me/worker-restart-limit`);
-					process.exit(1);
+					primaryHardExit(1);
 				}
 				restart_delay = restart_delay ? Math.min(restart_delay * 2, RESTART_DELAY_MAX) : 100;
 				console.log(`Worker thread ${worker.threadId} exited with code ${code}, restarting in ${restart_delay}ms... (attempt ${restart_attempts}/${RESTART_MAX_ATTEMPTS})`);
@@ -413,10 +463,14 @@ if (is_primary) {
 			worker.postMessage({ type: 'shutdown' });
 		}
 
-		// Force terminate after timeout
+		// Force-exit after timeout: ask any still-running worker to close its App
+		// and exit itself (worker.terminate() would abort the process; a bare
+		// primary process.exit(0) with live uWS workers would too). Each request
+		// carries its own SIGKILL fallback for a genuinely wedged worker; the last
+		// worker's exit handler (workers.size === 0) performs the clean primary
+		// process.exit(0).
 		setTimer(() => {
-			for (const [worker] of workers) worker.terminate();
-			process.exit(0);
+			for (const [worker] of workers) requestWorkerExit(worker, 0);
 		}, shutdown_timeout * 1000).unref();
 	}
 
@@ -425,7 +479,29 @@ if (is_primary) {
 } else {
 	// ── Worker thread or single-process mode ─────────────────────────────
 
-	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched } = await import('HANDLER');
+	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp } = await import('HANDLER');
+
+	// Clean worker-thread exit. A worker thread holds uWS's untracked libuv socket
+	// handles, so a bare process.exit() aborts the whole process
+	// (`uv_loop_close() while having open handles`). Close the App (drops all
+	// sockets, incl. the listen socket), let ONE real loop turn run so uv's close
+	// callbacks complete, then exit. The main thread (single-process) has no
+	// worker-teardown hazard and exits directly.
+	function exitWorkerClean(code) {
+		if (isMainThread) { process.exit(code); return; }
+		try { forceCloseApp(); } catch { /* nothing to close */ }
+		const t = setTimer(() => process.exit(code), 0);
+		if (t && t.unref) t.unref();
+	}
+
+	if (!isMainThread) {
+		// Route a hard-tier fatal() through the clean worker exit instead of the
+		// default raw process.exit(code), which would abort the worker (same
+		// uv_loop_close hazard). The sink is the module-level assertions singleton
+		// the handler graph already uses, so fatal() picks it up.
+		const { setFatalSink } = await import('./utils/assertions.js');
+		setFatalSink({ exit: exitWorkerClean });
+	}
 
 	if (isMainThread) {
 		// Single-process mode (no clustering). Awaiting `start()` lets the
@@ -468,6 +544,12 @@ if (is_primary) {
 			} else if (msg.type === 'heartbeat') {
 				// Respond immediately  - primary uses acks to detect stuck workers.
 				parentPort.postMessage({ type: 'heartbeat-ack' });
+			} else if (msg.type === 'terminate') {
+				// Primary asked us to close the uWS App and exit (heartbeat timeout,
+				// state divergence, or shutdown timeout). exitWorkerClean avoids the
+				// worker-teardown abort; a genuinely wedged worker never reaches this
+				// and the primary SIGKILLs the process as a fallback.
+				exitWorkerClean(typeof msg.code === 'number' ? msg.code : 0);
 			}
 		});
 	}
@@ -505,7 +587,7 @@ if (is_primary) {
 		// @ts-expect-error custom events cannot be typed
 		process.emit('sveltekit:shutdown', reason);
 		console.log(`${prefix}Shutdown complete.`);
-		process.exit(0);
+		exitWorkerClean(0);
 	}
 
 	if (isMainThread) {

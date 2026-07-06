@@ -301,5 +301,30 @@ describe('suspend-aware resume', () => {
 			vi.useRealTimers();
 			conn.close();
 		});
+
+		it('suppresses the pure-silence close when the timer itself was throttled', async () => {
+			vi.useFakeTimers();
+			const conn = clientModule.connect();
+			await vi.advanceTimersByTimeAsync(0);
+			const ws1 = MockWebSocket._last;
+
+			// A backgrounded tab throttled our 30s timer: 200s of awake time (NO
+			// sleep - wall and monotonic advance together) passes before the tick
+			// fires. Silence now exceeds 150s, but it is our own frozen loop, not a
+			// dead server, so the pure-silence close must be suppressed.
+			tickAwake(200_000);
+			await vi.advanceTimersByTimeAsync(30_000);
+			expect(ws1._closeCalls.length).toBe(0);
+
+			// The very next on-cadence tick re-measures: the server is still silent
+			// and the timer is no longer throttled, so the close now fires
+			// (suppression is temporary, never permanent).
+			tickAwake(30_000);
+			await vi.advanceTimersByTimeAsync(30_000);
+			expect(ws1._closeCalls.length).toBe(1);
+
+			vi.useRealTimers();
+			conn.close();
+		});
 	});
 });

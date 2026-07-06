@@ -805,6 +805,10 @@ function createConnection(options) {
 	// 2.5x the server's 120s idle timeout. If the server has been completely
 	// silent for this long while the socket appears open, it is likely a zombie.
 	const SERVER_TIMEOUT_MS = 150000;
+	// Cadence of the zombie/activity check. Also the baseline the tick measures
+	// itself against: a tick that fired much later than this was throttled by the
+	// browser (backgrounded tab), so the observed silence is our own frozen loop.
+	const ACTIVITY_INTERVAL_MS = 30000;
 	// Paired wall/monotonic reference stamps for suspend detection. The
 	// monotonic clock freezes during system sleep while the wall clock keeps
 	// counting, so a wall delta far exceeding the monotonic delta over the
@@ -819,6 +823,8 @@ function createConnection(options) {
 	const SUSPEND_GAP_MS = 60000;
 	let gapRefWall = now();
 	let gapRefMono = monotonicNow();
+	// Wall stamp of the last activity tick, to detect a throttled (late) timer.
+	let lastActivityTickWall = now();
 
 	// Sleep-gap excess accumulated since the last reference stamp; re-stamps.
 	function readSuspendGap() {
@@ -2142,14 +2148,22 @@ function createConnection(options) {
 			// where the silence check alone would ignore sleeps shorter than
 			// the timeout. Read unconditionally so the reference stamps stay
 			// fresh even while disconnected.
+			const nowMs = now();
 			const suspendGap = readSuspendGap();
-			const silence = now() - lastServerMessage;
+			const silence = nowMs - lastServerMessage;
+			// If THIS tick fired much later than its interval, the browser
+			// throttled our timer (backgrounded tab): the "silence" is our own
+			// frozen loop, not a dead server. Suppress ONLY the pure-silence
+			// close in that case - a real OS sleep still reconnects via the
+			// suspend-gap branch (re-measured on the next on-cadence tick).
+			const timerThrottled = (nowMs - lastActivityTickWall) > ACTIVITY_INTERVAL_MS * 1.5;
+			lastActivityTickWall = nowMs;
 			if (ws?.readyState === WebSocket.OPEN
-				&& (silence > SERVER_TIMEOUT_MS || (suspendGap > SUSPEND_GAP_MS && silence > 5000))) {
+				&& ((silence > SERVER_TIMEOUT_MS && !timerThrottled) || (suspendGap > SUSPEND_GAP_MS && silence > 5000))) {
 				if (debug) console.log('[ws] server silent for', silence, 'ms (suspend gap', suspendGap, 'ms), reconnecting');
 				ws.close();
 			}
-		}, 30000);
+		}, ACTIVITY_INTERVAL_MS);
 	}
 
 	function onRequest(handler) {

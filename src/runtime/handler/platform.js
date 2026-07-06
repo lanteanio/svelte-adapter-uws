@@ -1,7 +1,7 @@
 import { wsModule } from '../ws-handler-bridge.js';
 import { metricsRegistry } from '../metrics-bridge.js';
 import { parentPort } from 'node:worker_threads';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_SUBSCRIPTIONS, assert, fatal, collapseByCoalesceKey, completeEnvelope, createScopedTopic, isValidWireTopic, nextTopicSeq, processEpoch, readAssertionCounts, wrapBatchEnvelope } from '../utils.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_SUBSCRIPTIONS, assert, fatal, collapseByCoalesceKey, completeEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, nextTopicSeq, processEpoch, readAssertionCounts, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
 import { capCounts, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
@@ -15,6 +15,12 @@ import { ensureWireId, ensureWireState, poisonWireState, wireStatePoisoned } fro
 import { registerWireCodec as _registerWireCodec, getWireCodec } from './codec-registry.js';
 import { cohortTopics, joinSharedCohort, leaveSharedCohort } from './cohort.js';
 import { getSharedWireId } from './shared-wire-id.js';
+
+// Lazily-built LRU cache of scoped topic helpers, bound to platform.publish once
+// on first platform.topic() call (platform.publish exists by then). Reuses one
+// helper object per topic name instead of allocating a fresh one each call.
+/** @type {((name: string) => ReturnType<typeof createScopedTopic>) | null} */
+let _topicHelperCache = null;
 
 /** @type {import('../../index.js').Platform} */
 export const platform = {
@@ -1395,7 +1401,8 @@ export const platform = {
 	 * multiple events to the same topic.
 	 */
 	topic(name) {
-		return createScopedTopic(platform.publish, name);
+		if (!_topicHelperCache) _topicHelperCache = createTopicHelperCache(platform.publish);
+		return _topicHelperCache(name);
 	},
 
 	/**

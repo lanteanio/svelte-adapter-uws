@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.62] - 2026-07-06
+
+### Changed
+
+- **`platform.topic(name)` now returns a referentially-stable helper per name.** Repeated `platform.topic(name)` calls previously allocated a fresh seven-closure helper object every time; they now reuse one cached helper per topic name (a small per-server LRU, cap 256), cutting allocation churn for apps that scope by topic in a hot loop. Behavior is otherwise identical - the same methods, forwarding to the same `publish` - and the reference stability is a strict improvement.
+
+### Fixed
+
+- **A backgrounded browser tab no longer force-reconnects a healthy WebSocket.** The client's zombie-connection detector closes a socket that has gone silent past the server-timeout window; but when a browser throttles the 30s check timer in a backgrounded tab, that "silence" is the client's own frozen loop, not a dead server, so the check could needlessly tear down a perfectly live connection. The detector now notices when its own tick fired far later than its interval and suppresses only the pure-silence close in that case (re-measured on the next on-cadence tick); a genuine OS sleep still reconnects and resumes via the unchanged suspend-gap path.
+- **A clustered worker no longer aborts the whole process on teardown (crash under sustained fan-out).** A worker thread holds uWebSockets.js's raw libuv socket handles, which Node does not track, so tearing a worker down while it still held its uWS App aborted the entire process with `uv_loop_close() while having open handles` (`node::worker::WorkerThreadData::~WorkerThreadData`). It fired on graceful shutdown, on a hard-tier `fatal()` restart, and - the trigger seen in the wild - when the primary force-terminated a busy-but-alive worker whose heartbeat ack was starved behind a flood of publish/relay traffic under high topic fan-out; after the abort the reuseport cluster stopped accepting new upgrades. Fixed on three fronts: (1) every worker exit now closes the uWS App (dropping the listen socket + accepted connections) and lets one real event-loop turn run so libuv's close callbacks complete before `process.exit`, which exits cleanly even with live connections; (2) the primary asks a worker to close-and-exit itself instead of calling `worker.terminate()` (which aborts), falling back to a whole-process `SIGKILL` (clean orchestrator respawn) only if a genuinely wedged worker cannot self-close; and (3) the heartbeat monitor now treats ANY inbound worker message (including publish/relay) as proof of life, so a saturated worker is never false-flagged as unresponsive. A `fatal()` in a worker is routed through the same clean-exit path. Single-process (non-clustered) deployments are unaffected. Verified on Linux (the only platform reuseport runs on): the pre-fix path reproduces the exact abort, the fix exits 0 with a live connection.
+
 ## [0.6.0-next.61] - 2026-07-06
 
 ### Added

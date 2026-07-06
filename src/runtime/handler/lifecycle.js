@@ -147,6 +147,30 @@ export async function shutdown() {
 	}
 }
 
+let appClosed = false;
+
+/**
+ * Forcefully close the uWS App - all sockets INCLUDING the listen socket. A
+ * worker thread holds uWS's raw libuv socket-poll handles, which Node does not
+ * track and therefore does not close during worker teardown; a bare
+ * `process.exit()` (or `worker.terminate()`) in a worker that still holds those
+ * handles aborts the whole process with `uv_loop_close() while having open
+ * handles`. Closing the App drops the handles so the exit is clean. Idempotent.
+ *
+ * This is FORCEFUL (drops send buffers) - the graceful path (`shutdown()` above)
+ * still runs first and sends every client a clean 1001; this only mops up
+ * stragglers after the drain race, immediately before the worker exits.
+ */
+export function forceCloseApp() {
+	if (appClosed) return;
+	appClosed = true;
+	try {
+		app.close();
+	} catch {
+		/* already closed / never listened - nothing to mop up */
+	}
+}
+
 /**
  * Get the app descriptor for worker thread distribution.
  * The main thread's acceptor app uses this to route connections to this worker.

@@ -16,6 +16,7 @@ import {
 	esc,
 	isValidWireTopic,
 	createScopedTopic,
+	createTopicHelperCache,
 	isOriginAllowed,
 	isAuthOriginAccepted,
 	describeUnsafeSameOriginConfig,
@@ -2047,6 +2048,67 @@ describe('isValidWireTopic', () => {
 });
 
 // - createScopedTopic ------------------------------------------------------
+
+describe('createTopicHelperCache', () => {
+	function recorder() {
+		const calls = [];
+		const fn = (topic, event, data) => { calls.push({ topic, event, data }); return calls.length; };
+		return { fn, calls };
+	}
+
+	it('returns a referentially-stable helper per name', () => {
+		const { fn } = recorder();
+		const get = createTopicHelperCache(fn);
+		expect(get('chat')).toBe(get('chat'));       // same name -> same object
+		expect(get('chat')).not.toBe(get('room'));   // different names -> distinct
+	});
+
+	it('a cached helper forwards exactly like createScopedTopic', () => {
+		const { fn, calls } = recorder();
+		const get = createTopicHelperCache(fn);
+		get('chat').publish('typing', { u: 'a' });
+		get('chat').created({ id: 1 });
+		get('chat').increment(2);
+		expect(calls).toEqual([
+			{ topic: 'chat', event: 'typing', data: { u: 'a' } },
+			{ topic: 'chat', event: 'created', data: { id: 1 } },
+			{ topic: 'chat', event: 'increment', data: 2 }
+		]);
+	});
+
+	it('evicts the oldest key at the cap (true LRU)', () => {
+		const { fn } = recorder();
+		const get = createTopicHelperCache(fn, 2);
+		const a = get('a');
+		get('b');
+		get('c'); // overflows cap 2 -> evicts 'a' (oldest)
+		expect(get('a')).not.toBe(a); // 'a' was evicted -> rebuilt to a new identity
+		expect(get('c')).toBe(get('c')); // 'c' still cached
+	});
+
+	it('a hit moves the key to most-recent so it survives eviction', () => {
+		const { fn } = recorder();
+		const get = createTopicHelperCache(fn, 2);
+		const a = get('a');
+		const b = get('b');
+		get('a');  // touch 'a' -> now most-recent; 'b' becomes the oldest
+		get('c');  // overflow cap 2 -> evicts 'b' (oldest), keeps 'a'
+		expect(get('a')).toBe(a);     // 'a' survived
+		expect(get('b')).not.toBe(b); // 'b' was evicted -> rebuilt to a new identity
+	});
+
+	it('keeps per-publish-binding caches isolated', () => {
+		const one = recorder();
+		const two = recorder();
+		const getOne = createTopicHelperCache(one.fn);
+		const getTwo = createTopicHelperCache(two.fn);
+		getOne('chat').publish('e', 1);
+		getTwo('chat').publish('e', 2);
+		expect(one.calls).toEqual([{ topic: 'chat', event: 'e', data: 1 }]);
+		expect(two.calls).toEqual([{ topic: 'chat', event: 'e', data: 2 }]);
+		expect(getOne('chat')).not.toBe(getTwo('chat')); // bound to different publish fns
+	});
+});
 
 describe('createScopedTopic', () => {
 	function recorder() {

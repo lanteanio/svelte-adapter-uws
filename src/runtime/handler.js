@@ -57,7 +57,7 @@ setCohortHooks(
 import { platform } from './handler/platform.js';
 import { readBody, handleSSR } from './handler/ssr.js';
 import { requestDone, isDraining } from './handler/lifecycle.js';
-export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched } from './handler/lifecycle.js';
+export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp } from './handler/lifecycle.js';
 import { handleRequest } from './handler/request.js';
 import { handleAdminRequest } from './handler/admin.js';
 
