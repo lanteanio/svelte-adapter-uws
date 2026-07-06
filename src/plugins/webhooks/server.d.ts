@@ -63,6 +63,84 @@ export type WebhookDeliveryOutcome =
 	| { ok: true }
 	| { ok: false; err: Error; attempts: number };
 
+/** A retry budget: `take` consumes one token, returning whether a retry may
+ * proceed. In-process (sync) or cluster-shared (async); the key scopes the
+ * budget per endpoint. */
+export interface RetryBudget {
+	take(key?: string): boolean | Promise<boolean>;
+}
+
+/** An endpoint-ejection circuit breaker. `guard` throws when the key's circuit
+ * is open; `success`/`failure` record the terminal delivery outcome. Matches the
+ * shape of the extensions `createCircuitBreaker` so a cluster deployment can
+ * inject a shared breaker. */
+export interface WebhookBreaker {
+	guard(key?: string): void;
+	success(key?: string): void;
+	failure(err: any, key?: string): void;
+}
+
+/** Optional delivery controls injected into {@link deliverWebhook}. `key` scopes
+ * both collaborators to one endpoint (the realtime layer passes the webhook's
+ * registration id). */
+export interface WebhookDeliveryHooks {
+	budget?: RetryBudget;
+	breaker?: WebhookBreaker;
+	key?: string;
+}
+
+/** Options for {@link createRetryBudget}. */
+export interface RetryBudgetOptions {
+	/** Max tokens per key (default 100). */
+	capacity?: number;
+	/** Continuous refill rate in tokens/second (default 10). */
+	refillPerSec?: number;
+	/** Distinct-key cap before the oldest keyed bucket is evicted (default 1024). */
+	maxKeys?: number;
+}
+
+/** The in-process {@link RetryBudget} returned by {@link createRetryBudget}. */
+export interface InProcessRetryBudget extends RetryBudget {
+	take(key?: string): boolean;
+	tokensFor(key?: string): number;
+	reset(key?: string): void;
+}
+
+/** Options for {@link createWebhookBreaker}. */
+export interface WebhookBreakerOptions {
+	/** Consecutive failures before a key opens (default 5). */
+	failureThreshold?: number;
+	/** Ms an open key waits before allowing a half-open probe (default 30000). */
+	resetMs?: number;
+	/** Distinct-key cap before the oldest keyed slot is evicted (default 1024). */
+	maxKeys?: number;
+}
+
+/** The in-process {@link WebhookBreaker} returned by {@link createWebhookBreaker}. */
+export interface InProcessWebhookBreaker extends WebhookBreaker {
+	stateOf(key?: string): 'healthy' | 'broken' | 'probing';
+	reset(key?: string): void;
+}
+
+/** Thrown by {@link createWebhookBreaker}'s `guard` when a key's circuit is open. */
+export declare class WebhookCircuitOpenError extends Error {
+	readonly code: 'WEBHOOK_CIRCUIT_OPEN';
+}
+
+/**
+ * Create the in-process retry budget - the single-instance default for
+ * `deliverWebhook`'s `hooks.budget`. A per-key token bucket that caps retry
+ * amplification; a cluster deployment injects a Redis-backed budget instead.
+ */
+export function createRetryBudget(options?: RetryBudgetOptions): InProcessRetryBudget;
+
+/**
+ * Create the in-process endpoint-ejection breaker - the single-instance default
+ * for `deliverWebhook`'s `hooks.breaker`. Per-key, lazily reset off the
+ * monotonic clock (no timers); a cluster deployment injects a shared breaker.
+ */
+export function createWebhookBreaker(options?: WebhookBreakerOptions): InProcessWebhookBreaker;
+
 /**
  * Strip credentials and query from a URL for safe logging - keeps only origin +
  * pathname; returns `'[unparseable-url]'` when it does not parse.
@@ -76,10 +154,15 @@ export function redactUrl(url: string): string;
  * key and optional HMAC signature, and retries 5xx/429/network/timeout with
  * jittered backoff. Never throws and reports nothing - the caller inspects the
  * outcome for reporting and dead-letter capture.
+ *
+ * Pass `hooks` to inject delivery controls: `hooks.breaker` fast-fails an
+ * ejected endpoint and records the terminal result, `hooks.budget` rations retry
+ * amplification, both scoped by `hooks.key`. Omit `hooks` for bare delivery.
  */
 export function deliverWebhook<Event = string, Data = any>(
 	config: WebhookDeliveryConfig<Event, Data>,
 	topic: string,
 	event: Event,
-	data: Data
+	data: Data,
+	hooks?: WebhookDeliveryHooks
 ): Promise<WebhookDeliveryOutcome>;

@@ -6,6 +6,8 @@ import { createHmac, createHash } from 'node:crypto';
 import { checkUrl } from '../../safe-url.js';
 import { randomFloat, setTimer, clearTimer } from '../../runtime/runtime.js';
 
+export { createRetryBudget, createWebhookBreaker, WebhookCircuitOpenError } from './controls.js';
+
 /**
  * Generic outbound-webhook delivery: SSRF-gated, DNS-pinned, HMAC-signed HTTP
  * POST with jittered-exponential retry. Transport-only and framework-free - it
@@ -273,13 +275,14 @@ function httpDeliver(url, lookup, headers, body, timeoutMs) {
  * `{ kind: 'delivered' }`, `{ kind: 'redirect', location }`, or
  * `{ kind: 'failed', err, attempts }` (terminal; the caller reports it).
  */
-async function attemptDelivery(url, lookup, headers, body, config) {
+async function attemptDelivery(url, lookup, headers, body, config, hooks) {
 	const retry = config.retry || {};
 	const attempts = Number.isInteger(retry.attempts) && retry.attempts > 0 ? retry.attempts : 3;
 	const initialDelayMs = retry.initialDelayMs ?? 100;
 	const maxDelayMs = Math.max(1, retry.maxDelayMs ?? 5000);
 	const backoff = retry.backoffMultiplier ?? 2;
 	const timeoutMs = config.timeoutMs ?? 10000;
+	const budget = hooks && hooks.budget;
 
 	let lastErr;
 	for (let attempt = 0; attempt < attempts; attempt++) {
@@ -295,6 +298,21 @@ async function attemptDelivery(url, lookup, headers, body, config) {
 			lastErr = err; // network error / timeout -> retry
 		}
 		if (attempt < attempts - 1) {
+			// Retry-budget gate: consume a token before scheduling a retry - a
+			// shared, cross-delivery ceiling on retry AMPLIFICATION, distinct from
+			// the per-delivery `attempts` cap, so a storm of failing deliveries to
+			// one endpoint cannot launch unbounded retry work (the first attempt of
+			// every delivery always proceeds unrationed). Out of budget -> stop now
+			// and surface the last error as retry-exhausted. A throwing/unavailable
+			// budget fails OPEN (the retry proceeds): it is a best-effort throttle,
+			// not a correctness gate.
+			if (budget) {
+				let allowed = true;
+				try { allowed = await budget.take(hooks.key); } catch { allowed = true; }
+				if (!allowed) {
+					return { kind: 'failed', err: lastErr || new Error('outbound webhook: retry budget exhausted'), attempts: attempt + 1 };
+				}
+			}
 			// Equal-jitter backoff (through the runtime RNG seam) so many
 			// deliveries failing at once do not retry in lockstep.
 			const ceiling = Math.min(initialDelayMs * Math.pow(backoff, attempt), maxDelayMs);
@@ -315,7 +333,7 @@ async function attemptDelivery(url, lookup, headers, body, config) {
  *
  * @returns {Promise<{ ok: true } | { ok: false, err: Error, attempts: number }>}
  */
-async function deliverToUrl(initialUrl, headers, body, config) {
+async function deliverToUrl(initialUrl, headers, body, config, hooks) {
 	const maxRedirects = Number.isInteger(config.maxRedirects) && config.maxRedirects >= 0 ? config.maxRedirects : 5;
 	// Canonicalise the initial URL so the loop-detection set matches the `.href`
 	// form every redirect hop is normalised to (case differences would otherwise
@@ -335,7 +353,7 @@ async function deliverToUrl(initialUrl, headers, body, config) {
 			return { ok: false, err: new Error('outbound webhook: url "' + redactUrl(url) + '" blocked by SSRF guard (' + gate.reason + ')'), attempts: 0 };
 		}
 
-		const result = await attemptDelivery(url, gate.lookup, headers, body, config);
+		const result = await attemptDelivery(url, gate.lookup, headers, body, config, hooks);
 		if (result.kind === 'delivered') return { ok: true };
 		if (result.kind === 'failed') {
 			return { ok: false, err: result.err, attempts: result.attempts };
@@ -360,13 +378,25 @@ async function deliverToUrl(initialUrl, headers, body, config) {
  * + retry. Never throws; reports nothing - the caller owns reporting and
  * dead-letter capture from the returned outcome.
  *
+ * The optional `hooks` inject the delivery controls the single-instance
+ * defaults ({@link createRetryBudget}, {@link createWebhookBreaker}) or a
+ * cluster-shared implementation provide: `hooks.breaker` fast-fails an ejected
+ * endpoint (an open circuit -> a terminal `attempts:0` outcome, no network
+ * touched) and records the terminal result, keyed by `hooks.key`; `hooks.budget`
+ * rations retry amplification. Only outcomes that actually reached the network
+ * (`attempts > 0`) move the breaker - a pre-network rejection (SSRF block,
+ * redirect error, bad config) is a configuration signal, not an endpoint-health
+ * one, so it neither ejects nor heals. Omit `hooks` for the unchanged bare
+ * delivery.
+ *
  * @param {any} config the per-webhook config (url, transform, secret,
  *   previousSecret, retry, urlMode, validateUrl, resolve, allow, maxRedirects,
  *   timeoutMs, callbackTimeoutMs, idempotencyKey)
  * @param {string} topic @param {string} event @param {any} data
+ * @param {{ budget?: { take: (key?: string) => boolean | Promise<boolean> }, breaker?: { guard: (key?: string) => void, success: (key?: string) => void, failure: (err: any, key?: string) => void }, key?: string }} [hooks]
  * @returns {Promise<{ ok: true } | { ok: false, err: Error, attempts: number }>}
  */
-export async function deliverWebhook(config, topic, event, data) {
+export async function deliverWebhook(config, topic, event, data, hooks) {
 	const cbMs = config.callbackTimeoutMs ?? 10000;
 	try {
 		const payload = config.transform
@@ -379,6 +409,19 @@ export async function deliverWebhook(config, topic, event, data) {
 			: config.url;
 		if (typeof url !== 'string' || url.length === 0) {
 			return { ok: false, err: new Error('outbound webhook: url resolved to a non-string'), attempts: 0 };
+		}
+
+		// Endpoint-ejection gate BEFORE any body/crypto work: when the breaker is
+		// open, fast-fail without spending signing/idempotency cycles on a request
+		// that will not be sent. The caller dead-letters the `attempts:0` outcome.
+		const breaker = hooks && hooks.breaker;
+		const breakerKey = hooks && hooks.key;
+		if (breaker) {
+			try {
+				breaker.guard(breakerKey);
+			} catch (err) {
+				return { ok: false, err: err instanceof Error ? err : new Error(String(err)), attempts: 0 };
+			}
 		}
 
 		const body = JSON.stringify(payload);
@@ -421,7 +464,12 @@ export async function deliverWebhook(config, topic, event, data) {
 			headers['x-webhook-signature'] = signature;
 		}
 
-		return await deliverToUrl(url, headers, body, config);
+		const outcome = await deliverToUrl(url, headers, body, config, hooks);
+		if (breaker) {
+			if (outcome.ok) breaker.success(breakerKey);
+			else if (outcome.attempts > 0) breaker.failure(outcome.err, breakerKey);
+		}
+		return outcome;
 	} catch (err) {
 		return { ok: false, err, attempts: 0 };
 	}

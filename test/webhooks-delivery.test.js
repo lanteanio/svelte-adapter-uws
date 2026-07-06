@@ -7,7 +7,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createServer } from 'node:http';
 import { createHmac, createHash } from 'node:crypto';
-import { deliverWebhook, redactUrl } from '../src/plugins/webhooks/server.js';
+import {
+	deliverWebhook,
+	redactUrl,
+	createRetryBudget,
+	createWebhookBreaker,
+	WebhookCircuitOpenError
+} from '../src/plugins/webhooks/server.js';
 
 /** A scripted loopback server: `handler(req, res, body)` decides each response. */
 function makeServer() {
@@ -168,5 +174,97 @@ describe('deliverWebhook SSRF gate', () => {
 		const r = await deliverWebhook({ url: () => /** @type {any} */ (42), urlMode: 'off' }, 't', 'e', {});
 		expect(r.ok).toBe(false);
 		expect(String(r.err.message)).toContain('non-string');
+	});
+});
+
+describe('deliverWebhook with controls (hooks)', () => {
+	let srv;
+	let port;
+	beforeEach(async () => {
+		srv = makeServer();
+		port = await srv.listen();
+	});
+	afterEach(async () => {
+		await srv.close();
+	});
+
+	const url = () => `http://127.0.0.1:${port}/hook`;
+	const cfg = (extra) => ({ url: url(), urlMode: 'off', ...extra });
+
+	it('a retry budget stops retries early when out of tokens', async () => {
+		srv.set((_req, res) => { res.writeHead(500); res.end(); });
+		// capacity 1, no refill: the first retry consumes the only token, the
+		// second is denied -> 2 network attempts of the allowed 3.
+		const budget = createRetryBudget({ capacity: 1, refillPerSec: 0 });
+		const r = await deliverWebhook(cfg({ retry: fastRetry }), 't', 'e', {}, { budget, key: 'k' });
+		expect(r.ok).toBe(false);
+		expect(r.attempts).toBe(2);
+		expect(srv.received).toHaveLength(2);
+	});
+
+	it('a budget that denies every retry leaves exactly one attempt', async () => {
+		srv.set((_req, res) => { res.writeHead(503); res.end(); });
+		const r = await deliverWebhook(cfg({ retry: fastRetry }), 't', 'e', {}, { budget: { take: () => false }, key: 'k' });
+		expect(r.ok).toBe(false);
+		expect(r.attempts).toBe(1);
+		expect(srv.received).toHaveLength(1);
+	});
+
+	it('a budget error fails open so the retry still proceeds', async () => {
+		let n = 0;
+		srv.set((_req, res) => { n++; res.writeHead(n < 2 ? 500 : 200); res.end(); });
+		const budget = { take: () => { throw new Error('budget backend down'); } };
+		const r = await deliverWebhook(cfg({ retry: fastRetry }), 't', 'e', {}, { budget, key: 'k' });
+		expect(r.ok).toBe(true);
+		expect(n).toBe(2);
+	});
+
+	it('an open breaker fast-fails without touching the network', async () => {
+		const breaker = createWebhookBreaker({ failureThreshold: 1, resetMs: 60000 });
+		breaker.failure(new Error('prior'), 'k'); // open the circuit
+		const r = await deliverWebhook(cfg(), 't', 'e', {}, { breaker, key: 'k' });
+		expect(r.ok).toBe(false);
+		expect(r.attempts).toBe(0);
+		expect(r.err).toBeInstanceOf(WebhookCircuitOpenError);
+		expect(srv.received).toHaveLength(0);
+	});
+
+	it('a run of delivery failures opens the breaker, then ejects', async () => {
+		srv.set((_req, res) => { res.writeHead(500); res.end(); });
+		const breaker = createWebhookBreaker({ failureThreshold: 1, resetMs: 60000 });
+		const first = await deliverWebhook(cfg({ retry: fastRetry }), 't', 'e', {}, { breaker, key: 'k' });
+		expect(first.ok).toBe(false);
+		expect(first.attempts).toBe(3);
+		expect(breaker.stateOf('k')).toBe('broken');
+		const before = srv.received.length;
+		const second = await deliverWebhook(cfg({ retry: fastRetry }), 't', 'e', {}, { breaker, key: 'k' });
+		expect(second.attempts).toBe(0); // ejected, no further network hit
+		expect(srv.received.length).toBe(before);
+	});
+
+	it('a delivered webhook records success and heals the breaker', async () => {
+		const breaker = createWebhookBreaker({ failureThreshold: 5, resetMs: 60000 });
+		breaker.failure(new Error('x'), 'k'); // one prior failure, not yet open
+		const r = await deliverWebhook(cfg(), 't', 'e', {}, { breaker, key: 'k' });
+		expect(r.ok).toBe(true);
+		expect(breaker.stateOf('k')).toBe('healthy');
+	});
+
+	it('a pre-network rejection (SSRF block) does not trip the breaker', async () => {
+		const breaker = createWebhookBreaker({ failureThreshold: 1, resetMs: 60000 });
+		// strict mode (default) blocks the loopback target before any request -> attempts:0
+		const r = await deliverWebhook({ url: url() }, 't', 'e', {}, { breaker, key: 'k' });
+		expect(r.ok).toBe(false);
+		expect(r.attempts).toBe(0);
+		expect(breaker.stateOf('k')).toBe('healthy'); // endpoint health not signalled
+	});
+
+	it('a permanent 4xx counts as a delivery failure for the breaker', async () => {
+		srv.set((_req, res) => { res.writeHead(404); res.end(); });
+		const breaker = createWebhookBreaker({ failureThreshold: 1, resetMs: 60000 });
+		const r = await deliverWebhook(cfg({ retry: fastRetry }), 't', 'e', {}, { breaker, key: 'k' });
+		expect(r.ok).toBe(false);
+		expect(r.attempts).toBe(1);
+		expect(breaker.stateOf('k')).toBe('broken'); // attempts>0 -> endpoint signalled
 	});
 });

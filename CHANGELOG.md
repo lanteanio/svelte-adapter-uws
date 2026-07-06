@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.61] - 2026-07-06
+
+### Added
+
+- **`plugins/webhooks` gains injectable delivery controls: a retry budget and an endpoint-ejection breaker.** Outbound webhooks fan out one fire-and-forget delivery per subscribed endpoint per publish, with no ceiling - so a busy topic pointed at a slow or failing endpoint can pile up unbounded in-flight retries. `deliverWebhook(config, topic, event, data, hooks)` now takes an optional fifth `hooks` argument to bound that: `hooks.breaker` fast-fails an ejected endpoint (an open circuit returns a terminal `attempts:0` outcome without touching the network, so the caller dead-letters it) and records each terminal result, and `hooks.budget` rations retry *amplification* - a token consumed before each backoff, distinct from the per-delivery `attempts` cap, so a storm of failing deliveries to one endpoint cannot launch unbounded retry work while every delivery's first attempt still proceeds unrationed. Both are scoped by `hooks.key` (the caller passes the endpoint's identity), so one endpoint cannot starve or trip another. Only outcomes that actually reached the network (`attempts > 0`) move the breaker - a pre-network rejection (SSRF block, redirect error, bad config) is a configuration signal, not an endpoint-health one. Two in-process defaults ship for single-instance use: `createRetryBudget({ capacity, refillPerSec })` (a per-key token bucket) and `createWebhookBreaker({ failureThreshold, resetMs })` (a per-key circuit breaker that half-opens a single probe after the reset window and closes on success). Both read time only through the runtime seam, so backoff, refill, and reset stay deterministic under a seeded harness; `WebhookCircuitOpenError` (`code: 'WEBHOOK_CIRCUIT_OPEN'`) marks an ejected delivery. A cluster deployment injects a shared (Redis-backed) budget/breaker with the same interface instead. Fully backward compatible: omit `hooks` and delivery is byte-identical to before.
+
 ## [0.6.0-next.60] - 2026-07-06
 
 ### Added
