@@ -400,6 +400,12 @@ adapter({
     // Lower this if you expect many slow consumers.
     maxBackpressure: 1024 * 1024, // default: 1 MB
 
+    // Close a connection that stays pinned over maxBackpressure instead of
+    // shedding its frames forever - the bounded-recovery knob for a chronically
+    // slow consumer that would otherwise wedge a worker. Default false keeps the
+    // zero-config shed-and-continue behavior. Watch platform.pressure.maxBufferedBytes.
+    closeOnBackpressureLimit: false, // default: false
+
     // Enable per-message deflate. Default false (byte-identical to no
     // compression). `true` = SHARED_COMPRESSOR; a uWS constant (e.g.
     // uWS.DEDICATED_COMPRESSOR_4KB) for finer control. Applied per frame,
@@ -437,6 +443,8 @@ These options control how the server handles misbehaving or slow clients at the 
 **`maxPayloadLength`** (default: 1 MB) - the maximum size of a single incoming WebSocket message. If a client sends a message larger than this, uWS closes the connection immediately (not just the message - the entire connection is dropped). Set this based on the largest message your application expects to receive. uWS's own default is 16 KB, which the adapter previously matched; the 1 MB default ships now to handle typical app payloads in a single frame without forcing chunked-upload frameworks into ~12 KB chunks (which the previous 16 KB cap did). For a stricter cap, pin an explicit value (e.g. `16 * 1024` for the uWS-matching 16 KB).
 
 **`maxBackpressure`** (default: 1 MB) - the per-connection outbound send buffer, AND the threshold above which `publish` / `send` / `publishBatched` silently skip a subscriber. When a specific subscriber's buffer is over this size, uWS drops that frame *for that subscriber only* while continuing to deliver to every non-backpressured subscriber. This makes `publish` / `send` / `publishBatched` volatile-by-default for slow consumers (the right behavior for cursor positions, typing indicators, presence pings - see "Volatile / fire-and-forget delivery" below). The `drain` hook fires per-connection when the buffer empties again. Lower this if you want subscribers shed sooner; raise it if you prefer to keep the connection queued and absorb temporary slowness. uWS's own default is 64 KB; this adapter sets 1 MB to favor keeping the connection alive under pub/sub spikes.
+
+**`closeOnBackpressureLimit`** (default: `false`) - when `true`, uWS **closes** a connection that stays pinned over `maxBackpressure` instead of perpetually shedding its frames. The default shed-and-continue behavior keeps the connection alive and silently drops frames past the cap, which is correct for a transient spike but lets a permanently-slow client tie up buffer memory indefinitely; opt in to drop such a client instead. This is the bounded-recovery knob for a chronically slow consumer that would otherwise wedge a worker's outbound queue. Watch `platform.pressure.maxBufferedBytes` / `platform.pressure.backpressuredConnections` (or the `ws_backpressure_max_bytes` / `ws_backpressure_connections` metrics gauges) to decide whether your workload needs it. Default `false` is byte-identical to the previous behavior.
 
 **`compression`** (default: `false`) - per-message deflate for outbound frames. The default is byte-identical to no compression. Set `true` for `SHARED_COMPRESSOR` (one shared sliding window across all sockets - the right choice for a many-connection server), or pass a uWS constant like `uWS.DEDICATED_COMPRESSOR_4KB` (a per-socket window: slightly better compression for a few high-throughput connections, but memory grows with connection count). When a compressor is configured, compression is applied **per frame, not blanket**: text frames (`publish` / `send`) compress by default, binary codec frames (`publishWire` / `sendWire`) are opt-in, the **cursor** plugin stays uncompressed (its 60 Hz hot path), and the **presence** plugin opts in (low-frequency). This split matters because permessage-deflate CPU scales **per subscriber** - uWS does not compress-once-and-fan-out, even for `SHARED_COMPRESSOR` - so compressing a high-frequency broadcast to many subscribers is expensive (a coalesced cursor frame fanned to 1000 subscribers at 60 Hz can cost more than a full CPU core per topic). For a high-frequency, high-fan-out **text** topic, pass `{ compress: false }` to `publish` / `send` to opt it out. None of this applies until you enable compression.
 
@@ -722,7 +730,7 @@ SSL_CERT=./cert.pem SSL_KEY=./key.pem node build
 SSL_CERT=./cert.pem SSL_KEY=./key.pem PORT=443 HOST=0.0.0.0 BODY_SIZE_LIMIT=10M SHUTDOWN_TIMEOUT=60 node build
 ```
 
-When TLS is configured the server hot-reloads the certificate: a renewed cert on disk (certbot / cert-manager) is picked up automatically and served on new handshakes without re-binding the listen socket or dropping live connections (the served SAN host is swapped as a uWS SNI server name). The cert + key are validated before the swap, so a half-written file keeps the previous cert. Set `SSL_WATCH=0` to opt out. A non-SNI / unmatched-SNI client keeps the boot-time cert until a restart (the uWS default context is static). Automatic reload is single-process only in this release; a cluster deployment (`CLUSTER_WORKERS`) picks up a renewed cert on its next restart.
+When TLS is configured the server hot-reloads the certificate: a renewed cert on disk (certbot / cert-manager) is picked up automatically and served on new handshakes without re-binding the listen socket or dropping live connections (the served SAN host is swapped as a uWS SNI server name). The cert + key are validated before the swap, so a half-written file keeps the previous cert. Set `SSL_WATCH=0` to opt out. A non-SNI / unmatched-SNI client keeps the boot-time cert until a restart (the uWS default context is static). This works in clustered modes too: the primary watches the cert directory and broadcasts the reload to every worker (and reloads its own acceptor context in acceptor mode), so a renewed cert is served live across the whole cluster without a restart.
 
 ---
 
@@ -1498,13 +1506,17 @@ Worker-local backpressure signal. The adapter samples once per second (configura
 platform.pressure
 // {
 //   active: false,
-//   value: 0,                 // 0..1 saturation scalar (0 idle, 1 saturated)
-//   subscriberRatio: 12.4,    // total subscriptions / connections, on this worker
-//   publishRate: 240,         // platform.publish() calls/sec, last sample
-//   memoryMB: 128,            // process.memoryUsage().rss in MB
-//   reason: 'NONE'            // 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY'
+//   value: 0,                     // 0..1 saturation scalar (0 idle, 1 saturated)
+//   subscriberRatio: 12.4,        // total subscriptions / connections, on this worker
+//   publishRate: 240,             // platform.publish() calls/sec, last sample
+//   memoryMB: 128,                // process.memoryUsage().rss in MB
+//   reason: 'NONE',               // 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI' | 'CAPACITY'
+//   maxBufferedBytes: 0,          // worst per-connection outbound queue seen this tick (vs maxBackpressure)
+//   backpressuredConnections: 0   // sampled connections holding a notable (>64 KB) outbound queue
 // }
 ```
+
+`maxBufferedBytes` and `backpressuredConnections` are the outbound-queue view: `publish` fans out in C++ and drops silently past `maxBackpressure`, so these are how you SEE that shedding. The sampler reads `getBufferedAmount()` for a bounded sample of connections (up to 1024 per tick, so the cost is fixed even on a large worker); compare `maxBufferedBytes` against `maxBackpressure` (1 MB default) to gauge how close the worst consumer is to being shed, and set `closeOnBackpressureLimit` if you want a chronically wedged consumer dropped instead of shed forever.
 
 `value` folds the worst of the threshold signals and per-connection send-pressure into one number, so `platform.pressure.value > 0.8` is a coarse load gauge when you do not need to branch on the specific `reason`. Reading `platform.pressure` is a property access - safe in hot paths, no I/O. Use it for synchronous shed decisions in request handlers:
 
@@ -4796,6 +4808,32 @@ The bundled runner reads the swarm config from the environment, stamps wall-cloc
 DST_COUNT=1000 DST_BUGGIFY=random DST_CHECK_RATIO=0.05 GIT_COMMIT=$(git rev-parse HEAD) \
   npm run sim:swarm        # writes sim-swarm-result.json; exit 1 on a failing seed
 ```
+
+#### Golden-set regression gate
+
+The swarm proves each seed reproduces *itself*, but a code change that deterministically alters sim behavior still reproduces the new behavior - so the swarm passes it unnoticed. The golden gate pins the fingerprints to a committed baseline. `buildSimGoldens` projects a swarm result into a corpus (per-seed `{ seed, weight, fingerprint, digest }` plus the swarm config the fingerprints are only comparable under); `checkSimGoldens` re-runs those seeds and fails when the weighted sum of drifted fingerprints exceeds a budget (default `0` - any drift on a weighted seed fails).
+
+```js
+import { runSimSwarm, buildSimGoldens, checkSimGoldens } from 'svelte-adapter-uws/sim';
+
+// Bless a corpus from a clean swarm (a runner does this on --update):
+const swarm = await runSimSwarm({ seeds: ['1', '2', '3'], checkRatio: 1 });
+const corpus = buildSimGoldens(swarm, { swarm: { buggify: 'off' } });
+
+// Later, gate HEAD against it:
+const report = checkSimGoldens(corpus, await runSimSwarm({ seeds: ['1', '2', '3'] }));
+report.ok;         // false if any weighted seed's fingerprint drifted
+report.drifts;     // [{ seed, weight, kind: 'changed'|'missing', golden, actual }], weight-desc
+```
+
+A per-seed `weight` sets how much its drift counts against `maxDriftWeight`; `weight: 0` is a watch-list seed (drift is reported but never gates). The bundled runner verifies a committed corpus and re-blesses on demand:
+
+```sh
+npm run sim:golden               # verify HEAD against test/dst-goldens/*.json; exit 1 on drift
+npm run sim:golden -- --update   # regenerate + bless (refuses a broken or nondeterministic swarm)
+```
+
+An intentional behavior change is blessed by re-running `--update` and committing the corpus diff - the reviewable record of exactly what moved.
 
 ### Resource-leak harness
 

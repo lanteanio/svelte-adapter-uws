@@ -1,6 +1,6 @@
 {
   "name": "svelte-adapter-uws",
-  "version": "0.6.0-next.64",
+  "version": "0.6.0-next.65",
   "publishConfig": {
     "tag": "next"
   },
@@ -164,7 +164,8 @@
     "test:watch": "vitest",
     "test:e2e": "npx playwright test --config test/e2e/playwright.config.js",
     "test:coverage": "node scripts/coverage.js",
-    "sim:swarm": "node scripts/sim-swarm.js"
+    "sim:swarm": "node scripts/sim-swarm.js",
+    "sim:golden": "node scripts/sim-golden.js"
   },
   "engines": {
     "node": ">=22.0.0"

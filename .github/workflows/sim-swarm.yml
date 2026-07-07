@@ -11,6 +11,8 @@ on:
     paths:
       - 'src/**'
       - 'scripts/sim-swarm.js'
+      - 'scripts/sim-golden.js'
+      - 'test/dst-goldens/**'
       - 'test/**'
       - 'package.json'
   # A deeper nightly sweep that explores far more interleavings than a PR can.
@@ -52,6 +54,16 @@ jobs:
           DST_CHECK_RATIO: '0.05'
           DST_OUT: 'sim-swarm-result.json'
         run: npm run sim:swarm
+      # Golden-set regression gate: re-run the committed corpus seeds and fail if
+      # any fingerprint drifted from its blessed baseline. This is the cross-commit
+      # companion to the swarm above (which only proves each seed reproduces
+      # ITSELF); it runs here because this workflow, not `npm test`, is the CI that
+      # executes on a PR. An intentional behavior change is blessed by re-running
+      # `npm run sim:golden -- --update` and committing the corpus diff.
+      - name: Verify DST golden corpus
+        env:
+          GIT_COMMIT: ${{ github.sha }}
+        run: npm run sim:golden
       # Always upload, even on failure, so a failing sweep still leaves the
       # result JSON (with the failing seeds) for inspection.
       - name: Upload result

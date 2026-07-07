@@ -84,7 +84,7 @@ export const sharedTopics = new Map();
 /**
  * Coarse 1 Hz pressure snapshot exposed as platform.pressure. Mutated in place
  * by the sampler; read by the platform getter.
- * @type {{ active: boolean, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CAPACITY', topPublishers: { topic: string, messagesPerSec: number, bytesPerSec: number }[] }}
+ * @type {{ active: boolean, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI' | 'CAPACITY', maxBufferedBytes: number, backpressuredConnections: number, psi: { cpuSome10: number, memoryFull10: number, ioFull10: number } | null, cpuThrottle: { throttledRatio: number, nrThrottledDelta: number } | null, topPublishers: { topic: string, messagesPerSec: number, bytesPerSec: number }[] }}
  */
 export const pressureSnapshot = {
 	active: false,
@@ -93,6 +93,10 @@ export const pressureSnapshot = {
 	publishRate: 0,
 	memoryMB: 0,
 	reason: 'NONE',
+	maxBufferedBytes: 0,
+	backpressuredConnections: 0,
+	psi: null,
+	cpuThrottle: null,
 	topPublishers: []
 };
 

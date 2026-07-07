@@ -464,6 +464,12 @@ export default function (opts = {}) {
 				maxPayloadLength: websocket?.maxPayloadLength ?? 1024 * 1024,
 				idleTimeout: websocket?.idleTimeout ?? 120,
 				maxBackpressure: websocket?.maxBackpressure ?? 1024 * 1024,
+				// When true, uWS closes a connection that stays pinned over
+				// maxBackpressure instead of perpetually shedding its frames -
+				// the bounded-recovery knob for a chronically slow consumer that
+				// would otherwise wedge a worker's outbound queue. Default false
+				// keeps the zero-config shed-and-continue behavior byte-identical.
+				closeOnBackpressureLimit: websocket?.closeOnBackpressureLimit ?? false,
 				sendPingsAutomatically: websocket?.sendPingsAutomatically ?? true,
 				compression: websocket?.compression ?? false,
 				allowedOrigins: websocket?.allowedOrigins ?? 'same-origin',

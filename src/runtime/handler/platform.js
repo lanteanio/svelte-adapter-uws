@@ -730,7 +730,7 @@ export const platform = {
 	 *   closedWsAborts: number,
 	 *   protection: 'normal' | 'elevated' | 'siege',
 	 *   maxPayloadLength: number,
-	 *   pressure: { active: boolean, reason: string, value: number, subscriberRatio: number, publishRate: number, memoryMB: number },
+	 *   pressure: { active: boolean, reason: string, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, maxBufferedBytes: number, backpressuredConnections: number },
 	 *   assertions: Record<string, number>
 	 * }}
 	 */
@@ -747,7 +747,9 @@ export const platform = {
 				value: p.value,
 				subscriberRatio: p.subscriberRatio,
 				publishRate: p.publishRate,
-				memoryMB: p.memoryMB
+				memoryMB: p.memoryMB,
+				maxBufferedBytes: p.maxBufferedBytes,
+				backpressuredConnections: p.backpressuredConnections
 			},
 			assertions: Object.fromEntries(platform.assertions)
 		};

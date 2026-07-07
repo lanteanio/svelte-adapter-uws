@@ -424,6 +424,8 @@ export default function uws(options = {}) {
 				publishRate: 0,
 				memoryMB: 0,
 				reason: 'NONE',
+				maxBufferedBytes: 0,
+				backpressuredConnections: 0,
 				topPublishers: []
 			};
 		},
@@ -516,7 +518,9 @@ export default function uws(options = {}) {
 					value: p.value ?? 0,
 					subscriberRatio: p.subscriberRatio,
 					publishRate: p.publishRate,
-					memoryMB: p.memoryMB
+					memoryMB: p.memoryMB,
+					maxBufferedBytes: p.maxBufferedBytes ?? 0,
+					backpressuredConnections: p.backpressuredConnections ?? 0
 				},
 				assertions: Object.fromEntries(platform.assertions)
 			};

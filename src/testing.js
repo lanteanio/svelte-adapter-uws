@@ -807,7 +807,9 @@ export async function createTestServer(options = {}) {
 					value: p.value,
 					subscriberRatio: p.subscriberRatio,
 					publishRate: p.publishRate,
-					memoryMB: p.memoryMB
+					memoryMB: p.memoryMB,
+					maxBufferedBytes: p.maxBufferedBytes,
+					backpressuredConnections: p.backpressuredConnections
 				},
 				assertions: Object.fromEntries(platform.assertions)
 			};
@@ -1084,6 +1086,8 @@ export async function createTestServer(options = {}) {
 				publishRate: 0,
 				memoryMB: 0,
 				reason,
+				maxBufferedBytes: 0,
+				backpressuredConnections: 0,
 				topPublishers: []
 			};
 		},

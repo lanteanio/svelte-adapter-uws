@@ -1,7 +1,9 @@
 import process from 'node:process';
 import { isMainThread, parentPort, threadId, Worker, workerData } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
 import { env } from 'ENV';
+import { applyServerNames, createCertWatcher, reloadClusterTls } from './utils/tls-reload.js';
 import { monotonicNow, setTimer, setIntervalTimer, clearTimer } from './runtime.js';
 import { createStateHashDetector } from './state-hash-detector.js';
 import { readFdLimits, fdPreflightWarning } from './utils/fd-limit.js';
@@ -123,6 +125,14 @@ if (is_primary) {
 	const ssl_cert = env('SSL_CERT', '');
 	const ssl_key = env('SSL_KEY', '');
 	const is_tls = !!(ssl_cert && ssl_key);
+	// TLS cert hot-reload knobs, mirrored from the worker config (config.js) so the
+	// primary reads the same env. Default-ON when SSL is configured (opt out with
+	// SSL_WATCH=0). The primary owns the cert-directory watch in cluster mode; a
+	// single-process server watches worker-side (lifecycle.js).
+	const ssl_watch = is_tls && env('SSL_WATCH', '1') !== '0';
+	const _ssl_debounce_raw = parseInt(env('SSL_RELOAD_DEBOUNCE_MS', '500'), 10);
+	const ssl_reload_debounce_ms = Number.isFinite(_ssl_debounce_raw) && _ssl_debounce_raw >= 0 ? _ssl_debounce_raw : 500;
+	const ssl_sni_hosts = env('SSL_SNI_HOSTS', '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
 
 	let uWS, acceptorApp;
 	if (cluster_mode === 'acceptor') {
@@ -432,6 +442,57 @@ if (is_primary) {
 	for (let i = 0; i < io_count; i++) spawn_worker('io');
 	for (let i = 0; i < compute_count; i++) spawn_worker('compute');
 
+	// --- TLS certificate hot-reload (cluster primary half) ---
+	// The primary watches the cert directory and, on a renewed cert (certbot /
+	// cert-manager), broadcasts {type:'tls-reload'} so every worker swaps its own
+	// app's SNI context in place (validated before touching the app; a bad cert
+	// keeps the previous one). In acceptor mode the primary also reloads
+	// acceptorApp, which terminates TLS on this thread. Reloading BOTH is correct
+	// whether TLS terminates on the acceptor or the child worker apps. The listen
+	// socket is never re-bound and live connections survive. Non-SNI / unmatched
+	// clients keep the boot cert until a restart (the SSLApp default context is
+	// not swappable) - the documented caveat covering the SNI-sending majority.
+	let primaryCertWatcher = null;
+	let acceptorTlsHosts = [];
+	function onCertChange() {
+		acceptorTlsHosts = reloadClusterTls({
+			workers: workers.keys(),
+			acceptorApp: cluster_mode === 'acceptor' ? acceptorApp : null,
+			source: { certPath: ssl_cert, keyPath: ssl_key, hosts: ssl_sni_hosts },
+			acceptorHosts: acceptorTlsHosts,
+			onError: (err) => console.error('[tls] acceptor certificate reload skipped, kept the previous cert:', err && err.message ? err.message : err)
+		});
+	}
+	if (is_tls && ssl_watch) {
+		// Register the acceptor's SNI host(s) at boot so its context is reloadable
+		// (a worker registers its own hosts in start()). A parse failure disables
+		// the acceptor reload but never drops TLS.
+		if (cluster_mode === 'acceptor' && acceptorApp) {
+			try {
+				acceptorTlsHosts = applyServerNames(acceptorApp, { certPath: ssl_cert, keyPath: ssl_key, hosts: ssl_sni_hosts }, []);
+			} catch (err) {
+				console.error('[tls] acceptor SNI registration failed, hot-reload disabled on the acceptor context:', err && err.message ? err.message : err);
+			}
+		}
+		// Guard the watcher start: fs.watch throws ENOENT synchronously when the
+		// cert's parent directory does not exist (a not-yet-mounted secret volume,
+		// a mistyped path). Single-process degrades gracefully here (its cert-read
+		// gates the watcher), so the cluster primary must too - log and disable
+		// hot-reload rather than crash-loop the whole process at boot.
+		try {
+			primaryCertWatcher = createCertWatcher({
+				certPath: ssl_cert,
+				debounceMs: ssl_reload_debounce_ms,
+				onChange: onCertChange
+			});
+			primaryCertWatcher.start();
+			console.log(`[tls] primary watching ${dirname(ssl_cert)} for certificate renewals (cluster broadcast reload)`);
+		} catch (err) {
+			primaryCertWatcher = null;
+			console.error('[tls] primary cert watch failed to start, cluster hot-reload disabled (server keeps running):', err && err.message ? err.message : err);
+		}
+	}
+
 	/** @param {'SIGINT' | 'SIGTERM'} reason */
 	async function graceful_shutdown(reason) {
 		if (shutting_down) return;
@@ -443,6 +504,10 @@ if (is_primary) {
 		// Cancel all pending worker restarts so we don't spawn during shutdown
 		for (const t of restart_timers) clearTimer(t);
 		restart_timers.clear();
+
+		// Stop the cert-directory watcher so it never holds the loop or fires a
+		// broadcast at exiting workers.
+		if (primaryCertWatcher) { primaryCertWatcher.stop(); primaryCertWatcher = null; }
 
 		// Step 1: Keep accepting connections until the load balancer has
 		// had time to remove this pod from rotation (Kubernetes rolling updates).
@@ -479,7 +544,7 @@ if (is_primary) {
 } else {
 	// ── Worker thread or single-process mode ─────────────────────────────
 
-	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp } = await import('HANDLER');
+	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls } = await import('HANDLER');
 
 	// Clean worker-thread exit. A worker thread holds uWS's untracked libuv socket
 	// handles, so a bare process.exit() aborts the whole process
@@ -544,6 +609,12 @@ if (is_primary) {
 			} else if (msg.type === 'heartbeat') {
 				// Respond immediately  - primary uses acks to detect stuck workers.
 				parentPort.postMessage({ type: 'heartbeat-ack' });
+			} else if (msg.type === 'tls-reload') {
+				// Primary detected a renewed cert on disk and broadcast a reload.
+				// Swap this worker app's SNI context in place (validated before the
+				// swap; a bad cert keeps the previous one). No-op unless is_tls +
+				// ssl_watch, so a non-TLS or opted-out worker ignores it.
+				reloadTls();
 			} else if (msg.type === 'terminate') {
 				// Primary asked us to close the uWS App and exit (heartbeat timeout,
 				// state divergence, or shutdown timeout). exitWorkerClean avoids the

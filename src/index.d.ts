@@ -64,8 +64,9 @@ export type { WebSocket } from 'uWebSockets.js';
  * server watches the cert directory and swaps the SNI server name in place, so a
  * fresh cert is served without dropping the listen socket or live connections.
  * Set `SSL_WATCH=0` to opt out. A non-SNI / unmatched-SNI client keeps the boot
- * cert until a restart (the SSLApp default context is static). Automatic reload is
- * single-process only in this release; a cluster deployment reloads on restart.
+ * cert until a restart (the SSLApp default context is static). In clustered modes
+ * the primary watches the cert directory and broadcasts the reload to every
+ * worker, so a renewed cert is picked up live there too - no restart needed.
  */
 export interface AdapterOptions {
 	/**
@@ -236,6 +237,23 @@ export interface WebSocketOptions {
 	 * @default 1048576 (1 MB)
 	 */
 	maxBackpressure?: number;
+
+	/**
+	 * When `true`, uWS closes a connection that stays pinned over
+	 * `maxBackpressure` instead of perpetually shedding its frames. This is the
+	 * bounded-recovery knob for a chronically slow consumer that would otherwise
+	 * wedge a worker's outbound queue: the default shed-and-continue behavior
+	 * keeps the connection alive and silently drops frames past the cap, which is
+	 * correct for a transient spike but lets a permanently-slow client tie up
+	 * buffer memory indefinitely. Opt in to drop such a client instead.
+	 *
+	 * Watch `platform.pressure.maxBufferedBytes` /
+	 * `platform.pressure.backpressuredConnections` (or the `ws_backpressure_*`
+	 * metrics gauges) to decide whether your workload needs it.
+	 *
+	 * @default false (shed-and-continue; zero-config behavior unchanged)
+	 */
+	closeOnBackpressureLimit?: boolean;
 
 	/**
 	 * Enable per-message deflate compression. Pass `true` for `SHARED_COMPRESSOR`,
@@ -443,6 +461,10 @@ export interface WebSocketOptions {
 	 *   Map. `severity` is `soft` (a recoverable `assert`) or `fatal` (a
 	 *   hard-tier termination). Category cardinality is bounded by the
 	 *   source-declared categories (counter).
+	 * - `ws_backpressure_max_bytes` - worst per-connection outbound buffered
+	 *   bytes over the sampled connection set (gauge, sampled; `0` when healthy).
+	 * - `ws_backpressure_connections` - sampled connections holding a
+	 *   backpressured outbound queue (gauge, sampled; `0` when healthy).
 	 *
 	 * Accept-path cost is one unlabelled counter increment per admitted
 	 * upgrade; rejection branches add one labelled increment each; gauges
@@ -1524,6 +1546,22 @@ export interface PressureSnapshot {
 	 */
 	readonly cpuThrottle: { throttledRatio: number, nrThrottledDelta: number } | null;
 	/**
+	 * Worst per-connection outbound queue depth (`ws.getBufferedAmount()`, in
+	 * bytes) seen over the connections sampled this tick. `0` in the healthy
+	 * steady state. Compare against `maxBackpressure` (1 MB default) to gauge how
+	 * close the worst consumer is to the point where uWS begins shedding frames.
+	 * The walk is bounded (up to 1024 connections per tick), so on a worker
+	 * holding more than that this is a bounded sample rather than an exact max.
+	 */
+	readonly maxBufferedBytes: number;
+	/**
+	 * Number of sampled connections holding a notable outbound queue (more than
+	 * 64 KB of un-flushed bytes) at sample time - a wedged or slow consumer count
+	 * rather than the transient in-flight bytes of a healthy flush. Bounded by
+	 * the same per-tick sample cap as `maxBufferedBytes`.
+	 */
+	readonly backpressuredConnections: number;
+	/**
 	 * Top 5 topics by message rate during the last sample window, sorted
 	 * descending by `messagesPerSec`. Each entry is
 	 * `{ topic, messagesPerSec, bytesPerSec }`. Empty when no
@@ -2138,6 +2176,8 @@ export interface Platform {
 			subscriberRatio: number;
 			publishRate: number;
 			memoryMB: number;
+			maxBufferedBytes: number;
+			backpressuredConnections: number;
 		};
 		assertions: Record<string, number>;
 	};

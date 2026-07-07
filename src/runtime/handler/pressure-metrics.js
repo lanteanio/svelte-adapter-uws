@@ -1,4 +1,5 @@
 import { computePressureReason, computeTopPublishers, applyCapacityReason, WS_STATS, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from '../utils.js';
+import { foldConnectionBackpressure, BACKPRESSURE_SAMPLE_CAP, BACKPRESSURE_SAMPLE_THRESHOLD_BYTES } from '../utils/backpressure.js';
 import { DEFAULT_GRANT, leaseGrantSize, samplePressureValue } from '../wire.js';
 import { now, setIntervalTimer, clearIntervalTimer } from '../runtime.js';
 import { createOsPressureSampler } from '../utils/os-pressure.js';
@@ -143,6 +144,17 @@ function samplePressure(thresholds) {
 	const connections = wsConnections.size;
 	const subscriberRatio = connections > 0 ? counters.totalSubscriptions / connections : 0;
 
+	// Aggregate outbound backpressure across a bounded sample of the live
+	// connections. `getBufferedAmount()` is one C++ call per connection; the
+	// walk is capped at BACKPRESSURE_SAMPLE_CAP so a worker holding tens of
+	// thousands of sockets pays a fixed per-tick cost. This is the ONLY
+	// per-connection iteration the sampler performs and it never runs on the
+	// publish path (uWS fans out in C++; this reads a coarse 1 Hz health
+	// gauge). The fold is zero-alloc and unit-tested in isolation.
+	const { maxBufferedBytes, backpressuredConnections } = foldConnectionBackpressure(
+		wsConnections, BACKPRESSURE_SAMPLE_CAP, BACKPRESSURE_SAMPLE_THRESHOLD_BYTES
+	);
+
 	const mem = process.memoryUsage();
 	const heapUsedRatio = mem.heapTotal > 0 ? mem.heapUsed / mem.heapTotal : 0;
 	const memoryMB = mem.rss / (1024 * 1024);
@@ -202,6 +214,13 @@ function samplePressure(thresholds) {
 	pressureSnapshot.reason = effectiveReason;
 	pressureSnapshot.active = effectiveReason !== 'NONE';
 	pressureSnapshot.topPublishers = topPublishers;
+	// Aggregate outbound-queue telemetry from the bounded walk above. maxBufferedBytes
+	// is the worst per-connection queue depth seen this tick (compare against
+	// maxBackpressure, 1 MB default, to gauge headroom before uWS sheds);
+	// backpressuredConnections is how many sampled sockets are holding a
+	// notable queue. Both read 0 in the healthy steady state.
+	pressureSnapshot.maxBufferedBytes = maxBufferedBytes;
+	pressureSnapshot.backpressuredConnections = backpressuredConnections;
 	// Kernel readings ride the snapshot (platform.pressure / introspect /
 	// the posture export) as small stable objects; null when unavailable.
 	pressureSnapshot.psi = os.psi;

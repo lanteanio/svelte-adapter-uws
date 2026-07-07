@@ -58,7 +58,7 @@ setCohortHooks(
 import { platform } from './handler/platform.js';
 import { readBody, handleSSR } from './handler/ssr.js';
 import { requestDone, isDraining } from './handler/lifecycle.js';
-export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp } from './handler/lifecycle.js';
+export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls } from './handler/lifecycle.js';
 import { handleRequest } from './handler/request.js';
 import { handleAdminRequest } from './handler/admin.js';
 
@@ -416,6 +416,15 @@ if (WS_ENABLED) {
 	const gQueueDepth = containMetricInstrument(METRICS?.gauge(
 		'waiting_room_queue_depth', 'Clients currently polling the waiting room'
 	));
+	// Outbound-backpressure telemetry, sampled from the 1 Hz pressure snapshot.
+	// Worst per-connection buffered bytes seen over the sampled connection set,
+	// and the count of sampled connections holding a notable outbound queue.
+	const gBackpressureMaxBytes = containMetricInstrument(METRICS?.gauge(
+		'ws_backpressure_max_bytes', 'Worst per-connection outbound buffered bytes over the sampled connection set'
+	));
+	const gBackpressureConnections = containMetricInstrument(METRICS?.gauge(
+		'ws_backpressure_connections', 'Sampled connections holding a backpressured outbound queue'
+	));
 	// Descriptor observability. Worker threads share one process-wide fd
 	// table, so any worker's registry reports the whole-process truth. Each
 	// gauge registers only where its source exists (Linux/macOS; null on
@@ -664,6 +673,10 @@ if (WS_ENABLED) {
 		gPostureState?.set(lvl === 'siege' ? 2 : lvl === 'elevated' ? 1 : 0);
 		gUpgradeInflight?.set(admission.inFlight);
 		gQueueDepth?.set(queueDepthProbe !== null ? queueDepthProbe() : 0);
+		// Read the snapshot the sampler just folded (this hook runs later in the
+		// same tick), so these track the current window's backpressure figures.
+		gBackpressureMaxBytes?.set(pressureSnapshot.maxBufferedBytes);
+		gBackpressureConnections?.set(pressureSnapshot.backpressuredConnections);
 		if (gOpenFds !== undefined && ++fdSampleTick >= 5) {
 			fdSampleTick = 0;
 			const openFds = countOpenFds();
@@ -1830,6 +1843,7 @@ if (WS_ENABLED) {
 		maxPayloadLength: wsOptions.maxPayloadLength,
 		idleTimeout: wsOptions.idleTimeout,
 		maxBackpressure: wsOptions.maxBackpressure,
+		closeOnBackpressureLimit: wsOptions.closeOnBackpressureLimit,
 		sendPingsAutomatically: wsOptions.sendPingsAutomatically,
 		compression: typeof wsOptions.compression === 'number'
 			? wsOptions.compression

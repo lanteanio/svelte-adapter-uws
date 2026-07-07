@@ -139,3 +139,40 @@ export function createCertWatcher(config) {
 		}
 	};
 }
+
+/**
+ * The cluster-primary TLS reload action, fired by the primary's cert-directory
+ * watcher on a renewed cert. In acceptor mode - where TLS terminates on the
+ * primary's own acceptor app - it reloads that app's SNI context in place first;
+ * then it broadcasts a `{ type: 'tls-reload' }` message to every worker so each
+ * swaps its OWN app's context. Reloading both is correct whether TLS terminates
+ * on the acceptor or on the child worker apps. The acceptor reload validates the
+ * cert before touching the app (a bad cert keeps the previous one, reported via
+ * `onError`); the per-worker post is best-effort (a worker mid-exit may throw).
+ *
+ * Pure over its inputs apart from the acceptor-app mutation and the postMessage
+ * side effects, so a unit test drives it with a mock acceptor + mock workers.
+ *
+ * @param {{
+ *   workers: Iterable<{ postMessage: (msg: any) => void }>,
+ *   acceptorApp?: { addServerName: Function, removeServerName: Function } | null,
+ *   source?: { certPath: string, keyPath: string, hosts?: string[] },
+ *   acceptorHosts?: string[],
+ *   onError?: (err: any) => void
+ * }} args
+ * @returns {string[]} the acceptor's reconciled host list (the input `acceptorHosts` unchanged when there is no acceptor app or the reload threw)
+ */
+export function reloadClusterTls({ workers, acceptorApp, source, acceptorHosts = [], onError }) {
+	let hosts = acceptorHosts;
+	if (acceptorApp && source) {
+		try {
+			hosts = applyServerNames(acceptorApp, source, acceptorHosts);
+		} catch (err) {
+			if (onError) onError(err);
+		}
+	}
+	for (const worker of workers) {
+		try { worker.postMessage({ type: 'tls-reload' }); } catch { /* worker exiting */ }
+	}
+	return hosts;
+}

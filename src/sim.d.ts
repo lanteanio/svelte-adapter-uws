@@ -226,6 +226,67 @@ export interface SimSwarmResult {
 
 export function runSimSwarm(config?: SimSwarmConfig): Promise<SimSwarmResult>;
 
+/** One seed's committed golden: the structural fingerprint plus a small digest
+ *  for triage, weighted by how much its drift counts against the gate. */
+export interface SimGoldenEntry {
+	seed: string;
+	/** How much this seed's drift counts against maxDriftWeight. Default 1;
+	 *  0 is a watch-list seed (drift is reported but never gates). */
+	weight: number;
+	/** The 8-hex-char structural fingerprint recorded for this seed. */
+	fingerprint: string;
+	digest: {
+		violations: number;
+		fatals: number;
+		uncaught: number;
+		violationCategories: string[];
+		buggified: boolean;
+	};
+}
+
+/** A committable golden corpus: the per-seed fingerprints plus the swarm config
+ *  they are only comparable under. Regenerate (bless) when behavior changes. */
+export interface SimGoldenCorpus {
+	schemaVersion: number;
+	gitCommit: string | null;
+	recordedAt: string | null;
+	/** The swarm knobs the fingerprints were recorded under (buggify /
+	 *  buggifyProbability / faultProfile / base). Regenerate if any change. */
+	swarm: object | null;
+	entries: SimGoldenEntry[];
+}
+
+/** One drifted seed in a golden check: the recorded vs the freshly-observed
+ *  fingerprint + digest, for triage. */
+export interface SimGoldenDrift {
+	seed: string;
+	weight: number;
+	kind: 'changed' | 'missing';
+	golden: { fingerprint: string; digest: SimGoldenEntry['digest'] };
+	/** null when the seed was missing from the run. */
+	actual: { fingerprint: string; digest: SimGoldenEntry['digest'] } | null;
+}
+
+/** The result of checking a corpus against a fresh swarm. */
+export interface SimGoldenReport {
+	/** True iff there is no config mismatch and driftWeight <= maxDriftWeight. */
+	ok: boolean;
+	totalWeight: number;
+	driftWeight: number;
+	maxDriftWeight: number;
+	/** Drifted seeds, sorted weight-desc then seed. */
+	drifts: SimGoldenDrift[];
+	/** Non-null when the run's swarm config is incomparable to the corpus. */
+	configMismatch: string | null;
+	counts: { changed: number; missing: number; added: number; matched: number };
+}
+
+/** Project a swarm result into a committable golden corpus. Pure. */
+export function buildSimGoldens(swarmResult: SimSwarmResult, opts?: { weights?: Record<string, number>; gitCommit?: string | null; recordedAt?: string | null; swarm?: object | null }): SimGoldenCorpus;
+
+/** Compare a golden corpus against a fresh swarm result (weighted drift gate). Pure. */
+export function checkSimGoldens(golden: SimGoldenCorpus, swarmResult: SimSwarmResult, opts?: { maxDriftWeight?: number }): SimGoldenReport;
+
 // - Building blocks (re-exported for advanced harnesses) ---------------------
 
 export interface SeededRng {

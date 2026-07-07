@@ -24,11 +24,11 @@ export function requestDone() {
 
 // --- TLS certificate hot-reload (opt-in via ssl_watch; see utils/tls-reload.js) ---
 // Registered SNI hosts for this app, updated on each reload; and the directory
-// watcher. AUTOMATIC reload is SINGLE-PROCESS only in this release: a cluster
-// worker registers its SNI hosts but does not watch, and the cluster primary
-// broadcast that would drive per-worker reloads is not yet wired (reloadTls is
-// exported for that follow-up). A cluster deployment picks up a renewed cert on
-// its next restart; run single-process for automatic reload.
+// watcher. In SINGLE-PROCESS mode this module both watches the cert directory and
+// reloads. In CLUSTER mode the cert-directory watch lives on the primary (index.js);
+// a worker registers its SNI hosts here but does not watch, and reloadTls() is
+// driven by the primary's {type:'tls-reload'} broadcast when it detects a renewed
+// cert. Either way a renewed cert is served without re-binding the listen socket.
 let tlsHosts = [];
 let certWatcher = null;
 
@@ -36,8 +36,8 @@ let certWatcher = null;
  * Re-read the certificate on disk and swap the SNI server name(s) in place so a
  * renewed cert is served without re-binding the listen socket. Validates the
  * cert + key BEFORE touching the app, so a partial write keeps the previous
- * certificate (TLS never drops). No-op on a non-TLS server. Exported so a future
- * cluster primary-broadcast can drive a reload on this worker (not yet wired).
+ * certificate (TLS never drops). No-op on a non-TLS server. Exported so the
+ * cluster primary-broadcast handler (index.js) can drive a reload on this worker.
  */
 export function reloadTls() {
 	if (!is_tls || !ssl_watch) return;
@@ -52,9 +52,9 @@ export function reloadTls() {
  * Register the certificate's SNI host(s) so the served hosts become hot-reloadable
  * (the SSLApp default context is not), and - in single-process mode - start
  * watching the cert directory. Called from start() once the listen socket is
- * bound. In cluster mode every worker registers its hosts, but the automatic
- * cert-directory watch runs only single-process; the cluster primary-broadcast
- * reload is a follow-up, so a cluster deployment reloads on restart.
+ * bound. In cluster mode every worker registers its hosts here but does not watch;
+ * the primary (index.js) owns the cert-directory watch and drives each worker's
+ * reloadTls() via a {type:'tls-reload'} broadcast.
  */
 function initTlsReload() {
 	if (!is_tls || !ssl_watch) return;
@@ -65,8 +65,8 @@ function initTlsReload() {
 		return;
 	}
 	// Only a single-process server watches its own cert directory. A cluster worker
-	// (parentPort set) does not watch; automatic reload is single-process only in
-	// this release (the cluster primary-broadcast reload is a follow-up).
+	// (parentPort set) does not watch - the primary owns the watch and drives this
+	// worker's reload via a {type:'tls-reload'} broadcast (index.js).
 	if (!parentPort) {
 		certWatcher = createCertWatcher({
 			certPath: ssl_cert,

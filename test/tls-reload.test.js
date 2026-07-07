@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, copyFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseSniHosts, applyServerNames, createCertWatcher } from '../src/runtime/utils/tls-reload.js';
+import { parseSniHosts, applyServerNames, createCertWatcher, reloadClusterTls } from '../src/runtime/utils/tls-reload.js';
 
 // Cert parsing / server-name reconciliation needs a real X.509 cert with a SAN.
 // We generate a couple at setup with openssl (present on dev + CI images); if it
@@ -161,5 +161,78 @@ describe('createCertWatcher (injected clock + fs)', () => {
 		w.stop();
 		expect(t.size()).toBe(0);
 		expect(() => w.stop()).not.toThrow(); // safe repeat
+	});
+
+	it('surfaces a watchFs error from start() (fs.watch throws ENOENT on a missing dir) so the caller must guard it', () => {
+		// Node's fs.watch throws synchronously when the watched directory is absent.
+		// The watcher does not swallow it - callers (lifecycle.js, index.js primary)
+		// wrap start() to degrade gracefully instead of crashing the process.
+		const watchFs = () => { const e = new Error("ENOENT: no such file or directory, watch '/no/such/dir'"); e.code = 'ENOENT'; throw e; };
+		const w = createCertWatcher({ certPath: '/no/such/dir/live.crt', onChange: () => {}, watchFs });
+		expect(() => w.start()).toThrow(/ENOENT/);
+	});
+});
+
+// The cluster-primary reload action: broadcast to every worker, and (acceptor
+// mode) reload the acceptor app's own context first. The broadcast path needs no
+// certs; the acceptor-reload path uses a real cert (openssl-gated).
+function mockWorker() {
+	const posted = [];
+	return { posted, postMessage(msg) { posted.push(msg); } };
+}
+
+describe('reloadClusterTls (cluster broadcast)', () => {
+	it('broadcasts {type:tls-reload} to every worker (no acceptor app)', () => {
+		const workers = [mockWorker(), mockWorker(), mockWorker()];
+		const hosts = reloadClusterTls({ workers, acceptorApp: null, acceptorHosts: ['prev.example.com'] });
+		for (const w of workers) expect(w.posted).toEqual([{ type: 'tls-reload' }]);
+		// No acceptor app -> the acceptor host list is returned unchanged.
+		expect(hosts).toEqual(['prev.example.com']);
+	});
+
+	it('does not let one exiting worker (postMessage throws) stop the broadcast', () => {
+		const good1 = mockWorker();
+		const bad = { postMessage() { throw new Error('worker exiting'); } };
+		const good2 = mockWorker();
+		expect(() => reloadClusterTls({ workers: [good1, bad, good2], acceptorApp: null })).not.toThrow();
+		expect(good1.posted).toEqual([{ type: 'tls-reload' }]);
+		expect(good2.posted).toEqual([{ type: 'tls-reload' }]);
+	});
+
+	it('reports an acceptor reload error via onError but still broadcasts and keeps the prior hosts', () => {
+		const workers = [mockWorker()];
+		const app = mockApp();
+		let errored = null;
+		// A source pointing at a nonexistent cert makes applyServerNames throw.
+		const hosts = reloadClusterTls({
+			workers,
+			acceptorApp: app,
+			source: { certPath: '/no/such/cert.crt', keyPath: '/no/such/cert.key' },
+			acceptorHosts: ['kept.example.com'],
+			onError: (err) => { errored = err; }
+		});
+		expect(errored).toBeTruthy(); // onError fired with the thrown cert-read error
+		expect(String(errored.message || errored)).toMatch(/ENOENT|no such file/);
+		expect(hosts).toEqual(['kept.example.com']); // reload threw -> prior hosts kept
+		expect(app.calls.add).toHaveLength(0); // app never touched on a bad cert
+		expect(workers[0].posted).toEqual([{ type: 'tls-reload' }]); // workers still notified
+	});
+});
+
+describeSsl()('reloadClusterTls (acceptor reload with a real cert)', () => {
+	it('reloads the acceptor app SNI in place and broadcasts to workers', () => {
+		const workers = [mockWorker(), mockWorker()];
+		const app = mockApp();
+		const hosts = reloadClusterTls({
+			workers,
+			acceptorApp: app,
+			source: { certPath: certs.A.crt, keyPath: certs.A.key },
+			acceptorHosts: []
+		});
+		// Acceptor registered the cert's SAN hosts...
+		expect(hosts).toEqual(['*.api.example.com', 'a.example.com']);
+		expect(app.calls.add.map((c) => c.host).sort()).toEqual(['*.api.example.com', 'a.example.com']);
+		// ...and every worker was told to reload its own context.
+		for (const w of workers) expect(w.posted).toEqual([{ type: 'tls-reload' }]);
 	});
 });

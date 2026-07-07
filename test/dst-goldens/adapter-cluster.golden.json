@@ -1,0 +1,500 @@
+{
+  "schemaVersion": 1,
+  "gitCommit": null,
+  "recordedAt": "2026-07-07T13:36:00.888Z",
+  "swarm": {
+    "buggify": "off",
+    "buggifyProbability": 0.25,
+    "faultProfile": {
+      "drop": 0.25,
+      "duplicate": 0.15,
+      "reorder": 0.5,
+      "maxJitterMs": 30
+    },
+    "base": {
+      "workers": 3
+    }
+  },
+  "entries": [
+    {
+      "seed": "1",
+      "weight": 1,
+      "fingerprint": "f0bb8a29",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "2",
+      "weight": 1,
+      "fingerprint": "4c2dd16a",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "3",
+      "weight": 1,
+      "fingerprint": "4783a61c",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "4",
+      "weight": 1,
+      "fingerprint": "dfbe5f38",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "5",
+      "weight": 1,
+      "fingerprint": "592d0152",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "6",
+      "weight": 1,
+      "fingerprint": "ab004605",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "7",
+      "weight": 1,
+      "fingerprint": "8ef4b625",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "8",
+      "weight": 1,
+      "fingerprint": "437ae2cb",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "9",
+      "weight": 1,
+      "fingerprint": "0e7fcbd4",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "10",
+      "weight": 1,
+      "fingerprint": "2c67a0cd",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "11",
+      "weight": 1,
+      "fingerprint": "10494d2e",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "12",
+      "weight": 1,
+      "fingerprint": "2e0588c0",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "13",
+      "weight": 1,
+      "fingerprint": "8a8a4be4",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "14",
+      "weight": 1,
+      "fingerprint": "cb8247d1",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "15",
+      "weight": 1,
+      "fingerprint": "43bb3eb8",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "16",
+      "weight": 1,
+      "fingerprint": "093b3013",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "17",
+      "weight": 1,
+      "fingerprint": "1fd1dd39",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "18",
+      "weight": 1,
+      "fingerprint": "86b82126",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "19",
+      "weight": 1,
+      "fingerprint": "bbe21d8c",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "20",
+      "weight": 1,
+      "fingerprint": "0b1bf03d",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "21",
+      "weight": 1,
+      "fingerprint": "c029b8b3",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "22",
+      "weight": 1,
+      "fingerprint": "2d157cdf",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "23",
+      "weight": 1,
+      "fingerprint": "4f1dad9c",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "24",
+      "weight": 1,
+      "fingerprint": "655d9cc4",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "25",
+      "weight": 1,
+      "fingerprint": "c111bc89",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "26",
+      "weight": 1,
+      "fingerprint": "545d7604",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "27",
+      "weight": 1,
+      "fingerprint": "49b6b274",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "28",
+      "weight": 1,
+      "fingerprint": "b67b1854",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "29",
+      "weight": 1,
+      "fingerprint": "6ca796b2",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "30",
+      "weight": 1,
+      "fingerprint": "8f9f677e",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "31",
+      "weight": 1,
+      "fingerprint": "56b816c4",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "32",
+      "weight": 1,
+      "fingerprint": "a3f82084",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "33",
+      "weight": 1,
+      "fingerprint": "e8b27f3e",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "34",
+      "weight": 1,
+      "fingerprint": "acae4868",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "35",
+      "weight": 1,
+      "fingerprint": "de0a0cb5",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "36",
+      "weight": 1,
+      "fingerprint": "42fa1c51",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "37",
+      "weight": 1,
+      "fingerprint": "49cd5b47",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "38",
+      "weight": 1,
+      "fingerprint": "5b7cba33",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "39",
+      "weight": 1,
+      "fingerprint": "dc861957",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    },
+    {
+      "seed": "40",
+      "weight": 1,
+      "fingerprint": "8617db7b",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "buggified": false
+      }
+    }
+  ]
+}
