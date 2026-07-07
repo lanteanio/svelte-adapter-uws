@@ -220,7 +220,13 @@ export function createReplay(options = {}) {
 				try { snapshot = structuredClone(data); } catch { snapshot = JSON.parse(JSON.stringify(data)); }
 			}
 			pushMessage(state, { seq: state.seq, topic, event, data: snapshot });
-			return platform.publish(topic, event, data);
+			// Stamp the buffer's own authoritative seq onto the broadcast frame
+			// instead of letting platform.publish allocate an independent in-memory
+			// counter. Without this the wire seq and the replay seq are two spaces
+			// that diverge across a restart (or across cluster instances once a
+			// shared backend is the authority), so a resuming client gap-fills its
+			// live _lastSeq against the wrong offsets and duplicates or drops events.
+			return platform.publish(topic, event, data, { seq: state.seq });
 		},
 
 		seq(topic) {

@@ -137,6 +137,9 @@ export async function shutdown() {
 	// Stop the per-worker consistency auditor timer (no-op when it was never
 	// installed - the interval-0 / not-yet-started case).
 	counters.consistencyAuditor?.stop();
+	// Stop the optional resource-growth trend auditor timer (no-op when never
+	// installed - the default interval-0 case).
+	counters.resourceGrowthAuditor?.stop();
 	// Snapshot first: end() synchronously fires the close handler, which removes
 	// the entry from wsConnections as we iterate. Use end() (graceful) not
 	// close() (forceful) - end() flushes buffered outbound frames and sends a

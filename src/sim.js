@@ -13,6 +13,8 @@ import { createTestServer } from './testing.js';
 import { WS_SUBSCRIPTIONS, resetProcessEpoch } from './runtime/utils.js';
 import { checkSubscriptionBookkeeping } from './runtime/invariants.js';
 import { createConsistencyAuditor } from './runtime/auditor.js';
+import { createResourceTracker } from './runtime/leak-detect.js';
+import { structuralResourceProbes } from './runtime/leak-probes.js';
 import { createClusterRelay, createClusterBus, createSupervisor, clusterFinalState, checkNoMisdelivery, checkStateConvergence } from './runtime/sim-cluster.js';
 
 // Building blocks for composing a custom multi-instance runner over the SAME
@@ -25,6 +27,13 @@ export {
 	createInMemoryUwsHelpers, setRuntimeEnv, resetRuntimeEnv, resetProcessEpoch,
 	DEFAULT_SEED, FIXED_EPOCH
 };
+
+// The reusable resource-leak harness. The pure trend kernel + multi-series
+// tracker + assertion (leak-detect.js) and the live-collection probe factories
+// (leak-probes.js) are the single source of truth downstream packages re-export,
+// so a framework leak test and the adapter's own DST harness share one detector.
+export { detectGrowth, createResourceTracker, assertNoResourceGrowth, LeakError } from './runtime/leak-detect.js';
+export { structuralResourceProbes, processResourceProbes, createResourceGrowthAuditor } from './runtime/leak-probes.js';
 
 /**
  * Build the plain state snapshot the shared invariant predicates read from the
@@ -131,6 +140,62 @@ async function defaultScenario(api, opts) {
 	await api.advance();
 }
 
+// Number of open/close cycles churnScenario runs. Enough samples that the trend
+// kernel has a well-populated post-warmup window on the structural series.
+const CHURN_CYCLES = 12;
+
+/**
+ * A connection-churn scenario: repeatedly connect a batch of clients, subscribe
+ * them, publish, then CLOSE them, advancing between phases. A healthy close path
+ * sheds every per-connection and per-topic bookkeeping entry, so the structural
+ * resource series (sampled when `leakProbe` is set) oscillates around a flat
+ * baseline rather than trending upward. Exported so a leak test can use it as the
+ * scenario, and as a template for a downstream churn harness.
+ *
+ * @param {any} api the sim api (single-worker)
+ * @param {{ clients: number, topics: string[] }} opts
+ */
+export async function churnScenario(api, opts) {
+	const topics = opts.topics;
+	const perCycle = Math.max(1, opts.clients);
+	for (let cycle = 0; cycle < CHURN_CYCLES; cycle++) {
+		const conns = [];
+		for (let i = 0; i < perCycle; i++) conns.push(api.connect());
+		await api.advance();
+		for (const c of conns) for (const t of topics) c.subscribe(t);
+		await api.advance();
+		for (const t of topics) api.publish(t, 'tick', { cycle });
+		await api.advance();
+		for (const c of conns) c.close();
+		await api.advance();
+	}
+}
+
+/**
+ * The default structural resource sources the simulator trends when
+ * `leakProbe` is set: live population sizes that a correct close path returns to
+ * baseline. Both are read functions over the in-memory app, so they carry NO
+ * app-external state and reproduce bit-for-bit across runs of the same seed.
+ * Only `.size`-style live populations here - never a monotonic counter (see the
+ * exclusion list in leak-probes.js).
+ *
+ * @param {ReturnType<typeof createInMemoryApp>} app
+ * @returns {Record<string, () => number>}
+ */
+function structuralSimSources(app) {
+	return {
+		// Live connection count: rises on connect, must fall on close.
+		connections: () => app._connections.size,
+		// Total membership across all live connections (per-connection topic Sets):
+		// a subscribe/close path that stops shedding shows here.
+		subscriptions: () => {
+			let n = 0;
+			for (const ws of app._connections) n += ws._topics.size;
+			return n;
+		}
+	};
+}
+
 /**
  * Run one simulation.
  *
@@ -148,7 +213,8 @@ async function defaultScenario(api, opts) {
  *   allowSystemTopicSubscribe?: boolean,
  *   allowNonAsciiTopics?: boolean,
  *   upgradeAdmission?: object,
- *   protection?: string
+ *   protection?: string,
+ *   leakProbe?: boolean
  * }} [config]
  * @returns {Promise<any>} a SimResult
  */
@@ -189,11 +255,18 @@ export async function runSim(config = {}) {
 		const violations = [];
 		const seen = new Set();
 		const auditor = createSimAuditor(() => app);
+		// Opt-in structural resource sampling. Reads only live Map/Set-derived
+		// sizes (deterministic), so the resulting reports join the reproducer gate.
+		// Null (and zero cost) unless the caller sets `leakProbe`.
+		const leakTracker = config.leakProbe
+			? createResourceTracker(structuralResourceProbes(structuralSimSources(app)))
+			: null;
 		function checkInvariants() {
 			for (const v of auditor.runOnce()) {
 				const key = v.category + ':' + JSON.stringify(v.context);
 				if (!seen.has(key)) { seen.add(key); violations.push(v); }
 			}
+			if (leakTracker) leakTracker.sample();
 		}
 
 		let totalSteps = 0;
@@ -247,6 +320,9 @@ export async function runSim(config = {}) {
 			// seed. Excluded from the reproducer comparison (which is violations +
 			// structural state only).
 			clientFrames: clientList.map((c) => c.json()),
+			// Structural resource-growth trend per series (only when leakProbe is set).
+			// Deterministic (structural sizes only), so replaySim compares it too.
+			resourceGrowth: leakTracker ? leakTracker.analyze().metrics : undefined,
 			finalState,
 			// Non-serializable carriers for in-process replaySim (the CODE is what
 			// a cross-process reproducer pins via gitCommit).
@@ -601,7 +677,11 @@ export async function replaySim(reproducer) {
 	// them too. metrics has a fixed key order in both paths, so JSON.stringify is stable.
 	const sameMetrics = JSON.stringify(result.metrics) === JSON.stringify(reproducer.metrics);
 	const sameVirtualTime = result.virtualTimeMs === reproducer.virtualTimeMs;
-	result.reproduced = sameViolations && sameState && sameFatals && sameCluster && sameMetrics && sameVirtualTime;
+	// Structural resource-growth trend (leakProbe runs only; undefined otherwise,
+	// which compares equal). Fed by structural sizes only, so it is deterministic
+	// and a close/eviction path that drifts across runs flips `reproduced`.
+	const sameResourceGrowth = JSON.stringify(result.resourceGrowth ?? null) === JSON.stringify(reproducer.resourceGrowth ?? null);
+	result.reproduced = sameViolations && sameState && sameFatals && sameCluster && sameMetrics && sameVirtualTime && sameResourceGrowth;
 	return result;
 }
 

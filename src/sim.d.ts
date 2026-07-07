@@ -99,6 +99,10 @@ export interface SimConfig {
 	/** Forwarded to createTestServer to make the upgrade-admission gate live. */
 	upgradeAdmission?: Record<string, any>;
 	protection?: 'normal' | 'auto' | 'elevated' | 'siege';
+	/** Sample structural resource sizes each step and populate `resourceGrowth`
+	 *  on the result. Structural (Map/Set-size) only, so it stays inside the
+	 *  determinism gate. Off (and zero cost) by default. */
+	leakProbe?: boolean;
 }
 
 /** A single-server structural snapshot (the single-worker finalState). */
@@ -138,6 +142,9 @@ export interface SimResult {
 	/** Per-worker client frames (multi-worker only), sorted by worker id. */
 	clusterFrames?: Array<{ worker: number; clients: any[][] }>;
 	finalState: SimSnapshot | SimClusterFinalState;
+	/** Per-series structural resource-growth trend (present only when the run set
+	 *  `leakProbe`). Deterministic, so replaySim compares it too. */
+	resourceGrowth?: GrowthReport[];
 	/** True only on a replaySim result whose violations + state + fatals + cluster frames matched the reproducer. */
 	reproduced?: boolean;
 }
@@ -275,3 +282,89 @@ export function createInMemoryUwsHelpers(app: InMemoryApp): InMemoryUwsHelpers;
 
 export const DEFAULT_SEED: string;
 export const FIXED_EPOCH: number;
+
+// - Resource-leak harness ----------------------------------------------------
+// A reusable, pure trend detector over a numeric time series, plus the live
+// probe factories and an optional observe-only in-process auditor. Downstream
+// packages re-export these so a framework leak test shares one detector.
+
+/** The verdict of the pure trend kernel over one numeric series. */
+export interface GrowthReport {
+	/** Series label (set by the tracker; absent for a bare detectGrowth call). */
+	name?: string;
+	/** Number of samples analyzed (post-warmup window length). */
+	n: number;
+	first: number;
+	last: number;
+	min: number;
+	max: number;
+	/** last - first. */
+	delta: number;
+	/** Least-squares slope over the analyzed window (per sample). */
+	slope: number;
+	/** Fraction of consecutive pairs that did not decrease, in [0,1]. */
+	monotonicFraction: number;
+	/** True only when the slope, monotonic-fraction, and delta votes all agree. */
+	leaking: boolean;
+	/** Stable machine-readable verdict tag. */
+	reason: string;
+}
+
+export interface GrowthOptions {
+	/** Leading samples to discard before analysis (a startup transient). Default 0. */
+	warmup?: number;
+	/** Minimum analyzed-window length below which the verdict short-circuits. Default 8. */
+	minSamples?: number;
+	/** The delta (last - first) must EXCEED this to count. Default 0. */
+	tolerance?: number;
+	/** The least-squares slope must EXCEED this to count. Default 0. */
+	minSlope?: number;
+	/** The non-decreasing fraction must be at least this to count. Default 0.9. */
+	minMonotonicFraction?: number;
+}
+
+/** A single probe: a named numeric reading of some live resource. */
+export interface ResourceProbe {
+	name: string;
+	read: () => number;
+}
+
+/** A live source for structuralResourceProbes: a Map/Set (probed by `.size`) or a read function. */
+export type ResourceSource = { size?: number } | (() => number);
+
+export interface ResourceTracker {
+	/** Read every probe once and append to its series. */
+	sample(): void;
+	/** A copy of one probe's recorded series. */
+	series(name: string): number[];
+	/** The probe names, in order. */
+	names(): string[];
+	/** Run the trend kernel over every series. */
+	analyze(opts?: GrowthOptions): { metrics: GrowthReport[]; leaks: GrowthReport[]; leaking: boolean };
+	/** Clear all series. */
+	reset(): void;
+}
+
+/** Thrown by assertNoResourceGrowth; carries the offending reports on `.leaks`. */
+export class LeakError extends Error {
+	leaks: GrowthReport[];
+	constructor(leaks: GrowthReport[]);
+}
+
+export function detectGrowth(samples: number[], opts?: GrowthOptions): GrowthReport;
+export function createResourceTracker(probes: ResourceProbe[] | Record<string, () => number>, opts?: { maxSamples?: number }): ResourceTracker;
+export function assertNoResourceGrowth(trackerOrReport: ResourceTracker | GrowthReport[] | GrowthReport | { leaks: GrowthReport[] }, opts?: GrowthOptions): void;
+export function structuralResourceProbes(sources: Record<string, ResourceSource>): ResourceProbe[];
+export function processResourceProbes(opts?: { forceGc?: boolean }): ResourceProbe[];
+export function createResourceGrowthAuditor(config: {
+	probes: ResourceProbe[];
+	intervalMs?: number;
+	window?: number;
+	jitterMs?: number;
+	onGrowth?: (report: GrowthReport) => void;
+	metrics?: { inc?: (labels?: Record<string, string>) => void };
+	analyze?: GrowthOptions;
+}): { start(): void; stop(): void; runOnce(): void; stats: { ticks: number; samples: number; suspected: number } };
+
+/** A connection-churn scenario (connect+subscribe+publish+close cycles); use as `scenario`. */
+export function churnScenario(api: SimApi, opts: { clients: number; topics: string[] }): Promise<void>;

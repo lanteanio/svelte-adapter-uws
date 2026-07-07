@@ -1233,7 +1233,7 @@ sub.on('message', (channel, payload) => {
 });
 ```
 
-Every published frame is also stamped with a monotonic per-topic `seq` field in the envelope (first publish to a topic is `seq: 1`, then 2, 3, ...). Reconnecting clients can use this to detect dropped frames and resume from where they left off. Pass `{ seq: false }` to skip stamping for ephemeral or high-cardinality topics where the counter map would grow unbounded:
+Every published frame is also stamped with a monotonic per-topic `seq` field in the envelope (first publish to a topic is `seq: 1`, then 2, 3, ...). Reconnecting clients can use this to detect dropped frames and resume from where they left off. Pass `{ seq: false }` to skip stamping for ephemeral or high-cardinality topics where the counter map would grow unbounded. Pass `{ seq: <number> }` to stamp an explicit, externally-authoritative sequence instead of the in-memory counter (the counter is left untouched) - the hook a replay backend uses to keep the broadcast frame and its buffer on one sequence space across a restart or across cluster instances:
 
 ```js
 // Skip seq for per-user cursor topics: counter map would grow with users
@@ -4435,7 +4435,7 @@ platform.publish('chat', 'message', msg);
 platform.publish(`cursor:${userId}`, 'move', pos, { seq: false });
 ```
 
-> **Clustering:** the per-topic counter is worker-local. Each worker stamps its own publishes; relayed messages from other workers pass through with the originating worker's seq. For cluster-wide monotonic seq across all workers, wire up the Redis Lua INCR variant from the extensions package.
+> **Clustering:** the per-topic counter is worker-local. Each worker stamps its own publishes; relayed messages from other workers pass through with the originating worker's seq. For cluster-wide monotonic seq across all workers, wire up the Redis Lua INCR variant from the extensions package, which stamps its authoritative sequence onto the broadcast frame through the `{ seq: <number> }` publish option so the wire seq and the replay buffer share one space.
 
 The client store parses this automatically. When you use `on('todos')`, the store value is:
 ```js
@@ -4788,6 +4788,34 @@ The bundled runner reads the swarm config from the environment, stamps wall-cloc
 DST_COUNT=1000 DST_BUGGIFY=random DST_CHECK_RATIO=0.05 GIT_COMMIT=$(git rev-parse HEAD) \
   npm run sim:swarm        # writes sim-swarm-result.json; exit 1 on a failing seed
 ```
+
+### Resource-leak harness
+
+`svelte-adapter-uws/sim` also ships a reusable leak detector. Its core is a pure, deterministic trend kernel: give `detectGrowth` a numeric series (successive samples of some bookkeeping size) and it votes three ways - least-squares **slope**, **monotonic fraction**, and total **delta** - so a flat or sawtooth series is never mistaken for a leak, only a sustained climb is.
+
+```js
+import {
+  createResourceTracker,
+  structuralResourceProbes,
+  assertNoResourceGrowth
+} from 'svelte-adapter-uws/sim';
+
+// Trend the live sizes of your own registries across a churn workload.
+const tracker = createResourceTracker(structuralResourceProbes({ mySubs, myRooms }));
+for (const _ of cycles) { churn(); tracker.sample(); }
+assertNoResourceGrowth(tracker); // throws LeakError (with .leaks) if any series climbs
+```
+
+In the simulator, pass `leakProbe: true` to sample the server's structural sizes each step; the result carries a per-series `resourceGrowth`, and because the samples are structural (Map/Set sizes only) it stays inside the determinism gate - `replaySim` reproduces it bit-for-bit. The bundled `churnScenario` (open+subscribe+publish+close cycles) is a ready workload: a healthy close path sheds every entry, so a clean run reports zero leaks and a regression that retains per-connection state surfaces as a climbing series.
+
+```js
+import { runSim, churnScenario } from 'svelte-adapter-uws/sim';
+
+const r = await runSim({ scenario: churnScenario, leakProbe: true, clients: 4 });
+r.resourceGrowth.every((s) => !s.leaking); // true when the close path is clean
+```
+
+For the non-deterministic memory dimension, `processResourceProbes({ forceGc })` trends `heapUsed` / `rss` / `external` / `arrayBuffers` and active handle/request counts - drive it from a real server under `node --expose-gc`. And for production, the opt-in `resourceGrowthAuditIntervalMs` ws option installs an observe-only trend auditor (a metric plus one throttled warning, never fatal).
 
 ---
 

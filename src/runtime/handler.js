@@ -25,10 +25,11 @@ import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, d
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { now, monotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
-import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, sharedTopics, subscribeAuth } from './handler/state.js';
+import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, sharedTopics, subscribeAuth } from './handler/state.js';
 import { computeStateHash } from './invariants.js';
 import { createConsistencyAuditor } from './auditor.js';
 import { buildConnectionAuditSnapshot } from './audit-snapshot.js';
+import { structuralResourceProbes, createResourceGrowthAuditor } from './leak-probes.js';
 import { PayloadTooLargeError, METHODS, send400, send413, send500 } from './handler/http-helpers.js';
 import { acquireState, releaseState } from './handler/state-pool.js';
 import { ENVELOPE_CACHE_MAX, envelopePrefix } from './handler/envelope-cache.js';
@@ -534,6 +535,57 @@ if (WS_ENABLED) {
 		});
 		counters.consistencyAuditor = auditor;
 		auditor.start();
+	}
+
+	// - Optional resource-growth trend auditor ----------------------------
+	// Distinct from the consistency auditor above (which checks point-in-time
+	// invariants): this one trends the SIZE of the live bookkeeping collections
+	// across samples and flags a series that grows monotonically - the signature
+	// of a close / unsubscribe / eviction path that stopped shedding. It reads
+	// ONLY Map/Set `.size` (never a monotonic-by-design counter), rides its own
+	// slow, seam-jittered, unref'd timer, and is OBSERVE-ONLY: a suspected trend
+	// increments a metric and logs at most one throttled warning, and NEVER
+	// asserts or terminates. Off by default (interval 0), because a trend signal
+	// is inherently probabilistic and the always-on structural guard is the
+	// deterministic simulator, not production.
+	const RESOURCE_GROWTH_AUDIT_INTERVAL_MS = wsOptions.resourceGrowthAuditIntervalMs ?? 0;
+	if (RESOURCE_GROWTH_AUDIT_INTERVAL_MS > 0) {
+		const mResourceGrowth = containMetricInstrument(METRICS?.counter(
+			'framework_resource_growth_suspected_total',
+			'Bookkeeping collections whose size trended monotonically upward (suspected leak)',
+			['resource']
+		));
+		let growthWarned = false;
+		const growthAuditor = createResourceGrowthAuditor({
+			// Self-healing / bounded collections only, so a rising trend really is a
+			// leak: wsConnections shrinks as clients disconnect, topicPublishStats is
+			// cleared every pressure tick, and lastPublishWarnAt / decodeCache /
+			// envelopePrefixCache are LRU-evicted while staticCache plateaus at the
+			// finite asset set. The per-topic registries topicSeqs and sharedTopics
+			// are deliberately NEVER evicted - the resume protocol needs each topic's
+			// counter for the process lifetime - so their size grows with topic
+			// cardinality BY DESIGN; probing them here would self-fire a false leak.
+			// That accumulation is watched separately by the topicSeqs warn threshold.
+			probes: structuralResourceProbes({
+				wsConnections,
+				topicPublishStats,
+				lastPublishWarnAt,
+				decodeCache,
+				envelopePrefixCache,
+				staticCache
+			}),
+			intervalMs: RESOURCE_GROWTH_AUDIT_INTERVAL_MS,
+			metrics: mResourceGrowth,
+			onGrowth(report) {
+				// One throttled warning for the whole worker lifetime - the metric
+				// carries the ongoing signal; the log is a one-time nudge.
+				if (growthWarned) return;
+				growthWarned = true;
+				console.warn(`[ws] resource-growth auditor: '${report.name}' size trending upward (delta ${report.delta} over ${report.n} samples); investigate a close/unsubscribe/eviction path that stopped shedding.`);
+			}
+		});
+		counters.resourceGrowthAuditor = growthAuditor;
+		growthAuditor.start();
 	}
 
 	// The depth probe is closure-local to the waiting-room block below; this
@@ -1308,7 +1360,14 @@ if (WS_ENABLED) {
 			// frames are not control-shaped and fall through unchanged.
 			if (!isBinary && message.byteLength >= 8192 &&
 				(new Uint8Array(message))[3] === 0x79 /* 'y' in {"type" */) {
-				ws.send(controlFrameTooLargeFrame(message.byteLength), false, false);
+				// Count this reject's bytes into the connection's outbound total,
+				// symmetric with every other control-demux send (welcome, lease-ok,
+				// resumed, ingress-ok, subscribe-denied), each of which pairs ws.send
+				// with bumpOut. An error frame is outbound traffic like any other; a
+				// close hook's byte accounting must not silently drop it.
+				const rejectFrame = controlFrameTooLargeFrame(message.byteLength);
+				ws.send(rejectFrame, false, false);
+				bumpOut(ws, rejectFrame);
 				return;
 			}
 			// Built-in: handle subscribe/unsubscribe from the client store.

@@ -1201,7 +1201,12 @@ export default function uws(options = {}) {
 					// Oversized control-shaped frame: reject explicitly instead of a
 					// silent fall-through. Mirrors handler.js + testing.js.
 					if (!isBinary && buf.byteLength >= 8192 && buf[3] === 0x79 /* 'y' in {"type" */) {
-						ws.send(controlFrameTooLargeFrame(buf.byteLength));
+						// Count the reject bytes into the connection's outbound total, matching
+						// handler.js so the dev server and the real handler agree on a close
+						// hook's byte accounting.
+						const rejectFrame = controlFrameTooLargeFrame(buf.byteLength);
+						ws.send(rejectFrame);
+						bumpOutV(userData, rejectFrame);
 						return;
 					}
 

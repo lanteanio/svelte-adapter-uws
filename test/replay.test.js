@@ -61,6 +61,25 @@ describe('replay plugin - server', () => {
 			expect(result).toBe(true);
 		});
 
+		it('stamps the buffer authoritative seq onto the broadcast publish', () => {
+			// The buffer allocates its own per-topic seq; that exact value must ride
+			// the broadcast frame (the 4th publish arg) so the wire seq and the replay
+			// seq are one space. Without it platform.publish would allocate an
+			// independent in-memory seq and a resuming client would gap-fill its live
+			// _lastSeq against a divergent offset, duplicating or dropping events.
+			const calls = [];
+			const capturing = {
+				publish(topic, event, data, options) { calls.push({ topic, event, data, options }); return true; }
+			};
+			replay.publish(capturing, 'chat', 'created', { id: 1 });
+			replay.publish(capturing, 'chat', 'created', { id: 2 });
+
+			expect(calls[0].options).toEqual({ seq: 1 });
+			expect(calls[1].options).toEqual({ seq: 2 });
+			// The stamped seq equals the buffer's own seq for the topic.
+			expect(calls[1].options.seq).toBe(replay.seq('chat'));
+		});
+
 		it('snapshots data so mutations do not affect buffered messages', () => {
 			const obj = { n: 1 };
 			replay.publish(mockPlatform, 'chat', 'created', obj);

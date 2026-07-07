@@ -1,10 +1,10 @@
 import { wsModule } from '../ws-handler-bridge.js';
 import { metricsRegistry } from '../metrics-bridge.js';
 import { parentPort } from 'node:worker_threads';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_SUBSCRIPTIONS, assert, fatal, collapseByCoalesceKey, completeEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, nextTopicSeq, processEpoch, readAssertionCounts, wrapBatchEnvelope } from '../utils.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_SUBSCRIPTIONS, assert, fatal, collapseByCoalesceKey, completeEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
-import { capCounts, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
+import { capCounts, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
 import { app, wsDebug, WS_COMPRESSION_ON } from './config.js';
 import { envelopePrefix } from './envelope-cache.js';
 import { batchRelay } from './relay.js';
@@ -31,14 +31,18 @@ export const platform = {
 	 */
 	publish(topic, event, data, options) {
 		counters.publishCountWindow++;
-		const seq = (options && options.seq === false)
-			? null
-			: nextTopicSeq(topicSeqs, topic);
-		// Record the highest seq this worker has observed for the topic. The
-		// freshly stamped seq is the new max (nextTopicSeq is monotonic), so this
-		// is a bare set with no compare. Skipped when stamping is off so a
-		// {seq:false}-only topic never enters the convergence comparison.
-		if (seq !== null) maxSeenSeq.set(topic, seq);
+		const seq = stampSeq(options, topicSeqs, topic);
+		// Record the highest seq this worker has observed for the topic. An
+		// in-memory counter seq is freshly stamped and monotonic, so it is a bare
+		// set with no compare; an explicit numeric seq is cluster-authoritative,
+		// interleaves across workers on arrival, and so goes through the
+		// monotone-max guard (a bare set could regress the local max and fabricate
+		// a divergence). Skipped when stamping is off so a {seq:false}-only topic
+		// never enters the convergence comparison.
+		if (seq !== null) {
+			if (options && typeof options.seq === 'number') recordSeen(maxSeenSeq, topic, seq);
+			else maxSeenSeq.set(topic, seq);
+		}
 		// `{ jitterMs }` de-herd window: stamp it on the frame so each client rolls its
 		// own delay before dispatching (spreads N receivers' follow-up actions across
 		// the window). The window is carried verbatim - NOT a server-rolled offset,
@@ -156,11 +160,15 @@ export const platform = {
 		if (!isRelay) counters.publishCountWindow++;
 		const seq = isRelay
 			? (typeof options._relaySeq === 'number' ? options._relaySeq : null)
-			: ((options && options.seq === false) ? null : nextTopicSeq(topicSeqs, topic));
-		// Track the highest observed seq for this topic (see platform.publish).
-		// Skipped on the relay path: relayPublish already called recordSeen with the
-		// monotone-max guard the reorder-prone cross-worker receive path needs.
-		if (!isRelay && seq !== null) maxSeenSeq.set(topic, seq);
+			: stampSeq(options, topicSeqs, topic);
+		// Track the highest observed seq for this topic (see platform.publish). An
+		// explicit numeric seq takes the monotone-max guard; the in-memory counter
+		// takes a bare set. Skipped on the relay path: relayPublish already called
+		// recordSeen with the guard the reorder-prone cross-worker receive path needs.
+		if (!isRelay && seq !== null) {
+			if (options && typeof options.seq === 'number') recordSeen(maxSeenSeq, topic, seq);
+			else maxSeenSeq.set(topic, seq);
+		}
 		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
 		// A zero-length frame at a send site would broadcast garbage to every
 		// subscriber - unrecoverable framing corruption. One length guard, identical
@@ -1169,11 +1177,14 @@ export const platform = {
 		for (let i = 0; i < messages.length; i++) {
 			const m = messages[i];
 			counters.publishCountWindow++;
-			const seq = (m.options && m.options.seq === false)
-				? null
-				: nextTopicSeq(topicSeqs, m.topic);
-			// Track the highest observed seq per topic (see platform.publish).
-			if (seq !== null) maxSeenSeq.set(m.topic, seq);
+			const seq = stampSeq(m.options, topicSeqs, m.topic);
+			// Track the highest observed seq per topic (see platform.publish): a
+			// bare set for the monotonic in-memory counter, the monotone-max guard
+			// for an explicit numeric seq.
+			if (seq !== null) {
+				if (m.options && typeof m.options.seq === 'number') recordSeen(maxSeenSeq, m.topic, seq);
+				else maxSeenSeq.set(m.topic, seq);
+			}
 			const env = completeEnvelope(envelopePrefix(m.topic, m.event), m.data, seq);
 			events[i] = { topic: m.topic, env, seq };
 			let s = topicPublishStats.get(m.topic);

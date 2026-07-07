@@ -608,6 +608,29 @@ export interface WebSocketOptions {
 	consistencyAuditIntervalMs?: number;
 
 	/**
+	 * Interval in milliseconds for the optional per-worker resource-growth
+	 * auditor - a background trend detector that samples the SIZE of the live
+	 * bookkeeping collections (connections, topic index, caches) on a slow,
+	 * jittered, unref'd timer and flags a series that climbs monotonically, the
+	 * signature of a close / unsubscribe / eviction path that stopped shedding.
+	 * It reads only Map/Set sizes, never a monotonic-by-design counter.
+	 *
+	 * OBSERVE-ONLY: a suspected trend increments the
+	 * `framework_resource_growth_suspected_total{resource}` metric and logs at
+	 * most one throttled warning per worker; it NEVER asserts, throws, or
+	 * terminates. Distinct from `consistencyAuditIntervalMs`, which checks
+	 * point-in-time invariants rather than a time-series trend.
+	 *
+	 * Off by default (`0` - no timer is scheduled and the path costs nothing),
+	 * because a trend signal is probabilistic; the always-on structural guard is
+	 * the deterministic simulator (`svelte-adapter-uws/sim`), not production.
+	 * `30000` (30s) is a sensible enabled value.
+	 *
+	 * @default 0 (disabled)
+	 */
+	resourceGrowthAuditIntervalMs?: number;
+
+	/**
 	 * Backpressure-signal thresholds for `platform.pressure` and
 	 * `platform.onPressure(cb)`. The adapter samples the worker once per
 	 * `sampleIntervalMs` and reports the most urgent active signal.
@@ -1576,7 +1599,12 @@ export interface Platform {
 	 *     that already delivers to every process).
 	 *   - `seq: false` skips the per-topic monotonic seq stamp (use for
 	 *     ephemeral or high-cardinality topics where the counter map
-	 *     would grow unbounded).
+	 *     would grow unbounded). `seq: <number>` (a positive integer) stamps
+	 *     that exact value instead of the in-memory counter and does not
+	 *     advance it - a non-positive-integer seq is rejected, not stamped - the hook
+	 *     a replay backend uses to put the broadcast frame and its buffer on
+	 *     one authoritative seq space (see the extensions replay layer). A
+	 *     legacy truthy `seq: true` still means the in-memory counter.
 	 *   - `compress: false` skips permessage-deflate for this frame. No-op
 	 *     unless `websocket.compression` is configured, where text frames
 	 *     compress by default; pass `false` for a high-frequency,
@@ -1597,7 +1625,7 @@ export interface Platform {
 	 * }
 	 * ```
 	 */
-	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean; compress?: boolean; jitterMs?: number }): boolean;
+	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): boolean;
 
 	/**
 	 * Publish via a plugin-declared binary wire codec. Subscribers that
@@ -1659,7 +1687,13 @@ export interface Platform {
 		},
 		options?: {
 			relay?: boolean;
-			seq?: boolean;
+			/**
+			 * `false` omits the seq; a positive-integer `number` stamps that exact
+			 * authoritative seq (from a replay backend) onto both the JSON envelope
+			 * and the `0x03` binary frame without advancing the in-memory counter;
+			 * omitted (or a legacy truthy) uses the in-memory per-worker counter.
+			 */
+			seq?: boolean | number;
 			compress?: boolean;
 			/** Never delivered to this socket; exclusion is local to this instance. */
 			excludeWs?: WebSocket<any>;
@@ -1814,7 +1848,8 @@ export interface Platform {
 		 * ```
 		 */
 		coalesceKey?: string;
-		options?: { relay?: boolean; seq?: boolean };
+		/** Per-message `seq`: `false` omits it, a positive-integer `number` stamps that exact authoritative seq, omitted uses the in-memory counter. */
+		options?: { relay?: boolean; seq?: boolean | number };
 	}>, options?: {
 		/**
 		 * Compress the batch frame when `websocket.compression` is configured.

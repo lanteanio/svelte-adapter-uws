@@ -83,6 +83,39 @@ describeUWS('control-frame size ceiling reject', () => {
 		ws.close();
 	});
 
+	it('counts the CONTROL_FRAME_TOO_LARGE reject in the connection outbound totals', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const { controlFrameTooLargeFrame } = await import('../src/runtime/wire.js');
+		const closes = [];
+		server = await createTestServer({
+			handler: { close(_ws, ctx) { closes.push(ctx); } }
+		});
+
+		async function runConn(sendOversized) {
+			const { ws } = await connectClient(server.wsUrl);
+			await tick();
+			if (sendOversized) {
+				ws.send(oversizedControlFrame(9000));
+				await tick();
+			}
+			ws.close();
+			await new Promise(res => ws.on('close', res));
+			await tick();
+		}
+
+		await runConn(false); // baseline: welcome only
+		await runConn(true);  // welcome + CONTROL_FRAME_TOO_LARGE reject
+
+		const [ctrl, rej] = closes;
+		const rejectLen = controlFrameTooLargeFrame(Buffer.byteLength(oversizedControlFrame(9000))).length;
+		// The reject is outbound traffic: it adds exactly one message and its bytes
+		// to the connection totals. The delta would be 0 if the reject bypassed the
+		// outbound counter, as it did before it was made symmetric with the other
+		// control-demux sends (welcome / lease-ok / resumed / ingress-ok / denied).
+		expect(rej.messagesOut - ctrl.messagesOut).toBe(1);
+		expect(rej.bytesOut - ctrl.bytesOut).toBe(rejectLen);
+	});
+
 	it('does not reject a data-event-shaped frame over the ceiling; it falls through to the app hook', async () => {
 		const { createTestServer } = await import('../src/testing.js');
 		const appReceived = [];

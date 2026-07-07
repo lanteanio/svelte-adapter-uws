@@ -53,6 +53,61 @@ export function nextTopicSeq(seqMap, topic) {
 }
 
 /**
+ * Resolve the sequence number to stamp on a publish, honoring an explicit
+ * caller-supplied authority. Shared by every publish entry point so the
+ * three-way resolution never drifts between them.
+ *
+ * Keyed STRICTLY on the `seq` option type so a legacy truthy `seq: true` keeps
+ * its historical meaning (the in-memory counter, NOT numeric 1):
+ *
+ * - `options.seq` is a NUMBER: stamp that exact value and do NOT advance the
+ *   in-memory per-worker counter. This is a cluster-authoritative seq a replay
+ *   backend already allocated (a Redis Lua INCR, a Postgres CTE, or the
+ *   in-memory buffer's own counter), so the broadcast wire seq and the replay
+ *   seq occupy ONE space instead of diverging. Numeric seqs originate on
+ *   different workers and interleave on arrival, so a caller that tracks a
+ *   max-seen map must record them through the monotone-max guard
+ *   (`recordSeen`), never a bare set - a bare set could regress the local max.
+ * - `options.seq === false`: no seq. Returns null so the field is omitted from
+ *   the envelope and the topic stays out of the convergence comparison.
+ * - absent, or any other truthy value: the in-memory per-worker counter via
+ *   `nextTopicSeq`. Byte-identical to every prior release.
+ *
+ * Pure with respect to inputs other than the supplied map (mirrors
+ * `nextTopicSeq`), so a unit test can pass a fresh map per case.
+ *
+ * @param {{ seq?: boolean | number } | null | undefined} options
+ * @param {Map<string, number>} seqMap
+ * @param {string} topic
+ * @returns {number | null}
+ */
+export function stampSeq(options, seqMap, topic) {
+	if (options != null) {
+		const opt = options.seq;
+		if (opt === false) return null;
+		if (typeof opt === 'number') {
+			// An explicit seq is a cluster-authoritative value that must survive BOTH
+			// the JSON envelope and the 0x03 binary frame and drive the client's resume
+			// gap-fill, so it must be a positive integer. The binary frame reserves 0 as
+			// its "no seq" sentinel (a stamped 0 would vanish for binary subscribers),
+			// and a non-finite / negative / fractional value would emit invalid JSON,
+			// diverge from the varint, and poison the monotone-max guard. The in-memory
+			// counter and every shipped authority (Redis INCR) are 1-based; a 0-based
+			// external source must offset by 1. Fail fast rather than corrupt the wire.
+			if (Number.isInteger(opt) && opt >= 1) return opt;
+			throw new TypeError(`publish seq must be a positive integer (>= 1), received ${String(opt)}`);
+		}
+	}
+	// The in-memory per-worker counter, inlined from `nextTopicSeq` rather than
+	// called, so the common publish stays a single call frame (a wrapper call
+	// measured a few percent on the isolated publish-resolution micro-bench).
+	// Same increment semantics: first call for a topic returns 1.
+	const next = (seqMap.get(topic) ?? 0) + 1;
+	seqMap.set(topic, next);
+	return next;
+}
+
+/**
  * Build a hybrid logical clock the platform projects as `platform.hlc()`.
  *
  * Each returned stamp is `{ wall, logical, nodeId }`:

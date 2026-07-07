@@ -1,6 +1,6 @@
 import { now, monotonicNow, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
-import { nextTopicSeq, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
+import { stampSeq, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
@@ -459,9 +459,7 @@ export async function createTestServer(options = {}) {
 	let _topicHelperCache = null;
 	const platform = {
 		publish(topic, event, data, options) {
-			const seq = (options && options.seq === false)
-				? null
-				: nextTopicSeq(topicSeqs, topic);
+			const seq = stampSeq(options, topicSeqs, topic);
 			const msg = envelope(topic, event, data, seq);
 			// Relay the already-built envelope to other workers (sim), mirroring
 			// handler.js's `relayed = parentPort && options.relay !== false` gate.
@@ -499,7 +497,7 @@ export async function createTestServer(options = {}) {
 			const isRelay = !!(options && options._isRelay);
 			const seq = isRelay
 				? (typeof options._relaySeq === 'number' ? options._relaySeq : null)
-				: ((options && options.seq === false) ? null : nextTopicSeq(topicSeqs, topic));
+				: stampSeq(options, topicSeqs, topic);
 			const env = envelope(topic, event, data, seq);
 			// The relay carries the JSON envelope plus, for a registered codec, its
 			// capability + raw payload so the receiving server re-encodes binary
@@ -901,9 +899,7 @@ export async function createTestServer(options = {}) {
 			const events = new Array(messages.length);
 			for (let i = 0; i < messages.length; i++) {
 				const m = messages[i];
-				const seq = (m.options && m.options.seq === false)
-					? null
-					: nextTopicSeq(topicSeqs, m.topic);
+				const seq = stampSeq(m.options, topicSeqs, m.topic);
 				events[i] = { topic: m.topic, env: envelope(m.topic, m.event, m.data, seq) };
 			}
 			// Fast-path batch relay (sim): forward the stamped events as one IPC frame,
@@ -1419,7 +1415,12 @@ export async function createTestServer(options = {}) {
 			// silent fall-through. Mirrors handler.js + vite.js.
 			if (!isBinary && message.byteLength >= 8192 &&
 				new Uint8Array(message)[3] === 0x79 /* 'y' in {"type" */) {
-				ws.send(controlFrameTooLargeFrame(message.byteLength), false, false);
+				// Count the reject bytes into the connection's outbound total, matching
+				// handler.js so the mock and the real handler agree on a close hook's
+				// byte accounting.
+				const rejectFrame = controlFrameTooLargeFrame(message.byteLength);
+				ws.send(rejectFrame, false, false);
+				bumpOutT(ws, rejectFrame);
 				return;
 			}
 			// Handle subscribe/unsubscribe from client store.

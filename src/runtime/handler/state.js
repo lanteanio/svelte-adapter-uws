@@ -170,5 +170,11 @@ export const counters = {
 	// site (handler.js) and the shutdown site (lifecycle.js) - distinct modules -
 	// share the SAME reference. Mutated in place, never reassigned away, per the
 	// holder-property pattern this module's header documents.
-	consistencyAuditor: null
+	consistencyAuditor: null,
+	// The optional per-worker resource-growth trend auditor instance (null until
+	// the handler installs one; null when disabled by interval 0, the default).
+	// Same holder rationale as consistencyAuditor: the install site (handler.js)
+	// and the shutdown site (lifecycle.js) are distinct modules and must share ONE
+	// reference. Mutated in place, never reassigned away.
+	resourceGrowthAuditor: null
 };

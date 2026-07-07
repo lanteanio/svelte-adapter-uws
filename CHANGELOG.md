@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.63] - 2026-07-07
+
+### Added
+
+- **`platform.publish`, `platform.publishWire`, and `platform.publishBatched` now accept `seq: <number>` to stamp an explicit, externally-authoritative sequence on the broadcast frame.** The `seq` option widens from `boolean` to `boolean | number`: `seq: false` still omits the seq, an absent option (or a legacy truthy `seq: true`) still uses the in-memory per-worker counter, and a `number` (which must be a positive integer - the wire reserves 0 and rejects non-integer / negative / non-finite values rather than corrupting the frame) stamps that exact value onto both the JSON envelope and the `0x03` binary frame without advancing the counter. This is the hook a replay backend uses to put the broadcast frame and its buffer on ONE authoritative sequence space: a client resuming after a reconnect then gap-fills against the same offsets the live stream carried - across a process restart, or (with the Redis / Postgres replay layer) across cluster instances - instead of deduping against a divergent counter and duplicating or dropping events. An explicit numeric seq is recorded through the monotone-max guard, so an out-of-order authoritative seq cannot regress the cross-worker convergence detector; the in-memory replay plugin threads its own buffer seq through automatically. The common no-seq publish is unchanged and byte-identical.
+- **A reusable resource-leak harness, exported from `svelte-adapter-uws/sim`.** A pure, deterministic trend kernel - `detectGrowth(samples, opts)` - decides whether a numeric series is leaking by a three-way vote (least-squares slope AND monotonic fraction AND total delta), so a noisy or sawtooth series is never mistaken for a leak. Around it: `createResourceTracker(probes)` samples many named series and `analyze()`s each; `assertNoResourceGrowth(tracker)` throws a `LeakError` (carrying `.leaks`) when any series climbs; `structuralResourceProbes(sources)` builds probes over live Map/Set sizes (deterministic) and `processResourceProbes({ forceGc })` over heap/rss/handles (for a real-server harness). The deterministic simulator gains an opt-in `leakProbe: true` that samples structural sizes each step into `result.resourceGrowth` and folds it into the `replaySim` reproducer gate, plus a `churnScenario` helper (open+close N clients across many steps) whose clean shed proves zero growth. Production gains an opt-in, observe-only trend auditor via the `resourceGrowthAuditIntervalMs` ws option (default `0` = off): it emits `framework_resource_growth_suspected_total{resource}` and one throttled warning, and never asserts or terminates.
+
+### Fixed
+
+- **A `CONTROL_FRAME_TOO_LARGE` reject is now counted in the connection's outbound traffic totals.** The oversized-control-frame reject wrote its error frame with a raw socket send that skipped the per-connection outbound accounting, so a close hook's `messagesOut` / `bytesOut` under-counted by that one small error frame while every sibling control-demux send (welcome, lease-ok, resumed, ingress-ok, subscribe-denied) counted its bytes. The reject now routes through the same counter, symmetric with its siblings, in the production handler, the testing server, and the dev-server middleware alike.
+
 ## [0.6.0-next.62] - 2026-07-06
 
 ### Changed
