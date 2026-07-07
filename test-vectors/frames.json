@@ -27,6 +27,8 @@
     { "def": "ingress-ok", "frame": { "type": "ingress-ok" } },
     { "def": "ingress-bind", "frame": { "type": "ingress-bind", "id": 1, "kind": "smooth.command:1", "target": { "topic": "arena:1" } } },
     { "def": "ingress-bound", "frame": { "type": "ingress-bound", "id": 1 } },
+    { "def": "reconnect", "frame": { "type": "reconnect", "windowMs": 5000 } },
+    { "def": "reconnect", "frame": { "type": "reconnect", "afterMs": 1000, "windowMs": 5000 } },
     { "def": "data-event", "frame": { "topic": "arena:1", "event": "state", "data": { "tick": 41 }, "seq": 1 } },
     { "def": "data-event", "frame": { "topic": "arena:1", "event": "state", "data": { "tick": 41 }, "seq": 1, "j": 12.5 } },
     { "def": "data-event", "frame": { "topic": "chat", "event": "message", "data": "hello" } }
@@ -35,6 +37,9 @@
     { "reason": "subscribed missing epoch", "frame": { "type": "subscribed", "topic": "a", "ref": 1 } },
     { "reason": "wire-id id is a string", "frame": { "type": "wire-id", "topic": "a", "id": "1" } },
     { "reason": "error missing code", "frame": { "type": "error", "limit": 8192 } },
-    { "reason": "data-event missing event", "frame": { "topic": "a", "data": 1 } }
+    { "reason": "data-event missing event", "frame": { "topic": "a", "data": 1 } },
+    { "reason": "reconnect missing windowMs", "frame": { "type": "reconnect", "afterMs": 100 } },
+    { "reason": "reconnect windowMs must be > 0", "frame": { "type": "reconnect", "windowMs": 0 } },
+    { "reason": "reconnect afterMs must be >= 0", "frame": { "type": "reconnect", "windowMs": 5000, "afterMs": -1 } }
   ]
 }

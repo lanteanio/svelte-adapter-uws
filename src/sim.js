@@ -16,6 +16,7 @@ import { createConsistencyAuditor } from './runtime/auditor.js';
 import { createResourceTracker } from './runtime/leak-detect.js';
 import { structuralResourceProbes } from './runtime/leak-probes.js';
 import { createClusterRelay, createClusterBus, createSupervisor, clusterFinalState, checkNoMisdelivery, checkStateConvergence } from './runtime/sim-cluster.js';
+import { runSteadyState, faultClasses } from './runtime/steadystate.js';
 
 // Building blocks for composing a custom multi-instance runner over the SAME
 // virtual clock and seam (e.g. a redis/postgres-backed sim in a downstream
@@ -254,6 +255,11 @@ export async function runSim(config = {}) {
 		/** @type {Array<{ category: string, context: any }>} */
 		const violations = [];
 		const seen = new Set();
+		function recordViolation(v) {
+			if (!v) return;
+			const key = v.category + ':' + JSON.stringify(v.context);
+			if (!seen.has(key)) { seen.add(key); violations.push(v); }
+		}
 		const auditor = createSimAuditor(() => app);
 		// Opt-in structural resource sampling. Reads only live Map/Set-derived
 		// sizes (deterministic), so the resulting reports join the reproducer gate.
@@ -261,12 +267,36 @@ export async function runSim(config = {}) {
 		const leakTracker = config.leakProbe
 			? createResourceTracker(structuralResourceProbes(structuralSimSources(app)))
 			: null;
+		// Whole-run trajectory recorder (folded into the steady-state pass at
+		// end-of-run). Each per-step accumulator is O(1), the same posture as
+		// leakTracker.sample above.
+		//
+		// The virtual clock, sampled once per round: dedup'd on the value so the
+		// series stays bounded by the count of distinct virtual times (dropping an
+		// equal consecutive reading cannot hide a backward step). Monotonic by
+		// construction; recorded so a future clock regression is caught.
+		/** @type {number[]} */
+		const clockSamples = [];
+		let lastClock = null;
+		function observeClock(nowMs) {
+			if (nowMs !== lastClock) { clockSamples.push(nowMs); lastClock = nowMs; }
+		}
+		// The publish-time subscriber set per broadcast: captured when the publish
+		// fans out (NOT at end-of-run) so a later subscribe/unsubscribe cannot make
+		// the starvation hypothesis misfire. Reads the same native membership
+		// `app.publish` fans out on, so the log is exactly the eligible-receiver set.
+		/** @type {Array<{ topic: string, subscribers: number[] }>} */
+		const publishLog = [];
+		function recordPublish(topic) {
+			if (typeof topic !== 'string') return;
+			const subscribers = [];
+			for (const ws of app._connections) if (ws._topics.has(topic)) subscribers.push(ws._simId);
+			publishLog.push({ topic, subscribers });
+		}
 		function checkInvariants() {
-			for (const v of auditor.runOnce()) {
-				const key = v.category + ':' + JSON.stringify(v.context);
-				if (!seen.has(key)) { seen.add(key); violations.push(v); }
-			}
+			for (const v of auditor.runOnce()) recordViolation(v);
 			if (leakTracker) leakTracker.sample();
+			observeClock(scheduler.now());
 		}
 
 		let totalSteps = 0;
@@ -277,8 +307,11 @@ export async function runSim(config = {}) {
 			server,
 			app,
 			connect(opts) { const c = app.connect(opts); clientList.push(c); return c; },
-			publish: (topic, event, data, opts) => server.platform.publish(topic, event, data, opts),
-			publishBatched: (messages, opts) => server.platform.publishBatched(messages, opts),
+			publish: (topic, event, data, opts) => { recordPublish(topic); return server.platform.publish(topic, event, data, opts); },
+			publishBatched: (messages, opts) => {
+				if (Array.isArray(messages)) for (const m of messages) recordPublish(m && m.topic);
+				return server.platform.publishBatched(messages, opts);
+			},
 			async advance(rounds) {
 				totalSteps += await scheduler.run({ maxSteps: rounds ?? maxSteps, onStep: checkInvariants });
 			}
@@ -286,12 +319,36 @@ export async function runSim(config = {}) {
 
 		const scenario = config.scenario || defaultScenario;
 		await scenario(api, { clients, topics });
-		// Final drain to quiescence so any deferred frames / timers settle.
-		totalSteps += await scheduler.run({ maxSteps, onStep: checkInvariants });
+		// Final drain to quiescence so any deferred frames / timers settle. Capture
+		// the drained/pending signals here (before teardown): a healthy run reaches a
+		// fixpoint within the budget and leaves zero refed work.
+		const quiesceSteps = await scheduler.run({ maxSteps, onStep: checkInvariants });
+		totalSteps += quiesceSteps;
 		checkInvariants();
+		const drained = quiesceSteps < maxSteps;
+		const pendingAtQuiesce = scheduler.pending();
 
 		const finalState = snapshot(app);
 		const frames = clientList.reduce((sum, c) => sum + c.frames().length, 0);
+
+		// End-of-run steady-state pass: fold whole-run predicate violations into the
+		// same de-dup'd list the per-step auditor feeds. Extraction is O(frames), the
+		// same order as building clientFrames below.
+		const deliveredPairs = clientList.map((c) => ({
+			id: c.serverWs ? c.serverWs._simId : null,
+			raw: c.frames(),
+			decoded: c.json()
+		}));
+		for (const v of runSteadyState({
+			clockSamples,
+			drained,
+			pending: pendingAtQuiesce,
+			terminal: finalState,
+			publishLog,
+			clients: deliveredPairs,
+			faults: faultClasses(config.faults)
+		})) recordViolation(v);
+
 		await server.close();
 		totalSteps += await scheduler.run({ maxSteps, onStep: checkInvariants });
 
@@ -412,8 +469,38 @@ async function runClusterSim(config) {
 			const key = v.category + ':' + JSON.stringify(v.context);
 			if (!seen.has(key)) { seen.add(key); violations.push(v); }
 		}
+		// Whole-run trajectory recorder (folded into the steady-state pass at
+		// end-of-run), same O(1)-per-step posture as the single-worker path.
+		/** @type {number[]} */
+		const clockSamples = [];
+		let lastClock = null;
+		function observeClock(nowMs) {
+			if (nowMs !== lastClock) { clockSamples.push(nowMs); lastClock = nowMs; }
+		}
+		// The publish-time subscriber set per broadcast, captured across EVERY
+		// worker's native membership (a publish on one worker relays to subscribers
+		// on the others), keyed globally by `workerId:simId` since each worker's
+		// `_simId` space restarts at 0. `originators` tracks which workers published
+		// each topic so a topic with more than one publisher (two interleaved seq
+		// spaces) suppresses the delivery-monotonic hypothesis.
+		/** @type {Array<{ topic: string, subscribers: string[] }>} */
+		const publishLog = [];
+		/** @type {Map<string, Set<number>>} */
+		const originators = new Map();
+		function recordPublish(fromWorkerId, topic) {
+			if (typeof topic !== 'string') return;
+			const subscribers = [];
+			for (const w of workers.values()) {
+				for (const ws of w.app._connections) if (ws._topics.has(topic)) subscribers.push(w.id + ':' + ws._simId);
+			}
+			publishLog.push({ topic, subscribers });
+			let set = originators.get(topic);
+			if (!set) { set = new Set(); originators.set(topic, set); }
+			set.add(fromWorkerId);
+		}
 		function checkInvariants() {
 			for (const w of workers.values()) for (const v of w.auditor.runOnce()) recordViolation(v);
+			observeClock(scheduler.now());
 		}
 
 		async function makeWorker(id) {
@@ -502,11 +589,15 @@ async function runClusterSim(config) {
 					clients: () => (workers.get(id) ? workers.get(id).clients.slice() : []),
 					publish: (topic, event, data, opts) => {
 						const w = workers.get(id);
-						return w ? w.server.platform.publish(topic, event, data, opts) : false;
+						if (!w) return false;
+						recordPublish(id, topic);
+						return w.server.platform.publish(topic, event, data, opts);
 					},
 					publishBatched: (messages, opts) => {
 						const w = workers.get(id);
-						return w ? w.server.platform.publishBatched(messages, opts) : undefined;
+						if (!w) return undefined;
+						if (Array.isArray(messages)) for (const m of messages) recordPublish(id, m && m.topic);
+						return w.server.platform.publishBatched(messages, opts);
 					}
 				};
 			},
@@ -534,9 +625,13 @@ async function runClusterSim(config) {
 		const scenario = config.scenario || defaultClusterScenario;
 		await scenario(api, { clients, topics, workers: workersN });
 		// Drain to quiescence so every relay batch + in-flight delivery + restart
-		// timer settles before the snapshot.
-		totalSteps += await scheduler.run({ maxSteps, onStep: checkInvariants });
+		// timer settles before the snapshot. Capture the drained/pending signals
+		// here (before teardown) for the natural-quiescence hypothesis.
+		const quiesceSteps = await scheduler.run({ maxSteps, onStep: checkInvariants });
+		totalSteps += quiesceSteps;
 		checkInvariants();
+		const drained = quiesceSteps < maxSteps;
+		const pendingAtQuiesce = scheduler.pending();
 
 		// Quiescent no-misdelivery check: every data frame a client received names a
 		// topic it actually subscribed to (catches a relay routing leak).
@@ -572,6 +667,60 @@ async function runClusterSim(config) {
 				clients: allClients.filter((c) => c.workerId === id).map((c) => c.facade.json())
 			}));
 		const totalFrames = allClients.reduce((s, c) => s + c.facade.frames().length, 0);
+
+		// End-of-run steady-state pass over the whole-run trajectory, folded into the
+		// same de-dup'd list. delivery-monotonic is guarded by the combined per-worker
+		// wire + cross-worker relay fault classes, and by a topic published from more
+		// than one worker (two interleaved seq spaces read as non-monotonic at a
+		// subscriber); starvation is additionally guarded by cluster disruption (a
+		// flapped / wedged / restarted / budget-exhausted worker legitimately drops
+		// in-flight deliveries to its clients). The terminal orphan-topic check reads
+		// the merged per-worker topic index.
+		const steadyFaults = faultClasses(config.faults, config.relayFaults);
+		steadyFaults.disrupted = fatals.length > 0 || supervisor.metrics.flaps > 0
+			|| supervisor.metrics.wedges > 0 || supervisor.metrics.restarts > 0;
+		steadyFaults.multiOriginator = [...originators.values()].some((s) => s.size > 1);
+		/** @type {Record<string, number>} */
+		const mergedTopicCounts = {};
+		for (const w of workerSummaries) {
+			for (const t of Object.keys(w.snapshot.topicCounts)) {
+				mergedTopicCounts[t] = (mergedTopicCounts[t] || 0) + w.snapshot.topicCounts[t];
+			}
+		}
+		const deliveredPairs = allClients.map((c) => ({
+			id: c.workerId + ':' + (c.facade.serverWs ? c.facade.serverWs._simId : 'x'),
+			raw: c.facade.frames(),
+			decoded: c.facade.json()
+		}));
+		// A cross-worker subscriber is delivered its topic by the DEFERRED relay, so a
+		// client captured in the publish-time set that unsubscribes inside the relay
+		// window (after the origin publish, before the relay lands) legitimately
+		// receives nothing. Restrict the cluster starvation check to clients still
+		// subscribed to the topic at end-of-run (subscribed at BOTH endpoints): this
+		// drops that relay-window-unsubscribe false positive while still catching a
+		// client that stayed subscribed the whole run yet never received. Single-worker
+		// delivery is synchronous with the publish fan-out, so its publishLog needs no
+		// such restriction (see runSim) and stays byte-identical.
+		/** @type {Set<string>} `${workerId}:${simId} ${topic}` still subscribed at end-of-run */
+		const endSubscribed = new Set();
+		for (const w of workerSummaries) {
+			for (const conn of w.snapshot.connections) {
+				for (const t of conn.subscribed) endSubscribed.add(w.id + ':' + conn.id + ' ' + t);
+			}
+		}
+		const eligiblePublishLog = publishLog.map((entry) => ({
+			topic: entry.topic,
+			subscribers: entry.subscribers.filter((subId) => endSubscribed.has(subId + ' ' + entry.topic))
+		}));
+		for (const v of runSteadyState({
+			clockSamples,
+			drained,
+			pending: pendingAtQuiesce,
+			terminal: { topicCounts: mergedTopicCounts },
+			publishLog: eligiblePublishLog,
+			clients: deliveredPairs,
+			faults: steadyFaults
+		})) recordViolation(v);
 
 		supervisor.shutdown();
 		for (const w of workers.values()) { try { await w.server.close(); } catch {} }

@@ -3,7 +3,7 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { lookup as nodeDnsLookup } from 'node:dns';
 import { createHmac, createHash } from 'node:crypto';
-import { checkUrl } from '../../safe-url.js';
+import { checkUrl, classifyAddress } from '../../safe-url.js';
 import { randomFloat, setTimer, clearTimer } from '../../runtime/runtime.js';
 
 export { createRetryBudget, createWebhookBreaker, WebhookCircuitOpenError } from './controls.js';
@@ -144,8 +144,11 @@ async function resolveAndPin(hostname, config, rangeCheck) {
 		const isIp = canonHost.startsWith('[') || /^\d{1,3}(\.\d{1,3}){3}$/.test(canonHost);
 		if (!isIp) return { ok: false, reason: 'unresolved-host' };
 		if (rangeCheck) {
-			const verdict = checkUrl(probe, { mode: 'strict' });
-			if (!verdict.safe) return { ok: false, reason: verdict.reason };
+			// canonHost is a confirmed IP literal (bracketed IPv6 or dotted IPv4), so
+			// classify it directly against the SSRF ranges instead of re-wrapping it
+			// into a probe URL just to reach the same range check.
+			const reason = classifyAddress(canonHost);
+			if (reason) return { ok: false, reason };
 		}
 		pinned.push({
 			address: canonHost.startsWith('[') ? canonHost.slice(1, -1) : canonHost,

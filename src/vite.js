@@ -385,6 +385,33 @@ export default function uws(options = {}) {
 			// flushes on the first attempt with result === 0).
 			send(ws, topic, event, data);
 		},
+		adviseReconnect(options) {
+			// Dev-mode parity with the production platform: advise connected dev
+			// clients to reconnect on a jittered schedule, then (default) close them.
+			const windowMs = options && typeof options.windowMs === 'number' && options.windowMs > 0
+				? Math.floor(options.windowMs) : 0;
+			if (windowMs <= 0) return 0;
+			const afterMs = options && typeof options.afterMs === 'number' && options.afterMs > 0
+				? Math.floor(options.afterMs) : 0;
+			const doClose = !options || options.close !== false;
+			const filter = options && typeof options.filter === 'function' ? options.filter : null;
+			const frame = afterMs > 0
+				? '{"type":"reconnect","afterMs":' + afterMs + ',"windowMs":' + windowMs + '}'
+				: '{"type":"reconnect","windowMs":' + windowMs + '}';
+			let count = 0;
+			for (const [, wrapped] of wsWrappers) {
+				if (filter) {
+					const decision = filter(wrapped.getUserData());
+					if (decision && typeof decision.then === 'function') continue;
+					if (!decision) continue;
+				}
+				wrapped.send(frame);
+				bumpOutV(wrapped.getUserData(), frame);
+				if (doClose && typeof wrapped.end === 'function') { try { wrapped.end(1001, 'Server draining'); } catch { /* already closed */ } }
+				count++;
+			}
+			return count;
+		},
 		request,
 		get connections() { return connections.size; },
 		get pressure() {

@@ -7,7 +7,7 @@ const vectors = JSON.parse(readFileSync(new URL('../test-vectors/frames.json', i
 const binaryVector = JSON.parse(readFileSync(new URL('../test-vectors/binary.json', import.meta.url), 'utf8'));
 
 // A minimal JSON Schema validator covering exactly the subset protocol.schema.json
-// uses: $ref (local), type (string or array), const, enum, required, properties,
+// uses: $ref (local), type (string or array), const, enum, minimum, exclusiveMinimum, required, properties,
 // items, oneOf, and the empty schema {} (matches anything). Kept dependency-free
 // so the schema is enforced in CI without pulling a validator into the tree; a
 // third party validates the same schema with any standard tool.
@@ -48,6 +48,12 @@ function validate(schema, value, path = '$') {
 	}
 	if (schema.enum && !schema.enum.includes(value)) {
 		errors.push(`${path}: ${JSON.stringify(value)} not in enum`);
+	}
+	if ('minimum' in schema && typeof value === 'number' && value < schema.minimum) {
+		errors.push(`${path}: ${value} < minimum ${schema.minimum}`);
+	}
+	if ('exclusiveMinimum' in schema && typeof value === 'number' && value <= schema.exclusiveMinimum) {
+		errors.push(`${path}: ${value} <= exclusiveMinimum ${schema.exclusiveMinimum}`);
 	}
 	if (schema.required) {
 		for (const key of schema.required) {

@@ -133,6 +133,9 @@ export interface SimResult {
 	config: { clients: number; topics: string[]; steps: number; faults: SimFaults; tz: string | null; startEpoch: number; allowSystemTopicSubscribe: boolean; allowNonAsciiTopics: boolean; workers?: number; clusterMode?: 'reuseport' | 'acceptor'; relayFaults?: SimFaults };
 	steps: number;
 	virtualTimeMs: number;
+	/** Per-step invariant violations plus end-of-run steady-state hypotheses folded in
+	 *  under `steady.*` categories (steady.time-nonmonotonic, steady.no-quiescence,
+	 *  steady.delivery-nonmonotonic, steady.starvation) and terminal `topic.zero-subscribers`. */
 	invariantViolations: Array<{ category: string; context: any }>;
 	fatals: SimFatal[];
 	schedulerUncaught: string[];

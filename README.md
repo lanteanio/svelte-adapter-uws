@@ -666,6 +666,9 @@ If you set `envPrefix: 'MY_APP_'` in the adapter config, all variables are prefi
 | `ORIGIN` | *(derived)* | Fixed origin (e.g. `https://example.com`) |
 | `SSL_CERT` | - | Path to TLS certificate file |
 | `SSL_KEY` | - | Path to TLS private key file |
+| `SSL_WATCH` | `1` | Hot-reload the cert on disk change (SNI swap, no restart); `0` disables |
+| `SSL_RELOAD_DEBOUNCE_MS` | `500` | Debounce (ms) for the cert-reload watcher |
+| `SSL_SNI_HOSTS` | *(cert SAN)* | Comma-separated SNI host override for cert hot-reload |
 | `PROTOCOL_HEADER` | - | Header for protocol detection (e.g. `x-forwarded-proto`) |
 | `HOST_HEADER` | - | Header for host detection (e.g. `x-forwarded-host`) |
 | `PORT_HEADER` | - | Header for port override (e.g. `x-forwarded-port`) |
@@ -673,6 +676,7 @@ If you set `envPrefix: 'MY_APP_'` in the adapter config, all variables are prefi
 | `XFF_DEPTH` | `1` | Position from right in `X-Forwarded-For` |
 | `BODY_SIZE_LIMIT` | `512K` | Max request body size (supports `K`, `M`, `G` suffixes) |
 | `SHUTDOWN_TIMEOUT` | `30` | Seconds to wait during graceful shutdown |
+| `RECONNECT_DISPERSAL_MS` | `5000` | Graceful-shutdown reconnect dispersal window (ms); `0` disables the advisory |
 | `CLUSTER_WORKERS` | - | Number of worker threads (or `auto` for CPU count) |
 | `CLUSTER_MODE` | *(auto)* | `reuseport` (Linux default) or `acceptor` (other platforms) |
 | `RESTART_ON_STATE_DIVERGENCE` | - | Set to `1` to terminate a worker the primary detects as diverged (see [Cross-worker state-divergence detection](#cross-worker-state-divergence-detection)). Default: log + metric only |
@@ -685,6 +689,8 @@ On `SIGTERM` or `SIGINT`, the server:
 2. Waits for in-flight SSR requests to complete (up to `SHUTDOWN_TIMEOUT` seconds)
 3. Emits a `sveltekit:shutdown` event on `process` (for cleanup hooks like closing database connections)
 4. Exits
+
+Connected WebSocket clients are advised to reconnect on a jittered schedule before the socket closes, so a draining node's clients scatter across `RECONNECT_DISPERSAL_MS` (default 5000ms) instead of all reconnecting at once and stampeding the replacement node. Set `RECONNECT_DISPERSAL_MS=0` to restore the exact legacy shutdown. To drain a node without shutting it down (e.g. ahead of a rolling deploy), call `platform.adviseReconnect({ windowMs })` yourself - it broadcasts the advisory (optionally to a `filter`ed subset) and returns the count advised.
 
 ```js
 // Listen for shutdown in your server code (e.g. hooks.server.js)
@@ -715,6 +721,8 @@ SSL_CERT=./cert.pem SSL_KEY=./key.pem node build
 # Everything at once
 SSL_CERT=./cert.pem SSL_KEY=./key.pem PORT=443 HOST=0.0.0.0 BODY_SIZE_LIMIT=10M SHUTDOWN_TIMEOUT=60 node build
 ```
+
+When TLS is configured the server hot-reloads the certificate: a renewed cert on disk (certbot / cert-manager) is picked up automatically and served on new handshakes without re-binding the listen socket or dropping live connections (the served SAN host is swapped as a uWS SNI server name). The cert + key are validated before the swap, so a half-written file keeps the previous cert. Set `SSL_WATCH=0` to opt out. A non-SNI / unmatched-SNI client keeps the boot-time cert until a restart (the uWS default context is static). Automatic reload is single-process only in this release; a cluster deployment (`CLUSTER_WORKERS`) picks up a renewed cert on its next restart.
 
 ---
 

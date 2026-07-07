@@ -1,6 +1,6 @@
 import { writable, derived } from 'svelte/store';
 import { parseBinaryFrame, buildBinaryFrame, requestNFrame } from './runtime/wire.js';
-import { now, monotonicNow, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask, nextReconnectDelay } from './client-runtime.js';
+import { now, monotonicNow, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask, nextReconnectDelay, dispersedReconnectDelay } from './client-runtime.js';
 
 /** @type {ReturnType<typeof createConnection> | null} */
 let singleton = null;
@@ -796,6 +796,13 @@ function createConnection(options) {
 	// retries are exhausted. Distinct from intentionallyClosed (user-initiated).
 	// Both prevent the visibility handler from triggering a reconnect.
 	let terminalClosed = false;
+	// Stashed server drain advisory ({ afterMs, windowMs, deadline }) received via a
+	// `reconnect` control frame just before the server closes this socket. Honored in
+	// onclose to disperse the reconnect across the advertised window; cleared on the
+	// next successful open and ignored past its validity deadline (which guards an
+	// advisory whose close never actually arrives).
+	/** @type {{ afterMs: number, windowMs: number, deadline: number } | null} */
+	let reconnectAdvisory = null;
 	// Set when the page is hidden  - signals that the next disconnect may be
 	// browser-initiated and should reconnect immediately when the tab resumes.
 	let hiddenDisconnect = false;
@@ -1412,6 +1419,9 @@ function createConnection(options) {
 		ws.onopen = () => {
 			if (ws !== sock) return;
 			attempt = 0;
+			// A fresh connection supersedes any pending drain advisory from the old
+			// socket - clear it so a stale advisory cannot disperse a future reconnect.
+			reconnectAdvisory = null;
 			lastServerMessage = now();
 			failureStore.set(null);
 			setStatusOpen();
@@ -1668,6 +1678,26 @@ function createConnection(options) {
 						});
 					return;
 				}
+				if (msg.type === 'reconnect') {
+					// Server drain advisory: it is about to close this socket (it is
+					// draining or restarting) and wants us to reconnect on a jittered
+					// schedule so a whole fleet does not stampede the replacement in one
+					// backoff window. Each client rolls its own delay in
+					// [afterMs, afterMs + windowMs) - the frame advertises the WINDOW, not
+					// a pre-rolled offset. We only STASH it here; the dispersed reconnect
+					// is armed in onclose when the close actually arrives.
+					const windowMs = typeof msg.windowMs === 'number' && msg.windowMs > 0 ? msg.windowMs : 0;
+					if (windowMs > 0) {
+						const afterMs = typeof msg.afterMs === 'number' && msg.afterMs > 0 ? msg.afterMs : 0;
+						// Validity grace: honor the advisory only if the server's close lands
+						// within the dispersal window plus this slack, so a stray advisory
+						// whose close never comes goes stale instead of deferring a genuine
+						// later reconnect.
+						const graceMs = 5000;
+						reconnectAdvisory = { afterMs, windowMs, deadline: now() + afterMs + windowMs + graceMs };
+					}
+					return;
+				}
 			} catch {
 				// Not a valid envelope - ignore
 			}
@@ -1705,6 +1735,23 @@ function createConnection(options) {
 				return;
 			}
 
+			// Server drain advisory: it asked us to reconnect on a jittered schedule
+			// before closing (it is draining / restarting), so a whole fleet does not
+			// stampede the replacement node. Honor it OVER a normal THROTTLE / RETRY;
+			// TERMINAL already returned above, so a permanent close still wins. Only
+			// when the advisory is fresh (its close arrived within the validity
+			// deadline). Reset the backoff attempt: the client is migrating to a fresh
+			// node, not backing off a failure.
+			const advisory = reconnectAdvisory;
+			reconnectAdvisory = null;
+			if (advisory && now() < advisory.deadline) {
+				failureStore.set({ kind: 'ws-close', class: 'DRAIN', code, reason });
+				statusStore.set('disconnected');
+				attempt = 0;
+				scheduleReconnect(dispersedReconnectDelay(advisory.afterMs, advisory.windowMs));
+				return;
+			}
+
 			if (cls === 'THROTTLE') {
 				// Jump ahead in the backoff curve to avoid hammering a rate-limited server.
 				attempt = Math.max(attempt, 5);
@@ -1722,7 +1769,7 @@ function createConnection(options) {
 		};
 	}
 
-	function scheduleReconnect() {
+	function scheduleReconnect(overrideDelayMs) {
 		if (reconnectTimer) return;
 		if (attempt >= maxReconnectAttempts) {
 			failureStore.set({
@@ -1736,8 +1783,16 @@ function createConnection(options) {
 			permaClosedStore.set(true);
 			return;
 		}
-		const delay = nextReconnectDelay(reconnectInterval, maxReconnectInterval, attempt);
-		attempt++;
+		let delay;
+		if (typeof overrideDelayMs === 'number') {
+			// Dispersed reconnect (server drain advisory): the delay is pre-rolled from
+			// the advisory window; do NOT advance the backoff attempt - the client is
+			// migrating to a fresh node, not backing off a failure.
+			delay = overrideDelayMs;
+		} else {
+			delay = nextReconnectDelay(reconnectInterval, maxReconnectInterval, attempt);
+			attempt++;
+		}
 		reconnectTimer = setTimer(() => {
 			reconnectTimer = null;
 			doConnect();

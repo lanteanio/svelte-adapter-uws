@@ -24,6 +24,7 @@
     { "$ref": "#/$defs/ingress-ok" },
     { "$ref": "#/$defs/ingress-bind" },
     { "$ref": "#/$defs/ingress-bound" },
+    { "$ref": "#/$defs/reconnect" },
     { "$ref": "#/$defs/data-event" }
   ],
   "$defs": {
@@ -46,6 +47,16 @@
         "sessionId": { "type": "string" }
       },
       "required": ["type", "sessionId"]
+    },
+    "reconnect": {
+      "description": "Server -> client drain advisory: the node is draining/restarting and asks the client to reconnect on a jittered schedule in [afterMs, afterMs+windowMs), so a fleet does not stampede the replacement. Additive and unknown-type-safe (an old client ignores it).",
+      "type": "object",
+      "properties": {
+        "type": { "const": "reconnect" },
+        "windowMs": { "type": "integer", "exclusiveMinimum": 0 },
+        "afterMs": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["type", "windowMs"]
     },
     "hello": {
       "type": "object",

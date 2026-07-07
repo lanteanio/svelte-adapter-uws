@@ -282,8 +282,12 @@ export const denials: Readable<{
  *   server restart, etc). Reconnect is in progress.
  * - `'AUTH'` - auth preflight (`{ auth: true }`) failed before the WebSocket
  *   was opened. 4xx is terminal; 5xx and network errors retry.
+ * - `'DRAIN'` - the server sent a reconnect advisory before closing (it is
+ *   draining or restarting). Reconnect is scheduled on a dispersed delay so a
+ *   whole fleet does not stampede the replacement node all at once; distinct
+ *   from a generic drop so a consumer can show "server updating, reconnecting."
  */
-export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AUTH';
+export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AUTH' | 'DRAIN';
 
 /**
  * Latest failure cause behind a non-open status transition. The `kind`
@@ -292,7 +296,7 @@ export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AU
  * preflight (`'auth-preflight'`, with a `status` field).
  */
 export type Failure =
-	| { kind: 'ws-close'; class: 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY'; code: number; reason: string }
+	| { kind: 'ws-close'; class: 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'DRAIN'; code: number; reason: string }
 	| { kind: 'auth-preflight'; class: 'AUTH'; status: number; reason: string };
 
 /**

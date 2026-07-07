@@ -335,9 +335,19 @@ function classifyHost(hostname) {
  */
 
 /**
+ * The full vocabulary of rejection reasons across this module. Not every
+ * function produces every member: `unresolved-host` is only from
+ * `checkUrlResolved`, `not-allowlisted` only in `allowlist` mode, and
+ * `not-an-ip` only from `classifyAddress` (a non-IP string handed to the
+ * address classifier).
+ *
+ * @typedef {('loopback' | 'rfc1918' | 'link-local' | 'metadata' | 'ula' | 'unspecified' | 'unresolved-host' | 'not-allowlisted' | 'bad-scheme' | 'parse-error' | 'not-an-ip')} SafeUrlReason
+ */
+
+/**
  * @typedef {Object} CheckUrlResult
  * @property {boolean} safe
- * @property {('loopback' | 'rfc1918' | 'link-local' | 'metadata' | 'ula' | 'unspecified' | 'unresolved-host' | 'not-allowlisted' | 'bad-scheme' | 'parse-error')} [reason]
+ * @property {SafeUrlReason} [reason]
  */
 
 /**
@@ -402,6 +412,75 @@ export function checkUrl(url, options) {
  */
 export function isSafeUrl(url, options) {
 	return checkUrl(url, options).safe;
+}
+
+/**
+ * Classify a bare IP address literal against the SSRF blocked ranges - the
+ * address-level companion to `checkUrl`'s URL-level check, for a caller that
+ * already holds an address (a resolved DNS result, a proxied `X-Forwarded-For`
+ * hop, a socket peer) rather than a full URL. Returns the matching blocked
+ * reason for a private / loopback / metadata / link-local / ULA / unspecified
+ * address, or `null` when the input is a real, public IP literal.
+ *
+ * Accepts every IPv4 encoding the URL parser normalises (dotted-decimal, dotted
+ * octal `0177`, dotted/whole hex `0x7f`, short form `127.1`, bare integer
+ * `2130706433`) and both bracketed (`[::1]`) and bare (`::1`) IPv6, including
+ * the IPv4-mapped / IPv4-compatible forms (`::ffff:169.254.169.254`) which
+ * unwrap to the embedded IPv4 and re-check, so the metadata IP cannot be
+ * smuggled through an IPv6 wrapper.
+ *
+ * SECURITY: `null` means "a real IP literal that is public" and NOTHING else. A
+ * non-IP input is never `null`: a DNS name (`example.com`) returns `'not-an-ip'`
+ * and a malformed literal returns `'parse-error'`, so a hostname can never
+ * masquerade as a safe address. A name is not classified by resolution here -
+ * resolve it first (see `checkUrlResolved`) and classify the resulting address.
+ * The hostnames `localhost` and `metadata.google.internal` are the two
+ * name-based blocks and still report their range (`loopback` / `metadata`).
+ *
+ * @param {string} ip - A bare IP literal: an IPv4 in any encoding, or an IPv6
+ *   with or without brackets.
+ * @returns {SafeUrlReason | null}
+ */
+export function classifyAddress(ip) {
+	// A bare (unbracketed) IPv6 must be bracketed before it reaches classifyHost,
+	// which distinguishes IPv6 by the surrounding brackets; a bracketed value and
+	// every IPv4 encoding pass through unchanged.
+	if (typeof ip !== 'string') return 'not-an-ip';
+	const host = ip.indexOf(':') !== -1 && ip[0] !== '[' ? '[' + ip + ']' : ip;
+	const classified = classifyHost(host);
+	if (classified === null) {
+		// classifyHost returns null for a real PUBLIC IP literal AND for a host that
+		// normalises to empty ('' or '.'). Only the former is null-safe; confirm the
+		// input actually parses as an IP, else it is not an IP literal at all and
+		// MUST be non-null (null would let an empty forwarded-for hop read as safe).
+		const bare = host[0] === '[' ? host.slice(1, -1) : host;
+		if (bare.length === 0) return 'not-an-ip';
+		return (parseIpv4(bare) !== null || parseIpv6(bare) !== null) ? null : 'not-an-ip';
+	}
+	if ('reason' in classified) return /** @type {SafeUrlReason} */ (classified.reason);
+	// classifyHost returned a DNS name: the input was not an IP literal at all.
+	// This MUST be non-null - returning null would let a hostname pass as a safe
+	// public address (the SSRF hole this classifier exists to close).
+	return 'not-an-ip';
+}
+
+/**
+ * Boolean address gate: `true` only when `ip` is a real, public IP literal -
+ * the address-level companion to `isSafeUrl`. A private / loopback / metadata
+ * address, a malformed literal, and a non-IP string (a DNS name) all return
+ * `false`; a name is never treated as safe. Equivalent to
+ * `classifyAddress(ip) === null`.
+ *
+ * `options` is accepted for signature symmetry with `isSafeUrl` and is reserved
+ * for future policy knobs; the address check has no modes today (the `mode` /
+ * `allow` / `resolve` posture is a URL-level concern).
+ *
+ * @param {string} ip
+ * @param {SafeUrlOptions} [options]
+ * @returns {boolean}
+ */
+export function isAddressSafe(ip, options) {
+	return classifyAddress(ip) === null;
 }
 
 /**

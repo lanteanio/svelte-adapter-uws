@@ -14,6 +14,9 @@ export type { WebSocket } from 'uWebSockets.js';
  * | `ORIGIN` | *(derived)* | Fixed origin (e.g. `https://example.com`) |
  * | `SSL_CERT` | - | Path to TLS certificate file (enables HTTPS/WSS natively) |
  * | `SSL_KEY` | - | Path to TLS private key file |
+ * | `SSL_WATCH` | `1` | Hot-reload the cert on disk change (SNI swap, no restart); `0` disables |
+ * | `SSL_RELOAD_DEBOUNCE_MS` | `500` | Debounce window (ms) for the cert-reload watcher |
+ * | `SSL_SNI_HOSTS` | *(cert SAN)* | Comma-separated SNI host override for hot-reload |
  * | `PROTOCOL_HEADER` | - | Header for protocol detection (e.g. `x-forwarded-proto`) |
  * | `HOST_HEADER` | - | Header for host detection (e.g. `x-forwarded-host`) |
  * | `PORT_HEADER` | - | Header for port override (e.g. `x-forwarded-port`) |
@@ -21,6 +24,7 @@ export type { WebSocket } from 'uWebSockets.js';
  * | `XFF_DEPTH` | `1` | Position from right in `X-Forwarded-For` |
  * | `BODY_SIZE_LIMIT` | `512K` | Max request body size (`K`, `M`, `G` suffixes) |
  * | `SHUTDOWN_TIMEOUT` | `30` | Seconds to wait during graceful shutdown |
+ * | `RECONNECT_DISPERSAL_MS` | `5000` | Graceful-shutdown reconnect dispersal window (ms); `0` disables the advisory |
  * | `CLUSTER_WORKERS` | - | Number of worker threads (`'auto'` for CPU count) |
  * | `CLUSTER_MODE` | *(auto)* | `'reuseport'` (Linux default) or `'acceptor'` (other platforms) |
  *
@@ -55,6 +59,13 @@ export type { WebSocket } from 'uWebSockets.js';
  * ```
  *
  * This uses uWebSockets.js `SSLApp` - HTTPS and WSS with zero proxy overhead.
+ *
+ * A renewed cert on disk (certbot / cert-manager) is picked up automatically: the
+ * server watches the cert directory and swaps the SNI server name in place, so a
+ * fresh cert is served without dropping the listen socket or live connections.
+ * Set `SSL_WATCH=0` to opt out. A non-SNI / unmatched-SNI client keeps the boot
+ * cert until a restart (the SSLApp default context is static). Automatic reload is
+ * single-process only in this release; a cluster deployment reloads on restart.
  */
 export interface AdapterOptions {
 	/**
@@ -2025,6 +2036,30 @@ export interface Platform {
 	 * ```
 	 */
 	sendTo(filter: (userData: any) => boolean, topic: string, event: string, data?: unknown, options?: { compress?: boolean }): number;
+
+	/**
+	 * Advise connected clients to reconnect on a jittered schedule, then (by
+	 * default) close them. A draining or restarting node broadcasts the additive
+	 * `reconnect` control frame so each client rolls its own delay in
+	 * `[afterMs, afterMs + windowMs)` instead of a whole fleet stampeding the
+	 * replacement node in one backoff window. The frame is unknown-type-safe, so an
+	 * old client simply ignores it and falls back to normal backoff.
+	 *
+	 * `windowMs` (required, > 0) is the dispersal width; `afterMs` (default 0) is a
+	 * floor delay to hold clients off while the replacement warms. `close` (default
+	 * `true`) sends a graceful `1001` close after the advisory; pass `false` to
+	 * advise without closing. `filter` limits the advisory to matching connections
+	 * (by their upgrade `userData`, evaluated synchronously like `sendTo`). Returns
+	 * the number of connections advised. Graceful `shutdown()` calls this
+	 * automatically when `RECONNECT_DISPERSAL_MS > 0` (default 5000).
+	 *
+	 * @example
+	 * ```js
+	 * // Drain this node before a rolling deploy, scattering reconnects over 10s:
+	 * platform.adviseReconnect({ windowMs: 10000 });
+	 * ```
+	 */
+	adviseReconnect(options?: { windowMs?: number; afterMs?: number; close?: boolean; filter?: (userData: any) => boolean; compress?: boolean }): number;
 
 	/**
 	 * Number of active WebSocket connections.

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isSafeUrl, checkUrl, checkUrlResolved } from '../src/safe-url.js';
+import { isSafeUrl, checkUrl, checkUrlResolved, classifyAddress, isAddressSafe } from '../src/safe-url.js';
 
 describe('safe-url: blocked ranges (strict mode, the zero-config default)', () => {
 	it('blocks IPv4 loopback 127.0.0.0/8 and allows the just-outside member', () => {
@@ -268,5 +268,109 @@ describe('safe-url: checkUrlResolved (DNS-rebinding closer)', () => {
 			resolve: async () => 'still-a-name.example'
 		});
 		expect(r).toEqual({ safe: false, reason: 'unresolved-host' });
+	});
+});
+
+describe('safe-url: classifyAddress / isAddressSafe (bare-IP companion)', () => {
+	it('classifies bare IPv4 in every obfuscated encoding', () => {
+		expect(classifyAddress('127.0.0.1')).toBe('loopback'); // dotted-decimal
+		expect(classifyAddress('2130706433')).toBe('loopback'); // bare integer
+		expect(classifyAddress('0x7f000001')).toBe('loopback'); // whole hex
+		expect(classifyAddress('0x7f.0.0.1')).toBe('loopback'); // dotted hex
+		expect(classifyAddress('0177.0.0.1')).toBe('loopback'); // octal
+		expect(classifyAddress('127.1')).toBe('loopback'); // short form
+		expect(classifyAddress('10.1')).toBe('rfc1918'); // short form, rfc1918
+	});
+
+	it('classifies bare and bracketed IPv6', () => {
+		expect(classifyAddress('::1')).toBe('loopback');
+		expect(classifyAddress('[::1]')).toBe('loopback');
+		expect(classifyAddress('0:0:0:0:0:0:0:1')).toBe('loopback');
+		expect(classifyAddress('::')).toBe('unspecified');
+		expect(classifyAddress('fd00::1')).toBe('ula');
+		expect(classifyAddress('[fc00::1]')).toBe('ula');
+		expect(classifyAddress('fe80::1')).toBe('link-local');
+		expect(classifyAddress('[febf:ffff::1]')).toBe('link-local');
+		expect(classifyAddress('[fd00:ec2::254]')).toBe('metadata');
+	});
+
+	it('unwraps IPv4-mapped / IPv4-compatible IPv6 and re-checks the embedded IPv4', () => {
+		expect(classifyAddress('::ffff:169.254.169.254')).toBe('metadata');
+		expect(classifyAddress('[::ffff:127.0.0.1]')).toBe('loopback');
+		expect(classifyAddress('::ffff:192.168.1.1')).toBe('rfc1918');
+		expect(classifyAddress('::ffff:a9fe:a9fe')).toBe('metadata');
+		expect(classifyAddress('::169.254.169.254')).toBe('metadata');
+	});
+
+	it('reports metadata / ULA / link-local / loopback with a non-null reason', () => {
+		expect(classifyAddress('169.254.169.254')).toBe('metadata');
+		expect(classifyAddress('169.254.0.1')).toBe('link-local');
+		expect(classifyAddress('10.0.0.1')).toBe('rfc1918');
+		expect(classifyAddress('0.0.0.0')).toBe('unspecified');
+		// The two name-based blocks still report their range, never null.
+		expect(classifyAddress('localhost')).toBe('loopback');
+		expect(classifyAddress('metadata.google.internal')).toBe('metadata');
+	});
+
+	it('returns null (and isAddressSafe true) for a genuinely public IP', () => {
+		expect(classifyAddress('8.8.8.8')).toBeNull();
+		expect(classifyAddress('128.0.0.1')).toBeNull();
+		expect(classifyAddress('[2001:db8::1]')).toBeNull();
+		expect(classifyAddress('2606:4700:4700::1111')).toBeNull(); // bare public IPv6
+		expect(isAddressSafe('8.8.8.8')).toBe(true);
+		expect(isAddressSafe('2606:4700:4700::1111')).toBe(true);
+		expect(isAddressSafe('8.8.8.8', {})).toBe(true); // options accepted for symmetry
+	});
+
+	it('SECURITY: a DNS-name string is never null - it maps to a non-null reason', () => {
+		// The whole point: `null` must mean "a real public IP literal", so a
+		// hostname handed to the address classifier can never pass as safe.
+		expect(classifyAddress('example.com')).toBe('not-an-ip');
+		expect(classifyAddress('hooks.partner.com')).toBe('not-an-ip');
+		expect(isAddressSafe('example.com')).toBe(false);
+		expect(isAddressSafe('hooks.partner.com')).toBe(false);
+	});
+
+	it('SECURITY: an empty / degenerate input is never null (an empty forwarded-for hop is not safe)', () => {
+		// classifyHost normalises '' and '.' to an empty host and returns null;
+		// without a guard classifyAddress would report those as "a real public IP"
+		// (null), letting an absent / malformed X-Forwarded-For hop read as safe.
+		expect(classifyAddress('')).toBe('not-an-ip');
+		expect(classifyAddress('.')).toBe('not-an-ip');
+		expect(isAddressSafe('')).toBe(false);
+		expect(isAddressSafe('.')).toBe(false);
+		expect(isAddressSafe('   ')).toBe(false);
+		// A non-string input is also never null.
+		expect(classifyAddress(/** @type {any} */ (undefined))).toBe('not-an-ip');
+	});
+
+	it('reports a malformed literal as parse-error (also non-null / unsafe)', () => {
+		expect(classifyAddress('[not:valid:ipv6:::::]')).toBe('parse-error');
+		expect(classifyAddress('foo:bar')).toBe('parse-error'); // bracket-wrapped, fails IPv6 parse
+		expect(isAddressSafe('[not:valid:ipv6:::::]')).toBe(false);
+	});
+
+	it('isAddressSafe mirrors classifyAddress() === null', () => {
+		expect(isAddressSafe('127.0.0.1')).toBe(false);
+		expect(isAddressSafe('169.254.169.254')).toBe(false);
+		expect(isAddressSafe('fd00::1')).toBe(false);
+		expect(isAddressSafe('9.9.9.9')).toBe(true);
+	});
+
+	it('is drift-free vs the checkUrl URL wrapper for real IP literals', () => {
+		// Bracket a bare IPv6 exactly as classifyAddress and resolveAndPin do.
+		const wrap = (ip) => (ip.indexOf(':') !== -1 && ip[0] !== '[' ? '[' + ip + ']' : ip);
+		const ips = [
+			'127.0.0.1', '10.0.0.1', '169.254.169.254', '169.254.0.1', '0.0.0.0',
+			'8.8.8.8', '128.0.0.1', '2130706433', '0x7f000001', '0177.0.0.1', '127.1',
+			'[::1]', '::1', '[fc00::1]', 'fe80::1', '[fd00:ec2::254]',
+			'[2001:db8::1]', '2606:4700:4700::1111',
+			'::ffff:169.254.169.254', '[::ffff:127.0.0.1]'
+		];
+		for (const ip of ips) {
+			const result = checkUrl('http://' + wrap(ip) + '/');
+			const expected = result.safe ? null : result.reason;
+			expect(classifyAddress(ip)).toBe(expected);
+		}
 	});
 });

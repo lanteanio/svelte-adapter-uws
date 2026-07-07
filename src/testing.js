@@ -760,6 +760,33 @@ export async function createTestServer(options = {}) {
 			}
 			return count;
 		},
+		adviseReconnect(options) {
+			const windowMs = options && typeof options.windowMs === 'number' && options.windowMs > 0
+				? Math.floor(options.windowMs) : 0;
+			if (windowMs <= 0) return 0;
+			const afterMs = options && typeof options.afterMs === 'number' && options.afterMs > 0
+				? Math.floor(options.afterMs) : 0;
+			const doClose = !options || options.close !== false;
+			const filter = options && typeof options.filter === 'function' ? options.filter : null;
+			const frame = afterMs > 0
+				? '{"type":"reconnect","afterMs":' + afterMs + ',"windowMs":' + windowMs + '}'
+				: '{"type":"reconnect","windowMs":' + windowMs + '}';
+			let count = 0;
+			for (const ws of [...wsConnections]) {
+				let userData;
+				try { userData = ws.getUserData(); }
+				catch { closedWsAbortsT++; continue; }
+				if (filter) {
+					const decision = filter(userData);
+					if (decision && typeof decision.then === 'function') continue;
+					if (!decision) continue;
+				}
+				sendOutboundT(ws, frame);
+				if (doClose && typeof ws.end === 'function') { try { ws.end(1001, 'Server draining'); } catch { closedWsAbortsT++; } }
+				count++;
+			}
+			return count;
+		},
 		get connections() { return wsConnections.size; },
 		get assertions() { return readAssertionCounts(); },
 		get closedWsAborts() { return closedWsAbortsT; },
@@ -1944,6 +1971,12 @@ export async function createTestServer(options = {}) {
 						} catch (err) {
 							console.error('[ws] shutdown hook threw:', err);
 						}
+					}
+					// Advise clients to reconnect on a jittered schedule before closing
+					// (opt-in via createTestServer({ reconnectDispersalMs }); 0 = no-op),
+					// mirroring production shutdown() so the dispersal path is testable.
+					if (options.reconnectDispersalMs > 0) {
+						platform.adviseReconnect({ windowMs: options.reconnectDispersalMs, close: false });
 					}
 					// Mirror production graceful shutdown: end() (graceful) flushes
 					// buffered frames + sends a clean 1001 close frame; close() drops

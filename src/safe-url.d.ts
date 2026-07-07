@@ -54,9 +54,10 @@ export interface SafeUrlOptions {
 }
 
 /**
- * Why a URL was rejected. `unresolved-host` is reported by
- * `checkUrlResolved` when the resolver throws or returns a non-address;
- * `not-allowlisted` only in `allowlist` mode.
+ * Why a URL or address was rejected. Not every function produces every member:
+ * `unresolved-host` is reported by `checkUrlResolved` when the resolver throws
+ * or returns a non-address; `not-allowlisted` only in `allowlist` mode;
+ * `not-an-ip` only by `classifyAddress` when handed a non-IP string.
  */
 export type SafeUrlReason =
 	| 'loopback'
@@ -68,7 +69,8 @@ export type SafeUrlReason =
 	| 'unresolved-host'
 	| 'not-allowlisted'
 	| 'bad-scheme'
-	| 'parse-error';
+	| 'parse-error'
+	| 'not-an-ip';
 
 export interface CheckUrlResult {
 	safe: boolean;
@@ -96,6 +98,37 @@ export function isSafeUrl(url: string, options?: SafeUrlOptions): boolean;
  * DNS rebinding.
  */
 export function checkUrl(url: string, options?: SafeUrlOptions): CheckUrlResult;
+
+/**
+ * Classify a bare IP address literal against the SSRF blocked ranges - the
+ * address-level companion to `checkUrl`, for a caller that already holds an
+ * address (a resolved DNS result, a proxied forwarded-for hop) rather than a
+ * full URL. Returns the blocked reason, or `null` when the input is a real,
+ * public IP literal. Accepts every IPv4 encoding and bracketed or bare IPv6
+ * (IPv4-mapped forms unwrap and re-check).
+ *
+ * SECURITY: `null` means "a real public IP literal" and nothing else. A DNS
+ * name returns `'not-an-ip'` and a malformed literal returns `'parse-error'`,
+ * so a hostname can never masquerade as a safe address - resolve a name first
+ * (see `checkUrlResolved`), then classify the address.
+ *
+ * @example
+ * import { classifyAddress } from 'svelte-adapter-uws/safe-url';
+ *
+ * classifyAddress('169.254.169.254'); // 'metadata'
+ * classifyAddress('8.8.8.8');         // null (public)
+ * classifyAddress('example.com');     // 'not-an-ip' (never null)
+ */
+export function classifyAddress(ip: string): SafeUrlReason | null;
+
+/**
+ * Boolean address gate: `true` only when `ip` is a real, public IP literal -
+ * the address-level companion to `isSafeUrl`. A private/loopback/metadata
+ * address, a malformed literal, and a non-IP string (a DNS name) all return
+ * `false`. Equivalent to `classifyAddress(ip) === null`. `options` is accepted
+ * for symmetry with `isSafeUrl` and is reserved; the address check has no modes.
+ */
+export function isAddressSafe(ip: string, options?: SafeUrlOptions): boolean;
 
 /**
  * DNS-rebinding closer. Runs the synchronous literal check first; if that

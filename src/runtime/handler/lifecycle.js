@@ -4,9 +4,12 @@ import { wsModule } from '../ws-handler-bridge.js';
 import { WS_CAPS, WS_SUBSCRIPTIONS, assert, fatal, wrapBatchEnvelope } from '../utils.js';
 import { monotonicNow } from '../runtime.js';
 import { counters, maxSeenSeq, recordSeen, wsConnections } from './state.js';
-import { app, is_tls, _t_app, WS_COMPRESSION_ON } from './config.js';
+import { app, is_tls, _t_app, WS_COMPRESSION_ON, reconnect_dispersal_ms, ssl_cert, ssl_key, ssl_watch, ssl_reload_debounce_ms, ssl_sni_hosts } from './config.js';
 import { platform, relayPublishWire } from './platform.js';
 import { stopPressureSampling } from './pressure-metrics.js';
+import { applyServerNames, createCertWatcher } from '../utils/tls-reload.js';
+import { parentPort } from 'node:worker_threads';
+import { dirname } from 'node:path';
 
 /** @type {Array<() => void>} */
 let drainResolvers = [];
@@ -17,6 +20,68 @@ export function requestDone() {
 		for (const resolve of drainResolvers) resolve();
 		drainResolvers = [];
 	}
+}
+
+// --- TLS certificate hot-reload (opt-in via ssl_watch; see utils/tls-reload.js) ---
+// Registered SNI hosts for this app, updated on each reload; and the directory
+// watcher. AUTOMATIC reload is SINGLE-PROCESS only in this release: a cluster
+// worker registers its SNI hosts but does not watch, and the cluster primary
+// broadcast that would drive per-worker reloads is not yet wired (reloadTls is
+// exported for that follow-up). A cluster deployment picks up a renewed cert on
+// its next restart; run single-process for automatic reload.
+let tlsHosts = [];
+let certWatcher = null;
+
+/**
+ * Re-read the certificate on disk and swap the SNI server name(s) in place so a
+ * renewed cert is served without re-binding the listen socket. Validates the
+ * cert + key BEFORE touching the app, so a partial write keeps the previous
+ * certificate (TLS never drops). No-op on a non-TLS server. Exported so a future
+ * cluster primary-broadcast can drive a reload on this worker (not yet wired).
+ */
+export function reloadTls() {
+	if (!is_tls || !ssl_watch) return;
+	try {
+		tlsHosts = applyServerNames(app, { certPath: ssl_cert, keyPath: ssl_key, hosts: ssl_sni_hosts }, tlsHosts);
+	} catch (err) {
+		console.error('[tls] certificate reload skipped, kept the previous cert:', err && err.message ? err.message : err);
+	}
+}
+
+/**
+ * Register the certificate's SNI host(s) so the served hosts become hot-reloadable
+ * (the SSLApp default context is not), and - in single-process mode - start
+ * watching the cert directory. Called from start() once the listen socket is
+ * bound. In cluster mode every worker registers its hosts, but the automatic
+ * cert-directory watch runs only single-process; the cluster primary-broadcast
+ * reload is a follow-up, so a cluster deployment reloads on restart.
+ */
+function initTlsReload() {
+	if (!is_tls || !ssl_watch) return;
+	try {
+		tlsHosts = applyServerNames(app, { certPath: ssl_cert, keyPath: ssl_key, hosts: ssl_sni_hosts }, []);
+	} catch (err) {
+		console.error('[tls] initial SNI registration failed, hot-reload disabled:', err && err.message ? err.message : err);
+		return;
+	}
+	// Only a single-process server watches its own cert directory. A cluster worker
+	// (parentPort set) does not watch; automatic reload is single-process only in
+	// this release (the cluster primary-broadcast reload is a follow-up).
+	if (!parentPort) {
+		certWatcher = createCertWatcher({
+			certPath: ssl_cert,
+			debounceMs: ssl_reload_debounce_ms,
+			onChange: reloadTls
+		});
+		certWatcher.start();
+		console.log(`[tls] watching ${dirname(ssl_cert)} for certificate renewals (SNI: ${tlsHosts.join(', ')})`);
+	}
+}
+
+/** Stop the cert watcher (idempotent; no-op when never started). */
+export function stopTlsReload() {
+	certWatcher?.stop();
+	certWatcher = null;
 }
 
 /**
@@ -66,6 +131,10 @@ export async function start(host, port, opts) {
 			});
 		});
 	}
+
+	// Make the served TLS host(s) hot-reloadable and (single-process) start
+	// watching the cert directory, now that the listen socket is bound.
+	initTlsReload();
 
 	// Fire the user's `init` hook (if exported) once per worker, after the
 	// listen socket is bound (when listening) and before this function resolves.
@@ -140,11 +209,22 @@ export async function shutdown() {
 	// Stop the optional resource-growth trend auditor timer (no-op when never
 	// installed - the default interval-0 case).
 	counters.resourceGrowthAuditor?.stop();
+	// Stop the TLS cert watcher (no-op when never started).
+	stopTlsReload();
 	// Snapshot first: end() synchronously fires the close handler, which removes
 	// the entry from wsConnections as we iterate. Use end() (graceful) not
 	// close() (forceful) - end() flushes buffered outbound frames and sends a
 	// clean 1001 close frame, while close() drops the send buffer and (taking no
 	// args) sends no close code at all.
+	// Advise clients to reconnect on a jittered schedule before closing, so a
+	// draining node's clients disperse across the window instead of all
+	// reconnecting in one backoff burst and stampeding the replacement. Gated:
+	// 0 = legacy (no advisory). The advisory is a buffered send that the end()
+	// loop below flushes before the 1001 close frame, so the close code AND reason
+	// stay 'Server shutting down' (existing close-code assertions still hold).
+	if (reconnect_dispersal_ms > 0) {
+		platform.adviseReconnect({ windowMs: reconnect_dispersal_ms, close: false });
+	}
 	for (const ws of [...wsConnections]) {
 		ws.end(1001, 'Server shutting down');
 	}

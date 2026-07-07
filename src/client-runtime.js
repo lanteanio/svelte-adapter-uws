@@ -121,6 +121,31 @@ export function nextReconnectDelay(base, maxDelay, attempt, randFactor = randomF
 	return capped * (0.75 + randFactor * 0.5);
 }
 
+/**
+ * Roll this client's own reconnect delay for a server drain advisory, spreading
+ * the reconnect across the advertised window so a draining node's whole fleet
+ * does not stampede the replacement in one backoff window. The delay is uniform
+ * in `[afterMs, afterMs + windowMs)`: each client rolls independently (the server
+ * advertises the WINDOW, never a pre-rolled offset, exactly like the data-event
+ * `j` de-herd field). Non-finite / negative inputs clamp to 0, so a malformed
+ * advisory degrades to an immediate reconnect rather than NaN.
+ *
+ * Pure given an explicit `randFactor`; the default is the runtime float source
+ * (routed through the seam so a seeded harness reproduces the schedule). Kept
+ * internal, mirroring `nextReconnectDelay`.
+ *
+ * @param {number} afterMs      floor delay in ms (>= 0)
+ * @param {number} windowMs     dispersal window width in ms (> 0)
+ * @param {number} [randFactor] random factor in [0, 1); defaults to randomFloat()
+ * @returns {number}
+ */
+export function dispersedReconnectDelay(afterMs, windowMs, randFactor = randomFloat()) {
+	const floor = afterMs > 0 ? afterMs : 0;
+	const width = windowMs > 0 ? windowMs : 0;
+	const r = randFactor >= 0 && randFactor < 1 ? randFactor : 0;
+	return floor + width * r;
+}
+
 // Install a virtual environment (the simulator/test harness only). Refuses under
 // a node production build unless explicitly forced, so a stray call can never
 // swap the clock under a live deployment; in a real browser there is no process

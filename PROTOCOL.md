@@ -374,6 +374,31 @@ registered acks normally. An unanswered bind therefore costs nothing but the
 JSON fallback it would have used anyway. Ingress ids are connection-scoped and
 re-announced on reconnect (like `wire-id`, reversed).
 
+### 3.9 Drain / reconnect advisory
+
+A server that is draining or restarting MAY send
+
+```json
+{"type":"reconnect","windowMs":<int>,"afterMs"?:<int>}
+```
+
+to a connection immediately before it closes it (a graceful `1001`). The client
+rolls its OWN reconnect delay, uniform in `[afterMs, afterMs + windowMs)`, and
+reconnects on that schedule instead of its normal backoff - so the clients of a
+draining node scatter across the window rather than all reconnecting in one
+backoff-interval burst and stampeding the replacement. `windowMs` (> 0) is the
+dispersal width; `afterMs` (>= 0, default 0) is a floor that holds clients off
+entirely while the replacement warms.
+
+This reuses the de-herd design of the data-event `j` field (section 4, Appendix
+D): the server advertises the WINDOW, never a pre-rolled offset, so every client
+rolls independently. The frame is additive and unknown-type-safe (sections 1.4
+and 10) - a client that predates it ignores the unknown `type` and falls back to
+normal backoff, so it carries no capability token and the protocol revision is
+unchanged. It is advisory only: the client arms the dispersed reconnect when the
+close actually arrives, and discards the advisory if the close never comes or a
+terminal `4401` / `1008` arrives first.
+
 ---
 
 ## 4. The data-event envelope
@@ -915,7 +940,7 @@ Framework-defined `type` values. An unrecognized `type` is passed through
 `welcome`, `hello`, `lease-ok`, `subscribe`, `subscribe-batch`, `unsubscribe`,
 `subscribed`, `subscribe-denied`, `batch`, `request`, `reply`, `wire-id`,
 `resume`, `resumed`, `lease`, `request-n`, `error`, `ingress-ok`,
-`ingress-bind`, `ingress-bound`, and the plugin frames of section 8 (`cursor`,
+`ingress-bind`, `ingress-bound`, `reconnect`, and the plugin frames of section 8 (`cursor`,
 `cursor-snapshot`, `cursor-viewport`, `presence-update`, `presence-snapshot`,
 `replay`).
 
@@ -1034,6 +1059,7 @@ These non-choices are deliberate and are recorded so they are not relitigated:
 | `ingress-ok` | s->c | 3.8 |
 | `ingress-bind` | c->s | 3.8 |
 | `ingress-bound` | s->c | 3.8 |
+| `reconnect` | s->c | 3.9 |
 | data-event envelope | both | 4 |
 | `0x03` binary | both | 6 |
 | plugin ingress (`cursor`, `presence-*`, `replay`, ...) | c->s | 8 |

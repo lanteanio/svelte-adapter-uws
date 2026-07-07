@@ -606,6 +606,58 @@ export const platform = {
 	},
 
 	/**
+	 * Advise connected clients to reconnect on a jittered schedule, then (by
+	 * default) drain them. A draining or restarting node sends the additive
+	 * `{"type":"reconnect","windowMs":N,"afterMs"?:M}` control frame so each client
+	 * rolls its own delay in [afterMs, afterMs + windowMs) instead of a whole fleet
+	 * hammering the replacement in one backoff window. The frame is unknown-type-
+	 * safe (an old client ignores it and falls back to normal backoff), so it is
+	 * not capability-gated. Modeled on `sendTo`.
+	 *
+	 * @param {{ windowMs?: number, afterMs?: number, close?: boolean, filter?: (userData: any) => boolean, compress?: boolean }} [options]
+	 * @returns {number} the number of connections advised
+	 */
+	adviseReconnect(options) {
+		const windowMs = options && typeof options.windowMs === 'number' && options.windowMs > 0
+			? Math.floor(options.windowMs) : 0;
+		// A non-positive window means suppressed (legacy behavior): nothing to advise.
+		if (windowMs <= 0) return 0;
+		const afterMs = options && typeof options.afterMs === 'number' && options.afterMs > 0
+			? Math.floor(options.afterMs) : 0;
+		const doClose = !options || options.close !== false;
+		const filter = options && typeof options.filter === 'function' ? options.filter : null;
+		const frame = afterMs > 0
+			? '{"type":"reconnect","afterMs":' + afterMs + ',"windowMs":' + windowMs + '}'
+			: '{"type":"reconnect","windowMs":' + windowMs + '}';
+		const compress = WS_COMPRESSION_ON && !!(options && options.compress === true);
+		let count = 0;
+		// Snapshot: with close:true, ws.end() fires the close handler synchronously
+		// and removes the entry from wsConnections mid-iteration (unlike sendTo, which
+		// never closes). Mirrors shutdown()'s snapshot.
+		for (const ws of [...wsConnections]) {
+			let userData;
+			try { userData = ws.getUserData(); }
+			catch { counters.closedWsAborts++; continue; }
+			if (filter) {
+				const decision = filter(userData);
+				// An async filter cannot be evaluated synchronously; fail-closed (do not
+				// advise), matching sendTo.
+				if (decision && typeof decision.then === 'function') continue;
+				if (!decision) continue;
+			}
+			try {
+				// end() flushes buffered outbound before the 1001 close frame, so the
+				// advisory always lands before the close.
+				ws.send(frame, false, compress);
+				bumpOut(ws, frame);
+				if (doClose) ws.end(1001, 'Server draining');
+			} catch { counters.closedWsAborts++; continue; }
+			count++;
+		}
+		return count;
+	},
+
+	/**
 	 * Number of active WebSocket connections.
 	 */
 	get connections() {

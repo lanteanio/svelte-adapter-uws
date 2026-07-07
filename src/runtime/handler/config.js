@@ -12,6 +12,25 @@ export const ssl_key = env('SSL_KEY', '');
 
 export const is_tls = !!(ssl_cert && ssl_key);
 
+/**
+ * TLS certificate hot-reload. When SSL is configured the server watches the cert
+ * directory and, on a renewed cert (certbot / cert-manager), swaps the SNI server
+ * name in place so the fresh cert is served WITHOUT re-binding the listen socket
+ * or dropping live connections. Default ON when SSL is set (zero-config renewal
+ * "just works"); SSL_WATCH=0 opts out. A non-SNI / unmatched-SNI client keeps the
+ * boot-time cert until a restart (the uWS default context is not hot-swappable).
+ */
+export const ssl_watch = is_tls && env('SSL_WATCH', '1') !== '0';
+
+/** Debounce window (ms) coalescing a burst of cert-file writes into one reload. */
+const _ssl_debounce_raw = parseInt(env('SSL_RELOAD_DEBOUNCE_MS', '500'), 10);
+export const ssl_reload_debounce_ms = Number.isFinite(_ssl_debounce_raw) && _ssl_debounce_raw >= 0
+	? _ssl_debounce_raw
+	: 500;
+
+/** Optional comma-separated SNI host override; empty = auto-discover from the cert SAN. */
+export const ssl_sni_hosts = env('SSL_SNI_HOSTS', '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+
 export const origin = parse_origin(env('ORIGIN', undefined));
 
 export const xff_depth = parseInt(env('XFF_DEPTH', '1'), 10);
@@ -25,6 +44,19 @@ export const host_header = env('HOST_HEADER', '').toLowerCase();
 export const port_header = env('PORT_HEADER', '').toLowerCase();
 
 export const body_size_limit = parse_as_bytes(env('BODY_SIZE_LIMIT', '512K'));
+
+/**
+ * Graceful-shutdown reconnect dispersal window in ms. When > 0, `shutdown()`
+ * advises every connected client to reconnect on a jittered schedule in
+ * `[0, RECONNECT_DISPERSAL_MS)` before closing it, so a draining node's clients
+ * scatter instead of all reconnecting in one backoff window and stampeding the
+ * replacement. Default 5000 (zero-config gets the good behavior); 0 restores the
+ * exact legacy shutdown (no advisory frame).
+ */
+const _reconnect_dispersal_raw = parseInt(env('RECONNECT_DISPERSAL_MS', '5000'), 10);
+export const reconnect_dispersal_ms = Number.isFinite(_reconnect_dispersal_raw) && _reconnect_dispersal_raw >= 0
+	? _reconnect_dispersal_raw
+	: 5000;
 
 /**
  * Resolve the real client IP from a raw socket address, applying the
