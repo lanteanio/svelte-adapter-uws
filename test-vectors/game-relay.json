@@ -1,0 +1,42 @@
+{
+  "description": "Conformance transcript for the client-driven relay (the `game` lane, PROTOCOL.md section 3.10). This is the ORACLE a second implementation (e.g. a native daemon) A/Bs its wire output against: for each `in` frame, on a connection in the named state, the server emits exactly the frames in `out` (to the named connections) and nothing to the connections in `silent`. Connection A is subscribed to the topic and granted publish; B is subscribed to the topic (a receiver); D is neither subscribed nor granted. `seq` is the per-topic session-home counter (starts at 1, stamped only on a relayed frame - a denial consumes none). Validated live against the reference server in test/relay-oracle.test.js.",
+  "topic": "arena:1",
+  "transcript": [
+    {
+      "step": "granted, id present -> fan out to the room excluding the sender, seq 1, id echoed",
+      "in": { "conn": "A", "frame": { "type": "game", "event": "move", "data": { "dx": 1, "dy": 0 }, "id": 1 } },
+      "out": [ { "conn": "B", "frame": { "topic": "arena:1", "event": "move", "data": { "dx": 1, "dy": 0 }, "seq": 1, "id": 1 } } ],
+      "silent": ["A"]
+    },
+    {
+      "step": "granted, no id -> seq increments to 2, envelope carries no id",
+      "in": { "conn": "A", "frame": { "type": "game", "event": "move", "data": { "dx": 0, "dy": 1 } } },
+      "out": [ { "conn": "B", "frame": { "topic": "arena:1", "event": "move", "data": { "dx": 0, "dy": 1 }, "seq": 2 } } ],
+      "silent": ["A"]
+    },
+    {
+      "step": "granted but non-string event -> game-denied INVALID to the sender only, id echoed, no fan out, no seq consumed",
+      "in": { "conn": "A", "frame": { "type": "game", "event": 123, "data": { "x": 1 }, "id": 7 } },
+      "out": [ { "conn": "A", "frame": { "type": "game-denied", "reason": "INVALID", "id": 7 } } ],
+      "silent": ["B"]
+    },
+    {
+      "step": "never granted -> game-denied FORBIDDEN to the sender only",
+      "in": { "conn": "D", "frame": { "type": "game", "event": "move", "data": null } },
+      "out": [ { "conn": "D", "frame": { "type": "game-denied", "reason": "FORBIDDEN" } } ],
+      "silent": ["A", "B"]
+    },
+    {
+      "step": "after revoke, a formerly-granted connection is FORBIDDEN again, id echoed",
+      "revokeBefore": "A",
+      "in": { "conn": "A", "frame": { "type": "game", "event": "move", "data": null, "id": 9 } },
+      "out": [ { "conn": "A", "frame": { "type": "game-denied", "reason": "FORBIDDEN", "id": 9 } } ],
+      "silent": ["B"]
+    }
+  ],
+  "binaryTwin": {
+    "description": "The 0x03 binary twin (ingress kind `game:1`, PROTOCOL.md section 6.6) of the FIRST transcript step: the same event/data/id carried compact-encoded instead of as a JSON `game` frame, producing the identical fan-out. Layout [0x03][schemaVersion:u8][ingressId:varint][seq:varint][payload], payload = encodeValue(['move',{dx:1,dy:0},5]) (the generic value codec, PROTOCOL.md 6.3). The frame's own seq is the per-binding ingress counter; the ROOM seq is stamped on fan-out (1). A native decoder A/Bs against this.",
+    "hexFrame": "03010101060305046d6f7665070202647803020264790300030a",
+    "decoded": { "schemaVersion": 1, "ingressId": 1, "ingressSeq": 1, "value": ["move", { "dx": 1, "dy": 0 }, 5] }
+  }
+}

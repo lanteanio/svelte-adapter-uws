@@ -31,6 +31,15 @@
 
 export const WS_SUBSCRIPTIONS = Symbol.for('adapter-uws.ws.subscriptions');
 
+// The connection's client-publish binding: the single topic this connection is
+// authorized to publish to via the client-driven `game` lane (the dual of the
+// cached subscribe set above). Absent (undefined) until a trusted server-side
+// `platform.grantPublish(ws, topic)` binds it; cleared by `revokePublish`. A
+// client `game` frame carries NO topic and publishes to this binding, so a
+// client can never publish to a room it was not granted. Single-valued (one
+// session per connection), mirroring the native daemon's per-socket grant.
+export const WS_PUBLISH_GRANT = Symbol.for('adapter-uws.ws.publish-grant');
+
 // Shared-fan-out cohort hooks. trackedSubscribe/Unsubscribe live in utils (the
 // low-level membership primitive), but a subscribe to an already-shared topic must
 // also join the matching cohort (and an unsubscribe must leave it + release the

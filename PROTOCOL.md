@@ -5,9 +5,14 @@ The Lantean protocol is the WebSocket wire contract spoken by
 contract a third-party client - in any language - implements against.
 `svelte-adapter-uws` is the reference implementation; `svelte-realtime` is
 built on top of it and speaks the same wire. The name is implementation-neutral
-on purpose: five surfaces speak this protocol (the uWS production runtime, the
-Vite dev server, the in-process test handler, the deterministic simulator, and
-a native runtime), so the contract is named for itself, not for one package.
+on purpose: four surfaces speak this protocol (the uWS production runtime, the
+Vite dev server, the in-process test handler, and the deterministic simulator),
+and a third party may add more, so the contract is named for itself, not for
+one package.
+WebSocket is the protocol's canonical transport and the one every section
+assumes unless it says otherwise; section 14 additionally binds one lane - the
+client-driven relay of sections 3.10/6.6 - to WebTransport sessions over QUIC
+datagrams, reusing the frames frozen here rather than defining new ones.
 
 The reference implementation is `src/client.js` (client) and
 `src/runtime/wire.js` + `src/runtime/handler.js` (server); `src/vite.js` (dev)
@@ -399,6 +404,58 @@ unchanged. It is advisory only: the client arms the dispersed reconnect when the
 close actually arrives, and discards the advisory if the close never comes or a
 terminal `4401` / `1008` arrives first.
 
+### 3.10 Client-driven relay (the `game` lane)
+
+The core protocol lets the SERVER publish to a topic (section 4); the `game` lane
+lets an AUTHORIZED CLIENT publish to the one room it was granted, with the server
+stamping the ordering seq and fanning out to the room. It is the wire for a
+real-time session where every participant emits input (a game, a shared
+simulation) rather than one server-side author.
+
+| Frame | Dir | Shape |
+|---|---|---|
+| `game` | c->s | `{"type":"game","event":"<string>","data":<any>,"id"?:<int\|string>}` |
+| `game-denied` | s->c | `{"type":"game-denied","reason":"<string>","id"?:<int\|string>}` |
+
+- The `game` frame carries **no topic**. The server derives the destination from
+  the connection's *publish grant* - a single topic bound server-side (typically
+  at join, once the connection is authorized for the room). A client therefore
+  cannot publish to a room it was not granted, and cannot spoof a topic. A
+  connection holds at most one grant (one room per socket); binding a second topic
+  replaces the first.
+- `event` is a string; `data` is any JSON value (or `null`); `id` is an OPTIONAL
+  client-chosen input id (a number or string) the client attaches to correlate
+  the server's fan-out back to its own local prediction.
+- On a valid granted frame the server stamps a monotonic per-room `seq` (the
+  session-home sequencer, section 7) and fans the frame out to the room's other
+  subscribers as an ordinary **data-event** (section 4):
+  `{"topic":"<grant>","event":"<string>","data":<any>,"seq":<int>,"id"?:<...>}`.
+  The `id` is echoed only when the sender supplied one. The **sender is excluded**
+  from the fan-out (echo suppression): it already holds its own input and predicts
+  locally, so re-delivering its own frame would be redundant. A receiver reads
+  `id` (when present) to reconcile a frame it can attribute; `seq` is the room's
+  authoritative order.
+- On a frame the server will not relay it answers the SENDER with `game-denied`
+  and relays nothing. `reason` is one of:
+
+  | Reason | When |
+  |---|---|
+  | `FORBIDDEN` | The connection holds no publish grant (never granted, or revoked). |
+  | `INVALID` | The connection is granted but the frame was malformed (a non-string `event`). |
+
+  The frame's `id` is echoed on `game-denied` when present, so a client can tie
+  the rejection to the input it sent. A well-behaved client stops sending `game`
+  frames after a `FORBIDDEN` until it re-joins.
+- The lane is additive and unknown-type-safe (sections 1.4, 10): a server that
+  predates it treats `game` as an unknown control type and hands it to the
+  application message handler (a JSON data-event of the app's own making), so the
+  frame carries no capability token. The seq semantics are the oracle; a
+  0x03 binary twin (section 6.6) carries the same semantics compact-encoded.
+- The grant is a SERVER-SIDE primitive (`platform.grantPublish(ws, topic)` /
+  `revokePublish` / `publishGrant`), the trusted dual of the subscribe
+  authorization of section 3.2. There is no client frame to request a grant: a
+  client publishes only to a room the application already bound for it.
+
 ---
 
 ## 4. The data-event envelope
@@ -407,7 +464,7 @@ The carrier for every published event. It has no `type` field - it is identified
 by the presence of `topic` + `event`:
 
 ```
-{"topic":"<string>","event":"<string>","data":<any>,"seq"?:<int>,"j"?:<number>}
+{"topic":"<string>","event":"<string>","data":<any>,"seq"?:<int>,"j"?:<number>,"id"?:<int|string>}
 ```
 
 - `data` is any JSON value (or `null`).
@@ -421,6 +478,10 @@ by the presence of `topic` + `event`:
   integer. A client that ignores `j` is correct, just un-jittered.
 - A client MAY additionally observe a reconstructed `t` field (a server
   timestamp) on events delivered through a binary codec; it is informational.
+- `id` is an OPTIONAL echo of a client-supplied input id, present only on the
+  fan-out of a `game`-lane frame (section 3.10). It is a number or a string, and
+  lets a receiver correlate the event to a prediction. Absent on server-authored
+  events.
 
 A data-event frame is the one shape that flows in both directions: a
 client-originated frame of this shape is delivered to the server's application
@@ -613,6 +674,46 @@ codec (a tagged encoding of the JSON value space - null, boolean, integer as a
 zigzag varint, other numbers as f64, string, array, object - matching a
 `JSON.stringify`/`JSON.parse` round trip exactly). The decoded batch is identical
 to what the JSON path delivers.
+
+### 6.6 Client-driven relay binary twin (the `game` lane)
+
+The `game` lane (section 3.10) has a binary twin: the same semantics
+(topic-from-grant, server-stamped seq, sender-excluded fan-out, id echo)
+compact-encoded on the `0x03` ingress seam, for a connection that runs its input
+path off JSON. It is a NORMAL consumer of the ingress transport of section 6.5,
+registered as the ingress kind **`game:1`** - it introduces no new leading byte
+and no new framing:
+
+```
+[0x03][schemaVersion:u8][ingressId:varint][seq:varint][payload ...]
+```
+
+- The client `ingress-bind`s an id to kind `game:1` with **no `target`** (the
+  destination topic is the connection's publish grant, resolved server-side, never
+  named in the frame - the binary twin preserves the "no client topic" property of
+  the JSON lane exactly).
+- `schemaVersion` is `1`. `payload` is a SINGLE value-codec value (section 6.3, the
+  generic codec the `smooth.command:1` kind also uses, so the ingress seam stays
+  one codec table): the array `[event, data]`, or `[event, data, id]` when the
+  client supplied an input id. A decoded non-array, or a `game`-with-no-grant, is a
+  denial (below), never a crash. The frame's `seq` slot is the per-binding ingress
+  counter (section 6.5); the authoritative ROOM seq is the one the server stamps on
+  fan-out, as in the JSON lane.
+- Decode routes to the same server primitive the JSON lane calls
+  (`platform.publishGame(ws, grant, event, data, id)`), so the fan-out is
+  byte-identical to the JSON lane's fan-out: the JSON lane is the conformance
+  ORACLE and the binary twin produces the identical room delivery.
+- A grantless connection, or a non-string `event`, is answered `game-denied`
+  (`FORBIDDEN` / `INVALID`) exactly as the JSON lane (the gate is on the grant, not
+  the transport). A client uses the JSON `game` frame whenever it has not
+  negotiated binary ingress; the two are interchangeable on the same grant.
+
+**Wire status:** frozen and implemented server-side - the reference server decodes
+`game:1` and fans out identically to the JSON lane (`test/relay-oracle.test.js`
+drives a real `0x03` frame end to end). Binary ingress is opt-in (section 5): a
+client that has not negotiated `wire.ingress:1` uses the JSON `game` frame and is
+complete and correct. The client-side binary ENCODER lives with the consuming
+input channel (as the `smooth.command:1` encoder does), not in the core adapter.
 
 ---
 
@@ -841,6 +942,139 @@ satisfies. The ladder mirrors the reference client's own build-up.
 
 ---
 
+## 14. The WebTransport binding (the `game` lane over QUIC datagrams)
+
+WebSocket carries the whole protocol; this section binds exactly ONE lane - the
+client-driven relay of sections 3.10 and 6.6 - to a WebTransport session
+(RFC 9220 extended CONNECT over HTTP/3, RFC 9297 datagrams). The lane is the
+one part of the protocol whose payloads are natively loss-tolerant: an input
+stream where the room `seq` already defines the authoritative order and a
+stale input is worthless, which is precisely what an unreliable datagram is
+for. Everything in this section reuses frames frozen above; the binding
+defines carriage, not new wire. The lane's HOME transport remains WebSocket:
+sections 3.10 and 6.6 are complete over WebSocket on their own, a deployment
+that games over wss uses them unchanged and never needs this section, and
+nothing here is required to speak the `game` lane. What the binding adds is a
+second carriage - and because the two transports share rooms (14.3), enabling
+WebTransport later adds sessions to the same rooms without touching the
+WebSocket path.
+
+The reference `svelte-adapter-uws` runtime does not terminate QUIC and does
+not implement this binding; it is normative for any runtime that does, and
+the JSON lane of section 3.10 - including its committed conformance vectors -
+is the behavioral oracle such a runtime's relay output is proved against.
+
+### 14.1 Session establishment
+
+The extended-CONNECT request is this binding's analogue of the WebSocket
+upgrade (section 2), and the same trust boundary:
+
+- The application authorizes the session from the CONNECT request - `:path`,
+  request headers, and `origin` - exactly as an upgrade guard authorizes a
+  WebSocket. The path shape is application-defined; embedding the room key in
+  it (for example `/game/<room>`) is RECOMMENDED, since a session is bound to
+  one room at accept and the path is the natural place to say which.
+- Accepting the session (`:status 200`) binds it, server-side, to exactly ONE
+  room: the session is subscribed to that room's fan-out (14.3), and the
+  application MAY also bind the publish grant of section 3.10 (a granted
+  session is a *publisher*; an ungranted one is a *spectator* - its `game`
+  frames are answered `game-denied` `FORBIDDEN`, its fan-out delivery is
+  unaffected). One session holds at most one room and one grant, mirroring the
+  one-grant-per-connection rule; a non-200 response is a refusal and carries
+  no protocol meaning beyond HTTP semantics.
+- Closing the session (either end, or QUIC idle timeout) is the analogue of a
+  WebSocket close: the subscription and any grant are dropped. There is no
+  session resume; a client re-CONNECTs and re-joins.
+
+### 14.2 Client-to-server datagrams
+
+Section 1's frame demux maps onto the first payload byte of each datagram:
+
+| First byte | Meaning |
+|---|---|
+| `0x03` | The binary relay frame of section 6.6, with the `ingressId` slot carrying `0`. |
+| anything else | A UTF-8 JSON control frame; on this binding only `{"type":"game",...}` (section 3.10). |
+
+The binary form is byte-compatible with section 6.6's layout
+(`[0x03][schemaVersion:u8][ingressId:varint][seq:varint][payload]`,
+`schemaVersion` 1, payload the value-codec array `[event, data]` or
+`[event, data, id]`), so one decoder and one set of conformance vectors serve
+both transports. The differences are carriage-level only:
+
+- **`ingressId` is `0`.** There is no `hello`, no capability negotiation, and
+  no `ingress-bind` on a WebTransport session; the session itself IS the
+  binding (one room, kind `game:1`), and id `0` - which the client-allocated
+  WebSocket ingress space of section 6.5 never uses (it starts at 1) - marks
+  that implicit binding. A datagram with any other `ingressId` is dropped.
+- **`seq`** is the per-session monotonic counter of section 6.5 (`0` allowed).
+  It is diagnostic; the authoritative room order is the seq the server stamps
+  on fan-out, exactly as on WebSocket.
+- Relay semantics, denial reasons, and `id` echo are those of sections 3.10
+  and 6.6, unchanged: the gate is the grant, not the transport. `game-denied`
+  travels as a JSON datagram to the sender; it MAY be lost, and that is sound,
+  because every further ungranted frame re-fires it - the sender converges on
+  the denial.
+
+A client SHOULD prefer the binary form (the JSON form exists so a minimal
+client can speak the lane with no encoder at all), and MUST size its inputs to
+the session's maximum datagram size - an oversized input cannot be sent as a
+datagram and this binding defines no fragmentation.
+
+### 14.3 Server-to-client fan-out
+
+Fan-out to a WebTransport session is one datagram per event, carrying the
+UTF-8 bytes of the ordinary data-event envelope of section 4 -
+`{"topic":..,"event":..,"data":..,"seq":..,"id"?:..}` - byte-identical to what
+a WebSocket subscriber of the same room receives. Consequences, all
+intentional:
+
+- **Rooms are transport-agnostic.** A room's subscribers may be WebSocket
+  connections and WebTransport sessions in any mix; one relay produces one
+  envelope, delivered to each subscriber over its own transport. Sender
+  exclusion applies across transports (the sender is excluded whichever
+  transport it used).
+- **Loss is skipped, never repaired.** Each envelope carries the room `seq`;
+  a receiver detects a gap and continues - fresher input supersedes lost
+  input. The resume machinery of section 7 does NOT apply to this binding,
+  and there is no gap-fill.
+- **An envelope that exceeds the session's maximum datagram size is not
+  delivered to that session.** The room seq advances regardless (WebSocket
+  subscribers still receive the event), so the gap is visible to the session
+  like any other loss. Applications running rooms over this binding SHOULD
+  keep event payloads comfortably under a conservative path MTU (~1 KB).
+
+A compact binary fan-out form is deliberately NOT defined in this revision; it
+is a future additive extension (per sections 5 and 10) and its absence keeps
+the JSON envelope as the single fan-out shape both transports share today.
+
+### 14.4 What does not apply
+
+This binding carries the `game` lane and nothing else. There is no `welcome`,
+`hello`, or capability negotiation (section 5), no `subscribe` (membership
+comes from the CONNECT accept), no `batch`, no `lease`/`request-n`, no
+`resume` (section 7), and no server-to-client `0x03` topic frames (section 6).
+Liveness is the QUIC transport's own idle/keepalive machinery; the ping
+expectations of section 1.3 do not apply. WebTransport STREAMS are reserved:
+a client MUST NOT open them and a server ignores or closes any that appear -
+a future revision may bind reliable lanes (a join handshake, resume, or the
+full protocol) to streams, additively.
+
+### 14.5 Security considerations
+
+Section 12 applies, with the transport-specific notes: the CONNECT `origin`
+header SHOULD be checked exactly as the upgrade origin is on WebSocket; the
+publish grant remains a server-side primitive that no frame can request
+(sections 3.10, 6.5 notwithstanding, there is no bind handshake to abuse); and
+because datagrams are cheap to emit, a server SHOULD rate-limit per-session
+ingress the way it rate-limits WebSocket control traffic, and MAY close a
+session that persists past denial.
+
+A runtime claiming this binding implements sections 3.10, 6.6, and this
+section; the conformance classes of section 13 are WebSocket classes and do
+not apply to it.
+
+---
+
 ## Appendix A. Annotated session transcript
 
 One connection, from open to a binary frame to a reconnect gap-fill. `->` is
@@ -940,7 +1174,8 @@ Framework-defined `type` values. An unrecognized `type` is passed through
 `welcome`, `hello`, `lease-ok`, `subscribe`, `subscribe-batch`, `unsubscribe`,
 `subscribed`, `subscribe-denied`, `batch`, `request`, `reply`, `wire-id`,
 `resume`, `resumed`, `lease`, `request-n`, `error`, `ingress-ok`,
-`ingress-bind`, `ingress-bound`, `reconnect`, and the plugin frames of section 8 (`cursor`,
+`ingress-bind`, `ingress-bound`, `reconnect`, `game`, `game-denied`, and the
+plugin frames of section 8 (`cursor`,
 `cursor-snapshot`, `cursor-viewport`, `presence-update`, `presence-snapshot`,
 `replay`).
 
@@ -1060,6 +1295,8 @@ These non-choices are deliberate and are recorded so they are not relitigated:
 | `ingress-bind` | c->s | 3.8 |
 | `ingress-bound` | s->c | 3.8 |
 | `reconnect` | s->c | 3.9 |
+| `game` | c->s | 3.10 |
+| `game-denied` | s->c | 3.10 |
 | data-event envelope | both | 4 |
 | `0x03` binary | both | 6 |
 | plugin ingress (`cursor`, `presence-*`, `replay`, ...) | c->s | 8 |

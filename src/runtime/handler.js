@@ -21,9 +21,10 @@ import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { metricsRegistry } from './metrics-bridge.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
+import { registerGameIngress } from './handler/game-ingress.js';
 import { now, monotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, sharedTopics, subscribeAuth } from './handler/state.js';
 import { computeStateHash } from './invariants.js';
@@ -247,6 +248,10 @@ if (!origin && !host_header && !protocol_header && !is_tls) {
 
 // WS_ENABLED is set by the adapter at build time - no inference from exports needed
 if (WS_ENABLED) {
+	// Register the client-relay (`game` lane) binary twin so a `wire.ingress:1`
+	// client can bind an id to kind `game:1` and publish game frames as `0x03`
+	// (the compact counterpart of the JSON `game` demux guard below).
+	registerGameIngress();
 	// Warn about unrecognized exports - catches typos like "mesage" or "opn"
 	const knownWsExports = new Set([
 		'init', 'shutdown',
@@ -1764,6 +1769,26 @@ if (WS_ENABLED) {
 					} else if (wsDebug) {
 						console.log('[ws] ingress-bind for unregistered kind=%s (kept on JSON fallback)', msg.kind);
 					}
+					return;
+				}
+				if (msg.type === 'game') {
+					// Client-driven relay publish (the game lane). The connection must
+					// hold a publish grant (bound server-side via platform.grantPublish);
+					// the topic IS that grant, never client-supplied, so a client can
+					// never publish to a room it did not join. Ungranted (or a malformed
+					// event) -> game-denied. Granted -> stamp the per-room seq, fan out to
+					// the room excluding this sender, and echo the client id.
+					const gud = ws.getUserData();
+					const grantTopic = gud[WS_PUBLISH_GRANT];
+					if (!grantTopic || typeof msg.event !== 'string') {
+						const reason = grantTopic ? 'INVALID' : 'FORBIDDEN';
+						const denied = msg.id === undefined
+							? JSON.stringify({ type: 'game-denied', reason })
+							: JSON.stringify({ type: 'game-denied', reason, id: msg.id });
+						try { ws.send(denied, false, false); bumpOut(ws, denied); } catch { counters.closedWsAborts++; }
+						return;
+					}
+					platform.publishGame(ws, grantTopic, msg.event, msg.data, msg.id);
 					return;
 				}
 			}

@@ -1757,6 +1757,23 @@ const live = results.filter((r) => r.ok).map((r) => r.reply);
 
 **Partial success** is the contract: a subscriber that times out, errors, or whose socket closed lands in the array as `{ ok: false, error }` and never fails the whole call. `timeoutMs` (default 5000) bounds each request; since they run concurrently it is effectively the whole-fan-out budget. Walks this worker's subscriber set - a topic whose subscribers span a cluster is handled per-instance (cross-instance broadcast is the extensions layer's job). `svelte-realtime`'s `live.push({ topic })` / `live.notify({ topic })` aggregate this.
 
+### `platform.grantPublish(ws, topic)` / `revokePublish(ws)` / `publishGrant(ws)` - client-driven relay (the game lane)
+
+By default only your server code publishes to a topic. The **game lane** lets an authorized client publish to the one room it was granted, with the server stamping the ordering seq and fanning out to the room - the wire for a real-time session where every participant emits input (a game, a shared simulation) rather than one server-side author. It is the publish dual of [wire-subscribe authorization](#wire-subscribe-authorization).
+
+`platform.grantPublish(ws, topic)` binds a connection to publish to exactly one `topic` - typically at join, right after your guard authorizes the connection for the room. `revokePublish(ws)` clears it (session end); `publishGrant(ws)` returns the bound topic or `null`.
+
+```js
+// In your join RPC / subscribe gate, once the connection is authorized:
+export function subscribe(ws, topic, { platform }) {
+  platform.grantPublish(ws, topic); // the client may now publish to this room
+}
+```
+
+A granted client sends `{ type: 'game', event, data, id? }` - **no topic**: the server derives it from the grant, so a client can never publish to a room it did not join, nor spoof another room. The server stamps a monotonic per-room `seq` and fans the frame out to the room's other subscribers as an ordinary event envelope `{ topic, event, data, seq, id? }`, with the **sender excluded** (it already holds its own input and predicts locally) and the client-chosen `id` echoed so a receiver can reconcile it against its prediction. An ungranted frame is answered to the sender with `{ type: 'game-denied', reason: 'FORBIDDEN' }`; a granted-but-malformed frame (a non-string `event`) with `reason: 'INVALID'`. The lane is additive and needs no capability token (PROTOCOL.md section 3.10).
+
+`platform.publishGame(senderWs, topic, event, data, id?)` is the same relay from server code: it stamps the room seq and fans out excluding `senderWs` (pass `null` to include everyone - e.g. a server-authored or bot frame), returning `{ seq, delivered }`. On the `svelte-realtime` client the game lane is consumed by the smoothed-entity command channel. A client on a hot input path can run the lane over the compact `0x03` binary transport instead of JSON (ingress kind `game:1`, PROTOCOL.md section 6.6) - same semantics, opt-in, transparent.
+
 ### `platform.requestId`
 
 A correlation id you can thread through structured logs to follow a single request across server hooks, load functions, and downstream services.

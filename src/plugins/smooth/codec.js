@@ -5,16 +5,48 @@
  * `0x03` topic frame (see src/runtime/wire.js for the frame envelope). The payload
  * is `[op:u8][op-specific...]`, one op per smooth wire event:
  *
- *   STATE  [op][t:varint][keyref][stateJson]         arbitrary entity state
+ *   STATE_DELTA [op][t][keyref][nChanged][fieldref,value]*[nRemoved][fieldref]*  object state, field delta
+ *   STATE  [op][t:varint][keyref][stateJson]         array / primitive state (full)
  *   XY     [op][t:varint][keyref][x:f32][y:f32]      exactly-{x,y} state
  *   ACK    [op][id:varint][t:varint][sub:u8][state]  per-owner acknowledgement
  *   REMOVE [op][keyref]                              entity departure
  *
  * `keyref` is the shared per-connection short-id dictionary encoding and `t`
- * on STATE/XY is the shared delta-coded server stamp (src/runtime/keydict.js for
- * both disciplines: in-order, reset on reconnect, untouched on JSON
- * fallback). The stamp is what client-side interpolation reconstructs its
- * server time axis from.
+ * on STATE_DELTA/STATE/XY is the shared delta-coded server stamp
+ * (src/runtime/keydict.js for both disciplines: in-order, reset on reconnect,
+ * untouched on JSON fallback). The stamp is what client-side interpolation
+ * reconstructs its server time axis from.
+ *
+ * STATE_DELTA carries an object entity state as a FIELD delta against the
+ * connection's last-sent state for that key, not the whole state every tick. A
+ * field counts as changed by the SAME reference-inequality the authority's own
+ * change detection uses (`e.state !== before` - a functional update makes a
+ * changed value a new reference), so an unchanged field costs nothing. The
+ * changed fields split by value type:
+ *
+ *   - NUMERIC (finite number) fields ride a temporal value stream
+ *     (src/runtime/wire-stream.js): each field's value is delta-of-delta /
+ *     XOR-encoded against that field's previous sample on the connection, so a
+ *     coordinate that drifts a little costs a handful of bits, not eight bytes.
+ *     Their values travel bit-packed in a trailing block; the field NAMES ride
+ *     the byte-aligned head.
+ *   - every other kept field rides the JSON-faithful value codec
+ *     (src/runtime/wire-value.js) inline, exactly as the full state did.
+ *
+ * The layout is `[nNumChanged][numFieldref]* [nLitChanged][litFieldref,value]*
+ * [nRemoved][fieldref]* [numericBitStream]`. `fieldref` is a second short-id
+ * dictionary over field NAMES, shared across every entity on the connection (a
+ * topic's entities share a field vocabulary, so a name interns once). The
+ * reconstruction is byte-identical (deep-equal) to the full-state round trip.
+ *
+ * The per-key baseline and the per-(key,field) numeric slots live on the
+ * connection dictionary beside the key map and the stamp, with the identical
+ * discipline: they advance only on a STATE_DELTA frame, are left frozen by an
+ * XY / full-STATE / JSON-fallback frame (so an object stream that resumes after
+ * them still deltas against a basis both ends hold), a field's numeric slot is
+ * reset when that field is sent as a literal or removed, the whole key is
+ * cleared on REMOVE, and everything resets on reconnect. Array / primitive /
+ * null states ride the full STATE encoding and do not join the delta chain.
  *
  * ACK is a single-target frame (an entity's acknowledgement goes only to its
  * owning connection), so it carries no keyref - the owner knows which entity
@@ -45,6 +77,8 @@
 
 import { ByteWriter, ByteReader } from '../../runtime/wire.js';
 import { writeValue, readValue } from '../../runtime/wire-value.js';
+import { BitWriter, BitReader } from '../../runtime/wire-bits.js';
+import { createStreamSlot, writeStreamValue, readStreamValue } from '../../runtime/wire-stream.js';
 import {
 	KeyEncodeDict,
 	KeyDecodeDict,
@@ -163,9 +197,23 @@ const OP_STATE = 1;
 const OP_XY = 2;
 const OP_ACK = 3;
 const OP_REMOVE = 4;
+const OP_STATE_DELTA = 5;
 
 const ACK_SUB_XY = 0;
 const ACK_SUB_JSON = 1;
+
+/**
+ * True when a value survives a JSON round trip at an object-field position:
+ * `undefined`, functions and symbols are dropped by JSON.stringify (and by the
+ * wire-value codec), so a field holding one is treated as absent by the field
+ * delta - matching what the full-state JSON path would carry.
+ * @param {any} v
+ */
+function isKeptValue(v) {
+	if (v === undefined) return false;
+	const t = typeof v;
+	return t !== 'function' && t !== 'symbol';
+}
 
 /**
  * True when `d` is exactly a `{ x, y }` pair of finite numbers that survive
@@ -197,6 +245,17 @@ export class SmoothEncodeDict extends KeyEncodeDict {
 		this.schemaVersion = SMOOTH_SCHEMA_VERSION;
 		this.timeSource = timeSource;
 		this.lastT = -1;
+		// Field-delta state. `fields` is a SECOND short-id dictionary, over field
+		// NAMES rather than entity keys - shared across every entity on the
+		// connection because a topic's entities share a field vocabulary, so a name
+		// interns once. `baseline` holds the last-sent state per key, the reference
+		// the field delta encodes against. `slots` holds the temporal stream state
+		// per (key, field) for the numeric value streams.
+		this.fields = new KeyEncodeDict(maxEntries);
+		/** @type {Map<string, any>} */
+		this.baseline = new Map();
+		/** @type {Map<string, Map<string, ReturnType<typeof createStreamSlot>>>} */
+		this.slots = new Map();
 	}
 }
 
@@ -208,6 +267,14 @@ export class SmoothDecodeDict extends KeyDecodeDict {
 		super();
 		this.schemaVersion = SMOOTH_SCHEMA_VERSION;
 		this.lastT = -1;
+		// The decode-side twins of the encoder's field-delta state: the field-name
+		// dictionary, the last-reconstructed state per key (the basis the next
+		// delta applies onto), and the per-(key,field) numeric stream slots.
+		this.fields = new KeyDecodeDict();
+		/** @type {Map<string, any>} */
+		this.baseline = new Map();
+		/** @type {Map<string, Map<string, ReturnType<typeof createStreamSlot>>>} */
+		this.slots = new Map();
 	}
 }
 
@@ -239,9 +306,89 @@ export function encodeSmooth(event, data, state) {
 					return w.take();
 				}
 				if (s === undefined) return null;
-				// Serialize before the stamp is written or any key interned, so
-				// a non-serializable state falls back to JSON with the dict and
-				// stamp state untouched.
+				if (s !== null && typeof s === 'object' && !Array.isArray(s)) {
+					// Field delta. Split the changed fields into NUMERIC (a temporal
+					// value stream, bit-packed in a trailing block) and LITERAL (the
+					// JSON-faithful value codec, inline), plus the fields that dropped
+					// out. A field is "changed" by reference-inequality (a functional
+					// update makes a changed value a new reference, the same contract
+					// the authority's change detection rests on), so unchanged fields
+					// cost nothing and the reconstruction is byte-identical to the
+					// full-state round trip.
+					const prev = dict.baseline.get(data.key);
+					const keys = Object.keys(s);
+					const numChanged = [];
+					const litChanged = [];
+					for (let i = 0; i < keys.length; i++) {
+						const k = keys[i];
+						const v = s[k];
+						if (!isKeptValue(v)) continue;
+						if (prev !== undefined && v === prev[k]) continue;
+						if (typeof v === 'number' && Number.isFinite(v)) numChanged.push(k);
+						else litChanged.push(k);
+					}
+					const removed = [];
+					if (prev !== undefined) {
+						const pkeys = Object.keys(prev);
+						for (let i = 0; i < pkeys.length; i++) {
+							const k = pkeys[i];
+							if (!isKeptValue(prev[k])) continue;
+							if (isKeptValue(s[k])) continue;
+							removed.push(k);
+						}
+					}
+					dict.fields.beginFrame();
+					const w = new ByteWriter(32);
+					w.u8(OP_STATE_DELTA);
+					writeDeltaStamp(w, dict);
+					dict.writeKey(w, data.key);
+					w.varint(numChanged.length);
+					for (let i = 0; i < numChanged.length; i++) dict.fields.writeKey(w, numChanged[i]);
+					w.varint(litChanged.length);
+					for (let i = 0; i < litChanged.length; i++) {
+						dict.fields.writeKey(w, litChanged[i]);
+						writeValue(w, s[litChanged[i]]);
+					}
+					w.varint(removed.length);
+					for (let i = 0; i < removed.length; i++) dict.fields.writeKey(w, removed[i]);
+					// Per-(key,field) numeric slots for the temporal streams.
+					let keySlots = dict.slots.get(data.key);
+					if (numChanged.length > 0) {
+						if (keySlots === undefined) {
+							keySlots = new Map();
+							dict.slots.set(data.key, keySlots);
+						}
+						const bw = new BitWriter();
+						for (let i = 0; i < numChanged.length; i++) {
+							const k = numChanged[i];
+							let slot = keySlots.get(k);
+							if (slot === undefined) {
+								slot = createStreamSlot();
+								keySlots.set(k, slot);
+							}
+							const v = s[k];
+							// Normalize -0 to 0 so the stream matches the JSON / value-codec
+							// round trip (JSON has no negative zero).
+							writeStreamValue(bw, slot, v === 0 ? 0 : v);
+						}
+						w.bytes(bw.finish());
+					}
+					// A field that left the numeric stream (sent as a literal now, or
+					// removed) drops its slot so a later numeric value first-sights.
+					if (keySlots !== undefined) {
+						for (let i = 0; i < litChanged.length; i++) keySlots.delete(litChanged[i]);
+						for (let i = 0; i < removed.length; i++) keySlots.delete(removed[i]);
+					}
+					// Advance the baseline only after the whole frame is built - the
+					// freeze discipline the stamp and key dicts keep. Store the state
+					// reference itself: the next frame's reference-inequality reads it.
+					dict.baseline.set(data.key, s);
+					return w.take();
+				}
+				// Array / primitive / null state: the full JSON encoding. Serialize
+				// before the stamp is written or any key interned, so a
+				// non-serializable state falls back to JSON with the dict and stamp
+				// state untouched. Does not join the delta chain (baseline frozen).
 				const json = JSON.stringify(s);
 				if (typeof json !== 'string') return null;
 				const w = new ByteWriter(32 + json.length);
@@ -285,6 +432,10 @@ export function encodeSmooth(event, data, state) {
 				const w = new ByteWriter(16);
 				w.u8(OP_REMOVE);
 				dict.writeKey(w, data.key);
+				// A departed entity leaves the delta chain: a re-appearing key is
+				// first-sight again. Both ends clear from the same REMOVE frame.
+				dict.baseline.delete(data.key);
+				dict.slots.delete(data.key);
 				return w.take();
 			}
 			default:
@@ -326,6 +477,65 @@ export function decodeSmooth(payload, state, schemaVersion = SMOOTH_SCHEMA_VERSI
 				const data = JSON.parse(r.str());
 				return { event: 'update', data: { key, data }, t };
 			}
+			case OP_STATE_DELTA: {
+				const t = readDeltaStamp(r, dict);
+				const key = dict.readKey(r);
+				if (key === null) return null;
+				const prev = dict.baseline.get(key);
+				// A fresh object each frame (never the one handed to the consumer
+				// last time), so a downstream reader mutating a frame cannot corrupt
+				// the reconstruction basis.
+				const out = prev === undefined ? {} : { ...prev };
+				// Numeric field names (their values ride the trailing bit stream).
+				const nNum = r.varint();
+				const numFields = [];
+				for (let i = 0; i < nNum; i++) {
+					const fname = dict.fields.readKey(r);
+					if (fname === null) return null;
+					numFields.push(fname);
+				}
+				// Literal fields (value inline via the JSON-faithful codec).
+				const nLit = r.varint();
+				const litFields = [];
+				for (let i = 0; i < nLit; i++) {
+					const fname = dict.fields.readKey(r);
+					if (fname === null) return null;
+					out[fname] = readValue(r);
+					litFields.push(fname);
+				}
+				// Removed fields.
+				const nRem = r.varint();
+				const remFields = [];
+				for (let i = 0; i < nRem; i++) {
+					const fname = dict.fields.readKey(r);
+					if (fname === null) return null;
+					delete out[fname];
+					remFields.push(fname);
+				}
+				let keySlots = dict.slots.get(key);
+				if (nNum > 0) {
+					if (keySlots === undefined) {
+						keySlots = new Map();
+						dict.slots.set(key, keySlots);
+					}
+					const br = new BitReader(r.rest());
+					for (let i = 0; i < numFields.length; i++) {
+						const f = numFields[i];
+						let slot = keySlots.get(f);
+						if (slot === undefined) {
+							slot = createStreamSlot();
+							keySlots.set(f, slot);
+						}
+						out[f] = readStreamValue(br, slot);
+					}
+				}
+				if (keySlots !== undefined) {
+					for (let i = 0; i < litFields.length; i++) keySlots.delete(litFields[i]);
+					for (let i = 0; i < remFields.length; i++) keySlots.delete(remFields[i]);
+				}
+				dict.baseline.set(key, out);
+				return { event: 'update', data: { key, data: out }, t };
+			}
 			case OP_XY: {
 				const t = readDeltaStamp(r, dict);
 				const key = dict.readKey(r);
@@ -350,6 +560,8 @@ export function decodeSmooth(payload, state, schemaVersion = SMOOTH_SCHEMA_VERSI
 			case OP_REMOVE: {
 				const key = dict.readKey(r);
 				if (key === null) return null;
+				dict.baseline.delete(key);
+				dict.slots.delete(key);
 				return { event: 'remove', data: { key } };
 			}
 			default:

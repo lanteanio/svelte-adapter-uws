@@ -179,6 +179,27 @@ export function completeEnvelope(prefix, data, seq, jitterMs) {
 }
 
 /**
+ * Complete a client-relay (`game` lane) envelope: the standard
+ * `{topic, event, data, seq}` shape with the sender's client `id` echoed to the
+ * other receivers when present, for input ordering / prediction-reconcile. `id`
+ * is JSON-encoded so a string id (with quotes / unicode) is emitted safely; a
+ * numeric id serializes to the same bytes a hand-rolled concat would. Absent
+ * `id` (or `seq`) leaves that field off, so the frame stays a plain envelope.
+ *
+ * @param {string} prefix  output of envelopePrefix(topic, event)
+ * @param {unknown} data
+ * @param {number | null | undefined} seq
+ * @param {number | string | null | undefined} id  the sender's client input id
+ * @returns {string}
+ */
+export function completeGameEnvelope(prefix, data, seq, id) {
+	const body = prefix + JSON.stringify(data ?? null);
+	const seqTail = seq == null ? '' : ',"seq":' + seq;
+	const idTail = id == null ? '' : ',"id":' + JSON.stringify(id);
+	return body + seqTail + idTail + '}';
+}
+
+/**
  * Wrap an array of pre-built per-event envelope strings into a single
  * `{"type":"batch","events":[...]}` wire frame. Each input string is
  * a complete `{topic, event, data, seq?}` envelope as produced by

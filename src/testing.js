@@ -1,9 +1,10 @@
 import { now, monotonicNow, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
-import { stampSeq, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
+import { stampSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
+import { registerGameIngress } from './runtime/handler/game-ingress.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -207,6 +208,11 @@ export async function createTestServer(options = {}) {
 	}
 
 	const app = options.__app || uWS.App();
+
+	// Register the client-relay (`game` lane) binary twin (ingress kind `game:1`),
+	// matching production. Idempotent + per-server so it survives a test that
+	// clears the global ingress registry (_resetIngressRegistry).
+	registerGameIngress();
 
 	// Sim-only relay observer. The multi-worker simulator injects this to capture
 	// each originating publish (its already-built envelope + stamped seq) for the
@@ -877,6 +883,50 @@ export async function createTestServer(options = {}) {
 			if (sharedTopicsT.has(topic)) leaveCohortT(ws, ws.getUserData(), topic);
 			handler.unsubscribe?.(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
 			return true;
+		},
+		// Client-publish authorization (the `game` lane), mirroring the
+		// production platform. grantPublish binds a connection to exactly one
+		// topic it may publish to via a topicless `game` frame; the wire handler
+		// derives the topic from this binding, so a client can never publish to a
+		// room it was not granted. See src/runtime/handler/platform.js for the
+		// production contract.
+		grantPublish(ws, topic) {
+			let ud;
+			try { ud = ws.getUserData(); } catch { closedWsAbortsT++; return false; }
+			ud[WS_PUBLISH_GRANT] = topic;
+			return true;
+		},
+		revokePublish(ws) {
+			let ud;
+			try { ud = ws.getUserData(); } catch { return false; }
+			if (ud[WS_PUBLISH_GRANT] === undefined) return false;
+			ud[WS_PUBLISH_GRANT] = undefined;
+			return true;
+		},
+		publishGrant(ws) {
+			let ud;
+			try { ud = ws.getUserData(); } catch { return null; }
+			return ud[WS_PUBLISH_GRANT] ?? null;
+		},
+		publishGame(senderWs, topic, event, data, id) {
+			// Stamp the per-room seq (the session-home sequencer) and fan the
+			// game envelope out to the topic's local subscribers EXCLUDING the
+			// sender (echo suppression), echoing the sender's client id. Routes
+			// through sendOutboundT so chaos scenarios apply, matching the
+			// production per-subscriber walk (uncompressed 60 Hz input path).
+			const seq = stampSeq(undefined, topicSeqs, topic);
+			const env = completeGameEnvelope('{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":', data, seq, id);
+			let delivered = 0;
+			for (const ws of wsConnections) {
+				if (ws === senderWs) continue;
+				let ud;
+				try { ud = ws.getUserData(); } catch { continue; }
+				const subs = ud[WS_SUBSCRIPTIONS];
+				if (!subs || !subs.has(topic)) continue;
+				sendOutboundT(ws, env);
+				delivered++;
+			}
+			return { seq, delivered };
 		},
 		batch(messages) {
 			return messages.map(({ topic, event, data }) => platform.publish(topic, event, data));
@@ -1710,6 +1760,24 @@ export async function createTestServer(options = {}) {
 							if (bindIngress(bindUd, ws, msg.id, msg.kind, msg.target)) {
 								sendOutboundT(ws, ingressBoundFrame(msg.id));
 							}
+							return;
+						}
+						if (msg.type === 'game') {
+							// Client-driven relay publish (the game lane). The topic is
+							// the connection's publish grant, never client-supplied.
+							// Ungranted or a non-string event -> game-denied; granted ->
+							// stamp seq, fan out to the room excluding this sender, echo id.
+							const gud = ws.getUserData();
+							const grantTopic = gud[WS_PUBLISH_GRANT];
+							if (!grantTopic || typeof msg.event !== 'string') {
+								const reason = grantTopic ? 'INVALID' : 'FORBIDDEN';
+								const denied = msg.id === undefined
+									? JSON.stringify({ type: 'game-denied', reason })
+									: JSON.stringify({ type: 'game-denied', reason, id: msg.id });
+								sendOutboundT(ws, denied);
+								return;
+							}
+							platform.publishGame(ws, grantTopic, msg.event, msg.data, msg.id);
 							return;
 						}
 					} catch {

@@ -427,7 +427,14 @@ export function createSmoothWireCodec(options = {}) {
 				return new SmoothEncodeDict(timeSource);
 			},
 			onDetach(ws, state) {
-				if (state && state.byKey) state.byKey.clear();
+				if (!state) return;
+				if (state.byKey) state.byKey.clear();
+				// Release the field-delta state too (the field-name dictionary, the
+				// per-key baseline the delta encoded against, and the per-field
+				// temporal stream slots).
+				if (state.fields && state.fields.byKey) state.fields.byKey.clear();
+				if (state.baseline) state.baseline.clear();
+				if (state.slots) state.slots.clear();
 			}
 		}
 	};

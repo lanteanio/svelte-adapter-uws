@@ -176,6 +176,13 @@ export class ByteReader {
 		this.pos += len;
 		return s;
 	}
+
+	/** @returns {Uint8Array} a zero-copy view of the bytes from the cursor to the
+	 * end - a codec whose tail is a differently-framed region (e.g. a bit stream)
+	 * reads the byte-aligned head, then hands the remainder off. */
+	rest() {
+		return this._buf.subarray(this.pos);
+	}
 }
 
 /**

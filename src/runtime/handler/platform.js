@@ -1,7 +1,7 @@
 import { wsModule } from '../ws-handler-bridge.js';
 import { metricsRegistry } from '../metrics-bridge.js';
 import { parentPort } from 'node:worker_threads';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_SUBSCRIPTIONS, assert, fatal, collapseByCoalesceKey, completeEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, wrapBatchEnvelope } from '../utils.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_SUBSCRIPTIONS, assert, fatal, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
 import { capCounts, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
@@ -1005,6 +1005,107 @@ export const platform = {
 	 */
 	authorizeWireSubscribe() {
 		subscribeAuth.enabled = true;
+	},
+
+	/**
+	 * Grant a connection the right to publish to `topic` via the client-driven
+	 * relay (`game`) lane - the trusted server-side dual of `platform.subscribe`.
+	 * A client `game` frame carries NO topic; the server derives it from this
+	 * binding, so a client can only publish to a room it was granted (typically
+	 * at join, from the framework's authorization gate). This is the general
+	 * publish-authorization primitive; a game session is its first consumer.
+	 *
+	 * Single-valued per connection (one room per socket, mirroring the native
+	 * daemon's per-socket grant): a second call re-binds to the new topic. Pass a
+	 * different topic to move the binding; call `revokePublish` to clear it.
+	 *
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @param {string} topic
+	 * @returns {boolean} `true` on success, `false` if the socket had already closed
+	 */
+	grantPublish(ws, topic) {
+		let ud;
+		try { ud = ws.getUserData(); } catch { counters.closedWsAborts++; return false; }
+		ud[WS_PUBLISH_GRANT] = topic;
+		return true;
+	},
+
+	/**
+	 * Clear a connection's client-publish binding - the dual of `unsubscribe`.
+	 * After this the connection's `game` frames are denied (`game-denied`
+	 * `FORBIDDEN`) until re-granted. Idempotent.
+	 *
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @returns {boolean} `true` if a binding was cleared, `false` if there was none
+	 */
+	revokePublish(ws) {
+		let ud;
+		try { ud = ws.getUserData(); } catch { return false; }
+		if (ud[WS_PUBLISH_GRANT] === undefined) return false;
+		ud[WS_PUBLISH_GRANT] = undefined;
+		return true;
+	},
+
+	/**
+	 * The topic a connection is currently bound to publish to via the `game`
+	 * lane, or `null` when it holds no grant. Read-only introspection.
+	 *
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @returns {string | null}
+	 */
+	publishGrant(ws) {
+		let ud;
+		try { ud = ws.getUserData(); } catch { return null; }
+		return ud[WS_PUBLISH_GRANT] ?? null;
+	},
+
+	/**
+	 * Relay a client-originated `game` frame to a topic's local subscribers,
+	 * EXCLUDING the sender (echo suppression - the sender already holds its own
+	 * input and predicts locally) and echoing the sender's client `id` for
+	 * input ordering / prediction-reconcile on the other receivers. The server
+	 * stamps a monotonic per-room seq (the session-home sequencer), so a globally
+	 * ordered relay sequence is this home worker's counter.
+	 *
+	 * Trusted server path (explicit topic): the wire-level `game` handler resolves
+	 * the topic from the sender's `WS_PUBLISH_GRANT` and gates on it before calling
+	 * this. Fan-out takes the per-subscriber walk (uWS `app.publish` cannot skip a
+	 * socket); this is the conformance ORACLE behavior, not the perf path - the
+	 * native daemon does the same fan-out with `publish_wire`/`exclude_ws`. Local
+	 * only: cross-worker / cross-edge home relay is a separate mechanism. Game
+	 * frames are sent uncompressed (the 60 Hz input path, like the cursor lane).
+	 *
+	 * @param {import('uWebSockets.js').WebSocket<any>} senderWs  the publishing socket, excluded from the fan-out
+	 * @param {string} topic
+	 * @param {string} event
+	 * @param {unknown} data
+	 * @param {number | string} [id]  the sender's client input id, echoed to the other receivers
+	 * @returns {{ seq: number | null, delivered: number }}
+	 */
+	publishGame(senderWs, topic, event, data, id) {
+		counters.publishCountWindow++;
+		const seq = stampSeq(undefined, topicSeqs, topic);
+		if (seq !== null) maxSeenSeq.set(topic, seq);
+		const envelope = completeGameEnvelope(envelopePrefix(topic, event), data, seq, id);
+		fatal(envelope.length > 0, 'envelope.empty', { topic, event });
+		let s = topicPublishStats.get(topic);
+		if (!s) { s = { m: 0, b: 0 }; topicPublishStats.set(topic, s); maybeWarnTopicRegistry(); }
+		s.m++;
+		s.b += envelope.length;
+		// Fan out to the topic's LOCAL subscribers, skipping the sender. The single
+		// C++ app.publish fan-out cannot skip a socket, so the exclusion forces the
+		// per-subscriber walk (the same shape publishWire uses for excludeWs).
+		let delivered = 0;
+		for (const ws of wsConnections) {
+			if (ws === senderWs) continue;
+			let ud;
+			try { ud = ws.getUserData(); } catch { continue; }
+			const subs = ud[WS_SUBSCRIPTIONS];
+			if (!subs || !subs.has(topic)) continue;
+			try { ws.send(envelope, false, false); bumpOut(ws, envelope); delivered++; }
+			catch { counters.closedWsAborts++; }
+		}
+		return { seq, delivered };
 	},
 
 	/**

@@ -25,6 +25,8 @@
     { "$ref": "#/$defs/ingress-bind" },
     { "$ref": "#/$defs/ingress-bound" },
     { "$ref": "#/$defs/reconnect" },
+    { "$ref": "#/$defs/game" },
+    { "$ref": "#/$defs/game-denied" },
     { "$ref": "#/$defs/data-event" }
   ],
   "$defs": {
@@ -221,15 +223,37 @@
       },
       "required": ["type", "id"]
     },
+    "game": {
+      "description": "Client -> server client-driven relay publish (the `game` lane, PROTOCOL.md section 3.10). Carries NO topic: the server derives it from the connection's publish grant. `event` is a string; `data` is any JSON value; `id` is an optional client-chosen input id echoed on the fan-out.",
+      "type": "object",
+      "properties": {
+        "type": { "const": "game" },
+        "event": { "type": "string" },
+        "data": {},
+        "id": { "$ref": "#/$defs/ref" }
+      },
+      "required": ["type", "event"]
+    },
+    "game-denied": {
+      "description": "Server -> the sender of a rejected `game` frame (PROTOCOL.md section 3.10). `FORBIDDEN`: no publish grant. `INVALID`: granted but a malformed frame (non-string event). `id` is echoed when the rejected frame carried one.",
+      "type": "object",
+      "properties": {
+        "type": { "const": "game-denied" },
+        "reason": { "enum": ["FORBIDDEN", "INVALID"] },
+        "id": { "$ref": "#/$defs/ref" }
+      },
+      "required": ["type", "reason"]
+    },
     "data-event": {
-      "description": "The published-event carrier. No `type` field: identified by `topic` + `event`.",
+      "description": "The published-event carrier. No `type` field: identified by `topic` + `event`. `id` appears only on the fan-out of a `game`-lane frame (section 3.10), echoing the sender's input id.",
       "type": "object",
       "properties": {
         "topic": { "type": "string" },
         "event": { "type": "string" },
         "data": {},
         "seq": { "type": "integer" },
-        "j": { "type": "number" }
+        "j": { "type": "number" },
+        "id": { "$ref": "#/$defs/ref" }
       },
       "required": ["topic", "event"]
     }

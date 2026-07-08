@@ -1157,6 +1157,47 @@ export type SubscribeDenialReason =
 	| 'RATE_LIMITED';
 
 /**
+ * The client-driven relay lane (the `game` lane; see `platform.grantPublish`).
+ *
+ * Client -> server: `{ type: 'game', event, data, id? }`. There is NO
+ * client-supplied topic - the server derives it from the connection's publish
+ * grant, so a client can never publish to a room it was not granted. `event` is
+ * a string; `data` is arbitrary JSON; `id` is an optional client-chosen input
+ * id (number or string) echoed to the other receivers for input ordering /
+ * prediction-reconcile.
+ *
+ * Server -> the room (fan-out): the standard `{ topic, event, data, seq }`
+ * envelope with `id` echoed when the sender supplied one. The SENDER is excluded
+ * (it already holds its own input and predicts locally). `seq` is a monotonic
+ * per-room counter stamped by the home worker.
+ *
+ * Server -> the sender, on an ungranted or malformed frame:
+ * `{ type: 'game-denied', reason, id? }` (`id` echoed when present).
+ */
+export interface GameFrame {
+	type: 'game';
+	event: string;
+	data?: unknown;
+	id?: number | string;
+}
+
+/**
+ * The `game-denied` ack sent back to the SENDER of a rejected `game` frame.
+ *
+ * - `'FORBIDDEN'` - the connection holds no publish grant (never granted, or
+ *   revoked). Grant one with `platform.grantPublish(ws, topic)`.
+ * - `'INVALID'` - the connection is granted but the frame was malformed
+ *   (a non-string `event`).
+ */
+export type GameDenialReason = 'FORBIDDEN' | 'INVALID';
+
+export interface GameDeniedFrame {
+	type: 'game-denied';
+	reason: GameDenialReason;
+	id?: number | string;
+}
+
+/**
  * Context passed to the `resume` handler.
  *
  * Fired when a reconnecting client presents the session id from its
@@ -2388,6 +2429,60 @@ export interface Platform {
 	 * if the socket has already closed.
 	 */
 	unsubscribe(ws: WebSocket<unknown>, topic: string): boolean;
+
+	/**
+	 * Authorize a connection to publish to `topic` via the client-driven relay
+	 * (`game`) lane - the trusted server-side dual of `platform.subscribe`. Bind
+	 * this at join, after the connection is authorized for the room.
+	 *
+	 * A client `game` frame carries NO topic; the server derives it from this
+	 * binding, so a client can only publish to a room it was granted. A
+	 * connection holds at most one publish binding (one room per socket); a
+	 * second call re-binds to the new topic. This is the general
+	 * publish-authorization primitive - a real-time game session is its first
+	 * consumer, but any app can grant a client the right to publish to a room.
+	 *
+	 * The client sends `{ type: 'game', event, data, id? }`; the server stamps a
+	 * monotonic per-room `seq` and fans `{ topic, event, data, seq, id? }` out to
+	 * the room's other subscribers (the sender is excluded - it predicts locally
+	 * from its own input). An ungranted or malformed frame is answered to the
+	 * sender with `{ type: 'game-denied', reason, id? }`.
+	 *
+	 * Closed-WS safe: returns `false` (and bumps `platform.closedWsAborts`) if the
+	 * socket has already closed, otherwise binds and returns `true`.
+	 */
+	grantPublish(ws: WebSocket<unknown>, topic: string): boolean;
+
+	/**
+	 * Clear a connection's client-publish binding - the dual of `unsubscribe`,
+	 * for session end. After this the connection's `game` frames are denied
+	 * (`game-denied` `FORBIDDEN`) until re-granted. Idempotent: returns `true` if
+	 * a binding was cleared, `false` if there was none (or the socket had closed).
+	 */
+	revokePublish(ws: WebSocket<unknown>): boolean;
+
+	/**
+	 * The topic a connection is currently bound to publish to via the `game`
+	 * lane, or `null` when it holds no grant. Read-only introspection.
+	 */
+	publishGrant(ws: WebSocket<unknown>): string | null;
+
+	/**
+	 * Relay a `game`-lane message to a topic's local subscribers from
+	 * server-side code, EXCLUDING `senderWs` and echoing its client `id`. The
+	 * server stamps the per-room `seq`. This is the same primitive the wire-level
+	 * `game` handler calls after resolving the topic from the sender's grant;
+	 * call it directly to inject a server-authored frame into the relay sequence
+	 * (e.g. a bot's input). Returns the stamped `seq` and the number of
+	 * subscribers delivered to.
+	 */
+	publishGame(
+		senderWs: WebSocket<unknown> | null,
+		topic: string,
+		event: string,
+		data?: unknown,
+		id?: number | string
+	): { seq: number | null; delivered: number };
 
 	/**
 	 * Live snapshot of worker-local backpressure signals.

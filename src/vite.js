@@ -3,9 +3,10 @@ import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './runtime/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
+import { esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
+import { registerGameIngress } from './runtime/handler/game-ingress.js';
 import { now, monotonicNow, randomFloat, randomU32, randomUuid, randomBytes } from './runtime/runtime.js';
 
 /**
@@ -54,6 +55,14 @@ export default function uws(options = {}) {
 	/** @type {{ upgrade?: Function, open?: Function, message?: Function, close?: Function, drain?: Function, subscribe?: Function, subscribeBatch?: Function, unsubscribe?: Function, resume?: Function, authenticate?: Function }} */
 	let userHandlers = {};
 	let sendToAsyncWarnedV = false;
+
+	// Per-topic seq counter for the client-publish (`game`) lane. Dev skips
+	// per-topic seq on the regular publish/cursor lanes (see publishBatched),
+	// but the game lane's authoritative seq IS its contract - a client's
+	// prediction-reconcile must behave the same in `vite dev` as in prod - so
+	// the game envelope carries a stamped seq here too.
+	/** @type {Map<string, number>} */
+	const gameTopicSeqs = new Map();
 
 	/**
 	 * Wrap a ws WebSocket to mimic the uWS WebSocket API.
@@ -487,6 +496,46 @@ export default function uws(options = {}) {
 			userHandlers.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
 			return true;
 		},
+		// Client-publish authorization (the `game` lane), mirroring the
+		// production platform. A connection is bound to exactly one topic it may
+		// publish to via a topicless `game` frame; the wire handler derives the
+		// topic from this binding, so a client can never publish to a room it was
+		// not granted. Dev's `ws.getUserData()` never throws (Node ws, not uWS),
+		// so there is no closed-socket abort path here.
+		grantPublish(ws, topic) {
+			const ud = ws.getUserData();
+			if (!ud) return false;
+			ud[WS_PUBLISH_GRANT] = topic;
+			return true;
+		},
+		revokePublish(ws) {
+			const ud = ws.getUserData();
+			if (!ud || ud[WS_PUBLISH_GRANT] === undefined) return false;
+			ud[WS_PUBLISH_GRANT] = undefined;
+			return true;
+		},
+		publishGrant(ws) {
+			const ud = ws.getUserData();
+			return ud?.[WS_PUBLISH_GRANT] ?? null;
+		},
+		publishGame(senderWs, topic, event, data, id) {
+			// Stamp the per-room game seq and fan the game envelope out to the
+			// topic's local subscribers EXCLUDING the sender (echo suppression),
+			// echoing the sender's client id. Sender match handles both a raw
+			// socket (the wire handler passes the connection socket) and its
+			// wrapper (server-side app code), mirroring publish()'s excludeWs.
+			const seq = stampSeq(undefined, gameTopicSeqs, topic);
+			const env = completeGameEnvelope('{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":', data, seq, id);
+			let delivered = 0;
+			for (const [ws, topics] of subscriptions) {
+				if (ws === senderWs || wsWrappers.get(ws) === senderWs) continue;
+				if (!topics.has(topic) || ws.readyState !== 1) continue;
+				ws.send(env);
+				bumpOutV(/** @type {any} */ (ws).__userData, env);
+				delivered++;
+			}
+			return { seq, delivered };
+		},
 		get assertions() {
 			// Dev never tracks invariant violations; production exposes a
 			// live shared Map of category counts. Return a fresh empty Map
@@ -881,6 +930,11 @@ export default function uws(options = {}) {
 					'Set a different path via the websocket.path adapter option or server.hmr.path in vite.config.'
 				);
 			}
+
+			// Register the client-relay (`game` lane) binary twin (ingress kind
+			// `game:1`), matching production - so a dev client can run its input
+			// path over `0x03` exactly as it will in prod.
+			registerGameIngress();
 
 			wss = new WebSocketServer({
 				noServer: true,
@@ -1513,6 +1567,25 @@ export default function uws(options = {}) {
 									ws.send(boundFrame);
 									bumpOutV(bindUd, boundFrame);
 								}
+								return;
+							}
+							if (msg.type === 'game') {
+								// Client-driven relay publish (the game lane). The topic
+								// is the connection's publish grant, never client-supplied.
+								// Ungranted or a non-string event -> game-denied; granted
+								// -> stamp seq, fan out to the room excluding this sender.
+								const gud = /** @type {any} */ (ws).__userData;
+								const grantTopic = gud?.[WS_PUBLISH_GRANT];
+								if (!grantTopic || typeof msg.event !== 'string') {
+									const reason = grantTopic ? 'INVALID' : 'FORBIDDEN';
+									const denied = msg.id === undefined
+										? JSON.stringify({ type: 'game-denied', reason })
+										: JSON.stringify({ type: 'game-denied', reason, id: msg.id });
+									ws.send(denied);
+									bumpOutV(gud, denied);
+									return;
+								}
+								platform.publishGame(ws, grantTopic, msg.event, msg.data, msg.id);
 								return;
 							}
 						} catch {
