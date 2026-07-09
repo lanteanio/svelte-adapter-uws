@@ -1815,6 +1815,60 @@ export interface Platform {
 	): number;
 
 	/**
+	 * Multi-entry fan-out via a STATEFUL wire codec: one tick's same-event
+	 * updates delivered as ONE binary frame per capable connection (the codec's
+	 * `<event>-batch` form, `{ updates }` data) and as the per-entry JSON
+	 * envelopes - byte-identical to N `publishWire` calls - for everyone else.
+	 * Each entry may carry its own `excludeWs` (per-entry author suppression).
+	 * Sequencing, accounting, and the cross-instance relay match N
+	 * `publishWire` calls (one seq and one relay envelope per entry).
+	 * Degradation is per connection: a codec that declines the batch falls back
+	 * to per-entry encodes, a per-entry decline to that entry's JSON envelope,
+	 * and a dropped frame or announce poisons the capability to JSON until
+	 * reconnect. A stateless codec routes through the per-entry path unchanged.
+	 */
+	publishWireBatch(
+		topic: string,
+		event: string,
+		entries: Array<{ data: unknown; excludeWs?: WebSocket<any> }>,
+		wire: {
+			capability: string;
+			schemaVersion: number;
+			encode: (event: string, data: unknown, state?: unknown) => Uint8Array | null;
+			state?: {
+				onAttach: (ws: WebSocket<any>) => unknown;
+				onDetach?: (ws: WebSocket<any>, state: unknown) => void;
+			};
+		},
+		options?: { seq?: boolean; relay?: boolean; compress?: boolean }
+	): boolean;
+
+	/**
+	 * Multi-entry single-target counterpart to `publishWireBatch()`: one tick's
+	 * same-event updates for ONE subscriber as a single binary frame, or the
+	 * per-entry JSON envelopes when the connection has no capability. The
+	 * per-subscriber twin for culled (per-viewer) delivery walks. No per-topic
+	 * seq is stamped (matches `send()` / `sendWire()`). Returns the uWS send
+	 * status of the last frame sent.
+	 */
+	sendWireBatch(
+		ws: WebSocket<any>,
+		topic: string,
+		event: string,
+		entries: Array<{ data: unknown }>,
+		wire: {
+			capability: string;
+			schemaVersion: number;
+			encode: (event: string, data: unknown, state?: unknown) => Uint8Array | null;
+			state?: {
+				onAttach: (ws: WebSocket<any>) => unknown;
+				onDetach?: (ws: WebSocket<any>, state: unknown) => void;
+			};
+		},
+		options?: { compress?: boolean }
+	): number;
+
+	/**
 	 * Register a wire codec under its capability so a clustered deployment's
 	 * cross-worker relay can re-derive it on a receiving worker and re-encode binary
 	 * locally for that worker's binary-capable subscribers - without it, subscribers

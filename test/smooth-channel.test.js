@@ -228,6 +228,49 @@ describe('frame-arrival stall', () => {
 	});
 });
 
+describe('batched update ingest', () => {
+	it('splits an update-batch envelope into per-entity updates sharing the stamp', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t);
+		await flush();
+		let remote = null;
+		ch.onFrame((_local, r) => { remote = r; });
+		MockWebSocket._last.emit({
+			topic: wire(t),
+			event: 'update-batch',
+			data: { updates: [
+				{ key: 'other', data: { x: 6, y: 6 } },
+				{ key: 'third', data: { x: 9, y: 9 } },
+				{ key: 'me', data: { x: 40, y: 40 } } // own key: rebase path, never a ghost twin
+			] },
+			t: Date.now()
+		});
+		await flush(20);
+		expect(remote.has('other')).toBe(true);
+		expect(remote.has('third')).toBe(true);
+		expect(remote.has('me')).toBe(false);
+		ch.destroy();
+	});
+
+	it('ignores a malformed batch envelope and its malformed entries', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t);
+		await flush();
+		let remote = null;
+		ch.onFrame((_local, r) => { remote = r; });
+		// Malformed containers are dropped whole; malformed entries inside a
+		// valid container are skipped while valid siblings still land.
+		MockWebSocket._last.emit({ topic: wire(t), event: 'update-batch', data: { updates: 'nope' } });
+		MockWebSocket._last.emit({ topic: wire(t), event: 'update-batch', data: null });
+		MockWebSocket._last.emit({ topic: wire(t), event: 'update-batch', data: { updates: [null, { key: 42 }, { key: 'kept', data: { x: 1, y: 1 } }] } });
+		await flush(20);
+		expect(remote.has('kept')).toBe(true);
+		expect(remote.has('42')).toBe(false);
+		expect(remote.has(42)).toBe(false);
+		ch.destroy();
+	});
+});
+
 describe('remote freshness tag', () => {
 	it('tags each remote frame state with a freshness label', async () => {
 		const t = makeTransport();

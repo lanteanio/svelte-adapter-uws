@@ -372,6 +372,27 @@ export default function uws(options = {}) {
 		sendWire(ws, topic, event, data, _wire) {
 			return send(ws, topic, event, data);
 		},
+		// The batched wire forms delegate to N per-entry JSON deliveries - the
+		// same degradation the production walk applies to a JSON-only
+		// connection, so dev observes byte-identical envelopes. Per-entry
+		// sender exclusion flows through publishWire's options.
+		publishWireBatch(topic, event, entries, _wire, options) {
+			let ok = false;
+			for (let i = 0; i < entries.length; i++) {
+				const per = entries[i].excludeWs !== undefined
+					? { ...(options || {}), excludeWs: entries[i].excludeWs }
+					: options;
+				ok = publish(topic, event, entries[i].data, per) || ok;
+			}
+			return ok;
+		},
+		sendWireBatch(ws, topic, event, entries, _wire) {
+			let result = 1;
+			for (let i = 0; i < entries.length; i++) {
+				result = send(ws, topic, event, entries[i].data);
+			}
+			return result;
+		},
 		// The wire-codec registry feeds the production cross-worker relay's binary
 		// re-encode. Dev is single-process with no relay and delegates publishWire to
 		// JSON, so registration has nothing to drive: a no-op keeps the dev/prod

@@ -430,11 +430,12 @@ export function createSmoothWireCodec(options = {}) {
 				if (!state) return;
 				if (state.byKey) state.byKey.clear();
 				// Release the field-delta state too (the field-name dictionary, the
-				// per-key baseline the delta encoded against, and the per-field
-				// temporal stream slots).
+				// per-key baseline the delta encoded against, the per-field
+				// temporal stream slots, and the repeat-set field lists).
 				if (state.fields && state.fields.byKey) state.fields.byKey.clear();
 				if (state.baseline) state.baseline.clear();
 				if (state.slots) state.slots.clear();
+				if (state.lastNum) state.lastNum.clear();
 			}
 		}
 	};

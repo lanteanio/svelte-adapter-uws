@@ -326,6 +326,40 @@ export function createSmoothChannel(options) {
 	const localPoint = { x: 0, y: 0 };
 	const samplePoint = { x: 0, y: 0 };
 
+	// One authority update (a single frame, or one entry of a batched frame).
+	// `ev` is the per-entity envelope the smoother ingests; `d` its data.
+	function ingestUpdate(ev, d, recvMono) {
+		if (d === null || typeof d !== 'object' || typeof d.key !== 'string') return;
+		let s = d.data;
+		if (wireState !== null) {
+			try {
+				s = wireState.unpack(s);
+			} catch {
+				return; // malformed packed state: drop the frame
+			}
+		}
+		// An own-key update never enters the remote set (no ghost twin).
+		// While commands are in flight the acknowledgement is the
+		// reconciliation carrier and the frame is dropped; with nothing
+		// pending it is adopted as authoritative continuation - the
+		// server moves command-less entities (onMissing) and those
+		// updates are the owner's only feedback.
+		if (selfKey !== null && d.key === selfKey) {
+			if (predictor.rebase(s)) dirty = true;
+			return;
+		}
+		// A remote authority frame arrived: the world is live. Stamp it for the
+		// stall detector (own-key updates above are the local-avatar path and do
+		// not count - a stall is about the REMOTE world going quiet).
+		lastFrameAt = recvMono;
+		merged.set(d.key, s);
+		// The smoother reads the envelope's data.data; hand it the unpacked
+		// state (a fresh envelope only when a codec is on - the raw path
+		// stays allocation-identical).
+		smoother.ingest(wireState === null ? ev : { event: 'update', data: { key: d.key, data: s }, t: ev.t }, recvMono);
+		dirty = true;
+	}
+
 	function ingest(ev) {
 		if (ev === null || typeof ev !== 'object') return;
 		const recvMono = monotonicNow();
@@ -353,36 +387,21 @@ export function createSmoothChannel(options) {
 			return;
 		}
 		if (ev.event === 'update') {
+			ingestUpdate(ev, ev.data, recvMono);
+			return;
+		}
+		if (ev.event === 'update-batch') {
+			// One tick's updates in one frame (the batched wire form): split into
+			// the per-entity path, every entry sharing the frame's stamp and one
+			// receive time - exactly what N single frames arriving back-to-back
+			// would have produced.
 			const d = ev.data;
-			if (d === null || typeof d !== 'object' || typeof d.key !== 'string') return;
-			let s = d.data;
-			if (wireState !== null) {
-				try {
-					s = wireState.unpack(s);
-				} catch {
-					return; // malformed packed state: drop the frame
-				}
+			if (d === null || typeof d !== 'object' || !Array.isArray(d.updates)) return;
+			for (let i = 0; i < d.updates.length; i++) {
+				const u = d.updates[i];
+				if (u === null || typeof u !== 'object') continue;
+				ingestUpdate({ event: 'update', data: u, t: ev.t }, u, recvMono);
 			}
-			// An own-key update never enters the remote set (no ghost twin).
-			// While commands are in flight the acknowledgement is the
-			// reconciliation carrier and the frame is dropped; with nothing
-			// pending it is adopted as authoritative continuation - the
-			// server moves command-less entities (onMissing) and those
-			// updates are the owner's only feedback.
-			if (selfKey !== null && d.key === selfKey) {
-				if (predictor.rebase(s)) dirty = true;
-				return;
-			}
-			// A remote authority frame arrived: the world is live. Stamp it for the
-			// stall detector (own-key updates above are the local-avatar path and do
-			// not count - a stall is about the REMOTE world going quiet).
-			lastFrameAt = recvMono;
-			merged.set(d.key, s);
-			// The smoother reads the envelope's data.data; hand it the unpacked
-			// state (a fresh envelope only when a codec is on - the raw path
-			// stays allocation-identical).
-			smoother.ingest(wireState === null ? ev : { event: 'update', data: { key: d.key, data: s }, t: ev.t }, recvMono);
-			dirty = true;
 			return;
 		}
 		if (ev.event === 'remove') {

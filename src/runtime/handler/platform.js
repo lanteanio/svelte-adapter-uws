@@ -423,6 +423,182 @@ export const platform = {
 	},
 
 	/**
+	 * Multi-entry fan-out via a stateful plugin codec: one tick's same-event
+	 * updates delivered as ONE binary frame per capable connection (the
+	 * codec's `<event>-batch` form) and as the per-entry JSON envelopes -
+	 * byte-identical to N publishWire calls - for everyone else. Each entry
+	 * may carry its own `excludeWs` (per-entry author suppression); an entry
+	 * is withheld from its excluded socket on every delivery path.
+	 *
+	 * Sequencing, accounting, and the cross-worker relay match N publishWire
+	 * calls exactly: one seq per entry, one relay envelope per entry,
+	 * per-entry publish stats. The binary batch frame's header seq slot
+	 * carries the subset's LAST entry seq (batch consumers order by the
+	 * codec's own stamp, not the header seq).
+	 *
+	 * Degradation mirrors publishWire per connection: a codec that cannot
+	 * represent the batch (null) falls back to per-entry encodes; a per-entry
+	 * null falls back to that entry's JSON envelope; a dropped frame or
+	 * wire-id announce poisons the capability to JSON until reconnect. Not a
+	 * relay input: the cross-worker receive path re-encodes per entry through
+	 * publishWire, so batching stays a local egress optimization.
+	 *
+	 * @param {string} topic
+	 * @param {string} event - the PER-ENTRY event name; the codec's batch
+	 *   form is looked up as `<event>-batch` with `{ updates }` data.
+	 * @param {Array<{ data: any, excludeWs?: import('uWebSockets.js').WebSocket<any> }>} entries
+	 * @param {{ capability: string, schemaVersion: number, encode: Function, state?: any }} wire
+	 * @param {{ seq?: boolean, relay?: boolean, compress?: boolean }} [options]
+	 * @returns {boolean}
+	 */
+	publishWireBatch(topic, event, entries, wire, options) {
+		if (!Array.isArray(entries) || entries.length === 0) return false;
+		// A stateless codec gains nothing from a batched walk (encode-once
+		// already amortizes it) - route through the per-entry path unchanged.
+		if (!wire || !wire.state) {
+			let ok = false;
+			for (let i = 0; i < entries.length; i++) {
+				const per = entries[i].excludeWs !== undefined
+					? { ...(options || {}), excludeWs: entries[i].excludeWs }
+					: options;
+				ok = this.publishWire(topic, event, entries[i].data, wire, per) || ok;
+			}
+			return ok;
+		}
+		counters.publishCountWindow += entries.length;
+		const compressIntent = !!(options && options.compress === true);
+		const compress = WS_COMPRESSION_ON && compressIntent;
+		const relayed = !!(parentPort && (!options || options.relay !== false));
+		const relayCap = relayed && getWireCodec(wire.capability) ? wire.capability : undefined;
+
+		// Per-entry seq, envelope, and stats - the exact bookkeeping N
+		// publishWire calls would have produced.
+		let stats = topicPublishStats.get(topic);
+		if (!stats) {
+			stats = { m: 0, b: 0 };
+			topicPublishStats.set(topic, stats);
+			maybeWarnTopicRegistry();
+		}
+		const envs = new Array(entries.length);
+		const seqs = new Array(entries.length);
+		let anyExclude = false;
+		for (let i = 0; i < entries.length; i++) {
+			const seq = stampSeq(options, topicSeqs, topic);
+			if (seq !== null) maxSeenSeq.set(topic, seq);
+			seqs[i] = seq == null ? 0 : seq;
+			const envelope = completeEnvelope(envelopePrefix(topic, event), entries[i].data, seq);
+			fatal(envelope.length > 0, 'envelope.empty', { topic, event });
+			stats.m++;
+			stats.b += envelope.length;
+			envs[i] = envelope;
+			if (entries[i].excludeWs !== undefined && entries[i].excludeWs !== null) anyExclude = true;
+		}
+
+		const sendJson = (ws, list) => {
+			for (let i = 0; i < list.length; i++) {
+				try { ws.send(list[i], false, compress); } catch { counters.closedWsAborts++; return; }
+			}
+		};
+
+		// JSON fast path: no live connection wants binary for this codec and no
+		// entry excludes a socket - N native fan-outs, byte-identical to N
+		// publishWire calls.
+		if (!anyExclude && !capCounts.has(wire.capability)) {
+			for (let i = 0; i < entries.length; i++) app.publish(topic, envs[i], false, compress);
+		} else {
+			for (const ws of wsConnections) {
+				let ud;
+				try { ud = ws.getUserData(); } catch { continue; }
+				const subs = ud[WS_SUBSCRIPTIONS];
+				if (!subs || !subs.has(topic)) continue;
+				// The subset this socket receives: entries not excluded for it.
+				// The no-exclusion common case reuses the shared arrays.
+				let list = entries;
+				let envList = envs;
+				let lastSeq = seqs[entries.length - 1];
+				if (anyExclude) {
+					list = [];
+					envList = [];
+					for (let i = 0; i < entries.length; i++) {
+						if (entries[i].excludeWs === ws) continue;
+						list.push(entries[i]);
+						envList.push(envs[i]);
+						lastSeq = seqs[i];
+					}
+					if (list.length === 0) continue;
+				}
+				const caps = ud[WS_CAPS];
+				if (!caps || !caps.has(wire.capability)) {
+					sendJson(ws, envList);
+					continue;
+				}
+				// A poisoned capability reads a null state and is served JSON,
+				// exactly like publishWire's null-state branch.
+				const state = ensureWireState(ws, ud, wire);
+				if (state == null) {
+					sendJson(ws, envList);
+					continue;
+				}
+				const updates = new Array(list.length);
+				for (let i = 0; i < list.length; i++) updates[i] = list[i].data;
+				const payload = wire.encode(event + '-batch', { updates }, state);
+				const sv = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
+				if (payload == null) {
+					// The codec declined the batch (older codec, unrepresentable
+					// entry): per-entry encodes with per-entry JSON fallback - the
+					// N publishWire bodies this call replaces.
+					for (let i = 0; i < list.length; i++) {
+						const p = wire.encode(event, list[i].data, state);
+						if (p == null) {
+							try { ws.send(envList[i], false, compress); } catch { counters.closedWsAborts++; break; }
+							continue;
+						}
+						const id = ensureWireId(ws, ud, topic);
+						if (id === -1) {
+							poisonWireState(ws, ud, wire.capability);
+							sendJson(ws, envList.slice(i));
+							break;
+						}
+						const frame = buildBinaryFrame(sv, id, seqs[i], p);
+						let result;
+						try { result = ws.send(frame, true, compress); } catch { counters.closedWsAborts++; break; }
+						if (result === 2) {
+							poisonWireState(ws, ud, wire.capability);
+							sendJson(ws, envList.slice(i + 1));
+							break;
+						}
+					}
+					continue;
+				}
+				const id = ensureWireId(ws, ud, topic);
+				if (id === -1) {
+					// Dropped wire-id announce: binary is permanently undecodable
+					// here, and the batch encode already advanced this connection's
+					// dictionaries - the desync poisoning exists for.
+					poisonWireState(ws, ud, wire.capability);
+					sendJson(ws, envList);
+					continue;
+				}
+				const frame = buildBinaryFrame(sv, id, lastSeq, payload);
+				let result;
+				try { result = ws.send(frame, true, compress); } catch { counters.closedWsAborts++; continue; }
+				// 2 = dropped past maxBackpressure: the encode mutated the
+				// dictionaries for a frame the client never saw - JSON until
+				// reconnect.
+				if (result === 2) poisonWireState(ws, ud, wire.capability);
+			}
+		}
+		if (relayed) {
+			for (let i = 0; i < entries.length; i++) {
+				batchRelay(topic, envs[i], compressIntent, seqs[i] === 0 ? null : seqs[i], relayCap,
+					relayCap !== undefined ? event : undefined,
+					relayCap !== undefined ? entries[i].data : undefined);
+			}
+		}
+		return true;
+	},
+
+	/**
 	 * Register a plugin's wire codec under its capability so the cross-worker relay
 	 * can re-derive it on a receiving worker and re-encode binary locally for that
 	 * worker's binary-capable subscribers (see relayPublishWire). A plugin calls this
@@ -505,6 +681,92 @@ export const platform = {
 		// dropped frame, so degrade the capability to JSON until reconnect.
 		// Stateless payloads carry no per-connection state - no poisoning.
 		if (result === 2 && wire.state) poisonWireState(ws, ud, wire.capability);
+		return result;
+	},
+
+	/**
+	 * Multi-entry single-target send via a stateful plugin codec: one tick's
+	 * same-event updates for ONE subscriber as a single binary frame (the
+	 * codec's `<event>-batch` form), or the per-entry JSON envelopes when the
+	 * connection has no capability / is poisoned. The per-subscriber twin of
+	 * publishWireBatch, for the culled (per-viewer) delivery walks. No seq is
+	 * stamped (matches `send()` / `sendWire()`); the binary frame carries seq 0.
+	 *
+	 * Degradation mirrors sendWire per entry: a declined batch falls back to
+	 * per-entry encodes, a per-entry null to that entry's JSON envelope, and a
+	 * dropped stateful frame poisons the capability to JSON until reconnect.
+	 *
+	 * @param {import('uWebSockets.js').WebSocket<any>} ws
+	 * @param {string} topic
+	 * @param {string} event - the PER-ENTRY event name
+	 * @param {Array<{ data: any }>} entries
+	 * @param {{ capability: string, schemaVersion: number, encode: Function, state?: any }} wire
+	 * @param {{ compress?: boolean }} [options]
+	 * @returns {number} uWS send status of the LAST frame sent (0/1/2), or 2 on a freed handle
+	 */
+	sendWireBatch(ws, topic, event, entries, wire, options) {
+		if (!Array.isArray(entries) || entries.length === 0) return 1;
+		let ud;
+		try { ud = ws.getUserData(); } catch { counters.closedWsAborts++; return 2; }
+		const caps = ud[WS_CAPS];
+		const compress = WS_COMPRESSION_ON && !!(options && options.compress === true);
+		const sendJsonFrom = (i) => {
+			let result = 1;
+			for (; i < entries.length; i++) {
+				const json = envelopePrefix(topic, event) + JSON.stringify(entries[i].data ?? null) + '}';
+				try { result = ws.send(json, false, compress); } catch { counters.closedWsAborts++; return 2; }
+				bumpOut(ws, json);
+			}
+			return result;
+		};
+		if (!caps || !caps.has(wire.capability) || wireStatePoisoned(ud, wire.capability) || !wire.state) {
+			return sendJsonFrom(0);
+		}
+		const state = ensureWireState(ws, ud, wire);
+		if (state == null) return sendJsonFrom(0);
+		const updates = new Array(entries.length);
+		for (let i = 0; i < entries.length; i++) updates[i] = entries[i].data;
+		const schemaVersion = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
+		const payload = wire.encode(event + '-batch', { updates }, state);
+		if (payload == null) {
+			// The codec declined the batch (older codec, unrepresentable entry):
+			// the N sendWire bodies this call replaces.
+			let result = 1;
+			for (let i = 0; i < entries.length; i++) {
+				const p = wire.encode(event, entries[i].data, state);
+				if (p == null) {
+					const json = envelopePrefix(topic, event) + JSON.stringify(entries[i].data ?? null) + '}';
+					try { result = ws.send(json, false, compress); } catch { counters.closedWsAborts++; return 2; }
+					bumpOut(ws, json);
+					continue;
+				}
+				const id = ensureWireId(ws, ud, topic);
+				if (id === -1) {
+					poisonWireState(ws, ud, wire.capability);
+					return sendJsonFrom(i);
+				}
+				const frame = buildBinaryFrame(schemaVersion, id, 0, p);
+				try { result = ws.send(frame, true, compress); } catch { counters.closedWsAborts++; return 2; }
+				bumpOut(ws, frame);
+				if (result === 2) {
+					poisonWireState(ws, ud, wire.capability);
+					return sendJsonFrom(i + 1);
+				}
+			}
+			return result;
+		}
+		const id = ensureWireId(ws, ud, topic);
+		if (id === -1) {
+			// Dropped wire-id announce; the batch encode already advanced this
+			// connection's dictionaries - the desync poisoning exists for.
+			poisonWireState(ws, ud, wire.capability);
+			return sendJsonFrom(0);
+		}
+		const frame = buildBinaryFrame(schemaVersion, id, 0, payload);
+		let result;
+		try { result = ws.send(frame, true, compress); } catch { counters.closedWsAborts++; return 2; }
+		bumpOut(ws, frame);
+		if (result === 2) poisonWireState(ws, ud, wire.capability);
 		return result;
 	},
 

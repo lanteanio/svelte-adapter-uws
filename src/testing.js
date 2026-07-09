@@ -688,6 +688,104 @@ export async function createTestServer(options = {}) {
 			}
 			return delivered;
 		},
+		publishWireBatch(topic, event, entries, wire, options) {
+			// Mirror of handler/platform.js publishWireBatch: one binary frame per
+			// capable connection (the codec's `<event>-batch` form), per-entry JSON
+			// envelopes for everyone else, per-entry sender exclusion, per-entry
+			// seq/relay, poison-on-drop. A stateless codec routes per entry.
+			if (!Array.isArray(entries) || entries.length === 0) return false;
+			if (!wire || !wire.state) {
+				let ok = false;
+				for (let i = 0; i < entries.length; i++) {
+					const per = entries[i].excludeWs !== undefined
+						? { ...(options || {}), excludeWs: entries[i].excludeWs }
+						: options;
+					ok = platform.publishWire(topic, event, entries[i].data, wire, per) || ok;
+				}
+				return ok;
+			}
+			const envs = new Array(entries.length);
+			const seqs = new Array(entries.length);
+			let anyExclude = false;
+			for (let i = 0; i < entries.length; i++) {
+				const seq = stampSeq(options, topicSeqs, topic);
+				seqs[i] = seq == null ? 0 : seq;
+				envs[i] = envelope(topic, event, entries[i].data, seq);
+				if (onPublishT && !(options && options.relay === false)) {
+					onPublishT({ kind: 'publish', topic, envelope: envs[i], seq, compress: false });
+				}
+				if (entries[i].excludeWs !== undefined && entries[i].excludeWs !== null) anyExclude = true;
+			}
+			const sendJsonT = (ws, list) => { for (let i = 0; i < list.length; i++) sendOutboundT(ws, list[i]); };
+			if (!anyExclude && !capCountsT.has(wire.capability)) {
+				if (chaos.scenario === null) {
+					for (let i = 0; i < entries.length; i++) app.publish(topic, envs[i], false, false);
+					return true;
+				}
+				let delivered = false;
+				for (const ws of wsConnections) {
+					if (!ws.isSubscribed(topic)) continue;
+					sendJsonT(ws, envs);
+					delivered = true;
+				}
+				return delivered;
+			}
+			let delivered = false;
+			for (const ws of wsConnections) {
+				let ud;
+				try { ud = ws.getUserData(); } catch { continue; }
+				const subs = ud[WS_SUBSCRIPTIONS];
+				if (!subs || !subs.has(topic)) continue;
+				let list = entries;
+				let envList = envs;
+				let lastSeq = seqs[entries.length - 1];
+				if (anyExclude) {
+					list = [];
+					envList = [];
+					for (let i = 0; i < entries.length; i++) {
+						if (entries[i].excludeWs === ws) continue;
+						list.push(entries[i]);
+						envList.push(envs[i]);
+						lastSeq = seqs[i];
+					}
+					if (list.length === 0) continue;
+				}
+				const caps = ud[WS_CAPS];
+				if (!caps || !caps.has(wire.capability)) { sendJsonT(ws, envList); delivered = true; continue; }
+				const state = ensureWireStateT(ws, ud, wire);
+				if (state == null) { sendJsonT(ws, envList); delivered = true; continue; }
+				const updates = new Array(list.length);
+				for (let i = 0; i < list.length; i++) updates[i] = list[i].data;
+				const payload = wire.encode(event + '-batch', { updates }, state);
+				const sv = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
+				if (payload == null) {
+					// The codec declined the batch: the per-entry bodies instead.
+					for (let i = 0; i < list.length; i++) {
+						const p = wire.encode(event, list[i].data, state);
+						if (p == null) { sendOutboundT(ws, envList[i]); continue; }
+						const id = ensureWireIdT(ws, ud, topic);
+						if (id === -1) { poisonWireStateT(ws, ud, wire.capability); sendJsonT(ws, envList.slice(i)); break; }
+						const result = sendOutboundBinaryT(ws, buildBinaryFrame(sv, id, seqs[i], p));
+						if (result === 2) { poisonWireStateT(ws, ud, wire.capability); sendJsonT(ws, envList.slice(i + 1)); break; }
+					}
+					delivered = true;
+					continue;
+				}
+				const id = ensureWireIdT(ws, ud, topic);
+				if (id === -1) {
+					// Dropped wire-id announce: the batch encode already advanced this
+					// connection's dictionaries - poison, JSON for these entries.
+					poisonWireStateT(ws, ud, wire.capability);
+					sendJsonT(ws, envList);
+					delivered = true;
+					continue;
+				}
+				const result = sendOutboundBinaryT(ws, buildBinaryFrame(sv, id, lastSeq, payload));
+				if (result === 2) poisonWireStateT(ws, ud, wire.capability);
+				delivered = true;
+			}
+			return delivered;
+		},
 		registerWireCodec(wire) {
 			if (wire && typeof wire.capability === 'string') byCapabilityT.set(wire.capability, wire);
 		},
@@ -736,6 +834,50 @@ export async function createTestServer(options = {}) {
 			// capability to JSON until reconnect. Stateless payloads carry no
 			// per-connection state, so no poisoning.
 			if (result === 2 && wire.state) poisonWireStateT(ws, ud, wire.capability);
+			return result;
+		},
+		sendWireBatch(ws, topic, event, entries, wire, options) {
+			// Mirror of handler/platform.js sendWireBatch: one binary frame for a
+			// capable subscriber (the codec's `<event>-batch` form), per-entry JSON
+			// envelopes otherwise, poison-on-drop.
+			void options;
+			if (!Array.isArray(entries) || entries.length === 0) return 1;
+			let ud;
+			try { ud = ws.getUserData(); } catch { closedWsAbortsT++; return 2; }
+			const caps = ud[WS_CAPS];
+			const sendJsonFromT = (i) => {
+				let result = 1;
+				for (; i < entries.length; i++) result = sendOutboundT(ws, envelope(topic, event, entries[i].data));
+				return result;
+			};
+			if (!caps || !caps.has(wire.capability) || wireStatePoisonedT(ud, wire.capability) || !wire.state) {
+				return sendJsonFromT(0);
+			}
+			const state = ensureWireStateT(ws, ud, wire);
+			if (state == null) return sendJsonFromT(0);
+			const updates = new Array(entries.length);
+			for (let i = 0; i < entries.length; i++) updates[i] = entries[i].data;
+			const schemaVersion = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
+			const payload = wire.encode(event + '-batch', { updates }, state);
+			if (payload == null) {
+				let result = 1;
+				for (let i = 0; i < entries.length; i++) {
+					const p = wire.encode(event, entries[i].data, state);
+					if (p == null) { result = sendOutboundT(ws, envelope(topic, event, entries[i].data)); continue; }
+					const id = ensureWireIdT(ws, ud, topic);
+					if (id === -1) { poisonWireStateT(ws, ud, wire.capability); return sendJsonFromT(i); }
+					result = sendOutboundBinaryT(ws, buildBinaryFrame(schemaVersion, id, 0, p));
+					if (result === 2) { poisonWireStateT(ws, ud, wire.capability); return sendJsonFromT(i + 1); }
+				}
+				return result;
+			}
+			const id = ensureWireIdT(ws, ud, topic);
+			if (id === -1) {
+				poisonWireStateT(ws, ud, wire.capability);
+				return sendJsonFromT(0);
+			}
+			const result = sendOutboundBinaryT(ws, buildBinaryFrame(schemaVersion, id, 0, payload));
+			if (result === 2) poisonWireStateT(ws, ud, wire.capability);
 			return result;
 		},
 		sendTo(filter, topic, event, data, options) {

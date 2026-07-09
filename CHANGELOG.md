@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.68] - 2026-07-09
+
+### Added
+
+- **The smooth wire's steady state got cheaper twice: a repeat-set field delta and a batched update frame.** Under steady motion the field-delta frame re-lists the same changed-field references tick after tick - with a typical game record that is a fifth to a third of every frame's bytes spent saying "the same fields as last time". The codec now remembers each entity's last delta field set on both ends (the same advance-on-delta / freeze-on-fallback / clear-on-remove / reset-on-reconnect discipline the baseline keeps), and a frame whose changed numeric set repeats it - no literals, no removals - elides the field list entirely: the byte-aligned head collapses to the key reference and the temporal bit-stream values. And where every entity update used to travel as its own frame (own opcode, own stamp, own WebSocket frame, own send), one tick's updates can now travel as ONE frame per connection: a shared stamp, then per entity a sub-op byte plus that op's head, with every entity's numeric values in a single trailing bit block. The platform grew the fan-out to feed it - `publishWireBatch` (one binary frame per capable connection, the per-entry JSON envelopes byte-identical to N `publishWire` calls for everyone else, per-ENTRY sender exclusion so each update can suppress its own author, per-entry seq/relay/stats, and the same poison-to-JSON degradation on a dropped frame or announce) and `sendWireBatch` (the per-subscriber twin for culled delivery walks), mirrored on the dev and test-server platforms per the parity contract. The smooth client splits a batch frame back into per-entity updates sharing the frame's stamp and one receive time, exactly as N back-to-back single frames would have landed; own-key rebase, remote-set merge, and the stall detector behave identically. Encode hardening rode along: a field-delta literal is now pre-serialized before any dictionary state is touched, so a value the codec cannot carry (a throwing getter, a cyclic structure) declines to JSON with both ends' dictionaries provably untouched instead of risking a mid-frame intern. Both forms are additive opcodes inside `smooth.protocol:1`'s schema (the decoder-superset discipline the field delta itself shipped under); JSON delivery, single-frame encoding, and every other consumer are byte-identical to before.
+
 ## [0.6.0-next.67] - 2026-07-09
 
 ### Added

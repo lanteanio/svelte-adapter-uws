@@ -6,6 +6,8 @@
  * is `[op:u8][op-specific...]`, one op per smooth wire event:
  *
  *   STATE_DELTA [op][t][keyref][nChanged][fieldref,value]*[nRemoved][fieldref]*  object state, field delta
+ *   STATE_DELTA_SAME [op][t][keyref][bits]           field delta, repeat set (field list implied)
+ *   UPDATE_BATCH [op][t][count][sub,keyref,head]*[bits]  one tick's updates, one shared stamp
  *   STATE  [op][t:varint][keyref][stateJson]         array / primitive state (full)
  *   XY     [op][t:varint][keyref][x:f32][y:f32]      exactly-{x,y} state
  *   ACK    [op][id:varint][t:varint][sub:u8][state]  per-owner acknowledgement
@@ -198,9 +200,23 @@ const OP_XY = 2;
 const OP_ACK = 3;
 const OP_REMOVE = 4;
 const OP_STATE_DELTA = 5;
+// Repeat-set field delta: the changed NUMERIC field set (and its order) is
+// identical to this key's previous delta frame, no literals changed, nothing
+// removed - the steady-motion common case. The frame carries no field list at
+// all (both ends replay the key's remembered list), so the byte-aligned head
+// collapses to the keyref.
+const OP_STATE_DELTA_SAME = 6;
+// One tick's updates in one frame: a shared stamp, then per entity a sub-op
+// byte + keyref + that op's byte-aligned head, then ONE trailing bit block
+// carrying every entity's numeric values in entry order. Cuts the per-entity
+// frame overhead (op + stamp + transport framing) to once per tick.
+const OP_UPDATE_BATCH = 7;
 
 const ACK_SUB_XY = 0;
 const ACK_SUB_JSON = 1;
+
+/** Defensive ceiling on a decoded batch's entry count. */
+const UPDATE_BATCH_MAX = 65536;
 
 /**
  * True when a value survives a JSON round trip at an object-field position:
@@ -256,6 +272,14 @@ export class SmoothEncodeDict extends KeyEncodeDict {
 		this.baseline = new Map();
 		/** @type {Map<string, Map<string, ReturnType<typeof createStreamSlot>>>} */
 		this.slots = new Map();
+		// The numeric-changed field list of each key's last full delta frame: the
+		// basis the repeat-set frame (OP_STATE_DELTA_SAME) elides its field list
+		// against. Advances only on a full delta frame, is left untouched by a
+		// repeat-set / XY / full-state / JSON-fallback frame, cleared on REMOVE,
+		// reset on reconnect - the same discipline as the baseline, mirrored in
+		// lock-step by the decode dictionary.
+		/** @type {Map<string, string[]>} */
+		this.lastNum = new Map();
 	}
 }
 
@@ -275,13 +299,140 @@ export class SmoothDecodeDict extends KeyDecodeDict {
 		this.baseline = new Map();
 		/** @type {Map<string, Map<string, ReturnType<typeof createStreamSlot>>>} */
 		this.slots = new Map();
+		// Decode-side twin of the encoder's `lastNum` (see SmoothEncodeDict).
+		/** @type {Map<string, string[]>} */
+		this.lastNum = new Map();
 	}
+}
+
+/** True when `a` (a string array) equals `b` element-for-element in order. */
+function sameFieldList(a, b) {
+	if (b === undefined || a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+	return true;
+}
+
+/**
+ * Classify one object-state update against the connection's baseline: which
+ * fields ride the numeric stream, which ride the literal value codec (their
+ * bytes PRE-SERIALIZED here, so a value the codec cannot carry throws BEFORE
+ * any dictionary state is touched - the caller turns the throw into a JSON
+ * fallback / a rejected batch with both ends' state intact), which fields
+ * dropped out, and whether the numeric set repeats the key's previous delta
+ * frame (the repeat-set form). Read-only over the dictionary.
+ *
+ * @param {SmoothEncodeDict} dict
+ * @param {string} key
+ * @param {Record<string, any>} s
+ */
+function planDelta(dict, key, s) {
+	const prev = dict.baseline.get(key);
+	const keys = Object.keys(s);
+	const numChanged = [];
+	const litChanged = [];
+	for (let i = 0; i < keys.length; i++) {
+		const k = keys[i];
+		const v = s[k];
+		if (!isKeptValue(v)) continue;
+		if (prev !== undefined && v === prev[k]) continue;
+		if (typeof v === 'number' && Number.isFinite(v)) numChanged.push(k);
+		else litChanged.push(k);
+	}
+	const removed = [];
+	if (prev !== undefined) {
+		const pkeys = Object.keys(prev);
+		for (let i = 0; i < pkeys.length; i++) {
+			const k = pkeys[i];
+			if (!isKeptValue(prev[k])) continue;
+			if (isKeptValue(s[k])) continue;
+			removed.push(k);
+		}
+	}
+	// Pre-serialize the literal values into one scratch buffer with per-value
+	// offsets, so assembly interleaves [fieldref, value] without running the
+	// (throw-capable) value codec after a dictionary mutation.
+	let litBytes = null;
+	let litOffsets = null;
+	if (litChanged.length > 0) {
+		const lw = new ByteWriter(16);
+		litOffsets = new Array(litChanged.length + 1);
+		litOffsets[0] = 0;
+		for (let i = 0; i < litChanged.length; i++) {
+			writeValue(lw, s[litChanged[i]]);
+			litOffsets[i + 1] = lw.len;
+		}
+		litBytes = lw.take();
+	}
+	const same = prev !== undefined && litChanged.length === 0 && removed.length === 0 &&
+		numChanged.length > 0 && sameFieldList(numChanged, dict.lastNum.get(key));
+	return { numChanged, litChanged, removed, litBytes, litOffsets, same };
+}
+
+/**
+ * Write one planned delta body - keyref plus the byte-aligned head - into `w`,
+ * stream the numeric values into `bw`, and advance the key's delta state
+ * (baseline, slots, remembered numeric set). A repeat-set plan writes no field
+ * list at all. Shared by the single-frame delta ops and the batch entries.
+ *
+ * @param {import('../../runtime/wire.js').ByteWriter} w
+ * @param {import('../../runtime/wire-bits.js').BitWriter} bw
+ * @param {SmoothEncodeDict} dict
+ * @param {string} key
+ * @param {Record<string, any>} s
+ * @param {ReturnType<typeof planDelta>} plan
+ */
+function writeDeltaBody(w, bw, dict, key, s, plan) {
+	dict.writeKey(w, key);
+	if (!plan.same) {
+		w.varint(plan.numChanged.length);
+		for (let i = 0; i < plan.numChanged.length; i++) dict.fields.writeKey(w, plan.numChanged[i]);
+		w.varint(plan.litChanged.length);
+		for (let i = 0; i < plan.litChanged.length; i++) {
+			dict.fields.writeKey(w, plan.litChanged[i]);
+			w.bytes(plan.litBytes.subarray(plan.litOffsets[i], plan.litOffsets[i + 1]));
+		}
+		w.varint(plan.removed.length);
+		for (let i = 0; i < plan.removed.length; i++) dict.fields.writeKey(w, plan.removed[i]);
+	}
+	// Per-(key,field) numeric slots for the temporal streams.
+	let keySlots = dict.slots.get(key);
+	if (plan.numChanged.length > 0) {
+		if (keySlots === undefined) {
+			keySlots = new Map();
+			dict.slots.set(key, keySlots);
+		}
+		for (let i = 0; i < plan.numChanged.length; i++) {
+			const k = plan.numChanged[i];
+			let slot = keySlots.get(k);
+			if (slot === undefined) {
+				slot = createStreamSlot();
+				keySlots.set(k, slot);
+			}
+			const v = s[k];
+			// Normalize -0 to 0 so the stream matches the JSON / value-codec
+			// round trip (JSON has no negative zero).
+			writeStreamValue(bw, slot, v === 0 ? 0 : v);
+		}
+	}
+	// A field that left the numeric stream (sent as a literal now, or removed)
+	// drops its slot so a later numeric value first-sights. A repeat-set frame
+	// by definition has neither.
+	if (keySlots !== undefined && !plan.same) {
+		for (let i = 0; i < plan.litChanged.length; i++) keySlots.delete(plan.litChanged[i]);
+		for (let i = 0; i < plan.removed.length; i++) keySlots.delete(plan.removed[i]);
+	}
+	// Advance the baseline only after the whole body is built - the freeze
+	// discipline the stamp and key dicts keep. Store the state reference
+	// itself: the next frame's reference-inequality reads it.
+	dict.baseline.set(key, s);
+	if (!plan.same) dict.lastNum.set(key, plan.numChanged);
 }
 
 /**
  * Encode a smooth wire event into a codec payload.
  *
- * @param {string} event - 'update' | 'ack' | 'remove' (anything else declines)
+ * @param {string} event - 'update' | 'update-batch' | 'ack' | 'remove'
+ *   (anything else declines)
  * @param {any} data - the same value the JSON envelope would carry
  * @param {SmoothEncodeDict} [state] - per-connection dictionary; without one
  *   every frame declines to JSON (the smooth wire is dictionary-only).
@@ -314,75 +465,24 @@ export function encodeSmooth(event, data, state) {
 					// update makes a changed value a new reference, the same contract
 					// the authority's change detection rests on), so unchanged fields
 					// cost nothing and the reconstruction is byte-identical to the
-					// full-state round trip.
-					const prev = dict.baseline.get(data.key);
-					const keys = Object.keys(s);
-					const numChanged = [];
-					const litChanged = [];
-					for (let i = 0; i < keys.length; i++) {
-						const k = keys[i];
-						const v = s[k];
-						if (!isKeptValue(v)) continue;
-						if (prev !== undefined && v === prev[k]) continue;
-						if (typeof v === 'number' && Number.isFinite(v)) numChanged.push(k);
-						else litChanged.push(k);
-					}
-					const removed = [];
-					if (prev !== undefined) {
-						const pkeys = Object.keys(prev);
-						for (let i = 0; i < pkeys.length; i++) {
-							const k = pkeys[i];
-							if (!isKeptValue(prev[k])) continue;
-							if (isKeptValue(s[k])) continue;
-							removed.push(k);
-						}
+					// full-state round trip. When the numeric set repeats the key's
+					// previous delta frame with no literals and no removals (steady
+					// motion), the repeat-set op elides the field list entirely.
+					let plan;
+					try {
+						plan = planDelta(dict, data.key, s);
+					} catch {
+						// A literal the value codec cannot carry: JSON fallback with
+						// every dictionary untouched (planDelta is read-only).
+						return null;
 					}
 					dict.fields.beginFrame();
 					const w = new ByteWriter(32);
-					w.u8(OP_STATE_DELTA);
+					w.u8(plan.same ? OP_STATE_DELTA_SAME : OP_STATE_DELTA);
 					writeDeltaStamp(w, dict);
-					dict.writeKey(w, data.key);
-					w.varint(numChanged.length);
-					for (let i = 0; i < numChanged.length; i++) dict.fields.writeKey(w, numChanged[i]);
-					w.varint(litChanged.length);
-					for (let i = 0; i < litChanged.length; i++) {
-						dict.fields.writeKey(w, litChanged[i]);
-						writeValue(w, s[litChanged[i]]);
-					}
-					w.varint(removed.length);
-					for (let i = 0; i < removed.length; i++) dict.fields.writeKey(w, removed[i]);
-					// Per-(key,field) numeric slots for the temporal streams.
-					let keySlots = dict.slots.get(data.key);
-					if (numChanged.length > 0) {
-						if (keySlots === undefined) {
-							keySlots = new Map();
-							dict.slots.set(data.key, keySlots);
-						}
-						const bw = new BitWriter();
-						for (let i = 0; i < numChanged.length; i++) {
-							const k = numChanged[i];
-							let slot = keySlots.get(k);
-							if (slot === undefined) {
-								slot = createStreamSlot();
-								keySlots.set(k, slot);
-							}
-							const v = s[k];
-							// Normalize -0 to 0 so the stream matches the JSON / value-codec
-							// round trip (JSON has no negative zero).
-							writeStreamValue(bw, slot, v === 0 ? 0 : v);
-						}
-						w.bytes(bw.finish());
-					}
-					// A field that left the numeric stream (sent as a literal now, or
-					// removed) drops its slot so a later numeric value first-sights.
-					if (keySlots !== undefined) {
-						for (let i = 0; i < litChanged.length; i++) keySlots.delete(litChanged[i]);
-						for (let i = 0; i < removed.length; i++) keySlots.delete(removed[i]);
-					}
-					// Advance the baseline only after the whole frame is built - the
-					// freeze discipline the stamp and key dicts keep. Store the state
-					// reference itself: the next frame's reference-inequality reads it.
-					dict.baseline.set(data.key, s);
+					const bw = new BitWriter();
+					writeDeltaBody(w, bw, dict, data.key, s, plan);
+					if (plan.numChanged.length > 0) w.bytes(bw.finish());
 					return w.take();
 				}
 				// Array / primitive / null state: the full JSON encoding. Serialize
@@ -396,6 +496,70 @@ export function encodeSmooth(event, data, state) {
 				writeDeltaStamp(w, dict);
 				dict.writeKey(w, data.key);
 				w.str(json);
+				return w.take();
+			}
+			case 'update-batch': {
+				// One tick's updates in one frame. Two passes: EVERY entry is
+				// validated and planned (throw-capable work included: literal
+				// pre-serialization, full-state JSON.stringify) before the first
+				// dictionary mutation, so a rejected batch returns null with both
+				// ends' state untouched and the caller can fall back to the
+				// per-entity path, which has per-entity fallback. One entry per key
+				// (the decoder applies entries in order against shared per-key
+				// state); a duplicate rejects the batch.
+				const u = data && Array.isArray(data.updates) ? data.updates : null;
+				if (u === null || u.length === 0 || u.length > UPDATE_BATCH_MAX) return null;
+				const plans = new Array(u.length);
+				const seen = new Set();
+				for (let i = 0; i < u.length; i++) {
+					const e = u[i];
+					if (!e || typeof e.key !== 'string') return null;
+					if (seen.has(e.key)) return null;
+					seen.add(e.key);
+					const s = e.data;
+					if (isXY(s)) {
+						plans[i] = { sub: OP_XY };
+						continue;
+					}
+					if (s === undefined) return null;
+					if (s !== null && typeof s === 'object' && !Array.isArray(s)) {
+						const plan = planDelta(dict, e.key, s);
+						plans[i] = { sub: plan.same ? OP_STATE_DELTA_SAME : OP_STATE_DELTA, plan };
+						continue;
+					}
+					const json = JSON.stringify(s);
+					if (typeof json !== 'string') return null;
+					plans[i] = { sub: OP_STATE, json };
+				}
+				// Assembly: shared stamp, then per entry a sub-op byte + keyref +
+				// that op's byte-aligned head; every entity's numeric values ride
+				// ONE trailing bit block in entry order.
+				dict.fields.beginFrame();
+				const w = new ByteWriter(64);
+				w.u8(OP_UPDATE_BATCH);
+				writeDeltaStamp(w, dict);
+				w.varint(u.length);
+				const bw = new BitWriter();
+				let anyBits = false;
+				for (let i = 0; i < u.length; i++) {
+					const e = u[i];
+					const p = plans[i];
+					w.u8(p.sub);
+					if (p.sub === OP_XY) {
+						dict.writeKey(w, e.key);
+						w.f32(e.data.x);
+						w.f32(e.data.y);
+						continue;
+					}
+					if (p.sub === OP_STATE) {
+						dict.writeKey(w, e.key);
+						w.str(p.json);
+						continue;
+					}
+					writeDeltaBody(w, bw, dict, e.key, e.data, p.plan);
+					if (p.plan.numChanged.length > 0) anyBits = true;
+				}
+				if (anyBits) w.bytes(bw.finish());
 				return w.take();
 			}
 			case 'ack': {
@@ -436,6 +600,7 @@ export function encodeSmooth(event, data, state) {
 				// first-sight again. Both ends clear from the same REMOVE frame.
 				dict.baseline.delete(data.key);
 				dict.slots.delete(data.key);
+				dict.lastNum.delete(data.key);
 				return w.take();
 			}
 			default:
@@ -449,13 +614,117 @@ export function encodeSmooth(event, data, state) {
 }
 
 /**
+ * Read one field-delta head (numeric field names, literal field/value pairs,
+ * removed field names) off the byte-aligned section. Returns null on a keyref
+ * desync. Shared by the single delta frame and the batch entries; the numeric
+ * VALUES ride a bit block the caller hands to {@link applyDeltaEntry}.
+ * @param {import('../../runtime/wire.js').ByteReader} r
+ * @param {SmoothDecodeDict} dict
+ */
+function readDeltaHead(r, dict) {
+	const nNum = r.varint();
+	const numFields = [];
+	for (let i = 0; i < nNum; i++) {
+		const fname = dict.fields.readKey(r);
+		if (fname === null) return null;
+		numFields.push(fname);
+	}
+	const nLit = r.varint();
+	const litPairs = [];
+	for (let i = 0; i < nLit; i++) {
+		const fname = dict.fields.readKey(r);
+		if (fname === null) return null;
+		litPairs.push([fname, readValue(r)]);
+	}
+	const nRem = r.varint();
+	const remFields = [];
+	for (let i = 0; i < nRem; i++) {
+		const fname = dict.fields.readKey(r);
+		if (fname === null) return null;
+		remFields.push(fname);
+	}
+	return { numFields, litPairs, remFields };
+}
+
+/**
+ * Apply one decoded field-delta entry: reconstruct the state from the key's
+ * baseline plus the head, pull the numeric values off `br`, and advance the
+ * key's delta state (baseline, slots, remembered numeric set). A fresh object
+ * each frame (never the one handed to the consumer last time), so a
+ * downstream reader mutating a frame cannot corrupt the reconstruction basis.
+ * @param {SmoothDecodeDict} dict
+ * @param {string} key
+ * @param {ReturnType<typeof readDeltaHead>} head
+ * @param {import('../../runtime/wire-bits.js').BitReader | null} br
+ */
+function applyDeltaEntry(dict, key, head, br) {
+	const prev = dict.baseline.get(key);
+	const out = prev === undefined ? {} : { ...prev };
+	for (let i = 0; i < head.litPairs.length; i++) out[head.litPairs[i][0]] = head.litPairs[i][1];
+	for (let i = 0; i < head.remFields.length; i++) delete out[head.remFields[i]];
+	let keySlots = dict.slots.get(key);
+	if (head.numFields.length > 0) {
+		if (keySlots === undefined) {
+			keySlots = new Map();
+			dict.slots.set(key, keySlots);
+		}
+		for (let i = 0; i < head.numFields.length; i++) {
+			const f = head.numFields[i];
+			let slot = keySlots.get(f);
+			if (slot === undefined) {
+				slot = createStreamSlot();
+				keySlots.set(f, slot);
+			}
+			out[f] = readStreamValue(br, slot);
+		}
+	}
+	if (keySlots !== undefined) {
+		for (let i = 0; i < head.litPairs.length; i++) keySlots.delete(head.litPairs[i][0]);
+		for (let i = 0; i < head.remFields.length; i++) keySlots.delete(head.remFields[i]);
+	}
+	dict.lastNum.set(key, head.numFields);
+	dict.baseline.set(key, out);
+	return out;
+}
+
+/**
+ * Apply one repeat-set entry: the field list is the key's remembered numeric
+ * set from its previous delta frame. Null (a dropped frame) when the mirror
+ * state is missing - a desync this connection heals from on reconnect. The
+ * slot presence is verified for EVERY field before the first bit is read, so
+ * a rejected entry leaves the stream slots untouched.
+ * @param {SmoothDecodeDict} dict
+ * @param {string} key
+ * @param {import('../../runtime/wire-bits.js').BitReader} br
+ */
+function applySameEntry(dict, key, br) {
+	const fields = dict.lastNum.get(key);
+	if (fields === undefined || fields.length === 0) return null;
+	const prev = dict.baseline.get(key);
+	if (prev === undefined) return null;
+	const keySlots = dict.slots.get(key);
+	if (keySlots === undefined) return null;
+	for (let i = 0; i < fields.length; i++) {
+		if (keySlots.get(fields[i]) === undefined) return null;
+	}
+	const out = { ...prev };
+	for (let i = 0; i < fields.length; i++) {
+		out[fields[i]] = readStreamValue(br, keySlots.get(fields[i]));
+	}
+	dict.baseline.set(key, out);
+	return out;
+}
+
+/**
  * Decode a smooth codec payload back into the `{ event, data }` shape the
  * JSON path would have dispatched. Returns null on an unknown opcode, an
  * unknown schema version, a dictionary desync, or a truncated / malformed
  * frame (the frame is then dropped). Update frames additionally carry their
  * server stamp as `t` on the returned object - the additive field the
  * interpolation ingest reads; ack frames carry `t` inside the data,
- * mirroring the JSON form.
+ * mirroring the JSON form. A batch frame decodes to ONE
+ * `{ event: 'update-batch', data: { updates }, t }` envelope; the client
+ * channel splits it back into per-entity updates sharing the stamp.
  *
  * @param {Uint8Array} payload - codec bytes (frame header already stripped)
  * @param {SmoothDecodeDict} [state] - per-connection dictionary, required.
@@ -481,60 +750,71 @@ export function decodeSmooth(payload, state, schemaVersion = SMOOTH_SCHEMA_VERSI
 				const t = readDeltaStamp(r, dict);
 				const key = dict.readKey(r);
 				if (key === null) return null;
-				const prev = dict.baseline.get(key);
-				// A fresh object each frame (never the one handed to the consumer
-				// last time), so a downstream reader mutating a frame cannot corrupt
-				// the reconstruction basis.
-				const out = prev === undefined ? {} : { ...prev };
-				// Numeric field names (their values ride the trailing bit stream).
-				const nNum = r.varint();
-				const numFields = [];
-				for (let i = 0; i < nNum; i++) {
-					const fname = dict.fields.readKey(r);
-					if (fname === null) return null;
-					numFields.push(fname);
-				}
-				// Literal fields (value inline via the JSON-faithful codec).
-				const nLit = r.varint();
-				const litFields = [];
-				for (let i = 0; i < nLit; i++) {
-					const fname = dict.fields.readKey(r);
-					if (fname === null) return null;
-					out[fname] = readValue(r);
-					litFields.push(fname);
-				}
-				// Removed fields.
-				const nRem = r.varint();
-				const remFields = [];
-				for (let i = 0; i < nRem; i++) {
-					const fname = dict.fields.readKey(r);
-					if (fname === null) return null;
-					delete out[fname];
-					remFields.push(fname);
-				}
-				let keySlots = dict.slots.get(key);
-				if (nNum > 0) {
-					if (keySlots === undefined) {
-						keySlots = new Map();
-						dict.slots.set(key, keySlots);
-					}
-					const br = new BitReader(r.rest());
-					for (let i = 0; i < numFields.length; i++) {
-						const f = numFields[i];
-						let slot = keySlots.get(f);
-						if (slot === undefined) {
-							slot = createStreamSlot();
-							keySlots.set(f, slot);
-						}
-						out[f] = readStreamValue(br, slot);
-					}
-				}
-				if (keySlots !== undefined) {
-					for (let i = 0; i < litFields.length; i++) keySlots.delete(litFields[i]);
-					for (let i = 0; i < remFields.length; i++) keySlots.delete(remFields[i]);
-				}
-				dict.baseline.set(key, out);
+				const head = readDeltaHead(r, dict);
+				if (head === null) return null;
+				const br = head.numFields.length > 0 ? new BitReader(r.rest()) : null;
+				const out = applyDeltaEntry(dict, key, head, br);
 				return { event: 'update', data: { key, data: out }, t };
+			}
+			case OP_STATE_DELTA_SAME: {
+				const t = readDeltaStamp(r, dict);
+				const key = dict.readKey(r);
+				if (key === null) return null;
+				const out = applySameEntry(dict, key, new BitReader(r.rest()));
+				if (out === null) return null;
+				return { event: 'update', data: { key, data: out }, t };
+			}
+			case OP_UPDATE_BATCH: {
+				const t = readDeltaStamp(r, dict);
+				const count = r.varint();
+				if (count === 0 || count > UPDATE_BATCH_MAX) return null;
+				// Byte-aligned pass: every entry's sub-op, keyref, and head. The
+				// repeat-set entries resolve their field list from the mirror map;
+				// an unknown list is a desync and drops the whole frame.
+				const heads = new Array(count);
+				for (let i = 0; i < count; i++) {
+					const sub = r.u8();
+					const key = dict.readKey(r);
+					if (key === null) return null;
+					if (sub === OP_XY) {
+						heads[i] = { sub, key, out: { x: r.f32(), y: r.f32() } };
+						continue;
+					}
+					if (sub === OP_STATE) {
+						heads[i] = { sub, key, out: JSON.parse(r.str()) };
+						continue;
+					}
+					if (sub === OP_STATE_DELTA) {
+						const head = readDeltaHead(r, dict);
+						if (head === null) return null;
+						heads[i] = { sub, key, head };
+						continue;
+					}
+					if (sub === OP_STATE_DELTA_SAME) {
+						heads[i] = { sub, key };
+						continue;
+					}
+					return null;
+				}
+				// One trailing bit block carries every entry's numeric values in
+				// entry order; state advances per entry, in order.
+				const br = new BitReader(r.rest());
+				const updates = new Array(count);
+				for (let i = 0; i < count; i++) {
+					const h = heads[i];
+					if (h.sub === OP_XY || h.sub === OP_STATE) {
+						updates[i] = { key: h.key, data: h.out };
+						continue;
+					}
+					if (h.sub === OP_STATE_DELTA_SAME) {
+						const out = applySameEntry(dict, h.key, br);
+						if (out === null) return null;
+						updates[i] = { key: h.key, data: out };
+						continue;
+					}
+					updates[i] = { key: h.key, data: applyDeltaEntry(dict, h.key, h.head, br) };
+				}
+				return { event: 'update-batch', data: { updates }, t };
 			}
 			case OP_XY: {
 				const t = readDeltaStamp(r, dict);
@@ -562,6 +842,7 @@ export function decodeSmooth(payload, state, schemaVersion = SMOOTH_SCHEMA_VERSI
 				if (key === null) return null;
 				dict.baseline.delete(key);
 				dict.slots.delete(key);
+				dict.lastNum.delete(key);
 				return { event: 'remove', data: { key } };
 			}
 			default:
