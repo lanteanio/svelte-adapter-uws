@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.70] - 2026-07-09
+
+### Changed
+
+- **The cross-worker publish relay moved off structured-clone `postMessage` onto shared-memory rings.** The cluster relay is a star through the primary: a publishing worker hands over its batch, and the primary re-sends every message to every other worker - each hop a structured clone, so a hot topic on an N-worker box paid O(N) clones per publish on the primary, the star's scaling bottleneck. Each worker now shares two SharedArrayBuffer rings with the primary (one per direction), each a single-producer/single-consumer BYTE STREAM woken by `Atomics.waitAsync` (no polling): the publisher encodes each relayed message to bytes ONCE, the primary forwards the framed bytes VERBATIM (a memcpy - it never parses relay traffic), and only the receiving workers decode. Byte-stream semantics make the hard cases structural: order is exactly preserved (one stream per direction, no second path to race on), a full ring spills into the producer's pending queue and flushes as the consumer drains (the same unbounded-queue-under-lag behavior `postMessage` had, minus its allocations), and a frame larger than the whole ring streams through in pieces. Measured on the A/B harness (`bench/relay-ring-ab.mjs`, 1 producer through the primary to 3 consumers, realistic ~250 byte envelopes): end-to-end throughput 202k -> 422k messages/s and primary forwarding cost 4210ns -> 772ns per message (5.5x) - and since the primary's cost is the piece that grows with worker count, the gap widens on bigger boxes. Ring traffic also proves a worker alive to the primary's heartbeat monitor, exactly as the `postMessage` traffic it replaces did. Sized by `CLUSTER_RELAY_RING_KB` (default 256 per direction per worker); `CLUSTER_RELAY_RING_KB=0` restores the `postMessage` path byte-identically. Payloads cross with JSON semantics, which is what the relay contract already guarantees (the `data` field is JSON-serializable by construction - the envelope traveling beside it is the same value as a JSON string). Control traffic (heartbeats, TLS reload, shutdown, state-hash reports) stays on `postMessage`.
+
 ## [0.6.0-next.69] - 2026-07-09
 
 ### Added

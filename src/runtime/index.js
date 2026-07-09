@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 import { env } from 'ENV';
 import { applyServerNames, createCertWatcher, reloadClusterTls } from './utils/tls-reload.js';
 import { monotonicNow, setTimer, setIntervalTimer, clearTimer } from './runtime.js';
+import { createRelayRingBuffer, RingWriter, RingReader, decodeRelayFrame } from './relay-ring.js';
 import { createStateHashDetector } from './state-hash-detector.js';
 import { readFdLimits, fdPreflightWarning } from './utils/fd-limit.js';
 import { createSdNotify } from './utils/sd-notify.js';
@@ -36,6 +37,16 @@ const port = parseIntEnv('PORT', port_raw, 0);
 const shutdown_timeout = parseIntEnv('SHUTDOWN_TIMEOUT', env('SHUTDOWN_TIMEOUT', '30'), 0);
 const shutdown_delay = parseIntEnv('SHUTDOWN_DELAY_MS', env('SHUTDOWN_DELAY_MS', '0'), 0);
 const cluster_workers = env('CLUSTER_WORKERS', '');
+
+// Shared-memory relay ring size per direction per worker, in KB. The cluster
+// relay's hot path (publish fan-out across workers) rides two
+// SharedArrayBuffer rings per worker (worker->primary, primary->worker)
+// instead of structured-clone postMessage: the publisher encodes each message
+// to bytes once, the primary forwards the framed bytes verbatim, and only the
+// receiving workers decode. A ring that fills spills into the producer's
+// pending queue and flushes as the consumer drains - order always preserved.
+// 0 disables the rings (every relay rides postMessage exactly as before).
+const relay_ring_kb = parseIntEnv('CLUSTER_RELAY_RING_KB', env('CLUSTER_RELAY_RING_KB', '256'), 0);
 
 // Cross-worker state-hash divergence ACTION gate. The primary owns
 // worker.terminate() and never sees the per-build websocket options, so the
@@ -244,15 +255,39 @@ if (is_primary) {
 
 	/** @param {'io' | 'compute'} role */
 	function spawn_worker(role) {
+		// Shared-memory relay rings for this worker (fresh per spawn AND per
+		// respawn - a replacement never inherits a dead worker's stream state).
+		const relay_ring = relay_ring_kb > 0
+			? { up: createRelayRingBuffer(relay_ring_kb * 1024), down: createRelayRingBuffer(relay_ring_kb * 1024) }
+			: null;
 		const worker = new Worker(fileURLToPath(import.meta.url), {
 			// `app` is the retained primaryInit output, replayed identically on every
 			// spawn and respawn so a compute worker's replacement rejoins the same
 			// shared-memory world.
-			workerData: { mode: cluster_mode, role, app: app_worker_data }
+			workerData: { mode: cluster_mode, role, app: app_worker_data, relayRing: relay_ring }
 		});
 		// lastHeartbeat starts at 0  - worker is confirmed alive only after the
 		// first 'descriptor' / 'ready' / 'heartbeat-ack' message arrives.
-		workers.set(worker, { descriptor: null, lastHeartbeat: 0, role });
+		const meta = { descriptor: null, lastHeartbeat: 0, role, ringWriter: null, ringReader: null };
+		if (relay_ring !== null) {
+			meta.ringWriter = new RingWriter(relay_ring.down);
+			// Forward each inbound frame VERBATIM to every other worker's ring -
+			// the primary never parses relay traffic, it moves bytes. Ring
+			// activity also proves the worker alive (the same reasoning as the
+			// any-postMessage-advances-the-heartbeat rule: a worker saturating
+			// the relay is busy, not dead).
+			meta.ringReader = new RingReader(relay_ring.up, (frame) => {
+				meta.lastHeartbeat = monotonicNow();
+				for (const [w, m] of workers) {
+					if (w !== worker && m.ringWriter !== null) {
+						m.ringWriter.write(frame);
+						m.ringWriter.notify();
+					}
+				}
+			});
+			meta.ringReader.start();
+		}
+		workers.set(worker, meta);
 
 		worker.on('message', (msg) => {
 			const meta = workers.get(worker);
@@ -398,6 +433,11 @@ if (is_primary) {
 			// so its absence never stalls a comparison and a stale report cannot
 			// be judged a phantom divergence.
 			stateHashDetector.forget(worker.threadId);
+			// Release the relay rings: close() unblocks each side's pending
+			// Atomics wait so no promise (or the SharedArrayBuffer it retains)
+			// outlives the worker.
+			if (meta?.ringReader) meta.ringReader.close();
+			if (meta?.ringWriter) meta.ringWriter.close();
 			workers.delete(worker);
 			exit_requested.delete(worker);
 			if (!shutting_down) {
@@ -544,7 +584,7 @@ if (is_primary) {
 } else {
 	// ── Worker thread or single-process mode ─────────────────────────────
 
-	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls } = await import('HANDLER');
+	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls, setRelayRingWriter } = await import('HANDLER');
 
 	// Clean worker-thread exit. A worker thread holds uWS's untracked libuv socket
 	// handles, so a bare process.exit() aborts the whole process
@@ -597,6 +637,25 @@ if (is_primary) {
 		} else {
 			// Acceptor: register with the main thread's acceptor app
 			parentPort.postMessage({ type: 'descriptor', descriptor: getDescriptor() });
+		}
+
+		// Shared-memory relay rings (when the primary enabled them): outbound
+		// relays ride the up ring (see handler/relay.js), and inbound frames -
+		// forwarded verbatim by the primary from a sibling worker - decode here
+		// into the exact dispatch the postMessage path performs. The postMessage
+		// cases below stay live as the fallback and for control traffic.
+		if (workerData?.relayRing) {
+			setRelayRingWriter(new RingWriter(workerData.relayRing.up));
+			const relayReader = new RingReader(workerData.relayRing.down, (frame) => {
+				const msg = decodeRelayFrame(frame);
+				if (msg === null) return;
+				if (msg.type === 'publish') {
+					relayPublish(msg.topic, msg.envelope, msg.compress, msg.seq, msg.capability, msg.event, msg.data);
+				} else if (msg.type === 'publish-batched') {
+					relayPublishBatched(msg.events, msg.compress);
+				}
+			});
+			relayReader.start();
 		}
 
 		parentPort.on('message', (msg) => {

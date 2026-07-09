@@ -7,7 +7,7 @@ import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, rand
 import { capCounts, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
 import { app, wsDebug, WS_COMPRESSION_ON } from './config.js';
 import { envelopePrefix } from './envelope-cache.js';
-import { batchRelay } from './relay.js';
+import { batchRelay, relayBatched } from './relay.js';
 import { readHlc } from './hlc.js';
 import { BATCH_FRAME_WARN_BYTES, bumpOut, maybeWarnTopicRegistry, warnLargeBatchFrame } from './pressure-metrics.js';
 import { flushCoalescedFor, runUserSubscribeGate } from './subscribe-hooks.js';
@@ -1633,7 +1633,7 @@ export const platform = {
 				}
 			}
 			if (relayed.length > 0) {
-				parentPort.postMessage({ type: 'publish-batched', events: relayed, compress: compressOptIn });
+				relayBatched(relayed, compressOptIn);
 			}
 		}
 

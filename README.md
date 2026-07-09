@@ -687,6 +687,7 @@ If you set `envPrefix: 'MY_APP_'` in the adapter config, all variables are prefi
 | `RECONNECT_DISPERSAL_MS` | `5000` | Graceful-shutdown reconnect dispersal window (ms); `0` disables the advisory |
 | `CLUSTER_WORKERS` | - | Number of worker threads (or `auto` for CPU count) |
 | `CLUSTER_MODE` | *(auto)* | `reuseport` (Linux default) or `acceptor` (other platforms) |
+| `CLUSTER_RELAY_RING_KB` | `256` | Shared-memory relay ring size per direction per worker (KB). The cross-worker publish fan-out rides SharedArrayBuffer rings instead of structured-clone `postMessage`; `0` falls back to `postMessage` |
 | `RESTART_ON_STATE_DIVERGENCE` | - | Set to `1` to terminate a worker the primary detects as diverged (see [Cross-worker state-divergence detection](#cross-worker-state-divergence-detection)). Default: log + metric only |
 | `WS_DEBUG` | - | Set to `1` to enable structured WebSocket debug logging (open, close, subscribe, publish) |
 

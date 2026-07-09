@@ -60,6 +60,7 @@ import { platform } from './handler/platform.js';
 import { readBody, handleSSR } from './handler/ssr.js';
 import { requestDone, isDraining } from './handler/lifecycle.js';
 export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls } from './handler/lifecycle.js';
+export { setRelayRingWriter } from './handler/relay.js';
 import { handleRequest } from './handler/request.js';
 import { handleAdminRequest } from './handler/admin.js';
 
