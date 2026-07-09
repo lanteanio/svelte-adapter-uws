@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.69] - 2026-07-09
+
+### Added
+
+- **Outbound webhooks cache the validated DNS pin per host (`pinCacheMs`, default 30s with the built-in resolver).** Every delivery - and every redirect hop - re-resolved the target host and re-validated the address set before pinning the socket, so a delivery burst to one endpoint paid one DNS round trip per attempt for an answer that had just been validated. The SSRF gate now keeps a small per-config cache of VALIDATED pins: within the TTL, a delivery (or a redirect hop back to an already-validated host) reuses the pinned address set and skips the resolution entirely. The security posture is unchanged by construction - only successful validations are cached (a failed resolution is retried on the next delivery, never remembered), the cache is keyed by host AND range-check mode inside a per-config map (one webhook's allowlist or `urlMode` can never leak into another's), the map is bounded so attacker-steered redirect hostnames cannot grow it, and serving a cached pin is strictly rebinding-safe: the socket still reaches only addresses that passed the range check, and a DNS answer that changes mid-window cannot redirect an in-flight burst at all. `pinCacheMs: 0` disables; a custom `resolve` defaults the cache off (a caller-supplied resolver owns its own rotation semantics) and opts back in with an explicit `pinCacheMs`.
+
+### Fixed
+
+- **The TLS-reload test suite now resolves `openssl` at collection time, with a Git-for-Windows fallback.** Test-only: the suite's skip-when-no-openssl guard was decided before the availability check ran, so on a machine without `openssl` on the shell PATH the nine certificate-backed cases failed on missing fixtures instead of skipping; the binary is now discovered at module scope (checking the Git for Windows bundle on win32), so the cases run where a usable openssl exists anywhere and skip cleanly where none does.
+
 ## [0.6.0-next.68] - 2026-07-09
 
 ### Added

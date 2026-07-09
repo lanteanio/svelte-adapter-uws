@@ -149,6 +149,65 @@ describe('deliverWebhook', () => {
 		expect(srv.received).toHaveLength(0);
 	});
 
+	describe('validated-pin cache', () => {
+		const namedUrl = () => `http://pinned.test:${port}/hook`;
+
+		it('reuses the validated pin across deliveries on one config when pinCacheMs is set', async () => {
+			let resolves = 0;
+			const config = { url: namedUrl(), urlMode: 'off', pinCacheMs: 60000, resolve: () => { resolves++; return Promise.resolve(['127.0.0.1']); } };
+			expect(await deliverWebhook(config, 't', 'e', { n: 1 })).toEqual({ ok: true });
+			expect(await deliverWebhook(config, 't', 'e', { n: 2 })).toEqual({ ok: true });
+			expect(srv.received).toHaveLength(2);
+			expect(resolves).toBe(1);
+		});
+
+		it('a custom resolver defaults the cache off (one resolution per delivery)', async () => {
+			let resolves = 0;
+			const config = { url: namedUrl(), urlMode: 'off', resolve: () => { resolves++; return Promise.resolve(['127.0.0.1']); } };
+			await deliverWebhook(config, 't', 'e', {});
+			await deliverWebhook(config, 't', 'e', {});
+			expect(resolves).toBe(2);
+		});
+
+		it('pinCacheMs: 0 disables the cache explicitly', async () => {
+			let resolves = 0;
+			const config = { url: namedUrl(), urlMode: 'off', pinCacheMs: 0, resolve: () => { resolves++; return Promise.resolve(['127.0.0.1']); } };
+			await deliverWebhook(config, 't', 'e', {});
+			await deliverWebhook(config, 't', 'e', {});
+			expect(resolves).toBe(2);
+		});
+
+		it('never caches a failed resolution', async () => {
+			let resolves = 0;
+			const config = {
+				url: namedUrl(),
+				urlMode: 'off',
+				pinCacheMs: 60000,
+				retry: { attempts: 1 },
+				resolve: () => {
+					resolves++;
+					return resolves === 1 ? Promise.reject(new Error('boom')) : Promise.resolve(['127.0.0.1']);
+				}
+			};
+			const first = await deliverWebhook(config, 't', 'e', {});
+			expect(first.ok).toBe(false);
+			const second = await deliverWebhook(config, 't', 'e', {});
+			expect(second).toEqual({ ok: true });
+			expect(resolves).toBe(2);
+		});
+
+		it('keeps the cache isolated per config object', async () => {
+			let a = 0;
+			let bCount = 0;
+			const configA = { url: namedUrl(), urlMode: 'off', pinCacheMs: 60000, resolve: () => { a++; return Promise.resolve(['127.0.0.1']); } };
+			const configB = { url: namedUrl(), urlMode: 'off', pinCacheMs: 60000, resolve: () => { bCount++; return Promise.resolve(['127.0.0.1']); } };
+			await deliverWebhook(configA, 't', 'e', {});
+			await deliverWebhook(configB, 't', 'e', {});
+			expect(a).toBe(1);
+			expect(bCount).toBe(1);
+		});
+	});
+
 	it('resolves a function url per event', async () => {
 		const r = await deliverWebhook(cfg({ url: (event) => `${url()}?e=${event}` }), 't', 'created', {});
 		expect(r.ok).toBe(true);

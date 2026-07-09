@@ -6,16 +6,37 @@ import { join } from 'node:path';
 import { parseSniHosts, applyServerNames, createCertWatcher, reloadClusterTls } from '../src/runtime/utils/tls-reload.js';
 
 // Cert parsing / server-name reconciliation needs a real X.509 cert with a SAN.
-// We generate a couple at setup with openssl (present on dev + CI images); if it
-// is missing, those cases skip while the injected-deps watcher test still runs.
-let hasOpenssl = true;
+// We generate a couple at setup with openssl; if none is found, those cases skip
+// while the injected-deps watcher test still runs. The binary must be resolved at
+// module scope: describe-vs-skip is decided at collection time, so a beforeAll
+// discovery would register the cert suites before learning openssl is missing.
+// On Windows the shell PATH often lacks openssl, but Git for Windows bundles one.
+function findOpenssl() {
+	const candidates = ['openssl'];
+	if (process.platform === 'win32') {
+		const roots = new Set([process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.ProgramW6432].filter(Boolean));
+		for (const root of roots) {
+			candidates.push(join(root, 'Git', 'usr', 'bin', 'openssl.exe'));
+			candidates.push(join(root, 'Git', 'mingw64', 'bin', 'openssl.exe'));
+		}
+	}
+	for (const bin of candidates) {
+		try {
+			execFileSync(bin, ['version'], { stdio: 'ignore' });
+			return bin;
+		} catch {}
+	}
+	return null;
+}
+const openssl = findOpenssl();
+const hasOpenssl = openssl !== null;
 let dir;
 const certs = {};
 
 function gen(name, cn, san, subj) {
 	const key = join(dir, name + '.key');
 	const crt = join(dir, name + '.crt');
-	execFileSync('openssl', [
+	execFileSync(openssl, [
 		'req', '-x509', '-newkey', 'rsa:2048', '-sha256', '-days', '3650', '-nodes',
 		'-keyout', key, '-out', crt, '-subj', subj || ('/CN=' + cn), '-addext', 'subjectAltName=' + san
 	], { stdio: 'ignore' });
@@ -23,19 +44,15 @@ function gen(name, cn, san, subj) {
 }
 
 beforeAll(() => {
-	try {
-		execFileSync('openssl', ['version'], { stdio: 'ignore' });
-		dir = mkdtempSync(join(tmpdir(), 'tls-reload-'));
-		// A: a.example.com + a wildcard. B: a.example.com + c.example.com (b/wildcard
-		// gone, c new, a shared). D: CN only, no SAN DNS.
-		certs.A = gen('a', 'a.example.com', 'DNS:a.example.com,DNS:*.api.example.com');
-		certs.B = gen('b', 'a.example.com', 'DNS:a.example.com,DNS:c.example.com');
-		certs.CN = gen('cn', 'legacy.example.com', 'IP:10.0.0.1'); // no DNS SAN -> CN fallback
-		// CN-trap: an earlier RDN value literally contains "CN=", CN is last, no SAN DNS.
-		certs.CNTRAP = gen('cntrap', null, 'IP:10.0.0.2', '/O=Foo CN=Corp/CN=host.example.com');
-	} catch {
-		hasOpenssl = false;
-	}
+	if (!hasOpenssl) return;
+	dir = mkdtempSync(join(tmpdir(), 'tls-reload-'));
+	// A: a.example.com + a wildcard. B: a.example.com + c.example.com (b/wildcard
+	// gone, c new, a shared). D: CN only, no SAN DNS.
+	certs.A = gen('a', 'a.example.com', 'DNS:a.example.com,DNS:*.api.example.com');
+	certs.B = gen('b', 'a.example.com', 'DNS:a.example.com,DNS:c.example.com');
+	certs.CN = gen('cn', 'legacy.example.com', 'IP:10.0.0.1'); // no DNS SAN -> CN fallback
+	// CN-trap: an earlier RDN value literally contains "CN=", CN is last, no SAN DNS.
+	certs.CNTRAP = gen('cntrap', null, 'IP:10.0.0.2', '/O=Foo CN=Corp/CN=host.example.com');
 });
 
 function readPem(p) { return readFileSync(p, 'utf8'); }

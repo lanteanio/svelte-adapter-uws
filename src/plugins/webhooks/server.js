@@ -4,7 +4,7 @@ import { request as httpsRequest } from 'node:https';
 import { lookup as nodeDnsLookup } from 'node:dns';
 import { createHmac, createHash } from 'node:crypto';
 import { checkUrl, classifyAddress } from '../../safe-url.js';
-import { randomFloat, setTimer, clearTimer } from '../../runtime/runtime.js';
+import { randomFloat, setTimer, clearTimer, now } from '../../runtime/runtime.js';
 
 export { createRetryBudget, createWebhookBreaker, WebhookCircuitOpenError } from './controls.js';
 
@@ -104,6 +104,23 @@ function pinnedLookup(pinned) {
 	};
 }
 
+const PIN_CACHE_DEFAULT_MS = 30000;
+const PIN_CACHE_MAX_ENTRIES = 256;
+
+/**
+ * Per-config TTL cache of VALIDATED pins. Keyed by the config object (WeakMap,
+ * so one webhook's allow-list/mode can never leak into another's cache and a
+ * dropped config frees its entries) and by `host + rangeCheck` within it.
+ * Serving a cached validated address set is strictly rebinding-safe - the
+ * socket still reaches only addresses that passed the range check; the trade
+ * is up to `pinCacheMs` of staleness against a legitimate DNS move. Only
+ * successful validations are cached (a failure retries resolution on the next
+ * delivery, never extending an outage), and the per-config map is bounded so
+ * attacker-steered redirect hostnames cannot grow it without limit.
+ * @type {WeakMap<object, Map<string, { expires: number, pinned: Array<{ address: string, family: number }> }>>}
+ */
+const pinCaches = new WeakMap();
+
 /**
  * Resolve a DNS hostname and return the address set the connection is pinned to
  * - so the socket reaches exactly what was resolved here, with no second
@@ -115,9 +132,33 @@ function pinnedLookup(pinned) {
  * reach a private endpoint while still closing rebinding. Returns
  * `{ ok: false, reason }` when resolution fails, yields zero addresses, returns
  * a non-address, or (with rangeCheck) any address is private.
+ *
+ * A validated pin is cached for `config.pinCacheMs` (default 30s; 0 disables),
+ * so a delivery burst - and every redirect hop back to an already-validated
+ * host - costs one DNS resolution per host per window instead of one per hop.
+ * A custom `config.resolve` defaults the cache OFF (a caller-supplied resolver
+ * owns its own rotation and caching semantics), but an explicit `pinCacheMs`
+ * opts it back in.
  */
 async function resolveAndPin(hostname, config, rangeCheck) {
 	const resolver = config.resolve || defaultResolve;
+	const cacheMs = typeof config.pinCacheMs === 'number' && Number.isFinite(config.pinCacheMs) && config.pinCacheMs >= 0
+		? config.pinCacheMs
+		: (config.resolve ? 0 : PIN_CACHE_DEFAULT_MS);
+	const cacheKey = hostname + '\0' + (rangeCheck ? '1' : '0');
+	let cache = null;
+	if (cacheMs > 0) {
+		cache = pinCaches.get(config) ?? null;
+		if (cache === null) {
+			cache = new Map();
+			pinCaches.set(config, cache);
+		}
+		const hit = cache.get(cacheKey);
+		if (hit !== undefined) {
+			if (hit.expires > now()) return { ok: true, pinned: hit.pinned };
+			cache.delete(cacheKey);
+		}
+	}
 	let raw;
 	try {
 		raw = await callWithTimeout(() => resolver(hostname), config.callbackTimeoutMs ?? 10000, 'resolve');
@@ -154,6 +195,13 @@ async function resolveAndPin(hostname, config, rangeCheck) {
 			address: canonHost.startsWith('[') ? canonHost.slice(1, -1) : canonHost,
 			family: canonHost.startsWith('[') ? 6 : 4
 		});
+	}
+	if (cache !== null) {
+		if (cache.size >= PIN_CACHE_MAX_ENTRIES) {
+			const oldest = cache.keys().next().value;
+			if (oldest !== undefined) cache.delete(oldest);
+		}
+		cache.set(cacheKey, { expires: now() + cacheMs, pinned });
 	}
 	return { ok: true, pinned };
 }

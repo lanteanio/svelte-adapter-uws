@@ -45,8 +45,16 @@ export interface WebhookDeliveryConfig<Event = string, Data = any> {
 	/** An ADDITIONAL restriction (logical AND): can only narrow the allowed set,
 	 * never widen it. Return falsy to reject. */
 	validateUrl?: (url: string) => boolean | Promise<boolean>;
-	/** Custom DNS resolver for the SSRF pin (default `dns.lookup`, all addresses). */
+	/** Custom DNS resolver for the SSRF pin (default `dns.lookup`, all addresses).
+	 * Supplying one defaults the validated-pin cache OFF (the resolver owns its
+	 * own rotation/caching semantics); an explicit `pinCacheMs` opts back in. */
 	resolve?: (hostname: string) => Promise<Array<string | PinnedAddress> | string | PinnedAddress>;
+	/** TTL in ms for the per-host validated-pin cache: a delivery burst (and
+	 * every redirect hop back to an already-validated host) costs one DNS
+	 * resolution per host per window. Only validated results are cached, so the
+	 * rebinding pin and range check are unchanged. 0 disables. Default 30000
+	 * with the built-in resolver, 0 with a custom `resolve`. */
+	pinCacheMs?: number;
 	/** Max redirect hops, each re-gated (default 5). */
 	maxRedirects?: number;
 	/** Per-attempt absolute deadline in ms covering DNS+connect+TTFB+body (default 10000). */
