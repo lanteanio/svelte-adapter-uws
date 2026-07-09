@@ -55,7 +55,7 @@
 
 import { now, monotonicNow, setTimer, clearTimer, setIntervalTimer, clearIntervalTimer, nextReconnectDelay } from '../../client-runtime.js';
 import { parseBinaryFrame } from '../../runtime/wire.js';
-import { decodeCursor, CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CursorDecodeDict } from './codec.js';
+import { decodeCursor, CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CURSOR_CAPABILITY_STREAM, CursorDecodeDict } from './codec.js';
 import { applyEvent, sweepExpired } from './decode.js';
 import { createSmoother, SAMPLE_EMPTY } from '../smooth/interpolate.js';
 import { selectRenderer, hashColor } from './render/index.js';
@@ -244,13 +244,14 @@ export function attachCursorWorker(scope) {
 			if (phase !== 'running' || ws !== sock) return;
 			attempt = 0;
 			lastServerMessage = now();
-			// The time capability is advertised only when this pipeline smooths:
-			// it buys stamped position frames (one extra byte steady-state) that
-			// a non-smoothing canvas would pay for and never read.
+			// The time and stream capabilities are advertised only when this
+			// pipeline smooths: stamped frames cost one extra byte steady-state a
+			// non-smoothing canvas would pay for and never read, and the temporal
+			// position stream pays off exactly on that high-cadence consumer.
 			sock.send(JSON.stringify({
 				type: 'hello',
 				caps: smoother
-					? [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME]
+					? [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CURSOR_CAPABILITY_STREAM]
 					: [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT]
 			}));
 			// The snapshot request doubles as the subscription handshake; the

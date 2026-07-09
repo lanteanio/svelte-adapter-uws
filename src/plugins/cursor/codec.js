@@ -37,6 +37,24 @@
  *     discipline as the key dictionary. Roster ops (join/catalog/remove) carry
  *     no stamp. The stamp is what client-side interpolation reconstructs its
  *     server time axis from; a client that never smooths simply ignores it.
+ *   - schemaVersion 4 (`cursor.protocol:5`): the stamped short-id wire with
+ *     positions carried as a per-cursor temporal value stream
+ *     (src/runtime/wire-stream.js) instead of raw float32 pairs:
+ *
+ *       UPDATE  [op][t:varint][keyref][positionBits]
+ *       BULK    [op][t:varint][count:varint]({keyref})*[positionBits]
+ *
+ *     Each cursor's x and y are encoded against that cursor's PREVIOUS sample
+ *     on the connection (delta-of-delta for integer positions, XOR for
+ *     fractional ones), bit-packed in a trailing block - a whole-pixel cursor
+ *     drift costs a few bits instead of eight bytes. The streamed value is the
+ *     float32-narrowed position (`Math.fround`), so a client decodes exactly
+ *     the value the float32 wire would have delivered: the precision contract
+ *     is unchanged across versions, only the bytes drop. The per-cursor stream
+ *     state lives on both dictionaries with the key-dictionary discipline
+ *     (in-order, reset on reconnect, untouched on JSON fallback) and is
+ *     cleared by that cursor's REMOVE on both ends, so a re-appearing cursor
+ *     starts a fresh stream.
  *
  * The short-id keyref is a single varint `v`:
  *   - `v == 0` KEY-ASSIGN: followed by `varint(id)` then the key string. Binds
@@ -75,6 +93,8 @@
  */
 
 import { ByteWriter, ByteReader } from '../../runtime/wire.js';
+import { BitWriter, BitReader } from '../../runtime/wire-bits.js';
+import { createStreamSlot, writeStreamValue, readStreamValue } from '../../runtime/wire-stream.js';
 import {
 	KeyEncodeDict,
 	KeyDecodeDict,
@@ -116,6 +136,18 @@ export const CURSOR_CAPABILITY_TIME = 'cursor.protocol:4';
 
 /** 1-byte in-frame schema version for the time-stamped dictionary wire. */
 export const CURSOR_SCHEMA_VERSION_TIME = 3;
+
+/**
+ * Additive capability advertised alongside the time capability by a client
+ * that can also decode the temporally-streamed position wire (schemaVersion 4).
+ * The server streams positions only for connections carrying this token AND
+ * the time and dictionary tokens - one linear negotiation ladder, so every
+ * client keeps receiving exactly its negotiated form.
+ */
+export const CURSOR_CAPABILITY_STREAM = 'cursor.protocol:5';
+
+/** 1-byte in-frame schema version for the temporally-streamed wire. */
+export const CURSOR_SCHEMA_VERSION_STREAM = 4;
 
 const OP_UPDATE = 1;
 const OP_BULK = 2;
@@ -175,6 +207,23 @@ export class CursorTimeEncodeDict extends CursorEncodeDict {
 }
 
 /**
+ * Per-connection encoder dictionary for the schemaVersion-4 temporally-streamed
+ * cursor wire: the stamped dictionary plus per-cursor value-stream state -
+ * `slots` maps a cursor key to its `{ x, y }` stream slots, the reference each
+ * position frame's bits are encoded against. Cleared per cursor on REMOVE,
+ * wholesale on detach; reset on reconnect like everything else here.
+ */
+export class CursorStreamEncodeDict extends CursorTimeEncodeDict {
+	/** @param {() => number} timeSource @param {number} [maxEntries] */
+	constructor(timeSource, maxEntries = DEFAULT_MAX_ENTRIES) {
+		super(timeSource, maxEntries);
+		this.schemaVersion = CURSOR_SCHEMA_VERSION_STREAM;
+		/** @type {Map<string, { x: ReturnType<typeof createStreamSlot>, y: ReturnType<typeof createStreamSlot> }>} */
+		this.slots = new Map();
+	}
+}
+
+/**
  * Per-connection decoder dictionary for the schemaVersion-2 and -3 cursor
  * wires. Inverse of {@link CursorEncodeDict} via the shared decode dictionary
  * (src/runtime/keydict.js): resolves a keyref back to its key, caching `id -> key`
@@ -187,6 +236,10 @@ export class CursorDecodeDict extends KeyDecodeDict {
 		super();
 		this.schemaVersion = CURSOR_SCHEMA_VERSION_DICT;
 		this.lastT = -1;
+		// Per-cursor value-stream state, the decode twin of the schemaVersion-4
+		// encoder's `slots`. Populated only by v4 frames; inert on older wires.
+		/** @type {Map<string, { x: ReturnType<typeof createStreamSlot>, y: ReturnType<typeof createStreamSlot> }>} */
+		this.slots = new Map();
 	}
 }
 
@@ -208,6 +261,16 @@ function readKeyRef(r, dict) {
 const writeStamp = writeDeltaStamp;
 const readStamp = readDeltaStamp;
 
+/** A cursor's `{ x, y }` stream slots, created on first sight. */
+function slotsFor(dict, key) {
+	let s = dict.slots.get(key);
+	if (s === undefined) {
+		s = { x: createStreamSlot(), y: createStreamSlot() };
+		dict.slots.set(key, s);
+	}
+	return s;
+}
+
 /**
  * Encode a cursor wire event into a codec payload.
  *
@@ -220,8 +283,9 @@ const readStamp = readDeltaStamp;
  */
 export function encodeCursor(event, data, state) {
 	const sv = state != null ? state.schemaVersion : 0;
-	const dict = (sv === CURSOR_SCHEMA_VERSION_DICT || sv === CURSOR_SCHEMA_VERSION_TIME) ? state : null;
-	const stamped = sv === CURSOR_SCHEMA_VERSION_TIME;
+	const dict = (sv === CURSOR_SCHEMA_VERSION_DICT || sv === CURSOR_SCHEMA_VERSION_TIME || sv === CURSOR_SCHEMA_VERSION_STREAM) ? state : null;
+	const stamped = sv === CURSOR_SCHEMA_VERSION_TIME || sv === CURSOR_SCHEMA_VERSION_STREAM;
+	const streamed = sv === CURSOR_SCHEMA_VERSION_STREAM;
 	try {
 		// Advance the per-frame clock before any key is interned so eviction can
 		// distinguish ids assigned this frame from older ones.
@@ -233,8 +297,18 @@ export function encodeCursor(event, data, state) {
 				w.u8(OP_UPDATE);
 				if (stamped) writeStamp(w, dict);
 				writeKeyRef(w, data.key, dict);
-				w.f32(data.data.x);
-				w.f32(data.data.y);
+				if (streamed) {
+					// The streamed value is the float32-narrowed position, so the
+					// decoded value is exactly what the f32 wire would deliver.
+					const s = slotsFor(dict, data.key);
+					const bw = new BitWriter();
+					writeStreamValue(bw, s.x, Math.fround(data.data.x));
+					writeStreamValue(bw, s.y, Math.fround(data.data.y));
+					w.bytes(bw.finish());
+				} else {
+					w.f32(data.data.x);
+					w.f32(data.data.y);
+				}
 				return w.take();
 			}
 			case 'bulk': {
@@ -249,6 +323,20 @@ export function encodeCursor(event, data, state) {
 				w.u8(OP_BULK);
 				if (stamped) writeStamp(w, dict);
 				w.varint(data.length);
+				if (streamed) {
+					// Byte-aligned keyrefs first, then every position in entry order
+					// as one trailing bit block.
+					for (let i = 0; i < data.length; i++) writeKeyRef(w, data[i].key, dict);
+					const bw = new BitWriter();
+					for (let i = 0; i < data.length; i++) {
+						const e = data[i];
+						const s = slotsFor(dict, e.key);
+						writeStreamValue(bw, s.x, Math.fround(e.data.x));
+						writeStreamValue(bw, s.y, Math.fround(e.data.y));
+					}
+					w.bytes(bw.finish());
+					return w.take();
+				}
 				for (let i = 0; i < data.length; i++) {
 					const e = data[i];
 					writeKeyRef(w, e.key, dict);
@@ -262,6 +350,9 @@ export function encodeCursor(event, data, state) {
 				const w = new ByteWriter(16);
 				w.u8(OP_REMOVE);
 				writeKeyRef(w, data.key, dict);
+				// A departed cursor leaves the value-stream chain: a re-appearing
+				// key starts a fresh stream. Both ends clear from this same frame.
+				if (streamed) dict.slots.delete(data.key);
 				return w.take();
 			}
 			case 'join': {
@@ -322,7 +413,8 @@ export function encodeCursor(event, data, state) {
 export function decodeCursor(payload, state, schemaVersion = CURSOR_SCHEMA_VERSION) {
 	if (schemaVersion !== CURSOR_SCHEMA_VERSION
 		&& schemaVersion !== CURSOR_SCHEMA_VERSION_DICT
-		&& schemaVersion !== CURSOR_SCHEMA_VERSION_TIME) {
+		&& schemaVersion !== CURSOR_SCHEMA_VERSION_TIME
+		&& schemaVersion !== CURSOR_SCHEMA_VERSION_STREAM) {
 		return null; // unknown schema: drop rather than mis-decode
 	}
 	const needsDict = schemaVersion !== CURSOR_SCHEMA_VERSION;
@@ -330,7 +422,11 @@ export function decodeCursor(payload, state, schemaVersion = CURSOR_SCHEMA_VERSI
 	// A dictionaried frame with no decoder dictionary cannot resolve its refs -
 	// drop it rather than read the keyref varints as full-string lengths.
 	if (needsDict && !dict) return null;
-	const stamped = schemaVersion === CURSOR_SCHEMA_VERSION_TIME;
+	const stamped = schemaVersion === CURSOR_SCHEMA_VERSION_TIME || schemaVersion === CURSOR_SCHEMA_VERSION_STREAM;
+	const streamed = schemaVersion === CURSOR_SCHEMA_VERSION_STREAM;
+	// A streamed frame needs the per-cursor slot store (an old decode dictionary
+	// instance would lack it) - drop rather than misread the bit block.
+	if (streamed && !(dict.slots instanceof Map)) return null;
 	try {
 		const r = new ByteReader(payload);
 		const op = r.u8();
@@ -339,8 +435,17 @@ export function decodeCursor(payload, state, schemaVersion = CURSOR_SCHEMA_VERSI
 				const t = stamped ? readStamp(r, dict) : undefined;
 				const key = readKeyRef(r, dict);
 				if (key === null) return null;
-				const x = r.f32();
-				const y = r.f32();
+				let x;
+				let y;
+				if (streamed) {
+					const s = slotsFor(dict, key);
+					const br = new BitReader(r.rest());
+					x = readStreamValue(br, s.x);
+					y = readStreamValue(br, s.y);
+				} else {
+					x = r.f32();
+					y = r.f32();
+				}
 				const out = { event: 'update', data: { key, data: { x, y } } };
 				if (t !== undefined) out.t = t;
 				return out;
@@ -349,6 +454,23 @@ export function decodeCursor(payload, state, schemaVersion = CURSOR_SCHEMA_VERSI
 				const t = stamped ? readStamp(r, dict) : undefined;
 				const count = r.varint();
 				const arr = new Array(count);
+				if (streamed) {
+					for (let i = 0; i < count; i++) {
+						const key = readKeyRef(r, dict);
+						if (key === null) return null;
+						arr[i] = { key, data: null };
+					}
+					const br = new BitReader(r.rest());
+					for (let i = 0; i < count; i++) {
+						const s = slotsFor(dict, arr[i].key);
+						const x = readStreamValue(br, s.x);
+						const y = readStreamValue(br, s.y);
+						arr[i].data = { x, y };
+					}
+					const out = { event: 'bulk', data: arr };
+					if (t !== undefined) out.t = t;
+					return out;
+				}
 				for (let i = 0; i < count; i++) {
 					const key = readKeyRef(r, dict);
 					if (key === null) return null;
@@ -363,6 +485,7 @@ export function decodeCursor(payload, state, schemaVersion = CURSOR_SCHEMA_VERSI
 			case OP_REMOVE: {
 				const key = readKeyRef(r, dict);
 				if (key === null) return null;
+				if (streamed) dict.slots.delete(key);
 				return { event: 'remove', data: { key } };
 			}
 			case OP_JOIN: {

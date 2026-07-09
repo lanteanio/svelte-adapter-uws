@@ -48,7 +48,7 @@
  * @module svelte-adapter-uws/plugins/cursor
  */
 
-import { encodeCursor, CURSOR_CAPABILITY, CURSOR_SCHEMA_VERSION, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CursorEncodeDict, CursorTimeEncodeDict } from './codec.js';
+import { encodeCursor, CURSOR_CAPABILITY, CURSOR_SCHEMA_VERSION, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CURSOR_CAPABILITY_STREAM, CursorEncodeDict, CursorTimeEncodeDict, CursorStreamEncodeDict } from './codec.js';
 import { WS_CAPS, trackedSubscribe } from '../../runtime/utils.js';
 import { monotonicNow, wallEpoch, setTimer, clearTimer } from '../../runtime/runtime.js';
 
@@ -1422,12 +1422,18 @@ export function createCursorWireCodec(options = {}) {
 						let caps;
 						try { caps = ws.getUserData()[WS_CAPS]; } catch { return null; }
 						if (!caps || !caps.has(CURSOR_CAPABILITY_DICT)) return null;
-						return caps.has(CURSOR_CAPABILITY_TIME)
-							? new CursorTimeEncodeDict(wallEpoch)
-							: new CursorEncodeDict();
+						// One linear ladder: stream implies stamped implies dictionary,
+						// so every client gets exactly its negotiated form.
+						if (caps.has(CURSOR_CAPABILITY_TIME)) {
+							return caps.has(CURSOR_CAPABILITY_STREAM)
+								? new CursorStreamEncodeDict(wallEpoch)
+								: new CursorTimeEncodeDict(wallEpoch);
+						}
+						return new CursorEncodeDict();
 					},
 					onDetach(ws, state) {
 						if (state && state.byKey) state.byKey.clear();
+						if (state && state.slots) state.slots.clear();
 					}
 				}
 			};

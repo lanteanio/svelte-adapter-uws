@@ -514,6 +514,7 @@ token here.
 | `cursor.protocol:2` | yes | 1 | Binary cursor wire, full-string keys (stateless). The GATING token for the whole cursor family: without it no cursor binary is sent at all. |
 | `cursor.protocol:3` | yes | 2 | Binary cursor wire, per-connection short-id dictionary. Effective only alongside `cursor.protocol:2`; advertised alone it has no effect (no cursor binary is sent). |
 | `cursor.protocol:4` | yes | 3 | Binary cursor wire, time-stamped short-id dictionary. Effective only alongside `cursor.protocol:2` AND `cursor.protocol:3`; without `:3` it has no effect (the connection falls back to the schema-version-1 full-string encode). |
+| `cursor.protocol:5` | yes | 4 | Binary cursor wire, time-stamped short-id dictionary with temporally-streamed positions: each cursor's position is bit-packed against its own previous sample, and the streamed value is the float32-narrowed position, so the decoded value is identical to the schema-version-3 wire's. Effective only alongside `cursor.protocol:2` AND `:3` AND `:4`; without the full ladder the connection stays on its highest complete rung. |
 | `presence.protocol:1` | yes | 1 | Binary presence roster wire. |
 | `crdt.protocol:1` | yes | 1 | Binary CRDT update wire (opaque bytes; JSON fallback when absent). |
 | `smooth.protocol:1` | yes | 1 | Binary smoothed-entity state wire (server to client). |
@@ -527,8 +528,8 @@ Rules:
    not know it simply never advertises it and keeps the version it knows, or JSON.
 2. **The schema version is the fine gate within a token.** It is the second byte
    of every `0x03` frame (section 6). The cursor family shares one gating token
-   family but selects its schema version (1, 2, or 3) from the negotiated set, so
-   a single connection always sees one cursor schema version on the wire.
+   family but selects its schema version (1, 2, 3, or 4) from the negotiated set,
+   so a single connection always sees one cursor schema version on the wire.
 3. **A token is never reinterpreted.** Adding a field to a frame an existing token
    already gates is fine (unknown JSON fields are ignored). Changing the meaning
    of an existing field requires a new token version.

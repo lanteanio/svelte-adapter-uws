@@ -39,7 +39,7 @@ const TOPIC_PREFIX = '__cursor:';
 import { on, connect, status, registerWireCodec } from '../../client.js';
 import { monotonicNow, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask } from '../../client-runtime.js';
 import { writable } from 'svelte/store';
-import { decodeCursor, CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CursorDecodeDict } from './codec.js';
+import { decodeCursor, CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CURSOR_CAPABILITY_STREAM, CursorDecodeDict } from './codec.js';
 import { applyEvent, mergeOutput, sweepExpired } from './decode.js';
 import { createSmoother, SAMPLE_EMPTY } from '../smooth/interpolate.js';
 import { selectRenderer, hashColor } from './render/index.js';
@@ -62,23 +62,25 @@ registerWireCodec(TOPIC_PREFIX, {
 	decode: decodeCursor
 });
 
-// The time capability is advertised lazily, the first time a smoothing
-// pipeline needs server-stamped frames on the MAIN connection (the dedicated
-// worker socket manages its own hello): re-registering the codec with the
-// extended token list triggers a hello re-send, and the per-prefix decoder
-// dictionary survives the swap, so a live connection upgrades without a
-// desync. A connection whose server-side cursor codec state was already
+// The time and stream capabilities are advertised lazily, the first time a
+// smoothing pipeline needs server-stamped frames on the MAIN connection (the
+// dedicated worker socket manages its own hello): re-registering the codec
+// with the extended token list triggers a hello re-send, and the per-prefix
+// decoder dictionary survives the swap, so a live connection upgrades without
+// a desync. A connection whose server-side cursor codec state was already
 // attached keeps its negotiated schema until the next reconnect (the
 // attach-once contract); smoothing degrades to the arrival-time axis until
 // then. Never advertised by default: stamped frames cost one extra byte
 // steady-state, and a client that never smooths would pay it for nothing.
+// The stream token rides the same advert: the smoothing consumer is exactly
+// the high-cadence one the temporal position stream pays off for.
 let timeCapAdvertised = false;
 function advertiseTimeCap() {
 	if (timeCapAdvertised) return;
 	timeCapAdvertised = true;
 	registerWireCodec(TOPIC_PREFIX, {
 		capability: CURSOR_CAPABILITY,
-		capabilities: [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME],
+		capabilities: [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CURSOR_CAPABILITY_STREAM],
 		state: { onAttach: () => new CursorDecodeDict() },
 		decode: decodeCursor
 	});

@@ -1,216 +1,216 @@
 {
-  "name": "svelte-adapter-uws",
-  "version": "0.6.0-next.66",
-  "publishConfig": {
-    "tag": "next"
-  },
-  "description": "SvelteKit adapter for uWebSockets.js - high-performance C++ HTTP server with built-in WebSocket support",
-  "author": "Kevin Radziszewski",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/lanteanio/svelte-adapter-uws.git"
-  },
-  "homepage": "https://github.com/lanteanio/svelte-adapter-uws#readme",
-  "bugs": {
-    "url": "https://github.com/lanteanio/svelte-adapter-uws/issues"
-  },
-  "type": "module",
-  "exports": {
-    ".": {
-      "types": "./src/index.d.ts",
-      "default": "./src/index.js"
-    },
-    "./upgrade-response": {
-      "types": "./src/index.d.ts",
-      "default": "./src/upgrade-response.js"
-    },
-    "./client": {
-      "types": "./src/client.d.ts",
-      "default": "./src/client.js"
-    },
-    "./vite": {
-      "types": "./src/vite.d.ts",
-      "default": "./src/vite.js"
-    },
-    "./testing": {
-      "types": "./src/testing.d.ts",
-      "default": "./src/testing.js"
-    },
-    "./sim": {
-      "types": "./src/sim.d.ts",
-      "default": "./src/sim.js"
-    },
-    "./safe-url": {
-      "types": "./src/safe-url.d.ts",
-      "default": "./src/safe-url.js"
-    },
-    "./plugins/replay": {
-      "types": "./src/plugins/replay/server.d.ts",
-      "default": "./src/plugins/replay/server.js"
-    },
-    "./plugins/replay/client": {
-      "types": "./src/plugins/replay/client.d.ts",
-      "default": "./src/plugins/replay/client.js"
-    },
-    "./plugins/presence": {
-      "types": "./src/plugins/presence/server.d.ts",
-      "default": "./src/plugins/presence/server.js"
-    },
-    "./plugins/presence/client": {
-      "types": "./src/plugins/presence/client.d.ts",
-      "default": "./src/plugins/presence/client.js"
-    },
-    "./plugins/channels": {
-      "types": "./src/plugins/channels/server.d.ts",
-      "default": "./src/plugins/channels/server.js"
-    },
-    "./plugins/channels/client": {
-      "types": "./src/plugins/channels/client.d.ts",
-      "default": "./src/plugins/channels/client.js"
-    },
-    "./plugins/throttle": {
-      "types": "./src/plugins/throttle/server.d.ts",
-      "default": "./src/plugins/throttle/server.js"
-    },
-    "./plugins/ratelimit": {
-      "types": "./src/plugins/ratelimit/server.d.ts",
-      "default": "./src/plugins/ratelimit/server.js"
-    },
-    "./plugins/cursor": {
-      "types": "./src/plugins/cursor/server.d.ts",
-      "default": "./src/plugins/cursor/server.js"
-    },
-    "./plugins/cursor/client": {
-      "types": "./src/plugins/cursor/client.d.ts",
-      "default": "./src/plugins/cursor/client.js"
-    },
-    "./plugins/middleware": {
-      "types": "./src/plugins/middleware/server.d.ts",
-      "default": "./src/plugins/middleware/server.js"
-    },
-    "./plugins/queue": {
-      "types": "./src/plugins/queue/server.d.ts",
-      "default": "./src/plugins/queue/server.js"
-    },
-    "./plugins/groups": {
-      "types": "./src/plugins/groups/server.d.ts",
-      "default": "./src/plugins/groups/server.js"
-    },
-    "./plugins/groups/client": {
-      "types": "./src/plugins/groups/client.d.ts",
-      "default": "./src/plugins/groups/client.js"
-    },
-    "./plugins/lock": {
-      "types": "./src/plugins/lock/server.d.ts",
-      "default": "./src/plugins/lock/server.js"
-    },
-    "./plugins/session": {
-      "types": "./src/plugins/session/server.d.ts",
-      "default": "./src/plugins/session/server.js"
-    },
-    "./plugins/dedup": {
-      "types": "./src/plugins/dedup/server.d.ts",
-      "default": "./src/plugins/dedup/server.js"
-    },
-    "./plugins/crdt": {
-      "types": "./src/plugins/crdt/server.d.ts",
-      "default": "./src/plugins/crdt/server.js"
-    },
-    "./plugins/crdt/client": {
-      "types": "./src/plugins/crdt/client.d.ts",
-      "default": "./src/plugins/crdt/client.js"
-    },
-    "./plugins/crdt/replica": {
-      "types": "./src/plugins/crdt/replica.d.ts",
-      "default": "./src/plugins/crdt/replica.js"
-    },
-    "./plugins/crdt/channel": {
-      "types": "./src/plugins/crdt/channel.d.ts",
-      "default": "./src/plugins/crdt/channel.js"
-    },
-    "./plugins/smooth": {
-      "types": "./src/plugins/smooth/server.d.ts",
-      "default": "./src/plugins/smooth/server.js"
-    },
-    "./plugins/smooth/client": {
-      "types": "./src/plugins/smooth/client.d.ts",
-      "default": "./src/plugins/smooth/client.js"
-    },
-    "./plugins/smooth/random": {
-      "types": "./src/plugins/smooth/random.d.ts",
-      "default": "./src/plugins/smooth/random.js"
-    },
-    "./plugins/webhooks": {
-      "types": "./src/plugins/webhooks/server.d.ts",
-      "default": "./src/plugins/webhooks/server.js"
-    }
-  },
-  "types": "./src/index.d.ts",
-  "files": [
-    "src",
-    "LICENSE",
-    "README.md",
-    "MIGRATION.md",
-    "PROTOCOL.md",
-    "protocol.schema.json",
-    "test-vectors",
-    "examples"
-  ],
-  "scripts": {
-    "check": "node scripts/check-types.js && node scripts/check-determinism.js && node scripts/check-slugs.js",
-    "pretest": "npm run check",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:e2e": "npx playwright test --config test/e2e/playwright.config.js",
-    "test:coverage": "node scripts/coverage.js",
-    "sim:swarm": "node scripts/sim-swarm.js",
-    "sim:golden": "node scripts/sim-golden.js"
-  },
-  "engines": {
-    "node": ">=22.0.0"
-  },
-  "peerDependencies": {
-    "@sveltejs/kit": "^2.0.0",
-    "svelte": "^4.0.0 || ^5.0.0",
-    "ws": "^8.0.0"
-  },
-  "peerDependenciesMeta": {
-    "uWebSockets.js": {
-      "optional": true
-    },
-    "ws": {
-      "optional": true
-    }
-  },
-  "dependencies": {
-    "@rollup/plugin-commonjs": "^28.0.0",
-    "@rollup/plugin-json": "^6.0.0",
-    "@rollup/plugin-node-resolve": "^16.0.0",
-    "rollup": "^4.0.0",
-    "yjs": "^13.6.31"
-  },
-  "keywords": [
-    "svelte",
-    "sveltekit",
-    "adapter",
-    "uwebsockets",
-    "uws",
-    "performance",
-    "websocket"
-  ],
-  "devDependencies": {
-    "@playwright/test": "^1.59.1",
-    "@vitest/coverage-v8": "^4.0.18",
-    "autocannon": "^8.0.0",
-    "c8": "^11.0.0",
-    "polka": "^0.5.2",
-    "socket.io": "^4.8.3",
-    "socket.io-client": "^4.8.3",
-    "vitest": "^4.0.18",
-    "ws": "^8.19.0"
-  },
-  "optionalDependencies": {
-    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.67.0"
-  }
+	"name": "svelte-adapter-uws",
+	"version": "0.6.0-next.67",
+	"publishConfig": {
+		"tag": "next"
+	},
+	"description": "SvelteKit adapter for uWebSockets.js - high-performance C++ HTTP server with built-in WebSocket support",
+	"author": "Kevin Radziszewski",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/lanteanio/svelte-adapter-uws.git"
+	},
+	"homepage": "https://github.com/lanteanio/svelte-adapter-uws#readme",
+	"bugs": {
+		"url": "https://github.com/lanteanio/svelte-adapter-uws/issues"
+	},
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./src/index.d.ts",
+			"default": "./src/index.js"
+		},
+		"./upgrade-response": {
+			"types": "./src/index.d.ts",
+			"default": "./src/upgrade-response.js"
+		},
+		"./client": {
+			"types": "./src/client.d.ts",
+			"default": "./src/client.js"
+		},
+		"./vite": {
+			"types": "./src/vite.d.ts",
+			"default": "./src/vite.js"
+		},
+		"./testing": {
+			"types": "./src/testing.d.ts",
+			"default": "./src/testing.js"
+		},
+		"./sim": {
+			"types": "./src/sim.d.ts",
+			"default": "./src/sim.js"
+		},
+		"./safe-url": {
+			"types": "./src/safe-url.d.ts",
+			"default": "./src/safe-url.js"
+		},
+		"./plugins/replay": {
+			"types": "./src/plugins/replay/server.d.ts",
+			"default": "./src/plugins/replay/server.js"
+		},
+		"./plugins/replay/client": {
+			"types": "./src/plugins/replay/client.d.ts",
+			"default": "./src/plugins/replay/client.js"
+		},
+		"./plugins/presence": {
+			"types": "./src/plugins/presence/server.d.ts",
+			"default": "./src/plugins/presence/server.js"
+		},
+		"./plugins/presence/client": {
+			"types": "./src/plugins/presence/client.d.ts",
+			"default": "./src/plugins/presence/client.js"
+		},
+		"./plugins/channels": {
+			"types": "./src/plugins/channels/server.d.ts",
+			"default": "./src/plugins/channels/server.js"
+		},
+		"./plugins/channels/client": {
+			"types": "./src/plugins/channels/client.d.ts",
+			"default": "./src/plugins/channels/client.js"
+		},
+		"./plugins/throttle": {
+			"types": "./src/plugins/throttle/server.d.ts",
+			"default": "./src/plugins/throttle/server.js"
+		},
+		"./plugins/ratelimit": {
+			"types": "./src/plugins/ratelimit/server.d.ts",
+			"default": "./src/plugins/ratelimit/server.js"
+		},
+		"./plugins/cursor": {
+			"types": "./src/plugins/cursor/server.d.ts",
+			"default": "./src/plugins/cursor/server.js"
+		},
+		"./plugins/cursor/client": {
+			"types": "./src/plugins/cursor/client.d.ts",
+			"default": "./src/plugins/cursor/client.js"
+		},
+		"./plugins/middleware": {
+			"types": "./src/plugins/middleware/server.d.ts",
+			"default": "./src/plugins/middleware/server.js"
+		},
+		"./plugins/queue": {
+			"types": "./src/plugins/queue/server.d.ts",
+			"default": "./src/plugins/queue/server.js"
+		},
+		"./plugins/groups": {
+			"types": "./src/plugins/groups/server.d.ts",
+			"default": "./src/plugins/groups/server.js"
+		},
+		"./plugins/groups/client": {
+			"types": "./src/plugins/groups/client.d.ts",
+			"default": "./src/plugins/groups/client.js"
+		},
+		"./plugins/lock": {
+			"types": "./src/plugins/lock/server.d.ts",
+			"default": "./src/plugins/lock/server.js"
+		},
+		"./plugins/session": {
+			"types": "./src/plugins/session/server.d.ts",
+			"default": "./src/plugins/session/server.js"
+		},
+		"./plugins/dedup": {
+			"types": "./src/plugins/dedup/server.d.ts",
+			"default": "./src/plugins/dedup/server.js"
+		},
+		"./plugins/crdt": {
+			"types": "./src/plugins/crdt/server.d.ts",
+			"default": "./src/plugins/crdt/server.js"
+		},
+		"./plugins/crdt/client": {
+			"types": "./src/plugins/crdt/client.d.ts",
+			"default": "./src/plugins/crdt/client.js"
+		},
+		"./plugins/crdt/replica": {
+			"types": "./src/plugins/crdt/replica.d.ts",
+			"default": "./src/plugins/crdt/replica.js"
+		},
+		"./plugins/crdt/channel": {
+			"types": "./src/plugins/crdt/channel.d.ts",
+			"default": "./src/plugins/crdt/channel.js"
+		},
+		"./plugins/smooth": {
+			"types": "./src/plugins/smooth/server.d.ts",
+			"default": "./src/plugins/smooth/server.js"
+		},
+		"./plugins/smooth/client": {
+			"types": "./src/plugins/smooth/client.d.ts",
+			"default": "./src/plugins/smooth/client.js"
+		},
+		"./plugins/smooth/random": {
+			"types": "./src/plugins/smooth/random.d.ts",
+			"default": "./src/plugins/smooth/random.js"
+		},
+		"./plugins/webhooks": {
+			"types": "./src/plugins/webhooks/server.d.ts",
+			"default": "./src/plugins/webhooks/server.js"
+		}
+	},
+	"types": "./src/index.d.ts",
+	"files": [
+		"src",
+		"LICENSE",
+		"README.md",
+		"MIGRATION.md",
+		"PROTOCOL.md",
+		"protocol.schema.json",
+		"test-vectors",
+		"examples"
+	],
+	"scripts": {
+		"check": "node scripts/check-types.js && node scripts/check-determinism.js && node scripts/check-slugs.js",
+		"pretest": "npm run check",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"test:e2e": "npx playwright test --config test/e2e/playwright.config.js",
+		"test:coverage": "node scripts/coverage.js",
+		"sim:swarm": "node scripts/sim-swarm.js",
+		"sim:golden": "node scripts/sim-golden.js"
+	},
+	"engines": {
+		"node": ">=22.0.0"
+	},
+	"peerDependencies": {
+		"@sveltejs/kit": "^2.0.0",
+		"svelte": "^4.0.0 || ^5.0.0",
+		"ws": "^8.0.0"
+	},
+	"peerDependenciesMeta": {
+		"uWebSockets.js": {
+			"optional": true
+		},
+		"ws": {
+			"optional": true
+		}
+	},
+	"dependencies": {
+		"@rollup/plugin-commonjs": "^28.0.0",
+		"@rollup/plugin-json": "^6.0.0",
+		"@rollup/plugin-node-resolve": "^16.0.0",
+		"rollup": "^4.0.0",
+		"yjs": "^13.6.31"
+	},
+	"keywords": [
+		"svelte",
+		"sveltekit",
+		"adapter",
+		"uwebsockets",
+		"uws",
+		"performance",
+		"websocket"
+	],
+	"devDependencies": {
+		"@playwright/test": "^1.59.1",
+		"@vitest/coverage-v8": "^4.0.18",
+		"autocannon": "^8.0.0",
+		"c8": "^11.0.0",
+		"polka": "^0.5.2",
+		"socket.io": "^4.8.3",
+		"socket.io-client": "^4.8.3",
+		"vitest": "^4.0.18",
+		"ws": "^8.19.0"
+	},
+	"optionalDependencies": {
+		"uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.67.0"
+	}
 }

@@ -16,6 +16,7 @@ import {
 	CURSOR_CAPABILITY,
 	CURSOR_CAPABILITY_DICT,
 	CURSOR_CAPABILITY_TIME,
+	CURSOR_CAPABILITY_STREAM,
 	CURSOR_SCHEMA_VERSION_TIME
 } from '../src/plugins/cursor/codec.js';
 
@@ -132,12 +133,12 @@ function openSmoothed(ctrl, sock, serverBase) {
 }
 
 describe('smoothing handshake', () => {
-	it('advertises the time capability only when smoothing', () => {
+	it('advertises the time and stream capabilities only when smoothing', () => {
 		const { sock } = boot();
 		sock().open();
 		expect(sentJson(sock())[0]).toEqual({
 			type: 'hello',
-			caps: [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME]
+			caps: [CURSOR_CAPABILITY, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CURSOR_CAPABILITY_STREAM]
 		});
 	});
 
