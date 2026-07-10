@@ -185,7 +185,17 @@ Or if you want flexible header-based detection:
 PROTOCOL_HEADER=x-forwarded-proto HOST_HEADER=x-forwarded-host node build
 ```
 
-> **Important:** `PROTOCOL_HEADER`, `HOST_HEADER`, `PORT_HEADER`, and `ADDRESS_HEADER` are trusted verbatim. Only set these when running behind a reverse proxy that overwrites the corresponding headers on every request. If the server is directly internet-facing, clients can spoof these values. When in doubt, use a fixed `ORIGIN` instead.
+> **Important:** `PROTOCOL_HEADER`, `HOST_HEADER`, `PORT_HEADER`, and `ADDRESS_HEADER` are trusted verbatim by default. Only set these when running behind a reverse proxy that overwrites the corresponding headers on every request. If the server is directly internet-facing, clients can spoof these values. When in doubt, use a fixed `ORIGIN` instead.
+
+To make the trust mechanical instead of topological, set `TRUSTED_PROXIES` to a comma-separated list of proxy addresses or CIDR ranges (IPv4 and IPv6):
+
+```bash
+ADDRESS_HEADER=x-forwarded-for TRUSTED_PROXIES=10.0.0.0/8,::1 node build
+```
+
+With `TRUSTED_PROXIES` set, `ADDRESS_HEADER` is honored only when the direct socket peer is in the list; a claim from any other peer is ignored (the socket address is used, with a one-shot warning), so a client that can reach the listener directly cannot spoof its rate-limit identity or `getClientAddress()`. Unset, the historical trust-verbatim behavior is unchanged.
+
+If your load balancer speaks [PROXY protocol v2](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) (HAProxy, AWS NLB, etc.) instead of an address header, opt in with `PROXY_PROTOCOL=1`: the preamble's source address becomes the client address for rate limiting and `getClientAddress()`. Combine it with `TRUSTED_PROXIES` - uWS accepts a PP2 preamble from any peer, so without the allowlist any direct client could spoof its address the same way an ungated header does. An `ADDRESS_HEADER` on top of PROXY protocol composes: the header (from a trusted app proxy) wins over the PP2 address (from the outer LB).
 
 ---
 
@@ -682,6 +692,8 @@ If you set `envPrefix: 'MY_APP_'` in the adapter config, all variables are prefi
 | `PORT_HEADER` | - | Header for port override (e.g. `x-forwarded-port`) |
 | `ADDRESS_HEADER` | - | Header for client IP (e.g. `x-forwarded-for`) |
 | `XFF_DEPTH` | `1` | Position from right in `X-Forwarded-For` |
+| `TRUSTED_PROXIES` | - | Comma-separated proxy IPs/CIDRs; when set, `ADDRESS_HEADER` and PROXY protocol are honored only from these peers |
+| `PROXY_PROTOCOL` | - | `1` accepts a PROXY protocol v2 preamble as the client address (combine with `TRUSTED_PROXIES`) |
 | `BODY_SIZE_LIMIT` | `512K` | Max request body size (supports `K`, `M`, `G` suffixes) |
 | `SHUTDOWN_TIMEOUT` | `30` | Seconds to wait during graceful shutdown |
 | `RECONNECT_DISPERSAL_MS` | `5000` | Graceful-shutdown reconnect dispersal window (ms); `0` disables the advisory |

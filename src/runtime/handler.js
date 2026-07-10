@@ -36,7 +36,7 @@ import { acquireState, releaseState } from './handler/state-pool.js';
 import { ENVELOPE_CACHE_MAX, envelopePrefix } from './handler/envelope-cache.js';
 import { batchRelay } from './handler/relay.js';
 import { readHlc } from './handler/hlc.js';
-import { textDecoder, ssl_cert, ssl_key, is_tls, origin, xff_depth, address_header, protocol_header, host_header, port_header, body_size_limit, resolveClientIp, _t_app, app, wsDebug, closeHookRegistered, get_origin, WS_COMPRESSION_ON } from './handler/config.js';
+import { textDecoder, ssl_cert, ssl_key, is_tls, origin, xff_depth, address_header, protocol_header, host_header, port_header, body_size_limit, resolveClientIp, resolveTransportAddress, _t_app, app, wsDebug, closeHookRegistered, get_origin, WS_COMPRESSION_ON } from './handler/config.js';
 import { cacheDir, clientDir, prerenderedDir, _t_static, serveStatic, DECODE_CACHE_MAX, tryPrerendered } from './handler/static-assets.js';
 import { bumpIn, bumpOut, maybeWarnTopicRegistry, BATCH_FRAME_WARN_BYTES, warnLargeBatchFrame, grantSizeFor, resolvePressureThresholds, startPressureSampling, stopPressureSampling } from './handler/pressure-metrics.js';
 import { hasRef, runSubscribeHook, runSubscribeBatchHook, runUserSubscribeGate, hasUserSubscribeHook, sendSubscribed, sendSubscribeDenied, flushCoalescedFor } from './handler/subscribe-hooks.js';
@@ -752,7 +752,8 @@ if (WS_ENABLED) {
 			req.forEach((k, v) => { authHeaders[k] = v; });
 			const method = 'POST';
 			const url = req.getUrl() + (req.getQuery() ? '?' + req.getQuery() : '');
-			const clientIp = resolveClientIp(textDecoder.decode(res.getRemoteAddressAsText()), authHeaders);
+			const authAddr = resolveTransportAddress(res);
+			const clientIp = resolveClientIp(authAddr.effective, authHeaders, authAddr.direct);
 
 			if (AUTH_PATH_REQUIRE_ORIGIN && !isAuthOriginAccepted(authHeaders, {
 				allowedOrigins,
@@ -1042,10 +1043,14 @@ if (WS_ENABLED) {
 			req.forEach((key, value) => {
 				headers[key] = value;
 			});
-			// Decode the client IP once. resolveClientIp applies the configured
-			// proxy header (ADDRESS_HEADER / XFF_DEPTH) so rate limiting keys
-			// on the real client address, not the proxy address.
-			const clientIp = resolveClientIp(textDecoder.decode(res.getRemoteAddressAsText()), headers);
+			// Decode the client IP once. resolveTransportAddress applies the
+			// opt-in PROXY-protocol substitution, then resolveClientIp applies
+			// the configured proxy header (ADDRESS_HEADER / XFF_DEPTH) - both
+			// gated on TRUSTED_PROXIES when set - so rate limiting keys on the
+			// real client address, not the proxy address, and an untrusted
+			// peer cannot spoof its rate-limit identity.
+			const upgradeAddr = resolveTransportAddress(res);
+			const clientIp = resolveClientIp(upgradeAddr.effective, headers, upgradeAddr.direct);
 
 			// Rate limit upgrade requests per IP using a sliding window (0 = disabled).
 			// Sliding window prevents a client from doubling their effective rate by

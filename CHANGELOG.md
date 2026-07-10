@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.72] - 2026-07-10
+
+### Added
+
+- **`TRUSTED_PROXIES` - mechanical trust for forwarded client addresses.** `ADDRESS_HEADER` has always been trusted verbatim: any peer that can reach the listener directly could send the header and spoof its rate-limit identity (the per-IP upgrade limiter and the `plugins/ratelimit` per-message limiter both key on the resolved address) and `getClientAddress()`. `TRUSTED_PROXIES` is a comma-separated allowlist of proxy addresses or CIDR ranges (IPv4 + IPv6, IPv4-mapped forms normalized): when set, the header is honored only when the DIRECT socket peer is in the list - a claim from anyone else is ignored in favor of the socket address, with a one-shot warning naming the untrusted peer. Applies uniformly to the WebSocket upgrade path, the auth endpoint, and SSR `getClientAddress()`. Unset keeps the historical behavior byte-identical; a malformed entry throws at boot rather than failing open or closed unpredictably.
+- **`PROXY_PROTOCOL=1` - native PROXY protocol v2 support.** uWS parses a PP2 preamble natively and the adapter now consumes it: when enabled, the preamble's source address becomes the effective client address for rate limiting and `getClientAddress()` (the LB-without-HTTP-headers deployment shape: HAProxy `send-proxy-v2`, AWS NLB). Gated on `TRUSTED_PROXIES` when that is set, because uWS accepts a preamble from ANY peer - ungated, a direct client could spoof its address exactly like an ungated header. An `ADDRESS_HEADER` on top composes: the header (from a trusted app proxy) wins over the PP2 address (from the outer LB). Verified against the shipped binary with a live socket test (preamble parsed, absent preamble reports empty).
+
+### Fixed
+
+- **Prefixed env validation knows the full knob set.** `CLUSTER_RELAY_RING_KB`, `RESTART_ON_STATE_DIVERGENCE`, and `STATE_HASH_EPOCH_MS` were read via `env()` but missing from the expected-name set, so configuring any of them with an `envPrefix` threw a spurious "should change envPrefix" boot error.
+
 ## [0.6.0-next.71] - 2026-07-10
 
 ### Added

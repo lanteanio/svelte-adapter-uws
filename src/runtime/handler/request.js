@@ -1,7 +1,7 @@
 import { counters, staticCache } from './state.js';
 import { METHODS, send400 } from './http-helpers.js';
 import { acquireState, releaseState } from './state-pool.js';
-import { textDecoder } from './config.js';
+import { resolveTransportAddress } from './config.js';
 import { serveStatic, tryPrerendered } from './static-assets.js';
 import { handleSSR } from './ssr.js';
 import { requestDone } from './lifecycle.js';
@@ -61,8 +61,10 @@ export function handleRequest(res, req) {
 		headers[key] = value;
 	});
 
-	// Decode remote address eagerly - uWS may reuse the underlying buffer
-	const remoteAddress = textDecoder.decode(res.getRemoteAddressAsText());
+	// Decode remote address eagerly - uWS may reuse the underlying buffer.
+	// `effective` applies the opt-in PROXY-protocol substitution; `direct` is
+	// always the socket peer and decides ADDRESS_HEADER trust downstream.
+	const { direct: directAddress, effective: remoteAddress } = resolveTransportAddress(res);
 
 	// Set onAborted BEFORE any async work (mandatory uWS pattern).
 	// No AbortController here - readBody uses the state flag directly,
@@ -76,6 +78,6 @@ export function handleRequest(res, req) {
 
 	// === ASYNC PHASE: SSR ===
 	counters.inFlightCount++;
-	handleSSR(res, METHOD, url, headers, remoteAddress, state)
+	handleSSR(res, METHOD, url, headers, remoteAddress, state, directAddress)
 		.finally(() => { releaseState(state); requestDone(); });
 }

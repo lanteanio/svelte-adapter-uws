@@ -3,6 +3,7 @@ import { env } from '../env.js';
 import { wsModule } from '../ws-handler-bridge.js';
 import { parse_as_bytes, parse_origin } from '../utils.js';
 import { monotonicNow } from '../runtime.js';
+import { createTrustedProxyMatcher, createClientIpResolver } from '../utils/trusted-proxies.js';
 
 export const textDecoder = new TextDecoder();
 
@@ -46,6 +47,37 @@ export const port_header = env('PORT_HEADER', '').toLowerCase();
 export const body_size_limit = parse_as_bytes(env('BODY_SIZE_LIMIT', '512K'));
 
 /**
+ * Trusted-proxy allowlist (comma-separated IPs / CIDR ranges, IPv4 + IPv6).
+ * When set, ADDRESS_HEADER and the PROXY-protocol address are honored ONLY
+ * when the direct socket peer is in this set; a claim from any other peer is
+ * ignored (the socket address is used) with a one-shot warning. Unset keeps
+ * the historical trust-verbatim behavior byte-identical.
+ */
+export const trusted_proxies = createTrustedProxyMatcher(env('TRUSTED_PROXIES', ''));
+
+/**
+ * PROXY protocol v2 opt-in. When '1', a PP2 preamble's source address (parsed
+ * natively by uWS) replaces the socket address as the effective client
+ * address - gated on TRUSTED_PROXIES when that is set, because uWS accepts a
+ * PP2 preamble from ANY peer, so an ungated deployment directly reachable by
+ * clients would let them spoof their address the same way an ungated
+ * ADDRESS_HEADER does.
+ */
+export const proxy_protocol = env('PROXY_PROTOCOL', '') === '1';
+
+let warnedUntrustedClaim = false;
+/** One-shot warning for an address claim arriving from an untrusted peer. */
+export function warnUntrustedClaim(directIp, kind) {
+	if (warnedUntrustedClaim) return;
+	warnedUntrustedClaim = true;
+	console.warn(
+		`[adapter] Ignored a ${kind} client-address claim from untrusted peer ${directIp}: ` +
+		'the peer is not in TRUSTED_PROXIES, so the socket address was used instead. ' +
+		'If this peer is a legitimate proxy, add its address (or CIDR range) to TRUSTED_PROXIES.'
+	);
+}
+
+/**
  * Graceful-shutdown reconnect dispersal window in ms. When > 0, `shutdown()`
  * advises every connected client to reconnect on a jittered schedule in
  * `[0, RECONNECT_DISPERSAL_MS)` before closing it, so a draining node's clients
@@ -60,23 +92,42 @@ export const reconnect_dispersal_ms = Number.isFinite(_reconnect_dispersal_raw) 
 
 /**
  * Resolve the real client IP from a raw socket address, applying the
- * configured proxy header when present. Returns the raw IP on any error
- * so rate limiting and userData injection always get a usable string.
- * @param {string} rawIp
- * @param {Record<string, string>} headers
- * @returns {string}
+ * configured proxy header when present - gated on TRUSTED_PROXIES when that
+ * is set. Returns the raw IP on any error so rate limiting and userData
+ * injection always get a usable string. The optional third argument is the
+ * DIRECT socket peer (defaults to rawIp): header trust is decided on who
+ * actually connected, never on a forwarded claim.
+ * @type {(rawIp: string, headers: Record<string, string>, directIp?: string) => string}
  */
-export function resolveClientIp(rawIp, headers) {
-	if (!address_header) return rawIp;
-	const value = headers[address_header];
-	if (!value) return rawIp;
-	if (address_header === 'x-forwarded-for') {
-		if (value.length > 8192) return rawIp;
-		const addresses = value.split(',');
-		if (xff_depth > addresses.length) return rawIp;
-		return addresses[addresses.length - xff_depth].trim();
+export const resolveClientIp = createClientIpResolver({
+	addressHeader: address_header,
+	xffDepth: xff_depth,
+	matcher: trusted_proxies,
+	onUntrusted: (directIp) => warnUntrustedClaim(directIp, `${address_header} header`)
+});
+
+/**
+ * Decode the transport-level addresses for a request/upgrade: the direct
+ * socket peer, and the effective client address after the optional PROXY
+ * protocol v2 substitution (opt-in via PROXY_PROTOCOL=1, gated on
+ * TRUSTED_PROXIES when set). The ADDRESS_HEADER resolution then applies on
+ * top of `effective` via resolveClientIp, which composes the two proxy
+ * layers: an LB speaking PP2 in front of an app proxy appending XFF.
+ * @param {{ getRemoteAddressAsText(): ArrayBuffer, getProxiedRemoteAddressAsText(): ArrayBuffer }} res
+ * @returns {{ direct: string, effective: string }}
+ */
+export function resolveTransportAddress(res) {
+	const direct = textDecoder.decode(res.getRemoteAddressAsText());
+	if (!proxy_protocol) return { direct, effective: direct };
+	if (trusted_proxies && !trusted_proxies.match(direct)) {
+		// Only warn when a preamble was actually present - an untrusted peer
+		// without one is just a normal direct client.
+		const claimed = textDecoder.decode(res.getProxiedRemoteAddressAsText());
+		if (claimed) warnUntrustedClaim(direct, 'PROXY-protocol');
+		return { direct, effective: direct };
 	}
-	return value;
+	const proxied = textDecoder.decode(res.getProxiedRemoteAddressAsText());
+	return { direct, effective: proxied || direct };
 }
 
 export const _t_app = monotonicNow();

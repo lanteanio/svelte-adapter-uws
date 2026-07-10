@@ -3,7 +3,7 @@ import { server } from '../_init.js';
 import { resolveRequestId, writeChunkWithBackpressure } from '../utils.js';
 import { randomUuid } from '../runtime.js';
 import { PayloadTooLargeError, send413, send500 } from './http-helpers.js';
-import { origin, address_header, xff_depth, body_size_limit, get_origin, WS_COMPRESSION_ON } from './config.js';
+import { origin, address_header, xff_depth, body_size_limit, get_origin, WS_COMPRESSION_ON, trusted_proxies, warnUntrustedClaim } from './config.js';
 import { platform } from './platform.js';
 import { isDedupBufferable } from './ssr-dedup.js';
 
@@ -135,10 +135,11 @@ export function readBody(res, limit, state, contentLength) {
  * @param {string} method
  * @param {string} url
  * @param {Record<string, string>} headers
- * @param {string} remoteAddress - Client IP address
+ * @param {string} remoteAddress - Effective client IP (after any PROXY-protocol substitution)
  * @param {{ aborted: boolean }} state
+ * @param {string} [directAddress] - Direct socket peer; decides ADDRESS_HEADER trust
  */
-export async function handleSSR(res, method, url, headers, remoteAddress, state) {
+export async function handleSSR(res, method, url, headers, remoteAddress, state, directAddress = remoteAddress) {
 	try {
 		const base_origin = origin || get_origin(headers);
 
@@ -175,6 +176,13 @@ export async function handleSSR(res, method, url, headers, remoteAddress, state)
 		// the closure captures the full set of proxy variables.
 		const getClientAddress = address_header
 			? () => {
+				// Trusted-proxy gate: a header claim from a peer outside
+				// TRUSTED_PROXIES is ignored, not an error - the request is a
+				// direct client, and its socket address IS its address.
+				if (trusted_proxies && !trusted_proxies.match(directAddress)) {
+					warnUntrustedClaim(directAddress, `${address_header} header`);
+					return remoteAddress;
+				}
 				if (!(address_header in headers)) {
 					throw new Error(
 						`Address header was specified with ${ENV_PREFIX + 'ADDRESS_HEADER'}=${address_header} but is absent from request`
