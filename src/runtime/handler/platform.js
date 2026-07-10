@@ -12,6 +12,7 @@ import { readHlc } from './hlc.js';
 import { BATCH_FRAME_WARN_BYTES, bumpOut, maybeWarnTopicRegistry, warnLargeBatchFrame } from './pressure-metrics.js';
 import { flushCoalescedFor, runUserSubscribeGate } from './subscribe-hooks.js';
 import { ensureWireId, ensureWireState, poisonWireState, wireStatePoisoned } from './wire-state.js';
+import { GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './game-ingress.js';
 import { registerWireCodec as _registerWireCodec, getWireCodec } from './codec-registry.js';
 import { cohortTopics, joinSharedCohort, leaveSharedCohort } from './cohort.js';
 import { getSharedWireId } from './shared-wire-id.js';
@@ -1357,6 +1358,22 @@ export const platform = {
 		// Fan out to the topic's LOCAL subscribers, skipping the sender. The single
 		// C++ app.publish fan-out cannot skip a socket, so the exclusion forces the
 		// per-subscriber walk (the same shape publishWire uses for excludeWs).
+		//
+		// Compact fan-out (PROTOCOL.md 6.7): a subscriber that negotiated
+		// `game.fanout:1` receives the value-codec `0x03` frame; everyone else
+		// gets the JSON envelope, byte-identical to before. The compact payload is
+		// stateless (sender-independent), so it is encoded ONCE and framed per
+		// connection by its wire-id - exactly the stateless publishWire path. The
+		// walk is mandatory here regardless of that, because the sender must be
+		// excluded. capCounts short-circuits the whole binary path to zero cost
+		// when no connected client advertised the capability.
+		const wantBinary = capCounts.has(GAME_FANOUT_CAP);
+		const seqOnWire = seq == null ? 0 : seq;
+		/** @type {Uint8Array | null} */
+		let sharedPayload = null;
+		let sharedEncoded = false;
+		/** @type {Map<number, Uint8Array> | null} */
+		let sharedFrameById = null;
 		let delivered = 0;
 		for (const ws of wsConnections) {
 			if (ws === senderWs) continue;
@@ -1364,6 +1381,34 @@ export const platform = {
 			try { ud = ws.getUserData(); } catch { continue; }
 			const subs = ud[WS_SUBSCRIPTIONS];
 			if (!subs || !subs.has(topic)) continue;
+			const caps = wantBinary ? ud[WS_CAPS] : null;
+			if (caps && caps.has(GAME_FANOUT_CAP) && !wireStatePoisoned(ud, GAME_FANOUT_CAP)) {
+				if (!sharedEncoded) {
+					sharedPayload = encodeGameFanoutPayload(event, data, id);
+					sharedEncoded = true;
+					sharedFrameById = new Map();
+				}
+				const wid = ensureWireId(ws, ud, topic);
+				if (wid === -1) {
+					// Dropped wire-id announce: the client can never resolve this
+					// topic's numeric id, so binary is undecodable here from now on.
+					// JSON for this frame + poison to JSON until reconnect.
+					poisonWireState(ws, ud, GAME_FANOUT_CAP);
+					try { ws.send(envelope, false, false); bumpOut(ws, envelope); delivered++; }
+					catch { counters.closedWsAborts++; }
+					continue;
+				}
+				let frame = sharedFrameById.get(wid);
+				if (!frame) {
+					frame = buildBinaryFrame(GAME_FANOUT_SCHEMA_VERSION, wid, seqOnWire, /** @type {Uint8Array} */ (sharedPayload));
+					sharedFrameById.set(wid, frame);
+				}
+				// A dropped shared frame needs no poisoning: the payload carries no
+				// per-connection state, so the client decoder stays in sync.
+				try { ws.send(frame, true, false); bumpOut(ws, frame); delivered++; }
+				catch { counters.closedWsAborts++; }
+				continue;
+			}
 			try { ws.send(envelope, false, false); bumpOut(ws, envelope); delivered++; }
 			catch { counters.closedWsAborts++; }
 		}

@@ -519,6 +519,7 @@ token here.
 | `crdt.protocol:1` | yes | 1 | Binary CRDT update wire (opaque bytes; JSON fallback when absent). |
 | `smooth.protocol:1` | yes | 1 | Binary smoothed-entity state wire (server to client). |
 | `wire.ingress:1` | yes | n/a | Client-to-server binary payload frames (sections 3.8, 6.5). |
+| `game.fanout:1` | yes | 1 | Server-to-client compact binary fan-out of the `game` lane (section 6.7); the egress mirror of the `game:1` ingress twin. Independent of `wire.ingress:1`. |
 
 Rules:
 
@@ -715,6 +716,51 @@ drives a real `0x03` frame end to end). Binary ingress is opt-in (section 5): a
 client that has not negotiated `wire.ingress:1` uses the JSON `game` frame and is
 complete and correct. The client-side binary ENCODER lives with the consuming
 input channel (as the `smooth.command:1` encoder does), not in the core adapter.
+
+### 6.7 Server-driven relay binary twin (the `game` lane fan-out)
+
+The `game` lane fan-out (section 3.10) has a binary twin, the egress mirror of
+the `game:1` ingress twin (section 6.6): the same event delivered to a
+subscriber, compact-encoded on the `0x03` topic-payload frame instead of the
+JSON data-event envelope (section 4), for a subscriber that runs its receive
+path off binary. It is gated by the `game.fanout:1` capability (section 5.1) and
+introduces no new leading byte and no new framing:
+
+```
+[0x03][schemaVersion:u8][topicId:varint][seq:varint][payload ...]
+```
+
+- `schemaVersion` is `1`. `topicId` is the ordinary per-connection wire-id
+  binding (section 6.2), announced by a `wire-id` control frame before the first
+  `0x03` frame for the topic. `seq` is the authoritative ROOM seq the server
+  stamped on fan-out - the same value the JSON envelope's `seq` carries - so gap
+  detection is preserved.
+- `payload` is a SINGLE value-codec value (section 6.3, the same generic codec
+  the `game:1` ingress twin and the `smooth.command:1` kind use): the array
+  `[event, data]`, or `[event, data, id]` when the relayed event carries the
+  sender's echoed input id. This is the exact byte-inverse of the `game:1`
+  ingress payload (section 6.6) - one codec table serves both directions.
+- `topic` is never in the payload: it is carried by `topicId` in the header. The
+  compact frame encodes exactly the fields the JSON `game` fan-out envelope
+  carries (`event`, `data`, optional `id`), and nothing more - no `t`, no `j`
+  (the JSON `game` envelope carries neither).
+- Fan-out is otherwise identical to the JSON lane: one relay produces one logical
+  event, the sender is excluded, and each subscriber receives the event over its
+  own negotiated form. A subscriber that has NOT negotiated `game.fanout:1`
+  receives the JSON data-event envelope, byte-identical to today. The JSON lane
+  is the conformance ORACLE: the compact twin decodes to the identical
+  `{event, data, id?}` the JSON subscriber receives, with the identical room
+  `seq`.
+- Degradation is section 6.4 verbatim: a dropped `wire-id` announce or frame
+  poisons the topic to the JSON envelope for the connection's remainder; a client
+  MUST accept the JSON envelope for a `game.fanout` topic at any time.
+
+**Wire status:** frozen. The capability is opt-in and additive (section 5): a
+subscriber that never advertises `game.fanout:1` receives the JSON `game`
+envelope and is complete and correct. `game.fanout:1` is independent of
+`wire.ingress:1` - a connection may decode compact fan-out while sending JSON
+inputs, or send `game:1` binary inputs while receiving JSON fan-out, in any
+combination.
 
 ---
 
@@ -1044,16 +1090,20 @@ intentional:
   like any other loss. Applications running rooms over this binding SHOULD
   keep event payloads comfortably under a conservative path MTU (~1 KB).
 
-A compact binary fan-out form is deliberately NOT defined in this revision; it
-is a future additive extension (per sections 5 and 10) and its absence keeps
-the JSON envelope as the single fan-out shape both transports share today.
+A compact binary fan-out form is defined additively in section 14.6 (the
+`game.fanout:1` capability, the egress mirror of the section 6.6 / 14.2 ingress
+twins). When a session has not negotiated it, the JSON envelope above is the
+fan-out shape, byte-identical to what a WebSocket subscriber of the same room
+receives.
 
 ### 14.4 What does not apply
 
 This binding carries the `game` lane and nothing else. There is no `welcome`,
 `hello`, or capability negotiation (section 5), no `subscribe` (membership
 comes from the CONNECT accept), no `batch`, no `lease`/`request-n`, no
-`resume` (section 7), and no server-to-client `0x03` topic frames (section 6).
+`resume` (section 7), and no server-to-client `0x03` topic frames (section 6) -
+except the compact `game` fan-out of section 14.6 when the session declared
+`game.fanout` decode capability at CONNECT.
 Liveness is the QUIC transport's own idle/keepalive machinery; the ping
 expectations of section 1.3 do not apply. WebTransport STREAMS are reserved:
 a client MUST NOT open them and a server ignores or closes any that appear -
@@ -1073,6 +1123,50 @@ session that persists past denial.
 A runtime claiming this binding implements sections 3.10, 6.6, and this
 section; the conformance classes of section 13 are WebSocket classes and do
 not apply to it.
+
+### 14.6 Compact fan-out (the `game.fanout:1` datagram carriage)
+
+The compact `game` fan-out of section 6.7 has a WebTransport carriage: the same
+value-codec payload, carried on the `0x03` datagram shape. It is the egress
+mirror of section 14.2's ingress datagram, and shares its wire form with the
+WebSocket carriage (section 6.7) so ONE decoder serves both transports.
+
+```
+[0x03][schemaVersion:u8][0][seq:varint][payload ...]
+```
+
+- `schemaVersion` is `1`. The id slot is the reserved id `0` = "the session's
+  bound room" - the session holds exactly one room (14.1), so no `wire-id`
+  announce exists or is needed on this carriage, mirroring 14.2's reservation of
+  ingress id `0` in the opposite direction. With id `0` the header is
+  byte-layout-identical to the WebSocket `0x03` topic frame (section 6.7) with
+  `topicId` `0`, so one client decoder serves both carriages.
+- `payload` is byte-identical to the WebSocket carriage: a single value-codec
+  value `[event, data]` or `[event, data, id]` (section 6.3). `seq` is the
+  authoritative room seq.
+- Direction disambiguates the two `0x03` datagram forms: a client-to-server
+  `0x03` datagram is the ingress twin (14.2), a server-to-client `0x03` datagram
+  is this fan-out; datagrams are directional, so the shapes never meet on one
+  decode path.
+- Loss semantics are 14.3 verbatim: skipped, never repaired; the header `seq`
+  makes the gap visible. A payload that exceeds the session's datagram size is
+  not delivered to that session (the room seq advances regardless).
+  Applications SHOULD keep compact `game.fanout` payloads under a conservative
+  path MTU (~1 KB), noting that the datagram's quarter-stream-ID varint consumes
+  budget below this payload.
+- **Negotiation.** WebTransport has no `hello` (section 14.4), so a session
+  declares compact-decode capability at CONNECT (14.1's trust boundary) via the
+  CONNECT path's query component - the carrier every binding supports without
+  header plumbing. A session that does not declare it receives the JSON envelope
+  datagram (section 14.3), preserving the one-directional negotiation posture of
+  section 5. WHICH query key carries the declaration is the binding's to fix; the
+  requirement this section freezes is that the declaration is client-initiated at
+  CONNECT and the server falls back to the JSON envelope without it.
+
+A runtime MAY implement the WebSocket carriage (section 6.7) without this
+datagram carriage, and vice versa: the two are independently negotiated
+(`game.fanout:1` in `hello.caps` on WebSocket; the CONNECT query declaration on
+WebTransport) and share only the frozen payload and header shape above.
 
 ---
 

@@ -22,13 +22,40 @@
  */
 
 import { registerIngress } from './ingress.js';
-import { decodeValue } from '../wire-value.js';
+import { decodeValue, encodeValue } from '../wire-value.js';
 import { WS_PUBLISH_GRANT, WS_STATS } from '../utils.js';
 
 /** The ingress kind a client binds to publish `game` frames as `0x03`. */
 export const GAME_INGRESS_KIND = 'game:1';
 /** The frame schema version for the `game:1` payload layout (value-codec `[event, data, id?]`). */
 export const GAME_INGRESS_SCHEMA_VERSION = 1;
+
+/**
+ * The capability a SUBSCRIBER advertises to receive the `game` lane fan-out
+ * compact-encoded (PROTOCOL.md section 6.7 / 5.1) instead of the JSON
+ * data-event envelope. The EGRESS mirror of the `game:1` ingress twin;
+ * independent of `wire.ingress:1` (a connection may receive compact fan-out
+ * while sending JSON inputs, or vice versa).
+ */
+export const GAME_FANOUT_CAP = 'game.fanout:1';
+/** The fan-out frame schema version. Shares the `game:1` layout, so it shares its version. */
+export const GAME_FANOUT_SCHEMA_VERSION = GAME_INGRESS_SCHEMA_VERSION;
+
+/**
+ * Encode a game fan-out payload: the byte-inverse of {@link decodeGameFrame}.
+ * A SINGLE value-codec value `[event, data]`, or `[event, data, id]` when the
+ * relayed event carries the sender's echoed input id (the `id !== undefined`
+ * rule matches decode's `v.length > 2`). The framework wraps this in the
+ * `[0x03][schemaVersion][topicId][seq]` header (see `buildBinaryFrame`).
+ *
+ * @param {string} event
+ * @param {unknown} data
+ * @param {number | string | undefined} id
+ * @returns {Uint8Array}
+ */
+export function encodeGameFanoutPayload(event, data, id) {
+	return encodeValue(id === undefined ? [event, data] : [event, data, id]);
+}
 
 /**
  * Decode a `game:1` payload into `{ event, data, id }`. The payload is a single

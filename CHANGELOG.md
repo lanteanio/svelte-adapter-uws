@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.73] - 2026-07-10
+
+### Added
+
+- **Compact binary fan-out for the game lane (`game.fanout:1`).** The `game` lane's server-to-client fan-out could be sent compact only in the ingress direction (a granted publisher's `game:1` binary input); every subscriber still RECEIVED the JSON data-event envelope, so a high-frequency input echoed to a room paid the envelope's fixed overhead (the topic string repeated per event per subscriber, text-encoded numbers) on a payload that is a handful of numbers. A subscriber now advertises `game.fanout:1` in `hello.caps` and receives the event as the `0x03` topic frame carrying a single value-codec value `[event, data]` (or `[event, data, id]`) - the exact byte-inverse of the `game:1` ingress twin, one codec table for both directions. The JSON lane stays the conformance oracle: the compact frame decodes to the identical `{event, data, id?}` a JSON subscriber of the same room receives, with the identical room seq; the sender is excluded on both forms; a subscriber that does not advertise the capability keeps receiving the JSON envelope byte-identically. The reference client advertises it automatically (like `wire.ingress:1`), so it is zero-config; it is independent of `wire.ingress:1` (a connection may decode compact fan-out while sending JSON inputs, or the reverse). PROTOCOL.md freezes both carriages - the WebSocket form (section 6.7) and the WebTransport datagram form (section 14.6, reserved id `0` = the session's bound room, so one client decoder serves both); this release implements the WebSocket carriage. Conformance bytes: `test-vectors/game-fanout-compact.json`.
+
 ## [0.6.0-next.72] - 2026-07-10
 
 ### Added

@@ -1,5 +1,6 @@
 import { writable, derived } from 'svelte/store';
 import { parseBinaryFrame, buildBinaryFrame, requestNFrame } from './runtime/wire.js';
+import { decodeValue } from './runtime/wire-value.js';
 import { now, monotonicNow, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask, nextReconnectDelay, dispersedReconnectDelay } from './client-runtime.js';
 
 /** @type {ReturnType<typeof createConnection> | null} */
@@ -116,7 +117,7 @@ export function bindIngress(kind, target) {
  * @returns {string[]}
  */
 function buildHelloCaps() {
-	const caps = ['batch', 'lease', 'wire.ingress:1'];
+	const caps = ['batch', 'lease', 'wire.ingress:1', 'game.fanout:1'];
 	for (const codec of wireCodecs.values()) {
 		const tokens = codec.capabilities || [codec.capability];
 		for (let i = 0; i < tokens.length; i++) caps.push(tokens[i]);
@@ -1554,6 +1555,22 @@ function createConnection(options) {
 								// want it; the store merge ignores it.
 								if (decoded.t !== undefined) out.t = decoded.t;
 								dispatchEvent(out);
+							} else if (!match) {
+								// Compact game fan-out (PROTOCOL.md 6.7): a 0x03 frame for a
+								// known topic with NO prefix codec is the game lane's egress
+								// twin - the client advertised game.fanout:1 and the server
+								// sends binary only for negotiated caps, so by elimination
+								// this is a value-codec [event, data, id?] relay. Decode it
+								// and dispatch exactly as the JSON game envelope would (the
+								// JSON path drops id at the store, so this one does too - the
+								// two paths stay byte-identical).
+								let value;
+								try { value = decodeValue(parsed.payload); } catch { value = null; }
+								if (Array.isArray(value) && typeof value[0] === 'string') {
+									const out = { topic, event: value[0], data: value[1] };
+									if (parsed.seq > 0) out.seq = parsed.seq;
+									dispatchEvent(out);
+								}
 							}
 						} else if (debug) {
 							console.warn('[ws] 0x03 frame for unknown topicId', parsed.topicId);

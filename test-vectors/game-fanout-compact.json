@@ -1,0 +1,28 @@
+{
+  "description": "Compact game-lane fan-out (PROTOCOL.md 6.7 WebSocket carriage / 14.6 WebTransport carriage), the egress mirror of the game:1 ingress twin in game-relay.json. Sibling of the frozen game-relay.json, keyed by the same fan-out case ids. payloadHex is the frozen value-codec payload [event, data, id?], byte-identical on both carriages. wtFrameHex is the fully deterministic WebTransport datagram frame [0x03][schemaVersion][0][seq][payload] (id 0 = the session's bound room). The WebSocket carriage's topicId is the per-connection wire-id binding (section 6.2) and is therefore NOT a fixed vector; the WebSocket carriage is asserted by decoding the payload + seq. A denial step produces no fan-out (fanout: null).",
+  "topic": "arena:1",
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "move-with-id",
+      "event": "move",
+      "data": { "dx": 1, "dy": 0 },
+      "inputId": 5,
+      "seq": 1,
+      "payloadHex": "060305046d6f7665070202647803020264790300030a",
+      "wtFrameHex": "03010001060305046d6f7665070202647803020264790300030a"
+    },
+    {
+      "id": "move-no-id",
+      "event": "move",
+      "data": { "dx": 0, "dy": 1 },
+      "seq": 2,
+      "payloadHex": "060205046d6f7665070202647803000264790302",
+      "wtFrameHex": "03010002060205046d6f7665070202647803000264790302"
+    },
+    {
+      "id": "denied-forbidden",
+      "fanout": null
+    }
+  ]
+}

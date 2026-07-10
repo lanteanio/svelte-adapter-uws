@@ -4,7 +4,7 @@ import { stampSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBat
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
-import { registerGameIngress } from './runtime/handler/game-ingress.js';
+import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -1058,6 +1058,17 @@ export async function createTestServer(options = {}) {
 			// production per-subscriber walk (uncompressed 60 Hz input path).
 			const seq = stampSeq(undefined, topicSeqs, topic);
 			const env = completeGameEnvelope('{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":', data, seq, id);
+			// Compact fan-out (PROTOCOL.md 6.7): mirror of the production
+			// publishGame - a game.fanout:1 subscriber receives the value-codec
+			// 0x03 frame (encoded once, framed per connection by its wire-id),
+			// everyone else the JSON envelope; the sender is excluded either way.
+			const wantBinary = capCountsT.has(GAME_FANOUT_CAP);
+			const seqOnWire = seq == null ? 0 : seq;
+			/** @type {Uint8Array | null} */
+			let sharedPayload = null;
+			let sharedEncoded = false;
+			/** @type {Map<number, Uint8Array> | null} */
+			let sharedFrameById = null;
 			let delivered = 0;
 			for (const ws of wsConnections) {
 				if (ws === senderWs) continue;
@@ -1065,6 +1076,29 @@ export async function createTestServer(options = {}) {
 				try { ud = ws.getUserData(); } catch { continue; }
 				const subs = ud[WS_SUBSCRIPTIONS];
 				if (!subs || !subs.has(topic)) continue;
+				const caps = wantBinary ? ud[WS_CAPS] : null;
+				if (caps && caps.has(GAME_FANOUT_CAP) && !wireStatePoisonedT(ud, GAME_FANOUT_CAP)) {
+					if (!sharedEncoded) {
+						sharedPayload = encodeGameFanoutPayload(event, data, id);
+						sharedEncoded = true;
+						sharedFrameById = new Map();
+					}
+					const wid = ensureWireIdT(ws, ud, topic);
+					if (wid === -1) {
+						poisonWireStateT(ws, ud, GAME_FANOUT_CAP);
+						sendOutboundT(ws, env);
+						delivered++;
+						continue;
+					}
+					let frame = sharedFrameById.get(wid);
+					if (!frame) {
+						frame = buildBinaryFrame(GAME_FANOUT_SCHEMA_VERSION, wid, seqOnWire, /** @type {Uint8Array} */ (sharedPayload));
+						sharedFrameById.set(wid, frame);
+					}
+					sendOutboundBinaryT(ws, frame);
+					delivered++;
+					continue;
+				}
 				sendOutboundT(ws, env);
 				delivered++;
 			}

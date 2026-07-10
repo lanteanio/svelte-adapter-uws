@@ -1,6 +1,6 @@
 {
 	"name": "svelte-adapter-uws",
-	"version": "0.6.0-next.72",
+	"version": "0.6.0-next.73",
 	"publishConfig": {
 		"tag": "next"
 	},
