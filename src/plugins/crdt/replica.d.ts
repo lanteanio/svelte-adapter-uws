@@ -88,6 +88,16 @@ export interface CrdtAuthority {
 	persistNow(topic?: string): Promise<void>;
 	/** Whether the topic currently holds a loaded replica. */
 	has(topic: string): boolean;
+	/**
+	 * Erase one topic's replica regardless of live references: cancel its
+	 * persistence schedule and destroy the doc WITHOUT running any store (an
+	 * erasure must never write back the state it is erasing). Returns `true`
+	 * when a replica was dropped. Live holders observe the topic as unloaded
+	 * from the next call on; a subsequent `acquire` cold-loads from
+	 * persistence - deleting the persisted copy is the `persist`-store
+	 * owner's half of a whole-document erasure.
+	 */
+	drop(topic: string): boolean;
 	/** Live references on the topic (0 when absent). */
 	refs(topic: string): number;
 	/** Number of loaded topics. */

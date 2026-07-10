@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.71] - 2026-07-10
+
+### Added
+
+- **CRDT document authority: `drop(topic)` - whole-document erasure.** The authority could release references and destroy everything, but nothing could erase ONE topic's replica on demand: a right-to-erasure flow (a forgotten user's edits are merged into the document with no per-user attribution, so dropping the whole document is the only true erasure) had no primitive to call. `drop(topic)` erases the topic's replica regardless of live references, cancelling its persistence schedule and destroying the doc WITHOUT running any store - an erasure must never write back the state it is erasing. Live holders observe the topic as unloaded from the next call on (`applyUpdate`/`diff` return null, later `release` calls no-op), and a subsequent `acquire` cold-loads from persistence - deleting the persisted copy is the `persist`-store owner's half. Consumed by `svelte-realtime`'s `live.forget(userId, { cascade: { crdt: [...] } })`.
+
 ## [0.6.0-next.70] - 2026-07-09
 
 ### Changed

@@ -147,6 +147,65 @@ describe('lifecycle and the coalesced load', () => {
 	});
 });
 
+describe('drop (whole-document erasure)', () => {
+	/** Apply one client edit to a loaded topic so its replica turns dirty. */
+	function editTopic(auth, topic, entries) {
+		const client = new Y.Doc();
+		Y.applyUpdate(client, auth.diff(topic));
+		const update = captureUpdate(client, () => {
+			const m = client.getMap('root');
+			for (const [k, v] of Object.entries(entries)) m.set(k, v);
+		});
+		auth.applyUpdate(topic, update);
+	}
+
+	it('drops a referenced replica without running any store', async () => {
+		const store = vi.fn(async () => {});
+		const auth = createCrdtAuthority({ persist: { load: async () => null, store } });
+		await auth.acquire('board:1');
+		editTopic(auth, 'board:1', { secret: 'pii' });
+
+		expect(auth.drop('board:1')).toBe(true);
+		expect(auth.has('board:1')).toBe(false);
+		// The dirty state was NOT written back - an erasure must never persist
+		// the state it is erasing.
+		expect(store).not.toHaveBeenCalled();
+		// A late release from a live holder no-ops instead of throwing.
+		auth.release('board:1');
+		auth.destroy();
+	});
+
+	it('returns false for an unknown topic', () => {
+		const auth = createCrdtAuthority();
+		expect(auth.drop('never-acquired')).toBe(false);
+		auth.destroy();
+	});
+
+	it('a re-acquire after drop cold-loads from persistence', async () => {
+		const stored = Y.encodeStateAsUpdate(docWith({ title: 'from-store' }));
+		const load = vi.fn(async () => stored);
+		const auth = createCrdtAuthority({ persist: { load } });
+		await auth.acquire('board:1');
+		editTopic(auth, 'board:1', { title: 'edited' });
+		auth.drop('board:1');
+
+		await auth.acquire('board:1');
+		expect(load).toHaveBeenCalledTimes(2);
+		// The in-memory edits died with the drop; the store copy is the truth.
+		expect(readState(auth, 'board:1')).toEqual({ title: 'from-store' });
+		auth.destroy();
+	});
+
+	it('live holders observe the dropped topic as unloaded', async () => {
+		const auth = createCrdtAuthority();
+		await auth.acquire('board:1');
+		auth.drop('board:1');
+		expect(auth.stateVector('board:1')).toBeNull();
+		expect(auth.diff('board:1')).toBeNull();
+		auth.destroy();
+	});
+});
+
 describe('update merge and convergence', () => {
 	let auth;
 	beforeEach(async () => {

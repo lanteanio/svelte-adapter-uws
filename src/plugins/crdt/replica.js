@@ -512,6 +512,26 @@ export function createCrdtAuthority(options = {}) {
 		},
 
 		/**
+		 * Erase one topic's replica REGARDLESS of live references: cancel its
+		 * persistence schedule and destroy the doc WITHOUT running any store -
+		 * an erasure must never write back the state it is erasing. Returns
+		 * `true` when a replica (loaded or still loading) was dropped. Live
+		 * holders observe the topic as unloaded from the next call on
+		 * (`applyUpdate`/`diff` return null, exactly like a never-acquired
+		 * topic) and their later `release` calls no-op. A subsequent `acquire`
+		 * cold-loads from persistence - deleting the persisted copy is the
+		 * `persist`-store owner's half of a whole-document erasure.
+		 * @param {string} topic
+		 * @returns {boolean}
+		 */
+		drop(topic) {
+			const rec = topics.get(topic);
+			if (!rec) return false;
+			unload(topic, rec);
+			return true;
+		},
+
+		/**
 		 * Tear the authority down: cancel every schedule and destroy every
 		 * replica. Pending edits are NOT stored (call `persistNow()` first for
 		 * a graceful path); destroy is the hard-stop for tests and shutdown.
