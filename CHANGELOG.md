@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.75] - 2026-07-11
+
+### Fixed
+
+- **The client now reacts to the browser going offline and online.** The connection detected a dead socket only through its silence timer (about 150 s) plus a suspend-gap check, so a real network drop - or an emulated one (`context.setOffline(true)` in a test) - that fires the browser `offline` event without closing the socket left the status stuck at `open` for the full silence window: the offline queue never armed and the status indicator stayed lit. The client now listens for the window `offline` / `online` events. `offline` closes a live socket at once (or, with no live socket, sets `disconnected` directly) so the normal close path flips the status and schedules the reconnect, which is also what arms the realtime offline queue; `online` skips the remaining backoff and reconnects immediately, mirroring the tab-visible recovery. Listeners are registered only when `window.addEventListener` exists (never during SSR) and are removed on `close()`.
+
 ## [0.6.0-next.74] - 2026-07-11
 
 ### Added

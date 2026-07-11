@@ -2113,6 +2113,10 @@ function createConnection(options) {
 	 */
 	/** @type {(() => void) | null} */
 	let visibilityHandler = null;
+	/** @type {(() => void) | null} */
+	let offlineHandler = null;
+	/** @type {(() => void) | null} */
+	let onlineHandler = null;
 
 	function close() {
 		intentionallyClosed = true;
@@ -2128,6 +2132,10 @@ function createConnection(options) {
 		if (visibilityHandler && typeof document !== 'undefined') {
 			document.removeEventListener('visibilitychange', visibilityHandler);
 			visibilityHandler = null;
+		}
+		if (typeof window !== 'undefined') {
+			if (offlineHandler) { window.removeEventListener('offline', offlineHandler); offlineHandler = null; }
+			if (onlineHandler) { window.removeEventListener('online', onlineHandler); onlineHandler = null; }
 		}
 		ws?.close();
 		ws = null;
@@ -2205,6 +2213,44 @@ function createConnection(options) {
 			doConnect();
 		};
 		document.addEventListener('visibilitychange', visibilityHandler);
+	}
+
+	// Network connectivity: the browser fires `offline` / `online` on the window
+	// when the OS loses or regains a route. A plain `setOffline(true)` (and many
+	// real network drops) does NOT close the socket, so without this the client
+	// only learns it is offline via the ~150s silence detector - far too slow to
+	// arm the offline queue or show an accurate status. Drive the status machine
+	// off these events so a drop is reflected at once and recovery is immediate.
+	if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+		offlineHandler = () => {
+			if (intentionallyClosed || terminalClosed) return;
+			if (debug) console.log('[ws] browser reported offline, dropping the socket');
+			if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+				// Close now so onclose classifies RETRY, flips status to 'disconnected',
+				// and schedules the reconnect - which is also what arms the realtime
+				// offline queue. The `online` handler skips the backoff on recovery.
+				ws.close();
+			} else {
+				// No live socket to close - surface the drop directly.
+				statusStore.set('disconnected');
+			}
+		};
+		onlineHandler = () => {
+			if (intentionallyClosed || terminalClosed) return;
+			// The socket survived the drop (rare) - nothing to do.
+			if (ws?.readyState === WebSocket.OPEN) return;
+			if (debug) console.log('[ws] browser reported online, reconnecting now');
+			// Connectivity is back: skip the remaining backoff and reconnect now,
+			// mirroring the tab-visible recovery branch.
+			attempt = 0;
+			if (reconnectTimer) {
+				clearTimer(reconnectTimer);
+				reconnectTimer = null;
+			}
+			doConnect();
+		};
+		window.addEventListener('offline', offlineHandler);
+		window.addEventListener('online', onlineHandler);
 	}
 
 	// Zombie connection detection: check every 30s whether the server has gone
