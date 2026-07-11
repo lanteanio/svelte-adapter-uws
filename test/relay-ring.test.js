@@ -175,6 +175,46 @@ describe('ring stream', () => {
 		await tick();
 	});
 
+	// The two lost-wakeup regressions: each side's wait must register against
+	// the index value its full/empty verdict was computed from. The peer's
+	// advance-plus-notify is forced into the check/register gap by holding the
+	// armed flag through the predicate check, so with a reloaded-value wait
+	// (the old code) the one notify is gone and the direction parks forever.
+
+	it('writer: a consumer advance in the check/register gap does not strand the pending flush', async () => {
+		const sab = createRelayRingBuffer(1024);
+		const writer = new RingWriter(sab);
+		const i32 = new Int32Array(sab, 0, 16);
+		writer.write(new Uint8Array(writer.cap)); // fills the ring exactly
+		writer.flushArmed = true; // hold registration open across the gap
+		const extra = encodePublishFrame('t', '{}', false, 1, undefined, undefined, undefined);
+		writer.write(extra); // failed push: verdict computed, spill queued
+		expect(writer.pendingBytes).toBe(extra.length);
+		// The consumer drains everything and sends its ONE notify inside the gap.
+		Atomics.store(i32, 8, Atomics.load(i32, 0));
+		Atomics.notify(i32, 8);
+		writer.flushArmed = false;
+		writer._armFlush(); // registers AFTER the advance the old code slept through
+		await until(() => writer.pendingBytes === 0);
+	});
+
+	it('reader: a producer advance in the check/register gap does not strand delivered bytes', async () => {
+		const sab = createRelayRingBuffer(1024);
+		const writer = new RingWriter(sab);
+		const seen = [];
+		const reader = new RingReader(sab, (frame) => seen.push(decodeRelayFrame(frame).seq));
+		reader.waiting = true; // hold registration open across the gap
+		reader.start(); // empty verdict computed with WRITE_IDX = 0
+		// The producer writes and sends its ONE notify inside the gap.
+		writer.write(encodePublishFrame('t', '{}', false, 1, undefined, undefined, undefined));
+		writer.notify();
+		reader.waiting = false;
+		reader._armWait(0); // register against the pre-advance verdict value
+		await until(() => seen.length === 1);
+		expect(seen).toEqual([1]);
+		reader.close();
+	});
+
 	it('verbatim forwarding: a frame copied ring-to-ring by a forwarder decodes identically', async () => {
 		const upstream = createRelayRingBuffer(4096);
 		const downstream = createRelayRingBuffer(4096);
@@ -226,9 +266,9 @@ describe('cross-thread (real worker_threads)', () => {
 			`,
 			{ eval: true, workerData: { sab } }
 		);
+		const seen = [];
+		const reader = new RingReader(sab, (frame) => seen.push(decodeRelayFrame(frame)));
 		try {
-			const seen = [];
-			const reader = new RingReader(sab, (frame) => seen.push(decodeRelayFrame(frame)));
 			reader.start();
 			await until(() => seen.length === N, 10000);
 			for (let i = 0; i < N; i++) {
@@ -237,8 +277,8 @@ describe('cross-thread (real worker_threads)', () => {
 				expect(seen[i].compress).toBe(i % 2 === 0);
 				expect(seen[i].data).toEqual({ i });
 			}
-			reader.close();
 		} finally {
+			reader.close();
 			await worker.terminate();
 		}
 	}, 15000);

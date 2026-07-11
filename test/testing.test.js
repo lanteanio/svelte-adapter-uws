@@ -45,6 +45,35 @@ describeUWS('createTestServer', () => {
 		expect(server.wsUrl).toBe(`ws://localhost:${server.port}/live`);
 	});
 
+	it('close() joins tracked client sockets - none survive into the next test', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer();
+		const ws = server.track(await connectClient(server.wsUrl));
+		expect(ws.readyState).toBe(1); // OPEN
+
+		await server.close();
+		// A resolved close() means the tracked socket reached its terminal
+		// state - not merely that it was told to close.
+		expect(ws.readyState).toBe(3); // CLOSED
+		expect(server.wsConnections.size).toBe(0);
+		server = null;
+	});
+
+	it('close() joins a tracked socket that is still dialing (never opened)', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const { WebSocket } = await import('ws');
+		server = await createTestServer();
+		// Dial a port nobody answers on and hand the in-flight socket to the
+		// server: close() must settle it instead of letting the dial race
+		// the next test's listen.
+		const stray = new WebSocket('ws://127.0.0.1:9');
+		stray.on('error', () => {}); // the refused dial is the point
+		server.track(stray);
+		await server.close();
+		expect(stray.readyState).toBe(3); // CLOSED
+		server = null;
+	});
+
 	it('tracks connections via platform.connections', async () => {
 		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer();

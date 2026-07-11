@@ -48,7 +48,10 @@
  */
 
 import { ByteWriter, ByteReader } from '../../runtime/wire.js';
-import { WS_CAPS } from '../../runtime/utils.js';
+// The leaf module, not the runtime/utils.js barrel: this codec is client-reachable
+// (crdt/channel -> crdt/client -> here) and the barrel drags in server utilities
+// that import node: builtins, which breaks the consumer's browser bundle.
+import { WS_CAPS } from '../../runtime/utils/ws-symbols.js';
 
 /** Negotiated capability for the CRDT binary wire. Bumped only for an incompatible schema. */
 export const CRDT_CAPABILITY = 'crdt.protocol:1';

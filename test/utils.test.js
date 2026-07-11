@@ -33,6 +33,7 @@ import {
 	readAssertionCounts,
 	_resetAssertionCountsForTest
 } from '../src/runtime/utils.js';
+import { envelopePrefix, ENVELOPE_CACHE_MAX } from '../src/runtime/handler/envelope-cache.js';
 
 // - parse_as_bytes ---------------------------------------------------------
 
@@ -320,37 +321,10 @@ describe('decodePath', () => {
 });
 
 // - esc and envelopePrefix --------------------------------------------------
-// Inline copies of the internal handler.js functions.
-
-function esc(s) {
-	for (let i = 0; i < s.length; i++) {
-		const c = s.charCodeAt(i);
-		if (c < 32 || c === 34 || c === 92) {
-			throw new Error(
-				`Topic/event name contains invalid character at index ${i}: '${s}'. ` +
-				'Names must not contain quotes, backslashes, or control characters.'
-			);
-		}
-	}
-	return '"' + s + '"';
-}
-
-function makeEnvelopePrefix() {
-	const ENVELOPE_CACHE_MAX = 256;
-	const cache = new Map();
-	return function envelopePrefix(topic, event) {
-		const key = topic + '\0' + event;
-		let prefix = cache.get(key);
-		if (prefix === undefined) {
-			prefix = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":';
-			if (cache.size >= ENVELOPE_CACHE_MAX) {
-				cache.delete(cache.keys().next().value);
-			}
-			cache.set(key, prefix);
-		}
-		return prefix;
-	};
-}
+// The production implementations: esc comes from the top-of-file utils import,
+// envelopePrefix from the handler runtime (module-global cache - the eviction
+// test below asserts recompute-on-miss, which holds regardless of prior cache
+// contents).
 
 describe('esc', () => {
 	it('wraps normal identifiers in quotes', () => {
@@ -380,13 +354,11 @@ describe('esc', () => {
 
 describe('envelopePrefix', () => {
 	it('builds correct prefix string', () => {
-		const envelopePrefix = makeEnvelopePrefix();
 		expect(envelopePrefix('chat', 'created'))
 			.toBe('{"topic":"chat","event":"created","data":');
 	});
 
 	it('the prefix + JSON.stringify(data) + } forms valid JSON', () => {
-		const envelopePrefix = makeEnvelopePrefix();
 		const prefix = envelopePrefix('todos', 'updated');
 		const full = prefix + JSON.stringify({ id: 1, text: 'hello' }) + '}';
 		expect(() => JSON.parse(full)).not.toThrow();
@@ -397,22 +369,19 @@ describe('envelopePrefix', () => {
 	});
 
 	it('returns the same string reference on cache hit', () => {
-		const envelopePrefix = makeEnvelopePrefix();
 		const a = envelopePrefix('room', 'join');
 		const b = envelopePrefix('room', 'join');
 		expect(a).toBe(b);
 	});
 
 	it('treats topic+event as a combined key (no cross-collision)', () => {
-		const envelopePrefix = makeEnvelopePrefix();
 		const a = envelopePrefix('foo', 'bar');
 		const b = envelopePrefix('foob', 'ar');
 		expect(a).not.toBe(b);
 	});
 
 	it('evicts oldest entry when cache is full', () => {
-		const envelopePrefix = makeEnvelopePrefix();
-		for (let i = 0; i < 256; i++) {
+		for (let i = 0; i < ENVELOPE_CACHE_MAX; i++) {
 			envelopePrefix(`topic${i}`, 'event');
 		}
 		// One more evicts topic0/event
@@ -423,7 +392,6 @@ describe('envelopePrefix', () => {
 	});
 
 	it('throws when topic contains invalid characters', () => {
-		const envelopePrefix = makeEnvelopePrefix();
 		expect(() => envelopePrefix('bad"topic', 'event')).toThrow('invalid character');
 	});
 });

@@ -223,6 +223,10 @@ export async function createTestServer(options = {}) {
 
 	/** @type {Set<import('uWebSockets.js').WebSocket<any>>} */
 	const wsConnections = new Set();
+	// Client sockets registered via track(): close() terminates and JOINS
+	// them before the listen socket goes away, so no client-side dial or
+	// close handshake outlives this server into the next test's listen.
+	const trackedClients = new Set();
 
 	/** @type {Map<string, number>} */
 	const topicSeqs = new Map();
@@ -2226,6 +2230,29 @@ export async function createTestServer(options = {}) {
 					if (options.reconnectDispersalMs > 0) {
 						platform.adviseReconnect({ windowMs: options.reconnectDispersalMs, close: false });
 					}
+					// Terminate and JOIN every tracked client socket first: a
+					// client dial or close handshake still in flight when the
+					// next test binds is exactly the cross-test contention that
+					// makes parallel suites flaky. Joining is bounded - a socket
+					// that never reports terminal cannot wedge teardown.
+					await Promise.allSettled([...trackedClients].map((sock) => new Promise((resolve) => {
+						if (sock.readyState === 3 /* CLOSED */) return resolve(undefined);
+						let guard = null;
+						const done = () => {
+							if (guard !== null) { clearTimer(guard); guard = null; }
+							resolve(undefined);
+						};
+						guard = setTimer(done, 1000);
+						try {
+							sock.once('close', done);
+							sock.once('error', done);
+						} catch { return done(); }
+						try {
+							if (typeof sock.terminate === 'function') sock.terminate();
+							else sock.close();
+						} catch { done(); }
+					})));
+					trackedClients.clear();
 					// Mirror production graceful shutdown: end() (graceful) flushes
 					// buffered frames + sends a clean 1001 close frame; close() drops
 					// them and sends no code. Snapshot first - end() fires the close
@@ -2236,8 +2263,26 @@ export async function createTestServer(options = {}) {
 						if (typeof ws.end === 'function') ws.end(1001, 'Test server closing');
 						else ws.close(1001, 'Test server closing');
 					}
+					// Join the close callbacks those kicks fire, so a resolved
+					// close() means the sockets are gone, not merely told to go.
+					// Bounded: injected fake sockets without a close handler
+					// never empty the set and must not hang teardown.
+					const kickDeadline = monotonicNow() + 1000;
+					while (wsConnections.size > 0 && monotonicNow() < kickDeadline) {
+						await new Promise((r) => setTimer(r, 5));
+					}
 					wsConnections.clear();
 					uWS.us_listen_socket_close(listenSocket);
+				},
+				/**
+				 * Register a client socket (any `ws`-shaped object) this server
+				 * owns for teardown: close() will terminate it and await its
+				 * terminal event before releasing the port. Returns the socket
+				 * for inline use: `const ws = server.track(new WebSocket(url))`.
+				 */
+				track(sock) {
+					trackedClients.add(sock);
+					return sock;
 				},
 				waitForConnection(timeout = 5000) {
 					return new Promise((resolve, reject) => {

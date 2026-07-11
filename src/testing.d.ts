@@ -141,8 +141,23 @@ export interface TestServer {
 	 * target a specific connection.
 	 */
 	wsConnections: Set<import('uWebSockets.js').WebSocket<any>>;
-	/** Stop the server and close all connections. */
-	close(): void;
+	/**
+	 * Stop the server and close all connections. Tracked client sockets are
+	 * terminated and JOINED (their terminal event awaited, bounded) before
+	 * the port is released, and the server-side close callbacks of the
+	 * connection kicks are joined too - a resolved close() means the
+	 * sockets are gone, not merely told to go.
+	 */
+	close(): Promise<void>;
+	/**
+	 * Register a client socket (any `ws`-shaped object with `once`,
+	 * `terminate`/`close`, and `readyState`) that this server owns for
+	 * teardown: `close()` terminates it and awaits its terminal event
+	 * before releasing the port, so an in-flight dial can never race the
+	 * next test's listen. Returns the socket for inline use:
+	 * `const ws = server.track(new WebSocket(server.wsUrl))`.
+	 */
+	track<T>(sock: T): T;
 	/** Wait for a WebSocket client to connect. */
 	waitForConnection(timeout?: number): Promise<void>;
 	/** Wait for the next WebSocket message (after subscribe/unsubscribe handling). */

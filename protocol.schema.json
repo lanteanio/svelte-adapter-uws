@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:lantean-protocol:revision-1",
   "title": "The Lantean protocol, revision 1",
-  "description": "JSON Schema for every control frame and the data-event envelope of the Lantean protocol (PROTOCOL.md). Additional properties are permitted everywhere: the protocol is forward-compatible and a peer ignores fields it does not recognize (PROTOCOL.md section 10). A frame is one of the definitions in $defs; correlate control frames by their `type` const.",
+  "description": "JSON Schema for every CORE-OWNED control frame and the data-event envelope of the Lantean protocol (PROTOCOL.md). Additional properties are permitted everywhere: the protocol is forward-compatible and a peer ignores fields it does not recognize (PROTOCOL.md section 10). The same rule holds at the frame level: an unrecognized application control frame passes through to the application handler, and higher layers define their own frames that way (svelte-realtime ships its companion schema as svelte-realtime/protocol.schema.json). A validator for mixed ecosystem traffic accepts a frame when it matches the core schema OR a composed layer schema. A core frame is one of the definitions in $defs; correlate control frames by their `type` const.",
   "oneOf": [
     { "$ref": "#/$defs/welcome" },
     { "$ref": "#/$defs/hello" },

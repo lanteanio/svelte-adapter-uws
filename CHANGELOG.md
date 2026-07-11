@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.74] - 2026-07-11
+
+### Added
+
+- **`server.track(clientSocket)` on the test server.** Registers a client socket the server owns for teardown: `close()` now terminates every tracked socket and awaits its terminal event (bounded), then joins the server-side close callbacks of its own connection kicks, before releasing the port. A resolved `close()` means the sockets are gone, not merely told to go - an in-flight client dial can no longer race the next test's `listen()` on a recycled port, which is the cross-test contention behind parallel-pool flakes.
+
+### Fixed
+
+- **The cross-worker relay ring can no longer sleep through its only wake-up.** Both sides of the shared-memory ring re-loaded the peer's index immediately before registering their `Atomics.waitAsync` - so a peer that advanced (and sent its one notify) between the full/empty verdict and the registration was never heard: the wait was armed against the post-advance value and slept forever, a writer stall growing an unbounded spill queue behind a frozen relay direction, or a reader stranding delivered bytes in the ring. Each wait now registers against the exact index value its verdict was computed from, making `waitAsync`'s atomic compare the predicate re-check: an advance in the gap fails the compare and retries immediately. No new atomics on the hot path; deterministic gap-interleaving regression tests cover both directions.
+- **CRDT client entries no longer reach the server runtime.** `plugins/crdt/codec.js` imported `WS_CAPS` from the `runtime/utils.js` barrel, which re-exports server utilities that import `node:` builtins (`node:perf_hooks` via the runtime seam, `node:fs` via the fd-limit probe). Any browser bundle importing `plugins/crdt/channel` or `plugins/crdt/client` - which is every app using the framework's `doc()` codegen - failed its production build with `"performance" is not exported by "__vite-browser-external"`, because Rollup's missing-export check runs before tree-shaking. The codec now imports the symbol from its side-effect-free leaf module (`runtime/utils/ws-symbols.js`). A regression test walks the static import graph of every client-safe export subpath and fails if any reachable module imports a `node:` builtin, so no client entry can regress this way again.
+
+### Documentation
+
+- **`protocol.schema.json` scopes itself to core-owned frames.** The schema described itself as covering "every control frame" while the protocol's own forward-compatibility rule passes unrecognized application control frames through to higher layers - so a validator taking the description literally rejected legitimate ecosystem traffic (svelte-realtime's connect-time revision advertisement). The description now states the core-owned scope, the frame-level pass-through rule, and how to compose with a layer's companion schema (svelte-realtime ships `svelte-realtime/protocol.schema.json`).
+
 ## [0.6.0-next.73] - 2026-07-10
 
 ### Added

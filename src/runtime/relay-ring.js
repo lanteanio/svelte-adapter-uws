@@ -73,6 +73,14 @@ export class RingWriter {
 		this.pendingBytes = 0;
 		this.flushArmed = false;
 		this.closed = false;
+		/**
+		 * The raw READ_IDX observed by the last _push that could not fit all
+		 * its bytes. The flush wait MUST register against this observation:
+		 * waiting on a fresher load would miss a consumer advance (and its
+		 * one notify) landing between the failed push and the registration,
+		 * leaving the flush parked forever while bytes queue behind it.
+		 */
+		this.readSnapshot = 0;
 	}
 
 	/**
@@ -119,9 +127,14 @@ export class RingWriter {
 	 */
 	_push(bytes, offset) {
 		const write = Atomics.load(this.i32, WRITE_IDX) >>> 0;
-		const read = Atomics.load(this.i32, READ_IDX) >>> 0;
+		const readRaw = Atomics.load(this.i32, READ_IDX);
+		const read = readRaw >>> 0;
 		const free = this.cap - ((write - read) >>> 0);
-		const n = Math.min(free, bytes.length - offset);
+		const remaining = bytes.length - offset;
+		const n = Math.min(free, remaining);
+		// Ring can't take everything: snapshot the read position this verdict
+		// was computed from, for the flush wait to register against.
+		if (n < remaining) this.readSnapshot = readRaw;
 		if (n === 0) return 0;
 		const at = write & this.mask;
 		const firstPart = Math.min(n, this.cap - at);
@@ -152,10 +165,15 @@ export class RingWriter {
 	_armFlush() {
 		if (this.flushArmed || this.closed) return;
 		this.flushArmed = true;
-		// Wait for the consumer to advance the read position. If it already
-		// moved between our failed push and this wait, continue immediately.
-		const read = Atomics.load(this.i32, READ_IDX);
-		const res = Atomics.waitAsync(this.i32, READ_IDX, read);
+		// Wait for the consumer to advance the read position PAST the value
+		// the failed push observed. waitAsync's atomic compare is the
+		// predicate re-check: if the consumer already advanced (and sent its
+		// only notify) between the failed push and this registration, the
+		// compare fails ('not-equal') and the microtask retry below flushes
+		// immediately. Re-loading the index here instead would register
+		// against the post-advance value and sleep through a wake-up that
+		// already happened.
+		const res = Atomics.waitAsync(this.i32, READ_IDX, this.readSnapshot);
 		const resume = () => {
 			this.flushArmed = false;
 			if (this.closed) return;
@@ -202,8 +220,10 @@ export class RingReader {
 
 	_drain() {
 		if (this.closed) return;
+		let writeRaw = 0;
 		for (;;) {
-			const write = Atomics.load(this.i32, WRITE_IDX) >>> 0;
+			writeRaw = Atomics.load(this.i32, WRITE_IDX);
+			const write = writeRaw >>> 0;
 			const read = Atomics.load(this.i32, READ_IDX) >>> 0;
 			const avail = (write - read) >>> 0;
 			if (avail === 0) break;
@@ -225,7 +245,7 @@ export class RingReader {
 			this._parse();
 			if (this.closed) return;
 		}
-		this._armWait();
+		this._armWait(writeRaw);
 	}
 
 	_parse() {
@@ -250,11 +270,19 @@ export class RingReader {
 		if (this.acc !== null && this.acc.length === 0) this.acc = null;
 	}
 
-	_armWait() {
+	/**
+	 * Park until the producer advances the write position past the value the
+	 * empty verdict was computed from. As in the writer's flush wait, the
+	 * carried value is load-bearing: a producer advance (and its one notify)
+	 * landing between the empty check and this registration fails the
+	 * waitAsync compare and retries via microtask, instead of sleeping on the
+	 * post-advance value with bytes already in the ring.
+	 * @param {number} expectedWrite raw WRITE_IDX observed when avail hit 0
+	 */
+	_armWait(expectedWrite) {
 		if (this.waiting || this.closed) return;
 		this.waiting = true;
-		const write = Atomics.load(this.i32, WRITE_IDX);
-		const res = Atomics.waitAsync(this.i32, WRITE_IDX, write);
+		const res = Atomics.waitAsync(this.i32, WRITE_IDX, expectedWrite);
 		const resume = () => {
 			this.waiting = false;
 			if (this.closed) return;
