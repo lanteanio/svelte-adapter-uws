@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.76] - 2026-07-13
+
+### Fixed
+
+- **A cluster no longer loses a worker permanently when two workers restart at once.** The crash-restart backoff, the attempt counter, and the pending-respawn timers were single values shared across the whole worker cohort, and any worker reaching its ready state reset that shared budget and cleared EVERY pending respawn timer. So when two workers crashed at nearly the same moment, the first replacement to come back up cancelled the second dead worker's still-pending respawn - and capacity stayed permanently reduced by one, with no further restart ever scheduled. Each worker slot (a stable `role` plus index that a replacement re-occupies with the same replayed state) now carries its own attempt count, exponential backoff, and respawn timer, so a slot only ever resets or reschedules itself and readiness is slot-local. The heartbeat sweep also runs a reconciliation that reschedules any slot left with no live worker, no booting worker, and no pending respawn - a self-heal for the live-plus-spawning-plus-pending-equals-desired invariant that a booting slot never trips. One consequence of per-slot budgets: the restart-attempt cap that hard-exits the primary is now per slot (a single slot crash-looping past the cap exits), rather than a shared count across all workers, so unrelated occasional crashes across different slots no longer add up to a shutdown. Restart scheduling moved into a standalone, fully unit-tested module (deterministic timer queue, including a two-worker-flap regression that reproduces the lost slot).
+
 ## [0.6.0-next.75] - 2026-07-11
 
 ### Fixed

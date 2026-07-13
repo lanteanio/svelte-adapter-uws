@@ -7,6 +7,7 @@ import { applyServerNames, createCertWatcher, reloadClusterTls } from './utils/t
 import { monotonicNow, setTimer, setIntervalTimer, clearTimer } from './runtime.js';
 import { createRelayRingBuffer, RingWriter, RingReader, decodeRelayFrame } from './relay-ring.js';
 import { createStateHashDetector } from './state-hash-detector.js';
+import { createRestartSupervisor } from './restart-supervisor.js';
 import { readFdLimits, fdPreflightWarning } from './utils/fd-limit.js';
 import { createSdNotify } from './utils/sd-notify.js';
 
@@ -159,9 +160,10 @@ if (is_primary) {
 	);
 
 	/**
-	 * Per-worker metadata. `role` is the worker's assigned role ('io' | 'compute'),
-	 * retained so a respawn re-creates the SAME role after a crash.
-	 * @typedef {{ descriptor: any, lastHeartbeat: number, role: 'io' | 'compute' }} WorkerMeta
+	 * Per-worker metadata. `role` is the worker's assigned role ('io' | 'compute')
+	 * and `slot` is its stable `{ role, index }` identity, both retained so a
+	 * respawn re-creates the SAME role in the SAME slot after a crash.
+	 * @typedef {{ descriptor: any, lastHeartbeat: number, role: 'io' | 'compute', slot: { role: 'io' | 'compute', index: number } }} WorkerMeta
 	 */
 
 	/** @type {Map<import('node:worker_threads').Worker, WorkerMeta>} */
@@ -178,13 +180,30 @@ if (is_primary) {
 	let listening = false;
 	let listen_socket = null;
 
-	// Exponential backoff for crash-looping workers
-	let restart_delay = 0;
+	// Per-slot crash-restart budgets. A cluster has a fixed set of worker slots
+	// (io_count io + compute_count compute); the supervisor keeps each slot's
+	// restart attempts, exponential backoff, and pending respawn timer separate,
+	// so one slot becoming ready never resets or cancels another slot's restart.
+	// A cohort-global budget let a simultaneous two-worker flap lose one slot's
+	// respawn permanently - see restart-supervisor.js.
 	const RESTART_DELAY_MAX = 5000;
 	const RESTART_MAX_ATTEMPTS = 50;
-	let restart_attempts = 0;
-	/** @type {Set<ReturnType<typeof setTimeout>>} */
-	const restart_timers = new Set();
+	const restartSupervisor = createRestartSupervisor({
+		setTimer,
+		clearTimer,
+		spawn: (slot) => spawn_worker(slot),
+		onExhausted: (slot) => {
+			console.error(
+				`Worker restart limit reached for ${slot.role}#${slot.index} (${RESTART_MAX_ATTEMPTS}). Exiting.\n` +
+				'  See: https://svti.me/worker-restart-limit'
+			);
+			primaryHardExit(1);
+		},
+		shuttingDown: () => shutting_down,
+		delayBase: 100,
+		delayMax: RESTART_DELAY_MAX,
+		maxAttempts: RESTART_MAX_ATTEMPTS
+	});
 
 	// Worker health monitoring: send a heartbeat every 10 s.
 	// A worker that has not responded within 30 s is assumed stuck (deadlock /
@@ -251,10 +270,21 @@ if (is_primary) {
 				worker.postMessage({ type: 'heartbeat' });
 			}
 		}
+		// Self-heal the live-plus-spawning-plus-pending invariant: if any slot has
+		// somehow ended up with no live worker, no booting worker, and no pending
+		// respawn, schedule its restart. A correct event path never leaves a slot
+		// stranded; this only fires against a future regression, and it skips
+		// still-booting slots so it never double-spawns.
+		const backfilled = restartSupervisor.reconcile();
+		if (backfilled > 0) console.error(`[primary] reconciled ${backfilled} stranded worker slot(s)`);
 	}, HEARTBEAT_INTERVAL_MS).unref();
 
-	/** @param {'io' | 'compute'} role */
-	function spawn_worker(role) {
+	/** @param {{ role: 'io' | 'compute', index: number }} slot */
+	function spawn_worker(slot) {
+		// This worker is (re)occupying its slot: reset the slot's not-yet-live
+		// flag and drop any pending respawn timer before the new thread starts.
+		restartSupervisor.noteSpawn(slot);
+		const role = slot.role;
 		// Shared-memory relay rings for this worker (fresh per spawn AND per
 		// respawn - a replacement never inherits a dead worker's stream state).
 		const relay_ring = relay_ring_kb > 0
@@ -268,7 +298,7 @@ if (is_primary) {
 		});
 		// lastHeartbeat starts at 0  - worker is confirmed alive only after the
 		// first 'descriptor' / 'ready' / 'heartbeat-ack' message arrives.
-		const meta = { descriptor: null, lastHeartbeat: 0, role, ringWriter: null, ringReader: null };
+		const meta = { descriptor: null, lastHeartbeat: 0, role, slot, ringWriter: null, ringReader: null };
 		if (relay_ring !== null) {
 			meta.ringWriter = new RingWriter(relay_ring.down);
 			// Forward each inbound frame VERBATIM to every other worker's ring -
@@ -302,11 +332,9 @@ if (is_primary) {
 				meta.lastHeartbeat = monotonicNow();
 				acceptorApp.addChildAppDescriptor(msg.descriptor);
 				console.log(`Worker thread ${worker.threadId} registered`);
-				// Worker started successfully - reset backoff and attempt counter
-				restart_delay = 0;
-				restart_attempts = 0;
-				for (const t of restart_timers) clearTimer(t);
-				restart_timers.clear();
+				// Worker started successfully - reset ONLY this slot's backoff and
+				// attempt budget (never another slot's pending restart).
+				if (meta.slot) restartSupervisor.noteReady(meta.slot);
 				// Start (or resume) listening once a worker is ready to handle requests
 				if (!listening) {
 					listening = true;
@@ -333,10 +361,7 @@ if (is_primary) {
 					// First listening worker = the service accepts traffic.
 					sdReadyOnce();
 				}
-				restart_delay = 0;
-				restart_attempts = 0;
-				for (const t of restart_timers) clearTimer(t);
-				restart_timers.clear();
+				if (meta.slot) restartSupervisor.noteReady(meta.slot);
 			} else if (msg.type === 'heartbeat-ack') {
 				if (meta) meta.lastHeartbeat = monotonicNow();
 			} else if (msg.type === 'publish') {
@@ -422,9 +447,11 @@ if (is_primary) {
 
 		worker.on('exit', (code) => {
 			const meta = workers.get(worker);
-			// Retain the dead worker's role so its replacement comes back in the same
-			// role (a compute worker respawns as a compute worker, with the same
-			// replayed workerData.app).
+			// The dead worker's slot ({ role, index }) drives the respawn so its
+			// replacement re-occupies the SAME slot in the SAME role with the same
+			// replayed workerData.app. `role` here is only the fallback for the
+			// (never-hit, meta is captured above before the delete below) missing-meta
+			// case in the noteExit call.
 			const role = meta?.role ?? 'io';
 			if (cluster_mode === 'acceptor' && meta?.descriptor) {
 				try { acceptorApp.removeChildAppDescriptor(meta.descriptor); } catch {}
@@ -454,19 +481,17 @@ if (is_primary) {
 						console.log('All workers down, acceptor paused until a replacement is ready');
 					}
 				}
-				restart_attempts++;
-				if (restart_attempts > RESTART_MAX_ATTEMPTS) {
-					console.error(`Worker restart limit reached (${RESTART_MAX_ATTEMPTS}). Exiting.\n  See: https://svti.me/worker-restart-limit`);
-					primaryHardExit(1);
+				// Charge the attempt against THIS slot only and schedule ITS own
+				// respawn after ITS own backoff. onExhausted (hard-exit) fires from
+				// inside the supervisor when the slot passes its attempt cap.
+				const slot = meta?.slot ?? { role, index: 0 };
+				const outcome = restartSupervisor.noteExit(slot);
+				if (outcome && !('exhausted' in outcome)) {
+					console.log(
+						`Worker thread ${worker.threadId} (${slot.role}#${slot.index}) exited with code ${code}, ` +
+						`restarting in ${outcome.delay}ms... (attempt ${outcome.attempts}/${RESTART_MAX_ATTEMPTS})`
+					);
 				}
-				restart_delay = restart_delay ? Math.min(restart_delay * 2, RESTART_DELAY_MAX) : 100;
-				console.log(`Worker thread ${worker.threadId} exited with code ${code}, restarting in ${restart_delay}ms... (attempt ${restart_attempts}/${RESTART_MAX_ATTEMPTS})`);
-				const timer = setTimer(() => {
-				restart_timers.delete(timer);
-				if (shutting_down) return;
-				spawn_worker(role);
-			}, restart_delay);
-			restart_timers.add(timer);
 			}
 			// If shutting down and all workers have exited, exit immediately
 			if (shutting_down && workers.size === 0) {
@@ -479,8 +504,13 @@ if (is_primary) {
 		});
 	}
 
-	for (let i = 0; i < io_count; i++) spawn_worker('io');
-	for (let i = 0; i < compute_count; i++) spawn_worker('compute');
+	// One stable slot per desired worker. Registering every slot up front lets
+	// the supervisor account for it (desired() / reconcile()) before its first
+	// worker reports, and a respawn always targets the same { role, index }.
+	for (let i = 0; i < io_count; i++) restartSupervisor.register({ role: 'io', index: i });
+	for (let i = 0; i < compute_count; i++) restartSupervisor.register({ role: 'compute', index: i });
+	for (let i = 0; i < io_count; i++) spawn_worker({ role: 'io', index: i });
+	for (let i = 0; i < compute_count; i++) spawn_worker({ role: 'compute', index: i });
 
 	// --- TLS certificate hot-reload (cluster primary half) ---
 	// The primary watches the cert directory and, on a renewed cert (certbot /
@@ -541,9 +571,10 @@ if (is_primary) {
 		sdNotify.disarmWatchdog();
 		console.log(`Primary received ${reason}, shutting down ${workers.size} workers...`);
 
-		// Cancel all pending worker restarts so we don't spawn during shutdown
-		for (const t of restart_timers) clearTimer(t);
-		restart_timers.clear();
+		// Cancel all pending worker restarts so we don't spawn during shutdown.
+		// (The supervisor also re-checks shutting_down when a timer fires, so a
+		// respawn already in flight is a no-op even if it races this.)
+		restartSupervisor.stopAll();
 
 		// Stop the cert-directory watcher so it never holds the loop or fires a
 		// broadcast at exiting workers.
