@@ -8,6 +8,7 @@ import { monotonicNow, setTimer, setIntervalTimer, clearTimer } from './runtime.
 import { createRelayRingBuffer, RingWriter, RingReader, decodeRelayFrame } from './relay-ring.js';
 import { createStateHashDetector } from './state-hash-detector.js';
 import { createRestartSupervisor } from './restart-supervisor.js';
+import { classifyWorkerHealth, resolveBootTimeout, routeWorkerMessage } from './worker-watchdog.js';
 import { readFdLimits, fdPreflightWarning } from './utils/fd-limit.js';
 import { createSdNotify } from './utils/sd-notify.js';
 
@@ -163,7 +164,7 @@ if (is_primary) {
 	 * Per-worker metadata. `role` is the worker's assigned role ('io' | 'compute')
 	 * and `slot` is its stable `{ role, index }` identity, both retained so a
 	 * respawn re-creates the SAME role in the SAME slot after a crash.
-	 * @typedef {{ descriptor: any, lastHeartbeat: number, role: 'io' | 'compute', slot: { role: 'io' | 'compute', index: number } }} WorkerMeta
+	 * @typedef {{ descriptor: any, lastHeartbeat: number, spawnedAt: number, ready: boolean, role: 'io' | 'compute', slot: { role: 'io' | 'compute', index: number } }} WorkerMeta
 	 */
 
 	/** @type {Map<import('node:worker_threads').Worker, WorkerMeta>} */
@@ -213,6 +214,34 @@ if (is_primary) {
 	const HEARTBEAT_INTERVAL_MS = 10000;
 	const HEARTBEAT_TIMEOUT_MS = 30000;
 
+	// Boot-deadline watchdog. A worker whose `init` hook wedges (a sync infinite
+	// loop or a native hang) never confirms ready, so the steady-state timeout
+	// above - which only judges a worker that HAS confirmed ready - never
+	// escalates it and its cluster slot is stranded (permanent capacity loss).
+	// The boot deadline closes that window: a still-booting worker whose liveness
+	// clock goes stale past it is escalated and respawned via the normal exit
+	// path. A slow-but-healthy init keeps acking the heartbeats (its pre-start
+	// liveness responder answers while the event loop is free), so its clock never
+	// goes stale - only a genuine no-ack wedge reaches the deadline. Kept distinct
+	// from HEARTBEAT_TIMEOUT_MS and generously defaulted so a long-but-legitimate
+	// warmup (cron registration, dataset load, external connections) is never
+	// false-killed into a restart loop. 0 disables it (a wedged boot then stays
+	// stranded, the pre-fix behavior); a sync-blocking warmup that never yields the
+	// event loop cannot ack and so still reads as wedged (a documented non-goal).
+	// Clamped to at least two heartbeat intervals: a worker cannot ack before its
+	// first ping (one interval after spawn) and its liveness clock then trails by up
+	// to one interval between pings, so a shorter deadline could false-kill a healthy
+	// slow boot at a sweep boundary. Two intervals leaves a full interval of headroom.
+	const WORKER_BOOT_TIMEOUT_FLOOR_MS = 2 * HEARTBEAT_INTERVAL_MS;
+	const _boot_timeout_raw = parseIntEnv('WORKER_BOOT_TIMEOUT_MS', env('WORKER_BOOT_TIMEOUT_MS', '60000'), 0);
+	const { bootTimeoutMs: WORKER_BOOT_TIMEOUT_MS, clamped: _boot_timeout_clamped } = resolveBootTimeout(_boot_timeout_raw, WORKER_BOOT_TIMEOUT_FLOOR_MS);
+	if (_boot_timeout_clamped) {
+		console.warn(
+			`[primary] WORKER_BOOT_TIMEOUT_MS=${_boot_timeout_raw}ms is below the ${WORKER_BOOT_TIMEOUT_FLOOR_MS}ms floor ` +
+			`(two heartbeat intervals) and would risk false-killing a healthy slow boot; using ${WORKER_BOOT_TIMEOUT_FLOOR_MS}ms.`
+		);
+	}
+
 	// A worker thread holds uWS's raw libuv socket handles, so `worker.terminate()`
 	// on a worker that still holds a uWS App aborts the WHOLE process
 	// (`uv_loop_close() while having open handles`). Instead, ask the worker to
@@ -260,10 +289,15 @@ if (is_primary) {
 		if (shutting_down) return;
 		const t = monotonicNow();
 		for (const [worker, meta] of workers) {
-			if (meta.lastHeartbeat > 0 && t - meta.lastHeartbeat > HEARTBEAT_TIMEOUT_MS) {
+			// A ready worker is judged by the tight steady-state timeout; a
+			// still-booting one by the generous, separate boot deadline (regimes
+			// flipped at ready/descriptor, not at the first ack). A slow-but-healthy
+			// init acks throughout boot via its pre-start liveness responder, so its
+			// clock stays fresh under either timeout - only a genuine wedge goes stale.
+			const verdict = classifyWorkerHealth(meta, t, { steadyTimeoutMs: HEARTBEAT_TIMEOUT_MS, bootTimeoutMs: WORKER_BOOT_TIMEOUT_MS });
+			if (verdict.escalate) {
 				console.error(
-					`[primary] Worker ${worker.threadId} unresponsive ` +
-					`(no heartbeat ack in ${HEARTBEAT_TIMEOUT_MS}ms), asking it to exit...`
+					`[primary] Worker ${worker.threadId} (${meta.slot.role}#${meta.slot.index}) ${verdict.reason}, asking it to exit...`
 				);
 				requestWorkerExit(worker, 1);
 			} else {
@@ -297,8 +331,10 @@ if (is_primary) {
 			workerData: { mode: cluster_mode, role, app: app_worker_data, relayRing: relay_ring }
 		});
 		// lastHeartbeat starts at 0  - worker is confirmed alive only after the
-		// first 'descriptor' / 'ready' / 'heartbeat-ack' message arrives.
-		const meta = { descriptor: null, lastHeartbeat: 0, role, slot, ringWriter: null, ringReader: null };
+		// first 'descriptor' / 'ready' / 'heartbeat-ack' message arrives. spawnedAt
+		// anchors the boot deadline before the first ack; ready flips the watchdog
+		// from the boot regime to the steady-state regime at descriptor/ready.
+		const meta = { descriptor: null, lastHeartbeat: 0, spawnedAt: monotonicNow(), ready: false, role, slot, ringWriter: null, ringReader: null };
 		if (relay_ring !== null) {
 			meta.ringWriter = new RingWriter(relay_ring.down);
 			// Forward each inbound frame VERBATIM to every other worker's ring -
@@ -330,6 +366,7 @@ if (is_primary) {
 			if (msg.type === 'descriptor' && cluster_mode === 'acceptor') {
 				meta.descriptor = msg.descriptor;
 				meta.lastHeartbeat = monotonicNow();
+				meta.ready = true;
 				acceptorApp.addChildAppDescriptor(msg.descriptor);
 				console.log(`Worker thread ${worker.threadId} registered`);
 				// Worker started successfully - reset ONLY this slot's backoff and
@@ -355,6 +392,7 @@ if (is_primary) {
 				// worker (any mode) reports 'ready' once its init hook has resolved. Both
 				// mark the worker confirmed-alive and reset the crash-restart backoff.
 				meta.lastHeartbeat = monotonicNow();
+				meta.ready = true;
 				if (msg.role === 'compute') console.log(`Compute worker ${worker.threadId} ready`);
 				else {
 					console.log(`Worker thread ${worker.threadId} listening on :${port}`);
@@ -639,82 +677,10 @@ if (is_primary) {
 		setFatalSink({ exit: exitWorkerClean });
 	}
 
-	if (isMainThread) {
-		// Single-process mode (no clustering). Awaiting `start()` lets the
-		// hooks.ws `init` hook run to completion (cron registration, warmup
-		// tasks, etc.) before this entry script returns. A throwing init
-		// surfaces as an unhandled promise rejection and crashes the
-		// process - which is the right behavior for boot failure.
-		await start(host, port);
-		sdReadyOnce();
-	} else {
-		// Worker thread startup depends on role, then clustering mode.
-		const role = workerData?.role ?? 'io';
-		if (role === 'compute') {
-			// Compute worker: fire the app's `init` hook (which receives
-			// `workerData.app` - the shared memory seeded in primaryInit) but never
-			// bind a listen socket, so a latency-critical tick pays no connection-I/O
-			// jitter. `ready` is posted once init resolves, in any cluster mode.
-			await start(host, port, { listen: false });
-			parentPort.postMessage({ type: 'ready', role });
-		} else if (workerData?.mode === 'reuseport') {
-			// Reuseport: each worker listens on the shared port directly.
-			// The kernel distributes incoming connections via SO_REUSEPORT.
-			// `init` fires once per worker; `ready` is posted only after
-			// the hook resolves so the primary's worker-ready bookkeeping
-			// matches actual readiness.
-			await start(host, port);
-			parentPort.postMessage({ type: 'ready', role });
-		} else {
-			// Acceptor: register with the main thread's acceptor app
-			parentPort.postMessage({ type: 'descriptor', descriptor: getDescriptor() });
-		}
-
-		// Shared-memory relay rings (when the primary enabled them): outbound
-		// relays ride the up ring (see handler/relay.js), and inbound frames -
-		// forwarded verbatim by the primary from a sibling worker - decode here
-		// into the exact dispatch the postMessage path performs. The postMessage
-		// cases below stay live as the fallback and for control traffic.
-		if (workerData?.relayRing) {
-			setRelayRingWriter(new RingWriter(workerData.relayRing.up));
-			const relayReader = new RingReader(workerData.relayRing.down, (frame) => {
-				const msg = decodeRelayFrame(frame);
-				if (msg === null) return;
-				if (msg.type === 'publish') {
-					relayPublish(msg.topic, msg.envelope, msg.compress, msg.seq, msg.capability, msg.event, msg.data);
-				} else if (msg.type === 'publish-batched') {
-					relayPublishBatched(msg.events, msg.compress);
-				}
-			});
-			relayReader.start();
-		}
-
-		parentPort.on('message', (msg) => {
-			if (msg.type === 'shutdown') {
-				graceful_shutdown('shutdown');
-			} else if (msg.type === 'publish') {
-				relayPublish(msg.topic, msg.envelope, msg.compress, msg.seq, msg.capability, msg.event, msg.data);
-			} else if (msg.type === 'publish-batched') {
-				relayPublishBatched(msg.events, msg.compress);
-			} else if (msg.type === 'heartbeat') {
-				// Respond immediately  - primary uses acks to detect stuck workers.
-				parentPort.postMessage({ type: 'heartbeat-ack' });
-			} else if (msg.type === 'tls-reload') {
-				// Primary detected a renewed cert on disk and broadcast a reload.
-				// Swap this worker app's SNI context in place (validated before the
-				// swap; a bad cert keeps the previous one). No-op unless is_tls +
-				// ssl_watch, so a non-TLS or opted-out worker ignores it.
-				reloadTls();
-			} else if (msg.type === 'terminate') {
-				// Primary asked us to close the uWS App and exit (heartbeat timeout,
-				// state divergence, or shutdown timeout). exitWorkerClean avoids the
-				// worker-teardown abort; a genuinely wedged worker never reaches this
-				// and the primary SIGKILLs the process as a fallback.
-				exitWorkerClean(typeof msg.code === 'number' ? msg.code : 0);
-			}
-		});
-	}
-
+	// Shutdown is shared by single-process (OS signals) and worker-thread (primary
+	// 'shutdown' message) modes. The worker's message handler is registered BEFORE
+	// `await start()` below and can dispatch a buffered shutdown, so this is
+	// declared ahead of both branches rather than after them.
 	let shutting_down = false;
 
 	/** @param {'SIGINT' | 'SIGTERM' | 'shutdown'} reason */
@@ -749,6 +715,118 @@ if (is_primary) {
 		process.emit('sveltekit:shutdown', reason);
 		console.log(`${prefix}Shutdown complete.`);
 		exitWorkerClean(0);
+	}
+
+	if (isMainThread) {
+		// Single-process mode (no clustering). Awaiting `start()` lets the
+		// hooks.ws `init` hook run to completion (cron registration, warmup
+		// tasks, etc.) before this entry script returns. A throwing init
+		// surfaces as an unhandled promise rejection and crashes the
+		// process - which is the right behavior for boot failure.
+		await start(host, port);
+		sdReadyOnce();
+	} else {
+		// Worker thread startup depends on role, then clustering mode.
+		const role = workerData?.role ?? 'io';
+
+		// Worker message dispatch, registered BEFORE `await start()` so a worker
+		// still running - or wedged in - its `init` hook still answers the primary's
+		// liveness heartbeats. A healthy async init keeps its event loop free and
+		// keeps acking, so the primary tells it apart from a wedge (a blocked loop
+		// that never acks) and never boot-kills it; a genuine wedge stops acking and
+		// the primary's boot-deadline watchdog escalates the slot. Until the handler
+		// graph is live (`booted`), ONLY heartbeat (liveness) and terminate are
+		// actioned - relay and other control traffic is buffered and replayed in
+		// arrival order once boot completes, never dispatched into a half-built graph.
+		let booted = false;
+		/** @type {any[]} */
+		const boot_backlog = [];
+		function dispatchControl(msg) {
+			if (msg.type === 'shutdown') {
+				graceful_shutdown('shutdown');
+			} else if (msg.type === 'publish') {
+				relayPublish(msg.topic, msg.envelope, msg.compress, msg.seq, msg.capability, msg.event, msg.data);
+			} else if (msg.type === 'publish-batched') {
+				relayPublishBatched(msg.events, msg.compress);
+			} else if (msg.type === 'tls-reload') {
+				// Primary detected a renewed cert on disk and broadcast a reload.
+				// Swap this worker app's SNI context in place (validated before the
+				// swap; a bad cert keeps the previous one). No-op unless is_tls +
+				// ssl_watch, so a non-TLS or opted-out worker ignores it.
+				reloadTls();
+			}
+		}
+		parentPort.on('message', (msg) => {
+			const action = routeWorkerMessage(msg.type, booted);
+			if (action === 'ack') {
+				// Liveness ack - answered even mid-init (this handler is live before
+				// `await start()`) so a slow-but-healthy boot is never mistaken for a
+				// wedge. The primary advances its heartbeat clock on any inbound
+				// message, so this doubles as the boot-liveness signal.
+				parentPort.postMessage({ type: 'heartbeat-ack' });
+			} else if (action === 'terminate') {
+				// Primary asked us to close the uWS App and exit (steady-state or
+				// boot-deadline timeout, state divergence, or shutdown timeout).
+				// Honored during init too so a boot-deadline escalation lands cleanly;
+				// a genuinely wedged loop cannot process it and the primary SIGKILLs
+				// the whole process as the fallback. exitWorkerClean avoids the
+				// worker-teardown abort.
+				exitWorkerClean(typeof msg.code === 'number' ? msg.code : 0);
+			} else if (action === 'dispatch') {
+				dispatchControl(msg);
+			} else {
+				// buffer: handler graph not built yet - hold relay / shutdown /
+				// tls-reload until boot completes, then replay in arrival order.
+				boot_backlog.push(msg);
+			}
+		});
+
+		if (role === 'compute') {
+			// Compute worker: fire the app's `init` hook (which receives
+			// `workerData.app` - the shared memory seeded in primaryInit) but never
+			// bind a listen socket, so a latency-critical tick pays no connection-I/O
+			// jitter. `ready` is posted once init resolves, in any cluster mode.
+			await start(host, port, { listen: false });
+			parentPort.postMessage({ type: 'ready', role });
+		} else if (workerData?.mode === 'reuseport') {
+			// Reuseport: each worker listens on the shared port directly.
+			// The kernel distributes incoming connections via SO_REUSEPORT.
+			// `init` fires once per worker; `ready` is posted only after
+			// the hook resolves so the primary's worker-ready bookkeeping
+			// matches actual readiness.
+			await start(host, port);
+			parentPort.postMessage({ type: 'ready', role });
+		} else {
+			// Acceptor: register with the main thread's acceptor app. This path does
+			// not await start() before registering, so it is never exposed to the
+			// init-wedge window the boot deadline covers.
+			parentPort.postMessage({ type: 'descriptor', descriptor: getDescriptor() });
+		}
+
+		// Handler graph is live: drain any relay / control traffic that arrived
+		// during init, in arrival order, then switch to live dispatch.
+		booted = true;
+		for (const msg of boot_backlog) dispatchControl(msg);
+		boot_backlog.length = 0;
+
+		// Shared-memory relay rings (when the primary enabled them): outbound
+		// relays ride the up ring (see handler/relay.js), and inbound frames -
+		// forwarded verbatim by the primary from a sibling worker - decode here
+		// into the exact dispatch the postMessage path performs. Started after the
+		// graph is live; the postMessage path above is the fallback / control lane.
+		if (workerData?.relayRing) {
+			setRelayRingWriter(new RingWriter(workerData.relayRing.up));
+			const relayReader = new RingReader(workerData.relayRing.down, (frame) => {
+				const msg = decodeRelayFrame(frame);
+				if (msg === null) return;
+				if (msg.type === 'publish') {
+					relayPublish(msg.topic, msg.envelope, msg.compress, msg.seq, msg.capability, msg.event, msg.data);
+				} else if (msg.type === 'publish-batched') {
+					relayPublishBatched(msg.events, msg.compress);
+				}
+			});
+			relayReader.start();
+		}
 	}
 
 	if (isMainThread) {

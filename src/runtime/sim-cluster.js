@@ -15,6 +15,7 @@
 
 import { setTimer, setIntervalTimer, clearTimer, monotonicNow } from './runtime.js';
 import { computeStateHash } from './invariants.js';
+import { classifyWorkerHealth } from './worker-watchdog.js';
 
 // The supervisor constants, verbatim from src/runtime/index.js so the modeled budget
 // matches production exactly.
@@ -22,6 +23,7 @@ const RESTART_DELAY_MAX = 5000;
 const RESTART_MAX_ATTEMPTS = 50;
 const HEARTBEAT_INTERVAL_MS = 10000;
 const HEARTBEAT_TIMEOUT_MS = 30000;
+const WORKER_BOOT_TIMEOUT_MS = 60000;
 
 // - The per-worker relay sender adapter --------------------------------------
 
@@ -224,9 +226,10 @@ function withPayload(frame, payload) {
 export function createSupervisor(opts) {
 	const mode = opts.mode === 'acceptor' ? 'acceptor' : 'reuseport';
 	const maxAttempts = opts.maxAttempts ?? RESTART_MAX_ATTEMPTS;
+	const bootTimeoutMs = opts.bootTimeoutMs ?? WORKER_BOOT_TIMEOUT_MS;
 	const hooks = opts.hooks;
 
-	/** @type {Map<number, { id: number, state: 'starting'|'ready'|'dead', lastHeartbeat: number, wedged: boolean }>} */
+	/** @type {Map<number, { id: number, state: 'starting'|'ready'|'dead', lastHeartbeat: number, spawnedAt: number, wedged: boolean, bootWedged: boolean }>} */
 	const metas = new Map();
 	let restart_delay = 0;
 	let restart_attempts = 0;
@@ -239,7 +242,7 @@ export function createSupervisor(opts) {
 	const restartTimers = new Set();
 	let shuttingDown = false;
 	let listenPaused = false;
-	const metrics = { restarts: 0, flaps: 0, wedges: 0 };
+	const metrics = { restarts: 0, flaps: 0, wedges: 0, initWedges: 0 };
 
 	function liveReady() {
 		let n = 0;
@@ -248,7 +251,7 @@ export function createSupervisor(opts) {
 	}
 
 	function addWorker(id) {
-		metas.set(id, { id, state: 'starting', lastHeartbeat: 0, wedged: false });
+		metas.set(id, { id, state: 'starting', lastHeartbeat: 0, spawnedAt: monotonicNow(), wedged: false, bootWedged: false });
 	}
 	/** Mark a (freshly spawned) worker ready - the budget-reset edge (index.js resets the
 	 *  restart counters when a worker posts 'ready' / 'descriptor'). */
@@ -257,6 +260,7 @@ export function createSupervisor(opts) {
 		if (!m) return;
 		m.state = 'ready';
 		m.wedged = false;
+		m.bootWedged = false;
 		m.lastHeartbeat = monotonicNow();
 		restart_delay = 0;
 		restart_attempts = 0;
@@ -324,22 +328,44 @@ export function createSupervisor(opts) {
 		metrics.wedges++;
 	}
 
-	// The heartbeat scan (unref'd interval, mirror index.js's heartbeat monitor). Each tick:
-	// a healthy ready worker refreshes its stamp (models the immediate ack); a
-	// wedged worker does not, so once it crosses HEARTBEAT_TIMEOUT_MS it is
-	// terminated and routed through the exit/restart path.
+	/** Fault action: force a worker into a re-boot whose `init` hook wedges - it regresses
+	 *  to 'starting' and stops acking, so it never reaches ready. Models the exact class
+	 *  the boot-deadline watchdog exists for: the steady-state timeout never fires (it only
+	 *  judges a ready worker) and the per-slot restart supervisor leaves a still-booting slot
+	 *  alone, so before the boot deadline such a slot was stranded forever. The scan escalates
+	 *  it after the boot deadline and the respawn boots cleanly. */
+	function initWedge(id) {
+		const m = metas.get(id);
+		if (!m || m.state === 'dead') return;
+		m.state = 'starting';
+		m.bootWedged = true;
+		m.spawnedAt = monotonicNow();
+		m.lastHeartbeat = 0;
+		metrics.initWedges++;
+	}
+
+	// The heartbeat scan (unref'd interval, mirror index.js's heartbeat monitor). Each tick
+	// models each worker's liveness ack, then routes the escalate decision through the SAME
+	// classifyWorkerHealth index.js ships. A healthy worker - ready, or a slow-but-healthy
+	// boot answering via its pre-start responder - refreshes its stamp; a wedged worker
+	// (steady-state wedge, or an init that blocks the event loop) does not, so its clock goes
+	// stale and it is terminated and routed through the exit/restart path.
 	const heartbeat = setIntervalTimer(() => {
 		if (shuttingDown) return;
 		const t = monotonicNow();
 		for (const m of metas.values()) {
-			if (m.state !== 'ready') continue;
-			if (m.wedged) {
-				if (m.lastHeartbeat > 0 && t - m.lastHeartbeat > HEARTBEAT_TIMEOUT_MS) {
-					hooks.terminate(m.id);
-					workerExit(m.id);
-				}
-			} else {
-				m.lastHeartbeat = t;
+			// A dead worker is already on the respawn path; only a ready (steady regime)
+			// or a still-booting (boot regime) worker is judged here.
+			if (m.state === 'dead') continue;
+			if (!m.wedged && !m.bootWedged) m.lastHeartbeat = t;
+			const verdict = classifyWorkerHealth(
+				{ ready: m.state === 'ready', lastHeartbeat: m.lastHeartbeat, spawnedAt: m.spawnedAt },
+				t,
+				{ steadyTimeoutMs: HEARTBEAT_TIMEOUT_MS, bootTimeoutMs }
+			);
+			if (verdict.escalate) {
+				hooks.terminate(m.id);
+				workerExit(m.id);
 			}
 		}
 	}, HEARTBEAT_INTERVAL_MS);
@@ -358,6 +384,7 @@ export function createSupervisor(opts) {
 		markReady,
 		flap,
 		wedge,
+		initWedge,
 		shutdown,
 		get listenPaused() { return listenPaused; },
 		metrics,

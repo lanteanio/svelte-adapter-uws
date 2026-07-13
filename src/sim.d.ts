@@ -64,6 +64,9 @@ export interface SimClusterApi {
 	flapWorker(id: number, opts?: { recover?: boolean }): void;
 	/** Stop a worker acking heartbeats so the supervisor terminates it after the timeout. */
 	wedgeWorker(id: number): void;
+	/** Force a worker into a re-boot whose `init` hook wedges - it never reaches ready,
+	 *  so the boot-deadline watchdog (not the steady-state timeout) escalates it. */
+	initWedgeWorker(id: number): void;
 	advance(rounds?: number): Promise<void>;
 	/** Advance the virtual clock by `ms`, firing time-driven supervisor behaviour. */
 	advanceTime(ms: number): Promise<void>;
@@ -82,6 +85,10 @@ export interface SimConfig {
 	workers?: number;
 	/** Cluster topology when `workers` > 1. Defaults to 'reuseport'. */
 	clusterMode?: 'reuseport' | 'acceptor';
+	/** Boot-deadline (ms) for the modeled supervisor: how long a worker may run its
+	 *  `init` hook before a non-acking boot is escalated. Defaults to 60000; `0`
+	 *  disables it (mirrors the WORKER_BOOT_TIMEOUT_MS env var). Multi-worker only. */
+	workerBootTimeoutMs?: number;
 	/** Fault spec applied to the cross-worker relay (IPC) channel, independent of
 	 *  the per-worker `faults` (the client wire channel). Multi-worker only. */
 	relayFaults?: SimFaults;

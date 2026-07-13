@@ -223,6 +223,66 @@ describe('runSim multi-worker - restart-budget outcomes', () => {
 		expect(r.fatals).toEqual([]);
 		expect((await replaySim(r)).reproduced).toBe(true);
 	});
+
+	it('an init-wedged worker (never reaches ready) is escalated by the boot deadline, then recovers', async () => {
+		// The steady-state timeout only judges a ready worker and the per-slot restart
+		// supervisor leaves a still-booting slot alone, so before the boot deadline a
+		// worker wedged during its init hook stayed 'starting' forever - permanent
+		// capacity loss. The boot deadline escalates it and the respawn boots cleanly.
+		const r = await runSim({
+			workers: 2, seed: 'init-wedge',
+			scenario: async (api) => {
+				api.worker(0).connect();
+				await api.advance();
+				api.initWedgeWorker(1);
+				await api.advanceTime(75000);   // past WORKER_BOOT_TIMEOUT_MS (60s)
+			}
+		});
+		expect(r.metrics.initWedges).toBe(1);
+		expect(r.metrics.restarts).toBe(1);    // boot-deadline escalation -> respawn
+		expect(r.metrics.workersLive).toBe(2); // slot recovered, no permanent capacity loss
+		expect(r.fatals).toEqual([]);
+		expect((await replaySim(r)).reproduced).toBe(true);
+	});
+
+	it('a still-booting worker under the boot deadline is left alone (pins the pre-deadline boundary)', async () => {
+		// Same init-wedge, but time only advances partway to the 60s boot deadline: the
+		// worker must still be booting, not yet escalated. Pins the lower boundary of
+		// the deadline; the full slow-but-healthy (keeps-acking) guarantee is proven at
+		// the unit layer in worker-boot-deadline.test.js.
+		const r = await runSim({
+			workers: 2, seed: 'init-wedge-underdeadline',
+			scenario: async (api) => {
+				api.worker(0).connect();
+				await api.advance();
+				api.initWedgeWorker(1);
+				await api.advanceTime(30000);   // under WORKER_BOOT_TIMEOUT_MS (60s)
+			}
+		});
+		expect(r.metrics.initWedges).toBe(1);
+		expect(r.metrics.restarts).toBe(0);    // not yet escalated
+		expect(r.fatals).toEqual([]);
+		expect((await replaySim(r)).reproduced).toBe(true);
+	});
+
+	it('WORKER_BOOT_TIMEOUT_MS=0 disables the boot deadline - a wedged boot is left stranded', async () => {
+		// The documented opt-out: with the deadline disabled the pre-fix behavior
+		// returns (a wedged boot is never escalated) even long past the default 60s.
+		// Guards the `bootTimeoutMs > 0` gate in classifyWorkerHealth.
+		const r = await runSim({
+			workers: 2, seed: 'init-wedge-disabled', workerBootTimeoutMs: 0,
+			scenario: async (api) => {
+				api.worker(0).connect();
+				await api.advance();
+				api.initWedgeWorker(1);
+				await api.advanceTime(120000);  // well past the default deadline - still ignored
+			}
+		});
+		expect(r.metrics.initWedges).toBe(1);
+		expect(r.metrics.restarts).toBe(0);    // deadline disabled: never escalated
+		expect(r.fatals).toEqual([]);
+		expect((await replaySim(r)).reproduced).toBe(true);
+	});
 });
 
 describe('runSim multi-worker - acceptor mode', () => {
