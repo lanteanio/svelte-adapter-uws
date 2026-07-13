@@ -66,10 +66,14 @@ describeMaybe('DBOPS-02: acceptor workers run init before serving', () => {
 		expect(built, 'fixture build must succeed for this integration test').toBe(true);
 
 		const marker = '__ACCEPTOR_INIT_RAN__';
-		const port = 41800 + Math.floor((process.pid % 200)); // spread across parallel runners
 		let out = '';
+		// Both signals must appear: the init marker (an I/O worker ran init) AND the
+		// primary reaching the serving state. Cross-thread stdout ordering is
+		// unreliable (worker output buffers through the primary), so wait for both
+		// rather than race them on the first-seen line.
+		const ready = (s) => s.includes(marker) && s.includes('Acceptor listening');
 
-		const seen = await new Promise((resolve) => {
+		const ok = await new Promise((resolve) => {
 			child = spawn(process.execPath, [builtEntry], {
 				cwd: fixtureDir,
 				stdio: ['ignore', 'pipe', 'pipe'],
@@ -78,25 +82,24 @@ describeMaybe('DBOPS-02: acceptor workers run init before serving', () => {
 					CLUSTER_WORKERS: '2',
 					CLUSTER_MODE: 'acceptor',
 					HOST: '127.0.0.1',
-					PORT: String(port),
+					// PORT=0 binds an ephemeral port - the test never connects a client
+					// (it only watches stdout), so this avoids any parallel-runner
+					// port collision.
+					PORT: '0',
 					ACCEPTOR_INIT_PROBE: '1'
 				}
 			});
 			const scan = (buf) => {
 				out += buf.toString();
-				// Resolve as soon as at least one I/O worker has run its init hook.
-				if (out.includes(marker)) resolve(true);
+				if (ready(out)) resolve(true);
 			};
 			child.stdout.on('data', scan);
 			child.stderr.on('data', scan);
-			child.on('exit', () => resolve(out.includes(marker)));
-			// Overall bound: pre-fix the marker never appears, so time out and fail.
-			setTimeout(() => resolve(out.includes(marker)), 15000);
+			child.on('exit', () => resolve(ready(out)));
+			// Pre-fix the marker never appears, so time out and fail with the output.
+			setTimeout(() => resolve(ready(out)), 15000);
 		});
 
-		expect(seen, `acceptor I/O worker never ran init.\n--- server output ---\n${out}`).toBe(true);
-		// The primary only listens once a worker has registered, so a healthy boot
-		// also reached the serving state - init ran as part of that startup, not after.
-		expect(out).toContain('Acceptor listening');
+		expect(ok, `acceptor I/O worker did not run init before the server began serving.\n--- server output ---\n${out}`).toBe(true);
 	}, 30000);
 });
