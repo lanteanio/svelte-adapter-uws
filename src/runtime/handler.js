@@ -42,6 +42,7 @@ import { bumpIn, bumpOut, maybeWarnTopicRegistry, BATCH_FRAME_WARN_BYTES, warnLa
 import { hasRef, runSubscribeHook, runSubscribeBatchHook, runUserSubscribeGate, hasUserSubscribeHook, sendSubscribed, sendSubscribeDenied, flushCoalescedFor } from './handler/subscribe-hooks.js';
 import { ensureWireId, ensureWireState, wireStatePoisoned, poisonWireState, detachWireStates } from './handler/wire-state.js';
 import { joinSharedCohort, leaveSharedCohort } from './handler/cohort.js';
+import { beginResumeCapture, discardResumeCapture, flushResumeTopic, coveredSeqFor } from './handler/resume-buffer.js';
 import { releaseSharedWireId } from './handler/shared-wire-id.js';
 import { setCohortHooks } from './utils.js';
 import { startPostureExport } from './utils/posture-export.js';
@@ -1478,18 +1479,34 @@ if (WS_ENABLED) {
 					// the `resume` frame uses, BEFORE subscribing to live - so the __replay
 					// frames precede the first live frame. No-ops when no replay backend is
 					// mounted (like `resume`).
+					// A recovery barrier spans the resume await: a live-frame buffer for
+					// this topic opens BEFORE the hook runs, every fan-out site holds
+					// frames in it during the await, and the held frames flush in order
+					// once live membership is installed - so a publish landing inside an
+					// async resume window (past the backend read, before ws.subscribe) is
+					// delivered rather than silently lost. A synchronous in-memory resume
+					// never yields, so the buffer stays empty and this is a no-op.
+					let _cap = null;
+					let _covered;
 					if (msg.recover && typeof msg.recover === 'object' && Number.isInteger(msg.recover.offset) && msg.recover.offset >= 0 && wsModule.resume) {
 						const _rEpochs = Number.isInteger(msg.recover.epoch) ? { [msg.topic]: msg.recover.epoch } : undefined;
+						_cap = beginResumeCapture([msg.topic], ws);
 						try {
-							await wsModule.resume(ws, { sessionId: ws.getUserData()[WS_SESSION_ID], lastSeenSeqs: { [msg.topic]: msg.recover.offset }, lastSeenEpochs: _rEpochs, platform: ws.getUserData()[WS_PLATFORM] });
+							_covered = await wsModule.resume(ws, { sessionId: ws.getUserData()[WS_SESSION_ID], lastSeenSeqs: { [msg.topic]: msg.recover.offset }, lastSeenEpochs: _rEpochs, platform: ws.getUserData()[WS_PLATFORM] });
 						} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
-						// Re-check after the await: a concurrent subscribe may have added it.
-						if (subs.has(msg.topic)) { sendSubscribed(ws, msg.topic, ref); return; }
+						// Re-check after the await: a concurrent subscribe may have added
+						// it, so the client is already live and the buffered frames would
+						// be duplicates - discard them.
+						if (subs.has(msg.topic)) { discardResumeCapture(_cap); sendSubscribed(ws, msg.topic, ref); return; }
 					}
 					try { ws.subscribe(msg.topic); }
-					catch { counters.closedWsAborts++; return; }
+					catch { if (_cap) discardResumeCapture(_cap); counters.closedWsAborts++; return; }
 					subs.add(msg.topic);
 					counters.totalSubscriptions++;
+					// Live membership is installed: flush any frames held during the resume
+					// window to this connection, in order, skipping what the resume already
+					// covered, before the ack.
+					if (_cap) flushResumeTopic(_cap, msg.topic, coveredSeqFor(_covered, msg.topic));
 					// A topic already promoted to shared fan-out cohorts this new joiner
 					// into the right cohort (announcing the server-wide id now) so the
 					// next cohort-split publish reaches it. No-op for an ordinary topic.
@@ -1576,6 +1593,12 @@ if (WS_ENABLED) {
 					// (so __replay frames precede the first live frame for each recovered topic).
 					let _recoverSeqs = null;
 					let _recoverEpochs = null;
+					// Recovery barrier for the batch cutover: one live-frame buffer per
+					// recovered topic, opened before the shared resume await and flushed
+					// per topic after that topic subscribes (see the single-subscribe
+					// path). Empty behind a synchronous resume.
+					let _batchCap = null;
+					let _batchCovered;
 					if (msg.recover && typeof msg.recover === 'object') {
 						for (let i = 0; i < valid.length; i++) {
 							const _t = valid[i];
@@ -1590,8 +1613,9 @@ if (WS_ENABLED) {
 							}
 						}
 						if (_recoverSeqs !== null && wsModule.resume) {
+							_batchCap = beginResumeCapture(Object.keys(_recoverSeqs), ws);
 							try {
-								await wsModule.resume(ws, { sessionId: ws.getUserData()[WS_SESSION_ID], lastSeenSeqs: _recoverSeqs, lastSeenEpochs: _recoverEpochs || undefined, platform: ws.getUserData()[WS_PLATFORM] });
+								_batchCovered = await wsModule.resume(ws, { sessionId: ws.getUserData()[WS_SESSION_ID], lastSeenSeqs: _recoverSeqs, lastSeenEpochs: _recoverEpochs || undefined, platform: ws.getUserData()[WS_PLATFORM] });
 							} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
 						}
 					}
@@ -1622,9 +1646,22 @@ if (WS_ENABLED) {
 						subs.add(topic);
 						counters.totalSubscriptions++;
 						subscribed++;
+						// Flush frames held for this topic during the resume window, in
+						// order, before it starts receiving live frames.
+						if (_batchCap) {
+							// Batch: honor only a per-topic map watermark; a bare number is ambiguous
+							// across topics (it would apply one floor to all and could wrongly skip a
+							// lagging topic), so ignore it here - the pre-window floor covers that topic.
+							const _cov = (_batchCovered !== null && typeof _batchCovered === 'object') ? coveredSeqFor(_batchCovered, topic) : undefined;
+							flushResumeTopic(_batchCap, topic, _cov);
+						}
 						if (sharedTopics.has(topic)) joinSharedCohort(ws, userData, topic, sharedTopics.get(topic));
 						sendSubscribed(ws, topic, ref);
 					}
+					// Close any buffers not flushed above (a recovered topic that was
+					// denied, rate-limited, raced, or failed to subscribe) so none stays
+					// registered capturing frames.
+					if (_batchCap) discardResumeCapture(_batchCap);
 					if (wsDebug) console.log('[ws] subscribe-batch count=%d', subscribed);
 					return;
 				}
@@ -1737,6 +1774,14 @@ if (WS_ENABLED) {
 							console.error('[ws] resume hook threw:', err);
 						}
 					}
+					// No recovery barrier here: this frame installs no live membership (it
+					// never calls ws.subscribe), so there is no atomic cutover window in THIS
+					// branch to bridge. A client makes topics live through separate subscribe
+					// frames; when those carry a recover offset the barrier runs there. A
+					// legacy client that follows a standalone resume with plain (no-recover)
+					// subscribes has an unprotected window, but a buffer here cannot close it
+					// (it would have to span the client's separate round-trip), so that
+					// residual gap is a limitation of the standalone frame, not fixable here.
 					ws.send('{"type":"resumed"}', false, false);
 					bumpOut(ws, '{"type":"resumed"}');
 					if (wsDebug) console.log('[ws] resume sessionId=%s', msg.sessionId);

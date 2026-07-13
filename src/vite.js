@@ -138,6 +138,7 @@ export default function uws(options = {}) {
 		// carry the window so each client rolls its own dispatch delay.
 		const jitterMs = (options && typeof options.jitterMs === 'number' && options.jitterMs > 0) ? options.jitterMs : null;
 		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + (jitterMs == null ? '}' : ',"j":' + jitterMs + '}');
+		if (resumeBuffersV.size > 0) captureResumeFrameV(topic, envelope);
 		const excludeWs = (options && options.excludeWs) || null;
 		let sent = false;
 		for (const [ws, topics] of subscriptions) {
@@ -205,6 +206,10 @@ export default function uws(options = {}) {
 				topic: m.topic,
 				env: '{"topic":' + esc(m.topic) + ',"event":' + esc(m.event) + ',"data":' + JSON.stringify(m.data ?? null) + '}'
 			};
+		}
+		// A caps-less resuming connection receives these as per-event JSON.
+		if (resumeBuffersV.size > 0) {
+			for (let i = 0; i < events.length; i++) captureResumeFrameV(events[i].topic, events[i].env);
 		}
 		const slice = new Array(events.length);
 		for (let i = 0; i < events.length; i++) slice[i] = events[i].env;
@@ -354,6 +359,60 @@ export default function uws(options = {}) {
 	// publish on first platform.topic() call (see createTopicHelperCache).
 	/** @type {((name: string) => ReturnType<typeof createScopedTopic>) | null} */
 	let _topicHelperCache = null;
+	// --- Resume-cutover live-frame barrier (dev twin of handler/resume-buffer.js) ---
+	// Dev mode stamps no per-topic seq on ordinary publishes, so this holds the live
+	// frames a topic misses during an async resume await and flushes them on cutover
+	// WITHOUT seq dedup - it delivers the otherwise-lost frame (at-least-once in the
+	// rare async-backend race). The in-memory replay plugin resumes synchronously, so
+	// its buffer stays empty and this is a no-op.
+	const resumeBuffersV = new Map();
+	const MAX_RESUME_BUFFERED_FRAMES_V = 4096;
+	function captureResumeFrameV(topic, env) {
+		const set = resumeBuffersV.get(topic);
+		if (set === undefined) return;
+		for (const b of set) {
+			if (b.frames.length >= MAX_RESUME_BUFFERED_FRAMES_V) { b.overflow = true; continue; }
+			b.frames.push(env);
+		}
+	}
+	function beginResumeCaptureV(topics, ws) {
+		const entries = [];
+		for (const topic of topics) {
+			const buffer = { frames: [], overflow: false };
+			let set = resumeBuffersV.get(topic);
+			if (set === undefined) { set = new Set(); resumeBuffersV.set(topic, set); }
+			set.add(buffer);
+			entries.push({ topic, buffer });
+		}
+		return { ws, entries };
+	}
+	function unregisterResumeV(entry) {
+		const set = resumeBuffersV.get(entry.topic);
+		if (set === undefined) return;
+		set.delete(entry.buffer);
+		if (set.size === 0) resumeBuffersV.delete(entry.topic);
+	}
+	function discardResumeCaptureV(handle) {
+		for (const entry of handle.entries) unregisterResumeV(entry);
+	}
+	function flushResumeTopicV(handle, topic) {
+		const entry = handle.entries.find((e) => e.topic === topic);
+		if (entry === undefined) return;
+		const ws = handle.ws;
+		if (ws.readyState !== 1) { unregisterResumeV(entry); return; }
+		if (entry.buffer.overflow) {
+			// Overflow: signal truncation FIRST so the resync marker is not lost
+			// behind the partial flush (mirror of production).
+			ws.send('{"topic":' + JSON.stringify('__replay:' + topic) + ',"event":"truncated","data":null}');
+		}
+		for (const env of entry.buffer.frames) ws.send(env);
+		unregisterResumeV(entry);
+		// Drop the entry from the handle too, so a repeat flush for this topic is a
+		// no-op and the batch final-sweep discard only touches un-flushed topics.
+		const ei = handle.entries.indexOf(entry);
+		if (ei !== -1) handle.entries.splice(ei, 1);
+	}
+
 	const platform = {
 		publish,
 		publishBatched,
@@ -547,6 +606,7 @@ export default function uws(options = {}) {
 			// wrapper (server-side app code), mirroring publish()'s excludeWs.
 			const seq = stampSeq(undefined, gameTopicSeqs, topic);
 			const env = completeGameEnvelope('{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":', data, seq, id);
+			if (resumeBuffersV.size > 0) captureResumeFrameV(topic, env);
 			let delivered = 0;
 			for (const [ws, topics] of subscriptions) {
 				if (ws === senderWs || wsWrappers.get(ws) === senderWs) continue;
@@ -1387,15 +1447,18 @@ export default function uws(options = {}) {
 								}
 								// Resume-on-subscribe (mirror): gap-fill via the resume hook before
 								// subscribing to live, so __replay frames precede the first live frame.
+								let _cap = null;
 								if (msg.recover && typeof msg.recover === 'object' && Number.isInteger(msg.recover.offset) && msg.recover.offset >= 0 && userHandlers.resume) {
 									const _rEpochs = Number.isInteger(msg.recover.epoch) ? { [msg.topic]: msg.recover.epoch } : undefined;
+									_cap = beginResumeCaptureV([msg.topic], ws);
 									try {
 										await userHandlers.resume(wrapped, { sessionId: wrapped.getUserData()[WS_SESSION_ID], lastSeenSeqs: { [msg.topic]: msg.recover.offset }, lastSeenEpochs: _rEpochs, platform: wrapped.getUserData()[WS_PLATFORM] });
 									} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
-									if (subs.has(msg.topic)) { sendSubscribedV(ws, msg.topic, ref); return; }
+									if (subs.has(msg.topic)) { discardResumeCaptureV(_cap); sendSubscribedV(ws, msg.topic, ref); return; }
 								}
 								subscriptions.get(ws)?.add(msg.topic);
 								subs.add(msg.topic);
+								if (_cap) flushResumeTopicV(_cap, msg.topic);
 								sendSubscribedV(ws, msg.topic, ref);
 								return;
 							}
@@ -1481,6 +1544,7 @@ export default function uws(options = {}) {
 								// that passed the auth gate in one resume-hook call, before the subscribe loop.
 								let _recoverSeqs = null;
 								let _recoverEpochs = null;
+								let _batchCap = null;
 								if (msg.recover && typeof msg.recover === 'object') {
 									for (let i = 0; i < valid.length; i++) {
 										const _t = valid[i];
@@ -1495,6 +1559,7 @@ export default function uws(options = {}) {
 										}
 									}
 									if (_recoverSeqs !== null && userHandlers.resume) {
+									_batchCap = beginResumeCaptureV(Object.keys(_recoverSeqs), ws);
 										try {
 											await userHandlers.resume(wrapped, { sessionId: wrapped.getUserData()[WS_SESSION_ID], lastSeenSeqs: _recoverSeqs, lastSeenEpochs: _recoverEpochs || undefined, platform: wrapped.getUserData()[WS_PLATFORM] });
 										} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
@@ -1520,8 +1585,10 @@ export default function uws(options = {}) {
 									}
 									subs?.add(topic);
 									udSubs.add(topic);
+									if (_batchCap) flushResumeTopicV(_batchCap, topic);
 									sendSubscribedV(ws, topic, ref);
 								}
+								if (_batchCap) discardResumeCaptureV(_batchCap);
 								return;
 							}
 							if (msg.type === 'reply' && hasRefValue(msg.ref)) {

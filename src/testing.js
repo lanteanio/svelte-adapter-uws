@@ -467,6 +467,68 @@ export async function createTestServer(options = {}) {
 	// helpers to the wrong publish across concurrent test servers).
 	/** @type {((name: string) => ReturnType<typeof createScopedTopic>) | null} */
 	let _topicHelperCache = null;
+	// --- Resume-cutover live-frame barrier (harness twin of handler/resume-buffer.js) ---
+	// The test server is single-process and configures no compressor, so buffered
+	// frames flush uncompressed. See src/runtime/handler/resume-buffer.js for the
+	// design; this mirror runs over the createTestEnv-local topicSeqs + sendOutboundT.
+	const resumeBuffersT = new Map();
+	const MAX_RESUME_BUFFERED_FRAMES_T = 4096;
+	function captureResumeFrameT(topic, seq, env) {
+		const set = resumeBuffersT.get(topic);
+		if (set === undefined) return;
+		for (const b of set) {
+			if (b.frames.length >= MAX_RESUME_BUFFERED_FRAMES_T) { b.overflow = true; continue; }
+			b.frames.push({ seq, env });
+		}
+	}
+	function beginResumeCaptureT(topics, ws) {
+		const entries = [];
+		for (const topic of topics) {
+			const buffer = { frames: [], overflow: false };
+			let set = resumeBuffersT.get(topic);
+			if (set === undefined) { set = new Set(); resumeBuffersT.set(topic, set); }
+			set.add(buffer);
+			// Fallback floor: topicSeqs is this single-process harness twin of production maxSeenSeq (equivalent with no cross-worker relay).
+			const before = topicSeqs.get(topic);
+			entries.push({ topic, buffer, before: typeof before === 'number' ? before : 0 });
+		}
+		return { ws, entries };
+	}
+	function unregisterResumeT(entry) {
+		const set = resumeBuffersT.get(entry.topic);
+		if (set === undefined) return;
+		set.delete(entry.buffer);
+		if (set.size === 0) resumeBuffersT.delete(entry.topic);
+	}
+	function discardResumeCaptureT(handle) {
+		for (const entry of handle.entries) unregisterResumeT(entry);
+	}
+	function flushResumeTopicT(handle, topic, coveredSeq) {
+		const entry = handle.entries.find((e) => e.topic === topic);
+		if (entry === undefined) return;
+		if (entry.buffer.overflow) {
+			// Overflow: signal truncation FIRST so the resync marker is not lost
+			// behind the partial flush (mirror of handler/resume-buffer.js).
+			sendOutboundT(handle.ws, '{"topic":' + JSON.stringify('__replay:' + topic) + ',"event":"truncated","data":null}');
+		}
+		const floor = typeof coveredSeq === 'number' ? coveredSeq : entry.before;
+		for (const f of entry.buffer.frames) {
+			if (f.seq !== null && f.seq !== undefined && f.seq <= floor) continue;
+			sendOutboundT(handle.ws, f.env);
+		}
+		unregisterResumeT(entry);
+		// Drop the entry from the handle too, so a repeat flush for this topic is a
+		// no-op and the batch final-sweep discard only touches un-flushed topics.
+		const ei = handle.entries.indexOf(entry);
+		if (ei !== -1) handle.entries.splice(ei, 1);
+	}
+	function coveredSeqForT(covered, topic) {
+		if (covered == null) return undefined;
+		if (typeof covered === 'number') return covered;
+		if (typeof covered === 'object') { const v = covered[topic]; return typeof v === 'number' ? v : undefined; }
+		return undefined;
+	}
+
 	const platform = {
 		publish(topic, event, data, options) {
 			const seq = stampSeq(options, topicSeqs, topic);
@@ -476,6 +538,7 @@ export async function createTestServer(options = {}) {
 			if (onPublishT && !(options && options.relay === false)) {
 				onPublishT({ kind: 'publish', topic, envelope: msg, seq, compress: !!(options && options.compress) });
 			}
+			if (resumeBuffersT.size > 0) captureResumeFrameT(topic, seq, msg);
 			// Fast path: hand fan-out to uWS's C++ TopicTree. Chaos cannot
 			// intercept C++ dispatch, so when a scenario is active we
 			// degrade to a JS-side fanout that consults the chaos state
@@ -523,6 +586,7 @@ export async function createTestServer(options = {}) {
 					data: relayCap !== undefined ? data : undefined
 				});
 			}
+			if (resumeBuffersT.size > 0) captureResumeFrameT(topic, seq, env);
 			// Sender exclusion, mirroring handler.js: the single C++ app.publish
 			// fan-out cannot skip a socket, so an excluding publish always takes
 			// the per-subscriber walk.
@@ -719,6 +783,9 @@ export async function createTestServer(options = {}) {
 					onPublishT({ kind: 'publish', topic, envelope: envs[i], seq, compress: false });
 				}
 				if (entries[i].excludeWs !== undefined && entries[i].excludeWs !== null) anyExclude = true;
+			}
+			if (resumeBuffersT.size > 0) {
+				for (let i = 0; i < entries.length; i++) captureResumeFrameT(topic, seqs[i] === 0 ? null : seqs[i], envs[i]);
 			}
 			const sendJsonT = (ws, list) => { for (let i = 0; i < list.length; i++) sendOutboundT(ws, list[i]); };
 			if (!anyExclude && !capCountsT.has(wire.capability)) {
@@ -1066,6 +1133,7 @@ export async function createTestServer(options = {}) {
 			// publishGame - a game.fanout:1 subscriber receives the value-codec
 			// 0x03 frame (encoded once, framed per connection by its wire-id),
 			// everyone else the JSON envelope; the sender is excluded either way.
+			if (resumeBuffersT.size > 0) captureResumeFrameT(topic, seq, env);
 			const wantBinary = capCountsT.has(GAME_FANOUT_CAP);
 			const seqOnWire = seq == null ? 0 : seq;
 			/** @type {Uint8Array | null} */
@@ -1159,7 +1227,10 @@ export async function createTestServer(options = {}) {
 			for (let i = 0; i < messages.length; i++) {
 				const m = messages[i];
 				const seq = stampSeq(m.options, topicSeqs, m.topic);
-				events[i] = { topic: m.topic, env: envelope(m.topic, m.event, m.data, seq) };
+				const env = envelope(m.topic, m.event, m.data, seq);
+				events[i] = { topic: m.topic, env };
+				// A caps-less resuming connection receives these as per-event JSON.
+				if (resumeBuffersT.size > 0) captureResumeFrameT(m.topic, seq, env);
 			}
 			// Fast-path batch relay (sim): forward the stamped events as one IPC frame,
 			// mirroring handler.js's `publish-batched`. Per-message `relay: false` is
@@ -1417,9 +1488,11 @@ export async function createTestServer(options = {}) {
 					if (!caps || !caps.has('batch')) { everyoneCapable = false; break; }
 				}
 				if ((!allSameTopic && !allSeeAll) || !everyoneCapable) {
+					if (resumeBuffersT.size > 0) for (let i = 0; i < events.length; i++) captureResumeFrameT(events[i].topic, events[i].seq, events[i].env);
 					for (let i = 0; i < events.length; i++) app.publish(events[i].topic, events[i].env, false, false);
 					return;
 				}
+				if (resumeBuffersT.size > 0) for (let i = 0; i < events.length; i++) captureResumeFrameT(events[i].topic, events[i].seq, events[i].env);
 				const relaySlice = new Array(events.length);
 				for (let i = 0; i < events.length; i++) relaySlice[i] = events[i].env;
 				const sharedBatchEnv = wrapBatchEnvelope(relaySlice);
@@ -1436,6 +1509,7 @@ export async function createTestServer(options = {}) {
 					platform.relayPublishWire(frame.topic, frame.event, frame.data, frame.capability, frame.seq, frame.compress)) {
 					return;
 				}
+				if (resumeBuffersT.size > 0) captureResumeFrameT(frame.topic, frame.seq, frame.envelope);
 				app.publish(frame.topic, frame.envelope, false, false);
 			}
 		}
@@ -1748,16 +1822,20 @@ export async function createTestServer(options = {}) {
 							}
 							// Resume-on-subscribe (mirror): gap-fill via the resume hook before
 							// subscribing to live, so __replay frames precede the first live frame.
+							let _cap = null;
+							let _covered;
 							if (msg.recover && typeof msg.recover === 'object' && Number.isInteger(msg.recover.offset) && msg.recover.offset >= 0 && handler.resume) {
 								const _rEpochs = Number.isInteger(msg.recover.epoch) ? { [msg.topic]: msg.recover.epoch } : undefined;
+								_cap = beginResumeCaptureT([msg.topic], ws);
 								try {
-									await handler.resume(ws, { sessionId: ws.getUserData()[WS_SESSION_ID], lastSeenSeqs: { [msg.topic]: msg.recover.offset }, lastSeenEpochs: _rEpochs, platform: ws.getUserData()[WS_PLATFORM] });
+									_covered = await handler.resume(ws, { sessionId: ws.getUserData()[WS_SESSION_ID], lastSeenSeqs: { [msg.topic]: msg.recover.offset }, lastSeenEpochs: _rEpochs, platform: ws.getUserData()[WS_PLATFORM] });
 								} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
-								if (subs.has(msg.topic)) { sendSubscribedT(ws, msg.topic, ref); return; }
+								if (subs.has(msg.topic)) { discardResumeCaptureT(_cap); sendSubscribedT(ws, msg.topic, ref); return; }
 							}
 							try { ws.subscribe(msg.topic); }
-							catch { closedWsAbortsT++; return; }
+							catch { if (_cap) discardResumeCaptureT(_cap); closedWsAbortsT++; return; }
 							subs.add(msg.topic);
+							if (_cap) flushResumeTopicT(_cap, msg.topic, coveredSeqForT(_covered, msg.topic));
 							if (sharedTopicsT.has(msg.topic)) joinCohortT(ws, ws.getUserData(), msg.topic, sharedTopicsT.get(msg.topic));
 							sendSubscribedT(ws, msg.topic, ref);
 							return;
@@ -1838,6 +1916,8 @@ export async function createTestServer(options = {}) {
 							// that passed the auth gate in one resume-hook call, before the subscribe loop.
 							let _recoverSeqs = null;
 							let _recoverEpochs = null;
+							let _batchCap = null;
+							let _batchCovered;
 							if (msg.recover && typeof msg.recover === 'object') {
 								for (let i = 0; i < valid.length; i++) {
 									const _t = valid[i];
@@ -1852,8 +1932,9 @@ export async function createTestServer(options = {}) {
 									}
 								}
 								if (_recoverSeqs !== null && handler.resume) {
+								_batchCap = beginResumeCaptureT(Object.keys(_recoverSeqs), ws);
 									try {
-										await handler.resume(ws, { sessionId: ws.getUserData()[WS_SESSION_ID], lastSeenSeqs: _recoverSeqs, lastSeenEpochs: _recoverEpochs || undefined, platform: ws.getUserData()[WS_PLATFORM] });
+										_batchCovered = await handler.resume(ws, { sessionId: ws.getUserData()[WS_SESSION_ID], lastSeenSeqs: _recoverSeqs, lastSeenEpochs: _recoverEpochs || undefined, platform: ws.getUserData()[WS_PLATFORM] });
 									} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
 								}
 							}
@@ -1878,9 +1959,17 @@ export async function createTestServer(options = {}) {
 								try { ws.subscribe(topic); }
 								catch { closedWsAbortsT++; continue; }
 								udSubs.add(topic);
+								if (_batchCap) {
+									// Batch: honor only a per-topic map watermark; a bare number is ambiguous
+									// across topics (it would apply one floor to all and could wrongly skip a
+									// lagging topic), so ignore it here - the pre-window floor covers that topic.
+									const _cov = (_batchCovered !== null && typeof _batchCovered === 'object') ? coveredSeqForT(_batchCovered, topic) : undefined;
+									flushResumeTopicT(_batchCap, topic, _cov);
+								}
 								if (sharedTopicsT.has(topic)) joinCohortT(ws, ws.getUserData(), topic, sharedTopicsT.get(topic));
 								sendSubscribedT(ws, topic, ref);
 							}
+							if (_batchCap) discardResumeCaptureT(_batchCap);
 							return;
 						}
 						if (msg.type === 'reply' && hasRefT(msg.ref)) {

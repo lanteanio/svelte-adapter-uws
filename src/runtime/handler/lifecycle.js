@@ -3,7 +3,7 @@ import { workerData } from 'node:worker_threads';
 import { wsModule } from '../ws-handler-bridge.js';
 import { WS_CAPS, WS_SUBSCRIPTIONS, assert, fatal, wrapBatchEnvelope } from '../utils.js';
 import { monotonicNow } from '../runtime.js';
-import { counters, maxSeenSeq, recordSeen, wsConnections } from './state.js';
+import { captureResumeFrame, counters, maxSeenSeq, recordSeen, resumeBuffers, wsConnections } from './state.js';
 import { app, is_tls, _t_app, WS_COMPRESSION_ON, reconnect_dispersal_ms, ssl_cert, ssl_key, ssl_watch, ssl_reload_debounce_ms, ssl_sni_hosts } from './config.js';
 import { platform, relayPublishWire } from './platform.js';
 import { stopPressureSampling } from './pressure-metrics.js';
@@ -318,6 +318,10 @@ export function relayPublish(topic, envelope, compress, seq, capability, event, 
 		relayPublishWire(topic, event, data, capability, seq, compress)) {
 		return;
 	}
+	// Resume cutover in flight on this worker: hold the JSON envelope a caps-less
+	// resuming subscriber would receive from this cross-worker frame. The codec
+	// re-encode path above delivers through publishWire, which captures there.
+	if (resumeBuffers.size > 0) captureResumeFrame(topic, seq, envelope, compress === true);
 	app.publish(topic, envelope, false, WS_COMPRESSION_ON && compress === true);
 }
 
@@ -388,11 +392,18 @@ export function relayPublishBatched(events, compress) {
 		// cap-able subs on this worker would have seen if the
 		// originator had taken its slow path too.
 		for (let i = 0; i < events.length; i++) {
+			if (resumeBuffers.size > 0) captureResumeFrame(events[i].topic, events[i].seq, events[i].env, compress === true);
 			app.publish(events[i].topic, events[i].env, false, WS_COMPRESSION_ON && compress === true);
 		}
 		return;
 	}
 
+	// Resume cutover in flight: hold each per-event envelope a caps-less resuming
+	// connection would receive (the slow path this fast path stands in for), not the
+	// wrapped batch frame it never decodes.
+	if (resumeBuffers.size > 0) {
+		for (let i = 0; i < events.length; i++) captureResumeFrame(events[i].topic, events[i].seq, events[i].env, compress === true);
+	}
 	// Fast path: wrap and dispatch on the C++ TopicTree.
 	const slice = new Array(events.length);
 	for (let i = 0; i < events.length; i++) slice[i] = events[i].env;

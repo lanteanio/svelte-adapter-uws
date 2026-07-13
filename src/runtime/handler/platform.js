@@ -4,7 +4,7 @@ import { parentPort } from 'node:worker_threads';
 import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_SUBSCRIPTIONS, assert, fatal, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
-import { capCounts, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
+import { capCounts, captureResumeFrame, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, resumeBuffers, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
 import { app, wsDebug, WS_COMPRESSION_ON } from './config.js';
 import { envelopePrefix } from './envelope-cache.js';
 import { batchRelay, relayBatched } from './relay.js';
@@ -74,6 +74,11 @@ export const platform = {
 		// call with `{ compress: false }` (e.g. a very high-rate text topic where
 		// the per-subscriber deflate CPU would outweigh the bandwidth saving).
 		const compress = WS_COMPRESSION_ON && (!options || options.compress !== false);
+		// A connection still gap-filling this topic (a resume cutover in flight) is
+		// not yet subscribed to live, so hold this frame in its buffer to flush once
+		// it subscribes - otherwise a publish landing inside the async resume window
+		// is lost. Empty in the common case: one size check guards the hot path.
+		if (resumeBuffers.size > 0) captureResumeFrame(topic, seq, envelope, compress);
 		const result = app.publish(topic, envelope, false, compress);
 		// Relay to other workers via main thread (no-op in single-process mode).
 		// Pass { relay: false } when the message originates from an external
@@ -198,6 +203,11 @@ export const platform = {
 		// keeps the hot path uncompressed.
 		const compressIntent = !!(options && options.compress === true);
 		const compress = WS_COMPRESSION_ON && compressIntent;
+
+		// A connection still gap-filling this topic (resume cutover in flight) is not
+		// yet subscribed to live, so hold the JSON envelope it would receive as a
+		// caps-less subscriber; it flushes on subscribe. One guarded size check.
+		if (resumeBuffers.size > 0) captureResumeFrame(topic, seq, envelope, compress);
 
 		// Codec-aware relay carry: a codec registered in the wire-codec registry
 		// (presence, cursor) relays its capability + raw payload across the worker
@@ -495,6 +505,11 @@ export const platform = {
 			if (entries[i].excludeWs !== undefined && entries[i].excludeWs !== null) anyExclude = true;
 		}
 
+		// Resume cutover in flight: hold the per-entry JSON envelopes a caps-less
+		// resuming subscriber would receive from this stateful batch.
+		if (resumeBuffers.size > 0) {
+			for (let i = 0; i < entries.length; i++) captureResumeFrame(topic, seqs[i] === 0 ? null : seqs[i], envs[i], compress);
+		}
 		const sendJson = (ws, list) => {
 			for (let i = 0; i < list.length; i++) {
 				try { ws.send(list[i], false, compress); } catch { counters.closedWsAborts++; return; }
@@ -1367,6 +1382,10 @@ export const platform = {
 		// walk is mandatory here regardless of that, because the sender must be
 		// excluded. capCounts short-circuits the whole binary path to zero cost
 		// when no connected client advertised the capability.
+		// Resume cutover in flight: hold the JSON game envelope a caps-less resuming
+		// subscriber would receive (compact-binary subscribers recover via their own
+		// wire-id announce on join, not this buffer). One guarded size check.
+		if (resumeBuffers.size > 0) captureResumeFrame(topic, seq, envelope, false);
 		const wantBinary = capCounts.has(GAME_FANOUT_CAP);
 		const seqOnWire = seq == null ? 0 : seq;
 		/** @type {Uint8Array | null} */
@@ -1680,6 +1699,14 @@ export const platform = {
 			if (relayed.length > 0) {
 				relayBatched(relayed, compressOptIn);
 			}
+		}
+
+		// Resume cutover in flight: a caps-less resuming connection receives these
+		// events as per-event JSON (the slow path this fast path stands in for), so
+		// hold each per-event envelope for any open buffer - NOT the wrapped batch
+		// frame, which a caps-less connection never decodes and which can span topics.
+		if (resumeBuffers.size > 0) {
+			for (let i = 0; i < events.length; i++) captureResumeFrame(events[i].topic, events[i].seq, events[i].env, compressOptIn);
 		}
 
 		// Build the shared batch frame once.

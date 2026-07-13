@@ -69,6 +69,49 @@ export function recordSeen(seenMap, topic, seq) {
 export const topicPublishStats = new Map();
 
 /**
+ * Active resume-cutover live-frame buffers, keyed by topic. A connection that is
+ * gap-filling a topic on subscribe (recover offset) registers a buffer here for
+ * the duration of the async resume hook: every fan-out site that would deliver a
+ * live frame to that topic appends it here too (see `captureResumeFrame`), so a
+ * publish that lands DURING the resume await - after the backend read, before the
+ * connection is subscribed to live - is held instead of lost, then flushed in
+ * order once live membership is installed. Empty (size 0) in the overwhelming
+ * common case; every fan-out site guards on `resumeBuffers.size > 0` first so an
+ * idle server pays a single size check. A synchronous (in-memory) resume never
+ * yields a macrotask, so its buffer stays empty and the flush is a no-op - the
+ * window only ever captures anything behind an async (network-backed) resume.
+ * @type {Map<string, Set<{ frames: { seq: number | null, envelope: string, compress: boolean }[], overflow: boolean }>>}
+ */
+export const resumeBuffers = new Map();
+
+/**
+ * Hard cap on frames held per resume buffer, so a hung resume behind a high-rate
+ * publisher cannot grow one without bound. On overflow the buffer stops
+ * appending and marks itself so the cutover tells the client to cold-rehydrate
+ * (a clean gap signal) rather than deliver a silently partial tail.
+ */
+const MAX_RESUME_BUFFERED_FRAMES = 4096;
+
+/**
+ * Append a live frame to every open resume buffer for `topic`. Called from each
+ * fan-out site (local publish, cross-worker relay receive) AFTER its guard has
+ * confirmed `resumeBuffers.size > 0`, so the common path never reaches here.
+ * @param {string} topic
+ * @param {number | null} seq
+ * @param {string} envelope
+ * @param {boolean} compress
+ * @returns {void}
+ */
+export function captureResumeFrame(topic, seq, envelope, compress) {
+	const set = resumeBuffers.get(topic);
+	if (set === undefined) return;
+	for (const b of set) {
+		if (b.frames.length >= MAX_RESUME_BUFFERED_FRAMES) { b.overflow = true; continue; }
+		b.frames.push({ seq, envelope, compress });
+	}
+}
+
+/**
  * Topics that have been published through a `shared: true` wire codec, mapped to the
  * codec's capability. A topic enters on its FIRST shared publish (which also
  * migrates the topic's current subscribers into cohorts); the subscribe path reads

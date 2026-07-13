@@ -1520,6 +1520,15 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * highest `seq` the client received before disconnect. Topics the
 	 * client never received a message for are absent.
 	 *
+	 * The hook may be async. While it runs, the server buffers any live frame
+	 * published to a recovering topic and flushes it once the connection goes
+	 * live, so a message that lands mid-resume is never lost. Return the highest
+	 * `seq` you delivered per topic - a `{ [topic]: seq }` map, or a bare number
+	 * for a single-topic resume - and the server de-duplicates those buffered
+	 * frames against it exactly. Return nothing and they are still delivered, but
+	 * a frame from the narrow window between the buffer opening and your backend
+	 * read may arrive twice (at-least-once) instead of exactly once.
+	 *
 	 * @example
 	 * ```js
 	 * import { createReplay } from 'svelte-adapter-uws/plugins/replay';
@@ -1531,8 +1540,21 @@ export interface WebSocketHandler<UserData = unknown> {
 	 *   }
 	 * }
 	 * ```
+	 *
+	 * @example
+	 * ```js
+	 * // Exact de-dup: report the highest seq delivered per topic.
+	 * export async function resume(ws, { lastSeenSeqs, platform }) {
+	 *   const covered = {};
+	 *   for (const [topic, sinceSeq] of Object.entries(lastSeenSeqs)) {
+	 *     covered[topic] = await myBackend.replay(ws, topic, sinceSeq, platform);
+	 *   }
+	 *   return covered;
+	 * }
+	 * ```
 	 */
-	resume?: (ws: WebSocket<UserData>, ctx: ResumeContext) => void;
+	resume?: (ws: WebSocket<UserData>, ctx: ResumeContext) =>
+		void | Record<string, number> | number | Promise<void | Record<string, number> | number>;
 
 	/** Called when the connection closes. */
 	close?: (ws: WebSocket<UserData>, ctx: CloseContext) => void;

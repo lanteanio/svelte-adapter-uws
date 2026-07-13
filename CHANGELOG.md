@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.77] - 2026-07-13
+
+### Fixed
+
+- **A message published during a resume no longer vanishes into the reconnect gap.** When a client reconnects and re-subscribes with a recovery offset, the server runs the resume hook (a replay backend gap-fills the tail the client missed) and only then subscribes the connection to live updates. If that hook awaited I/O - as a Redis or Postgres replay backend does - a message published in the window between the backend read and the live subscribe was lost: past the read, not yet live, so the client never saw it and had no way to know. The recover-on-subscribe cutover (single and batch) now opens a per-connection buffer before the resume runs; every publish path holds frames for a resuming topic in that buffer, and once the connection goes live the held frames are flushed to it in order, before the acknowledgement. Held frames are skipped when the resume already covered them, so nothing is delivered twice: a resume backend that reports the highest sequence it delivered (by returning `{ [topic]: seq }`) gets exact de-duplication, and a backend that reports nothing is delivered at-least-once - a possible duplicate, never a gap. A synchronous in-memory resume never yields the event loop, so its buffer stays empty and delivery is byte-identical to before; on the publish hot path the whole mechanism is one map-size check, measured free.
+
 ## [0.6.0-next.76] - 2026-07-13
 
 ### Fixed
