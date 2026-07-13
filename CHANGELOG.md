@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0-next.78] - 2026-07-13
+## [0.6.0-next.79] - 2026-07-14
+
+### Fixed
+
+- **Acceptor-mode cluster workers now run their `init` hook before serving.** On non-Linux hosts (macOS, Windows) a cluster defaults to acceptor mode, and acceptor I/O workers only posted their `getDescriptor()` to the primary, which began listening immediately - they never went through `start()`, which is what fires the documented per-worker `hooks.ws.init`. So on those platforms (and on acceptor-forced Linux) every I/O worker took traffic without running its init: no database connectivity check, no connection-pool warmup, no migration validation, even though reuseport and compute workers all run init before they are considered ready. The acceptor branch now `await start(host, port, { listen: false })` (fire init without binding a listen socket - the primary's acceptor owns the socket and routes connections to this child app by descriptor) before posting the descriptor, so an acceptor I/O worker runs the exact same init as every other role and a throwing init fails the boot loudly instead of registering a half-initialized worker. As a bonus the acceptor path now comes under the boot-deadline watchdog like the other roles. Verified by a real integration test that builds the fixture and spawns it in acceptor cluster mode, asserting an I/O worker fires init (red without the fix: pre-fix the hook never runs for acceptor I/O workers).
 
 ### Fixed
 

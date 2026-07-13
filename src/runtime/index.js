@@ -797,9 +797,16 @@ if (is_primary) {
 			await start(host, port);
 			parentPort.postMessage({ type: 'ready', role });
 		} else {
-			// Acceptor: register with the main thread's acceptor app. This path does
-			// not await start() before registering, so it is never exposed to the
-			// init-wedge window the boot deadline covers.
+			// Acceptor: fire the app's `init` hook (listen:false - the primary's
+			// acceptor owns the listen socket and distributes connections to this
+			// child app by descriptor) BEFORE registering, so an acceptor io worker
+			// runs the SAME documented per-worker init - DB connectivity checks, pool
+			// warmup, migration validation - as a reuseport or compute worker, and
+			// never takes traffic uninitialized. Registering only after `await start()`
+			// resolves makes registration success-gated (a throwing init crashes the
+			// boot loudly instead of serving a half-initialized worker) and brings the
+			// acceptor path under the boot-deadline watchdog like every other role.
+			await start(host, port, { listen: false });
 			parentPort.postMessage({ type: 'descriptor', descriptor: getDescriptor() });
 		}
 

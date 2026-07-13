@@ -6,6 +6,15 @@ const cursors = createCursor({
 	select: (userData) => ({ name: userData.token || 'anon' })
 });
 
+// Test-only init probe: when ACCEPTOR_INIT_PROBE=1 the per-worker init hook logs a
+// marker so the acceptor-init integration test can prove that a clustered acceptor
+// worker runs its init BEFORE the primary starts serving (a no-op otherwise).
+export function init({ platform }) {
+	if (process.env.ACCEPTOR_INIT_PROBE === '1') {
+		console.log(`__ACCEPTOR_INIT_RAN__ connections=${platform.connections}`);
+	}
+}
+
 export function upgrade({ headers, cookies, url }) {
 	const token = cookies?.token;
 	if (token === 'reject') return false;
