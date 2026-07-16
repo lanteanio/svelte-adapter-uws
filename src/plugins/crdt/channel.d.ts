@@ -134,4 +134,13 @@ export function createCrdtChannel(options: {
 	transport: CrdtChannelTransport;
 	/** CRDT garbage collection on the local replica. Default true. */
 	gc?: boolean;
+	/**
+	 * Cadence (ms) of the healthy-channel background reconcile - the periodic
+	 * state-vector exchange that converges a terminally-dropped fan-out frame
+	 * (a loss with no causally-later update, which the pending-structs
+	 * detector cannot see) without waiting for a reconnect. An in-sync
+	 * exchange costs one tiny request answered with an empty diff. `0`
+	 * disables it. Default 30000.
+	 */
+	reconcileIntervalMs?: number;
 }): CrdtChannel;

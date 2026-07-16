@@ -29,8 +29,12 @@
  *   - After every apply the channel checks the replica's pending-structs
  *     gauge: a dependency gap means a frame was lost somewhere (backpressure,
  *     a dropped JSON fallback, anything) and schedules a debounced resync -
- *     the CRDT analog of ack-famine recovery. Every silent-drop path
- *     converges through this one detector.
+ *     the CRDT analog of ack-famine recovery. The detector needs a causally
+ *     LATER struct to arrive and reference the missing one, so it cannot see
+ *     a TERMINAL drop (the lost update was the last edit to reach this
+ *     replica); a low-frequency background reconcile on the healthy channel
+ *     re-runs the same state-vector exchange and closes that path too, so
+ *     every silent drop converges without waiting for a reconnect.
  *
  * Read-only mounts: when the access record says `write: false`, the facet
  * mutators throw. A CRDT cannot "reconcile away" local-only edits (nothing
@@ -54,6 +58,16 @@ const PENDING_RESYNC_DEBOUNCE_MS = 250;
 
 /** Retry cadence for a failed sync while the connection stays open (ms). */
 const SYNC_RETRY_MS = 1000;
+
+/**
+ * Cadence of the healthy-channel background reconcile (ms). The
+ * pending-structs detector only sees a loss when a causally-later struct
+ * arrives referencing it, so a TERMINAL drop (the lost update had no
+ * successor) would otherwise stand until the next reconnect; the reconcile
+ * re-runs the state-vector exchange at this cadence to close that path. An
+ * in-sync exchange costs one tiny request and an empty diff.
+ */
+const HEALTHY_RECONCILE_MS = 30000;
 
 /** Pre-sync frame buffer bound; overflow drops oldest (pending-structs heals). */
 const PRESYNC_BUFFER_CAP = 256;
@@ -130,7 +144,8 @@ function isEmptyUpdate(u8) {
  *     sync: (stateVector: number[]) => Promise<{ topic?: string, access?: any, diff?: number[] | Uint8Array, sv?: number[] | Uint8Array } | null | undefined>,
  *     close?: () => void
  *   },
- *   gc?: boolean
+ *   gc?: boolean,
+ *   reconcileIntervalMs?: number
  * }} options
  */
 export function createCrdtChannel(options) {
@@ -141,6 +156,14 @@ export function createCrdtChannel(options) {
 	if (!transport || typeof transport.sendUpdate !== 'function' || typeof transport.sync !== 'function') {
 		throw new Error('crdt: transport with sendUpdate and sync is required');
 	}
+	// Background-reconcile cadence. 0 disables (power users running their own
+	// reconcile discipline); anything non-numeric or negative falls back to the
+	// default rather than silently disabling loss recovery.
+	const reconcileIntervalMs = typeof options.reconcileIntervalMs === 'number'
+		&& Number.isFinite(options.reconcileIntervalMs)
+		&& options.reconcileIntervalMs >= 0
+		? options.reconcileIntervalMs
+		: HEALTHY_RECONCILE_MS;
 
 	const doc = new Y.Doc({ gc: options.gc !== false });
 	// Route the replica's actor id through the injectable RNG so a
@@ -177,6 +200,8 @@ export function createCrdtChannel(options) {
 	let retryTimer = null;
 	/** @type {any} */
 	let pendingResyncTimer = null;
+	/** @type {any} */
+	let reconcileTimer = null;
 	/** Frames buffered while the first sync is in flight (topic unknown). */
 	/** @type {Array<{ topic: string, bytes: Uint8Array }>} */
 	let presyncBuffer = [];
@@ -285,10 +310,14 @@ export function createCrdtChannel(options) {
 		retryTimer = setTimer(() => {
 			retryTimer = null;
 			if (destroyed || lastStatus !== 'open') return;
-			// Retry while un-synced OR while a dependency gap stands: a
-			// failed gap-recovery sync on an otherwise-synced channel must
-			// keep retrying, or a lost frame with no successor stands forever.
-			if (!synced || doc.store.pendingStructs || doc.store.pendingDs) resync();
+			// Retry while un-synced, degraded, OR while a dependency gap stands.
+			// The degraded case covers a failed exchange on an otherwise-synced
+			// channel (a background reconcile hitting a server blip): synced stays
+			// true there - outbound edits must not pause on a healthy socket - so
+			// without this clause nothing would ever clear the degraded latch and
+			// the reconcile chain (which skips while degraded) would be disabled
+			// until an unrelated reconnect.
+			if (!synced || degraded || doc.store.pendingStructs || doc.store.pendingDs) resync();
 		}, SYNC_RETRY_MS);
 	}
 
@@ -332,12 +361,24 @@ export function createCrdtChannel(options) {
 					wireTopic = CRDT_TOPIC_PREFIX + reply.topic;
 					bindTap();
 				}
+				// The server re-runs the guard on every sync (a mid-session
+				// downgrade takes effect through this reply), and the background
+				// reconcile makes this exchange the standard delivery path for a
+				// revocation - so an access CHANGE must always reach the state
+				// callback, even on an otherwise-silent healthy reconcile, or the
+				// UI keeps inputs enabled while the mutators throw.
+				let accessChanged = false;
 				if (reply.access !== null && typeof reply.access === 'object') {
-					access = {
+					const next = {
 						read: !!reply.access.read,
 						write: !!reply.access.write,
 						comment: !!reply.access.comment
 					};
+					accessChanged = access === null
+						|| access.read !== next.read
+						|| access.write !== next.write
+						|| access.comment !== next.comment;
+					access = next;
 				}
 				if (reply.diff !== undefined && reply.diff !== null) {
 					const diff = toBytes(reply.diff);
@@ -378,10 +419,16 @@ export function createCrdtChannel(options) {
 					// outbound sends stay paused and the next open resyncs.
 					return;
 				}
+				const wasSynced = synced;
 				synced = true;
 				clearRetry();
-				setDegraded(false);
-				notifyState();
+				if (degraded) {
+					setDegraded(false); // notifies with the fresh synced + access values
+				} else if (!wasSynced || accessChanged) {
+					notifyState();
+				}
+				// else: a healthy background reconcile that changed nothing - no
+				// redundant state callback every cadence tick.
 			})
 			.catch(() => {
 				if (syncInFlightGen === gen) syncInFlightGen = -1;
@@ -413,6 +460,27 @@ export function createCrdtChannel(options) {
 			notifyState();
 		}
 	});
+
+	/**
+	 * The healthy-channel background reconcile: a self-rescheduling tick that
+	 * re-runs the sync exchange while the channel is open and synced. This is
+	 * what converges a TERMINAL drop - a lost fan-out frame with no causal
+	 * successor leaves pendingStructs null, so the loss detector never fires
+	 * and, without this, the replica would stay behind until the next
+	 * reconnect. Skips itself while un-synced or degraded (the retry loop owns
+	 * recovery there) and while a sync is already in flight; each in-sync tick
+	 * costs one state-vector request answered with an empty diff.
+	 */
+	function scheduleReconcile() {
+		if (destroyed || reconcileIntervalMs === 0 || reconcileTimer !== null) return;
+		reconcileTimer = setTimer(() => {
+			reconcileTimer = null;
+			if (destroyed) return;
+			if (lastStatus === 'open' && synced && !degraded && syncInFlightGen === -1) resync();
+			scheduleReconcile();
+		}, reconcileIntervalMs);
+	}
+	scheduleReconcile();
 
 	function assertWritable() {
 		if (access !== null && !access.write) {
@@ -654,6 +722,10 @@ export function createCrdtChannel(options) {
 			if (pendingResyncTimer !== null) {
 				clearTimer(pendingResyncTimer);
 				pendingResyncTimer = null;
+			}
+			if (reconcileTimer !== null) {
+				clearTimer(reconcileTimer);
+				reconcileTimer = null;
 			}
 			presyncBuffer = [];
 			stateCb = null;

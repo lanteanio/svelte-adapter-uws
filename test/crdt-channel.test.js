@@ -615,3 +615,177 @@ describe('teardown', () => {
 		expect(s.closed).toBe(0);
 	});
 });
+
+describe('background reconcile (terminal drop)', () => {
+	// The pending-structs detector needs a causally-LATER struct to arrive and
+	// reference the missing one. A TERMINAL drop - the lost fan-out frame was
+	// the last edit to reach this replica - leaves pendingStructs null, so
+	// only the healthy-channel background reconcile can converge it short of a
+	// reconnect. These tests drop the frame by simply never delivering one:
+	// the server doc advances, the client hears nothing.
+
+	it('converges a terminally-dropped update without any reconnect or later edit', async () => {
+		const s = makeServer();
+		const ch = createCrdtChannel({ transport: s.transport, reconcileIntervalMs: 40 });
+		await flush();
+		expect(ch.synced).toBe(true);
+		expect(s.syncs.length).toBe(1);
+
+		// A peer edit reaches the server; the fan-out frame to THIS client is
+		// dropped (backpressure, poisoned wire state, anything) and the peer
+		// goes idle - no causally-later update will ever flag the gap.
+		s.doc.getText('root').insert(0, 'x');
+		expect(ch.text().toString()).toBe(''); // stale, and pendingStructs is null
+		await flush(5);
+		expect(ch.text().toString()).toBe(''); // the loss detector cannot see it
+
+		// The background reconcile re-runs the state-vector exchange and the
+		// server diff supplies the missing struct. Red without the reconcile:
+		// the replica stays stale forever (only a reconnect would heal it).
+		await flush(250);
+		expect(s.syncs.length).toBeGreaterThan(1);
+		expect(ch.text().toString()).toBe('x');
+		ch.destroy();
+	});
+
+	it('stays quiet while in sync: no uploads, no redundant state callbacks', async () => {
+		const s = makeServer();
+		const ch = createCrdtChannel({ transport: s.transport, reconcileIntervalMs: 40 });
+		const states = [];
+		ch.onState((st) => states.push({ ...st }));
+		await flush();
+		const settledStates = states.length;
+		await flush(250);
+		expect(s.syncs.length).toBeGreaterThan(1); // ticks ran...
+		expect(s.uploads.length).toBe(0);          // ...but an empty diff is never uploaded
+		expect(states.length).toBe(settledStates); // ...and consumers hear nothing new
+		ch.destroy();
+	});
+
+	it('reconcileIntervalMs: 0 disables the background exchange', async () => {
+		const s = makeServer();
+		const ch = createCrdtChannel({ transport: s.transport, reconcileIntervalMs: 0 });
+		await flush();
+		s.doc.getText('root').insert(0, 'x');
+		await flush(250);
+		expect(s.syncs.length).toBe(1);         // only the open sync ever ran
+		expect(ch.text().toString()).toBe(''); // the terminal drop stands, as opted into
+		ch.destroy();
+	});
+
+	it('destroy stops the reconcile ticks', async () => {
+		const s = makeServer();
+		const ch = createCrdtChannel({ transport: s.transport, reconcileIntervalMs: 40 });
+		await flush();
+		ch.destroy();
+		const after = s.syncs.length;
+		await flush(250);
+		expect(s.syncs.length).toBe(after); // no tick outlives the channel
+	});
+
+	it('a failed reconcile does not latch degraded: the retry loop clears it without a reconnect', async () => {
+		// The trap: a reconcile-triggered sync fails once (server blip), degraded
+		// latches, and - because synced stays true (outbound edits must not pause
+		// on a healthy socket) - neither the retry loop nor the reconcile chain
+		// (which skips while degraded) would ever run another exchange. The
+		// terminal-drop protection would be silently off until a reconnect, and
+		// downstream health surfaces would read degraded on an open connection
+		// indefinitely.
+		let failOnce = false;
+		const s = makeServer({
+			sync(sv) {
+				if (failOnce) {
+					failOnce = false;
+					return Promise.reject(new Error('blip'));
+				}
+				return Promise.resolve({
+					topic: s.name,
+					access: s.access,
+					diff: Array.from(Y.encodeStateAsUpdate(s.doc, new Uint8Array(sv))),
+					sv: Array.from(Y.encodeStateVector(s.doc))
+				});
+			}
+		});
+		const ch = createCrdtChannel({ transport: s.transport, reconcileIntervalMs: 40 });
+		await flush();
+		expect(ch.synced).toBe(true);
+
+		failOnce = true;
+		await flush(120); // a reconcile tick hits the blip
+		expect(ch.degraded).toBe(true);
+		expect(ch.synced).toBe(true); // never paused outbound on the healthy socket
+
+		// The 1s retry owns recovery: degraded clears with no reconnect involved.
+		await flush(1300);
+		expect(ch.degraded).toBe(false);
+		expect(ch.synced).toBe(true);
+		ch.destroy();
+	}, 10000);
+
+	it('a mid-session access change arriving on a healthy reconcile reaches onState', async () => {
+		// The server re-runs the guard on every sync, so the background reconcile
+		// is the standard delivery path for a revocation. The quiet-in-sync
+		// suppression must not swallow it: internal access flips (mutators start
+		// throwing) and the UI must hear about it in the same tick.
+		const s = makeServer();
+		const ch = createCrdtChannel({ transport: s.transport, reconcileIntervalMs: 40 });
+		const states = [];
+		ch.onState((st) => states.push({ ...st }));
+		await flush();
+		expect(ch.readOnly).toBe(false);
+		const settled = states.length;
+
+		s.access = { read: true, write: false, comment: false }; // guard downgraded us
+		await flush(250);
+		expect(ch.readOnly).toBe(true);
+		expect(states.length).toBeGreaterThan(settled); // the change was notified...
+		expect(states[states.length - 1].access).toEqual({ read: true, write: false, comment: false });
+		expect(states[states.length - 1].synced).toBe(true);
+		ch.destroy();
+	});
+
+	it('invalid reconcileIntervalMs falls back to the default cadence; 0 schedules no reconcile timer', async () => {
+		// Injected recording timers (passthrough to the real clock) make the
+		// scheduled delays observable, so "disabled" is distinguishable from
+		// "invalid value silently fell back" without waiting 30 seconds.
+		const { setRuntimeEnv, resetRuntimeEnv } = await import('../src/client-runtime.js');
+		const scheduled = [];
+		const cleared = [];
+		setRuntimeEnv({
+			timers: {
+				set: (cb, ms, ...a) => { const h = setTimeout(cb, ms, ...a); scheduled.push({ ms, h }); return h; },
+				clear: (h) => { cleared.push(h); clearTimeout(h); }
+			}
+		});
+		try {
+			for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, /** @type {any} */ ('20')]) {
+				scheduled.length = 0;
+				const s = makeServer();
+				const ch = createCrdtChannel({ transport: s.transport, reconcileIntervalMs: bad });
+				expect(scheduled.some((t) => t.ms === 30000), `fallback for ${String(bad)}`).toBe(true);
+				ch.destroy();
+			}
+
+			scheduled.length = 0;
+			const s2 = makeServer();
+			const ch2 = createCrdtChannel({ transport: s2.transport, reconcileIntervalMs: 0 });
+			expect(scheduled.some((t) => t.ms === 30000)).toBe(false); // no fallback...
+			expect(scheduled.some((t) => t.ms === 0)).toBe(false);     // ...and no zero-delay chain
+			ch2.destroy();
+
+			// And destroy genuinely CLEARS the pending reconcile timer (not just
+			// suppresses its tick): the handle scheduled with the reconcile
+			// cadence shows up in the cleared list.
+			scheduled.length = 0;
+			cleared.length = 0;
+			const s3 = makeServer();
+			const ch3 = createCrdtChannel({ transport: s3.transport, reconcileIntervalMs: 7777 });
+			const timer = scheduled.find((t) => t.ms === 7777);
+			expect(timer).toBeTruthy();
+			ch3.destroy();
+			expect(cleared).toContain(timer.h);
+		} finally {
+			resetRuntimeEnv();
+		}
+	});
+});
