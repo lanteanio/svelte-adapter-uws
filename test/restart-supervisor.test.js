@@ -49,9 +49,12 @@ function makeClock() {
 
 // Build a supervisor wired to a fresh clock, plus recorders. `spawn` mirrors
 // index.js: the real spawn_worker calls noteSpawn(slot) at its top, so the test
-// spawn does too - keeping the simulated lifecycle faithful.
-function harness({ maxAttempts = 50, delayBase = 100, delayMax = 5000 } = {}) {
+// spawn does too - keeping the simulated lifecycle faithful. `now` is a virtual
+// monotonic clock the test advances with `advance(ms)`, so stable-up aging is
+// deterministic and never touches real time.
+function harness({ maxAttempts = 50, delayBase = 100, delayMax = 5000, stableMs = 30000 } = {}) {
 	const clock = makeClock();
+	let nowMs = 0;
 	const spawned = [];
 	const exhausted = [];
 	let shuttingDown = false;
@@ -60,18 +63,21 @@ function harness({ maxAttempts = 50, delayBase = 100, delayMax = 5000 } = {}) {
 	sup = createRestartSupervisor({
 		setTimer: clock.setTimer,
 		clearTimer: clock.clearTimer,
+		now: () => nowMs,
 		spawn: (slot) => { spawned.push(`${slot.role}#${slot.index}`); sup.noteSpawn(slot); },
 		onExhausted: (slot) => { exhausted.push(`${slot.role}#${slot.index}`); },
 		shuttingDown: () => shuttingDown,
 		delayBase,
 		delayMax,
-		maxAttempts
+		maxAttempts,
+		stableMs
 	});
 	return {
 		sup,
 		clock,
 		spawned,
 		exhausted,
+		advance: (ms) => { nowMs += ms; },
 		setShuttingDown: (v) => { shuttingDown = v; }
 	};
 }
@@ -79,17 +85,6 @@ function harness({ maxAttempts = 50, delayBase = 100, delayMax = 5000 } = {}) {
 const io = (index) => ({ role: 'io', index });
 
 describe('restart supervisor: per-slot budgets', () => {
-	it('resets a slot backoff on ready and grows it on repeated crashes', () => {
-		const { sup } = harness();
-		sup.register(io(0));
-		sup.noteReady(io(0)); // initial worker up
-
-		// crash -> respawn -> ready: backoff starts over each recovery
-		expect(sup.noteExit(io(0))).toEqual({ delay: 100, attempts: 1 });
-		sup.noteReady(io(0));
-		expect(sup.noteExit(io(0))).toEqual({ delay: 100, attempts: 1 });
-	});
-
 	it('grows backoff exponentially while a slot keeps crashing without becoming ready', () => {
 		const { sup, clock } = harness();
 		sup.register(io(0));
@@ -111,6 +106,62 @@ describe('restart supervisor: per-slot budgets', () => {
 		expect(sup.noteExit(io(0)).delay).toBe(300); // 400 clamped
 		clock.fireOldest();
 		expect(sup.noteExit(io(0)).delay).toBe(300); // stays clamped
+	});
+});
+
+describe('restart supervisor: stable-up budget reset', () => {
+	// A worker reporting 'ready' no longer resets its slot's budget. The reset
+	// happens on the NEXT exit, and only when the worker had been up past
+	// stableMs, so a slot that flaps a brief ready between every crash still
+	// accumulates attempts and exhausts instead of resetting forever.
+	it('a slot flapping faster than stableMs never resets its budget, so it still exhausts', () => {
+		const { sup, clock, exhausted, advance } = harness({ maxAttempts: 3 });
+		sup.register(io(0));
+
+		// Each cycle: worker boots, reports ready, runs briefly (far under
+		// stableMs), then crashes. The old code reset attempts to 0 on every ready,
+		// so a flapper's count could never reach the cap - it flapped forever,
+		// invisible to the exhaustion escalation. Now attempts climb across cycles.
+		for (let i = 1; i <= 3; i++) {
+			advance(1000);
+			sup.noteReady(io(0));  // brief ready - NOT enough uptime to earn a reset
+			advance(1000);
+			expect(sup.noteExit(io(0)).attempts).toBe(i); // climbs, not stuck at 1
+			clock.fireOldest();    // respawn timer fires -> noteSpawn
+		}
+		const last = sup.noteExit(io(0)); // 4th crash > cap 3
+		expect(last).toEqual({ exhausted: true, attempts: 4 });
+		expect(exhausted).toEqual(['io#0']);
+	});
+
+	it('a slot up for at least stableMs resets its budget on the next crash', () => {
+		const { sup, clock, advance } = harness();
+		sup.register(io(0));
+
+		// Two quick crashes with no stable uptime: attempts 2, delay 200.
+		expect(sup.noteExit(io(0)).delay).toBe(100);
+		clock.fireOldest();
+		expect(sup.noteExit(io(0))).toEqual({ delay: 200, attempts: 2 });
+		clock.fireOldest();
+
+		// The worker finally comes up and stays up exactly stableMs, then crashes:
+		// the crash earns a fresh budget, so it charges as attempt 1 at base backoff.
+		sup.noteReady(io(0));
+		advance(30000); // == stableMs (inclusive boundary)
+		expect(sup.noteExit(io(0))).toEqual({ delay: 100, attempts: 1 });
+	});
+
+	it('a crash one ms short of stableMs keeps the accumulated budget', () => {
+		const { sup, clock, advance } = harness();
+		sup.register(io(0));
+
+		sup.noteExit(io(0)); clock.fireOldest();                          // attempts 1, delay 100
+		expect(sup.noteExit(io(0))).toEqual({ delay: 200, attempts: 2 }); // attempts 2, delay 200
+		clock.fireOldest();
+
+		sup.noteReady(io(0));
+		advance(29999); // one ms short of the stable window
+		expect(sup.noteExit(io(0))).toEqual({ delay: 400, attempts: 3 }); // no reset - keeps climbing
 	});
 });
 

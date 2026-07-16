@@ -186,12 +186,16 @@ if (is_primary) {
 	// restart attempts, exponential backoff, and pending respawn timer separate,
 	// so one slot becoming ready never resets or cancels another slot's restart.
 	// A cohort-global budget let a simultaneous two-worker flap lose one slot's
-	// respawn permanently - see restart-supervisor.js.
+	// respawn permanently - see restart-supervisor.js. A slot's budget resets only
+	// after a worker has been ready for RESTART_STABLE_MS, so a slot that flaps a
+	// brief ready between crashes exhausts instead of resetting forever.
 	const RESTART_DELAY_MAX = 5000;
 	const RESTART_MAX_ATTEMPTS = 50;
+	const RESTART_STABLE_MS = 30000;
 	const restartSupervisor = createRestartSupervisor({
 		setTimer,
 		clearTimer,
+		now: monotonicNow,
 		spawn: (slot) => spawn_worker(slot),
 		onExhausted: (slot) => {
 			console.error(
@@ -203,7 +207,8 @@ if (is_primary) {
 		shuttingDown: () => shutting_down,
 		delayBase: 100,
 		delayMax: RESTART_DELAY_MAX,
-		maxAttempts: RESTART_MAX_ATTEMPTS
+		maxAttempts: RESTART_MAX_ATTEMPTS,
+		stableMs: RESTART_STABLE_MS
 	});
 
 	// Worker health monitoring: send a heartbeat every 10 s.
@@ -369,8 +374,9 @@ if (is_primary) {
 				meta.ready = true;
 				acceptorApp.addChildAppDescriptor(msg.descriptor);
 				console.log(`Worker thread ${worker.threadId} registered`);
-				// Worker started successfully - reset ONLY this slot's backoff and
-				// attempt budget (never another slot's pending restart).
+				// Worker started successfully - mark this slot ready and stamp its
+				// uptime clock. The backoff/attempt budget resets on the NEXT exit,
+				// and only after the worker has stayed up past the stable window.
 				if (meta.slot) restartSupervisor.noteReady(meta.slot);
 				// Start (or resume) listening once a worker is ready to handle requests
 				if (!listening) {
@@ -390,7 +396,8 @@ if (is_primary) {
 			} else if (msg.type === 'ready' && (cluster_mode === 'reuseport' || msg.role === 'compute')) {
 				// A reuseport io worker reports 'ready' once it is listening; a compute
 				// worker (any mode) reports 'ready' once its init hook has resolved. Both
-				// mark the worker confirmed-alive and reset the crash-restart backoff.
+				// mark the worker confirmed-alive and stamp its uptime clock; the
+				// crash-restart budget resets on a later exit only if it stayed up.
 				meta.lastHeartbeat = monotonicNow();
 				meta.ready = true;
 				if (msg.role === 'compute') console.log(`Compute worker ${worker.threadId} ready`);

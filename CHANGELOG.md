@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.80] - 2026-07-16
+
+### Fixed
+
+- **A worker slot that flaps a brief `ready` between every crash now exhausts instead of restarting forever.** The per-slot crash-restart budgets reset a slot's attempt count and backoff the moment its worker reported ready, so a slot whose worker booted, went ready for a moment, then crashed - over and over - reset its budget on every recovery and never reached the restart cap that escalates a hopeless slot to a loud primary exit. It flapped indefinitely, burning CPU respawning a worker that could not stay up, with no operator-visible escalation. The budget reset now happens on the slot's next exit, and only when the worker had been ready for at least a stable window (30 s): a genuinely healthy worker that finally dies still earns a fresh backoff and restarts fast, while a worker up for less than the window between crashes keeps accumulating attempts until it exhausts and the primary exits (which an orchestrator restarts cleanly, instead of leaving a zombie slot thrashing). A slot that never reports ready is unchanged - it already accumulated. A brief ready between crashes also no longer zeroes the exponential backoff, so a flapping slot's respawn interval grows rather than hammering at the base delay. The stable window is aged by the primary's monotonic clock (injected, so the scheduling stays deterministically unit-testable) and is the only new per-slot state; the hot path is untouched, since this runs only when a worker exits. Regression coverage added on top of the existing deterministic timer queue: a slot flapping faster than the window climbs to its cap and exhausts, and a crash one millisecond short of the window keeps its accumulated budget - both red against the pre-fix reset-on-ready supervisor.
+
 ## [0.6.0-next.79] - 2026-07-14
 
 ### Fixed
