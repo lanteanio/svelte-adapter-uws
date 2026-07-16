@@ -2,12 +2,13 @@ import uWS from 'uWebSockets.js';
 import { workerData } from 'node:worker_threads';
 import { wsModule } from '../ws-handler-bridge.js';
 import { WS_CAPS, WS_SUBSCRIPTIONS, assert, fatal, wrapBatchEnvelope } from '../utils.js';
-import { monotonicNow } from '../runtime.js';
+import { monotonicNow, setTimer, clearTimer } from '../runtime.js';
 import { captureResumeFrame, counters, maxSeenSeq, recordSeen, resumeBuffers, wsConnections } from './state.js';
-import { app, is_tls, _t_app, WS_COMPRESSION_ON, reconnect_dispersal_ms, ssl_cert, ssl_key, ssl_watch, ssl_reload_debounce_ms, ssl_sni_hosts } from './config.js';
+import { app, is_tls, _t_app, WS_COMPRESSION_ON, reconnect_dispersal_ms, ssl_cert, ssl_key, ssl_watch, ssl_reload_debounce_ms, ssl_sni_hosts, boot_cert_fingerprint } from './config.js';
 import { platform, relayPublishWire } from './platform.js';
 import { stopPressureSampling } from './pressure-metrics.js';
 import { applyServerNames, createCertWatcher } from '../utils/tls-reload.js';
+import { mirrorRoutes } from './route-registry.js';
 import { parentPort } from 'node:worker_threads';
 import { dirname } from 'node:path';
 
@@ -22,66 +23,131 @@ export function requestDone() {
 	}
 }
 
-// --- TLS certificate hot-reload (opt-in via ssl_watch; see utils/tls-reload.js) ---
-// Registered SNI hosts for this app, updated on each reload; and the directory
-// watcher. In SINGLE-PROCESS mode this module both watches the cert directory and
-// reloads. In CLUSTER mode the cert-directory watch lives on the primary (index.js);
-// a worker registers its SNI hosts here but does not watch, and reloadTls() is
-// driven by the primary's {type:'tls-reload'} broadcast when it detects a renewed
-// cert. Either way a renewed cert is served without re-binding the listen socket.
-let tlsHosts = [];
+// --- TLS certificate hot-reload (on by default; SSL_WATCH=0 opts out) ---
+// Cert-identity state for this app ({ hosts, fingerprint }) and the directory
+// watcher. The SNI overlay is LAZY: boot registers NOTHING - the boot cert is
+// served by the SSLApp default context alone, byte-identical to SSL_WATCH=0 -
+// and only a genuine cert change (fingerprint gate) activates the overlay.
+// That laziness is load-bearing: a uWS server name carries its OWN empty HTTP
+// router which force-closes every request it cannot route, so a server name may
+// only ever exist together with a full route mirror (mirrorRoutes below), and
+// registering none at boot means the hot-reload default cannot regress plain
+// serving. In SINGLE-PROCESS mode this module both watches the cert directory
+// and reloads. In CLUSTER mode the cert-directory watch lives on the primary
+// (index.js); reloadTls() on a worker is driven by the primary's
+// {type:'tls-reload'} broadcast. Either way a renewed cert is served without
+// re-binding the listen socket.
+/** @type {{ hosts: string[], fingerprint: string | null } | null} */
+let tlsState = null;
 let certWatcher = null;
+let tlsRetryTimer = null;
 
 /**
- * Re-read the certificate on disk and swap the SNI server name(s) in place so a
- * renewed cert is served without re-binding the listen socket. Validates the
- * cert + key BEFORE touching the app, so a partial write keeps the previous
- * certificate (TLS never drops). No-op on a non-TLS server. Exported so the
- * cluster primary-broadcast handler (index.js) can drive a reload on this worker.
+ * Re-read the certificate on disk and - when it genuinely changed - swap the
+ * SNI server name(s) in place so the renewed cert is served without re-binding
+ * the listen socket, then replay the app's routes onto each host's fresh SNI
+ * domain router (a swap replaces the router with an empty one that would
+ * force-close every request). Fingerprint-gated: an unchanged cert (watcher
+ * double-fire, unconditional cluster broadcast) is a no-op. Validates the cert
+ * + key BEFORE touching the app, so a partial write keeps the previous
+ * certificate (TLS never drops). No-op on a non-TLS server and when boot
+ * disabled hot-reload (unreadable boot cert). Exported so the cluster
+ * primary-broadcast handler (index.js) can drive a reload on this worker.
  */
 export function reloadTls() {
-	if (!is_tls || !ssl_watch) return;
+	if (!is_tls || !ssl_watch || tlsState === null) return;
+	let swappedHosts = null;
 	try {
-		tlsHosts = applyServerNames(app, { certPath: ssl_cert, keyPath: ssl_key, hosts: ssl_sni_hosts }, tlsHosts);
+		const result = applyServerNames(app, { certPath: ssl_cert, keyPath: ssl_key, hosts: ssl_sni_hosts }, tlsState);
+		if (!result.changed) return;
+		swappedHosts = result.hosts;
+		// The swap just replaced each host's SNI domain router with a fresh empty
+		// one; mirror the app's full route set onto them before any handshake
+		// resolves to a routeless router. Synchronous, so no request interleaves.
+		mirrorRoutes(app, result.hosts);
+		tlsState = { hosts: result.hosts, fingerprint: result.fingerprint };
+		console.log(`[tls] renewed certificate now served (SNI: ${result.hosts.join(', ')})`);
 	} catch (err) {
-		console.error('[tls] certificate reload skipped, kept the previous cert:', err && err.message ? err.message : err);
+		const msg = err && err.message ? err.message : err;
+		if (swappedHosts !== null || (err && err.tlsAppTouched)) {
+			// The app was already mutated (partial server-name swap, or a swap whose
+			// route mirror failed) - SNI-matched clients may be unroutable on some
+			// hosts. "Kept the previous cert" would be a lie here. Clear the
+			// fingerprint so the next watcher/broadcast event bypasses the gate and
+			// re-runs the full swap + mirror instead of no-opping until the next
+			// genuine renewal months away.
+			tlsState = { hosts: swappedHosts !== null ? swappedHosts : tlsState.hosts, fingerprint: null };
+			console.error('[tls] certificate swap failed MID-APPLY - some SNI hosts may be unroutable; retrying shortly:', msg);
+			// Self-contained retry: the throw may have consumed the LAST fs event of
+			// the renewal burst, so waiting for the next watcher/broadcast event could
+			// mean waiting for the next renewal months away. One-shot, and each retry
+			// re-arms only from its own failure path, so a persistent fault retries at
+			// this cadence (loudly) instead of spinning.
+			if (tlsRetryTimer === null) {
+				tlsRetryTimer = setTimer(() => { tlsRetryTimer = null; reloadTls(); }, ssl_reload_debounce_ms > 0 ? ssl_reload_debounce_ms : 500);
+			}
+		} else {
+			// Validation threw before the app was touched (half-written cert, key
+			// mismatch): the previous cert is fully intact, and the file write that
+			// completes the renewal fires the watcher again.
+			console.error('[tls] certificate reload skipped, kept the previous cert:', msg);
+		}
 	}
 }
 
 /**
- * Register the certificate's SNI host(s) so the served hosts become hot-reloadable
- * (the SSLApp default context is not), and - in single-process mode - start
- * watching the cert directory. Called from start() once the listen socket is
- * bound. In cluster mode every worker registers its hosts here but does not watch;
- * the primary (index.js) owns the cert-directory watch and drives each worker's
- * reloadTls() via a {type:'tls-reload'} broadcast.
+ * Arm the TLS hot-reload: record the boot cert's fingerprint (the gate that
+ * keeps the SNI overlay inactive until the cert on disk genuinely changes) and
+ * - in single-process mode - start watching the cert directory. Registers NO
+ * server names: boot-time serving is exactly the SSLApp default context, so
+ * SSL_WATCH=1 (the default) serves byte-identically to SSL_WATCH=0 until the
+ * first real renewal. Called from start() once the listen socket is bound. In
+ * cluster mode a worker does not watch - the primary (index.js) owns the watch
+ * and drives each worker's reloadTls() via a {type:'tls-reload'} broadcast. An
+ * unreadable / unparseable boot cert disables hot-reload loudly (the server
+ * itself keeps serving - uWS already loaded the cert into its boot context).
  */
 function initTlsReload() {
 	if (!is_tls || !ssl_watch) return;
-	try {
-		tlsHosts = applyServerNames(app, { certPath: ssl_cert, keyPath: ssl_key, hosts: ssl_sni_hosts }, []);
-	} catch (err) {
-		console.error('[tls] initial SNI registration failed, hot-reload disabled:', err && err.message ? err.message : err);
-		return;
-	}
+	// Baseline = the fingerprint captured in the same tick the SSLApp loaded the
+	// cert (config.js), NOT a fresh read: module eval runs for seconds on a real
+	// app, and a renewal completing in that window must read as "changed" here,
+	// not get recorded as already-served and gated off until the cert expires.
+	// A null capture (unreadable at app creation) bypasses the gate on the first
+	// event, which converges on the disk cert - safe in both directions.
+	tlsState = { hosts: [], fingerprint: boot_cert_fingerprint };
 	// Only a single-process server watches its own cert directory. A cluster worker
 	// (parentPort set) does not watch - the primary owns the watch and drives this
 	// worker's reload via a {type:'tls-reload'} broadcast (index.js).
 	if (!parentPort) {
-		certWatcher = createCertWatcher({
-			certPath: ssl_cert,
-			debounceMs: ssl_reload_debounce_ms,
-			onChange: reloadTls
-		});
-		certWatcher.start();
-		console.log(`[tls] watching ${dirname(ssl_cert)} for certificate renewals (SNI: ${tlsHosts.join(', ')})`);
+		try {
+			certWatcher = createCertWatcher({
+				certPath: ssl_cert,
+				debounceMs: ssl_reload_debounce_ms,
+				onChange: reloadTls
+			});
+			certWatcher.start();
+			console.log(`[tls] watching ${dirname(ssl_cert)} for certificate renewals`);
+		} catch (err) {
+			certWatcher = null;
+			console.error('[tls] cert watch failed to start, hot-reload disabled (server keeps running):', err && err.message ? err.message : err);
+		}
 	}
+	// Arm-time catch-up: swap now if the cert on disk already differs from the
+	// one the boot context serves (a renewal that landed during module eval, or
+	// - single-process - an fs event that fired before the watcher existed).
+	// Fingerprint-gated, so the common unchanged-cert boot costs one file read.
+	reloadTls();
 }
 
-/** Stop the cert watcher (idempotent; no-op when never started). */
+/** Stop the cert watcher and any pending retry (idempotent; no-op when never started). */
 export function stopTlsReload() {
 	certWatcher?.stop();
 	certWatcher = null;
+	if (tlsRetryTimer !== null) {
+		clearTimer(tlsRetryTimer);
+		tlsRetryTimer = null;
+	}
 }
 
 /**
@@ -109,9 +175,12 @@ let listenSocket = null;
  * @param {string} host
  * @param {number} port
  * @param {{ listen?: boolean }} [opts] - `listen: false` fires the `init` hook
- *   without binding a listen socket. Used by a compute worker (worker roles): it
- *   runs app boot work over the shared memory from primaryInit but never accepts
- *   connections. Omitted / `listen: true` is the normal listen-and-init path.
+ *   without binding a listen socket, for workers that must boot fully but never
+ *   own the socket: a compute worker (runs app boot work over the shared memory
+ *   from primaryInit but never accepts connections) and an acceptor-mode io
+ *   worker (the primary's acceptor owns the socket and routes connections to
+ *   this child app by descriptor). Omitted / `listen: true` is the normal
+ *   listen-and-init path.
  * @returns {Promise<void>}
  */
 export async function start(host, port, opts) {

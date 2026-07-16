@@ -1,4 +1,6 @@
 import uWS from 'uWebSockets.js';
+import { X509Certificate } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { env } from '../env.js';
 import { wsModule } from '../ws-handler-bridge.js';
 import { parse_as_bytes, parse_origin } from '../utils.js';
@@ -135,6 +137,25 @@ export const _t_app = monotonicNow();
 export const app = is_tls
 	? uWS.SSLApp({ cert_file_name: ssl_cert, key_file_name: ssl_key })
 	: uWS.App();
+
+// Fingerprint of the certificate the SSLApp default context is SERVING,
+// captured in the same tick as the app creation above. The TLS hot-reload's
+// change gate must baseline against this, not against a later read: module
+// eval continues for seconds on a real app (static cache indexing, SSR init),
+// and a renewal completing in that window would otherwise be recorded as
+// already-served and silently gated off forever - the server would sit on the
+// old cert until it expired. Null when unreadable (uWS read the file a moment
+// earlier, so this is near-impossible); a null baseline makes the first reload
+// event bypass the gate and converge on the disk cert, which is the safe
+// direction.
+export const boot_cert_fingerprint = (() => {
+	if (!is_tls) return null;
+	try {
+		return new X509Certificate(readFileSync(ssl_cert)).fingerprint256;
+	} catch {
+		return null;
+	}
+})();
 
 // WS_DEBUG=1 enables per-event logging for subscribe/publish/open/close.
 // Read once at module load so it is never sampled inside a hot callback.

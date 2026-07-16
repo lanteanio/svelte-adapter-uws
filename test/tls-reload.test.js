@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, copyFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseSniHosts, applyServerNames, createCertWatcher, reloadClusterTls } from '../src/runtime/utils/tls-reload.js';
+import { parseSniHosts, readCertIdentity, applyServerNames, createCertWatcher, reloadClusterTls } from '../src/runtime/utils/tls-reload.js';
 
 // Cert parsing / server-name reconciliation needs a real X.509 cert with a SAN.
 // We generate a couple at setup with openssl; if none is found, those cases skip
@@ -87,11 +87,47 @@ describeSsl()('parseSniHosts', () => {
 	});
 });
 
+describeSsl()('readCertIdentity', () => {
+	it('returns the cert fingerprint and its SAN hosts without touching any app', () => {
+		const id = readCertIdentity(certs.A.crt);
+		expect(id.hosts).toEqual(['*.api.example.com', 'a.example.com']);
+		expect(id.fingerprint).toMatch(/^([0-9A-F]{2}:)+[0-9A-F]{2}$/);
+		// Different cert bytes -> different fingerprint (the change-detection key).
+		expect(readCertIdentity(certs.B.crt).fingerprint).not.toBe(id.fingerprint);
+	});
+
+	it('honors an explicit host override instead of SAN discovery', () => {
+		const id = readCertIdentity(certs.A.crt, ['override.example.com']);
+		expect(id.hosts).toEqual(['override.example.com']);
+	});
+
+	it('throws on an unreadable cert so boot can disable hot-reload loudly', () => {
+		expect(() => readCertIdentity(join(dir, 'nope.crt'))).toThrow();
+	});
+});
+
 describeSsl()('applyServerNames', () => {
-	it('registers every served host on the first apply', () => {
+	it('skips untouched (changed: false) when the disk cert fingerprint matches prev', () => {
+		// The lazy-activation core: boot state carries the boot cert's fingerprint
+		// and NO registered hosts; a watcher double-fire / unchanged-cert broadcast
+		// must leave the app exactly as it was.
 		const app = mockApp();
-		const hosts = applyServerNames(app, { certPath: certs.A.crt, keyPath: certs.A.key }, []);
-		expect(hosts).toEqual(['*.api.example.com', 'a.example.com']);
+		const bootFp = readCertIdentity(certs.A.crt).fingerprint;
+		const result = applyServerNames(app, { certPath: certs.A.crt, keyPath: certs.A.key }, { hosts: [], fingerprint: bootFp });
+		expect(result).toEqual({ hosts: [], fingerprint: bootFp, changed: false });
+		expect(app.calls.add).toEqual([]);
+		expect(app.calls.remove).toEqual([]);
+	});
+
+	it('registers every served host on the first genuine change (empty prev hosts)', () => {
+		// Boot state fingerprint belongs to a DIFFERENT cert than the one now on
+		// disk -> the overlay activates and registers all hosts fresh.
+		const app = mockApp();
+		const bootFp = readCertIdentity(certs.B.crt).fingerprint;
+		const result = applyServerNames(app, { certPath: certs.A.crt, keyPath: certs.A.key }, { hosts: [], fingerprint: bootFp });
+		expect(result.changed).toBe(true);
+		expect(result.hosts).toEqual(['*.api.example.com', 'a.example.com']);
+		expect(result.fingerprint).toBe(readCertIdentity(certs.A.crt).fingerprint);
 		expect(app.calls.add.map((c) => c.host).sort()).toEqual(['*.api.example.com', 'a.example.com']);
 		expect(app.calls.remove).toEqual([]);
 		// The add carries the file paths so uWS reads the current cert bytes.
@@ -99,13 +135,14 @@ describeSsl()('applyServerNames', () => {
 	});
 
 	it('diffs on reload: removes gone hosts, reloads shared, adds new', () => {
-		// Swap cert A's files for cert B's content in place, then reconcile from A's hosts.
+		// Swap cert A's files for cert B's content in place, then reconcile from A's state.
 		const app = mockApp();
 		copyFileSync(certs.B.crt, join(dir, 'live.crt'));
 		copyFileSync(certs.B.key, join(dir, 'live.key'));
-		const prev = ['*.api.example.com', 'a.example.com'];
-		const hosts = applyServerNames(app, { certPath: join(dir, 'live.crt'), keyPath: join(dir, 'live.key') }, prev);
-		expect(hosts).toEqual(['a.example.com', 'c.example.com']);
+		const prev = { hosts: ['*.api.example.com', 'a.example.com'], fingerprint: readCertIdentity(certs.A.crt).fingerprint };
+		const result = applyServerNames(app, { certPath: join(dir, 'live.crt'), keyPath: join(dir, 'live.key') }, prev);
+		expect(result.changed).toBe(true);
+		expect(result.hosts).toEqual(['a.example.com', 'c.example.com']);
 		// *.api gone -> removed; a shared -> reloaded (remove+add); c new -> added.
 		expect(app.calls.remove).toContain('*.api.example.com'); // gone
 		expect(app.calls.remove).toContain('a.example.com');     // reloaded
@@ -116,8 +153,8 @@ describeSsl()('applyServerNames', () => {
 
 	it('honors an explicit host override instead of SAN discovery', () => {
 		const app = mockApp();
-		const hosts = applyServerNames(app, { certPath: certs.A.crt, keyPath: certs.A.key, hosts: ['override.example.com'] }, []);
-		expect(hosts).toEqual(['override.example.com']);
+		const result = applyServerNames(app, { certPath: certs.A.crt, keyPath: certs.A.key, hosts: ['override.example.com'] }, { hosts: [], fingerprint: null });
+		expect(result.hosts).toEqual(['override.example.com']);
 		expect(app.calls.add.map((c) => c.host)).toEqual(['override.example.com']);
 	});
 
@@ -125,15 +162,56 @@ describeSsl()('applyServerNames', () => {
 		const app = mockApp();
 		const badCrt = join(dir, 'bad.crt');
 		writeFileSync(badCrt, '-----BEGIN CERTIFICATE-----\nnot a real cert\n-----END CERTIFICATE-----\n');
-		expect(() => applyServerNames(app, { certPath: badCrt, keyPath: certs.A.key }, ['a.example.com'])).toThrow();
+		expect(() => applyServerNames(app, { certPath: badCrt, keyPath: certs.A.key }, { hosts: ['a.example.com'], fingerprint: 'AA:BB' })).toThrow();
 		expect(app.calls.add).toEqual([]);
 		expect(app.calls.remove).toEqual([]);
 	});
 
 	it('throws on a cert/key mismatch (never registers a broken pair)', () => {
 		const app = mockApp();
-		expect(() => applyServerNames(app, { certPath: certs.A.crt, keyPath: certs.B.key }, [])).toThrow(/do not match/);
+		expect(() => applyServerNames(app, { certPath: certs.A.crt, keyPath: certs.B.key }, { hosts: [], fingerprint: null })).toThrow(/do not match/);
 		expect(app.calls.add).toEqual([]);
+	});
+
+	it('marks a mid-apply throw with tlsAppTouched so callers can tell a partial swap from an untouched app', () => {
+		// Validation throws leave the app untouched (asserted above) and carry no
+		// marker; a throw from the mutation loop means the swap is PARTIAL and the
+		// caller must escalate + force a retry instead of claiming the previous
+		// cert was kept.
+		const app = mockApp();
+		app.addServerName = () => { throw new Error('native add failed'); };
+		let caught = null;
+		try {
+			applyServerNames(app, { certPath: certs.A.crt, keyPath: certs.A.key }, { hosts: [], fingerprint: null });
+		} catch (err) {
+			caught = err;
+		}
+		expect(caught).toBeTruthy();
+		expect(caught.tlsAppTouched).toBe(true);
+
+		// A non-Error throw from the native layer is normalized so it cannot
+		// dodge the marker.
+		const rawApp = mockApp();
+		rawApp.addServerName = () => { throw 'native string throw'; };
+		let normalized = null;
+		try {
+			applyServerNames(rawApp, { certPath: certs.A.crt, keyPath: certs.A.key }, { hosts: [], fingerprint: null });
+		} catch (err) {
+			normalized = err;
+		}
+		expect(normalized).toBeInstanceOf(Error);
+		expect(normalized.tlsAppTouched).toBe(true);
+		expect(normalized.message).toContain('native string throw');
+
+		// The pre-mutation counterpart: a key mismatch throws WITHOUT the marker.
+		let validation = null;
+		try {
+			applyServerNames(mockApp(), { certPath: certs.A.crt, keyPath: certs.B.key }, { hosts: [], fingerprint: null });
+		} catch (err) {
+			validation = err;
+		}
+		expect(validation).toBeTruthy();
+		expect(validation.tlsAppTouched).toBeUndefined();
 	});
 });
 
@@ -190,65 +268,61 @@ describe('createCertWatcher (injected clock + fs)', () => {
 	});
 });
 
-// The cluster-primary reload action: broadcast to every worker, and (acceptor
-// mode) reload the acceptor app's own context first. The broadcast path needs no
-// certs; the acceptor-reload path uses a real cert (openssl-gated).
+// The cluster-primary reload action: an UNCONDITIONAL broadcast to every worker
+// (each worker fingerprint-gates its own apply), plus an observability refresh
+// of the primary's view of the disk cert. The primary terminates no TLS, so no
+// app is ever touched here. The broadcast paths need no certs; the identity
+// refresh uses a real cert (openssl-gated).
 function mockWorker() {
 	const posted = [];
 	return { posted, postMessage(msg) { posted.push(msg); } };
 }
 
 describe('reloadClusterTls (cluster broadcast)', () => {
-	it('broadcasts {type:tls-reload} to every worker (no acceptor app)', () => {
+	it('broadcasts {type:tls-reload} to every worker (no source to read)', () => {
 		const workers = [mockWorker(), mockWorker(), mockWorker()];
-		const hosts = reloadClusterTls({ workers, acceptorApp: null, acceptorHosts: ['prev.example.com'] });
+		const state = reloadClusterTls({ workers, state: { hosts: ['prev.example.com'], fingerprint: 'AA:BB' } });
 		for (const w of workers) expect(w.posted).toEqual([{ type: 'tls-reload' }]);
-		// No acceptor app -> the acceptor host list is returned unchanged.
-		expect(hosts).toEqual(['prev.example.com']);
+		// No source -> the primary's cert-identity state is returned unchanged.
+		expect(state).toEqual({ hosts: ['prev.example.com'], fingerprint: 'AA:BB' });
 	});
 
 	it('does not let one exiting worker (postMessage throws) stop the broadcast', () => {
 		const good1 = mockWorker();
 		const bad = { postMessage() { throw new Error('worker exiting'); } };
 		const good2 = mockWorker();
-		expect(() => reloadClusterTls({ workers: [good1, bad, good2], acceptorApp: null })).not.toThrow();
+		expect(() => reloadClusterTls({ workers: [good1, bad, good2] })).not.toThrow();
 		expect(good1.posted).toEqual([{ type: 'tls-reload' }]);
 		expect(good2.posted).toEqual([{ type: 'tls-reload' }]);
 	});
 
-	it('reports an acceptor reload error via onError but still broadcasts and keeps the prior hosts', () => {
+	it('reports an unreadable cert via onError but still broadcasts and keeps the prior state', () => {
 		const workers = [mockWorker()];
-		const app = mockApp();
 		let errored = null;
-		// A source pointing at a nonexistent cert makes applyServerNames throw.
-		const hosts = reloadClusterTls({
+		const state = reloadClusterTls({
 			workers,
-			acceptorApp: app,
-			source: { certPath: '/no/such/cert.crt', keyPath: '/no/such/cert.key' },
-			acceptorHosts: ['kept.example.com'],
+			source: { certPath: '/no/such/cert.crt' },
+			state: { hosts: ['kept.example.com'], fingerprint: 'AA:BB' },
 			onError: (err) => { errored = err; }
 		});
 		expect(errored).toBeTruthy(); // onError fired with the thrown cert-read error
 		expect(String(errored.message || errored)).toMatch(/ENOENT|no such file/);
-		expect(hosts).toEqual(['kept.example.com']); // reload threw -> prior hosts kept
-		expect(app.calls.add).toHaveLength(0); // app never touched on a bad cert
+		expect(state).toEqual({ hosts: ['kept.example.com'], fingerprint: 'AA:BB' }); // read threw -> prior state kept
 		expect(workers[0].posted).toEqual([{ type: 'tls-reload' }]); // workers still notified
 	});
 });
 
-describeSsl()('reloadClusterTls (acceptor reload with a real cert)', () => {
-	it('reloads the acceptor app SNI in place and broadcasts to workers', () => {
+describeSsl()('reloadClusterTls (identity refresh with a real cert)', () => {
+	it('refreshes the primary state from the disk cert and broadcasts to workers', () => {
 		const workers = [mockWorker(), mockWorker()];
-		const app = mockApp();
-		const hosts = reloadClusterTls({
+		const state = reloadClusterTls({
 			workers,
-			acceptorApp: app,
-			source: { certPath: certs.A.crt, keyPath: certs.A.key },
-			acceptorHosts: []
+			source: { certPath: certs.A.crt },
+			state: { hosts: [], fingerprint: null }
 		});
-		// Acceptor registered the cert's SAN hosts...
-		expect(hosts).toEqual(['*.api.example.com', 'a.example.com']);
-		expect(app.calls.add.map((c) => c.host).sort()).toEqual(['*.api.example.com', 'a.example.com']);
+		// The primary now reflects the cert on disk...
+		expect(state.hosts).toEqual(['*.api.example.com', 'a.example.com']);
+		expect(state.fingerprint).toBe(readCertIdentity(certs.A.crt).fingerprint);
 		// ...and every worker was told to reload its own context.
 		for (const w of workers) expect(w.posted).toEqual([{ type: 'tls-reload' }]);
 	});

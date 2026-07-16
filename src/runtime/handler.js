@@ -64,6 +64,15 @@ export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatche
 export { setRelayRingWriter } from './handler/relay.js';
 import { handleRequest } from './handler/request.js';
 import { handleAdminRequest } from './handler/admin.js';
+import { registerRoute } from './handler/route-registry.js';
+
+// EVERY route registration on `app` goes through this helper, never through
+// `app.get(...)` directly: it records the registration so the TLS hot-reload
+// can replay the full route set onto each SNI domain router it creates
+// (route-registry.js) - a uWS server name carries its own empty router that
+// force-closes anything it cannot route, so an unrecorded route would vanish
+// for every SNI-matched connection after the first cert renewal.
+const route = (method, ...args) => registerRoute(app, method, ...args);
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -747,7 +756,7 @@ if (WS_ENABLED) {
 		// a small value to make malicious payloads cheap to reject.
 		const AUTH_BODY_LIMIT = 64 * 1024;
 
-		app.post(authPath, (res, req) => {
+		route('post', authPath, (res, req) => {
 			/** @type {Record<string, string>} */
 			const authHeaders = {};
 			req.forEach((k, v) => { authHeaders[k] = v; });
@@ -863,7 +872,7 @@ if (WS_ENABLED) {
 
 		// Reject non-POST verbs on the auth path so GET/HEAD do not fall through
 		// to the SSR catch-all (which would try to render a SvelteKit route).
-		app.any(authPath, (res) => {
+		route('any', authPath, (res) => {
 			res.cork(() => {
 				res.writeStatus('405 Method Not Allowed');
 				res.writeHeader('allow', 'POST');
@@ -889,7 +898,7 @@ if (WS_ENABLED) {
 		const currentQueueDepth = () => pollCounter.depth(now());
 		queueDepthProbe = currentQueueDepth;
 
-		app.get(WAITING_ROOM.admitCheckPath, (res) => {
+		route('get', WAITING_ROOM.admitCheckPath, (res) => {
 			res.onAborted(() => {});
 			pollCounter.record(now());
 			// Siege never admits a reload into a full gate: it always reports
@@ -930,7 +939,7 @@ if (WS_ENABLED) {
 
 		// Direct navigation to the configured path renders the same page the
 		// gate serves on rejection, seeded from the live poll counter.
-		app.get(WAITING_ROOM.path, (res) => {
+		route('get', WAITING_ROOM.path, (res) => {
 			res.onAborted(() => {});
 			const body = WAITING_ROOM.renderPage(currentQueueDepth());
 			res.cork(() => {
@@ -942,7 +951,7 @@ if (WS_ENABLED) {
 		});
 	}
 
-	app.ws(WS_PATH, {
+	route('ws', WS_PATH, {
 		// Handle HTTP -> WebSocket upgrade with user-provided auth
 		upgrade: (res, req, context) => {
 			// Cursor-only upgrade lane (the worker's second WebSocket). Read the
@@ -1940,7 +1949,7 @@ if (WS_ENABLED) {
 // LIVENESS probe: it reports 200 whenever the process is up, INCLUDING during a
 // graceful drain - so a k8s liveness probe never restarts a pod mid-shutdown.
 if (HEALTH_CHECK_PATH) {
-	app.get(HEALTH_CHECK_PATH, (res) => {
+	route('get', HEALTH_CHECK_PATH, (res) => {
 		res.cork(() => {
 			res.writeStatus('200 OK').end('OK');
 		});
@@ -1954,7 +1963,7 @@ if (HEALTH_CHECK_PATH) {
 // it separate from `healthCheckPath` so a single endpoint is never used for
 // both purposes (a readiness 503 must NOT trip a liveness probe into a restart).
 if (READINESS_CHECK_PATH) {
-	app.get(READINESS_CHECK_PATH, (res) => {
+	route('get', READINESS_CHECK_PATH, (res) => {
 		if (isDraining()) {
 			res.cork(() => {
 				res.writeStatus('503 Service Unavailable').end('draining');
@@ -1977,12 +1986,12 @@ if (READINESS_CHECK_PATH) {
 // adapter is pure request/response plumbing.
 const ADMIN_PATH = (WS_OPTIONS && WS_OPTIONS.adminPath !== undefined) ? WS_OPTIONS.adminPath : '/__realtime';
 if (WS_ENABLED && ADMIN_PATH !== false && typeof wsModule.admin === 'function') {
-	app.any(ADMIN_PATH + '/*', handleAdminRequest);
+	route('any', ADMIN_PATH + '/*', handleAdminRequest);
 	console.log(`Admin route registered at ${ADMIN_PATH}/*`);
 }
 
 // Register HTTP handler (after WS so the WS route takes priority)
-app.any('/*', handleRequest);
+route('any', '/*', handleRequest);
 
 // - In-flight request tracking -------------------------------------------
 

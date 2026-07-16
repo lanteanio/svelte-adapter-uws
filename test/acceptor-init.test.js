@@ -1,4 +1,4 @@
-// DBOPS-02 regression: in acceptor cluster mode, an I/O worker must run its
+// Acceptor-init regression: in acceptor cluster mode, an I/O worker must run its
 // hooks.ws `init` hook (DB connectivity checks, pool warmup, migration validation)
 // BEFORE the primary starts serving. The bug: the acceptor branch only posted
 // getDescriptor() and the primary listened immediately, so acceptor I/O workers
@@ -17,10 +17,11 @@
 // runner without the binding so the default matrix stays green.
 
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
-import { spawn, execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { buildFixtureOnce } from './helpers/fixture-build.js';
 
 const fixtureDir = fileURLToPath(new URL('./fixture', import.meta.url));
 const builtEntry = path.join(fixtureDir, 'build', 'index.js');
@@ -39,21 +40,18 @@ const canRun = bindingLoads();
 
 const describeMaybe = canRun ? describe : describe.skip;
 
-describeMaybe('DBOPS-02: acceptor workers run init before serving', () => {
+describeMaybe('acceptor cluster mode: io workers run init before serving', () => {
 	/** @type {import('node:child_process').ChildProcess | null} */
 	let child = null;
 
 	beforeAll(() => {
-		// Build the fixture once (build/ is gitignored, so CI has no prebuilt copy).
+		// Build the fixture (build/ is gitignored, so CI has no prebuilt copy).
 		// The adapter resolves through a symlink to this repo, so the build embeds
-		// the current runtime source under test.
-		try {
-			execSync('npx vite build', { cwd: fixtureDir, stdio: 'pipe', timeout: 180000 });
-			built = true;
-		} catch {
-			built = false;
-		}
-	}, 200000);
+		// the current runtime source under test. Serialized + reused across the
+		// suites that boot the built fixture (the TLS hot-reload suite builds the
+		// same directory).
+		built = buildFixtureOnce();
+	}, 400000);
 
 	afterEach(() => {
 		if (child && !child.killed) {

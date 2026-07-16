@@ -3,7 +3,7 @@ import { isMainThread, parentPort, threadId, Worker, workerData } from 'node:wor
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 import { env } from 'ENV';
-import { applyServerNames, createCertWatcher, reloadClusterTls } from './utils/tls-reload.js';
+import { createCertWatcher, readCertIdentity, reloadClusterTls } from './utils/tls-reload.js';
 import { monotonicNow, setTimer, setIntervalTimer, clearTimer } from './runtime.js';
 import { createRelayRingBuffer, RingWriter, RingReader, decodeRelayFrame } from './relay-ring.js';
 import { createStateHashDetector } from './state-hash-detector.js';
@@ -560,34 +560,34 @@ if (is_primary) {
 	// --- TLS certificate hot-reload (cluster primary half) ---
 	// The primary watches the cert directory and, on a renewed cert (certbot /
 	// cert-manager), broadcasts {type:'tls-reload'} so every worker swaps its own
-	// app's SNI context in place (validated before touching the app; a bad cert
-	// keeps the previous one). In acceptor mode the primary also reloads
-	// acceptorApp, which terminates TLS on this thread. Reloading BOTH is correct
-	// whether TLS terminates on the acceptor or the child worker apps. The listen
-	// socket is never re-bound and live connections survive. Non-SNI / unmatched
-	// clients keep the boot cert until a restart (the SSLApp default context is
-	// not swappable) - the documented caveat covering the SNI-sending majority.
+	// app's SNI context in place (each worker validates + fingerprint-gates its
+	// own apply; a bad cert keeps the previous one). The primary itself
+	// terminates no TLS in either cluster mode - reuseport workers own their
+	// listen sockets, and the acceptor only distributes accepted connections to
+	// the child worker apps, whose contexts run the handshakes - so the primary
+	// registers no server names; it only tracks the disk cert's identity for
+	// observability. The listen socket is never re-bound and live connections
+	// survive. Non-SNI / unmatched clients keep the boot cert until a restart
+	// (the SSLApp default context is not swappable) - the documented caveat
+	// covering the SNI-sending majority.
 	let primaryCertWatcher = null;
-	let acceptorTlsHosts = [];
+	let primaryTlsState = { hosts: [], fingerprint: null };
 	function onCertChange() {
-		acceptorTlsHosts = reloadClusterTls({
+		primaryTlsState = reloadClusterTls({
 			workers: workers.keys(),
-			acceptorApp: cluster_mode === 'acceptor' ? acceptorApp : null,
-			source: { certPath: ssl_cert, keyPath: ssl_key, hosts: ssl_sni_hosts },
-			acceptorHosts: acceptorTlsHosts,
-			onError: (err) => console.error('[tls] acceptor certificate reload skipped, kept the previous cert:', err && err.message ? err.message : err)
+			source: { certPath: ssl_cert, hosts: ssl_sni_hosts },
+			state: primaryTlsState,
+			onError: (err) => console.error('[tls] renewed certificate unreadable on the primary (workers keep the previous cert):', err && err.message ? err.message : err)
 		});
 	}
 	if (is_tls && ssl_watch) {
-		// Register the acceptor's SNI host(s) at boot so its context is reloadable
-		// (a worker registers its own hosts in start()). A parse failure disables
-		// the acceptor reload but never drops TLS.
-		if (cluster_mode === 'acceptor' && acceptorApp) {
-			try {
-				acceptorTlsHosts = applyServerNames(acceptorApp, { certPath: ssl_cert, keyPath: ssl_key, hosts: ssl_sni_hosts }, []);
-			} catch (err) {
-				console.error('[tls] acceptor SNI registration failed, hot-reload disabled on the acceptor context:', err && err.message ? err.message : err);
-			}
+		// Record the boot cert's identity so the reload broadcast has a baseline to
+		// report against. A parse failure only degrades primary-side observability -
+		// the workers gate on their own reads.
+		try {
+			primaryTlsState = readCertIdentity(ssl_cert, ssl_sni_hosts);
+		} catch (err) {
+			console.error('[tls] boot certificate unreadable on the primary (hot-reload broadcast stays armed):', err && err.message ? err.message : err);
 		}
 		// Guard the watcher start: fs.watch throws ENOENT synchronously when the
 		// cert's parent directory does not exist (a not-yet-mounted secret volume,
