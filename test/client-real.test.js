@@ -1648,6 +1648,81 @@ describe('client.js (real module)', () => {
 			conn.close();
 		});
 
+		it('sends the wire unsubscribe frame for a server-managed topic on last ref release', async () => {
+			// The subscribe frame is skipped for managed topics (the server subscribed
+			// the socket itself), but the RELEASE is not symmetric: the client is the
+			// only party that knows the last local consumer left, so the last release
+			// MUST emit the unsubscribe frame. Without it the server keeps delivering to
+			// a topic nothing consumes and never fires the app's unsubscribe hook.
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			clientModule.setTopicManaged('managed:leave-1');
+			const s1 = clientModule.on('managed:leave-1');
+			const s2 = clientModule.on('managed:leave-1');
+			const u1 = s1.subscribe(() => {});
+			const u2 = s2.subscribe(() => {});
+			await flush();
+
+			// Managed: no client subscribe frame ever rode the wire.
+			const sawSub = ws._sent
+				.map((s) => { try { return JSON.parse(s); } catch { return null; } })
+				.some((m) => m && (m.type === 'subscribe' || m.type === 'subscribe-batch') &&
+					(m.topic === 'managed:leave-1' || (Array.isArray(m.topics) && m.topics.includes('managed:leave-1'))));
+			expect(sawSub).toBe(false);
+			ws._sent.length = 0;
+
+			// Dropping one of two refs releases nothing at the wire level.
+			u1();
+			await flush();
+			const sawEarly = ws._sent
+				.map((s) => { try { return JSON.parse(s); } catch { return null; } })
+				.some((m) => m && m.type === 'unsubscribe' && m.topic === 'managed:leave-1');
+			expect(sawEarly).toBe(false);
+
+			// Dropping the LAST ref emits the unsubscribe frame.
+			u2();
+			await flush();
+			const frame = ws._sent
+				.map((s) => { try { return JSON.parse(s); } catch { return null; } })
+				.find((m) => m && m.type === 'unsubscribe' && m.topic === 'managed:leave-1');
+			expect(frame).toEqual({ type: 'unsubscribe', topic: 'managed:leave-1' });
+
+			conn.close();
+		});
+
+		it('the public force-unsubscribe emits the wire frame for a managed topic too', async () => {
+			// force-unsubscribe (ignores the ref count) routes through the same release
+			// path as ref release, so a managed topic still emits the frame.
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+
+			clientModule.setTopicManaged('managed:force-1');
+			const store = clientModule.on('managed:force-1');
+			const u = store.subscribe(() => {});
+			await flush();
+
+			// Confirm the topic really is on the managed path (no subscribe frame).
+			const sawSub = ws._sent
+				.map((s) => { try { return JSON.parse(s); } catch { return null; } })
+				.some((m) => m && (m.type === 'subscribe' || m.type === 'subscribe-batch') &&
+					(m.topic === 'managed:force-1' || (Array.isArray(m.topics) && m.topics.includes('managed:force-1'))));
+			expect(sawSub).toBe(false);
+			ws._sent.length = 0;
+
+			conn.unsubscribe('managed:force-1');
+			await flush();
+			const frame = ws._sent
+				.map((s) => { try { return JSON.parse(s); } catch { return null; } })
+				.find((m) => m && m.type === 'unsubscribe' && m.topic === 'managed:force-1');
+			expect(frame).toEqual({ type: 'unsubscribe', topic: 'managed:force-1' });
+
+			u();
+			conn.close();
+		});
+
 	describe('presence client plugin', () => {
 		/** @type {any} */
 		let presenceFn;

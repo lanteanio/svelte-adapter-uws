@@ -1884,10 +1884,9 @@ function createConnection(options) {
 	 * @param {string} topic
 	 */
 	function doUnsubscribe(topic) {
-		// Managed topics never sent a client subscribe frame and are re-marked on
-		// the next server-driven attach, so drop the mark here to keep the set
-		// bounded across churn of dynamic topics.
-		const wasManaged = managedTopics.delete(topic);
+		// Drop the managed mark (re-added on the next server-driven attach) to keep
+		// the set bounded across churn of dynamic topics.
+		managedTopics.delete(topic);
 		subscribedTopics.delete(topic);
 		topicStores.delete(topic);
 		// Clean up topic+event filtered stores for this topic
@@ -1895,10 +1894,25 @@ function createConnection(options) {
 			if (key.startsWith(topic + '\0')) eventStores.delete(key);
 		}
 		if (debug) console.log('[ws] unsubscribe ->', topic);
-		// Symmetric to subscribe(): __-prefixed and server-managed topics never sent
-		// a wire subscribe, so there is no wire-level subscription state for the
-		// server to release.
-		if ((topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) || wasManaged) return;
+		// __-prefixed topics are framework broadcast taps: the client never sent a
+		// wire subscribe (the server's INVALID_TOPIC gate would reject one) and holds
+		// no wire-level subscription state, so there is nothing for the server to
+		// release - skip the frame, exactly as subscribe() did.
+		if (topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) return;
+		// Server-managed topics are the opposite of __-prefixed here. subscribe() skips
+		// their wire frame because the server established the subscription itself (its
+		// stream RPC ran platform.subscribe: real ws.subscribe membership plus the
+		// subscribe hook chain), so a client subscribe would be redundant and would
+		// race the server's re-subscribe on reconnect. Release is not symmetric: the
+		// client is the only party that knows when the last local ref dropped, so it
+		// MUST send the unsubscribe frame. Suppressing it would leave the socket
+		// subscribed to a topic nothing consumes (publishes keep flowing, the server's
+		// subscription total drifts) and would never fire the app's unsubscribe hook -
+		// and everything chained on it - until the socket closes. The frame is not an
+		// authorization surface and the server release path is idempotent (an absent
+		// subscription unsubscribes to a no-op, the membership delete reports false, and
+		// the unsubscribe hook chain is required to be idempotent), so a framework that
+		// also sends its own release frame stays correct.
 		if (ws?.readyState === WebSocket.OPEN) {
 			ws.send(JSON.stringify({ type: 'unsubscribe', topic }));
 		}
