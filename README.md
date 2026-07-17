@@ -2804,7 +2804,7 @@ presence.update(ws, 'room', { typing: true }, platform);
 ```svelte
 <!-- client: the field is merged into the existing user object -->
 {#each $users as u (u.id)}
-  <span>{u.name}{#if u.typing} is typing…{/if}</span>
+  <span>{u.name}{#if u.typing} is typing...{/if}</span>
 {/each}
 ```
 
