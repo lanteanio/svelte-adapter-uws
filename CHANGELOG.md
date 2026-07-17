@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.84] - 2026-07-17
+
+### Fixed
+
+- **The `upgradeResponse` helper's type declarations now match what actually ships at runtime, closing two import forms that typechecked but were `undefined`.** The `svelte-adapter-uws/upgrade-response` subpath pointed its TypeScript types at the full adapter declaration file (which declares a default adapter export), while the subpath's runtime module exports only the named `upgradeResponse` helper - so `import adapter from 'svelte-adapter-uws/upgrade-response'` compiled but was `undefined` at runtime. Inversely, the package root declared a named `upgradeResponse` that the root runtime never exported, so `import { upgradeResponse } from 'svelte-adapter-uws'` also compiled but was `undefined`. The subpath now has its own declaration file describing exactly the named helper (no phantom default), and the phantom root declaration is removed: `upgradeResponse` is imported solely from `svelte-adapter-uws/upgrade-response`, a tiny standalone module with no build-time dependencies. This is deliberate - the package root is the build-time adapter (it pulls in Rollup and Node built-ins), so re-exporting the helper there would risk dragging build tooling into a runtime bundle, and the usual `sideEffects: false` mitigation is unsafe here because some modules register wire codecs on import. Importing `upgradeResponse` from the package root is now a compile error instead of a silent runtime `undefined`, failing fast at the point of the mistake. A new export-shape gate test asserts the runtime exports and the declarations agree at both entry points, so the two can no longer drift.
+
 ## [0.6.0-next.83] - 2026-07-17
 
 ### Fixed
