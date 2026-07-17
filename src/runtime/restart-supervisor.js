@@ -1,3 +1,5 @@
+import { monotonicNow } from './runtime.js';
+
 /**
  * Per-slot crash-restart supervisor for the cluster primary.
  *
@@ -39,7 +41,7 @@
  * @param {(slot: { role: string, index: number }) => void} opts.spawn  (re)spawn a worker for the slot
  * @param {(slot: { role: string, index: number }) => void} opts.onExhausted  a slot exceeded maxAttempts (fatal)
  * @param {() => boolean} opts.shuttingDown  true once the primary is tearing down
- * @param {() => number} [opts.now]  monotonic clock in ms (default performance.now); used to age stable uptime
+ * @param {() => number} [opts.now]  monotonic clock in ms (default monotonicNow); used to age stable uptime
  * @param {number} [opts.delayBase]  first backoff delay in ms (default 100)
  * @param {number} [opts.delayMax]  backoff ceiling in ms (default 5000)
  * @param {number} [opts.maxAttempts]  per-slot restart cap before onExhausted (default 50)
@@ -51,7 +53,7 @@ export function createRestartSupervisor({
 	spawn,
 	onExhausted,
 	shuttingDown,
-	now = () => performance.now(),
+	now = monotonicNow,
 	delayBase = 100,
 	delayMax = 5000,
 	maxAttempts = 50,

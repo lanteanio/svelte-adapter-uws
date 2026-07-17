@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0-next.84] - 2026-07-17
+## [0.6.0-next.85] - 2026-07-17
+
+### Fixed
+
+- **Restored the deterministic-clock gate (`npm run check`).** The cluster restart supervisor's default monotonic clock read `performance.now()` directly instead of the runtime's injectable `monotonicNow`, tripping the check that keeps every clock and randomness source injectable for deterministic simulation - so `npm run check` (and therefore `npm test`, which runs it as `pretest`) failed on an enforced violation. The default now routes through `monotonicNow`. Runtime behavior is unchanged: the supervisor uses the clock only for duration math (aging a slot's stable uptime), and the two sources differ by a constant offset that cancels in the subtraction.
 
 ### Fixed
 
