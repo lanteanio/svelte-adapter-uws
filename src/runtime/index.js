@@ -419,9 +419,11 @@ if (is_primary) {
 				// Forward each message individually so receiving workers use the same
 				// single-message 'publish' path in their relayPublish handler. The
 				// stamped seq rides along so the receiver can advance its
-				// delivered-seq tracker without re-parsing the envelope.
-				for (const { topic, envelope, compress, seq, capability, event, data } of msg.messages) {
-					const relay = { type: 'publish', topic, envelope, compress, seq, capability, event, data };
+				// delivered-seq tracker without re-parsing the envelope, and the
+				// sender's origin/ordinal/birth so it can also tell whether the
+				// stream it is being handed has a hole in it.
+				for (const { topic, envelope, compress, seq, capability, event, data, origin, ord, birth } of msg.messages) {
+					const relay = { type: 'publish', topic, envelope, compress, seq, capability, event, data, origin, ord, birth };
 					for (const [w] of workers) {
 						if (w !== worker) w.postMessage(relay);
 					}
@@ -486,6 +488,23 @@ if (is_primary) {
 							}
 						}
 					}
+				}
+			} else if (msg.type === 'relay-gap') {
+				// A worker found a hole in a relay stream that is dense by
+				// construction, so it lost frames its siblings received - it has
+				// already logged which ones and counted them on its own registry.
+				// Nothing is compared here: unlike a divergent hash, the reporter
+				// names ITSELF, so there is no majority to weigh and no way to act on
+				// the wrong worker. Only a thread id and a frame count crossed the
+				// boundary.
+				if (meta) meta.lastHeartbeat = monotonicNow();
+				console.error('[primary] relay-gap worker=%d frames=%d', msg.threadId, msg.count);
+				// Same action gate as a divergence, for the same reason: the worker is
+				// missing state its siblings have, and a restart is what re-syncs it.
+				// Off by default - logged and counted, never auto-killed.
+				if (restart_on_state_divergence) {
+					console.error('[primary] asking worker %d to exit to re-sync after a relay gap (RESTART_ON_STATE_DIVERGENCE=1)', msg.threadId);
+					requestWorkerExit(worker, 1);
 				}
 			}
 		});
@@ -660,7 +679,7 @@ if (is_primary) {
 } else {
 	// ── Worker thread or single-process mode ─────────────────────────────
 
-	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls, setRelayRingWriter } = await import('HANDLER');
+	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls, setRelayRingWriter, markRelayAttached } = await import('HANDLER');
 
 	// Clean worker-thread exit. A worker thread holds uWS's untracked libuv socket
 	// handles, so a bare process.exit() aborts the whole process
@@ -752,7 +771,7 @@ if (is_primary) {
 			if (msg.type === 'shutdown') {
 				graceful_shutdown('shutdown');
 			} else if (msg.type === 'publish') {
-				relayPublish(msg.topic, msg.envelope, msg.compress, msg.seq, msg.capability, msg.event, msg.data);
+				relayPublish(msg.topic, msg.envelope, msg.compress, msg.seq, msg.capability, msg.event, msg.data, msg.origin, msg.ord, msg.birth);
 			} else if (msg.type === 'publish-batched') {
 				relayPublishBatched(msg.events, msg.compress);
 			} else if (msg.type === 'tls-reload') {
@@ -834,13 +853,22 @@ if (is_primary) {
 				const msg = decodeRelayFrame(frame);
 				if (msg === null) return;
 				if (msg.type === 'publish') {
-					relayPublish(msg.topic, msg.envelope, msg.compress, msg.seq, msg.capability, msg.event, msg.data);
+					relayPublish(msg.topic, msg.envelope, msg.compress, msg.seq, msg.capability, msg.event, msg.data, msg.origin, msg.ord, msg.birth);
 				} else if (msg.type === 'publish-batched') {
 					relayPublishBatched(msg.events, msg.compress);
 				}
 			});
 			relayReader.start();
 		}
+
+		// Both relay lanes are now live, so from here on a sibling's publish is owed
+		// to this worker and a stream it never sees the start of is a lost frame
+		// rather than a stream that predates it. Latched LAST on purpose: every
+		// frame already taken from the boot backlog or sitting in the ring is thereby
+		// treated as a stream we joined mid-flight, which at worst under-reports.
+		// Over-reporting is the failure that matters - it would restart a healthy
+		// worker - so every ambiguity here resolves toward silence.
+		markRelayAttached();
 	}
 
 	if (isMainThread) {

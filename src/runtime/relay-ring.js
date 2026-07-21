@@ -300,9 +300,14 @@ export class RingReader {
 //                          [u32le envelopeLen][envelope]
 //                          [f64le seq]?[u16le capLen][capability]?
 //                          [u16le eventLen][event]?[u32le dataLen][dataJson]?
+//                          [u32le origin][f64le ord][f64le birth]?
 //   flags: bit0 compress, bit1 has seq, bit2 has capability, bit3 has event,
-//          bit4 has data.
+//          bit4 has data, bit5 has origin+ord+birth (one flag: the three are
+//          stamped together by the sending worker or not at all).
+//   ord/birth are f64 rather than u32: a long-lived high-rate topic can relay
+//   past 2^32 frames, and birth is a fractional-ms clock reading.
 // kind 2 (publish-batched): [u8 flags(bit0 compress)][u32le len][eventsJson]
+//   (its per-event origin/ord/birth ride inside the JSON)
 
 const KIND_PUBLISH = 1;
 const KIND_PUBLISH_BATCHED = 2;
@@ -314,18 +319,20 @@ const KIND_PUBLISH_BATCHED = 2;
  * string); a value that cannot stringify makes this THROW, and the caller
  * falls back to the structured-clone path for that message.
  */
-export function encodePublishFrame(topic, envelope, compress, seq, capability, event, data) {
+export function encodePublishFrame(topic, envelope, compress, seq, capability, event, data, origin, ord, birth) {
 	const topicB = textEncoder.encode(topic);
 	const envB = textEncoder.encode(envelope);
 	const hasSeq = typeof seq === 'number';
 	const capB = capability !== undefined ? textEncoder.encode(capability) : null;
 	const eventB = event !== undefined ? textEncoder.encode(event) : null;
 	const dataB = data !== undefined ? textEncoder.encode(JSON.stringify(data)) : null;
+	const hasOrigin = typeof origin === 'number' && typeof ord === 'number' && typeof birth === 'number';
 	let len = 1 + 1 + 2 + topicB.length + 4 + envB.length;
 	if (hasSeq) len += 8;
 	if (capB !== null) len += 2 + capB.length;
 	if (eventB !== null) len += 2 + eventB.length;
 	if (dataB !== null) len += 4 + dataB.length;
+	if (hasOrigin) len += 4 + 8 + 8;
 	const out = new Uint8Array(4 + len);
 	const dv = new DataView(out.buffer);
 	dv.setUint32(0, len, true);
@@ -335,7 +342,8 @@ export function encodePublishFrame(topic, envelope, compress, seq, capability, e
 		(hasSeq ? 2 : 0) |
 		(capB !== null ? 4 : 0) |
 		(eventB !== null ? 8 : 0) |
-		(dataB !== null ? 16 : 0);
+		(dataB !== null ? 16 : 0) |
+		(hasOrigin ? 32 : 0);
 	let o = 6;
 	dv.setUint16(o, topicB.length, true); o += 2;
 	out.set(topicB, o); o += topicB.length;
@@ -345,6 +353,11 @@ export function encodePublishFrame(topic, envelope, compress, seq, capability, e
 	if (capB !== null) { dv.setUint16(o, capB.length, true); o += 2; out.set(capB, o); o += capB.length; }
 	if (eventB !== null) { dv.setUint16(o, eventB.length, true); o += 2; out.set(eventB, o); o += eventB.length; }
 	if (dataB !== null) { dv.setUint32(o, dataB.length, true); o += 4; out.set(dataB, o); o += dataB.length; }
+	if (hasOrigin) {
+		dv.setUint32(o, /** @type {number} */ (origin), true); o += 4;
+		dv.setFloat64(o, /** @type {number} */ (ord), true); o += 8;
+		dv.setFloat64(o, /** @type {number} */ (birth), true); o += 8;
+	}
 	return out;
 }
 
@@ -397,6 +410,14 @@ export function decodeRelayFrame(frame) {
 			const n = dv.getUint32(o, true); o += 4;
 			data = JSON.parse(textDecoder.decode(frame.subarray(o, o + n))); o += n;
 		}
+		let origin;
+		let ord;
+		let birth;
+		if (flags & 32) {
+			origin = dv.getUint32(o, true); o += 4;
+			ord = dv.getFloat64(o, true); o += 8;
+			birth = dv.getFloat64(o, true); o += 8;
+		}
 		return {
 			type: 'publish',
 			topic,
@@ -405,7 +426,10 @@ export function decodeRelayFrame(frame) {
 			seq: flags & 2 ? seq : null,
 			capability,
 			event,
-			data
+			data,
+			origin,
+			ord,
+			birth
 		};
 	}
 	if (kind === KIND_PUBLISH_BATCHED) {

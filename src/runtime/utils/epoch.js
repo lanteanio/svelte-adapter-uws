@@ -69,7 +69,9 @@ export function nextTopicSeq(seqMap, topic) {
  *   max-seen map must record them through the monotone-max guard
  *   (`recordSeen`), never a bare set - a bare set could regress the local max.
  * - `options.seq === false`: no seq. Returns null so the field is omitted from
- *   the envelope and the topic stays out of the convergence comparison.
+ *   the envelope and the topic stays out of the cross-worker SEQUENCE comparison
+ *   (it has no number to compare). Such a topic is still contiguity-checked over
+ *   the relay, which numbers frames independently of the publish seq.
  * - absent, or any other truthy value: the in-memory per-worker counter via
  *   `nextTopicSeq`. Byte-identical to every prior release.
  *

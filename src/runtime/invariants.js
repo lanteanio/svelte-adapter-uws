@@ -198,6 +198,13 @@ const FNV_OFFSET = 2166136261 >>> 0;
  * seq integer, which moves that entry's digest. A later consumer can widen to 64
  * bits if collision risk ever matters.
  *
+ * SCOPE: this compares MAXIMA, which is a question no single worker can answer
+ * about itself - holding a lower maximum than a sibling is only knowable by
+ * comparison, which is what the majority vote over this hash is for. A lost
+ * INTERIOR frame is the opposite kind of fact: the worker that lost it can tell
+ * on its own (see handler/state.js `recordOriginStream`), so it is reported
+ * directly rather than voted on, and deliberately does NOT enter this hash.
+ *
  * @param {{ topicSeqs?: Record<string, number> }} projection
  * @returns {number} unsigned 32-bit hash
  */

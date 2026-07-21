@@ -290,13 +290,15 @@ describe('cross-thread (real worker_threads)', () => {
 		// decodes and reports. This is the production topology minus the uWS app.
 		const relayUrl = pathToFileURL(fileURLToPath(new URL('../src/runtime/handler/relay.js', import.meta.url))).href;
 		const ringUrl = pathToFileURL(fileURLToPath(new URL('../src/runtime/relay-ring.js', import.meta.url))).href;
+		const stateUrl = pathToFileURL(fileURLToPath(new URL('../src/runtime/handler/state.js', import.meta.url))).href;
 		const upSab = createRelayRingBuffer(8192);
 		const downSab = createRelayRingBuffer(8192);
 
 		const producer = new Worker(
 			`
 			const { workerData, parentPort } = require('node:worker_threads');
-			Promise.all([import(${JSON.stringify(relayUrl)}), import(${JSON.stringify(ringUrl)})]).then(([relay, ring]) => {
+			Promise.all([import(${JSON.stringify(relayUrl)}), import(${JSON.stringify(ringUrl)}), import(${JSON.stringify(stateUrl)})]).then(([relay, ring, state]) => {
+				state.streamTracking.enabled = true; // what handler.js does when the cross-worker reporter is configured
 				relay.setRelayRingWriter(new ring.RingWriter(workerData.up));
 				relay.batchRelay('game:7', '{"event":"update","data":{"x":1}}', true, 11, 'smooth.protocol:1', 'update', { x: 1 });
 				relay.batchRelay('game:7', '{"event":"update","data":{"x":2}}', false, 12, undefined, undefined, undefined);
@@ -344,6 +346,259 @@ describe('cross-thread (real worker_threads)', () => {
 			expect(publishes[1]).toMatchObject({ type: 'publish', topic: 'game:7', compress: false, seq: 12 });
 			expect(batched[0]).toMatchObject({ type: 'publish-batched', compress: true, events: [{ topic: 'game:7', env: '{"n":3}', seq: 13 }] });
 			expect(ringActivity).toBe(3);
+			forwarder.close();
+			producer.postMessage('stop');
+			consumer.postMessage('stop');
+		} finally {
+			await producer.terminate();
+			await consumer.terminate();
+		}
+	}, 15000);
+
+	it('end-to-end star: the REAL batchRelay stamps a dense per-topic ordinal, origin and birth that survive the ring', async () => {
+		// The interior-gap detector is only as good as this carry: a receiver can
+		// only find a hole in a stream if the SENDING worker numbered the frames it
+		// sent. The primary forwards ring bytes verbatim without ever parsing them,
+		// so it cannot stamp an origin on the way through - the origin worker has to,
+		// and that is what this proves against the real relay.js, over a real ring,
+		// through the real forward loop, decoded by the real codec.
+		const relayUrl = pathToFileURL(fileURLToPath(new URL('../src/runtime/handler/relay.js', import.meta.url))).href;
+		const ringUrl = pathToFileURL(fileURLToPath(new URL('../src/runtime/relay-ring.js', import.meta.url))).href;
+		const stateUrl = pathToFileURL(fileURLToPath(new URL('../src/runtime/handler/state.js', import.meta.url))).href;
+		const upSab = createRelayRingBuffer(16384);
+		const downSab = createRelayRingBuffer(16384);
+
+		const producer = new Worker(
+			`
+			const { workerData, parentPort, threadId } = require('node:worker_threads');
+			Promise.all([import(${JSON.stringify(relayUrl)}), import(${JSON.stringify(ringUrl)}), import(${JSON.stringify(stateUrl)})]).then(([relay, ring, state]) => {
+				state.streamTracking.enabled = true; // what handler.js does when the cross-worker reporter is configured
+				relay.setRelayRingWriter(new ring.RingWriter(workerData.up));
+				// Two interleaved topics, so a per-topic (not global) ordinal is proven.
+				for (let i = 1; i <= 4; i++) {
+					relay.batchRelay('room:a', JSON.stringify({ n: i }), false, i, undefined, undefined, undefined);
+					relay.batchRelay('room:b', JSON.stringify({ n: i }), false, i, undefined, undefined, undefined);
+				}
+				// A wire-level batch carries one publish per event, so each event must
+				// take its own ordinal in ITS topic's stream.
+				relay.relayBatched([{ topic: 'room:a', env: '{"n":5}', seq: 5 }, { topic: 'room:b', env: '{"n":5}', seq: 5 }], false);
+				parentPort.postMessage({ threadId });
+				const hold = setInterval(() => {}, 100);
+				parentPort.on('message', () => clearInterval(hold));
+			});
+			`,
+			{ eval: true, workerData: { up: upSab } }
+		);
+		const consumer = new Worker(
+			`
+			const { workerData, parentPort } = require('node:worker_threads');
+			import(${JSON.stringify(ringUrl)}).then(({ RingReader, decodeRelayFrame }) => {
+				const reader = new RingReader(workerData.down, (frame) => {
+					parentPort.postMessage(decodeRelayFrame(frame));
+				});
+				reader.start();
+				const hold = setInterval(() => {}, 100);
+				parentPort.on('message', () => clearInterval(hold));
+			});
+			`,
+			{ eval: true, workerData: { down: downSab } }
+		);
+		try {
+			const received = [];
+			let producerThreadId = null;
+			consumer.on('message', (m) => received.push(m));
+			producer.on('message', (m) => { producerThreadId = m.threadId; });
+			const downWriter = new RingWriter(downSab);
+			const forwarder = new RingReader(upSab, (frame) => {
+				downWriter.write(frame);
+				downWriter.notify();
+			});
+			forwarder.start();
+
+			await until(() => received.filter((m) => m.type === 'publish').length === 8
+				&& received.some((m) => m.type === 'publish-batched') && producerThreadId !== null, 10000);
+
+			const publishes = received.filter((m) => m.type === 'publish');
+			// Every frame names the worker that actually sent it.
+			for (const m of publishes) expect(m.origin).toBe(producerThreadId);
+
+			// Dense per topic, independent of the other topic's traffic. The batch
+			// below writes synchronously while these were deferred a tick, so it takes
+			// ordinal 1 of each topic and these take 2..5 - ordinals follow the wire.
+			for (const topic of ['room:a', 'room:b']) {
+				const ords = publishes.filter((m) => m.topic === topic).map((m) => m.ord);
+				expect(ords).toEqual([2, 3, 4, 5]);
+			}
+
+			// One birth per topic stream, identical on every frame of that stream and
+			// read on the process-shared timeline (so it is comparable against the
+			// receiving worker's own attach instant).
+			for (const topic of ['room:a', 'room:b']) {
+				const births = new Set(publishes.filter((m) => m.topic === topic).map((m) => m.birth));
+				expect(births.size).toBe(1);
+				expect([...births][0]).toBeGreaterThan(0);
+			}
+			// The two topics opened at different instants, so their births differ -
+			// a birth is per stream, not one per worker.
+			const birthA = publishes.find((m) => m.topic === 'room:a').birth;
+			const birthB = publishes.find((m) => m.topic === 'room:b').birth;
+			expect(birthA).not.toBe(birthB);
+
+			// Each event of the batch takes its own ordinal in ITS topic's stream -
+			// the batch is one frame but one publish per topic, so losing it must show
+			// as a hole in each. It reached the wire first, hence ordinal 1.
+			const batched = received.find((m) => m.type === 'publish-batched');
+			for (const ev of batched.events) {
+				expect(ev.origin).toBe(producerThreadId);
+				expect(ev.ord).toBe(1);
+			}
+			forwarder.close();
+			producer.postMessage('stop');
+			consumer.postMessage('stop');
+		} finally {
+			await producer.terminate();
+			await consumer.terminate();
+		}
+	}, 15000);
+
+	it('end-to-end star: numbers nothing when the cross-worker reporter is not configured', async () => {
+		// The numbering exists only to be checked for holes, and every worker in a
+		// cluster runs one config - so with the reporter off a receiver would discard
+		// it, and the frames must not carry the 20 bytes (or the sender the per-topic
+		// map) for a feature nothing reads. Same producer as above, minus the enable.
+		const relayUrl = pathToFileURL(fileURLToPath(new URL('../src/runtime/handler/relay.js', import.meta.url))).href;
+		const ringUrl = pathToFileURL(fileURLToPath(new URL('../src/runtime/relay-ring.js', import.meta.url))).href;
+		const upSab = createRelayRingBuffer(8192);
+		const downSab = createRelayRingBuffer(8192);
+
+		const producer = new Worker(
+			`
+			const { workerData, parentPort } = require('node:worker_threads');
+			Promise.all([import(${JSON.stringify(relayUrl)}), import(${JSON.stringify(ringUrl)})]).then(([relay, ring]) => {
+				relay.setRelayRingWriter(new ring.RingWriter(workerData.up));
+				relay.batchRelay('room', '{"n":1}', false, 1, undefined, undefined, undefined);
+				relay.relayBatched([{ topic: 'room', env: '{"n":2}', seq: 2 }], false);
+				const hold = setInterval(() => {}, 100);
+				parentPort.on('message', () => clearInterval(hold));
+			});
+			`,
+			{ eval: true, workerData: { up: upSab } }
+		);
+		const consumer = new Worker(
+			`
+			const { workerData, parentPort } = require('node:worker_threads');
+			import(${JSON.stringify(ringUrl)}).then(({ RingReader, decodeRelayFrame }) => {
+				const reader = new RingReader(workerData.down, (frame) => {
+					parentPort.postMessage({ msg: decodeRelayFrame(frame), bytes: frame.byteLength });
+				});
+				reader.start();
+				const hold = setInterval(() => {}, 100);
+				parentPort.on('message', () => clearInterval(hold));
+			});
+			`,
+			{ eval: true, workerData: { down: downSab } }
+		);
+		try {
+			const received = [];
+			consumer.on('message', (m) => received.push(m));
+			const downWriter = new RingWriter(downSab);
+			const forwarder = new RingReader(upSab, (frame) => {
+				downWriter.write(frame);
+				downWriter.notify();
+			});
+			forwarder.start();
+
+			await until(() => received.length === 2, 10000);
+			const publish = received.find((r) => r.msg.type === 'publish');
+			const batched = received.find((r) => r.msg.type === 'publish-batched');
+			// The publish itself is untouched - only the numbering is absent.
+			expect(publish.msg).toMatchObject({ topic: 'room', seq: 1 });
+			expect(publish.msg.origin).toBeUndefined();
+			expect(publish.msg.ord).toBeUndefined();
+			expect(publish.msg.birth).toBeUndefined();
+			expect(batched.msg.events[0].origin).toBeUndefined();
+			expect(batched.msg.events[0].ord).toBeUndefined();
+			forwarder.close();
+			producer.postMessage('stop');
+			consumer.postMessage('stop');
+		} finally {
+			await producer.terminate();
+			await consumer.terminate();
+		}
+	}, 15000);
+
+	it('end-to-end star: ordinals follow WIRE order when a batched publish overtakes a single one', async () => {
+		// batchRelay defers its flush by a timer tick while relayBatched writes
+		// synchronously, so a publishBatched issued AFTER a publish on the same topic
+		// reaches the wire FIRST. If the two numbered their frames at publish time,
+		// the overtaking batch would carry the higher ordinals and the receiver would
+		// see the earlier frame arrive last - reading as a hole that never fills, on
+		// nothing worse than a tick that mixes the two APIs. This asserts the ordering
+		// across BOTH lanes together, which the per-lane assertions above cannot see.
+		const relayUrl = pathToFileURL(fileURLToPath(new URL('../src/runtime/handler/relay.js', import.meta.url))).href;
+		const ringUrl = pathToFileURL(fileURLToPath(new URL('../src/runtime/relay-ring.js', import.meta.url))).href;
+		const stateUrl = pathToFileURL(fileURLToPath(new URL('../src/runtime/handler/state.js', import.meta.url))).href;
+		const upSab = createRelayRingBuffer(65536);
+		const downSab = createRelayRingBuffer(65536);
+
+		const producer = new Worker(
+			`
+			const { workerData, parentPort } = require('node:worker_threads');
+			Promise.all([import(${JSON.stringify(relayUrl)}), import(${JSON.stringify(ringUrl)}), import(${JSON.stringify(stateUrl)})]).then(([relay, ring, state]) => {
+				state.streamTracking.enabled = true; // what handler.js does when the cross-worker reporter is configured
+				relay.setRelayRingWriter(new ring.RingWriter(workerData.up));
+				// One tick: a publish (deferred) then a publishBatched (synchronous),
+				// same topic. The batch is deliberately larger than the receiver's
+				// pending-buffer cap, which is what used to latch the false gap.
+				relay.batchRelay('room', '{"n":"single"}', false, 1, undefined, undefined, undefined);
+				const events = [];
+				for (let i = 0; i < 80; i++) events.push({ topic: 'room', env: '{"n":' + i + '}', seq: i + 2 });
+				relay.relayBatched(events, false);
+				const hold = setInterval(() => {}, 100);
+				parentPort.on('message', () => clearInterval(hold));
+			});
+			`,
+			{ eval: true, workerData: { up: upSab } }
+		);
+		const consumer = new Worker(
+			`
+			const { workerData, parentPort } = require('node:worker_threads');
+			import(${JSON.stringify(ringUrl)}).then(({ RingReader, decodeRelayFrame }) => {
+				const reader = new RingReader(workerData.down, (frame) => {
+					parentPort.postMessage(decodeRelayFrame(frame));
+				});
+				reader.start();
+				const hold = setInterval(() => {}, 100);
+				parentPort.on('message', () => clearInterval(hold));
+			});
+			`,
+			{ eval: true, workerData: { down: downSab } }
+		);
+		try {
+			const received = [];
+			consumer.on('message', (m) => received.push(m));
+			const downWriter = new RingWriter(downSab);
+			const forwarder = new RingReader(upSab, (frame) => {
+				downWriter.write(frame);
+				downWriter.notify();
+			});
+			forwarder.start();
+
+			await until(() => received.length === 2, 10000);
+
+			// Flatten both lanes into one arrival-ordered list of room ordinals.
+			const arrived = [];
+			for (const m of received) {
+				if (m.type === 'publish') arrived.push(m.ord);
+				else for (const ev of m.events) arrived.push(ev.ord);
+			}
+			// The batch really did overtake the single publish (otherwise this test is
+			// asserting nothing).
+			expect(received[0].type).toBe('publish-batched');
+			expect(received[1].type).toBe('publish');
+			// Ordinals are dense 1..81 IN ARRIVAL ORDER: the overtaking batch takes
+			// 1..80 and the deferred single publish takes 81.
+			expect(arrived).toEqual(Array.from({ length: 81 }, (_, i) => i + 1));
 			forwarder.close();
 			producer.postMessage('stop');
 			consumer.postMessage('stop');

@@ -20,6 +20,14 @@ if (_refresher && _refresher.unref) _refresher.unref();
 
 // Snapshot at load: the wall time at performance.now() === 0. Adding
 // performance.now() yields a monotonic ms-since-epoch value immune to clock steps.
+//
+// This anchor is snapshotted PER MODULE LOAD, so each worker thread computes its
+// own. Two workers therefore agree only as closely as their anchors do: at boot
+// they load milliseconds apart and agree to well under a millisecond, but a
+// worker loaded much later (a respawn) anchors against a wall clock that NTP has
+// since slewed or stepped, so ITS monotonic values sit that far off its siblings'.
+// Which is why `monotonic` is for same-clock duration math only - anything that
+// compares an instant ACROSS worker threads must use `processMonotonic` below.
 const _processStartEpoch = Date.now() - performance.now();
 
 // One frozen environment object, one stable hidden class. In production
@@ -30,6 +38,7 @@ const defaultEnv = Object.freeze({
 	clock: Object.freeze({
 		now: () => cachedNow,                                   // wall, ~1s precision, cheap
 		monotonic: () => _processStartEpoch + performance.now(), // strictly-forward duration math
+		processMonotonic: () => performance.now(),              // one timeline shared by every worker thread
 		wallEpoch: () => Date.now()                             // exact wall clock; process-identity baseline
 	}),
 	rng: Object.freeze({
@@ -56,6 +65,26 @@ let current = defaultEnv;
 export const now = () => current.clock.now();
 export const monotonicNow = () => current.clock.monotonic();
 export const wallEpoch = () => current.clock.wallEpoch();
+
+/**
+ * A monotonic reading on the timeline the WHOLE PROCESS shares, so two worker
+ * threads can compare each other's instants.
+ *
+ * `performance.timeOrigin` is assigned once per process and every worker thread
+ * inherits it verbatim - a thread spawned an hour in reads `performance.now()`
+ * an hour ahead of one spawned at boot, on the same continuous scale. So the
+ * raw reading, unlike `monotonicNow`, carries no per-load wall-clock anchor and
+ * is immune to NTP entirely: two threads' values differ by exactly the real time
+ * between them and by nothing else.
+ *
+ * The trade is that the value is meaningless on its own - it is ms since this
+ * process started, not since the epoch, and it is NOT comparable across
+ * processes (each has its own origin). Use `monotonicNow` for durations within
+ * one worker and `now` / `wallEpoch` for anything a human or another host reads.
+ * This is strictly for the cross-thread ordering questions - "was this stream
+ * already running when I attached?" - that a per-thread anchor would blur.
+ */
+export const processMonotonicNow = () => current.clock.processMonotonic();
 export const randomFloat = () => current.rng.float();
 export const randomU32 = () => current.rng.u32();
 export const randomUuid = () => current.rng.uuid();

@@ -2,8 +2,8 @@ import uWS from 'uWebSockets.js';
 import { workerData } from 'node:worker_threads';
 import { wsModule } from '../ws-handler-bridge.js';
 import { WS_CAPS, WS_SUBSCRIPTIONS, assert, fatal, wrapBatchEnvelope } from '../utils.js';
-import { monotonicNow, setTimer, clearTimer } from '../runtime.js';
-import { captureResumeFrame, counters, maxSeenSeq, recordSeen, resumeBuffers, wsConnections } from './state.js';
+import { monotonicNow, processMonotonicNow, setTimer, clearTimer } from '../runtime.js';
+import { captureResumeFrame, counters, maxSeenSeq, originStreams, recordOriginStream, recordSeen, relayAttach, resumeBuffers, streamTracking, wsConnections } from './state.js';
 import { app, is_tls, _t_app, WS_COMPRESSION_ON, reconnect_dispersal_ms, ssl_cert, ssl_key, ssl_watch, ssl_reload_debounce_ms, ssl_sni_hosts, boot_cert_fingerprint } from './config.js';
 import { platform, relayPublishWire } from './platform.js';
 import { stopPressureSampling } from './pressure-metrics.js';
@@ -355,8 +355,16 @@ export function getDescriptor() {
  * @param {any} [data] - The raw publish payload, for the codec-aware re-encode. May
  *   be undefined for a codec whose frame carries no payload; carried alongside
  *   `capability` regardless.
+ * @param {number} [origin] - The sending worker's thread id.
+ * @param {number} [ord] - That worker's per-topic relay ordinal for this frame.
+ * @param {number} [birth] - When that worker opened this topic's relay stream.
+ *   The three travel together and identify the frame's place in a dense
+ *   per-origin stream, which is what makes a DROPPED frame observable: `seq`
+ *   alone only reveals a lost tail, since a lost interior frame leaves the max
+ *   untouched. Absent from a frame relayed by a worker predating this carry, in
+ *   which case the topic is simply not contiguity-checked.
  */
-export function relayPublish(topic, envelope, compress, seq, capability, event, data) {
+export function relayPublish(topic, envelope, compress, seq, capability, event, data, origin, ord, birth) {
 	// Hard tier: a non-string topic or an empty/non-string envelope arriving
 	// from a sibling worker (trusted, same codebase) means our own cross-worker
 	// relay serialization is structurally broken - publishing it would misroute
@@ -369,6 +377,9 @@ export function relayPublish(topic, envelope, compress, seq, capability, event, 
 		envelopeLen: typeof envelope === 'string' ? envelope.length : null
 	});
 	recordSeen(maxSeenSeq, topic, seq);
+	if (streamTracking.enabled) {
+		recordOriginStream(originStreams, topic, origin, ord, birth, relayAttach.at, processMonotonicNow);
+	}
 	// Codec-aware relay: when the origin worker carried a registered wire codec's
 	// capability alongside the JSON envelope, re-encode binary locally for this
 	// worker's binary-capable subscribers - the (N-1)/N of them that would otherwise
@@ -403,7 +414,10 @@ export function relayPublish(topic, envelope, compress, seq, capability, event, 
  * originator and ride along in each per-event envelope; we never
  * re-stamp and never re-relay.
  *
- * @param {Array<{ topic: string, env: string, seq?: number | null }>} events
+ * @param {Array<{ topic: string, env: string, seq?: number | null, origin?: number, ord?: number, birth?: number }>} events
+ *   Each event also carries the sending worker's identity and that worker's
+ *   per-topic relay ordinal + stream birth: the batch is one frame but N logical
+ *   publishes, so losing it is a hole in each topic's stream (see relayPublish).
  * @param {boolean} [compress] - Batch-level compress intent from the originating
  *   worker; re-gated by this worker's WS_COMPRESSION_ON. Absent -> uncompressed.
  */
@@ -420,7 +434,15 @@ export function relayPublishBatched(events, compress) {
 	// metadata, ungated by the fast/slow fan-out decision below and by whether
 	// this worker has a local subscriber, so every worker that receives the
 	// batch converges. recordSeen ignores a non-number seq ({seq:false} events).
-	for (let i = 0; i < events.length; i++) recordSeen(maxSeenSeq, events[i].topic, events[i].seq);
+	// The batch arrived as ONE frame but carries a publish per event, so each
+	// event also advances its own topic's per-origin stream.
+	for (let i = 0; i < events.length; i++) {
+		recordSeen(maxSeenSeq, events[i].topic, events[i].seq);
+		if (streamTracking.enabled) {
+			recordOriginStream(originStreams, events[i].topic, events[i].origin, events[i].ord, events[i].birth,
+				relayAttach.at, processMonotonicNow);
+		}
+	}
 
 	const firstTopic = events[0].topic;
 	let allSameTopic = true;

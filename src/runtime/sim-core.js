@@ -195,6 +195,7 @@ export function createScheduler(opts = {}) {
 			clock: {
 				now: () => vnow,
 				monotonic: () => vnow, // virtual wall and monotonic share one strictly-non-decreasing clock
+				processMonotonic: () => vnow, // one simulated process, so the cross-thread timeline is that same clock
 				wallEpoch: () => vnow
 			},
 			rng: { float: rng.float, u32: rng.u32, uuid: rng.uuid, bytes: rng.bytes },

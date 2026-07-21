@@ -25,8 +25,8 @@ import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, d
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { registerGameIngress } from './handler/game-ingress.js';
-import { now, monotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
-import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, sharedTopics, subscribeAuth } from './handler/state.js';
+import { now, monotonicNow, processMonotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
+import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, sharedTopics, subscribeAuth, originStreams, streamTracking, takeConfirmedGaps, GAP_CONFIRM_MS } from './handler/state.js';
 import { computeStateHash } from './invariants.js';
 import { createConsistencyAuditor } from './auditor.js';
 import { buildConnectionAuditSnapshot } from './audit-snapshot.js';
@@ -62,6 +62,7 @@ import { readBody, handleSSR } from './handler/ssr.js';
 import { requestDone, isDraining } from './handler/lifecycle.js';
 export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls } from './handler/lifecycle.js';
 export { setRelayRingWriter } from './handler/relay.js';
+export { markRelayAttached } from './handler/state.js';
 import { handleRequest } from './handler/request.js';
 import { handleAdminRequest } from './handler/admin.js';
 import { registerRoute } from './handler/route-registry.js';
@@ -466,6 +467,14 @@ if (WS_ENABLED) {
 	const mStateDivergence = containMetricInstrument(METRICS?.counter(
 		'state_divergence_total', 'Cross-worker state hash divergence detections', ['role']
 	));
+	// Relayed frames this worker was sent and never received, counted where they
+	// are found (unlike a divergence, a gap needs no cross-worker comparison to
+	// establish). Counts FRAMES, not incidents, so one lost burst reads as the
+	// burst it was. No topic strings and no client identity cross into the
+	// registry - the topic is named only in the local log line.
+	const mRelayGap = containMetricInstrument(METRICS?.counter(
+		'relay_gap_frames_total', 'Relayed frames lost to this worker (interior relay gaps)', []
+	));
 	// Route the framework's own invariant violations (assert/fatal) into the
 	// same registry, labelled by category and severity, so the `metrics` option
 	// lights up `framework_assertion_violations_total` without the app touching
@@ -485,12 +494,30 @@ if (WS_ENABLED) {
 	// pays nothing. The timer is unref'd so it never holds the loop open.
 	const STATE_HASH_INTERVAL_MS = wsOptions.stateHashIntervalMs ?? 0;
 	if (parentPort && STATE_HASH_INTERVAL_MS > 0) {
+		// The same interval also drives the relay-contiguity check below, so the
+		// tracker only runs when something will read it.
+		streamTracking.enabled = true;
 		const reportStateHash = () => {
 			/** @type {Record<string, number>} */
 			const topicSeqsProjection = {};
 			for (const [t, s] of maxSeenSeq) topicSeqsProjection[t] = s;
 			const hash = computeStateHash({ topicSeqs: topicSeqsProjection });
 			parentPort.postMessage({ type: 'state-hash', hash, threadId, intervalMs: STATE_HASH_INTERVAL_MS });
+
+			// A maximum only ever reveals a lost TAIL. A lost INTERIOR frame moves no
+			// maximum - a worker that got [2,3] of a stream and one that got [1,2,3]
+			// both report 3 - so it is caught by contiguity instead, and reported
+			// rather than voted on: this worker found the hole in a stream that is
+			// dense by construction, so it already knows it lost the frames and no
+			// comparison could tell it more. Each hole is drained once, so this is
+			// silent until something is actually lost.
+			for (const gap of takeConfirmedGaps(originStreams, processMonotonicNow(), GAP_CONFIRM_MS)) {
+				console.error('[adapter-uws/relay-gap] lost %d relayed frame(s) for topic=%s from worker=%d (ordinals %d-%d). ' +
+					'This worker is missing state its siblings received.',
+					gap.count, gap.topic, gap.origin, gap.from, gap.to);
+				mRelayGap?.inc({}, gap.count);
+				parentPort.postMessage({ type: 'relay-gap', threadId, count: gap.count });
+			}
 		};
 		// Spread the FIRST report by a per-worker jitter (drawn from the
 		// injectable RNG so a seeded harness reproduces it) to avoid a thundering

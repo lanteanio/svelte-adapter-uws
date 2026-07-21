@@ -3956,7 +3956,16 @@ adapter({
 })
 ```
 
-When set, each worker periodically folds a structure-only projection of its per-topic delivered-sequence map into a single 32-bit hash and reports it to the primary. The primary buckets the reports by its own clock (so a worker's clock skew never matters), and once every live worker has reported it compares the hashes. If they disagree at rest, the primary logs a `state-divergence` line carrying the epoch, the per-thread hash, and the majority/minority split. **Only the integer hash and the worker's thread id ever cross the thread boundary - no topic strings, no payloads, no client identity.**
+When set, each worker periodically folds a structure-only projection of its relay state into a single 32-bit hash and reports it to the primary. The primary buckets the reports by its own clock (so a worker's clock skew never matters), and once every live worker has reported it compares the hashes. If they disagree at rest, the primary logs a `state-divergence` line carrying the epoch, the per-thread hash, and the majority/minority split. **Only the integer hash and the worker's thread id ever cross the thread boundary - no topic strings, no payloads, no client identity.**
+
+The same interval also checks for a **lost interior frame**, which the hash comparison structurally cannot see: a worker that received frames 2 and 3 of a stream and one that received 1, 2 and 3 both top out at 3, so their hashes agree exactly. Each worker numbers the frames it hands to the relay, per topic, and a receiver that finds a hole in that numbering has lost data - it does not need to be compared against anyone to know that, so it reports it directly rather than being voted on:
+
+```
+[adapter-uws/relay-gap] lost 1 relayed frame(s) for topic=room:42 from worker=3 (ordinals 7-7). This worker is missing state its siblings received.
+[primary] relay-gap worker=5 frames=1
+```
+
+A hole is only reported once it has outlived any plausible in-process reorder, so a frame that is merely late is never called lost, and each loss is reported once rather than restated on every interval. When a `metrics` registry is configured the frames are counted on `relay_gap_frames_total`. `RESTART_ON_STATE_DIVERGENCE=1` also covers this case, and unambiguously: the worker that reports the gap is the worker that lost the data, so there is no majority to weigh.
 
 This is observe-only by default: a divergence is logged, and (when a [`metrics`](#backpressure-and-connection-limits) registry is configured) the `state_divergence_total` counter is incremented. It never costs anything in single-process mode or when `stateHashIntervalMs` is `0` (the default) - no reporter timer is scheduled.
 
@@ -3966,7 +3975,7 @@ To have the primary automatically terminate a diverged (minority) worker so it r
 CLUSTER_WORKERS=auto RESTART_ON_STATE_DIVERGENCE=1 node build
 ```
 
-Divergence between workers in the built-in relay indicates a framework or plugin bug and is worth reporting. Note that topics fed from an *external* pub/sub source (passed with `{ relay: false }`) are stamped with a per-process sequence and are deliberately excluded from this comparison - the guarantee is scoped to the in-process relay.
+Divergence between workers in the built-in relay indicates a framework or plugin bug and is worth reporting. Note that topics fed from an *external* pub/sub source (passed with `{ relay: false }`) never travel the in-process relay and are deliberately excluded from this comparison - the guarantee is scoped to the relay the adapter itself operates.
 
 ### Per-worker consistency auditor
 

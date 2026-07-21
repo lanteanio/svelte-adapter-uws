@@ -24,14 +24,21 @@
 // Defaults: 200 subscribers, 2000 publishes/round, 8 rounds.
 
 import { WebSocket } from 'ws';
-import { recordSeen } from '../src/runtime/handler/state.js';
+import { recordSeen, recordOriginStream } from '../src/runtime/handler/state.js';
 import { completeEnvelope } from '../src/runtime/utils/epoch.js';
+import { processMonotonicNow } from '../src/runtime/runtime.js';
 import { esc } from '../src/runtime/utils.js';
 
 const SUBS = parseInt(process.argv[2] || '200', 10);
 const REPEATS = parseInt(process.argv[3] || '2000', 10);
 const ROUNDS = parseInt(process.argv[4] || '8', 10);
 const TOPIC = 'feed';
+// A single sibling origin whose stream opened before this worker attached, i.e.
+// the steady-state shape: the tracker walks its contiguous fast path and never
+// reads the clock. A gapped stream is not the case worth optimising for.
+const ORIGIN = 7;
+const BIRTH = 100;
+const ATTACHED_AT = 200;
 
 let uWS;
 try {
@@ -60,15 +67,25 @@ function stddev(values) {
 async function startServer() {
 	let app;
 	const maxSeenSeq = new Map();
+	const originStreams = new Map();
 	const driver = {
 		// The receive body under test. `seq` arrives as explicit relay metadata
 		// (a number) - the production change carries it on the frame so the
 		// receiver never re-parses the envelope string to recover it.
-		receive(topic, envelope, seq, tracked) {
-			if (tracked) recordSeen(maxSeenSeq, topic, seq);
+		//
+		// Arms: 'base' is app.publish alone; 'seq' adds the max-seen guard; 'stream'
+		// is the shipped body, which also folds the frame's relay ordinal into the
+		// per-origin contiguity tracker. 'seq' -> 'stream' is the regression this
+		// bench gates: the ordinal fold is what the interior-gap detector costs.
+		receive(topic, envelope, seq, ord, mode) {
+			if (mode !== 'base') recordSeen(maxSeenSeq, topic, seq);
+			if (mode === 'stream') {
+				recordOriginStream(originStreams, topic, ORIGIN, ord, BIRTH, ATTACHED_AT, processMonotonicNow);
+			}
 			app.publish(topic, envelope, false, false);
 		},
-		maxSeenSeq
+		maxSeenSeq,
+		originStreams
 	};
 	await new Promise((resolve, reject) => {
 		app = uWS.App().ws('/ws', {
@@ -98,18 +115,22 @@ async function connectClients(port, n) {
 	return clients;
 }
 
-async function runArm(driver, clients, tracked) {
+async function runArm(driver, clients, mode) {
 	const before = clients.reduce((a, c) => a + c.received(), 0);
 	const expected = SUBS * REPEATS;
 	const prefix = '{"topic":' + esc(TOPIC) + ',"event":' + esc('tick') + ',"data":';
+	// The ordinal continues across rounds, as a real origin's stream does, so the
+	// tracker never sees a hole and every round measures the contiguous path.
+	let ord = driver.ordBase || 0;
 
 	const t0 = performance.now();
 	for (let r = 0; r < REPEATS; r++) {
 		const seq = r + 1;
 		const env = completeEnvelope(prefix, { i: r }, seq);
-		driver.receive(TOPIC, env, seq, tracked);
+		driver.receive(TOPIC, env, seq, ++ord, mode);
 		if (r % 200 === 199) await sleep(1); // let the outbound queue drain
 	}
+	driver.ordBase = ord;
 	for (let waited = 0; waited < 4000; waited += 25) {
 		await sleep(25);
 		if (clients.reduce((a, c) => a + c.received(), 0) - before >= expected) break;
@@ -128,25 +149,33 @@ async function main() {
 	await sleep(200); // settle subscribes
 
 	// Warm-up round per arm (cold JIT), discarded.
-	await runArm(driver, clients, false);
-	await runArm(driver, clients, true);
+	await runArm(driver, clients, 'base');
+	await runArm(driver, clients, 'seq');
+	await runArm(driver, clients, 'stream');
 
 	const baseSamples = [];
 	const trackedSamples = [];
+	const streamSamples = [];
 	for (let r = 0; r < ROUNDS; r++) {
-		baseSamples.push(await runArm(driver, clients, false));
-		trackedSamples.push(await runArm(driver, clients, true));
+		baseSamples.push(await runArm(driver, clients, 'base'));
+		trackedSamples.push(await runArm(driver, clients, 'seq'));
+		streamSamples.push(await runArm(driver, clients, 'stream'));
 	}
 
 	const baseMed = median(baseSamples);
 	const trackedMed = median(trackedSamples);
+	const streamMed = median(streamSamples);
 	const baseSd = stddev(baseSamples);
 	const trackedSd = stddev(trackedSamples);
+	const streamSd = stddev(streamSamples);
 	const deltaPct = ((trackedMed - baseMed) / baseMed) * 100;
+	const streamDeltaPct = ((streamMed - trackedMed) / trackedMed) * 100;
 
-	console.log(`\n  baseline (app.publish only)        median=${baseMed.toFixed(0)}/s  stddev=${baseSd.toFixed(0)}  (rel ${((baseSd / baseMed) * 100).toFixed(2)}%)`);
-	console.log(`  tracked  (recordSeen + app.publish) median=${trackedMed.toFixed(0)}/s  stddev=${trackedSd.toFixed(0)}  (rel ${((trackedSd / trackedMed) * 100).toFixed(2)}%)`);
-	console.log(`  delta    ${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%  (negative = tracked slower)`);
+	console.log(`\n  baseline (app.publish only)         median=${baseMed.toFixed(0)}/s  stddev=${baseSd.toFixed(0)}  (rel ${((baseSd / baseMed) * 100).toFixed(2)}%)`);
+	console.log(`  tracked  (recordSeen + app.publish)  median=${trackedMed.toFixed(0)}/s  stddev=${trackedSd.toFixed(0)}  (rel ${((trackedSd / trackedMed) * 100).toFixed(2)}%)`);
+	console.log(`  stream   (+ per-origin contiguity)   median=${streamMed.toFixed(0)}/s  stddev=${streamSd.toFixed(0)}  (rel ${((streamSd / streamMed) * 100).toFixed(2)}%)`);
+	console.log(`  delta    base -> tracked  ${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%  (negative = slower)`);
+	console.log(`  delta    tracked -> stream ${streamDeltaPct >= 0 ? '+' : ''}${streamDeltaPct.toFixed(2)}%  (negative = slower)`);
 
 	for (const c of clients) c.ws.close();
 	await sleep(50);
@@ -159,6 +188,11 @@ async function main() {
 	const regressionPct = -deltaPct;
 	const pass = regressionPct < GATE;
 	console.log(`relay-receive regression ${regressionPct.toFixed(2)}%  gate < ${GATE}%  -> ${pass ? 'PASS' : 'BLOCKER'}`);
+	// The gate that governs the contiguity tracker: it must not cost measurably
+	// more than the max-seen guard already shipped alongside it.
+	const streamRegressionPct = -streamDeltaPct;
+	const streamPass = streamRegressionPct < GATE;
+	console.log(`contiguity regression    ${streamRegressionPct.toFixed(2)}%  gate < ${GATE}%  -> ${streamPass ? 'PASS' : 'BLOCKER'}`);
 	process.exit(0);
 }
 
