@@ -6,25 +6,30 @@
 // embeds are unchanged, so N suites cost one build.
 //
 // Freshness is source-keyed, not time-keyed: the stamp records a digest over
-// the adapter runtime sources, the fixture app sources, and both manifests
-// (path + mtime + size of every file). Any source edit - including a test
-// harness swapping the runtime under test - changes the digest and forces a
-// rebuild. (Deliberately NOT covered: node_modules contents, so a manually
-// patched dependency without a manifest change reuses a build - delete
-// test/fixture/build to force one.)
+// the relative paths and CONTENTS of the adapter runtime sources, fixture app
+// sources, and manifests. Content matters here: absolute paths and mtimes differ
+// on every clean CI checkout, so a timestamp-keyed stamp can never validate a
+// restored build cache. Any source edit - including a test harness swapping the
+// runtime under test - changes the digest and forces a rebuild. (Deliberately
+// NOT covered: node_modules contents, so a manually patched dependency without
+// a manifest change reuses a build - delete test/fixture/build* to force one.)
 
 import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { variantOut } from '../fixture/variants.js';
 
 const fixtureDir = fileURLToPath(new URL('../fixture', import.meta.url));
 const srcDir = fileURLToPath(new URL('../../src', import.meta.url));
+// ONE lock for the whole fixture, not one per variant: two `vite build`s in the
+// same cwd corrupt each other's .svelte-kit/ regardless of where their output
+// goes, so variants serialize behind the same lock and only the stamp is
+// per-variant.
 const lockDir = join(fixtureDir, '.build-lock');
-const stampFile = join(fixtureDir, 'build', '.build-stamp');
 
-function digestTree(hash, dir) {
+function digestTree(hash, dir, prefix) {
 	let entries;
 	try {
 		entries = readdirSync(dir, { withFileTypes: true });
@@ -34,32 +39,44 @@ function digestTree(hash, dir) {
 	// Sort for a stable digest across platforms/readdir orders.
 	entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 	for (const entry of entries) {
-		if (entry.name === 'node_modules' || entry.name === 'build' || entry.name === '.svelte-kit' || entry.name === '.build-lock') continue;
+		// Skip EVERY variant's output dir (build, build-grant, ...), not just the
+		// default one - a build output must never feed its own digest.
+		if (entry.name === 'node_modules' || entry.name.startsWith('build') || entry.name === '.svelte-kit' || entry.name === '.build-lock') continue;
 		const full = join(dir, entry.name);
+		const relative = `${prefix}/${entry.name}`;
 		if (entry.isDirectory()) {
-			digestTree(hash, full);
+			digestTree(hash, full, relative);
 		} else if (entry.isFile()) {
-			const s = statSync(full);
-			hash.update(full);
-			hash.update(String(s.mtimeMs));
-			hash.update(String(s.size));
+			hash.update(`file:${relative}\0`);
+			hash.update(readFileSync(full));
+			hash.update('\0');
 		}
 	}
 }
 
-function sourceDigest() {
+function digestFile(hash, label, file) {
+	hash.update(`file:${label}\0`);
+	hash.update(readFileSync(file));
+	hash.update('\0');
+}
+
+function sourceDigest(variant) {
 	const hash = createHash('sha256');
-	digestTree(hash, srcDir);
-	digestTree(hash, join(fixtureDir, 'src'));
-	digestTree(hash, join(fixtureDir, 'static'));
-	hash.update(readFileSync(join(fixtureDir, 'svelte.config.js'), 'utf8'));
-	hash.update(readFileSync(join(fixtureDir, 'vite.config.js'), 'utf8'));
+	// The variant name and the table that maps it to an adapter config both
+	// change what gets baked into the handler, so both key the digest.
+	hash.update(`variant:${variant}\0`);
+	digestFile(hash, 'fixture/variants.js', join(fixtureDir, 'variants.js'));
+	digestTree(hash, srcDir, 'adapter/src');
+	digestTree(hash, join(fixtureDir, 'src'), 'fixture/src');
+	digestTree(hash, join(fixtureDir, 'static'), 'fixture/static');
+	digestFile(hash, 'fixture/svelte.config.js', join(fixtureDir, 'svelte.config.js'));
+	digestFile(hash, 'fixture/vite.config.js', join(fixtureDir, 'vite.config.js'));
 	// Manifests, so a dependency bump (uWebSockets.js, @sveltejs/kit) or a
 	// fixture dep change invalidates the build too.
-	hash.update(readFileSync(join(fixtureDir, 'package.json'), 'utf8'));
-	hash.update(readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8'));
+	digestFile(hash, 'fixture/package.json', join(fixtureDir, 'package.json'));
+	digestFile(hash, 'package.json', fileURLToPath(new URL('../../package.json', import.meta.url)));
 	try {
-		hash.update(readFileSync(join(fixtureDir, 'package-lock.json'), 'utf8'));
+		digestFile(hash, 'fixture/package-lock.json', join(fixtureDir, 'package-lock.json'));
 	} catch { /* no lockfile - the manifests still key the digest */ }
 	return hash.digest('hex');
 }
@@ -75,9 +92,15 @@ const sleepSync = (ms) => {
  * (fresh or just built), false when the build itself failed. Throws only on a
  * lock that never frees (a crashed holder after the stale window is reclaimed,
  * so this is effectively unreachable).
+ *
+ * @param {string} [variant] which build-time adapter configuration to produce
+ *   (see test/fixture/variants.js). Each variant has its own output directory
+ *   and its own stamp, so variants coexist and do not rebuild over each other.
  */
-export function buildFixtureOnce() {
-	const digest = sourceDigest();
+export function buildFixtureOnce(variant = 'default') {
+	const outDir = variantOut(variant);
+	const stampFile = join(fixtureDir, outDir, '.build-stamp');
+	const digest = sourceDigest(variant);
 	const deadline = Date.now() + 300000;
 	// Acquire: mkdir is atomic across processes. A holder that died without
 	// unlocking is reclaimed after the stale window - 240s against the build's
@@ -105,12 +128,17 @@ export function buildFixtureOnce() {
 	const acquiredAt = Date.now();
 	try {
 		try {
-			if (existsSync(join(fixtureDir, 'build', 'index.js')) && readFileSync(stampFile, 'utf8') === digest) {
+			if (existsSync(join(fixtureDir, outDir, 'index.js')) && readFileSync(stampFile, 'utf8') === digest) {
 				return true; // another suite already built this exact source state
 			}
 		} catch { /* no stamp yet - build below */ }
 		try {
-			execSync('npx vite build', { cwd: fixtureDir, stdio: 'pipe', timeout: 180000 });
+			execSync('npx vite build', {
+				cwd: fixtureDir,
+				stdio: 'pipe',
+				timeout: 180000,
+				env: { ...process.env, FIXTURE_VARIANT: variant }
+			});
 			// Stamp only when OUR lock survived the whole build: a missing lock dir,
 			// or one whose mtime moved past our acquire, means a racer reclaimed it
 			// mid-build (the suspend/resume residual above) and another build may
@@ -122,7 +150,21 @@ export function buildFixtureOnce() {
 			} catch { /* lock gone - reclaimed */ }
 			if (lockIntact) writeFileSync(stampFile, digest);
 			return true;
-		} catch {
+		} catch (err) {
+			// Surface what Vite actually said. `stdio: 'pipe'` keeps a passing
+			// build quiet, but swallowing the failure too left callers with only
+			// `fixture variant "x" failed to build` and nothing to act on - which
+			// is the entire diagnostic on a CI runner, where nobody can re-run it
+			// by hand.
+			const out = [err?.stdout, err?.stderr]
+				.map((buf) => (buf ? buf.toString() : ''))
+				.filter(Boolean)
+				.join('\n')
+				.trim();
+			console.error(
+				`[fixture-build] variant "${variant}" failed to build` +
+				(out ? `:\n${out}` : ` (no output; ${err?.message || 'unknown error'})`)
+			);
 			return false;
 		}
 	} finally {

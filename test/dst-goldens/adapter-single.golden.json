@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "gitCommit": null,
-  "recordedAt": "2026-07-07T13:36:00.847Z",
+  "recordedAt": "2026-07-25T17:13:41.628Z",
   "swarm": {
-    "buggify": "random",
-    "buggifyProbability": 0.25,
+    "faultMode": "random",
+    "faultProbability": 0.25,
     "faultProfile": {
       "drop": 0.25,
       "duplicate": 0.15,
@@ -17,25 +17,25 @@
     {
       "seed": "1",
       "weight": 1,
-      "fingerprint": "268af542",
-      "digest": {
-        "violations": 0,
-        "fatals": 0,
-        "uncaught": 0,
-        "violationCategories": [],
-        "buggified": true
-      }
-    },
-    {
-      "seed": "2",
-      "weight": 1,
       "fingerprint": "66ede951",
       "digest": {
         "violations": 0,
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
+      }
+    },
+    {
+      "seed": "2",
+      "weight": 1,
+      "fingerprint": "a131ee49",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "faulted": true
       }
     },
     {
@@ -47,7 +47,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -59,7 +59,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -71,7 +71,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -83,7 +83,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -95,7 +95,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -107,7 +107,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -119,7 +119,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -131,7 +131,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -143,7 +143,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": true
+        "faulted": true
       }
     },
     {
@@ -155,7 +155,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -167,7 +167,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -179,7 +179,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -191,7 +191,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -203,19 +203,19 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
       "seed": "17",
       "weight": 1,
-      "fingerprint": "8859ea46",
+      "fingerprint": "66ede951",
       "digest": {
         "violations": 0,
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": true
+        "faulted": false
       }
     },
     {
@@ -227,43 +227,43 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
       "seed": "19",
       "weight": 1,
-      "fingerprint": "66ede951",
+      "fingerprint": "da85d8bb",
       "digest": {
         "violations": 0,
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": true
       }
     },
     {
       "seed": "20",
       "weight": 1,
+      "fingerprint": "8862e4a2",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "faulted": true
+      }
+    },
+    {
+      "seed": "21",
+      "weight": 1,
       "fingerprint": "66ede951",
       "digest": {
         "violations": 0,
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
-      }
-    },
-    {
-      "seed": "21",
-      "weight": 1,
-      "fingerprint": "a614141a",
-      "digest": {
-        "violations": 0,
-        "fatals": 0,
-        "uncaught": 0,
-        "violationCategories": [],
-        "buggified": true
+        "faulted": false
       }
     },
     {
@@ -275,7 +275,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": true
+        "faulted": true
       }
     },
     {
@@ -287,47 +287,11 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
       "seed": "24",
-      "weight": 1,
-      "fingerprint": "a018e772",
-      "digest": {
-        "violations": 0,
-        "fatals": 0,
-        "uncaught": 0,
-        "violationCategories": [],
-        "buggified": true
-      }
-    },
-    {
-      "seed": "25",
-      "weight": 1,
-      "fingerprint": "20aefa21",
-      "digest": {
-        "violations": 0,
-        "fatals": 0,
-        "uncaught": 0,
-        "violationCategories": [],
-        "buggified": true
-      }
-    },
-    {
-      "seed": "26",
-      "weight": 1,
-      "fingerprint": "c5b32f76",
-      "digest": {
-        "violations": 0,
-        "fatals": 0,
-        "uncaught": 0,
-        "violationCategories": [],
-        "buggified": true
-      }
-    },
-    {
-      "seed": "27",
       "weight": 1,
       "fingerprint": "66ede951",
       "digest": {
@@ -335,7 +299,43 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
+      }
+    },
+    {
+      "seed": "25",
+      "weight": 1,
+      "fingerprint": "66ede951",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "faulted": false
+      }
+    },
+    {
+      "seed": "26",
+      "weight": 1,
+      "fingerprint": "66ede951",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "faulted": false
+      }
+    },
+    {
+      "seed": "27",
+      "weight": 1,
+      "fingerprint": "a410e19a",
+      "digest": {
+        "violations": 0,
+        "fatals": 0,
+        "uncaught": 0,
+        "violationCategories": [],
+        "faulted": true
       }
     },
     {
@@ -347,7 +347,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -359,7 +359,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -371,7 +371,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -383,7 +383,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -395,7 +395,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -407,7 +407,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -419,19 +419,19 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
       "seed": "35",
       "weight": 1,
-      "fingerprint": "66ede951",
+      "fingerprint": "0047302f",
       "digest": {
         "violations": 0,
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": true
       }
     },
     {
@@ -443,7 +443,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -455,19 +455,19 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
       "seed": "38",
       "weight": 1,
-      "fingerprint": "c9f0f9b9",
+      "fingerprint": "66ede951",
       "digest": {
         "violations": 0,
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": true
+        "faulted": false
       }
     },
     {
@@ -479,7 +479,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -491,7 +491,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     }
   ]

@@ -1,3 +1,5 @@
+/* global require */
+
 import { describe, it, expect, vi } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
@@ -940,5 +942,75 @@ describe('upgradeResponse helper', () => {
 		const wrapped = upgradeResponse(plain, { 'set-cookie': 'x=1' });
 		expect(wrapped.__upgradeResponse).toBe(true);
 		expect(wrapped.userData).toBe(plain);
+	});
+});
+
+// Regression tests for the wsOpts serialization path itself. The
+// documented `websocket.authorizeWireSubscribe` option was never threaded
+// into the WS_OPTIONS payload, so the runtime arming in handler.js was dead
+// code and any client could subscribe any topic even with the option set.
+// These import the REAL serialization helpers from src/index.js (the inline
+// replicas above predate the extraction and cannot catch a dropped key).
+describe('websocket option serialization (WS_OPTIONS)', () => {
+	it('serializes authorizeWireSubscribe into wsOpts', async () => {
+		const { serializeWsOptions } = await import('../src/index.js');
+		expect(serializeWsOptions({ authorizeWireSubscribe: true }, '/__realtime').authorizeWireSubscribe).toBe(true);
+		expect(serializeWsOptions({}, '/__realtime').authorizeWireSubscribe).toBe(false);
+		expect(serializeWsOptions(undefined, '/__realtime').authorizeWireSubscribe).toBe(false);
+	});
+
+	it('preserves the documented defaults and custom values through the extraction', async () => {
+		const { serializeWsOptions } = await import('../src/index.js');
+		const defaults = serializeWsOptions({}, '/__realtime');
+		expect(defaults.maxPayloadLength).toBe(1024 * 1024);
+		expect(defaults.idleTimeout).toBe(120);
+		expect(defaults.allowedOrigins).toBe('same-origin');
+		expect(defaults.allowSystemTopicSubscribe).toBe(false);
+		expect(defaults.adminPath).toBe('/__realtime');
+
+		const custom = serializeWsOptions({ maxPayloadLength: 65536, allowedOrigins: '*' }, false);
+		expect(custom.maxPayloadLength).toBe(65536);
+		expect(custom.allowedOrigins).toBe('*');
+		expect(custom.adminPath).toBe(false);
+	});
+
+	it('detects unknown websocket option keys for the build-time warning', async () => {
+		const { unknownWebsocketOptionKeys, KNOWN_WEBSOCKET_OPTION_KEYS } = await import('../src/index.js');
+		// Every documented key is recognized (no warning) ...
+		expect(unknownWebsocketOptionKeys({ authorizeWireSubscribe: true, path: '/ws', postureExport: '/run/p.sock' })).toEqual([]);
+		// ... and a typo'd / unknown key is caught, in order.
+		expect(unknownWebsocketOptionKeys({ authorizeSubscribe: true, bogus: 1 })).toEqual(['authorizeSubscribe', 'bogus']);
+		expect(unknownWebsocketOptionKeys(null)).toEqual([]);
+		expect(unknownWebsocketOptionKeys(undefined)).toEqual([]);
+		expect(KNOWN_WEBSOCKET_OPTION_KEYS.has('authorizeWireSubscribe')).toBe(true);
+	});
+
+	it('every recognized option is either serialized or consumed at build time', async () => {
+		// The direction that actually catches a silently-dropped option. The
+		// reverse check below only proves no serialized key is unknown; a key
+		// that is documented and KNOWN but never serialized is dead config AND
+		// has its unknown-key warning suppressed, which is how the original
+		// bug survived. Anything not in wsOpts must be named here on purpose.
+		const { serializeWsOptions, KNOWN_WEBSOCKET_OPTION_KEYS } = await import('../src/index.js');
+		const BUILD_TIME_ONLY_KEYS = new Set([
+			'handler', 'path', 'authPath', 'metrics', 'primaryInit', 'workers'
+		]);
+		const serialized = new Set(Object.keys(serializeWsOptions({}, '/__realtime')));
+		for (const key of KNOWN_WEBSOCKET_OPTION_KEYS) {
+			expect(
+				serialized.has(key) || BUILD_TIME_ONLY_KEYS.has(key),
+				`websocket option '${key}' is recognized but never reaches the runtime: add it to serializeWsOptions, or to BUILD_TIME_ONLY_KEYS if it is consumed at build time`
+			).toBe(true);
+		}
+	});
+
+	it('every serialized wsOpts key is a recognized websocket option', async () => {
+		// Guards the other direction of that bug class: a key CANNOT be
+		// added to wsOpts without also being registered as known, so the
+		// unknown-key warning can never flag a legitimately serialized option.
+		const { serializeWsOptions, KNOWN_WEBSOCKET_OPTION_KEYS } = await import('../src/index.js');
+		for (const key of Object.keys(serializeWsOptions({}, '/__realtime'))) {
+			expect(KNOWN_WEBSOCKET_OPTION_KEYS.has(key), `wsOpts key '${key}' must be registered in KNOWN_WEBSOCKET_OPTION_KEYS`).toBe(true);
+		}
 	});
 });

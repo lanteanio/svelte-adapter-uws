@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 import { parseCookies, serializeCookie, createCookies } from '../src/runtime/cookies.js';
 import {
 	mimeLookup,
-	splitCookiesString,
 	parse_as_bytes,
 	parse_origin,
 	writeChunkWithBackpressure,
@@ -123,40 +122,6 @@ describe('parse_origin', () => {
 
 	it('throws for non-http protocol', () => {
 		expect(() => parse_origin('ftp://example.com')).toThrow('Only http:// and https://');
-	});
-});
-
-// - splitCookiesString -----------------------------------------------------
-
-describe('splitCookiesString', () => {
-	it('returns array as-is', () => {
-		const arr = ['a=1', 'b=2'];
-		expect(splitCookiesString(arr)).toBe(arr);
-	});
-
-	it('returns empty array for non-string', () => {
-		expect(splitCookiesString(null)).toEqual([]);
-		expect(splitCookiesString(undefined)).toEqual([]);
-	});
-
-	it('splits simple Set-Cookie values', () => {
-		const result = splitCookiesString('a=1, b=2');
-		expect(result).toEqual(['a=1', 'b=2']);
-	});
-
-	it('handles single cookie', () => {
-		expect(splitCookiesString('session=abc123; Path=/; HttpOnly')).toEqual([
-			'session=abc123; Path=/; HttpOnly'
-		]);
-	});
-
-	it('handles Expires with commas (RFC date)', () => {
-		const input = 'a=1; Expires=Thu, 01 Jan 2025 00:00:00 GMT, b=2';
-		const result = splitCookiesString(input);
-		expect(result).toEqual([
-			'a=1; Expires=Thu, 01 Jan 2025 00:00:00 GMT',
-			'b=2'
-		]);
 	});
 });
 
@@ -2278,6 +2243,66 @@ describe('isOriginAllowed', () => {
 				// Header configured but missing -> use isTls default (https)
 				expect(isOriginAllowed('https://example.com', { host: 'example.com' }, ctx)).toBe(true);
 				expect(isOriginAllowed('http://example.com', { host: 'example.com' }, ctx)).toBe(false);
+			});
+		});
+
+		describe('pinned ORIGIN env (pinnedOrigin)', () => {
+			const pinnedCtx = { ...baseCtx, allowedOrigins: 'same-origin', pinnedOrigin: 'https://example.com' };
+
+			it('accepts an exact match against the pin, whatever the Host header says', () => {
+				expect(isOriginAllowed('https://example.com', { host: 'evil.example' }, pinnedCtx)).toBe(true);
+			});
+
+			it('rejects a host-spoofed Origin/Host pair that matches only each other', () => {
+				// The bypass: both headers attacker-controlled, neither
+				// related to the pinned ORIGIN env the startup guard certified.
+				expect(isOriginAllowed('http://evil.example', { host: 'evil.example' }, pinnedCtx)).toBe(false);
+			});
+
+			it('rejects a scheme mismatch against the pin', () => {
+				expect(isOriginAllowed('http://example.com', { host: 'example.com' }, pinnedCtx)).toBe(false);
+			});
+
+			it('matches a pin carrying a non-default port exactly', () => {
+				const ctx = { ...baseCtx, allowedOrigins: 'same-origin', pinnedOrigin: 'https://example.com:8443' };
+				expect(isOriginAllowed('https://example.com:8443', { host: 'evil.example' }, ctx)).toBe(true);
+				expect(isOriginAllowed('https://example.com', { host: 'example.com:8443' }, ctx)).toBe(false);
+			});
+
+			it('never consults the Host header when pinned (absent Host still matches)', () => {
+				expect(isOriginAllowed('https://example.com', {}, pinnedCtx)).toBe(true);
+			});
+
+			it('rejects a malformed pin instead of throwing', () => {
+				const ctx = { ...baseCtx, allowedOrigins: 'same-origin', pinnedOrigin: 'not a url' };
+				expect(isOriginAllowed('https://example.com', { host: 'example.com' }, ctx)).toBe(false);
+			});
+		});
+
+		describe('default-port stripping is anchored to the end of the host', () => {
+			it('does not eat the :80 inside :8080', () => {
+				const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: false };
+				expect(isOriginAllowed('http://example.com:8080', { host: 'example.com:8080' }, ctx)).toBe(true);
+				expect(isOriginAllowed('http://example.com', { host: 'example.com:8080' }, ctx)).toBe(false);
+			});
+
+			it('does not eat the :80 inside :8000', () => {
+				const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: false };
+				expect(isOriginAllowed('http://example.com:8000', { host: 'example.com:8000' }, ctx)).toBe(true);
+				expect(isOriginAllowed('http://example.com', { host: 'example.com:8000' }, ctx)).toBe(false);
+			});
+
+			it('does not eat the :443 inside :8443 (https)', () => {
+				const ctx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: true };
+				expect(isOriginAllowed('https://example.com:8443', { host: 'example.com:8443' }, ctx)).toBe(true);
+				expect(isOriginAllowed('https://example.com', { host: 'example.com:8443' }, ctx)).toBe(false);
+			});
+
+			it('still strips an exact trailing default port', () => {
+				const httpCtx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: false };
+				const httpsCtx = { ...baseCtx, allowedOrigins: 'same-origin', isTls: true };
+				expect(isOriginAllowed('http://example.com', { host: 'example.com:80' }, httpCtx)).toBe(true);
+				expect(isOriginAllowed('https://example.com', { host: 'example.com:443' }, httpsCtx)).toBe(true);
 			});
 		});
 	});

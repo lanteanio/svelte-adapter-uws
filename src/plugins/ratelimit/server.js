@@ -1,9 +1,17 @@
 /**
  * Rate limit plugin for svelte-adapter-uws.
  *
- * Token-bucket rate limiter for inbound WebSocket messages.
+ * Fixed-window rate limiter for inbound WebSocket messages.
  * Supports per-IP, per-connection, or custom key extraction,
  * with optional auto-ban when a bucket is exhausted.
+ *
+ * Fixed-window semantics: the allowance refills in full at each
+ * interval boundary, so a client can fire a full window of messages
+ * at the end of one interval and another full window at the start of
+ * the next - up to 2x `points` inside a short seam. The adapter
+ * core's upgrade limiter uses a sliding window to avoid exactly this.
+ * If burst smoothness matters, prefer a smaller `points` / `interval`
+ * pair with the same average rate.
  *
  * Zero impact on the adapter core - this is a standalone module
  * that you call from your `message` hook to decide whether to
@@ -16,10 +24,10 @@ import { now } from '../../runtime/runtime.js';
 
 /**
  * @typedef {Object} RateLimitOptions
- * @property {number} points - Tokens available per interval. Must be a positive integer.
+ * @property {number} points - Allowance per interval. Must be a positive integer.
  * @property {number} interval - Refill interval in milliseconds. Must be positive.
  * @property {number} [blockDuration=0] - If > 0, automatically ban the key for this many
- *   milliseconds when all tokens are consumed. Subsequent `consume()` calls return
+ *   milliseconds when the allowance is exhausted. Subsequent `consume()` calls return
  *   `{ allowed: false }` until the ban expires.
  * @property {'ip' | 'connection' | ((ws: any) => string)} [keyBy='ip'] - How to derive the
  *   rate-limit key from a WebSocket connection.
@@ -42,23 +50,28 @@ import { now } from '../../runtime/runtime.js';
 /**
  * @typedef {Object} ConsumeResult
  * @property {boolean} allowed - Whether the request was permitted.
- * @property {number} remaining - Tokens left in the bucket (0 if banned or exhausted).
+ * @property {number} remaining - Allowance left in the current window (0 if banned or exhausted).
  * @property {number} resetMs - Milliseconds until the bucket refills or the ban expires.
  */
 
 /**
  * @typedef {Object} RateLimiter
  * @property {(ws: any, cost?: number) => ConsumeResult} consume -
- *   Attempt to consume tokens. Returns the result synchronously.
+ *   Attempt to consume from the current window's allowance. Returns the result synchronously.
  * @property {(key: string, tenant?: string | null) => void} reset - Clear the bucket for a key.
  * @property {(key: string, duration?: number, tenant?: string | null) => void} ban -
  *   Manually ban a key. Uses `duration` or `blockDuration` or 60 000 ms.
- * @property {(key: string, tenant?: string | null) => void} unban - Remove a ban (bucket stays, tokens unchanged).
+ * @property {(key: string, tenant?: string | null) => void} unban - Remove a ban (the window counter is untouched).
  * @property {(tenant?: string | null) => void} clear - Reset all state, or only one tenant's buckets when a tenant id is given.
  */
 
 /**
- * Create a rate limiter.
+ * Create a fixed-window rate limiter.
+ *
+ * The allowance refills in full at each interval boundary (fixed
+ * window, not token bucket): up to 2x `points` can pass inside a
+ * short seam across a boundary. See the module header for the sizing
+ * guidance.
  *
  * @param {RateLimitOptions} options
  * @returns {RateLimiter}

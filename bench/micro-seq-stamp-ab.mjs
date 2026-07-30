@@ -8,7 +8,7 @@
 // takes the monotone-max guard; the in-memory counter keeps its bare set). The
 // common publish carries NO seq option, so the hot path must stay byte-identical:
 // an absent-option publish must resolve + record exactly as fast as the old
-// inline ternary + bare set. Credo #4 requires the bench, not an estimate - a
+// inline ternary + bare set. This needs the bench, not an estimate - a
 // single-digit-% regression on the publish resolution is a blocker.
 //
 // Variant A replays the pre-change inline shape; Variant B calls the real shipped
@@ -51,8 +51,8 @@ function current(options, seqMap, seenMap) {
 // Publish proxy: the resolution PLUS the completeEnvelope (JSON.stringify) + stats
 // work a real publish does around it. The isolated resolution is a few ns; a real
 // publish also serializes the payload and builds the envelope, so this measures
-// the resolution delta against a real publish's cost - the number credo #4 cares
-// about, since nothing calls the resolution in a hot loop on its own.
+// the resolution delta against a real publish's cost - the number that decides
+// the verdict, since nothing calls the resolution in a hot loop on its own.
 function baselinePublish(options, seqMap, seenMap, stats) {
 	const seq = (options && options.seq === false) ? null : nextTopicSeq(seqMap, topic);
 	if (seq !== null) seenMap.set(topic, seq);
@@ -125,7 +125,7 @@ for (const c of CASES) {
 }
 
 // Publish proxy: resolution measured inside a realistic publish (payload
-// serialize + envelope build + stats). This is the credo #4 verdict - the
+// serialize + envelope build + stats). This is the verdict that counts - the
 // resolution delta as a fraction of a real publish, not of the bare resolution.
 function runCasePublish(fn, options) {
 	const seqMap = new Map();
@@ -137,7 +137,7 @@ function runCasePublish(fn, options) {
 	return t1 - t0;
 }
 
-console.log('\n== publish proxy (resolution + completeEnvelope + stats): the credo #4 verdict ==');
+console.log('\n== publish proxy (resolution + completeEnvelope + stats): the verdict ==');
 let blocker = false;
 for (const c of [{ name: 'absent (hot path)', options: undefined }, { name: '{ seq: <number> }', options: { seq: 123456 } }]) {
 	for (let i = 0; i < 4; i++) { runCasePublish(baselinePublish, c.options); runCasePublish(currentPublish, c.options); }

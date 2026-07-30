@@ -30,6 +30,8 @@
  *     coerced to null inside arrays and at the top level - exactly as
  *     `JSON.stringify` treats them.
  *   - non-finite numbers (NaN, +/-Infinity): encoded as null, as JSON does.
+ *   - a `__proto__` object key decodes to an own data property (never a
+ *     prototype swap), exactly as `JSON.parse` defines it.
  *   - integers within +/- 2^52 use the zigzag varint (compact, exact); every
  *     other finite number uses f64 (full double precision - command payloads
  *     are arbitrary app data, not screen coordinates, so f32 would lose bits).
@@ -147,7 +149,16 @@ export function readValue(r) {
 			const out = {};
 			for (let i = 0; i < n; i++) {
 				const key = r.str();
-				out[key] = readValue(r);
+				const val = readValue(r);
+				// '__proto__' is defined as an OWN DATA property, exactly as
+				// JSON.parse defines it: plain assignment would invoke the
+				// inherited setter and replace the object's prototype with
+				// wire-controlled data instead of creating the key.
+				if (key === '__proto__') {
+					Object.defineProperty(out, key, { value: val, enumerable: true, writable: true, configurable: true });
+				} else {
+					out[key] = val;
+				}
 			}
 			return out;
 		}

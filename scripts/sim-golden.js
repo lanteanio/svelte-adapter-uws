@@ -24,7 +24,7 @@ import { dirname } from 'node:path';
 import process from 'node:process';
 import { runSimSwarm, buildSimGoldens, checkSimGoldens } from '../src/sim.js';
 
-// The fault profile buggified runs layer on. Matches sim-swarm.js so the golden
+// The fault profile faulted runs layer on. Matches sim-swarm.js so the golden
 // corpus exercises the same drop/duplicate/reorder/jitter interleavings the CI
 // swarm does - none of which may break a server invariant.
 const FAULT_PROFILE = { drop: 0.25, duplicate: 0.15, reorder: 0.5, maxJitterMs: 30 };
@@ -36,11 +36,11 @@ const CONFIGS = [
 	{
 		name: 'adapter-single',
 		file: 'test/dst-goldens/adapter-single.golden.json',
-		swarm: { count: 40, startSeed: 1, buggify: 'random', buggifyProbability: 0.25, faultProfile: FAULT_PROFILE, base: {} }
+		swarm: { count: 40, startSeed: 1, faultMode: 'random', faultProbability: 0.25, faultProfile: FAULT_PROFILE, base: {} }
 	},
 	{
 		// Cluster pins FAULT-FREE deterministic behavior (cross-worker relay,
-		// seq stamping, convergence, final-state aggregation). buggify is 'off'
+		// seq stamping, convergence, final-state aggregation). faultMode is 'off'
 		// on purpose: the quiescent cross-worker convergence check is a relay-
 		// fault DETECTOR (a diverged worker means a dropped/reordered/duplicated
 		// relay stream), so injecting those faults would deterministically trip
@@ -49,7 +49,7 @@ const CONFIGS = [
 		// is the main sim:swarm gate's job; this gate pins the clean path.
 		name: 'adapter-cluster',
 		file: 'test/dst-goldens/adapter-cluster.golden.json',
-		swarm: { count: 40, startSeed: 1, buggify: 'off', buggifyProbability: 0.25, faultProfile: FAULT_PROFILE, base: { workers: 3 } }
+		swarm: { count: 40, startSeed: 1, faultMode: 'off', faultProbability: 0.25, faultProfile: FAULT_PROFILE, base: { workers: 3 } }
 	}
 ];
 
@@ -76,8 +76,8 @@ async function buildCorpus(cfg) {
 		gitCommit,
 		recordedAt: new Date().toISOString(),
 		swarm: {
-			buggify: cfg.swarm.buggify,
-			buggifyProbability: cfg.swarm.buggifyProbability,
+			faultMode: cfg.swarm.faultMode,
+			faultProbability: cfg.swarm.faultProbability,
 			faultProfile: cfg.swarm.faultProfile,
 			base: cfg.swarm.base
 		}
@@ -96,8 +96,8 @@ async function verify(cfg) {
 	// Run EXACTLY the corpus seeds under EXACTLY the corpus config.
 	const { summary, runs } = await runSimSwarm({
 		seeds: corpus.entries.map((e) => e.seed),
-		buggify: swarm.buggify,
-		buggifyProbability: swarm.buggifyProbability,
+		faultMode: swarm.faultMode,
+		faultProbability: swarm.faultProbability,
 		faultProfile: swarm.faultProfile,
 		base: swarm.base,
 		gitCommit

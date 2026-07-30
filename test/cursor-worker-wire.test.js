@@ -39,12 +39,20 @@ let controllers;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function until(pred, timeout = 3000, step = 20) {
-	const deadline = Date.now() + timeout;
+// Deliberately under vitest's 5000ms testTimeout, so a stall surfaces as this
+// helper's message (which says how long it waited and how many times it looked)
+// rather than as a bare "Test timed out" pointing at the `it` line.
+async function until(pred, timeout = 4000, step = 20) {
+	const started = Date.now();
+	const deadline = started + timeout;
+	let attempts = 0;
 	for (;;) {
 		const v = pred();
 		if (v) return v;
-		if (Date.now() > deadline) throw new Error('until() timed out');
+		attempts++;
+		if (Date.now() > deadline) {
+			throw new Error(`until() timed out after ${Date.now() - started}ms / ${attempts} polls`);
+		}
 		await sleep(step);
 	}
 }
@@ -78,15 +86,17 @@ async function moverClient(url, topic = 'board') {
 	};
 }
 
-function cursorServer(options = {}) {
+function cursorServer(options = {}, userData = null) {
 	const cursors = createCursor({ throttle: 0, topicThrottle: 0, ...options });
+	const handler = {
+		message(ws, ctx) {
+			if (cursors.hooks.message(ws, ctx)) return;
+		},
+		close: cursors.hooks.close
+	};
+	if (userData !== null) handler.upgrade = () => ({ ...userData });
 	return createTestServer({
-		handler: {
-			message(ws, ctx) {
-				if (cursors.hooks.message(ws, ctx)) return;
-			},
-			close: cursors.hooks.close
-		}
+		handler
 	}).then((s) => ({ server: s, cursors }));
 }
 
@@ -98,6 +108,16 @@ describeUWS('cursor render worker against a real server', () => {
 		server = null;
 	});
 	controllers = [];
+
+	// This suite needs the REAL global WebSocket: the cursor controller runs
+	// in-process here and constructs `new WebSocket(url, [subprotocol])` itself, so
+	// a mock left installed by a client suite makes every test below hang on a
+	// socket that never connects. Eighteen suites install one; `stubGlobals` is
+	// what puts them back. Asserting it here names the cause in one line instead of
+	// five timeouts that read as a cursor regression.
+	it('runs against the real global WebSocket, not a mock left by another suite', () => {
+		expect(globalThis.WebSocket?.name).toBe('WebSocket');
+	});
 
 	it('handshakes through the lane subprotocol, snapshots, and ingests moves as BINARY frames', async () => {
 		const made = await cursorServer();
@@ -117,6 +137,35 @@ describeUWS('cursor render worker against a real server', () => {
 		// publishWire announced a topic id before the first 0x03 frame.
 		expect(ctrl._wireIds.size).toBeGreaterThanOrEqual(1);
 		expect([...ctrl._wireIds.values()]).toContain('__cursor:board');
+
+		mover.ws.close();
+	});
+
+	it('projects personal data before the BINARY snapshot catalog is encoded', async () => {
+		const made = await cursorServer({}, {
+			id: 'u-1',
+			name: 'Ada',
+			email: 'ada@example.com',
+			phoneNumber: '+1-555-0100',
+			userphone: '+1-555-0101',
+			msisdn: '15550102',
+			ip: '203.0.113.9',
+			remoteAddress: '203.0.113.9'
+		});
+		server = made.server;
+
+		// Put one cursor in the store before the worker connects. Its first frame
+		// is therefore a single-target catalog through sendWire, not the JSON mock
+		// path used by the unit suite or a join published after the snapshot.
+		const mover = await moverClient(server.wsUrl);
+		mover.move(10, 20);
+		await until(() => made.cursors.list('board').length === 1);
+
+		const { ctrl } = bootWorker(server.wsUrl);
+		await until(() => ctrl._state.userMap.size === 1);
+		const [user] = [...ctrl._state.userMap.values()];
+		expect(user).toEqual({ id: 'u-1', name: 'Ada' });
+		expect(ctrl._wireIds.size).toBeGreaterThanOrEqual(1);
 
 		mover.ws.close();
 	});

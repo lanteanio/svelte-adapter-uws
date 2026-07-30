@@ -93,9 +93,24 @@ describe('adapter client send gate (production-wired)', () => {
 	let sock;
 
 	beforeEach(async () => {
+		// RETIRE ANY SINGLETON THIS FILE DID NOT CREATE. `connect()` returns a
+		// process-wide singleton, and a serial run (`--no-file-parallelism`, one
+		// worker, pool size 1) shares a single module registry across test files -
+		// so a suite that ran earlier can leave a live connection behind. This
+		// file's `connect()` would then return THAT connection, never construct a
+		// MockWebSocket, and leave `_last` unset: the failure reads as
+		// `Cannot read properties of undefined (reading '_sent')` several helpers
+		// away from the cause. Closing first is what makes this file's socket ours.
+		// Under file parallelism each file gets a fresh registry, so this is a
+		// no-op there - which is exactly why the defect only ever showed up serial.
+		clientModule.connect().close();
+		MockWebSocket._last = null;
 		conn = clientModule.connect({ url: 'ws://localhost:5173/ws' });
 		await flush(); // socket auto-opens
 		sock = MockWebSocket._last;
+		// Fail here rather than several helpers deep if the retire above ever
+		// stops working: an undefined socket is a harness fault, not a gate bug.
+		expect(sock, 'the client did not construct a socket - a stale singleton leaked in').toBeTruthy();
 	});
 
 	afterEach(() => {

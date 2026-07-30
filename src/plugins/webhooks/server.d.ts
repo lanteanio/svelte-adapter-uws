@@ -20,8 +20,41 @@ export interface WebhookDeliveryConfig<Event = string, Data = any> {
 	/** Map the event to the delivered JSON body; returning `null`/`undefined`
 	 * skips delivery. Default body is `{ event, data }`. */
 	transform?: (event: Event, data: Data) => any;
-	/** HMAC-SHA256 secret; when set, signs the body (`x-webhook-signature`) and
-	 * keys the idempotency header so it cannot be precomputed. */
+	/**
+	 * HMAC-SHA256 secret. When set, signs the delivery and keys the
+	 * idempotency header so it cannot be precomputed.
+	 *
+	 * THE RECEIVER CONTRACT, in full - the signature is worth nothing if the
+	 * far side verifies it loosely:
+	 *
+	 * 1. Read `x-webhook-timestamp`. Reject unless it matches `/^\d+$/`. This
+	 *    check is load-bearing, not hygiene: it is what makes the `.`
+	 *    delimiter unambiguous, so a body containing a dot cannot be re-split
+	 *    into a different timestamp/body pair that signs identically.
+	 * 2. Reject if it is more than 300 seconds (5 minutes) from your own
+	 *    clock, in either direction. Without this the signature never expires
+	 *    and a captured delivery replays forever - which is the entire point
+	 *    of signing the timestamp.
+	 * 3. Recompute `HMAC_SHA256(secret, timestamp + '.' + rawBody)` over the
+	 *    RAW body bytes, before any JSON parse and re-serialize.
+	 * 4. Split `x-webhook-signature` on commas and accept if ANY entry matches,
+	 *    comparing with a constant-time function (`crypto.timingSafeEqual`),
+	 *    never `===`. Several entries appear only during a `previousSecret`
+	 *    rotation, and both sign the same timestamped material.
+	 *
+	 * Freshness bounds replay; it does not make a request single-use inside the
+	 * five-minute window. After successful verification, deduplicate on the
+	 * authenticated signature header (or a unique event id inside the signed
+	 * body). Do not use the mutable `idempotency-key` header by itself as a
+	 * security replay token: that header is not part of the signed material.
+	 *
+	 * BREAKING vs the pre-timestamp contract: a receiver verifying
+	 * `HMAC(secret, body)` rejects every delivery from a sender on this
+	 * version. Update receivers BEFORE upgrading senders. A legacy body-only
+	 * signature is deliberately not emitted alongside the new one - a receiver
+	 * accepting either is still replayable through the legacy entry, which
+	 * would leave the hole open while looking closed.
+	 */
 	secret?: string;
 	/** A second secret that ALSO signs (comma-appended) during a key rotation, so
 	 * a receiver still verifying the old key keeps accepting deliveries. */
@@ -150,16 +183,52 @@ export function createRetryBudget(options?: RetryBudgetOptions): InProcessRetryB
 export function createWebhookBreaker(options?: WebhookBreakerOptions): InProcessWebhookBreaker;
 
 /**
- * Strip credentials and query from a URL for safe logging - keeps only origin +
- * pathname; returns `'[unparseable-url]'` when it does not parse.
+ * Strip a URL down to its origin for safe logging - userinfo, query, hash AND
+ * the path are all dropped (webhook endpoints commonly embed their credential
+ * in the path); returns `'[unparseable-url]'` when it does not parse.
  */
 export function redactUrl(url: string): string;
+
+/**
+ * Verify a received delivery against the contract documented on
+ * {@link WebhookDeliveryConfig.secret}: numeric timestamp, freshness window,
+ * HMAC over `<timestamp>.<rawBody>`, constant-time compare, any comma entry
+ * may match (several appear only during a `previousSecret` rotation).
+ *
+ * Use this in your receiver rather than re-implementing it - each of those
+ * four steps has a quiet failure mode, and a signature verified loosely is
+ * worth nothing.
+ *
+ * @param headers Received headers, lowercase keys.
+ * @param rawBody The body exactly as received, before any JSON round-trip.
+ */
+export function verifyWebhookSignature(
+	headers: Record<string, string | string[] | undefined>,
+	/**
+	 * The body EXACTLY as received. Any byte container works: a Node `Buffer`,
+	 * the `ArrayBuffer` from `await request.arrayBuffer()`, a typed-array view
+	 * over one, or the raw string. A parsed object is refused, because
+	 * re-serializing it does not reproduce the bytes the sender signed.
+	 */
+	rawBody: string | Buffer | ArrayBuffer | ArrayBufferView,
+	options?: {
+		/** The current signing secret. */
+		secret?: string;
+		/** Several accepted secrets (use during a rotation). */
+		secrets?: string[];
+		/** Finite, non-negative freshness window either side of the receiver clock. Default 300. */
+		toleranceSeconds?: number;
+		/** Finite override for the receiver clock, in ms. Defaults to the exact wall clock. */
+		nowMs?: number;
+	}
+): boolean;
 
 /**
  * Deliver one outbound webhook for `(topic, event, data)` under `config` and
  * return its terminal outcome. SSRF-gates the initial URL and every redirect
  * hop, pins the connection to validated addresses, attaches a stable idempotency
- * key and optional HMAC signature, and retries 5xx/429/network/timeout with
+ * key and optional timestamped HMAC signature (neither is forwarded to a
+ * cross-origin redirect target), and retries 5xx/429/network/timeout with
  * jittered backoff. Never throws and reports nothing - the caller inspects the
  * outcome for reporting and dead-letter capture.
  *

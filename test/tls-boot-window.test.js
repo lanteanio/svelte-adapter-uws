@@ -32,9 +32,15 @@ import { request as httpsRequest } from 'node:https';
 import path from 'node:path';
 import { join } from 'node:path';
 import { buildFixtureOnce } from './helpers/fixture-build.js';
+import { variantOut } from './fixture/variants.js';
 
 const fixtureDir = fileURLToPath(new URL('./fixture', import.meta.url));
-const builtHandler = path.join(fixtureDir, 'build', 'handler.js');
+// The `tls` variant, NOT the shared `build/` output. This suite configures TLS
+// through env that the runtime reads at module eval, and Node's ESM cache is
+// per process while vitest reuses a worker across files - so importing the
+// default build here would hand every later plaintext suite in the same worker
+// an HTTPS listener. See test/fixture/variants.js.
+const builtHandler = path.join(fixtureDir, variantOut('tls'), 'handler.js');
 
 function bindingLoads() {
 	try {
@@ -130,7 +136,7 @@ describeMaybe('TLS boot window: a renewal landing between SSLApp creation and ar
 	let handler = null;
 
 	beforeAll(() => {
-		built = buildFixtureOnce();
+		built = buildFixtureOnce('tls');
 	}, 400000);
 
 	afterAll(async () => {
@@ -138,6 +144,11 @@ describeMaybe('TLS boot window: a renewal landing between SSLApp creation and ar
 			try { await handler.shutdown(); } catch {}
 			try { handler.forceCloseApp(); } catch {}
 		}
+		// Hand the worker back clean. The variant above already stops this suite
+		// poisoning another one's MODULE, but the env is process-wide and a later
+		// suite that boots a runtime reads it at eval - so leaving SSL_CERT set
+		// would still turn somebody else's server into an HTTPS one.
+		for (const key of ['SSL_CERT', 'SSL_KEY', 'SSL_RELOAD_DEBOUNCE_MS']) delete process.env[key];
 	});
 
 	it('serves the renewed cert on the first fresh SNI handshake, with the watcher out of the picture', async () => {

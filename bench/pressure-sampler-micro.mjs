@@ -1,4 +1,4 @@
-// Micro-bench (credo rule 4) for the g27 sampler fold. The 1 Hz pressure tick
+// Micro-bench for the pressure sampler fold. The 1 Hz pressure tick
 // gained a per-connection getBufferedAmount() walk to report aggregate
 // backpressure. That walk is the ONLY per-connection iteration the sampler
 // does, so it must stay bounded: on a worker holding 100k sockets a naive

@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createGroup } from '../src/plugins/groups/server.js';
+import { isAuthorizationHook, deniesUngrantedObserve, isPluginOwnedTopic, registerPluginOwnedPrefix } from '../src/runtime/utils/ws-symbols.js';
 import { mockWs, mockPlatform } from './_helpers.js';
 
 describe('groups plugin - server', () => {
@@ -145,6 +146,74 @@ describe('groups plugin - server', () => {
 			});
 			g.join(mockWs(), platform, 'admin');
 			expect(joinCalls).toEqual(['admin']);
+		});
+
+		it('uses the role returned by onJoin', () => {
+			const g = createGroup('test', { onJoin: () => 'admin' });
+			const ws = mockWs();
+			expect(g.join(ws, platform, 'member')).toBe(true);
+			expect(g.members()[0].role).toBe('admin');
+			expect(platform.published[0].data.role).toBe('admin');
+		});
+
+		it('onJoin false rejects before any membership or roster side effect', () => {
+			const g = createGroup('test', { onJoin: () => false });
+			const ws = mockWs();
+			expect(g.join(ws, platform)).toBe(false);
+			expect(g.count()).toBe(0);
+			expect(ws.isSubscribed('__group:test')).toBe(false);
+			expect(platform.published).toHaveLength(0);
+			expect(platform.sent).toHaveLength(0);
+		});
+
+		it('onJoin throw fails before any membership or roster side effect', () => {
+			const g = createGroup('test', { onJoin: () => { throw new Error('denied'); } });
+			const ws = mockWs();
+			expect(() => g.join(ws, platform)).toThrow('denied');
+			expect(g.count()).toBe(0);
+			expect(ws.isSubscribed('__group:test')).toBe(false);
+			expect(platform.published).toHaveLength(0);
+			expect(platform.sent).toHaveLength(0);
+		});
+
+		it('rejects an invalid role returned by onJoin before side effects', () => {
+			const g = createGroup('test', { onJoin: () => /** @type {any} */ ('owner') });
+			const ws = mockWs();
+			expect(() => g.join(ws, platform)).toThrow('onJoin returned invalid role');
+			expect(g.count()).toBe(0);
+			expect(ws.isSubscribed('__group:test')).toBe(false);
+			expect(platform.published).toHaveLength(0);
+			expect(platform.sent).toHaveLength(0);
+		});
+
+		it('rejects an async onJoin instead of granting before it resolves', () => {
+			const g = createGroup('test', { onJoin: /** @type {any} */ (async () => 'admin') });
+			const ws = mockWs();
+			expect(() => g.join(ws, platform)).toThrow('onJoin must be synchronous');
+			expect(g.count()).toBe(0);
+			expect(ws.isSubscribed('__group:test')).toBe(false);
+			expect(platform.published).toHaveLength(0);
+			expect(platform.sent).toHaveLength(0);
+		});
+
+		it('contains a later async onJoin rejection after refusing the join', async () => {
+			const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+			try {
+				const g = createGroup('test', {
+					onJoin: /** @type {any} */ (async () => { throw new Error('late denial'); })
+				});
+				const ws = mockWs();
+				expect(() => g.join(ws, platform)).toThrow('onJoin must be synchronous');
+				await new Promise((resolve) => setTimeout(resolve, 0));
+				expect(logged).toHaveBeenCalledWith(
+					'[group test] async onJoin rejected after being refused:',
+					expect.objectContaining({ message: 'late denial' })
+				);
+				expect(g.count()).toBe(0);
+				expect(ws.isSubscribed('__group:test')).toBe(false);
+			} finally {
+				logged.mockRestore();
+			}
 		});
 
 		it('returns false when group is closed', () => {
@@ -460,6 +529,122 @@ describe('groups plugin - server', () => {
 
 			unsubscribe(ws, '__group:lobby', { platform });
 			expect(group.has(ws)).toBe(false);
+		});
+
+		// The server-grant gate stands down for the WHOLE connection as soon as
+		// the app exports a subscribe hook, and this plugin's documented wiring
+		// re-exports this one. But it decides for exactly one topic - the
+		// group's own channel - and returns undefined for every app topic, so
+		// counting it as the app taking over authorization meant arming
+		// `authorizeWireSubscribe` and following this plugin's README produced
+		// no enforcement on any topic at all.
+		it('subscribe hook does not count as the app taking over authorization', () => {
+			expect(isAuthorizationHook(group.hooks.subscribe)).toBe(false);
+		});
+
+		it('the mark survives the documented destructuring', () => {
+			// The mark lives on the function, not the container, so re-exporting
+			// individual hooks - which is what the README tells apps to do -
+			// carries it through.
+			const { subscribe } = group.hooks;
+			expect(isAuthorizationHook(subscribe)).toBe(false);
+		});
+
+		it('an app wrapper is still treated as an authorization hook', () => {
+			// Wrapping is app code, which may decide, so the gate steps aside as
+			// documented. Losing this would break the escape hatch.
+			const wrapped = (ws, topic, ctx) => group.hooks.subscribe(ws, topic, ctx);
+			expect(isAuthorizationHook(wrapped)).toBe(true);
+		});
+
+		// The mark alone was not enough, and asserting only on the mark could not
+		// see it: with the gate armed, a client joins a group by subscribing to
+		// `__group:<name>`, the gate refused that before the hook ran, and the
+		// hook was the only thing that would ever authorize it - so the group
+		// became permanently unjoinable.
+		//
+		// The deferral belongs to the WIRE-SUBSCRIBE pre-gate, which re-tests
+		// real membership when the hook lands. It must NOT extend to
+		// deniesUngrantedObserve, which answers for the observer gate and the
+		// client-named resume filter - lanes with no landing re-check, where the
+		// predicate IS the gate. This suite previously asserted the opposite and
+		// so pinned the bypass in place: a client could be refused
+		// `__group:private` on the live path and served its buffered history by
+		// naming it in a resume frame.
+		it('the observer/resume gate refuses an ungranted group channel', () => {
+			const armed = true;
+			const noAppHook = false;
+			const noGrants = new Set();
+			expect(deniesUngrantedObserve(armed, noAppHook, noGrants, '__group:lobby')).toBe(true);
+		});
+
+		it('and admits the group channel once the plugin has actually joined the socket', () => {
+			// The deferral the plugin needs, expressed as membership rather than
+			// as a namespace exemption: a client the hook admitted is in the
+			// subscription registry, so the ordinary grant test passes for it.
+			const granted = new Set(['__group:lobby']);
+			expect(deniesUngrantedObserve(true, false, granted, '__group:lobby')).toBe(false);
+		});
+
+		it('and still refuses an ordinary topic the server never granted', () => {
+			expect(deniesUngrantedObserve(true, false, new Set(), 'private-room')).toBe(true);
+		});
+
+		it('claims only its own prefix', () => {
+			expect(isPluginOwnedTopic('__group:lobby')).toBe(true);
+			expect(isPluginOwnedTopic('private-room')).toBe(false);
+			expect(isPluginOwnedTopic('__presence:room')).toBe(false);
+		});
+
+		// registerPluginOwnedPrefix punches a hole in the grant gate, so what it
+		// ACCEPTS is a security surface. It previously took any non-empty string:
+		// `''` was refused but `'__'` was not (making every internal topic
+		// plugin-owned), and an ordinary namespace like `'room:'` handed the
+		// exemption to a whole class of app topics.
+		it('refuses a prefix that would swallow more than one plugin namespace', () => {
+			for (const bad of ['', '_', '__', 'a', 'room:', 'chat:', '0', ' ', '__group', 'group:', '__:', '__1bad:']) {
+				expect(() => registerPluginOwnedPrefix(bad), `"${bad}" must be refused`).toThrow();
+			}
+		});
+
+		it('refuses a non-string prefix', () => {
+			for (const bad of [undefined, null, 42, {}, ['__x:']]) {
+				expect(() => registerPluginOwnedPrefix(/** @type {any} */ (bad))).toThrow(TypeError);
+			}
+		});
+
+		it('cannot register a namespace that swallows another plugin', () => {
+			// The format is what guarantees this: a namespace carries no `:` and
+			// the prefix ends with one, so two distinct valid prefixes always
+			// diverge at the terminator and neither can be a prefix of the other.
+			// `__gro:` shares five characters with `__group:` yet claims none of
+			// its topics.
+			expect(() => registerPluginOwnedPrefix('__gro:')).not.toThrow();
+			expect(isPluginOwnedTopic('__gro:x')).toBe(true);
+			expect(isPluginOwnedTopic('__group:lobby')).toBe(true);
+			// A nested spelling is refused outright - the namespace rule catches
+			// the `:` before anything else can.
+			expect(() => registerPluginOwnedPrefix('__group:sub:')).toThrow();
+		});
+
+		it('stays idempotent for the identical prefix', () => {
+			expect(() => registerPluginOwnedPrefix('__group:')).not.toThrow();
+			expect(isPluginOwnedTopic('__group:lobby')).toBe(true);
+		});
+
+		it('accepts a well-formed prefix from another plugin', () => {
+			expect(() => registerPluginOwnedPrefix('__lobbyx:')).not.toThrow();
+			expect(isPluginOwnedTopic('__lobbyx:one')).toBe(true);
+			// And that registration did not widen anything else.
+			expect(isPluginOwnedTopic('lobbyx:one')).toBe(false);
+		});
+
+		it('still denies its own topic while marked', () => {
+			// Marking changes only the arming decision - a `false` return is
+			// still honoured as a denial by the hook runner.
+			const g = createGroup('tiny', { maxMembers: 1 });
+			g.hooks.subscribe(mockWs(), '__group:tiny', { platform });
+			expect(g.hooks.subscribe(mockWs(), '__group:tiny', { platform })).toBe(false);
 		});
 	});
 });

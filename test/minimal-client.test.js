@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createLanteanClient } from '../examples/minimal-client.mjs';
 
 // Keeps the ~40-line Core client example honest: it must connect, subscribe,
@@ -15,9 +15,58 @@ try {
 const describeUWS = uWS ? describe : describe.skip;
 
 let server;
+/** @type {any} */
+let client;
+
+describe('examples/minimal-client.mjs teardown', () => {
+	afterEach(() => vi.useRealTimers());
+
+	it('cancels a pending reconnect and remains safe when closed twice', () => {
+		vi.useFakeTimers();
+		const sockets = [];
+		class FakeWebSocket {
+			constructor() {
+				this.readyState = 0;
+				this.closeCalls = 0;
+				sockets.push(this);
+			}
+			send() {}
+			close() {
+				this.closeCalls++;
+				this.readyState = 3;
+				this.onclose?.();
+			}
+		}
+
+		const localClient = createLanteanClient('ws://localhost:9/', { WebSocket: FakeWebSocket });
+		const first = sockets[0];
+		expect(first.onerror).toBeTypeOf('function');
+
+		// Model the server disappearing: onclose arms the 500 ms reconnect.
+		first.onclose();
+		expect(vi.getTimerCount()).toBe(1);
+
+		localClient.close();
+		localClient.close();
+		expect(first.closeCalls).toBe(1);
+		expect(vi.getTimerCount()).toBe(0);
+
+		vi.advanceTimersByTime(1000);
+		expect(sockets, 'close() must prevent every later dial').toHaveLength(1);
+	});
+});
 
 describeUWS('examples/minimal-client.mjs (Core class)', () => {
 	afterEach(async () => {
+		// The client FIRST, and this is not tidiness. The example reconnects
+		// 500 ms after any close, so a client left running when the server goes
+		// away retries into a dead port forever - and `ws` throws that connect
+		// error uncaught into whichever test file the worker happens to be
+		// running when the timer fires. That is where this suite's stray
+		// ECONNREFUSED came from, attributed to a different innocent file every
+		// run for as long as it went unnoticed.
+		client?.close();
+		client = null;
 		await server?.close();
 		server = null;
 	});
@@ -31,7 +80,7 @@ describeUWS('examples/minimal-client.mjs (Core class)', () => {
 
 		const { WebSocket } = await import('ws');
 		const received = [];
-		const client = createLanteanClient(server.wsUrl, {
+		client = createLanteanClient(server.wsUrl, {
 			WebSocket,
 			onEvent: (topic, event, data) => received.push({ topic, event, data })
 		});

@@ -3,8 +3,13 @@ import { parseCookies } from './runtime/cookies.js';
 import { stampSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
+import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
+import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap } from './runtime/utils/subscribe-policy.js';
+import { deniesUngrantedObserve, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, isAuthorizationHook, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
+import { runMessageHook } from './runtime/utils/hook-boundary.js';
+import { assertRestrictiveBoolean } from './config-guards.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -55,6 +60,14 @@ function envelope(topic, event, data, seq) {
  * @returns {Promise<import('./testing.js').TestServer>}
  */
 export async function createTestServer(options = {}) {
+	// A permissive test double for a restrictive production deployment creates a
+	// false-green authorization test. Apply the same value guard as the adapter
+	// and Vite surfaces before the option is normalized with `=== true`.
+	assertRestrictiveBoolean(
+		options,
+		'authorizeWireSubscribe',
+		'the createTestServer option authorizeWireSubscribe'
+	);
 	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, protection, metrics, adminPath = '/__realtime', readinessCheckPath = '/readyz', healthCheckPath = '/healthz', primaryInit } = options;
 
 	// Readiness flag, mirroring the production `counters.draining`. Flipped true
@@ -63,8 +76,10 @@ export async function createTestServer(options = {}) {
 	// `platform.__setDraining(true)` to assert the route without tearing down.
 	let drainingT = false;
 	// Mirror production: block client-initiated subscribes to `__`-prefixed
-	// system topics by default. Tests that intentionally exercise system
-	// channels can opt in with `allowSystemTopicSubscribe: true`.
+	// system topics by default. A registered plugin namespace may reach its hook,
+	// but landing still requires tracked membership. Tests that intentionally
+	// exercise arbitrary system channels can opt in broadly with
+	// `allowSystemTopicSubscribe: true`.
 	const ALLOW_SYSTEM_TOPIC_SUBSCRIBE_T = options.allowSystemTopicSubscribe === true;
 	// Mirror production: wire topics default to printable ASCII only.
 	const ALLOW_NON_ASCII_TOPICS_T = options.allowNonAsciiTopics === true;
@@ -73,7 +88,11 @@ export async function createTestServer(options = {}) {
 	// framework does in production. Seeded from the config option for the
 	// static-config path.
 	let SUBSCRIBE_AUTHZ_T = options.authorizeWireSubscribe === true;
-	const hasUserSubscribeHookT = () => !!(handler.subscribe || handler.subscribeBatch);
+	// A plugin's side-effect hook does not count as the app taking over the topic
+	// decision, matching production - otherwise exporting presence's subscribe
+	// hook disarms the grant gate. See WS_HOOK_SIDE_EFFECT_ONLY.
+	const hasUserSubscribeHookT = () =>
+		isAuthorizationHook(handler.subscribe) || isAuthorizationHook(handler.subscribeBatch);
 
 	// Same wiring shape as the production handler: a per-instance
 	// admission state instantiated once, consulted at the top of the
@@ -146,16 +165,33 @@ export async function createTestServer(options = {}) {
 		} catch (err) {
 			console.error('[ws] subscribeBatch hook threw:', err);
 			/** @type {Record<string, string>} */
-			const failed = {};
+			const failed = Object.create(null);
 			for (let i = 0; i < topics.length; i++) failed[topics[i]] = 'INTERNAL_ERROR';
 			return failed;
 		}
+		// Null-prototype for the same reason as production: an empty `{}` reads back
+		// every Object.prototype member name as truthy, so a topic named `toString`
+		// or `constructor` would be DENIED here while production allows it, and a
+		// `__proto__` key would reach the inherited setter and store nothing.
 		/** @type {Record<string, string>} */
-		const denials = {};
+		const denials = Object.create(null);
 		if (!result || typeof result !== 'object') return denials;
-		for (const [topic, val] of Object.entries(result)) {
-			if (val === false) denials[topic] = 'FORBIDDEN';
-			else if (typeof val === 'string') denials[topic] = val;
+		// Reading the hook RESULT can throw - a getter, a Proxy, a lazy row -
+		// and this sits between the pending-subscribe begin and settle. An escape
+		// would leak the pending entry forever, so every later unsubscribe on that
+		// topic would falsely report cancelling an in-flight grant and the map would
+		// grow unbounded. Fail closed on the whole batch instead.
+		try {
+			for (const [topic, val] of Object.entries(result)) {
+				if (val === false) denials[topic] = 'FORBIDDEN';
+				else if (typeof val === 'string') denials[topic] = val;
+			}
+		} catch (err) {
+			console.error('[ws] subscribeBatch result read threw:', err);
+			/** @type {Record<string, string>} */
+			const broken = Object.create(null);
+			for (let i = 0; i < topics.length; i++) broken[topics[i]] = 'INTERNAL_ERROR';
+			return broken;
 		}
 		return denials;
 	}
@@ -525,11 +561,32 @@ export async function createTestServer(options = {}) {
 	function coveredSeqForT(covered, topic) {
 		if (covered == null) return undefined;
 		if (typeof covered === 'number') return covered;
-		if (typeof covered === 'object') { const v = covered[topic]; return typeof v === 'number' ? v : undefined; }
+		if (typeof covered === 'object') {
+			// Guarded for the same reason as production's coveredSeqFor: this reads
+			// the app's `resume` hook result between beginPendingSubscribe and
+			// settlePendingSubscribe on the batch path, so a throwing getter would
+			// abort the loop and leak a pending entry for every remaining topic.
+			try {
+				const v = covered[topic];
+				return typeof v === 'number' ? v : undefined;
+			} catch (err) {
+				console.error('[ws] resume hook result read threw for topic', topic, err);
+				return undefined;
+			}
+		}
 		return undefined;
 	}
 
 	const platform = {
+		// The observer lane's deny-unwind (authorizeDerivedSubscribe) runs the
+		// app's unsubscribe hook through this slot - the shared primitive has no
+		// reference to this server's hook container. Per-platform rather than
+		// process-global: several test servers coexist in one process, and a
+		// global slot would run server A's unsubscribe hook for server B's
+		// connections. See WS_REVOKED_UNSUBSCRIBE.
+		[WS_REVOKED_UNSUBSCRIBE](ws, topic, ud) {
+			handler.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+		},
 		publish(topic, event, data, options) {
 			const seq = stampSeq(options, topicSeqs, topic);
 			const msg = envelope(topic, event, data, seq);
@@ -1060,41 +1117,132 @@ export async function createTestServer(options = {}) {
 			// user hook so async hooks gate correctly.
 			// Server-side caller: trust non-ASCII topics (matches platform.subscribe in production).
 			if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
-			let subs;
-			try { subs = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+			let ud;
+			try { ud = ws.getUserData(); }
 			catch { closedWsAbortsT++; return null; }
+			const subs = ud[WS_SUBSCRIPTIONS];
 			if (!(subs instanceof Set)) return 'INVALID_TOPIC';
 			if (subs.has(topic)) return null;
-			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
+			if (exceedsSubscriptionCap({ held: subs.has(topic), size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) return 'RATE_LIMITED';
+			// Track this subscribe across its authorization await. A revocation
+			// landing in that gap cannot remove a subscription that does not exist
+			// yet, so unsubscribe tombstones the in-flight attempt and the landing
+			// below discards the grant instead of installing it. Same primitive as
+			// the production runtime - without it an app's ban logic verified
+			// against this server passes while the equivalent production path is
+			// the one that was fixed.
+			const token = beginPendingSubscribe(ud, topic, subs.has(topic));
 			const denial = await runUserSubscribeGateT(ws, topic);
-			if (denial !== null) return denial;
-			if (subs.has(topic)) return null;
-			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
+			if (denial !== null) {
+				// The hook denied, but it may have installed tracked membership
+				// (a plugin join) before deciding, and a revocation may have tombstoned
+				// this attempt mid-await. Settling blindly here left that membership
+				// standing: the held branch below defers to a sibling attempt still in
+				// flight, so when that sibling's hook denies too, every attempt leaves
+				// through this exit and nothing remains to judge the membership.
+				if (settleDeniedSubscribe(ud, topic, token, subs.has(topic)) === 'deny-unwind') {
+					unwindRevokedMembership(ws, topic);
+					handler.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+				}
+				return denial;
+			}
+			if (subs.has(topic)) {
+				// Held is not enough when this attempt was revoked mid-await and
+				// its own hook installed the membership (a plugin join): read the
+				// provenance, and unwind a grant no live authority backs.
+				const heldVerdict = settleHeldSubscribe(ud, topic, token);
+				if (heldVerdict === 'ack') return null;
+				if (heldVerdict === 'deny-unwind') {
+					unwindRevokedMembership(ws, topic);
+					handler.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+				}
+				return 'FORBIDDEN';
+			}
+			if (exceedsSubscriptionCap({ held: subs.has(topic), size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) { settlePendingSubscribe(ud, topic, token); return 'RATE_LIMITED'; }
+			// Revoked while parked: discard the grant rather than installing it.
+			if (!settlePendingSubscribe(ud, topic, token, true)) return 'FORBIDDEN';
 			try { ws.subscribe(topic); }
 			catch { closedWsAbortsT++; return null; }
 			subs.add(topic);
 			if (sharedTopicsT.has(topic)) joinCohortT(ws, ws.getUserData(), topic, sharedTopicsT.get(topic));
 			return null;
 		},
-		async checkSubscribe(ws, topic) {
-			// Server-side caller: see platform.subscribe note above.
-			if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
-			return await runUserSubscribeGateT(ws, topic);
+		// `opts`, not `options`: the enclosing createTestServer(options) is in scope
+		// here, and shadowing it invites a future config read from the caller's
+		// object instead.
+		async checkSubscribe(ws, topic, opts) {
+			// Ordinary callers are trusted server code. Observer-mode callers are
+			// fed client-named snapshot topics, so mirror the configured wire
+			// alphabet rather than silently accepting a larger topic space.
+			if (!isValidWireTopic(topic, opts && opts.requireGrant ? ALLOW_NON_ASCII_TOPICS_T : true)) {
+				return 'INVALID_TOPIC';
+			}
+			// `requireGrant` is the observer-lane mode - "may this connection see
+			// what it already holds?" - and it must not be the default, because the
+			// ordinary use of this method gates BEFORE a grant exists. Same shared
+			// predicate and same precedence as the production runtime: an app
+			// asserting its own tenancy boundary against this server must not get
+			// the opposite answer from the one production would give.
+			const requireGrant = Boolean(opts && opts.requireGrant);
+			let observerHasUserHook = false;
+			if (requireGrant) {
+				observerHasUserHook = hasUserSubscribeHookT();
+				let granted;
+				try { granted = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+				catch { closedWsAbortsT++; return 'FORBIDDEN'; }
+				if (deniesUngrantedObserve(SUBSCRIBE_AUTHZ_T, observerHasUserHook, granted, topic)) {
+					return 'FORBIDDEN';
+				}
+			}
+			const denial = await runUserSubscribeGateT(ws, topic);
+			if (denial !== null) return denial;
+			if (requireGrant) {
+				// Re-read after the async hook: a grant revoked inside that await must
+				// not produce an allow answer after it is gone.
+				let granted;
+				try { granted = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+				catch { closedWsAbortsT++; return 'FORBIDDEN'; }
+				if (deniesUngrantedObserve(SUBSCRIBE_AUTHZ_T, observerHasUserHook, granted, topic)) {
+					return 'FORBIDDEN';
+				}
+			}
+			return null;
 		},
 		authorizeWireSubscribe() {
 			// Mirror production: arm wire-subscribe authorization at runtime.
 			SUBSCRIBE_AUTHZ_T = true;
 		},
 		unsubscribe(ws, topic) {
-			let subs;
-			try { subs = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+			let ud;
+			try { ud = ws.getUserData(); }
 			catch { closedWsAbortsT++; return false; }
-			if (!(subs instanceof Set) || !subs.has(topic)) return false;
+			const subs = ud[WS_SUBSCRIPTIONS];
+			// Cancel any subscribe for this topic parked in its authorization await.
+			// Taken BEFORE the membership early-return below, because the racing
+			// case is precisely "not a member yet" - returning false there without
+			// tombstoning is the silent no-op that lets a revoked connection end up
+			// subscribed anyway. `true` here is the truthful answer for a revoke
+			// that cancelled an in-flight grant.
+			const cancelledInFlight = tombstonePendingSubscribe(ud, topic);
+			// Release any observer tap derived from this topic, as production does:
+			// presence and cursor keep their tap alive across a participant leave
+			// and drop it only on socket close, so a revocation that left it in
+			// place kept delivering the roster and every peer's cursor position to
+			// a client that had just been kicked. Also before the early return -
+			// revoking a topic must release its taps whether or not the primary
+			// membership is still present.
+			releaseDerivedSubscriptions(ws, topic);
+			// Withdraw WRITE access with read access, as production does: the
+			// `game` lane carries no topic and publishes to whatever binding the
+			// connection holds, so a kick that left the binding behind kept the
+			// kicked sender publishing into the room.
+			if (ud[WS_PUBLISH_GRANT] === topic) ud[WS_PUBLISH_GRANT] = undefined;
+			if (!(subs instanceof Set) || !subs.has(topic)) return cancelledInFlight;
 			try { ws.unsubscribe(topic); }
 			catch { closedWsAbortsT++; return false; }
 			subs.delete(topic);
 			if (sharedTopicsT.has(topic)) leaveCohortT(ws, ws.getUserData(), topic);
-			handler.unsubscribe?.(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
+			handler.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
 			return true;
 		},
 		// Client-publish authorization (the `game` lane), mirroring the
@@ -1661,6 +1809,23 @@ export async function createTestServer(options = {}) {
 					if (result && result.__upgradeResponse === true) {
 						userData = result.userData || {};
 						responseHeaders = result.headers;
+						// Same shared guard as the production runtime, with the same
+						// consequence: throwing here takes the hook-error path below
+						// (500, no 101). The sentinel is duck-typed, so an app can
+						// reach this with headers upgradeResponse() never validated -
+						// by mutating a helper result, or by building the shape by
+						// hand. Without this check an app could verify its handshake
+						// against this server, see a clean pass, and ship a
+						// splittable header to production.
+						//
+						// Validated as a SNAPSHOT that is also what gets written, for
+						// the same reason as production: the object is the app's and
+						// admission may defer the write, so checking the live object
+						// and writing it later leaves a mutation window.
+						responseHeaders = snapshotUpgradeHeaders(responseHeaders);
+						// Same one-shot Cloudflare advisory production gives, so an app
+						// developing against this server is not told a different story.
+						if (responseHeaders) warnSetCookieOnUpgradeOnce(responseHeaders);
 					} else {
 						userData = result || {};
 					}
@@ -1677,7 +1842,9 @@ export async function createTestServer(options = {}) {
 								res.writeStatus('101 Switching Protocols');
 								for (const [hk, hv] of Object.entries(responseHeaders)) {
 									if (Array.isArray(hv)) {
-										for (const v of hv) res.writeHeader(hk, v);
+										// Index the trusted snapshot; never invoke an
+										// app-controlled Symbol.iterator at the wire sink.
+										for (let i = 0; i < hv.length; i++) res.writeHeader(hk, hv[i]);
 									} else {
 										res.writeHeader(hk, hv);
 									}
@@ -1690,6 +1857,12 @@ export async function createTestServer(options = {}) {
 					});
 				})
 				.catch((err) => {
+					// Say WHY, as the production handler does. This path now also
+					// carries the upgrade-response header validation failures, whose
+					// whole point is naming the offending header - discarding that on
+					// the surface an app uses to debug its handshake leaves it with a
+					// bare 500 and nothing to go on.
+					console.error('WebSocket upgrade error:', err);
 					if (!aborted) {
 						mUpgradeRejectedT?.inc({ reason: 'hook_error' });
 						res.cork(() => {
@@ -1785,7 +1958,7 @@ export async function createTestServer(options = {}) {
 								sendDeniedT(ws, msg.topic, ref, 'INVALID_TOPIC');
 								return;
 							}
-							if (!ALLOW_SYSTEM_TOPIC_SUBSCRIBE_T && msg.topic.charCodeAt(0) === 95 && msg.topic.charCodeAt(1) === 95) {
+							if (deniesWireSystemTopicSubscribe({ allowSystem: ALLOW_SYSTEM_TOPIC_SUBSCRIBE_T, topic: msg.topic })) {
 								sendDeniedT(ws, msg.topic, ref, 'INVALID_TOPIC');
 								return;
 							}
@@ -1796,41 +1969,138 @@ export async function createTestServer(options = {}) {
 							// handler does instead of silently bypassing the cap.
 							assert(subs instanceof Set, 'subs.shape', null);
 							const isNew = !subs.has(msg.topic);
-							if (isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+							if (exceedsSubscriptionCap({ held: !isNew, size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) {
 								sendDeniedT(ws, msg.topic, ref, 'RATE_LIMITED');
 								return;
 							}
 							// Wire-subscribe authorization (mirror): a client may only
 							// (re)subscribe to a topic the server already authorized for
 							// this connection, unless the app ships its own subscribe hook.
-							if (SUBSCRIBE_AUTHZ_T && !subs.has(msg.topic) && !hasUserSubscribeHookT()) {
+							// The plugin-owned carve-out belongs on BOTH spellings. It was
+							// on the batch path only, so the same client, server and topic
+							// got opposite answers depending on how many topics happened to
+							// be pending when the client flushed - src/client.js sends a
+							// single `subscribe` frame when exactly one is queued, so a
+							// documented group join worked or failed on microtask
+							// coalescing. Safe here for the same reason as production: the
+							// landing re-check below re-tests real membership.
+							if (deniesWireSubscribePreHook({ armed: SUBSCRIBE_AUTHZ_T, hasUserHook: hasUserSubscribeHookT(), held: subs.has(msg.topic), topic: msg.topic })) {
 								sendDeniedT(ws, msg.topic, ref, 'FORBIDDEN');
 								return;
 							}
+							// Track the in-flight subscribe, exactly as production does: a
+							// revocation (platform.unsubscribe) landing during the hook
+							// await cannot remove a subscription that does not exist yet,
+							// so it tombstones this topic in the connection's
+							// pending-subscribe set and the landing below discards the
+							// grant. platform.unsubscribe already tombstones here, so
+							// without this the tombstone was a guaranteed no-op for every
+							// client-driven subscribe - the attacker-controlled path.
+							const pendingUd = ws.getUserData();
+							const pendingToken = beginPendingSubscribe(pendingUd, msg.topic, subs.has(msg.topic));
 							const denial = await runUserSubscribeGateT(ws, msg.topic);
 							if (denial !== null) {
+								// The hook denied, but it may have installed tracked membership
+								// (a plugin join) before deciding, and a revocation may have tombstoned
+								// this attempt mid-await. Settling blindly here left that membership
+								// standing: the held branch below defers to a sibling attempt still in
+								// flight, so when that sibling's hook denies too, every attempt leaves
+								// through this exit and nothing remains to judge the membership.
+								if (settleDeniedSubscribe(pendingUd, msg.topic, pendingToken, subs.has(msg.topic)) === 'deny-unwind') {
+									unwindRevokedMembership(ws, msg.topic);
+									handler.unsubscribe?.(ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+								}
 								sendDeniedT(ws, msg.topic, ref, denial);
 								return;
 							}
-							if (subs.has(msg.topic)) {
-								sendSubscribedT(ws, msg.topic, ref);
+							// Mirrors production: a client that asked to recover from an
+							// offset is not caught up merely because something else
+							// installed live membership during the await, since a
+							// re-grant carries no HISTORY. Fall through to the recover
+							// lane, which acks through its own already-subscribed branch.
+							const _wantsRecoverT = wantsRecover({ hasResumeHook: handler.resume, recover: msg.recover });
+							if (subs.has(msg.topic) && !_wantsRecoverT) {
+								// Held is not enough: the membership may have been installed
+								// mid-await by THIS attempt's own hook after a revocation
+								// tombstoned it. settleHeldSubscribe reads the provenance -
+								// ack a surviving attempt or a fresh post-revoke grant, deny
+								// a revoked one, unwinding hook-installed membership when no
+								// live authority backs it. Mirrors runtime/handler.js.
+								const heldVerdict = settleHeldSubscribe(pendingUd, msg.topic, pendingToken);
+								if (heldVerdict === 'ack') {
+									sendSubscribedT(ws, msg.topic, ref);
+									return;
+								}
+								if (heldVerdict === 'deny-unwind') {
+									unwindRevokedMembership(ws, msg.topic);
+									handler.unsubscribe?.(ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+								}
+								sendDeniedT(ws, msg.topic, ref, 'FORBIDDEN');
 								return;
 							}
-							if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+							if (exceedsSubscriptionCap({ held: subs.has(msg.topic), size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) {
+								settlePendingSubscribe(pendingUd, msg.topic, pendingToken);
 								sendDeniedT(ws, msg.topic, ref, 'RATE_LIMITED');
 								return;
 							}
 							// Resume-on-subscribe (mirror): gap-fill via the resume hook before
 							// subscribing to live, so __replay frames precede the first live frame.
+							//
+							// GUARDED, as production is: this call serves the topic's
+							// replay HISTORY, and the tombstone below refuses the
+							// subscription only afterwards - by which time the messages
+							// have gone out. Membership first, epoch only when the socket
+							// does not hold the topic, so a revoke-then-re-grant inside
+							// one await window is still served.
+							const _recoverRevokedT = recoverIsRevoked({
+								held: subs instanceof Set && subs.has(msg.topic),
+								wireAuthz: SUBSCRIBE_AUTHZ_T && !hasUserSubscribeHookT(),
+								cancelled: isPendingSubscribeCancelled(pendingUd, msg.topic, pendingToken),
+								topic: msg.topic
+							});
 							let _cap = null;
 							let _covered;
-							if (msg.recover && typeof msg.recover === 'object' && Number.isInteger(msg.recover.offset) && msg.recover.offset >= 0 && handler.resume) {
+							if (!_recoverRevokedT && _wantsRecoverT) {
 								const _rEpochs = Number.isInteger(msg.recover.epoch) ? { [msg.topic]: msg.recover.epoch } : undefined;
 								_cap = beginResumeCaptureT([msg.topic], ws);
 								try {
 									_covered = await handler.resume(ws, { sessionId: ws.getUserData()[WS_SESSION_ID], lastSeenSeqs: { [msg.topic]: msg.recover.offset }, lastSeenEpochs: _rEpochs, platform: ws.getUserData()[WS_PLATFORM] });
 								} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
-								if (subs.has(msg.topic)) { discardResumeCaptureT(_cap); sendSubscribedT(ws, msg.topic, ref); return; }
+								if (subs.has(msg.topic)) {
+									const heldVerdictR = settleHeldSubscribe(pendingUd, msg.topic, pendingToken);
+									if (heldVerdictR === 'ack') { discardResumeCaptureT(_cap); sendSubscribedT(ws, msg.topic, ref); return; }
+									// Revoked mid-await; the replay went out, but a grant
+									// installed by the revoked attempt's own hook must not stand.
+									if (heldVerdictR === 'deny-unwind') {
+										unwindRevokedMembership(ws, msg.topic);
+										handler.unsubscribe?.(ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+									}
+									discardResumeCaptureT(_cap);
+									sendDeniedT(ws, msg.topic, ref, 'FORBIDDEN');
+									return;
+								}
+							}
+							// Revocation tombstone: a platform.unsubscribe that landed during
+							// the gate / resume awaits cancelled this pending subscribe -
+							// discard the grant rather than subscribing, and answer the
+							// client's ref'd frame with a denial so its awaited subscribe
+							// resolves truthfully.
+							if (!settlePendingSubscribe(pendingUd, msg.topic, pendingToken, true)) {
+								if (_cap) discardResumeCaptureT(_cap);
+								sendDeniedT(ws, msg.topic, ref, 'FORBIDDEN');
+								return;
+							}
+							// Re-check the server-grant gate against the CURRENT grant set,
+							// not the reading taken before the awaits: the tombstone above
+							// fires only for revocation paths that bump the epoch. Mirrors
+							// the production landing in runtime/handler.js. Not applied to
+							// the platform.subscribe helper above, which is the trusted
+							// server-side path that MINTS grants - a grant check there would
+							// refuse every server-initiated subscribe.
+							if (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_T, hasUserHook: hasUserSubscribeHookT(), held: subs.has(msg.topic), topic: msg.topic })) {
+								if (_cap) discardResumeCaptureT(_cap);
+								sendDeniedT(ws, msg.topic, ref, 'FORBIDDEN');
+								return;
 							}
 							try { ws.subscribe(msg.topic); }
 							catch { if (_cap) discardResumeCaptureT(_cap); closedWsAbortsT++; return; }
@@ -1841,10 +2111,24 @@ export async function createTestServer(options = {}) {
 							return;
 						}
 						if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
+							// Same TOCTOU as platform.unsubscribe: a subscribe for this topic may
+							// still be parked in the app's authorization hook, so the membership
+							// does not exist yet and removing it is a no-op.
+							tombstonePendingSubscribe(ws.getUserData(), msg.topic);
+							// The observer taps are authority derived from the base topic: a
+							// client-driven revocation must release them just like
+							// platform.unsubscribe does, or leaving `room` removes the base
+							// membership while `__cursor:room` / `__presence:room` keeps
+							// delivering private fan-out (and cursor keeps accepting writes).
+							releaseDerivedSubscriptions(ws, msg.topic);
 							ws.unsubscribe(msg.topic);
 							ws.getUserData()[WS_SUBSCRIPTIONS]?.delete(msg.topic);
+							// Read access gone means write access gone, as production and the
+							// platform.unsubscribe above both do.
+							const udWireUnsub = ws.getUserData();
+							if (udWireUnsub[WS_PUBLISH_GRANT] === msg.topic) udWireUnsub[WS_PUBLISH_GRANT] = undefined;
 							if (sharedTopicsT.has(msg.topic)) leaveCohortT(ws, ws.getUserData(), msg.topic);
-							handler.unsubscribe?.(ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
+							handler.unsubscribe?.(ws, msg.topic, { platform: udWireUnsub[WS_PLATFORM] });
 							return;
 						}
 						if (msg.type === 'hello' && Array.isArray(msg.caps)) {
@@ -1892,8 +2176,7 @@ export async function createTestServer(options = {}) {
 									sendDeniedT(ws, topic, ref, 'INVALID_TOPIC');
 									continue;
 								}
-								if (!ALLOW_SYSTEM_TOPIC_SUBSCRIBE_T && typeof topic === 'string' &&
-									topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) {
+								if (deniesWireSystemTopicSubscribe({ allowSystem: ALLOW_SYSTEM_TOPIC_SUBSCRIBE_T, topic })) {
 									sendDeniedT(ws, topic, ref, 'INVALID_TOPIC');
 									continue;
 								}
@@ -1902,13 +2185,43 @@ export async function createTestServer(options = {}) {
 							// Wire-subscribe authorization (mirror, batch): pre-deny every valid
 							// topic the server has not already authorized when no app hook is
 							// present; with a hook, that hook decides.
-							const _wireAuthzT = SUBSCRIBE_AUTHZ_T && !hasUserSubscribeHookT();
+							// Hoisted once per frame, so every topic in one frame is judged
+							// against one reading of the app's hooks. The caller owns this
+							// handler object and may mutate it, which is exactly why the
+							// reading is taken once here rather than per topic.
+							const _hasUserHookT = hasUserSubscribeHookT();
+							const _wireAuthzT = SUBSCRIBE_AUTHZ_T && !_hasUserHookT;
 							const authzDeniedT = _wireAuthzT
-								? valid.map((t) => !ws.getUserData()[WS_SUBSCRIPTIONS].has(t))
+								? valid.map((t) => deniesWireSubscribePreHook({ armed: SUBSCRIBE_AUTHZ_T, hasUserHook: _hasUserHookT, held: ws.getUserData()[WS_SUBSCRIPTIONS].has(t), topic: t }))
 								: null;
-							const batchDenials = await runSubscribeBatchHookT(ws, valid);
+							// Track every topic in this batch as in-flight, for the same reason
+							// the single path does: platform.unsubscribe cannot remove a
+							// membership that does not exist yet, so it tombstones the topic
+							// and the landing below discards the grant.
+							//
+							// This has to match the single path or the mismatch is worse than
+							// either gap alone: with only the single path tracked, a client
+							// sending BOTH frames for one topic made platform.unsubscribe
+							// answer `true` - "I cancelled the in-flight grant" - while this
+							// path went on to ack the topic and install the membership.
+							const batchUd = ws.getUserData();
+							const batchTokens = valid.map((t) => beginPendingSubscribe(batchUd, t, batchUd[WS_SUBSCRIPTIONS].has(t)));
+							// A topic the grant gate already denied must not reach the hook,
+							// exactly as on the single path. Running the hook first and
+							// reading the decision only at the landing lets a plugin hook's
+							// side effects (roster join, observer tap) land for a topic the
+							// caller is then told FORBIDDEN about.
+							const hookTopics = authzDeniedT === null
+								// Keep the hook's mutable input separate from the landing
+								// queue whose topics/tokens still have to settle.
+								? valid.slice()
+								: valid.filter((_t, i) => !authzDeniedT[i]);
+							const batchDenials = hookTopics.length > 0
+								? await runSubscribeBatchHookT(ws, hookTopics)
+								: null;
 							const perTopicDenials = batchDenials === null && handler.subscribe
-								? await Promise.all(valid.map((t) => runSubscribeHookT(ws, t)))
+								? await Promise.all(valid.map((t, i) =>
+									(authzDeniedT !== null && authzDeniedT[i]) ? null : runSubscribeHookT(ws, t)))
 								: null;
 							const udSubs = ws.getUserData()[WS_SUBSCRIPTIONS];
 							assert(udSubs instanceof Set, 'subs.shape-batch', null);
@@ -1921,11 +2234,28 @@ export async function createTestServer(options = {}) {
 							if (msg.recover && typeof msg.recover === 'object') {
 								for (let i = 0; i < valid.length; i++) {
 									const _t = valid[i];
+									// Between the hook awaits and the landing, so neither the
+									// landing re-check nor its tombstone covers it - and it
+									// serves a topic's replay history. Re-read the CURRENT
+									// grant set and the revocation tombstone rather than the
+									// pre-await snapshot.
+									// MEMBERSHIP FIRST, matching production: the epoch only ever
+									// rises, so consulting it unconditionally refuses a topic
+									// that was revoked and then legitimately RE-GRANTED inside
+									// one await window. Reading it only when the socket does
+									// not hold the topic makes the re-grant visible, because a
+									// re-grant is what puts the topic back in the registry.
+									const _batchSubsT = ws.getUserData()[WS_SUBSCRIPTIONS];
+									const _heldT = _batchSubsT instanceof Set && _batchSubsT.has(_t);
+									// Pre-hook decision first (a pre-denied topic is filtered out of the
+									// hook pass, so nothing downstream would catch it), and both halves
+									// of wireAuthz read exactly as the landing reads them.
 									const _denial = (authzDeniedT !== null && authzDeniedT[i] ? 'FORBIDDEN' : null)
+										?? (recoverIsRevoked({ held: _heldT, wireAuthz: SUBSCRIBE_AUTHZ_T && !_hasUserHookT, cancelled: isPendingSubscribeCancelled(batchUd, _t, batchTokens[i]), topic: _t }) ? 'FORBIDDEN' : null)
 										?? (batchDenials !== null ? (batchDenials[_t] ?? null) : (perTopicDenials !== null ? perTopicDenials[i] : null));
 									if (_denial !== null) continue;
 									const _rec = msg.recover[_t];
-									if (_rec && typeof _rec === 'object' && Number.isInteger(_rec.offset) && _rec.offset >= 0) {
+									if (wantsRecover({ hasResumeHook: handler.resume, recover: _rec })) {
 										if (_recoverSeqs === null) _recoverSeqs = {};
 										_recoverSeqs[_t] = _rec.offset;
 										if (Number.isInteger(_rec.epoch)) { if (_recoverEpochs === null) _recoverEpochs = {}; _recoverEpochs[_t] = _rec.epoch; }
@@ -1940,20 +2270,59 @@ export async function createTestServer(options = {}) {
 							}
 							for (let i = 0; i < valid.length; i++) {
 								const topic = valid[i];
-								const denial = (authzDeniedT !== null && authzDeniedT[i] ? 'FORBIDDEN' : null)
+								// Re-evaluated HERE against the current grant set, not from the
+								// reading taken before the awaits: the tombstone below fires only
+								// for revocation paths that bump the epoch, so a revocation that
+								// merely drops the membership would otherwise let a pre-await
+								// decision install a grant the server no longer authorizes.
+								// Mirrors the production landing in runtime/handler.js.
+								// Read once and handed to both decisions below; nothing between
+								// here and the subscribe mutates the set for this topic.
+								const held = udSubs.has(topic);
+								const denial = (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_T, hasUserHook: _hasUserHookT, held, topic }) ? 'FORBIDDEN' : null)
 									?? (batchDenials !== null
 										? (batchDenials[topic] ?? null)
 										: (perTopicDenials !== null ? perTopicDenials[i] : null));
 								if (denial !== null) {
+									// The hook denied, but it may have installed tracked membership
+									// (a plugin join) before deciding, and a revocation may have tombstoned
+									// this attempt mid-await. Settling blindly here left that membership
+									// standing: the held branch below defers to a sibling attempt still in
+									// flight, so when that sibling's hook denies too, every attempt leaves
+									// through this exit and nothing remains to judge the membership.
+									if (settleDeniedSubscribe(batchUd, topic, batchTokens[i], held) === 'deny-unwind') {
+										unwindRevokedMembership(ws, topic);
+										handler.unsubscribe?.(ws, topic, { platform: batchUd[WS_PLATFORM] });
+									}
 									sendDeniedT(ws, topic, ref, denial);
 									continue;
 								}
-								if (udSubs.has(topic)) {
-									sendSubscribedT(ws, topic, ref);
+								if (held) {
+									// Same provenance read as the single lane: a revoked
+									// attempt whose own hook installed the membership must
+									// not ack it.
+									const heldVerdict = settleHeldSubscribe(batchUd, topic, batchTokens[i]);
+									if (heldVerdict === 'ack') {
+										sendSubscribedT(ws, topic, ref);
+										continue;
+									}
+									if (heldVerdict === 'deny-unwind') {
+										unwindRevokedMembership(ws, topic);
+										handler.unsubscribe?.(ws, topic, { platform: batchUd[WS_PLATFORM] });
+									}
+									sendDeniedT(ws, topic, ref, 'FORBIDDEN');
 									continue;
 								}
-								if (udSubs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+								if (exceedsSubscriptionCap({ held, size: udSubs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) {
+									settlePendingSubscribe(batchUd, topic, batchTokens[i]);
 									sendDeniedT(ws, topic, ref, 'RATE_LIMITED');
+									continue;
+								}
+								// Revocation tombstone: a platform.unsubscribe that landed during
+								// the hook or resume awaits cancelled this topic - discard the
+								// grant and answer the client truthfully rather than acking it.
+								if (!settlePendingSubscribe(batchUd, topic, batchTokens[i], true)) {
+									sendDeniedT(ws, topic, ref, 'FORBIDDEN');
 									continue;
 								}
 								try { ws.subscribe(topic); }
@@ -1993,6 +2362,26 @@ export async function createTestServer(options = {}) {
 							const lastSeenEpochs = (msg.lastSeenEpochs && typeof msg.lastSeenEpochs === 'object')
 								? msg.lastSeenEpochs
 								: undefined;
+							// Mirror production's grant filter. `resume` is
+							// client-named and yields a topic's replay history -
+							// the largest thing any client-named lane serves - so
+							// under the pure-grant model topics the connection was
+							// never granted are dropped before the hook sees them.
+							// This is a published test double, and a double that
+							// hands the app's replay backend topics production
+							// refuses passes exactly the case it exists to catch.
+							let resumeSeqsT = msg.lastSeenSeqs;
+							if (SUBSCRIBE_AUTHZ_T && !hasUserSubscribeHookT() && resumeSeqsT && typeof resumeSeqsT === 'object') {
+								const grantsT = ws.getUserData()[WS_SUBSCRIPTIONS];
+								/** @type {Record<string, unknown>} */
+								const allowedT = Object.create(null);
+								let droppedT = 0;
+								for (const t of Object.keys(resumeSeqsT)) {
+									if (deniesUngrantedObserve(true, false, grantsT, t)) { droppedT++; continue; }
+									allowedT[t] = resumeSeqsT[t];
+								}
+								if (droppedT > 0) resumeSeqsT = allowedT;
+							}
 							if (handler.resume) {
 								try {
 									// Mirror production: await the user hook so
@@ -2001,7 +2390,7 @@ export async function createTestServer(options = {}) {
 									// to live mode.
 									await handler.resume(ws, {
 										sessionId: msg.sessionId,
-										lastSeenSeqs: msg.lastSeenSeqs,
+										lastSeenSeqs: resumeSeqsT,
 										lastSeenEpochs,
 										platform: ws.getUserData()[WS_PLATFORM]
 									});
@@ -2067,7 +2456,7 @@ export async function createTestServer(options = {}) {
 
 			// `msg` is the JSON-parsed envelope when the prefix matched + parsed
 			// to an object + no control type matched; otherwise undefined.
-			handler.message?.(ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
+			await runMessageHook(handler.message, ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
 		},
 
 		close(ws, code, message) {

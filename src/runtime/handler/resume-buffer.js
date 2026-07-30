@@ -129,8 +129,24 @@ export function coveredSeqFor(covered, topic) {
 	if (covered == null) return undefined;
 	if (typeof covered === 'number') return covered;
 	if (typeof covered === 'object') {
-		const v = /** @type {Record<string, unknown>} */ (covered)[topic];
-		return typeof v === 'number' ? v : undefined;
+		// `covered` is whatever the app's `resume` hook returned, so this property
+		// read can throw - a getter, a Proxy, a lazy ORM row. It is guarded HERE
+		// rather than at each call site because the batch subscribe path reads it
+		// between beginPendingSubscribe and settlePendingSubscribe: an escape there
+		// aborts the loop with the remaining topics still marked in flight, leaking
+		// a pending entry per topic that is never drained, so every later
+		// unsubscribe on those topics falsely reports cancelling an in-flight grant
+		// and the map grows unbounded per hostile batch.
+		//
+		// A hook that cannot be read is treated as covering nothing, which is the
+		// same answer a hook returning a non-number gives.
+		try {
+			const v = /** @type {Record<string, unknown>} */ (covered)[topic];
+			return typeof v === 'number' ? v : undefined;
+		} catch (err) {
+			console.error('[ws] resume hook result read threw for topic', topic, err);
+			return undefined;
+		}
 	}
 	return undefined;
 }

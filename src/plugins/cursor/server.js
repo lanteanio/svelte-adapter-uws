@@ -49,10 +49,20 @@
  */
 
 import { encodeCursor, CURSOR_CAPABILITY, CURSOR_SCHEMA_VERSION, CURSOR_CAPABILITY_DICT, CURSOR_CAPABILITY_TIME, CURSOR_CAPABILITY_STREAM, CursorEncodeDict, CursorTimeEncodeDict, CursorStreamEncodeDict } from './codec.js';
-import { WS_CAPS, trackedSubscribe } from '../../runtime/utils.js';
+import { WS_CAPS, trackedSubscribe, registerDerivedTopicPrefix, authorizeDerivedSubscribe } from '../../runtime/utils.js';
+import { MAX_PROJECTION_DEPTH, exceedsDepth, noteDroppedField, isUnsafeProjectionFieldName } from '../_shared/sensitive.js';
 import { monotonicNow, wallEpoch, setTimer, clearTimer } from '../../runtime/runtime.js';
 
 const TOPIC_PREFIX = '__cursor:';
+
+// The position tap is a DERIVED subscription with no unsubscribe hook of its
+// own, so it outlived a revocation of the underlying topic. Declaring the
+// prefix makes `platform.unsubscribe(ws, topic)` release it, which matters
+// twice over here: the tap carries every peer's position TO the revoked client,
+// and the publish gate authorizes an outgoing cursor frame by asking whether
+// the socket still holds the tap - so leaving it in place let a revoked client
+// keep broadcasting as well as keep receiving.
+registerDerivedTopicPrefix(TOPIC_PREFIX);
 
 /** Wire-protocol event names. */
 const EVENTS = Object.freeze({
@@ -107,10 +117,19 @@ function packCell(cx, cy) {
  *   then governs broadcast rate.
  * @property {(userData: any) => any} [select] - Extract user-identifying data
  *   from the connection's userData. This is announced on the `catalog` /
- *   `join` channel when a user first appears on a topic. Defaults to the
- *   full userData. Should return JSON-serializable data (plain objects,
- *   arrays, strings, numbers, booleans, null). The same applies to the
- *   `data` argument passed to `update()`.
+ *   `join` channel when a user first appears on a topic - frames that go to
+ *   EVERY peer on the topic, so the default does NOT pass the full userData
+ *   through: it recursively drops internal/prototype names; request and
+ *   transport metadata (`remoteAddress`, `ip`, `address`, `headers`, bare
+ *   `url`, `requestId`); and credential- or personal-data-shaped names using
+ *   the shared predicates in `plugins/_shared/sensitive.js`, identical to the
+ *   presence plugin's default. It substitutes
+ *   binary views with a `'[bytes: <len>]'` placeholder. Restate the old
+ *   passthrough explicitly if you really want it (`select: (ud) => ud`),
+ *   or pass a strict allowlist (`select: (ud) => ({ id: ud.id })`).
+ *   Should return JSON-serializable data (plain objects, arrays, strings,
+ *   numbers, booleans, null). The same applies to the `data` argument
+ *   passed to `update()`.
  */
 
 /**
@@ -153,6 +172,126 @@ function packCell(cx, cy) {
  */
 
 /**
+ * Default `select`: recursively drop internal-looking (`__`-prefixed) keys,
+ * request/transport metadata and credential- or personal-data-shaped names,
+ * substitute binary views with a `'[bytes: <len>]'` placeholder, and pass
+ * ordinary identity fields through. `join` / `catalog` frames go to every peer on the topic and
+ * userData commonly carries session material, so the default cannot be a
+ * passthrough.
+ *
+ * The name predicates come from ../_shared/sensitive.js, the same module the
+ * presence plugin's default uses - the two surfaces project the same userData
+ * and must drop exactly the same fields. Apps that want the old
+ * full-userData passthrough back can restate it (`select: (ud) => ud`); apps
+ * that want a tighter strict allowlist pass their own
+ * (`select: (ud) => ({ id: ud.id })`).
+ *
+ * Cycle-safe via a per-call WeakSet of the CURRENT PATH, depth-capped
+ * (MAX_PROJECTION_DEPTH), and memoised per node so a DAG costs one expansion
+ * per node rather than one per path - see the presence plugin's default for
+ * why the path set alone bounds depth but not work.
+ *
+ * @param {unknown} obj
+ * @param {WeakSet<object>} [ancestors]
+ * @param {number} [depth]
+ * @param {WeakMap<object, any>} [memo]
+ */
+function defaultCursorSelect(obj, ancestors, depth = 0, memo) {
+	// A function is never projected. `typeof fn === 'object'` is false, so one
+	// used to be copied to the wire verbatim - and `JSON.stringify` calls an own
+	// enumerable `toJSON`, which REPLACES the whole projected subtree with
+	// whatever that function returns, so every name check below counts for
+	// nothing. Mirrors the presence projection.
+	if (typeof obj === 'function') return undefined;
+	if (!obj || typeof obj !== 'object') {
+		// Primitive / null / undefined - pass through as-is. Unlike presence,
+		// cursor has no downstream "must be a plain object" requirement.
+		return obj;
+	}
+	// Built-ins with no enumerable own keys would otherwise project to `{}`.
+	// Tag-checked, not `instanceof`, which is realm-bound - a Date from a worker
+	// or vm context would otherwise fall through and become the `{}` this
+	// prevents. Mirrors the presence projection.
+	let builtinTag;
+	try {
+		if (ArrayBuffer.isView(obj) || obj instanceof ArrayBuffer) {
+			const len = /** @type {{ byteLength: number }} */ (obj).byteLength;
+			return '[bytes: ' + len + ']';
+		}
+		// Object#toString reads Symbol.toStringTag. A hostile getter must drop
+		// this subtree, not throw out of the fire-and-forget update path.
+		builtinTag = Object.prototype.toString.call(obj);
+	} catch {
+		return undefined;
+	}
+	if (builtinTag === '[object Date]') {
+		// The tag is FORGEABLE - see the presence projection. A spoofed
+		// `Symbol.toStringTag` made `getTime` throw out of `cursor.update()`,
+		// which is fire-and-forget, so the throw surfaced with no caller to
+		// catch it.
+		try {
+			const ms = Date.prototype.getTime.call(obj);
+			return Number.isNaN(ms) ? undefined : Date.prototype.toISOString.call(obj);
+		} catch { return undefined; }
+	}
+	if (builtinTag === '[object Map]' || builtinTag === '[object Set]') return undefined;
+	if (depth > MAX_PROJECTION_DEPTH) return undefined;
+	if (!ancestors) ancestors = new WeakSet();
+	if (!memo) memo = new WeakMap();
+	if (ancestors.has(obj)) return undefined; // cycle: this node is on the current path
+	if (memo.has(obj)) return memo.get(obj);  // DAG: already projected, reuse it
+	ancestors.add(obj);
+	let result;
+	if (Array.isArray(obj)) {
+		// An index loop, not `map`, which honours `Symbol.species` - an Array
+		// subclass can name a constructor whose instances carry a `toJSON` that
+		// then replaces this subtree at serialize time.
+		let length;
+		try { length = obj.length; } catch {
+			ancestors.delete(obj);
+			return undefined;
+		}
+		result = new Array(length);
+		for (let i = 0; i < length; i++) {
+			let v;
+			try { v = obj[i]; } catch { continue; }
+			result[i] = (v && typeof v === 'object')
+				? defaultCursorSelect(v, ancestors, depth + 1, memo)
+				: typeof v === 'function' ? undefined : v;
+		}
+	} else {
+		result = {};
+		let keys;
+		try { keys = Object.keys(obj); } catch {
+			ancestors.delete(obj);
+			return undefined;
+		}
+		for (const k of keys) {
+			if (isUnsafeProjectionFieldName(k)) {
+				noteDroppedField(k, 'cursor');
+				continue;
+			}
+			// The read itself can throw: the previous default was
+			// `(ud) => ud`, which touched no properties, while this one reads
+			// every enumerable own key - so a userData carrying an accessor
+			// that throws would now surface out of cursor.update(), a
+			// fire-and-forget call. Skip the field instead.
+			let v;
+			try { v = obj[k]; } catch { continue; }
+			// Dropped HERE, not in the recursive call: a function never reaches
+			// the projector, it took the pass-through branch below and was copied
+			// verbatim - and an own enumerable `toJSON` then replaces this whole
+			// subtree at serialize time. Mirrors the presence projection.
+			if (typeof v === 'function') continue;
+			result[k] = (v && typeof v === 'object') ? defaultCursorSelect(v, ancestors, depth + 1, memo) : v;
+		}
+	}
+	ancestors.delete(obj);
+	memo.set(obj, result);
+	return result;
+}
+
+/**
  * Create a cursor tracker.
  *
  * @param {CursorOptions} [options]
@@ -192,7 +331,7 @@ function packCell(cx, cy) {
 export function createCursor(options = {}) {
 	const throttleMs = options.throttle ?? 16;
 	const topicThrottleMs = options.topicThrottle ?? 16;
-	const select = options.select || ((userData) => userData);
+	const select = options.select || defaultCursorSelect;
 	const maxConnections = options.maxConnections ?? 1_000_000;
 	const maxTopics = options.maxTopics ?? 1_000_000;
 	const maxTopicLength = options.maxTopicLength ?? 256;
@@ -1011,6 +1150,18 @@ export function createCursor(options = {}) {
 					return;
 				}
 				if (dataBytes > maxDataBytes) return;
+				// The byte cap does not bound DEPTH, and the two limits are far
+				// apart: nesting costs about two bytes a level, so 8 KB of
+				// client JSON reaches roughly 4000 levels while `structuredClone`
+				// - which the cluster relay publishes through - overflows around
+				// 1834. Stored, that blob is re-serialized on every read: it
+				// throws out of `list()`, the documented SSR call, so every
+				// render of the board 500s until the sender's socket closes, and
+				// on the relay path it terminates the worker rather than dropping
+				// one frame. Presence has bounded this since the same class was
+				// found there; cursor takes client data on the identical path and
+				// did not.
+				if (exceedsDepth(data, MAX_PROJECTION_DEPTH)) return;
 			}
 			const state = getWsState(ws);
 			const isFirstOnTopic = !state.topics.has(topic);
@@ -1179,6 +1330,10 @@ export function createCursor(options = {}) {
 		},
 
 		async snapshot(ws, topic, platform) {
+			// Client snapshot topics are application topics. A tap this plugin
+			// minted must never satisfy authorization for a client-supplied
+			// internal name and create `__cursor:__cursor:...` recursively.
+			if (typeof topic !== 'string' || topic.startsWith('__')) return;
 			// The snapshot handshake is the membership-establishing path for this
 			// tap channel: the client never wire-subscribes a `__`-prefixed topic
 			// (the wire gate blocks that), so the plugin subscribes the socket
@@ -1187,15 +1342,18 @@ export function createCursor(options = {}) {
 			// cannot join `__cursor:{topic}` for a topic it is not allowed to
 			// subscribe to (closing the message-triggered path around the wire-level
 			// `__`-subscribe block). checkSubscribe is async and was added to the
-			// platform later, so it is optional-chained; the handshake is
-			// low-frequency (once per (re)connect) so the await is off the hot path.
+			// platform. If the method is missing access cannot be established, so
+			// fail closed; the handshake is low-frequency (once per (re)connect) so
+			// the await is off the hot path.
 			// Subsequent `cursor` / `cursor-viewport` frames require this established
 			// membership via the isSubscribed gate in hooks.message.
-			if (platform && typeof platform.checkSubscribe === 'function') {
-				let denial;
-				try { denial = await platform.checkSubscribe(ws, topic); } catch { return; }
-				if (denial) return;
-			}
+			// Run under the revocation guard: a `platform.unsubscribe` landing
+			// while this await is parked must cancel the tap, not be undone by it.
+			if (!platform || typeof platform.checkSubscribe !== 'function') return;
+			const allowed = await authorizeDerivedSubscribe(ws, topic, () =>
+				platform.checkSubscribe(ws, topic, { requireGrant: true })
+			);
+			if (!allowed) return;
 			// Tracked: the native subscribe alone would deliver JSON publishes
 			// (uWS fans those out itself) but silently miss every binary
 			// publishWire frame, whose per-subscriber walk reads the
@@ -1339,7 +1497,10 @@ export function createCursor(options = {}) {
 				let parsed;
 				try { parsed = JSON.parse(new TextDecoder().decode(data)); } catch { return; }
 				if (parsed.type === 'cursor' && typeof parsed.topic === 'string') {
-					if (typeof ws.isSubscribed === 'function' && !ws.isSubscribed(TOPIC_PREFIX + parsed.topic)) return true;
+					let subscribed = false;
+					try { subscribed = typeof ws.isSubscribed === 'function' && ws.isSubscribed(TOPIC_PREFIX + parsed.topic); }
+					catch { /* closed / invalid socket: fail closed */ }
+					if (!subscribed) return true;
 					tracker.update(ws, parsed.topic, parsed.data ?? parsed.position, platform);
 					return true;
 				}
@@ -1352,7 +1513,10 @@ export function createCursor(options = {}) {
 					return true;
 				}
 				if (parsed.type === 'cursor-viewport' && typeof parsed.topic === 'string') {
-					if (typeof ws.isSubscribed === 'function' && !ws.isSubscribed(TOPIC_PREFIX + parsed.topic)) return true;
+					let subscribed = false;
+					try { subscribed = typeof ws.isSubscribed === 'function' && ws.isSubscribed(TOPIC_PREFIX + parsed.topic); }
+					catch { /* closed / invalid socket: fail closed */ }
+					if (!subscribed) return true;
 					tracker.viewport(ws, parsed.topic, parsed.rect);
 					return true;
 				}

@@ -155,6 +155,32 @@ describe('sync lifecycle', () => {
 		ch.destroy();
 	});
 
+	it('completes the sync handler when the server replies with cells mode', async () => {
+		// The cells branch assigned to an undeclared name, which is a
+		// ReferenceError in a module - and the sync chain ends in an empty catch
+		// commented "a failed sync (offline, server restarting)", so the whole
+		// handler aborted SILENTLY and the failure was misattributed to the
+		// network. Everything after that line never ran: the cell sink was never
+		// registered, the clock never seeded, the catalog never applied. Cells
+		// mode was entirely non-functional on the client.
+		//
+		// `self` is assigned BEFORE that line and the clock is seeded AFTER it,
+		// so the pair distinguishes "the handler ran" from "the handler started".
+		// (`now()` is what applies a seeded sample, exactly as the plain
+		// sync-on-open test above does it.)
+		const t = makeTransport({ cells: 1 });
+		const ch = makeChannel(t);
+		await flush();
+
+		expect(t.syncs).toBe(1);
+		expect(ch.self).toBe('me');
+		const est = ch.now();
+		expect(Math.abs(est - Date.now()), 'sync aborted before seeding the clock').toBeLessThan(1000);
+		expect(ch.clockOffset).not.toBe(null);
+		expect(ch.topic).toBe(wire(t));
+		ch.destroy();
+	});
+
 	it('feeds the announced identity to apply as ctx.key (null before the reply)', async () => {
 		const keys = [];
 		const t = makeTransport();

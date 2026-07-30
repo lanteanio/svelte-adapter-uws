@@ -1,3 +1,6 @@
+// Substituted by the adapter's build step; free identifiers until then.
+/* global WS_ENABLED */
+/* global WS_OPTIONS */
 import uWS from 'uWebSockets.js';
 import { X509Certificate } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -217,3 +220,10 @@ export function get_origin(headers) {
 // on a connection with no compressor is not free (measured in
 // bench/ws-compression-cpu.mjs).
 export const WS_COMPRESSION_ON = Boolean(WS_OPTIONS && WS_OPTIONS.compression);
+
+// The observer lanes (`checkSubscribe(..., { requireGrant: true })`) are fed
+// client-named topics even though the check itself lives on the server-side
+// Platform API. Keep their alphabet identical to the wire subscribe boundary.
+// Exported from the shared config module so platform.js reads the same
+// build-substituted WS_OPTIONS value as the wire handler.
+export const ALLOW_NON_ASCII_TOPICS = Boolean(WS_OPTIONS && WS_OPTIONS.allowNonAsciiTopics);

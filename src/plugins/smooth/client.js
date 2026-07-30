@@ -540,7 +540,6 @@ export function createSmoothChannel(options) {
 				// here. Idempotent across reconnects (name-keyed).
 				if ((reply.cells === 1 || reply.cells === true) && typeof reply.topic === 'string') {
 					smoothName = reply.topic;
-					cellsEnabled = true;
 					_cellChannels.set(smoothName, ingestCell);
 				}
 				const stampT = typeof reply.t === 'number' && Number.isFinite(reply.t) ? reply.t : undefined;

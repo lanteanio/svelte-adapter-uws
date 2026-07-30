@@ -28,3 +28,26 @@ export const TOPIC_SEQS_WARN_THRESHOLD = 1_000_000;
 
 /** Max entries in the runaway-publisher warn-throttle dedup. FIFO-evicted - dropping oldest just resets the warn cooldown for that topic. */
 export const PUBLISH_WARN_DEDUP_MAX = 1_000_000;
+
+/**
+ * Max ingress bindings (client->server `0x03` id -> destination, see
+ * handler/ingress.js) one connection may hold before further `ingress-bind`
+ * frames get no ack and the client keeps those destinations on its JSON
+ * fallback. Deliberately much smaller than the siblings above: a binding is
+ * pure per-connection retained state, and the stock client binds exactly one
+ * id per binary command channel (the smooth command channel), so 32 is
+ * already generous headroom - while an unbounded map let a client pin one
+ * retained entry per control frame for the connection's whole lifetime.
+ */
+export const MAX_INGRESS_BINDINGS_PER_CONNECTION = 32;
+
+/**
+ * Max serialized (JSON) size of an ingress binding's retained `target` before
+ * the bind is refused (no ack, JSON fallback). The smooth command target is
+ * `{ path, room }` - a volatile-RPC path string plus room args, tens of bytes
+ * in practice - so 1 KiB is generous while stopping multi-KB attacker blobs
+ * from being pinned for the connection's lifetime. Kinds whose route never
+ * reads the target retain nothing at all (see handler/ingress.js), so the
+ * bound only applies to kinds that actually use it.
+ */
+export const MAX_INGRESS_TARGET_BYTES = 1024;

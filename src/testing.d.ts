@@ -9,6 +9,48 @@ export interface TestServerOptions {
 	/** WebSocket handler hooks (same shape as hooks.ws.ts exports). */
 	handler?: Partial<WebSocketHandler>;
 	/**
+	 * Arm wire-subscribe authorization, mirroring
+	 * `adapter({ websocket: { authorizeWireSubscribe: true } })`. A client may
+	 * then only (re)subscribe to a topic the server already granted for that
+	 * connection, unless the app ships its own subscribe hook.
+	 *
+	 * Declared here because an app verifying its own tenancy boundary against
+	 * this server must be able to ARM the same posture production runs. Without
+	 * it a TypeScript caller writes `createTestServer({})`, the grant conjunct
+	 * never fires, and the double answers permissively where production denies -
+	 * the exact shape of green false negative this harness exists to avoid.
+	 * A present non-boolean value throws, matching the adapter and Vite surfaces;
+	 * it is never silently read as `false`.
+	 */
+	authorizeWireSubscribe?: boolean;
+	/**
+	 * Allow clients to subscribe to `__`-prefixed system topics, mirroring
+	 * `adapter({ websocket: { allowSystemTopicSubscribe: true } })`.
+	 */
+	allowSystemTopicSubscribe?: boolean;
+	/**
+	 * Allow non-ASCII topic names, mirroring
+	 * `adapter({ websocket: { allowNonAsciiTopics: true } })`.
+	 */
+	allowNonAsciiTopics?: boolean;
+	/** Path of the auto-mounted admin route. @default '/__realtime' */
+	adminPath?: string;
+	/** Readiness probe path. @default '/readyz' */
+	readinessCheckPath?: string;
+	/** Liveness probe path. @default '/healthz' */
+	healthCheckPath?: string;
+	/**
+	 * Spread reconnect attempts over this window (ms) so a mass disconnect does
+	 * not return as a synchronized thundering herd. Mirrors the production
+	 * handler's setting of the same name.
+	 */
+	reconnectDispersalMs?: number;
+	/**
+	 * Hook run once before the server begins listening, for a test that needs to
+	 * seed state the way a primary would.
+	 */
+	primaryInit?: (...args: any[]) => any;
+	/**
 	 * Two-layer admission control on the WebSocket upgrade path. Same
 	 * wiring as the production handler's `wsOptions.upgradeAdmission`
 	 * setting. Both layers are opt-in; both default to disabled (`0`).
@@ -170,6 +212,11 @@ export interface TestServer {
  * Starts on a random port and provides a Platform-compatible API for
  * publishing, sending, and asserting on WebSocket behavior. The server
  * uses the same subscribe/unsubscribe protocol as the production handler.
+ * It is a separately implemented public test harness, not an import of the
+ * production handler: it does not exercise the adapter build, worker/cluster
+ * lifecycle, TLS, static serving, or every production admission branch. Use a
+ * built-fixture integration test as well when the assertion is specifically
+ * about production wiring or a runtime security boundary.
  *
  * @example
  * ```js

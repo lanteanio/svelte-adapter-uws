@@ -66,6 +66,7 @@ export function mockPlatform() {
 	const p = {
 		published: [],
 		sent: [],
+		checkSubscribeCalls: [],
 		publish(topic, event, data) {
 			p.published.push({ topic, event, data });
 			return true;
@@ -77,6 +78,15 @@ export function mockPlatform() {
 		reset() {
 			p.published.length = 0;
 			p.sent.length = 0;
+			p.checkSubscribeCalls.length = 0;
+		},
+		// The production Platform always exposes this async gate. Unit tests use
+		// an allow-all authorization decision unless they override it explicitly,
+		// while retaining every argument so plugin tests can prove they selected
+		// observer mode rather than silently dropping the third parameter.
+		async checkSubscribe(ws, topic, options) {
+			p.checkSubscribeCalls.push({ ws, topic, options });
+			return null;
 		}
 	};
 	return p;

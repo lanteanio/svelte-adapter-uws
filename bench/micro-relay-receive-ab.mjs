@@ -16,7 +16,7 @@
 //
 // PASS CRITERION: the tracked arm's delivered-msgs/sec stays within a
 // single-digit percent of the baseline arm. A sustained >=5% regression is a
-// blocker (credo rule 4). Run each arm several rounds, compare medians.
+// blocker. Run each arm several rounds, compare medians.
 //
 // Usage:
 //   node bench/micro-relay-receive-ab.mjs [subscribers] [repeats] [rounds]

@@ -164,3 +164,28 @@ describe('presence binary wire (presence.protocol:1)', () => {
 		expect(frame[1]).toBe(PRESENCE_SCHEMA_VERSION);
 	});
 });
+
+describe('presence roster __proto__ keys (JSON.parse parity)', () => {
+	it('decodes an own __proto__ roster key as a data property, prototype untouched', () => {
+		// Roster keys are user ids: an id of '__proto__' must round-trip as an
+		// inert own key, exactly as the JSON envelope's JSON.parse delivers it -
+		// not be assigned through the inherited setter into a live prototype.
+		const roster = JSON.parse('{"__proto__":{"trusted":true},"user-1":{"name":"alice"}}');
+		const out = rt('state', roster).out;
+		expect(out.event).toBe('state');
+		expect(Object.prototype.hasOwnProperty.call(out.data, '__proto__')).toBe(true);
+		expect(out.data.__proto__).toEqual({ trusted: true });
+		expect(Object.getPrototypeOf(out.data)).toBe(Object.prototype);
+		expect(out.data.trusted).toBeUndefined();
+		expect(JSON.stringify(out.data)).toBe(JSON.stringify(roster));
+	});
+
+	it('round-trips __proto__ keys inside a diff roster', () => {
+		const data = { joins: JSON.parse('{"__proto__":{"trusted":true}}'), leaves: {} };
+		const out = rt('diff', data).out;
+		expect(Object.prototype.hasOwnProperty.call(out.data.joins, '__proto__')).toBe(true);
+		expect(out.data.joins.__proto__).toEqual({ trusted: true });
+		expect(Object.getPrototypeOf(out.data.joins)).toBe(Object.prototype);
+		expect(out.data.joins.trusted).toBeUndefined();
+	});
+});

@@ -9,13 +9,14 @@
 //     onEvent: (topic, event, data) => console.log(topic, event, data),
 //   });
 //   client.subscribe('chat');
+//   // Later, during teardown: client.close();
 //
 // In a browser, globalThis.WebSocket is used automatically. In Node, pass a
 // WebSocket implementation: createLanteanClient(url, { WebSocket, onEvent }).
 
 export function createLanteanClient(url, { WebSocket = globalThis.WebSocket, onEvent = () => {} } = {}) {
 	const topics = new Map(); // topic -> { lastSeq, epoch }
-	let ws, sessionId, ref = 0;
+	let ws, sessionId, ref = 0, closed = false, retry = null;
 
 	function sendSubscribe(topic) {
 		const t = topics.get(topic);
@@ -51,7 +52,20 @@ export function createLanteanClient(url, { WebSocket = globalThis.WebSocket, onE
 			// Every other control frame (subscribe-denied, error, lease, ...) is
 			// ignored by a Core client (section 1.4).
 		};
-		ws.onclose = () => setTimeout(connect, 500);            // reconnect; welcome triggers resume
+		// A socket error must be OBSERVED or Node throws it as an unhandled
+		// error: `ws` emits 'error' for a refused connect, a reset, and for a
+		// close() called while still CONNECTING. `onclose` always follows, so
+		// the reconnect below is what handles it - this listener exists so the
+		// error has somewhere to land. Browsers tolerate its absence; Node
+		// does not, and the example is run in both.
+		ws.onerror = () => {};
+		ws.onclose = () => {                                    // reconnect; welcome triggers resume
+			if (closed) return;                                 // ...unless close() was called
+			retry = setTimeout(() => {
+				retry = null;
+				if (!closed) connect();
+			}, 500);
+		};
 	}
 
 	connect();
@@ -60,6 +74,19 @@ export function createLanteanClient(url, { WebSocket = globalThis.WebSocket, onE
 		subscribe(topic) {
 			if (!topics.has(topic)) topics.set(topic, { lastSeq: -1, epoch: null });
 			if (ws.readyState === 1) sendSubscribe(topic);
+		},
+		// Stop for good. Without this the reconnect timer above outlives the
+		// caller: a client whose server has gone away retries every 500 ms
+		// forever, and in Node an unhandled connect error from that timer
+		// surfaces wherever the process happens to be at the time.
+		close() {
+			if (closed) return;
+			closed = true;
+			if (retry !== null) {
+				clearTimeout(retry);
+				retry = null;
+			}
+			ws.close();
 		},
 	};
 }

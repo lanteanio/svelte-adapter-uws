@@ -102,7 +102,16 @@ function readRoster(r) {
 	const obj = {};
 	for (let i = 0; i < count; i++) {
 		const key = r.str();
-		obj[key] = JSON.parse(r.str());
+		const value = JSON.parse(r.str());
+		// A user key of '__proto__' is defined as an OWN DATA property, exactly
+		// as the JSON envelope's JSON.parse delivers it: plain assignment would
+		// invoke the inherited setter and replace the roster's prototype with
+		// wire-controlled data instead of creating the key.
+		if (key === '__proto__') {
+			Object.defineProperty(obj, key, { value, enumerable: true, writable: true, configurable: true });
+		} else {
+			obj[key] = value;
+		}
 	}
 	return obj;
 }

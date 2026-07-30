@@ -485,3 +485,49 @@ describe('createSmoothWireCodec', () => {
 		expect(() => codec.state.onDetach(ws, null)).not.toThrow();
 	});
 });
+
+describe('field-delta __proto__ field names (JSON.parse parity)', () => {
+	it('a __proto__ literal field decodes as an own data property, prototype untouched', () => {
+		// A field named '__proto__' must reconstruct as an inert own key -
+		// byte-identical to the full-state JSON path - not be assigned through
+		// the inherited setter into a live, wire-controlled prototype.
+		const enc = new SmoothEncodeDict(scriptedTime([1000]));
+		const dec = new SmoothDecodeDict();
+		const state = JSON.parse('{"__proto__":{"isAdmin":true},"x":1}');
+		const frame = encodeSmooth('update', { key: 'a', data: state }, enc);
+		expect(frame).not.toBe(null);
+		const data = decodeSmooth(frame, dec).data.data;
+		expect(Object.prototype.hasOwnProperty.call(data, '__proto__')).toBe(true);
+		expect(data.__proto__).toEqual({ isAdmin: true });
+		expect(Object.getPrototypeOf(data)).toBe(Object.prototype);
+		expect(data.isAdmin).toBeUndefined();
+		expect(JSON.stringify(data)).toBe(JSON.stringify(state));
+	});
+
+	it('a __proto__ numeric field decodes as an own data property too', () => {
+		const enc = new SmoothEncodeDict(scriptedTime([1000]));
+		const dec = new SmoothDecodeDict();
+		const state = JSON.parse('{"__proto__":5,"x":1}');
+		const frame = encodeSmooth('update', { key: 'a', data: state }, enc);
+		expect(frame).not.toBe(null);
+		const data = decodeSmooth(frame, dec).data.data;
+		expect(Object.prototype.hasOwnProperty.call(data, '__proto__')).toBe(true);
+		expect(data.__proto__).toBe(5);
+		expect(Object.getPrototypeOf(data)).toBe(Object.prototype);
+	});
+
+	it('a repeat-set delta carrying a __proto__ numeric field keeps it an own property', () => {
+		const enc = new SmoothEncodeDict(scriptedTime([1000, 1016]));
+		const dec = new SmoothDecodeDict();
+		const first = encodeSmooth('update', { key: 'a', data: JSON.parse('{"__proto__":1,"x":2}') }, enc);
+		expect(decodeSmooth(first, dec)).not.toBe(null);
+		// Same numeric field set, no literals, nothing removed: the repeat-set op.
+		const second = encodeSmooth('update', { key: 'a', data: JSON.parse('{"__proto__":3,"x":4}') }, enc);
+		expect(second).not.toBe(null);
+		expect(second[0]).toBe(6); // OP_STATE_DELTA_SAME
+		const data = decodeSmooth(second, dec).data.data;
+		expect(Object.prototype.hasOwnProperty.call(data, '__proto__')).toBe(true);
+		expect(data.__proto__).toBe(3);
+		expect(Object.getPrototypeOf(data)).toBe(Object.prototype);
+	});
+});

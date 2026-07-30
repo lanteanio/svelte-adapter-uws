@@ -2,9 +2,9 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { lookup as nodeDnsLookup } from 'node:dns';
-import { createHmac, createHash } from 'node:crypto';
+import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
 import { checkUrl, classifyAddress } from '../../safe-url.js';
-import { randomFloat, setTimer, clearTimer, now } from '../../runtime/runtime.js';
+import { randomFloat, setTimer, clearTimer, now, wallEpoch } from '../../runtime/runtime.js';
 
 export { createRetryBudget, createWebhookBreaker, WebhookCircuitOpenError } from './controls.js';
 
@@ -26,21 +26,218 @@ export { createRetryBudget, createWebhookBreaker, WebhookCircuitOpenError } from
  */
 
 /**
- * Strip credentials and query from a URL before it appears in an error message
- * or log line: userinfo (`user:pass@`) and the query string can carry secrets,
- * so failure reporting keeps only origin + pathname. Falls back to a fixed
- * placeholder when the value does not parse.
+ * Strip a URL down to its origin before it appears in an error message or log
+ * line: userinfo (`user:pass@`), the query string, AND the path can all carry
+ * secrets (mainstream webhook endpoints embed their credential in the path,
+ * e.g. `https://hooks.example.com/services/T00/B00/SECRET`), and URL-bearing
+ * failure messages are persisted in dead-letter queues and logs, so only the
+ * origin is safe to keep. Falls back to a fixed placeholder when the value
+ * does not parse.
  * @param {string} url
  * @returns {string}
  */
+/** Default freshness window, in seconds, either side of the receiver's clock. */
+const DEFAULT_SIGNATURE_TOLERANCE_S = 300;
+
+/**
+ * Ceiling on the `x-webhook-signature` header this will parse at all.
+ *
+ * One entry is `sha256=` plus 64 hex characters, so 1 KB already admits about
+ * fourteen. The header is attacker-controlled and was previously unbounded.
+ */
+const MAX_SIGNATURE_HEADER_LENGTH = 1024;
+
+/**
+ * Ceiling on the decimal Unix-seconds timestamp header. The sender currently
+ * emits ten digits; sixteen exceeds even JavaScript's maximum Date range while
+ * bounding validation and signed-prefix allocation for a wire-controlled value.
+ */
+const MAX_TIMESTAMP_HEADER_LENGTH = 16;
+
+/**
+ * Ceiling on signature entries compared, so the compare count cannot be driven
+ * from the wire. Rotation needs two (old and new); this is generous.
+ */
+const MAX_SIGNATURE_ENTRIES = 8;
+
+/**
+ * Constant-time compare of two ASCII strings. Returns false on a length
+ * mismatch (which `timingSafeEqual` throws on) without comparing further -
+ * the length of a hex digest is not a secret.
+ * @param {string} a
+ * @param {string} b
+ */
+function safeEqual(a, b) {
+	const ab = Buffer.from(a, 'utf8');
+	const bb = Buffer.from(b, 'utf8');
+	if (ab.length !== bb.length) return false;
+	return timingSafeEqual(ab, bb);
+}
+
+/**
+ * The received body as the exact bytes to sign, or null if it is not a body
+ * this function can hash byte-exactly.
+ *
+ * A receiver reads its body in whichever shape its framework hands over, and
+ * the three that matter are all byte containers: `Buffer` (Node), `ArrayBuffer`
+ * (`await request.arrayBuffer()`) and any typed-array view over one. A string
+ * is accepted too and encoded as UTF-8, which is what a sender that signed a
+ * JSON string produced. Anything else - an already-parsed object, a stream, a
+ * null body - cannot be reconstructed byte-for-byte here and returns null so
+ * the caller fails closed instead of verifying against a coerced stand-in.
+ *
+ * @param {unknown} rawBody
+ * @returns {Buffer | null}
+ */
+function toBodyBytes(rawBody) {
+	if (Buffer.isBuffer(rawBody)) return rawBody;
+	if (typeof rawBody === 'string') return Buffer.from(rawBody, 'utf8');
+	// A view must be sliced to ITS window, not the whole backing buffer: a
+	// `Uint8Array` over a pooled allocation would otherwise hash its neighbours.
+	if (ArrayBuffer.isView(rawBody)) {
+		return Buffer.from(rawBody.buffer, rawBody.byteOffset, rawBody.byteLength);
+	}
+	if (rawBody instanceof ArrayBuffer) return Buffer.from(rawBody);
+	return null;
+}
+
+/**
+ * Verify a delivery on the RECEIVING side.
+ *
+ * Shipped as executable code rather than a documentation snippet on purpose:
+ * this contract has four separate ways to get it subtly wrong (a non-numeric
+ * timestamp making the `.` delimiter ambiguous, a missing freshness window
+ * that lets a capture replay forever, verifying a re-serialized body instead
+ * of the raw bytes, and a `===` comparison that leaks the digest a byte at a
+ * time), and every receiver re-implementing it from prose gets to make those
+ * mistakes independently.
+ *
+ * Accepts when ANY comma-separated entry in `x-webhook-signature` matches -
+ * several appear only while a `previousSecret` rotation is converging, and
+ * both sign the same timestamped material.
+ *
+ * @param {Record<string, string | string[] | undefined>} headers - received headers, lowercase keys
+ * @param {string | Buffer | ArrayBuffer | ArrayBufferView} rawBody - the body EXACTLY as received,
+ *   before any JSON round-trip. Pass whatever your framework gives you: a Node `Buffer`, the
+ *   `ArrayBuffer` from `await request.arrayBuffer()`, a typed-array view over one, or the raw string.
+ *   An already-parsed object cannot be verified - re-serializing it does not reproduce the bytes the
+ *   sender signed - and is refused rather than coerced.
+ * @param {{ secret?: string, secrets?: string[], toleranceSeconds?: number, nowMs?: number }} [options]
+ * @returns {boolean}
+ */
+export function verifyWebhookSignature(headers, rawBody, options) {
+	// Authentication helpers must fail closed even when a framework hands over a
+	// malformed header container or a detached byte view. Keeping the catch at
+	// the public boundary also covers hostile accessors without weakening the
+	// straight-line verifier below.
+	try {
+		return verifyWebhookSignatureUnchecked(headers, rawBody, options);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * @param {Record<string, string | string[] | undefined>} headers
+ * @param {string | Buffer | ArrayBuffer | ArrayBufferView} rawBody
+ * @param {{ secret?: string, secrets?: string[], toleranceSeconds?: number, nowMs?: number } | undefined} options
+ * @returns {boolean}
+ */
+function verifyWebhookSignatureUnchecked(headers, rawBody, options) {
+	if (headers === null || typeof headers !== 'object') return false;
+	const opts = options ?? {};
+	const configuredSecrets = opts.secrets ?? (opts.secret === undefined ? [] : [opts.secret]);
+	if (!Array.isArray(configuredSecrets)) return false;
+	const secrets = configuredSecrets
+		.filter((s) => typeof s === 'string' && s.length > 0);
+	if (secrets.length === 0) return false;
+
+	const readHeader = (/** @type {string} */ name) => {
+		const v = headers[name];
+		return Array.isArray(v) ? v[0] : v;
+	};
+
+	// A numeric timestamp is required, and checking it is what makes the '.'
+	// delimiter unambiguous: without it a body containing a dot could be
+	// re-split into a different (timestamp, body) pair that signs identically.
+	const ts = readHeader('x-webhook-timestamp');
+	if (
+		typeof ts !== 'string' ||
+		ts.length > MAX_TIMESTAMP_HEADER_LENGTH ||
+		!/^\d+$/.test(ts)
+	) return false;
+
+	const tolerance = opts.toleranceSeconds ?? DEFAULT_SIGNATURE_TOLERANCE_S;
+	// Freshness is an authentication boundary, so use the exact wall clock rather
+	// than the runtime's 1 Hz cached `now()`. After a long event-loop stall the
+	// cached value can be minutes old until its interval callback runs; the first
+	// receiver verification after that stall would otherwise accept a captured
+	// signature against the stale cache. Callers can still inject `nowMs` for a
+	// deterministic receiver test.
+	const nowMs = opts.nowMs ?? wallEpoch();
+	if (
+		typeof tolerance !== 'number' ||
+		!Number.isFinite(tolerance) ||
+		tolerance < 0 ||
+		typeof nowMs !== 'number' ||
+		!Number.isFinite(nowMs)
+	) return false;
+	const timestampSeconds = Number(ts);
+	if (!Number.isFinite(timestampSeconds)) return false;
+	if (Math.abs(nowMs / 1000 - timestampSeconds) > tolerance) return false;
+
+	// SIGN THE BYTES, not a decoded string. `rawBody.toString('utf8')` replaces
+	// every invalid sequence with U+FFFD, so a body that is not valid UTF-8 never
+	// verifies against the signature its sender computed - and worse, two
+	// different bodies that differ only inside invalid sequences decode to the
+	// SAME string and therefore accept the same signature. Hashing the buffer is
+	// byte-exact and is identical to the old behaviour for any body that was valid
+	// UTF-8, so no legitimate sender changes.
+	// EVERY byte container takes the byte path, not just `Buffer`. Testing only
+	// `Buffer.isBuffer` and coercing the rest with `String()` reintroduced the
+	// same defect one level down, and worse: `String(arrayBuffer)` is the
+	// CONSTANT '[object ArrayBuffer]', so the digest stopped covering the body
+	// at all and any two bodies signed each other. A `Uint8Array` fared no
+	// better, stringifying to a decimal CSV of its bytes. Both are exactly what
+	// `await request.arrayBuffer()` hands a receiver in this project's own
+	// framework, which is the call the doc above invites.
+	const bodyBytes = toBodyBytes(rawBody);
+	// Fail closed on a body this function cannot hash byte-exactly, rather than
+	// coercing it into something that hashes but means nothing.
+	if (bodyBytes === null) return false;
+	// The prefix is ASCII digits and a dot, so latin1 and utf8 agree on it.
+	const signed = Buffer.concat([Buffer.from(ts + '.', 'latin1'), bodyBytes]);
+
+	// BOUND THE HEADER before splitting it. The value is attacker-controlled and
+	// nothing limited it: a multi-megabyte header of commas allocated one string
+	// per comma and then ran a constant-time compare against every one of them,
+	// for every configured secret. Failing closed on an over-long header is the
+	// safe direction here - unlike the client-IP resolver, where refusing to parse
+	// merges distinct identities, a rejected signature merely fails a delivery
+	// that no legitimate sender produces.
+	const rawSignature = readHeader('x-webhook-signature');
+	if (typeof rawSignature !== 'string') return false;
+	// Counted in BYTES, which is what the bound is arguing about. `.length` is
+	// UTF-16 code units, so a caller that hands in an already-decoded header can
+	// carry roughly twice the intended bytes under the same number.
+	if (Buffer.byteLength(rawSignature, 'utf8') > MAX_SIGNATURE_HEADER_LENGTH) return false;
+	const entries = rawSignature.split(',', MAX_SIGNATURE_ENTRIES);
+
+	// No early exit on the first match: keep the work independent of WHICH
+	// secret or entry matched.
+	let ok = false;
+	for (const secret of secrets) {
+		const expected = 'sha256=' + createHmac('sha256', secret).update(signed).digest('hex');
+		for (const entry of entries) {
+			if (safeEqual(entry.trim(), expected)) ok = true;
+		}
+	}
+	return ok;
+}
+
 export function redactUrl(url) {
 	try {
-		const u = new URL(url);
-		u.username = '';
-		u.password = '';
-		u.search = '';
-		u.hash = '';
-		return u.origin + u.pathname;
+		return new URL(url).origin;
 	} catch {
 		return '[unparseable-url]';
 	}
@@ -319,6 +516,33 @@ function httpDeliver(url, lookup, headers, body, timeoutMs) {
 }
 
 /**
+ * The auth-artifact headers a cross-origin redirect hop must NOT carry. The
+ * signature authenticates the body to the INTENDED endpoint and the keyed
+ * idempotency-key is unforgeable only as long as it stays there; forwarding
+ * either to a different origin (an open redirect on the receiver, a
+ * compromised endpoint) hands the target a validly-signed payload it can
+ * replay against any receiver trusting the same secret - the same reason
+ * browsers strip Authorization on cross-origin redirects. The body itself is
+ * still forwarded (following the redirect is the feature); consumers wanting
+ * none of that set `maxRedirects: 0`.
+ */
+const CROSS_ORIGIN_STRIPPED_HEADERS = ['x-webhook-signature', 'x-webhook-timestamp', 'idempotency-key'];
+
+/**
+ * The headers one redirect hop is allowed to send: the full set while the hop
+ * stays on the ORIGINAL request's origin, and a copy stripped of the
+ * auth-artifact headers once the hop target is any other origin.
+ */
+function headersForHop(hopUrl, initialOrigin, headers) {
+	let origin = null;
+	try { origin = new URL(hopUrl).origin; } catch { origin = null; }
+	if (origin !== null && initialOrigin !== null && origin === initialOrigin) return headers;
+	const stripped = { ...headers };
+	for (const name of CROSS_ORIGIN_STRIPPED_HEADERS) delete stripped[name];
+	return stripped;
+}
+
+/**
  * Deliver to one URL with retry + jittered exponential backoff, using the pinned
  * `lookup`. A 2xx is delivered; a 3xx returns the redirect Location to the
  * caller (not retried); a 4xx other than 429 is permanent; a 5xx / 429 / network
@@ -378,9 +602,13 @@ async function attemptDelivery(url, lookup, headers, body, config, hooks) {
  * redirect hop and pinning each connection to validated addresses. Follows up
  * to `maxRedirects` hops (default 5), re-running the full gate on each Location;
  * a redirect to a blocked host, a non-http(s) scheme, an https->http downgrade,
- * a missing Location, a loop, or hop-cap overflow ends delivery. Returns the
- * terminal outcome (`{ ok: true }` or `{ ok: false, err, attempts }`); the
- * CALLER reports it (so a replay can re-attempt without re-reporting).
+ * a missing Location, a loop, or hop-cap overflow ends delivery. The
+ * auth-artifact headers (`x-webhook-signature`, `x-webhook-timestamp`,
+ * `idempotency-key`) are sent only while a hop stays on the INITIAL URL's
+ * origin - a cross-origin hop gets the body and content-type but never the
+ * signature artifacts. Returns the terminal outcome (`{ ok: true }` or
+ * `{ ok: false, err, attempts }`); the CALLER reports it (so a replay can
+ * re-attempt without re-reporting).
  *
  * @returns {Promise<{ ok: true } | { ok: false, err: Error, attempts: number }>}
  */
@@ -391,7 +619,12 @@ async function deliverToUrl(initialUrl, headers, body, config, hooks) {
 	// let one extra hop slip past the seen-set check). A url that does not parse
 	// is left as-is; ssrfGate reports it as parse-error.
 	let url = initialUrl;
-	try { url = new URL(initialUrl).href; } catch { /* leave raw; the gate rejects it */ }
+	let initialOrigin = null;
+	try {
+		const parsed = new URL(initialUrl);
+		url = parsed.href;
+		initialOrigin = parsed.origin;
+	} catch { /* leave raw; the gate rejects it */ }
 	const seen = new Set();
 	for (let hop = 0; hop <= maxRedirects; hop++) {
 		if (seen.has(url)) {
@@ -404,7 +637,7 @@ async function deliverToUrl(initialUrl, headers, body, config, hooks) {
 			return { ok: false, err: new Error('outbound webhook: url "' + redactUrl(url) + '" blocked by SSRF guard (' + gate.reason + ')'), attempts: 0 };
 		}
 
-		const result = await attemptDelivery(url, gate.lookup, headers, body, config, hooks);
+		const result = await attemptDelivery(url, gate.lookup, headersForHop(url, initialOrigin, headers), body, config, hooks);
 		if (result.kind === 'delivered') return { ok: true };
 		if (result.kind === 'failed') {
 			return { ok: false, err: result.err, attempts: result.attempts };
@@ -499,18 +732,33 @@ export async function deliverWebhook(config, topic, event, data, hooks) {
 			headers['idempotency-key'] = key;
 		}
 
-		// HMAC signature so the receiver can authenticate the payload. During a
-		// key rotation (`previousSecret` set) both keys sign, comma-separated,
-		// so a receiver still verifying against the old key keeps accepting
-		// deliveries while the fleet converges - the receiver contract is:
-		// split the header on commas, accept when ANY entry matches. The
-		// idempotency key above stays keyed to the CURRENT secret only, so a
-		// rotation briefly reopens the leader-transition dedup window (retries
-		// of one delivery are unaffected - they reuse the computed headers).
+		// HMAC signature so the receiver can authenticate the payload AND its
+		// freshness. The signed material is `<unix-seconds>.<body>` (Stripe /
+		// GitHub style) and the timestamp rides alongside as
+		// `x-webhook-timestamp`, so a captured (body, signature) pair stops
+		// verifying once the receiver's tolerance window (documented: 5
+		// minutes of skew) has passed - a body-only signature replays forever.
+		// The timestamp is drawn once per delivery (through the runtime clock
+		// seam) so every retry and redirect hop of one delivery carries the
+		// same signed material. During a key rotation (`previousSecret` set)
+		// both keys sign, comma-separated, so a receiver still verifying
+		// against the old key keeps accepting deliveries while the fleet
+		// converges - the receiver contract is: split the header on commas,
+		// accept when ANY entry matches. The idempotency key above stays keyed
+		// to the CURRENT secret only, so a rotation briefly reopens the
+		// leader-transition dedup window (retries of one delivery are
+		// unaffected - they reuse the computed headers).
 		if (config.secret) {
-			let signature = 'sha256=' + createHmac('sha256', config.secret).update(body).digest('hex');
+			// This is a security timestamp, not hot-path duration bookkeeping.
+			// Use the exact wall-clock seam: cached `now()` can remain stale until
+			// its 1 Hz refresher runs after an event-loop stall, which would emit a
+			// timestamp already outside the receiver's freshness window.
+			const timestamp = String(Math.floor(wallEpoch() / 1000));
+			headers['x-webhook-timestamp'] = timestamp;
+			const signed = timestamp + '.' + body;
+			let signature = 'sha256=' + createHmac('sha256', config.secret).update(signed).digest('hex');
 			if (config.previousSecret) {
-				signature += ',sha256=' + createHmac('sha256', config.previousSecret).update(body).digest('hex');
+				signature += ',sha256=' + createHmac('sha256', config.previousSecret).update(signed).digest('hex');
 			}
 			headers['x-webhook-signature'] = signature;
 		}

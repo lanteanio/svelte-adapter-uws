@@ -1,10 +1,38 @@
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './runtime/cookies.js';
-import { esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
+import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
+import { deniesUngrantedObserve, isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
+import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap } from './runtime/utils/subscribe-policy.js';
+import { assertRestrictiveBoolean, assertProtectiveNumber, unknownOptionKeys } from './config-guards.js';
+import { runMessageHook } from './runtime/utils/hook-boundary.js';
+import { snapshotUpgradeHeaders } from './runtime/utils/upgrade-headers.js';
+
+/**
+ * Options the dev plugin honors, mirroring `UWSPluginOptions` in vite.d.ts.
+ *
+ * Deliberately an explicit list rather than a derived one, for the same reason
+ * the type is an explicit `Pick`: a flag added to the adapter's
+ * `WebSocketOptions` is NOT honored here until it is wired in this file, so
+ * accepting it silently would promise dev enforcement that does not exist. Keep
+ * this set and the type in step - a key here that the type omits is a key an
+ * app cannot pass without a type error, and the reverse is a silent drop.
+ */
+const KNOWN_PLUGIN_OPTION_KEYS = new Set([
+	'path',
+	'handler',
+	'authPath',
+	'allowedOrigins',
+	'allowSystemTopicSubscribe',
+	'allowNonAsciiTopics',
+	'authPathRequireOrigin',
+	'authorizeWireSubscribe',
+	'devSkipOriginCheck',
+	'timeoutMs'
+]);
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { registerGameIngress } from './runtime/handler/game-ingress.js';
 import { now, monotonicNow, randomFloat, randomU32, randomUuid, randomBytes } from './runtime/runtime.js';
@@ -15,15 +43,41 @@ import { now, monotonicNow, randomFloat, randomU32, randomUuid, randomBytes } fr
  * Uses the same subscribe/unsubscribe/publish protocol as the production
  * uWS handler, so the client store works identically in dev and prod.
  *
- * @param {{ path?: string, handler?: string, authPath?: string }} [options]
+ * @param {import('./vite.d.ts').UWSPluginOptions} [options]
  * @returns {import('vite').Plugin}
  */
 export default function uws(options = {}) {
+	// The dev plugin reads a FLAT option bag, so it has both of the failure
+	// modes the adapter build guards against: a misshaped value on a
+	// restrictive flag, and an unrecognized key dropped in silence. The second
+	// bites harder here than in production - a typo'd `authorizeWireSubcribe`
+	// leaves dev wide open while the developer's own manual testing shows the
+	// app working, so the misconfiguration is discovered in production or not
+	// at all.
+	assertRestrictiveBoolean(options, 'authorizeWireSubscribe', 'the uws() dev plugin option authorizeWireSubscribe');
+	// The dev plugin's only numeric option, guarded on the same terms as the
+	// adapter's: `timeoutMs: process.env.X` is a string when set, and every
+	// comparison against a non-number is false, so a misshaped value would not
+	// fall back to the default - it would disable the timeout. The adapter's
+	// size and timeout options are NOT guarded here because they are not dev
+	// plugin options at all; passing one to `uws()` already warns as unknown.
+	assertProtectiveNumber(options, 'timeoutMs', 'the uws() dev plugin option timeoutMs');
+	const unknownPluginKeys = unknownOptionKeys(options, KNOWN_PLUGIN_OPTION_KEYS);
+	if (unknownPluginKeys.length) {
+		console.warn(
+			`[adapter-uws] unknown uws() plugin option(s): ${unknownPluginKeys.join(', ')} - ` +
+			'not recognized by the dev plugin and ignored. Check the spelling against ' +
+			'UWSPluginOptions in vite.d.ts. Note the dev plugin takes these FLAT, not under ' +
+			'a `websocket` key as svelte.config.js does.'
+		);
+	}
+
 	const wsPath = options.path || '/ws';
 	const wsAuthPath = options.authPath || '/__ws/auth';
 	// Mirror production: block client-initiated subscribes to `__`-prefixed
-	// system topics by default. Apps that need to opt in can pass
-	// `allowSystemTopicSubscribe: true` to the dev plugin in vite.config.js.
+	// system topics by default. A registered plugin namespace may reach its hook,
+	// but landing still requires tracked membership. Apps that need the broad
+	// opt-out can pass `allowSystemTopicSubscribe: true` to the dev plugin.
 	const ALLOW_SYSTEM_TOPIC_SUBSCRIBE_V = options.allowSystemTopicSubscribe === true;
 	// Mirror production: wire topics default to printable ASCII only.
 	const ALLOW_NON_ASCII_TOPICS_V = options.allowNonAsciiTopics === true;
@@ -31,7 +85,10 @@ export default function uws(options = {}) {
 	// `platform.authorizeWireSubscribe()` can arm it at runtime the way the
 	// framework does; seeded from the config option for the static path.
 	let SUBSCRIBE_AUTHZ_V = options.authorizeWireSubscribe === true;
-	const hasUserSubscribeHookV = () => !!(userHandlers.subscribe || userHandlers.subscribeBatch);
+	// A plugin's side-effect hook does not count as the app taking over the topic
+	// decision, matching production. See WS_HOOK_SIDE_EFFECT_ONLY.
+	const hasUserSubscribeHookV = () =>
+		isAuthorizationHook(userHandlers.subscribe) || isAuthorizationHook(userHandlers.subscribeBatch);
 	// Mirror production CSRF defense for the authenticate POST endpoint.
 	// Same opt-out shape as the production handler: pass
 	// `authPathRequireOrigin: false` to the dev plugin to accept native
@@ -39,6 +96,12 @@ export default function uws(options = {}) {
 	// / matching `Origin`.
 	const AUTH_PATH_REQUIRE_ORIGIN_V = options.authPathRequireOrigin !== false;
 	const ALLOWED_ORIGINS_V = /** @type {'*' | 'same-origin' | string[]} */ (options.allowedOrigins ?? 'same-origin');
+	// The ORIGIN env pin, read the same way production reads it. Under
+	// `same-origin` without a pin the check compares the request Origin against
+	// the Host header, both of which a non-browser client supplies - so the pin
+	// is what makes that mode mean anything. Dev honouring it too keeps the dev
+	// server from being quietly more permissive than the deployment.
+	const PINNED_ORIGIN_V = parse_origin(process.env.ORIGIN || undefined);
 
 	/** @type {import('ws').WebSocketServer | undefined} */
 	let wss;
@@ -306,6 +369,15 @@ export default function uws(options = {}) {
 
 	let nextRequestRefV = 1;
 
+	// The documented dev default for `platform.request()`. Resolved HERE, at
+	// plugin scope, because both call sites take their own `options` parameter -
+	// which shadows the plugin bag of the same name, so `uws({ timeoutMs })` was
+	// read as the per-call argument, found absent, and fell through to the
+	// hardcoded default. Documented, type-exposed, allowlisted (so the new
+	// unknown-key warning stayed quiet for it), and dead.
+	const defaultRequestTimeoutMs =
+		typeof options.timeoutMs === 'number' && options.timeoutMs > 0 ? options.timeoutMs : 5000;
+
 	/**
 	 * Dev-mode equivalent of `platform.request`. Same wire contract as
 	 * production so apps that work in dev work in prod.
@@ -329,7 +401,7 @@ export default function uws(options = {}) {
 			));
 		}
 		const ref = nextRequestRefV++;
-		const timeoutMs = (options && options.timeoutMs) || 5000;
+		const timeoutMs = (options && options.timeoutMs) || defaultRequestTimeoutMs;
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
 				if (pending.delete(ref)) reject(new Error('request timed out'));
@@ -414,6 +486,13 @@ export default function uws(options = {}) {
 	}
 
 	const platform = {
+		// The observer lane's deny-unwind (authorizeDerivedSubscribe) runs the
+		// app's unsubscribe hook through this slot - the shared primitive has
+		// no reference to this server's hook container. See
+		// WS_REVOKED_UNSUBSCRIBE.
+		[WS_REVOKED_UNSUBSCRIBE](ws, topic, ud) {
+			userHandlers.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+		},
 		publish,
 		publishBatched,
 		// Binary wire (publishWire/sendWire) is a production transport
@@ -545,23 +624,86 @@ export default function uws(options = {}) {
 			const subs = ud?.[WS_SUBSCRIPTIONS];
 			if (!(subs instanceof Set)) return 'INVALID_TOPIC';
 			if (subs.has(topic)) return null;
-			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
+			if (exceedsSubscriptionCap({ held: subs.has(topic), size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) return 'RATE_LIMITED';
+			// Enrolled, like the wire lanes and like production: a server-side
+			// kick racing a server-side join must cancel it, not install the
+			// grant a moment after `unsubscribe` answered "nothing to revoke".
+			const tokenS = beginPendingSubscribe(ud, topic, subs.has(topic));
 			const denial = await runUserSubscribeGateV(ws, topic);
-			if (denial !== null) return denial;
+			if (denial !== null) {
+				// The hook denied, but it may have installed tracked membership
+				// (a plugin join) before deciding, and a revocation may have tombstoned
+				// this attempt mid-await. Settling blindly here left that membership
+				// standing: the held branch below defers to a sibling attempt still in
+				// flight, so when that sibling's hook denies too, every attempt leaves
+				// through this exit and nothing remains to judge the membership.
+				if (settleDeniedSubscribe(ud, topic, tokenS, subs.has(topic)) === 'deny-unwind') {
+					unwindRevokedMembership(ws, topic);
+					userHandlers.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+				}
+				return denial;
+			}
 			// Post-await re-check: a concurrent subscribe may have raced
 			// through and already added the topic during the gate await.
-			if (subs.has(topic)) return null;
-			if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
+			if (subs.has(topic)) {
+				// Held is not enough when this attempt was revoked mid-await and
+				// its own hook installed the membership (a plugin join): read the
+				// provenance, and unwind a grant no live authority backs.
+				const heldVerdict = settleHeldSubscribe(ud, topic, tokenS);
+				if (heldVerdict === 'ack') return null;
+				if (heldVerdict === 'deny-unwind') {
+					unwindRevokedMembership(ws, topic);
+					userHandlers.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+				}
+				return 'FORBIDDEN';
+			}
+			if (exceedsSubscriptionCap({ held: subs.has(topic), size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) { settlePendingSubscribe(ud, topic, tokenS); return 'RATE_LIMITED'; }
+			if (!settlePendingSubscribe(ud, topic, tokenS, true)) return 'FORBIDDEN';
 			ws.subscribe(topic);
 			subs.add(topic);
 			return null;
 		},
-		async checkSubscribe(ws, topic) {
+		// `opts`, not `options`: the plugin-wide `options` is in scope here, and
+		// shadowing it invites a future config read from the caller's object.
+		async checkSubscribe(ws, topic, opts) {
 			// Pure gate: consult the user's hook chain without subscribing.
 			// Same precedence as production (subscribeBatch first, falls
 			// back to subscribe). No state mutation, no cap check.
-			if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
-			return await runUserSubscribeGateV(ws, topic);
+			// Observer-mode callers carry client-named snapshot topics, so their
+			// alphabet must match this dev server's wire boundary.
+			if (!isValidWireTopic(topic, opts && opts.requireGrant ? ALLOW_NON_ASCII_TOPICS_V : true)) {
+				return 'INVALID_TOPIC';
+			}
+			// `requireGrant` is the observer-lane mode - "may this connection see
+			// what it already holds?" - and it must not be the default, because the
+			// ordinary use of this method gates BEFORE a grant exists. Same shared
+			// predicate as the production runtime: without it, dev would hand out a
+			// roster that production denies, and the developer's own manual testing
+			// would show the permissive answer.
+			const requireGrant = Boolean(opts && opts.requireGrant);
+			let observerHasUserHook = false;
+			if (requireGrant) {
+				observerHasUserHook = hasUserSubscribeHookV();
+				let granted;
+				try { granted = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+				catch { return 'FORBIDDEN'; }
+				if (deniesUngrantedObserve(SUBSCRIBE_AUTHZ_V, observerHasUserHook, granted, topic)) {
+					return 'FORBIDDEN';
+				}
+			}
+			const denial = await runUserSubscribeGateV(ws, topic);
+			if (denial !== null) return denial;
+			if (requireGrant) {
+				// Re-read after the async hook: a grant revoked inside that await must
+				// not produce an allow answer after it is gone.
+				let granted;
+				try { granted = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+				catch { return 'FORBIDDEN'; }
+				if (deniesUngrantedObserve(SUBSCRIBE_AUTHZ_V, observerHasUserHook, granted, topic)) {
+					return 'FORBIDDEN';
+				}
+			}
+			return null;
 		},
 		authorizeWireSubscribe() {
 			// Mirror production: arm wire-subscribe authorization at runtime.
@@ -570,7 +712,36 @@ export default function uws(options = {}) {
 		unsubscribe(ws, topic) {
 			const ud = ws.getUserData();
 			const subs = ud?.[WS_SUBSCRIPTIONS];
-			if (!(subs instanceof Set) || !subs.has(topic)) return false;
+			// BEFORE the membership early-return, as production
+			// (handler/platform.js) and the in-process server (testing.js) both
+			// do. Revoking a topic must release its taps and its write grant
+			// whether or not the PRIMARY membership is still present, and an
+			// observer socket holds only the derived tap: `cursor.snapshot` and
+			// `presence.sync` subscribe `__cursor:{topic}` / `__presence:{topic}`
+			// and never the base topic. Placed after the return, both statements
+			// were inert in precisely the shape they were written for - the
+			// revoke answered `false` and changed nothing.
+			//
+			// Revoking read access revokes WRITE access with it. The client-driven
+			// `game` lane carries no topic and publishes to whatever binding the
+			// connection holds, so a revoke that took the subscription away but
+			// left the binding standing meant a kicked client kept publishing into
+			// the room - silently, to everyone still in it.
+			// Cancel any subscribe still parked in its authorization hook, exactly
+			// as production and the in-process server do. Without this the revoke
+			// returned, the parked subscribe landed afterwards, and the socket was
+			// left subscribed to a topic it had just been removed from.
+			const cancelledPendingV = ud ? tombstonePendingSubscribe(ud, topic) : false;
+			if (ud && ud[WS_PUBLISH_GRANT] === topic) ud[WS_PUBLISH_GRANT] = undefined;
+			// And the observer taps: without this a revoked client kept receiving
+			// the roster and every peer's cursor position, and for cursor kept
+			// PUBLISHING, because that lane authorizes an outgoing frame by asking
+			// whether the socket still holds the tap.
+			releaseDerivedSubscriptions(ws, topic);
+			// Cancelling an in-flight subscribe IS a removal, so it answers
+			// truthfully even when no established membership was present - the
+			// same contract production reports.
+			if (!(subs instanceof Set) || !subs.has(topic)) return cancelledPendingV;
 			ws.unsubscribe(topic);
 			subs.delete(topic);
 			userHandlers.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
@@ -677,7 +848,7 @@ export default function uws(options = {}) {
 		// Broadcast-request to every local subscriber of `topic`, mirroring
 		// production platform.requestTopic; partial success per subscriber.
 		requestTopic(topic, event, data, options) {
-			const timeoutMs = (options && options.timeoutMs) || 5000;
+			const timeoutMs = (options && options.timeoutMs) || defaultRequestTimeoutMs;
 			const targets = [];
 			for (const [ws, topics] of subscriptions) {
 				if (topics.has(topic)) targets.push(ws);
@@ -793,16 +964,35 @@ export default function uws(options = {}) {
 		} catch (err) {
 			console.error('[ws] subscribeBatch hook threw:', err);
 			/** @type {Record<string, string>} */
-			const failed = {};
+			const failed = Object.create(null);
 			for (let i = 0; i < topics.length; i++) failed[topics[i]] = 'INTERNAL_ERROR';
 			return failed;
 		}
+		// Null-prototype for the same reason as production: an empty `{}` reads
+		// back every Object.prototype member name as truthy, so a topic named
+		// `toString` or `constructor` would be DENIED here while production
+		// allows it, and a `__proto__` key would reach the inherited setter and
+		// store nothing.
 		/** @type {Record<string, string>} */
-		const denials = {};
+		const denials = Object.create(null);
 		if (!result || typeof result !== 'object') return denials;
-		for (const [topic, val] of Object.entries(result)) {
-			if (val === false) denials[topic] = 'FORBIDDEN';
-			else if (typeof val === 'string') denials[topic] = val;
+		// Reading the hook RESULT can throw - a getter, a Proxy, a lazy ORM row.
+		// This runs BETWEEN a batch's enrolment and its settle, so an escape here
+		// would strand every pending entry for the connection's life as well as
+		// leaving the client's ref'd frames unanswered. Fail closed
+		// on the whole batch instead, and keep the shape identical to production so
+		// the three surfaces stay comparable.
+		try {
+			for (const [topic, val] of Object.entries(result)) {
+				if (val === false) denials[topic] = 'FORBIDDEN';
+				else if (typeof val === 'string') denials[topic] = val;
+			}
+		} catch (err) {
+			console.error('[ws] subscribeBatch result read threw:', err);
+			/** @type {Record<string, string>} */
+			const broken = Object.create(null);
+			for (let i = 0; i < topics.length; i++) broken[topics[i]] = 'INTERNAL_ERROR';
+			return broken;
 		}
 		return denials;
 	}
@@ -906,22 +1096,155 @@ export default function uws(options = {}) {
 	}
 
 	/**
-	 * Discover the WS handler file path.
+	 * The adapter's `websocket.handler`, read from SvelteKit's resolved config.
+	 *
+	 * The plugin and the adapter are two halves of one package that both decide
+	 * which module becomes the WS handler, and the plugin decides FIRST: it
+	 * emits `ws-handler.js` into the SSR output and the adapter then takes that
+	 * file as it stands. A handler named only on the adapter would therefore
+	 * never be read, and the app would silently run whatever auto-discovery
+	 * found instead - a different module, with a different set of authorization
+	 * hooks. Reading the adapter's value here is what makes one value drive
+	 * both surfaces.
+	 *
+	 * A null `handler` means the active config does not name one; resolution then
+	 * falls back to auto-discovery, and the adapter still cross-checks what was
+	 * bundled.
+	 *
+	 * Prefer the resolved SvelteKit plugin API over importing a config file. It
+	 * carries the validated config SvelteKit is actually running, including the
+	 * direct `sveltekit(config)` form (which intentionally ignores
+	 * svelte.config.js), and avoids evaluating an app config a second time.
+	 * Older SvelteKit releases without that API retain the file-import fallback.
+	 *
 	 * @param {string} root
-	 * @returns {string | null}
+	 * @param {{ plugins?: Array<any> } | null | undefined} resolved
+	 * @returns {Promise<{ handler: string | null, from: string | null }>}
 	 */
-	function discoverHandler(root) {
-		if (options.handler) return path.resolve(root, options.handler);
+	async function adapterHandlerOption(root, resolved) {
+		for (const plugin of resolved?.plugins ?? []) {
+			const adapter = plugin?.api?.options?.kit?.adapter;
+			if (adapter?.name !== 'adapter-uws') continue;
+			const handler = adapter.websocketHandler;
+			return {
+				handler: typeof handler === 'string' && handler ? handler : null,
+				from: 'websocket.handler in SvelteKit config'
+			};
+		}
+
+		for (const name of ['svelte.config.js', 'svelte.config.mjs', 'svelte.config.cjs']) {
+			const full = path.resolve(root, name);
+			if (!existsSync(full)) continue;
+			try {
+				// Compatibility path for old SvelteKit releases that do not expose
+				// the validated config through their Vite plugin API. Current Kit's
+				// loader cache-busts config imports, so modern releases must take the
+				// API path above to avoid evaluating app config twice.
+				const mod = await import(pathToFileURL(full).href);
+				const adapter = mod?.default?.kit?.adapter;
+				if (adapter?.name !== 'adapter-uws') return { handler: null, from: null };
+				const handler = adapter.websocketHandler;
+				return {
+					handler: typeof handler === 'string' && handler ? handler : null,
+					from: `websocket.handler in ${name}`
+				};
+			} catch {
+				return { handler: null, from: null };
+			}
+		}
+		return { handler: null, from: null };
+	}
+
+	/**
+	 * Resolve the WS handler module, for the dev server and the SSR build alike.
+	 *
+	 * Precedence: the plugin's own `handler`, then the adapter's
+	 * `websocket.handler`, then auto-discovery of `src/hooks.ws.{js,ts,mjs}`.
+	 * Two explicit values that disagree is a configuration error rather than a
+	 * precedence question - there is no reading of the app's intent under which
+	 * one of them is meant to lose silently.
+	 *
+	 * @param {string} root
+	 * @param {{ plugins?: Array<any> } | null | undefined} resolved
+	 * @returns {Promise<{ path: string, from: string } | null>}
+	 */
+	async function discoverHandler(root, resolved) {
+		const adapterOption = await adapterHandlerOption(root, resolved);
+		const fromAdapter = adapterOption.handler;
+		// `websocket.handler` belongs to the adapter, whose non-plugin fallback
+		// resolves it with path.resolve() from the project process cwd. Vite's
+		// `root` is the base only for the plugin-owned `uws({ handler })` option;
+		// applying it to the adapter option makes dev/build name a different file
+		// whenever an app uses an explicit Vite root.
+		const adapterPath = fromAdapter ? path.resolve(fromAdapter) : null;
+
+		if (options.handler) {
+			const pluginPath = path.resolve(root, options.handler);
+			const pathsAgree = adapterPath === pluginPath || (
+				process.platform === 'win32' &&
+				adapterPath?.toLowerCase() === pluginPath.toLowerCase()
+			);
+			if (fromAdapter && !pathsAgree) {
+				throw new Error(
+					'[adapter-uws] the WebSocket handler is named twice, and the two disagree:\n' +
+					`  vite.config.js    uws({ handler: ${JSON.stringify(options.handler)} })\n` +
+					`  SvelteKit config  websocket.handler: ${JSON.stringify(fromAdapter)}\n` +
+					'Remove one of them. The dev plugin honors the adapter\'s websocket.handler, ' +
+					'so naming it once on the adapter covers dev and the build.'
+				);
+			}
+			assertHandlerExists(pluginPath, options.handler, 'uws({ handler }) in vite.config.js');
+			return { path: pluginPath, from: 'uws({ handler }) in vite.config.js' };
+		}
+
+		if (fromAdapter) {
+			assertHandlerExists(adapterPath, fromAdapter, adapterOption.from ?? 'websocket.handler in SvelteKit config');
+			return { path: adapterPath, from: adapterOption.from ?? 'websocket.handler in SvelteKit config' };
+		}
+
 		const candidates = ['src/hooks.ws.js', 'src/hooks.ws.ts', 'src/hooks.ws.mjs'];
 		for (const candidate of candidates) {
 			const full = path.resolve(root, candidate);
-			if (existsSync(full)) return full;
+			if (existsSync(full)) return { path: full, from: `auto-discovered ${candidate}` };
 		}
 		return null;
 	}
 
+	/**
+	 * A handler the app named as a FILE must exist. Auto-discovery may come up
+	 * empty (that is its job), but a named path that does not resolve is a typo
+	 * the app should hear about by name rather than as a bundler resolve error.
+	 *
+	 * Only file-shaped specifiers are checked. A handler may equally be a
+	 * virtual module id served by another Vite plugin (`/virtual-ws-handler`,
+	 * `virtual:ws`) or a bare package specifier, none of which exist on disk and
+	 * all of which resolve perfectly well - checking those turns a working setup
+	 * into a build failure.
+	 *
+	 * @param {string} full
+	 * @param {string} named
+	 * @param {string} where
+	 */
+	function assertHandlerExists(full, named, where) {
+		// RELATIVE specifiers only - the documented form, and the one a typo
+		// actually lands in. Everything else belongs to the resolver: an
+		// extension test refused `$lib/server/ws.js` (a SvelteKit alias that both
+		// the esbuild path and ssrLoadModule resolve), `my-pkg/ws.js` and
+		// `@scope/pkg/ws.js`; adding absolute paths then refused Vite virtual
+		// ids like `/virtual-ws-handler`, which `path.isAbsolute` calls absolute
+		// on every platform and which exist only inside a plugin. Guessing wrong
+		// here turns a working app into a build failure, so the guess is narrow.
+		const fileShaped = named.startsWith('./') || named.startsWith('../');
+		if (!fileShaped || existsSync(full)) return;
+		throw new Error(
+			`[adapter-uws] WebSocket handler ${JSON.stringify(named)} (${where}) does not exist.\n` +
+			`  looked for: ${full}`
+		);
+	}
+
 	/** SSR-build state captured in `configResolved` and consumed in `buildStart`. */
-	let ssrHandlerPath = /** @type {string | null} */ (null);
+	let ssrHandler = /** @type {{ path: string, from: string } | null} */ (null);
+	let ssrRoot = '';
 
 	return {
 		name: 'svelte-adapter-uws',
@@ -944,14 +1267,15 @@ export default function uws(options = {}) {
 				}
 			};
 		},
-		configResolved(resolved) {
+		async configResolved(resolved) {
 			// Capture the handler path once the resolved Vite config is
 			// available. SvelteKit runs Vite 7's environment API with
 			// separate `client` and `ssr` environments; `env.isSsrBuild`
 			// in `config()` is `false` even during the SSR build, so we
 			// detect SSR via `resolved.build.ssr` instead.
 			if (resolved.build?.ssr) {
-				ssrHandlerPath = discoverHandler(resolved.root || process.cwd());
+				ssrRoot = resolved.root || process.cwd();
+				ssrHandler = await discoverHandler(ssrRoot, resolved);
 			}
 		},
 		buildStart() {
@@ -972,12 +1296,32 @@ export default function uws(options = {}) {
 			// (metrics registries, leader-election state, in-memory
 			// caches) land in `chunks/` rather than getting duplicated
 			// into the ws-handler bundle.
-			if (!ssrHandlerPath) return;
+			if (!ssrHandler) return;
 			if (this.environment?.name && this.environment.name !== 'ssr') return;
 			this.emitFile({
 				type: 'chunk',
-				id: ssrHandlerPath,
+				id: ssrHandler.path,
 				fileName: 'ws-handler.js'
+			});
+			// Record WHICH module became the handler, beside the chunk itself.
+			// The adapter reads this to name the module in its build log and to
+			// refuse a build whose own `websocket.handler` disagrees with what
+			// was actually bundled. Without it the adapter can see only that
+			// some ws-handler.js exists, which is what let a substitution pass
+			// silently while the build log positively reported success.
+			this.emitFile({
+				type: 'asset',
+				fileName: 'ws-handler.origin.json',
+				source: JSON.stringify({
+					source: path.relative(ssrRoot, ssrHandler.path).split(path.sep).join('/'),
+					// The absolute path is what the adapter COMPARES. `source` is
+					// relative to the Vite root and the adapter resolves against
+					// its own cwd, so in any project where the two differ - a
+					// monorepo, or an explicit Vite `root` - comparing the
+					// relative form would report a mismatch for the same file.
+					absolute: ssrHandler.path,
+					from: ssrHandler.from
+				}) + '\n'
 			});
 		},
 		async configureServer(server) {
@@ -1035,41 +1379,33 @@ export default function uws(options = {}) {
 			viteServer = server;
 			const root = server.config.root;
 
-			// Load user's WebSocket handler via Vite's ssrLoadModule (handles TS/aliases/etc.)
-			const handlerPath = options.handler
-				? path.resolve(root, options.handler)
-				: null;
+			// Load the user's WebSocket handler via Vite's ssrLoadModule (handles
+			// TS/aliases/etc.). Resolution goes through the SAME resolver the SSR
+			// build uses, so the module dev runs is the module the build bundles.
+			// Dev used to resolve independently - its own option, then
+			// auto-discovery, never the adapter's `websocket.handler` - so an app
+			// that named a handler on the adapter could develop against one set of
+			// authorization hooks and ship another. A misconfiguration throws here
+			// and aborts dev startup, which is the point: it is the same error the
+			// build raises, surfaced at the earliest moment an app can see it.
+			const resolvedHandler = await discoverHandler(root, server.config);
 
-			if (handlerPath) {
-				resolvedHandlerPath = handlerPath;
-				handlerReady = server.ssrLoadModule(handlerPath).then((mod) => {
+			handlerReady = (async () => {
+				if (!resolvedHandler) return;
+				resolvedHandlerPath = resolvedHandler.path;
+				try {
+					const mod = await server.ssrLoadModule(resolvedHandler.path);
 					handlerFailed = false;
 					applyHandlers(mod);
-				}).catch((err) => {
+				} catch (err) {
 					handlerFailed = true;
-					console.error(`[adapter-uws] Failed to load WebSocket handler '${options.handler}':`, err, '\n  See: https://svti.me/ws-handler-load');
-				});
-			} else {
-				// Auto-discover src/hooks.ws.{js,ts,mjs}
-				const candidates = ['src/hooks.ws.js', 'src/hooks.ws.ts', 'src/hooks.ws.mjs'];
-				handlerReady = (async () => {
-					for (const candidate of candidates) {
-						const fullPath = path.resolve(root, candidate);
-						if (!existsSync(fullPath)) continue;
-						resolvedHandlerPath = fullPath;
-						try {
-							const mod = await server.ssrLoadModule(fullPath);
-							handlerFailed = false;
-							applyHandlers(mod);
-							break;
-						} catch (err) {
-							handlerFailed = true;
-							console.error(`[adapter-uws] Error loading '${candidate}':`, err.message);
-							break;
-						}
-					}
-				})();
-			}
+					console.error(
+						`[adapter-uws] Failed to load WebSocket handler (${resolvedHandler.from}):`,
+						err,
+						'\n  See: https://svti.me/ws-handler-load'
+					);
+				}
+			})();
 
 			// Fire the user's `init` hook once the handler module has loaded.
 			// Awaited so a throwing init surfaces during dev startup rather
@@ -1106,6 +1442,13 @@ export default function uws(options = {}) {
 
 				if (AUTH_PATH_REQUIRE_ORIGIN_V && !isAuthOriginAccepted(headers, {
 					allowedOrigins: ALLOWED_ORIGINS_V,
+					// Same ORIGIN-env pin as production. Without it the `same-origin`
+					// mode compares the request Origin against the Host header, which
+					// a non-browser client controls - two attacker-supplied values
+					// compared against each other. Dev being MORE permissive than
+					// production is the direction that misleads: the developer's own
+					// testing passes and the deployment refuses.
+					pinnedOrigin: PINNED_ORIGIN_V,
 					isTls: false,
 					hasUpgradeHook: false
 				})) {
@@ -1204,6 +1547,13 @@ export default function uws(options = {}) {
 			server.httpServer?.on('upgrade', async (req, socket, head) => {
 				const { pathname } = new URL(req.url || '', 'http://localhost');
 				if (pathname !== wsPath) return;
+				// The missing-Origin branch delegates trust to an app upgrade hook.
+				// Resolve the handler before reading that authority: configureServer
+				// starts module loading without awaiting it, so an upgrade arriving in
+				// that window used to observe an empty userHandlers object and get 403,
+				// even though the same request is accepted once the hook has loaded (and
+				// by production, whose handler is static before it begins listening).
+				await handlerReady;
 
 				// Mirror production: enforce allowedOrigins on the dev WSS
 				// upgrade. The dev plugin runs on a localhost port that is
@@ -1222,6 +1572,9 @@ export default function uws(options = {}) {
 					}
 					if (!isOriginAllowed(upgHeaders['origin'], upgHeaders, {
 						allowedOrigins: ALLOWED_ORIGINS_V,
+						// See the auth-path check above: production honours ORIGIN as
+						// the authoritative host pin, and dev must not be looser.
+						pinnedOrigin: PINNED_ORIGIN_V,
 						isTls: false,
 						hasUpgradeHook: !!userHandlers.upgrade
 					})) {
@@ -1233,8 +1586,6 @@ export default function uws(options = {}) {
 
 				// If user has an upgrade handler, run it for auth
 				let userData = {};
-				await handlerReady;
-
 				// If the handler file exists but failed to load, reject the
 				// upgrade so a broken auth handler does not silently degrade
 				// to open access.
@@ -1274,8 +1625,12 @@ export default function uws(options = {}) {
 						}
 						if (result && result.__upgradeResponse === true) {
 							userData = result.userData || {};
-							if (result.headers && Object.keys(result.headers).length > 0) {
-								const hasSetCookie = Object.keys(result.headers).some(
+							// Dev cannot emit custom 101 headers, but it must still reject
+							// the same malformed result production rejects. Otherwise an app
+							// verifies a broken upgrade in dev and only production fails.
+							const responseHeaders = snapshotUpgradeHeaders(result.headers);
+							if (responseHeaders && Object.keys(responseHeaders).length > 0) {
+								const hasSetCookie = Object.keys(responseHeaders).some(
 									(k) => k.toLowerCase() === 'set-cookie'
 								);
 								if (hasSetCookie) {
@@ -1405,7 +1760,7 @@ export default function uws(options = {}) {
 									sendDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
 									return;
 								}
-								if (!ALLOW_SYSTEM_TOPIC_SUBSCRIBE_V && msg.topic.charCodeAt(0) === 95 && msg.topic.charCodeAt(1) === 95) {
+								if (deniesWireSystemTopicSubscribe({ allowSystem: ALLOW_SYSTEM_TOPIC_SUBSCRIBE_V, topic: msg.topic })) {
 									sendDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
 									return;
 								}
@@ -1419,42 +1774,133 @@ export default function uws(options = {}) {
 								// runs first.
 								assert(subs instanceof Set, 'subs.shape', null);
 								const isNew = !subs.has(msg.topic);
-								if (isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+								if (exceedsSubscriptionCap({ held: !isNew, size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) {
 									sendDenied(ws, msg.topic, ref, 'RATE_LIMITED');
 									return;
 								}
 								// Wire-subscribe authorization (mirror): a client may only
 								// (re)subscribe to a topic the server already authorized for
 								// this connection, unless the app ships its own subscribe hook.
-								if (SUBSCRIBE_AUTHZ_V && isNew && !hasUserSubscribeHookV()) {
+								// The plugin-owned carve-out belongs on BOTH spellings. It was
+								// on the batch path only, so the same client, server and
+								// topic got opposite answers depending on how many topics
+								// happened to be pending when the client flushed -
+								// src/client.js sends a single `subscribe` frame when exactly
+								// one is queued, so a documented group join worked or failed
+								// on microtask coalescing. Paired with the landing re-check
+								// below, which is what keeps the exemption from BEING the
+								// gate here.
+								if (deniesWireSubscribePreHook({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: hasUserSubscribeHookV(), held: !isNew, topic: msg.topic })) {
 									sendDenied(ws, msg.topic, ref, 'FORBIDDEN');
 									return;
 								}
+								// ENROL before the await, so a revocation landing while the
+								// app's authorization hook is parked can SEE this subscribe
+								// and cancel it. Dev had no pending-subscribe tracking at
+								// all: a `platform.unsubscribe` inside that window was a
+								// silent no-op and the parked subscribe re-installed the
+								// membership afterwards - the "dev looser than production"
+								// direction an app then develops against.
+								const pendingUdV = wrapped.getUserData();
+								const pendingTokenV = beginPendingSubscribe(pendingUdV, msg.topic, subs.has(msg.topic));
 								const denial = await runUserSubscribeGateV(wrapped, msg.topic);
 								if (denial !== null) {
+									// The hook denied, but it may have installed tracked membership
+									// (a plugin join) before deciding, and a revocation may have tombstoned
+									// this attempt mid-await. Settling blindly here left that membership
+									// standing: the held branch below defers to a sibling attempt still in
+									// flight, so when that sibling's hook denies too, every attempt leaves
+									// through this exit and nothing remains to judge the membership.
+									if (settleDeniedSubscribe(pendingUdV, msg.topic, pendingTokenV, subs.has(msg.topic)) === 'deny-unwind') {
+										unwindRevokedMembership(wrapped, msg.topic);
+										userHandlers.unsubscribe?.(wrapped, msg.topic, { platform: pendingUdV[WS_PLATFORM] });
+									}
 									sendDenied(ws, msg.topic, ref, denial);
 									return;
 								}
 								// Post-await re-check: a concurrent subscribe may have
 								// raced through and added the topic during the gate await.
-								if (subs.has(msg.topic)) {
-									sendSubscribedV(ws, msg.topic, ref);
+								// NOT when a gap-fill was requested - live membership
+								// arriving during the await carries no HISTORY, so acking
+								// here leaves a client that asked to recover believing
+								// itself caught up. Mirrors production.
+								const _wantsRecoverV = wantsRecover({ hasResumeHook: userHandlers.resume, recover: msg.recover });
+								if (subs.has(msg.topic) && !_wantsRecoverV) {
+									// Held is not enough: the membership may have been installed
+									// mid-await by THIS attempt's own hook after a revocation
+									// tombstoned it. settleHeldSubscribe reads the provenance -
+									// ack a surviving attempt or a fresh post-revoke grant, deny
+									// a revoked one, unwinding hook-installed membership when no
+									// live authority backs it. Mirrors runtime/handler.js.
+									const heldVerdictV = settleHeldSubscribe(pendingUdV, msg.topic, pendingTokenV);
+									if (heldVerdictV === 'ack') {
+										sendSubscribedV(ws, msg.topic, ref);
+										return;
+									}
+									if (heldVerdictV === 'deny-unwind') {
+										unwindRevokedMembership(wrapped, msg.topic);
+										userHandlers.unsubscribe?.(wrapped, msg.topic, { platform: pendingUdV[WS_PLATFORM] });
+									}
+									sendDenied(ws, msg.topic, ref, 'FORBIDDEN');
 									return;
 								}
-								if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+								// Landing re-check (mirror). The pre-gate above stands aside
+								// for a plugin-owned topic so the plugin's own hook can run;
+								// something must then confirm the hook ACTUALLY admitted this
+								// socket, or the exemption is the entire gate. Scoped to a
+								// topic the socket does NOT already hold, so the recover
+								// fall-through above cannot be refused by it.
+								if (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: hasUserSubscribeHookV(), held: subs.has(msg.topic), topic: msg.topic })) {
+									settlePendingSubscribe(pendingUdV, msg.topic, pendingTokenV);
+									sendDenied(ws, msg.topic, ref, 'FORBIDDEN');
+									return;
+								}
+								if (exceedsSubscriptionCap({ held: subs.has(msg.topic), size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) {
+									settlePendingSubscribe(pendingUdV, msg.topic, pendingTokenV);
 									sendDenied(ws, msg.topic, ref, 'RATE_LIMITED');
 									return;
 								}
 								// Resume-on-subscribe (mirror): gap-fill via the resume hook before
 								// subscribing to live, so __replay frames precede the first live frame.
 								let _cap = null;
-								if (msg.recover && typeof msg.recover === 'object' && Number.isInteger(msg.recover.offset) && msg.recover.offset >= 0 && userHandlers.resume) {
+								// Same guard as production: this serves the topic's replay
+								// HISTORY, and the landing refuses the subscription only
+								// afterwards - by which time the messages have gone out.
+								const _recoverRevokedV = recoverIsRevoked({
+									held: subs instanceof Set && subs.has(msg.topic),
+									wireAuthz: SUBSCRIBE_AUTHZ_V && !hasUserSubscribeHookV(),
+									cancelled: isPendingSubscribeCancelled(pendingUdV, msg.topic, pendingTokenV),
+									topic: msg.topic
+								});
+								if (!_recoverRevokedV && _wantsRecoverV) {
 									const _rEpochs = Number.isInteger(msg.recover.epoch) ? { [msg.topic]: msg.recover.epoch } : undefined;
 									_cap = beginResumeCaptureV([msg.topic], ws);
 									try {
 										await userHandlers.resume(wrapped, { sessionId: wrapped.getUserData()[WS_SESSION_ID], lastSeenSeqs: { [msg.topic]: msg.recover.offset }, lastSeenEpochs: _rEpochs, platform: wrapped.getUserData()[WS_PLATFORM] });
 									} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
-									if (subs.has(msg.topic)) { discardResumeCaptureV(_cap); sendSubscribedV(ws, msg.topic, ref); return; }
+									if (subs.has(msg.topic)) {
+										const heldVerdictVR = settleHeldSubscribe(pendingUdV, msg.topic, pendingTokenV);
+										if (heldVerdictVR === 'ack') { discardResumeCaptureV(_cap); sendSubscribedV(ws, msg.topic, ref); return; }
+										// Revoked mid-await; the replay went out, but a grant
+										// installed by the revoked attempt's own hook must not stand.
+										if (heldVerdictVR === 'deny-unwind') {
+											unwindRevokedMembership(wrapped, msg.topic);
+											userHandlers.unsubscribe?.(wrapped, msg.topic, { platform: pendingUdV[WS_PLATFORM] });
+										}
+										discardResumeCaptureV(_cap);
+										sendDenied(ws, msg.topic, ref, 'FORBIDDEN');
+										return;
+									}
+								}
+								// Landing settle. A revocation that bumped this subscribe's
+								// epoch while the hook was parked means the grant must be
+								// discarded rather than installed, and the client's ref'd
+								// frame answered truthfully - the same landing production
+								// and the in-process server perform.
+								if (!settlePendingSubscribe(pendingUdV, msg.topic, pendingTokenV, true)) {
+									if (_cap) discardResumeCaptureV(_cap);
+									sendDenied(ws, msg.topic, ref, 'FORBIDDEN');
+									return;
 								}
 								subscriptions.get(ws)?.add(msg.topic);
 								subs.add(msg.topic);
@@ -1463,8 +1909,19 @@ export default function uws(options = {}) {
 								return;
 							}
 							if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
+								// A client-driven unsubscribe is a revocation too: it must
+								// cancel this connection's own subscribe if one is still
+								// parked in its authorization hook, or the parked frame
+								// lands afterwards and re-installs the membership the
+								// client just asked to drop. Production tombstones here for
+								// exactly this TOCTOU.
+								const uudV = /** @type {any} */ (ws).__userData;
+								if (uudV) tombstonePendingSubscribe(uudV, msg.topic);
 								subscriptions.get(ws)?.delete(msg.topic);
-								/** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS]?.delete(msg.topic);
+								uudV?.[WS_SUBSCRIPTIONS]?.delete(msg.topic);
+								// Read access gone means write access gone, as production does.
+								if (uudV && uudV[WS_PUBLISH_GRANT] === msg.topic) uudV[WS_PUBLISH_GRANT] = undefined;
+								releaseDerivedSubscriptions(wrapped, msg.topic);
 								userHandlers.unsubscribe?.(wrapped, msg.topic, { platform: wrapped.getUserData()[WS_PLATFORM] });
 								return;
 							}
@@ -1519,8 +1976,7 @@ export default function uws(options = {}) {
 										sendDenied(ws, topic, ref, 'INVALID_TOPIC');
 										continue;
 									}
-									if (!ALLOW_SYSTEM_TOPIC_SUBSCRIBE_V && typeof topic === 'string' &&
-										topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) {
+									if (deniesWireSystemTopicSubscribe({ allowSystem: ALLOW_SYSTEM_TOPIC_SUBSCRIBE_V, topic })) {
 										sendDenied(ws, topic, ref, 'INVALID_TOPIC');
 										continue;
 									}
@@ -1529,14 +1985,53 @@ export default function uws(options = {}) {
 								// Wire-subscribe authorization (mirror, batch): pre-deny every
 								// valid topic the server has not already authorized when no app
 								// hook is present; with a hook, that hook decides.
-								const _wireAuthzV = SUBSCRIBE_AUTHZ_V && !hasUserSubscribeHookV();
+								// Hoisted once per frame, so every topic in one frame is judged
+								// against one reading of the app's hooks. `userHandlers` is
+								// REASSIGNED by the hook-reload path, so a per-topic read could
+								// split a single frame across two versions of the app's hooks.
+								const _hasUserHookV = hasUserSubscribeHookV();
+								const _wireAuthzV = SUBSCRIBE_AUTHZ_V && !_hasUserHookV;
+								// Fails CLOSED when the grant set is missing. Requiring a
+								// truthy `_authzSubsV` made an absent or malformed slot
+								// skip the gate entirely, so dev admitted what production
+								// refuses - production asserts the Set and always computes
+								// the decision. An armed gate with no grants denies
+								// everything, which is the correct reading of "the server
+								// has authorized nothing on this connection".
 								const _authzSubsV = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS];
-								const authzDeniedV = (_wireAuthzV && _authzSubsV)
-									? valid.map((t) => !_authzSubsV.has(t))
+								const authzDeniedV = _wireAuthzV
+									? valid.map((t) => deniesWireSubscribePreHook({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: _hasUserHookV, held: _authzSubsV instanceof Set && _authzSubsV.has(t), topic: t }))
 									: null;
-								const batchDenials = await runSubscribeBatchHookV(wrapped, valid);
+								// A topic the grant gate already denied must not reach the
+								// hook, as on the single path. Calling the hook first and
+								// reading the decision only at the landing lets a plugin
+								// hook's side effects (roster join, observer tap) land for a
+								// topic the caller is then told FORBIDDEN about.
+								const hookTopics = authzDeniedV === null
+									// Keep the hook's mutable input separate from the
+									// landing queue whose topics/tokens still have to settle.
+									? valid.slice()
+									: valid.filter((_t, i) => !authzDeniedV[i]);
+								// ENROL EVERY TOPIC IN THE BATCH, for the same reason the
+								// single lane does - and this is the lane that matters most,
+								// because `src/client.js` sends a single frame only when
+								// exactly one topic is queued and a `subscribe-batch`
+								// otherwise. Leaving it unenrolled meant a ban landing during
+								// authorization was defeated in dev depending on nothing but
+								// microtask coalescing. Note the landing's own grant re-check
+								// is inert here whenever the app ships a subscribe hook,
+								// since `_wireAuthzV` is false in exactly that configuration -
+								// which is the configuration where a hook can park at all.
+								const batchUdV = /** @type {any} */ (ws).__userData;
+								const batchTokensV = batchUdV
+									? valid.map((t) => beginPendingSubscribe(batchUdV, t, batchUdV?.[WS_SUBSCRIPTIONS] instanceof Set && batchUdV[WS_SUBSCRIPTIONS].has(t)))
+									: null;
+								const batchDenials = hookTopics.length > 0
+									? await runSubscribeBatchHookV(wrapped, hookTopics)
+									: null;
 								const perTopicDenials = batchDenials === null && userHandlers.subscribe
-									? await Promise.all(valid.map((t) => runSubscribeHookV(wrapped, t)))
+									? await Promise.all(valid.map((t, i) =>
+										(authzDeniedV !== null && authzDeniedV[i]) ? null : runSubscribeHookV(wrapped, t)))
 									: null;
 								const udSubs = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS];
 								assert(udSubs instanceof Set, 'subs.shape-batch', null);
@@ -1548,11 +2043,25 @@ export default function uws(options = {}) {
 								if (msg.recover && typeof msg.recover === 'object') {
 									for (let i = 0; i < valid.length; i++) {
 										const _t = valid[i];
+										// Between the hook awaits and the landing, and it serves
+										// a topic's replay history - so read the CURRENT grant
+										// set rather than the pre-await snapshot, and the
+										// revocation tombstone with it. This lane used to ask
+										// only the grant gate, so with the gate off (the
+										// default) a topic whose pending subscribe had been
+										// cancelled mid-await still had its history served.
+										const _heldV = udSubs instanceof Set && udSubs.has(_t);
+										// Pre-hook decision first (a pre-denied topic is filtered out
+										// of the hook pass, so nothing downstream would catch it),
+										// and both halves of wireAuthz read exactly as the landing
+										// reads them - otherwise the two sites disagree inside one
+										// frame, which is how this repair failed the first time.
 										const _denial = (authzDeniedV !== null && authzDeniedV[i] ? 'FORBIDDEN' : null)
+											?? (recoverIsRevoked({ held: _heldV, wireAuthz: SUBSCRIBE_AUTHZ_V && !_hasUserHookV, cancelled: batchTokensV === null || isPendingSubscribeCancelled(batchUdV, _t, batchTokensV[i]), topic: _t }) ? 'FORBIDDEN' : null)
 											?? (batchDenials !== null ? (batchDenials[_t] ?? null) : (perTopicDenials !== null ? perTopicDenials[i] : null));
 										if (_denial !== null) continue;
 										const _rec = msg.recover[_t];
-										if (_rec && typeof _rec === 'object' && Number.isInteger(_rec.offset) && _rec.offset >= 0) {
+										if (wantsRecover({ hasResumeHook: userHandlers.resume, recover: _rec })) {
 											if (_recoverSeqs === null) _recoverSeqs = {};
 											_recoverSeqs[_t] = _rec.offset;
 											if (Number.isInteger(_rec.epoch)) { if (_recoverEpochs === null) _recoverEpochs = {}; _recoverEpochs[_t] = _rec.epoch; }
@@ -1567,20 +2076,77 @@ export default function uws(options = {}) {
 								}
 								for (let i = 0; i < valid.length; i++) {
 									const topic = valid[i];
-									const denial = (authzDeniedV !== null && authzDeniedV[i] ? 'FORBIDDEN' : null)
+									// Re-evaluated HERE against the current grant set, not from the
+									// reading taken before the awaits, so a revocation landing in
+									// the await window cannot be defeated by a pre-await decision.
+									// Mirrors the production landing in runtime/handler.js.
+									//
+									// Settle this topic's enrolment exactly once, and MEMBERSHIP
+									// FIRST: the tombstone is consulted only after the topic has
+									// failed to be an existing membership. Consulting it before
+									// (which this lane used to do) cannot tell a revoke from a
+									// revoke followed by a legitimate re-grant inside the same
+									// await window, so it denied a topic the connection holds -
+									// the same reasoning recoverIsRevoked is built on. It also
+									// answered FORBIDDEN over the hook's own denial reason and
+									// over RATE_LIMITED. Production and src/testing.js both
+									// settle last; this lane was the only one that did not.
+									const settleV = (granted) => (batchTokensV === null
+										? true
+										: settlePendingSubscribe(batchUdV, topic, batchTokensV[i], granted === true));
+									const settleHeldV = () => (batchTokensV === null
+										? 'ack'
+										: settleHeldSubscribe(batchUdV, topic, batchTokensV[i]));
+									const settleDeniedV = (heldNow) => (batchTokensV === null
+										? 'deny'
+										: settleDeniedSubscribe(batchUdV, topic, batchTokensV[i], heldNow));
+									// Read once and handed to both decisions below; nothing
+									// between here and the subscribe mutates it for this topic.
+									const held = udSubs.has(topic);
+									const denial = (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: _hasUserHookV, held, topic }) ? 'FORBIDDEN' : null)
 										?? (batchDenials !== null
 											? (batchDenials[topic] ?? null)
 											: (perTopicDenials !== null ? perTopicDenials[i] : null));
 									if (denial !== null) {
+										// The hook denied, but it may have installed tracked membership
+										// (a plugin join) before deciding, and a revocation may have tombstoned
+										// this attempt mid-await. Settling blindly here left that membership
+										// standing: the held branch below defers to a sibling attempt still in
+										// flight, so when that sibling's hook denies too, every attempt leaves
+										// through this exit and nothing remains to judge the membership.
+										if (settleDeniedV(held) === 'deny-unwind') {
+											unwindRevokedMembership(wrapped, topic);
+											userHandlers.unsubscribe?.(wrapped, topic, { platform: batchUdV[WS_PLATFORM] });
+										}
 										sendDenied(ws, topic, ref, denial);
 										continue;
 									}
-									if (udSubs.has(topic)) {
-										sendSubscribedV(ws, topic, ref);
+									if (held) {
+										// Same provenance read as the single lane: a revoked
+										// attempt whose own hook installed the membership must
+										// not ack it.
+										const heldVerdictV = settleHeldV();
+										if (heldVerdictV === 'ack') {
+											sendSubscribedV(ws, topic, ref);
+											continue;
+										}
+										if (heldVerdictV === 'deny-unwind') {
+											unwindRevokedMembership(wrapped, topic);
+											userHandlers.unsubscribe?.(wrapped, topic, { platform: batchUdV[WS_PLATFORM] });
+										}
+										sendDenied(ws, topic, ref, 'FORBIDDEN');
 										continue;
 									}
-									if (udSubs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+									if (exceedsSubscriptionCap({ held, size: udSubs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) {
+										settleV();
 										sendDenied(ws, topic, ref, 'RATE_LIMITED');
+										continue;
+									}
+									// Revocation tombstone: a platform.unsubscribe that landed
+									// during the hook or resume awaits cancelled this topic -
+									// discard the grant and answer truthfully rather than acking.
+									if (!settleV(true)) {
+										sendDenied(ws, topic, ref, 'FORBIDDEN');
 										continue;
 									}
 									subs?.add(topic);
@@ -1613,6 +2179,24 @@ export default function uws(options = {}) {
 								const lastSeenEpochs = (msg.lastSeenEpochs && typeof msg.lastSeenEpochs === 'object')
 									? msg.lastSeenEpochs
 									: undefined;
+								// Mirror production's grant filter: `resume` is
+								// client-named and yields a topic's replay history,
+								// so under the pure-grant model ungranted topics are
+								// dropped before the hook sees them. Dev running a
+								// looser rule than production is how an app ends up
+								// developing against a gate that is not there.
+								let resumeSeqsV = msg.lastSeenSeqs;
+								if (SUBSCRIBE_AUTHZ_V && !hasUserSubscribeHookV() && resumeSeqsV && typeof resumeSeqsV === 'object') {
+									const grantsV = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS];
+									/** @type {Record<string, unknown>} */
+									const allowedV = Object.create(null);
+									let droppedV = 0;
+									for (const t of Object.keys(resumeSeqsV)) {
+										if (deniesUngrantedObserve(true, false, grantsV, t)) { droppedV++; continue; }
+										allowedV[t] = resumeSeqsV[t];
+									}
+									if (droppedV > 0) resumeSeqsV = allowedV;
+								}
 								if (userHandlers.resume) {
 									try {
 										// Mirror production: await the user hook so
@@ -1621,7 +2205,7 @@ export default function uws(options = {}) {
 										// to live mode.
 										await userHandlers.resume(wrapped, {
 											sessionId: msg.sessionId,
-											lastSeenSeqs: msg.lastSeenSeqs,
+											lastSeenSeqs: resumeSeqsV,
 											lastSeenEpochs,
 											platform: wrapped.getUserData()[WS_PLATFORM]
 										});
@@ -1689,9 +2273,7 @@ export default function uws(options = {}) {
 					// when the prefix matched + parsed to an object + no control
 					// type matched; otherwise undefined.
 					await handlerReady;
-					if (userHandlers.message) {
-						userHandlers.message(wrapped, { data: arrayBuffer, isBinary: !!isBinary, msg, platform: wrapped.getUserData()[WS_PLATFORM] });
-					}
+					await runMessageHook(userHandlers.message, wrapped, { data: arrayBuffer, isBinary: !!isBinary, msg, platform: wrapped.getUserData()[WS_PLATFORM] });
 				});
 
 				ws.on('close', (code, reason) => {

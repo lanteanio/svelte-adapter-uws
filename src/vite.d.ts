@@ -2,10 +2,17 @@ import type { Plugin } from 'vite';
 import type { WebSocketOptions } from './index.js';
 
 /**
- * Subset of `WebSocketOptions` that the dev plugin honors. Picked from
- * the adapter's own type so JSDoc and defaults stay in lockstep with
- * production - a flag added to `WebSocketOptions` surfaces here
- * automatically without a second declaration.
+ * Subset of `WebSocketOptions` that the dev plugin honors. Picked from the
+ * adapter's own type so the JSDoc and defaults of a listed flag stay in lockstep
+ * with production.
+ *
+ * NOTE this is an explicit list, not an open door: a flag added to
+ * `WebSocketOptions` does NOT appear here until it is named below. That gap is
+ * how `authorizeWireSubscribe` came to be read by src/vite.js while being a type
+ * error to pass, so a flag the dev server honors must be added in both places.
+ * These options are FLAT and are not copied from the adapter's `websocket`
+ * object. Repeat security options here when dev must enforce the production
+ * posture, e.g. `uws({ authorizeWireSubscribe: true })`.
  */
 type SharedAdapterOptions = Pick<
 	WebSocketOptions,
@@ -16,6 +23,7 @@ type SharedAdapterOptions = Pick<
 	| 'allowSystemTopicSubscribe'
 	| 'allowNonAsciiTopics'
 	| 'authPathRequireOrigin'
+	| 'authorizeWireSubscribe'
 >;
 
 export interface UWSPluginOptions extends SharedAdapterOptions {
@@ -48,12 +56,16 @@ export interface UWSPluginOptions extends SharedAdapterOptions {
  * - Dev: spins up a WebSocket server so `event.platform` works during `npm run dev`
  * - Build: injects `hooks.ws` into Vite's SSR pipeline so `$lib`, `$env`, and `$app` resolve correctly
  *
+ * The plugin's dev options are separate from `adapter({ websocket: ... })`.
+ * Repeat shared security flags explicitly; they are not inherited from
+ * `svelte.config.js`.
+ *
  * ```js
  * import { sveltekit } from '@sveltejs/kit/vite';
  * import uws from 'svelte-adapter-uws/vite';
  *
  * export default {
- *   plugins: [sveltekit(), uws()]
+ *   plugins: [sveltekit(), uws({ authorizeWireSubscribe: true })]
  * };
  * ```
  */

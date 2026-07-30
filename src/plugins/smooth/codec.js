@@ -647,6 +647,24 @@ function readDeltaHead(r, dict) {
 }
 
 /**
+ * Set one decoded field on a reconstructed state. A '__proto__' field name is
+ * defined as an OWN DATA property - matching JSON.parse, whose reconstruction
+ * the field delta must stay byte-identical to - rather than assigned through
+ * the inherited setter, which would replace the object's prototype with
+ * wire-controlled data instead of creating the field.
+ * @param {Record<string, any>} out
+ * @param {string} field
+ * @param {any} value
+ */
+function setDecodedField(out, field, value) {
+	if (field === '__proto__') {
+		Object.defineProperty(out, field, { value, enumerable: true, writable: true, configurable: true });
+	} else {
+		out[field] = value;
+	}
+}
+
+/**
  * Apply one decoded field-delta entry: reconstruct the state from the key's
  * baseline plus the head, pull the numeric values off `br`, and advance the
  * key's delta state (baseline, slots, remembered numeric set). A fresh object
@@ -660,7 +678,7 @@ function readDeltaHead(r, dict) {
 function applyDeltaEntry(dict, key, head, br) {
 	const prev = dict.baseline.get(key);
 	const out = prev === undefined ? {} : { ...prev };
-	for (let i = 0; i < head.litPairs.length; i++) out[head.litPairs[i][0]] = head.litPairs[i][1];
+	for (let i = 0; i < head.litPairs.length; i++) setDecodedField(out, head.litPairs[i][0], head.litPairs[i][1]);
 	for (let i = 0; i < head.remFields.length; i++) delete out[head.remFields[i]];
 	let keySlots = dict.slots.get(key);
 	if (head.numFields.length > 0) {
@@ -675,7 +693,7 @@ function applyDeltaEntry(dict, key, head, br) {
 				slot = createStreamSlot();
 				keySlots.set(f, slot);
 			}
-			out[f] = readStreamValue(br, slot);
+			setDecodedField(out, f, readStreamValue(br, slot));
 		}
 	}
 	if (keySlots !== undefined) {
@@ -709,7 +727,7 @@ function applySameEntry(dict, key, br) {
 	}
 	const out = { ...prev };
 	for (let i = 0; i < fields.length; i++) {
-		out[fields[i]] = readStreamValue(br, keySlots.get(fields[i]));
+		setDecodedField(out, fields[i], readStreamValue(br, keySlots.get(fields[i])));
 	}
 	dict.baseline.set(key, out);
 	return out;

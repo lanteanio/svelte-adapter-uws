@@ -82,6 +82,11 @@ const TOPIC_PREFIX = '__replay:';
  *
  *   // Client requests replay after SSR
  *   if (msg.type === 'replay') {
+ *     // Authorize before replaying: the buffer is identity-blind and
+ *     // hands any topic's history to whoever names it. Only replay
+ *     // topics this connection passed the subscribe gate for - without
+ *     // the check, a client can read every topic's buffered history.
+ *     if (!ws.isSubscribed(msg.topic)) return;
  *     replay.replay(ws, msg.topic, msg.since, platform);
  *     return;
  *   }

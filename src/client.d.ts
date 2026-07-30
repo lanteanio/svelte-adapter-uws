@@ -766,3 +766,25 @@ export function registerWireCodec(
  * and safe to call before the connection exists.
  */
 export function setTopicManaged(topic: string): void;
+
+/**
+ * How a WebSocket close code should be treated by the reconnect loop:
+ * `TERMINAL` (do not retry), `THROTTLE` (retry, but back off harder) or
+ * `RETRY` (ordinary reconnect).
+ * @internal
+ */
+export function classifyCloseCode(
+	code: number | undefined
+): 'TERMINAL' | 'THROTTLE' | 'RETRY';
+
+/**
+ * The next reconnect delay in milliseconds: exponential backoff from `base`,
+ * capped at `maxDelay`, jittered to spread a fleet's reconnects.
+ * @internal
+ */
+export function nextReconnectDelay(
+	base: number,
+	maxDelay: number,
+	attempt: number,
+	randFactor?: number
+): number;

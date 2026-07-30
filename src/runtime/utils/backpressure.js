@@ -147,7 +147,7 @@ export const BACKPRESSURE_SAMPLE_THRESHOLD_BYTES = 64 * 1024;
  * Pure with respect to everything but the supplied connections: the only
  * side-effecting boundary is `getBufferedAmount()`, so a unit test drives it
  * with mock connections and no real socket. Kept in this module (not inline in
- * the sampler) so the credo-4-sensitive bounded walk is unit-testable without
+ * the sampler) so the hot-path-sensitive bounded walk is unit-testable without
  * pulling the sampler's build-time-configured module graph.
  *
  * @param {Iterable<{ getBufferedAmount: () => number }>} connections

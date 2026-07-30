@@ -2,7 +2,7 @@
 // ws.subscribe() in try/catch inside platform.subscribe.
 //
 // The closed-WS race fix adds two try/catch blocks around uWS calls
-// that can throw on freed sockets. Credo #4 requires hot-path A/B
+// that can throw on freed sockets. This needs a hot-path A/B
 // before/after; this isolates the V8 try/catch cost from everything
 // else by mocking ws as a plain object so the only difference between
 // variants is the try/catch wrapper.

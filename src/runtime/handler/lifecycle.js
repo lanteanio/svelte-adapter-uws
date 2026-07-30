@@ -1,3 +1,5 @@
+// Substituted by the adapter's build step; a free identifier until then.
+/* global WS_ENABLED */
 import uWS from 'uWebSockets.js';
 import { workerData } from 'node:worker_threads';
 import { wsModule } from '../ws-handler-bridge.js';

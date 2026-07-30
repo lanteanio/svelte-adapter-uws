@@ -4,7 +4,6 @@
 // Decomposed from a single 1839-line module; behaviour and exports unchanged.
 
 export * from './utils/mime.js';
-export * from './utils/cookies-string.js';
 export * from './utils/parse.js';
 export * from './utils/backpressure.js';
 export * from './utils/epoch.js';

@@ -1,3 +1,5 @@
+// Substituted by the adapter's build step; a free identifier until then.
+/* global WORKERS_CONFIG */
 import process from 'node:process';
 import { isMainThread, parentPort, threadId, Worker, workerData } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';

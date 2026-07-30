@@ -173,7 +173,11 @@ export interface WebSocketOptions {
 	 * is found, a built-in handler is used that accepts all connections and handles
 	 * subscribe/unsubscribe messages from the client store.
 	 *
-	 * Only specify this if your handler lives at a non-standard path.
+	 * Only specify this if your handler lives at a non-standard path. Naming it
+	 * here is enough - the dev plugin reads this value too, so the module the
+	 * dev server runs is the module the build bundles. Naming a *different*
+	 * module on the plugin (`uws({ handler })`) is a configuration error and
+	 * fails the build, rather than letting one of the two win silently.
 	 *
 	 * @example './src/lib/server/websocket.js'
 	 */
@@ -219,6 +223,21 @@ export interface WebSocketOptions {
 	adminPath?: string | false;
 
 	/**
+	 * Silence the boot warning that the auto-mounted admin route carries no
+	 * adapter-level authentication.
+	 *
+	 * The adapter mounts `admin` without gating it - whether requests are
+	 * authenticated is entirely up to the handler, and the adapter cannot
+	 * inspect that - so it warns once at startup. Set this to `true` after
+	 * confirming the handler validates a session cookie, bearer token or
+	 * equivalent, so the line stops appearing in logs an operator has already
+	 * acted on. It changes nothing about routing or authorization.
+	 *
+	 * @default false
+	 */
+	adminAuthAcknowledged?: boolean;
+
+	/**
 	 * Max message size in bytes. Connections sending larger messages are closed.
 	 * Default 1 MB is balanced for typical app payloads in a single frame; uWS
 	 * itself defaults to 16 KB. Lower this for stricter caps (e.g. `16 * 1024`
@@ -229,6 +248,9 @@ export interface WebSocketOptions {
 
 	/**
 	 * Seconds of inactivity before the connection is closed.
+	 * Set to `0` to disable the idle timeout and uWS's automatic ping. A peer
+	 * that disappears silently is then never reaped and keeps its connection
+	 * slot until the socket is closed by some other means.
 	 * @default 120
 	 */
 	idleTimeout?: number;
@@ -298,7 +320,18 @@ export interface WebSocketOptions {
 	/**
 	 * Allowed origins for WebSocket connections.
 	 *
-	 * - `'same-origin'` - only accept connections where Origin matches Host and scheme *(default)*
+	 * - `'same-origin'` - only accept connections whose Origin matches the
+	 *   deployment's own origin *(default)*. When the `ORIGIN` env var is set
+	 *   it is the authority and the request Host header is NOT consulted:
+	 *   Host is attacker-controlled for a non-browser client, so comparing
+	 *   two attacker-supplied headers accepts anything. Without `ORIGIN`, the
+	 *   comparison falls back to Host (with `HOST_HEADER` / `PROTOCOL_HEADER`
+	 *   / `PORT_HEADER` overrides applied). Consequence worth knowing: a
+	 *   deployment reachable at several hostnames (apex plus www, a staging
+	 *   alias, an internal load-balancer name) must either leave `ORIGIN`
+	 *   unset or list every origin explicitly with the array form - with
+	 *   `ORIGIN` set, WebSocket upgrades from the other names are refused
+	 *   while ordinary HTTP keeps working.
 	 * - `'*'` - accept connections from any origin
 	 * - `string[]` - whitelist of allowed origin URLs (e.g. `['https://example.com']`)
 	 *
@@ -324,6 +357,17 @@ export interface WebSocketOptions {
 	 * preserved, or set this to `0` if you rate-limit upstream. The runtime
 	 * warns once if it rejects an upgrade keyed on a private/loopback address
 	 * while `ADDRESS_HEADER` is unset.
+	 *
+	 * A global IPv6 address is keyed on its /64 prefix rather than the full
+	 * address: a /64 is the smallest block a host is routinely given, so keying
+	 * on the /128 would let one host source every request from a fresh address
+	 * and never share a bucket with itself. The consequence for legitimate
+	 * traffic is that clients behind one /64 (a campus, an office, a VPN
+	 * egress) share a bucket. A 6to4 address (`2002::/16`) encodes its site
+	 * allocation, so it is keyed coarser, on its /48 site prefix - the whole
+	 * site shares one bucket. IPv4, IPv4-mapped addresses and ranges whose
+	 * /64 is shared by unrelated clients (NAT64, Teredo, link-local) keep the
+	 * full address.
 	 * @default 10
 	 */
 	upgradeRateLimit?: number;
@@ -333,6 +377,33 @@ export interface WebSocketOptions {
 	 * @default 10
 	 */
 	upgradeRateLimitWindow?: number;
+
+	/**
+	 * Per-IP sliding-window rate limit on the auth preflight endpoint - the
+	 * request `connect({ auth: true })` clients POST before upgrading. Clients
+	 * over the limit get `429 Too Many Requests` and the `authenticate` hook is
+	 * never called, so a credential check against a database cannot be driven at
+	 * raw server capacity from one address. Set to `0` to disable.
+	 *
+	 * The default is HIGHER than `upgradeRateLimit` on purpose. Every reconnect
+	 * that preflights also upgrades, so this door sees at least as much traffic
+	 * as the upgrade door during a deploy's reconnect wave, and a NAT'd network
+	 * behind one address multiplies both. Matching them 1:1 would make the
+	 * preflight the binding constraint and refuse traffic the upgrade limit would
+	 * have admitted.
+	 *
+	 * Same identity resolution as `upgradeRateLimit`, so it inherits the same
+	 * caveat: behind an address-rewriting proxy with `ADDRESS_HEADER` unset,
+	 * every client shares one bucket and this becomes a global cap.
+	 * @default 30
+	 */
+	authPathRateLimit?: number;
+
+	/**
+	 * Time window in seconds for the auth preflight rate limiter.
+	 * @default 10
+	 */
+	authPathRateLimitWindow?: number;
 
 	/**
 	 * Admission control for WebSocket upgrades. Two independent layers,
@@ -852,11 +923,19 @@ export interface WebSocketOptions {
 	 * This closes the bypass where a client names a topic it was never granted
 	 * (a private room, another tenant's channel) and receives its fan-out,
 	 * because the server-side guard ran only on the server-initiated subscribe,
-	 * not the client's wire frame. Server-side `platform.subscribe` /
-	 * `platform.checkSubscribe` are the trusted authorization path and are never
-	 * gated by this. A framework whose subscriptions are all server-initiated
-	 * (svelte-realtime) arms this automatically via
+	 * not the client's wire frame. Server-side `platform.subscribe` is the
+	 * trusted grant-establishing path and is never gated by this.
+	 * `platform.checkSubscribe(ws, topic, { requireGrant: true })` - the gate
+	 * `presence.sync` and `cursor.snapshot` run - honors the same grant model
+	 * once armed: the topic must be in the connection's grant set AND pass the
+	 * hook chain, so those snapshot lanes cannot bypass tenant isolation
+	 * either. (`presence.join` is invoked by the app from its own already
+	 * gated subscribe path and is not covered by this.) A framework whose subscriptions
+	 * are all server-initiated (svelte-realtime) arms this automatically via
 	 * `platform.authorizeWireSubscribe()`; direct adapter apps set it here.
+	 * The Vite dev server has a separate, flat option bag: repeat this as
+	 * `uws({ authorizeWireSubscribe: true })` in `vite.config.js`. Security flags
+	 * are not copied from `svelte.config.js` into the already-created dev plugin.
 	 *
 	 * @default false
 	 */
@@ -984,7 +1063,14 @@ export interface MetricsRegistry {
 		name: string,
 		help: string,
 		labelNames?: string[]
-	): { inc(labels?: Record<string, string>): void };
+	): {
+		/**
+		 * Increment the counter. `value` defaults to 1; a registry that ignores it
+		 * will under-count any metric the runtime increments in bulk (the relay-gap
+		 * counter reports FRAMES lost, not incidents), so implement it.
+		 */
+		inc(labels?: Record<string, string>, value?: number): void;
+	};
 	gauge(
 		name: string,
 		help: string
@@ -2405,6 +2491,14 @@ export interface Platform {
 	 * both times and does not double-charge counters or trigger the hook
 	 * a second time. Updates `WS_SUBSCRIPTIONS` and `totalSubscriptions`
 	 * so observability stays consistent with client-initiated subscribes.
+	 *
+	 * One exception, and it is a revocation rather than a race: if
+	 * {@link Platform.unsubscribe} cancels this call while its hook is still
+	 * awaiting, and the topic is nonetheless held afterwards only because that
+	 * cancelled hook installed membership itself (a plugin join), the call
+	 * resolves `'FORBIDDEN'` and removes that membership rather than reporting
+	 * it as a success. A subscription granted AFTER the revocation is current
+	 * authority and still resolves `null`.
 	 * Does not send a `{type:'subscribed', topic, ref}` ack frame - there
 	 * is no client `ref` for a server-initiated subscribe.
 	 *
@@ -2466,6 +2560,21 @@ export interface Platform {
 	 * throwing user hook denies with `'INTERNAL_ERROR'` rather than
 	 * crashing the caller.
 	 *
+	 * Pass `{ requireGrant: true }` for an OBSERVER lane - a caller showing a
+	 * connection state for a topic it should already hold, rather than one
+	 * deciding whether to grant it. With wire-subscribe authorization armed
+	 * and no app subscribe hook, that mode also requires the topic to be in
+	 * the connection's grant set (a prior `platform.subscribe`), which is what
+	 * stops `presence.sync` / `cursor.snapshot` handing over a cross-tenant
+	 * roster. Membership is checked again after an async side-effect hook, so a
+	 * `platform.unsubscribe` that lands while authorization is pending revokes
+	 * the observation; a topic genuinely re-granted before the check lands is
+	 * admitted. It is deliberately not the default: the ordinary use below gates
+	 * BEFORE the grant exists, so requiring one would deny every such call.
+	 * Observer mode also applies the configured client wire-topic alphabet,
+	 * because presence/cursor pass a topic named by a snapshot frame rather than
+	 * a server-trusted string.
+	 *
 	 * @example
 	 * ```js
 	 * // Inside a stream-RPC handler that gates before running the
@@ -2478,21 +2587,30 @@ export interface Platform {
 	 * reply({ id, ok: true, data: initial, topic });
 	 * ```
 	 */
-	checkSubscribe(ws: WebSocket<unknown>, topic: string): Promise<string | null>;
+	checkSubscribe(
+		ws: WebSocket<unknown>,
+		topic: string,
+		options?: { requireGrant?: boolean }
+	): Promise<string | null>;
 
 	/**
-	 * Arm wire-subscribe authorization for this process (the programmatic
+	 * Arm wire-subscribe authorization for this worker (the programmatic
 	 * equivalent of the `websocket.authorizeWireSubscribe` option). Once armed,
 	 * a CLIENT-initiated `subscribe` / `subscribe-batch` frame is honored only
 	 * for a topic the server already authorized for that connection via
 	 * `platform.subscribe`, unless the app exports its own `subscribe` /
 	 * `subscribeBatch` hook (which then decides). Server-side `platform.subscribe`
-	 * / `platform.checkSubscribe` are never gated by this.
+	 * is the trusted grant-establishing path and is never gated by this;
+	 * `platform.checkSubscribe(ws, topic, { requireGrant: true })` - the
+	 * observer-lane mode - additionally requires grant-set membership once
+	 * armed.
 	 *
 	 * For a framework that owns subscription authorization and routes every
 	 * legitimate subscribe through `platform.subscribe` (e.g. svelte-realtime,
 	 * which gates each subscription in its stream RPC): call once at startup,
-	 * before connections arrive. Idempotent and process-wide.
+	 * before connections arrive. Idempotent and worker-wide; call it from each
+	 * worker's startup hook rather than expecting one worker's call to mutate
+	 * another worker's JavaScript realm.
 	 */
 	authorizeWireSubscribe(): void;
 
@@ -2504,6 +2622,11 @@ export interface Platform {
 	 * otherwise removes the subscription, decrements `totalSubscriptions`,
 	 * fires `hooks.ws.unsubscribe` (informational, not a gate - mirrors
 	 * the wire-level unsubscribe path), and returns `true`.
+	 *
+	 * A topic whose subscribe is still in flight (parked in an async
+	 * authorization-hook await) is tombstoned instead: the pending grant
+	 * is discarded when the awaited subscribe lands, and the cancel
+	 * counts as a removal (`true`).
 	 *
 	 * Closed-WS safe: returns `false` and bumps `platform.closedWsAborts`
 	 * if the socket has already closed.
@@ -2803,5 +2926,69 @@ export interface TopicHelper {
 
 // `upgradeResponse` is exported from the 'svelte-adapter-uws/upgrade-response' subpath, not
 // from this root module - see src/upgrade-response.d.ts for the helper and its docs.
+
+// Build internals. These are not part of the supported API and carry no
+// compatibility promise - they are declared because the module really does
+// export them, and a runtime export with no declaration is the drift this
+// package closed once already (an import that runs but does not typecheck).
+// Prefer configuring the adapter through `AdapterOptions`.
+
+/**
+ * Websocket option keys the adapter recognizes. Anything else in the
+ * `websocket` object is dropped at build time and warned about.
+ * @internal
+ */
+export declare const KNOWN_WEBSOCKET_OPTION_KEYS: ReadonlySet<string>;
+
+/**
+ * Keys present in a `websocket` object that the adapter does not recognize.
+ * @internal
+ */
+export declare function unknownWebsocketOptionKeys(
+	websocket: Record<string, unknown> | null | undefined
+): string[];
+
+/**
+ * Serialize normalized websocket options into the object baked into the build.
+ * Throws when a flag that restricts access carries a non-boolean value, since
+ * reading such a value as "off" would silently disarm it.
+ * @internal
+ */
+export declare function serializeWsOptions(
+	websocket: Record<string, unknown> | null,
+	adminPath: string | false
+): Record<string, unknown>;
+
+/**
+ * Recognized keys inside the nested `websocket` option objects, keyed by the
+ * dotted path of the object they belong to. A typo nested one level down is
+ * dropped just as silently as a top-level one, so these are checked too.
+ * @internal
+ */
+export declare const KNOWN_NESTED_WEBSOCKET_OPTION_KEYS: Readonly<
+	Record<string, ReadonlySet<string>>
+>;
+
+/**
+ * Read the record the Vite plugin leaves of which module it built the
+ * WebSocket handler from. `null` when the build carries no such record.
+ * @internal
+ */
+export declare function readHandlerOrigin(
+	tmp: string
+): { source: string; absolute: string | null; from: string } | null;
+
+/**
+ * Refuse when the adapter's `websocket.handler` disagrees with the module the
+ * Vite plugin actually bundled, which would otherwise ship a handler the app
+ * did not ask for. Warns only when an older/unrelated plugin emitted no origin
+ * record at all.
+ * @internal
+ */
+export declare function assertBundledHandlerMatches(
+	handler: string | null | undefined,
+	origin: { source: string; absolute?: string | null; from: string } | null,
+	log: { warn: (msg: string) => void }
+): void;
 
 export default function adapter(options?: AdapterOptions): Adapter;

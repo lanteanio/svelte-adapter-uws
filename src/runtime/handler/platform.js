@@ -1,16 +1,19 @@
+// Substituted by the adapter's build step; a free identifier until then.
+/* global WS_OPTIONS */
 import { wsModule } from '../ws-handler-bridge.js';
 import { metricsRegistry } from '../metrics-bridge.js';
 import { parentPort } from 'node:worker_threads';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_SUBSCRIPTIONS, assert, fatal, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, wrapBatchEnvelope } from '../utils.js';
+import { exceedsSubscriptionCap } from '../utils/subscribe-policy.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, deniesUngrantedObserve, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
 import { capCounts, captureResumeFrame, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, resumeBuffers, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
-import { app, wsDebug, WS_COMPRESSION_ON } from './config.js';
+import { app, wsDebug, WS_COMPRESSION_ON, ALLOW_NON_ASCII_TOPICS } from './config.js';
 import { envelopePrefix } from './envelope-cache.js';
 import { batchRelay, relayBatched } from './relay.js';
 import { readHlc } from './hlc.js';
 import { BATCH_FRAME_WARN_BYTES, bumpOut, maybeWarnTopicRegistry, warnLargeBatchFrame } from './pressure-metrics.js';
-import { flushCoalescedFor, runUserSubscribeGate } from './subscribe-hooks.js';
+import { flushCoalescedFor, runUserSubscribeGate, hasUserSubscribeHook } from './subscribe-hooks.js';
 import { ensureWireId, ensureWireState, poisonWireState, wireStatePoisoned } from './wire-state.js';
 import { GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './game-ingress.js';
 import { registerWireCodec as _registerWireCodec, getWireCodec } from './codec-registry.js';
@@ -25,6 +28,13 @@ let _topicHelperCache = null;
 
 /** @type {import('../../index.js').Platform} */
 export const platform = {
+	// The observer lane's deny-unwind (authorizeDerivedSubscribe) runs the
+	// app's unsubscribe hook through this slot - the shared primitive has no
+	// module reference to wsModule. Symbol-keyed: invisible to Object.keys /
+	// JSON / spread, unreachable from wire input. See WS_REVOKED_UNSUBSCRIBE.
+	[WS_REVOKED_UNSUBSCRIBE](ws, topic, ud) {
+		wsModule.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+	},
 	/**
 	 * Publish a message to all WebSocket clients subscribed to a topic.
 	 * Auto-wraps in a { topic, event, data } envelope that the client store understands.
@@ -1167,24 +1177,62 @@ export const platform = {
 		// plugin code paths routinely `await` something else before
 		// reaching here, so the WS may already be closed by the time
 		// this runs. Treat as a silent no-op.
-		let subs;
-		try { subs = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+		let ud;
+		try { ud = ws.getUserData(); }
 		catch { counters.closedWsAborts++; return null; }
+		const subs = ud[WS_SUBSCRIPTIONS];
 		// The subscription slot is assigned a Set once at open and never reassigned;
 		// a non-Set here is unrecoverable heap/dispatch corruption. One instanceof
 		// guard, identical in cost to the assert it replaces. A freed handle is
 		// caught above and returns early, so this only runs on a live connection.
 		fatal(subs instanceof Set, 'subs.shape', null);
-		if (subs.has(topic)) return null;
-		if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
+		const held = subs.has(topic);
+		if (held) return null;
+		if (exceedsSubscriptionCap({ held, size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) return 'RATE_LIMITED';
+		// Track the in-flight subscribe so a revocation landing during the
+		// hook await can cancel it: platform.unsubscribe tombstones the topic
+		// in the pending set and the landing below discards the grant instead
+		// of subscribing (revocation TOCTOU).
+		const pendingToken = beginPendingSubscribe(ud, topic, held);
 		const denial = await runUserSubscribeGate(ws, topic);
-		if (denial !== null) return denial;
+		if (denial !== null) {
+			// The hook denied, but it may have installed tracked membership
+			// (a plugin join) before deciding, and a revocation may have tombstoned
+			// this attempt mid-await. Settling blindly here left that membership
+			// standing: the held branch below defers to a sibling attempt still in
+			// flight, so when that sibling's hook denies too, every attempt leaves
+			// through this exit and nothing remains to judge the membership.
+			if (settleDeniedSubscribe(ud, topic, pendingToken, subs.has(topic)) === 'deny-unwind') {
+				unwindRevokedMembership(ws, topic);
+				wsModule.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+			}
+			return denial;
+		}
 		// Re-check after the await: a concurrent subscribe (wire frame
 		// or another platform.subscribe call) may have raced through
 		// while we awaited the user hook. Idempotent ack and skip the
 		// counter bump in that case.
-		if (subs.has(topic)) return null;
-		if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) return 'RATE_LIMITED';
+		const heldAfter = subs.has(topic);
+		if (heldAfter) {
+			// A revocation may have tombstoned this attempt mid-await while its
+			// OWN hook installed the membership (a plugin join). Read the
+			// provenance rather than acking blindly: ack a surviving attempt or
+			// a fresh post-revoke grant, deny a revoked one - unwinding the
+			// hook-installed membership when no live authority backs it.
+			const heldVerdict = settleHeldSubscribe(ud, topic, pendingToken);
+			if (heldVerdict === 'ack') return null;
+			if (heldVerdict === 'deny-unwind') {
+				unwindRevokedMembership(ws, topic);
+				wsModule.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
+			}
+			return 'FORBIDDEN';
+		}
+		if (exceedsSubscriptionCap({ held: heldAfter, size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) { settlePendingSubscribe(ud, topic, pendingToken); return 'RATE_LIMITED'; }
+		// Revocation tombstone: platform.unsubscribe ran while the hook
+		// awaited, so the grant was revoked before it materialized - discard
+		// it. No further await follows before ws.subscribe, so this single
+		// check covers the whole window.
+		if (!settlePendingSubscribe(ud, topic, pendingToken, true)) return 'FORBIDDEN';
 		// `ws.subscribe()` throws if the socket closed during the await
 		// above. Under mass-connect / backpressure churn this is the
 		// dominant abort mode (10-15% of connections close mid-setup).
@@ -1231,6 +1279,18 @@ export const platform = {
 	 * `Promise` so async user hooks (typically those touching a database
 	 * or session store) deny correctly when they return `false`.
 	 *
+	 * Pass `{ requireGrant: true }` for an OBSERVER lane - a caller that shows
+	 * a connection state for a topic it is supposed to already hold, rather
+	 * than one deciding whether to grant it. With wire-subscribe authorization
+	 * armed and no app subscribe hook, that mode additionally requires the
+	 * topic to be in the connection's grant set (a prior `platform.subscribe`),
+	 * which is what keeps `presence.sync` and `cursor.snapshot` - gated only by
+	 * this check - from leaking a cross-tenant roster. Grant membership is read
+	 * again after an async side-effect hook, so a revocation inside that await
+	 * cannot return an obsolete allow. It is deliberately NOT
+	 * the default: the ordinary use below gates BEFORE establishing the grant,
+	 * so requiring one would deny every such call.
+	 *
 	 * @example
 	 * ```js
 	 * // Inside a stream-RPC handler that needs to gate before running
@@ -1247,23 +1307,66 @@ export const platform = {
 	 * @param {string} topic
 	 * @returns {Promise<string | null>} denial reason string or `null` on allow
 	 */
-	async checkSubscribe(ws, topic) {
+	async checkSubscribe(ws, topic, options) {
 		// Server-side caller: same trust as platform.subscribe (see
 		// note there). Wire-side gating happens earlier in the message
-		// handler with the strict ASCII-only default.
-		if (!isValidWireTopic(topic, true)) return 'INVALID_TOPIC';
-		return await runUserSubscribeGate(ws, topic);
+		// handler with the configured alphabet. `requireGrant` is different:
+		// presence/cursor use it for CLIENT-NAMED snapshot frames, so that mode
+		// must accept exactly the same topic alphabet as the wire boundary.
+		if (!isValidWireTopic(topic, options && options.requireGrant ? ALLOW_NON_ASCII_TOPICS : true)) {
+			return 'INVALID_TOPIC';
+		}
+		// `requireGrant` is the OBSERVER-LANE mode, opted into by the caller.
+		// It must not be the default: the ordinary use of this method is to
+		// gate BEFORE establishing a grant (the stream-RPC example above
+		// gates, runs a loader, then subscribes), and requiring the grant to
+		// exist already would make every such call deny under a pure-grant
+		// deployment. The snapshot lanes are the opposite shape - they answer
+		// "may this connection see what it already holds?" - so they pass it.
+		const requireGrant = Boolean(options && options.requireGrant);
+		let observerHasUserHook = false;
+		if (requireGrant) {
+			// One authorization-model reading for the entire async decision. The
+			// production module is static, but the mirrors hot-swap/mutate handlers;
+			// taking a second reading after the await could judge one call under two
+			// different authorities.
+			observerHasUserHook = hasUserSubscribeHook();
+			let granted;
+			try { granted = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+			catch { counters.closedWsAborts++; return 'FORBIDDEN'; }
+			if (deniesUngrantedObserve(subscribeAuth.enabled, observerHasUserHook, granted, topic)) {
+				return 'FORBIDDEN';
+			}
+		}
+		const denial = await runUserSubscribeGate(ws, topic);
+		if (denial !== null) return denial;
+		if (requireGrant) {
+			// The hook can be async. A grant that existed before that await is not
+			// authority to reveal state after platform.unsubscribe revoked it while
+			// the hook was parked. Re-read the CURRENT Set at landing; a legitimate
+			// revoke-then-regrant is visible because the topic is present again.
+			let granted;
+			try { granted = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+			catch { counters.closedWsAborts++; return 'FORBIDDEN'; }
+			if (deniesUngrantedObserve(subscribeAuth.enabled, observerHasUserHook, granted, topic)) {
+				return 'FORBIDDEN';
+			}
+		}
+		return null;
 	},
 
 	/**
-	 * Turn on wire-subscribe authorization for this process. Once enabled, a
+	 * Turn on wire-subscribe authorization for this worker. Once enabled, a
 	 * CLIENT-initiated `subscribe` / `subscribe-batch` frame is honored only
 	 * for a topic the server already authorized for that connection via
 	 * `platform.subscribe` (recorded in the connection's subscription set),
 	 * unless the app exports its own `subscribe` / `subscribeBatch` hook - in
 	 * which case that hook decides, exactly as today. Server-side
-	 * `platform.subscribe` / `platform.checkSubscribe` are the trusted
-	 * authorization path and are never gated by this.
+	 * `platform.subscribe` is the trusted grant-establishing path and is
+	 * never gated by this; `platform.checkSubscribe` (the observer-lane
+	 * gate) additionally requires the topic to be in the connection's
+	 * grant set once armed, so the presence / cursor snapshot lanes hold
+	 * the same grant model as the wire path.
 	 *
 	 * This is the programmatic equivalent of the `websocket.authorizeWireSubscribe`
 	 * config flag, for a framework that owns subscription authorization and
@@ -1274,10 +1377,11 @@ export const platform = {
 	 * channel - and receives that topic's fan-out, because the server-side
 	 * guard ran only on the server-initiated subscribe, not the wire frame.
 	 *
-	 * Idempotent and process-wide (the flag lives in shared handler state, so
-	 * one call from any connection's platform reference arms every connection).
-	 * Call once at startup, before connections arrive - e.g. from a framework
-	 * `init({ platform })` hook.
+	 * Idempotent and worker-wide (the flag lives in this worker's shared handler
+	 * state, so one call arms every connection owned by this worker). Call from
+	 * per-worker startup - e.g. a framework `init({ platform })` hook - before
+	 * connections arrive. A call in one worker does not mutate another worker's
+	 * JavaScript realm.
 	 *
 	 * @returns {void}
 	 */
@@ -1444,20 +1548,52 @@ export const platform = {
 	 * a gate - mirrors the wire-level unsubscribe path), and returns
 	 * `true`.
 	 *
+	 * A topic with a subscribe still IN FLIGHT (a wire subscribe parked in
+	 * its authorization-hook await, or a `platform.subscribe` in the same
+	 * window) is tombstoned in the connection's pending-subscribe set: the
+	 * post-await landing checks the tombstone and discards the grant
+	 * instead of subscribing, so a revocation can no longer be silently
+	 * defeated by a subscribe that completes after it. Cancelling an
+	 * in-flight subscribe counts as a removal (`true`) - the revoke was
+	 * honored.
+	 *
 	 * @param {import('uWebSockets.js').WebSocket<any>} ws
 	 * @param {string} topic
-	 * @returns {boolean} `true` if a subscription was removed
+	 * @returns {boolean} `true` if a subscription was removed or an in-flight subscribe cancelled
 	 */
 	unsubscribe(ws, topic) {
 		// Closed sockets get an early-out: there is no subscription
 		// state to remove, no uWS bookkeeping to drop, no informational
 		// hook to fire. The platform contract is "best effort; no throw
 		// on closed WS" - mirrors subscribe / send.
-		let subs;
-		try { subs = ws.getUserData()[WS_SUBSCRIPTIONS]; }
+		let ud;
+		try { ud = ws.getUserData(); }
 		catch { counters.closedWsAborts++; return false; }
+		const subs = ud[WS_SUBSCRIPTIONS];
 		assert(subs instanceof Set, 'subs.shape-unsubscribe', null);
-		if (!subs.has(topic)) return false;
+		// Tombstone any in-flight subscribe for this topic FIRST, so a
+		// racing post-await landing discards its grant even when an
+		// established subscription is being removed below (a duplicate
+		// in-flight subscribe must not re-materialize it).
+		const cancelledPending = tombstonePendingSubscribe(ud, topic);
+		// Release any observer tap derived from this topic (presence's roster
+		// channel, cursor's position channel). Both plugins keep their tap alive
+		// across a participant leave on purpose and drop it only on socket close,
+		// so without this a kicked or banned client kept receiving the roster and
+		// every peer's position - and kept publishing, since the cursor lane
+		// authorizes a publish by asking whether the socket holds the tap. Done
+		// BEFORE the early return below: revoking a topic must release its taps
+		// whether or not the primary membership is still present.
+		releaseDerivedSubscriptions(ws, topic);
+		// Revoking a topic withdraws WRITE access to it as well as read access.
+		// The client-driven `game` lane carries no topic - it publishes to
+		// whatever `grantPublish` bound - so a kick that took the subscription
+		// away left the sender still bound to the room and still able to publish
+		// into it, silently, to everyone who remained. Read and write were
+		// granted together and must be revoked together. Scoped to this topic:
+		// a connection bound to some OTHER room keeps that binding.
+		if (ud[WS_PUBLISH_GRANT] === topic) ud[WS_PUBLISH_GRANT] = undefined;
+		if (!subs.has(topic)) return cancelledPending;
 		try { ws.unsubscribe(topic); }
 		catch { counters.closedWsAborts++; return false; }
 		subs.delete(topic);

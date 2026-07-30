@@ -63,6 +63,20 @@ import { now } from '../../runtime/runtime.js';
 /**
  * Create an in-process dedup cache with fixed-window TTL.
  *
+ * SECURITY - capacity is shared across all callers. The pool is one
+ * global map per instance, so eviction pressure does not respect key
+ * namespaces: a flood of more than 1.1x `maxEntries` distinct ids
+ * inside one TTL forces hard eviction of other users' live entries,
+ * which re-arms their operations - a victim's retry of an already-
+ * processed id is treated as first-sight and the side effect runs
+ * twice. Key namespacing (e.g. `order:${userId}:${clientRequestId}`)
+ * scopes collision resistance, not capacity; it does NOT mitigate
+ * the flood. Size `maxEntries` above your peak claim rate multiplied
+ * by `ttl`, and pair with the ratelimit plugin so a single caller
+ * cannot mint distinct ids fast enough to saturate the pool. Hosts
+ * handling financial or other one-shot side effects should monitor
+ * `size()` against `maxEntries` and alert on saturation.
+ *
  * @param {DedupOptions} options
  * @returns {Dedup}
  *

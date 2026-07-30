@@ -4,13 +4,12 @@
  * telemetry gauge) are correlated, so each is encoded against the slot's
  * previous sample instead of in full:
  *
- *   - integers ride delta-of-delta (the Facebook Gorilla timestamp scheme): a
- *     value moving at a constant rate costs a single zero bit, and small
- *     changes ride 7 / 9 / 12-bit buckets before a 32-bit escape.
- *   - other finite numbers ride XOR-against-previous (the Gorilla value
- *     scheme): the XOR of two nearby doubles is mostly leading/trailing zeros,
- *     so only the meaningful middle bits travel, reusing the previous block's
- *     window when it fits.
+ *   - integers ride delta-of-delta: a value moving at a constant rate costs a
+ *     single zero bit, and small changes ride 7 / 9 / 12-bit buckets before a
+ *     32-bit escape.
+ *   - other finite numbers ride XOR-against-previous: the XOR of two nearby
+ *     doubles is mostly leading/trailing zeros, so only the meaningful middle
+ *     bits travel, reusing the previous block's window when it fits.
  *
  * A per-value mode bit selects int vs float, so a series that mixes them (or
  * whose values wander in and out of the safe-integer range) stays correct with

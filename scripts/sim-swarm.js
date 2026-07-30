@@ -7,8 +7,8 @@
 // Environment:
 //   DST_SEED          first integer seed (default 1)
 //   DST_COUNT         number of consecutive seeds (default 200)
-//   DST_BUGGIFY       off | on | random (default random)
-//   DST_BUGGIFY_PROB  buggify probability under random mode (default 0.25)
+//   DST_FAULTS       off | on | random (default random)
+//   DST_FAULT_PROB  fault probability under random mode (default 0.25)
 //   DST_CHECK_RATIO   fraction of runs re-checked for determinism (default 0.05)
 //   DST_WORKERS       model N workers per run (default 1, single-worker)
 //   GIT_COMMIT        pins the source revision in the report
@@ -32,8 +32,8 @@ const num = (name, def) => {
 
 const startSeed = num('DST_SEED', 1);
 const count = num('DST_COUNT', 200);
-const buggify = (process.env.DST_BUGGIFY || 'random').toLowerCase();
-const buggifyProbability = num('DST_BUGGIFY_PROB', 0.25);
+const faultMode = (process.env.DST_FAULTS || 'random').toLowerCase();
+const faultProbability = num('DST_FAULT_PROB', 0.25);
 const checkRatio = num('DST_CHECK_RATIO', 0.05);
 const workers = num('DST_WORKERS', 1);
 const gitCommit = process.env.GIT_COMMIT || null;
@@ -43,13 +43,13 @@ const maxRuns = num('DST_MAX_RUNS', 200);
 const base = {};
 if (workers > 1) base.workers = workers;
 
-// A representative fault profile for buggified runs: drop / duplicate / reorder
+// A representative fault profile for faulted runs: drop / duplicate / reorder
 // / jitter applied below the dispatch. These never break the server invariants -
 // proving that under chaos is exactly the swarm's job.
 const faultProfile = { drop: 0.25, duplicate: 0.15, reorder: 0.5, maxJitterMs: 30 };
 
 console.log(
-	`sim-swarm: ${count} seeds from ${startSeed}, buggify=${buggify}, checkRatio=${checkRatio}` +
+	`sim-swarm: ${count} seeds from ${startSeed}, faultMode=${faultMode}, checkRatio=${checkRatio}` +
 	(workers > 1 ? `, workers=${workers}` : '')
 );
 
@@ -61,9 +61,9 @@ const { summary, runs } = await runSimSwarm({
 	startSeed,
 	count,
 	base,
-	buggify,
+	faultMode,
 	faultProfile,
-	buggifyProbability,
+	faultProbability,
 	checkRatio,
 	gitCommit,
 	onResult(run, i) {
@@ -99,7 +99,7 @@ const report = {
 	durationMs,
 	node: process.version,
 	gitCommit: summary.gitCommit,
-	config: { startSeed, count, buggify, buggifyProbability, checkRatio, workers: workers > 1 ? workers : 1 },
+	config: { startSeed, count, faultMode, faultProbability, checkRatio, workers: workers > 1 ? workers : 1 },
 	summary,
 	runsTruncated,
 	keptPassingRuns: keptPassing.length,

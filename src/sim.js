@@ -838,8 +838,8 @@ export async function replaySim(reproducer) {
 }
 
 /**
- * Deterministic structural fingerprint of a run (the "unseed"): folds the
- * byte-stable result fields into one 8-hex-char FNV-1a digest. Same seed ->
+ * Deterministic structural fingerprint of a run: folds the byte-stable
+ * result fields into one 8-hex-char FNV-1a digest. Same seed ->
  * same fingerprint; if it ever differs for a fixed seed, determinism has
  * regressed - a cheap canary that needs no full trace diff.
  *
@@ -888,10 +888,10 @@ function runFailed(result) {
  * from `startSeed` (the one-base-int-plus-a-count contract, where the failing
  * seed string is itself the entire local reproduce command).
  *
- * `buggify` is the fault-enablement knob: 'off' (default - each run uses
+ * `faultMode` is the fault-enablement knob: 'off' (default - each run uses
  * `base.faults` as given, byte-identical to runSimMany), 'on' (every run layers
  * `faultProfile` over the base faults), or 'random' (a per-seed seeded coin at
- * `buggifyProbability`, default 0.25, decides whether that run is faulted - so
+ * `faultProbability`, default 0.25, decides whether that run is faulted - so
  * one swarm covers both the quiet and the chaotic interleavings, reproducibly).
  * With no `faultProfile`, 'on'/'random' are no-ops.
  *
@@ -906,9 +906,9 @@ function runFailed(result) {
  *   count?: number,
  *   startSeed?: number,
  *   base?: object,
- *   buggify?: 'off' | 'on' | 'random',
+ *   faultMode?: 'off' | 'on' | 'random',
  *   faultProfile?: object,
- *   buggifyProbability?: number,
+ *   faultProbability?: number,
  *   checkRatio?: number,
  *   gitCommit?: string,
  *   onResult?: (run: any, index: number) => void
@@ -917,8 +917,8 @@ function runFailed(result) {
  */
 export async function runSimSwarm(config = {}) {
 	const base = config.base || {};
-	const buggify = config.buggify || 'off';
-	const buggifyProbability = config.buggifyProbability ?? 0.25;
+	const faultMode = config.faultMode || 'off';
+	const faultProbability = config.faultProbability ?? 0.25;
 	const checkRatio = config.checkRatio ?? 0;
 	const faultProfile = config.faultProfile || {};
 
@@ -941,18 +941,18 @@ export async function runSimSwarm(config = {}) {
 	for (let i = 0; i < seeds.length; i++) {
 		const seed = seeds[i];
 
-		// Per-seed fault enablement, seeded from the seed so the buggified set is
+		// Per-seed fault enablement, seeded from the seed so the faulted set is
 		// itself reproducible across swarm runs.
-		let buggified = buggify === 'on';
-		if (buggify === 'random') buggified = createSeededRng(seed + ':buggify').float() < buggifyProbability;
-		const faults = buggified ? { ...(base.faults || {}), ...faultProfile } : (base.faults || {});
+		let faulted = faultMode === 'on';
+		if (faultMode === 'random') faulted = createSeededRng(seed + ':faultmode').float() < faultProbability;
+		const faults = faulted ? { ...(base.faults || {}), ...faultProfile } : (base.faults || {});
 
 		const result = await runSim({ ...base, seed, faults });
 		if (gitCommit === null) gitCommit = result.gitCommit;
 
 		const failed = runFailed(result);
 
-		// Deterministically-chosen determinism re-check (the unseed-check ratio).
+		// Deterministically-chosen determinism re-check (the check ratio).
 		let reproduced = null;
 		if (checkRatio > 0 && createSeededRng(seed + ':check').float() < checkRatio) {
 			determinismChecks++;
@@ -963,7 +963,7 @@ export async function runSimSwarm(config = {}) {
 		const run = {
 			seed,
 			ok: !failed && reproduced !== false,
-			buggified,
+			faulted,
 			fingerprint: runFingerprint(result),
 			violations: (result.invariantViolations || []).length,
 			fatals: (result.fatals || []).length,
@@ -983,8 +983,8 @@ export async function runSimSwarm(config = {}) {
 		failed: failingSeeds.length,
 		firstFailingSeed: failingSeeds.length ? failingSeeds[0] : null,
 		failingSeeds,
-		buggify,
-		buggified: runs.filter((r) => r.buggified).length,
+		faultMode,
+		faulted: runs.filter((r) => r.faulted).length,
 		determinismChecks,
 		determinismFailures,
 		determinismFailingSeeds,
@@ -1040,7 +1040,7 @@ export function buildSimGoldens(swarmResult, opts = {}) {
 			fatals: r.fatals,
 			uncaught: r.uncaught,
 			violationCategories: r.violationCategories,
-			buggified: r.buggified
+			faulted: r.faulted
 		}
 	}));
 	entries.sort((a, b) => compareSeeds(a.seed, b.seed));
@@ -1076,14 +1076,14 @@ export function checkSimGoldens(golden, swarmResult, opts = {}) {
 	for (const r of swarmResult.runs) actual.set(String(r.seed), r);
 
 	// The corpus fingerprints are comparable only to a run produced under the
-	// same swarm config - the buggify mode above all, since it decides which
+	// same swarm config - the fault mode above all, since it decides which
 	// seeds are faulted. A mismatch means the runner ran the wrong config; fail
 	// loudly rather than silently comparing incomparable fingerprints.
 	let configMismatch = null;
-	const gBuggify = golden.swarm ? golden.swarm.buggify : undefined;
-	const aBuggify = swarmResult.summary ? swarmResult.summary.buggify : undefined;
-	if (gBuggify !== undefined && gBuggify !== null && aBuggify !== undefined && gBuggify !== aBuggify) {
-		configMismatch = "buggify mode differs: corpus recorded '" + gBuggify + "', run used '" + aBuggify +
+	const gFaultMode = golden.swarm ? golden.swarm.faultMode : undefined;
+	const aFaultMode = swarmResult.summary ? swarmResult.summary.faultMode : undefined;
+	if (gFaultMode !== undefined && gFaultMode !== null && aFaultMode !== undefined && gFaultMode !== aFaultMode) {
+		configMismatch = "fault mode differs: corpus recorded '" + gFaultMode + "', run used '" + aFaultMode +
 			"' - fingerprints are not comparable; regenerate the corpus or fix the runner config";
 	}
 
@@ -1115,7 +1115,7 @@ export function checkSimGoldens(golden, swarmResult, opts = {}) {
 				golden: { fingerprint: entry.fingerprint, digest: entry.digest },
 				actual: {
 					fingerprint: a.fingerprint,
-					digest: { violations: a.violations, fatals: a.fatals, uncaught: a.uncaught, violationCategories: a.violationCategories, buggified: a.buggified }
+					digest: { violations: a.violations, fatals: a.fatals, uncaught: a.uncaught, violationCategories: a.violationCategories, faulted: a.faulted }
 				}
 			});
 		}

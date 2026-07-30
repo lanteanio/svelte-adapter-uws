@@ -1,3 +1,5 @@
+// Substituted by the adapter's build step; a free identifier until then.
+/* global PRECOMPRESS */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

@@ -4,6 +4,9 @@
  * @property {string} [hostHeader]    - lowercased name of a HOST_HEADER env override (e.g. 'x-forwarded-host')
  * @property {string} [protocolHeader] - lowercased name of a PROTOCOL_HEADER env override
  * @property {string} [portHeader]    - lowercased name of a PORT_HEADER env override
+ * @property {string} [pinnedOrigin]  - URL-normalized ORIGIN env value (url.origin); when set, the
+ *                                      same-origin branch compares the request Origin against this
+ *                                      pin instead of the attacker-controlled Host header
  * @property {boolean} isTls          - true when running under SSLApp
  * @property {boolean} hasUpgradeHook - true when the user supplied an upgrade handler (used to decide whether to accept Origin-less clients)
  */
@@ -16,9 +19,11 @@
  *   - allowedOrigins is '*' (wildcard accepts everything)
  *   - the request has no Origin header AND an upgrade hook is configured
  *     (the hook can authenticate non-browser clients itself)
- *   - allowedOrigins is 'same-origin' AND the Origin host+scheme match the
- *     request's host (PROTOCOL_HEADER / HOST_HEADER / PORT_HEADER overrides
- *     applied; default ports stripped to allow port-omitted Host comparisons)
+ *   - allowedOrigins is 'same-origin' AND the Origin matches the pinned
+ *     ORIGIN env (`ctx.pinnedOrigin`, URL-normalized scheme+host+port) when
+ *     one is configured, else the request's host (PROTOCOL_HEADER /
+ *     HOST_HEADER / PORT_HEADER overrides applied; default ports stripped
+ *     to allow port-omitted Host comparisons)
  *   - allowedOrigins is an array AND the Origin is a member
  *
  * Returns `false` otherwise. Malformed Origin headers (URL parse failure)
@@ -39,6 +44,12 @@ export function isOriginAllowed(reqOrigin, headers, ctx) {
 	if (ctx.allowedOrigins === 'same-origin') {
 		try {
 			const parsed = new URL(reqOrigin);
+			// A configured ORIGIN env is the authoritative pin (the deployment's
+			// canonical public origin): compare against it and never against the
+			// Host header, which a non-browser client controls. Both sides are
+			// URL-normalized (url.origin = scheme://host:port, default port
+			// omitted) so the comparison is exact.
+			if (ctx.pinnedOrigin) return parsed.origin === new URL(ctx.pinnedOrigin).origin;
 			const requestHost = (ctx.hostHeader && headers[ctx.hostHeader]) || headers['host'];
 			if (!requestHost) return false;
 			const requestScheme = ctx.protocolHeader
@@ -53,8 +64,10 @@ export function isOriginAllowed(reqOrigin, headers, ctx) {
 			}
 			// Strip the default port so "example.com" matches "example.com:443"
 			// (URL.host omits the port when it is the default for the scheme).
+			// Anchored to the end: an unanchored strip would eat the ':80' inside
+			// 'example.com:8080'.
 			const defaultPort = requestScheme === 'https' ? '443' : '80';
-			expectedHost = expectedHost.replace(':' + defaultPort, '');
+			expectedHost = expectedHost.replace(new RegExp(':' + defaultPort + '$'), '');
 			return parsed.host === expectedHost && parsed.protocol === requestScheme + ':';
 		} catch {
 			return false;
@@ -105,6 +118,7 @@ export function isAuthOriginAccepted(headers, originCtx) {
 		hostHeader: originCtx.hostHeader,
 		protocolHeader: originCtx.protocolHeader,
 		portHeader: originCtx.portHeader,
+		pinnedOrigin: originCtx.pinnedOrigin,
 		isTls: originCtx.isTls,
 		hasUpgradeHook: false
 	});

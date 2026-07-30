@@ -612,7 +612,7 @@ export function createCrdtChannel(options) {
 				/**
 				 * Encode a [start, end) range as a position anchor that survives concurrent
 				 * edits: a selection highlight stays on the same characters as other users
-				 * insert and delete around it. Returns opaque bytes (a packed pair of yjs
+				 * insert and delete around it. Returns opaque bytes (a packed pair of encoded
 				 * relative positions); pass them to resolveRange on any converged replica.
 				 * The start binds right and the end binds left, so an insert exactly at
 				 * either edge stays outside the range while an insert strictly inside it
@@ -632,7 +632,7 @@ export function createCrdtChannel(options) {
 				 * replica (e.g. a different document, or before the first sync), so a stale
 				 * selection drops rather than throws. If the anchored text was deleted the
 				 * range collapses to a zero-width caret at the deletion point (a caret, not a
-				 * ghost) - the natural yjs sticky-anchor behavior.
+				 * ghost).
 				 * @param {Uint8Array} bytes @returns {{ start: number, end: number } | null}
 				 */
 				resolveRange(bytes) {

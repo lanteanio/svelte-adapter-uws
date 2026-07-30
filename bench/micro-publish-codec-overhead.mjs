@@ -1,5 +1,5 @@
-// Publish hot-path overhead microbench (credo rule 4: no single-digit-% loss
-// on a hot primitive). Three arms over the same cursor frames:
+// Publish hot-path overhead microbench: no single-digit-% loss on a hot
+// primitive. Three arms over the same cursor frames:
 //
 //   A. JSON publish        - the current platform.publish envelope build.
 //   B. publishWire (JSON)   - the path a JSON-only deployment takes: same

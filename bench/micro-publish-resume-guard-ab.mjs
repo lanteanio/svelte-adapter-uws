@@ -6,7 +6,7 @@
 // compress)`. In the overwhelming common case no connection is mid-resume, so
 // `resumeBuffers` is empty and the guard is a single Map.size read + integer
 // compare + untaken branch per publish. This proves that guard is free on the
-// hot path - credo #4 requires the bench, not an estimate.
+// hot path - a measured bench, not an estimate.
 //
 // Variant A is the publish per-call work WITHOUT the guard; variant B adds the
 // real shipped guard with an EMPTY resumeBuffers (the hot path). Both pay the
@@ -71,7 +71,7 @@ function runCase(fn) {
 if (resumeBuffers.size !== 0) throw new Error('bench precondition: resumeBuffers must start empty');
 
 console.log(`Node ${process.version}, ${ITERATIONS.toLocaleString()} iterations x ${ROUNDS} rounds, alternating`);
-console.log('\n== publish proxy (per-call work + completeEnvelope + stats): the credo #4 verdict ==');
+console.log('\n== publish proxy (per-call work + completeEnvelope + stats): the verdict ==');
 
 for (let i = 0; i < 4; i++) { runCase(baselinePublish); runCase(currentPublish); }
 const aMs = [];

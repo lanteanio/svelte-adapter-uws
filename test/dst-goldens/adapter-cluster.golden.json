@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "gitCommit": null,
-  "recordedAt": "2026-07-13T22:15:00.495Z",
+  "recordedAt": "2026-07-25T17:13:41.665Z",
   "swarm": {
-    "buggify": "off",
-    "buggifyProbability": 0.25,
+    "faultMode": "off",
+    "faultProbability": 0.25,
     "faultProfile": {
       "drop": 0.25,
       "duplicate": 0.15,
@@ -25,7 +25,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -37,7 +37,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -49,7 +49,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -61,7 +61,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -73,7 +73,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -85,7 +85,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -97,7 +97,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -109,7 +109,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -121,7 +121,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -133,7 +133,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -145,7 +145,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -157,7 +157,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -169,7 +169,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -181,7 +181,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -193,7 +193,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -205,7 +205,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -217,7 +217,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -229,7 +229,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -241,7 +241,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -253,7 +253,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -265,7 +265,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -277,7 +277,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -289,7 +289,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -301,7 +301,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -313,7 +313,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -325,7 +325,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -337,7 +337,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -349,7 +349,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -361,7 +361,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -373,7 +373,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -385,7 +385,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -397,7 +397,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -409,7 +409,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -421,7 +421,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -433,7 +433,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -445,7 +445,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -457,7 +457,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -469,7 +469,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -481,7 +481,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     },
     {
@@ -493,7 +493,7 @@
         "fatals": 0,
         "uncaught": 0,
         "violationCategories": [],
-        "buggified": false
+        "faulted": false
       }
     }
   ]

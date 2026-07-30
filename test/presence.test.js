@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createPresence } from '../src/plugins/presence/server.js';
 import { encodePresence } from '../src/plugins/presence/codec.js';
 import { mockWs, mockPlatform } from './_helpers.js';
+import { WS_SUBSCRIPTIONS, MAX_SUBSCRIPTIONS_PER_CONNECTION } from '../src/runtime/utils.js';
 
 describe('presence plugin - server', () => {
 	let presence;
@@ -163,7 +164,7 @@ describe('presence plugin - server', () => {
 				p.join(mockWs({ id: 'joiner-' + i }), 'room', platform);
 				await Promise.resolve(); // crosses microtask boundary like uWS dispatches
 			}
-			vi.advanceTimersByTime(1);
+			vi.advanceTimersByTime(16);
 
 			const diffs = platform.published.filter((pp) => pp.event === 'diff' && pp.topic === '__presence:room');
 			expect(diffs).toHaveLength(1);
@@ -553,14 +554,14 @@ describe('presence plugin - server', () => {
 	});
 
 	describe('sync', () => {
-		it('sends state snapshot without joining', () => {
+		it('sends state snapshot without joining', async () => {
 			const ws1 = mockWs({ id: '1', name: 'Alice' });
 			const wsObserver = mockWs({ id: 'admin', name: 'Admin' });
 
 			presence.join(ws1, 'room', platform);
 			platform.sent.length = 0;
 
-			presence.sync(wsObserver, 'room', platform);
+			await presence.sync(wsObserver, 'room', platform);
 
 			// Should send snapshot to observer
 			expect(platform.sent).toHaveLength(1);
@@ -577,23 +578,23 @@ describe('presence plugin - server', () => {
 			expect(presence.list('room')[0].name).toBe('Alice');
 		});
 
-		it('sends empty snapshot for unknown topics', () => {
+		it('sends empty snapshot for unknown topics', async () => {
 			const ws = mockWs({ id: '1', name: 'Alice' });
-			presence.sync(ws, 'nonexistent', platform);
+			await presence.sync(ws, 'nonexistent', platform);
 
 			expect(platform.sent).toHaveLength(1);
 			expect(platform.sent[0].event).toBe('state');
 			expect(platform.sent[0].data).toEqual({});
 		});
 
-		it('keeps an observer subscribed after a co-resident participant role leaves (dual-role teardown)', () => {
+		it('keeps an observer subscribed after a co-resident participant role leaves (dual-role teardown)', async () => {
 			// One socket is BOTH a participant (join) and a sync-observer (sync) of
 			// the same topic. Dropping the participant role must NOT evict the
 			// observer's tap subscription - otherwise its roster freezes with the
 			// departed user still shown.
 			const dual = mockWs({ id: 'dual', name: 'Dual' });
 			presence.join(dual, 'room', platform);
-			presence.sync(dual, 'room', platform);
+			await presence.sync(dual, 'room', platform);
 			expect(dual.isSubscribed('__presence:room')).toBe(true);
 
 			// Leave the participant role (the real-topic unsubscribe path).
@@ -618,6 +619,41 @@ describe('presence plugin - server', () => {
 			// An authorized topic still works.
 			await presence.sync(attacker, 'lobby', denyPlatform);
 			expect(attacker.isSubscribed('__presence:lobby')).toBe(true);
+		});
+
+		it('refuses the presence-snapshot observer subscribe at the per-connection subscription cap', async () => {
+			// The snapshot handshake subscribes the socket to __presence:{topic}
+			// via trackedSubscribe, which never consulted the wire-enforced
+			// MAX_SUBSCRIPTIONS_PER_CONNECTION cap - one connection could
+			// accumulate unbounded subscriptions through this lane. The cap is
+			// now enforced centrally in trackedSubscribe; the handshake fails
+			// silently, exactly like its other gate failures.
+			const ws1 = mockWs({ id: '1', name: 'Alice' });
+			presence.join(ws1, 'room', platform);
+			platform.reset();
+
+			const attacker = mockWs({ id: 'a' });
+			const subs = new Set();
+			for (let i = 0; i < MAX_SUBSCRIPTIONS_PER_CONNECTION; i++) subs.add('filler:' + i);
+			attacker.getUserData()[WS_SUBSCRIPTIONS] = subs;
+
+			await presence.sync(attacker, 'room', platform);
+
+			expect(attacker.isSubscribed('__presence:room')).toBe(false); // cap refused
+			expect(subs.size).toBe(MAX_SUBSCRIPTIONS_PER_CONNECTION); // registry unchanged
+			expect(platform.sent).toHaveLength(0); // no roster snapshot emitted
+		});
+
+		it('presence-snapshot observer subscribe works below the cap', async () => {
+			const ws1 = mockWs({ id: '1', name: 'Alice' });
+			presence.join(ws1, 'room', platform);
+
+			const attacker = mockWs({ id: 'a' });
+			attacker.getUserData()[WS_SUBSCRIPTIONS] = new Set(['existing']);
+			await presence.sync(attacker, 'room', platform);
+
+			expect(attacker.isSubscribed('__presence:room')).toBe(true);
+			expect(attacker.getUserData()[WS_SUBSCRIPTIONS].has('__presence:room')).toBe(true);
 		});
 	});
 
@@ -712,7 +748,7 @@ describe('presence plugin - server', () => {
 			expect(platform.sent[0].event).toBe('state');
 		});
 
-		it('hooks.subscribe sends current snapshot for __presence: topics', () => {
+		it('hooks.subscribe sends current snapshot for __presence: topics', async () => {
 			const ws1 = mockWs({ id: '1', name: 'Alice' });
 			presence.join(ws1, 'room', platform);
 			presence.flushDiffs();
@@ -720,6 +756,7 @@ describe('presence plugin - server', () => {
 
 			const wsObserver = mockWs({ id: 'obs', name: 'Observer' });
 			presence.hooks.subscribe(wsObserver, '__presence:room', { platform });
+			await vi.waitFor(() => expect(platform.sent).toHaveLength(1));
 
 			// Should send the snapshot
 			expect(platform.sent).toHaveLength(1);
@@ -736,9 +773,10 @@ describe('presence plugin - server', () => {
 			expect(presence.count('room')).toBe(1);
 		});
 
-		it('hooks.subscribe sends empty snapshot for __presence: with no users', () => {
+		it('hooks.subscribe sends empty snapshot for __presence: with no users', async () => {
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			presence.hooks.subscribe(ws, '__presence:empty', { platform });
+			await vi.waitFor(() => expect(platform.sent).toHaveLength(1));
 
 			expect(platform.sent).toHaveLength(1);
 			expect(platform.sent[0].event).toBe('state');
@@ -842,6 +880,140 @@ describe('presence plugin - server', () => {
 	});
 
 	describe('default select strips known-sensitive fields (denylist)', () => {
+		it('drops personal data, not just credentials', () => {
+			// The denylist covered the credential half only, so a zero-config app
+			// whose upgrade hook returned a user record published every peer's
+			// email, phone and date of birth on the roster, and again on every
+			// diff, heartbeat and snapshot. The names here are the runtime's own
+			// sensitive list, so one idea of "sensitive" covers logs and broadcasts.
+			const p = createPresence({ key: 'id' });
+			const ws = mockWs({
+				id: '1',
+				name: 'Alice',
+				email: 'alice@example.com',
+				phoneNumber: '+41 79 000 00 00',
+				dob: '1990-01-01',
+				ssn: '123-45-6789',
+				iban: 'CH93 0076 2011 6238 5295 7',
+				ccNumber: '4111111111111111',
+				pinCode: '1234'
+			});
+
+			p.join(ws, 'room', platform);
+			p.flushDiffs();
+
+			const stateData = platform.sent[0].data['1'];
+			expect(stateData.name, 'ordinary identity still rides the roster').toBe('Alice');
+			for (const leaked of ['email', 'phoneNumber', 'dob', 'ssn', 'iban', 'ccNumber', 'pinCode']) {
+				expect(stateData[leaked], `${leaked} must not be broadcast`).toBeUndefined();
+			}
+		});
+
+		it('keeps the author family, which is ordinary display identity', () => {
+			// A bare `auth` substring match dropped these from every roster. They
+			// are what a collaborative surface shows next to a document.
+			const p = createPresence({ key: 'id' });
+			const ws = mockWs({
+				id: '1',
+				author: 'Alice',
+				authorId: 'u-1',
+				authorName: 'Alice A',
+				authoredAt: '2026-01-01',
+				accountId: 'acct-9',
+				authToken: 'must-go'
+			});
+
+			p.join(ws, 'room', platform);
+			p.flushDiffs();
+
+			const stateData = platform.sent[0].data['1'];
+			expect(stateData.author).toBe('Alice');
+			expect(stateData.authorId).toBe('u-1');
+			expect(stateData.authorName).toBe('Alice A');
+			expect(stateData.authoredAt).toBe('2026-01-01');
+			expect(stateData.accountId, 'account contains cc but is not a card number').toBe('acct-9');
+			expect(stateData.authToken, 'genuine auth material still goes').toBeUndefined();
+		});
+
+		it('drops the client IP under every name this project documents for it', () => {
+			// The ratelimit plugin reads `ud.remoteAddress || ud.ip || ud.address`
+			// and documents all three as client-IP slots, so matching only
+			// remoteAddress left an app following our own convention publishing
+			// every peer's IP. `headers` and `url` are here for the same reason:
+			// the case this denylist exists for is an upgrade hook that spreads
+			// its whole context, which puts x-forwarded-for and a token-bearing
+			// query string on the wire.
+			const p = createPresence({ key: 'id' });
+			const ws = mockWs({
+				id: '1',
+				name: 'Alice',
+				ip: '203.0.113.9',
+				address: '203.0.113.9',
+				remoteAddress: '203.0.113.9',
+				headers: { 'x-forwarded-for': '203.0.113.9', 'user-agent': 'Firefox/128' },
+				url: '/ws?token=abc123',
+				requestId: 'req-1'
+			});
+
+			p.join(ws, 'room', platform);
+			p.flushDiffs();
+
+			const stateData = platform.sent[0].data['1'];
+			expect(stateData.name).toBe('Alice');
+			for (const leaked of ['ip', 'address', 'remoteAddress', 'headers', 'url', 'requestId']) {
+				expect(stateData[leaked], `${leaked} must not be broadcast`).toBeUndefined();
+			}
+		});
+
+		it('drops credential families that do not literally say token or password', () => {
+			// These are all real credential spellings from the hostile review. The
+			// first fix widened only the `key` qualifier list, so product-qualified
+			// keys, authentication codes and signed request material still rode a
+			// real presence frame unchanged.
+			const p = createPresence({ key: 'id' });
+			const ws = mockWs({
+				id: '1',
+				name: 'Alice',
+				awsKey: 'AKIA...',
+				stripeKey: 'sk_live_...',
+				hostKey: 'private-host-key',
+				hmac: 'signed-mac',
+				signature: 'captured-signature',
+				sig: 'captured-short-signature',
+				nonce: 'one-time-value',
+				csrf: 'csrf-value',
+				xsrf: 'xsrf-value',
+				recoveryCode: 'recover-me',
+				backupCode: 'backup-me',
+				inviteCode: 'invite-me',
+				magicLink: '/login?code=secret',
+				api2Key: 'versioned-api-key',
+				access2Key: 'versioned-access-key',
+				API2KEY: 'flat-versioned-api-key',
+				clientSort2Key: 'sort-2',
+				nonceHashKey: 'hash-id',
+				hmacRouteKey: 'route-id',
+				signatureRowKey: 'row-id'
+			});
+
+			p.join(ws, 'room', platform);
+			p.flushDiffs();
+
+			const stateData = platform.sent[0].data['1'];
+			expect(stateData.name).toBe('Alice');
+			for (const leaked of [
+				'awsKey', 'stripeKey', 'hostKey', 'hmac', 'signature', 'sig', 'nonce',
+				'csrf', 'xsrf', 'recoveryCode', 'backupCode', 'inviteCode', 'magicLink',
+				'api2Key', 'access2Key', 'API2KEY'
+			]) {
+				expect(stateData[leaked], `${leaked} must not be broadcast`).toBeUndefined();
+			}
+			expect(stateData.clientSort2Key).toBe('sort-2');
+			expect(stateData.nonceHashKey).toBe('hash-id');
+			expect(stateData.hmacRouteKey).toBe('route-id');
+			expect(stateData.signatureRowKey).toBe('row-id');
+		});
+
 		it('drops token / secret / password / auth / session / cookie / jwt / credential keys', () => {
 			const p = createPresence({ key: 'id' });
 			const ws = mockWs({
@@ -1005,6 +1177,68 @@ describe('presence plugin - server', () => {
 			p.join(ws, 'room', platform);
 
 			expect(platform.sent[0].data['1'].sessionToken).toBe('now-leaks');
+		});
+	});
+
+	describe('diff throttle', () => {
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it('bounds topic-wide publishes at the secure 16 ms default', () => {
+			vi.useFakeTimers();
+			const p = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id }),
+				heartbeat: 0
+			});
+			const ws = mockWs({ id: '1' });
+			p.join(ws, 'room', platform);
+			p.flushDiffs();
+			platform.reset();
+
+			p.update(ws, 'room', { n: 1 }, platform);
+			vi.advanceTimersByTime(15);
+			expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(0);
+			vi.advanceTimersByTime(1);
+			expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(1);
+
+			p.update(ws, 'room', { n: 2 }, platform);
+			vi.advanceTimersByTime(15);
+			expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(1);
+			vi.advanceTimersByTime(1);
+			expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(2);
+			p.clear();
+		});
+
+		it('lets heartbeat observe pending state and manual flush cancels the delayed publish', () => {
+			vi.useFakeTimers();
+			const p = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id }),
+				heartbeat: 5,
+				topicThrottle: 20
+			});
+			const ws = mockWs({ id: '1' });
+			p.join(ws, 'room', platform);
+			p.flushDiffs();
+			platform.reset();
+
+			p.update(ws, 'room', { mood: 'calm' }, platform);
+			vi.advanceTimersByTime(5);
+			expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(0);
+			expect(platform.published.find((e) => e.event === 'heartbeat').data['1'].mood).toBe('calm');
+
+			p.flushDiffs();
+			expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(1);
+			vi.advanceTimersByTime(15);
+			expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(1);
+			p.clear();
+		});
+
+		it('rejects invalid topicThrottle values', () => {
+			expect(() => createPresence({ topicThrottle: -1 })).toThrow('topicThrottle must be a non-negative number');
+			expect(() => createPresence({ topicThrottle: NaN })).toThrow('topicThrottle must be a non-negative number');
 		});
 	});
 
@@ -1317,9 +1551,10 @@ describe('presence plugin - server', () => {
 	});
 
 	describe('caps', () => {
-		it('rejects invalid maxConnections / maxTopics', () => {
+		it('rejects invalid connection/topic caps', () => {
 			expect(() => createPresence({ maxConnections: 0 })).toThrow('maxConnections must be a positive integer');
 			expect(() => createPresence({ maxTopics: -1 })).toThrow('maxTopics must be a positive integer');
+			expect(() => createPresence({ maxTopicsPerConnection: 0 })).toThrow('maxTopicsPerConnection must be a positive integer');
 		});
 
 		it('evicts oldest connection state when at maxConnections', () => {
@@ -1333,10 +1568,42 @@ describe('presence plugin - server', () => {
 			p.join(mockWs({ id: 'B' }), 'room', platform);
 			// Adding the third connection evicts the oldest wsTopics entry.
 			p.join(mockWs({ id: 'C' }), 'room', platform);
-			// All three users are still tracked in the topic-level map,
-			// since eviction is connection-scoped (the per-ws bookkeeping)
-			// not topic-scoped (the per-user roster).
-			expect(p.count('room')).toBe(3);
+			// Eviction releases the topic-level entry too. Leaving it behind
+			// orphaned durable update fields in every future heartbeat because a
+			// later close could no longer find the wsTopics bookkeeping.
+			expect(p.count('room')).toBe(2);
+			expect(p.list('room').map((u) => u.id)).toEqual(['B', 'C']);
+		});
+
+		it('caps presence topics per connection before retaining state', () => {
+			const p = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id }),
+				heartbeat: 0,
+				maxTopicsPerConnection: 2,
+				maxFieldsBytes: 1024,
+				maxTotalFieldsBytes: 100
+			});
+			const ws = mockWs({ id: 'A' });
+
+			p.join(ws, 'a', platform);
+			p.join(ws, 'b', platform);
+			p.join(ws, 'c', platform);
+			p.update(ws, 'a', { blob: 'a'.repeat(80) }, platform);
+			p.update(ws, 'b', { blob: 'b'.repeat(80) }, platform);
+			p.update(ws, 'c', { blob: 'c'.repeat(80) }, platform);
+			p.flushDiffs();
+
+			expect(p.count('a')).toBe(1);
+			expect(p.count('b')).toBe(1);
+			expect(p.count('c')).toBe(0);
+			expect(ws.isSubscribed('__presence:a')).toBe(true);
+			expect(ws.isSubscribed('__presence:b')).toBe(true);
+			expect(ws.isSubscribed('__presence:c')).toBe(false);
+			// The per-topic cap and the membership cap compose into an aggregate
+			// upper bound; a third full-budget entry cannot be retained.
+			expect(p.list('a')[0].blob).toBe('a'.repeat(80));
+			expect(p.list('b')[0].blob).toBe('b'.repeat(80));
 		});
 
 		it('evicts oldest topic when at maxTopics', () => {
@@ -1370,6 +1637,7 @@ function binaryMockPlatform() {
 		sentWire: [],
 		publish(topic, event, data) { p.published.push({ topic, event, data }); return true; },
 		send(ws, topic, event, data) { p.sent.push({ ws, topic, event, data }); return 1; },
+		checkSubscribe: async () => null,
 		publishWire(topic, event, data, codec, options) { p.publishedWire.push({ topic, event, data, codec, options }); return true; },
 		sendWire(ws, topic, event, data, codec, options) { p.sentWire.push({ ws, topic, event, data, codec, options }); return 1; },
 		reset() { p.published.length = p.sent.length = p.publishedWire.length = p.sentWire.length = 0; }
@@ -1505,11 +1773,13 @@ describe('presence plugin - hooks.message (reconnect snapshot)', () => {
 		const ws = mockWs({ id: '2', name: 'Bob' });
 		const handled = presence.hooks.message(ws, { data: encodeFrame({ type: 'presence-snapshot', topic: 'room' }), platform });
 
-		expect(handled).toBe(true);
-		expect(platform.sentWire).toHaveLength(1);
-		expect(platform.sentWire[0].ws).toBe(ws);
-		expect(platform.sentWire[0].event).toBe('state');
-		expect(platform.sentWire[0].data).toEqual({ '1': { id: '1', name: 'Alice' } });
+		return vi.waitFor(() => {
+			expect(handled).toBe(true);
+			expect(platform.sentWire).toHaveLength(1);
+			expect(platform.sentWire[0].ws).toBe(ws);
+			expect(platform.sentWire[0].event).toBe('state');
+			expect(platform.sentWire[0].data).toEqual({ '1': { id: '1', name: 'Alice' } });
+		});
 	});
 
 	it('accepts a pre-parsed envelope via ctx.msg (adapter direct-hook wiring)', () => {
@@ -1526,7 +1796,7 @@ describe('presence plugin - hooks.message (reconnect snapshot)', () => {
 			platform
 		});
 		expect(handled).toBe(true);
-		expect(platform.sentWire.filter((m) => m.event === 'state')).toHaveLength(1);
+		return vi.waitFor(() => expect(platform.sentWire.filter((m) => m.event === 'state')).toHaveLength(1));
 	});
 
 	it('accepts an already-parsed object as ctx.data (onUnhandled / onJsonMessage wiring)', () => {
@@ -1543,7 +1813,7 @@ describe('presence plugin - hooks.message (reconnect snapshot)', () => {
 			platform
 		});
 		expect(handled).toBe(true);
-		expect(platform.sentWire.filter((m) => m.event === 'state')).toHaveLength(1);
+		return vi.waitFor(() => expect(platform.sentWire.filter((m) => m.event === 'state')).toHaveLength(1));
 	});
 
 	it('ignores frames it does not own (returns undefined)', () => {
@@ -1566,8 +1836,10 @@ describe('presence plugin - hooks.message (reconnect snapshot)', () => {
 		platform.reset();
 
 		presence.hooks.message(mockWs({ id: '2' }), { data: encodeFrame({ type: 'presence-snapshot', topic: 'room' }), platform });
-		expect(platform.sent).toHaveLength(1);
-		expect(platform.sent[0].event).toBe('state');
+		return vi.waitFor(() => {
+			expect(platform.sent).toHaveLength(1);
+			expect(platform.sent[0].event).toBe('state');
+		});
 	});
 });
 
@@ -1671,7 +1943,7 @@ describe('presence plugin - field-level update + transient', () => {
 		expect(diff.leaves).toEqual({ '1': { id: '1', name: 'Alice' } });
 	});
 
-	it('excludes a transient field from the state snapshot a new subscriber receives', () => {
+	it('excludes a transient field from the state snapshot a new subscriber receives', async () => {
 		const ws1 = mockWs({ id: '1', name: 'Alice' });
 		presence.join(ws1, 'room', platform);
 		presence.flushDiffs();
@@ -1680,12 +1952,12 @@ describe('presence plugin - field-level update + transient', () => {
 		platform.reset();
 
 		const observer = mockWs({ id: '9', name: 'Obs' });
-		presence.sync(observer, 'room', platform);
+		await presence.sync(observer, 'room', platform);
 		const state = platform.sent.find((s) => s.event === 'state').data;
 		expect(state['1']).toEqual({ id: '1', name: 'Alice' }); // NO typing
 	});
 
-	it('includes a non-transient update field in the state snapshot (durable)', () => {
+	it('includes a non-transient update field in the state snapshot (durable)', async () => {
 		const p = createPresence({ key: 'id', select: (ud) => ({ id: ud.id }), transient: ['typing'], heartbeat: 0 });
 		const plat = mockPlatform();
 		const ws = mockWs({ id: '1' });
@@ -1696,7 +1968,7 @@ describe('presence plugin - field-level update + transient', () => {
 		plat.reset();
 
 		const obs = mockWs({ id: '9' });
-		p.sync(obs, 'room', plat);
+		await p.sync(obs, 'room', plat);
 		const state = plat.sent.find((s) => s.event === 'state').data;
 		expect(state['1']).toEqual({ id: '1', status: 'away' }); // durable field present
 	});
@@ -1802,5 +2074,652 @@ describe('presence plugin - client presence-update message frame', () => {
 
 		expect(handled).toBeUndefined();
 		expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(0);
+	});
+});
+
+describe('presence plugin - security hardening', () => {
+	let platform;
+
+	beforeEach(() => {
+		platform = mockPlatform();
+	});
+
+	const lastDiff = () => {
+		const diffs = platform.published.filter((e) => e.event === 'diff');
+		return diffs.length ? diffs[diffs.length - 1].data : null;
+	};
+
+	describe('dedup key prototype-gadget names (roster ghost)', () => {
+		it('joins a user whose id is "__proto__" under the fallback key - visible in every roster', () => {
+			const presence = createPresence({ heartbeat: 0 }); // default select, key 'id'
+			const victim = mockWs({ id: 'victim', name: 'Vera' });
+			const ghost = mockWs({ id: '__proto__', name: 'Ghost' });
+
+			presence.join(victim, 'room', platform);
+			presence.join(ghost, 'room', platform);
+			presence.flushDiffs();
+
+			// Server-side truth: two distinct users.
+			expect(presence.count('room')).toBe(2);
+			// The ghost must be a visible own key in every roster frame, not the
+			// object's prototype. The resolved key is refused, so the ghost rides
+			// the per-connection fallback key (no cross-tab dedup).
+			const state = platform.sent.find((s) => s.event === 'state' && s.ws === ghost).data;
+			expect(Object.keys(state)).toContain('victim');
+			expect(Object.keys(state).some((k) => k.startsWith('__conn:'))).toBe(true);
+			// And the JSON wire form carries the ghost too (JSON.stringify only
+			// emits own enumerable properties).
+			const wireKeys = Object.keys(JSON.parse(JSON.stringify(state)));
+			expect(wireKeys).toEqual(Object.keys(state));
+			// The diff joins roster is null-prototype: no inherited __proto__ setter.
+			const diff = lastDiff();
+			expect(Object.getPrototypeOf(diff.joins)).toBeNull();
+			expect(Object.getPrototypeOf(diff.leaves)).toBeNull();
+		});
+
+		it('refuses "constructor" and "prototype" as resolved keys the same way', () => {
+			const presence = createPresence({ heartbeat: 0 });
+			for (const id of ['constructor', 'prototype']) {
+				const ws = mockWs({ id, name: 'N' });
+				presence.join(ws, 'room-' + id, platform);
+				const state = platform.sent.find((s) => s.event === 'state' && s.ws === ws).data;
+				expect(Object.keys(state)).toHaveLength(1);
+				expect(Object.keys(state)[0].startsWith('__conn:')).toBe(true);
+				expect(presence.count('room-' + id)).toBe(1);
+			}
+		});
+
+		it('a key field value that is not a gadget still dedups normally', () => {
+			const presence = createPresence({ heartbeat: 0 });
+			presence.join(mockWs({ id: '7', name: 'Sam' }), 'room', platform);
+			presence.join(mockWs({ id: '7', name: 'Sam' }), 'room', platform);
+			expect(presence.count('room')).toBe(1);
+		});
+	});
+
+	describe('update() byte caps', () => {
+		it('drops an update whose serialized fields exceed maxFieldsBytes (default 8192)', async () => {
+			const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id }), heartbeat: 0 });
+			const ws = mockWs({ id: '1' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+			platform.reset();
+
+			presence.update(ws, 'room', { blob: 'A'.repeat(9000) }, platform);
+			presence.flushDiffs();
+
+			expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(0);
+			// Nothing stored: a later snapshot carries the bare identity.
+			const obs = mockWs({ id: '9' });
+			await presence.sync(obs, 'room', platform);
+			expect(platform.sent.find((s) => s.event === 'state').data['1']).toEqual({ id: '1' });
+		});
+
+		it('honors a custom maxFieldsBytes', () => {
+			const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id }), heartbeat: 0, maxFieldsBytes: 64 });
+			const ws = mockWs({ id: '1' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+			platform.reset();
+
+			presence.update(ws, 'room', { typing: true }, platform); // ~16 bytes - under
+			presence.update(ws, 'room', { blob: 'A'.repeat(100) }, platform); // over 64 - dropped
+			presence.flushDiffs();
+
+			expect(lastDiff().updates).toEqual({ '1': { typing: true } });
+		});
+
+		it('enforces the cumulative per-entry budget (maxTotalFieldsBytes) across frames', async () => {
+			const presence = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id }),
+				heartbeat: 0,
+				maxFieldsBytes: 1024,
+				maxTotalFieldsBytes: 100
+			});
+			const ws = mockWs({ id: '1' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+			platform.reset();
+
+			// Each frame is under the per-frame cap; together they exceed the budget.
+			presence.update(ws, 'room', { a: 'A'.repeat(60) }, platform); // stored (~63 bytes)
+			presence.update(ws, 'room', { b: 'B'.repeat(60) }, platform); // would exceed 100 - dropped whole
+			presence.flushDiffs();
+
+			expect(lastDiff().updates).toEqual({ '1': { a: 'A'.repeat(60) } });
+			const obs = mockWs({ id: '9' });
+			await presence.sync(obs, 'room', platform);
+			const data = platform.sent.find((s) => s.event === 'state').data['1'];
+			expect(data.a).toBe('A'.repeat(60));
+			expect(data.b).toBeUndefined();
+		});
+
+		it('charges a field name at its SERIALIZED size, not its raw size', async () => {
+			// A control character is one byte raw and six once JSON-escaped, and the
+			// escaped form is what is stored and re-broadcast on every snapshot and
+			// heartbeat. Charging the raw name let a client buy roughly six times
+			// the documented budget in retained, re-broadcast state while every
+			// individual frame stayed under the per-frame cap.
+			//
+			// Each name here is one control character plus a digit. Raw that is 2
+			// bytes, so the old charge was 2 + 2 framing + 1 value = 5, and ten of
+			// them fit a 100-byte budget with room to spare. Serialized, the name is
+			// 7 characters and 9 bytes with its quotes, so the real cost is 12 and the
+			// budget is exhausted before the tenth. The character is built with
+			// fromCharCode rather than an escape so the source file itself stays
+			// plain ASCII.
+			const ctl = String.fromCharCode(1);
+			const presence = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id }),
+				heartbeat: 0,
+				maxFieldsBytes: 1024,
+				maxTotalFieldsBytes: 100
+			});
+			const ws = mockWs({ id: '1' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+			platform.reset();
+
+			for (let i = 0; i < 10; i++) {
+				presence.update(ws, 'room', { [ctl + i]: 0 }, platform);
+			}
+			presence.flushDiffs();
+
+			const obs = mockWs({ id: '9' });
+			await presence.sync(obs, 'room', platform);
+			const stored = platform.sent.find((s) => s.event === 'state').data['1'];
+			const storedNames = Object.keys(stored).filter((k) => k !== 'id');
+			const serializedBytes = storedNames.reduce(
+				(sum, k) => sum + Buffer.byteLength(JSON.stringify(k)) + 2 + 1,
+				0
+			);
+
+			expect(storedNames.length, 'a raw charge would have accepted all ten').toBeLessThan(10);
+			expect(
+				serializedBytes,
+				'retained serialized state must stay within the documented budget'
+			).toBeLessThanOrEqual(100);
+		});
+
+		it('shrinking an existing field refunds the budget', async () => {
+			const presence = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id }),
+				heartbeat: 0,
+				maxFieldsBytes: 1024,
+				maxTotalFieldsBytes: 100
+			});
+			const ws = mockWs({ id: '1' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+
+			presence.update(ws, 'room', { a: 'A'.repeat(60) }, platform);
+			presence.update(ws, 'room', { a: 'x' }, platform); // shrink: frees ~60 bytes
+			presence.update(ws, 'room', { b: 'B'.repeat(60) }, platform); // now fits
+			presence.flushDiffs();
+
+			const obs = mockWs({ id: '9' });
+			await presence.sync(obs, 'room', platform);
+			const data = platform.sent.find((s) => s.event === 'state' && s.ws === obs).data['1'];
+			expect(data.a).toBe('x');
+			expect(data.b).toBe('B'.repeat(60));
+		});
+
+		it('drops an unserializable (cyclic) fields blob without throwing', () => {
+			const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id }), heartbeat: 0 });
+			const ws = mockWs({ id: '1' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+			platform.reset();
+
+			const cyclic = { ok: 1 };
+			cyclic.self = cyclic;
+			expect(() => presence.update(ws, 'room', cyclic, platform)).not.toThrow();
+			presence.flushDiffs();
+			expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(0);
+		});
+
+		it('validates the new options like the existing caps', () => {
+			expect(() => createPresence({ maxFieldsBytes: 0 })).toThrow('maxFieldsBytes must be a positive integer');
+			expect(() => createPresence({ maxTotalFieldsBytes: -1 })).toThrow('maxTotalFieldsBytes must be a positive integer');
+		});
+	});
+
+	describe('deepEqual depth cap (deep-nesting DoS)', () => {
+		const deepArray = (depth, leaf) => {
+			let v = leaf;
+			for (let i = 0; i < depth; i++) v = [v];
+			return v;
+		};
+
+		// THE DEPTH IS LOAD-BEARING, and too deep is as useless as too shallow.
+		// Past roughly 4800 levels the serialization update() runs BEFORE it
+		// compares overflows on its own and the update returns early; a raw frame
+		// beyond the 8192-byte field cap is refused earlier still. Either way the
+		// guard under test never executes, so a wrong-magnitude vector passes
+		// against broken code. 4000 clears both of those gates (about 8060 frame
+		// bytes, 8009 serialized).
+		const DEPTH = 4000;
+
+		it('drops a client field nested deeper than the cap, rather than storing it', async () => {
+			// A byte cap does not bound depth: DEPTH here is about 8 KB, well
+			// inside the default field cap, and roughly twice as deep as the
+			// structuredClone limit the cluster relay serializes through. Stored,
+			// it would terminate the worker on the next relayed publish - a much
+			// worse outcome than a dropped frame, and one no byte cap can prevent.
+			const presence = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id }),
+				heartbeat: 0,
+				maxFieldsBytes: 100_000, // lift the byte cap so DEPTH is what decides
+				maxTotalFieldsBytes: 1_000_000
+			});
+			const ws = mockWs({ id: '1' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+
+			expect(() => {
+				presence.update(ws, 'room', { sel: deepArray(DEPTH, 1) }, platform);
+			}).not.toThrow();
+
+			presence.flushDiffs();
+			const obs = mockWs({ id: '9' });
+			await presence.sync(obs, 'room', platform);
+			const stored = platform.sent.find((s) => s.event === 'state' && s.ws === obs).data['1'];
+			expect(
+				stored.sel,
+				'a value too deep to relay must never be stored, or the next publish kills the worker'
+			).toBeUndefined();
+		});
+
+		it('still compares an ordinary nested value and counts it as changed', () => {
+			// The counterpart: the depth guard must not have turned every nested
+			// field into a silent drop. This depth is unremarkable and must be
+			// stored, compared, and reported as a change.
+			const presence = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id }),
+				heartbeat: 0
+			});
+			const ws = mockWs({ id: '1' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+			const before = platform.published.filter((e) => e.event === 'diff').length;
+
+			presence.update(ws, 'room', { sel: deepArray(8, 1) }, platform);
+			presence.update(ws, 'room', { sel: deepArray(8, 2) }, platform);
+			presence.flushDiffs();
+
+			expect(
+				platform.published.filter((e) => e.event === 'diff').length,
+				'an ordinary nested value must still be processed'
+			).toBeGreaterThan(before);
+		});
+
+		it('drops the same frame arriving as raw wire bytes', async () => {
+			// The real entry point a client reaches, not the helper: the depth
+			// guard has to sit where the frame lands, not only where a test calls
+			// update() directly.
+			const presence = createPresence({ key: 'id', select: (ud) => ({ id: ud.id }), heartbeat: 0 });
+			const ws = mockWs({ id: '1' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+
+			// Built as text: JSON.stringify of the live object is itself recursive.
+			const frame = (leaf) =>
+				new TextEncoder().encode(
+					'{"type":"presence-update","topic":"room","fields":{"sel":' + '['.repeat(DEPTH) + leaf + ']'.repeat(DEPTH) + '}}'
+				);
+			expect(() => {
+				presence.hooks.message(ws, { data: frame(1), platform });
+			}).not.toThrow();
+
+			presence.flushDiffs();
+			const obs = mockWs({ id: '9' });
+			await presence.sync(obs, 'room', platform);
+			const stored = platform.sent.find((s) => s.event === 'state' && s.ws === obs).data['1'];
+			expect(
+				stored.sel,
+				'a value too deep to relay must not be stored, however it arrived'
+			).toBeUndefined();
+		});
+	});
+
+	describe('default select denylist broadening', () => {
+		it('drops the adapter-injected remoteAddress transport field', () => {
+			const p = createPresence({ key: 'id', heartbeat: 0 });
+			const ws = mockWs({ id: '1', name: 'Alice', remoteAddress: '203.0.113.7' });
+
+			p.join(ws, 'room', platform);
+
+			const stateData = platform.sent[0].data['1'];
+			expect(stateData.id).toBe('1');
+			expect(stateData.name).toBe('Alice');
+			expect(stateData.remoteAddress).toBeUndefined();
+		});
+
+		it('drops credential-shaped key names (apiKey, api_key, key, KEY, accessKey, licenseKey)', () => {
+			const p = createPresence({ key: 'id', heartbeat: 0 });
+			const ws = mockWs({
+				id: '1',
+				name: 'Alice',
+				apiKey: 'ak_live_1234',
+				api_key: 'ak_snake',
+				key: 'k',
+				KEY: 'K',
+				accessKey: 'AKIA',
+				privateKey: '-----BEGIN',
+				licenseKey: 'lic'
+			});
+
+			p.join(ws, 'room', platform);
+
+			const stateData = platform.sent[0].data['1'];
+			expect(stateData.apiKey).toBeUndefined();
+			expect(stateData.api_key).toBeUndefined();
+			expect(stateData.key).toBeUndefined();
+			expect(stateData.KEY).toBeUndefined();
+			expect(stateData.accessKey).toBeUndefined();
+			expect(stateData.privateKey).toBeUndefined();
+			expect(stateData.licenseKey).toBeUndefined();
+			expect(stateData.name).toBe('Alice');
+		});
+
+		it('keeps structural id-like names and words that merely contain "key"', () => {
+			// The split between credential-shaped and structural is the whole
+			// reason this is not a bare substring match: an app legitimately
+			// shows peers a primaryKey / sortKey, and a publicKey is public.
+			const p = createPresence({ key: 'id', heartbeat: 0 });
+			const ws = mockWs({
+				id: '1',
+				monkey: 'see',
+				keyboard: 'cowboy',
+				turnkey: 'solution',
+				primaryKey: 'pk',
+				foreignKey: 'fk',
+				sortKey: 'sk',
+				publicKey: 'ssh-ed25519'
+			});
+
+			p.join(ws, 'room', platform);
+
+			const stateData = platform.sent[0].data['1'];
+			expect(stateData.monkey).toBe('see');
+			expect(stateData.keyboard).toBe('cowboy');
+			expect(stateData.turnkey).toBe('solution');
+			expect(stateData.primaryKey).toBe('pk');
+			expect(stateData.foreignKey).toBe('fk');
+			expect(stateData.sortKey).toBe('sk');
+			expect(stateData.publicKey).toBe('ssh-ed25519');
+		});
+	});
+
+	describe('reserved-field warning is bounded', () => {
+		it('warns once for a finite reserved name, never twice', () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			try {
+				const p = createPresence({ key: 'id', heartbeat: 0 });
+				const ws = mockWs({ id: 'u-1' });
+				p.join(ws, 'room', platform);
+				p.update(ws, 'room', { role: 'admin' }, platform);
+				p.update(ws, 'room', { role: 'owner' }, platform);
+				const roleWarnings = warn.mock.calls.filter((c) => String(c[0]).includes("'role'"));
+				expect(roleWarnings).toHaveLength(1);
+			} finally {
+				warn.mockRestore();
+			}
+		});
+
+		it('never warns for the unbounded credential-shaped name space', () => {
+			// A hostile client can mint distinct matching names forever; warning
+			// on those would drive an unbounded log and an unbounded dedup set
+			// straight from the wire.
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			try {
+				const p = createPresence({ key: 'id', heartbeat: 0 });
+				const ws = mockWs({ id: 'u-1' });
+				p.join(ws, 'room', platform);
+				for (let i = 0; i < 200; i++) {
+					p.update(ws, 'room', { [`f${i}Token`]: 'x', [`__x${i}`]: 'y' }, platform);
+				}
+				expect(warn.mock.calls.filter((c) => String(c[0]).includes('presence.update()'))).toHaveLength(0);
+			} finally {
+				warn.mockRestore();
+			}
+		});
+	});
+
+	describe('default select depth cap', () => {
+		it('does not throw on a pathologically nested userData', () => {
+			let deep = {};
+			const root = deep;
+			for (let i = 0; i < 100_000; i++) { deep.n = {}; deep = deep.n; }
+			const p = createPresence({ key: 'id', heartbeat: 0 });
+
+			expect(() => p.join(mockWs({ id: 'u-1', bio: root }), 'room', platform)).not.toThrow();
+			expect(p.list('room')[0].id).toBe('u-1');
+		});
+
+		it('keeps normally-nested data intact', () => {
+			const p = createPresence({ key: 'id', heartbeat: 0 });
+			p.join(mockWs({ id: 'u-1', a: { b: { c: { d: 'deep enough' } } } }), 'room', platform);
+			expect(p.list('room')[0].a.b.c.d).toBe('deep enough');
+		});
+	});
+
+	describe('list() matches the wire snapshot', () => {
+		it('includes durable update() fields, so SSR and the first snapshot agree', async () => {
+			const p = createPresence({ key: 'id', heartbeat: 0 });
+			const ws = mockWs({ id: 'u-1', name: 'Ada' });
+			p.join(ws, 'room', platform);
+			p.update(ws, 'room', { typing: true }, platform);
+			p.flushDiffs();
+			platform.reset();
+
+			await p.sync(mockWs({ id: 'observer' }), 'room', platform);
+			const snapshotEntry = platform.sent[0].data['u-1'];
+
+			expect(p.list('room')[0]).toEqual(snapshotEntry);
+			expect(p.list('room')[0].typing).toBe(true);
+		});
+
+		it('excludes transient fields, exactly as the snapshot does', () => {
+			const p = createPresence({ key: 'id', heartbeat: 0, transient: ['typing'] });
+			const ws = mockWs({ id: 'u-1', name: 'Ada' });
+			p.join(ws, 'room', platform);
+			p.update(ws, 'room', { typing: true, mood: 'calm' }, platform);
+			p.flushDiffs();
+
+			const entry = p.list('room')[0];
+			expect(entry.typing).toBeUndefined();
+			expect(entry.mood).toBe('calm');
+		});
+
+		it('still returns deep copies the caller cannot use to mutate plugin state', () => {
+			const p = createPresence({ key: 'id', heartbeat: 0 });
+			const ws = mockWs({ id: 'u-1' });
+			p.join(ws, 'room', platform);
+			p.update(ws, 'room', { nested: { n: 1 } }, platform);
+
+			p.list('room')[0].nested.n = 999;
+			expect(p.list('room')[0].nested.n).toBe(1);
+		});
+	});
+
+	describe('a credential-shaped dedup key is never broadcast', () => {
+		// The resolved dedup key is not just stored - it IS the roster map key
+		// in every wire frame. Exempting it from the denylist so dedup keeps
+		// working would publish the secret to every peer, twice over. The
+		// denylist wins; the app is warned instead.
+
+		it('drops a credential-shaped key field and warns instead of broadcasting it', () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			try {
+				const p = createPresence({ key: 'sessionId', heartbeat: 0 });
+				expect(warn.mock.calls.some((c) => String(c[0]).includes("key field 'sessionId'"))).toBe(true);
+
+				p.join(mockWs({ sessionId: 'sess_SUPER_SECRET', name: 'Ada' }), 'room', platform);
+				p.join(mockWs({ sessionId: 'sess_SUPER_SECRET', name: 'Ada' }), 'room', platform);
+
+				// Dedup falls back to per-connection entries ...
+				expect(p.count('room')).toBe(2);
+				// ... and the secret appears nowhere: not in the entry, and not
+				// as the roster key either.
+				const frames = JSON.stringify(platform.sent) + JSON.stringify(platform.published) + JSON.stringify(p.list('room'));
+				expect(frames.includes('sess_SUPER_SECRET')).toBe(false);
+			} finally {
+				warn.mockRestore();
+			}
+		});
+
+		it('does not warn for an ordinary key field', () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			try {
+				createPresence({ key: 'id', heartbeat: 0 });
+				createPresence({ key: 'userKey', heartbeat: 0 }); // an identifier, not a credential name
+				expect(warn.mock.calls.some((c) => String(c[0]).includes('key field'))).toBe(false);
+			} finally {
+				warn.mockRestore();
+			}
+		});
+
+		it('an explicit select is the escape hatch and is not second-guessed', () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			try {
+				const p = createPresence({ key: 'sessionId', heartbeat: 0, select: (ud) => ({ sessionId: ud.sessionId }) });
+				expect(warn.mock.calls.some((c) => String(c[0]).includes('key field'))).toBe(false);
+				p.join(mockWs({ sessionId: 's-1' }), 'room', platform);
+				p.join(mockWs({ sessionId: 's-1' }), 'room', platform);
+				expect(p.count('room')).toBe(1);
+			} finally {
+				warn.mockRestore();
+			}
+		});
+
+		it('a plain userKey is an identifier and dedups normally', () => {
+			const p = createPresence({ key: 'userKey', heartbeat: 0 });
+			p.join(mockWs({ userKey: 'u-42', name: 'Ada' }), 'room', platform);
+			p.join(mockWs({ userKey: 'u-42', name: 'Ada' }), 'room', platform);
+
+			expect(p.count('room')).toBe(1);
+			expect(p.list('room')[0].userKey).toBe('u-42');
+		});
+
+		it('still reserves the key field against client updates', () => {
+			const p = createPresence({ key: 'id', heartbeat: 0 });
+			const ws = mockWs({ id: 'u-1', name: 'Ada' });
+			p.join(ws, 'room', platform);
+			p.flushDiffs();
+			platform.reset();
+
+			p.update(ws, 'room', { id: 'u-victim', typing: true }, platform);
+			p.flushDiffs();
+
+			const diff = platform.published.find((e) => e.event === 'diff');
+			expect(diff.data.updates['u-1']).toEqual({ typing: true });
+		});
+	});
+
+	describe('client update reserved-fields guard (identity impersonation)', () => {
+		it('strips id / role / credential-shaped fields from a client presence-update', async () => {
+			const presence = createPresence({ heartbeat: 0 }); // default select
+			const ws = mockWs({ id: 'mallory', role: 'user', name: 'Mallory' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+			platform.reset();
+
+			const handled = presence.hooks.message(ws, {
+				data: {
+					type: 'presence-update',
+					topic: 'room',
+					fields: { role: 'admin', id: 'root', name: 'System', sessionToken: 'x', typing: true }
+				},
+				platform
+			});
+			presence.flushDiffs();
+
+			expect(handled).toBe(true);
+			// Only the non-reserved fields are broadcast.
+			expect(lastDiff().updates).toEqual({ mallory: { name: 'System', typing: true } });
+			// A late joiner's snapshot keeps the server-selected identity.
+			platform.reset();
+			await presence.sync(mockWs({ id: 'observer' }), 'room', platform);
+			const wire = platform.sent.find((s) => s.event === 'state').data.mallory;
+			expect(wire.id).toBe('mallory');
+			expect(wire.role).toBe('user');
+			expect(wire.name).toBe('System'); // name is not reserved - app choice
+			expect(wire.sessionToken).toBeUndefined();
+		});
+
+		it('strips the custom dedup key field too', () => {
+			const presence = createPresence({ key: 'userId', heartbeat: 0 });
+			const ws = mockWs({ userId: 'u-1', name: 'A' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+			platform.reset();
+
+			presence.update(ws, 'room', { userId: 'u-2', typing: true }, platform);
+			presence.flushDiffs();
+
+			expect(lastDiff().updates).toEqual({ 'u-1': { typing: true } });
+		});
+
+		it('clientUpdateFields allowlist accepts ONLY the listed fields', () => {
+			const presence = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id, name: ud.name }),
+				heartbeat: 0,
+				clientUpdateFields: ['typing', 'selection']
+			});
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+			platform.reset();
+
+			presence.update(ws, 'room', { typing: true, status: 'away', role: 'admin' }, platform);
+			presence.flushDiffs();
+
+			expect(lastDiff().updates).toEqual({ '1': { typing: true } });
+		});
+
+		it('clientUpdateFields is the escape hatch for a deliberately client-writable reserved name', () => {
+			const presence = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id, role: ud.role }),
+				heartbeat: 0,
+				clientUpdateFields: ['role']
+			});
+			const ws = mockWs({ id: '1', role: 'user' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+			platform.reset();
+
+			presence.update(ws, 'room', { role: 'moderator' }, platform);
+			presence.flushDiffs();
+
+			expect(lastDiff().updates).toEqual({ '1': { role: 'moderator' } });
+		});
+
+		it('the documented self-update flow is unaffected (typing / selection / status pass)', () => {
+			const presence = createPresence({
+				key: 'id',
+				select: (ud) => ({ id: ud.id, name: ud.name }),
+				transient: ['typing'],
+				heartbeat: 0
+			});
+			const ws = mockWs({ id: '1', name: 'Alice' });
+			presence.join(ws, 'room', platform);
+			presence.flushDiffs();
+			platform.reset();
+
+			presence.update(ws, 'room', { typing: true, selection: { start: 1, end: 5 }, status: 'away' }, platform);
+			presence.flushDiffs();
+
+			expect(lastDiff().updates).toEqual({
+				'1': { typing: true, selection: { start: 1, end: 5 }, status: 'away' }
+			});
+		});
 	});
 });

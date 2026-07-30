@@ -7,6 +7,7 @@ import { nodeResolve } from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 import json from '@rollup/plugin-json';
 import { normalizeStaticHeaders } from './build-config.js';
+import { assertRestrictiveBoolean, assertProtectiveNumber } from './config-guards.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
 
 const runtimeDir = fileURLToPath(new URL('./runtime', import.meta.url).href);
@@ -56,6 +57,384 @@ function detectSetCookieOnUpgrade(source) {
 	return false;
 }
 
+/**
+ * Every `websocket.*` option key the adapter consumes - either serialized
+ * into `wsOpts` (see {@link serializeWsOptions}) or used at build time
+ * (handler / path / authPath / metrics / primaryInit / workers). Options
+ * are baked into the build, so a key the adapter does not know is dropped
+ * SILENTLY; the build warns on any key outside this set so a typo'd or
+ * renamed option is loud instead of dead config.
+ */
+export const KNOWN_WEBSOCKET_OPTION_KEYS = new Set([
+	'handler', 'path', 'authPath', 'adminPath', 'adminAuthAcknowledged', 'metrics', 'primaryInit', 'workers',
+	'maxPayloadLength', 'idleTimeout', 'maxBackpressure', 'closeOnBackpressureLimit',
+	'sendPingsAutomatically', 'compression', 'allowedOrigins',
+	'upgradeTimeout', 'upgradeRateLimit', 'upgradeRateLimitWindow', 'upgradeAdmission',
+	'authPathRateLimit', 'authPathRateLimitWindow',
+	'pressure', 'protection', 'stateHashIntervalMs', 'consistencyAuditIntervalMs',
+	'resourceGrowthAuditIntervalMs', 'postureExport',
+	'allowSystemTopicSubscribe', 'authorizeWireSubscribe', 'allowNonAsciiTopics',
+	'authPathRequireOrigin', 'compressCredentialedResponses', 'unsafeSameOriginWithoutHostPin'
+]);
+
+/**
+ * Object-valued options whose CONTENTS are also checked, keyed by dotted path.
+ *
+ * A top-level-only walk cannot see a typo one level down, and for
+ * `upgradeAdmission` that is not cosmetic: every gate reads
+ * `maxConcurrent > 0`, so `maxConcurent: 500` leaves the concurrency ceiling,
+ * the cursor lane (which is sized from the same value) and the waiting room
+ * all switched off, silently. The 1 MB `maxPayloadLength` default is
+ * documented as safe BECAUSE that ceiling bounds it, so the typo also removes
+ * the stated bound on the payload default.
+ *
+ * `pressure` is milder - its thresholds are merged over defaults, so a typo
+ * leaves the default threshold rather than "off" - but a dropped key there
+ * still means the operator's tuning silently did nothing.
+ */
+export const KNOWN_NESTED_WEBSOCKET_OPTION_KEYS = {
+	upgradeAdmission: new Set(['maxConcurrent', 'perTickBudget', 'cursorLane', 'waitingRoom']),
+	'upgradeAdmission.cursorLane': new Set(['fraction']),
+	'upgradeAdmission.waitingRoom': new Set([
+		'path', 'admitCheckPath', 'pollIntervalMs', 'retryAfterSeconds', 'template'
+	]),
+	pressure: new Set([
+		'memoryHeapUsedRatio', 'publishRatePerSec', 'subscriberRatio', 'sampleIntervalMs',
+		'topicPublishRatePerSec', 'topicPublishBytesPerSec',
+		'psiCpuSome', 'psiMemoryFull', 'psiIoFull', 'cpuThrottledRatio'
+	]),
+	// `workers: { comptue: 2 }` silently runs zero compute workers - the same
+	// failure class, one level down, on a different option.
+	workers: new Set(['compute']),
+	postureExport: new Set(['path'])
+};
+
+/**
+ * Keys present on the user's `websocket` option that the adapter does not
+ * recognize, as dotted paths. The adapt step warns on every returned key.
+ *
+ * @param {Record<string, unknown> | null} websocket - normalized websocket options
+ * @returns {string[]}
+ */
+export function unknownWebsocketOptionKeys(websocket) {
+	if (!websocket || typeof websocket !== 'object') return [];
+	/** @type {string[]} */
+	const out = [];
+	collectUnknownKeys(websocket, KNOWN_WEBSOCKET_OPTION_KEYS, '', out);
+	return out;
+}
+
+/**
+ * @param {Record<string, unknown>} bag
+ * @param {Set<string>} known
+ * @param {string} prefix
+ * @param {string[]} out
+ */
+function collectUnknownKeys(bag, known, prefix, out) {
+	for (const key of Object.keys(bag)) {
+		const path = prefix ? `${prefix}.${key}` : key;
+		if (!known.has(key)) {
+			out.push(path);
+			continue;
+		}
+		const nested = KNOWN_NESTED_WEBSOCKET_OPTION_KEYS[path];
+		const value = bag[key];
+		// `false` disables a whole section (waitingRoom, pressure) and an array
+		// is never a section - neither has keys worth walking.
+		if (nested && value && typeof value === 'object' && !Array.isArray(value)) {
+			collectUnknownKeys(/** @type {Record<string, unknown>} */ (value), nested, path, out);
+		}
+	}
+}
+
+/**
+ * What the Vite plugin recorded about the module it bundled as the WS handler,
+ * written beside the emitted chunk. Null when there is no record - an app can
+ * place a `ws-handler.js` of its own, and older plugin builds wrote none.
+ *
+ * @param {string} tmp - the adapter build directory, which is also the SSR output dir
+ * @returns {{ source: string, absolute: string | null, from: string } | null}
+ */
+export function readHandlerOrigin(tmp) {
+	try {
+		const parsed = JSON.parse(readFileSync(`${tmp}/ws-handler.origin.json`, 'utf8'));
+		if (typeof parsed?.source !== 'string' || !parsed.source) return null;
+		return {
+			source: parsed.source,
+			// Absolute where the plugin recorded one. `source` is relative to the
+			// VITE root while this side resolves against its own cwd, so the two
+			// only agree when those coincide - comparing the relative form would
+			// report the same file as a mismatch in a monorepo or under an
+			// explicit Vite `root`.
+			absolute: typeof parsed.absolute === 'string' && parsed.absolute ? parsed.absolute : null,
+			from: typeof parsed.from === 'string' ? parsed.from : 'unknown'
+		};
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Two paths naming the same file. Compared after resolution so `./src/x.js`
+ * and `src/x.js` agree, and case-insensitively on the platforms whose file
+ * systems are, so a drive-letter or casing difference is not reported as a
+ * configuration conflict.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+function samePath(a, b) {
+	const left = path.resolve(a);
+	const right = path.resolve(b);
+	if (left === right) return true;
+	return process.platform === 'win32' && left.toLowerCase() === right.toLowerCase();
+}
+
+/**
+ * Refuse a build whose `websocket.handler` names a different module than the
+ * one the Vite plugin actually bundled.
+ *
+ * The plugin resolves the handler and emits `ws-handler.js` before the adapter
+ * runs, and the adapter then takes that file as it stands. So when the two
+ * disagree the adapter's option loses - silently, while the build log reports
+ * a handler was built. That is not a cosmetic drop: the module that wins
+ * decides WHICH authorization hooks exist, and an app-supplied `subscribe`
+ * hook stands the server-grant model down, so an accidental substitution can
+ * disarm a gate the operator explicitly enabled.
+ *
+ * The plugin honors `websocket.handler` itself, so agreement is the normal
+ * case; this catches the paths where it could not - an unreadable Svelte
+ * config, a hand-written `ws-handler.js`, or a plugin from a different install.
+ *
+ * @param {string | null | undefined} handler - the adapter's `websocket.handler`
+ * @param {{ source: string, absolute?: string | null, from: string } | null} origin - what the plugin recorded
+ * @param {{ warn: (msg: string) => void }} log - builder.log
+ */
+export function assertBundledHandlerMatches(handler, origin, log) {
+	if (!handler) return;
+
+	if (!origin) {
+		log.warn(
+			`websocket.handler is set to '${handler}', but the WebSocket handler was already built ` +
+			'by the Vite plugin and carries no record of which module it used, so the adapter ' +
+			'cannot confirm the two agree.\n' +
+			'  If the plugin and the adapter come from the same svelte-adapter-uws install this ' +
+			'should not happen - check for a stale or duplicated copy of the package.'
+		);
+		return;
+	}
+
+	if (samePath(handler, origin.absolute ?? origin.source)) return;
+
+	throw new Error(
+		`websocket.handler names a different module than the one that was built.\n` +
+		`  SvelteKit config  websocket.handler: ${JSON.stringify(handler)}\n` +
+		`  actually bundled: ${JSON.stringify(origin.source)} (${origin.from})\n` +
+		(origin.from.startsWith('auto-discovered')
+			? '  The plugin fell back to auto-discovery, which also happens when it cannot read ' +
+			  'the active SvelteKit adapter config - check that it exports this adapter instance.\n'
+			: '') +
+		'The Vite plugin resolves the WebSocket handler before the adapter runs, so the ' +
+		'bundled module is the one that decides which upgrade/subscribe hooks your app has. ' +
+		'Refusing the build rather than shipping the wrong one.\n' +
+		'  Name the handler in ONE place - websocket.handler on the adapter is honored ' +
+		'by the dev plugin too.'
+	);
+}
+
+/**
+ * The `wsOpts` payload serialized into the build as `WS_OPTIONS` (the
+ * production handler's `wsOptions`). Every runtime-tunable `websocket.*`
+ * key must be threaded through here - a documented key missing from this
+ * object is silently dropped at build time (`authorizeWireSubscribe` was,
+ * which left the wire-subscribe authorization arming in handler.js dead).
+ *
+ * @param {Record<string, any> | null} websocket - normalized websocket options
+ * @param {string | false} adminPath - validated admin route prefix (or false)
+ * @returns {Record<string, unknown>}
+ */
+export function serializeWsOptions(websocket, adminPath) {
+	// A flag that RESTRICTS access must never be coerced. The reads below are
+	// `=== true`, which treats every other value as "off" - so
+	// `authorizeWireSubscribe: process.env.WS_AUTHZ` (a string when set,
+	// undefined when not) would emit `"authorizeWireSubscribe":false` with no
+	// warning and leave the gate disarmed. That is the same silent no-op as
+	// dropping the key entirely, moved from the key to the value, and the
+	// unknown-key warning cannot catch it because the key is known. The
+	// permissive siblings (allowSystemTopicSubscribe, allowNonAsciiTopics) can
+	// coerce safely because coercing them yields the SAFE state; this one is
+	// the inverted case, so a misshaped value is a build error instead.
+	assertRestrictiveBoolean(websocket, 'authorizeWireSubscribe');
+	// The same inversion in the numeric options that size the two doors: a
+	// non-number does not fall back to the default, it disables the limiter.
+	assertProtectiveNumber(websocket, 'upgradeRateLimit');
+	assertProtectiveNumber(websocket, 'authPathRateLimit');
+	// The WINDOWS additionally refuse 0. It reads like "disable", and it does
+	// the opposite of what the limit's own 0 does: a zero window makes every
+	// request a fresh window, the sliding estimate evaluates to NaN, and
+	// `NaN >= limit` is false - so everything is admitted, silently.
+	const ZERO_WINDOW =
+		'A zero WINDOW does not disable the limiter, it breaks it: every request then looks ' +
+		'like a fresh window, the estimate evaluates to NaN, and NaN >= limit is false - so ' +
+		'everything is admitted. Set the limit itself to 0 to disable it deliberately.';
+	assertProtectiveNumber(websocket, 'upgradeRateLimitWindow', 'websocket.upgradeRateLimitWindow', { allowZero: false, zeroMeans: ZERO_WINDOW });
+	assertProtectiveNumber(websocket, 'authPathRateLimitWindow', 'websocket.authPathRateLimitWindow', { allowZero: false, zeroMeans: ZERO_WINDOW });
+	// The SIZE and TIMEOUT bounds are protective too, and they are handed
+	// straight to uWS. The guard covered only the rate limits, so
+	// `maxPayloadLength: '1000'` serialized into the build as a STRING with no
+	// warning - a value the operator wrote to bound a resource, arriving at the
+	// native layer as something it never validates back. Same reasoning as the
+	// limits above: a bound that silently does not apply is worse than a loud
+	// refusal at build time, which is the only place anyone is watching.
+	// These four are handed straight to uWS, which never validates them back, so
+	// a misshaped value is a bound that silently does not apply. The floor is no
+	// longer a guess: it was measured against the real binary, and for two of
+	// them zero INVERTS the option.
+	assertProtectiveNumber(websocket, 'maxPayloadLength', 'websocket.maxPayloadLength', {
+		allowZero: false,
+		zeroMeans:
+			'uWS closes the connection on any message when the maximum payload is 0, so it does ' +
+			'not disable the limit - it refuses all traffic. Raise the limit instead.'
+	});
+	assertProtectiveNumber(websocket, 'maxBackpressure', 'websocket.maxBackpressure', {
+		allowZero: false,
+		zeroMeans:
+			'uWS reads 0 as UNLIMITED buffering, the opposite of what it looks like: measured ' +
+			'against the real binary, a slow client buffered 99.75 MB at 0 against 1.00 MB at ' +
+			'the default. One slow reader would grow the worker without bound.'
+	});
+	// These two genuinely do disable in uWS - unlike the pair above, where 0
+	// inverts the option - so 0 stays legal for both. Both now say so in the
+	// README, including what disabling costs: `idleTimeout: 0` also stands down
+	// the automatic ping, so a peer that vanished silently is never reaped.
+	// Documenting it is the fix; a guard would refuse a legitimate setting.
+	assertProtectiveNumber(websocket, 'idleTimeout');
+	assertProtectiveNumber(websocket, 'upgradeTimeout');
+	return {
+		// Default raised from 16 KB to 1 MB in 0.5. uWS's own
+		// default is also 16 KB, which the adapter previously
+		// matched - that was excessively conservative and forced
+		// chunked-upload frameworks to use ~12 KB chunks (~9000
+		// chunks for a 100 MB file). 1 MB handles typical app
+		// payloads in a single frame without per-app tuning. DoS
+		// exposure is bounded by `upgradeAdmission.maxConcurrent`
+		// (connection count) and `maxBackpressure` (per-conn
+		// outbound queue, also 1 MB), so per-frame cost stays
+		// predictable. Apps that want a stricter cap can pin via
+		// `websocket.maxPayloadLength` in svelte.config.js.
+		maxPayloadLength: websocket?.maxPayloadLength ?? 1024 * 1024,
+		idleTimeout: websocket?.idleTimeout ?? 120,
+		maxBackpressure: websocket?.maxBackpressure ?? 1024 * 1024,
+		// When true, uWS closes a connection that stays pinned over
+		// maxBackpressure instead of perpetually shedding its frames -
+		// the bounded-recovery knob for a chronically slow consumer that
+		// would otherwise wedge a worker's outbound queue. Default false
+		// keeps the zero-config shed-and-continue behavior byte-identical.
+		closeOnBackpressureLimit: websocket?.closeOnBackpressureLimit ?? false,
+		sendPingsAutomatically: websocket?.sendPingsAutomatically ?? true,
+		compression: websocket?.compression ?? false,
+		allowedOrigins: websocket?.allowedOrigins ?? 'same-origin',
+		upgradeTimeout: websocket?.upgradeTimeout ?? 10,
+		upgradeRateLimit: websocket?.upgradeRateLimit ?? 10,
+		upgradeRateLimitWindow: websocket?.upgradeRateLimitWindow ?? 10,
+		authPathRateLimit: websocket?.authPathRateLimit ?? 30,
+		authPathRateLimitWindow: websocket?.authPathRateLimitWindow ?? 10,
+		upgradeAdmission: websocket?.upgradeAdmission,
+		pressure: websocket?.pressure,
+		// Graduated protection posture ('normal' | 'auto' | 'elevated' |
+		// 'siege'). A plain string enum, so it rides the JSON placeholder
+		// cleanly; the runtime applies the 'normal' default and only builds
+		// the posture machine when this is non-'normal'.
+		protection: websocket?.protection,
+		// Interval (ms) for the per-worker resource-growth auditor, and the
+		// posture export socket. Both are read off wsOptions at runtime
+		// (handler.js), so both have to be threaded through here - being on
+		// KNOWN_WEBSOCKET_OPTION_KEYS without being serialized is precisely
+		// the silent-drop failure this function was extracted to prevent, and
+		// it also suppresses the unknown-key warning that would have caught it.
+		resourceGrowthAuditIntervalMs: websocket?.resourceGrowthAuditIntervalMs ?? 0,
+		postureExport: websocket?.postureExport,
+		// Interval (ms) for the clustered cross-worker state-hash
+		// reporter. 0 (default) disables it - no reporter timer is
+		// scheduled and a single-process deployment never runs it.
+		// When > 0 in clustered mode each worker reports a
+		// structure-only hash of its delivered-seq map to the
+		// primary, which logs a `state-divergence` event if the live
+		// workers disagree at rest. The auto-restart of a diverged
+		// worker is a separate primary env switch
+		// (`RESTART_ON_STATE_DIVERGENCE`), default off.
+		stateHashIntervalMs: websocket?.stateHashIntervalMs ?? 0,
+		// Interval (ms) for the per-worker consistency auditor. Default
+		// 5000; 0 disables it (no timer scheduled, zero cost). On a slow,
+		// jittered, unref'd timer each worker runs the shared invariant
+		// predicates against a bounded structure-only snapshot of its live
+		// connections. A violation logs + increments the assertion counter
+		// (soft); only a subscription-slot type corruption that persists
+		// across two audits escalates to a worker restart. Off the hot
+		// path - publish/send/subscribe/close pay nothing. Runs
+		// single-process AND clustered (a per-worker safety net).
+		consistencyAuditIntervalMs: websocket?.consistencyAuditIntervalMs ?? 5000,
+		// Wire-level subscribes to '__'-prefixed system topics
+		// (e.g. '__signal:userId', '__rpc', plugin '__presence:*'
+		// '__group:*' '__replay:*') are reserved for internal
+		// framework / plugin use. Default off; set to `true` only
+		// for advanced apps that intentionally let clients listen
+		// on framework-internal channels.
+		allowSystemTopicSubscribe: websocket?.allowSystemTopicSubscribe === true,
+		// Wire-subscribe authorization. When true, a CLIENT-initiated
+		// subscribe / subscribe-batch frame is honored only for a topic
+		// the server already authorized for that connection via
+		// `platform.subscribe`, unless the app exports its own subscribe
+		// hook. Serialized as a strict boolean like its siblings; the
+		// runtime arming lives in handler.js (`subscribeAuth.enabled`).
+		authorizeWireSubscribe: websocket?.authorizeWireSubscribe === true,
+		// Wire-level subscribe topics default to printable ASCII
+		// only (0x20-0x7E, minus the always-illegal `"` and `\\`).
+		// This closes Unicode line separators, RTL override, and
+		// the byte-order mark - all of which survive the wire
+		// and surprise log dashboards / admin tools that render
+		// topics back to a human. Apps that legitimately use
+		// non-ASCII topic names can opt back in.
+		allowNonAsciiTopics: websocket?.allowNonAsciiTopics === true,
+		// CSRF defense for the `/__ws/auth` POST endpoint. By
+		// default, the request must carry one of:
+		//   - `x-requested-with: XMLHttpRequest`
+		//   - `Sec-Fetch-Site: same-origin`
+		//   - an `Origin` header matching `allowedOrigins`
+		// Apps that need to accept this endpoint from native
+		// (non-browser) clients without these headers can set
+		// `authPathRequireOrigin: false` here.
+		authPathRequireOrigin: websocket?.authPathRequireOrigin !== false,
+		// BREACH defense: dynamic compression of credentialed
+		// responses turns the response length into a side channel
+		// that leaks any secret reflected alongside attacker
+		// input. Compression is skipped on every request that
+		// carries a `Cookie` or `Authorization` header. Apps that
+		// have audited their reflected-input surface (random
+		// per-response masking, no secrets reflected with attacker
+		// input) can opt back in by setting
+		// `compressCredentialedResponses: true`.
+		compressCredentialedResponses: websocket?.compressCredentialedResponses === true,
+		// When `allowedOrigins: 'same-origin'` is set without any
+		// fronting trust to pin Host against (no ORIGIN env, no
+		// HOST_HEADER env, no native TLS, no upgrade() hook), the
+		// runtime refuses to start because the same-origin check
+		// then compares two attacker-controlled headers and
+		// trivially passes for any non-browser scripted client.
+		// Apps that have audited this and want the previous
+		// warn-only behavior can set
+		// `unsafeSameOriginWithoutHostPin: true`.
+		unsafeSameOriginWithoutHostPin: websocket?.unsafeSameOriginWithoutHostPin === true,
+		// Silences the boot warning that the admin route carries no
+		// adapter-level authentication. Set it once the app's admin() handler
+		// gates its own requests - the adapter cannot detect that itself.
+		adminAuthAcknowledged: websocket?.adminAuthAcknowledged === true,
+		// Admin route prefix (validated above): a normalized path string
+		// (default `/__realtime`) or `false` to disable the auto-mount.
+		adminPath
+	};
+}
 /** @type {import('./index.js').default} */
 export default function (opts = {}) {
 	const { out = 'build', precompress = true, envPrefix = '', healthCheckPath = '/healthz', readinessCheckPath = '/readyz' } = opts;
@@ -91,8 +470,21 @@ export default function (opts = {}) {
 			? {}
 			: opts.websocket || null;
 
+	if (websocket?.handler != null && typeof websocket.handler !== 'string') {
+		throw new Error(
+			`websocket.handler must be a path string (e.g. './src/lib/server/ws.js') - ` +
+			`got ${JSON.stringify(websocket.handler)}.`
+		);
+	}
+
 	return {
 		name: 'adapter-uws',
+
+		// Read by the Vite plugin (src/vite.js) so this one value drives both
+		// surfaces. The plugin resolves the WS handler and emits it BEFORE the
+		// adapter runs, so without this the plugin could not see the adapter's
+		// choice and would bundle whatever auto-discovery found instead.
+		websocketHandler: websocket?.handler ?? null,
 
 		async adapt(builder) {
 			// Verify uWebSockets.js is installed - it's a native addon from GitHub,
@@ -207,7 +599,18 @@ export default function (opts = {}) {
 				// writeServer output - built through the same Vite pipeline as
 				// hooks.server.ts, with $lib/$env/$app resolved and shared modules.
 				if (existsSync(`${tmp}/ws-handler.js`)) {
-					builder.log.minor('WebSocket handler: built by Vite plugin');
+					// The plugin already resolved and emitted the handler. Confirm it
+					// bundled the module this adapter was configured with, and name
+					// that module in the log - the old line asserted a handler was
+					// built without saying which, which is why a substitution stayed
+					// invisible.
+					const origin = readHandlerOrigin(tmp);
+					assertBundledHandlerMatches(websocket.handler, origin, builder.log);
+					builder.log.minor(
+						origin
+							? `WebSocket handler: ${origin.source} (${origin.from}, built by Vite plugin)`
+							: 'WebSocket handler: built by Vite plugin'
+					);
 				} else {
 					// Vite plugin not installed - resolve handler ourselves
 					let handlerFile = websocket.handler;
@@ -449,108 +852,21 @@ export default function (opts = {}) {
 					'`platform.metrics` (e.g. in a /metrics +server.js route). See the README metrics section.'
 				);
 			}
-			const wsOpts = {
-				// Default raised from 16 KB to 1 MB in 0.5. uWS's own
-				// default is also 16 KB, which the adapter previously
-				// matched - that was excessively conservative and forced
-				// chunked-upload frameworks to use ~12 KB chunks (~9000
-				// chunks for a 100 MB file). 1 MB handles typical app
-				// payloads in a single frame without per-app tuning. DoS
-				// exposure is bounded by `upgradeAdmission.maxConcurrent`
-				// (connection count) and `maxBackpressure` (per-conn
-				// outbound queue, also 1 MB), so per-frame cost stays
-				// predictable. Apps that want a stricter cap can pin via
-				// `websocket.maxPayloadLength` in svelte.config.js.
-				maxPayloadLength: websocket?.maxPayloadLength ?? 1024 * 1024,
-				idleTimeout: websocket?.idleTimeout ?? 120,
-				maxBackpressure: websocket?.maxBackpressure ?? 1024 * 1024,
-				// When true, uWS closes a connection that stays pinned over
-				// maxBackpressure instead of perpetually shedding its frames -
-				// the bounded-recovery knob for a chronically slow consumer that
-				// would otherwise wedge a worker's outbound queue. Default false
-				// keeps the zero-config shed-and-continue behavior byte-identical.
-				closeOnBackpressureLimit: websocket?.closeOnBackpressureLimit ?? false,
-				sendPingsAutomatically: websocket?.sendPingsAutomatically ?? true,
-				compression: websocket?.compression ?? false,
-				allowedOrigins: websocket?.allowedOrigins ?? 'same-origin',
-				upgradeTimeout: websocket?.upgradeTimeout ?? 10,
-				upgradeRateLimit: websocket?.upgradeRateLimit ?? 10,
-				upgradeRateLimitWindow: websocket?.upgradeRateLimitWindow ?? 10,
-				upgradeAdmission: websocket?.upgradeAdmission,
-				pressure: websocket?.pressure,
-				// Graduated protection posture ('normal' | 'auto' | 'elevated' |
-				// 'siege'). A plain string enum, so it rides the JSON placeholder
-				// cleanly; the runtime applies the 'normal' default and only builds
-				// the posture machine when this is non-'normal'.
-				protection: websocket?.protection,
-				// Interval (ms) for the clustered cross-worker state-hash
-				// reporter. 0 (default) disables it - no reporter timer is
-				// scheduled and a single-process deployment never runs it.
-				// When > 0 in clustered mode each worker reports a
-				// structure-only hash of its delivered-seq map to the
-				// primary, which logs a `state-divergence` event if the live
-				// workers disagree at rest. The auto-restart of a diverged
-				// worker is a separate primary env switch
-				// (`RESTART_ON_STATE_DIVERGENCE`), default off.
-				stateHashIntervalMs: websocket?.stateHashIntervalMs ?? 0,
-				// Interval (ms) for the per-worker consistency auditor. Default
-				// 5000; 0 disables it (no timer scheduled, zero cost). On a slow,
-				// jittered, unref'd timer each worker runs the shared invariant
-				// predicates against a bounded structure-only snapshot of its live
-				// connections. A violation logs + increments the assertion counter
-				// (soft); only a subscription-slot type corruption that persists
-				// across two audits escalates to a worker restart. Off the hot
-				// path - publish/send/subscribe/close pay nothing. Runs
-				// single-process AND clustered (a per-worker safety net).
-				consistencyAuditIntervalMs: websocket?.consistencyAuditIntervalMs ?? 5000,
-				// Wire-level subscribes to '__'-prefixed system topics
-				// (e.g. '__signal:userId', '__rpc', plugin '__presence:*'
-				// '__group:*' '__replay:*') are reserved for internal
-				// framework / plugin use. Default off; set to `true` only
-				// for advanced apps that intentionally let clients listen
-				// on framework-internal channels.
-				allowSystemTopicSubscribe: websocket?.allowSystemTopicSubscribe === true,
-				// Wire-level subscribe topics default to printable ASCII
-				// only (0x20-0x7E, minus the always-illegal `"` and `\\`).
-				// This closes Unicode line separators, RTL override, and
-				// the byte-order mark - all of which survive the wire
-				// and surprise log dashboards / admin tools that render
-				// topics back to a human. Apps that legitimately use
-				// non-ASCII topic names can opt back in.
-				allowNonAsciiTopics: websocket?.allowNonAsciiTopics === true,
-				// CSRF defense for the `/__ws/auth` POST endpoint. By
-				// default, the request must carry one of:
-				//   - `x-requested-with: XMLHttpRequest`
-				//   - `Sec-Fetch-Site: same-origin`
-				//   - an `Origin` header matching `allowedOrigins`
-				// Apps that need to accept this endpoint from native
-				// (non-browser) clients without these headers can set
-				// `authPathRequireOrigin: false` here.
-				authPathRequireOrigin: websocket?.authPathRequireOrigin !== false,
-				// BREACH defense: dynamic compression of credentialed
-				// responses turns the response length into a side channel
-				// that leaks any secret reflected alongside attacker
-				// input. Compression is skipped on every request that
-				// carries a `Cookie` or `Authorization` header. Apps that
-				// have audited their reflected-input surface (random
-				// per-response masking, no secrets reflected with attacker
-				// input) can opt back in by setting
-				// `compressCredentialedResponses: true`.
-				compressCredentialedResponses: websocket?.compressCredentialedResponses === true,
-				// When `allowedOrigins: 'same-origin'` is set without any
-				// fronting trust to pin Host against (no ORIGIN env, no
-				// HOST_HEADER env, no native TLS, no upgrade() hook), the
-				// runtime refuses to start because the same-origin check
-				// then compares two attacker-controlled headers and
-				// trivially passes for any non-browser scripted client.
-				// Apps that have audited this and want the previous
-				// warn-only behavior can set
-				// `unsafeSameOriginWithoutHostPin: true`.
-				unsafeSameOriginWithoutHostPin: websocket?.unsafeSameOriginWithoutHostPin === true,
-				// Admin route prefix (validated above): a normalized path string
-				// (default `/__realtime`) or `false` to disable the auto-mount.
-				adminPath
-			};
+			const wsOpts = serializeWsOptions(websocket, adminPath);
+
+			// Loud on unknown websocket.* keys: adapter options are serialized
+			// into the build, so a key the adapter does not recognize is dropped
+			// silently - warn so a typo'd or renamed option surfaces instead of
+			// no-op'ing (the documented authorizeWireSubscribe was dropped exactly
+			// this way before it was threaded into wsOpts).
+			const unknownWsKeys = unknownWebsocketOptionKeys(websocket);
+			if (unknownWsKeys.length) {
+				builder.log.warn(
+					`[adapter-uws] unknown websocket option(s): ${unknownWsKeys.join(', ')} - ` +
+					'not recognized by the adapter and ignored. Check the spelling against the ' +
+					'documented websocket options (WebSocketOptions in index.d.ts).'
+				);
+			}
 
 			// Scan the bundled WS handler for `upgradeResponse(..., { 'set-cookie': ... })`
 			// and warn loudly. Cloudflare Tunnel and some other strict edge proxies

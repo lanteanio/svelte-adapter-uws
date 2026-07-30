@@ -331,3 +331,374 @@ describe('primary relay-gap handler wiring (runtime/index.js)', () => {
 			.toBe(literals.length);
 	});
 });
+
+describe('the report never names a frame that arrived', () => {
+	// The buffer above a hole is capped. Once full, an arrival BELOW the lowest
+	// buffered ordinal used to be recorded nowhere, while the report boundary is
+	// computed from that lowest buffered value - so a deep reorder with the high
+	// block first made the report span frames the worker was holding. One lost
+	// frame came back as 98, and relay_gap_frames_total was incremented by 98.
+	//
+	// The buffer now keeps the SMALLEST ordinals, so the boundary is the true
+	// lowest arrival above the hole and everything below it genuinely never came.
+	const BIRTH = 300;
+	const ATTACHED = 200;
+	const clock = (t) => () => t;
+	const gapsOf = (streams, at = 10_000) => takeConfirmedGaps(streams, at, GAP_CONFIRM_MS);
+
+	it('reports one lost frame as one, not as the whole reordered span', () => {
+		const streams = new Map();
+		const now = clock(1000);
+		const HIGH = 100;
+
+		// Ordinal 1 lands. Ordinal 2 is the only frame that is ever lost.
+		recordOriginStream(streams, 'room', 7, 1, BIRTH, ATTACHED, now);
+		// A high block arrives first and fills the buffer to the cap...
+		for (let o = HIGH; o < HIGH + MAX_PENDING_ABOVE; o++) {
+			recordOriginStream(streams, 'room', 7, o, BIRTH, ATTACHED, now);
+		}
+		// ... and only then does everything between 3 and 99 arrive. All of it was
+		// delivered; none of it may appear in the report.
+		for (let o = 3; o < HIGH; o++) {
+			recordOriginStream(streams, 'room', 7, o, BIRTH, ATTACHED, now);
+		}
+
+		const gaps = gapsOf(streams);
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0]).toMatchObject({ topic: 'room', origin: 7, from: 2, to: 2, count: 1 });
+	});
+
+	it('stays silent when a deep reorder delivered everything', () => {
+		// An arrival ABOVE everything retained is discarded once the buffer is full.
+		// It still ARRIVED, so the report boundary must not cross it - otherwise a
+		// later straggler drains the watermark past it and a DELIVERED ordinal lands
+		// inside the reported range. Here every ordinal 1..81 is delivered and
+		// nothing at all is lost.
+		const streams = new Map();
+		const now = clock(1000);
+		const rec = (o) => recordOriginStream(streams, 'room', 7, o, BIRTH, ATTACHED, now);
+		const order = [1];
+		for (let o = 3; o <= 40; o++) order.push(o);
+		for (let o = 42; o <= 67; o++) order.push(o);
+		for (let o = 68; o <= 80; o++) order.push(o);
+		order.push(2, 81, 41);
+		for (const o of order) rec(o);
+
+		expect(gapsOf(streams), 'every ordinal arrived, so nothing may be reported').toEqual([]);
+	});
+
+	it('retains a later real loss when an earlier deep reorder closes', () => {
+		// Fill the exact buffer behind a reordered 2, then lose 67 while later
+		// frames continue. The old scalar remembered that 68 arrived, but when 2
+		// landed it discarded that fact, jumped w to hi=80 and made the real
+		// interior loss invisible - the card's equal-maxima bug again.
+		const streams = new Map();
+		const now = clock(1000);
+		const rec = (o) => recordOriginStream(streams, 'room', 7, o, BIRTH, ATTACHED, now);
+		rec(1);
+		for (let o = 3; o < 3 + MAX_PENDING_ABOVE; o++) rec(o);
+		for (let o = 68; o <= 80; o++) rec(o);
+		rec(2);
+
+		expect(gapsOf(streams)).toEqual([
+			{ topic: 'room', origin: 7, from: 67, to: 67, count: 1 }
+		]);
+	});
+
+	it('closes a later compacted range when its missing frame also arrives', () => {
+		// Negative control: compact retention must not turn the same complete deep
+		// reorder into a restart-worthy report.
+		const streams = new Map();
+		const now = clock(1000);
+		const rec = (o) => recordOriginStream(streams, 'room', 7, o, BIRTH, ATTACHED, now);
+		rec(1);
+		for (let o = 3; o < 3 + MAX_PENDING_ABOVE; o++) rec(o);
+		for (let o = 68; o <= 80; o++) rec(o);
+		rec(2);
+		rec(67);
+
+		expect(gapsOf(streams), 'every ordinal arrived, so nothing may be reported').toEqual([]);
+		expect(streams.get('room').get(7).w).toBe(80);
+	});
+
+	it('never emits an inverted or zero-width range', () => {
+		// A consumer reads `count` into relay_gap_frames_total and the `[from, to]`
+		// span into an operator-facing log line, and RESTART_ON_STATE_DIVERGENCE
+		// acts on the report - so a `to < from` entry would restart a worker over
+		// nothing. Sweep the shapes that close a hole out of order while the buffer
+		// is saturated.
+		for (let extra = 0; extra <= 6; extra++) {
+			const streams = new Map();
+			const now = clock(1000);
+			const rec = (o) => recordOriginStream(streams, 'room', 7, o, BIRTH, ATTACHED, now);
+			rec(1);
+			for (let o = 3; o < 3 + MAX_PENDING_ABOVE + extra; o++) rec(o);
+			rec(2);
+			for (const g of gapsOf(streams)) {
+				expect(g.to, 'inverted range ' + JSON.stringify(g)).toBeGreaterThanOrEqual(g.from);
+				expect(g.count, 'non-positive count ' + JSON.stringify(g)).toBeGreaterThan(0);
+			}
+		}
+	});
+
+	it('keeps the cached buffer maximum consistent with the buffer', () => {
+		// aboveMax is the eviction pivot. A stale value evicts the wrong ordinal and
+		// silently corrupts the report boundary, and three separate mutations of its
+		// bookkeeping previously left this whole file green.
+		const maxOf = (set) => (set === null ? -Infinity : Math.max(...set));
+		const check = (streams, label) => {
+			const st = streams.get('room').get(7);
+			expect(st.aboveMax, label + ': cached max disagrees with the buffer').toBe(maxOf(st.above));
+			if (st.above !== null) expect(st.above.size, label + ': buffer exceeded the cap').toBeLessThanOrEqual(MAX_PENDING_ABOVE);
+		};
+		const now = clock(1000);
+
+		// After a first-sighting gap (the constructor that seeds a non-empty buffer).
+		const a = new Map();
+		recordOriginStream(a, 'room', 7, 42, BIRTH, ATTACHED, now);
+		check(a, 'first sighting');
+
+		// After a partial drain that leaves a second hole behind.
+		const b = new Map();
+		for (const o of [1, 3, 5, 6, 7]) recordOriginStream(b, 'room', 7, o, BIRTH, ATTACHED, now);
+		recordOriginStream(b, 'room', 7, 2, BIRTH, ATTACHED, now);
+		check(b, 'partial drain');
+
+		// Across the cap, with evictions and duplicates.
+		const c = new Map();
+		recordOriginStream(c, 'room', 7, 1, BIRTH, ATTACHED, now);
+		for (let o = 3 + MAX_PENDING_ABOVE * 2; o > 2; o--) {
+			recordOriginStream(c, 'room', 7, o, BIRTH, ATTACHED, now);
+			if (o % 7 === 0) recordOriginStream(c, 'room', 7, o, BIRTH, ATTACHED, now);
+		}
+		check(c, 'descending with duplicates');
+
+		// After a re-baseline, the buffer is released and the cache must follow...
+		const d = new Map();
+		recordOriginStream(d, 'room', 7, 1, BIRTH, ATTACHED, now);
+		recordOriginStream(d, 'room', 7, 3, BIRTH, ATTACHED, now);
+		gapsOf(d);
+		check(d, 'after re-baseline');
+
+		// ...and a NEW hole opening afterwards must start from a clean cache. This
+		// is the case that catches a stale maximum surviving the null-ing of the
+		// buffer: checking only at the moment of re-baseline cannot see it, because
+		// the buffer is empty and any value trivially agrees.
+		recordOriginStream(d, 'room', 7, 5, BIRTH, ATTACHED, now);
+		check(d, 'new hole after re-baseline');
+		recordOriginStream(d, 'room', 7, 9, BIRTH, ATTACHED, now);
+		recordOriginStream(d, 'room', 7, 7, BIRTH, ATTACHED, now);
+		check(d, 'new hole, several buffered');
+	});
+
+	it('a duplicate arriving at the cap does not evict a frame that arrived', () => {
+		// Duplicate re-delivery is expected input on this path, and it interacts with
+		// the eviction: re-adding a value the buffer already holds would still evict
+		// the maximum, shrinking the set by one and forgetting an ordinal that
+		// ARRIVED. A later arrival takes the freed slot, the drain stops on the
+		// forgotten value, and it is reported lost - the exact class the retention
+		// exists to close, reintroduced by the retention itself.
+		const streams = new Map();
+		const now = clock(1000);
+		const rec = (o) => recordOriginStream(streams, 'room', 7, o, BIRTH, ATTACHED, now);
+
+		rec(1);
+		// Fill the buffer to the cap with 3..66 (2 is the only frame not yet seen).
+		for (let o = 3; o < 3 + MAX_PENDING_ABOVE; o++) rec(o);
+		// A duplicate of a buffered ordinal, then one more new arrival, then the
+		// straggler that plugs the hole. Nothing was ever lost.
+		rec(3);
+		rec(3 + MAX_PENDING_ABOVE);
+		rec(2);
+
+		expect(gapsOf(streams), 'nothing was lost, so nothing may be reported').toEqual([]);
+	});
+
+	it('still reports a genuinely wide gap at its true width', () => {
+		// Control: the narrowing above must come from arrivals being recorded, not
+		// from the report having been clamped.
+		const streams = new Map();
+		const now = clock(1000);
+		recordOriginStream(streams, 'room', 7, 1, BIRTH, ATTACHED, now);
+		// 2..99 really are lost; only 100 arrives.
+		recordOriginStream(streams, 'room', 7, 100, BIRTH, ATTACHED, now);
+
+		const gaps = gapsOf(streams);
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0]).toMatchObject({ from: 2, to: 99, count: 98 });
+	});
+});
+
+describe('relay attach latch (markRelayAttached)', () => {
+	// The latch is what separates "this stream started before we were listening,
+	// so its prefix was never ours" from "we were attached and lost the prefix".
+	// Without it every late-joining worker would report the whole history of every
+	// stream as lost.
+	it('records an attach instant that a later stream birth compares against', async () => {
+		const state = await import('../src/runtime/handler/state.js');
+		expect(typeof state.markRelayAttached).toBe('function');
+		state.markRelayAttached();
+		expect(state.relayAttach.at, 'attaching must stamp a non-zero instant').toBeGreaterThan(0);
+
+		// A stream BORN BEFORE the attach owes this worker nothing below the first
+		// ordinal it saw, so a missing prefix must stay silent...
+		const before = new Map();
+		const now = () => state.relayAttach.at + 5_000;
+		recordOriginStream(before, 'room', 1, 42, state.relayAttach.at - 100, state.relayAttach.at, now);
+		expect(takeConfirmedGaps(before, state.relayAttach.at + 20_000, GAP_CONFIRM_MS)).toEqual([]);
+
+		// ... while a stream born AFTER the attach owed us ordinal 1, so the same
+		// shape is a real loss. This is the comparison the latch exists for.
+		const after = new Map();
+		recordOriginStream(after, 'room', 1, 42, state.relayAttach.at + 100, state.relayAttach.at, now);
+		const gaps = takeConfirmedGaps(after, state.relayAttach.at + 20_000, GAP_CONFIRM_MS);
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0]).toMatchObject({ from: 1, to: 41 });
+	});
+});
+
+describe('the detector is actually wired into the runtime', () => {
+	// The decisions above are driven behaviourally. The JOINS that turn them into
+	// a working detector are split:
+	//
+	// The two receive-path joins are now proven BEHAVIOURALLY, in
+	// relay-receive-real.test.js, which boots the built runtime and drives the
+	// real relayPublish / relayPublishBatched. Importing lifecycle.js from SOURCE
+	// does fail with "Cannot find package 'WS_HANDLER'" (via
+	// ws-handler-bridge.js), but the adapter emits handler/ as separate modules
+	// with that placeholder resolved, so the built copy imports fine. Each of the
+	// two calls is verified red there by deleting it.
+	//
+	// The remaining two joins below stay STRUCTURAL, and are deliberately
+	// labelled as such - they prove a call exists and is not smothered by a
+	// condition, not that it runs. That is a property of THIS suite, not a
+	// property of the code: the reporter installs when `parentPort` is present
+	// and `stateHashIntervalMs` is set, which needs a worker thread and a build
+	// variant carrying that option - both of which this repo already does
+	// elsewhere (relay-ring.test.js spawns worker threads; acceptor-init.test.js
+	// boots a real CLUSTER_WORKERS=2 runtime). So these two are undriven here,
+	// not undrivable, and the drain-and-report join in particular is worth
+	// driving: draining without reporting consumes the evidence and tells
+	// nobody.
+	const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+	const astOf = (src) => parse(src, { ecmaVersion: 'latest', sourceType: 'module' });
+
+	/**
+	 * Collect every CallExpression to `name`, each with its ancestor chain.
+	 * @param {any} node @param {string} name
+	 * @returns {{ node: any, ancestors: any[] }[]}
+	 */
+	function callsTo(node, name) {
+		/** @type {{ node: any, ancestors: any[] }[]} */
+		const hits = [];
+		const walk = (n, ancestors) => {
+			if (!n || typeof n.type !== 'string') return;
+			if (n.type === 'CallExpression' && n.callee?.type === 'Identifier' && n.callee.name === name) {
+				hits.push({ node: n, ancestors });
+			}
+			const next = ancestors.concat(n);
+			for (const key of Object.keys(n)) {
+				const v = n[key];
+				if (Array.isArray(v)) for (const c of v) walk(c, next);
+				else if (v && typeof v.type === 'string') walk(v, next);
+			}
+		};
+		walk(node, []);
+		return hits;
+	}
+
+	/**
+	 * The nearest enclosing function of a node, plus whether that function is
+	 * REACHABLE - exported, or referenced by name somewhere else in the file.
+	 * A call parked inside a function nobody calls satisfies a presence check
+	 * while never running, which is how the first version of these guards was
+	 * defeated by moving the wiring into a dead `__neverCalled()`.
+	 */
+	function enclosing(ancestors, src) {
+		for (let i = ancestors.length - 1; i >= 0; i--) {
+			const a = ancestors[i];
+			if (a.type !== 'FunctionDeclaration' && a.type !== 'FunctionExpression' && a.type !== 'ArrowFunctionExpression') continue;
+			const name = a.id?.name ?? null;
+			if (name === null) return { name: null, reachable: true }; // inline callback: runs where it sits
+			const exported = new RegExp('export\\s+(async\\s+)?function\\s+' + name + '\\b').test(src) ||
+				new RegExp('export\\s*\\{[^}]*\\b' + name + '\\b').test(src);
+			const referenced = (src.match(new RegExp('\\b' + name + '\\b', 'g')) || []).length > 1;
+			return { name, reachable: exported || referenced };
+		}
+		return { name: null, reachable: true };
+	}
+
+	it('keeps both receive-path recordings behind the streamTracking gate (lifecycle.js)', () => {
+		// THAT these two calls run, and that each records, is proven behaviourally
+		// in relay-receive-real.test.js. What a behavioural test cannot see is the
+		// SHAPE of the gate: moving the flag test inside recordOriginStream would
+		// keep every assertion there green while making a default deployment pay a
+		// call, an argument evaluation and a Map lookup on every relayed frame.
+		// That perf property is what this guard still covers.
+		const src = read('../src/runtime/handler/lifecycle.js');
+		const hits = callsTo(astOf(src), 'recordOriginStream');
+		expect(hits.length, 'both the single and batch relay receive paths must record').toBeGreaterThanOrEqual(2);
+		// Checked per CALL via the ancestor chain rather than as a whole-file
+		// substring, which a comment mentioning the flag would satisfy.
+		for (const { ancestors } of hits) {
+			const gated = ancestors.some(
+				(a) => a.type === 'IfStatement' && src.slice(a.test.start, a.test.end).includes('streamTracking.enabled')
+			);
+			// An early return at the top of the enclosing function -
+			// `if (!streamTracking.enabled) return;` - is the same gate at the same
+			// cost, and must not read as a violation just because it leaves the call
+			// with no enclosing IfStatement.
+			const earlyReturn = !gated && ancestors.some((a) => {
+				if (a.type !== 'FunctionDeclaration' && a.type !== 'FunctionExpression' && a.type !== 'ArrowFunctionExpression') return false;
+				return /if\s*\(\s*!\s*streamTracking\.enabled\s*\)\s*(\{\s*)?return\b/.test(src.slice(a.start, a.end));
+			});
+			expect(gated || earlyReturn, 'a recordOriginStream call is not behind streamTracking.enabled').toBe(true);
+		}
+	});
+
+	it('drains confirmed gaps and emits them from the SAME function (handler.js)', () => {
+		const src = read('../src/runtime/handler.js');
+		const hits = callsTo(astOf(src), 'takeConfirmedGaps');
+		expect(hits.length, 'the reporter must drain the confirmed gaps').toBeGreaterThanOrEqual(1);
+		// Draining without reporting consumes the evidence and tells nobody, which
+		// is worse than not detecting. Parking the emission in a separate function
+		// satisfies a whole-file substring check, so require the emission to live
+		// in the same enclosing function as the drain.
+		let emitted = false;
+		for (const { ancestors } of hits) {
+			const fn = enclosing(ancestors, src);
+			expect(fn.reachable, 'takeConfirmedGaps sits in unreachable function ' + fn.name).toBe(true);
+			for (let i = ancestors.length - 1; i >= 0; i--) {
+				const a = ancestors[i];
+				if (a.type !== 'FunctionDeclaration' && a.type !== 'FunctionExpression' && a.type !== 'ArrowFunctionExpression') continue;
+				const body = src.slice(a.start, a.end);
+				if (body.includes('relay-gap') && /postMessage\(/.test(body)) emitted = true;
+				break;
+			}
+		}
+		expect(emitted, 'a drained gap must be reported from the function that drained it').toBe(true);
+	});
+
+	it('latches the attach instant unconditionally (runtime/index.js)', () => {
+		// markRelayAttached must run for EVERY worker. Smothered by a relayRing
+		// test - in an if, a ternary, or a && short-circuit - a worker with no ring
+		// would never latch and would then treat every stream as born after its
+		// attach, reporting whole histories as lost.
+		const src = read('../src/runtime/index.js');
+		const hits = callsTo(astOf(src), 'markRelayAttached');
+		expect(hits.length, 'the attach latch must be called').toBeGreaterThanOrEqual(1);
+		let unconditional = 0;
+		for (const { ancestors } of hits) {
+			const fn = enclosing(ancestors, src);
+			expect(fn.reachable, 'markRelayAttached sits in unreachable function ' + fn.name).toBe(true);
+			const smothered = ancestors.some((a) => {
+				if (a.type === 'IfStatement') return src.slice(a.test.start, a.test.end).includes('relayRing');
+				// A ternary or a && guard is not an IfStatement but gates just as hard.
+				if (a.type === 'LogicalExpression' || a.type === 'ConditionalExpression') return true;
+				return false;
+			});
+			if (!smothered) unconditional++;
+		}
+		expect(unconditional, 'every markRelayAttached call is gated by a condition').toBeGreaterThanOrEqual(1);
+	});
+});

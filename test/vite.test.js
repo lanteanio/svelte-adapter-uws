@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import path from 'node:path';
 
 describe('vite plugin', () => {
 	describe('module loading', () => {
@@ -40,6 +41,39 @@ describe('vite plugin', () => {
 	});
 
 	describe('configureServer', () => {
+		it('loads websocket.handler from SvelteKit resolved config in dev', async () => {
+			const mod = await import('../src/vite.js');
+			const plugin = mod.default();
+			const ssrLoadModule = vi.fn().mockResolvedValue({});
+			const server = {
+				httpServer: { on: vi.fn(), once: vi.fn() },
+				middlewares: { use: vi.fn() },
+				ssrLoadModule,
+				config: {
+					root: path.join(process.cwd(), 'test'),
+					server: {},
+					logger: { warn: vi.fn() },
+					plugins: [{
+						name: 'vite-plugin-sveltekit-setup',
+						api: {
+							options: {
+								kit: {
+									adapter: {
+										name: 'adapter-uws',
+										websocketHandler: './test/vite.test.js'
+									}
+								}
+							}
+						}
+					}]
+				}
+			};
+
+			await plugin.configureServer(server);
+
+			expect(ssrLoadModule).toHaveBeenCalledWith(path.resolve('test/vite.test.js'));
+		});
+
 		it('warns and returns early in middleware mode (no httpServer)', async () => {
 			const mod = await import('../src/vite.js');
 			const plugin = mod.default();
@@ -196,27 +230,105 @@ describe('vite plugin', () => {
 	});
 
 	describe('SSR build (configResolved + buildStart)', () => {
-		it('emits the ws-handler chunk when handler file exists during the SSR build', async () => {
+		it('reads websocket.handler from SvelteKit resolved config when no config file exists', async () => {
 			const mod = await import('../src/vite.js');
-			const plugin = mod.default({ handler: './test/vite.test.js' });
+			const plugin = mod.default();
 
-			plugin.configResolved({ root: process.cwd(), build: { ssr: true } });
+			await plugin.configResolved({
+				// Adapter paths use the same project-cwd base as adapt(); an
+				// explicit Vite root must not reinterpret the configured module.
+				root: path.join(process.cwd(), 'test'),
+				build: { ssr: true },
+				plugins: [{
+					name: 'vite-plugin-sveltekit-setup',
+					api: {
+						options: {
+							kit: {
+								adapter: {
+									name: 'adapter-uws',
+									websocketHandler: './test/vite.test.js'
+								}
+							}
+						}
+					}
+				}]
+			});
 
 			const emitFile = vi.fn();
 			plugin.buildStart.call({ emitFile, environment: { name: 'ssr' } });
 
-			expect(emitFile).toHaveBeenCalledTimes(1);
+			expect(emitFile).toHaveBeenCalledWith(expect.objectContaining({
+				type: 'chunk',
+				id: path.resolve('test/vite.test.js'),
+				fileName: 'ws-handler.js'
+			}));
+			const marker = emitFile.mock.calls
+				.map(([arg]) => arg)
+				.find((arg) => arg.fileName === 'ws-handler.origin.json');
+			expect(JSON.parse(marker.source).from).toBe('websocket.handler in SvelteKit config');
+		});
+
+		it('refuses conflicting plugin and direct SvelteKit handler values', async () => {
+			const mod = await import('../src/vite.js');
+			const plugin = mod.default({ handler: './vite.test.js' });
+
+			await expect(plugin.configResolved({
+				root: path.join(process.cwd(), 'test'),
+				build: { ssr: true },
+				plugins: [{
+					name: 'vite-plugin-sveltekit-setup',
+					api: {
+						options: {
+							kit: {
+								adapter: {
+									name: 'adapter-uws',
+									websocketHandler: './test/_helpers.js'
+								}
+							}
+						}
+					}
+				}]
+			})).rejects.toThrow(/named twice, and the two disagree/);
+		});
+
+		it('emits the ws-handler chunk when handler file exists during the SSR build', async () => {
+			const mod = await import('../src/vite.js');
+			const plugin = mod.default({ handler: './test/vite.test.js' });
+
+			await plugin.configResolved({ root: process.cwd(), build: { ssr: true } });
+
+			const emitFile = vi.fn();
+			plugin.buildStart.call({ emitFile, environment: { name: 'ssr' } });
+
+			// The chunk, plus a record of WHICH module became the handler. The
+			// adapter reads that record to name the module in its build log and
+			// to refuse a build where its own `websocket.handler` disagrees with
+			// what was bundled - without it the adapter can see only that some
+			// ws-handler.js exists, which is what let a substitution pass in
+			// silence.
+			expect(emitFile).toHaveBeenCalledTimes(2);
 			expect(emitFile).toHaveBeenCalledWith(expect.objectContaining({
 				type: 'chunk',
 				fileName: 'ws-handler.js'
 			}));
+			expect(emitFile).toHaveBeenCalledWith(expect.objectContaining({
+				type: 'asset',
+				fileName: 'ws-handler.origin.json'
+			}));
+
+			const marker = emitFile.mock.calls
+				.map(([arg]) => arg)
+				.find((arg) => arg.fileName === 'ws-handler.origin.json');
+			const origin = JSON.parse(marker.source);
+			expect(origin.source).toBe('test/vite.test.js');
+			expect(origin.from).toContain('vite.config.js');
 		});
 
 		it('does not emit when the build is not an SSR build', async () => {
 			const mod = await import('../src/vite.js');
 			const plugin = mod.default({ handler: './test/vite.test.js' });
 
-			plugin.configResolved({ root: process.cwd(), build: { ssr: false } });
+			await plugin.configResolved({ root: process.cwd(), build: { ssr: false } });
 
 			const emitFile = vi.fn();
 			plugin.buildStart.call({ emitFile, environment: { name: 'ssr' } });
@@ -228,7 +340,7 @@ describe('vite plugin', () => {
 			const mod = await import('../src/vite.js');
 			const plugin = mod.default({ handler: './test/vite.test.js' });
 
-			plugin.configResolved({ root: process.cwd(), build: { ssr: true } });
+			await plugin.configResolved({ root: process.cwd(), build: { ssr: true } });
 
 			const emitFile = vi.fn();
 			plugin.buildStart.call({ emitFile, environment: { name: 'client' } });
@@ -240,7 +352,7 @@ describe('vite plugin', () => {
 			const mod = await import('../src/vite.js');
 			const plugin = mod.default();
 
-			plugin.configResolved({ root: '/nonexistent/path', build: { ssr: true } });
+			await plugin.configResolved({ root: '/nonexistent/path', build: { ssr: true } });
 
 			const emitFile = vi.fn();
 			plugin.buildStart.call({ emitFile, environment: { name: 'ssr' } });

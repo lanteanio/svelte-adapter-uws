@@ -180,7 +180,7 @@ const receiveDelta = bench('receive  (recordSeen guard before app.publish)', run
 
 console.log('\n--- gate ---');
 // Single-digit percent: a sustained >=5% regression on a publish/relay
-// primitive is a blocker (credo rule 4). The added op is one Map write on a
+// primitive is a blocker. The added op is one Map write on a
 // path that already does a Map write, so the marginal cost is expected to be a
 // few ns/op - a large RELATIVE delta on a cheap loop is fine; what matters is
 // the absolute ns and that it does not balloon the per-frame cost.

@@ -1,6 +1,6 @@
 export interface RateLimitOptions<UserData = unknown> {
 	/**
-	 * Tokens available per interval. Must be a positive integer.
+	 * Allowance per interval. Must be a positive integer.
 	 *
 	 * @example
 	 * ```js
@@ -18,7 +18,7 @@ export interface RateLimitOptions<UserData = unknown> {
 
 	/**
 	 * If > 0, automatically ban the key for this many milliseconds
-	 * when all tokens are consumed. Subsequent `consume()` calls
+	 * when the allowance is exhausted. Subsequent `consume()` calls
 	 * return `{ allowed: false }` until the ban expires.
 	 *
 	 * @default 0
@@ -68,7 +68,7 @@ export interface ConsumeResult {
 
 export interface RateLimiter {
 	/**
-	 * Attempt to consume `cost` tokens from the bucket for this connection.
+	 * Attempt to consume `cost` from this connection's allowance for the current window.
 	 * Returns synchronously.
 	 *
 	 * @example
@@ -96,7 +96,10 @@ export interface RateLimiter {
 }
 
 /**
- * Create a token-bucket rate limiter for WebSocket messages.
+ * Create a fixed-window rate limiter for WebSocket messages. Refills the
+ * bucket wholesale when the window elapses, so a client can fire a full
+ * bucket at the end of one window and another at the start of the next
+ * (up to ~2x `points` inside a small seam); sustained rate is unaffected.
  *
  * @example
  * ```js

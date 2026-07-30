@@ -32,9 +32,21 @@ export interface CursorOptions<UserData = unknown, UserInfo = unknown> {
 	/**
 	 * Extract user-identifying data from a connection's userData.
 	 * This is announced on the `catalog` / `join` channel when a user
-	 * first appears on a topic, not on every position frame.
+	 * first appears on a topic, not on every position frame - frames
+	 * that go to EVERY peer on the topic, so the default does NOT pass
+	 * the full userData through: it recursively drops internal-looking
+	 * internal/prototype names; request and transport metadata
+	 * (`remoteAddress`, `ip`, `address`, `headers`, bare `url`, `requestId`);
+	 * and credential- or personal-data-shaped names. Structural ids such as
+	 * `primaryKey` and `sortKey` pass through,
+	 * and substitutes binary views with a
+	 * `'[bytes: <len>]'` placeholder. These are the same predicates the
+	 * presence plugin's default `select` applies, so the two surfaces project
+	 * the same fields from the same userData.
 	 *
-	 * Defaults to the full userData object.
+	 * Restate the old passthrough explicitly if you really want it
+	 * (`select: (ud) => ud`), or pass a strict allowlist
+	 * (`select: (ud) => ({ id: ud.id })`).
 	 *
 	 * Should return JSON-serializable data (plain objects, arrays, strings,
 	 * numbers, booleans, null). The same applies to the `data` argument

@@ -1,4 +1,4 @@
-// REAL uWS fan-out backpressure + recovery bench (g27). The single-worker
+// REAL uWS fan-out backpressure + recovery bench. The single-worker
 // goodput collapse under fan-out overload is NOT an accumulation bug - uWS's
 // per-connection maxBackpressure already bounds each outbound queue and sheds
 // past it. What was missing was OBSERVABILITY (the publish path drops silently
@@ -14,7 +14,7 @@
 //
 // The telemetry is read via the SAME pure fold the 1 Hz pressure sampler uses
 // (foldConnectionBackpressure), so this exercises the shipped code path, not a
-// bench-only reimplementation. Phase 4 also exercises the closeOnBackpressureLimit
+// bench-only reimplementation. Stage 4 also exercises the closeOnBackpressureLimit
 // knob on a second route and reports whether a consumer wedged there is dropped by
 // uWS (instead of shed forever like the default route); the drop is uWS-internal
 // and loopback-timing-dependent, so it is reported, not asserted.
@@ -53,7 +53,7 @@ const app = uWS.App().ws('/rt', {
 	close: (ws) => { conns.delete(ws); }
 }).ws('/rt-drop', {
 	// Same limits, but closeOnBackpressureLimit ON: a consumer pinned over
-	// maxBackpressure is CLOSED by uWS instead of shed-and-kept. Phase 4 wedges a
+	// maxBackpressure is CLOSED by uWS instead of shed-and-kept. Stage 4 wedges a
 	// consumer here to show the bounded-recovery knob dropping it.
 	maxPayloadLength: 1024 * 1024,
 	maxBackpressure: MAX_BACKPRESSURE,
@@ -101,14 +101,14 @@ console.log('\nREAL uWS fan-out backpressure + recovery (' + N_CLIENTS + ' clien
 	kb(FRAME.length) + ' frames, maxBackpressure=' + kb(MAX_BACKPRESSURE) + ')');
 console.log('  ' + pad('phase', 10) + '  ' + pad('maxBuffered', 12) + '  ' + pad('bpConns', 8));
 
-// Phase 1: warm - everyone reads.
+// Stage 1: warm - everyone reads.
 publishing = true;
 pump();
 await sleep(500);
 const warm = sample();
 console.log('  ' + pad('warm', 10) + '  ' + pad(kb(warm.maxBufferedBytes), 12) + '  ' + pad(warm.backpressuredConnections, 8));
 
-// Phase 2: overload - wedge one client by pausing its TCP read.
+// Stage 2: overload - wedge one client by pausing its TCP read.
 const victim = clients[0];
 victim._socket.pause();
 let peak = { maxBufferedBytes: 0, backpressuredConnections: 0 };
@@ -120,7 +120,7 @@ while (Date.now() < overloadDeadline) {
 }
 console.log('  ' + pad('overload', 10) + '  ' + pad(kb(peak.maxBufferedBytes), 12) + '  ' + pad(peak.backpressuredConnections, 8));
 
-// Phase 3: recovery - stop overloading and let the wedged client read again.
+// Stage 3: recovery - stop overloading and let the wedged client read again.
 publishing = false;
 victim._socket.resume();
 const recoveryStart = Date.now();
@@ -150,7 +150,7 @@ console.log('\n  recovery time after load drop: ' + (recoveredMs < 0 ? 'NOT RECO
 console.log('  peak wedged-consumer queue: ' + kb(peak.maxBufferedBytes) + '  (maxBackpressure ' + kb(MAX_BACKPRESSURE) + ')');
 console.log('\n  ' + (ok ? 'PASS - overload raises backpressure telemetry; a load drop clears it within the bound.' : 'FAIL - see above.'));
 
-// Phase 4: the closeOnBackpressureLimit knob. A consumer wedged on the /rt-drop
+// Stage 4: the closeOnBackpressureLimit knob. A consumer wedged on the /rt-drop
 // route (which set the option) is CLOSED by uWS when its queue pins over
 // maxBackpressure, instead of being kept and shed forever like the default
 // route above. Connect one consumer, wedge it (pause its read), overload it,

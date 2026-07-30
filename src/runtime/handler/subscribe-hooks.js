@@ -1,5 +1,5 @@
 import { wsModule } from '../ws-handler-bridge.js';
-import { WS_COALESCED, WS_PLATFORM, assert, drainCoalesced, processEpoch } from '../utils.js';
+import { WS_COALESCED, WS_PLATFORM, assert, drainCoalesced, isAuthorizationHook, processEpoch } from '../utils.js';
 import { counters } from './state.js';
 import { bumpOut } from './pressure-metrics.js';
 import { envelopePrefix } from './envelope-cache.js';
@@ -75,18 +75,37 @@ export async function runSubscribeBatchHook(ws, topics) {
 		// so a throwing (or rejecting) hook cannot let unauthorized
 		// subscribes through.
 		console.error('[ws] subscribeBatch hook threw:', err);
+		// Null-prototype: the keys are client-supplied topic names, and
+		// `failed['__proto__'] = '...'` on a normal object hits the inherited
+		// setter and stores nothing. The lookup then reads Object.prototype
+		// back, which happens to fail closed here, but it means a topic named
+		// `__proto__` can never be ALLOWED even when the hook allows it, and
+		// the denial reason serializes to `{}` on the wire.
 		/** @type {Record<string, string>} */
-		const failed = {};
+		const failed = Object.create(null);
 		for (let i = 0; i < topics.length; i++) failed[topics[i]] = 'INTERNAL_ERROR';
 		return failed;
 	}
 	/** @type {Record<string, string>} */
-	const denials = {};
+	const denials = Object.create(null);
 	if (!result || typeof result !== 'object') return denials;
-	for (const [topic, val] of Object.entries(result)) {
-		if (val === false) denials[topic] = 'FORBIDDEN';
-		else if (typeof val === 'string') denials[topic] = val;
-		// truthy / true / undefined -> allow (skip)
+	// Reading the hook RESULT can throw - a getter, a Proxy, a lazy ORM row - and
+	// this sits between the pending-subscribe begin and settle. An escape would
+	// leak the pending entry forever, so every later unsubscribe on that topic
+	// would falsely report cancelling an in-flight grant, and the map would grow
+	// unbounded. Fail closed on the whole batch instead.
+	try {
+		for (const [topic, val] of Object.entries(result)) {
+			if (val === false) denials[topic] = 'FORBIDDEN';
+			else if (typeof val === 'string') denials[topic] = val;
+			// truthy / true / undefined -> allow (skip)
+		}
+	} catch (err) {
+		console.error('[ws] subscribeBatch result read threw:', err);
+		/** @type {Record<string, string>} */
+		const broken = Object.create(null);
+		for (let i = 0; i < topics.length; i++) broken[topics[i]] = 'INTERNAL_ERROR';
+		return broken;
 	}
 	return denials;
 }
@@ -126,7 +145,11 @@ export async function runUserSubscribeGate(ws, topic) {
  * @returns {boolean}
  */
 export function hasUserSubscribeHook() {
-	return !!(wsModule.subscribe || wsModule.subscribeBatch);
+	// A plugin's side-effect hook does not count: presence's subscribe joins a
+	// roster and never denies, so treating it as the app taking over the topic
+	// decision disarmed the grant gate for every app that followed the presence
+	// README while arming it. See WS_HOOK_SIDE_EFFECT_ONLY.
+	return isAuthorizationHook(wsModule.subscribe) || isAuthorizationHook(wsModule.subscribeBatch);
 }
 
 /**

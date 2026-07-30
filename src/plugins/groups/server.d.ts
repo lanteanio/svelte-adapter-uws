@@ -13,8 +13,12 @@ export interface GroupOptions {
 	/** Initial group metadata (shallow-copied). */
 	meta?: Record<string, any>;
 
-	/** Called after a member joins. */
-	onJoin?: (ws: WebSocket<any>, role: GroupRole) => void;
+	/**
+	 * Synchronous admission hook, called before membership is installed.
+	 * Return `false` to reject, a role to override the requested role, or
+	 * `undefined` to accept it unchanged. Throwing also fails closed.
+	 */
+	onJoin?: (ws: WebSocket<any>, role: GroupRole) => GroupRole | false | void;
 
 	/** Called after a member leaves. */
 	onLeave?: (ws: WebSocket<any>, role: GroupRole) => void;
@@ -90,10 +94,13 @@ export interface Group {
 	close(platform: Platform): void;
 
 	/**
-	 * Ready-made WebSocket hooks for access-controlled groups.
+	 * Ready-made WebSocket hooks for group admission and membership.
 	 *
 	 * `subscribe` intercepts the internal `__group:{name}` topic and calls
-	 * `join()` to gate access. Returns `false` if the group is full or closed.
+	 * `join()` to gate access. Returns `false` when `onJoin` rejects or the group
+	 * is full or closed. Its registered namespace can reach this hook through
+	 * the default system-topic guard, but the wire landing still requires
+	 * `join()` to establish tracked membership.
 	 * `unsubscribe` calls `leave()` when the client unsubscribes from the
 	 * internal topic. `close` calls `leave()`.
 	 *

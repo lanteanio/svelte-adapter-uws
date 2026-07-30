@@ -551,7 +551,7 @@ export function samplePressureValue(sample, thresholds, leaseSaturationPeak) {
 }
 
 // - Send-gate control frames -----------------------------------------------
-// JSON control frames, METADATA_PUSH-shaped (no data body), JSON transport
+// JSON control frames carrying no data body, JSON transport
 // only. Routed through the existing JSON-control demux (byte[3] === 'y') on
 // both ends; no new demux branch. ASCII-safe numeric serialization.
 

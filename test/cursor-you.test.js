@@ -150,6 +150,7 @@ describe('cursor plugin - self identity (server)', () => {
 		const p = {
 			publish() { return true; },
 			send() { return 1; },
+			checkSubscribe: async () => null,
 			publishWire() { return true; },
 			sendWire(ws, topic, event, data, codec) {
 				wired.push({ event, encoded: codec.encode(event, data, new CursorEncodeDict()) });

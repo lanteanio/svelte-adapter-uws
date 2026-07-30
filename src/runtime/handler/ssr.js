@@ -1,3 +1,6 @@
+// Substituted by the adapter's build step; free identifiers until then.
+/* global WS_OPTIONS */
+/* global ENV_PREFIX */
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
 import { server } from '../_init.js';
 import { resolveRequestId, writeChunkWithBackpressure } from '../utils.js';

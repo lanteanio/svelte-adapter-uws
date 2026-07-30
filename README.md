@@ -317,7 +317,7 @@ The client store automatically uses `wss://` when the page is served over HTTPS 
 
 ### `npm run dev` - works (with the Vite plugin)
 
-The Vite plugin is required for WebSocket support in both dev and production (see [Step 2](#step-2-add-the-vite-plugin-required)). It spins up a `ws` WebSocket server alongside Vite's dev server, so your client store and `event.platform` work identically to production.
+The Vite plugin is required for WebSocket support in both dev and production (see [Step 2](#step-2-add-the-vite-plugin-required)). It spins up a `ws` WebSocket server alongside Vite's dev server, so the client protocol and `event.platform` API are available during development. It is a behavioural implementation of those contracts, not the production handler: it runs on `ws`, cannot attach custom headers to the 101 response, and does not exercise the built uWS artifact, worker/cluster lifecycle, TLS, admission, or build-time option substitution. Security-sensitive runtime tests should also boot the built fixture; a passing dev-server test alone is not production evidence.
 
 Changes to your `hooks.ws` file are picked up automatically - the plugin reloads the handler on save and closes existing connections so they reconnect with the new code. No dev server restart needed.
 
@@ -402,7 +402,10 @@ adapter({
     // Max message size in bytes (connections sending larger messages are closed)
     maxPayloadLength: 1024 * 1024, // default: 1 MB
 
-    // Seconds of inactivity before the connection is closed
+    // Seconds of inactivity before the connection is closed.
+    // 0 DISABLES the idle timeout entirely - a silent connection is then never
+    // closed and holds its slot until the client goes away, so pair it with
+    // upgradeAdmission.maxConcurrent if you set it.
     idleTimeout: 120, // default: 120
 
     // Max bytes of backpressure per connection before messages are dropped.
@@ -458,7 +461,9 @@ These options control how the server handles misbehaving or slow clients at the 
 
 **`compression`** (default: `false`) - per-message deflate for outbound frames. The default is byte-identical to no compression. Set `true` for `SHARED_COMPRESSOR` (one shared sliding window across all sockets - the right choice for a many-connection server), or pass a uWS constant like `uWS.DEDICATED_COMPRESSOR_4KB` (a per-socket window: slightly better compression for a few high-throughput connections, but memory grows with connection count). When a compressor is configured, compression is applied **per frame, not blanket**: text frames (`publish` / `send`) compress by default, binary codec frames (`publishWire` / `sendWire`) are opt-in, the **cursor** plugin stays uncompressed (its 60 Hz hot path), and the **presence** plugin opts in (low-frequency). This split matters because permessage-deflate CPU scales **per subscriber** - uWS does not compress-once-and-fan-out, even for `SHARED_COMPRESSOR` - so compressing a high-frequency broadcast to many subscribers is expensive (a coalesced cursor frame fanned to 1000 subscribers at 60 Hz can cost more than a full CPU core per topic). For a high-frequency, high-fan-out **text** topic, pass `{ compress: false }` to `publish` / `send` to opt it out. None of this applies until you enable compression.
 
-**`upgradeRateLimit`** (default: 10 per 10s window) - sliding-window rate limit on WebSocket upgrade requests per client IP. Clients exceeding the limit get a `429 Too Many Requests` response. The IP rate map is capped at 10,000 entries with LRU eviction by activity score, so sustained connection floods from many IPs don't cause unbounded memory growth. Set to `0` to disable.
+**`upgradeRateLimit`** (default: 10 per 10s window) - sliding-window rate limit on WebSocket upgrade requests per client IP. Clients exceeding the limit get a `429 Too Many Requests` response. The IP rate map is capped at 10,000 entries, enforced when an entry is inserted rather than only by the 60s sweep, so a flood of rotating client identities cannot grow it unbounded in between. At the cap the least active entry in a rotating sample is evicted and the new client is admitted, rather than the new client being refused - refusing would let one host rotating `X-Forwarded-For` fill the map and lock every other client out until the next sweep. Keys are truncated to 128 characters, matching the accepted single-address-header ceiling, so the entry cap bounds memory rather than only entry count while accepted identities remain distinct; longer `X-Forwarded-For` chains sharing that prefix share a limiter bucket. Set to `0` to disable.
+
+**`authPathRateLimit`** (default: 30 per 10s window) - the same sliding-window limit on the auth preflight endpoint, the request `connect({ auth: true })` clients POST before upgrading. Over the limit they get `429 Too Many Requests` and your `authenticate` hook is never called, so a credential check against a database cannot be driven at full server speed from one address. The default is higher than `upgradeRateLimit` on purpose: every reconnect that preflights also upgrades, so this door sees at least as much traffic during a reconnect wave, and matching them would make the preflight refuse traffic the upgrade limit would have admitted. `authPathRateLimitWindow` sets the window; `0` disables. Same client-address resolution as `upgradeRateLimit`, so the same proxy caveat applies.
 
 > **Behind a proxy?** The limit is keyed on the client IP, which is the raw socket address unless you set `ADDRESS_HEADER`. If the server sits behind a reverse proxy, an L4 load balancer, or docker's `userland-proxy` (its default) that rewrites the source address, **every client arrives as the same gateway IP** and the "per-IP" limit silently collapses into a single **global** cap - 10 new connections per 10s for the entire site, trivially tripped by normal traffic or a crawler. The runtime emits a one-time warning the first time it rejects an upgrade keyed on a private/loopback address while `ADDRESS_HEADER` is unset. To restore real per-IP limiting, set `ADDRESS_HEADER=x-forwarded-for` (with [`XFF_DEPTH`](#environment-variables) for the trusted-proxy hop count) so the limiter sees the real client, set docker `userland-proxy: false` so iptables DNAT preserves the source IP, or set `upgradeRateLimit: 0` if you rate-limit upstream. The same applies to the per-message [`plugins/ratelimit`](https://github.com/lanteanio/svelte-adapter-uws-extensions), which keys on the same resolved address.
 
@@ -540,6 +545,7 @@ export const GET = ({ platform }) =>
 | --- | --- | --- |
 | `upgrade_admitted_total` | counter | Upgrades accepted (the `res.upgrade()` actually ran). |
 | `upgrade_rejected_total{reason}` | counter | Upgrades rejected before open. Reasons: `siege`, `over_capacity`, `cursor_lane`, `ip_rate_limit`, `bad_origin`, `auth_timeout`, `auth_rejected`, `hook_error`. |
+| `upgrade_rate_map_evicted_total{door}` | counter | Rate-limit entries evicted to make room at the map cap. `door` is `upgrade` or `auth` - a sustained rate on either door means rotating client identities are churning that limiter's map faster than the periodic sweep reclaims it. |
 | `upgrade_inflight` | gauge | Upgrades currently between admission and open (sampled once per pressure interval). |
 | `waiting_room_queue_depth` | gauge | Clients currently polling the waiting room (sampled; `0` with the room off). |
 | `protection_posture_state` | gauge | The live posture: `0` normal, `1` elevated, `2` siege (sampled). |
@@ -590,7 +596,72 @@ Defense-in-depth opt-ins layered on top of `allowedOrigins`. All default to safe
 - **`websocket.compressCredentialedResponses`** (default `false`) - requests carrying `Cookie` or `Authorization` skip dynamic brotli/gzip compression to defend against the [BREACH](https://en.wikipedia.org/wiki/BREACH) attack (compressed length leaks attacker-influenced reflected input alongside a secret). Set `true` only after auditing the page surface for BREACH defenses (random per-response masking, prefix randomization, no secrets reflected with attacker input). Build-time precompressed static files are unaffected.
 - **`websocket.unsafeSameOriginWithoutHostPin`** (default `false`) - when `allowedOrigins: 'same-origin'` is paired with no fronting trust (no `ORIGIN` env, no `HOST_HEADER` env, no native TLS, no `upgrade()` hook), the runtime throws at startup because the same-origin check then compares two attacker-controlled headers (Origin vs Host). Set `true` to restore the previous warn-only behavior. Pin the deployment shape first (`ORIGIN`, `HOST_HEADER`, native TLS, or an `upgrade()` hook).
 
-`websocket.allowSystemTopicSubscribe` (default `false`) and `websocket.allowNonAsciiTopics` (default `false`) are documented in [Topic validation](#topic-validation); `websocket.authorizeWireSubscribe` (default `false`) is documented in [Wire-subscribe authorization](#wire-subscribe-authorization). The Vite plugin mirrors all of these flags; `devSkipOriginCheck` (default `false`) on the plugin disables the dev-mode `allowedOrigins` enforcement for local-only scenarios.
+`websocket.allowSystemTopicSubscribe` (default `false`) and `websocket.allowNonAsciiTopics` (default `false`) are documented in [Topic validation](#topic-validation); `websocket.authorizeWireSubscribe` (default `false`) is documented in [Wire-subscribe authorization](#wire-subscribe-authorization). The Vite plugin mirrors all of these flags, but its options are a separate flat bag: repeat the production posture in `vite.config.js` (for example, `uws({ authorizeWireSubscribe: true })`). Flags are not copied from `svelte.config.js` into the dev plugin. `devSkipOriginCheck` (default `false`) on the plugin disables the dev-mode `allowedOrigins` enforcement for local-only scenarios.
+
+### Outbound SSRF gate (`svelte-adapter-uws/safe-url`)
+
+Server-side code that fetches a user-supplied URL - an outbound webhook, a link preview, an avatar import - is a classic SSRF target. `isSafeUrl` answers "is it safe to fetch this" with one boolean, and never throws:
+
+```js
+import { isSafeUrl, checkUrl, classifyAddress } from 'svelte-adapter-uws/safe-url';
+
+if (!isSafeUrl(userWebhookUrl)) throw new Error('Webhook URL is not allowed');
+
+checkUrl('http://169.254.169.254/');   // { safe: false, reason: 'metadata' }
+classifyAddress('8.8.8.8');            // null, i.e. a real public address
+```
+
+It is pure and synchronous, classifying the URL's *literal* host: loopback, link-local, RFC1918, CGNAT, cloud metadata (v4, v6 and by hostname), and the IPv4-embedding IPv6 forms - IPv4-mapped, NAT64, 6to4, ISATAP - are unwrapped to the embedded IPv4 and re-checked, so `http://[64:ff9b::a9fe:a9fe]/` cannot smuggle the metadata IP past an IPv4-only check. Non-http(s) schemes are refused in every mode. To also close DNS rebinding, pass a resolver to the async `checkUrlResolved`.
+
+**On a NAT64 network, declare your prefix.** The default classifier recognises NAT64 embeddings across `64:ff9b::/32`; if your translator uses a Network-Specific Prefix elsewhere, `nat64Prefix` is required for SSRF protection because that range otherwise looks like ordinary public IPv6. Inside the recognised range, an IPv6 address still does not record which of the six RFC 6052 prefix lengths produced it, so without a declaration the embedded IPv4 is read at all of them and the URL refused if *any* reading looks private. That is fail-closed but costs real destinations - the readings that do not match your prefix decode prefix bits into a phantom address, which refuses roughly a quarter of public destinations at `/48` and a third at `/32` and `/40`. For a `/96` inside `64:ff9b:1::/48` the subnet id becomes the phantom's leading octets, so about a quarter of subnet ids refuse *everything*.
+
+```js
+isSafeUrl(url, { nat64Prefix: '64:ff9b::/96' });      // or '64:ff9b:1:a::/96', or your own NSP
+```
+
+One reading is then taken instead of six, which removes the over-block entirely. A private embedded address is still refused, so a *correct* declaration cannot re-open a blocked destination.
+
+> **Declare the exact prefix your translator uses.** Treat this option as a trusted assertion about your network. A parseable wrong length in *either* direction can turn an address the guard would otherwise refuse into an allowed one. A shorter declaration reads prefix bits as the destination; a longer declaration reads destination and suffix bits. For example, declaring a parent `/48` for a real `/96` can miss `169.254.169.254`, while declaring `/64` for a real `/48` can read private `10.8.8.8` as public `8.8.0.0`. The real prefix length is not recoverable from the address text, and trying every length would restore the false positives this option exists to remove. A non-zero suffix proves some mismatches and is refused, but a clean suffix does not prove the declaration correct. Only a value that does not parse at all is safe by default - that one is ignored in favour of reading every length. At `/96`, RFC 6052 also requires bits 64-71 of the prefix itself to be zero; a `/96` declaration that breaks that rule refuses the whole range rather than none.
+
+The dead-subnet problem is not confined to `/96` either: a `/56` on an unlucky subnet byte refuses 100% of destinations, and a `/40` averages ~44% across subnet bytes for the same reason. Nothing about the prefix tells you whether yours is one of the bad ones, which is the whole argument for declaring it.
+
+Note `allow` (in `allowlist` mode) narrows the permitted set - it never widens it. The range checks run first, so allowlisting a private host does not re-open it, and `allow` is not an escape from the over-block above.
+
+### Verifying a received webhook (`svelte-adapter-uws/plugins/webhooks`)
+
+`verifyWebhookSignature` is the receiving half of the delivery signature, shipped as code rather than a prose snippet because the contract has four ways to get subtly wrong and every receiver that re-implements it from documentation gets to make those mistakes independently.
+
+```js
+import { verifyWebhookSignature } from 'svelte-adapter-uws/plugins/webhooks';
+
+export async function POST({ request }) {
+	const headers = Object.fromEntries(request.headers);
+	// The RAW bytes, before any JSON round-trip.
+	const rawBody = await request.arrayBuffer();
+
+	if (!verifyWebhookSignature(headers, rawBody, { secret: process.env.WEBHOOK_SECRET })) {
+		return new Response('bad signature', { status: 401 });
+	}
+	const event = JSON.parse(new TextDecoder().decode(rawBody));
+	// ...
+}
+```
+
+**Pass the body as bytes, not as a parsed object.** Any byte container works - a Node `Buffer`, the `ArrayBuffer` from `request.arrayBuffer()`, a typed-array view over one, or the raw string. A parsed object is refused rather than coerced, because `JSON.stringify` does not reproduce the bytes the sender signed: key order, whitespace and number formatting all differ, so a re-serialized body verifies against nothing.
+
+It returns a boolean and never throws, including when `options` is omitted entirely - every malformed input fails closed. The signature covers `"<timestamp>.<body>"`, and the timestamp is required and checked against a freshness window (`toleranceSeconds`, default 300) so a captured delivery cannot replay forever. Comparison is constant-time. During a secret rotation pass `secrets: [next, previous]`; the sender emits both entries in one header and either one accepts.
+
+> **Breaking receiver change: update receivers before upgrading senders.** A
+> receiver that still verifies `HMAC(secret, body)` rejects every delivery from
+> the timestamped sender. The sender deliberately does not emit a second,
+> body-only signature: accepting that legacy entry would keep captured
+> deliveries replayable forever while making the migration look secure.
+
+Freshness bounds replay; it does not make a request single-use inside the
+five-minute window. After successful verification, deduplicate on the
+authenticated `x-webhook-signature` value or on a unique event identifier
+inside the signed body. Do not rely on the mutable `idempotency-key` header
+alone as a security replay token: that header is not part of the HMAC.
 
 ### Capacity model
 
@@ -607,16 +678,19 @@ Every internal `Map` / `Set` that grows with client behaviour or topic cardinali
 | `decodeCache` | 256 | FIFO half-evict | not exposed |
 | SSR dedup in-flight | 500 | new request bypasses dedup | not exposed |
 | SSR dedup body buffer per request | 512 KB | response replays without dedup | not exposed |
-| Upgrade rate-limit IP map | 10,000 | LRU on 60s sweep | not exposed |
+| Upgrade rate-limit IP map | 10,000 entries, 128-character keys | least active of rotating sample, at insertion | not exposed |
+| Auth-preflight rate-limit IP map | 10,000 entries, 128-character keys | least active of rotating sample, at insertion | not exposed |
 | Aggregate live connections | unbounded by default | reject upgrade with 503 once `maxConcurrent` set | `upgradeAdmission.maxConcurrent` |
 | Outbound buffer per connection | 1 MB | uWS drops the frame for that subscriber only | `wsOptions.maxBackpressure` |
 
-**Plugin caps** all default to 1,000,000 with the same idiot-proof bias:
+Both rate-limit maps key IPv6 on its **/64 prefix**, not the full address: a /64 is the smallest block a host is routinely given, so keying on the /128 would let one ordinary attacker source every request from a fresh address and never share a bucket with itself. IPv4 keeps its full address, and so does anything whose /64 is shared by unrelated clients - IPv4-mapped, NAT64 (`64:ff9b::/32`), Teredo (`2001::/32`) and link-local. A 6to4 address (`2002::/16`) encodes its site allocation and is keyed coarser, on its **/48 site prefix**, so the whole site shares one bucket. Note the consequence for legitimate traffic: clients behind one /64 (a campus, an office, a VPN) share a bucket.
+
+**Plugin caps** use finite defaults and fail by refusing work or evicting bounded state:
 
 | Plugin | Cap | Behaviour at saturation | Override |
 |--------|-----|-------------------------|----------|
 | `replay` | `maxTopics: 100`, ring `size: 1000` | LRU evict / ring overwrite | per-topic options |
-| `presence` | `maxConnections: 1_000_000`, `maxTopics: 1_000_000` | drop oldest insertion-order entry | constructor options |
+| `presence` | `maxConnections: 1_000_000`, `maxTopics: 1_000_000`, `maxTopicsPerConnection: 100` | drop oldest registry entry; refuse a connection's over-cap join | constructor options |
 | `cursor` | `maxConnections: 1_000_000`, `maxTopics: 1_000_000` | drop oldest insertion-order entry; pending throttle timers cleared | constructor options |
 | `throttle` / `debounce` | `maxTopics: 1_000_000` | flush pending then drop oldest topic | second arg to `throttle(interval, options)` / `debounce(...)` |
 | `lock` | `maxKeys: 1_000_000` | new-key `withLock` rejects with "active key count exceeded" | constructor options |
@@ -1005,13 +1079,15 @@ Topics submitted by clients are validated before being accepted:
 - Default accept set is printable ASCII (0x20-0x7E) excluding `"` and `\`. Control bytes, line separators (U+2028/U+2029), bidirectional overrides (U+202E), the byte-order mark, and other non-ASCII runes are rejected at the wire boundary so log dashboards and admin UIs see a clean, greppable topic name. Apps that legitimately accept non-ASCII topic names from clients can opt in via `websocket.allowNonAsciiTopics: true` (always-illegal `"` and `\` remain rejected).
 - `subscribe-batch` accepts at most 256 topics per message (the client only sends what it was subscribed to before a reconnect)
 
-Topics prefixed with `__` are reserved for framework-internal channels (presence uses `__presence:*`, replay uses `__replay:*`, plus `__signal:*`, `__group:*`, `__rpc`, etc.). Wire-level subscribes to `__`-prefixed topics are rejected with `INVALID_TOPIC`, so a client cannot intercept signals routed to other users or plugin broadcasts. Server-side `platform.subscribe(ws, '__signal:userId')` (the legitimate pattern that `enableSignals` uses) still works because the block is on the wire layer only. Advanced apps that intentionally route public topics through the `__` prefix can opt out via `websocket.allowSystemTopicSubscribe: true`.
+Topics prefixed with `__` are reserved for framework-internal channels (presence uses `__presence:*`, replay uses `__replay:*`, plus `__signal:*`, `__group:*`, `__rpc`, etc.). Wire-level subscribes to `__`-prefixed topics are rejected with `INVALID_TOPIC`, so a client cannot intercept signals routed to other users or plugin broadcasts. The narrow exception is a namespace registered by a plugin that owns its wire subscription flow: the topic may reach that plugin's hook, but the request still fails unless the hook establishes tracked membership before it returns. Importing the groups plugin therefore does not open arbitrary `__group:*` topics, while its own documented `group.hooks` join can work without disabling the system-topic guard globally. Server-side `platform.subscribe(ws, '__signal:userId')` (the legitimate pattern that `enableSignals` uses) still works because the block is on the wire layer only. Advanced apps that intentionally route public topics through the `__` prefix can opt out broadly via `websocket.allowSystemTopicSubscribe: true`.
 
 ### Wire-subscribe authorization
 
 By default the adapter is a primitive: any connected client may subscribe to any valid, non-`__` topic, and per-topic authorization is entirely your [`subscribe` hook](#authentication) (with no hook, subscription is open). That is the right default for a building block, but it leaves a gap for a framework that authorizes subscriptions **server-side** - in an RPC handler that runs a guard and then calls `platform.subscribe(ws, topic)` - rather than in a wire hook. In that model a client could still send a raw `{ type: 'subscribe', topic }` frame for a topic it was never granted (a private room, another tenant's channel) and receive its fan-out, because the guard ran only on the server-initiated subscribe, not the client's wire frame.
 
-Set `websocket.authorizeWireSubscribe: true` (or call `platform.authorizeWireSubscribe()` once at startup) to close that gap. With it on, a client-initiated `subscribe` / `subscribe-batch` is honored only for a topic the server already authorized for that connection via `platform.subscribe` - unless you export your own `subscribe` / `subscribeBatch` hook, which then decides every topic exactly as before. Server-side `platform.subscribe` / `platform.checkSubscribe` are the trusted path and are never gated. A framework whose subscriptions are all server-initiated (like [`svelte-realtime`](https://github.com/lanteanio/svelte-realtime), which authorizes each subscription in its stream RPC) arms this automatically. A client that attaches server-managed topics can suppress its own redundant subscribe frame with the client-side `setTopicManaged(topic)` (exported from `svelte-adapter-uws/client`).
+Set `websocket.authorizeWireSubscribe: true` (or call `platform.authorizeWireSubscribe()` once at startup) to close that gap. With it on, a client-initiated `subscribe` / `subscribe-batch` is honored only for a topic the server already authorized for that connection via `platform.subscribe` - unless you export your own `subscribe` / `subscribeBatch` hook, which then decides every topic exactly as before. Two things do *not* stand the gate down, because neither is your app deciding: a plugin hook you re-export verbatim (presence's and groups' are marked as side effects, so following their READMEs no longer disables the gate for every other topic), and a plugin's own `__`-prefixed channel (a group is joined by subscribing to `__group:<name>`, which that plugin's hook authorizes - the gate defers to it there and nowhere else). Wrap a plugin hook in your own function and it counts as yours again. Server-side `platform.subscribe` is the trusted path and is never gated; `platform.checkSubscribe` is gated only when you pass `{ requireGrant: true }`, which is what the presence and cursor observer lanes do. Observer membership is rechecked after an async side-effect hook, so `platform.unsubscribe` revokes an in-flight check instead of letting it return an obsolete allow; a real re-grant before the hook lands remains valid. A framework whose subscriptions are all server-initiated (like [`svelte-realtime`](https://github.com/lanteanio/svelte-realtime), which authorizes each subscription in its stream RPC) arms this automatically. A client that attaches server-managed topics can suppress its own redundant subscribe frame with the client-side `setTopicManaged(topic)` (exported from `svelte-adapter-uws/client`).
+
+For `npm run dev`, repeat the static flag on the Vite plugin: `uws({ authorizeWireSubscribe: true })`. The adapter's `websocket` object is build configuration; it is not copied into the separate plugin instance created by `vite.config.js`. Omitting the flat plugin option therefore leaves the dev server at its documented open default even when the production build is armed.
 
 ### Explicit handler path
 
@@ -1024,6 +1100,8 @@ adapter({
   }
 })
 ```
+
+Name it here and you are done: the Vite dev plugin reads the value from SvelteKit's resolved configuration (whether it came from `svelte.config.js` or the direct `sveltekit(config)` form), so the module the dev server runs is the module the build bundles. Adapter handler paths keep the adapter's project-working-directory base even when Vite has an explicit `root`. The plugin also accepts a `handler` of its own (`uws({ handler })`); naming a *different* module on both fails the build rather than one of them quietly winning, and the build log names the module it actually bundled.
 
 ### What the handler gets
 
@@ -1106,6 +1184,13 @@ export async function upgrade({ cookies }) {
   // (see "Refreshing session cookies on WebSocket connect" below).
   // `upgradeResponse()` with custom non-cookie headers is also supported:
   // return upgradeResponse({ userId: user.id }, { 'x-session-version': '2' });
+  // It throws a TypeError for a header that cannot be written safely - a name
+  // outside the RFC 7230 token set, a non-string value, or a string outside
+  // Node's accepted header class (TAB, printable ASCII and Latin-1 high bytes).
+  // CR, LF and NUL split or truncate the 101; the other refused controls fail
+  // at strict Node-based proxies. The throw takes the hook-error path: 500, no
+  // 101. Passing no headers at all
+  // is fine, so `upgradeResponse(ud, refresh ? headers : undefined)` works.
   return { userId: user.id, name: user.name, role: user.role };
 }
 
@@ -2343,7 +2428,7 @@ Opt-in modules that build on top of the adapter's public API. They don't change 
 
 ### Authorization model
 
-Every plugin in this directory is an **authorization-free primitive**. None of them know who the caller is, what roles the caller has, or whether the requested action is allowed - they execute whatever the caller passes. Calling `withLock(key, fn)`, `replay.replay(ws, topic, since)`, or `idempotency.handle(key, fn)` is no more an authorization check than calling `Map.set(key, value)` is one.
+Plugin action APIs are **authorization-free primitives**: they do not know roles or ownership, and execute whatever trusted server code passes. Calling `withLock(key, fn)`, `replay.replay(ws, topic, since)`, or `idempotency.handle(key, fn)` is no more an authorization check than calling `Map.set(key, value)` is one. The narrow exception is a client-facing observer handshake: `presence.sync()` and `cursor.snapshot()` consult `platform.checkSubscribe` before installing their private tap, because the built-in `message` hooks feed them a client-named topic. That transport check does not replace your application authorization for mutations or other plugin calls.
 
 Your message handler is the gate. Identity is established at connect time by the [`upgrade()` hook](#authentication) and stashed on the socket via `ws.getUserData()`. Your `message()` handler reads that identity, decides whether the action is allowed, and **only then** invokes the plugin:
 
@@ -2368,7 +2453,7 @@ export async function message(ws, { data }) {
 }
 ```
 
-Higher-level frameworks built on this adapter (e.g. [`svelte-realtime`](https://github.com/lanteanio/svelte-realtime)) wrap this pattern: `ctx.user` is the same identity object the `upgrade()` hook returned, and the framework's `_guard` / `live.public()` / `// realtime-allow-public` machinery is the authorization layer at the RPC seam. The plugins below still do not gate anything themselves; the framework's auth lives outside them.
+Higher-level frameworks built on this adapter (e.g. [`svelte-realtime`](https://github.com/lanteanio/svelte-realtime)) wrap this pattern: `ctx.user` is the same identity object the `upgrade()` hook returned, and the framework's `_guard` / `live.public()` / `// realtime-allow-public` machinery is the authorization layer at the RPC seam. Apart from the observer transport check above, the framework's application authorization lives outside the plugins.
 
 The same pattern applies to every plugin in this section: read identity, decide, then invoke. A plugin that "looks like an auth gate" by virtue of taking a userId-shaped key (e.g. `presence.subscribe(`user:${userId}`)`) is just substituting whatever string the caller hands it - if your handler interpolates `payload.targetUserId` from the wire without checking that the caller owns it, the plugin will happily address a user the caller has no business touching.
 
@@ -2498,6 +2583,10 @@ import { replay } from '$lib/server/replay';
 export function message(ws, { data, platform }) {
   const msg = JSON.parse(Buffer.from(data).toString());
   if (msg.type === 'replay') {
+    // Authorize first: the buffer is identity-blind. Only replay topics
+    // this connection is subscribed to (i.e. passed the subscribe gate) -
+    // without the check, a client can name any topic and read its history.
+    if (!ws.isSubscribed(msg.topic)) return;
     replay.replay(ws, msg.topic, msg.since, platform, msg.reqId);
     return;
   }
@@ -2632,6 +2721,7 @@ The pattern composes with idempotency-key headers on form actions and RPCs the s
 - **In-memory and per-process.** In cluster mode, each worker has its own dedup cache. If a client retry lands on a different worker than the original, it will not see the duplicate. For cluster-coherent dedup, swap to the Redis variant in `svelte-adapter-uws-extensions`.
 - **No persistence.** Restarting the worker forgets all in-flight ids. The window after a restart is effectively zero until clients re-claim. For payment-grade idempotency, back the cache with a durable store.
 - **Window-bounded, not exactly-once.** A retry that arrives more than `ttl` after the original is treated as a fresh delivery. Choose `ttl` longer than your worst-case retry latency.
+- **Shared capacity under flood.** The pool is one global map across all users, so eviction pressure does not respect key namespaces. A flood of more than 110% of `maxEntries` distinct ids inside one TTL hard-evicts other users' live entries and re-arms their operations: a victim's retry of an already-processed id is treated as first-sight and the side effect double-executes. Key namespacing (e.g. `order:${userId}:${clientRequestId}`) scopes collision resistance, not capacity, so it does NOT mitigate the flood. Size `maxEntries` above your peak claim rate multiplied by `ttl`, and pair with the [rate limiter](#rate-limiting) so a single caller cannot mint distinct ids fast enough to saturate the pool. Hosts handling financial or other one-shot side effects should monitor `dedup.size()` against `maxEntries` and alert on saturation.
 
 ---
 
@@ -2655,11 +2745,17 @@ export const presence = createPresence({
   // heartbeat:      30_000 (default) - broadcast every 30s; clients refresh maxAge / re-add aged-out entries
   // maxConnections: 1_000_000 (default) - hard cap on tracked connections
   // maxTopics:      1_000_000 (default) - hard cap on active topic registry
+  // maxTopicsPerConnection: 100 (default) - bounds one socket's presence-topic multiplier
   // binary:         true (default) - send compact 0x03 frames to binary-capable clients (presence.protocol:1); false forces JSON for all
+  // topicThrottle:  16 (default) - roughly one topic-wide diff per display frame; 0 restores next-tick-only batching
+  // maxFieldsBytes: 8192 (default) - per-update() fields size cap; over-cap updates are dropped
+  // maxTotalFieldsBytes: 65_536 (default) - cumulative per-user budget for durable update() fields
+  // clientUpdateFields: unset (default) - update() may set any field except server-reserved identity names
+  //                   (key field, id, role, credential-shaped); set to an array to allow ONLY those fields
 });
 ```
 
-The two cap options bound internal Maps that grow with topic cardinality (`chat-${userId}` patterns) and connection count. Eviction at cap drops the oldest insertion-order entry. In practice eviction is rare because `presence.hooks.close` calls `leave(ws)` automatically on disconnect.
+The registry caps bound internal Maps that grow with topic cardinality (`chat-${userId}` patterns) and connection count. `maxTopicsPerConnection` also composes with `maxTotalFieldsBytes`: at the defaults one socket can retain at most about 6.25 MiB of dynamic fields across its presence entries, rather than multiplying 64 KB by the global one-million-topic limit. Registry eviction drops the oldest insertion-order state. In practice eviction is rare because `presence.hooks.close` calls `leave(ws)` automatically on disconnect.
 
 Wire it into your WebSocket hooks:
 
@@ -2687,7 +2783,7 @@ export function subscribe(ws, topic, ctx) {
 export const { unsubscribe, message, close } = presence.hooks;
 ```
 
-Like `subscribe`, `message` does not gate topic access - a client can request any topic's roster (the roster carries only `select`-stripped public fields, never credentials). If a topic must be limited to a subset of users, wrap `message` the same way you wrap `subscribe`.
+The snapshot `message` path does gate the requested topic through `platform.checkSubscribe` before it subscribes the socket to `__presence:<topic>` or emits a roster. With `authorizeWireSubscribe` armed and no application authorization hook, the connection must already hold a server grant from `platform.subscribe`; otherwise the request is dropped. With the policy unarmed, the normal subscribe-hook decision applies. A missing `checkSubscribe` method fails closed. This is a transport/topic gate, not a role policy: keep application-specific checks in your subscribe hook, and grant protected rooms server-side before the client asks for its observer snapshot.
 
 #### Binary wire mode
 
@@ -2731,7 +2827,8 @@ import { createPresence } from 'svelte-adapter-uws/plugins/presence';
 
 const presence = createPresence({
   key: 'id',             // field for multi-tab dedup (default: 'id')
-  select: (userData) => userData,  // extract public fields (default: recursive denylist)
+  // Explicit public-field allowlist; omit `select` to use the recursive denylist.
+  select: (userData) => ({ id: userData.id, name: userData.name }),
   heartbeat: 30_000      // broadcast every 30s (default: 30000; pass 0 to disable)
 });
 
@@ -2792,9 +2889,13 @@ If Alice's data changes between connections (for example she updates her avatar 
 
 If no `key` field is found in the selected data (e.g. no auth), each connection is tracked separately.
 
+The dedup key is read from the data the `select` callback returned, so a field the projection drops cannot dedup. The default `select` denylist covers the `key` field too, deliberately: the resolved key is broadcast as the roster key in every frame, so it must never be a secret. Naming a credential-shaped dedup key (`key: 'sessionId'`, `key: 'apiKey'`) logs a warning at startup and falls back to per-connection entries rather than publishing the value. Dedup on a non-secret identifier such as a user id, or pass an explicit `select` that returns the field if it genuinely is one.
+
 #### Field-level updates and transient fields
 
 `presence.update(ws, topic, fields, platform)` sets dynamic fields on the present user as a field-level delta - only fields whose value actually changed are merged into the user and broadcast in the next `diff` under `updates[key]`. A typing toggle sends `{ typing: true }`, not the whole user object. The update applies to the user (per dedup key), so any of a multi-tab user's connections may call it and every observer sees one change. A connection that is not present on the topic, or an update where nothing changed, is a no-op.
+
+Updates are bounded and identity-safe: a fields blob over `maxFieldsBytes` (default 8 KB, same shape as the cursor plugin's `maxDataBytes`) is dropped, a user's durable fields may not exceed the cumulative `maxTotalFieldsBytes` budget (default 64 KB - durable fields ride every future snapshot and heartbeat), and one connection may hold at most `maxTopicsPerConnection` presence memberships (default 100), which bounds the cross-topic multiplier. Topic-wide diffs are coalesced behind `topicThrottle` (default 16 ms); pass `0` only when the old next-tick latency is worth giving up the default rate bound. Server-reserved field names (the dedup key field, `id`, `role`, `__`-prefixed, `constructor`/`prototype`, credential-shaped names) are stripped so a client cannot overwrite the server-selected identity its peers see. Pass `clientUpdateFields: ['typing', 'selection']` to accept only an explicit allowlist (which is also the escape hatch for deliberately letting clients write a reserved name).
 
 ```js
 // server
@@ -3020,7 +3121,9 @@ t=260  [timer fires, 100ms]  --> sends {q:"hel"}
 
 ### Rate limiting
 
-Token-bucket rate limiter for inbound WebSocket messages. Protects against spam, abuse, and runaway clients. Supports per-IP, per-connection, or custom key extraction, with optional auto-ban when a bucket is exhausted.
+Fixed-window rate limiter for inbound WebSocket messages. Protects against spam, abuse, and runaway clients. Supports per-IP, per-connection, or custom key extraction, with optional auto-ban when a bucket is exhausted.
+
+The allowance refills in full at each interval boundary (fixed window, not token bucket): a client can fire a full window of messages at the end of one interval and another full window at the start of the next - up to 2x `points` inside a short seam. If burst smoothness matters, prefer a smaller `points` / `interval` pair with the same average rate (e.g. `points: 5, interval: 500` instead of `points: 10, interval: 1000`).
 
 Different from throttle - throttle shapes **outbound** publish rate, rate limiting protects **inbound** against abuse.
 
@@ -3080,6 +3183,7 @@ With `keyBy: 'ip'` (default), the limiter reads `userData.remoteAddress`, `.ip`,
 - **Server-side only.** No client component needed.
 - **In-memory.** Buckets live in the process. In cluster mode, each worker has independent rate limits (acceptable for most apps - abusers hit the same worker via the acceptor).
 - **Lazy cleanup.** Expired buckets are swept when the internal map exceeds 1000 entries.
+- **Fixed-window seam burst.** Refills happen in full at each interval boundary, so up to 2x `points` can pass inside a short seam across a boundary (e.g. 9 accepted messages in ~1s at `points: 5, interval: 1000`). The adapter core's upgrade limiter uses a sliding window to avoid this; this plugin keeps the simpler fixed-window model.
 
 ### Cursor (ephemeral state)
 
@@ -3167,7 +3271,7 @@ Writing your own high-throughput plugin? The same mechanism is available via `pl
 
 #### Server usage
 
-Use the `hooks` helper for zero-config cursor handling. The `message` hook handles `cursor` and `cursor-snapshot` messages automatically, and `close` calls `remove()`. The hooks verify that the sender is subscribed to the `__cursor:{topic}` channel before processing - clients that haven't passed the `subscribe` hook for that topic are silently rejected.
+Use the `hooks` helper for zero-config cursor handling. The `message` hook handles `cursor` and `cursor-snapshot` messages automatically, and `close` calls `remove()`. A snapshot first runs `platform.checkSubscribe` for the client-named base topic and, only when allowed, establishes the `__cursor:{topic}` tap. Later `cursor` and `cursor-viewport` frames require that tap and fail closed if membership cannot be queried. With `authorizeWireSubscribe` armed and no application authorization hook, grant the base topic server-side with `platform.subscribe` before the client requests its snapshot.
 
 ```js
 // src/hooks.ws.js
@@ -3184,13 +3288,13 @@ export const close = cursors.hooks.close;
 For custom auth or topic filtering, handle the messages manually:
 
 ```js
-export function message(ws, { data, platform }) {
+export async function message(ws, { data, platform }) {
   const msg = JSON.parse(Buffer.from(data).toString());
   if (msg.type === 'cursor') {
     cursors.update(ws, msg.topic, { x: msg.x, y: msg.y }, platform);
   }
   if (msg.type === 'cursor-snapshot') {
-    cursors.snapshot(ws, msg.topic, platform);
+    await cursors.snapshot(ws, msg.topic, platform);
   }
 }
 
@@ -3694,11 +3798,13 @@ export function message(ws) {
 
 ### Broadcast groups
 
-Named groups with explicit membership, roles, metadata, and lifecycle hooks. Like topics but with access control - you decide who can join, what role they have, and what happens when the group fills up or closes.
+Named groups with explicit membership, roles, metadata, and lifecycle hooks. Like topics with an admission step: you decide who can join, what role they have, and what happens when the group fills up or closes.
 
 > **Authorization:** the group's `onJoin` hook is **the** place the join decision lives; the plugin itself does not authorize. Returning a role from `onJoin` admits the socket; throwing rejects. If your `onJoin` accepts every caller and only relies on `maxMembers` for backpressure, the group is effectively public - which may be fine, but is your decision, not the plugin's. The "access control" framing above refers to the **mechanism** (membership lookup, roles, slot counts) you can wire up; the policy is yours. See [Authorization model](#authorization-model).
 
 #### Setup
+
+`onJoin` is synchronous. Return `false` for an ordinary policy rejection, return `'member'`, `'admin'`, or `'viewer'` to override the requested role, or return `undefined` to accept it unchanged. It runs before membership, the join broadcast, the native subscription, and the member-list response, so a rejection cannot disclose the roster or leave a hidden subscription behind.
 
 ```js
 // src/lib/server/lobby.js
@@ -3707,7 +3813,11 @@ import { createGroup } from 'svelte-adapter-uws/plugins/groups';
 export const lobby = createGroup('lobby', {
   maxMembers: 50,
   meta: { game: 'chess' },
-  onJoin: (ws, role) => console.log('joined as', role),
+  onJoin: (ws) => {
+    const user = ws.getUserData();
+    if (!user.canJoinLobby) return false;
+    return user.isAdmin ? 'admin' : 'member';
+  },
   onFull: (ws, role) => {
     // optionally notify the rejected client
   }
@@ -3716,7 +3826,7 @@ export const lobby = createGroup('lobby', {
 
 #### Server usage
 
-Use the `hooks` helper for zero-config access control. The `subscribe` hook intercepts the internal `__group:lobby` topic, calls `join()`, and blocks the subscription if the group is full or closed. The `close` hook calls `leave()`.
+Use the `hooks` helper for ready-made admission and membership wiring. The `subscribe` hook intercepts the internal `__group:lobby` topic, calls `join()`, and blocks the subscription when `onJoin` rejects or the group is full or closed. The registered `__group:` namespace is allowed through the default system-topic guard only to reach this hook; the wire request is not accepted unless `join()` establishes tracked membership. The `close` hook calls `leave()`.
 
 ```js
 // src/hooks.ws.js
@@ -3725,7 +3835,9 @@ import { lobby } from '$lib/server/lobby';
 export const { subscribe, unsubscribe, close } = lobby.hooks;
 ```
 
-If you need custom logic (role selection, auth gating), wrap the hook:
+The exported `subscribe` function is marked as a plugin side effect, so it does not disarm an enabled server-grant gate for unrelated topics. If your app relies on server-issued grants, keep `websocket.authorizeWireSubscribe: true` in the adapter and repeat `authorizeWireSubscribe: true` in the Vite plugin's separate option bag. You do not need `allowSystemTopicSubscribe`; that broad opt-out exposes every `__` namespace to your authorization hook.
+
+Prefer `onJoin` for group-specific role selection and admission. If you need a custom wire `subscribe` hook, remember that wrapping the plugin hook makes it an application authorization hook: it decides every client-named topic and the server-grant gate deliberately steps aside. Deny every topic your wrapper does not explicitly authorize:
 
 ```js
 // src/hooks.ws.js
@@ -3736,7 +3848,7 @@ export function subscribe(ws, topic, ctx) {
     const role = ws.getUserData().isAdmin ? 'admin' : 'member';
     return lobby.join(ws, ctx.platform, role) ? undefined : false;
   }
-  lobby.hooks.subscribe(ws, topic, ctx);
+  return false;
 }
 
 export const { unsubscribe, close } = lobby.hooks;
@@ -3781,7 +3893,7 @@ The client store exposes two reactive values: the main store for events (`$lobby
 | `group.close(platform)` | Dissolve group, notify everyone |
 | `group.name` | Group name (read-only) |
 | `group.meta` | Metadata (get/set) |
-| `group.hooks` | Ready-made `{ subscribe, unsubscribe, close }` hooks with access control |
+| `group.hooks` | Ready-made `{ subscribe, unsubscribe, close }` admission and membership hooks |
 
 Roles: `'member'` (default), `'admin'`, `'viewer'`.
 
@@ -3791,7 +3903,7 @@ Roles: `'member'` (default), `'admin'`, `'viewer'`.
 |---|---|---|
 | `maxMembers` | `Infinity` | Maximum members |
 | `meta` | `{}` | Initial metadata (shallow-copied) |
-| `onJoin` | - | `(ws, role) => void` |
+| `onJoin` | - | Synchronous admission: `(ws, requestedRole) => false \| role \| void` |
 | `onLeave` | - | `(ws, role) => void` |
 | `onFull` | - | `(ws, role) => void` |
 | `onClose` | - | `() => void` |
@@ -3975,7 +4087,7 @@ To have the primary automatically terminate a diverged (minority) worker so it r
 CLUSTER_WORKERS=auto RESTART_ON_STATE_DIVERGENCE=1 node build
 ```
 
-Divergence between workers in the built-in relay indicates a framework or plugin bug and is worth reporting. Note that topics fed from an *external* pub/sub source (passed with `{ relay: false }`) never travel the in-process relay and are deliberately excluded from this comparison - the guarantee is scoped to the relay the adapter itself operates.
+Divergence between workers in the built-in relay indicates a framework or plugin bug and is worth reporting. Note that topics fed from an *external* pub/sub source (passed with `{ relay: false }`) never travel the in-process relay, so the gap detector - which numbers relayed frames - has nothing to check for them. They are still included in the divergence hash, which projects the whole sequence map regardless of how a topic was published.
 
 ### Per-worker consistency auditor
 
@@ -4107,7 +4219,7 @@ uWebSockets.js manages connection lifecycle at the C++ level. These are its buil
 
 **Slow-loris protection:** uWS requires at least 16 KB/second of throughput from each HTTP client. Connections that send data slower than this (a common DoS technique) are dropped by the C++ layer before they reach your application code.
 
-**WebSocket ping/pong:** Set `idleTimeout` in the adapter's `websocket` option (in seconds) to have uWS send automatic WebSocket ping frames and close connections that don't respond. The default is 120 seconds. The client store handles pong automatically.
+**WebSocket ping/pong:** Set `idleTimeout` in the adapter's `websocket` option (in seconds) to have uWS send automatic WebSocket ping frames and close connections that don't respond. The default is 120 seconds. The client store handles pong automatically. Setting it to `0` disables the idle timeout, which also disables that liveness check: a connection whose peer has silently gone away is never reaped and keeps its slot.
 
 ```js
 // svelte.config.js
@@ -4833,7 +4945,7 @@ import { runSimSwarm } from 'svelte-adapter-uws/sim';
 const { summary } = await runSimSwarm({
   count: 500,                 // 500 consecutive integer seeds...
   startSeed: 1,               // ...from seed 1 (or pass an explicit `seeds` list)
-  buggify: 'random',          // fault a per-seed seeded subset (off | on | random)
+  faultMode: 'random',           // fault a per-seed seeded subset (off | on | random)
   faultProfile: { drop: 0.25, reorder: 0.5, maxJitterMs: 30 },
   checkRatio: 0.05            // replay 5% of seeds and assert they reproduce
 });
@@ -4843,12 +4955,12 @@ summary.firstFailingSeed; // e.g. '237' - reproduce with runSim({ seed: '237' })
 summary.failingSeeds;     // every failing seed
 ```
 
-`buggify` mirrors the FoundationDB knob: `'off'` runs each seed unfaulted, `'on'` layers `faultProfile` on every run, and `'random'` flips a per-seed seeded coin (`buggifyProbability`, default `0.25`) so one swarm covers both quiet and chaotic interleavings reproducibly. `checkRatio` re-runs a deterministically-chosen fraction through `replaySim` so a determinism regression fails the swarm distinctly from an invariant violation. Each run also carries an 8-hex-char structural `fingerprint` (the "unseed"): if it ever changes for a fixed seed, determinism has regressed.
+`faultMode` sets how fault injection is applied across the swarm: `'off'` runs each seed unfaulted, `'on'` layers `faultProfile` on every run, and `'random'` flips a per-seed seeded coin (`faultProbability`, default `0.25`) so one swarm covers both quiet and chaotic interleavings reproducibly. `checkRatio` re-runs a deterministically-chosen fraction through `replaySim` so a determinism regression fails the swarm distinctly from an invariant violation. Each run also carries an 8-hex-char structural `fingerprint`: if it ever changes for a fixed seed, determinism has regressed.
 
 The bundled runner reads the swarm config from the environment, stamps wall-clock metadata, writes a result JSON, and exits non-zero on any failure - the shape a scheduled CI job runs:
 
 ```sh
-DST_COUNT=1000 DST_BUGGIFY=random DST_CHECK_RATIO=0.05 GIT_COMMIT=$(git rev-parse HEAD) \
+DST_COUNT=1000 DST_FAULTS=random DST_CHECK_RATIO=0.05 GIT_COMMIT=$(git rev-parse HEAD) \
   npm run sim:swarm        # writes sim-swarm-result.json; exit 1 on a failing seed
 ```
 
@@ -4861,7 +4973,7 @@ import { runSimSwarm, buildSimGoldens, checkSimGoldens } from 'svelte-adapter-uw
 
 // Bless a corpus from a clean swarm (a runner does this on --update):
 const swarm = await runSimSwarm({ seeds: ['1', '2', '3'], checkRatio: 1 });
-const corpus = buildSimGoldens(swarm, { swarm: { buggify: 'off' } });
+const corpus = buildSimGoldens(swarm, { swarm: { faultMode: 'off' } });
 
 // Later, gate HEAD against it:
 const report = checkSimGoldens(corpus, await runSimSwarm({ seeds: ['1', '2', '3'] }));

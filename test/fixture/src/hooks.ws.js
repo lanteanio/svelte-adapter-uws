@@ -15,6 +15,14 @@ export function init({ platform }) {
 	}
 }
 
+// Exporting this is what makes the adapter register the auth preflight route
+// (`connect({ auth: true })` POSTs it before upgrading), so it is required for
+// any test of that endpoint. Accepts everything: the tests here are about the
+// door in front of the hook, not about the hook's own decision.
+export function authenticate() {
+	return { userId: 'fixture-user' };
+}
+
 export function upgrade({ headers, cookies, url }) {
 	const token = cookies?.token;
 	if (token === 'reject') return false;
@@ -59,6 +67,26 @@ export function message(ws, ctx) {
 			msg.event || 'dm',
 			msg.payload
 		);
+	}
+	if (msg.type === 'revoke-topic') {
+		// Server-side revocation, the shape a kick / ban / lease expiry uses. Lets
+		// a test prove that revoking a topic also releases the observer taps
+		// derived from it (the cursor and presence channels), against the real
+		// runtime rather than against the in-process mirror.
+		const removed = platform.unsubscribe(ws, msg.topic);
+		platform.send(ws, 'probe', 'revoked', { topic: msg.topic, removed });
+	}
+	if (msg.type === 'tap-count') {
+		// Server-visible membership for any topic, including the `__`-prefixed
+		// derived ones a client can never name in a subscribe frame.
+		// The nonce is echoed because the test client's frame matcher rescans every
+		// frame it has received: without it, a poll would keep matching the FIRST
+		// answer for a topic and never observe the value changing.
+		platform.send(ws, 'probe', 'tap-count', {
+			topic: msg.topic,
+			nonce: msg.nonce,
+			count: platform.subscribers(msg.topic)
+		});
 	}
 	if (msg.type === 'cork-test') {
 		ws.cork(() => {

@@ -1,7 +1,7 @@
-// Coverage for the aggregate outbound-backpressure telemetry (g27): the bounded
+// Coverage for the aggregate outbound-backpressure telemetry: the bounded
 // per-connection walk-and-fold the 1 Hz pressure sampler uses to populate
 // `pressureSnapshot.maxBufferedBytes` / `.backpressuredConnections`. The fold is
-// extracted into a config-free pure helper so the credo-4-sensitive sample cap,
+// extracted into a config-free pure helper so the hot-path-sensitive sample cap,
 // the closed-connection-as-zero path, and the worst/count arithmetic are unit-
 // testable with mock connections and no real socket or build-time config graph.
 

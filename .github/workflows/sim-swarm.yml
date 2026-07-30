@@ -25,7 +25,7 @@ on:
       count:
         description: 'Number of seeds'
         default: '2000'
-      buggify:
+      faultMode:
         description: 'Fault enablement (off | on | random)'
         default: 'random'
 
@@ -50,7 +50,7 @@ jobs:
         env:
           GIT_COMMIT: ${{ github.sha }}
           DST_COUNT: ${{ github.event_name == 'pull_request' && '300' || github.event.inputs.count || '5000' }}
-          DST_BUGGIFY: ${{ github.event.inputs.buggify || 'random' }}
+          DST_FAULTS: ${{ github.event.inputs.faultMode || 'random' }}
           DST_CHECK_RATIO: '0.05'
           DST_OUT: 'sim-swarm-result.json'
         run: npm run sim:swarm

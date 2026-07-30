@@ -170,6 +170,44 @@ test.describe('WebSocket pub/sub via ws client', () => {
 // - Upgrade handler (auth) ---------------------------------------------------
 
 test.describe('WebSocket platform API coverage', () => {
+	test('server revocation releases an observer-only cursor tap', async () => {
+		// This must run through the REAL Vite SSR module loader. The Vite plugin
+		// calls releaseDerivedSubscriptions from its config-loaded copy of the
+		// adapter, while hooks.ws imports the cursor plugin through ssrLoadModule.
+		// A fake handler object cannot detect those becoming separate module
+		// instances with separate derived-prefix registries.
+		const client = await connectWs();
+		const topic = 'dev-derived-revoke';
+		const derived = `__cursor:${topic}`;
+
+		client.send(JSON.stringify({ type: 'cursor-snapshot', topic }));
+
+		let before = 0;
+		for (let i = 0; i < 50 && before !== 1; i++) {
+			const nonce = `before-${i}`;
+			const answer = waitFor(client, (m) =>
+				m.event === 'tap-count' && m.data?.topic === derived && m.data?.nonce === nonce
+			);
+			client.send(JSON.stringify({ type: 'tap-count', topic: derived, nonce }));
+			before = (await answer).data.count;
+			if (before !== 1) await new Promise((r) => setTimeout(r, 20));
+		}
+		expect(before, 'cursor snapshot must establish the observer tap').toBe(1);
+
+		const revoked = waitFor(client, (m) => m.event === 'revoked' && m.data?.topic === topic);
+		client.send(JSON.stringify({ type: 'revoke-topic', topic }));
+		await revoked;
+
+		const nonce = 'after-revoke';
+		const afterAnswer = waitFor(client, (m) =>
+			m.event === 'tap-count' && m.data?.topic === derived && m.data?.nonce === nonce
+		);
+		client.send(JSON.stringify({ type: 'tap-count', topic: derived, nonce }));
+		expect((await afterAnswer).data.count, 'revocation must release the SSR-loaded cursor tap').toBe(0);
+
+		client.close();
+	});
+
 	test('sendTo delivers only to matching connections', async () => {
 		const client = await connectWs(WS_URL);
 		subscribe(client, 'test-topic');

@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createCursor } from '../src/plugins/cursor/server.js';
+import { createPresence } from '../src/plugins/presence/server.js';
 import { mockWs, mockPlatform, mockWalkPlatform, installFakeRuntimeClock, releaseRuntimeClock } from './_helpers.js';
+import { WS_SUBSCRIPTIONS, MAX_SUBSCRIPTIONS_PER_CONNECTION } from '../src/runtime/utils.js';
 
 // Helpers to filter the new split-wire-format publish stream. The plugin
 // emits `join` (with user metadata) then `update` / `bulk` (positions
@@ -144,13 +146,119 @@ describe('cursor plugin - server', () => {
 			expect(join.data.user.secret).toBeUndefined();
 		});
 
-		it('without select, the join event carries full userData', () => {
+		it('without select, the join event carries userData minus sensitive keys', () => {
 			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', role: 'admin' });
 			c.update(ws, 'room', { x: 5, y: 5 }, platform);
 
 			const join = pubs(platform, 'join')[0];
 			expect(join.data.user).toEqual({ id: '1', role: 'admin' });
+		});
+
+		it('default select strips remoteAddress and credential-shaped keys, keeps id/name/position fields', () => {
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
+			// Shaped like a real upgrade hook's userData plus the adapter's
+			// injected remoteAddress (src/runtime/handler.js).
+			const ws = mockWs({
+				id: 'u-7',
+				name: 'Vera',
+				position: { x: 1, y: 2 },
+				remoteAddress: '203.0.113.7',
+				sessionToken: 'sess_9f8e7d6c',
+				apiKey: 'ak_live_1234'
+			});
+			c.update(ws, 'room', { x: 5, y: 5 }, platform);
+
+			const join = pubs(platform, 'join')[0];
+			expect(join.data.user).toEqual({ id: 'u-7', name: 'Vera', position: { x: 1, y: 2 } });
+		});
+
+		it('applies the same predicates as the presence default, apart from the key field', () => {
+			// Both defaults read plugins/_shared/sensitive.js. This pins the
+			// parity the doc blocks on both plugins claim, so a future tuning
+			// of one surface cannot silently diverge from the other.
+			//
+			// The presence tracker below uses a NON-exempt key (`id`) on
+			// purpose: presence exempts its configured dedup key field and
+			// cursor has no dedup key, so a credential-shaped key would make
+			// the two legitimately differ. The exemption itself is pinned
+			// separately, in the presence suite and in the divergence test
+			// below - a parity test run only on the default key would pass
+			// while the surfaces disagreed for every app that sets one.
+			const userData = {
+				id: 'u-7',
+				name: 'Vera',
+				apiKey: 'ak', api_key: 'ak2', key: 'k', KEY: 'K',
+				accessKey: 'AKIA', privateKey: 'pk', licenseKey: 'lic',
+				sessionToken: 'st', password: 'pw', jwt: 'j', credential: 'c',
+				remoteAddress: '203.0.113.7', __internal: 'x',
+				primaryKey: 'pkey', foreignKey: 'fkey', sortKey: 'skey',
+				publicKey: 'ssh-ed25519', monkey: 'see', keyboard: 'cowboy'
+			};
+
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
+			c.update(mockWs({ ...userData }), 'room', { x: 5, y: 5 }, platform);
+			const cursorUser = pubs(platform, 'join')[0].data.user;
+
+			const p = createPresence({ key: 'id', heartbeat: 0 });
+			const presencePlatform = mockPlatform();
+			p.join(mockWs({ ...userData }), 'room', presencePlatform);
+			const presenceUser = presencePlatform.sent[0].data['u-7'];
+
+			expect(Object.keys(cursorUser).sort()).toEqual(Object.keys(presenceUser).sort());
+			expect(cursorUser).toEqual({
+				id: 'u-7', name: 'Vera',
+				primaryKey: 'pkey', foreignKey: 'fkey', sortKey: 'skey',
+				publicKey: 'ssh-ed25519', monkey: 'see', keyboard: 'cowboy'
+			});
+		});
+
+		it('default select strips sensitive keys from the snapshot catalog too', async () => {
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
+			const writer = mockWs({ id: '1', name: 'Alice', password: 'hunter2', remoteAddress: '198.51.100.9' });
+			c.update(writer, 'room', { x: 1, y: 1 }, platform);
+			platform.reset();
+
+			const reader = mockWs({ id: '2' });
+			await c.snapshot(reader, 'room', platform);
+
+			const catalog = platform.sent.find((s) => s.event === 'catalog');
+			expect(catalog.data).toEqual([{ key: expect.any(String), user: { id: '1', name: 'Alice' } }]);
+		});
+
+		it('does not retain flat contact identifiers in joins, list(), or the snapshot catalog', async () => {
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
+			const writer = mockWs({
+				id: '1',
+				name: 'Alice',
+				userphone: '+1-555-0100',
+				usertelephone: '+1-555-0101',
+				faxNumber: '+1-555-0102',
+				msisdn: '15550103',
+				e164: '+15550104'
+			});
+
+			c.update(writer, 'room', { x: 1, y: 1 }, platform);
+			expect(pubs(platform, 'join')[0].data.user).toEqual({ id: '1', name: 'Alice' });
+			expect(c.list('room')[0].user).toEqual({ id: '1', name: 'Alice' });
+			platform.reset();
+
+			await c.snapshot(mockWs({ id: '2' }), 'room', platform);
+			const catalog = platform.sent.find((s) => s.event === 'catalog');
+			expect(catalog.data).toEqual([{ key: expect.any(String), user: { id: '1', name: 'Alice' } }]);
+		});
+
+		it('default select strips nested and __-prefixed keys recursively', () => {
+			const c = createCursor({ throttle: 0, topicThrottle: 0 });
+			const ws = mockWs({
+				id: '1',
+				__internal: 'x',
+				meta: { color: 'red', jwt: 'eyJ...', nested: { cookie: 'c=1' } }
+			});
+			c.update(ws, 'room', { x: 0, y: 0 }, platform);
+
+			const join = pubs(platform, 'join')[0];
+			expect(join.data.user).toEqual({ id: '1', meta: { color: 'red', nested: {} } });
 		});
 	});
 
@@ -716,7 +824,7 @@ describe('cursor plugin - server', () => {
 			expect(typeof cursors.snapshot).toBe('function');
 		});
 
-		it('sends catalog + bulk events with current positions to the given ws', () => {
+		it('sends catalog + bulk events with current positions to the given ws', async () => {
 			const c = createCursor({
 				throttle: 0,
 				topicThrottle: 0,
@@ -731,7 +839,7 @@ describe('cursor plugin - server', () => {
 			p.reset();
 
 			const newWs = mockWs({ id: '3', name: 'Carol' });
-			c.snapshot(newWs, 'canvas', p);
+			await c.snapshot(newWs, 'canvas', p);
 
 			// The reply leads with the server time event (the smoothing clock
 			// seed), then the requester's own roster key, then the roster,
@@ -763,7 +871,7 @@ describe('cursor plugin - server', () => {
 			}
 		});
 
-		it('catalog and bulk reference the same key set', () => {
+		it('catalog and bulk reference the same key set', async () => {
 			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id, name: ud.name }) });
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			const p = mockPlatform();
@@ -771,7 +879,7 @@ describe('cursor plugin - server', () => {
 			p.reset();
 
 			const newWs = mockWs({ id: '2', name: 'Bob' });
-			c.snapshot(newWs, 'room', p);
+			await c.snapshot(newWs, 'room', p);
 
 			const catalogKeys = p.sent[2].data.map((e) => e.key).sort();
 			const bulkKeys = p.sent[3].data.map((e) => e.key).sort();
@@ -780,9 +888,9 @@ describe('cursor plugin - server', () => {
 			expect(p.sent[3].data[0].data).toEqual({ x: 5, y: 15 });
 		});
 
-		it('sends empty catalog + bulk for an unknown topic', () => {
+		it('sends empty catalog + bulk for an unknown topic', async () => {
 			const p = mockPlatform();
-			cursors.snapshot(mockWs({ id: '1' }), 'nonexistent', p);
+			await cursors.snapshot(mockWs({ id: '1' }), 'nonexistent', p);
 			expect(p.sent).toHaveLength(4);
 			expect(p.sent[0].event).toBe('time');
 			expect(p.sent[1].event).toBe('you');
@@ -792,7 +900,7 @@ describe('cursor plugin - server', () => {
 			expect(p.sent[3].data).toEqual([]);
 		});
 
-		it('sends empty catalog + bulk when the topic has no active cursors', () => {
+		it('sends empty catalog + bulk when the topic has no active cursors', async () => {
 			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			const p = mockPlatform();
@@ -801,13 +909,13 @@ describe('cursor plugin - server', () => {
 			c.remove(ws, p);
 			p.reset();
 
-			c.snapshot(mockWs({ id: '2' }), 'canvas', p);
+			await c.snapshot(mockWs({ id: '2' }), 'canvas', p);
 			expect(p.sent).toHaveLength(4);
 			expect(p.sent[2].data).toEqual([]);
 			expect(p.sent[3].data).toEqual([]);
 		});
 
-		it('reflects the latest stored position even if not yet broadcast', () => {
+		it('reflects the latest stored position even if not yet broadcast', async () => {
 			vi.useFakeTimers();
 			const c = createCursor({ throttle: 100, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
@@ -819,12 +927,12 @@ describe('cursor plugin - server', () => {
 			p.reset();
 
 			const newWs = mockWs({ id: '2' });
-			c.snapshot(newWs, 'canvas', p);
+			await c.snapshot(newWs, 'canvas', p);
 
 			expect(p.sent[3].data[0].data).toEqual({ x: 99 });
 		});
 
-		it('sends snapshots independently per topic', () => {
+		it('sends snapshots independently per topic', async () => {
 			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', name: 'Alice' });
 			const p = mockPlatform();
@@ -834,7 +942,7 @@ describe('cursor plugin - server', () => {
 			p.reset();
 
 			const viewer = mockWs({ id: '2' });
-			c.snapshot(viewer, 'canvas-a', p);
+			await c.snapshot(viewer, 'canvas-a', p);
 
 			expect(p.sent).toHaveLength(4);
 			expect(p.sent[0].topic).toBe('__cursor:canvas-a');
@@ -922,7 +1030,7 @@ describe('cursor plugin - server', () => {
 			expect(pubs(p, 'update')).toHaveLength(1);
 		});
 
-		it('hooks.message handles cursor-snapshot and subscribes the socket (zero-config)', () => {
+		it('hooks.message handles cursor-snapshot and subscribes the socket (zero-config)', async () => {
 			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const ws1 = mockWs({ id: '1' });
 			const p = mockPlatform();
@@ -936,6 +1044,7 @@ describe('cursor plugin - server', () => {
 			// the regression guard for "cursor sync silently no-ops zero-config".
 			const ws2 = mockWs({ id: '2' });
 			const handled = c.hooks.message(ws2, { data: encode({ type: 'cursor-snapshot', topic: 'canvas' }), platform: p });
+			await vi.waitFor(() => expect(ws2.isSubscribed('__cursor:canvas')).toBe(true));
 
 			expect(handled).toBe(true);
 			expect(ws2.isSubscribed('__cursor:canvas')).toBe(true); // now actually subscribed
@@ -962,6 +1071,43 @@ describe('cursor plugin - server', () => {
 			// ...but an authorized topic still works.
 			await c.snapshot(attacker, 'public', p);
 			expect(attacker.isSubscribed('__cursor:public')).toBe(true);
+		});
+
+		it('refuses the cursor-snapshot subscribe at the per-connection subscription cap', async () => {
+			// The snapshot handshake subscribes the socket to __cursor:{topic}
+			// via trackedSubscribe, which never consulted the wire-enforced
+			// MAX_SUBSCRIPTIONS_PER_CONNECTION cap - one connection could
+			// accumulate unbounded subscriptions through this lane. The cap is
+			// now enforced centrally in trackedSubscribe; the handshake fails
+			// silently, exactly like its other gate failures.
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
+			const p = mockPlatform();
+			const writer = mockWs({ id: 'w' });
+			c.update(writer, 'board', { x: 1 }, p);
+			p.reset();
+
+			const attacker = mockWs({ id: 'a' });
+			const subs = new Set();
+			for (let i = 0; i < MAX_SUBSCRIPTIONS_PER_CONNECTION; i++) subs.add('filler:' + i);
+			attacker.getUserData()[WS_SUBSCRIPTIONS] = subs;
+
+			await c.snapshot(attacker, 'board', p);
+
+			expect(attacker.isSubscribed('__cursor:board')).toBe(false); // cap refused
+			expect(subs.size).toBe(MAX_SUBSCRIPTIONS_PER_CONNECTION); // registry unchanged
+			expect(p.sent).toHaveLength(0); // no catalog / positions emitted
+		});
+
+		it('cursor-snapshot subscribe works below the cap', async () => {
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
+			const p = mockPlatform();
+			const viewer = mockWs({ id: 'v' });
+			viewer.getUserData()[WS_SUBSCRIPTIONS] = new Set(['existing']);
+
+			await c.snapshot(viewer, 'board', p);
+
+			expect(viewer.isSubscribed('__cursor:board')).toBe(true);
+			expect(viewer.getUserData()[WS_SUBSCRIPTIONS].has('__cursor:board')).toBe(true);
 		});
 
 		it('hooks.message rejects cursor updates from unsubscribed clients', () => {

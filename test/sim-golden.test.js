@@ -8,16 +8,16 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { buildSimGoldens, checkSimGoldens, runSimSwarm } from '../src/sim.js';
 
-const digest = (over = {}) => ({ violations: 0, fatals: 0, uncaught: 0, violationCategories: [], buggified: false, ...over });
+const digest = (over = {}) => ({ violations: 0, fatals: 0, uncaught: 0, violationCategories: [], faulted: false, ...over });
 
 function mkRun(seed, fingerprint, over = {}) {
-	return { seed: String(seed), ok: true, buggified: false, fingerprint, violations: 0, fatals: 0, uncaught: 0, violationCategories: [], reproduced: null, ...over };
+	return { seed: String(seed), ok: true, faulted: false, fingerprint, violations: 0, fatals: 0, uncaught: 0, violationCategories: [], reproduced: null, ...over };
 }
 function mkSwarm(runs, summaryOver = {}) {
-	return { summary: { buggify: 'off', gitCommit: null, ...summaryOver }, runs };
+	return { summary: { faultMode: 'off', gitCommit: null, ...summaryOver }, runs };
 }
 function mkGolden(entries, over = {}) {
-	return { schemaVersion: 1, gitCommit: null, recordedAt: null, swarm: { buggify: 'off' }, entries, ...over };
+	return { schemaVersion: 1, gitCommit: null, recordedAt: null, swarm: { faultMode: 'off' }, entries, ...over };
 }
 
 describe('checkSimGoldens', () => {
@@ -102,22 +102,22 @@ describe('checkSimGoldens', () => {
 	});
 
 	it('fails on a swarm-config mismatch (incomparable fingerprints)', () => {
-		const golden = mkGolden(baseEntries, { swarm: { buggify: 'off' } });
-		const swarm = mkSwarm([mkRun('1', 'aaaaaaaa'), mkRun('2', 'bbbbbbbb'), mkRun('10', 'cccccccc')], { buggify: 'random' });
+		const golden = mkGolden(baseEntries, { swarm: { faultMode: 'off' } });
+		const swarm = mkSwarm([mkRun('1', 'aaaaaaaa'), mkRun('2', 'bbbbbbbb'), mkRun('10', 'cccccccc')], { faultMode: 'random' });
 		const report = checkSimGoldens(golden, swarm);
 		expect(report.ok).toBe(false);
-		expect(report.configMismatch).toMatch(/buggify mode differs/);
+		expect(report.configMismatch).toMatch(/fault mode differs/);
 	});
 });
 
 describe('buildSimGoldens', () => {
 	it('projects a swarm result into a sorted corpus that round-trips through checkSimGoldens', () => {
 		const swarm = mkSwarm([
-			mkRun('10', 'ffff', { violations: 0, buggified: true }),
+			mkRun('10', 'ffff', { violations: 0, faulted: true }),
 			mkRun('2', 'eeee'),
 			mkRun('1', 'dddd')
 		], { gitCommit: 'abc123' });
-		const corpus = buildSimGoldens(swarm, { swarm: { buggify: 'off' }, recordedAt: '2026-01-01T00:00:00.000Z' });
+		const corpus = buildSimGoldens(swarm, { swarm: { faultMode: 'off' }, recordedAt: '2026-01-01T00:00:00.000Z' });
 		expect(corpus.schemaVersion).toBe(1);
 		expect(corpus.gitCommit).toBe('abc123');
 		expect(corpus.recordedAt).toBe('2026-01-01T00:00:00.000Z');
@@ -153,8 +153,8 @@ describe('DST golden corpus matches HEAD', () => {
 			const swarm = corpus.swarm || {};
 			const result = await runSimSwarm({
 				seeds: corpus.entries.map((e) => e.seed),
-				buggify: swarm.buggify,
-				buggifyProbability: swarm.buggifyProbability,
+				faultMode: swarm.faultMode,
+				faultProbability: swarm.faultProbability,
 				faultProfile: swarm.faultProfile,
 				base: swarm.base
 			});
@@ -173,8 +173,8 @@ describe('DST golden corpus matches HEAD', () => {
 		const swarm = corpus.swarm || {};
 		const cfg = {
 			seeds: corpus.entries.slice(0, 12).map((e) => e.seed),
-			buggify: swarm.buggify,
-			buggifyProbability: swarm.buggifyProbability,
+			faultMode: swarm.faultMode,
+			faultProbability: swarm.faultProbability,
 			faultProfile: swarm.faultProfile,
 			base: swarm.base
 		};

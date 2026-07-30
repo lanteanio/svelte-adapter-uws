@@ -169,9 +169,9 @@ export interface SimSwarmRun {
 	seed: string;
 	/** Clean: no invariant/fatal/uncaught failure, and (if re-checked) it reproduced. */
 	ok: boolean;
-	/** Whether this run had the fault profile enabled (see buggify). */
-	buggified: boolean;
-	/** 8-hex-char structural fingerprint (the "unseed" determinism canary). */
+	/** Whether this run had the fault profile enabled (see faultMode). */
+	faulted: boolean;
+	/** 8-hex-char structural fingerprint; a determinism canary for a fixed seed. */
 	fingerprint: string;
 	violations: number;
 	fatals: number;
@@ -190,9 +190,9 @@ export interface SimSwarmSummary {
 	/** The first failing seed - the entire local reproduce command - or null. */
 	firstFailingSeed: string | null;
 	failingSeeds: string[];
-	buggify: 'off' | 'on' | 'random';
+	faultMode: 'off' | 'on' | 'random';
 	/** How many runs had the fault profile enabled. */
-	buggified: number;
+	faulted: number;
 	/** How many runs were re-checked for determinism (the checkRatio sample). */
 	determinismChecks: number;
 	/** Re-checked runs that failed to reproduce (a determinism regression). */
@@ -213,12 +213,12 @@ export interface SimSwarmConfig {
 	/** Base SimConfig applied to every run (its `seed`/`faults` are overridden per run). */
 	base?: SimConfig;
 	/** Fault-enablement knob. 'off' (default), 'on' (always layer faultProfile), or
-	 *  'random' (a per-seed seeded coin at buggifyProbability). */
-	buggify?: 'off' | 'on' | 'random';
-	/** The fault profile layered on when a run is buggified. */
+	 *  'random' (a per-seed seeded coin at faultProbability). */
+	faultMode?: 'off' | 'on' | 'random';
+	/** The fault profile layered on when a run is faulted. */
 	faultProfile?: SimFaults;
-	/** Probability a run is buggified under buggify:'random' (default 0.25). */
-	buggifyProbability?: number;
+	/** Probability a run is faulted under faultMode:'random' (default 0.25). */
+	faultProbability?: number;
 	/** Fraction in [0,1] of runs also replayed to assert determinism (default 0). */
 	checkRatio?: number;
 	gitCommit?: string;
@@ -247,7 +247,7 @@ export interface SimGoldenEntry {
 		fatals: number;
 		uncaught: number;
 		violationCategories: string[];
-		buggified: boolean;
+		faulted: boolean;
 	};
 }
 
@@ -257,8 +257,8 @@ export interface SimGoldenCorpus {
 	schemaVersion: number;
 	gitCommit: string | null;
 	recordedAt: string | null;
-	/** The swarm knobs the fingerprints were recorded under (buggify /
-	 *  buggifyProbability / faultProfile / base). Regenerate if any change. */
+	/** The swarm knobs the fingerprints were recorded under (faultMode /
+	 *  faultProbability / faultProfile / base). Regenerate if any change. */
 	swarm: object | null;
 	entries: SimGoldenEntry[];
 }

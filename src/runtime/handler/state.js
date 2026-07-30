@@ -103,7 +103,7 @@ export function recordSeen(seenMap, topic, seq) {
  * `above` is allocated lazily (null while the stream is contiguous, the common
  * case) and `holeSince` is 0 when there is no open hole, so a healthy stream
  * costs one small object per (topic, origin).
- * @type {Map<string, Map<number, { w: number, hi: number, above: Set<number> | null, holeSince: number }>>}
+ * @type {Map<string, Map<number, { w: number, hi: number, above: Set<number> | null, aboveMax: number, aboveRanges: Array<[number, number]>, holeSince: number }>>}
  */
 export const originStreams = new Map();
 
@@ -141,16 +141,23 @@ export function markRelayAttached() {
 }
 
 /**
- * Ordinals buffered above an open hole before the buffer stops growing. Once a
- * hole is open, buffering more of what came after it adds nothing the report does
- * not already carry, so further arrivals only advance `hi` and are not retained:
- * that bounds what one lost frame behind a live publisher can hold, without
- * touching the hole's identity or its age. Not a tuning knob.
+ * How many ordinals above an open hole the buffer retains. Bounds what one lost
+ * frame behind a live publisher can hold. Not a tuning knob.
  *
- * The stream stops auditing above the cap, but it never forgets that those frames
- * ARRIVED - that is what `hi` is for. Dropping them from the buffer without
- * recording them would make the stream resume from the highest ordinal it still
- * held, and report everything above it as lost the next time it fell behind.
+ * At the cap the buffer keeps the `MAX_PENDING_ABOVE` SMALLEST ordinals seen: an
+ * arrival below the current maximum evicts that maximum. The report boundary is
+ * the LOWEST arrival above the hole, so keeping the smallest is what makes that
+ * boundary exact - everything between the watermark and it genuinely never came.
+ * Simply refusing arrivals once full leaves a larger ordinal defining the
+ * boundary while smaller ones that DID arrive go unrecorded, and the report then
+ * names delivered frames as lost.
+ *
+ * Eviction never forgets that a frame ARRIVED for re-baselining purposes - that
+ * is what `hi` is for, and the drain resumes from `hi` rather than from the
+ * buffer. What it does cost is auditing: ordinals evicted above the reported hole
+ * are no longer individually checkable, so a second loss inside the same window
+ * is folded into the first report rather than counted. The reported `count` is
+ * therefore frames PROVEN lost - a lower bound, not a total.
  */
 export const MAX_PENDING_ABOVE = 64;
 
@@ -171,6 +178,49 @@ export const MAX_PENDING_ABOVE = 64;
 export const GAP_CONFIRM_MS = 1000;
 
 /**
+ * Retain a delivered ordinal that no longer fits in `above` as one of a bounded
+ * set of sorted, merged ranges. A busy damaged stream is normally one ascending
+ * range, however many frames it carries, so this preserves exact contiguity
+ * without returning to an unbounded per-frame Set.
+ *
+ * At the range cap we keep the LOWEST ranges: only the first delivered ordinal
+ * above the watermark defines the currently reportable hole. Losses beyond all
+ * retained ranges remain part of the documented lower-bound trade once a stream
+ * has exceeded both bounds.
+ * @param {Array<[number, number]>} ranges
+ * @param {number} ord
+ */
+function retainAboveRange(ranges, ord) {
+	let i = 0;
+	while (i < ranges.length && ranges[i][1] + 1 < ord) i++;
+	if (i < ranges.length && ord >= ranges[i][0] - 1 && ord <= ranges[i][1] + 1) {
+		if (ord < ranges[i][0]) ranges[i][0] = ord;
+		if (ord > ranges[i][1]) ranges[i][1] = ord;
+		while (i + 1 < ranges.length && ranges[i + 1][0] <= ranges[i][1] + 1) {
+			ranges[i][1] = Math.max(ranges[i][1], ranges[i + 1][1]);
+			ranges.splice(i + 1, 1);
+		}
+		return;
+	}
+	if (ranges.length < MAX_PENDING_ABOVE) {
+		ranges.splice(i, 0, [ord, ord]);
+	} else if (i < ranges.length) {
+		// Keep the closest ranges; the last one is furthest from today's hole.
+		ranges.splice(i, 0, [ord, ord]);
+		ranges.pop();
+	}
+}
+
+/** @param {Array<[number, number]>} ranges @param {number} ord */
+function aboveRangesContain(ranges, ord) {
+	for (let i = 0; i < ranges.length; i++) {
+		if (ord < ranges[i][0]) return false;
+		if (ord <= ranges[i][1]) return true;
+	}
+	return false;
+}
+
+/**
  * Fold one relayed frame's ordinal into the (topic, origin) stream tracker.
  *
  * The classification that matters is the FIRST sighting of a stream, where an
@@ -189,7 +239,7 @@ export const GAP_CONFIRM_MS = 1000;
  * `recordSeen`), and `nowFn` is called ONLY when a hole opens - never on the
  * contiguous path - so a healthy relay pays no clock read per frame.
  *
- * @param {Map<string, Map<number, { w: number, hi: number, above: Set<number> | null, holeSince: number }>>} streams
+ * @param {Map<string, Map<number, { w: number, hi: number, above: Set<number> | null, aboveMax: number, aboveRanges: Array<[number, number]>, holeSince: number }>>} streams
  * @param {string} topic
  * @param {number} origin - the publishing worker's thread id
  * @param {number} ord - the origin's per-topic relay ordinal for this frame
@@ -210,11 +260,11 @@ export function recordOriginStream(streams, topic, origin, ord, birth, attachedA
 		if (ord > 1 && birth > attachedAt) {
 			// We were already attached when this stream started, so ordinal 1 was
 			// owed to us and never came: the prefix below `ord` is missing.
-			byOrigin.set(origin, { w: 0, hi: ord, above: new Set([ord]), holeSince: nowFn() });
+			byOrigin.set(origin, { w: 0, hi: ord, above: new Set([ord]), aboveMax: ord, aboveRanges: [], holeSince: nowFn() });
 		} else {
 			// The stream predates our attach (or this IS its head): whatever came
 			// before was never ours to receive. Baseline here and track from now on.
-			byOrigin.set(origin, { w: ord, hi: ord, above: null, holeSince: 0 });
+			byOrigin.set(origin, { w: ord, hi: ord, above: null, aboveMax: -Infinity, aboveRanges: [], holeSince: 0 });
 		}
 		return;
 	}
@@ -222,19 +272,28 @@ export function recordOriginStream(streams, topic, origin, ord, birth, attachedA
 	if (ord <= st.w) return; // already covered: a duplicate or a late reorder below the watermark
 	if (ord === st.w + 1) {
 		st.w = ord;
-		if (st.above !== null && st.above.size > 0) {
-			// This frame may have been the one plugging the hole - drain everything
-			// the buffer can now make contiguous.
-			while (st.above.delete(st.w + 1)) st.w++;
-			if (st.above.size === 0) {
+		if (st.above !== null) {
+			// This frame may plug the current hole. Drain both exact retained
+			// ordinals and compact delivered ranges until the next real hole.
+			for (;;) {
+				while (st.above.delete(st.w + 1)) st.w++;
+				const range = st.aboveRanges[0];
+				if (range === undefined || range[0] !== st.w + 1) break;
+				st.w = range[1];
+				st.aboveRanges.shift();
+			}
+			if (st.above.size === 0 && st.aboveRanges.length === 0) {
 				// Nothing known is outstanding, so resume from everything that has
-				// actually arrived - which is `hi`, not the watermark: above the cap
-				// frames stopped being buffered but did not stop arriving, and
-				// resuming from the buffer would report them all as lost.
+				// actually arrived. This equals `hi` while the bounded summaries cover
+				// the window; assigning it explicitly preserves the lower-bound policy
+				// after both retention bounds have been exceeded.
 				st.above = null;
+				st.aboveMax = -Infinity;
+				st.aboveRanges.length = 0;
 				st.holeSince = 0;
 				st.w = st.hi;
 			} else {
+				if (st.above.size === 0) st.aboveMax = -Infinity;
 				// Anything still buffered sits behind a DIFFERENT hole, which only
 				// became the blocking one just now: its age starts here, not at the
 				// closed one's. Dating it from the older hole would confirm it early
@@ -245,13 +304,60 @@ export function recordOriginStream(streams, topic, origin, ord, birth, attachedA
 		return;
 	}
 	// A higher ordinal with at least one missing below it.
-	if (st.above === null) st.above = new Set();
+	// The two cache resets here are DEFENSIVE, not load-bearing: every path that
+	// nulls `above` already resets them, so `above === null` implies the cache is
+	// clean. Deleting them leaves the suite green, and that is expected rather than
+	// a coverage hole - they exist so the invariant holds locally instead of by an
+	// argument about three other call sites.
+	if (st.above === null) { st.above = new Set(); st.aboveMax = -Infinity; st.aboveRanges.length = 0; }
 	if (st.holeSince === 0) st.holeSince = nowFn();
-	// Past the cap the arrival is recorded by `hi` alone: the hole below is what
-	// gets reported and it is already identified, so buffering more of what came
-	// after it adds nothing. The watermark is deliberately NOT moved here - that
+	// The buffer keeps the N SMALLEST ordinals seen above the hole, because the
+	// report boundary is the LOWEST arrival above it - everything between the
+	// watermark and that lowest arrival is what never came. Simply dropping
+	// arrivals once the buffer is full would leave a larger ordinal defining the
+	// boundary while a smaller one that DID arrive went unrecorded, and the report
+	// would then name delivered frames as lost: with a reorder deeper than the cap
+	// and the high block first, one lost frame was reported as 98 and
+	// `relay_gap_frames_total` incremented by 98.
+	//
+	// The scan is bounded by the cap and only runs on an already-damaged stream
+	// that has exceeded it. The watermark is deliberately NOT moved here - that
 	// would swallow the very frame we are waiting for if it arrives late.
-	if (st.above.size < MAX_PENDING_ABOVE) st.above.add(ord);
+	if (st.above.has(ord) || aboveRangesContain(st.aboveRanges, ord)) return;
+	if (st.above.size < MAX_PENDING_ABOVE) {
+		st.above.add(ord);
+		if (ord > st.aboveMax) st.aboveMax = ord;
+	} else if (ord < st.aboveMax) {
+		// ORDER OF THE TWO TESTS IS A PERFORMANCE DECISION, not a semantic one - the
+		// branch is entered on the same inputs either way. The numeric compare goes
+		// first because it rejects the common post-drop shape (a stream still
+		// arriving in order behind one missing frame, where every ordinal is above
+		// the maximum) in one comparison. Putting the Set lookup first walks the
+		// 64-entry buffer on every relayed frame for as long as the hole stays
+		// open, which measured +126% against the previous policy.
+		//
+		// The duplicate test itself is load-bearing wherever it sits: re-adding a
+		// value the buffer already holds would still evict the maximum, shrinking
+		// the set by one and forgetting an ordinal that ARRIVED - the drain would
+		// later stop on it and report it lost, which is the very class this
+		// retention exists to close. Duplicate re-delivery is expected input here.
+		//
+		// The maximum is CACHED rather than rescanned per arrival; rescanning made
+		// the same shape ~10x more expensive per relayed frame.
+		const evicted = st.aboveMax;
+		st.above.delete(evicted);
+		st.above.add(ord);
+		let m = -Infinity;
+		for (const s of st.above) if (s > m) m = s;
+		st.aboveMax = m;
+		retainAboveRange(st.aboveRanges, evicted);
+	} else {
+		// Compact every delivered ordinal outside the exact buffer. Remembering
+		// only the old scalar minimum prevented one false positive, but closing an
+		// earlier reorder then erased a genuine later loss
+		// (1,3..66,68..80,2 silently skipped 67).
+		retainAboveRange(st.aboveRanges, ord);
+	}
 }
 
 /**
@@ -276,7 +382,7 @@ export function recordOriginStream(streams, topic, origin, ord, birth, attachedA
  * a restarted worker's empty map are all simply absent from the report rather
  * than a disagreement to resolve.
  *
- * @param {Map<string, Map<number, { w: number, hi: number, above: Set<number> | null, holeSince: number }>>} streams
+ * @param {Map<string, Map<number, { w: number, hi: number, above: Set<number> | null, aboveMax: number, aboveRanges: Array<[number, number]>, holeSince: number }>>} streams
  * @param {number} nowMs - process-monotonic reading
  * @param {number} graceMs - see GAP_CONFIRM_MS
  * @returns {{ topic: string, origin: number, from: number, to: number, count: number }[]}
@@ -292,11 +398,25 @@ export function takeConfirmedGaps(streams, nowMs, graceMs) {
 			let lowestAbove = Infinity;
 			for (const s of st.above) if (s < lowestAbove) lowestAbove = s;
 			const from = st.w + 1;
-			const to = lowestAbove - 1;
-			gaps.push({ topic, origin, from, to, count: to - from + 1 });
+			const lowestRanged = st.aboveRanges.length === 0 ? Infinity : st.aboveRanges[0][0];
+			// The boundary is the lowest ARRIVAL above the hole: the exact-buffer
+			// minimum or the first compact delivered range, whichever is lower.
+			// Using the buffer alone lets a drained watermark cross a discarded
+			// arrival and report a delivered ordinal as lost.
+			const to = Math.min(lowestAbove, lowestRanged) - 1;
+			// `to < from` means every ordinal between the watermark and the lowest
+			// arrival above it turned out to have ARRIVED - the hole closed out of
+			// order while the buffer was full. There is nothing to report, and an
+			// inverted or zero-width range must never be emitted: consumers read
+			// `count` into relay_gap_frames_total and a `[from, to]` span into an
+			// operator-facing log line, and RESTART_ON_STATE_DIVERGENCE would restart
+			// a worker that lost nothing.
+			if (to >= from) gaps.push({ topic, origin, from, to, count: to - from + 1 });
 			// Resume from what ARRIVED, not from what the buffer still held.
 			st.w = st.hi;
 			st.above = null;
+			st.aboveMax = -Infinity;
+			st.aboveRanges.length = 0;
 			st.holeSince = 0;
 		}
 	}
@@ -387,8 +507,11 @@ export const pressureSnapshot = {
  * server already authorized for that connection (i.e. a prior
  * `platform.subscribe`, recorded in the connection's `WS_SUBSCRIPTIONS` set) -
  * unless the app exports an explicit `subscribe` / `subscribeBatch` hook, which
- * still decides. Server-initiated `platform.subscribe` / `platform.checkSubscribe`
- * are unaffected (they are the trusted authorization path). Off by default, so
+ * still decides. Server-initiated `platform.subscribe` is unaffected (it is the
+ * trusted authorization path); `platform.checkSubscribe` with
+ * `{ requireGrant: true }` - the mode presence.sync / cursor.snapshot use -
+ * additionally requires grant-set membership while this is enabled, so those
+ * snapshot lanes enforce the same conjunction as the wire gate. Off by default, so
  * the adapter's standalone "any client may subscribe to any topic" contract is
  * unchanged; a framework (svelte-realtime) or an app opts in. A holder object,
  * not `export let`, so a runtime enable in one module is visible to the wire

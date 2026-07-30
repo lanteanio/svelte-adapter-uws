@@ -56,20 +56,20 @@ describe('runSimSwarm - aggregation + reproduce key', () => {
 	});
 });
 
-describe('runSimSwarm - buggify fault enablement', () => {
-	it('buggify:off leaves every run unfaulted (byte-identical to a plain swarm)', async () => {
-		const off = await runSimSwarm({ count: 4, startSeed: 1, buggify: 'off' });
+describe('runSimSwarm - faultMode fault enablement', () => {
+	it('faultMode:off leaves every run unfaulted (byte-identical to a plain swarm)', async () => {
+		const off = await runSimSwarm({ count: 4, startSeed: 1, faultMode: 'off' });
 		const plain = await runSimSwarm({ count: 4, startSeed: 1 });
-		expect(off.runs.every((r) => r.buggified === false)).toBe(true);
+		expect(off.runs.every((r) => r.faulted === false)).toBe(true);
 		expect(off.runs).toEqual(plain.runs);
 	});
 
-	it('buggify:on faults every run and changes the fingerprints vs unfaulted', async () => {
+	it('faultMode:on faults every run and changes the fingerprints vs unfaulted', async () => {
 		const faultProfile = { drop: 0.3, duplicate: 0.2, reorder: 0.6, maxJitterMs: 30 };
-		const on = await runSimSwarm({ count: 4, startSeed: 1, buggify: 'on', faultProfile });
+		const on = await runSimSwarm({ count: 4, startSeed: 1, faultMode: 'on', faultProfile });
 		const off = await runSimSwarm({ count: 4, startSeed: 1 });
-		expect(on.runs.every((r) => r.buggified === true)).toBe(true);
-		expect(on.summary.buggified).toBe(4);
+		expect(on.runs.every((r) => r.faulted === true)).toBe(true);
+		expect(on.summary.faulted).toBe(4);
 		// Faults change the delivery interleaving -> a different structural
 		// fingerprint, proving the profile is actually applied; invariants still hold.
 		const changed = on.runs.some((r, i) => r.fingerprint !== off.runs[i].fingerprint);
@@ -77,15 +77,15 @@ describe('runSimSwarm - buggify fault enablement', () => {
 		expect(on.summary.ok).toBe(true);
 	});
 
-	it('buggify:random faults a reproducible, non-trivial subset', async () => {
+	it('faultMode:random faults a reproducible, non-trivial subset', async () => {
 		const faultProfile = { drop: 0.3, reorder: 0.6, maxJitterMs: 30 };
-		const a = await runSimSwarm({ count: 24, startSeed: 1, buggify: 'random', faultProfile, buggifyProbability: 0.5 });
-		const b = await runSimSwarm({ count: 24, startSeed: 1, buggify: 'random', faultProfile, buggifyProbability: 0.5 });
-		expect(a.summary.buggified).toBeGreaterThan(0);
-		expect(a.summary.buggified).toBeLessThan(24);
-		// The buggified subset is identical across runs (seeded per seed).
-		expect(b.runs.map((r) => r.buggified)).toEqual(a.runs.map((r) => r.buggified));
-		expect(a.summary.buggified).toBe(a.runs.filter((r) => r.buggified).length);
+		const a = await runSimSwarm({ count: 24, startSeed: 1, faultMode: 'random', faultProfile, faultProbability: 0.5 });
+		const b = await runSimSwarm({ count: 24, startSeed: 1, faultMode: 'random', faultProfile, faultProbability: 0.5 });
+		expect(a.summary.faulted).toBeGreaterThan(0);
+		expect(a.summary.faulted).toBeLessThan(24);
+		// The faulted subset is identical across runs (seeded per seed).
+		expect(b.runs.map((r) => r.faulted)).toEqual(a.runs.map((r) => r.faulted));
+		expect(a.summary.faulted).toBe(a.runs.filter((r) => r.faulted).length);
 	});
 });
 

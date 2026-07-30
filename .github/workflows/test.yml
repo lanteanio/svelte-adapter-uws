@@ -1,0 +1,84 @@
+name: test
+
+# The test suite as a gate.
+#
+# Until now nothing in CI ran it: the only workflow was the simulation swarm,
+# which exercises the in-memory server and never touches the real uWS runtime.
+# So the suites that drive a built server over real sockets - the ones that
+# stand behind every authorization, revocation and handshake claim - were run
+# only on whichever machine a contributor happened to be using.
+#
+# REQUIRE_UWS makes the native dependency mandatory here. It is optional by
+# design, and absent it the real-runtime suites skip and report PASSED with
+# zero assertions - which as a gate result is worse than a failure, because it
+# looks like proof.
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'examples/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vitest.config.js'
+      - '.github/workflows/test.yml'
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+# A new push supersedes an in-flight run on the same ref.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    strategy:
+      fail-fast: false
+      # Both, deliberately. The fixture build serializes behind an on-disk lock
+      # and several path behaviours differ, so a Linux-only gate would not have
+      # caught the Windows-specific breakages this suite has had.
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # Restore the source-keyed built fixture variants. The helper validates
+      # each restored stamp against file CONTENTS before trusting it.
+      - name: Cache built fixture variants
+        uses: actions/cache@v4
+        with:
+          path: 'test/fixture/build*'
+          key: fixture-${{ runner.os }}-${{ hashFiles('src/**', 'test/fixture/src/**', 'test/fixture/static/**', 'test/fixture/variants.js', 'test/fixture/svelte.config.js', 'test/fixture/vite.config.js', 'test/fixture/package.json', 'test/fixture/package-lock.json', 'package.json') }}
+
+      - run: npm ci
+
+      # The fixture is a real SvelteKit app with its own manifest, and its
+      # node_modules is gitignored. Several suites boot the REAL built runtime
+      # from it, and without this its `svelte-adapter-uws` / `.../vite` imports
+      # do not resolve, `vite build` fails, and every real-runtime suite dies at
+      # "fixture variant failed to build" - on a cold runner, which is every run.
+      - name: Install fixture dependencies
+        working-directory: test/fixture
+        run: npm ci
+
+      # Fail loudly here rather than letting the suites skip their way to green.
+      - name: Verify the native runtime is installed
+        run: node -e "require('uWebSockets.js'); console.log('uWebSockets.js OK')"
+
+      # `pretest` runs the check scripts (types, determinism, slugs, scope,
+      # syntax), so this one command is the whole gate.
+      - name: Test
+        run: npm test
+        env:
+          REQUIRE_UWS: '1'

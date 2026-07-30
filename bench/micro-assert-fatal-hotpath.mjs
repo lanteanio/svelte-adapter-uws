@@ -6,7 +6,7 @@
 // `fatal(cond, cat, ctx)` at the publish envelope guard, the message platform
 // guard, and the subscribe subscription-shape guard. Both functions short-circuit
 // on a truthy condition with a single comparison (`if (cond) return;`), so the
-// expectation is byte-unchanged hot-path cost. Credo #4 requires the bench, not
+// expectation is byte-unchanged hot-path cost. This needs the bench, not
 // an estimate: a single-digit-percent regression on any hot path is a blocker.
 //
 // The production handler/platform modules are built against rollup-injected

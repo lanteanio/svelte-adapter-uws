@@ -23,9 +23,20 @@
  * @module svelte-adapter-uws/plugins/groups
  */
 
-import { trackedSubscribe, trackedUnsubscribe } from '../../runtime/utils.js';
+import { trackedSubscribe, trackedUnsubscribe, markSideEffectHooks, registerPluginOwnedPrefix } from '../../runtime/utils.js';
 
 const TOPIC_PREFIX = '__group:';
+
+// A group is joined by the client subscribing to `__group:<name>`, and the only
+// thing that authorizes that is this plugin's own subscribe hook below. Marking
+// that hook a side effect stops it disarming the grant gate for every other
+// topic; declaring the prefix is the other half, so the gate does not refuse
+// the group's own channel before the hook it defers to has run. The hook still
+// decides, and still refuses an admission-denied, full, or closed group. The
+// system-topic guard consults the same prefix registry; landing still requires
+// join() to have established tracked membership, so other __group:* spellings
+// do not inherit access.
+registerPluginOwnedPrefix(TOPIC_PREFIX);
 
 /**
  * @typedef {'member' | 'admin' | 'viewer'} GroupRole
@@ -36,7 +47,10 @@ const TOPIC_PREFIX = '__group:';
  * @property {number} [maxMembers=Infinity] - Maximum members allowed.
  *   When the group is full, `join()` returns `false` and calls `onFull`.
  * @property {Record<string, any>} [meta] - Initial group metadata (shallow-copied).
- * @property {(ws: any, role: GroupRole) => void} [onJoin] - Called after a member joins.
+ * @property {(ws: any, role: GroupRole) => GroupRole | false | void} [onJoin] -
+ *   Synchronous admission hook. Return false to reject, a role to override the
+ *   requested role, or undefined to accept it unchanged. Runs before any
+ *   membership, broadcast, or roster side effect.
  * @property {(ws: any, role: GroupRole) => void} [onLeave] - Called after a member leaves.
  * @property {(ws: any, role: GroupRole) => void} [onFull] - Called when a join is rejected
  *   because the group is full.
@@ -95,7 +109,7 @@ const TOPIC_PREFIX = '__group:';
  *
  * @example
  * ```js
- * // src/hooks.ws.js - zero-config (just spread hooks)
+ * // src/hooks.ws.js - ready-made admission + membership wiring
  * import { lobby } from '$lib/server/lobby';
  *
  * export const { subscribe, unsubscribe, close } = lobby.hooks;
@@ -166,6 +180,39 @@ export function createGroup(name, options = {}) {
 				return false;
 			}
 
+			// Admission comes before EVERY membership side effect. The README has
+			// always documented onJoin as the policy decision, but it used to run
+			// after members.set(), the join broadcast, trackedSubscribe(), and the
+			// full roster send. A thrown authorization error therefore told the
+			// client INTERNAL_ERROR while leaving it subscribed with the roster it
+			// was meant to be denied. Undefined preserves the historical callback
+			// style (accept the requested role); false rejects cleanly; a returned
+			// role lets the policy assign privileges.
+			if (onJoin) {
+				const decision = onJoin(ws, role);
+				if (decision === false) return false;
+				if (VALID_ROLES.has(decision)) {
+					role = decision;
+				} else if (typeof decision === 'string') {
+					// Strings are unambiguously attempts to select a role, so a typo
+					// must be loud rather than silently granting the requested role.
+					throw new Error(`group ${name}: onJoin returned invalid role ${decision}`);
+				} else if (decision && typeof decision.then === 'function') {
+					// join() is synchronous. Treating a Promise as an incidental return
+					// would install membership before async authorization resolved. The
+					// callback has already created the Promise, so observe a later reject
+					// rather than turning this fail-closed configuration error into an
+					// unhandled rejection that can terminate the worker.
+					void Promise.resolve(decision).catch((err) => {
+						console.error(`[group ${name}] async onJoin rejected after being refused:`, err);
+					});
+					throw new Error(`group ${name}: onJoin must be synchronous`);
+				}
+				// Preserve existing lifecycle callbacks such as
+				// `onJoin: () => calls.push(...)`, whose incidental numeric return was
+				// historically ignored. Only false and role strings are decisions.
+			}
+
 			members.set(ws, { role });
 
 			// Publish join BEFORE subscribing so joiner doesn't see own join
@@ -184,7 +231,6 @@ export function createGroup(name, options = {}) {
 			// Send current member list to the joiner
 			platform.send(ws, internalTopic, 'members', membersList());
 
-			if (onJoin) onJoin(ws, role);
 			return true;
 		},
 
@@ -254,7 +300,19 @@ export function createGroup(name, options = {}) {
 			if (onClose) onClose();
 		},
 
-		hooks: {
+		// This subscribe hook decides for exactly one topic - the group's own
+		// `__group:` channel - and returns undefined for every other topic an
+		// app has. The server-grant gate, though, steps aside for the WHOLE
+		// connection as soon as an app exports a subscribe hook, and the
+		// documented wiring re-exports this one. So arming
+		// `authorizeWireSubscribe` and following this plugin's README used to
+		// produce no enforcement on any app topic: a client could name any
+		// topic and be subscribed. Marking it keeps the gate armed while the
+		// hook still runs and its `false` still denies - the mark is read only
+		// when deciding whether the APP took over authorization, never when
+		// honouring a denial. An app that wraps this hook in its own function
+		// is not marked, and the gate steps aside as documented.
+		hooks: markSideEffectHooks({
 			subscribe(ws, topic, { platform }) {
 				if (topic === internalTopic) {
 					return grp.join(ws, platform) ? undefined : false;
@@ -268,7 +326,7 @@ export function createGroup(name, options = {}) {
 			close(ws, { platform }) {
 				grp.leave(ws, platform);
 			}
-		}
+		}, ['subscribe'])
 	};
 
 	return grp;

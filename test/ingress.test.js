@@ -16,13 +16,14 @@ import {
 	WIRE_INGRESS_CAP
 } from '../src/runtime/handler/ingress.js';
 import { buildBinaryFrame, parseBinaryFrame } from '../src/runtime/wire.js';
+import { registerGameIngress, GAME_INGRESS_KIND } from '../src/runtime/handler/game-ingress.js';
 import {
 	encodeSmoothCommandBatch,
 	decodeSmoothCommandBatch,
 	SMOOTH_COMMAND_CAPABILITY,
 	SMOOTH_COMMAND_SCHEMA_VERSION
 } from '../src/plugins/smooth/codec.js';
-import { WS_INGRESS_BINDINGS } from '../src/runtime/utils.js';
+import { WS_INGRESS_BINDINGS, MAX_INGRESS_BINDINGS_PER_CONNECTION, MAX_INGRESS_TARGET_BYTES } from '../src/runtime/utils.js';
 import { mockWs } from './_helpers.js';
 
 let uWS;
@@ -138,6 +139,45 @@ describe('bindIngress', () => {
 		bindIngress(ud, mockWs(ud), 1, 'stateful:1', {});
 		expect(attached).toBe(1);
 		expect(ud[WS_INGRESS_BINDINGS].get(1).state).toEqual({ dict: true });
+	});
+	it('refuses binds past the per-connection cap; earlier bindings still bind and route', () => {
+		const routed = [];
+		registerIngress('k:1', { decode: (p) => p, route: () => routed.push(1) });
+		const ud = {};
+		const ws = mockWs(ud);
+		for (let i = 1; i <= MAX_INGRESS_BINDINGS_PER_CONNECTION; i++) {
+			expect(bindIngress(ud, ws, i, 'k:1', {})).toBe(true);
+		}
+		// The cap+1th bind gets no binding and no ack (false) - the caller keeps
+		// that id on its JSON fallback, exactly like an unknown kind.
+		expect(bindIngress(ud, ws, MAX_INGRESS_BINDINGS_PER_CONNECTION + 1, 'k:1', {})).toBe(false);
+		const map = ud[WS_INGRESS_BINDINGS];
+		expect(map.size).toBe(MAX_INGRESS_BINDINGS_PER_CONNECTION);
+		expect(map.has(MAX_INGRESS_BINDINGS_PER_CONNECTION + 1)).toBe(false);
+		// Rebinding an already-bound id still works at the cap...
+		expect(bindIngress(ud, ws, 1, 'k:1', {})).toBe(true);
+		// ...and the earlier bindings still route.
+		dispatchIngressFrame(ws, ud, buildBinaryFrame(1, 2, 1, new Uint8Array([1])), null);
+		expect(routed).toHaveLength(1);
+	});
+	it('refuses a binding whose retained target exceeds the serialized-size bound', () => {
+		registerIngress('k:1', { decode: (p) => p, route: () => {} });
+		const ud = {};
+		const oversized = { blob: 'x'.repeat(MAX_INGRESS_TARGET_BYTES) };
+		expect(bindIngress(ud, mockWs(ud), 1, 'k:1', oversized)).toBe(false);
+		expect(ud[WS_INGRESS_BINDINGS]).toBeUndefined();
+		// A target within the bound still binds and is retained.
+		expect(bindIngress(ud, mockWs(ud), 1, 'k:1', { path: 'p', room: ['r'] })).toBe(true);
+		expect(ud[WS_INGRESS_BINDINGS].get(1).target).toEqual({ path: 'p', room: ['r'] });
+	});
+	it('does not retain the target for a kind whose route never reads it (game:1)', () => {
+		registerGameIngress();
+		const ud = {};
+		// Even a huge attacker target binds (nothing needs refusing) yet the
+		// binding retains no target - the route derives the topic from the
+		// connection's publish grant.
+		expect(bindIngress(ud, mockWs(ud), 1, GAME_INGRESS_KIND, { blob: 'x'.repeat(6000) })).toBe(true);
+		expect(ud[WS_INGRESS_BINDINGS].get(1).target).toBeUndefined();
 	});
 });
 
@@ -335,5 +375,20 @@ describeUWS('binary ingress over the wire', () => {
 		a.send({ type: 'ingress-bind', id: 1, kind: 'never.registered:1', target: {} });
 		await sleep(150);
 		expect(a.frames.some((f) => f.parsed?.type === 'ingress-bound')).toBe(false);
+	});
+
+	it('acks only up to the per-connection bind cap - further binds keep their JSON fallback', async () => {
+		registerIngress('k:1', { decode: (p) => p, route: () => {} });
+		server = await createTestServer({ handler: { message() {} } });
+		const a = await connectClient(server.wsUrl, ['wire.ingress:1']);
+		await a.waitFor((f) => f.parsed?.type === 'ingress-ok');
+		for (let i = 1; i <= MAX_INGRESS_BINDINGS_PER_CONNECTION + 1; i++) {
+			a.send({ type: 'ingress-bind', id: i, kind: 'k:1', target: {} });
+		}
+		await sleep(300);
+		// Exactly the capped binds got an ack; the cap+1th got none, so the
+		// client keeps that destination on its JSON fallback.
+		const acks = a.frames.filter((f) => f.parsed?.type === 'ingress-bound');
+		expect(acks).toHaveLength(MAX_INGRESS_BINDINGS_PER_CONNECTION);
 	});
 });

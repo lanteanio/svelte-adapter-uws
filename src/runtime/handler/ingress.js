@@ -29,10 +29,21 @@
  */
 
 import { parseBinaryFrame } from '../wire.js';
-import { WS_INGRESS_BINDINGS } from '../utils.js';
+import {
+	WS_INGRESS_BINDINGS,
+	MAX_INGRESS_BINDINGS_PER_CONNECTION,
+	MAX_INGRESS_TARGET_BYTES
+} from '../utils.js';
 
 /** The `0x03` ingress control token a client advertises in `hello.caps`. */
 export const WIRE_INGRESS_CAP = 'wire.ingress:1';
+
+// Kinds whose registered route never reads the binding `target` - `game:1`
+// derives its destination from the connection's publish grant instead (see
+// ./game-ingress.js routeGameFrame), so a retained target would be pure
+// attacker-controlled garbage pinned in the binding map for the connection's
+// lifetime. Their target is dropped at bind time, never stored.
+const TARGETLESS_INGRESS_KINDS = new Set(['game:1']);
 
 // Process-global kind registry. See the module doc for why this is not a plain
 // module-level Map.
@@ -86,11 +97,20 @@ export function _resetIngressRegistry() {
  * Bind a client-allocated ingress id to a destination for one connection, in
  * response to an `{type:'ingress-bind'}` control frame. Resolves the kind to a
  * registered handler and stores `id -> binding` in the connection's
- * `WS_INGRESS_BINDINGS` slot (created lazily). Returns true when the kind is
- * known and the binding was stored - the caller then acks with `ingress-bound`
- * so the client promotes the binding to binary. Returns false when the kind is
- * unregistered (an old/mismatched consumer): no binding, no ack, and the client
- * keeps that destination on its JSON fallback - never a silent drop.
+ * `WS_INGRESS_BINDINGS` slot (created lazily). Returns true when the binding
+ * was stored - the caller then acks with `ingress-bound` so the client
+ * promotes the binding to binary. Returns false - no binding, no ack, and the
+ * client keeps that destination on its JSON fallback, never a silent drop -
+ * when the kind is unregistered (an old/mismatched consumer), when the
+ * connection already holds MAX_INGRESS_BINDINGS_PER_CONNECTION bindings
+ * (rebinding an existing id still works), or when the retained target would
+ * exceed MAX_INGRESS_TARGET_BYTES serialized.
+ *
+ * Retention is bounded because the map lives as long as the connection: the
+ * entry count is capped, kinds whose route never reads `target`
+ * (TARGETLESS_INGRESS_KINDS) store none at all, and every other kind's target
+ * is size-bounded - an `ingress-bind` frame can never pin attacker bytes ~1:1
+ * for the connection's lifetime.
  *
  * @param {any} ud - ws.getUserData()
  * @param {any} ws
@@ -103,6 +123,23 @@ export function bindIngress(ud, ws, id, kind, target) {
 	const handler = getIngress(kind);
 	if (!handler) return false;
 	let map = ud[WS_INGRESS_BINDINGS];
+	if (map && !map.has(id) && map.size >= MAX_INGRESS_BINDINGS_PER_CONNECTION) return false;
+	let retained = target;
+	if (TARGETLESS_INGRESS_KINDS.has(kind)) {
+		retained = undefined;
+	} else if (target !== undefined) {
+		// `target` arrives JSON-parsed, so re-serializing measures exactly what
+		// the binding would retain. Measured in BYTES (not String.length,
+		// which counts UTF-16 code units and would let a multi-byte target
+		// retain ~3x the cap). An unserializable target (never produced by the
+		// JSON demux; possible from a direct caller) is refused outright.
+		let size = 0;
+		try {
+			const json = JSON.stringify(target);
+			size = json === undefined ? 0 : Buffer.byteLength(json);
+		} catch { return false; }
+		if (size > MAX_INGRESS_TARGET_BYTES) return false;
+	}
 	if (!map) {
 		map = new Map();
 		ud[WS_INGRESS_BINDINGS] = map;
@@ -111,7 +148,7 @@ export function bindIngress(ud, ws, id, kind, target) {
 	if (handler.state && typeof handler.state.onAttach === 'function') {
 		try { state = handler.state.onAttach(ws); } catch { state = null; }
 	}
-	map.set(id, { kind, target, decode: handler.decode, route: handler.route, state });
+	map.set(id, { kind, target: retained, decode: handler.decode, route: handler.route, state });
 	return true;
 }
 

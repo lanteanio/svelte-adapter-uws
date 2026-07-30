@@ -15,6 +15,47 @@
  */
 
 /**
+ * Longest a non-XFF address header may be before it stops being an address.
+ * The widest real spelling (expanded IPv6, brackets, port, zone id) is under
+ * 90 characters.
+ */
+const MAX_ADDRESS_HEADER_LENGTH = 128;
+
+/**
+ * Bound on the X-Forwarded-For value that is parsed.
+ *
+ * Far larger than the single-address headers because this one legitimately
+ * chains: every hop appends, so a long path is normal traffic rather than an
+ * attack. Over the bound the HEAD is dropped, never the tail - see the resolver.
+ */
+const MAX_XFF_LENGTH = 8192;
+
+/**
+ * Return a copy of `value` that does not retain the header it came from.
+ *
+ * `split()` and `trim()` hand back a V8 SlicedString for anything 13
+ * characters or longer, and a SlicedString keeps its PARENT alive. The client
+ * IP derived from a multi-kilobyte header is therefore a small string holding
+ * the whole header, and storing it as a rate-limit key pins that header for
+ * the entry's lifetime - measured, 10,000 entries retained ~40 MB per worker
+ * instead of the ~2 MB the entry cap implies, with the documented 128-character
+ * key bound doing nothing about it because the bound counts characters and the
+ * cost is in the parent.
+ *
+ * Concatenating and re-slicing forces a fresh, compact backing string, so what
+ * survives is the address and nothing else. Only reached on the configured
+ * address-header path; the default `getRemoteAddressAsText()` value is already
+ * a standalone string and pays none of this.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function detachFromHeader(value) {
+	if (value.length < 13) return value; // V8 copies these outright
+	return (' ' + value).slice(1);
+}
+
+/**
  * Normalize a socket-layer or config IP literal for comparison: lowercase,
  * strip brackets and an IPv6 zone id, and unwrap an IPv4-mapped IPv6 address
  * to its dotted-quad form so `::ffff:10.0.0.1` and `10.0.0.1` agree.
@@ -181,10 +222,53 @@ export function createClientIpResolver({ addressHeader, xffDepth, matcher, onUnt
 			return rawIp;
 		}
 		if (addressHeader === 'x-forwarded-for') {
-			if (value.length > 8192) return rawIp;
-			const addresses = value.split(',');
+			// TRUNCATE FROM THE HEAD, do not fall back to the socket address.
+			//
+			// This branch used to answer `rawIp` for anything over the bound, which
+			// is the behaviour the comment below this block argues is unacceptable
+			// for the other headers: it merges every client behind one proxy into a
+			// single rate-limit identity, and a client that can pad the header can
+			// therefore force that merge on demand.
+			//
+			// The tail is the part to keep. Every hop APPENDS to X-Forwarded-For, so
+			// the rightmost addresses are the ones infrastructure added and the
+			// leftmost is the only region a client controls - which is also why
+			// `xffDepth` counts from the right. Cutting the head keeps exactly the
+			// addresses the depth selects while bounding the work, where cutting the
+			// tail would throw away the only trustworthy end.
+			const bounded = value.length > MAX_XFF_LENGTH
+				? value.slice(value.length - MAX_XFF_LENGTH)
+				: value;
+			const addresses = bounded.split(',');
+			// Slicing mid-address leaves a partial first element. It is not an
+			// address, so it must not be counted when the depth is applied.
+			if (bounded.length !== value.length) addresses.shift();
 			if (xffDepth > addresses.length) return rawIp;
-			return addresses[addresses.length - xffDepth].trim();
+			return detachFromHeader(addresses[addresses.length - xffDepth].trim());
+		}
+		// TRUNCATE an over-long value; do NOT fall back to the socket address.
+		//
+		// Nothing bounded the non-XFF headers (`x-real-ip`, `cf-connecting-ip`,
+		// `true-client-ip`, ...), so a client could name itself with kilobytes
+		// and have that string become a rate-limit identity. But answering
+		// `rawIp` for anything over the bound MERGES every client behind one
+		// proxy into a single identity, and some of these headers legitimately
+		// CHAIN: `x-original-forwarded-for` (ingress-nginx, the GCP external LB)
+		// and RFC 7239 `Forwarded` carry every hop, so three IPv6 hops already
+		// reach ~121 characters. Measured, thirty distinct clients behind such a
+		// header collapsed to one bucket and two thirds of their upgrades were
+		// refused. The limiter states the rule this broke: merging distinct
+		// clients is a far worse error than failing to merge one client's
+		// addresses.
+		//
+		// Truncation keeps the LEADING address, which is the client's, so
+		// distinct clients stay distinct while the stored value stays bounded.
+		// Only this branch detaches, and only when it slices: below the bound
+		// the header value is already a standalone string from the uWS binding
+		// (`request.js` builds it per key), so detaching it there would copy for
+		// no reason on every single request.
+		if (value.length > MAX_ADDRESS_HEADER_LENGTH) {
+			return detachFromHeader(value.slice(0, MAX_ADDRESS_HEADER_LENGTH));
 		}
 		return value;
 	};

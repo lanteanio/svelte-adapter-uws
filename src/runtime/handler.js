@@ -21,7 +21,7 @@ import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { metricsRegistry } from './metrics-bridge.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, deniesUngrantedObserve, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { registerGameIngress } from './handler/game-ingress.js';
@@ -45,7 +45,11 @@ import { joinSharedCohort, leaveSharedCohort } from './handler/cohort.js';
 import { beginResumeCapture, discardResumeCapture, flushResumeTopic, coveredSeqFor } from './handler/resume-buffer.js';
 import { releaseSharedWireId } from './handler/shared-wire-id.js';
 import { setCohortHooks } from './utils.js';
+import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap } from './utils/subscribe-policy.js';
 import { startPostureExport } from './utils/posture-export.js';
+import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './utils/upgrade-headers.js';
+import { createSlidingWindowLimiter } from './utils/rate-limiter.js';
+import { runMessageHook } from './utils/hook-boundary.js';
 
 // Make the low-level membership primitive (trackedSubscribe / trackedUnsubscribe,
 // used by plugins to establish server-side membership) cohort-aware: a tracked
@@ -281,31 +285,6 @@ if (WS_ENABLED) {
 		}
 	}
 
-	// One-shot runtime warning when a user upgrade handler attaches Set-Cookie
-	// to the 101 Switching Protocols response. Cloudflare Tunnel and some other
-	// strict edge proxies silently close WebSocket connections with 1006 when
-	// the 101 carries Set-Cookie. The `authenticate` hook refreshes cookies
-	// over a normal HTTP response and works behind every proxy.
-	let warnedSetCookieOnUpgrade = false;
-	/** @param {Record<string, string | string[]> | null | undefined} responseHeaders */
-	function maybeWarnSetCookieOnUpgrade(responseHeaders) {
-		if (warnedSetCookieOnUpgrade || !responseHeaders) return;
-		for (const k of Object.keys(responseHeaders)) {
-			if (k.toLowerCase() === 'set-cookie') {
-				warnedSetCookieOnUpgrade = true;
-				console.warn(
-					'[adapter-uws] Set-Cookie on the 101 upgrade response is rejected by ' +
-					'Cloudflare Tunnel and some other edge proxies (WebSocket opens, then ' +
-					'closes with 1006 TCP FIN). Migrate to the `authenticate` hook to ' +
-					'refresh session cookies over a normal HTTP response: ' +
-					'export function authenticate({ cookies }) { cookies.set(...); }\n' +
-					'  See: https://svti.me/cf-cookies'
-				);
-				return;
-			}
-		}
-	}
-
 	const wsOptions = WS_OPTIONS;
 	const allowedOrigins = wsOptions.allowedOrigins || 'same-origin';
 
@@ -342,8 +321,10 @@ if (WS_ENABLED) {
 	// `platform.publish` - never via a client `subscribe` frame. Allowing
 	// clients to subscribe to these topics let any authenticated user
 	// intercept other users' signals, presence rosters, and group
-	// broadcasts. Apps that intentionally route public topics through the
-	// `__` prefix can opt in via `websocket.allowSystemTopicSubscribe`.
+	// broadcasts. A registered plugin namespace may reach its own subscribe
+	// hook, but landing still requires tracked membership. Apps that
+	// intentionally route public topics through the `__` prefix can opt in
+	// broadly via `websocket.allowSystemTopicSubscribe`.
 	const ALLOW_SYSTEM_TOPIC_SUBSCRIBE = wsOptions.allowSystemTopicSubscribe === true;
 
 	// Wire topics default to printable ASCII only - the loop in
@@ -384,10 +365,63 @@ if (WS_ENABLED) {
 	const UPGRADE_MAX_PER_WINDOW = wsOptions.upgradeRateLimit ?? 10;
 	const UPGRADE_WINDOW_MS = (wsOptions.upgradeRateLimitWindow ?? 10) * 1000;
 	// Maximum number of IP entries to retain in the rate map under sustained DDoS.
-	// Excess entries are evicted by lowest activity score during the 60s sweep.
+	// Enforced at insertion time by EVICTING the least active of a bounded
+	// sample, so the map can never outgrow the cap between sweeps and a new
+	// client is never refused because other identities filled it; the 60s sweep
+	// still purges expired entries.
 	const MAX_RATE_ENTRIES = 10000;
-	/** @type {Map<string, { prev: number, curr: number, windowStart: number }>} */
-	const upgradeRateMap = new Map();
+	// How many entries each rotating insertion-time eviction sample inspects.
+	const RATE_MAP_EVICTION_SAMPLE = 16;
+	// Longest key the rate map will store. Capping the ENTRY COUNT alone does
+	// not bound memory, because the key is not necessarily an address: with a
+	// configured ADDRESS_HEADER and no TRUSTED_PROXIES it is the client's header
+	// value verbatim. Ten thousand multi-kilobyte keys is tens of megabytes per
+	// worker, not the ~2 MB the entry cap implies. Keep this aligned with the
+	// resolver's single-address-header ceiling: accepted identities must not
+	// collide merely because the limiter uses a shorter prefix, while XFF's
+	// legitimate multi-hop 8 KiB value still needs a bound.
+	const MAX_RATE_KEY_LEN = 128;
+
+	// Per-IP rate limit for the auth preflight, the door `connect({ auth: true })`
+	// clients POST before upgrading. Without it the app's authenticate() hook -
+	// typically a credential check against a database - was reachable at raw
+	// server capacity from a single address, while the upgrade door beside it was
+	// metered. The Origin gate does not bound rate: a non-browser client sends
+	// whatever Origin it likes.
+	//
+	// The default deliberately EXCEEDS the upgrade limit rather than matching it.
+	// Every reconnect that preflights also upgrades, so a deploy's reconnect wave
+	// hits this door at least as hard as the upgrade door, and a NAT'd office
+	// behind one address multiplies both. Sizing it 1:1 would make the preflight
+	// the binding constraint on a legitimate reconnect storm, refusing traffic the
+	// upgrade limit would have admitted. `0` disables it, matching
+	// `upgradeRateLimit`.
+	//
+	// Declared here rather than beside the route so the periodic sweep below can
+	// reach it; the route itself is registered only when an authenticate hook
+	// exists.
+	const authRateLimiter = createSlidingWindowLimiter({
+		maxPerWindow: wsOptions.authPathRateLimit ?? 30,
+		windowMs: (wsOptions.authPathRateLimitWindow ?? 10) * 1000,
+		maxEntries: MAX_RATE_ENTRIES,
+		evictionSample: RATE_MAP_EVICTION_SAMPLE,
+		maxKeyLen: MAX_RATE_KEY_LEN,
+		onEvict: () => mUpgradeRateEvicted?.inc({ door: 'auth' })
+	});
+	// The upgrade door runs the SAME limiter as the preflight door above rather
+	// than an inlined copy of it. The two copies were behaviourally identical
+	// when written, which is exactly why keeping them was a bad bet: every later
+	// correction - the IPv6 /64 key fold most recently - has to be made twice or
+	// the doors silently diverge, and the one that gets missed is a hole nobody
+	// is looking at.
+	const upgradeRateLimiter = createSlidingWindowLimiter({
+		maxPerWindow: UPGRADE_MAX_PER_WINDOW,
+		windowMs: UPGRADE_WINDOW_MS,
+		maxEntries: MAX_RATE_ENTRIES,
+		evictionSample: RATE_MAP_EVICTION_SAMPLE,
+		maxKeyLen: MAX_RATE_KEY_LEN,
+		onEvict: () => mUpgradeRateEvicted?.inc({ door: 'upgrade' })
+	});
 	// One-shot guard for the proxy-collapse advisory below. The per-IP upgrade
 	// limit silently degrades to a single GLOBAL cap when the server sits behind
 	// an address-rewriting proxy (docker userland-proxy, an L4 load balancer, a
@@ -420,6 +454,9 @@ if (WS_ENABLED) {
 	));
 	const mUpgradeRejected = containMetricInstrument(METRICS?.counter(
 		'upgrade_rejected_total', 'WebSocket upgrades rejected before open', ['reason']
+	));
+	const mUpgradeRateEvicted = containMetricInstrument(METRICS?.counter(
+		'upgrade_rate_map_evicted_total', 'Rate-limit entries evicted to make room at the map cap (door: upgrade | auth)', ['door']
 	));
 	const mPostureTransitions = containMetricInstrument(METRICS?.counter(
 		'protection_posture_transitions_total', 'Protection posture level changes', ['from', 'to']
@@ -473,7 +510,7 @@ if (WS_ENABLED) {
 	// burst it was. No topic strings and no client identity cross into the
 	// registry - the topic is named only in the local log line.
 	const mRelayGap = containMetricInstrument(METRICS?.counter(
-		'relay_gap_frames_total', 'Relayed frames lost to this worker (interior relay gaps)', []
+		'relay_gap_frames_total', 'Relayed frames PROVEN lost to this worker (interior relay gaps); a lower bound, since losses inside an already-reported window are folded into that report', []
 	));
 	// Route the framework's own invariant violations (assert/fatal) into the
 	// same registry, labelled by category and severity, so the `metrics` option
@@ -732,23 +769,20 @@ if (WS_ENABLED) {
 	// caches exist. Add future periodic tasks here rather than creating
 	// additional intervals.
 	setIntervalTimer(() => {
-		// 1. Purge rate-limit entries whose entire two-window history has expired,
-		//    then evict the least active entries if the map exceeds the cap.
-		//    Two windows must elapse with no activity before an entry is stale  -
+		// 1. Purge rate-limit entries whose entire two-window history has expired.
+		//    Two windows must elapse with no activity before an entry is stale -
 		//    after one window the previous slot still contributes to the estimate.
-		if (UPGRADE_MAX_PER_WINDOW > 0) {
-			const t = now();
-			for (const [ip, entry] of upgradeRateMap) {
-				if (t - entry.windowStart >= 2 * UPGRADE_WINDOW_MS) upgradeRateMap.delete(ip);
-			}
-			if (upgradeRateMap.size > MAX_RATE_ENTRIES) {
-				const sorted = [...upgradeRateMap.entries()].sort(
-					(a, b) => (a[1].prev + a[1].curr) - (b[1].prev + b[1].curr)
-				);
-				const excess = upgradeRateMap.size - MAX_RATE_ENTRIES;
-				for (let i = 0; i < excess; i++) upgradeRateMap.delete(sorted[i][0]);
-			}
-		}
+		//    The insertion-time cap is what actually bounds each map; this only
+		//    reclaims idle entries so a quiet server does not hold identities
+		//    indefinitely.
+		//
+		// Read once for every task below. A block-scoped copy of this left the
+		// second sweep reading an undeclared name - a ReferenceError on the first
+		// tick that took the whole worker down 60 s after boot, and with it every
+		// task further down this callback.
+		const t = now();
+		upgradeRateLimiter.sweep(t);
+		authRateLimiter.sweep(t);
 		// 2. Trim module-level LRU caches if they are full. When a cache is at
 		//    capacity it evicts one entry per insertion, but traffic patterns can
 		//    shift and leave the cache full of stale entries. Clearing the oldest
@@ -783,6 +817,7 @@ if (WS_ENABLED) {
 		// a small value to make malicious payloads cheap to reject.
 		const AUTH_BODY_LIMIT = 64 * 1024;
 
+
 		route('post', authPath, (res, req) => {
 			/** @type {Record<string, string>} */
 			const authHeaders = {};
@@ -797,6 +832,8 @@ if (WS_ENABLED) {
 				hostHeader: host_header,
 				protocolHeader: protocol_header,
 				portHeader: port_header,
+				// Same ORIGIN-env pin as the upgrade-side check below.
+				pinnedOrigin: origin,
 				isTls: is_tls,
 				hasUpgradeHook: false
 			})) {
@@ -804,6 +841,20 @@ if (WS_ENABLED) {
 					res.writeStatus('403 Forbidden');
 					res.writeHeader('content-type', 'text/plain');
 					res.end('Origin not allowed');
+				});
+				return;
+			}
+
+			// Meter accepted origins before any body is read or app hook runs.
+			// The origin predicate is a cheap header-only gate; charging rejected
+			// origins first lets hostile traffic behind a shared NAT consume the
+			// legitimate clients' whole authentication budget.
+			if (authRateLimiter.exceeded(clientIp, now())) {
+				mUpgradeRejected?.inc({ reason: 'auth_rate_limit' });
+				res.cork(() => {
+					res.writeStatus('429 Too Many Requests');
+					res.writeHeader('content-type', 'text/plain');
+					res.end('Too many authentication requests');
 				});
 				return;
 			}
@@ -1089,33 +1140,19 @@ if (WS_ENABLED) {
 			const upgradeAddr = resolveTransportAddress(res);
 			const clientIp = resolveClientIp(upgradeAddr.effective, headers, upgradeAddr.direct);
 
-			// Rate limit upgrade requests per IP using a sliding window (0 = disabled).
-			// Sliding window prevents a client from doubling their effective rate by
-			// placing requests at the boundary between two fixed windows.
+			// Rate limit upgrade requests per IP using a sliding window (0 =
+			// disabled), which stops a client doubling its effective rate by
+			// placing requests either side of a fixed-window boundary.
+			//
+			// This runs the SAME limiter as the auth preflight door rather than an
+			// inlined copy of it. The two copies were behaviourally identical when
+			// written, which is precisely why keeping both was a bad bet: every
+			// later correction - the IPv6 /64 key fold most recently - has to be
+			// made twice, and the copy that gets missed is a hole nobody is
+			// looking at. The eviction policy, the key bound and the window
+			// arithmetic all live in rate-limiter.js now.
 			if (UPGRADE_MAX_PER_WINDOW > 0) {
-				const t = now();
-				let rateEntry = upgradeRateMap.get(clientIp);
-				if (!rateEntry) {
-					rateEntry = { prev: 0, curr: 0, windowStart: t };
-					upgradeRateMap.set(clientIp, rateEntry);
-				} else {
-					const elapsed = t - rateEntry.windowStart;
-					if (elapsed >= 2 * UPGRADE_WINDOW_MS) {
-						rateEntry.prev = 0;
-						rateEntry.curr = 0;
-						rateEntry.windowStart = t;
-					} else if (elapsed >= UPGRADE_WINDOW_MS) {
-						rateEntry.prev = rateEntry.curr;
-						rateEntry.curr = 0;
-						rateEntry.windowStart = t;
-					}
-				}
-				// Sliding estimate: the previous window's count fades out linearly as
-				// the current window progresses. At 0% elapsed, prev counts fully.
-				// At 100% elapsed, prev contributes nothing and we rotate next time.
-				const elapsed = t - rateEntry.windowStart;
-				const estimate = rateEntry.prev * (1 - elapsed / UPGRADE_WINDOW_MS) + rateEntry.curr;
-				if (estimate >= UPGRADE_MAX_PER_WINDOW) {
+				if (upgradeRateLimiter.exceeded(clientIp, now())) {
 					// Per-IP rate-limit reject. Reported on its own counter, never
 					// the over-capacity one, so an attack-driven 429 storm can
 					// never escalate the protection posture toward siege.
@@ -1156,7 +1193,6 @@ if (WS_ENABLED) {
 					releaseInFlight();
 					return;
 				}
-				rateEntry.curr++;
 			}
 
 			const secKey = req.getHeader('sec-websocket-key');
@@ -1172,6 +1208,11 @@ if (WS_ENABLED) {
 				hostHeader: host_header,
 				protocolHeader: protocol_header,
 				portHeader: port_header,
+				// The ORIGIN env (already parsed + URL-normalized for SSR) is
+				// the authoritative same-origin pin when set - the startup
+				// guard above counts it as a pin, so the check must compare
+				// against it rather than the attacker-controlled Host header.
+				pinnedOrigin: origin,
 				isTls: is_tls,
 				hasUpgradeHook: !!wsModule.upgrade
 			})) {
@@ -1298,13 +1339,24 @@ if (WS_ENABLED) {
 					const ud = userData || {};
 					if (!ud.remoteAddress) ud.remoteAddress = clientIp;
 					ud[WS_REQUEST_ID_KEY] = wsRequestId;
-					if (responseHeaders) maybeWarnSetCookieOnUpgrade(responseHeaders);
+					// Headers actually written to the 101. This is a SNAPSHOT, not the
+					// app's object, and the snapshot is what gets validated and what
+					// gets written. The object belongs to the app and stays mutable,
+					// while admission.admit() below may defer the write to a later
+					// macrotask - so validating the live object and writing it later
+					// leaves a window in which another connection's upgrade hook can
+					// rewrite a shared or module-level headers object between the
+					// check and the write, and the poisoned value would go out
+					// unvalidated. Validate what will be written; write what was
+					// validated.
+					const safeHeaders = snapshotUpgradeHeaders(responseHeaders);
+					if (safeHeaders) warnSetCookieOnUpgradeOnce(safeHeaders);
 					admission.admit(() => {
 						// Recheck after possible setImmediate defer: the client
 						// may have hung up between admission and execution.
 						if (aborted || timedOut) { releaseInFlight(); return; }
 						res.cork(() => {
-							if (responseHeaders) {
+							if (safeHeaders) {
 								// Write the switching-protocols status line BEFORE any
 								// header. uWS emits an implicit "200 OK" on the first
 								// writeHeader, and a 200 makes spec-compliant WebSocket
@@ -1312,9 +1364,11 @@ if (WS_ENABLED) {
 								// response: 200"). res.upgrade() below tolerates the
 								// pre-written 101 and appends Sec-WebSocket-Accept to it.
 								res.writeStatus('101 Switching Protocols');
-								for (const [hk, hv] of Object.entries(responseHeaders)) {
+								for (const [hk, hv] of Object.entries(safeHeaders)) {
 									if (Array.isArray(hv)) {
-										for (const v of hv) res.writeHeader(hk, v);
+										// Index the trusted snapshot; never invoke an
+										// app-controlled Symbol.iterator at the wire sink.
+										for (let i = 0; i < hv.length; i++) res.writeHeader(hk, hv[i]);
 									} else {
 										res.writeHeader(hk, hv);
 									}
@@ -1459,7 +1513,7 @@ if (WS_ENABLED) {
 				if (parsed === null || typeof parsed !== 'object') {
 					// Not a JSON object envelope (parse failed, or parsed to
 					// null / primitive / array). Forward raw bytes only.
-					wsModule.message?.(ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
+					await runMessageHook(wsModule.message, ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
 					return;
 				}
 				msg = parsed;
@@ -1469,7 +1523,7 @@ if (WS_ENABLED) {
 						sendSubscribeDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
 						return;
 					}
-					if (!ALLOW_SYSTEM_TOPIC_SUBSCRIBE && msg.topic.charCodeAt(0) === 95 && msg.topic.charCodeAt(1) === 95) {
+					if (deniesWireSystemTopicSubscribe({ allowSystem: ALLOW_SYSTEM_TOPIC_SUBSCRIBE, topic: msg.topic })) {
 						sendSubscribeDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
 						return;
 					}
@@ -1479,7 +1533,7 @@ if (WS_ENABLED) {
 					// One instanceof guard, identical in cost to the assert it replaces.
 					fatal(subs instanceof Set, 'subs.shape', null);
 					const isNew = !subs.has(msg.topic);
-					if (isNew && subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+					if (exceedsSubscriptionCap({ held: !isNew, size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) {
 						sendSubscribeDenied(ws, msg.topic, ref, 'RATE_LIMITED');
 						return;
 					}
@@ -1489,12 +1543,31 @@ if (WS_ENABLED) {
 					// granted is hard-denied here UNLESS the app ships its own subscribe
 					// hook, which then decides via `runUserSubscribeGate` below. `isNew`
 					// is exactly "not already server-authorized on this connection".
-					if (subscribeAuth.enabled && isNew && !hasUserSubscribeHook()) {
+					if (deniesWireSubscribePreHook({ armed: subscribeAuth.enabled, hasUserHook: hasUserSubscribeHook(), held: !isNew, topic: msg.topic })) {
 						sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
 						return;
 					}
+					// Track the in-flight subscribe: a revocation
+					// (platform.unsubscribe) landing during the hook await
+					// cannot remove a subscription that does not exist yet,
+					// so it tombstones this topic in the connection's
+					// pending-subscribe set; the landing below checks the
+					// tombstone and discards the grant (revocation TOCTOU).
+					const pendingUd = ws.getUserData();
+					const pendingToken = beginPendingSubscribe(pendingUd, msg.topic, subs.has(msg.topic));
 					const denial = await runUserSubscribeGate(ws, msg.topic);
 					if (denial !== null) {
+						// The hook denied, but it may have installed tracked membership
+						// (a plugin join) before deciding, and a revocation may have
+						// tombstoned this attempt mid-await. Settling blindly here left
+						// that membership standing: the held branch below defers to a
+						// sibling attempt still in flight, so when that sibling's hook
+						// denies too, every attempt leaves through this exit and nothing
+						// remains to judge the membership.
+						if (settleDeniedSubscribe(pendingUd, msg.topic, pendingToken, subs.has(msg.topic)) === 'deny-unwind') {
+							unwindRevokedMembership(ws, msg.topic);
+							wsModule.unsubscribe?.(ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+						}
 						sendSubscribeDenied(ws, msg.topic, ref, denial);
 						return;
 					}
@@ -1502,11 +1575,39 @@ if (WS_ENABLED) {
 					// may have raced through and already added the topic while
 					// the user hook awaited. Idempotent ack and skip the
 					// counters.totalSubscriptions++ to avoid double-counting.
-					if (subs.has(msg.topic)) {
-						sendSubscribed(ws, msg.topic, ref);
+					// NOT when a gap-fill was requested. Live membership arriving during
+					// the await - a re-grant, a concurrent subscribe - carries no
+					// HISTORY, so acking here left a client that asked to recover from
+					// an offset subscribed and believing itself caught up, with the tail
+					// between its last-seen seq and now silently missing. Fall through to
+					// the recover lane instead; it acks through its own
+					// already-subscribed branch once the gap is filled.
+					const _wantsRecover = wantsRecover({ hasResumeHook: wsModule.resume, recover: msg.recover });
+					if (subs.has(msg.topic) && !_wantsRecover) {
+						// Held is not enough: the membership may have been installed
+						// mid-await by THIS attempt's own hook after a revocation
+						// tombstoned it. settleHeldSubscribe reads the provenance -
+						// ack a surviving attempt or a fresh post-revoke grant, deny
+						// a revoked one, unwinding hook-installed membership when no
+						// live authority backs it.
+						const heldVerdict = settleHeldSubscribe(pendingUd, msg.topic, pendingToken);
+						if (heldVerdict === 'ack') {
+							sendSubscribed(ws, msg.topic, ref);
+							return;
+						}
+						if (heldVerdict === 'deny-unwind') {
+							unwindRevokedMembership(ws, msg.topic);
+							wsModule.unsubscribe?.(ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+						}
+						sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
 						return;
 					}
-					if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+					// Scoped to a topic the socket does NOT already hold. The recover
+					// fall-through above can now reach this line with the topic
+					// already a membership, and refusing that would answer
+					// RATE_LIMITED to a connection that is not growing at all.
+					if (exceedsSubscriptionCap({ held: subs.has(msg.topic), size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) {
+						settlePendingSubscribe(pendingUd, msg.topic, pendingToken);
 						sendSubscribeDenied(ws, msg.topic, ref, 'RATE_LIMITED');
 						return;
 					}
@@ -1524,7 +1625,25 @@ if (WS_ENABLED) {
 					// never yields, so the buffer stays empty and this is a no-op.
 					let _cap = null;
 					let _covered;
-					if (msg.recover && typeof msg.recover === 'object' && Number.isInteger(msg.recover.offset) && msg.recover.offset >= 0 && wsModule.resume) {
+					// A revocation can land while the authorization hook is parked, and
+					// this call serves the topic's REPLAY HISTORY. The tombstone below
+					// refuses the subscription, but it runs afterwards - by then the
+					// history has gone out. Checked here for the same reason the batch
+					// lane is. Under the grant model the current grant set is
+					// authoritative (a revoke followed by a re-grant is a topic the
+					// connection legitimately holds again); with the gate off the
+					// revocation epoch is the only signal there is.
+					// MEMBERSHIP FIRST - see the batch lane for why. The epoch is
+					// consulted only when the socket does not hold the topic, so a
+					// revoke followed by a re-grant inside one await window is served
+					// rather than acked-and-silently-dropped.
+					const _recoverRevoked = recoverIsRevoked({
+						held: subs instanceof Set && subs.has(msg.topic),
+						wireAuthz: subscribeAuth.enabled && !hasUserSubscribeHook(),
+						cancelled: isPendingSubscribeCancelled(pendingUd, msg.topic, pendingToken),
+						topic: msg.topic
+					});
+					if (!_recoverRevoked && _wantsRecover) {
 						const _rEpochs = Number.isInteger(msg.recover.epoch) ? { [msg.topic]: msg.recover.epoch } : undefined;
 						_cap = beginResumeCapture([msg.topic], ws);
 						try {
@@ -1533,7 +1652,39 @@ if (WS_ENABLED) {
 						// Re-check after the await: a concurrent subscribe may have added
 						// it, so the client is already live and the buffered frames would
 						// be duplicates - discard them.
-						if (subs.has(msg.topic)) { discardResumeCapture(_cap); sendSubscribed(ws, msg.topic, ref); return; }
+						if (subs.has(msg.topic)) {
+							const heldVerdictR = settleHeldSubscribe(pendingUd, msg.topic, pendingToken);
+							if (heldVerdictR === 'ack') { discardResumeCapture(_cap); sendSubscribed(ws, msg.topic, ref); return; }
+							// Revoked mid-await; the replay went out, but a grant
+							// installed by the revoked attempt's own hook must not stand.
+							if (heldVerdictR === 'deny-unwind') {
+								unwindRevokedMembership(ws, msg.topic);
+								wsModule.unsubscribe?.(ws, msg.topic, { platform: pendingUd[WS_PLATFORM] });
+							}
+							discardResumeCapture(_cap);
+							sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
+							return;
+						}
+					}
+					// Revocation tombstone: a platform.unsubscribe that landed
+					// during the gate / resume awaits cancelled this pending
+					// subscribe - discard the grant instead of subscribing, and
+					// answer the client's ref'd frame with a denial (not the ack)
+					// so its awaited subscribe resolves truthfully.
+					// Gate re-check BEFORE the grant is marked: stamping this attempt as
+					// post-revocation authority and then refusing the install left a
+					// revoked sibling's landing reading that mark as current. The batch
+					// and dev lanes already check first; this makes the single lane agree.
+					if (deniesWireSubscribeLanding({ armed: subscribeAuth.enabled, hasUserHook: hasUserSubscribeHook(), held: subs.has(msg.topic), topic: msg.topic })) {
+						settlePendingSubscribe(pendingUd, msg.topic, pendingToken);
+						if (_cap) discardResumeCapture(_cap);
+						sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
+						return;
+					}
+					if (!settlePendingSubscribe(pendingUd, msg.topic, pendingToken, true)) {
+						if (_cap) discardResumeCapture(_cap);
+						sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
+						return;
 					}
 					try { ws.subscribe(msg.topic); }
 					catch { if (_cap) discardResumeCapture(_cap); counters.closedWsAborts++; return; }
@@ -1552,12 +1703,34 @@ if (WS_ENABLED) {
 					return;
 				}
 				if (msg.type === 'unsubscribe' && typeof msg.topic === 'string') {
+					// A client unsubscribing while its OWN subscribe for the same topic is
+					// still parked in an async authorization hook is the same TOCTOU
+					// platform.unsubscribe has: the membership does not exist yet, so
+					// removing it is a no-op and the parked subscribe installs it after the
+					// app's unsubscribe hook has already run. Tombstone it so the landing
+					// discards the grant.
+					tombstonePendingSubscribe(ws.getUserData(), msg.topic);
+					// The observer taps are authority derived from the base topic. A
+					// client-driven revocation must release them just like
+					// platform.unsubscribe does; otherwise leaving `room` removes the
+					// base membership while `__cursor:room` / `__presence:room` keeps
+					// delivering private fan-out (and cursor keeps accepting writes).
+					releaseDerivedSubscriptions(ws, msg.topic);
 					ws.unsubscribe(msg.topic);
 					const udSubs = ws.getUserData()[WS_SUBSCRIPTIONS];
 					assert(udSubs instanceof Set, 'subs.shape-unsubscribe', null);
 					if (udSubs.delete(msg.topic)) {
 						counters.totalSubscriptions--;
 						assert(counters.totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions: counters.totalSubscriptions });
+					}
+					// Read and write are granted together and are dropped together,
+					// on this path as on platform.unsubscribe and the plugin evict
+					// primitive. The client-driven `game` lane carries no topic, so
+					// a binding left behind here keeps publishing into a room the
+					// sender just left.
+					{
+						const _ud = ws.getUserData();
+						if (_ud[WS_PUBLISH_GRANT] === msg.topic) _ud[WS_PUBLISH_GRANT] = undefined;
 					}
 					// Drop the cohort memberships + release the shared wire-id ref for a
 					// shared topic, so an unsubscribed client stops receiving its
@@ -1592,8 +1765,7 @@ if (WS_ENABLED) {
 							sendSubscribeDenied(ws, topic, ref, 'INVALID_TOPIC');
 							continue;
 						}
-						if (!ALLOW_SYSTEM_TOPIC_SUBSCRIBE && typeof topic === 'string' &&
-							topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) {
+						if (deniesWireSystemTopicSubscribe({ allowSystem: ALLOW_SYSTEM_TOPIC_SUBSCRIBE, topic })) {
 							sendSubscribeDenied(ws, topic, ref, 'INVALID_TOPIC');
 							continue;
 						}
@@ -1606,9 +1778,14 @@ if (WS_ENABLED) {
 					// an app hook present, authorization is deferred to it (below), same
 					// as the single-subscribe path. `authzDenied` short-circuits the
 					// hook calls for the pre-denied topics.
-					const _wireAuthz = subscribeAuth.enabled && !hasUserSubscribeHook();
+					// Hoisted once per frame rather than read per topic, so every topic
+					// in one frame is judged against one reading of the app's hooks.
+					// NOT hoisted: the ARM flag. `subscribeAuth.enabled` is
+					// runtime-mutable and is read fresh at each decision below.
+					const _hasUserHook = hasUserSubscribeHook();
+					const _wireAuthz = subscribeAuth.enabled && !_hasUserHook;
 					const authzDenied = _wireAuthz
-						? valid.map((t) => !userData[WS_SUBSCRIPTIONS].has(t))
+						? valid.map((t) => deniesWireSubscribePreHook({ armed: subscribeAuth.enabled, hasUserHook: _hasUserHook, held: userData[WS_SUBSCRIPTIONS].has(t), topic: t }))
 						: null;
 
 					// Pass 2: gather denial decisions. If a batch hook is exported,
@@ -1617,11 +1794,44 @@ if (WS_ENABLED) {
 					// `subscribe` hook for parity with single-subscribe behaviour.
 					// Both paths are awaited so async hooks (the idiomatic style for
 					// hooks that touch a session store or DB) gate correctly.
-					const batchDenials = await runSubscribeBatchHook(ws, valid);
+					// Track every topic in this batch as in-flight, exactly as the
+					// single-subscribe path does: platform.unsubscribe cannot remove a
+					// membership that does not exist yet, so it tombstones the topic and
+					// the landing below discards the grant. Without it a revocation
+					// arriving during the hook await is lost for batch frames, and once
+					// only the single path tracked, a client with the same topic in
+					// flight on BOTH made platform.unsubscribe answer `true` while this
+					// path installed the membership anyway.
+					const batchUd = ws.getUserData();
+					const batchTokens = valid.map((t) => beginPendingSubscribe(batchUd, t, batchUd[WS_SUBSCRIPTIONS].has(t)));
+					// A topic the grant gate already denied must not reach the hook at
+					// all. The single-subscribe path denies before its hook runs; this
+					// path used to compute `authzDenied` and then call the hooks over
+					// every valid topic anyway, consulting the decision only at the
+					// landing. Hooks are not pure - a plugin's subscribe hook joins a
+					// roster and establishes its observer tap - so for a denied topic
+					// those side effects had already happened by the time the client
+					// was told FORBIDDEN: the caller was added to a private topic's
+					// roster, broadcast to its real members, handed the full roster,
+					// and left holding a live tap. The single-frame asymmetry between
+					// the two paths was the whole bug.
+					const hookTopics = authzDenied === null
+						// Never hand the hook the landing queue itself. Hooks receive
+						// ordinary mutable arrays; an in-place filter/sort must not
+						// remove or reorder topics after their pending tokens have
+						// already been enrolled, otherwise refs go unanswered and the
+						// pending entries never settle. The filtered branch already
+						// returns a fresh array; copy the all-authorized branch too.
+						? valid.slice()
+						: valid.filter((_t, i) => !authzDenied[i]);
+					const batchDenials = hookTopics.length > 0
+						? await runSubscribeBatchHook(ws, hookTopics)
+						: null;
 					// When falling back to per-topic, run the hooks in parallel so
 					// a slow async hook on N topics is one round-trip not N.
 					const perTopicDenials = batchDenials === null && wsModule.subscribe
-						? await Promise.all(valid.map((t) => runSubscribeHook(ws, t)))
+						? await Promise.all(valid.map((t, i) =>
+							(authzDenied !== null && authzDenied[i]) ? null : runSubscribeHook(ws, t)))
 						: null;
 
 					// Resume-on-subscribe (batch): gap-fill every recover-tagged topic that
@@ -1638,11 +1848,68 @@ if (WS_ENABLED) {
 					if (msg.recover && typeof msg.recover === 'object') {
 						for (let i = 0; i < valid.length; i++) {
 							const _t = valid[i];
+							// This lane sits BETWEEN the hook awaits and the landing, so
+							// neither the landing's re-check nor its tombstone covers it -
+							// and it is the largest client-named lane there is, handing the
+							// app's resume hook a topic's replay history rather than a
+							// roster. It therefore re-reads the CURRENT grant set and the
+							// revocation instead of trusting the `authzDenied` snapshot
+							// taken before the awaits: a revocation that landed while a
+							// hook was parked would otherwise still get the history
+							// flushed, and the landing would deny the subscription only
+							// afterwards - refusing the membership having already served
+							// the messages.
+							//
+							// Under the grant model the CURRENT grant set is the
+							// authority, and the revocation epoch is deliberately NOT
+							// consulted as well: the epoch only ever rises, so a revoke
+							// followed by a re-grant inside the same await window could
+							// never clear it, and the gap-fill was refused forever while
+							// the landing below acked the subscription - a positive ack
+							// and a silently dropped replay. With the gate off there is
+							// no grant set to read, so there the epoch is the only signal.
+							// MEMBERSHIP FIRST, in every configuration. Reading the epoch
+							// only when the socket does NOT hold the topic is what makes a
+							// re-grant visible: a re-grant is exactly what puts the topic
+							// back in the registry. Restricting that correction to the
+							// grant model left the same defect in the two mainstream
+							// configurations, since `authorizeWireSubscribe` defaults to
+							// false and exporting a subscribe hook is the documented way to
+							// keep control. Under the grant model this still reduces to the
+							// grant-set test it replaces.
+							const _batchSubs = userData[WS_SUBSCRIPTIONS];
+							const _revoked = recoverIsRevoked({
+								held: _batchSubs instanceof Set && _batchSubs.has(_t),
+								// Read FRESH, not from the pre-await `_wireAuthz` snapshot.
+								// `subscribeAuth.enabled` is runtime-mutable via
+								// platform.authorizeWireSubscribe() and latches false->true, so a
+								// gate armed while this batch was parked in its hook left the
+								// snapshot reading "off" - and this call serves REPLAY HISTORY.
+								// The landing 40 lines below already reads it fresh, so the stale
+								// snapshot disclosed a topic's history and then denied the
+								// subscription in the same frame.
+								// BOTH halves must read the way the LANDING reads them, or the two
+								// sites disagree inside one frame - which is how the first version
+								// of this repair still served history and then denied. `armed` is
+								// fresh at both; `hasUserHook` is the frame's single reading at
+								// both, because an app hook appearing or vanishing mid-await must
+								// not split one batch across two authorization models.
+								wireAuthz: subscribeAuth.enabled && !_hasUserHook,
+								cancelled: isPendingSubscribeCancelled(batchUd, _t, batchTokens[i]),
+								topic: _t
+							});
+							// The pre-hook decision comes FIRST, as it did before this lane was
+							// rewritten. A topic denied there is filtered out of `hookTopics`, so
+							// `batchDenials[_t]` is undefined for it and nothing downstream would
+							// catch it: dropping this clause let a pre-denied topic reach the
+							// resume hook and have its history served, before the landing denied
+							// the subscription it never got.
 							const _denial = (authzDenied !== null && authzDenied[i] ? 'FORBIDDEN' : null)
+								?? (_revoked ? 'FORBIDDEN' : null)
 								?? (batchDenials !== null ? (batchDenials[_t] ?? null) : (perTopicDenials !== null ? perTopicDenials[i] : null));
 							if (_denial !== null) continue;
 							const _rec = msg.recover[_t];
-							if (_rec && typeof _rec === 'object' && Number.isInteger(_rec.offset) && _rec.offset >= 0) {
+							if (wantsRecover({ hasResumeHook: wsModule.resume, recover: _rec })) {
 								if (_recoverSeqs === null) _recoverSeqs = {};
 								_recoverSeqs[_t] = _rec.offset;
 								if (Number.isInteger(_rec.epoch)) { if (_recoverEpochs === null) _recoverEpochs = {}; _recoverEpochs[_t] = _rec.epoch; }
@@ -1659,22 +1926,66 @@ if (WS_ENABLED) {
 					for (let i = 0; i < valid.length; i++) {
 						const topic = valid[i];
 						const subs = userData[WS_SUBSCRIPTIONS];
-						const denial = (authzDenied !== null && authzDenied[i] ? 'FORBIDDEN' : null)
+						// The server-grant gate is re-evaluated HERE, against the current
+						// grant set, rather than trusting the `authzDenied` reading taken
+						// before the awaits. The tombstone below only fires for revocation
+						// paths that bump the epoch, so a revocation that merely drops the
+						// membership would otherwise let a decision made before the await
+						// install a grant the server no longer authorizes. Under the pure
+						// grant model this can only deny a topic whose grant disappeared
+						// mid-await: an unauthorized one is already false here and reaches
+						// the same denial, and an authorized one takes the idempotent-ack
+						// branch below.
+						// Read once and handed to both decisions below. Nothing between
+						// here and the subscribe mutates `subs` for this topic, and the
+						// inline spelling this replaces asked the same Set twice.
+						const held = subs.has(topic);
+						const denial = (deniesWireSubscribeLanding({ armed: subscribeAuth.enabled, hasUserHook: _hasUserHook, held, topic }) ? 'FORBIDDEN' : null)
 							?? (batchDenials !== null
 								? (batchDenials[topic] ?? null)
 								: (perTopicDenials !== null ? perTopicDenials[i] : null));
 						if (denial !== null) {
+							// The hook denied, but it may have installed tracked membership
+							// (a plugin join) before deciding, and a revocation may have tombstoned
+							// this attempt mid-await. Settling blindly here left that membership
+							// standing: the held branch below defers to a sibling attempt still in
+							// flight, so when that sibling's hook denies too, every attempt leaves
+							// through this exit and nothing remains to judge the membership.
+							if (settleDeniedSubscribe(batchUd, topic, batchTokens[i], held) === 'deny-unwind') {
+								unwindRevokedMembership(ws, topic);
+								wsModule.unsubscribe?.(ws, topic, { platform: batchUd[WS_PLATFORM] });
+							}
 							sendSubscribeDenied(ws, topic, ref, denial);
 							continue;
 						}
 						// Post-await re-check: idempotent ack on race with another
 						// concurrent subscribe.
-						if (subs.has(topic)) {
-							sendSubscribed(ws, topic, ref);
+						if (held) {
+							// Same provenance read as the single lane: a revoked
+							// attempt whose own hook installed the membership must
+							// not ack it.
+							const heldVerdict = settleHeldSubscribe(batchUd, topic, batchTokens[i]);
+							if (heldVerdict === 'ack') {
+								sendSubscribed(ws, topic, ref);
+								continue;
+							}
+							if (heldVerdict === 'deny-unwind') {
+								unwindRevokedMembership(ws, topic);
+								wsModule.unsubscribe?.(ws, topic, { platform: batchUd[WS_PLATFORM] });
+							}
+							sendSubscribeDenied(ws, topic, ref, 'FORBIDDEN');
 							continue;
 						}
-						if (subs.size >= MAX_SUBSCRIPTIONS_PER_CONNECTION) {
+						if (exceedsSubscriptionCap({ held, size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) {
+							settlePendingSubscribe(batchUd, topic, batchTokens[i]);
 							sendSubscribeDenied(ws, topic, ref, 'RATE_LIMITED');
+							continue;
+						}
+						// Revocation tombstone: a platform.unsubscribe that landed during
+						// the hook or resume awaits cancelled this topic - discard the
+						// grant and answer the client truthfully rather than acking it.
+						if (!settlePendingSubscribe(batchUd, topic, batchTokens[i], true)) {
+							sendSubscribeDenied(ws, topic, ref, 'FORBIDDEN');
 							continue;
 						}
 						try { ws.subscribe(topic); }
@@ -1790,6 +2101,30 @@ if (WS_ENABLED) {
 					const lastSeenEpochs = (msg.lastSeenEpochs && typeof msg.lastSeenEpochs === 'object')
 						? msg.lastSeenEpochs
 						: undefined;
+					// The resume lane is CLIENT-NAMED: the frame carries the topics,
+					// and the app's hook typically answers each one with its replay
+					// buffer. Under the pure-grant model that is the largest of the
+					// observer lanes - it yields a topic's message history, not just
+					// a roster - so an ungranted topic is dropped here before the
+					// hook sees it, exactly as the wire subscribe and the plugin
+					// observer lanes are gated. Filtered rather than refused whole:
+					// a resume names many topics at once and a client legitimately
+					// holds some of them, so dropping only the ungranted ones keeps
+					// a reconnect working while serving nothing it was not granted.
+					// Untouched when the gate is off or an app hook owns the topic
+					// decision, which is the same condition the other lanes use.
+					let resumeSeqs = msg.lastSeenSeqs;
+					if (subscribeAuth.enabled && !hasUserSubscribeHook()) {
+						const _grants = ws.getUserData()[WS_SUBSCRIPTIONS];
+						/** @type {Record<string, unknown>} */
+						const _allowed = Object.create(null);
+						let _dropped = 0;
+						for (const _t of Object.keys(resumeSeqs)) {
+							if (deniesUngrantedObserve(true, false, _grants, _t)) { _dropped++; continue; }
+							_allowed[_t] = resumeSeqs[_t];
+						}
+						if (_dropped > 0) resumeSeqs = _allowed;
+					}
 					if (wsModule.resume) {
 						try {
 							// Await the hook so per-topic replay flushes
@@ -1802,7 +2137,7 @@ if (WS_ENABLED) {
 							// the client store handles it like `truncated`.
 							await wsModule.resume(ws, {
 								sessionId: msg.sessionId,
-								lastSeenSeqs: msg.lastSeenSeqs,
+								lastSeenSeqs: resumeSeqs,
 								lastSeenEpochs,
 								platform: ws.getUserData()[WS_PLATFORM]
 							});
@@ -1882,7 +2217,7 @@ if (WS_ENABLED) {
 			// Delegate everything else to the user's handler (if provided).
 			// `msg` is the JSON-parsed envelope when the prefix matched + parsed
 			// to an object + no control type matched; otherwise undefined.
-			wsModule.message?.(ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
+			await runMessageHook(wsModule.message, ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
 		},
 
 		drain: (ws) => {
@@ -2015,6 +2350,19 @@ const ADMIN_PATH = (WS_OPTIONS && WS_OPTIONS.adminPath !== undefined) ? WS_OPTIO
 if (WS_ENABLED && ADMIN_PATH !== false && typeof wsModule.admin === 'function') {
 	route('any', ADMIN_PATH + '/*', handleAdminRequest);
 	console.log(`Admin route registered at ${ADMIN_PATH}/*`);
+	// The adapter cannot see whether the app's admin() handler gates its own
+	// requests, so it says so once at boot. An operator who HAS gated it sets
+	// `adminAuthAcknowledged: true` to silence the line - a warning that
+	// cannot be turned off after the operator has acted on it is how a log
+	// learns to be ignored, which costs more than it buys.
+	if (!(WS_OPTIONS && WS_OPTIONS.adminAuthAcknowledged)) {
+		console.warn(
+			`Warning: Admin route ${ADMIN_PATH}/* is mounted with NO adapter-level ` +
+			'authentication. It is publicly reachable unless the app\'s admin() ' +
+			'handler gates it (e.g. by validating a session cookie or bearer token). ' +
+			'Set websocket.adminAuthAcknowledged: true once it is gated to silence this.'
+		);
+	}
 }
 
 // Register HTTP handler (after WS so the WS route takes priority)
@@ -2024,5 +2372,3 @@ route('any', '/*', handleRequest);
 
 
 // - Exports -----------------------------------------------------------------
-
-
