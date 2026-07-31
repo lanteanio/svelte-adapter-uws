@@ -2,6 +2,7 @@
 /* global WS_OPTIONS */
 import { wsModule } from '../ws-handler-bridge.js';
 import { metricsRegistry } from '../metrics-bridge.js';
+import { metricsSnapshot } from './metrics-snapshot.js';
 import { parentPort } from 'node:worker_threads';
 import { exceedsSubscriptionCap } from '../utils/subscribe-policy.js';
 import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, deniesUngrantedObserve, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, wrapBatchEnvelope } from '../utils.js';
@@ -1998,6 +1999,26 @@ export const platform = {
 	 */
 	get metrics() {
 		return metricsRegistry;
+	},
+
+	/**
+	 * Cluster-wide metrics, merged. `platform.metrics.serialize()` renders only
+	 * the worker that happened to serve the scrape - and since every worker
+	 * shares one port, that is a different worker each time. This collects all
+	 * of them through the primary and combines each metric by its declared law
+	 * (counters and per-worker quantities add; process-wide readings and
+	 * saturation take the worst; freshness takes the stalest).
+	 *
+	 * Resolves to `null` when no `metrics` registry is configured. It does NOT
+	 * need `serialize()`: the snapshot is built from the values the adapter
+	 * wrote, not from rendered text. One collection runs at a time across the
+	 * cluster; a caller arriving while one is open joins it.
+	 *
+	 * @param {{ timeoutMs?: number }} [options]
+	 * @returns {Promise<string | null>}
+	 */
+	metricsSnapshot(options) {
+		return metricsSnapshot(options);
 	},
 
 	/**

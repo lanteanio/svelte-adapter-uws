@@ -611,6 +611,17 @@ export default function uws(options = {}) {
 			// `metrics` is unset).
 			return null;
 		},
+		/**
+		 * Mirrors the production `metricsSnapshot()`. Dev has no registry to
+		 * collect and no worker threads to collect from, so it resolves to
+		 * `null` - the same answer production gives when `metrics` is unset,
+		 * which is what a scrape route written against dev will already handle.
+		 *
+		 * @returns {Promise<string | null>}
+		 */
+		metricsSnapshot() {
+			return Promise.resolve(null);
+		},
 		onPressure(_cb) { return () => {}; },
 		onPublishRate(_cb) { return () => {}; },
 		async subscribe(ws, topic) {

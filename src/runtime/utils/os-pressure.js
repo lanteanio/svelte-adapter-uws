@@ -47,6 +47,43 @@ const CPU_STAT_PATHS = [
 ];
 
 /**
+ * Which kernel pressure sources this host exposes.
+ *
+ * Probed once at startup so the metric instruments for these readings can be
+ * registered at startup like every other one. Registering them lazily on the
+ * first reading instead would move instrument creation into a 1 Hz timer
+ * callback, where a registry that throws while creating an instrument - a
+ * configuration fault that is meant to fail loudly at boot - becomes an
+ * uncaught exception on every tick, and a registry that returns nothing
+ * becomes an endless re-registration attempt.
+ *
+ * Two file reads on Linux, two failed opens elsewhere, once per worker.
+ *
+ * @param {{ readFile?: (path: string) => string }} [deps]
+ * @returns {{ psi: boolean, cpuThrottle: boolean }}
+ */
+export function probeOsPressureSources(deps) {
+	const readFile = deps?.readFile ?? ((path) => readFileSync(path, 'utf8'));
+	let psi = false;
+	try {
+		readFile(PSI_FILES.cpu);
+		readFile(PSI_FILES.memory);
+		readFile(PSI_FILES.io);
+		psi = true;
+	} catch { /* not a PSI-enabled kernel */ }
+	let cpuThrottle = false;
+	for (const path of CPU_STAT_PATHS) {
+		try {
+			if (parseCpuStat(readFile(path)) !== null) {
+				cpuThrottle = true;
+				break;
+			}
+		} catch { /* try the next layout */ }
+	}
+	return { psi, cpuThrottle };
+}
+
+/**
  * Parse one PSI file. Returns the avg10 percentages for the `some` and
  * `full` lines (older kernels omit `full` for cpu - reads as 0).
  *

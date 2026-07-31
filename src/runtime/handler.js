@@ -20,8 +20,10 @@ import { env } from 'ENV';
 import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { metricsRegistry } from './metrics-bridge.js';
+import { PRESSURE_REASON_CODES } from './observability-manifest.js';
+import { probeOsPressureSources } from './utils/os-pressure.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, deniesUngrantedObserve, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, deniesUngrantedObserve, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { registerGameIngress } from './handler/game-ingress.js';
@@ -73,6 +75,7 @@ import { requestDone, isDraining, lifecycleState } from './handler/lifecycle.js'
 // (src/runtime/index.js), which is the shape this list exists to end.
 export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls, beginDrain, lifecycleState, tlsReloadState } from './handler/lifecycle.js';
 export { setRelayRingWriter } from './handler/relay.js';
+export { collectLocalMetrics, resolveMetricsSnapshot } from './handler/metrics-snapshot.js';
 export { markRelayAttached } from './handler/state.js';
 import { handleRequest } from './handler/request.js';
 import { handleAdminRequest } from './handler/admin.js';
@@ -467,7 +470,15 @@ if (WS_ENABLED) {
 	// on `platform.metrics` for a scrape route. Instruments resolve once; every
 	// emit is optional-chained, so the disabled path (registry null) costs one
 	// undefined check per site and the accept path allocates nothing.
-	const METRICS = metricsRegistry;
+	// Registrations go through a mirroring wrapper: every value the runtime
+	// writes is recorded under the adapter's own declared name, which is what
+	// `platform.metricsSnapshot()` merges across worker threads. Merging the
+	// registry's RENDERED text instead was tried and is wrong - a registry that
+	// namespaces its output (the documented way to use one) renders names the
+	// manifest cannot match, and the cluster merge would silently degrade to
+	// per-worker passthrough. `platform.metrics` still exposes the real
+	// registry, so an app's own scrape route is unaffected.
+	const METRICS = mirrorRegistry(metricsRegistry);
 	const mUpgradeAdmitted = containMetricInstrument(METRICS?.counter(
 		'upgrade_admitted_total', 'WebSocket upgrades accepted'
 	));
@@ -498,6 +509,72 @@ if (WS_ENABLED) {
 	const gBackpressureConnections = containMetricInstrument(METRICS?.gauge(
 		'ws_backpressure_connections', 'Sampled connections holding a backpressured outbound queue'
 	));
+	// The rest of what the 1 Hz sampler already computes. These are scalars the
+	// fold produces and then discarded before this hook existed - exporting them
+	// adds gauge writes to a callback that already runs, and no new work to any
+	// per-request or per-message path.
+	const gConnections = containMetricInstrument(METRICS?.gauge(
+		'ws_connections', 'Live WebSocket connections on this worker'
+	));
+	const gSubscriptions = containMetricInstrument(METRICS?.gauge(
+		'ws_subscriptions', 'Live topic subscriptions across this worker\'s connections; divide by ws_connections for the subscriber ratio'
+	));
+	// A counter, not the sampler's precomputed rate: a rate baked at our cadence
+	// cannot be re-windowed by the query, and reads wrong whenever the scrape
+	// interval differs from the sample interval. Counts publish CALLS - uWS fans
+	// out in C++, so per-recipient counting would mean walking the subscriber
+	// set in JS on every publish.
+	const mPublishes = containMetricInstrument(METRICS?.counter(
+		'ws_publishes_total', 'Publish calls made on this worker (fan-out happens in C++; this counts publishes, not deliveries)', []
+	));
+	const gPressureSaturation = containMetricInstrument(METRICS?.gauge(
+		'pressure_saturation', 'Worker saturation scalar, 0 healthy to 1 at the configured thresholds'
+	));
+	const gPressureReason = containMetricInstrument(METRICS?.gauge(
+		'pressure_reason', 'Current pressure reason as a severity-ordered code (0 none, 1 subscribers, 2 publish rate, 3 psi, 4 cpu quota, 5 capacity, 6 memory)'
+	));
+	const gResidentBytes = containMetricInstrument(METRICS?.gauge(
+		'resident_memory_bytes', 'Resident set size of the process; worker threads share one address space, so every worker reports the same value'
+	));
+	const gHeapUsedRatio = containMetricInstrument(METRICS?.gauge(
+		'heap_used_ratio', 'Used fraction of this worker isolate\'s V8 heap'
+	));
+	// Freshness of the sample the gauges above were written from. The pressure
+	// timer is unref'd and driven from one interval; if it ever stops, every
+	// gauge here keeps serving its last value against a target that still reads
+	// up. Alerting on the age of this timestamp is what separates "healthy and
+	// steady" from "frozen".
+	const gSampleTimestamp = containMetricInstrument(METRICS?.gauge(
+		'pressure_sample_timestamp_seconds', 'Unix time of the most recent completed pressure sample; alert on its age to catch a wedged sampler'
+	));
+	// Kernel pressure readings. Availability is probed ONCE here rather than
+	// discovered on the first sample, so these register at startup like every
+	// other instrument: creating an instrument inside the 1 Hz tick would put a
+	// configuration fault (a registry that throws on registration, which is
+	// meant to fail loudly at boot) into a timer callback that repeats forever.
+	// A host without the source registers nothing, so the gauges are absent
+	// rather than serving a zero that reads as "no pressure".
+	const OS_PRESSURE_SOURCES = METRICS == null ? { psi: false, cpuThrottle: false } : probeOsPressureSources();
+	const gPsiCpuSome = OS_PRESSURE_SOURCES.psi
+		? containMetricInstrument(METRICS?.gauge(
+			'psi_cpu_some_avg10', 'Kernel pressure-stall CPU some avg10, percent of the last 10s any task was stalled on CPU'
+		))
+		: undefined;
+	const gPsiMemoryFull = OS_PRESSURE_SOURCES.psi
+		? containMetricInstrument(METRICS?.gauge(
+			'psi_memory_full_avg10', 'Kernel pressure-stall memory full avg10, percent of the last 10s all tasks were stalled on memory'
+		))
+		: undefined;
+	const gPsiIoFull = OS_PRESSURE_SOURCES.psi
+		? containMetricInstrument(METRICS?.gauge(
+			'psi_io_full_avg10', 'Kernel pressure-stall IO full avg10, percent of the last 10s all tasks were stalled on IO'
+		))
+		: undefined;
+	const gCpuThrottled = OS_PRESSURE_SOURCES.cpuThrottle
+		? containMetricInstrument(METRICS?.gauge(
+			'cpu_throttled_ratio', 'Fraction of the sampled window the cgroup CPU quota held this process suspended'
+		))
+		: undefined;
 	// Descriptor observability. Worker threads share one process-wide fd
 	// table, so any worker's registry reports the whole-process truth. Each
 	// gauge registers only where its source exists (Linux/macOS; null on
@@ -776,6 +853,24 @@ if (WS_ENABLED) {
 		// same tick), so these track the current window's backpressure figures.
 		gBackpressureMaxBytes?.set(pressureSnapshot.maxBufferedBytes);
 		gBackpressureConnections?.set(pressureSnapshot.backpressuredConnections);
+		gConnections?.set(counters.lastConnections);
+		gSubscriptions?.set(counters.totalSubscriptions);
+		gPressureSaturation?.set(pressureSnapshot.value);
+		// Unknown reasons floor to 0 rather than throwing: the vocabulary is
+		// source-declared, so an unmapped value means the two lists drifted, and
+		// silently reading "no pressure" is the safer of two wrong answers here
+		// only because the reason string also reaches the log and the export.
+		gPressureReason?.set(PRESSURE_REASON_CODES[pressureSnapshot.reason] ?? 0);
+		gResidentBytes?.set(counters.lastResidentBytes);
+		gHeapUsedRatio?.set(counters.lastHeapUsedRatio);
+		if (counters.lastSampleWallMs > 0) gSampleTimestamp?.set(counters.lastSampleWallMs / 1000);
+		if (counters.lastPublishCount > 0) mPublishes?.inc({}, counters.lastPublishCount);
+		if (pressureSnapshot.psi !== null) {
+			gPsiCpuSome?.set(pressureSnapshot.psi.cpuSome10);
+			gPsiMemoryFull?.set(pressureSnapshot.psi.memoryFull10);
+			gPsiIoFull?.set(pressureSnapshot.psi.ioFull10);
+		}
+		if (pressureSnapshot.cpuThrottle !== null) gCpuThrottled?.set(pressureSnapshot.cpuThrottle.throttledRatio);
 		if (gOpenFds !== undefined && ++fdSampleTick >= 5) {
 			fdSampleTick = 0;
 			const openFds = countOpenFds();

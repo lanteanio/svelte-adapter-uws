@@ -549,10 +549,55 @@ export interface WebSocketOptions {
 	 *   Map. `severity` is `soft` (a recoverable `assert`) or `fatal` (a
 	 *   hard-tier termination). Category cardinality is bounded by the
 	 *   source-declared categories (counter).
+	 * - `upgrade_rate_map_evicted_total{door}` - rate-limit entries evicted at
+	 *   the map cap; `door` is `upgrade` or `auth` (counter).
+	 * - `ws_connections` - live WebSocket connections on this worker (gauge,
+	 *   sampled).
+	 * - `ws_subscriptions` - live topic subscriptions across this worker's
+	 *   connections (gauge, sampled). Divide by `ws_connections` for the
+	 *   subscriber ratio; the two are exported separately because averaging
+	 *   per-worker ratios is not the cluster ratio.
+	 * - `ws_publishes_total` - publish calls on this worker (counter). Counts
+	 *   publishes, never per-recipient deliveries: uWS fans out in C++.
 	 * - `ws_backpressure_max_bytes` - worst per-connection outbound buffered
 	 *   bytes over the sampled connection set (gauge, sampled; `0` when healthy).
 	 * - `ws_backpressure_connections` - sampled connections holding a
 	 *   backpressured outbound queue (gauge, sampled; `0` when healthy).
+	 * - `pressure_saturation` - worker saturation, `0` healthy to `1` at the
+	 *   configured thresholds (gauge, sampled).
+	 * - `pressure_reason` - the live pressure reason as a severity-ordered
+	 *   code: `0` none, `1` subscribers, `2` publish rate, `3` psi, `4` cpu
+	 *   quota, `5` capacity, `6` memory (gauge, sampled).
+	 * - `pressure_sample_timestamp_seconds` - unix time of the most recent
+	 *   completed pressure sample (gauge). The sampling timer is `unref`'d; if
+	 *   it stops, every sampled gauge above keeps serving its last value while
+	 *   the target still reads up. Alert on this timestamp's age.
+	 * - `resident_memory_bytes` - process RSS (gauge, sampled). Worker threads
+	 *   share one address space, so every worker reports the same value.
+	 * - `heap_used_ratio` - used fraction of this worker isolate's V8 heap
+	 *   (gauge, sampled). Per-isolate, so each worker has its own.
+	 * - `psi_cpu_some_avg10`, `psi_memory_full_avg10`, `psi_io_full_avg10` -
+	 *   kernel pressure-stall readings (gauges, sampled). Registered on first
+	 *   reading, so absent where the kernel does not expose PSI.
+	 * - `cpu_throttled_ratio` - fraction of the sampled window the cgroup CPU
+	 *   quota held the process suspended (gauge, sampled). Same availability
+	 *   note as the PSI gauges.
+	 * - `open_fds` / `fd_soft_limit` - open descriptors and the soft limit
+	 *   (gauges, sampled every ~5 pressure intervals). Registered only where
+	 *   the source exists (Linux, macOS). Whole-process values: every worker
+	 *   reports the same number.
+	 * - `state_divergence_total{role}` - cross-worker state-hash divergence
+	 *   detections; `role` is `majority` or `minority` (counter). Structure-only
+	 *   hash, so no topic strings and no client identity.
+	 * - `relay_gap_frames_total` - relayed frames proven lost to this worker
+	 *   (counter). Counts frames, not incidents; a lower bound.
+	 * - `framework_resource_growth_suspected_total{resource}` - sustained-growth
+	 *   suspicions from the optional resource-growth auditor (counter).
+	 *   Registered only when `resourceGrowthAuditIntervalMs` is set.
+	 *
+	 * Every metric declares how it combines across worker threads. That law is
+	 * executed, not merely documented: `platform.metricsSnapshot()` merges the
+	 * cluster with it. See the README metrics table for the per-metric column.
 	 *
 	 * Accept-path cost is one unlabelled counter increment per admitted
 	 * upgrade; rejection branches add one labelled increment each; gauges
@@ -1089,10 +1134,36 @@ export interface MetricsRegistry {
 		help: string
 	): { set(value: number): void };
 	/**
+	 * Observe a distribution. Optional: the adapter registers no histogram
+	 * today, so a registry without this method satisfies the contract and
+	 * nothing breaks.
+	 *
+	 * It is declared because a registry that omits it cannot be TOLD what
+	 * buckets to use, and a duration histogram is worthless with the wrong
+	 * ones. Bucket bounds are the caller's to choose and are always in the
+	 * metric's own unit.
+	 *
+	 * Unit convention: durations are `seconds`, named with a `_seconds`
+	 * suffix, with bucket bounds written as fractions of a second
+	 * (`0.001`, `0.005`, `0.01`, ...). Milliseconds are not used in a metric
+	 * name or value even where the source clock reports them, so a bound
+	 * always reads in the same unit as the sample. Sizes are `bytes` with a
+	 * `_bytes` suffix. A histogram of sub-second work whose buckets start at
+	 * `1` records every sample in the first bucket and measures nothing.
+	 */
+	histogram?(
+		name: string,
+		help: string,
+		options?: { labelNames?: string[]; buckets?: number[] }
+	): { observe(labels?: Record<string, string>, value?: number): void };
+	/**
 	 * Render all metrics in Prometheus text exposition format. Present on the
 	 * `createMetrics()` registry from `svelte-adapter-uws-extensions/prometheus`;
 	 * optional here because the adapter itself only ever calls `counter`/`gauge`.
 	 * Read it from a scrape route via `platform.metrics`.
+	 *
+	 * NOT required for `platform.metricsSnapshot()`, which is built from the
+	 * values the adapter wrote rather than from rendered text.
 	 */
 	serialize?(): string;
 }
@@ -2788,6 +2859,96 @@ export interface Platform {
 	 * ```
 	 */
 	readonly metrics: MetricsRegistry | null;
+
+	/**
+	 * Cluster-wide metrics in Prometheus text format, or `null` when no
+	 * `metrics` registry is configured (or it has no `serialize()`).
+	 *
+	 * `platform.metrics.serialize()` renders ONE worker: every worker thread
+	 * builds its own registry, and they all serve the same port, so a scrape
+	 * lands on an arbitrary worker and gets an arbitrary fraction of the truth.
+	 * Counters appear to jump backwards between scrapes, gauges alias across
+	 * workers, and every `rate()` over them is noise. There is no per-worker
+	 * port to scrape instead - this is the way to get the whole picture.
+	 *
+	 * Each metric combines by its declared law: counters and per-worker
+	 * quantities add, process-wide readings and saturation take the worst,
+	 * sample freshness takes the stalest.
+	 *
+	 * It reports the ADAPTER's metrics. What crosses the thread boundary is the
+	 * values the adapter itself wrote, keyed by its own declared names, never
+	 * your registry's rendered text - so namespacing the registry with
+	 * `createMetrics({ prefix })` does not stop it recognising them, and
+	 * `serialize()` is not required. A metric your app registered is not
+	 * included: the adapter cannot know whether yours should be summed, maxed
+	 * or averaged, and guessing would be a silent wrong number. Read those from
+	 * `platform.metrics` per worker.
+	 *
+	 * Cluster counters do not decrease between consecutive documents from one
+	 * process. That takes three mechanisms, because a summed counter can fall
+	 * for three different reasons and only one of them involves a restart:
+	 *
+	 * - A worker that EXITS has its final counter totals carried forward, so a
+	 *   replacement starting at zero does not drop the sum.
+	 * - A LIVE worker that misses the collection deadline - a long synchronous
+	 *   stretch, a major collection - contributes its last known counter totals
+	 *   rather than dropping out. A per-worker counter never decreases, so
+	 *   re-using its previous total undercounts it for that scrape instead of
+	 *   erasing it.
+	 * - A DEGRADED document omits counter families entirely rather than
+	 *   publishing one worker's fraction of them. A gap reads as staleness; a
+	 *   smaller value for a growing series reads as a counter reset, and the
+	 *   recovery then gets charged as traffic that never happened.
+	 *
+	 * Only counters are carried - a gauge describes a live worker, and a stale
+	 * connection count is a wrong number rather than a lagging one. So gauges
+	 * DO dip when a worker is missing, which is what
+	 * `metrics_snapshot_workers_reporting` is for.
+	 *
+	 * The residual is one-directional: a total can lag reality by up to one
+	 * collection interval of one worker's traffic. It does not go backwards.
+	 *
+	 * The document always carries `metrics_snapshot_workers_expected` and
+	 * `metrics_snapshot_workers_reporting`. When they differ the answer is
+	 * partial: a worker missed the deadline, and every summed series is
+	 * understated for that scrape. Alert on the difference rather than reading
+	 * the dip as a real drop in traffic.
+	 *
+	 * It also carries `metrics_snapshot_degraded`, `1` when the collection did
+	 * not complete at all and the document is this worker alone. That case
+	 * needs its own flag: a worker that never heard back from the primary does
+	 * not know how many siblings it has, so expected and reporting would agree
+	 * with each other and the partial-answer alert above would stay silent.
+	 *
+	 * One collection runs at a time across the whole cluster - a request that
+	 * arrives while one is open joins it - so hitting the route hard cannot fan
+	 * out into a cluster broadcast per request. The bound is enforced by the
+	 * primary, not per worker: N workers each admitting one collection that
+	 * fans out to all N would be the amplification it is meant to prevent.
+	 *
+	 * In a single-process deployment this still merges (of one worker), so the
+	 * document has the same shape either way and enabling `CLUSTER_WORKERS`
+	 * does not change what your dashboard reads.
+	 *
+	 * @param options.timeoutMs How long to wait for workers to report, clamped
+	 *   to 50-10000ms. Default 2000. The ceiling sits below a default Prometheus
+	 *   scrape timeout on purpose: a slower snapshot is useless to its caller,
+	 *   and one generous deadline would become the wait for every caller that
+	 *   joins that collection.
+	 *
+	 * @example
+	 * ```js
+	 * // src/routes/metrics/+server.js
+	 * export const GET = async ({ platform }) => {
+	 *   const body = await platform.metricsSnapshot();
+	 *   if (body === null) return new Response('metrics not configured', { status: 503 });
+	 *   return new Response(body, {
+	 *     headers: { 'content-type': 'text/plain; version=0.0.4' }
+	 *   });
+	 * };
+	 * ```
+	 */
+	metricsSnapshot(options?: { timeoutMs?: number }): Promise<string | null>;
 
 	/**
 	 * Register a callback fired on each pressure-state transition (when

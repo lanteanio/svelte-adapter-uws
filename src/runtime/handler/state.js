@@ -565,6 +565,21 @@ export const counters = {
 	postureExporter: null,
 	// Base (un-layered) pressure reason from the most recent sample (for the posture transition log).
 	lastBasePressureReason: 'NONE',
+	// Readings the pressure sampler computes and then discards, retained for the
+	// metrics hook that runs later in the same tick. The hook cannot recompute
+	// them: the publish window is zeroed as it is read, and the heap/resident
+	// figures come from one process.memoryUsage() call the sampler already paid
+	// for. Retained here rather than widened onto pressureSnapshot, which is a
+	// documented public shape (platform.pressure, introspect, the posture export)
+	// that this internal handoff has no business changing.
+	lastPublishCount: 0,
+	lastConnections: 0,
+	lastHeapUsedRatio: 0,
+	lastResidentBytes: 0,
+	// Wall-clock ms of the most recent completed pressure fold; 0 until the
+	// first sample, which is how the freshness gauge stays absent rather than
+	// publishing a zero timestamp that reads as 1970.
+	lastSampleWallMs: 0,
 	// In-flight SSR request count, for drain().
 	inFlightCount: 0,
 	// True once graceful shutdown has begun. The readiness route reports a 503

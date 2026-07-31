@@ -139,9 +139,16 @@ const DEFAULT_PRESSURE_THRESHOLDS = {
 function samplePressure(thresholds) {
 	const interval = thresholds.sampleIntervalMs / 1000;
 	const publishRate = interval > 0 ? counters.publishCountWindow / interval : 0;
+	// Retain the raw window count before it is zeroed. The metrics hook exports
+	// it as a monotonic counter rather than re-exporting `publishRate`: a
+	// precomputed rate is only readable at the sampler's own cadence, while a
+	// counter lets the query choose its window and survives a scrape interval
+	// that does not match ours.
+	counters.lastPublishCount = counters.publishCountWindow;
 	counters.publishCountWindow = 0;
 
 	const connections = wsConnections.size;
+	counters.lastConnections = connections;
 	const subscriberRatio = connections > 0 ? counters.totalSubscriptions / connections : 0;
 
 	// Aggregate outbound backpressure across a bounded sample of the live
@@ -158,6 +165,11 @@ function samplePressure(thresholds) {
 	const mem = process.memoryUsage();
 	const heapUsedRatio = mem.heapTotal > 0 ? mem.heapUsed / mem.heapTotal : 0;
 	const memoryMB = mem.rss / (1024 * 1024);
+	// Both retained for the metrics hook. Resident memory is process-wide (worker
+	// threads share one address space); the heap ratio is per-isolate, so each
+	// worker thread reports its own.
+	counters.lastHeapUsedRatio = heapUsedRatio;
+	counters.lastResidentBytes = mem.rss;
 
 	// Kernel signals for this window. Null per source when unavailable; the
 	// sample fields stay absent then, so every downstream comparison and the
@@ -235,6 +247,10 @@ function samplePressure(thresholds) {
 	// dwell never sees a calm sample and the level could never relax. The base
 	// `reason` is the true load signal that drives both directions.
 	if (counters.activePosture !== null) counters.activePosture.tick({ active: reason !== 'NONE' });
+
+	// Stamp the fold as complete BEFORE the hook publishes it, so the freshness
+	// gauge dates the sample it is exported with rather than the previous one.
+	counters.lastSampleWallMs = now();
 
 	// Sample the admission gauges on the same cadence. Null unless a metrics
 	// registry is configured, so the zero-config sampler is unchanged.

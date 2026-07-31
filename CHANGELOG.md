@@ -5,6 +5,103 @@ All notable changes to `svelte-adapter-uws` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.89] - 2026-07-31
+
+### Added
+
+- **`platform.metricsSnapshot()` - cluster-wide metrics.** Every worker thread builds its own
+  registry and they all serve the same port, so a scrape route reading
+  `platform.metrics.serialize()` returned whichever worker the kernel or the acceptor picked:
+  counters appeared to jump backwards between scrapes, gauges aliased across workers, and
+  every `rate()` over them was noise. There is no per-worker port to scrape instead. The new
+  method collects every live worker's exposition text through the primary and merges it, each
+  metric combining by its declared law. It merges in a single process too, so the document has
+  the same shape whether or not clustering is on. Concurrent callers share one collection, so
+  an unauthenticated scrape route cannot amplify into one cluster broadcast per request.
+  What crosses the thread boundary is the values the adapter itself wrote, keyed by its own
+  declared names - never a registry's rendered text, which would stop matching anything the
+  moment a registry namespaced its output with `createMetrics({ prefix })` and would quietly
+  go back to summing `open_fds` across workers. Metrics your app registered are therefore not
+  in the snapshot: the adapter cannot know how yours should combine, and guessing would be a
+  silent wrong number. `serialize()` is not required.
+  Cluster counters do not decrease between consecutive documents, which takes three separate
+  mechanisms because a summed counter can fall for three different reasons and only one of
+  them is a restart. A worker that EXITS has its final counter totals carried forward, so a
+  replacement starting at zero does not drop the sum. A LIVE worker that misses the collection
+  deadline - a long synchronous stretch, a major collection - contributes its last known
+  counter totals rather than dropping out; a per-worker counter never decreases, so re-using
+  its previous total undercounts it for one scrape instead of erasing it. A DEGRADED document
+  omits counter families entirely rather than publishing one worker's fraction of them,
+  because a gap reads as staleness while a smaller value for a growing series reads as a
+  counter reset. Only counters get this treatment - a gauge describes a live worker, so gauges
+  do dip when one is missing, and `metrics_snapshot_workers_reporting` is what says so. The
+  residual is one-directional: a total can lag reality by up to one collection interval of one
+  worker's traffic, and never goes backwards.
+- **A signal manifest** (`src/runtime/observability-manifest.js`) declaring every metric's type,
+  labels, unit, scope and cross-worker aggregation law. The law is executed by the merge rather
+  than described beside it - summing a process-wide reading like `open_fds` multiplies one truth
+  by the worker count, which is the failure this replaces.
+- **Twelve metrics the 1 Hz pressure sampler already computed and then discarded**:
+  `ws_connections`, `ws_subscriptions`, `ws_publishes_total`, `pressure_saturation`,
+  `pressure_reason`, `resident_memory_bytes`, `heap_used_ratio`,
+  `pressure_sample_timestamp_seconds`, and, where the kernel exposes them,
+  `psi_cpu_some_avg10`, `psi_memory_full_avg10`, `psi_io_full_avg10` and `cpu_throttled_ratio`.
+  These are gauge writes inside a callback that already runs; no per-request or per-message
+  path is touched.
+- **`pressure_sample_timestamp_seconds`, the sampler's own freshness.** The sampling timer is
+  `unref`'d; if it ever stopped, every sampled gauge kept serving its last value while the
+  scrape target still reported up, and nothing distinguished healthy-and-steady from frozen.
+  Alert on this timestamp's age.
+- **`histogram()` in the `MetricsRegistry` contract**, with an explicit `buckets` option and a
+  documented seconds-with-fractional-bounds unit convention. The adapter registers no histogram
+  yet; the method is declared because a registry that omits it cannot be told what buckets to
+  use, and a duration histogram with the wrong ones measures nothing.
+- **Publish accounting as a counter, not a rate.** `ws_publishes_total` counts publish calls,
+  never per-recipient deliveries - uWS fans out in C++, and counting recipients would mean
+  walking the subscriber set in JS on every publish.
+- **A shipped observability pack** at `examples/observability/`, which reaches consumers because
+  `examples` is in the package `files` list. The adapter's metrics have non-obvious aggregation
+  laws - `open_fds` is whole-process and must never be summed across workers, freshness is taken
+  from the stalest worker, connections and subscriptions are exported separately because
+  averaging per-worker ratios is not the cluster ratio. Shipping the queries is how those laws
+  become executable rather than prose an adopter reads once and then writes the wrong query
+  against.
+  - `queries.md` - the canonical expression and cross-worker law for every metric, GENERATED from
+    the signal manifest and regenerated by a test, so a new metric cannot ship without an entry.
+  - `rules.yml` - Prometheus recording and alerting rules, including the derived quantities most
+    often written wrongly by hand and a no-data rule.
+  - `runbook.md` - what each alert means, what to check, and what not to do.
+- **A coverage gate.** Every metric must either be referenced by a rule or named in the runbook's
+  explicit no-alert list, and every alert must name a runbook section that exists. In a rules file
+  "nobody thought about this metric" and "we decided not to alert on it" look identical; the list
+  forces them apart. A test also fails if any shipped query sums a whole-process metric across
+  workers, which would re-introduce the defect the cluster merge exists to remove.
+
+No Grafana dashboard ships. Dashboard JSON is tied to a schema version and ages into a liability
+faster than anything else in the pack, while `queries.md` carries every expression needed to build
+one against whatever you run.
+
+### Fixed
+
+- **The two documented metric inventories had drifted from the code and from each other.** Six
+  of fifteen registered metrics were missing from the `metrics` option's JSDoc list, four from
+  the README table, and `relay_gap_frames_total` and `framework_resource_growth_suspected_total`
+  were in neither. Both inventories are now complete, and the existing acorn-based metrics
+  contract test asserts three-way parity between the code, the manifest and both documents, so
+  they cannot drift apart again.
+- `ws_subscriptions` and `ws_connections` are exported separately rather than as the sampler's
+  precomputed subscriber ratio: averaging per-worker ratios is not the cluster ratio, while
+  summing a numerator and a denominator is.
+- **Two long-standing bugs that read `worker.threadId` inside the `exit` handler.** Node nulls
+  the worker handle before emitting `exit`, so it reads `-1` there, and any cleanup keyed on the
+  thread id addresses a worker that never existed. The cross-worker state-hash detector never
+  dropped a dead worker from its open epoch buckets, where a stale entry could stall a
+  comparison, and the restart log line reported `Worker thread -1 exited`. The id is now stamped
+  into the worker's record at spawn and used for every id-keyed cleanup in that handler.
+- A `metrics` module default-exporting a non-object (a string, a number) threw at module
+  evaluation in every worker, with a message naming neither metrics nor the option that caused
+  it. It now disables metrics and says so.
+
 ## [0.6.0-next.88] - 2026-07-31
 
 ### Breaking Changes
