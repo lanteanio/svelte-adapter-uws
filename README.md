@@ -538,7 +538,7 @@ WatchdogSec=30
 ExecStart=/usr/bin/node build/index.js
 ```
 
-**`metrics`** (default: off) - a **module path** whose default export (or a named `metrics` / `registry` export) is a Prometheus-style registry that makes the whole admission stack chartable. Any registry with positional `counter(name, help, labelNames?)` / `gauge(name, help)` factories works - the `createMetrics()` registry from [`svelte-adapter-uws-extensions/prometheus`](https://github.com/lanteanio/svelte-adapter-uws-extensions) fits as-is and owns naming concerns like a global prefix.
+**`metrics`** (default: off) - a **module path** whose default export (or a named `metrics` / `registry` export) is a Prometheus-style registry that makes the whole admission stack chartable. Any registry implementing the four-method contract below works - the `createMetrics()` registry from [`svelte-adapter-uws-extensions/prometheus`](https://github.com/lanteanio/svelte-adapter-uws-extensions) fits as-is and owns naming concerns like a global prefix.
 
 It is a module path (like `handler`), not a live object: adapter options are serialized into the build, so a registry constructed inline in `svelte.config.js` never reaches the production runtime. Put the registry in its own module; the adapter bundles it, populates it, and exposes the **same instance** on `platform.metrics`. Scrape it from a route via `platform.metrics` - do not re-import the metrics module from app code, which would create a second, empty copy.
 
@@ -562,6 +562,17 @@ export const GET = ({ platform }) =>
     headers: { 'content-type': 'text/plain; version=0.0.4' }
   });
 ```
+
+The registry contract is four methods, two of them optional:
+
+| Method | Required | Returns, and what a registry must get right |
+| --- | --- | --- |
+| `counter(name, help, labelNames?)` | yes | `{ inc(labels?, value?) }`. Implement `value`: `ws_publishes_total` is incremented once per pressure sample with the whole window's publish count, so a registry that ignores `value` reports roughly one publish per second on a server doing thousands - a wrong number that looks plausible. The relay-gap counter increments in bulk the same way. |
+| `gauge(name, help)` | yes | `{ set(value) }`. No label names: every adapter gauge is unlabelled, and `set` receives the bare number. |
+| `histogram(name, help, options?)` | no | `{ observe(labels?, value?) }`. Takes an **options object** - `{ labelNames, buckets }` - not a positional `labelNames`, because a registry that cannot be told which buckets to use silently falls back to its own. |
+| `serialize()` | no | Prometheus text exposition. Any route that renders `platform.metrics` itself needs it, and that is always one worker's view; [`platform.metricsSnapshot()`](#cluster-wide-metrics) is built from mirrored values and never calls it. |
+
+Durations are **seconds with fractional bucket bounds**; sizes are **bytes** with a `_bytes` suffix. That convention matters most for `histogram`: buckets that start at `1` put a 5 ms call and a 900 ms call in the same bucket and measure nothing. **`createMetrics()` defaults to millisecond-shaped buckets beginning at `1`**, so a seconds-valued histogram must pass `buckets` explicitly - the default is the failure this paragraph describes. The adapter registers no histogram of its own yet; `histogram` is in the contract because a registry that omits it cannot be told what buckets to use, and samples already recorded into the wrong buckets cannot be repaired afterwards.
 
 Every metric below declares how it combines across worker threads, and that column is not documentation - it is the law [`platform.metricsSnapshot()`](#cluster-wide-metrics) executes when it merges the cluster. `sum` means the workers hold disjoint parts of one whole; `max` means they report the same underlying quantity (or the worst one is the useful answer); `min` is freshness, where the stalest worker is the honest cluster-level reading.
 

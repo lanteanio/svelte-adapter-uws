@@ -79,6 +79,144 @@ function dtsListedMetrics() {
 	return names;
 }
 
+/**
+ * The text between a matching delimiter pair, starting at the first `open` at
+ * or after `from`. Depth-counted rather than line-matched: an interface member
+ * spans lines, and the nearest closing brace at column zero is not reliably the
+ * one that closes the declaration.
+ *
+ * @param {string} text
+ * @param {number} from
+ * @param {string} open
+ * @param {string} close
+ * @returns {string}
+ */
+function balanced(text, from, open, close) {
+	const start = text.indexOf(open, from);
+	if (start === -1) throw new Error(`no ${open} at or after index ${from}`);
+	let depth = 0;
+	for (let i = start; i < text.length; i++) {
+		if (text[i] === open) depth++;
+		else if (text[i] === close && --depth === 0) return text.slice(start + 1, i);
+	}
+	throw new Error(`unbalanced ${open}${close} from index ${from}`);
+}
+
+/**
+ * Split on a separator appearing at nesting depth zero, so a `;` inside a
+ * returned instrument type or a `,` inside an options object does not split a
+ * declaration. `>` is only a closer when it is not the tail of an arrow, or
+ * every function-typed property would unbalance the count.
+ *
+ * @param {string} text
+ * @param {string} sep
+ * @returns {string[]}
+ */
+function splitTopLevel(text, sep) {
+	const out = [];
+	let depth = 0;
+	let last = 0;
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i];
+		if (c === '{' || c === '(' || c === '[' || c === '<') depth++;
+		else if (c === '}' || c === ')' || c === ']') depth--;
+		else if (c === '>' && text[i - 1] !== '=') depth--;
+		else if (c === sep && depth === 0) {
+			out.push(text.slice(last, i));
+			last = i + 1;
+		}
+	}
+	out.push(text.slice(last));
+	return out.filter((s) => s.trim() !== '');
+}
+
+/**
+ * The `MetricsRegistry` interface in src/index.d.ts: each member's name,
+ * whether it is optional, and its parameter names rebuilt in the shape the
+ * README documents them (`counter(name, help, labelNames?)`).
+ *
+ * SIGNATURES, not just names. The drift this exists to catch is a method still
+ * documented in the positional form after the type moved to an options object,
+ * which is invisible to a comparison of names alone.
+ *
+ * @returns {Map<string, { optional: boolean, signature: string }>}
+ */
+function dtsRegistryContract() {
+	const text = readFileSync(path.join(ROOT, 'src/index.d.ts'), 'utf8').replace(/\r\n/g, '\n');
+	const marker = 'export interface MetricsRegistry {';
+	const first = text.indexOf(marker);
+	expect(first, 'the MetricsRegistry interface was not found in src/index.d.ts').toBeGreaterThan(-1);
+	expect(
+		text.indexOf(marker, first + 1),
+		'MetricsRegistry is declared more than once; TypeScript merges those declarations and this parser reads only the first'
+	).toBe(-1);
+
+	// Comments carry `@example` blocks with their own braces and semicolons,
+	// which would otherwise parse as members.
+	const body = balanced(text, first + marker.length - 1, '{', '}')
+		.replace(/\/\*[\s\S]*?\*\//g, '')
+		.replace(/\/\/[^\n]*/g, '');
+
+	/** @type {Map<string, { optional: boolean, signature: string }>} */
+	const members = new Map();
+	for (const chunk of splitTopLevel(body, ';')) {
+		// `counter(` is method syntax; `counter: (` is a property holding a
+		// function type. Both declare the same contract, so both must be seen -
+		// the property form is the prevailing style elsewhere in this file.
+		const head = /^\s*([A-Za-z_$][\w$]*)\s*(\??)\s*(?::\s*)?\(/.exec(chunk);
+		if (!head) continue;
+		const params = balanced(chunk, chunk.indexOf('('), '(', ')');
+		const names = splitTopLevel(params, ',')
+			.map((p) => /^\s*(\.\.\.)?([A-Za-z_$][\w$]*)\s*(\??)/.exec(p))
+			.filter((m) => m !== null)
+			.map((m) => `${m[1] ?? ''}${m[2]}${m[3]}`);
+		expect(
+			members.has(head[1]),
+			`MetricsRegistry declares ${head[1]} twice; the README can only document one of them`
+		).toBe(false);
+		members.set(head[1], { optional: head[2] === '?', signature: `${head[1]}(${names.join(', ')})` });
+	}
+	return members;
+}
+
+/**
+ * The README's registry contract table: the same three facts, read out of the
+ * documented signature and the Required column. Anchored on the header row
+ * rather than a heading, in the same idiom as the metrics table above.
+ *
+ * @returns {Map<string, { optional: boolean, signature: string }>}
+ */
+function readmeRegistryContract() {
+	const lines = readFileSync(path.join(ROOT, 'README.md'), 'utf8').split(/\r?\n/);
+	const header = lines.findIndex((l) => l.trim().startsWith('| Method | Required |'));
+	expect(header, 'the README registry contract table header row was not found - if the table moved or its columns changed, update this parser').toBeGreaterThan(-1);
+	/** @type {Map<string, { optional: boolean, signature: string }>} */
+	const methods = new Map();
+	// Skip the header and the |---| separator beneath it.
+	for (let i = header + 2; i < lines.length; i++) {
+		const line = lines[i].trim();
+		if (!line.startsWith('|')) break;
+		const cells = line.split('|').map((c) => c.trim());
+		const m = /^`([A-Za-z_$][\w$]*)(\([^`]*\))`/.exec(cells[1] ?? '');
+		if (!m) continue;
+		// Exactly `yes` or `no`. Reading "anything that is not yes" as optional
+		// makes an empty or misspelled cell agree with whatever the types say,
+		// so the column would be unverifiable for the optional methods - the
+		// only ones whose optionality is worth stating.
+		const required = (cells[2] ?? '').toLowerCase();
+		expect(
+			['yes', 'no'],
+			`the Required cell for ${m[1]} reads ${JSON.stringify(cells[2] ?? '')}; it must be exactly yes or no`
+		).toContain(required);
+		expect(
+			methods.has(m[1]),
+			`the README registry contract table lists ${m[1]} twice, so it can state two different contracts`
+		).toBe(false);
+		methods.set(m[1], { optional: required === 'no', signature: m[1] + m[2] });
+	}
+	return methods;
+}
+
 // Every file that registers instruments on the operator-supplied registry
 // (the `websocket.metrics` contract). wireAssertionMetrics receives that same
 // registry from the handler, so its registration and emit are in scope too.
@@ -358,6 +496,54 @@ describe('metrics label contract', () => {
 				offenders,
 				'these labels read as client identity, which must never reach a metric: ' + JSON.stringify(offenders)
 			).toEqual([]);
+		});
+
+		it('the registry contract is documented method for method, signature included', () => {
+			// `metrics` takes a registry the OPERATOR supplies, so every member of
+			// the interface is a thing somebody has to implement against the README.
+			// A method declared in the types and absent from the README ships a
+			// contract nobody can discover, and a method documented in the wrong
+			// SHAPE is worse: `histogram` takes an options object, and a registry
+			// told to expect a positional `labelNames` never receives buckets. Its
+			// samples land in whatever the registry defaults to, and samples already
+			// recorded into the wrong buckets cannot be repaired afterwards.
+			const declared = dtsRegistryContract();
+			const documented = readmeRegistryContract();
+
+			// Non-vacuity: a named probe that only matches if the walk reached the
+			// LAST member, plus a floor. `declared.size > 0` would not fire on a
+			// parser that stops halfway, and a member the parser never sees is
+			// exactly the one that can go undocumented.
+			expect([...declared.keys()], 'the MetricsRegistry walk did not reach `serialize`, so it stopped early and proves nothing about what follows').toContain('serialize');
+			expect(declared.size, 'the MetricsRegistry walk found fewer members than the interface has').toBeGreaterThanOrEqual(4);
+
+			const missing = [...declared.keys()].filter((m) => !documented.has(m));
+			expect(missing, 'declared in the MetricsRegistry interface but missing from the README registry contract table: ' + JSON.stringify(missing)).toEqual([]);
+
+			const phantom = [...documented.keys()].filter((m) => !declared.has(m));
+			expect(phantom, 'the README registry contract table documents methods the interface does not declare: ' + JSON.stringify(phantom)).toEqual([]);
+
+			/** @type {string[]} */
+			const disagree = [];
+			for (const [name, dts] of declared) {
+				const readme = documented.get(name);
+				if (!readme) continue;
+				// Optionality is part of the contract: a registry author reads
+				// "Required: yes" and implements it.
+				if (readme.optional !== dts.optional) {
+					disagree.push(`${name}: index.d.ts says ${dts.optional ? 'optional' : 'required'}, the README says ${readme.optional ? 'optional' : 'required'}`);
+				}
+				if (readme.signature !== dts.signature) {
+					disagree.push(`${name}: index.d.ts declares ${dts.signature}, the README documents ${readme.signature}`);
+				}
+			}
+			expect(disagree, 'the types and the README disagree: ' + JSON.stringify(disagree)).toEqual([]);
+
+			// The runtime's own view of the contract, so the types and the README
+			// cannot agree with each other while both drift from the code that
+			// actually calls the registry.
+			const unknownToTypes = [...FACTORY_METHODS].filter((m) => !declared.has(m));
+			expect(unknownToTypes, 'the runtime registers instruments through factories the MetricsRegistry interface does not declare: ' + JSON.stringify(unknownToTypes)).toEqual([]);
 		});
 	});
 

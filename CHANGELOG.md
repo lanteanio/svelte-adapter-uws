@@ -5,6 +5,36 @@ All notable changes to `svelte-adapter-uws` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.90] - 2026-08-01
+
+### Fixed
+
+- **`histogram` was in the registry contract and in no documentation.** `0.6.0-next.89` added
+  `histogram(name, help, { labelNames, buckets })` to the `MetricsRegistry` type, while the
+  paragraph introducing the `metrics` option still described the contract an operator
+  implements as two positional factories - so the options form, and the fact that buckets can
+  be passed at all, was discoverable only by reading the type declarations. `metrics` takes a
+  registry the operator supplies, which makes every member of that interface something somebody
+  has to implement against the README. All four methods are now documented in one table with
+  their signatures, their return shapes and which two are optional, and the paragraph that
+  described a two-method contract defers to it rather than restating half of it.
+- **The bucket convention now says the part that bites.** Durations are seconds with fractional
+  bucket bounds, so buckets starting at `1` put a 5 ms call and a 900 ms call in the same bucket
+  and measure nothing - and `createMetrics()`, the registry this same section recommends,
+  defaults to exactly those buckets. A seconds-valued histogram has to pass `buckets`
+  explicitly. Samples already recorded into the wrong buckets cannot be repaired afterwards.
+- **Nothing was gating any of that.** The metrics contract test asserted three-way parity for
+  metric NAMES, so a method could join the registry interface without the README ever
+  mentioning it. It now also asserts the interface and the README agree member for member,
+  in both directions, including optionality and the documented signature - re-documenting
+  `histogram` in the positional form is the drift that made buckets unreachable in the first
+  place, and a name-only comparison cannot see it. The walk reads property-style members
+  (`name?: (...) => ...`) as well as method syntax, and is pinned by a probe on the last member
+  so a parser that stops halfway fails instead of passing vacuously.
+- The `0.6.0-next.89` entry below said `metricsSnapshot()` collects each worker's *exposition
+  text*, which its own next paragraph and the implementation both contradict: what crosses the
+  thread boundary is recorded values, never rendered text. Corrected in place.
+
 ## [0.6.0-next.89] - 2026-07-31
 
 ### Added
@@ -14,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `platform.metrics.serialize()` returned whichever worker the kernel or the acceptor picked:
   counters appeared to jump backwards between scrapes, gauges aliased across workers, and
   every `rate()` over them was noise. There is no per-worker port to scrape instead. The new
-  method collects every live worker's exposition text through the primary and merges it, each
+  method collects every live worker's recorded values through the primary and merges them, each
   metric combining by its declared law. It merges in a single process too, so the document has
   the same shape whether or not clustering is on. Concurrent callers share one collection, so
   an unauthenticated scrape route cannot amplify into one cluster broadcast per request.
