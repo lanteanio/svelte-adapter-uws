@@ -90,6 +90,34 @@ export interface SmoothChannelOptions<State = any, Command = any> {
 	/** Remote sample gap treated as a discontinuity and snapped (default 500). */
 	snapGapMs?: number;
 	/**
+	 * How a remote entity's teleports are told apart from its travel. This is
+	 * the case `snapGapMs` cannot see: a server-side placement (`world.set`, a
+	 * warp, a respawn) is delivered on the ordinary tick, so its two samples sit
+	 * one interval apart like any other pair and a gap threshold never fires.
+	 *
+	 *   - `'auto'` (the default) measures each pair against the samples on
+	 *     either side of it: a pair that outruns every neighbour it has by a
+	 *     wide factor is a placement, and the render snaps to the new position
+	 *     instead of sliding the entity across the map. It needs no knowledge
+	 *     of the topic's units, and it has a baseline even for an entity the
+	 *     app has never moved, so it works with no configuration at all.
+	 *     Uniform motion, hard acceleration, hard braking and a dead stop all
+	 *     keep interpolating - each keeps a neighbouring pair at a comparable
+	 *     speed - and the same test stops a teleport's implied velocity from
+	 *     being dead-reckoned onward, and stops a resync ease from smearing a
+	 *     placement that happened while the frames were away.
+	 *   - A positive number adds an absolute ceiling in world units per second
+	 *     on top, for a topic that knows its own scale. Set it above anything
+	 *     the simulation can legitimately produce (top speed with headroom): a
+	 *     ceiling below real motion snaps constantly, which looks worse than
+	 *     the smear. It is a speed and not a distance because a distance tuned
+	 *     for the steady cadence fires on every dropped frame, where an honest
+	 *     pair spans several intervals and covers several times the ground.
+	 *   - `0` turns both off and restores pure interpolation, for content whose
+	 *     motion genuinely arrives in isolated one-interval bursts.
+	 */
+	snapSpeedPerSec?: 'auto' | number;
+	/**
 	 * How long the remote world may go without an inbound authority frame - while
 	 * entities are tracked - before the channel reports `stalled` (a blackout on a
 	 * still-open socket, which prediction overflow does not observe). Default 1000.

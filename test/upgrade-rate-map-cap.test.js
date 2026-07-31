@@ -24,54 +24,40 @@
 // `Get-NetTCPConnection -State TimeWait` and give it a minute before believing a
 // failure here.
 //
+// WHAT IS AND IS NOT SCORED. The tallies below are EXACT, so only a protocol
+// outcome may enter them. A connection that dies before the server answered
+// never reached the rate limiter, and counting it as though it had made the
+// exact counts depend on kernel timing: at this connection count the listen
+// backlog sheds one occasionally, and a stray RST scored beside the 101s failed
+// this file roughly one run in three. The shared helper re-issues such a request
+// and throws if it keeps failing, so a socket error can no longer be mistaken
+// for an admission decision - and a failure once bytes have arrived still throws
+// rather than becoming a tally entry nobody reads.
+//
 // ADDRESS_HEADER=x-forwarded-for with TRUSTED_PROXIES unset (the documented
 // default) lets each request carry its own rate-limit identity, so unique XFF
 // values fill the map. The cap is the hardcoded 10000, so the test performs
 // ~10000 upgrades.
 
 import { describe, it, expect, afterAll } from 'vitest';
-import net from 'node:net';
-import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
+import { hasUWS, startRealRuntime, rawUpgrade } from './helpers/real-runtime.js';
 
 const describeUWS = hasUWS ? describe : describe.skip;
 
 /**
  * One raw WebSocket upgrade request presenting the given X-Forwarded-For.
  * Resolves with the HTTP status code of the response status line.
+ *
+ * The shared helper owns the request, the TIME_WAIT-avoiding reset and the
+ * connect-level retry, so this file cannot drift into scoring a socket error as
+ * an admission decision the way its own private copy did.
  * @param {number} port
  * @param {string} xff
  * @returns {Promise<string>}
  */
-function rawUpgrade(port, xff) {
-	return new Promise((resolve) => {
-		const sock = net.connect(port, '127.0.0.1', () => {
-			sock.write([
-				'GET /ws HTTP/1.1',
-				`Host: 127.0.0.1:${port}`,
-				'Connection: Upgrade',
-				'Upgrade: websocket',
-				'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
-				'Sec-WebSocket-Version: 13',
-				`X-Forwarded-For: ${xff}`,
-				'', ''
-			].join('\r\n'));
-		});
-		let buf = '';
-		sock.on('data', (d) => {
-			buf += d.toString('latin1');
-			const idx = buf.indexOf('\r\n\r\n');
-			if (idx !== -1) {
-				const code = (buf.slice(0, buf.indexOf('\r\n')).match(/HTTP\/1\.1 (\d{3})/) || [, '???'])[1];
-				// RST, not FIN - see the TIME_WAIT note in the header. The response
-				// is already fully read, so there is nothing to lose by resetting.
-				if (typeof sock.resetAndDestroy === 'function') sock.resetAndDestroy();
-				else sock.destroy();
-				resolve(code);
-			}
-		});
-		sock.on('error', () => resolve('ERR'));
-		sock.setTimeout(15000, () => { sock.destroy(); resolve('TIMEOUT'); });
-	});
+async function upgradeAs(port, xff) {
+	const { status } = await rawUpgrade(port, { 'X-Forwarded-For': xff });
+	return status;
 }
 
 /** @param {number} port @param {string[]} xffs @param {number} concurrency */
@@ -81,7 +67,7 @@ async function runBatch(port, xffs, concurrency = 50) {
 	let i = 0;
 	async function worker() {
 		while (i < xffs.length) {
-			const code = await rawUpgrade(port, xffs[i++]);
+			const code = await upgradeAs(port, xffs[i++]);
 			codes[code] = (codes[code] || 0) + 1;
 		}
 	}
@@ -140,7 +126,7 @@ describeUWS('upgrade rate map insertion cap', () => {
 		//    evicting instead of refusing. This is the whole point: the map is
 		//    shared, so refusing here would let one host that filled it lock out
 		//    every other client until the next sweep.
-		expect(await rawUpgrade(port, '192.0.2.1')).toBe('101');
+		expect(await upgradeAs(port, '192.0.2.1')).toBe('101');
 
 		// ... and THIS is what an unbounded map cannot fake: room was made by
 		// evicting an entry at insertion time, not by the 60s sweep.

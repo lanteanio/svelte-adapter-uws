@@ -74,7 +74,7 @@ uWS.App().any('/*', (res, req) => {
 						});
 						return;
 					}
-					// Leader failed — fall through to own call
+					// Leader failed - fall through to own call
 				} else {
 					let resolveShared;
 					const sharedPromise = new Promise((r) => { resolveShared = r; });

@@ -1,18 +1,19 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createLanteanClient } from '../examples/minimal-client.mjs';
+// The shared gate, not a local try/import: this suite is what backs the
+// published promise that the example client is exercised against the reference
+// server, and a skipped suite reports PASSED with zero assertions. Taking the
+// helper's flag is what makes REQUIRE_UWS / CI turn a missing addon into a
+// failure here too - a local import could only ever skip.
+import { hasUWS } from './helpers/real-runtime.js';
 
 // Keeps the ~40-line Core client example honest: it must connect, subscribe,
 // dispatch data events, and track the resume state (lastSeq + epoch) against the
 // real reference server. Proves the "a JSON-only client is complete" claim by
 // construction (PROTOCOL.md section 13).
 
-let uWS;
-try {
-	uWS = (await import('uWebSockets.js')).default;
-} catch {
-	uWS = null;
-}
-const describeUWS = uWS ? describe : describe.skip;
+const uWS = hasUWS ? (await import('uWebSockets.js')).default : null;
+const describeUWS = hasUWS ? describe : describe.skip;
 
 let server;
 /** @type {any} */

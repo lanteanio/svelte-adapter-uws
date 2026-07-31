@@ -253,7 +253,7 @@ describe('recordOriginStream (per-origin relay contiguity)', () => {
 
 	it('a worker that received the whole stream reports nothing (the case the report must not fire on)', () => {
 		const s = new Map();
-		// The counterpart to the card's scenario: the sibling that got [1,2,3] while
+		// The counterpart to the reported scenario: the sibling that got [1,2,3] while
 		// another got [2,3]. Same maximum, but only the one that lost a frame speaks.
 		for (const ord of [1, 2, 3]) recordOriginStream(s, 'room', 7, ord, NEW_BIRTH, ATTACHED_AT, clock(1000));
 		expect(gapsOf(s)).toEqual([]);
@@ -391,7 +391,7 @@ describe('the report never names a frame that arrived', () => {
 		// Fill the exact buffer behind a reordered 2, then lose 67 while later
 		// frames continue. The old scalar remembered that 68 arrived, but when 2
 		// landed it discarded that fact, jumped w to hi=80 and made the real
-		// interior loss invisible - the card's equal-maxima bug again.
+		// interior loss invisible - the equal-maxima bug again.
 		const streams = new Map();
 		const now = clock(1000);
 		const rec = (o) => recordOriginStream(streams, 'room', 7, o, BIRTH, ATTACHED, now);

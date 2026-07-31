@@ -98,7 +98,7 @@ describeUWS('revocation during a batch subscribe (built runtime)', () => {
 	});
 
 	it('discards a single-frame grant when revocation lands mid-authorization', async () => {
-		// The card's original production defect was on this path. The in-process
+		// The original production defect was on this path. The in-process
 		// mirror has exercised it for a long time, but a mirror cannot detect this
 		// separate landing losing its settle/tombstone check.
 		const single = await client();

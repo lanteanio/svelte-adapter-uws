@@ -166,13 +166,24 @@ export interface CursorCanvasOptions extends CursorStoreOptions {
 	 * interval and collapses toward a 32ms floor when updates arrive at
 	 * display rate. `extrapolateMs` caps dead-reckoning when the buffer
 	 * runs dry (default 250); `snapGapMs` is the sample gap treated as a
-	 * discontinuity and snapped rather than smeared (default 500). Requires
-	 * a canvas (the plain store has no render loop). Off by default.
+	 * discontinuity and snapped rather than smeared (default 500);
+	 * `snapSpeedPerSec` decides how a jump is told from travel (default
+	 * `'auto'`) - the case a gap threshold cannot see, because a cursor the app
+	 * relocates arrives on the ordinary cadence with its samples one interval
+	 * apart. `'auto'` reads the jump off the cursor's own neighbouring samples,
+	 * so it needs no knowledge of the board's units; a positive number adds an
+	 * absolute board-units-per-second ceiling on top, which must sit above the
+	 * fastest real pointer flick the board can produce (a ceiling below real
+	 * motion snaps constantly); `0` turns both off. It is a speed and not a
+	 * distance so a dropped frame, whose pair legitimately spans several
+	 * intervals, does not read as a jump. Requires a canvas (the plain store
+	 * has no render loop). Off by default.
 	 */
 	smooth?: boolean | {
 		interpolationMs?: 'auto' | number;
 		extrapolateMs?: number;
 		snapGapMs?: number;
+		snapSpeedPerSec?: 'auto' | number;
 	};
 	/**
 	 * Exclude the viewer's own cursor from the canvas (and the optional

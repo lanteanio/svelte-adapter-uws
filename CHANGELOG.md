@@ -5,6 +5,882 @@ All notable changes to `svelte-adapter-uws` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.88] - 2026-07-31
+
+### Breaking Changes
+
+Each of these is detailed in the section below that owns it; this list is the upgrade
+checklist.
+
+- **A request repeating a single-valued header is now refused with `400 Bad Request`.** The
+  affected names are `host`, `content-length`, `transfer-encoding`, `content-type`,
+  `authorization`, `proxy-authorization` and `origin`. Previously the last line won silently.
+  A WebSocket upgrade carrying one is refused the same way. Nothing well-behaved in front of
+  the adapter emits these twice; a proxy that does was already producing a request this layer
+  and the proxy disagreed about.
+- **Every other repeated header now reaches the app merged rather than as the last line
+  alone.** `event.request.headers` sees the joined value - `", "` for list-valued headers,
+  `"; "` for `cookie`. An app that read a single hop out of `x-forwarded-for` behind a proxy
+  emitting one line per hop now sees the whole chain, which is the point of the fix, but it
+  is a value change on a surface apps read.
+- **`SHUTDOWN_TIMEOUT=0` now means NO budget rather than no wait.** Zero previously aborted
+  in-flight teardown immediately; it now awaits the `shutdown` hook and the
+  `sveltekit:shutdown` listeners to completion with nothing cutting them off, and the hook
+  receives `signal: null, deadline: null` so it can see that. An operator who set `0` to get
+  a fast exit should set `1`. The default of `30` is unchanged.
+- **The `groups` plugin caps membership at `1_000_000` by default, where it was unbounded.**
+  The cap sits at the process connection ceiling, so it cannot bite a real group; it exists
+  so an app that wires the group's `subscribe` hook without its `close` hook cannot pile up
+  member entries forever. Opt out with `createGroup(name, { maxMembers: Infinity })`.
+- **`CrdtAuthority.persistNow()` resolves to a `CrdtFlushResult` instead of `undefined`, and
+  is now bounded.** Callers that await and ignore the value are unaffected; a TypeScript
+  caller that annotated it `Promise<void>` must update the annotation. The flush is bounded
+  by the new `flushTimeout` (default 10000 ms, chosen to sit inside the adapter's own 30 s
+  shutdown grace); nothing is discarded on expiry - the record stays dirty and its retry
+  keeps running. A store that legitimately exceeds 10 s needs a raised `flushTimeout`, a
+  per-call `persistNow({ timeout })`, or `Infinity` for the old unbounded wait.
+- **Each precompressed static representation now carries its own `ETag`.** Caches holding an
+  entry under the previously shared validator revalidate once into a full `200`. Nothing is
+  served incorrectly in the meantime, and the change is what stops a compressed response
+  being validated against the uncompressed entity.
+- **The built-in waiting-room page no longer claims a queue position or a wait estimate.**
+  `You are in line`, `Ahead of you: N` and `Estimated wait: N seconds` are gone, because
+  upgrade admission keeps no per-client identity, arrival order or reservation and so had no
+  position to report. Operator pages written against the `{{queueDepth}}` and
+  `{{estimatedSeconds}}` template tokens keep working with unchanged values.
+
+### Added
+
+
+- `upgrade_rejected_total{reason="duplicate_header"}` counts upgrades refused for an
+  ambiguous repeated header. The documented reason list now also names `auth_rate_limit`,
+  which the authentication preflight has always emitted on this counter, and says which
+  rejections it does NOT cover: the preflight's own duplicate-header `400` is counted on no
+  series.
+
+
+- `hooks.ws` `shutdown` receives `{ platform, reason, signal, deadline }`: `reason` is the signal or
+  message that started the shutdown, `signal` aborts when the shutdown budget is spent, and
+  `deadline` is the wall-clock epoch milliseconds it expires at. `sveltekit:shutdown` listeners
+  receive the same three as a second argument alongside the existing `reason`. The published type
+  declares all four and states what the awaiting adapter actually guarantees - the three budget
+  fields are typed optional because the `vite dev` plugin fires the hook with `platform` alone,
+  a dev server having no budget to report.
+- The reload path's health is readable as state, not only as log lines: watcher liveness, whether
+  renewals are being picked up at all, per-worker reload generation (a generation skew across a fleet
+  means one worker missed a renewal), failure count and timestamps, and the served certificate's
+  expiry. No key material and no certificate bytes.
+- `readCertIdentity` also returns the leaf's expiry, in both the certificate's own printed form and
+  the epoch form the remaining-validity arithmetic needs.
+- The built runtime's handler module re-exports the whole lifecycle surface - `beginDrain`,
+  `lifecycleState` and `tlsReloadState` alongside the existing `start` / `shutdown` / `drain` - so a
+  caller reads them from the module the runtime imports instead of reaching into a submodule and
+  depending on the file split.
+
+
+- The built-in waiting-room holding page now carries a persistent status region
+  (`role="status" aria-live="polite" aria-atomic="true"`) that is present at
+  first paint rather than injected on change, so a screen reader is told when
+  the waiting count moves, when a capacity check fails, and when it recovers.
+  Previously the page mutated two plain `<strong>` nodes and swallowed fetch
+  failures entirely, leaving assistive tech with no programmatic status at all.
+  Rewrites happen only when the composed line actually changes, and unforced
+  rewrites no more often than once per 10 seconds, so a short `pollIntervalMs`
+  cannot turn the region into a stream of near-identical announcements.
+- A native `Pause live updates` button (an `aria-pressed` toggle) on the same
+  page, which previously had no focusable element at all. While paused the page
+  stops rewriting the status line and stops reloading itself, but it keeps
+  polling on the same cadence: a poll that fails, recovers, or reports a new
+  count while paused changes nothing on screen. The two things a paused page
+  still says are the ones its own paused wording promises - that a slot has
+  opened, offered as a `Reload now` button instead of a navigation, and that an
+  offered slot was taken by somebody else before the visitor pressed it.
+  Unpaused, the documented automatic reload is unchanged.
+- Because the capacity check reports live capacity and reserves nothing, an
+  offered slot can close again. The page keeps polling across an offer, so the
+  offer is withdrawn and announced within one poll interval rather than leaving
+  a visitor holding a `Reload now` button for a slot that is long gone. The
+  button is only withdrawn when it does not hold focus: pulling the focused
+  element out of the document mid-press is worse than an offer one interval
+  stale, and pressing it then simply re-serves the holding page. The pause
+  control likewise keeps its place throughout.
+- The status region is never given `aria-live="off"`. Pausing controls which
+  rewrites happen, not whether the region can speak, so the pause confirmation
+  and the free-slot news still reach a screen reader.
+- `button:focus-visible` styling on the page, which had no focus indicator.
+
+
+- **`snapSpeedPerSec`, an absolute teleport ceiling, on `createSmoothChannel` options and on `smooth` for `cursor()`** (threaded to the cursor render worker as well as to the main-thread fallback). `'auto'`, the default, is the detection described above. A positive number adds an exact ceiling in world units per second on top, for a topic that knows its own scale; set it above anything the simulation can legitimately produce, since a ceiling below real motion snaps constantly. It is deliberately a speed and not a distance: a distance tuned for the steady cadence fires on every dropped frame, where an honest pair spans several intervals and covers several times the ground. `0` turns both the automatic test and the ceiling off and restores pure interpolation, for content whose motion genuinely arrives in isolated one-interval bursts.
+
+
+- **Queue plugin: aggregate bounds.** `createQueue()` accepts `maxKeys`,
+  `maxPendingTotal` and `maxRunningTotal` alongside the existing per-key
+  `maxSize` and `concurrency`. `maxKeys` bounds how many keys hold live work,
+  `maxPendingTotal` bounds waiting tasks summed across all keys, and
+  `maxRunningTotal` bounds tasks in flight across all keys. All three accept
+  `Infinity` to opt out, and all three default to `1_000_000` - high enough
+  that they never bind in practice, so the zero-config path behaves exactly as
+  it did before. They are ceilings that turn a runaway into a typed rejection,
+  not working limits: a queue that should push back needs real numbers, and
+  `maxRunningTotal` in particular has to be chosen rather than assumed, because
+  a task that awaits work pushed later would deadlock under a low in-flight cap
+  it never asked for.
+- **Queue plugin: `queue.stats()`.** Snapshot of `keysCurrent`,
+  `pendingCurrent`, `runningCurrent`, `readyCurrent` (keys waiting for a
+  running slot), their peaks, `pushedTotal`, `completedTotal`, `failedTotal`,
+  `clearedTotal`, `onDropErrorsTotal`, and a `dropped` breakdown counted per
+  bound that tripped. The peaks are what tell you whether a bound needs
+  raising.
+- **Queue plugin: typed rejections.** Overload and cancellation errors now carry
+  `err.code` (`QUEUE_FULL`, `QUEUE_TOO_MANY_KEYS`, `QUEUE_BACKLOG_FULL`,
+  `QUEUE_CLEARED`), `err.key`, and the bound that tripped under its own option
+  name, so a handler can shed to 503 without parsing messages. Exported as
+  `QueueError` / `QueueErrorCode` / `QueueStats` types.
+- **Queue plugin: `onDrop` reason.** The `onDrop` payload gained
+  `reason: 'maxSize' | 'maxKeys' | 'maxPendingTotal'`, and now fires for every
+  bound that sheds a task, not only `maxSize`.
+
+
+- `createRateLimit({ onEvict })` - called once per eviction with `{ key, banned }`. `key` is the
+  stored bucket key (`tenantId + '\0' + key` when a `tenant` resolver is set). `banned: true`
+  means every sampled candidate was still serving a ban and enforcement state had to be dropped
+  anyway, which is the case worth alerting on: it says the cap is too small for the number of
+  bans in flight.
+- `createRateLimit({ evictionSample })` - how many entries an eviction inspects before choosing
+  a victim, default 16. The whole map is inspected when it holds fewer entries than this.
+
+
+- **`plugins/webhooks` gains a first-attempt admission gate keyed by the PINNED DESTINATION ADDRESS,
+  so an endpoint's outbound allowance stops being a product of how many things name it.** Until now
+  the only rationed part of an outbound delivery was the retry: `hooks.budget` is consulted inside
+  the retry loop and never before the first request, and it is scoped by the caller-chosen
+  `hooks.key`. A scheduler that holds one registration per alias therefore gave the same endpoint one
+  unrationed first attempt and one full retry bucket per entry, and the ceiling an operator
+  configured came out multiplied by the number of entries (and again by the number of replicas
+  holding them) - a `capacity: 3` budget admitted 30 retries across ten aliases of one endpoint, and
+  one publish to 16 registrations issued 48 requests. `deliverWebhook`'s `hooks` seam now also
+  accepts `hooks.admission`, consulted for exactly one hop per delivery - after the SSRF gate has
+  resolved and pinned the destination, before any request is issued - and keyed on `<address>:<port>`
+  rather than on `hooks.key` or on the URL. Keying on the URL (or its origin) would not have closed
+  this: the caller picks the hostname too, so `127.0.0.1:8080`, `localhost:8080`, `localhost.:8080`
+  and every name a wildcard-DNS record can mint are distinct URLs reaching one listener. A pinned
+  address is the one part of a delivery the caller cannot rename, so registrations, aliases, path
+  rewrites and per-event `url` callbacks that land on one address now draw on one allowance. The gate
+  charges EVERY address in the pin rather than one chosen member of it, and that detail is what makes
+  the ceiling hold: which member the socket lands on is decided by the connect logic (dual-stack, one
+  address after another), and a caller who controls its DNS answer picks both the contents and the
+  order of that set, so any single-member rule - lowest address, first address - names a bucket the
+  caller can point away from the address the request actually reaches. Charging the whole set makes
+  the choice moot: wherever the socket ends up, that address paid, and a resolver rotating its answer
+  charges the same buckets because the set is sorted and deduplicated. Stated exactly, since the
+  difference matters when sizing an outbound path: one endpoint published on several addresses
+  (separate IPv4 and IPv6 literals, or DNS answers whose address sets differ) is several destinations,
+  holds one allowance each, and a delivery to it spends one unit at each of them; a caller controlling
+  its own DNS answer can therefore spend an unrelated address's allowance without sending it traffic
+  (what no answer can do is reach an address without spending that address's unit); a refusal
+  part-way through a set keeps the units already taken, since the interface only takes, so a refused
+  delivery can cost more than it sent, never less; and the gate is per process, so a cluster
+  multiplies by replica count until a shared implementation with the same `take(destination)`
+  interface is injected through the same seam. The pin itself is now capped at 32 addresses (dropped
+  after the whole answer has been range-checked, so a private address anywhere in it still rejects
+  the delivery - the cap can only narrow where a socket may go), which bounds the buckets and the work
+  one delivery can cost. `createWebhookAdmission({ capacity = 100, refillPerSec = 10,
+  maxKeys = 1024 })` ships as the in-process default, reading time only through the runtime seam so
+  refill stays deterministic under a seeded harness. Its AGGREGATE ceiling is `maxKeys * capacity`
+  admitted deliveries in a burst and `maxKeys * refillPerSec` per second sustained - 102,400 and
+  10,240 on the defaults, and lowering `maxKeys` is how that is lowered. Those figures bound admitted
+  DELIVERIES, not HTTP requests: one admitted delivery may still issue up to `retry.attempts` x
+  (`maxRedirects` + 1) requests - 18 on the delivery defaults - so an outbound path carries that
+  multiple of them. A refused delivery is
+  terminal with `attempts: 0` and carries `WebhookAdmissionDeniedError`
+  (`code: 'WEBHOOK_ADMISSION_DENIED'`), deliberately distinguishable from a delivery failure: nothing
+  was sent and the endpoint said nothing, so a caller requeues rather than dead-letters, and the
+  circuit breaker is not moved. The gate is consulted after the breaker (an already-ejected endpoint
+  costs no tokens) and after the SSRF gate (a URL the guard rejects - an unparseable one, a `file:` /
+  `data:` / `gopher:` scheme, a link-local metadata address - can never reach the network, so it must
+  not cost a destination anything). A redirect hop is NOT charged: a redirect target is chosen by the
+  endpoint being delivered to, so charging it would let anyone who can register a webhook drain a
+  bystander's allowance by answering 302 to that bystander. The unmetered amplification that leaves
+  is bounded by `maxRedirects` requests per admitted delivery, with the SSRF gate still running on
+  every hop. Only a definite no from the gate (`false`, or the `0` a Lua-scripted shared backend
+  replies with) refuses a delivery; a throw, or an implementation that answers with nothing, admits -
+  a shared backend having a bad minute must not become an outbound outage. Fully opt-in and backward
+  compatible: omit `hooks.admission` and delivery is byte-identical to before, first attempts
+  unrationed as documented.
+
+
+- **CRDT: `persist.store` and `persist.load` receive the context they run in.** `store` is
+  now called as `store(topic, bytes, { signal, deadline, attempt })` and `load` as
+  `load(topic, { signal })`: `signal` aborts when a flush deadline expires, when the topic is
+  erased with `drop()`, or when the authority is destroyed, so a host can cancel its own
+  query instead of writing into a torn-down authority; `deadline` is the epoch-ms reading at
+  which the last flush waiting on that write stops waiting (`null` for a store the background
+  schedule owns), sized for a statement timeout; `attempt` is 1 for the first store of the
+  current unstored state and increments per consecutive write of that state that did not
+  confirm, so a host can back off
+  without tracking per-topic state. Existing two-argument hooks are unaffected. Honouring
+  `signal` stays optional: an abandoned write is never read as durable either way, but a host
+  that ignores it can see the rescheduled write overlap the abandoned one, so honouring it is
+  how a host keeps a topic's writes strictly serialized.
+- **CRDT: `flushTimeout` authority option and a per-call `persistNow(topic?, { timeout })`.**
+  Milliseconds the explicit flush waits before reporting the rest as timed out; `Infinity`
+  waits indefinitely. `persistNow({ timeout })` is accepted as the every-topic form.
+- **CRDT: `destroy()` aborts the host I/O still in flight** rather than dropping the replicas
+  and leaving the store and load calls running against nothing.
+
+
+- **`groups`: read-only `group.maxMembers`.** Reports the resolved cap, including the default,
+  so an app can show remaining slots or refuse a queued join without duplicating the option it
+  passed to `createGroup()`.
+
+
+- **`npm run check` now fails when any tracked file names a `uWebSockets.js#<ref>` install spec other than the `optionalDependencies` pin** (`scripts/check-uws-pin.js`, wired into the `check` chain and so into `pretest`). The addon is a GitHub-hosted native build pinned by tag, and because it is an OPTIONAL dependency npm says nothing when a different tag is fetched, so a stale install line in a doc, a snippet or a test harness silently sends people to a different binary than the one the adapter is built and tested against. That skew has now happened twice. The expected tag comes from `uwsInstallSpec()` in `src/uws-load-hint.js`, the same derivation the runtime install hints use, so the guard and the messages it protects cannot disagree about what the pin is.
+
+  The guard only sees the copy-pasteable spec form (`uNetworking/uWebSockets.js#<tag>`), never a bare version named in prose, so `CHANGELOG.md` and `MIGRATION.md` keep describing past pin moves exactly as written - a guard that forced history to be rewritten on every bump would be worse than the drift. `CHANGELOG.md` is skipped whole as append-only history. Lockfiles are reported as a note rather than failing the build, since a stale one is corrected by rerunning `npm install` in that directory and never by editing it. A deliberately synthetic spec (a unit-test fixture, say) opts out with a `uws-pin-allow: <reason>` comment on its line.
+
+
+- **`npm run doctor`** - one command that answers whether a green run on this
+  machine proves anything. It checks the Node version against `engines` and
+  against the baseline CI runs, whether the running npm is new enough to write
+  the committed lockfile format (an older one rewrites the whole file on the
+  next install), whether the platform/arch/libc has a prebuilt native binary at
+  all, `git` on PATH (the addon is fetched with it), the root and fixture
+  installs, whether a loopback listener can bind, and whether Playwright's
+  browser is present. A missing native addon is a WARNING locally and a FAILURE
+  under `--require-uws`, `REQUIRE_UWS=1` or `CI` - the rule the test suites
+  already applied, now applied to the environment as well.
+- **`npm run bootstrap`** - installs what a clone actually needs, which is not
+  what a root install gives you: `test/fixture` is a separate app with its own
+  lockfile and its own `node_modules`, and several suites build it to boot the
+  real runtime. Without it they failed minutes later inside a `vite build`
+  whose output never mentioned the missing install. Ends by running the doctor.
+- **`.nvmrc`**, pinning the Node baseline (22.23.2) that the hosted gate runs.
+  Both workflows now resolve their Node version from that file instead of a
+  floating major, so `nvm use` and CI read one line. It is the ONLY baseline on
+  purpose: a Node release bundles an npm, so a second pin naming a different one
+  would be a baseline that contradicts the first, and the doctor would warn on
+  exactly the setup contributors are told to adopt. The npm question the doctor
+  does ask is answerable from this tree - can the running npm write the
+  committed lockfile format.
+- **An accepted-binaries record for uWebSockets.js** (`scripts/uws-accepted.json`)
+  and `scripts/check-uws-binaries.js`, wired into `npm run check`. The addon is
+  pinned by a Git TAG, which is mutable; it carries 15 prebuilt native binaries
+  built elsewhere, one of which is dlopen'd in every production process, and a
+  git dependency has no registry integrity hash and no signature. Retagging
+  upstream changes what a fresh install runs while every version string stays
+  identical. The record holds the resolved commit, the upstream source commit
+  and a SHA-256 for every shipped file, and the check fails when the installed
+  tree is not the accepted one. Re-accepting after a deliberate pin bump is
+  `node scripts/check-uws-binaries.js --update`, and the diff it writes is the
+  record of which binaries changed. Text files are compared with CRLF
+  normalized, because npm checks a git dependency out with the contributor's own
+  git config; the binaries are compared byte for byte. An installed entry that
+  is not a file is reported as a change of SHAPE rather than stepped over, and
+  `--update` refuses to bless a tree containing one, because the verdict this
+  prints claims the whole tree.
+- **`npm run verify:fast` / `verify:suite` / `verify:sim` / `verify:pr` /
+  `verify:full`** - the verification lanes, named once. Both workflows invoke a
+  lane verbatim, so "it passed locally" and "CI is green" cannot drift into
+  meaning different things, and a step added to a lane lands in both places at
+  once. `verify:pr` is exactly the union of the hosted lanes; `verify:full` adds
+  the Playwright run, which no workflow runs.
+- **`npm run check:links`** - a dependency-free checker for the shipped
+  documentation: every `](#anchor)` names a heading that exists and every
+  relative file link names a file that exists. It reproduces GitHub's slug rule
+  exactly, including the double hyphen a deleted word leaves behind, because an
+  approximation either passes dead links or fails live ones. External links are
+  not fetched.
+- **An advisory job** in the test workflow: `npm audit --audit-level=high` over
+  the root and fixture lockfiles. The locks were swept clean once and nothing
+  kept them that way - an advisory published afterwards arrives through a plain
+  `npm ci`, silently, and the suite has no opinion about it. It fails the
+  workflow only on the SHIPPED tree (`--omit=dev`), which is the one where an
+  advisory describes exposure a consumer has; the development and fixture trees
+  are reported without blocking, because an advisory against a transitive
+  dependency of a benchmarking tool that ships to nobody would otherwise turn
+  every unrelated change red with no in-repo remedy.
+- **A support-floor job**: `peerDependencies` publishes `svelte ^4.0.0`, and
+  every other lane installs what the lockfile resolves, which is a current
+  svelte 5. The floor half of the published range had never been executed once.
+  The job installs `svelte@4.0.0` and `ws@8.0.0` exactly and runs the suites
+  that load the browser client, which is the only code here importing a peer at
+  runtime. It builds no fixture, but it is not addon-free - one selected suite
+  drives a real socket - so it verifies the native addon loaded before running
+  anything, rather than answering a question about svelte 4 with a message
+  about a missing addon.
+
+### Changed
+
+- **`uWebSockets.js` moves from v20.67.0 to v20.69.0**, picking up native uWS v20.78.0 and
+  v20.79.0. Two upstream changes matter to this adapter:
+  - Upgrading an HTTP socket to a WebSocket inside a `cork()` callback from an ASYNC context
+    - a timer, or any callback uWS did not itself drive - was buggy upstream. The adapter has
+    always upgraded that way and still does: an `authenticate` hook resumes the corked upgrade
+    after an await, and the per-tick admission budget resumes it after a `setImmediate`. No
+    workaround is removed here, because none was carried - the pattern the adapter already
+    uses is simply correct upstream now.
+  - A build compiled with `UWS_WITH_PROXY` sitting behind an L4 (TCP) proxy could be made to
+    report an attacker-chosen `getProxiedRemoteAddress()`: an L4 proxy does not parse HTTP, so
+    a remote client could simply send an extra PROXY v2 frame and uWS would update its record
+    for the connection. Any IP-level blocking or rate limiting built on that value was
+    spoofable. Fixed upstream. This affects only builds compiled with `UWS_WITH_PROXY`; the
+    published prebuilt binaries the adapter installs are not compiled with it.
+  `beginWrite()` is also new upstream, for establishing the chunked write path before the
+  first chunk is known; the adapter does not use it yet. The full suite passes across the
+  bump with no adapter change, and `npm run check` now fails if any tracked file names a
+  different tag than the pin.
+
+- **A repeated single-valued header now refuses the request with `400 Bad Request`**, where
+  the last line used to win silently: `host`, `content-length`, `transfer-encoding`,
+  `content-type`, `authorization`, `proxy-authorization`, `origin`. Whichever value this
+  layer picks, the proxy in front may have picked the other, and the two then disagree about
+  where the request ends, how its body parses, who it is from, or which origin it claims.
+  Merging is meaningless and choosing is a security decision no transport layer should make
+  silently. A WebSocket upgrade carrying one is refused with the same `400` before the client
+  address is decoded, and the in-flight admission slot is handed straight back.
+- `X-Forwarded-For` chains that arrive on several lines now resolve to the hop `XFF_DEPTH`
+  names instead of falling back to the socket address. A chain genuinely SHORTER than
+  `XFF_DEPTH` still answers the socket address: that no longer happens through multi-line
+  proxy emission, and the only alternative - the leftmost address - is client-authored by
+  construction, so taking it would let any client name its own rate-limit identity.
+  `x-forwarded-for` stays comma-joined when `ADDRESS_HEADER` names it, which is the
+  documented configuration and the case the merge exists for; every OTHER configured
+  address header keeps the last line, because that is the one the resolver can read.
+
+
+- Each precompressed static representation carries its own `ETag`, derived from the uncompressed one
+  with the coding appended inside the quotes. Existing caches holding an entry under the old shared
+  validator revalidate once into a full `200`; nothing is served incorrectly in the meantime.
+- Byte ranges are served from whichever representation the request negotiated, not from the
+  uncompressed bytes. `Accept-Ranges: bytes`, `Content-Range` and `If-Range` all now refer to that
+  representation, and a `206` for a compressed representation carries its `Content-Encoding`. A
+  `Range` header that cannot be honoured (malformed, multi-range, or a stale `If-Range`) still falls
+  through to a normal negotiated response, so a junk `Range` does not cost a client its compression.
+- `304 Not Modified` responses for static assets now carry `ETag`, `Vary: Accept-Encoding` and
+  `Cache-Control`. A 304 updates a stored response, and without those a shared cache can attach it
+  to the wrong stored variant or keep it under a freshness policy the origin no longer applies.
+
+
+- **BREAKING (only for `SHUTDOWN_TIMEOUT=0`; the default 30 is unchanged): `SHUTDOWN_TIMEOUT=0` now
+  means NO budget - wait as long as the shutdown takes.** The budget added above covers application
+  code, so the value had to be given a meaning it did not have before: read as a budget of zero
+  milliseconds it aborts on the first macrotask, and every flush an app performs on the way out is
+  lost - the exact data loss the budget exists to prevent. It also has to be sayable at all, because
+  the `hooks.ws` `shutdown` hook used to be awaited with no deadline whatever `SHUTDOWN_TIMEOUT` was
+  set to, and an app that must never be cut off mid-flush needs a spelling for that. 0 is what a
+  disabled timeout is spelled as elsewhere in Node. With no budget the hook receives
+  `signal: null, deadline: null`, nothing aborts, and the shutdown path says so on the way out.
+  Previously `SHUTDOWN_TIMEOUT=0` meant "do not wait for in-flight requests" (only the drain was
+  bounded); an operator who set it for a fast exit should now set `SHUTDOWN_TIMEOUT=1`, and one who
+  set it and relied on their hook finishing keeps exactly the behaviour they had.
+
+- Boot and shutdown log lines now distinguish the three states an operator has to reason about.
+  `Listening on ... (ready in Nms)` is now `(bound in Nms)` and is followed by a separate
+  `Ready for traffic (Nms since boot)` once `init` commits; entering the drain prints
+  `Readiness now reports NOT ready (draining); still accepting.`; and `Shutdown complete.` now
+  carries how long the close took, or is replaced by a `was NOT clean` error line naming the phase
+  that ran out of budget.
+
+
+- The built-in holding page no longer claims a queue position or a wait
+  estimate. `You are in line`, `Ahead of you: N` and `Estimated wait: N seconds`
+  are gone: upgrade admission is a concurrency gate that keeps no per-client
+  identity, arrival order or reservation, so there is no position to report, and
+  the wait was a hardcoded one-slot-per-second projection that nothing measured.
+  The page now reads `Server at capacity` and, when the caller seeds a live
+  count, `About N people are waiting for a free slot.` - a crowd size, which is
+  what the underlying rolling poll counter actually observes.
+- The waiting count is bucketed before display (exact under 10, to the nearest
+  10 under 100, to the nearest 100 above) so the shown figure carries only the
+  precision the estimate has.
+- Rendering the page without a live count - which the upgrade-refusal path does
+  - now shows `Waiting for a free slot.` instead of `Ahead of you: 0` and
+  `Estimated wait: 0 seconds`. A refused visitor no longer reads a fabricated
+  zero until the first poll lands.
+- `{{queueDepth}}` and `{{estimatedSeconds}}` remain supported template tokens
+  with unchanged values, for operator pages written against them. Their meaning
+  is now documented where they are substituted: a count of browsers polling the
+  page, and that count at a nominal one slot per second - neither is a position
+  or a measured wait.
+
+
+- **`smoothWorld.set()` now documents where a placement is rendered.** The replacement travels as an ordinary update on the ordinary cadence, so nothing on the wire marks it discontinuous; the docstring (and `plugins/smooth/server.d.ts`) now names `snapSpeedPerSec` as the knob that governs how it is drawn.
+
+
+- **The 256-topic-name cap is documented in the unit it has always been enforced in: UTF-16 code units.** No behaviour change - `topic.length` was and remains the measure. The unit is stated because it is load-bearing: the server-side `maxTopicLength` caps in the cursor and throttle plugins read the same `topic.length` against the same default of 256, so a wire boundary counting Unicode code points instead would admit up to 512 units and hand a client-named topic to a plugin that then refuses it (throttle by throwing out of the app's own publish call, cursor by dropping every frame with no signal, with the client picking which). The wire ceiling stays at or below the narrowest downstream cap, in the same unit.
+
+
+- **Queue plugin: O(1) dequeue.** The per-key waiting list is a linked FIFO
+  instead of an array with `Array#shift`, which was O(n) in the backlog length
+  and therefore slowest exactly when the queue was saturated. The list threads
+  itself through the queued task records rather than wrapping each one in a
+  node, so a waiting task still costs a single object. A/B against the released
+  implementation at default options, best of three runs each: one key with 200k
+  tasks 7.7s -> 0.10s (-98%), 1000 keys x 200 tasks -1% to -6%, 50k keys x 4
+  tasks -7% to -9% (lower is faster; no shape regressed).
+
+
+- **BREAKING (return type): `CrdtAuthority.persistNow()` resolves to a `CrdtFlushResult`
+  instead of `undefined`.** Callers that `await` the flush and ignore the value are
+  unaffected; a caller that typed the result as `Promise<void>` needs its annotation updated.
+- **BREAKING (default): `persistNow()` is bounded by default.** It previously waited
+  indefinitely for the host's stores; it now waits `flushTimeout` ms (default 10000, well
+  inside a typical shutdown grace period) and then reports the unfinished topics in
+  `timedOut` and aborts their signals. A deployment whose store legitimately takes longer
+  than 10s must raise `flushTimeout` or pass `persistNow({ timeout })`; `Infinity` restores
+  the old unbounded wait. Nothing is discarded on expiry - the record goes back to dirty and
+  a fresh write is scheduled - but a host that honours the new `signal` will now stop a write
+  the flush gave up on, and the rescheduled write is one attempt at the `debounceMaxWait`
+  cadence (floored at 1000 ms), not an unbounded retry loop: only an explicit flush carries a
+  deadline, so if that write also never settles the topic's persistence stalls until it
+  settles or until the next `persistNow()` abandons it. Editing does NOT clear that stall -
+  the edit's own capture queues behind the wedged write and is never dispatched (verified:
+  the host's store is entered twice and stays there across an edit and three seconds; the
+  next `persistNow()` takes it to three) - so a deployment that can wedge a write needs a
+  periodic flush, not traffic. The flush result is where a caller learns that, which is why a
+  shutdown path should act on `dirty` rather than flush and exit.
+
+
+- **`groups` plugin: `maxMembers` now defaults to `1_000_000` instead of `Infinity`.** Groups
+  were the one plugin whose internal state had no bound unless the app remembered to set one,
+  even though the capacity model promises that every plugin cap is finite by default. The new
+  default matches the rest of the plugin caps and sits at the connection ceiling of the process,
+  so it cannot bite a real group; it does stop member entries piling up past that ceiling when an
+  app wires the group's `subscribe` hook without its `close` hook and departed sockets never
+  leave. Apps that genuinely want an unbounded group opt out explicitly with
+  `createGroup(name, { maxMembers: Infinity })`. Saturation behaviour is unchanged: `join()`
+  returns `false` and `onFull` fires.
+
+
+- The test workflow now triggers on `PROTOCOL.md`, `protocol.schema.json` and
+  `test-vectors/**`. The spec says those artifacts are validated in CI against
+  the reference implementation, and the suites that do it existed, but a pull
+  request touching only the schema or a recorded vector triggered nothing at
+  all, so the promise held only for changes that happened to touch `src/`.
+- The test workflow now also triggers on `README.md`, `MIGRATION.md` and
+  `CONTRIBUTING.md`. `npm run check` reads all four shipped documents, so a pull
+  request that only rewords a heading - orphaning every link pointing at it -
+  used to match no filter at all, and the one gate that can see a dead anchor
+  would have run on every change EXCEPT the change that breaks one.
+- The simulation workflow now triggers on `package-lock.json`, `.nvmrc` and its
+  own workflow file. A dependency move changes what the simulation runs and
+  could previously reach `main` without the swarm executing once.
+- `test/protocol-schema.test.js` and `test/minimal-client.test.js` take their
+  native-runtime gate from `test/helpers/real-runtime.js` instead of each
+  rolling a local `try { await import(...) }` around `describe.skip`. A local
+  gate can only ever skip; `REQUIRE_UWS=1` could not reach either suite, so the
+  two suites standing behind the published conformance promise were the two the
+  hard-fail rule did not cover.
+
+### Fixed
+
+
+- **Repeated request header lines are no longer last-wins.** Every entry point collected
+  headers with `headers[key] = value` per line, so a second line of the same name silently
+  overwrote the first. A proxy that emits one `X-Forwarded-For` LINE per hop (HAProxy's
+  `option forwardfor`) therefore arrived as a single address: with `XFF_DEPTH >= 2` the
+  resolver found fewer addresses than configured hops and answered the socket peer, which
+  collapses every client behind that proxy onto one rate-limit identity - reachable through
+  ordinary infrastructure rather than an attack. Repeated lines are now merged per header
+  class by one shared collector used at all four collection sites (WebSocket upgrade, auth
+  preflight, SSR, reserved admin route) and in the `createTestServer` mirror, which had
+  drifted from each other:
+  - list-valued headers (`x-forwarded-for`, `forwarded`, `via`, `accept-encoding`, and any
+    unenumerated vendor chain) join with `", "` in arrival order, the form RFC 9110 defines
+    as equivalent to the separate lines;
+  - single-valued proxy headers keep the LAST line, the one the appending hop in front
+    wrote: `x-forwarded-proto`, `x-forwarded-protocol`, `x-forwarded-scheme`,
+    `x-forwarded-host`, `x-forwarded-port`, `x-real-ip`, `cf-connecting-ip`,
+    `true-client-ip`, `x-client-ip`, `fly-client-ip`, plus whatever names `PROTOCOL_HEADER`
+    / `HOST_HEADER` / `PORT_HEADER` / `ADDRESS_HEADER` were configured with;
+  - `cookie` joins with `"; "` - several `Cookie` lines are what an HTTP/2 to HTTP/1.1
+    downgrade at an edge proxy produces, and a comma join would fold every later cookie into
+    the previous cookie's value;
+  - `set-cookie` is never joined (a comma is legal inside an `Expires` date); the first line
+    is kept, the rest are dropped, and the request is still served.
+- **A repeated `X-Forwarded-Proto` / `X-Forwarded-Host` / `X-Forwarded-Port` no longer breaks
+  origin derivation.** Each carries one scheme, one host, one port, so a join produces a
+  value of the wrong shape rather than a longer one. With the documented
+  `PROTOCOL_HEADER=x-forwarded-proto HOST_HEADER=x-forwarded-host` configuration behind a
+  proxy that APPENDS its line, `"https, https"` is not a protocol - origin derivation throws,
+  and SSR answers 500 on every request of that deployment - and `"a.test, a.test"` builds a
+  request URL the WHATWG parser refuses outright. The same rule protects the client address:
+  a joined `x-real-ip` puts the client's own bytes in FRONT of the proxy's, and the
+  resolver's 128-character bound truncates to the leading ones, which would have handed a
+  client its own choice of rate-limit identity and of `getClientAddress()`.
+- **The WebSocket auth preflight answers `400` instead of hanging when no origin can be
+  derived.** Origin derivation throws on a missing or malformed Host, or on a
+  client-supplied `PROTOCOL_HEADER` / `PORT_HEADER` value, and nothing wrapped that route:
+  the throw escaped the uWS callback as a synchronous exception, so no response was ever
+  written and the pooled request-state object was never handed back. Guarded the way the
+  reserved admin route already was, `Request` construction included.
+- **A chain header named as `ADDRESS_HEADER` no longer lets a client choose its own
+  rate-limit identity.** The header class was decided by the header's GRAMMAR, so
+  `ADDRESS_HEADER=x-original-forwarded-for` (ingress-nginx, the GCP external load balancer),
+  `=forwarded` (RFC 7239) or `=via` kept the comma join. The client-IP resolver counts hops
+  in `x-forwarded-for` and in nothing else: every other configured name reaches its
+  single-address branch, which truncates an over-long value keeping the LEADING bytes -
+  the proxy's bytes on one line, the CLIENT'S on a joined one. Behind a proxy that appends
+  its own line, a client padding that header past 128 characters therefore decided the
+  per-address upgrade limiter's key and `getClientAddress()` outright: rotate the padding to
+  keep evading the cap, or pin it to spend a victim's budget. Without padding the same
+  request resolved to the literal string `9.9.9.9, 203.0.113.5`, which is not an address at
+  all. The class now follows what PARSES the value rather than the header's grammar: every
+  configured proxy header keeps its last line except `x-forwarded-for`, whatever it is
+  called. Chains that are not the configured address header are untouched and still join, so
+  an app reading one off `event.request.headers` still sees every hop.
+- **A refused header no longer changes how the rest of a request collects.** The ambiguity
+  check ran before the merge, so once one repeated single-valued header was seen, every
+  later repeated header kept its FIRST line instead of merging - a third policy nothing
+  documented. The refusal now names the first offender without altering any other header's
+  class.
+
+
+- Static assets no longer hand a resumed download bytes from a different representation. Byte
+  ranges were always cut out of the uncompressed buffer, whatever content-coding the request had
+  negotiated. A client that fetched an asset with `Accept-Encoding: br` stored brotli bytes, and its
+  resume (`Range: bytes=N-` with the same `Accept-Encoding`, which is what `curl -C - --compressed`,
+  `wget --continue` and every download manager send) came back `206` with uncompressed bytes sliced
+  at offsets the client had computed against the brotli stream, a `Content-Range` total quoting the
+  uncompressed length, and no `Content-Encoding` at all. Nothing reported an error at either end;
+  the assembled file simply failed to decompress. Content negotiation now runs first and the range
+  is cut from the representation the request selected, in that representation's own coordinates, so
+  a resumed compressed download joins back into the original file. Sending `If-Range` did not avoid
+  this either: the single validator matched across codings, so it confirmed the wrong
+  representation. Each content-coding now carries its own validator
+  (`W/"<mtime>-<size>-br"`, `-gzip`), so a cross-representation `If-Range` is a mismatch and the
+  full selected representation is returned instead of a meaningless slice.
+- `416 Range Not Satisfiable` no longer quotes the wrong entity length. `Content-Range: bytes */N`
+  reported the uncompressed file size even when the request had negotiated a much smaller
+  compressed representation, telling the client its download was many times longer than the bytes
+  it was actually receiving. The length quoted is now the selected representation's.
+- Static assets no longer answer `304 Not Modified` across content-codings. `If-None-Match` was
+  compared against the uncompressed ETag whatever the negotiated coding was, so a client holding a
+  brotli copy that revalidated without `Accept-Encoding: br` was told its copy was current and kept
+  using compressed bytes as if they were the decoded file. The conditional check now runs against
+  the validator of the representation the request would actually receive, and answers `200` with
+  the right body when they differ.
+
+
+- **Readiness no longer reports ready while the server is still starting up.** The listen socket is
+  bound before the app's `hooks.ws` `init` hook runs (deliberately - the kernel queues arriving
+  connections instead of refusing them), but `/readyz` answered `200 ready` from the moment of the
+  bind, so a load balancer could route into an instance whose database pools, warmup or cron
+  registration had not finished. The instance now has an explicit lifecycle state
+  (`starting -> ready -> draining -> closed`); readiness answers `503` until `init` resolves and
+  commits it, and an `init` that throws leaves the instance `starting`, so readiness never turns
+  green for a failed boot.
+
+- **The readiness `503` names which not-ready state it is instead of always saying `draining`.** The
+  route wrote one fixed word for every `503`, so an instance that was still booting told operators it
+  was draining - during a rolling deploy, every freshly started instance, which reads as a stuck or
+  reversed rollout and is the standard trigger for a rollback. The body is now the lifecycle state:
+  `starting`, `draining` or `closed`, with `200 ready` unchanged. The routing DECISION is unchanged -
+  all three are not-ready and answer `503`.
+
+- **`createTestServer` no longer disagrees with production about shutdown or about readiness.** The
+  shipped test server is what an app verifies its handshake and its teardown against, and it fired the
+  `shutdown` hook with `{ platform }` alone and awaited it forever, while production passes
+  `{ platform, reason, signal, deadline }` and stops waiting when `SHUTDOWN_TIMEOUT` is spent. A hook
+  written to give up cleanly on `signal` could not be exercised at all, and a hook that never settled
+  passed locally while production cut it off and logged that its work did not finish. The mirror now
+  reads the same `SHUTDOWN_TIMEOUT` (seconds, default 30, `0` = no budget) at `close()`, passes the
+  same four-field context, races the hook against the same signal and logs the same not-settled error.
+  Its readiness is the same four-state machine too, so `/readyz` answers `503 starting` while the
+  app's `init` hook is running exactly as a real instance does. Two differences remain by design:
+  `ENV_PREFIX` is not applied to the variable here (the harness reads the bare name), and the harness
+  has no in-flight-request drain or `sveltekit:shutdown` phase for the budget to cover.
+
+- **Readiness now flips at the START of the load-balancer drain delay instead of at the end of it.**
+  `SHUTDOWN_DELAY_MS` exists so a balancer can deregister an instance before its sockets close, and
+  the signal it deregisters on is readiness - which used to flip only once the delay had elapsed and
+  the sockets were about to close. New work was therefore routed to a deliberately draining instance
+  for the whole propagation window, and then met a closed socket. Draining and closing are now two
+  separate steps: readiness answers `503` immediately on `SIGTERM`/`SIGINT` (and, in cluster mode,
+  when the primary broadcasts the drain to its workers), while the listen socket stays open and keeps
+  serving for the configured delay. Liveness (`healthCheckPath`) is unaffected in every state, so a
+  readiness 503 can never trip a liveness probe into restarting a pod that is shutting down on
+  purpose.
+
+- **`SHUTDOWN_TIMEOUT` now bounds the whole shutdown, including application code.** It previously
+  bounded only the in-flight request drain - the one phase the adapter controls. The `hooks.ws`
+  `shutdown` hook was awaited with no deadline before the listen socket was even closed, so a hook
+  that never settled (an `await` on a dependency that was already gone) held the socket open, kept
+  the drain race unarmed and held the process until the supervisor's SIGKILL - with in-flight
+  requests dropped and, under systemd, a stop that looked like it was progressing. One budget is now
+  computed once and shared by every phase as an `AbortSignal`; when it expires the close path
+  continues and the phase that ran out of it is named in the log.
+
+- **`process.on('sveltekit:shutdown')` listeners are awaited instead of being abandoned mid-await.**
+  The event was emitted synchronously and the process exited immediately afterwards, and
+  `EventEmitter` discards what a listener returns - so the documented
+  `async (reason) => { await db.close(); }` cleanup never resumed past its first `await`. Pool
+  closes, final durable writes and shutdown telemetry were lost silently. Listeners are now invoked
+  directly and any promise they return is awaited under the shared shutdown budget, after the drain,
+  so a listener sees no request still using what it is closing. A listener that throws or rejects is
+  reported by the shutdown log instead of surfacing as an uncaught error during exit, and one that
+  never settles is reported and cannot hold the exit past the budget.
+
+- **A cluster worker told to drain while it is still booting leaves the rotation immediately.** The
+  primary broadcasts the drain to its workers, and a worker buffers everything the primary sends
+  until its handler graph is live - correct for relay and shutdown traffic, wrong for this one
+  message, which touches nothing but the readiness state. Replayed after boot, the worker first
+  announced `Ready for traffic` for an instance the primary had put into shutdown seconds earlier,
+  and only then reported that it was draining, so a slow rollout read backwards in the log. The drain
+  is now applied on arrival, and a worker drained during boot never announces itself ready at all.
+
+- **A failure inside the shutdown sequence can no longer leave the process with no way out.** The
+  budget timer is deliberately ref'd (it is what keeps the process alive across the awaited
+  teardown), and it was cleared on the success path only. A throw between arming and clearing - the
+  teardown of a listen socket or a reconnect advisory - escaped as an unhandled rejection with that
+  timer still holding the event loop: the process either died on the rejection with the clean exit
+  never reached, or, in an app that installs an `unhandledRejection` handler, kept running with no
+  exit path at all. The sequence now clears the timer and exits from a `finally`, and reports the
+  failure.
+
+- **A failed TLS reload is no longer silent about the certificate it keeps serving.** Validation
+  failures, a mid-apply swap failure and a cert watcher that fails to start each kept the previous
+  certificate (correct for availability) and logged one line, after which every probe stayed green
+  while renewal was in fact dead - the first symptom being every handshake failing at once at expiry.
+  The reload path now records its own health, and while it is degraded an hourly sentinel re-reports
+  the failure together with the served leaf's expiry and remaining validity once that leaf is inside
+  a 14-day window. The sentinel is armed only while degraded and is silent otherwise. Readiness is
+  deliberately NOT wired to certificate expiry: taking a fleet out of rotation because its
+  certificate is running out removes a service that is still serving.
+
+
+- The page rendered `Estimated wait: 1 seconds`. The status line now agrees its
+  noun and verb with the count (`About 1 person is` / `About 2 people are`), and
+  large counts are grouped with an explicit locale. The whole sentence is
+  composed by one function whose source is embedded into the page script, so the
+  server's first paint and every polled update cannot drift apart in grammar or
+  rounding - the previous page updated only the number and left the unit as
+  static text, so a server-side plural branch alone would not have fixed it.
+- A failed capacity check no longer retries silently behind a stale number: it
+  is shown and announced, and the recovery is announced as soon as a check gets
+  through again.
+- Every line the status region can hold is composed in one place from the page's
+  own flags, and no branch writes a literal of its own. A branch that announced
+  its own text went on asserting it after the condition behind it had passed -
+  which is how a page could sit on an offer of a slot that had already been
+  taken, or replace live news with a paused notice that contradicted the button
+  still on screen.
+
+
+- **Remote interpolation renders a teleport as a teleport, with no configuration.** The smoother treated a straddling sample pair as a discontinuity only when the pair spanned more than `snapGapMs` (default 500) - a TIME test. A server-side placement (`world.set`, a warp, a respawn, a scripted move) is delivered on the ordinary tick, so its two samples sit one interval apart like any other pair, and the render frame lerped the entity the whole way to the new position: a streak across the board, and in cells mode a pop between cells. The interpolator now also judges a pair against the entity's OWN neighbouring samples and snaps one that outruns both of them by a wide factor. That comparison needs no knowledge of the topic's units, which is what makes it safe to have on by default - the same code renders cursors in CSS pixels and game entities in arbitrary world units, and an entity the app has never moved has no absolute baseline at all while it always has neighbouring samples.
+
+  Ordinary motion is untouched by construction: a pair is a jump only if it outruns the pair BEHIND it and, once a later sample has arrived, the pair AHEAD of it. Uniform motion, hard acceleration, hard braking and a dead stop each keep an adjacent pair moving at a comparable speed, and the first pair of a ring has no baseline behind it and is never judged.
+
+- **Dead-reckoning no longer flies an entity onward at teleport speed.** When the buffer runs dry the extrapolation velocity comes from the last two samples, and the only rejection was a pair spanning more than `snapGapMs`. A last pair judged a jump now contributes no velocity either, so the entity rests at the placement instead of continuing across the world at the jump's implied speed for the whole extrapolation cap - the longest smear this pipeline could paint.
+
+- **A placement during a resync is snapped, not smeared across the resume window.** The resume ease slides each remote entity from where it was last drawn to the rebuilt basis over `resumeEaseMs` (default 150). It armed unconditionally, so a server-side placement during a short blackout was painted every frame of that window - the same defect as the straddle smear, stretched over 150ms instead of one sample interval. The ease now measures its own slide against the entity's peak honest speed from the history being discarded (captured by `renderedSnapshot`, once per resume) and snaps when the slide would outrun it. An entity that was at REST before the resume has a peak of zero, so any disagreement between the two bases snaps: two bases should agree about where a resting entity is.
+
+
+- **Unpaired surrogates are rejected in wire topic names.** With `websocket.allowNonAsciiTopics: true` a client could subscribe to a topic containing a lone high or low surrogate - reachable through a JSON `\uD83D` escape in the subscribe frame, which parses to a lone surrogate without the frame itself ever being ill-formed UTF-8. Such a name is not encodable as UTF-8, so it is replaced by U+FFFD on the way back out of the socket: the `subscribed` ack and every published frame carry a name the client's own dispatch does not recognise, and the subscription stays open while silently delivering nothing. The same rule now applies on the server-named `platform.subscribe` / `platform.checkSubscribe` APIs, which run the same widened alphabet - there a name sliced mid-pair by app code leaves the client with no name it could send back to unsubscribe again. Both are answered with `INVALID_TOPIC` at the point of subscribe.
+
+
+- **Queue plugin: a per-key bound did not bound the queue.** `maxSize` capped
+  one key's backlog and `concurrency` capped one key's in-flight tasks, but
+  nothing capped the totals: N distinct keys each below `maxSize` accumulated
+  N x maxSize waiting tasks, and N keys each below `concurrency` started
+  N x concurrency tasks simultaneously with no rejection at any point. High key
+  cardinality therefore bypassed queueing entirely and launched arbitrary work.
+  The new aggregate bounds close both dimensions once they are set to real
+  numbers.
+- **Queue plugin: keys are serviced round-robin.** Task completion used to
+  restart the completing key immediately, so once a global in-flight bound
+  binds, a saturated key would hold the whole budget and starve keys that
+  arrived later. The scheduler now takes one task per key per visit and sends
+  the key to the back of the line.
+- **Queue plugin: the scheduler's service line no longer keeps places for keys
+  that are gone.** A key waiting for a running slot holds a place in the line.
+  Emptying it with `clear()` - the ordinary cancel-this-user's-pending-work
+  path - used to leave that place behind, and the only code that consumes
+  places is blocked by exactly the condition that made the key wait, so under a
+  saturated `maxRunningTotal` the line grew without bound and each abandoned
+  place pinned its key string. Measured before the fix: one held task at
+  `maxRunningTotal: 1`, then 500 x (`push('user:N')` + `clear('user:N')`) left
+  500 places for keys that no longer existed while `keysCurrent` reported 1. A
+  key now gives its place back the moment it stops having startable work, so
+  the line never holds more entries than there are live keys, and
+  `stats().readyCurrent` reports its size.
+- **Queue plugin: a throwing `onDrop` no longer escapes `push()`
+  synchronously.** `push()` is documented to return a promise, but a metrics
+  sink that threw was called before the rejection was constructed, so the throw
+  came out of `push()` itself and a caller's `.catch()` never saw it. The sink
+  is now reported to, not consulted: a throw is contained, counted as
+  `stats().onDropErrorsTotal`, and the caller still gets the rejection.
+- **Queue plugin: a rejected push no longer allocates its key.** Every bound is
+  checked before any per-key state is created, so a shed push cannot leave an
+  empty key behind - which would itself have leaked the cardinality `maxKeys`
+  exists to bound.
+
+
+- **Rate-limit plugin: bucket eviction can no longer be aimed at an active ban.** At
+  `maxBuckets` the plugin deleted the oldest insertion-order entry with no reference to
+  `bannedUntil`, so a key that had just been auto-banned (`blockDuration`) or banned through
+  `ban()` was the first entry dropped as new keys arrived, and its next message recreated it
+  with a full allowance. Anyone able to mint identities - a new address, a new value for a
+  custom `keyBy` - could therefore push their own banned key out of the map and walk straight
+  back in. Eviction now samples the map and takes an entry that is still serving a ban only
+  when every sampled candidate is banned; the one it takes then is the most recently placed
+  ban of that sample, which at the far end means the ban placed longest ago in the whole map
+  is never the victim - so identity churn, which can only add newer bans, cannot clear the
+  OLDEST ban (wherever an eviction can compare two entries at all: at `evictionSample: 1` or
+  a one-bucket cap it takes the entry it lands on). Every lost ban is reported through the
+  new `onEvict` with `banned: true`.
+  Three things this deliberately does not claim. The choice is sample-local, not map-wide: an
+  eviction consults `evictionSample` entries, so it can drop a ban while newer bans sit
+  elsewhere in the map (measured at `maxBuckets: 64` with the default sample of 16: 241 of
+  ~300 last-resort evictions dropped a ban that still had newer ones resident). A ban is
+  therefore not indestructible - a map saturated with bans must drop one to admit any new
+  key, and traffic that first fills the map with a map's worth of its own bans can then have
+  a ban placed after those churned out from under it, which is what `banned: true` and sizing
+  `maxBuckets` above the bans in flight are for. And evicting an unbanned bucket always hands
+  its key a fresh allowance, so identity churn still buys throughput per identity the way a
+  per-key limiter always allows.
+- **Rate-limit plugin: eviction no longer feeds the longest-lived clients to identity churn.**
+  Insertion order puts resident clients at the head of the map, so evicting the head handed a
+  flood of one-shot identities exactly the buckets worth keeping. The victim is now the least
+  active entry of a rotating sample, where activity is the allowance drawn across the current
+  window and the one before it - the same two-window span the adapter core's upgrade limiter
+  scores on. A bucket whose window has elapsed no longer wins outright, which had made every
+  client that messages more slowly than one `interval` the outright preferred victim; it is
+  now only a tiebreak, and it is the right tiebreak because such a bucket refills to full on
+  its owner's next message either way. The rotating cursor is also what keeps the sample
+  cheap: a fresh iterator re-walks the tombstone run that every previous eviction left behind,
+  so it degrades as the cap grows.
+- **Rate-limit plugin: `onEvict` is called after the triggering call has finished deciding.**
+  It fired between the bucket insert and the ban check, so a listener that threw skipped the
+  charge and the ban that call owed - under a flood, where every call evicts, one bad logger
+  turned every `consume()` into an exception that had already inserted a bucket but never
+  drawn from it. The listener still throws through to the caller (it is the app's own error,
+  not something to swallow), but it can no longer change what the call charged, refused or
+  banned.
+- **Rate-limit plugin: `ban()` on a key that has not been seen is held to `maxBuckets`.** It
+  inserted unconditionally, so an app banning attacker-supplied keys grew the bucket map past
+  its own cap. Note the trade this makes, now stated on `ban()` itself: at the cap such a ban
+  evicts another key's bucket, so an app that bans ids supplied by the traffic it is defending
+  against hands the attacker one eviction of somebody else's rate-limit state per ban.
+
+
+- **`plugins/webhooks` delivery controls no longer hand back the state they are supposed to enforce
+  when their key cap is reached.** `createRetryBudget` and `createWebhookBreaker` reclaimed a slot by
+  deleting the oldest key in insertion order, and the next access recreated it - a drained budget
+  came back full, an ejected endpoint came back healthy. Anything able to push entries out of the map
+  could therefore clear its own enforcement record simply by naming keys nobody cares about, which
+  costs one throwaway key per slot and is trivially met by a per-event `url` callback under wildcard
+  DNS. Both controls now reclaim only entries that carry no enforcement state: a token bucket that
+  has refilled to full (dropping it is exactly equivalent to keeping it, since the next access
+  recreates the same full bucket) and a breaker key that is healthy with no failures recorded. When
+  nothing is reclaimable, a token bucket REFUSES a key it has no slot to account for rather than
+  granting it an untracked allowance - which is what makes `maxKeys * capacity` a real aggregate
+  bound instead of an arithmetic product - and the breaker leaves the new key untracked (it can never
+  be ejected) rather than forgetting an ejection. The reclaim pass is a full walk rather than a
+  sample of the insertion-order head, which is the worst possible sample because it holds the
+  longest-lived keys; it runs only when a new key arrives at the cap, and a pass that frees nothing
+  is not repeated until enough time has passed for one to be able to free something, so a flood of
+  one-shot keys cannot turn every insert into a walk of the whole map. Both observability reads are
+  read-only as well - `tokensFor()` no longer instantiates a bucket and `stateOf()` no longer
+  instantiates a breaker entry - so polling them cannot take the last slot, evict anything, or set off
+  a reclaim walk. `tokensFor()` answers a destination's allowance and nothing about slot
+  availability, which the type now says out loud: at `maxKeys` with nothing reclaimable, an untracked
+  destination reports `capacity` while `take` refuses it for want of a slot.
+
+
+- **CRDT: a graceful `persistNow()` flush no longer reports a failed or declined store as
+  a durable one.** Every per-topic store chain ends in its own terminal `catch` (it reports
+  through `onError`, marks the replica dirty and arms a retry), and `persistNow()` awaited
+  exactly those already-caught chains before resolving `undefined` - so `await
+  authority.persistNow()` resolved successfully after every host `store` call had rejected,
+  and a store that resolved `false` to decline the write was indistinguishable from one that
+  wrote. A shutdown path could destroy the authority believing the documents were safe. The
+  flush now resolves to `{ ok, durable, declined, failed, timedOut, dirty }`, so the caller
+  learns per topic what actually happened to the bytes. `persistNow()` still never rejects.
+- **CRDT: a host `store` that never settles can no longer hang shutdown forever.**
+  `persistNow()` had no deadline and no `Promise.race`: one wedged write blocked the flush
+  indefinitely, and the documented escape (`destroy()`) discards pending edits without
+  storing them, making the recovery from a hung flush data loss. The flush is now bounded
+  (see `flushTimeout` below): on expiry the topics still in flight are reported in
+  `timedOut` and their host I/O is aborted through its `AbortSignal`.
+- **CRDT: a flush deadline no longer drops the state of the write it gave up on.** Expiry
+  reported the topic in `timedOut` and aborted the write, but the record had already had its
+  dirty flag cleared at capture time and its schedule cancelled, and neither was restored -
+  so recovery depended entirely on the host's store REJECTING, which the hooks explicitly do
+  not require. Two ways that lost bytes. A store that never settles at all was never retried
+  (measured: the host was called exactly once in the three seconds after the timeout). And a
+  host that honoured the abort the obvious way - abandoning the write and RESOLVING, having
+  written nothing - had that resolution read as `durable`, so the NEXT `persistNow()`
+  returned `{ok: true, durable: ['t'], dirty: []}` with zero bytes ever written, after which
+  `release()` unloaded the replica and the edit was gone. Abandoning a write is now distinct
+  from it succeeding: its answer is discarded however it settles, its captured state goes
+  back to dirty, a fresh full-state write is scheduled at the `debounceMaxWait` cadence, and
+  the topic's store chain is released so that write can actually run (previously a promise
+  that never settled wedged every later store for that topic, retry included). A write
+  abandoned before it was ever dispatched is not sent at all rather than handed a signal that
+  has already fired.
+- **CRDT: a short-budget flush no longer cancels the write a concurrent longer-budget flush
+  is waiting on.** The deadline belongs to one flush but the abort was applied to every
+  in-flight call on the RECORD, and two callers share one store chain, so the smallest
+  timeout in the process decided for everybody: with one dirty topic and a healthy 800 ms
+  write, `persistNow({timeout: 100})` issued alongside `persistNow({timeout: 5000})` made
+  the long flush report `failed` with zero bytes written. Any second caller - a test, an
+  admin checkpoint, a periodic flush - could therefore make the shutdown flush lose the
+  document it existed to save. Each flush now registers as a waiter on the writes it awaits
+  and cancels one only when it is the last waiter left; the short flush reports its own
+  `timedOut` and the long flush still gets its `durable`.
+- **CRDT: the `deadline` handed to `persist.store` is the longest budget waiting on that
+  write, not the budget of the flush that armed it.** It was stamped from the arming flush
+  and never widened when a longer-budget flush joined as a waiter, so a host doing exactly
+  what the hook documents - sizing its statement timeout by `deadline` - reproduced the
+  cancelled-write symptom through the hint instead of through the signal: with the same
+  100 ms / 5000 ms pair over an 800 ms write, the host aborted its own write at 96 ms and
+  BOTH flushes reported `failed` with zero bytes written. The deadline is now read when the
+  write is dispatched and is the latest deadline among the flushes waiting on it (`null`
+  when nothing bounds it, including when a waiter opted out with `Infinity`). Residual, now
+  stated on the field: a flush that starts waiting on a write ALREADY dispatched cannot
+  widen the reading the host took: that write is not aborted, but a host that bounded its
+  own I/O by the earlier reading has already stopped, so bound on `signal` too.
+- **CRDT: `attempt` handed to `persist.store` counts retries again, not writes.** It was
+  incremented on every capture and only reset by a store that was still the newest when it
+  settled, so sustained editing against a slow-but-healthy backend climbed without bound
+  (measured: six edits with `snapshotEvery: 1` produced attempts 1 through 6 with zero
+  failures and zero declines). A host doing what the hook documents - exponential backoff on
+  `attempt`, or an alert above a threshold - would throttle or page against a backend that
+  was working perfectly. It is now 1 for the first write of the current unstored state and
+  only grows for a write of that same state that did not confirm: failed, declined, or
+  abandoned by a flush deadline.
+- **CRDT: `drop()` and `destroy()` no longer report a spurious store or load failure.**
+  Cancelling the host's in-flight I/O makes it reject with the abort reason, which went
+  straight to `onError` as `store: crdt: authority destroyed` - a false "CRDT persistence
+  failed" on every shutdown that had writes in flight, and a new page for an operator whose
+  handler alerts. An intentional teardown is no longer a persistence fault; a store cancelled
+  by a flush DEADLINE still reports, because there the host really did run out of budget.
+- **CRDT: `persistNow()` validates its first argument instead of taking any object as the
+  options bag.** `persistNow(['a'])` - a plausible mistake when the RESULT is topic arrays -
+  flushed every topic and reported `durable: ['a', 'b']` for a call the caller believed was
+  scoped to one. Only a plain options object is read as options now; anything else in the
+  topic position throws `crdt: persistNow topic must be a string`, and an array in the
+  options position throws too.
+- **CRDT: `ok` no longer disagrees with `dirty`.** It was computed from failed/declined/timed
+  out alone, so a topic edited while the flush ran, or any topic at all on an authority with
+  no `store` hook, resolved `{ok: true, dirty: ['t']}` - and the one-line check the API
+  recommends, `if (result.ok) authority.destroy()`, then discarded unconfirmed bytes while
+  reporting success. `ok` is now exactly `dirty.length === 0`.
+
+### Security
+
+
+- Every third-party action in both workflows is pinned to a full commit SHA
+  rather than a tag, with the release it corresponds to in a trailing comment.
+  `@v4` re-resolves on every run: a moved tag changes the code that checks the
+  tree out and runs it without changing anything in this repository.
+
+### Internal
+
+
+- `SampleRing.sampleInto` takes one resolved bounds object instead of a positional argument list whose neighbouring entries were in different units (`snapGapMs` in milliseconds, the speed bound per millisecond). Each pair's jump verdict is resolved when its sample lands and stored as one bit per ring slot, so a render frame costs a single bit test. Measured on `bench/34-smooth-straddle-ab.mjs` (medians of 3 runs of 7 rounds): 29 ns/entity with detection on against 29 ns/entity with it off at 200 entities, 35 vs 35 at 1000. `bench/micro-smooth-alloc.mjs` reports 0.642 bytes/entity/frame against its gate of 2.
+
 ## [0.6.0-next.87] - 2026-07-30
 
 ### Breaking Changes

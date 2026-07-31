@@ -101,10 +101,14 @@ export interface AdapterOptions {
 
 	/**
 	 * Readiness probe path, distinct from the `healthCheckPath` liveness probe.
-	 * Reports `200` when ready and `503` once graceful shutdown has begun, so a
-	 * fronting load balancer stops routing NEW traffic to a draining instance
-	 * while its in-flight requests finish. Keep it separate from
-	 * `healthCheckPath` (a readiness `503` during drain must not trip a liveness
+	 * Reports `200` with the body `ready` only while this instance can take new
+	 * traffic, and `503` otherwise, so a fronting load balancer stops routing
+	 * NEW traffic while in-flight requests finish. The `503` body names WHICH
+	 * not-ready state it is: `starting` (the socket is bound but the app's `init`
+	 * hook has not committed yet), `draining` (graceful shutdown has begun) or
+	 * `closed` (the listen socket is gone) - during a rolling deploy that is the
+	 * difference between an instance still booting and one going away. Keep it
+	 * separate from `healthCheckPath` (a readiness `503` must not trip a liveness
 	 * probe into a restart). Must differ from `healthCheckPath`. Set to `false`
 	 * to disable.
 	 * @default '/readyz'
@@ -520,9 +524,18 @@ export interface WebSocketOptions {
 	 *
 	 * - `upgrade_admitted_total` - upgrades accepted (counter).
 	 * - `upgrade_rejected_total{reason}` - upgrades rejected before open
-	 *   (counter). Reasons: `siege`, `over_capacity`, `cursor_lane`,
-	 *   `ip_rate_limit`, `bad_origin`, `auth_timeout`, `auth_rejected`,
-	 *   `hook_error`.
+	 *   (counter). Reasons, in the order the upgrade path can reach them:
+	 *   `siege`, `over_capacity`, `cursor_lane`, `duplicate_header` (a
+	 *   repeated `Host` / `Origin` / `Authorization` / framing header, which
+	 *   cannot be given one reading), `ip_rate_limit`, `bad_origin`,
+	 *   `auth_timeout`, `auth_rejected`, `hook_error`. One more reason,
+	 *   `auth_rate_limit`, is emitted on the `connect({ auth: true })`
+	 *   preflight POST rather than on an upgrade - it shares this counter
+	 *   because it refuses the same client at the door in front of the
+	 *   handshake. That preflight also refuses a repeated framing header
+	 *   with a `400`, and THAT rejection is not counted on any series, so a
+	 *   dashboard built on this counter sees duplicate-header refusals from
+	 *   the upgrade path only.
 	 * - `upgrade_inflight` - upgrades between admission and open (gauge,
 	 *   sampled once per pressure interval).
 	 * - `waiting_room_queue_depth` - clients polling the waiting room
@@ -1443,11 +1456,36 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * this for app-level teardown that needs `platform` - cron drain,
 	 * last metrics dump, external pubsub bridge teardown, queue flush.
 	 *
-	 * Async-allowed. The adapter awaits the returned promise before
-	 * closing the listen socket. Throws are logged and ignored: shutdown
-	 * is best-effort and the adapter cannot refuse to stop. If your
-	 * teardown is strictly required, surface its failure via your own
-	 * logging / alerting before the adapter logs it.
+	 * Async-allowed, and awaited before the listen socket closes - but only
+	 * until the shutdown budget is spent. `SHUTDOWN_TIMEOUT` (seconds,
+	 * default `30`) bounds the whole shutdown sequence, this hook included:
+	 * when it expires the adapter logs that the hook did not settle and
+	 * closes anyway. The hook itself is not interrupted (user code cannot
+	 * be), it simply stops holding the close path, so work still running
+	 * past that point may be lost. `SHUTDOWN_TIMEOUT=0` is the no-budget
+	 * spelling: the await is unbounded and a wedged hook holds the process
+	 * until something kills it.
+	 *
+	 * Throws are logged and ignored: shutdown is best-effort and the
+	 * adapter cannot refuse to stop. If your teardown is strictly required,
+	 * surface its failure via your own logging / alerting before the
+	 * adapter logs it.
+	 *
+	 * The context carries the budget so a hook can honour it rather than be
+	 * cut off by it:
+	 *
+	 * - `reason` - what started the shutdown (`'SIGTERM'`, `'SIGINT'`, or
+	 *   `'shutdown'` for a programmatic close).
+	 * - `signal` - aborts when the budget is spent, so a flush can stop
+	 *   cleanly at a consistent point. `null` when no budget is configured.
+	 * - `deadline` - wall-clock epoch ms the budget expires at, to compare
+	 *   against your own `Date.now()`. `null` when no budget is configured.
+	 *
+	 * The three budget fields are OPTIONAL because one surface does not have
+	 * them: the `vite dev` plugin fires this hook with `platform` alone. A
+	 * dev server has no shutdown budget to report, so read them with a
+	 * default (`signal ?? null`) if your hook must also run under dev. The
+	 * built server and `createTestServer` both pass all four.
 	 *
 	 * Per-worker firing in clustered mode, same as `init`. Each worker
 	 * fires `shutdown` independently when it receives the shutdown signal.
@@ -1457,12 +1495,17 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * // hooks.ws.js
 	 * import { live } from 'svelte-realtime/server';
 	 *
-	 * export async function shutdown({ platform }) {
-	 *   await live.flushPendingCronTicks(platform);
+	 * export async function shutdown({ platform, signal }) {
+	 *   await live.flushPendingCronTicks(platform, { signal });
 	 * }
 	 * ```
 	 */
-	shutdown?: (ctx: { platform: Platform }) => void | Promise<void>;
+	shutdown?: (ctx: {
+		platform: Platform;
+		reason?: string | null;
+		signal?: AbortSignal | null;
+		deadline?: number | null;
+	}) => void | Promise<void>;
 
 	/**
 	 * Called during the HTTP upgrade handshake.

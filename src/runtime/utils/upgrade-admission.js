@@ -189,22 +189,94 @@ export function isCursorLaneUpgrade(secProtocol) {
 }
 
 /**
+ * Shortest gap between two unforced rewrites of the holding page's status line.
+ * The line is a live region, so a rewrite is an announcement; at a sub-second
+ * poll interval an estimate that drifts by one would otherwise announce
+ * continuously. State changes bypass this floor - it exists to damp the count,
+ * not to delay the news the visitor is waiting for.
+ */
+const ANNOUNCE_FLOOR_MS = 10000;
+
+/**
+ * Compose the holding page's status line for a live waiting count.
+ *
+ * The count is a rolling estimate of how many browsers are polling the holding
+ * page right now. It is NOT a position and NOT a reservation: admission is a
+ * concurrency gate that keeps no per-client identity, arrival order or hold, so
+ * a waiting visitor can be overtaken by anyone and two tabs of one person count
+ * twice. The wording therefore states a crowd size and nothing else, and a
+ * count of zero - which is also what an unseeded first paint carries - renders
+ * the neutral line instead of "0 people".
+ *
+ * The value is bucketed before it is shown. The underlying number is not
+ * precise enough to justify single-unit churn, and the line is a live region:
+ * rewriting it every poll interval because the estimate moved by one is worse
+ * than silence for a screen reader.
+ *
+ * The source of this function is ALSO embedded verbatim into the page's inline
+ * script, so the server's first paint and every polled update come from one
+ * implementation and cannot drift apart in grammar or rounding. That embedding
+ * is a hard constraint on the body: it must stay self-contained (no imports, no
+ * module-scope reads) and must contain no `</` sequence, which would close the
+ * script element early. The `'en'` locale is pinned for the same reason - the
+ * page is `lang="en"` and the two sides must format an identical string.
+ *
+ * @param {number} waiting rolling count of browsers currently holding the page
+ * @returns {string}
+ */
+export function waitingRoomStatusText(waiting) {
+	const n = Math.floor(Number(waiting) || 0);
+	if (!(n > 0)) return 'Waiting for a free slot.';
+	const rounded = n < 10 ? n : n < 100 ? Math.round(n / 10) * 10 : Math.round(n / 100) * 100;
+	const shown = new Intl.NumberFormat('en').format(rounded);
+	return 'About ' + shown + (rounded === 1 ? ' person is' : ' people are') + ' waiting for a free slot.';
+}
+
+/**
  * Build the default self-contained holding page served when an upgrade is
  * refused at capacity. No framework, no external fetch beyond the poll
- * endpoint. First paint shows real numbers (server injected), then the
- * inline script polls `admitCheckPath` on a jittered interval, ticks the
- * on-page estimate from each `202` body, and reloads on a `200` admit.
+ * endpoint. The inline script polls `admitCheckPath` on a jittered interval,
+ * recomposes the status line from each `202` body, and reloads on a `200`
+ * admit.
+ *
+ * The page states only what the gate actually observes: that new connections
+ * cannot be opened, and (when the caller seeds one) a rolling estimate of how
+ * many browsers are waiting. There is no queue position and no wait estimate,
+ * because nothing in the runtime orders waiting clients or measures the drain
+ * rate. A caller that renders without a depth therefore gets an honest neutral
+ * line rather than a fabricated zero.
+ *
+ * Accessibility contract of the emitted document, which the inline script has
+ * to keep intact:
+ * - the status line is one persistent `role="status"` region, present at first
+ *   paint (a region injected at update time is unreliable across assistive
+ *   tech) and rewritten whole, hence `aria-atomic`;
+ * - it is rewritten only on a material change, and no more often than once per
+ *   `ANNOUNCE_FLOOR_MS`, so a short poll interval cannot turn the region into a
+ *   stream of near-identical announcements;
+ * - a failed poll is a visible and announced state, not a silent retry behind a
+ *   stale number, and the recovery is announced too;
+ * - the auto-updating content has a native pause control. While paused the page
+ *   stops rewriting the region and stops reloading itself, but it keeps polling:
+ *   the only two things it still says are the ones its own paused wording
+ *   promises - that a slot has opened, offered as a button rather than taken by
+ *   navigating, and that an offered slot was taken by somebody else before the
+ *   visitor acted on it;
+ * - the region is never given `aria-live="off"`, not even while paused. Which
+ *   rewrites happen is what pausing controls; muting the region instead would
+ *   silence the two announcements above and the confirmation of the visitor's
+ *   own press, which is the one moment they are certainly listening.
  *
  * All numeric context fields are coerced to integers before embedding and
  * `admitCheckPath` is embedded via `JSON.stringify`, so no value reaches the
- * HTML or the inline script unescaped.
+ * HTML or the inline script unescaped; the status line is composed from a
+ * coerced integer through a fixed template, so it carries no markup either.
  *
  * @param {{ queueDepth?: number, estimatedSeconds?: number, pollIntervalMs?: number, retryAfterSeconds?: number, admitCheckPath?: string }} ctx
  * @returns {string}
  */
 export function buildWaitingRoomPage(ctx) {
 	const queueDepth = Math.max(0, Math.floor(Number(ctx && ctx.queueDepth) || 0));
-	const estimatedSeconds = Math.max(0, Math.floor(Number(ctx && ctx.estimatedSeconds) || 0));
 	const pollIntervalMs = Math.max(250, Math.floor(Number(ctx && ctx.pollIntervalMs) || 2000));
 	const checkPath = JSON.stringify((ctx && ctx.admitCheckPath) || '/__admit-check');
 	return '<!doctype html>' +
@@ -214,33 +286,108 @@ export function buildWaitingRoomPage(ctx) {
 		'<style>body{font-family:system-ui,sans-serif;margin:0;display:flex;min-height:100vh;' +
 		'align-items:center;justify-content:center;background:#0b0c10;color:#e8e8e8}' +
 		'main{text-align:center;max-width:30rem;padding:2rem}h1{font-size:1.4rem;margin:0 0 .75rem}' +
-		'p{margin:.4rem 0;color:#a9b0bd}strong{color:#e8e8e8}</style></head>' +
+		'p{margin:.4rem 0;color:#a9b0bd}' +
+		'button{font:inherit;margin:.75rem .25rem 0;padding:.5rem 1rem;border:1px solid #4a5162;' +
+		'border-radius:.4rem;background:#171a21;color:#e8e8e8;cursor:pointer}' +
+		'button:hover{background:#222733}' +
+		'button:focus-visible{outline:3px solid #9ab4f8;outline-offset:2px}' +
+		'[hidden]{display:none}</style></head>' +
 		'<body><main>' +
-		'<h1>You are in line</h1>' +
-		'<p>The server is at capacity. This page reloads automatically when a slot opens.</p>' +
-		'<p>Ahead of you: <strong id="q">' + queueDepth + '</strong></p>' +
-		'<p>Estimated wait: <strong id="eta">' + estimatedSeconds + '</strong> seconds</p>' +
+		'<h1>Server at capacity</h1>' +
+		'<p>New connections cannot be opened right now. This page checks for a free slot ' +
+		'and reloads by itself as soon as one opens.</p>' +
+		'<p id="s" role="status" aria-live="polite" aria-atomic="true">' +
+		waitingRoomStatusText(queueDepth) + '</p>' +
+		'<p><button type="button" id="p" aria-pressed="false">Pause live updates</button>' +
+		'<button type="button" id="c" hidden>Reload now</button></p>' +
 		'</main>' +
 		'<script>' +
 		'(function(){' +
 		'var url=' + checkPath + ';' +
 		'var base=' + pollIntervalMs + ';' +
-		'var q=document.getElementById("q");' +
-		'var eta=document.getElementById("eta");' +
+		'var say=' + String(waitingRoomStatusText) + ';' +
+		'var box=document.getElementById("s");' +
+		'var pause=document.getElementById("p");' +
+		'var go=document.getElementById("c");' +
+		'var paused=false,open=false,missed=false,stale=false,depth=' + queueDepth + ';' +
+		'var shown=box.textContent,last=0;' +
+		// Every line the region can hold is derived here from the flags, and no
+		// call site ever writes a literal. A branch that announced its own text
+		// would keep asserting it after the condition behind it had passed, which
+		// is how a paused page ends up frozen on a count that stopped being true
+		// or on an offer of a slot somebody else already took.
+		'function state(){' +
+		'if(open)return "A slot is open. Choose Reload now to continue.";' +
+		'if(paused)return missed?"That slot was taken before you chose Reload now. ' +
+		'Live updates are still paused and this page keeps checking.":' +
+		'"Live updates paused. This page will not reload by itself; it keeps checking ' +
+		'and shows a Reload now button when a slot opens.";' +
+		'return stale?"The last check did not reach the server. Retrying.":say(depth);' +
+		'}' +
+		// Rewrite levels, in rising order of what they may interrupt:
+		//   0 the polled count - damped by the announce floor, silent while paused;
+		//   1 a check failed or recovered - skips the floor, still silent while
+		//     paused, because a paused page promised to stop reporting on its own
+		//     polling and a blip is not news the visitor asked to keep hearing;
+		//   2 a slot opened or was taken, or the visitor worked the control - the
+		//     only rewrites a paused page performs, and exactly the ones its own
+		//     wording promises.
+		// The region keeps aria-live="polite" throughout. Muting it while paused
+		// would also swallow the confirmation of the visitor's own press and the
+		// free-slot news, which are the two things a paused visitor still has to
+		// hear; the levels above, not the attribute, are what hold it quiet.
+		'function show(level){' +
+		'if(paused&&level<2)return;' +
+		'var text=state();' +
+		'if(text===shown)return;' +
+		'var t=Date.now();' + // determinism-allow: browser-side script text in the holding page, not a server primitive
+		'if(!level&&t-last<' + ANNOUNCE_FLOOR_MS + ')return;' +
+		'shown=text;last=t;box.textContent=text;' +
+		'}' +
 		'function jitter(ms){return ms+Math.floor(Math.random()*ms*0.5);}' + // determinism-allow: browser-side script text in the holding page, not a server primitive
 		'function tick(delay){setTimeout(poll,delay);}' + // determinism-allow: browser-side script text in the holding page, not a server primitive
+		// The check reports live capacity and reserves nothing, so a slot seen
+		// open can close again before the visitor acts on it. The loop therefore
+		// keeps running across an offer instead of stopping on it: the offer is
+		// withdrawn, and said out loud, the moment a later check disagrees. The
+		// button itself is only withdrawn when it does not hold focus - pulling
+		// the focused element out of the document mid-press is a worse failure
+		// than an offer that is one poll interval stale, and pressing it then
+		// simply re-serves this page.
+		'function offer(on){' +
+		'if(on)go.hidden=false;else if(document.activeElement!==go)go.hidden=true;' +
+		'show(2);' +
+		'}' +
 		'function poll(){' +
 		'fetch(url,{headers:{accept:"application/json"},cache:"no-store"})' +
 		'.then(function(r){return r.json().then(function(b){return {s:r.status,b:b};});})' +
 		'.then(function(o){' +
-		'if(o.s===200&&o.b&&o.b.admit){location.reload();return;}' +
-		'if(o.b){if(typeof o.b.queueDepth==="number")q.textContent=o.b.queueDepth;' +
-		'if(typeof o.b.estimatedSeconds==="number")eta.textContent=o.b.estimatedSeconds;}' +
+		'var admit=!!(o.s===200&&o.b&&o.b.admit);' +
+		// Unpaused, an admit is the documented automatic reload and the page is
+		// on its way out, so nothing further is scheduled.
+		'if(admit&&!paused){location.reload();return;}' +
+		'if(o.b&&typeof o.b.queueDepth==="number")depth=o.b.queueDepth;' +
+		'var back=stale;stale=false;' +
+		'if(admit!==open){missed=paused&&open&&!admit;open=admit;offer(admit);}' +
+		'else show(back?1:0);' +
 		'var next=(o.b&&typeof o.b.pollAfterMs==="number")?o.b.pollAfterMs:base;' +
 		'tick(jitter(next));' +
 		'})' +
-		'.catch(function(){tick(jitter(base));});' +
+		'.catch(function(){stale=true;show(1);tick(jitter(base));});' +
 		'}' +
+		// Pausing speaks even though it is the act of going quiet: it confirms a
+		// key press the visitor just made. Resuming drops the record of a missed
+		// slot, which is news about a pause that is over, and leaves the next
+		// poll to reload if a slot is still open - re-checking beats navigating
+		// off a reading that may already be a poll interval old.
+		'pause.addEventListener("click",function(){' +
+		'paused=!paused;' +
+		'pause.setAttribute("aria-pressed",paused?"true":"false");' +
+		'pause.textContent=paused?"Resume live updates":"Pause live updates";' +
+		'if(!paused)missed=false;' +
+		'show(2);' +
+		'});' +
+		'go.addEventListener("click",function(){location.reload();});' +
 		'tick(jitter(base));' +
 		'})();' +
 		'</script></body></html>';
@@ -256,6 +403,14 @@ export function buildWaitingRoomPage(ctx) {
  *
  * Supported tokens: `{{queueDepth}}`, `{{estimatedSeconds}}`,
  * `{{pollIntervalMs}}`, `{{retryAfterSeconds}}`, `{{admitCheckPath}}`.
+ *
+ * What the two estimate tokens actually carry, so an operator page does not
+ * repeat a claim the runtime cannot back: `{{queueDepth}}` is a rolling count
+ * of browsers polling the holding page - a crowd size, never a position in a
+ * line - and `{{estimatedSeconds}}` is that count projected at a nominal one
+ * slot per second, never a measured wait. Both are kept for templates written
+ * against them; the built-in page words the first honestly and shows no wait
+ * estimate at all.
  *
  * @param {string} tpl
  * @param {{ queueDepth: number, estimatedSeconds: number, pollIntervalMs: number, retryAfterSeconds: number, admitCheckPath: string }} ctx
@@ -335,9 +490,12 @@ export function resolveWaitingRoom(upgradeAdmission) {
 			return retryAfterSeconds + Math.floor(randomFloat() * retryAfterSeconds * s);
 		},
 		/**
-		 * Rolling drain estimate surfaced for UX only - never an admission
-		 * input. The drain rate defaults to one slot per second when no
-		 * better estimate is available.
+		 * The polling-browser count projected at a nominal one slot per second.
+		 * Nothing measures the real release rate, so this is a shape for a
+		 * template that asks for it - never an admission input, and never shown
+		 * by the built-in page, which does not claim a wait it cannot observe.
+		 * Kept because it is a documented operator-facing field of the poll body
+		 * and the template context.
 		 *
 		 * @param {number} queueDepth
 		 * @returns {number}
@@ -349,6 +507,11 @@ export function resolveWaitingRoom(upgradeAdmission) {
 		/**
 		 * Render the holding page for the given live queue depth, using the
 		 * operator template when supplied or the built-in page otherwise.
+		 *
+		 * Called with no depth - which the refusal path does, having no counter
+		 * of its own to read - the built-in page opens on its neutral status
+		 * line and the first poll fills in the count. Nothing invents a zero
+		 * crowd for a visitor who was just refused.
 		 *
 		 * @param {number} [queueDepth]
 		 * @returns {string}

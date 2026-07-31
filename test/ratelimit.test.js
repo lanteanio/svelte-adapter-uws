@@ -480,35 +480,463 @@ describe('ratelimit plugin', () => {
 				.toThrow('maxBuckets must be a positive integer');
 		});
 
-		it('evicts oldest insertion-order bucket when at cap and all entries are unexpired', () => {
+		it('rejects invalid evictionSample', () => {
+			expect(() => createRateLimit({ points: 1, interval: 1000, evictionSample: 0 }))
+				.toThrow('evictionSample must be a positive integer');
+			expect(() => createRateLimit({ points: 1, interval: 1000, evictionSample: 2.5 }))
+				.toThrow('evictionSample must be a positive integer');
+		});
+
+		it('rejects a non-function onEvict', () => {
+			expect(() => createRateLimit({ points: 1, interval: 1000, onEvict: 'nope' }))
+				.toThrow('onEvict must be a function');
+		});
+
+		it('reports the evicted key, and ties fall to the earliest sampled entry', () => {
 			// Tiny cap to make the saturation path testable in unit time.
-			const rl = createRateLimit({ points: 1, interval: 60_000, maxBuckets: 2 });
+			const evicted = [];
+			const rl = createRateLimit({
+				points: 1,
+				interval: 60_000,
+				maxBuckets: 2,
+				onEvict: (e) => evicted.push(e)
+			});
 
 			// Pin Date.now so the lazy expired-entry sweep does not free
 			// any slots: every bucket is unexpired.
-			const now = 1000;
-			vi.spyOn(Date, 'now').mockReturnValue(now);
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
 
 			rl.consume(mockWs({ ip: 'a' }));
 			rl.consume(mockWs({ ip: 'b' }));
-			// At cap. Inserting 'c' must evict 'a' (oldest insertion order).
+			// At cap, and both candidates are equally active, so the earliest
+			// one sampled loses.
 			rl.consume(mockWs({ ip: 'c' }));
 
-			// Check 'b' first - it must still be at the post-consume state
-			// (allowed: false because points was already drained to 0). If
-			// the cap evicted 'b' instead of 'a', we'd see a fresh bucket
-			// here with allowed: true.
-			const bAgain = rl.consume(mockWs({ ip: 'b' }));
-			expect(bAgain.allowed).toBe(false);
+			expect(evicted).toEqual([{ key: 'a', banned: false }]);
 
-			// 'a' was evicted in the previous consume('c') call, so its
-			// next consume creates a fresh bucket with full points. We
-			// know this because the cap is 2 and after the consume('b')
-			// above the map holds {b, c}; consume('a') then evicts 'b'
-			// (now oldest) and creates a fresh 'a'.
-			const aAgain = rl.consume(mockWs({ ip: 'a' }));
-			expect(aAgain.allowed).toBe(true);
-			expect(aAgain.remaining).toBe(0); // 1 point, just consumed
+			// 'b' is untouched: still at its post-consume state (allowed: false,
+			// because its single point was already drained).
+			expect(rl.consume(mockWs({ ip: 'b' })).allowed).toBe(false);
+		});
+
+		it('evicts an unbanned bucket rather than a banned one, so key churn cannot clear a ban', () => {
+			const evicted = [];
+			const rl = createRateLimit({
+				points: 2,
+				interval: 1000,
+				blockDuration: 30_000,
+				maxBuckets: 2,
+				onEvict: (e) => evicted.push(e)
+			});
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			// 'a' exhausts its allowance and earns a 30 s ban.
+			const wsA = mockWs({ ip: 'a' });
+			rl.consume(wsA);
+			rl.consume(wsA);
+			expect(rl.consume(wsA).resetMs).toBe(30_000);
+
+			// 'b' fills the map to the cap. It is deliberately made both busier than
+			// the banned key and the only one still inside its window, so neither the
+			// activity nor the expiry preference can be what saves 'a' here.
+			const wsB = mockWs({ ip: 'b' });
+			rl.consume(wsB);
+			rl.consume(wsB);
+			Date.now.mockReturnValue(2100);
+			rl.consume(wsB);
+			rl.consume(wsB);
+
+			// A third identity forces an eviction.
+			rl.consume(mockWs({ ip: 'c' }));
+
+			expect(evicted).toEqual([{ key: 'b', banned: false }]);
+
+			// 'a' is still serving its ban, with the time it had left.
+			const aAgain = rl.consume(wsA);
+			expect(aAgain.allowed).toBe(false);
+			expect(aAgain.resetMs).toBe(28_900);
+		});
+
+		it('does not prefer a banned bucket even when it is the least active one', () => {
+			const evicted = [];
+			const rl = createRateLimit({
+				points: 1,
+				interval: 60_000,
+				maxBuckets: 2,
+				onEvict: (e) => evicted.push(e)
+			});
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			// A ban placed on a key that has never sent a message: nothing in the map
+			// is less active, so only its ban keeps it out of the victim pool.
+			rl.ban('a', 30_000);
+			rl.consume(mockWs({ ip: 'b' }));
+			rl.consume(mockWs({ ip: 'c' }));
+
+			expect(evicted).toEqual([{ key: 'b', banned: false }]);
+			expect(rl.consume(mockWs({ ip: 'a' })).resetMs).toBe(30_000);
+		});
+
+		it('evicts the most recently placed ban only when every sampled candidate is banned, and flags it', () => {
+			const evicted = [];
+			const rl = createRateLimit({
+				points: 1,
+				interval: 60_000,
+				maxBuckets: 2,
+				onEvict: (e) => evicted.push(e)
+			});
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			rl.ban('a', 30_000);
+			rl.ban('b', 60_000);
+			rl.consume(mockWs({ ip: 'c' }));
+
+			// Nothing unbanned to take, so the bound wins - and the lost enforcement
+			// is reported rather than silent. The ban that goes is the one placed
+			// last, so a key that keeps earning fresh bans can only ever evict its
+			// own. Both were placed in the same millisecond here, which is exactly
+			// the case a timestamp comparison could not have decided at all.
+			expect(evicted).toEqual([{ key: 'b', banned: true }]);
+
+			// The ban that was already in the map is untouched.
+			expect(rl.consume(mockWs({ ip: 'a' })).resetMs).toBe(30_000);
+		});
+
+		it('does not let identity churn that earns its own bans clear an older ban', () => {
+			// A cap below the default evictionSample of 16, so the sampling loop
+			// wraps and every eviction sees the whole map: the exhaustive regime,
+			// where sample-max and map-max are the same entry. The sampled regime
+			// - a cap far above the sample, which is the shipped default shape -
+			// is covered by the three tests below.
+			const evicted = [];
+			const rl = createRateLimit({
+				points: 2,
+				interval: 1000,
+				blockDuration: 60_000,
+				maxBuckets: 8,
+				onEvict: (e) => evicted.push(e)
+			});
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			// 'a' spends its allowance and earns a sixty-second ban.
+			const wsA = mockWs({ ip: 'a' });
+			for (let i = 0; i < 3; i++) rl.consume(wsA);
+			expect(rl.consume(wsA).allowed).toBe(false);
+
+			// Forty throwaway identities, each spending the three messages it takes
+			// to auto-ban itself. That fills the map with bans, so every eviction
+			// candidate is banned and the last-resort rule is the only thing between
+			// 'a' and a fresh allowance. Picking the soonest-expiring ban there would
+			// hand the flood precisely the oldest ban in the map, which is 'a'.
+			for (let i = 0; i < 40; i++) {
+				Date.now.mockReturnValue(1001 + i);
+				const ws = mockWs({ ip: 'churn-' + i });
+				for (let j = 0; j < 3; j++) rl.consume(ws);
+			}
+
+			expect(evicted.some((e) => e.key === 'a')).toBe(false);
+			// The map really did saturate with bans, so the last-resort rule ran.
+			expect(evicted.some((e) => e.banned)).toBe(true);
+
+			// 'a' is still serving the ban it earned, with the time it had left.
+			const after = rl.consume(wsA);
+			expect(after.allowed).toBe(false);
+			expect(after.resetMs).toBe(61_000 - 1040);
+		});
+
+		it('leaves a ban alone under churn that stays under the limit, at a cap far above the sample', () => {
+			// maxBuckets four times the default evictionSample of 16: every
+			// eviction now walks a WINDOW of the map, which is the regime the
+			// shipped defaults (1_000_000 / 16) always run in.
+			const evicted = [];
+			const rl = createRateLimit({
+				points: 2,
+				interval: 1000,
+				blockDuration: 60_000,
+				maxBuckets: 64,
+				onEvict: (e) => evicted.push(e)
+			});
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			// 'a' is banned and then says nothing, so by 3500 it has drawn nothing
+			// across both scored windows and its own window has elapsed: the ideal
+			// victim on every count except the ban, and the first entry the cursor
+			// walks. Only the ban keeps it out of the pool.
+			rl.ban('a', 60_000);
+			Date.now.mockReturnValue(3500);
+
+			// Four hundred one-shot identities, none of which exhausts itself, so
+			// every sample has unbanned entries to take.
+			for (let i = 0; i < 400; i++) {
+				Date.now.mockReturnValue(3500 + i);
+				rl.consume(mockWs({ ip: 'churn-' + i }));
+			}
+
+			expect(evicted.some((e) => e.banned)).toBe(false);
+			expect(evicted.some((e) => e.key === 'a')).toBe(false);
+			const after = rl.consume(mockWs({ ip: 'a' }));
+			expect(after.allowed).toBe(false);
+			expect(after.resetMs).toBe(61_000 - 3899);
+		});
+
+		it('cannot clear the oldest ban in the map by churning bans, at a cap far above the sample', () => {
+			const evicted = [];
+			const rl = createRateLimit({
+				points: 2,
+				interval: 1000,
+				blockDuration: 60_000,
+				maxBuckets: 64,
+				onEvict: (e) => evicted.push(e)
+			});
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			// 'a' is banned before anything else, so it holds the oldest ban in
+			// the map for the whole run.
+			const wsA = mockWs({ ip: 'a' });
+			for (let i = 0; i < 3; i++) rl.consume(wsA);
+			expect(rl.consume(wsA).allowed).toBe(false);
+
+			// Four hundred throwaway identities, each spending the three messages
+			// it takes to auto-ban itself: the map saturates with bans, so the
+			// last-resort rule runs on a sample of nothing but bans - and it can
+			// never pick the one placed before all of them.
+			for (let i = 0; i < 400; i++) {
+				Date.now.mockReturnValue(1001 + i);
+				const ws = mockWs({ ip: 'churn-' + i });
+				for (let j = 0; j < 3; j++) rl.consume(ws);
+			}
+
+			// The last-resort rule really did run, many times over.
+			expect(evicted.filter((e) => e.banned).length).toBeGreaterThan(100);
+			expect(evicted.some((e) => e.key === 'a')).toBe(false);
+
+			const after = rl.consume(wsA);
+			expect(after.allowed).toBe(false);
+			expect(after.resetMs).toBe(61_000 - 1400);
+		});
+
+		it('can still lose a ban placed after the map filled with bans - the documented residual', () => {
+			const evicted = [];
+			const rl = createRateLimit({
+				points: 2,
+				interval: 1000,
+				blockDuration: 60_000,
+				maxBuckets: 64,
+				onEvict: (e) => evicted.push(e)
+			});
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			// A map's worth of bans placed BEFORE the victim's, so the victim is
+			// no longer the oldest ban and the sample-local rule is all that is
+			// left. Under an exhaustive scan this could not happen (there is
+			// always a newer ban in the map than 'a'), so it is also the proof
+			// that eviction really samples rather than walking everything.
+			for (let i = 0; i < 64; i++) {
+				Date.now.mockReturnValue(1000 + i);
+				const ws = mockWs({ ip: 'pre-' + i });
+				for (let j = 0; j < 3; j++) rl.consume(ws);
+			}
+
+			Date.now.mockReturnValue(2000);
+			const wsA = mockWs({ ip: 'a' });
+			for (let i = 0; i < 3; i++) rl.consume(wsA);
+			expect(rl.consume(wsA).allowed).toBe(false);
+
+			for (let i = 0; i < 400; i++) {
+				Date.now.mockReturnValue(2001 + i);
+				const ws = mockWs({ ip: 'churn-' + i });
+				for (let j = 0; j < 3; j++) rl.consume(ws);
+			}
+
+			// Enforcement was lost, and it was REPORTED - which is what onEvict
+			// with banned:true exists for and what sizing maxBuckets above the
+			// bans in flight prevents.
+			expect(evicted).toContainEqual({ key: 'a', banned: true });
+			const after = rl.consume(wsA);
+			expect(after.allowed).toBe(true);
+			expect(after.resetMs).toBe(1000);
+		});
+
+		it('holds ban() to the same cap as consume()', () => {
+			const evicted = [];
+			const rl = createRateLimit({
+				points: 1,
+				interval: 60_000,
+				maxBuckets: 1,
+				onEvict: (e) => evicted.push(e)
+			});
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			rl.ban('a', 30_000);
+			rl.ban('b', 30_000);
+
+			// The insert made room instead of growing the map past the cap, and the
+			// ban it was asked to record is in place.
+			expect(evicted).toEqual([{ key: 'a', banned: true }]);
+			expect(rl.consume(mockWs({ ip: 'b' })).allowed).toBe(false);
+		});
+
+		it('evicts the least active bucket, not the oldest', () => {
+			const rl = createRateLimit({ points: 10, interval: 60_000, maxBuckets: 2 });
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			const wsA = mockWs({ ip: 'a' });
+			for (let i = 0; i < 5; i++) rl.consume(wsA);
+			rl.consume(mockWs({ ip: 'b' }));
+
+			// 'a' is the oldest entry but has seen five messages to 'b's one.
+			rl.consume(mockWs({ ip: 'c' }));
+
+			// 'a' kept its drawn-down window: 10 points, 5 consumed, 1 more now.
+			expect(rl.consume(wsA).remaining).toBe(4);
+			// 'b' was the victim, so it comes back as a fresh bucket.
+			expect(rl.consume(mockWs({ ip: 'b' })).remaining).toBe(9);
+		});
+
+		it('breaks a tie towards the bucket whose window has already elapsed', () => {
+			const evicted = [];
+			const rl = createRateLimit({
+				points: 10,
+				interval: 1000,
+				maxBuckets: 2,
+				onEvict: (e) => evicted.push(e)
+			});
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			// 'a' is inserted first and so is sampled first: only the tiebreak can
+			// send this eviction to 'b'.
+			const wsA = mockWs({ ip: 'a' });
+			const wsB = mockWs({ ip: 'b' });
+			rl.consume(wsA);
+			rl.consume(wsB);
+			rl.consume(wsB);
+
+			// 'a' refills at 2000 and draws again, so it carries one point from the
+			// window that just ended and one from the current one - the same two
+			// that 'b' drew.
+			Date.now.mockReturnValue(2000);
+			rl.consume(wsA);
+
+			// At 2600 'b' has been sitting on an elapsed window since 2000 while 'a'
+			// runs to 3000. Equal activity, so the one that would have refilled on
+			// its next message anyway is the one dropped.
+			Date.now.mockReturnValue(2600);
+			rl.consume(mockWs({ ip: 'c' }));
+			expect(evicted).toEqual([{ key: 'b', banned: false }]);
+
+			// 'a' is intact: still inside its window with one point spent.
+			expect(rl.consume(wsA).remaining).toBe(8);
+		});
+
+		it('prefers the bucket idle longest, and dropping it costs its owner nothing', () => {
+			const evicted = [];
+			const capped = createRateLimit({
+				points: 10,
+				interval: 1000,
+				maxBuckets: 2,
+				onEvict: (e) => evicted.push(e)
+			});
+			// The same traffic against a limiter that never reaches its cap, as the
+			// control for what eviction cost.
+			const roomy = createRateLimit({ points: 10, interval: 1000, maxBuckets: 100 });
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			const wsIdle = mockWs({ ip: 'idle' });
+			const wsLive = mockWs({ ip: 'live' });
+			for (let i = 0; i < 8; i++) {
+				capped.consume(wsIdle);
+				roomy.consume(wsIdle);
+			}
+
+			// Three windows later 'idle' has said nothing since, so it has drawn
+			// nothing in either of the two windows the score spans - it goes, even
+			// though it was by far the busier of the two when it was awake. A
+			// lifetime counter would have made it the harder one to evict the
+			// longer it stayed silent.
+			Date.now.mockReturnValue(5000);
+			capped.consume(wsLive);
+			roomy.consume(wsLive);
+			capped.consume(mockWs({ ip: 'new' }));
+			roomy.consume(mockWs({ ip: 'new' }));
+			expect(evicted).toEqual([{ key: 'idle', banned: false }]);
+
+			// And it cost 'idle' nothing at all: the limiter that kept the bucket
+			// and the limiter that dropped it answer identically, because a bucket
+			// whose window elapsed refills to full on the next message either way.
+			expect(capped.consume(wsIdle)).toEqual(roomy.consume(wsIdle));
+			expect(capped.consume(wsIdle)).toEqual(roomy.consume(wsIdle));
+		});
+
+		it('keeps a resident key through sustained identity churn', () => {
+			const rl = createRateLimit({ points: 100, interval: 60_000, maxBuckets: 4 });
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			const resident = mockWs({ ip: 'resident' });
+			for (let i = 0; i < 20; i++) rl.consume(resident);
+
+			// Two hundred one-shot identities against a four-entry map: every one
+			// of them forces an eviction, and none of them may cost the resident
+			// client its window.
+			for (let i = 0; i < 200; i++) rl.consume(mockWs({ ip: 'churn-' + i }));
+
+			expect(rl.consume(resident).remaining).toBe(79);
+		});
+
+		it('keeps a resident key that messages more slowly than one window', () => {
+			const evicted = [];
+			const rl = createRateLimit({
+				points: 10,
+				interval: 1000,
+				maxBuckets: 4,
+				onEvict: (e) => evicted.push(e)
+			});
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			// A client sending a burst every couple of seconds against a one-second
+			// window: its window is elapsed most of the time, and that alone must
+			// not make it the preferred victim, or the anti-churn property would
+			// hold for nobody but clients faster than the window.
+			const resident = mockWs({ ip: 'resident' });
+			for (let i = 0; i < 9; i++) rl.consume(resident);
+
+			Date.now.mockReturnValue(2500);
+			for (let i = 0; i < 30; i++) rl.consume(mockWs({ ip: 'churn-' + i }));
+			expect(evicted.some((e) => e.key === 'resident')).toBe(false);
+
+			// And again once its draw has aged into the previous window.
+			Date.now.mockReturnValue(2900);
+			rl.consume(resident);
+			for (let i = 30; i < 60; i++) rl.consume(mockWs({ ip: 'churn-' + i }));
+			expect(evicted.some((e) => e.key === 'resident')).toBe(false);
+
+			// Its allowance was never handed back either: nine drawn before the
+			// churn, one after the refill.
+			expect(rl.consume(resident).remaining).toBe(8);
+		});
+
+		it('an onEvict listener that throws cannot change what the call charged', () => {
+			const rl = createRateLimit({
+				points: 5,
+				interval: 60_000,
+				maxBuckets: 2,
+				onEvict: () => {
+					throw new Error('listener blew up');
+				}
+			});
+			vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+			rl.consume(mockWs({ ip: 'a' }));
+			rl.consume(mockWs({ ip: 'b' }));
+
+			// The insert that trips the cap. The listener throws through to the
+			// caller, but only once the call has decided and taken its point - a
+			// broken logger must not be a way to send a free message.
+			const wsC = mockWs({ ip: 'c' });
+			expect(() => rl.consume(wsC)).toThrow('listener blew up');
+			expect(rl.consume(wsC).remaining).toBe(3);
+
+			// The map is whole: exactly one entry went, and 'b' kept its state.
+			expect(rl.consume(mockWs({ ip: 'b' })).remaining).toBe(3);
 		});
 	});
 });

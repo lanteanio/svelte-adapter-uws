@@ -5,8 +5,10 @@ export type GroupRole = 'member' | 'admin' | 'viewer';
 
 export interface GroupOptions {
 	/**
-	 * Maximum members allowed. When full, `join()` returns `false`.
-	 * @default Infinity
+	 * Maximum members allowed. When full, `join()` returns `false` and
+	 * `onFull` fires. Pass `Infinity` to disable the cap (not recommended
+	 * at uWS scale).
+	 * @default 1_000_000
 	 */
 	maxMembers?: number;
 
@@ -38,6 +40,9 @@ export interface GroupMember {
 export interface Group {
 	/** The group name. */
 	readonly name: string;
+
+	/** The resolved member cap, including the default when none was passed. */
+	readonly maxMembers: number;
 
 	/** Group metadata (get/set). */
 	meta: Record<string, any>;

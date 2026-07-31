@@ -23,6 +23,7 @@ describe('groups plugin - server', () => {
 			expect(typeof group.has).toBe('function');
 			expect(typeof group.close).toBe('function');
 			expect(group.name).toBe('lobby');
+			expect(group.maxMembers).toBe(5);
 		});
 
 		it('throws on empty/non-string name', () => {
@@ -39,6 +40,25 @@ describe('groups plugin - server', () => {
 		it('throws on invalid maxMembers', () => {
 			expect(() => createGroup('x', { maxMembers: 0 })).toThrow('positive number');
 			expect(() => createGroup('x', { maxMembers: -1 })).toThrow('positive number');
+		});
+
+		// Every other plugin cap in this package is finite by default; groups used
+		// to default to Infinity, so the one structure whose growth is driven
+		// entirely by client behaviour - and whose every join fans out to everyone
+		// already in it - was the only one with no bound at all unless the app
+		// remembered to set one.
+		it('maxMembers defaults to a finite cap', () => {
+			const g = createGroup('test');
+			expect(Number.isFinite(g.maxMembers)).toBe(true);
+			expect(g.maxMembers).toBe(1_000_000);
+		});
+
+		it('an unbounded group stays available as an explicit opt-out', () => {
+			expect(createGroup('test', { maxMembers: Infinity }).maxMembers).toBe(Infinity);
+		});
+
+		it('reports the cap the group was configured with', () => {
+			expect(createGroup('test', { maxMembers: 2 }).maxMembers).toBe(2);
 		});
 
 		it('throws on non-function hooks', () => {

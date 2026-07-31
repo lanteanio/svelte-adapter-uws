@@ -243,9 +243,48 @@ export function createClientIpResolver({ addressHeader, xffDepth, matcher, onUnt
 			// Slicing mid-address leaves a partial first element. It is not an
 			// address, so it must not be counted when the depth is applied.
 			if (bounded.length !== value.length) addresses.shift();
+			// A DEPTH OVERFLOW still answers the socket peer, and that is not the
+			// merge the paragraph above removes.
+			//
+			// The route into this branch that ordinary infrastructure could take is
+			// gone. A proxy emitting one X-Forwarded-For LINE per hop used to arrive
+			// with a single address, because header collection kept the last line
+			// and dropped the rest, so a correctly configured two-hop deployment
+			// landed here and merged. Collection joins repeated lines now, and the
+			// depth finds the hops it was configured for.
+			//
+			// What is left is a chain SHORTER than the configured hop count, which a
+			// client cannot manufacture - every hop only appends. Either the request
+			// did not traverse the configured chain (it reached the origin directly,
+			// or through a hop that does not append), in which case the socket peer
+			// IS the client and nothing is merged; or the configured depth names
+			// more hops than exist. The only alternative for that second case is the
+			// leftmost surviving address, and that one is client-authored by
+			// construction - the first hop appends to whatever the client sent - so
+			// it would let any client choose its own rate-limit identity, a victim's
+			// included. An accidental merge under a misconfiguration is the smaller
+			// harm than a targeted one available on demand.
 			if (xffDepth > addresses.length) return rawIp;
 			return detachFromHeader(addresses[addresses.length - xffDepth].trim());
 		}
+		// THIS BRANCH REQUIRES A SINGLE HEADER LINE, and gets one. Every
+		// configured address header EXCEPT the literal `x-forwarded-for` reaches
+		// here - including names that chain by grammar, such as `forwarded`,
+		// `via` and `x-original-forwarded-for` - and header collection puts
+		// exactly those in the last-line-wins class rather than joining their
+		// repeats (utils/request-headers.js keys that class off the configured
+		// name, not off the grammar). Widening the comparison above therefore
+		// requires widening RESOLVER_CHAIN_HEADER in the same change, or this
+		// branch starts receiving joined values again. The requirement is not
+		// cosmetic. A proxy that APPENDS
+		// rather than overwrites arrives as two lines, and a joined
+		// "<client's 130 bytes of padding>, 203.0.113.5" is both over the bound
+		// below and leading-truncated - so the resolved address, the rate-limit
+		// key and `getClientAddress()` would all be entirely client-authored,
+		// which is the opposite of what naming a trusted proxy header is for.
+		// A collector that ever comma-joins a configured ADDRESS_HEADER hands
+		// this branch that value.
+		//
 		// TRUNCATE an over-long value; do NOT fall back to the socket address.
 		//
 		// Nothing bounded the non-XFF headers (`x-real-ip`, `cf-connecting-ip`,

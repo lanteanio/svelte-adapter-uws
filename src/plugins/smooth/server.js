@@ -234,6 +234,13 @@ export function createSmoothAuthority(options) {
 		 * baseline is the already-broadcast state - no duplicate update). Never
 		 * touches the queue, the ack watermark, or `lastCommand`. Unknown keys
 		 * are ignored (false).
+		 *
+		 * The replacement reaches subscribers as an ordinary update on the
+		 * ordinary cadence, so nothing on the wire marks it as discontinuous.
+		 * Rendering it as a jump rather than a slide across the map is the
+		 * client channel's `snapSpeedPerSec`, which detects it from the entity's
+		 * own motion by default - if a placement ever renders as a streak, that
+		 * is the knob it belongs to.
 		 * @param {string} key @param {any} state
 		 * @returns {boolean}
 		 */

@@ -15,8 +15,24 @@
  *     flying off on a stale heading.
  *   - When the straddling pair spans more than `snapGapMs`, the gap is a
  *     discontinuity (the entity left the subscriber's view, an idle pause, a
- *     genuine teleport) and the position snaps to the newer sample instead of
+ *     resumed delivery) and the position snaps to the newer sample instead of
  *     smearing across the screen for the length of the gap.
+ *   - When the straddling pair covers ground the entity's own neighbouring
+ *     samples come nowhere near, it is a discontinuity too: a teleport or a
+ *     scripted placement delivered on the ordinary cadence has its samples one
+ *     interval apart like any other pair, so the time test above cannot see
+ *     it. The comparison is the entity's OWN adjacent motion rather than an
+ *     absolute speed, because one interpolator serves a cursor in CSS pixels
+ *     and a game entity in arbitrary world units, and because an entity the
+ *     app has never moved has no absolute baseline at all while it always has
+ *     neighbouring samples. A pair is a jump only when it leaves the pair
+ *     behind it - and the sample ahead of it, once one has arrived - behind by
+ *     `JUMP_FACTOR`, so uniform motion, acceleration, deceleration and an
+ *     abrupt stop all keep interpolating: each of those keeps an adjacent pair
+ *     moving at a comparable speed.
+ *   - `snapSpeedPerSec` names an absolute bound on top of that, for a topic
+ *     that knows its own scale and wants an exact ceiling; `snapSpeedPerSec:
+ *     0` turns both tests off and restores pure interpolation everywhere.
  *
  * Rendering remote entities slightly in the past is what makes a dropped or
  * late frame invisible: with the delay at two update intervals there is
@@ -42,7 +58,9 @@ import { createServerClock } from './clock.js';
 
 /** Ring capacity per entity. At a 16ms stamp interval this holds ~500ms of
  * history - the maximum interpolation delay plus the extrapolation cap with
- * margin. Fixed so a ring is two cache-friendly typed arrays, never grown. */
+ * margin. Fixed so a ring is a few cache-friendly typed arrays, never grown.
+ * Must not exceed 32: the per-slot jump verdicts are one bit each in a single
+ * 32-bit field. */
 const RING_CAP = 32;
 
 /** No samples for this key: the caller renders the raw merged position. */
@@ -67,12 +85,71 @@ export const FRESH_COASTING = 1;
 /** Extrapolation is exhausted: the entity is frozen on stale data. */
 export const FRESH_STALE = 2;
 
+/**
+ * How far a sample pair must outrun its immediate neighbours before it counts
+ * as a discontinuity rather than travel. Dimensionless on purpose: the
+ * comparison is the entity's own adjacent motion, so one factor serves a
+ * cursor in CSS pixels and a game entity in arbitrary world units. Eight is
+ * far outside what either produces between consecutive samples - a pointer
+ * and a physical simulation are both continuous in velocity at the sample
+ * cadence, and the widest honest step (a full stop, a dead start) reaches the
+ * factor only against a neighbour that has already been left behind on the
+ * other side - and far inside a placement, which moves an entity by a screen
+ * in one interval.
+ */
+const JUMP_FACTOR = 8;
+
+/** `JUMP_FACTOR` squared: the comparisons work on squared speeds so the frame
+ * path never takes a square root. */
+const JUMP_FACTOR_SQ = JUMP_FACTOR * JUMP_FACTOR;
+
+/**
+ * True when a displacement covers more ground than `perMs` allows over
+ * `span`. `perMs <= 0` means no absolute bound was configured.
+ * @param {number} dx @param {number} dy @param {number} span
+ * @param {number} perMs bound in position units per millisecond
+ */
+function overSpeed(dx, dy, span, perMs) {
+	if (!(perMs > 0)) return false;
+	const lim = perMs * span;
+	return dx * dx + dy * dy > lim * lim;
+}
+
+/**
+ * The resolved sampling bounds. Built once per smoother and handed to every
+ * ring by reference, so the frame path sees one hidden class and never packs
+ * an argument list whose positional units (`snapGapMs` in milliseconds,
+ * `snapSpeedPerMs` per millisecond, both next to each other) could be read
+ * for one another.
+ * @typedef {{
+ *   extrapolateMs: number,
+ *   snapGapMs: number,
+ *   snapSpeedPerMs: number,
+ *   autoSnap: boolean
+ * }} SampleBounds
+ */
+
 /** One entity's position history on the server time axis. */
 export class SampleRing {
 	constructor() {
 		this.t = new Float64Array(RING_CAP);
 		this.x = new Float64Array(RING_CAP);
 		this.y = new Float64Array(RING_CAP);
+		// The whole jump verdict for the pair ENDING at each slot, resolved as
+		// samples land rather than on every frame that straddles them: bit i is
+		// set where that pair outruns the pair before it by `JUMP_FACTOR` and
+		// the sample after it (once one arrives) did not sustain that speed. One
+		// bit per slot, which is why `RING_CAP` is capped at the 32 a bitmask
+		// holds - a fourth typed array would cost a cache line per entity per
+		// frame, and this field sits beside `head` and `len`, already read.
+		// Judging at push time is also what makes the oldest surviving pair
+		// judgeable: its verdict was formed while the sample before it still
+		// existed, and it stays valid after that sample is overwritten.
+		this.spikes = 0;
+		// Squared speed of the newest pair (position units per ms, squared), or
+		// -1 when there is no usable one - the only history `push` needs to
+		// judge the next pair, so no per-slot speed array exists to walk.
+		this.lastV2 = -1;
 		this.head = 0;
 		this.len = 0;
 		// Resume-ease overlay: a decaying positional offset added on top of the
@@ -89,6 +166,12 @@ export class SampleRing {
 		this.easeFromX = 0;
 		this.easeFromY = 0;
 		this.easePending = false;
+		// The fastest honest motion this entity showed before the rebuild that
+		// armed the ease (position units per millisecond), captured by
+		// `renderedSnapshot` while the old rings still existed. The ease slide
+		// is measured against it: a resume that would move the entity faster
+		// than it has ever moved is a placement, not a correction.
+		this.easeMaxPerMs = 0;
 		// The last rendered output (post-offset), so a resume can capture where
 		// each entity was drawn before the rings are rebuilt.
 		this.lastX = 0;
@@ -103,8 +186,10 @@ export class SampleRing {
 	 * @param {number} t @param {number} x @param {number} y
 	 */
 	push(t, x, y) {
+		let prev = -1;
 		if (this.len > 0) {
-			const newest = this.t[(this.head + this.len - 1) % RING_CAP];
+			prev = (this.head + this.len - 1) % RING_CAP;
+			const newest = this.t[prev];
 			if (t < newest) t = newest;
 		}
 		if (this.len === RING_CAP) {
@@ -115,7 +200,85 @@ export class SampleRing {
 		this.t[i] = t;
 		this.x[i] = x;
 		this.y[i] = y;
+		let v2 = -1;
+		if (prev >= 0) {
+			const span = t - this.t[prev];
+			if (span > 0) {
+				const dx = x - this.x[prev];
+				const dy = y - this.y[prev];
+				v2 = (dx * dx + dy * dy) / (span * span);
+			}
+		}
+		const back = this.lastV2;
+		if (v2 >= 0 && back >= 0 && v2 > JUMP_FACTOR_SQ * back) this.spikes |= 1 << i;
+		else this.spikes &= ~(1 << i);
+		// The pair before this one now HAS a sample after it. A pair that was
+		// flagged but whose successor moves just as fast was sustained motion -
+		// a dead start, a hard acceleration - not a placement.
+		if (prev >= 0 && v2 >= 0 && back <= JUMP_FACTOR_SQ * v2) this.spikes &= ~(1 << prev);
+		this.lastV2 = v2;
 		this.len++;
+	}
+
+	/**
+	 * True when the pair at ring slots `(lo, hi)` is a discontinuity rather
+	 * than travel - the positional half of the snap test, shared by the
+	 * straddle and the extrapolation-velocity gate so the two can never
+	 * disagree about what counts as a jump.
+	 *
+	 * The absolute bound decides first when the topic set one. Otherwise the
+	 * verdict is the one that `push` recorded for this pair, measuring it
+	 * against the samples on either side of it - it has to outrun both.
+	 *
+	 * The pair BEFORE it is required: the entity's motion up to the jump is the
+	 * baseline, and the FIRST pair of a ring has none, so an entity that just
+	 * appeared always interpolates. Without that rule a ring whose history
+	 * begins with motion that then stops would read its own first move as a
+	 * placement.
+	 *
+	 * The sample AFTER the pair is used when one has arrived, and is what keeps
+	 * sustained motion intact: a dead start and a hard acceleration both look
+	 * like a jump against the pair behind them, and are contradicted by the
+	 * pair ahead moving just as fast. It cannot be required, because the
+	 * placement this exists for is often the newest sample there is - a server
+	 * that places a resting entity sends nothing more until it moves again.
+	 *
+	 * `lo` and `hi` are adjacent slots at both call sites, so the pair IS the
+	 * one `push` already judged: with no absolute bound configured, ordinary
+	 * motion costs one bit test here.
+	 *
+	 * @param {number} lo @param {number} hi adjacent ring slots of the pair
+	 * @param {number} dx @param {number} dy the pair's displacement
+	 * @param {number} span the pair's duration; callers pass a positive value
+	 * @param {SampleBounds} bounds
+	 */
+	isJump(lo, hi, dx, dy, span, bounds) {
+		if (overSpeed(dx, dy, span, bounds.snapSpeedPerMs)) return true;
+		return bounds.autoSnap && (this.spikes & (1 << hi)) !== 0;
+	}
+
+	/**
+	 * The fastest motion this ring's history actually shows, in position units
+	 * per millisecond, skipping pairs that span more than `snapGapMs` (their
+	 * implied speed is an artifact of the delivery gap, not of the entity).
+	 * Scans the whole ring and takes a square root, so it is called once per
+	 * resume - never on the frame path.
+	 * @param {number} snapGapMs
+	 * @returns {number}
+	 */
+	peakSpeedPerMs(snapGapMs) {
+		let best = 0;
+		for (let k = 1; k < this.len; k++) {
+			const i = (this.head + k) % RING_CAP;
+			const p = (this.head + k - 1) % RING_CAP;
+			const s = this.t[i] - this.t[p];
+			if (!(s > 0) || s > snapGapMs) continue;
+			const dx = this.x[i] - this.x[p];
+			const dy = this.y[i] - this.y[p];
+			const v = Math.sqrt(dx * dx + dy * dy) / s;
+			if (v > best) best = v;
+		}
+		return best;
 	}
 
 	/**
@@ -123,11 +286,12 @@ export class SampleRing {
 	 * `{ x, y }` scratch). Returns one of the SAMPLE_* statuses.
 	 * @param {number} renderTime
 	 * @param {{ x: number, y: number }} out
-	 * @param {number} extrapolateMs hard cap on dead-reckoning past the newest sample
-	 * @param {number} snapGapMs sample gap treated as a discontinuity
+	 * @param {SampleBounds} bounds
 	 * @returns {number}
 	 */
-	sampleInto(renderTime, out, extrapolateMs, snapGapMs) {
+	sampleInto(renderTime, out, bounds) {
+		const extrapolateMs = bounds.extrapolateMs;
+		const snapGapMs = bounds.snapGapMs;
 		const len = this.len;
 		if (len === 0) return SAMPLE_EMPTY;
 		const head = this.head;
@@ -142,9 +306,17 @@ export class SampleRing {
 			if (len >= 2) {
 				const pi = (head + len - 2) % RING_CAP;
 				const span = tn - this.t[pi];
-				if (span > 0 && span <= snapGapMs) {
-					vx = (this.x[ni] - this.x[pi]) / span;
-					vy = (this.y[ni] - this.y[pi]) / span;
+				const dx = this.x[ni] - this.x[pi];
+				const dy = this.y[ni] - this.y[pi];
+				// A discontinuity's implied velocity is fiction in both
+				// directions: dead-reckoning along a teleport would fling the
+				// entity onward at the jump's speed for the whole extrapolation
+				// cap - the longest smear the pipeline can paint - which is the
+				// same reason a pair spanning more than the gap threshold
+				// carries no velocity either.
+				if (span > 0 && span <= snapGapMs && !this.isJump(pi, ni, dx, dy, span, bounds)) {
+					vx = dx / span;
+					vy = dy / span;
 				}
 			}
 			const over = renderTime - tn;
@@ -184,17 +356,22 @@ export class SampleRing {
 		}
 		const tl = this.t[lower];
 		const span = this.t[upper] - tl;
-		if (span > snapGapMs) {
+		const dx = this.x[upper] - this.x[lower];
+		const dy = this.y[upper] - this.y[lower];
+		if (span > snapGapMs || (span > 0 && this.isJump(lower, upper, dx, dy, span, bounds))) {
 			// Discontinuity: snap to the newer side rather than smearing the
-			// entity across the gap (view re-entry, idle resume, teleport).
+			// entity across it. Either the pair spans a delivery gap (view
+			// re-entry, idle resume) or it covers ground no honest motion
+			// could, which is a teleport or a scripted placement whatever the
+			// cadence that delivered it.
 			out.x = this.x[upper];
 			out.y = this.y[upper];
 			out.fresh = FRESH_LIVE;
 			return SAMPLE_ACTIVE;
 		}
 		const f = span > 0 ? (renderTime - tl) / span : 1;
-		out.x = this.x[lower] + (this.x[upper] - this.x[lower]) * f;
-		out.y = this.y[lower] + (this.y[upper] - this.y[lower]) * f;
+		out.x = this.x[lower] + dx * f;
+		out.y = this.y[lower] + dy * f;
 		out.fresh = FRESH_LIVE;
 		return SAMPLE_ACTIVE;
 	}
@@ -206,13 +383,26 @@ export class SampleRing {
  * interpolation delay. One instance per rendering pipeline (one in the
  * worker, or one on the main-thread fallback).
  *
- * @param {{ delayMs: 'auto' | number, extrapolateMs: number, snapGapMs: number }} options
+ * @param {{ delayMs: 'auto' | number, extrapolateMs: number, snapGapMs: number,
+ *   snapSpeedPerSec?: 'auto' | number }} options
  *   resolved knobs - validation belongs to the caller's public surface.
+ *   `snapSpeedPerSec` omitted or `'auto'` detects jumps from each entity's own
+ *   neighbouring motion; a positive number adds an absolute ceiling on top;
+ *   `0` turns both off.
  */
 export function createSmoother(options) {
 	const delayOpt = options.delayMs;
-	const extrapolateMs = options.extrapolateMs;
 	const snapGapMs = options.snapGapMs;
+	const perSec = options.snapSpeedPerSec;
+	/** @type {SampleBounds} */
+	const bounds = {
+		extrapolateMs: options.extrapolateMs,
+		snapGapMs,
+		// Held per millisecond because every ring time is in milliseconds: the
+		// render frame's absolute test is then one multiply instead of a divide.
+		snapSpeedPerMs: typeof perSec === 'number' && perSec > 0 ? perSec / 1000 : 0,
+		autoSnap: perSec !== 0
+	};
 
 	const clock = createServerClock();
 	/** @type {Map<string, SampleRing>} */
@@ -343,17 +533,38 @@ export function createSmoother(options) {
 		sampleInto(key, renderTime, out) {
 			const ring = rings.get(key);
 			if (ring === undefined) return SAMPLE_EMPTY;
-			const s = ring.sampleInto(renderTime, out, extrapolateMs, snapGapMs);
+			const s = ring.sampleInto(renderTime, out, bounds);
 			// Resume ease: on the first sample after an armed resume, compute the
 			// offset from where the entity was last drawn to where the new basis
 			// renders it now, then decay that offset to zero over offMs so the
 			// entity slides into place instead of popping. The offset is a pure
 			// render overlay - the rings and clock already hold the true basis.
 			if (ring.easePending) {
-				ring.offX = ring.easeFromX - out.x;
-				ring.offY = ring.easeFromY - out.y;
-				ring.offAt = renderTime;
+				const ox = ring.easeFromX - out.x;
+				const oy = ring.easeFromY - out.y;
 				ring.easePending = false;
+				// The ease is a correction, not a path. An offset that would slide
+				// the entity faster than its own motion ever did (or past the
+				// configured ceiling) is the server having PLACED it elsewhere
+				// while the frames were away, and easing that paints the placement
+				// across every frame of the ease window - the same smear the
+				// straddle snap removes, just stretched over resumeEaseMs instead
+				// of one sample interval. Snap those.
+				// The automatic ceiling is the entity's own peak honest speed, so
+				// an entity that was at rest before the resume has a ceiling of
+				// zero: the two bases should agree about where a resting entity
+				// is, and any disagreement is exactly the placement this snaps.
+				const auto = ring.easeMaxPerMs * JUMP_FACTOR * ring.offMs;
+				if (
+					overSpeed(ox, oy, ring.offMs, bounds.snapSpeedPerMs) ||
+					(bounds.autoSnap && ox * ox + oy * oy > auto * auto)
+				) {
+					ring.offAt = -1;
+				} else {
+					ring.offX = ox;
+					ring.offY = oy;
+					ring.offAt = renderTime;
+				}
 			}
 			if (ring.offAt >= 0) {
 				const f = ring.offMs > 0 ? 1 - (renderTime - ring.offAt) / ring.offMs : 0;
@@ -376,13 +587,19 @@ export function createSmoother(options) {
 		 * Snapshot each entity's last rendered position (post-ease), for a
 		 * resume that is about to rebuild the rings: the caller captures this
 		 * BEFORE `reset()`, rebuilds on the new basis, then `armResumeEase`s
-		 * back into it. Allocates - called once per resume, never per frame.
-		 * @returns {Map<string, { x: number, y: number }>}
+		 * back into it. Each entry carries the entity's peak honest speed
+		 * (`perMs`) from the history that is about to be discarded, which is
+		 * the only surviving evidence of how fast this entity actually moves -
+		 * the ease measures its own slide against it. Allocates and scans the
+		 * rings; called once per resume, never per frame.
+		 * @returns {Map<string, { x: number, y: number, perMs: number }>}
 		 */
 		renderedSnapshot() {
 			const snap = new Map();
 			for (const [key, ring] of rings) {
-				if (ring.hasLast) snap.set(key, { x: ring.lastX, y: ring.lastY });
+				if (ring.hasLast) {
+					snap.set(key, { x: ring.lastX, y: ring.lastY, perMs: ring.peakSpeedPerMs(snapGapMs) });
+				}
 			}
 			return snap;
 		},
@@ -392,8 +609,10 @@ export function createSmoother(options) {
 		 * (last-rendered positions captured before the rebuild) and the freshly
 		 * rebuilt rings. An entity absent from the new basis is skipped (it left);
 		 * a newly appeared entity is skipped (nothing to ease from). No-op when
-		 * `easeMs <= 0` (snap).
-		 * @param {Map<string, { x: number, y: number }>} fromMap
+		 * `easeMs <= 0` (snap). Arming is only an intent: the first eased frame
+		 * measures the offset the rebuild actually produced and snaps instead
+		 * when that offset is a placement rather than a correction.
+		 * @param {Map<string, { x: number, y: number, perMs?: number }>} fromMap
 		 * @param {number} easeMs
 		 */
 		armResumeEase(fromMap, easeMs) {
@@ -405,6 +624,7 @@ export function createSmoother(options) {
 				ring.easeFromY = pos.y;
 				ring.easePending = true;
 				ring.offMs = easeMs;
+				ring.easeMaxPerMs = typeof pos.perMs === 'number' && pos.perMs > 0 ? pos.perMs : 0;
 			}
 		},
 

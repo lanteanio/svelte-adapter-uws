@@ -164,6 +164,7 @@ function checkWirePair(pair, label) {
  *   interpolationMs?: 'auto' | number,
  *   extrapolateMs?: number,
  *   snapGapMs?: number,
+ *   snapSpeedPerSec?: 'auto' | number,
  *   stallMs?: number,
  *   resumeEaseMs?: number,
  *   cmdRate?: number,
@@ -211,6 +212,9 @@ export function createSmoothChannel(options) {
 	}
 	checkKnob(options.extrapolateMs, 'extrapolateMs', 0);
 	checkKnob(options.snapGapMs, 'snapGapMs', 1);
+	if (options.snapSpeedPerSec !== undefined && options.snapSpeedPerSec !== 'auto') {
+		checkKnob(options.snapSpeedPerSec, 'snapSpeedPerSec', 0);
+	}
 	checkKnob(options.stallMs, 'stallMs', 1);
 	checkKnob(options.resumeEaseMs, 'resumeEaseMs', 0);
 	checkKnob(options.cmdRate, 'cmdRate', 0);
@@ -273,7 +277,12 @@ export function createSmoothChannel(options) {
 	const smoother = createSmoother({
 		delayMs: options.interpolationMs === undefined ? 'auto' : options.interpolationMs,
 		extrapolateMs: options.extrapolateMs === undefined ? 250 : options.extrapolateMs,
-		snapGapMs: options.snapGapMs === undefined ? 500 : options.snapGapMs
+		snapGapMs: options.snapGapMs === undefined ? 500 : options.snapGapMs,
+		// Teleport handling. 'auto' reads a jump off the entity's own
+		// neighbouring samples, which needs no knowledge of the topic's units
+		// and is why it can be the default; a number adds an absolute world-
+		// units-per-second ceiling; 0 turns both off.
+		snapSpeedPerSec: options.snapSpeedPerSec === undefined ? 'auto' : options.snapSpeedPerSec
 	});
 
 	/** Latest merged remote states (positions interpolate, other fields are

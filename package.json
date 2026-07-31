@@ -1,6 +1,6 @@
 {
 	"name": "svelte-adapter-uws",
-	"version": "0.6.0-next.87",
+	"version": "0.6.0-next.88",
 	"publishConfig": {
 		"tag": "next"
 	},
@@ -159,14 +159,23 @@
 		"examples"
 	],
 	"scripts": {
-		"check": "node scripts/check-types.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node scripts/check-scope.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+		"check": "node scripts/check-types.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node scripts/check-uws-pin.js && node scripts/check-uws-binaries.js && node scripts/check-links.js && node scripts/check-scope.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
 		"pretest": "npm run check",
+		"check:links": "node scripts/check-links.js",
+		"doctor": "node scripts/doctor.js",
+		"bootstrap": "node scripts/bootstrap.js",
 		"test": "vitest run",
 		"test:watch": "vitest",
 		"test:e2e": "npx playwright test --config test/e2e/playwright.config.js",
 		"test:coverage": "node scripts/coverage.js",
+		"test:floor": "vitest run test/client test/crdt- test/cursor-handle test/cursor-viewport-client test/lease-client test/presence-client test/smooth-channel test/smooth-interpolate test/smooth-wire-view test/utils test/wire-client test/wire-sink",
 		"sim:swarm": "node scripts/sim-swarm.js",
-		"sim:golden": "node scripts/sim-golden.js"
+		"sim:golden": "node scripts/sim-golden.js",
+		"verify:fast": "node scripts/verify.js fast",
+		"verify:suite": "node scripts/verify.js suite",
+		"verify:sim": "node scripts/verify.js sim",
+		"verify:pr": "npm run verify:suite && npm run verify:sim",
+		"verify:full": "npm run verify:pr && npm run test:e2e"
 	},
 	"engines": {
 		"node": ">=22.0.0"
@@ -213,7 +222,7 @@
 		"ws": "^8.19.0"
 	},
 	"optionalDependencies": {
-		"uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.67.0"
+		"uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.69.0"
 	},
 	"overrides": {
 		"cookie": "^0.7.2",

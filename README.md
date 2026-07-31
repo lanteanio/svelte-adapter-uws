@@ -12,7 +12,7 @@ I've been loving Svelte and SvelteKit for a long time. I always wanted to expand
 - **Dynamic response compression** - SSR HTML and API JSON compressed on the fly with brotli or gzip
 - **Backpressure handling** - streaming responses that won't blow up memory
 - **Graceful shutdown** - waits for in-flight requests before exiting
-- **Liveness + readiness probes** - `/healthz` (always 200 while up) and `/readyz` (503 during graceful drain) out of the box
+- **Liveness + readiness probes** - `/healthz` (always 200 while up) and `/readyz` (503 `starting` before `init` commits, 503 `draining` once shutdown begins) out of the box
 - **Zero-config WebSocket** - just set `websocket: true` and go
 
 **Upgrading from 0.4.x?** See the [migration guide](./MIGRATION.md) for every breaking change between 0.4.x and 0.5.x.
@@ -102,12 +102,22 @@ npm install
 
 ```bash
 npm install svelte-adapter-uws
-npm install uNetworking/uWebSockets.js#v20.60.0
+npm install uNetworking/uWebSockets.js#v20.69.0
 ```
 
 > **Note:** uWebSockets.js is a native C++ addon installed directly from GitHub, not from npm. It may not compile on all platforms. Check the [uWebSockets.js README](https://github.com/uNetworking/uWebSockets.js) if you have issues.
 >
 > **Docker:** Use `node:22-trixie-slim` or another glibc >= 2.38 image. Bookworm-based images and Alpine won't work. See [Deploying with Docker](#deploying-with-docker).
+
+The supported set is exactly what the pinned addon ships prebuilt binaries for - there is no source build to fall back on:
+
+| platform | arch | note |
+|---|---|---|
+| linux | x64, arm64 | glibc >= 2.38. musl (Alpine) has no binary at all |
+| darwin | x64, arm64 | |
+| win32 | x64 | no arm64 binary is published |
+
+Node is `>=22.0.0`, and the same "no source build to fall back on" applies to the Node ABI: the pinned addon ships one binary per ABI it targets, currently three (Node 22, 24 and 26). `engines` does not block a Node major outside that set, but there is no binary for one - and because the addon is an OPTIONAL dependency, npm reports nothing when it finds none, so the first sign is `adapt()` failing at build time. A clone of this repository additionally pins 22.23.2 in `.nvmrc`, the version the hosted gate runs and the one to reproduce a native ABI question on.
 
 If you plan to use WebSockets during development, also install `ws`:
 
@@ -187,6 +197,8 @@ PROTOCOL_HEADER=x-forwarded-proto HOST_HEADER=x-forwarded-host node build
 
 > **Important:** `PROTOCOL_HEADER`, `HOST_HEADER`, `PORT_HEADER`, and `ADDRESS_HEADER` are trusted verbatim by default. Only set these when running behind a reverse proxy that overwrites the corresponding headers on every request. If the server is directly internet-facing, clients can spoof these values. When in doubt, use a fixed `ORIGIN` instead.
 
+A proxy that appends its line instead of overwriting is handled rather than being an error. When a request arrives with two `X-Forwarded-Proto` lines the last one wins, because that is the line the hop in front wrote and an earlier one is whatever the client sent. The same rule covers `HOST_HEADER`, `PORT_HEADER` and every `ADDRESS_HEADER` name except `x-forwarded-for`, which keeps all of its lines joined with `", "` so `XFF_DEPTH` can count the hops.
+
 To make the trust mechanical instead of topological, set `TRUSTED_PROXIES` to a comma-separated list of proxy addresses or CIDR ranges (IPv4 and IPv6):
 
 ```bash
@@ -196,6 +208,8 @@ ADDRESS_HEADER=x-forwarded-for TRUSTED_PROXIES=10.0.0.0/8,::1 node build
 With `TRUSTED_PROXIES` set, `ADDRESS_HEADER` is honored only when the direct socket peer is in the list; a claim from any other peer is ignored (the socket address is used, with a one-shot warning), so a client that can reach the listener directly cannot spoof its rate-limit identity or `getClientAddress()`. Unset, the historical trust-verbatim behavior is unchanged.
 
 If your load balancer speaks [PROXY protocol v2](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) (HAProxy, AWS NLB, etc.) instead of an address header, opt in with `PROXY_PROTOCOL=1`: the preamble's source address becomes the client address for rate limiting and `getClientAddress()`. Combine it with `TRUSTED_PROXIES` - uWS accepts a PP2 preamble from any peer, so without the allowlist any direct client could spoof its address the same way an ungated header does. An `ADDRESS_HEADER` on top of PROXY protocol composes: the header (from a trusted app proxy) wins over the PP2 address (from the outer LB).
+
+**Repeated header lines.** A request carrying two lines of the same header is not resolved by last-wins across the board; the policy is fixed per header class. A repeated `host`, `content-length`, `transfer-encoding`, `content-type`, `authorization`, `proxy-authorization` or `origin` is answered `400 Bad Request`, and a WebSocket upgrade carrying one is refused with the same status: those headers decide how a request is framed, how its body is parsed, who it is from, or which origin it claims, and the value this layer picked might not be the one the proxy in front picked. Every other repeated header is merged or picked. `cookie` joins with `"; "` (what an HTTP/2 to HTTP/1.1 downgrade at an edge proxy produces). `set-cookie` keeps its first line and is never joined - a comma is legal inside an `Expires` date. The single-valued proxy headers keep their last line: the names you configured through `PROTOCOL_HEADER` / `HOST_HEADER` / `PORT_HEADER` / `ADDRESS_HEADER` (`x-forwarded-for` excepted - it stays joined, which is what `XFF_DEPTH` counts), plus the ubiquitous spellings (`x-forwarded-proto`, `x-forwarded-host`, `x-forwarded-port`, `x-real-ip`, `cf-connecting-ip`, `true-client-ip`, and friends) whether or not you configured them. Everything else is comma-joined in arrival order, including vendor chains such as `x-original-forwarded-for`, `forwarded` and `via` - with one carve-out: naming one of those as your `ADDRESS_HEADER` moves it into the last-line class, because the client-IP resolver reads any name other than `x-forwarded-for` as a single address and a joined value would put the client's own bytes in front of the proxy's.
 
 ---
 
@@ -388,6 +402,12 @@ adapter({
 })
 ```
 
+The two probes answer different questions, and wiring them the other way round is the classic rolling-deploy outage:
+
+- `healthCheckPath` is **liveness**: `200` for as long as the process runs, in every state including the whole drain. Wire a liveness probe here and nothing else.
+- `readinessCheckPath` is **routing**: `200 ready` only while the instance is ready; `503` while it is starting up (before `init` commits) and once shutdown has begun. The 503 body is the state - `starting` or `draining` - because those are opposite things to an operator watching a rolling deploy: every new pod reporting `draining` reads as a stuck or reversed rollout. Wire the load balancer and the readiness probe here.
+- Accepting connections is neither: the socket stays open through the drain delay, which is what makes a rolling restart lossless.
+
 ### WebSocket options
 
 ```js
@@ -465,13 +485,15 @@ These options control how the server handles misbehaving or slow clients at the 
 
 **`authPathRateLimit`** (default: 30 per 10s window) - the same sliding-window limit on the auth preflight endpoint, the request `connect({ auth: true })` clients POST before upgrading. Over the limit they get `429 Too Many Requests` and your `authenticate` hook is never called, so a credential check against a database cannot be driven at full server speed from one address. The default is higher than `upgradeRateLimit` on purpose: every reconnect that preflights also upgrades, so this door sees at least as much traffic during a reconnect wave, and matching them would make the preflight refuse traffic the upgrade limit would have admitted. `authPathRateLimitWindow` sets the window; `0` disables. Same client-address resolution as `upgradeRateLimit`, so the same proxy caveat applies.
 
-> **Behind a proxy?** The limit is keyed on the client IP, which is the raw socket address unless you set `ADDRESS_HEADER`. If the server sits behind a reverse proxy, an L4 load balancer, or docker's `userland-proxy` (its default) that rewrites the source address, **every client arrives as the same gateway IP** and the "per-IP" limit silently collapses into a single **global** cap - 10 new connections per 10s for the entire site, trivially tripped by normal traffic or a crawler. The runtime emits a one-time warning the first time it rejects an upgrade keyed on a private/loopback address while `ADDRESS_HEADER` is unset. To restore real per-IP limiting, set `ADDRESS_HEADER=x-forwarded-for` (with [`XFF_DEPTH`](#environment-variables) for the trusted-proxy hop count) so the limiter sees the real client, set docker `userland-proxy: false` so iptables DNAT preserves the source IP, or set `upgradeRateLimit: 0` if you rate-limit upstream. The same applies to the per-message [`plugins/ratelimit`](https://github.com/lanteanio/svelte-adapter-uws-extensions), which keys on the same resolved address.
+> **Behind a proxy?** The limit is keyed on the client IP, which is the raw socket address unless you set `ADDRESS_HEADER`. If the server sits behind a reverse proxy, an L4 load balancer, or docker's `userland-proxy` (its default) that rewrites the source address, **every client arrives as the same gateway IP** and the "per-IP" limit silently collapses into a single **global** cap - 10 new connections per 10s for the entire site, trivially tripped by normal traffic or a crawler. The runtime emits a one-time warning the first time it rejects an upgrade keyed on a private/loopback address while `ADDRESS_HEADER` is unset. To restore real per-IP limiting, set `ADDRESS_HEADER=x-forwarded-for` (with [`XFF_DEPTH`](#environment-variables) for the trusted-proxy hop count) so the limiter sees the real client, set docker `userland-proxy: false` so iptables DNAT preserves the source IP, or set `upgradeRateLimit: 0` if you rate-limit upstream. Match `XFF_DEPTH` to the number of hops that actually append: a value larger than the real chain finds fewer addresses than hops and falls back to the socket address, which resolves every client to the gateway again - the exact collapse this callout is about. The same applies to the per-message [`plugins/ratelimit`](https://github.com/lanteanio/svelte-adapter-uws-extensions), which keys on the same resolved address.
 
 **`upgradeAdmission`** (default: disabled) - two-layer admission control on the upgrade path, both opt-in:
 
 - `maxConcurrent` caps how many upgrades may be in flight at once. Crossed requests get a fast `503 Service Unavailable` before any per-request work, so a connection storm can be shed without spending CPU on TLS, header parsing, or cookie decoding. Set this just above your steady-state in-flight count to act as a circuit breaker.
 - `perTickBudget` caps how many actual `res.upgrade()` calls run per Node.js event-loop tick. Once the budget is spent, subsequent calls are deferred via `setImmediate` so the loop is not starved by 10K synchronous handshakes from one I/O batch. Pre-upgrade work (rate limit, origin check, hook dispatch) still runs in the original tick; only the hand-off to the C++ upgrade path is paced. Start with `64` and adjust based on your peak burst envelope.
-- `waitingRoom` upgrades the over-capacity rejection from a bare `503` to a content-negotiated waiting room: a browser navigation gets a self-polling HTML holding page that auto-reloads when capacity frees, while a WebSocket upgrade or non-HTML client keeps a `503` with a jittered `Retry-After`. On by default once `maxConcurrent > 0`; set `waitingRoom: false` for the exact bare `503`. The page polls a read-only `/__admit-check` endpoint (`202` with a queue-depth/ETA body while full, `200` when capacity exists) that consumes no gate slot. Tune with `waitingRoom: { path, admitCheckPath, retryAfterSeconds, pollIntervalMs, template }`.
+- `waitingRoom` upgrades the over-capacity rejection from a bare `503` to a content-negotiated waiting room: a browser navigation gets a self-polling HTML holding page that reloads itself when capacity frees, while a WebSocket upgrade or non-HTML client keeps a `503` with a jittered `Retry-After`. On by default once `maxConcurrent > 0`; set `waitingRoom: false` for the exact bare `503`. The page polls a read-only `/__admit-check` endpoint (`202` with a waiting-count body while full, `200` when capacity exists) that consumes no gate slot. Tune with `waitingRoom: { path, admitCheckPath, retryAfterSeconds, pollIntervalMs, template }`.
+  - The built-in page carries a `Pause live updates` control. A paused page keeps polling but hands the visitor a `Reload now` button instead of navigating for them. `/__admit-check` reports live capacity and reserves nothing, so a slot it offers can be taken by another browser first: the page keeps polling across an offer, withdraws it when a later check disagrees, and pressing `Reload now` after that simply re-serves the holding page.
+  - What the page states is the capacity situation and, when a count is available, an approximate number of browsers waiting. It shows no queue position and no wait estimate, because admission keeps no arrival order and nothing measures the drain rate. The poll body's `queueDepth` is a rolling count of browsers polling the page (a crowd size, not a place in a line) and `estimatedSeconds` is that count at a nominal one slot per second. A deployment that wants a real position and a real estimate has to implement a ticketed queue and render it through `waitingRoom.template`.
 - `cursorLane` reserves a fraction of `maxConcurrent` (default `0.25`, at least one slot) for a deprioritised cursor-only upgrade lane - a second WebSocket that requests the `svelte-realtime-cursor` subprotocol. A cursor upgrade is admitted only while both the main ceiling and the cursor sub-budget have room, so a flood of cursor connects can never starve main-WebSocket admission; the main lane never waits on the cursor sub-budget. The cursor lane is refused first and, under `siege`, refused entirely - always with a bare `503` (never the holding page, since the cursor connection is not a browser). Omit `cursorLane` to disable the lane: the second counter never increments and admission is unchanged. Set it with `cursorLane: { fraction }`.
 
 ```js
@@ -544,7 +566,7 @@ export const GET = ({ platform }) =>
 | Metric | Type | What it charts |
 | --- | --- | --- |
 | `upgrade_admitted_total` | counter | Upgrades accepted (the `res.upgrade()` actually ran). |
-| `upgrade_rejected_total{reason}` | counter | Upgrades rejected before open. Reasons: `siege`, `over_capacity`, `cursor_lane`, `ip_rate_limit`, `bad_origin`, `auth_timeout`, `auth_rejected`, `hook_error`. |
+| `upgrade_rejected_total{reason}` | counter | Upgrades rejected before open. Reasons, in the order the upgrade path can reach them: `siege`, `over_capacity`, `cursor_lane`, `duplicate_header` (a repeated framing / identity header, which cannot be given one reading), `ip_rate_limit`, `bad_origin`, `auth_timeout`, `auth_rejected`, `hook_error`. One more, `auth_rate_limit`, is emitted on the auth preflight POST rather than on an upgrade - it shares this counter because it refuses the same client at the door in front of the handshake. That preflight also answers a repeated framing header with a `400`, and that rejection is counted on no series, so a dashboard built on this counter sees duplicate-header refusals from the upgrade path only. |
 | `upgrade_rate_map_evicted_total{door}` | counter | Rate-limit entries evicted to make room at the map cap. `door` is `upgrade` or `auth` - a sustained rate on either door means rotating client identities are churning that limiter's map faster than the periodic sweep reclaims it. |
 | `upgrade_inflight` | gauge | Upgrades currently between admission and open (sampled once per pressure interval). |
 | `waiting_room_queue_depth` | gauge | Clients currently polling the waiting room (sampled; `0` with the room off). |
@@ -663,6 +685,56 @@ authenticated `x-webhook-signature` value or on a unique event identifier
 inside the signed body. Do not rely on the mutable `idempotency-key` header
 alone as a security replay token: that header is not part of the HMAC.
 
+### Sending a webhook (`deliverWebhook` and the delivery controls)
+
+`deliverWebhook(config, topic, event, data, hooks?)` performs one outbound delivery and returns its terminal outcome. It never throws and reports nothing - the caller owns reporting and dead-letter capture. The optional `hooks` are three independent controls; omit them and delivery behaves as it always has, with first attempts unrationed and retries bounded only by `retry.attempts` (default 3).
+
+```js
+import { deliverWebhook, createWebhookAdmission, createRetryBudget, createWebhookBreaker }
+	from 'svelte-adapter-uws/plugins/webhooks';
+
+// One set of controls per process, shared by every delivery.
+const admission = createWebhookAdmission();          // first attempts, per destination address
+const budget = createRetryBudget();                  // retries, per hooks.key
+const breaker = createWebhookBreaker();              // endpoint ejection, per hooks.key
+
+const outcome = await deliverWebhook(
+	{ url: 'https://hooks.example.com/inbox', secret: process.env.WEBHOOK_SECRET },
+	'orders', 'created', { id: 17 },
+	{ admission, budget, breaker, key: registrationId }
+);
+
+if (!outcome.ok) {
+	if (outcome.err.code === 'WEBHOOK_ADMISSION_DENIED') queue.push(event); // over allowance, retry later
+	else if (outcome.err.code === 'WEBHOOK_CIRCUIT_OPEN') deadLetter(event); // endpoint ejected
+	else deadLetter(event, outcome.err, outcome.attempts);
+}
+```
+
+Three controls, three different questions, and the scoping differs on purpose:
+
+| Hook | Rations | Keyed by | Denial |
+|------|---------|----------|--------|
+| `hooks.admission` | the FIRST attempt of each delivery | `<address>:<port>` - every address the SSRF gate pinned the socket to (not `hooks.key`, not the URL) | terminal `attempts: 0`, `WebhookAdmissionDeniedError` (`code: 'WEBHOOK_ADMISSION_DENIED'`) |
+| `hooks.budget` | each RETRY, before its backoff | `hooks.key` | terminal, carrying the last delivery error |
+| `hooks.breaker` | every attempt to an ejected endpoint | `hooks.key` | terminal `attempts: 0`, `WebhookCircuitOpenError` (`code: 'WEBHOOK_CIRCUIT_OPEN'`) |
+
+The admission gate ignores both `hooks.key` and the URL because a scheduler typically holds one registration (and one key) per subscription, and several registrations routinely point at the same endpoint. Keying the first-attempt ceiling on the caller's key would give each of them a full allowance, so the configured ceiling would come out multiplied by the number of registrations. Keying on the URL or its origin only narrows that, because the caller picks the hostname too - `127.0.0.1:8080`, `localhost:8080`, `localhost.:8080` and any number of wildcard-DNS names are distinct URLs reaching one listener. A pinned address is the one part the caller cannot rename, so registrations, aliases, path rewrites and per-event `url` callbacks that land on one address draw on one bucket.
+
+The gate charges every address in the pin, not one chosen member of it: which member the socket ends up on is decided by the connect logic, and the caller orders its own DNS answer, so a single-member rule would name a bucket a padded answer can point away from. Charging the set settles it - whichever address the request goes to has paid for it.
+
+What that does not cover, stated so nobody has to discover it:
+
+- One endpoint published on several addresses (separate IPv4 and IPv6 literals, or DNS answers whose address sets differ) is several destinations, holds one allowance each, and a delivery to it spends one unit at each of them. A caller who controls its own DNS answer can therefore spend an unrelated address's allowance without sending it any traffic. What holds without qualification is narrower: a request cannot be put on an address **at the first hop** without spending that address's unit - see the redirect bullet below for what happens after it.
+- A refusal part-way through a multi-address set keeps the units already taken (the interface only takes), so a refused delivery can cost more than it sent, never less.
+- A DNS answer wider than 32 addresses is pinned to its first 32, so the socket may use only those and only those are charged.
+- The in-process gate is per process, so a cluster multiplies allowances by replica count until a shared implementation with the same `take(destination)` interface is injected through the same seam.
+- A redirect hop is not charged. The redirect target is chosen by the endpoint being delivered to, so charging it would let anyone who can register a webhook drain a bystander's allowance by answering `302` to that bystander. Size what that leaves unmetered from both knobs rather than from `maxRedirects` alone: delivery is attempted once per hop and retries inside each hop, so one admitted delivery can issue up to `(maxRedirects + 1) * retry.attempts` requests - **18** at the defaults of `5` and `3` - and only the first hop's destination set is charged. The SSRF gate still runs on every hop, so none of them can reach an address the gate refuses; they are unmetered, not unchecked.
+
+A URL the SSRF gate rejects costs nothing: the gate runs first, so an unparseable URL, a `file:` / `data:` / `gopher:` scheme and a blocked address (link-local metadata, private ranges) never spend a destination's allowance.
+
+A denial is deliberately distinguishable from a delivery failure: nothing was sent and the endpoint said nothing about its health, so requeue the event rather than dead-lettering it, and note that the breaker is not moved by an admission denial (only outcomes with `attempts > 0` move it). Only a definite no from an injected gate (`false`, or the `0` a Lua-scripted shared backend replies with) refuses a delivery - a throw, or an implementation that answers with nothing, admits, because a shared backend having a bad minute must not become an outbound outage.
+
 ### Capacity model
 
 Every internal `Map` / `Set` that grows with client behaviour or topic cardinality has an explicit upper bound and a defined behaviour at saturation. The defaults are deliberately generous (1,000,000 across the board) - far above any healthy single-connection use, even at uWS's million-connection scale - so the cap catches obvious bugs and runaway clients without ever biting real apps. Aggregate memory at extreme scale is bounded separately by `upgradeAdmission.maxConcurrent`; per-connection caps are not the right place to defend against a 1M-connection DoS.
@@ -694,11 +766,14 @@ Both rate-limit maps key IPv6 on its **/64 prefix**, not the full address: a /64
 | `cursor` | `maxConnections: 1_000_000`, `maxTopics: 1_000_000` | drop oldest insertion-order entry; pending throttle timers cleared | constructor options |
 | `throttle` / `debounce` | `maxTopics: 1_000_000` | flush pending then drop oldest topic | second arg to `throttle(interval, options)` / `debounce(...)` |
 | `lock` | `maxKeys: 1_000_000` | new-key `withLock` rejects with "active key count exceeded" | constructor options |
-| `ratelimit` | `maxBuckets: 1_000_000` | drop oldest insertion-order bucket on insert | constructor options |
-| `queue` | `maxSize: 1_000_000` per key | `push` rejects, `onDrop` callback fires | constructor options (pass `Infinity` to opt out) |
+| `ratelimit` | `maxBuckets: 1_000_000` | evict the least active unbanned bucket of a sample on insert; `onEvict` callback fires | constructor options |
+| `queue` | `maxSize: 1_000_000` per key, `maxKeys` / `maxPendingTotal` / `maxRunningTotal` `1_000_000` aggregate | `push` rejects with a typed `err.code`, `onDrop` fires with the bound that tripped; work over `maxRunningTotal` waits its turn rather than being rejected | constructor options (pass `Infinity` to opt out) |
 | `dedup` | `maxEntries: 10_000` | soft + hard cap, oldest insertion-order evicted | constructor options |
 | `session` | `maxEntries: 10_000` | soft + hard cap, oldest insertion-order evicted | constructor options |
-| `groups` | `maxMembers` (per group, required) | `join` returns `false`, `onFull` callback fires | required option |
+| `groups` | `maxMembers: 1_000_000` per group | `join` returns `false`, `onFull` callback fires | constructor options (pass `Infinity` to opt out) |
+| `webhooks` | opt-in: `createWebhookAdmission` `capacity: 100`, `refillPerSec: 10` per destination address, `maxKeys: 1024` destinations, so an aggregate 102,400 admitted deliveries in a burst / 10,240 per second per process; same per-key figures for `createRetryBudget` | delivery refused with `WEBHOOK_ADMISSION_DENIED` (admission) / retries stop early (budget); at `maxKeys` only a bucket refilled to full is reclaimed, and a destination that cannot be tracked is refused rather than admitted untracked | factory options (lower `maxKeys` to lower the aggregate); omit the hook for no ceiling |
+
+The `webhooks` row is the only opt-in one: those caps exist only once you pass the hooks to `deliverWebhook`, so the row states the default figures of the control rather than of the plugin. `capacity: 100` bounds one destination and `maxKeys * capacity` bounds the process, but both count ADMITTED DELIVERIES rather than HTTP requests, so neither is the figure to size an outbound path off on its own: one admitted delivery may issue up to `retry.attempts` x (`maxRedirects` + 1) requests - 18 on the delivery defaults - and the path has to carry that multiple. Lower `retry.attempts` or `maxRedirects` to shrink the multiplier, `maxKeys` to shrink the aggregate. A delivery to a host answering with several addresses spends one unit at each of them, so both figures are upper bounds on deliveries rather than exact counts of them.
 
 Two policy notes:
 
@@ -713,15 +788,15 @@ All static assets (from the `client/` and `prerendered/` output directories) are
 - `Vary: Accept-Encoding`: required for correct CDN/proxy caching when serving precompressed variants
 - `Accept-Ranges: bytes`: enables partial content requests (e.g. for download resume)
 - `X-Content-Type-Options: nosniff`: prevents MIME-type sniffing in browsers
-- `ETag`: derived from the file's modification time and size; enables `304 Not Modified` responses
+- `ETag`: derived from the file's modification time and size; enables `304 Not Modified` responses. Each content-coding is a distinct representation and carries its own validator, with the coding appended inside the quotes (`W/"lx3k9-1f4"`, `W/"lx3k9-1f4-br"`, `W/"lx3k9-1f4-gzip"`), so a conditional request or a resume can never cross from one representation to another
 - `Cache-Control: public, max-age=31536000, immutable`: for versioned assets under `/_app/immutable/`
 - `Cache-Control: no-cache`: for all other assets (forces ETag revalidation)
 
-**Range requests (HTTP 206):** The server handles `Range: bytes=start-end` requests for static files. Single byte ranges are supported (`bytes=0-499`, `bytes=-500`, `bytes=500-`). Multi-range requests (comma-separated) are served as full `200` responses. An unsatisfiable range returns `416 Range Not Satisfiable`. When a `Range` header is present, the response is always served uncompressed so byte offsets are correct. The `If-Range` header is respected: if it doesn't match the file's ETag, the full file is returned.
+**Range requests (HTTP 206):** The server handles `Range: bytes=start-end` requests for static files that carry a validator. Single byte ranges are supported (`bytes=0-499`, `bytes=-500`, `bytes=500-`). Multi-range requests (comma-separated) are served as full `200` responses. An unsatisfiable range returns `416 Range Not Satisfiable`, quoting the negotiated representation's length in `Content-Range: bytes */N`. A range is served from whichever representation the request negotiates, in that representation's own coordinates: a resume sent with `Accept-Encoding: br` gets a `206` of the brotli bytes, carrying `Content-Encoding: br` and a `Content-Range` measured against the brotli length, so the client can join it onto the prefix it already has. `If-Range` is matched against that representation's ETag, so a validator from a different representation does not match and the full body is returned rather than a slice whose offsets would be meaningless. A `Range` that cannot be honoured (malformed, multi-range, or a stale `If-Range`) falls through to a normal negotiated response, compression included. Versioned assets under `/_app/immutable/` carry no validator and are therefore never served as a range - a client could not tell a resume apart from a changed file.
 
 Files with extensions that browsers cannot render inline (`.zip`, `.tar`, `.tgz`, `.exe`, `.dmg`, `.pkg`, `.deb`, `.apk`, `.iso`, `.img`, `.bin`, etc.) automatically receive `Content-Disposition: attachment` so browsers prompt a download dialog instead of attempting to display them.
 
-If `precompress: true` is set in the adapter options, brotli (`.br`) and gzip (`.gz`) precompressed variants are loaded at startup and served when the client's `Accept-Encoding` header includes `br` or `gzip`. Precompressed variants are only used when they are smaller than the original file.
+If `precompress: true` is set in the adapter options, brotli (`.br`) and gzip (`.gz`) precompressed variants are loaded at startup and served when the client's `Accept-Encoding` header includes `br` or `gzip`. Precompressed variants are only used when they are smaller than the original file. Each variant is a separate representation: it carries its own ETag, byte ranges into it are measured against its own length, and `Vary: Accept-Encoding` is sent on every response - including `304 Not Modified`, which also repeats the validated representation's `ETag` and `Cache-Control` so a shared cache updates the right stored variant under the right freshness policy.
 
 #### Security headers on static assets (`staticHeaders`)
 
@@ -765,11 +840,12 @@ If you set `envPrefix: 'MY_APP_'` in the adapter config, all variables are prefi
 | `HOST_HEADER` | - | Header for host detection (e.g. `x-forwarded-host`) |
 | `PORT_HEADER` | - | Header for port override (e.g. `x-forwarded-port`) |
 | `ADDRESS_HEADER` | - | Header for client IP (e.g. `x-forwarded-for`) |
-| `XFF_DEPTH` | `1` | Position from right in `X-Forwarded-For` |
+| `XFF_DEPTH` | `1` | Position from right in `X-Forwarded-For`, counted across every `X-Forwarded-For` line of the request (a proxy that appends its own line per hop, as HAProxy's `option forwardfor` does, is counted the same as one comma-joined line). A chain shorter than `XFF_DEPTH` falls back to the socket address |
 | `TRUSTED_PROXIES` | - | Comma-separated proxy IPs/CIDRs; when set, `ADDRESS_HEADER` and PROXY protocol are honored only from these peers |
 | `PROXY_PROTOCOL` | - | `1` accepts a PROXY protocol v2 preamble as the client address (combine with `TRUSTED_PROXIES`) |
 | `BODY_SIZE_LIMIT` | `512K` | Max request body size (supports `K`, `M`, `G` suffixes) |
-| `SHUTDOWN_TIMEOUT` | `30` | Seconds to wait during graceful shutdown |
+| `SHUTDOWN_DELAY_MS` | `0` | Milliseconds to keep serving after readiness flips to 503, so a load balancer can deregister this instance before its sockets close. Only applies to `SIGTERM` / `SIGINT` (in cluster mode the primary waits it once for the whole fleet). `0` is correct outside Kubernetes-style rolling deploys |
+| `SHUTDOWN_TIMEOUT` | `30` | Seconds the whole shutdown sequence may take, measured from the end of `SHUTDOWN_DELAY_MS`: the `shutdown` hook, the in-flight request drain and the `sveltekit:shutdown` listeners share this one budget. When it expires the close path continues, the phase that ran out is named in the log, and the process exits. `0` means no budget at all - every phase is awaited for as long as it takes, so a hook that never settles holds the process until your supervisor kills it |
 | `RECONNECT_DISPERSAL_MS` | `5000` | Graceful-shutdown reconnect dispersal window (ms); `0` disables the advisory |
 | `CLUSTER_WORKERS` | - | Number of worker threads (or `auto` for CPU count) |
 | `CLUSTER_MODE` | *(auto)* | `reuseport` (Linux default) or `acceptor` (other platforms) |
@@ -780,20 +856,39 @@ If you set `envPrefix: 'MY_APP_'` in the adapter config, all variables are prefi
 
 ### Graceful shutdown
 
+Readiness, liveness and accepting new connections are three separate things, and the shutdown sequence moves them at three different moments.
+
 On `SIGTERM` or `SIGINT`, the server:
-1. Stops accepting new connections
-2. Waits for in-flight SSR requests to complete (up to `SHUTDOWN_TIMEOUT` seconds)
-3. Emits a `sveltekit:shutdown` event on `process` (for cleanup hooks like closing database connections)
-4. Exits
+
+1. Reports **not ready** - `readinessCheckPath` (default `/readyz`) answers `503` with the body `draining`, so a load balancer stops routing new work here. The server keeps accepting and serving; liveness (`healthCheckPath`, default `/healthz`) keeps answering `200`, so a liveness probe never restarts an instance that is shutting down on purpose.
+2. Waits `SHUTDOWN_DELAY_MS` (default `0`) for that readiness change to propagate to the balancer. Still accepting throughout.
+3. Runs the `hooks.ws` `shutdown` hook, then closes the listen socket and sends every WebSocket client a clean `1001 Going Away`.
+4. Waits for in-flight SSR requests to finish.
+5. Runs the `sveltekit:shutdown` listeners on `process` and **awaits** them, so a database pool close or a final durable write completes before the process goes away.
+6. Exits.
+
+Steps 3 to 5 share ONE budget, `SHUTDOWN_TIMEOUT` seconds (default 30), which starts after the delay in step 2. Application code runs in steps 3 and 5, and neither can hold the process past that budget: when it expires the sequence continues, the phase that ran out is named on stderr, and the exit still happens. Both receive an `AbortSignal` and the deadline so they can give up cleanly on their own terms.
+
+Set `SHUTDOWN_TIMEOUT=0` if your cleanup must never be cut off: there is then no budget, both phases are awaited to completion, and the hook receives `signal: null, deadline: null` so it can see that nothing will interrupt it. The trade is the obvious one - a hook that never settles holds the process until your supervisor kills it - so the server logs that it is running without a budget.
+
+Readiness also stays `503` during **startup**: the listen socket is bound before your `init` hook runs (so arriving connections are queued by the kernel rather than refused), and readiness only turns green once `init` has resolved. An `init` that throws never turns it green at all. The 503 body is the state itself - `starting` while booting, `draining` once shutdown has begun - so a rolling deploy is readable from the probe alone.
 
 Connected WebSocket clients are advised to reconnect on a jittered schedule before the socket closes, so a draining node's clients scatter across `RECONNECT_DISPERSAL_MS` (default 5000ms) instead of all reconnecting at once and stampeding the replacement node. Set `RECONNECT_DISPERSAL_MS=0` to restore the exact legacy shutdown. To drain a node without shutting it down (e.g. ahead of a rolling deploy), call `platform.adviseReconnect({ windowMs })` yourself - it broadcasts the advisory (optionally to a `filter`ed subset) and returns the count advised.
 
 ```js
-// Listen for shutdown in your server code (e.g. hooks.server.js)
-process.on('sveltekit:shutdown', async (reason) => {
+// Cleanup in your server code (e.g. hooks.server.js). The listener is awaited.
+process.on('sveltekit:shutdown', async (reason, { signal, deadline }) => {
   console.log(`Shutting down: ${reason}`);
   await db.close();
 });
+```
+
+```js
+// Or, closer to the app, in src/hooks.ws.js - this one runs BEFORE the socket
+// closes, which is where flushing app state belongs.
+export async function shutdown({ platform, reason, signal, deadline }) {
+  await flushMetrics({ signal });
+}
 ```
 
 ### Examples
@@ -819,6 +914,8 @@ SSL_CERT=./cert.pem SSL_KEY=./key.pem PORT=443 HOST=0.0.0.0 BODY_SIZE_LIMIT=10M 
 ```
 
 When TLS is configured the server hot-reloads the certificate: a renewed cert on disk (certbot / cert-manager) is picked up automatically and served on new handshakes without re-binding the listen socket or dropping live connections. At boot nothing changes - the boot cert is served by the plain TLS context, exactly as with `SSL_WATCH=0`. Only when the cert on disk genuinely changes (its fingerprint differs from the one being served) is the renewed cert registered as a uWS SNI server name for its SAN host(s), with the server's full route set mirrored onto it, so SNI-matching clients get the fresh cert and identical routing. The cert + key are validated before the swap, so a half-written file keeps the previous cert. Set `SSL_WATCH=0` to opt out. A non-SNI / unmatched-SNI client keeps the boot-time cert until a restart (the uWS default context is static). This works in clustered modes too: the primary watches the cert directory and broadcasts the reload to every worker, and each worker validates and fingerprint-gates its own swap, so a renewed cert is served live across the whole cluster without a restart.
+
+A failed reload keeps the previous certificate, which protects availability and also hides the failure - renewal is dead while every probe stays green. So while the reload path is degraded (the watcher failed to start, the certificate on disk did not validate, or a swap failed mid-apply), the server re-reports it hourly on stderr together with the served certificate's expiry and remaining validity, once that certificate is within 14 days of expiring. Readiness is deliberately not tied to certificate expiry: a fleet that takes itself out of rotation over an expiring certificate removes a service that is still serving.
 
 ---
 
@@ -1075,8 +1172,8 @@ For the complete frame-by-frame wire contract - every control frame, the capabil
 
 Topics submitted by clients are validated before being accepted:
 
-- Must be between 1 and 256 characters
-- Default accept set is printable ASCII (0x20-0x7E) excluding `"` and `\`. Control bytes, line separators (U+2028/U+2029), bidirectional overrides (U+202E), the byte-order mark, and other non-ASCII runes are rejected at the wire boundary so log dashboards and admin UIs see a clean, greppable topic name. Apps that legitimately accept non-ASCII topic names from clients can opt in via `websocket.allowNonAsciiTopics: true` (always-illegal `"` and `\` remain rejected).
+- Must be between 1 and 256 UTF-16 code units (an astral symbol such as an emoji costs two, matching the `maxTopicLength` caps in the cursor and throttle plugins)
+- Default accept set is printable ASCII (0x20-0x7E) excluding `"` and `\`. Control bytes, line separators (U+2028/U+2029), bidirectional overrides (U+202E), the byte-order mark, and other non-ASCII runes are rejected at the wire boundary so log dashboards and admin UIs see a clean, greppable topic name. Apps that legitimately accept non-ASCII topic names from clients can opt in via `websocket.allowNonAsciiTopics: true` (always-illegal `"` and `\` remain rejected, and so do unpaired surrogates, which have no UTF-8 encoding and would reach the client as a different name than the one that was subscribed to). The opt-in widens the letters and nothing else: with it on, a topic may again contain a bidirectional control or the byte-order mark, so a console that renders topic names back to a human sees whatever the client sent.
 - `subscribe-batch` accepts at most 256 topics per message (the client only sends what it was subscribed to before a reconnect)
 
 Topics prefixed with `__` are reserved for framework-internal channels (presence uses `__presence:*`, replay uses `__replay:*`, plus `__signal:*`, `__group:*`, `__rpc`, etc.). Wire-level subscribes to `__`-prefixed topics are rejected with `INVALID_TOPIC`, so a client cannot intercept signals routed to other users or plugin broadcasts. The narrow exception is a namespace registered by a plugin that owns its wire subscription flow: the topic may reach that plugin's hook, but the request still fails unless the hook establishes tracked membership before it returns. Importing the groups plugin therefore does not open arbitrary `__group:*` topics, while its own documented `group.hooks` join can work without disabling the system-topic guard globally. Server-side `platform.subscribe(ws, '__signal:userId')` (the legitimate pattern that `enableSignals` uses) still works because the block is on the wire layer only. Advanced apps that intentionally route public topics through the `__` prefix can opt out broadly via `websocket.allowSystemTopicSubscribe: true`.
@@ -2346,7 +2443,7 @@ const todos = on('todos');
 
 When `url` is set, `path` is ignored and the `window` check is bypassed, so the client works in environments without a browser DOM. All other features (reconnect, backoff, batch resubscription, topic stores) work the same way.
 
-> **Note:** Your server's `allowedOrigins` config must include the origin your client connects from (or `'*'` during development). See the [origin validation](#origin-validation) section.
+> **Note:** Your server's `allowedOrigins` config must include the origin your client connects from (or `'*'` during development). See the [cross-origin and native app usage](#cross-origin-and-native-app-usage) section.
 
 ---
 
@@ -3162,9 +3259,11 @@ export function message(ws, { data, platform }) {
 |---|---|
 | `limiter.consume(ws, cost?)` | Deduct tokens (cost must be >= 0, defaults to 1), returns `{ allowed, remaining, resetMs }` |
 | `limiter.reset(key)` | Clear the bucket for a key |
-| `limiter.ban(key, duration?)` | Manually ban a key |
-| `limiter.unban(key)` | Remove a ban |
+| `limiter.ban(key, duration?)` | Manually ban a key. Banning a key the limiter has not seen is an insert, so at `maxBuckets` it evicts another key's bucket - an app that bans ids supplied by the traffic it is defending against therefore lets that traffic force one eviction of another client's rate-limit state per ban |
+| `limiter.unban(key)` | Remove a ban (the window counter is untouched) |
 | `limiter.clear()` | Reset all state |
+
+`reset`, `ban`, `unban` and `clear` take an optional trailing tenant id when a `tenant` resolver is configured, so a tenant's calls touch only that tenant's buckets.
 
 #### Options
 
@@ -3174,9 +3273,14 @@ export function message(ws, { data, platform }) {
 | `interval` | *required* | Refill interval in ms |
 | `blockDuration` | `0` | Auto-ban duration in ms when exhausted (0 = no auto-ban) |
 | `keyBy` | `'ip'` | `'ip'`, `'connection'`, or `(ws) => string` |
-| `maxBuckets` | `1_000_000` | Hard cap on retained buckets. Lazy expired-entry sweep runs first; the hard cap protects against sustained DDoS where every entry is unexpired. Oldest insertion-order entry is evicted on insert at cap. |
+| `tenant` | - | `(ws) => id \| null`, an optional per-connection tenant resolver. When set, the bucket key is scoped by the returned id so two tenants sharing an IP, connection or custom key get independent buckets. Return `null`/`undefined` for an unscoped connection; omit for a single-tenant deployment |
+| `maxBuckets` | `1_000_000` | Hard cap on retained buckets. The lazy expired-entry sweep runs first; the hard cap protects against sustained DDoS where every entry is unexpired. At the cap an insert evicts the least active bucket of a sample, where activity is the allowance drawn across the current window and the one before it. A bucket serving a ban is taken only when every sampled candidate is banned, and then it is the most recently placed ban of that sample - so the oldest ban in the map is never the one evicted, but a newer one can be, since the choice sees a sample rather than the whole map |
+| `evictionSample` | `16` | How many buckets an eviction inspects before choosing its victim. The whole map is inspected when it holds fewer entries than this |
+| `onEvict` | - | `({ key, banned }) => void`, called once per eviction, after the call that triggered it has finished deciding. `key` is the stored bucket key (`tenantId + '\0' + key` when `tenant` is set). `banned: true` means every sampled candidate was still serving a ban, so enforcement state had to be dropped - alert on it: the cap is too small for the number of bans in flight |
 
 With `keyBy: 'ip'` (default), the limiter reads `userData.remoteAddress`, `.ip`, or `.address`. With `keyBy: 'connection'`, each WebSocket gets its own bucket. Pass a function for custom grouping (e.g. by user ID or room).
+
+**Eviction is not a reset, and it is not a ban amnesty.** At `maxBuckets` an insert reclaims a slot from the least active bucket of a rotating sample, measured over the current window and the one before it. A bucket serving a ban is taken only when every sampled candidate is banned, and then it is the most recently placed ban of that sample. The rule is sample-local - an eviction inspects `evictionSample` buckets, not the whole map - so read what it guarantees at the far end: the ban placed longest ago is never the victim, and a flood minting identities, which can only add newer bans, cannot clear the oldest ban in the map (that needs an eviction able to compare two entries, so `evictionSample: 1` or a one-bucket cap simply takes the entry it lands on). It is not a promise that a ban always survives. A saturated map has to drop one ban to admit any new key, the one it drops is only the newest of the buckets that eviction walked, and traffic that first fills the map with its own bans can then have a ban placed after those churned out. Every such drop is reported through `onEvict` with `banned: true`, and sizing `maxBuckets` above the number of bans you expect in flight is what actually keeps enforcement intact.
 
 #### Limitations
 
@@ -3425,14 +3529,17 @@ Without smoothing, remote cursors paint exactly where the last wire frame put th
 
 The trade is stated once and plainly: **remote cursors render `interpolationMs` behind their newest known position - a larger delay survives more dropped frames but trails further behind.** The `'auto'` default tracks twice the measured update interval, so a stream already arriving at display rate collapses toward the 32ms floor and pays almost nothing, while a coarse stream widens itself just enough. Your own pointer is unaffected (it is drawn by the OS, not the canvas), and the `mainThreadFeed` keeps shipping raw wire positions - smoothing changes pixels, never data.
 
+`snapGapMs` catches a discontinuity that arrives as a delivery gap; `snapSpeedPerSec` catches the one that does not. A cursor the app relocates - rather than the pointer moving it - lands on the ordinary cadence, its two samples one interval apart, so a gap threshold never fires and the cursor is interpolated across the whole board. The default `'auto'` measures each pair against the cursor's own neighbouring samples and snaps one that outruns both by a wide factor, which needs no knowledge of your board's units. Pass a number to add an exact board-units-per-second ceiling on top, above the fastest real flick the board can produce; pass `0` to turn both off.
+
 ```js
 cursor('board:42', { canvas, smooth: true });                  // tuned defaults
 cursor('board:42', {
   canvas,
   smooth: {
-    interpolationMs: 'auto', // or a fixed ms: the render-in-the-past delay
-    extrapolateMs: 250,      // dead-reckoning cap when the buffer runs dry
-    snapGapMs: 500           // sample gap snapped (a view re-entry, an idle resume), not smeared
+    interpolationMs: 'auto',    // or a fixed ms: the render-in-the-past delay
+    extrapolateMs: 250,         // dead-reckoning cap when the buffer runs dry
+    snapGapMs: 500,             // sample gap snapped (a view re-entry, an idle resume), not smeared
+    snapSpeedPerSec: 'auto'     // jump detection; a number adds a hard ceiling, 0 turns it off
   }
 });
 ```
@@ -3520,6 +3627,8 @@ The contract that makes it correct: clients send COMMANDS, never state; the serv
 
 Two health surfaces cover the two ways the world can go quiet. `onOverflow(cb)` fires when the LOCAL prediction window overflows (the server stopped acknowledging the owner's commands). `onStall(cb)` fires when the REMOTE world goes quiet - no inbound authority frame for longer than `stallMs` (default 1000) while remote entities are tracked, a blackout on a still-open socket that overflow never sees - and clears when frames resume; the same state reads synchronously off `channel.stalled` and `stats().stalled`. Per entity, each interpolated remote state in the frame carries its freshness under the exported `SMOOTH_FRESHNESS` Symbol key - `'live'`, `'coasting'` (dead-reckoned within the extrapolation cap), or `'stale'` (frozen past it) - so a renderer can `state[SMOOTH_FRESHNESS]` to dim a coasted entity without a second structure. Resume is eased, not popped: a reconnect or manual `resync()` after a brief absence slides each entity from where it was last drawn into the rebuilt basis over `resumeEaseMs` (default 150; 0 snaps; a blackout longer than `snapGapMs` always snaps), and a `'suspended' -> 'open'` refocus where the socket survived reconciles the catalog in place - no clear, no reset - so a tab-switch does not pop the world.
 
+A remote entity the server REPLACES rather than moves - a teleport, a respawn, a scripted placement - arrives on the ordinary tick, so the sample pair that straddles the render time carries the whole jump inside one interval and `snapGapMs` cannot see it. `snapSpeedPerSec` decides how that pair is drawn: `'auto'` (the default) reads the jump off the entity's own neighbouring samples and snaps it, on the remote view, in the dead-reckoning that follows it, and in the resume ease after a resync; a number adds an absolute world-units-per-second ceiling on top; `0` restores pure interpolation.
+
 Discrete one-shot effects - a shot, a hit, a pickup - take the event channel rather than state: `ctx.emitEvent(type, data, opts?)` fires once on a command's optimistic application (the `firstTime` gate suppresses it on every reconciliation replay, so the owner draws one muzzle flash, not one per replay), and `channel.onEvent` delivers it with `origin:'local'` the frame the command was issued. The authority emits the same event with a matching `<commandId>:<ordinal>` key and broadcasts it author-excluded, so other clients receive it with `origin:'server'` while the owner never double-draws its own. An event the owner must also confirm against the server's adjudication (a hit) sets `opts.toAuthor`: it is no longer author-excluded, and the shared key lets the owner correlate the optimistic copy with the authoritative one. The author-exclusion is the fan-out's job, not the client's (the channel never suppresses by key, so one author's `7:0` can never shadow another's): publish each event with `excludeWs` set to its `ws` as shown above, or the owner receives both copies and double-draws. A fan-out that does not honor `excludeWs` - a hand-rolled broadcast, or a cross-instance relay (cluster mode) where exclusion is local to the owning worker - must carry the exclusion itself.
 
 The pure cores (`plugins/smooth/predict.js`, `random.js`, `interpolate.js`, `clock.js`) take every time reading as an argument, so the same code runs in a worker, on the main thread, and under a deterministic simulation harness unchanged. Replaying a 5-command window costs ~85ns (`bench/35-smooth-replay-ab.mjs`); the steady-state loop allocates nothing beyond the by-contract window entries.
@@ -3535,8 +3644,9 @@ import { createCrdtWireCodec, CRDT_TOPIC_PREFIX } from 'svelte-adapter-uws/plugi
 
 const authority = createCrdtAuthority({
   persist: {
-    load: (topic) => db.loadSnapshot(topic),          // once per cold topic; concurrent joins coalesce
-    store: (topic, bytes) => db.saveSnapshot(topic, bytes)  // debounced, compacted, flushed on empty
+    load: (topic, { signal }) => db.loadSnapshot(topic, { signal }),   // once per cold topic; concurrent joins coalesce
+    store: (topic, bytes, { signal, deadline, attempt }) =>            // debounced, compacted, flushed on empty
+      db.saveSnapshot(topic, bytes, { signal, timeout: deadline && deadline - Date.now() })
   }
 });
 const codec = createCrdtWireCodec();
@@ -3554,7 +3664,14 @@ if (bytes) platform.publishWire(CRDT_TOPIC_PREFIX + topic, 'crdt', { op: 'update
 
 // The last leaver: the final store runs before the replica unloads.
 authority.release(topic);
+
+// Graceful shutdown: flush, then act on what did NOT land. destroy() discards.
+const flushed = await authority.persistNow();          // bounded by flushTimeout (default 10s)
+if (!flushed.ok) console.error('crdt documents not persisted', flushed.dirty, flushed.failed);
+authority.destroy();
 ```
+
+`ok` is exactly `flushed.dirty.length === 0`, so an authority configured with no `persist.store` hook reports `ok: false` for any topic holding edits - it has nothing to make them durable with, and the snippet above logs on shutdown for an in-memory-only setup.
 
 ```js
 // Client: the channel owns the local replica and the recovery loop.
@@ -3569,6 +3686,10 @@ cards.set('c1', { title: 'hello' });   // applies locally now, merges everywhere
 A collaborative `text` facet additionally exposes **position anchors that survive concurrent edits** - the primitive a selection or cursor highlight needs so it stays on the same characters as other users type around it. `text.anchorRange(start, end)` encodes a `[start, end)` range as opaque bytes; `text.resolveRange(bytes)` maps them back to current `{ start, end }` offsets on any converged replica, after arbitrary concurrent inserts and deletes. The start binds right and the end binds left, so an insert exactly at either edge stays outside the range while one strictly inside extends it; deleting the anchored text collapses the range to a caret at the deletion point, and a malformed or unresolvable blob returns `null`. `anchorRange` is a read (no write access). The bytes are opaque - no CRDT-library type crosses the API - so they ride a presence roster or any side channel; this is what `svelte-realtime`'s `live.multiplayer({ selections: 'crdt' })` is built on.
 
 The properties that make it correct: the merge is commutative and idempotent, so apply order never matters and replaying overlap is a no-op - which collapses every recovery path (reconnect, offline, a frame lost to backpressure) into the same two-way exchange: the client sends its state vector, applies the server's diff, and uploads `encodeStateAsUpdate(localDoc, serverVector)`. The local replica IS the offline queue; there is no frame bookkeeping to lose. A dependency gap after any apply (the fingerprint of a lost frame, whatever dropped it) schedules a debounced resync through the same exchange - and because that detector needs a causally-later update to expose the gap, the healthy channel also runs the exchange on a low-frequency background cadence (`reconcileIntervalMs`, default 30s, `0` disables), so a lost frame with no successor - the last edit before everyone goes idle - converges within one cadence tick instead of standing until the next reconnect. An in-sync exchange costs one tiny request answered with an empty diff; the server re-runs the document guard on each exchange (that is also how a mid-session permission change reaches a connected client), so a guard that queries a database sees roughly one call per mounted client per cadence. Persistence is never on the message path: the authority captures a consistent full-state snapshot and writes it on a debounce/max-wait/compaction schedule, with the final store gating the unload so a dirty replica is never destroyed - and stores for one topic are chained so they can never race each other out of order.
+
+The scheduled path is best-effort - a rejected store retries at the max-wait cadence and the operator watches `onError` - but an explicit `persistNow()` is not, because a caller that awaits it is usually about to exit. It resolves (never rejects) to `{ ok, durable, declined, failed, timedOut, dirty }`, so a shutdown path can tell "every store rejected" from "everything is durable" instead of both looking like success, and it is bounded by `flushTimeout` (default 10000 ms; per call `persistNow(topic?, { timeout })`, `Infinity` to wait indefinitely) so one wedged backend cannot hold the process open until the orchestrator kills it. `ok` is exactly "nothing is left unconfirmed", so `if (result.ok) authority.destroy()` can never discard bytes - and `destroy()` discards pending edits by contract, so check the flush result before calling it. On expiry the unfinished topics are reported in `timedOut` and their `store` call's `AbortSignal` fires; that write is then abandoned - whatever it eventually answers is discarded, the replica goes back to dirty, and a fresh full-state write is scheduled - so a flush that gave up can never leave unwritten bytes looking stored. It is one rescheduled write, not an unbounded retry loop: if that one also never settles, only the next `persistNow()` recovers the topic - editing does not, because the edit's own write queues behind the wedged one - which is why a deployment that can wedge a write wants a periodic flush, and why a shutdown path should act on `dirty` rather than flush and exit. A write that a second, longer-budget `persistNow()` is still waiting on is left running, and the `deadline` it was handed is that longer flush's: the shortest budget in the process decides for nobody but itself.
+
+The hooks receive the context they run in: `store(topic, bytes, { signal, deadline, attempt })` and `load(topic, { signal })`. `attempt` counts consecutive writes of the same unstored state that did not confirm - 1 after a durable write, and 1 however fast the edits arrive against a healthy backend - and `signal` also aborts when the topic is erased with `drop()` or the authority is destroyed. Honouring `signal` is optional; a host that ignores it can see the rescheduled write overlap the one it abandoned, so honour it if you want a topic's writes strictly serialized. `deadline` is the epoch-ms reading at which the LAST flush waiting on that write stops waiting (`null` when nothing bounds it), taken when the write is dispatched; a flush that joins a write already in flight cannot widen the reading the host took, so a host that must keep a write alive for whoever is still waiting bounds on `signal` as well. A call cancelled by `drop()` or `destroy()` does not reach `onError` - tearing down is not a persistence fault - while one cancelled by a flush deadline does, and only the flush-deadline case re-dirties the record and reschedules, since an erase or teardown has no record left.
 
 `normalizeCrdtAccess` is the one definition of the `{read, write, comment}` access record both layers share: a boolean widens to all three rights, a partial record defaults missing rights to false. The `comment` right is carried and cached in full but no comment producer exists yet - the server cannot structurally verify that a client-tagged update touches only comment marks until the rich-text marks layer lands, and trusting the tag would be a write bypass, so the right activates with that layer.
 
@@ -3616,22 +3737,77 @@ export async function message(ws, { data, platform }) {
 | `queue.size(key?)` | Waiting + running count for a key, or total |
 | `queue.clear(key?)` | Cancel waiting tasks (running tasks continue) |
 | `queue.drain(key?)` | Wait for all tasks to complete |
+| `queue.stats()` | Occupancy gauges, peaks, and lifetime totals |
 
 #### Options
 
 | Option | Default | Description |
 |---|---|---|
 | `concurrency` | `1` | Max concurrent tasks per key |
-| `maxSize` | `1_000_000` | Max waiting tasks per key (rejects when exceeded). Pass `Infinity` to disable the cap (not recommended at uWS scale). |
-| `onDrop` | `null` | Called with `{ key, task }` when a task is rejected |
+| `maxSize` | `1_000_000` | Max waiting tasks per key (rejects with `QUEUE_FULL` when exceeded). Pass `Infinity` to disable the cap (not recommended at uWS scale) |
+| `maxKeys` | `1_000_000` | Max keys with live work. A key is live from its first accepted `push()` until it has no waiting and no running task, so draining a key frees its slot. A `push()` for a key that is not live rejects with `QUEUE_TOO_MANY_KEYS`; pushes to already-live keys are unaffected. Pass `Infinity` to disable |
+| `maxPendingTotal` | `1_000_000` | Max waiting tasks summed across all keys. Rejects with `QUEUE_BACKLOG_FULL` regardless of how much room the selected key still has under `maxSize`. Pass `Infinity` to disable |
+| `maxRunningTotal` | `1_000_000` | Max tasks in flight summed across all keys. A scheduling bound, not an admission bound: work above it waits its turn (and is then subject to `maxPendingTotal`) rather than being rejected. Pass `Infinity` to disable |
+| `maxKeyLength` | `256` | Reject keys longer than this at `push()` entry |
+| `onDrop` | `null` | Called with `{ key, task, reason }` when a bound rejects a task; `reason` is `'maxSize'`, `'maxKeys'` or `'maxPendingTotal'`. A throw from it is contained and counted as `stats().onDropErrorsTotal`, so a broken metrics sink cannot change the shed decision or turn `push()`'s rejection into a synchronous throw |
 
 Different keys are independent - `push('room-a', ...)` and `push('room-b', ...)` run concurrently. Only tasks with the same key are queued.
+
+**Per-key bounds do not bound the queue.** `maxSize` and `concurrency` are per key, so N distinct keys each below `maxSize` still add up to N x maxSize waiting tasks, and N keys each below `concurrency` still start N x concurrency tasks at once. That is the shape a high-cardinality key (`user:${userId}`, `doc:${docId}`) produces under load: queueing is bypassed entirely and arbitrary work launches. The three aggregate bounds are what cap the totals, and **they only do anything once you set them**: at the `1_000_000` defaults none of them binds at any realistic load, so a default queue still starts a task per key exactly as it always did. Treat the defaults as a ceiling that turns an OOM into a typed rejection, and set your real capacity:
+
+```js
+export const queue = createQueue({
+  concurrency: 4,
+  maxKeys: 10_000,         // how many docs can be mid-flight
+  maxPendingTotal: 50_000, // total backlog you are willing to hold
+  maxRunningTotal: 64      // total work you are willing to run at once
+});
+```
+
+Once `maxRunningTotal` binds, keys are serviced round-robin - one task per key per turn - so a saturated key cannot hold the whole budget and starve keys that arrived later.
+
+#### Shedding
+
+Rejections carry a typed `err.code` and the bound that tripped, so a handler can shed without parsing messages:
+
+| `err.code` | Raised when |
+|---|---|
+| `QUEUE_FULL` | the key's waiting list is at `maxSize` (`err.maxSize`) |
+| `QUEUE_TOO_MANY_KEYS` | the key is new and `maxKeys` keys are live (`err.maxKeys`) |
+| `QUEUE_BACKLOG_FULL` | waiting tasks across all keys are at `maxPendingTotal` (`err.maxPendingTotal`) |
+| `QUEUE_CLEARED` | `clear()` cancelled the task before it ran |
+
+Every one also carries `err.key`.
+
+```js
+try {
+  await queue.push('doc:' + docId, work);
+} catch (err) {
+  if (err.code === 'QUEUE_BACKLOG_FULL') return new Response('busy', { status: 503 });
+  throw err;
+}
+```
+
+#### Observability
+
+`queue.stats()` returns live gauges plus lifetime totals. The peaks are what tell you whether a bound needs raising - a `pendingPeak` that sits at `maxPendingTotal` means you are shedding, a `runningPeak` well under `maxRunningTotal` means the bound is not the constraint. `readyCurrent` is how many keys are queued for a running slot, so a `readyCurrent` that stays high is `maxRunningTotal` holding work back.
+
+```js
+queue.stats();
+// {
+//   keysCurrent: 12, pendingCurrent: 340, runningCurrent: 64, readyCurrent: 8,
+//   keysPeak: 91, pendingPeak: 12_004, runningPeak: 64,
+//   pushedTotal: 918_233, completedTotal: 917_829, failedTotal: 40,
+//   clearedTotal: 0, onDropErrorsTotal: 0,
+//   dropped: { maxSize: 0, maxKeys: 0, maxPendingTotal: 320 }
+// }
+```
 
 #### Limitations
 
 - **Server-side only.** No client component.
 - **In-memory.** Queue state lives in the process. Not durable across restarts.
-- **No cancellation.** Running tasks cannot be aborted. `clear()` only rejects waiting tasks.
+- **No cancellation.** Running tasks cannot be aborted. `clear()` only rejects waiting tasks, with `QUEUE_CLEARED`.
 
 ### Lock (per-key serialization)
 
@@ -3892,6 +4068,7 @@ The client store exposes two reactive values: the main store for events (`$lobby
 | `group.has(ws)` | Check membership |
 | `group.close(platform)` | Dissolve group, notify everyone |
 | `group.name` | Group name (read-only) |
+| `group.maxMembers` | Resolved member cap, including the default (read-only) |
 | `group.meta` | Metadata (get/set) |
 | `group.hooks` | Ready-made `{ subscribe, unsubscribe, close }` admission and membership hooks |
 
@@ -3901,7 +4078,7 @@ Roles: `'member'` (default), `'admin'`, `'viewer'`.
 
 | Option | Default | Description |
 |---|---|---|
-| `maxMembers` | `Infinity` | Maximum members |
+| `maxMembers` | `1_000_000` | Maximum members. Pass `Infinity` to disable the cap |
 | `meta` | `{}` | Initial metadata (shallow-copied) |
 | `onJoin` | - | Synchronous admission: `(ws, requestedRole) => false \| role \| void` |
 | `onLeave` | - | `(ws, role) => void` |
@@ -4535,7 +4712,7 @@ uWebSockets.js is a native C++ addon. It's installed from GitHub, not npm, and n
 
 ```bash
 # Make sure you're using the right install command (no uWebSockets.js@ prefix)
-npm install uNetworking/uWebSockets.js#v20.60.0
+npm install uNetworking/uWebSockets.js#v20.69.0
 ```
 
 **On Windows:** Make sure you have the Visual C++ Build Tools installed. You can get them from the [Visual Studio Installer](https://visualstudio.microsoft.com/downloads/) (select "Desktop development with C++").
@@ -4550,6 +4727,8 @@ sudo apt install build-essential
 FROM node:22-trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 ```
+
+**Working in a clone of this repository:** the installed addon is verified byte for byte against `scripts/uws-accepted.json` - the resolved commit, the upstream source commit, and a SHA-256 per shipped file. A `check-uws-binaries FAILED` message means the installed binaries are not the ones this tree was tested against, and the repair is `npm install`, not editing the record. A deliberate pin bump is re-accepted with `node scripts/check-uws-binaries.js --update`; review that diff, it is the record of which binaries changed.
 
 ### "I can't see what's happening with WebSocket messages"
 
@@ -4710,6 +4889,17 @@ npm run test:e2e      # 25 e2e tests (playwright, ~13s)
 npm run test:coverage # both + coverage reports (~30s)
 ```
 
+Working in a clone of this repository, these are the commands around them:
+
+| Command | What it does |
+|---|---|
+| `npm run bootstrap` | Root deps if absent, the fixture's own deps, then the doctor |
+| `npm run doctor` | Whether this machine can prove anything; `--require-uws` makes a missing addon fatal |
+| `npm run verify:fast` | The static gates |
+| `npm run verify:pr` | Exactly what the hosted gate runs |
+| `npm run verify:full` | `verify:pr` plus the Playwright e2e run, which no workflow runs |
+| `npm run check:links` | Dead anchors and dead relative links in the shipped docs |
+
 Unit tests cover store patterns, adapter options, plugin logic, client behavior, and the WebSocket test harness. They run in vitest with the `vmForks` pool.
 
 E2e tests start a real SvelteKit app (`test/fixture/`) with the adapter installed via `file:../..`. Playwright runs two projects:
@@ -4785,6 +4975,8 @@ server = await createTestServer({
   // env: { ... }   // ENV_PREFIX-aware env shim for the SvelteKit `platform.env`
 });
 ```
+
+`close()` fires your `shutdown` hook with the same `{ platform, reason, signal, deadline }` production passes, under the same `SHUTDOWN_TIMEOUT` budget (seconds, default 30, `0` = no budget), so a hook that gives up cleanly on `signal` - or one that wedges - behaves here the way it will in the deployment. `/readyz` answers `503 starting` while your `init` hook runs, exactly as a real instance does. Two differences worth knowing rather than discovering: the harness reads `SHUTDOWN_TIMEOUT` without the `ENV_PREFIX` your deployment may apply, and it has no in-flight request drain and no `sveltekit:shutdown` phase for the budget to cover - here the budget bounds the hook only.
 
 `upgradeAdmission` is the same `{ maxConcurrent, perTickBudget }` shape the production handler accepts via `adapter({ websocket: { upgradeAdmission: ... } })`. Passing it to `createTestServer` lets you assert admission shedding (503 responses on the upgrade path) end-to-end without booting a full SvelteKit app. `protection` and `metrics` mirror the production options the same way: the harness emits `upgrade_admitted_total` and `upgrade_rejected_total{reason}` at the branches it mirrors (`siege`, `over_capacity`, `cursor_lane`, `auth_rejected`, `hook_error`), so a test can assert the admission counters with a recording registry. The sampled gauges and the `ip_rate_limit` / `bad_origin` / `auth_timeout` reasons are production-only - the harness runs no pressure sampler, no per-IP limiter, no origin check, and no upgrade timeout.
 

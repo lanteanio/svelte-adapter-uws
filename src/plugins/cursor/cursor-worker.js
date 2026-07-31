@@ -109,7 +109,7 @@ export function attachCursorWorker(scope) {
 	let renderOpts = { gpu: 'auto', gpuThreshold: 500, devicePixelRatio: 1 };
 	let maxAge = 0;
 	let feedRate = 0;
-	/** @type {{ delayMs: 'auto' | number, extrapolateMs: number, snapGapMs: number } | null} */
+	/** @type {{ delayMs: 'auto' | number, extrapolateMs: number, snapGapMs: number, snapSpeedPerSec: 'auto' | number } | null} */
 	let smoothCfg = null;
 	/** @type {ReturnType<typeof createSmoother> | null} */
 	let smoother = null;
@@ -501,7 +501,8 @@ export function attachCursorWorker(scope) {
 			smoothCfg = (msg.smooth && typeof msg.smooth === 'object') ? {
 				delayMs: msg.smooth.delayMs === 'auto' || typeof msg.smooth.delayMs === 'number' ? msg.smooth.delayMs : 'auto',
 				extrapolateMs: typeof msg.smooth.extrapolateMs === 'number' ? msg.smooth.extrapolateMs : 250,
-				snapGapMs: typeof msg.smooth.snapGapMs === 'number' ? msg.smooth.snapGapMs : 500
+				snapGapMs: typeof msg.smooth.snapGapMs === 'number' ? msg.smooth.snapGapMs : 500,
+				snapSpeedPerSec: typeof msg.smooth.snapSpeedPerSec === 'number' ? msg.smooth.snapSpeedPerSec : 'auto'
 			} : null;
 			hideSelf = msg.hideSelf === true;
 			renderOpts = {

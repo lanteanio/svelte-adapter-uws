@@ -105,6 +105,12 @@ export interface SmoothAuthority<State = any, Command = any> {
 	 * run post-drain; the next drain's change-detection baseline is then the
 	 * already-broadcast state). Never touches the queue, the ack watermark, or
 	 * `lastCommand`. False for an unknown key.
+	 *
+	 * The replacement travels as an ordinary update on the ordinary cadence, so
+	 * nothing on the wire marks it as discontinuous: rendering it as a jump
+	 * rather than a slide across the map is the client channel's
+	 * `snapSpeedPerSec`, which detects it from the entity's own motion by
+	 * default. If a placement ever renders as a streak, that is the knob.
 	 */
 	set(key: string, state: State): boolean;
 	/**

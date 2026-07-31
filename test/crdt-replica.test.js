@@ -1,10 +1,13 @@
 // Server-side tests for the CRDT document authority: access-record
 // normalization, the reference-counted replica lifecycle, the coalesced
 // (hydrate-stampede-safe) load, update merge + convergence invariants, the
-// state-vector diff, and the persistence schedule (debounce, max-wait force,
-// update-count compaction, persist-on-empty, store-failure retry). Time and
-// timers are scripted through the injectable runtime, the same harness shape
-// as the other plugin servers.
+// state-vector diff, the persistence schedule (debounce, max-wait force,
+// update-count compaction, persist-on-empty, store-failure retry), and the
+// explicit flush (per-topic durable/declined/failed/timed-out reporting, the
+// deadline that keeps a wedged store from hanging shutdown, what happens to the
+// state of a write the deadline abandoned, and the signal / deadline / attempt
+// metadata the host's I/O receives). Time and timers are scripted through the
+// injectable runtime, the same harness shape as the other plugin servers.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as Y from 'yjs';
@@ -561,6 +564,635 @@ describe('persistence schedule', () => {
 		await vi.advanceTimersByTimeAsync(10000);
 		expect(stores.length).toBe(0);
 		auth = null;
+	});
+});
+
+describe('explicit flush (persistNow)', () => {
+	let auth;
+	const edit = (topic = 't', key = 'k', value = 1) => {
+		const client = docWith({});
+		const u = captureUpdate(client, () => client.getMap('root').set(key, value));
+		return auth.applyUpdate(topic, u);
+	};
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		installFakeRuntimeClock();
+	});
+	afterEach(() => {
+		if (auth) auth.destroy();
+		auth = null;
+		releaseRuntimeClock();
+		vi.useRealTimers();
+	});
+
+	it('reports the flushed topic as durable when the store lands', async () => {
+		auth = createCrdtAuthority({ persist: { load: async () => null, store: async () => {} } });
+		await auth.acquire('t');
+		edit('t', 'a');
+		expect(await auth.persistNow()).toEqual({
+			ok: true, durable: ['t'], declined: [], failed: [], timedOut: [], dirty: []
+		});
+	});
+
+	it('reports a rejecting store instead of resolving as if the bytes were durable', async () => {
+		const errors = [];
+		auth = createCrdtAuthority({
+			persist: { load: async () => null, store: async () => { throw new Error('disk full'); } },
+			onError: (e, info) => errors.push(info.op)
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		const result = await auth.persistNow();
+		expect(result.ok).toBe(false);
+		expect(result.failed).toEqual(['t']);
+		expect(result.durable).toEqual([]);
+		expect(result.dirty).toEqual(['t']);
+		expect(errors).toEqual(['store']);
+	});
+
+	it('reports a declined store as declined, distinct from durable', async () => {
+		auth = createCrdtAuthority({ persist: { load: async () => null, store: async () => false } });
+		await auth.acquire('t');
+		edit('t', 'a');
+		const result = await auth.persistNow();
+		expect(result.ok).toBe(false);
+		expect(result.declined).toEqual(['t']);
+		expect(result.durable).toEqual([]);
+		expect(result.dirty).toEqual(['t']);
+	});
+
+	it('times out a never-settling store instead of waiting forever, and aborts its signal', async () => {
+		let handed = null;
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				store: (topic, bytes, info) => { handed = info; return new Promise(() => {}); }
+			},
+			flushTimeout: 500
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		let settled = null;
+		const flush = auth.persistNow().then((r) => { settled = r; });
+		await tick(8);
+		expect(settled).toBe(null); // still waiting on the store
+		expect(handed.signal.aborted).toBe(false);
+		await vi.advanceTimersByTimeAsync(600);
+		await flush;
+		expect(settled.ok).toBe(false);
+		expect(settled.timedOut).toEqual(['t']);
+		expect(settled.durable).toEqual([]);
+		expect(settled.dirty).toEqual(['t']);
+		expect(handed.signal.aborted).toBe(true);
+	});
+
+	it('puts a timed-out store back on the retry schedule instead of dropping the state', async () => {
+		const calls = [];
+		auth = createCrdtAuthority({
+			// The worst case the deadline exists for: a host that never answers
+			// and never honours the abort either.
+			persist: {
+				load: async () => null,
+				store: (topic, bytes) => { calls.push(bytes); return new Promise(() => {}); }
+			},
+			flushTimeout: 500,
+			debounceMaxWait: 2000
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		let settled = null;
+		const flush = auth.persistNow().then((r) => { settled = r; });
+		await vi.advanceTimersByTimeAsync(600);
+		await flush;
+		expect(settled.timedOut).toEqual(['t']);
+		expect(calls.length).toBe(1);
+		// The capture cleared the dirty flag; abandoning the write has to put it
+		// back, or the state sits in memory with nothing left to write it.
+		await vi.advanceTimersByTimeAsync(2100);
+		await tick(8);
+		expect(calls.length).toBe(2); // the schedule tried again
+		expect(auth.has('t')).toBe(true);
+	});
+
+	it('never reads a store the deadline abandoned as durable, and the next flush really writes', async () => {
+		const written = [];
+		let stalled = true;
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				// A host that honours the abort the obvious way: it gives up on
+				// the write - having written nothing - and RESOLVES.
+				store: (topic, bytes, info) => new Promise((resolve) => {
+					if (!stalled) { written.push(bytes); resolve(); return; }
+					info.signal.addEventListener('abort', () => resolve());
+				})
+			},
+			flushTimeout: 500,
+			debounceMaxWait: 2000
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		let first = null;
+		const flush = auth.persistNow().then((r) => { first = r; });
+		await vi.advanceTimersByTimeAsync(600);
+		await flush;
+		expect(first.timedOut).toEqual(['t']);
+		expect(written).toHaveLength(0);
+		await tick(8); // the abandoned write resolves, claiming a write it never did
+		stalled = false;
+		const second = await auth.persistNow();
+		expect(written).toHaveLength(1); // the bytes finally left the process
+		const scratch = new Y.Doc();
+		Y.applyUpdate(scratch, written[0]);
+		expect(Object.keys(scratch.getMap('root').toJSON())).toEqual(['a']);
+		expect(second).toEqual({
+			ok: true, durable: ['t'], declined: [], failed: [], timedOut: [], dirty: []
+		});
+	});
+
+	it('never issues a write whose signal has already fired', async () => {
+		const seen = [];
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				store: (topic, bytes, info) => { seen.push(info.signal.aborted); return new Promise(() => {}); }
+			},
+			debounceWait: 2000,
+			debounceMaxWait: 60000,
+			flushTimeout: 500
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		await vi.advanceTimersByTimeAsync(2100); // the scheduled write, wedged
+		await tick(8);
+		expect(seen).toEqual([false]);
+		edit('t', 'b');
+		const flush = auth.persistNow(); // a second write, queued behind the wedged one
+		await vi.advanceTimersByTimeAsync(600);
+		expect((await flush).timedOut).toEqual(['t']);
+		await tick(8);
+		// Releasing the wedged write lets the queued one start. It was cancelled
+		// before it was ever dispatched, so it must not reach the host at all:
+		// a write handed a signal that already fired is a write nobody wants.
+		expect(seen).toEqual([false]);
+	});
+
+	it('an abandoned write never resets the retry count by answering late', async () => {
+		const attempts = [];
+		let mode = 'fail';
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				store: (topic, bytes, info) => {
+					attempts.push(info.attempt);
+					if (mode === 'fail') return Promise.reject(new Error('disk full'));
+					// Abandons the write on abort and resolves, having written
+					// nothing - the shape that looks like success from outside.
+					if (mode === 'stall') return new Promise((resolve) => { info.signal.addEventListener('abort', () => resolve()); });
+					return Promise.resolve();
+				}
+			},
+			flushTimeout: 500,
+			debounceWait: 2000,
+			debounceMaxWait: 2000,
+			onError: () => {}
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		await vi.advanceTimersByTimeAsync(2100); // scheduled write, rejects
+		await tick(8);
+		expect(attempts).toEqual([1]);
+		mode = 'stall';
+		const flush = auth.persistNow();
+		await vi.advanceTimersByTimeAsync(600); // budget expires, the write is abandoned
+		expect((await flush).timedOut).toEqual(['t']);
+		await tick(8); // the abandoned write now resolves
+		mode = 'ok';
+		await auth.persistNow();
+		// Three writes of the same unstored state, two of which did not stick.
+		// A write the flush gave up on cannot claim the count back.
+		expect(attempts).toEqual([1, 2, 3]);
+	});
+
+	it('a short-budget flush does not cancel the write a longer-budget flush is waiting on', async () => {
+		const written = [];
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				// A legitimately slow but perfectly healthy write.
+				store: (topic, bytes, info) => new Promise((resolve, reject) => {
+					const t = setTimeout(() => { written.push(bytes); resolve(); }, 800);
+					info.signal.addEventListener('abort', () => { clearTimeout(t); reject(info.signal.reason); });
+				})
+			}
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		let short = null;
+		let long = null;
+		const a = auth.persistNow({ timeout: 100 }).then((r) => { short = r; });
+		const b = auth.persistNow({ timeout: 5000 }).then((r) => { long = r; });
+		await vi.advanceTimersByTimeAsync(1000);
+		await Promise.all([a, b]);
+		// The short budget answers only for itself.
+		expect(short.timedOut).toEqual(['t']);
+		// The write it did not own ran to completion for the caller that still
+		// had budget for it.
+		expect(long.durable).toEqual(['t']);
+		expect(long.ok).toBe(true);
+		expect(written).toHaveLength(1);
+	});
+
+	it('hands a store the longest budget waiting on it, so a host that sizes its own timeout by the deadline does not fail the long flush', async () => {
+		const written = [];
+		const deadlines = [];
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				// A host that does exactly what the deadline documents: it bounds
+				// its own I/O by it.
+				store: (topic, bytes, info) => new Promise((resolve, reject) => {
+					deadlines.push(info.deadline);
+					const budget = setTimeout(
+						() => reject(new Error('statement timeout')),
+						info.deadline - Date.now()
+					);
+					const write = setTimeout(() => {
+						clearTimeout(budget);
+						written.push(bytes);
+						resolve();
+					}, 800);
+					info.signal.addEventListener('abort', () => {
+						clearTimeout(budget);
+						clearTimeout(write);
+						reject(info.signal.reason);
+					});
+				})
+			}
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		const at = Date.now();
+		let short = null;
+		let long = null;
+		const a = auth.persistNow({ timeout: 100 }).then((r) => { short = r; });
+		const b = auth.persistNow({ timeout: 5000 }).then((r) => { long = r; });
+		await vi.advanceTimersByTimeAsync(1000);
+		await Promise.all([a, b]);
+
+		// One write, told the LATER of the two budgets. Stamping it with the
+		// arming flush's own 100 ms instead makes the host abort at 96 ms and the
+		// long flush fail with nothing written - the short budget deciding for
+		// everybody through the hint rather than through the signal.
+		expect(deadlines).toEqual([at + 5000]);
+		expect(written).toHaveLength(1);
+		expect(short.timedOut).toEqual(['t']);
+		expect(long.durable).toEqual(['t']);
+		expect(long.ok).toBe(true);
+	});
+
+	it('does not widen the deadline of a write already dispatched, but keeps that write alive', async () => {
+		const deadlines = [];
+		let handed = null;
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				store: (topic, bytes, info) => {
+					deadlines.push(info.deadline);
+					handed = info;
+					return new Promise(() => {});
+				}
+			}
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		const at = Date.now();
+		const short = auth.persistNow({ timeout: 100 });
+		await tick(8); // the store is dispatched, holding the 100 ms reading
+		const long = auth.persistNow({ timeout: 5000 });
+		await vi.advanceTimersByTimeAsync(200);
+		expect((await short).timedOut).toEqual(['t']);
+
+		// The residual the deadline documents: a flush that joins after the write
+		// went out cannot change the reading the host already took.
+		expect(deadlines).toEqual([at + 100]);
+		// What the long flush does get is the signal - the short flush is no
+		// longer the last waiter, so the write keeps running for it.
+		expect(handed.signal.aborted).toBe(false);
+		await vi.advanceTimersByTimeAsync(5000);
+		expect((await long).timedOut).toEqual(['t']);
+		expect(handed.signal.aborted).toBe(true);
+	});
+
+	it('an edit does not restart a topic whose rescheduled write also wedged - only persistNow does', async () => {
+		const dispatched = [];
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				// Wedged forever, and it ignores the abort as well.
+				store: (topic, bytes) => { dispatched.push(bytes); return new Promise(() => {}); }
+			},
+			flushTimeout: 500,
+			debounceWait: 100,
+			debounceMaxWait: 1000
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		const first = auth.persistNow();
+		await vi.advanceTimersByTimeAsync(600);
+		expect((await first).timedOut).toEqual(['t']);
+
+		await vi.advanceTimersByTimeAsync(1100); // the one rescheduled write
+		await tick(8);
+		expect(dispatched).toHaveLength(2);
+
+		// Traffic alone does not recover it: the edit's own capture queues behind
+		// the wedged write and is never dispatched. An operator told that the next
+		// edit heals the topic would schedule no periodic flush and never persist
+		// this document again.
+		edit('t', 'b');
+		await vi.advanceTimersByTimeAsync(3000);
+		await tick(8);
+		expect(dispatched).toHaveLength(2);
+
+		// Only a flush deadline abandons the wedged write and frees the chain.
+		const second = auth.persistNow();
+		await vi.advanceTimersByTimeAsync(600);
+		expect((await second).timedOut).toEqual(['t']);
+		await vi.advanceTimersByTimeAsync(1100);
+		await tick(8);
+		expect(dispatched).toHaveLength(3);
+	});
+
+	it('attempt counts retries of the same unstored state, not writes', async () => {
+		const attempts = [];
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				// Healthy, just slow: every write lands.
+				store: async (topic, bytes, info) => {
+					attempts.push(info.attempt);
+					await new Promise((r) => { setTimeout(r, 120); });
+				}
+			},
+			snapshotEvery: 1
+		});
+		await auth.acquire('t');
+		for (let i = 0; i < 6; i++) edit('t', 'k' + i);
+		await vi.advanceTimersByTimeAsync(3000);
+		await tick(8);
+		// Sustained editing against a working backend is not a retry storm: a
+		// host backing off or paging on `attempt` must not be told otherwise.
+		expect(attempts).toEqual([1, 1, 1, 1, 1, 1]);
+	});
+
+	it('does not report an error for a store its own teardown cancelled', async () => {
+		const errors = [];
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				// The common shape of honouring an abort: reject with the reason.
+				store: (topic, bytes, info) => new Promise((resolve, reject) => {
+					info.signal.addEventListener('abort', () => reject(info.signal.reason));
+				})
+			},
+			debounceWait: 2000,
+			onError: (e, info) => errors.push(info.op)
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		await vi.advanceTimersByTimeAsync(2100);
+		await tick(8);
+		auth.destroy();
+		await tick(8);
+		// Shutting down is not a persistence fault; an operator's handler must
+		// not page on every clean exit that had writes in flight.
+		expect(errors).toEqual([]);
+		auth = null;
+	});
+
+	it('does not report an error for a load its own drop cancelled', async () => {
+		const errors = [];
+		auth = createCrdtAuthority({
+			persist: {
+				load: (topic, info) => new Promise((resolve, reject) => {
+					info.signal.addEventListener('abort', () => reject(info.signal.reason));
+				})
+			},
+			onError: (e, info) => errors.push(info.op)
+		});
+		const joining = auth.acquire('t');
+		await tick();
+		auth.drop('t');
+		await expect(joining).rejects.toThrow();
+		await tick(8);
+		expect(errors).toEqual([]);
+	});
+
+	it('still reports a store the flush deadline cancelled: that host really ran out of budget', async () => {
+		const errors = [];
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				store: (topic, bytes, info) => new Promise((resolve, reject) => {
+					info.signal.addEventListener('abort', () => reject(info.signal.reason));
+				})
+			},
+			flushTimeout: 500,
+			onError: (e, info) => errors.push(info.op)
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		const flush = auth.persistNow();
+		await vi.advanceTimersByTimeAsync(600);
+		await flush;
+		await tick(8);
+		expect(errors).toEqual(['store']);
+	});
+
+	it('a topic array throws instead of silently flushing every topic', async () => {
+		const writes = [];
+		auth = createCrdtAuthority({
+			persist: { load: async () => null, store: async (topic) => { writes.push(topic); } }
+		});
+		await auth.acquire('a');
+		await auth.acquire('b');
+		edit('a', 'x');
+		edit('b', 'x');
+		expect(() => auth.persistNow(['a'])).toThrow('crdt: persistNow topic must be a string');
+		await tick(8);
+		expect(writes).toEqual([]);
+	});
+
+	it('waits for a slow store when the caller opts out with Infinity', async () => {
+		let releaseStore;
+		auth = createCrdtAuthority({
+			persist: { load: async () => null, store: () => new Promise((r) => { releaseStore = r; }) },
+			flushTimeout: 500
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		let settled = null;
+		const flush = auth.persistNow({ timeout: Infinity }).then((r) => { settled = r; });
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(settled).toBe(null); // the default budget did not apply
+		releaseStore();
+		await flush;
+		expect(settled.ok).toBe(true);
+		expect(settled.durable).toEqual(['t']);
+	});
+
+	it('reports each topic of an every-topic flush separately', async () => {
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				store: async (topic) => {
+					if (topic === 'b') throw new Error('disk full');
+					if (topic === 'c') return false;
+				}
+			}
+		});
+		await auth.acquire('a');
+		await auth.acquire('b');
+		await auth.acquire('c');
+		edit('a', 'x');
+		edit('b', 'x');
+		edit('c', 'x');
+		const result = await auth.persistNow();
+		expect(result.ok).toBe(false);
+		expect(result.durable).toEqual(['a']);
+		expect(result.failed).toEqual(['b']);
+		expect(result.declined).toEqual(['c']);
+		expect(result.dirty.slice().sort()).toEqual(['b', 'c']);
+	});
+
+	it('flushes only the named topic', async () => {
+		const writes = [];
+		auth = createCrdtAuthority({
+			persist: { load: async () => null, store: async (topic) => { writes.push(topic); } }
+		});
+		await auth.acquire('a');
+		await auth.acquire('b');
+		edit('a', 'x');
+		edit('b', 'x');
+		const result = await auth.persistNow('a');
+		expect(writes).toEqual(['a']);
+		expect(result.durable).toEqual(['a']);
+		expect(result.dirty).toEqual([]);
+	});
+
+	it('flushing an unknown topic reports an empty, successful flush', async () => {
+		auth = createCrdtAuthority({ persist: { load: async () => null, store: async () => {} } });
+		expect(await auth.persistNow('never-acquired')).toEqual({
+			ok: true, durable: [], declined: [], failed: [], timedOut: [], dirty: []
+		});
+	});
+
+	it('claims nothing durable when no store hook is configured', async () => {
+		auth = createCrdtAuthority();
+		await auth.acquire('t');
+		await auth.acquire('untouched');
+		edit('t', 'a');
+		const result = await auth.persistNow();
+		expect(result.durable).toEqual([]);
+		// Only the topic holding edits is at risk; an unedited one is not dirty.
+		expect(result.dirty).toEqual(['t']);
+		// An authority with no store hook cannot make bytes durable, so the
+		// one-line shutdown check must not wave those edits through.
+		expect(result.ok).toBe(false);
+	});
+
+	it('ok tracks dirty, so a topic edited during the flush is not reported as a clean shutdown', async () => {
+		let releaseStore;
+		auth = createCrdtAuthority({
+			persist: { load: async () => null, store: () => new Promise((r) => { releaseStore = r; }) }
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		const flush = auth.persistNow({ timeout: Infinity });
+		await tick();
+		edit('t', 'b'); // an edit the in-flight capture does not contain
+		releaseStore();
+		const result = await flush;
+		expect(result.durable).toEqual(['t']);
+		expect(result.dirty).toEqual(['t']);
+		expect(result.ok).toBe(false);
+	});
+
+	it('hands the store a signal, the flush deadline and a retry-counting attempt', async () => {
+		const infos = [];
+		let failNext = true;
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				store: async (topic, bytes, info) => {
+					infos.push({ deadline: info.deadline, attempt: info.attempt, aborted: info.signal.aborted });
+					if (failNext) { failNext = false; throw new Error('disk full'); }
+				}
+			},
+			debounceWait: 2000,
+			debounceMaxWait: 5000
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		await vi.advanceTimersByTimeAsync(2100); // the scheduled store: nobody is waiting
+		await tick(8);
+		expect(infos[0]).toEqual({ deadline: null, attempt: 1, aborted: false });
+		await vi.advanceTimersByTimeAsync(5100); // the retry after the failure
+		await tick(8);
+		expect(infos[1].attempt).toBe(2);
+		expect(infos[1].deadline).toBe(null);
+		// A durable store restarts the count; an explicit flush carries its
+		// deadline through to the host so its own I/O can respect it.
+		edit('t', 'b');
+		const at = Date.now();
+		await auth.persistNow({ timeout: 1000 });
+		expect(infos[2].attempt).toBe(1);
+		expect(infos[2].deadline).toBe(at + 1000);
+	});
+
+	it('aborts an in-flight store when the authority is destroyed', async () => {
+		let handed = null;
+		auth = createCrdtAuthority({
+			persist: {
+				load: async () => null,
+				store: (topic, bytes, info) => { handed = info; return new Promise(() => {}); }
+			},
+			debounceWait: 2000
+		});
+		await auth.acquire('t');
+		edit('t', 'a');
+		await vi.advanceTimersByTimeAsync(2100);
+		await tick();
+		expect(handed.signal.aborted).toBe(false);
+		auth.destroy();
+		expect(handed.signal.aborted).toBe(true);
+		auth = null;
+	});
+
+	it('aborts an in-flight load when the topic is erased', async () => {
+		let handed = null;
+		auth = createCrdtAuthority({
+			persist: { load: (topic, info) => { handed = info; return new Promise(() => {}); } }
+		});
+		void auth.acquire('t');
+		await tick();
+		expect(handed.signal.aborted).toBe(false);
+		auth.drop('t');
+		expect(handed.signal.aborted).toBe(true);
+	});
+
+	it('rejects a malformed flush budget or topic eagerly', async () => {
+		expect(() => createCrdtAuthority({ flushTimeout: -1 })).toThrow('flushTimeout');
+		expect(() => createCrdtAuthority({ flushTimeout: 'soon' })).toThrow('flushTimeout');
+		auth = createCrdtAuthority();
+		expect(() => auth.persistNow(5)).toThrow('topic');
+		expect(() => auth.persistNow(['a', 'b'])).toThrow('topic');
+		expect(() => auth.persistNow('t', 'later')).toThrow('options');
+		expect(() => auth.persistNow('t', ['later'])).toThrow('options');
+		expect(() => auth.persistNow({ timeout: -1 })).toThrow('timeout');
+		expect(() => auth.persistNow('t', { timeout: 'later' })).toThrow('timeout');
 	});
 });
 

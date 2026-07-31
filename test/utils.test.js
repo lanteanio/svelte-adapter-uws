@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { hasUWS } from './helpers/real-runtime.js';
 import { parseCookies, serializeCookie, createCookies } from '../src/runtime/cookies.js';
 import {
 	mimeLookup,
@@ -1978,6 +1979,178 @@ describe('isValidWireTopic', () => {
 		});
 	});
 
+	// The cap counts UTF-16 code units on BOTH lanes, deliberately. The
+	// server-side maxTopicLength caps in the cursor and throttle plugins read
+	// `topic.length` against the same default of 256, so a wire boundary that
+	// counted code points instead would admit up to 512 units and hand a
+	// client-named topic to a plugin that then refuses it - throttle by
+	// throwing out of the app's publish call, cursor by dropping every frame
+	// with no signal. Widening the ceiling is not free until those move too.
+	describe('length cap counts UTF-16 code units on both lanes', () => {
+		const emoji = '\u{1F600}';
+
+		it('measures an astral name in units, not code points', () => {
+			expect(emoji.length, 'the fixture must be a surrogate pair for this to test anything').toBe(2);
+			// 128 pairs is 256 units; the 129th crosses the cap even though the
+			// name is only 129 characters as a human would count them.
+			expect(isValidWireTopic(emoji.repeat(128), true)).toBe(true);
+			expect(isValidWireTopic(emoji.repeat(129), true)).toBe(false);
+		});
+
+		it('never accepts more units than the narrowest downstream cap', () => {
+			// 200 pairs plus 56 ASCII characters is 456 units. A code-point count
+			// would have called that 256 and let it through.
+			expect(isValidWireTopic(emoji.repeat(200) + 'a'.repeat(56), true)).toBe(false);
+		});
+
+		it('applies the same cap with and without the opt-in', () => {
+			expect(isValidWireTopic('a'.repeat(256))).toBe(true);
+			expect(isValidWireTopic('a'.repeat(257))).toBe(false);
+			expect(isValidWireTopic('a'.repeat(256), true)).toBe(true);
+			expect(isValidWireTopic('a'.repeat(257), true)).toBe(false);
+		});
+	});
+
+	// An unpaired surrogate is not encodable as UTF-8, so it becomes U+FFFD on
+	// the way out of the socket. On the wire lane that breaks egress: the
+	// `subscribed` ack and every published frame carry a name the client's own
+	// dispatch does not recognise, so the subscription delivers nothing. On the
+	// server-named platform lane the client never sees anything but the
+	// replaced form, so it holds no name that could unsubscribe again.
+	describe('unpaired surrogates', () => {
+		it('accepts a well-formed surrogate pair when opted in', () => {
+			expect(isValidWireTopic('chat:\u{1F600}', true)).toBe(true);
+			expect(isValidWireTopic('\u{1F600}', true)).toBe(true);
+		});
+
+		it('rejects a lone high surrogate', () => {
+			expect(isValidWireTopic('chat:\ud83d', true)).toBe(false);
+			expect(isValidWireTopic('\ud83dchat', true)).toBe(false);
+		});
+
+		it('rejects a lone low surrogate', () => {
+			expect(isValidWireTopic('chat:\ude00', true)).toBe(false);
+			expect(isValidWireTopic('\ude00chat', true)).toBe(false);
+		});
+
+		it('rejects a high surrogate followed by a non-low unit', () => {
+			expect(isValidWireTopic('chat:\ud83da', true)).toBe(false);
+			expect(isValidWireTopic('chat:\ud83d\ud83d', true)).toBe(false);
+		});
+
+		it('rejects a reversed pair', () => {
+			expect(isValidWireTopic('chat:\ude00\ud83d', true)).toBe(false);
+		});
+
+		it('rejects surrogates under the printable-ASCII default too', () => {
+			expect(isValidWireTopic('chat:\ud83d')).toBe(false);
+			expect(isValidWireTopic('chat:\u{1F600}')).toBe(false);
+		});
+	});
+
+});
+
+// A predicate asserted against string literals proves the function, not the
+// path a client can actually walk to it. Raw malformed UTF-8 never gets there -
+// the frame is decoded before the topic is read, so bad bytes are already
+// U+FFFD by then - which leaves exactly one route: a JSON `\uD83D` escape,
+// which parses to a lone surrogate without ever being ill-formed UTF-8 on the
+// wire. These drive that frame over a real socket and assert on what the CLIENT
+// receives back.
+//
+// The server here is the published `./testing` harness rather than the built
+// runtime, because reaching this branch needs `allowNonAsciiTopics`, which the
+// production fixture bakes in at build time and no fixture variant enables.
+// The harness calls the same `isValidWireTopic` from the same module the
+// production wire path calls, with the same flag in the same argument, so
+// mutating the validator turns these red.
+
+const describeUWS = hasUWS ? describe : describe.skip;
+
+describeUWS('isValidWireTopic over a real socket', () => {
+	/** @type {any} */
+	let server = null;
+	/** @type {any} */
+	let client = null;
+
+	afterEach(async () => {
+		try { client?.terminate(); } catch { /* already gone */ }
+		client = null;
+		await server?.close();
+		server = null;
+	});
+
+	/**
+	 * Boot a server with the non-ASCII opt-in on and return a connected client.
+	 * @returns {Promise<any>}
+	 */
+	async function bootWidened() {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer({ allowNonAsciiTopics: true, handler: {} });
+		const wsMod = await import('ws');
+		const WebSocket = wsMod.WebSocket ?? wsMod.default;
+		client = new WebSocket(server.wsUrl);
+		/** @type {any[]} */
+		const frames = [];
+		client.on('message', (data) => {
+			try { frames.push(JSON.parse(data.toString())); } catch { /* non-JSON frame */ }
+		});
+		await new Promise((resolve, reject) => {
+			client.on('open', resolve);
+			client.on('error', reject);
+		});
+		return frames;
+	}
+
+	/**
+	 * Poll the recorded frames for the answer to one `ref`.
+	 * @param {any[]} frames
+	 * @param {string} ref
+	 */
+	async function answerFor(frames, ref) {
+		const deadline = Date.now() + 1000;
+		for (;;) {
+			const hit = frames.find((f) => f && f.ref === ref);
+			if (hit) return hit;
+			if (Date.now() >= deadline) return null;
+			await new Promise((r) => setTimeout(r, 10));
+		}
+	}
+
+	it('denies a subscribe whose topic carries a lone surrogate escape', async () => {
+		const frames = await bootWidened();
+		// Sent as raw frame text, not JSON.stringify of a JS string, so the
+		// escape a hostile client would type is what actually goes on the wire.
+		client.send('{"type":"subscribe","topic":"chat:\\ud83d","ref":"lone"}');
+		const answer = await answerFor(frames, 'lone');
+		expect(answer, 'the server must answer a subscribe carrying a ref').not.toBeNull();
+		expect(answer.type).toBe('subscribe-denied');
+		expect(answer.reason).toBe('INVALID_TOPIC');
+	});
+
+	it('accepts the same name once the surrogate pair is complete', async () => {
+		const frames = await bootWidened();
+		client.send('{"type":"subscribe","topic":"chat:\\ud83d\\ude00","ref":"pair"}');
+		const answer = await answerFor(frames, 'pair');
+		expect(answer, 'the server must answer a subscribe carrying a ref').not.toBeNull();
+		// The refusal above is the surrogate rule talking and not a blanket
+		// rejection of everything above ASCII.
+		expect(answer.type).toBe('subscribed');
+		expect(answer.topic).toBe('chat:\u{1F600}');
+	});
+
+	it('denies a name over the unit cap that a code-point count would admit', async () => {
+		const frames = await bootWidened();
+		// 200 astral symbols is 400 UTF-16 units but only 200 characters, so a
+		// code-point ceiling would let this through and hand the plugin-side
+		// maxTopicLength caps a name they measure at 405 and refuse.
+		const topic = 'chat:' + '\\ud83d\\ude00'.repeat(200);
+		client.send(`{"type":"subscribe","topic":"${topic}","ref":"long"}`);
+		const answer = await answerFor(frames, 'long');
+		expect(answer, 'the server must answer a subscribe carrying a ref').not.toBeNull();
+		expect(answer.type).toBe('subscribe-denied');
+		expect(answer.reason).toBe('INVALID_TOPIC');
+	});
 });
 
 // - createScopedTopic ------------------------------------------------------

@@ -48,6 +48,7 @@ import { setCohortHooks } from './utils.js';
 import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap } from './utils/subscribe-policy.js';
 import { startPostureExport } from './utils/posture-export.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './utils/upgrade-headers.js';
+import { collectRequestHeaders, declareSingleValuedProxyHeaders } from './utils/request-headers.js';
 import { createSlidingWindowLimiter } from './utils/rate-limiter.js';
 import { runMessageHook } from './utils/hook-boundary.js';
 
@@ -63,8 +64,14 @@ setCohortHooks(
 );
 import { platform } from './handler/platform.js';
 import { readBody, handleSSR } from './handler/ssr.js';
-import { requestDone, isDraining } from './handler/lifecycle.js';
-export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls } from './handler/lifecycle.js';
+import { requestDone, isDraining, lifecycleState } from './handler/lifecycle.js';
+// The lifecycle module's whole public surface, re-exported here because
+// handler.js is the module the built runtime imports: a caller reaching into
+// handler/lifecycle.js directly depends on the file split rather than on the
+// contract. `beginDrain`, `lifecycleState` and `tlsReloadState` were reachable
+// only that way - the boot driver dynamic-imports the submodule for the first
+// (src/runtime/index.js), which is the shape this list exists to end.
+export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls, beginDrain, lifecycleState, tlsReloadState } from './handler/lifecycle.js';
 export { setRelayRingWriter } from './handler/relay.js';
 export { markRelayAttached } from './handler/state.js';
 import { handleRequest } from './handler/request.js';
@@ -78,6 +85,18 @@ import { registerRoute } from './handler/route-registry.js';
 // force-closes anything it cannot route, so an unrecorded route would vanish
 // for every SNI-matched connection after the first cert renewal.
 const route = (method, ...args) => registerRoute(app, method, ...args);
+
+// Tell the shared header collector which names THIS deployment reads as a
+// single value, before anything listens. Repeated lines of a header the
+// collector does not know about are comma-joined, which is right for a chain
+// and wrong for these: `get_origin` throws on a joined protocol or builds an
+// unparseable URL from a joined host, and the client-IP resolver takes a joined
+// address header's LEADING bytes, which are the client's rather than the
+// proxy's. The names are operator-chosen, so only this layer knows them.
+// Declared here rather than at each collection site because handler/request.js
+// and handler/admin.js share this module's process state, so one declaration
+// covers every entry point including the ones added later.
+declareSingleValuedProxyHeaders([protocol_header, host_header, port_header, address_header]);
 
 /* global ENV_PREFIX */
 /* global PRECOMPRESS */
@@ -819,9 +838,16 @@ if (WS_ENABLED) {
 
 
 		route('post', authPath, (res, req) => {
+			// Repeated header lines are merged per header class. A repeated
+			// framing / identity header is refused outright: this door reads the
+			// Origin and hands the whole header set to a credential check, and
+			// neither can be given one of two possible readings.
 			/** @type {Record<string, string>} */
 			const authHeaders = {};
-			req.forEach((k, v) => { authHeaders[k] = v; });
+			if (collectRequestHeaders(req, authHeaders) !== null) {
+				send400(res);
+				return;
+			}
 			const method = 'POST';
 			const url = req.getUrl() + (req.getQuery() ? '?' + req.getQuery() : '');
 			const authAddr = resolveTransportAddress(res);
@@ -859,6 +885,26 @@ if (WS_ENABLED) {
 				return;
 			}
 
+			// `get_origin` derives the base origin from the Host (and the
+			// configured PROTOCOL / HOST / PORT headers) when ORIGIN is unset -
+			// the zero-config default. It THROWS on a value it cannot make an
+			// origin out of, and nothing wraps this route: an unguarded throw
+			// escapes the uWS callback as a synchronous exception, so no response
+			// is ever written and the request hangs until the client gives up.
+			// The reachable trigger is a client-supplied PROTOCOL_HEADER /
+			// PORT_HEADER value on a deployment configured for one; a Host-less
+			// request cannot reach here, because uWS answers that itself.
+			// Resolved BEFORE the state object and the body reader exist, so
+			// refusing costs nothing to unwind. The admin route carries the same
+			// guard for the same reason.
+			let base_origin;
+			try {
+				base_origin = origin || get_origin(authHeaders);
+			} catch {
+				send400(res);
+				return;
+			}
+
 			const state = acquireState();
 			res.onAborted(() => { state.aborted = true; });
 
@@ -871,14 +917,26 @@ if (WS_ENABLED) {
 
 			const body = readBody(res, AUTH_BODY_LIMIT, state, isNaN(contentLength) ? -1 : contentLength);
 
-			const base_origin = origin || get_origin(authHeaders);
-			const request = new Request(base_origin + url, {
-				method,
-				headers: authHeaders,
-				body,
-				// @ts-expect-error
-				duplex: 'half'
-			});
+			// A base origin that satisfied the protocol and port checks can still
+			// build a URL the WHATWG parser refuses, and a header value the
+			// Headers constructor rejects throws here too. Same guard the admin
+			// route already carries, with the pooled state handed back on the way
+			// out - the response is ended first, so uWS will not call onAborted
+			// against a state object that now belongs to another request.
+			let request;
+			try {
+				request = new Request(base_origin + url, {
+					method,
+					headers: authHeaders,
+					body,
+					// @ts-expect-error
+					duplex: 'half'
+				});
+			} catch {
+				send400(res);
+				releaseState(state);
+				return;
+			}
 
 			const cookies = createCookies(authHeaders['cookie']);
 
@@ -1125,12 +1183,19 @@ if (WS_ENABLED) {
 				else admission.release();
 			}
 
-			// Read everything synchronously - uWS req is stack-allocated
+			// Read everything synchronously - uWS req is stack-allocated.
+			// Repeated lines are merged per header class; a repeated framing /
+			// identity header is refused before the address is even decoded,
+			// which is the cheapest point at which the ambiguity can die. The
+			// in-flight slot acquired above is handed back on the way out.
 			/** @type {Record<string, string>} */
 			const headers = {};
-			req.forEach((key, value) => {
-				headers[key] = value;
-			});
+			if (collectRequestHeaders(req, headers) !== null) {
+				mUpgradeRejected?.inc({ reason: 'duplicate_header' });
+				send400(res);
+				releaseInFlight();
+				return;
+			}
 			// Decode the client IP once. resolveTransportAddress applies the
 			// opt-in PROXY-protocol substitution, then resolveClientIp applies
 			// the configured proxy header (ADDRESS_HEADER / XFF_DEPTH) - both
@@ -2320,15 +2385,24 @@ if (HEALTH_CHECK_PATH) {
 
 // Readiness endpoint (before catch-all so it never hits SSR). This is a
 // READINESS probe, distinct from liveness: it reports 200 when ready and 503
-// once graceful shutdown has begun, so a fronting load balancer stops routing
-// NEW traffic to a draining instance while its in-flight requests finish. Keep
-// it separate from `healthCheckPath` so a single endpoint is never used for
-// both purposes (a readiness 503 must NOT trip a liveness probe into a restart).
+// whenever this instance must not be sent new traffic, so a fronting load
+// balancer stops routing NEW traffic while in-flight requests finish. Keep it
+// separate from `healthCheckPath` so a single endpoint is never used for both
+// purposes (a readiness 503 must NOT trip a liveness probe into a restart).
+//
+// THE BODY IS THE LIFECYCLE STATE, not a fixed word. Not-ready covers `starting`
+// (bound, but the app's init has not committed) as well as `draining` and
+// `closed`, and those mean opposite things to an operator: during a rolling
+// deploy every freshly started instance would otherwise report that it is
+// draining, which reads as a stuck or reversed rollout. The routing decision is
+// the same for all of them - which is why it stays isDraining() - but the word
+// an operator reads has to say which one it is.
 if (READINESS_CHECK_PATH) {
 	route('get', READINESS_CHECK_PATH, (res) => {
 		if (isDraining()) {
+			const state = lifecycleState();
 			res.cork(() => {
-				res.writeStatus('503 Service Unavailable').end('draining');
+				res.writeStatus('503 Service Unavailable').end(state);
 			});
 		} else {
 			res.cork(() => {

@@ -1,6 +1,7 @@
 import { origin, get_origin, body_size_limit } from './config.js';
 import { METHODS } from './http-helpers.js';
 import { readBody } from './ssr.js';
+import { collectRequestHeaders } from '../utils/request-headers.js';
 import { wsModule } from '../ws-handler-bridge.js';
 
 // Reserved admin / observability route. The app's WebSocket handler may export
@@ -90,9 +91,16 @@ export function handleAdminRequest(res, req) {
 	const query = req.getQuery();
 	const METHOD = METHODS[method] || method.toUpperCase();
 
+	// Repeated header lines are merged per header class. A repeated framing /
+	// identity header cannot be merged into one meaning, and the admin handler
+	// authorizes off these headers, so an ambiguous one is refused here rather
+	// than handed on as whichever line happened to arrive last.
 	/** @type {Record<string, string>} */
 	const headers = {};
-	req.forEach((key, value) => { headers[key] = value; });
+	if (collectRequestHeaders(req, headers) !== null) {
+		sendAdminError(res, 400, 'bad request');
+		return;
+	}
 
 	// Shared abort flag, mandatory uWS pattern: set onAborted before any async
 	// work so an aborted request never writes to a freed response.

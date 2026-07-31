@@ -1,4 +1,4 @@
-// Benchmark: SSR deduplication — shows render call reduction under concurrent identical requests.
+// Benchmark: SSR deduplication - shows render call reduction under concurrent identical requests.
 //
 // Both servers use a 5ms artificial render delay. We send exactly BURST requests
 // to the same URL concurrently, then read each server's render call counter to see

@@ -1,5 +1,6 @@
-import { now, monotonicNow, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
+import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
+import { collectRequestHeaders } from './runtime/utils/request-headers.js';
 import { stampSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
@@ -10,6 +11,7 @@ import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, W
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
 import { runMessageHook } from './runtime/utils/hook-boundary.js';
 import { assertRestrictiveBoolean } from './config-guards.js';
+import { uwsInstallSpec, readAdapterPackageJson } from './uws-load-hint.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -50,6 +52,47 @@ function envelope(topic, event, data, seq) {
 	return completeEnvelope(prefix, data, seq);
 }
 
+/** Default shutdown budget in seconds, the same value the server entry defaults to. */
+const DEFAULT_SHUTDOWN_TIMEOUT_S = 30;
+
+/**
+ * The shutdown budget `close()` gives the app's `shutdown` hook, in ms.
+ *
+ * Read from `SHUTDOWN_TIMEOUT` at every call rather than once at import, so a
+ * test can set the budget it wants to exercise immediately before closing.
+ * `0` is the no-budget spelling, exactly as it is in production: nothing aborts
+ * and the hook is awaited for as long as it takes. A value the runtime itself
+ * would reject (not a number, or negative) falls back to the default rather than
+ * silently disarming the budget.
+ *
+ * @returns {number} milliseconds, or 0 for no budget
+ */
+function shutdownBudgetMs() {
+	const raw = process.env.SHUTDOWN_TIMEOUT;
+	if (raw === undefined || raw === '') return DEFAULT_SHUTDOWN_TIMEOUT_S * 1000;
+	const seconds = Number.parseInt(raw, 10);
+	if (!Number.isFinite(seconds) || seconds < 0) return DEFAULT_SHUTDOWN_TIMEOUT_S * 1000;
+	return seconds * 1000;
+}
+
+/**
+ * A promise that settles when `signal` aborts, and never when there is none.
+ *
+ * The never-settling half is deliberate: it is one side of a `Promise.race`, so
+ * "no budget" has to mean "this side never wins" rather than "this side wins
+ * immediately".
+ *
+ * @param {AbortSignal | null} signal
+ * @returns {Promise<void>}
+ */
+function whenAbortedT(signal) {
+	if (!signal) return new Promise(() => {});
+	if (signal.aborted) return Promise.resolve();
+	return new Promise((resolve) => {
+		signal.addEventListener('abort', () => resolve(), { once: true });
+	});
+}
+
 /**
  * Create a lightweight test server backed by a real uWebSockets.js instance.
  *
@@ -70,11 +113,19 @@ export async function createTestServer(options = {}) {
 	);
 	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, protection, metrics, adminPath = '/__realtime', readinessCheckPath = '/readyz', healthCheckPath = '/healthz', primaryInit } = options;
 
-	// Readiness flag, mirroring the production `counters.draining`. Flipped true
-	// at the start of the returned `close()` (graceful shutdown) so the readiness
-	// route reports 503; a test can also flip it directly via
-	// `platform.__setDraining(true)` to assert the route without tearing down.
-	let drainingT = false;
+	// Lifecycle state, mirroring the production state machine
+	// (runtime/handler/lifecycle.js) rather than a boolean: `starting` while the
+	// socket is bound but the app's `init` has not committed, `ready` once it
+	// has, `draining` from the start of the returned `close()`, `closed` once the
+	// listen socket is gone. Readiness is 200 in exactly one of them and answers
+	// 503 with the state's NAME in the other three - a two-valued flag reported
+	// `draining` to an operator whose instance was still booting, which during a
+	// rolling deploy reads as a stuck or reversed rollout.
+	//
+	// A test can drive it directly with `platform.__setDraining(true)` to assert
+	// the route without tearing the server down.
+	/** @type {'starting' | 'ready' | 'draining' | 'closed'} */
+	let lifecycleT = 'starting';
 	// Mirror production: block client-initiated subscribes to `__`-prefixed
 	// system topics by default. A registered plugin namespace may reach its hook,
 	// but landing still requires tracked membership. Tests that intentionally
@@ -238,7 +289,7 @@ export async function createTestServer(options = {}) {
 		} catch {
 			throw new Error(
 				'createTestServer requires uWebSockets.js to be installed.\n' +
-				'  npm install uNetworking/uWebSockets.js#v20.60.0'
+				'  npm install ' + uwsInstallSpec(readAdapterPackageJson())
 			);
 		}
 	}
@@ -1555,12 +1606,18 @@ export async function createTestServer(options = {}) {
 				: null;
 		},
 		/**
-		 * Test-only seam: flip the readiness flag the readiness route reports on,
-		 * without tearing the server down (the returned `close()` also sets it).
+		 * Test-only seam: move the lifecycle state the readiness route reports on,
+		 * without tearing the server down (the returned `close()` also moves it).
+		 *
+		 * Boolean, because that is the transition a readiness test drives: `true`
+		 * is `draining`, `false` puts the instance back in rotation as `ready`.
+		 * The `starting` state is not reachable through this seam - it is the boot
+		 * window, and the only honest way to observe it is from an `init` hook
+		 * while the server is genuinely in it.
 		 * @param {boolean} value
 		 */
 		__setDraining(value) {
-			drainingT = value === true;
+			lifecycleT = value === true ? 'draining' : 'ready';
 		},
 		__chaos(cfg) {
 			if (cfg && cfg.scenario === 'worker-flap') {
@@ -1750,8 +1807,22 @@ export async function createTestServer(options = {}) {
 				else admission.release();
 			}
 
+			// Repeated header lines are merged per header class, and a repeated
+			// framing / identity header refuses the upgrade - the production
+			// wiring exactly, since an app verifying its handshake against this
+			// mirror must not see an ambiguity the real server rejects.
+			/** @type {Record<string, string>} */
 			const headers = {};
-			req.forEach((k, v) => { headers[k] = v; });
+			if (collectRequestHeaders(req, headers) !== null) {
+				mUpgradeRejectedT?.inc({ reason: 'duplicate_header' });
+				res.cork(() => {
+					res.writeStatus('400 Bad Request');
+					res.writeHeader('content-type', 'text/plain');
+					res.end('Bad Request');
+				});
+				releaseInFlight();
+				return;
+			}
 			const secKey = req.getHeader('sec-websocket-key');
 			const secProtocol = req.getHeader('sec-websocket-protocol');
 			const secExtensions = req.getHeader('sec-websocket-extensions');
@@ -2567,9 +2638,12 @@ export async function createTestServer(options = {}) {
 			const method = req.getMethod().toUpperCase();
 			const pathname = req.getUrl();
 			const query = req.getQuery();
+			// Repeated header lines are merged per header class, mirroring the
+			// production admin route. An ambiguous framing / identity header is
+			// refused below, as soon as the error writer exists.
 			/** @type {Record<string, string>} */
 			const adminHeaders = {};
-			req.forEach((k, v) => { adminHeaders[k] = v; });
+			const ambiguousAdminHeader = collectRequestHeaders(req, adminHeaders);
 			const adminUrl = query ? `${pathname}?${query}` : pathname;
 			const base = 'http://' + (adminHeaders.host || 'localhost');
 
@@ -2586,6 +2660,11 @@ export async function createTestServer(options = {}) {
 					res.end(status === 400 ? '{"error":"bad request"}' : '{"error":"internal error"}');
 				});
 			};
+
+			if (ambiguousAdminHeader !== null) {
+				failAdmin(400);
+				return;
+			}
 
 			const writeAdmin = (response) => {
 				Promise.resolve(response.body ? response.arrayBuffer() : null)
@@ -2636,7 +2715,7 @@ export async function createTestServer(options = {}) {
 
 	// Liveness route, mirroring handler.js: always 200 while the process is up,
 	// INCLUDING during a drain (a liveness probe must never restart a draining
-	// instance mid-shutdown), so it does NOT consult `drainingT`.
+	// instance mid-shutdown), so it does NOT consult the lifecycle state.
 	if (healthCheckPath !== false) {
 		app.get(healthCheckPath, (res) => {
 			res.onAborted(() => {});
@@ -2644,13 +2723,15 @@ export async function createTestServer(options = {}) {
 		});
 	}
 
-	// Readiness route, mirroring handler.js: 200 'ready' normally, 503 'draining'
-	// once `drainingT` is set (graceful shutdown or the __setDraining seam).
+	// Readiness route, mirroring handler.js: 200 'ready' in the one ready state,
+	// 503 in every other one with the state's name as the body - `starting`
+	// during boot, `draining` from the start of close(), `closed` afterwards.
 	if (readinessCheckPath !== false) {
 		app.get(readinessCheckPath, (res) => {
 			res.onAborted(() => {});
-			if (drainingT) {
-				res.cork(() => { res.writeStatus('503 Service Unavailable').end('draining'); });
+			if (lifecycleT !== 'ready') {
+				const state = lifecycleT;
+				res.cork(() => { res.writeStatus('503 Service Unavailable').end(state); });
 			} else {
 				res.cork(() => { res.writeStatus('200 OK').end('ready'); });
 			}
@@ -2681,6 +2762,13 @@ export async function createTestServer(options = {}) {
 				}
 			}
 
+			// Readiness commits HERE, not at the bind, exactly as production does:
+			// the socket is open while `init` runs so arriving connections queue
+			// rather than being refused, and /readyz answers 503 `starting` for that
+			// whole window. An app whose init hook probes its own readiness sees the
+			// same answer it would get from a real instance.
+			lifecycleT = 'ready';
+
 			resolve({
 				url: `http://localhost:${boundPort}`,
 				wsUrl: `ws://localhost:${boundPort}${wsPath}`,
@@ -2688,19 +2776,62 @@ export async function createTestServer(options = {}) {
 				platform,
 				wsConnections,
 				async close() {
-					// Flip readiness to NOT-ready at the start of graceful shutdown,
-					// mirroring production's `counters.draining = true` - the
-					// readiness route now reports 503 while we drain.
-					drainingT = true;
+					// Enter the draining state at the start of graceful shutdown,
+					// mirroring production's `beginDrain()` - the readiness route now
+					// reports 503 `draining` while we drain.
+					lifecycleT = 'draining';
 					// Fire `shutdown` hook before kicking connections so the
 					// hook sees a healthy platform. Throws are logged-and-
 					// ignored (best-effort, mirrors production).
+					//
+					// THE HOOK GETS PRODUCTION'S CONTEXT AND PRODUCTION'S BUDGET.
+					// Handing it `{ platform }` alone and awaiting it forever made
+					// this server disagree with the deployment it stands in for on
+					// both halves of the contract an app writes its hook against: the
+					// hook could not read `reason` / `signal` / `deadline`, so a flush
+					// that gives up cleanly when the budget is spent had no way to be
+					// exercised, and a hook that never settles passed here while
+					// production cut it off at SHUTDOWN_TIMEOUT and logged that its
+					// work did NOT finish. Same env knob, same default, same 0-means-
+					// unbounded spelling, read at close() so a test can set it per
+					// case. The one difference from production: ENV_PREFIX is not
+					// applied here, the harness reads the bare name.
+					const budgetMs = shutdownBudgetMs();
+					const expiry = new AbortController();
+					const budgetTimer = budgetMs > 0 ? setTimer(() => expiry.abort(), budgetMs) : null;
+					// Null with no budget, which is how a hook reads "nothing will cut
+					// me off" rather than having to guess from a far-future number.
+					const signal = budgetMs > 0 ? expiry.signal : null;
+					const deadline = budgetMs > 0 ? wallEpoch() + budgetMs : null;
 					if (typeof handler.shutdown === 'function') {
+						const started = monotonicNow();
 						try {
-							await handler.shutdown({ platform });
+							// The rejection handler is attached BEFORE the race: once
+							// the race is lost nothing awaits the hook any more, and a
+							// late rejection would surface as an unhandled rejection in
+							// the middle of teardown.
+							const hook = Promise.resolve(
+								handler.shutdown({ platform, reason: 'shutdown', signal, deadline })
+							).then(() => true, (err) => { console.error('[ws] shutdown hook threw:', err); return true; });
+							// The hook keeps running after the budget expires - user
+							// code cannot be interrupted - but it no longer holds the
+							// close path.
+							const settled = await Promise.race([hook, whenAbortedT(signal).then(() => false)]);
+							if (!settled) {
+								console.error(
+									`[ws] shutdown hook has not settled after ${(monotonicNow() - started).toFixed(0)}ms and the shutdown budget is spent; ` +
+									'closing anyway - whatever the hook was flushing did NOT finish.'
+								);
+							}
 						} catch (err) {
+							// A hook that threw synchronously, before it ever returned a
+							// promise. Log-and-continue: shutdown is best-effort.
 							console.error('[ws] shutdown hook threw:', err);
+						} finally {
+							if (budgetTimer !== null) clearTimer(budgetTimer);
 						}
+					} else if (budgetTimer !== null) {
+						clearTimer(budgetTimer);
 					}
 					// Advise clients to reconnect on a jittered schedule before closing
 					// (opt-in via createTestServer({ reconnectDispersalMs }); 0 = no-op),
@@ -2751,6 +2882,10 @@ export async function createTestServer(options = {}) {
 					}
 					wsConnections.clear();
 					uWS.us_listen_socket_close(listenSocket);
+					// Accepting stops HERE, not when readiness flipped: the window
+					// between the two is what the drain delay exists for, and
+					// production moves the same state at the same point.
+					lifecycleT = 'closed';
 				},
 				/**
 				 * Register a client socket (any `ws`-shaped object) this server

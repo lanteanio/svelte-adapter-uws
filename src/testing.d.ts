@@ -82,8 +82,9 @@ export interface TestServerOptions {
 	 * Prometheus-style registry, mirroring the production handler's
 	 * `metrics` option at the upgrade branches this harness mirrors:
 	 * `upgrade_admitted_total` and `upgrade_rejected_total` with reasons
-	 * `siege`, `over_capacity`, `cursor_lane`, `auth_rejected` and
-	 * `hook_error`. The sampled gauges and the `ip_rate_limit`,
+	 * `siege`, `over_capacity`, `cursor_lane`, `auth_rejected`,
+	 * `hook_error` and `duplicate_header`. The sampled gauges and the
+	 * `ip_rate_limit`,
 	 * `bad_origin` and `auth_timeout` reasons are production-only - the
 	 * harness runs no pressure sampler, no per-IP limiter, no origin
 	 * check, and no upgrade timeout.

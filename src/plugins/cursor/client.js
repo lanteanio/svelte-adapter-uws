@@ -90,7 +90,7 @@ function advertiseTimeCap() {
  * Resolve and validate the `smooth` option into the interpolator's knob
  * object, throwing on the main thread for anything malformed (deferring to
  * the worker's first frame would surface as an opaque worker error).
- * `true` selects the tuned defaults; the object form exposes three knobs:
+ * `true` selects the tuned defaults; the object form exposes four knobs:
  *
  *   - `interpolationMs`: how far in the past remote cursors render. Larger
  *     survives more dropped frames but trails further behind; `'auto'`
@@ -99,14 +99,20 @@ function advertiseTimeCap() {
  *   - `extrapolateMs`: hard cap on dead-reckoning when the buffer runs dry
  *     (default 250).
  *   - `snapGapMs`: sample gap treated as a discontinuity and snapped, not
- *     smeared (default 500) - view re-entry, idle resume, teleports.
+ *     smeared (default 500) - view re-entry, idle resume, resumed delivery.
+ *   - `snapSpeedPerSec`: how a jump is told from travel (default `'auto'`).
+ *     A cursor the app relocates rather than the pointer moving arrives on the
+ *     ordinary cadence, which the gap test cannot see; `'auto'` reads that off
+ *     the cursor's own neighbouring samples, a positive number adds an
+ *     absolute board-units-per-second ceiling, and 0 turns both off.
  *
  * @param {any} raw
- * @returns {{ delayMs: 'auto' | number, extrapolateMs: number, snapGapMs: number } | null}
+ * @returns {{ delayMs: 'auto' | number, extrapolateMs: number, snapGapMs: number,
+ *   snapSpeedPerSec: 'auto' | number } | null}
  */
 function resolveSmoothOptions(raw) {
 	if (raw === undefined || raw === null || raw === false) return null;
-	if (raw === true) return { delayMs: 'auto', extrapolateMs: 250, snapGapMs: 500 };
+	if (raw === true) return { delayMs: 'auto', extrapolateMs: 250, snapGapMs: 500, snapSpeedPerSec: 'auto' };
 	if (typeof raw !== 'object') {
 		throw new Error('cursor: smooth must be true or an options object, got ' + JSON.stringify(raw));
 	}
@@ -122,7 +128,14 @@ function resolveSmoothOptions(raw) {
 	if (!(typeof snapGapMs === 'number' && Number.isFinite(snapGapMs) && snapGapMs > 0)) {
 		throw new Error('cursor: smooth.snapGapMs must be a positive number');
 	}
-	return { delayMs, extrapolateMs, snapGapMs };
+	const snapSpeedPerSec = raw.snapSpeedPerSec === undefined ? 'auto' : raw.snapSpeedPerSec;
+	if (
+		snapSpeedPerSec !== 'auto' &&
+		!(typeof snapSpeedPerSec === 'number' && Number.isFinite(snapSpeedPerSec) && snapSpeedPerSec >= 0)
+	) {
+		throw new Error("cursor: smooth.snapSpeedPerSec must be 'auto' or a non-negative number");
+	}
+	return { delayMs, extrapolateMs, snapGapMs, snapSpeedPerSec };
 }
 
 /** @type {Map<string, ReturnType<typeof cursor>>} */

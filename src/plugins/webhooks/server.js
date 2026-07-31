@@ -6,7 +6,15 @@ import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
 import { checkUrl, classifyAddress } from '../../safe-url.js';
 import { randomFloat, setTimer, clearTimer, now, wallEpoch } from '../../runtime/runtime.js';
 
-export { createRetryBudget, createWebhookBreaker, WebhookCircuitOpenError } from './controls.js';
+import { WebhookAdmissionDeniedError } from './controls.js';
+
+export {
+	createWebhookAdmission,
+	createRetryBudget,
+	createWebhookBreaker,
+	WebhookCircuitOpenError,
+	WebhookAdmissionDeniedError
+} from './controls.js';
 
 /**
  * Generic outbound-webhook delivery: SSRF-gated, DNS-pinned, HMAC-signed HTTP
@@ -243,6 +251,61 @@ export function redactUrl(url) {
 	}
 }
 
+/**
+ * The origin of a URL, or null when it does not parse.
+ * @param {string} url
+ * @returns {string | null}
+ */
+function originOf(url) {
+	try { return new URL(url).origin; } catch { return null; }
+}
+
+/**
+ * The identities a first-attempt allowance is charged to: `<address>:<port>` for
+ * EVERY address the SSRF gate pinned this request's socket to.
+ *
+ * Not the URL, and not its origin. Every part of the URL is caller-chosen, the
+ * hostname included, so an allowance keyed on any of it is an allowance the
+ * caller can multiply by inventing names: `http://127.0.0.1:P`,
+ * `http://localhost:P`, `http://localhost.:P` and `http://[::1]:P` are four
+ * origins reaching one listener, and one wildcard-DNS record makes the supply of
+ * them unbounded.
+ *
+ * The whole pinned set is charged rather than one chosen member of it, because
+ * WHICH member the socket lands on is not knowable before the request: the
+ * connect logic tries the set (dual-stack, address by address), and a caller who
+ * controls the DNS answer picks both its contents and its order. Charging every
+ * address makes the question moot - wherever the socket ends up, that address
+ * paid for the request - and it makes the charge order-independent, so a
+ * resolver rotating its answer keys the same buckets. The set is deduplicated,
+ * so an answer that repeats an address does not charge it twice, and the gate's
+ * set is capped (see `MAX_PINNED_ADDRESSES`), so one delivery cannot charge an
+ * unbounded number of buckets.
+ *
+ * `pinned` is the gate's validated address set; it is absent for an IP literal,
+ * for which the URL parser has already canonicalised every encoding of the
+ * address into the hostname.
+ *
+ * @param {string} url a URL the gate accepted, so it parses
+ * @param {Array<{ address: string, family: number }> | undefined} pinned
+ * @returns {string[]} sorted, deduplicated destination keys, never empty
+ */
+function destinationsOf(url, pinned) {
+	const parsed = new URL(url);
+	const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+	const keys = new Set();
+	if (pinned !== undefined && pinned.length > 0) {
+		for (const p of pinned) {
+			keys.add((p.address.includes(':') ? '[' + p.address + ']' : p.address) + ':' + port);
+		}
+	} else {
+		let address = parsed.hostname;
+		if (address.startsWith('[')) address = address.slice(1, -1);
+		keys.add((address.includes(':') ? '[' + address + ']' : address) + ':' + port);
+	}
+	return [...keys].sort();
+}
+
 /** Backoff sleep through the runtime timer seam; unref'd so it never holds the loop. */
 function sleep(ms) {
 	return new Promise((resolve) => {
@@ -305,6 +368,17 @@ const PIN_CACHE_DEFAULT_MS = 30000;
 const PIN_CACHE_MAX_ENTRIES = 256;
 
 /**
+ * How many addresses of one DNS answer a connection is pinned to. A real
+ * endpoint publishes a handful; the cap only bites on an answer padded far past
+ * that, and it bounds the work and the bucket count ONE delivery can cost, since
+ * the admission gate charges every address the socket could reach. Addresses
+ * past the cap are dropped AFTER the whole answer has been range-checked, so a
+ * private address anywhere in it still rejects the delivery - the cap can only
+ * narrow where a socket may go, never widen it.
+ */
+const MAX_PINNED_ADDRESSES = 32;
+
+/**
  * Per-config TTL cache of VALIDATED pins. Keyed by the config object (WeakMap,
  * so one webhook's allow-list/mode can never leak into another's cache and a
  * dropped config frees its entries) and by `host + rangeCheck` within it.
@@ -328,7 +402,8 @@ const pinCaches = new WeakMap();
  * false (off mode) the address is pinned WITHOUT the range check, so off can
  * reach a private endpoint while still closing rebinding. Returns
  * `{ ok: false, reason }` when resolution fails, yields zero addresses, returns
- * a non-address, or (with rangeCheck) any address is private.
+ * a non-address, or (with rangeCheck) any address is private. The validated set
+ * is capped at `MAX_PINNED_ADDRESSES` addresses.
  *
  * A validated pin is cached for `config.pinCacheMs` (default 30s; 0 disables),
  * so a delivery burst - and every redirect hop back to an already-validated
@@ -393,14 +468,17 @@ async function resolveAndPin(hostname, config, rangeCheck) {
 			family: canonHost.startsWith('[') ? 6 : 4
 		});
 	}
+	// Every address was validated above; keep only the first `MAX_PINNED_ADDRESSES`
+	// of them as the set the socket may use.
+	const capped = pinned.length > MAX_PINNED_ADDRESSES ? pinned.slice(0, MAX_PINNED_ADDRESSES) : pinned;
 	if (cache !== null) {
 		if (cache.size >= PIN_CACHE_MAX_ENTRIES) {
 			const oldest = cache.keys().next().value;
 			if (oldest !== undefined) cache.delete(oldest);
 		}
-		cache.set(cacheKey, { expires: now() + cacheMs, pinned });
+		cache.set(cacheKey, { expires: now() + cacheMs, pinned: capped });
 	}
-	return { ok: true, pinned };
+	return { ok: true, pinned: capped };
 }
 
 /**
@@ -413,8 +491,12 @@ async function resolveAndPin(hostname, config, rangeCheck) {
  * so it cannot re-open a blocked host. Only `urlMode: 'off'` relaxes the ranges
  * (the scheme gate still applies); to reach a specific private endpoint, pair
  * `urlMode: 'off'` with a `validateUrl` that allows exactly that host. Returns
- * `{ ok: true, lookup }` (lookup may be undefined for an IP literal / off mode)
- * or `{ ok: false, reason }`.
+ * `{ ok: true, lookup, pinned }` (both undefined for an IP literal, which needs
+ * no resolution) or `{ ok: false, reason }`. `pinned` is the same validated
+ * address set the `lookup` serves, handed back so a caller that needs to know
+ * where the request may land - the admission gate does - reads it from the
+ * resolution that already happened rather than resolving the name a second time
+ * and possibly getting a different answer.
  */
 async function ssrfGate(url, config) {
 	const mode = config.urlMode || 'strict';
@@ -441,7 +523,7 @@ async function ssrfGate(url, config) {
 	let host;
 	try { host = new URL(url).hostname; } catch { return { ok: false, reason: 'parse-error' }; }
 	const isIpLiteral = host.startsWith('[') || /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
-	if (isIpLiteral) return { ok: true, lookup: undefined };
+	if (isIpLiteral) return { ok: true, lookup: undefined, pinned: undefined };
 
 	// A DNS name: resolve + pin so the socket reaches exactly the resolved
 	// address with no rebinding window. strict/allowlist also range-check every
@@ -451,7 +533,7 @@ async function ssrfGate(url, config) {
 	// validateUrl, and an unpinned off mode would let that host rebind.
 	const pin = await resolveAndPin(host, config, mode !== 'off');
 	if (!pin.ok) return { ok: false, reason: pin.reason };
-	return { ok: true, lookup: pinnedLookup(pin.pinned) };
+	return { ok: true, lookup: pinnedLookup(pin.pinned), pinned: pin.pinned };
 }
 
 /**
@@ -534,8 +616,7 @@ const CROSS_ORIGIN_STRIPPED_HEADERS = ['x-webhook-signature', 'x-webhook-timesta
  * auth-artifact headers once the hop target is any other origin.
  */
 function headersForHop(hopUrl, initialOrigin, headers) {
-	let origin = null;
-	try { origin = new URL(hopUrl).origin; } catch { origin = null; }
+	const origin = originOf(hopUrl);
 	if (origin !== null && initialOrigin !== null && origin === initialOrigin) return headers;
 	const stripped = { ...headers };
 	for (const name of CROSS_ORIGIN_STRIPPED_HEADERS) delete stripped[name];
@@ -625,6 +706,7 @@ async function deliverToUrl(initialUrl, headers, body, config, hooks) {
 		url = parsed.href;
 		initialOrigin = parsed.origin;
 	} catch { /* leave raw; the gate rejects it */ }
+	const admission = hooks && hooks.admission;
 	const seen = new Set();
 	for (let hop = 0; hop <= maxRedirects; hop++) {
 		if (seen.has(url)) {
@@ -635,6 +717,53 @@ async function deliverToUrl(initialUrl, headers, body, config, hooks) {
 		const gate = await ssrfGate(url, config);
 		if (!gate.ok) {
 			return { ok: false, err: new Error('outbound webhook: url "' + redactUrl(url) + '" blocked by SSRF guard (' + gate.reason + ')'), attempts: 0 };
+		}
+
+		// First-attempt admission: consulted for exactly ONE hop per delivery, the
+		// hop the caller actually asked for, and only after the gate has resolved
+		// and pinned the destination - `destinationsOf` needs those addresses, and
+		// a URL the gate rejects can never reach the network so it must not cost a
+		// destination anything. A REDIRECT hop is deliberately not charged. It is
+		// tempting to charge it (a redirect does put a request on a second host),
+		// but the redirect target is chosen by the endpoint being delivered to,
+		// which means charging it lets anyone who can register a webhook drain a
+		// bystander's allowance by answering 302 to that bystander's address -
+		// turning the control that bounds abuse into a way to deny service to a
+		// co-tenant. Size the unmetered amplification from BOTH knobs, not from
+		// `maxRedirects` alone: `attemptDelivery` runs once per hop and retries
+		// inside itself, so one admitted delivery can issue up to
+		// `(maxRedirects + 1) * retry.attempts` requests - 18 at the defaults of
+		// 5 and 3 - of which only the first hop's destination set is charged. The
+		// SSRF gate still runs on every hop, so none of them can reach an address
+		// the gate refuses; they are unmetered, not unchecked.
+		//
+		// A denial is terminal with `attempts:0` and carries
+		// WEBHOOK_ADMISSION_DENIED, so a caller requeues instead of dead-lettering,
+		// and the breaker stays untouched: nothing reached the network and the
+		// endpoint said nothing about its health. Only a definite no from the gate
+		// (`false`, or the `0` a Lua-scripted shared backend replies with) refuses
+		// a delivery. A throw, or an implementation that answers with nothing at
+		// all, admits: a shared backend having a bad minute must not become an
+		// outbound outage, and denying on `undefined` would make a single missing
+		// return path in a cluster gate exactly that outage.
+		//
+		// One unit is spent at EVERY address the pin allows the socket to reach,
+		// not at one chosen member of the set: which member the connect logic ends
+		// up on is not knowable here, and the caller controls both the contents and
+		// the order of its own DNS answer, so a single charged member would be an
+		// address the caller can point away from the one the request lands on.
+		// Charging the whole set costs a multi-address endpoint one unit at each of
+		// its addresses, and a set that refuses part-way keeps the units already
+		// spent (the gate interface only takes, it cannot give back) - so a
+		// delivery can cost more than it sends, never less.
+		if (admission && hop === 0) {
+			for (const destination of destinationsOf(url, gate.pinned)) {
+				let verdict;
+				try { verdict = await admission.take(destination); } catch { verdict = undefined; }
+				if (verdict === false || verdict === 0) {
+					return { ok: false, err: new WebhookAdmissionDeniedError(destination), attempts: 0 };
+				}
+			}
 		}
 
 		const result = await attemptDelivery(url, gate.lookup, headersForHop(url, initialOrigin, headers), body, config, hooks);
@@ -663,21 +792,30 @@ async function deliverToUrl(initialUrl, headers, body, config, hooks) {
  * dead-letter capture from the returned outcome.
  *
  * The optional `hooks` inject the delivery controls the single-instance
- * defaults ({@link createRetryBudget}, {@link createWebhookBreaker}) or a
- * cluster-shared implementation provide: `hooks.breaker` fast-fails an ejected
- * endpoint (an open circuit -> a terminal `attempts:0` outcome, no network
- * touched) and records the terminal result, keyed by `hooks.key`; `hooks.budget`
- * rations retry amplification. Only outcomes that actually reached the network
- * (`attempts > 0`) move the breaker - a pre-network rejection (SSRF block,
- * redirect error, bad config) is a configuration signal, not an endpoint-health
- * one, so it neither ejects nor heals. Omit `hooks` for the unchanged bare
- * delivery.
+ * defaults ({@link createWebhookAdmission}, {@link createRetryBudget},
+ * {@link createWebhookBreaker}) or a cluster-shared implementation provide:
+ * `hooks.breaker` fast-fails an ejected endpoint (an open circuit -> a terminal
+ * `attempts:0` outcome, no network touched) and records the terminal result,
+ * keyed by `hooks.key`; `hooks.budget` rations retry amplification, also keyed
+ * by `hooks.key`; `hooks.admission` rations FIRST attempts and ignores
+ * `hooks.key`, keyed instead by `<address>:<port>` for EVERY address the SSRF
+ * gate pinned the socket to, so every registration, alias and per-event `url`
+ * callback that lands on one address draws on that address's allowance and
+ * whichever address the socket ends up on has paid for the request. The cost of
+ * that: a host answering with several addresses spends one unit at each of them,
+ * so it holds several allowances rather than one. Charging happens for one hop
+ * per delivery, after the gate and before any request - a URL the gate rejects
+ * costs nothing, and a redirect hop is not charged. Only outcomes that
+ * actually reached the network (`attempts > 0`) move the breaker - a pre-network
+ * rejection (SSRF block, redirect error, admission denial, bad config) is a
+ * configuration or capacity signal, not an endpoint-health one, so it neither
+ * ejects nor heals. Omit `hooks` for the unchanged bare delivery.
  *
  * @param {any} config the per-webhook config (url, transform, secret,
  *   previousSecret, retry, urlMode, validateUrl, resolve, allow, maxRedirects,
  *   timeoutMs, callbackTimeoutMs, idempotencyKey)
  * @param {string} topic @param {string} event @param {any} data
- * @param {{ budget?: { take: (key?: string) => boolean | Promise<boolean> }, breaker?: { guard: (key?: string) => void, success: (key?: string) => void, failure: (err: any, key?: string) => void }, key?: string }} [hooks]
+ * @param {{ admission?: { take: (destination: string) => boolean | Promise<boolean> }, budget?: { take: (key?: string) => boolean | Promise<boolean> }, breaker?: { guard: (key?: string) => void, success: (key?: string) => void, failure: (err: any, key?: string) => void }, key?: string }} [hooks]
  * @returns {Promise<{ ok: true } | { ok: false, err: Error, attempts: number }>}
  */
 export async function deliverWebhook(config, topic, event, data, hooks) {

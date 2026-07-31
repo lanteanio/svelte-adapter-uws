@@ -1,6 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+// The shared gate, not a local try/import: the published spec says these
+// artifacts are validated in CI against the reference implementation, and a
+// skipped suite reports PASSED with zero assertions. Taking the helper's flag
+// is what makes REQUIRE_UWS / CI turn a missing addon into a failure here too.
+import { hasUWS } from './helpers/real-runtime.js';
 
 const root = JSON.parse(readFileSync(new URL('../protocol.schema.json', import.meta.url), 'utf8'));
 const vectors = JSON.parse(readFileSync(new URL('../test-vectors/frames.json', import.meta.url), 'utf8'));
@@ -141,13 +146,8 @@ describe('binary 0x03 vector decodes to the documented layout', () => {
 });
 
 // Anti-drift: frames the real server emits must conform to the published schema.
-let uWS;
-try {
-	uWS = (await import('uWebSockets.js')).default;
-} catch {
-	uWS = null;
-}
-const describeUWS = uWS ? describe : describe.skip;
+const uWS = hasUWS ? (await import('uWebSockets.js')).default : null;
+const describeUWS = hasUWS ? describe : describe.skip;
 
 let server;
 

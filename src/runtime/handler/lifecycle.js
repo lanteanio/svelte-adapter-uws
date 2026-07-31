@@ -4,12 +4,12 @@ import uWS from 'uWebSockets.js';
 import { workerData } from 'node:worker_threads';
 import { wsModule } from '../ws-handler-bridge.js';
 import { WS_CAPS, WS_SUBSCRIPTIONS, assert, fatal, wrapBatchEnvelope } from '../utils.js';
-import { monotonicNow, processMonotonicNow, setTimer, clearTimer } from '../runtime.js';
+import { monotonicNow, processMonotonicNow, wallEpoch, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from '../runtime.js';
 import { captureResumeFrame, counters, maxSeenSeq, originStreams, recordOriginStream, recordSeen, relayAttach, resumeBuffers, streamTracking, wsConnections } from './state.js';
 import { app, is_tls, _t_app, WS_COMPRESSION_ON, reconnect_dispersal_ms, ssl_cert, ssl_key, ssl_watch, ssl_reload_debounce_ms, ssl_sni_hosts, boot_cert_fingerprint } from './config.js';
 import { platform, relayPublishWire } from './platform.js';
 import { stopPressureSampling } from './pressure-metrics.js';
-import { applyServerNames, createCertWatcher } from '../utils/tls-reload.js';
+import { applyServerNames, certExpiryAlert, createCertWatcher, readCertIdentity } from '../utils/tls-reload.js';
 import { mirrorRoutes } from './route-registry.js';
 import { parentPort } from 'node:worker_threads';
 import { dirname } from 'node:path';
@@ -44,6 +44,96 @@ let tlsState = null;
 let certWatcher = null;
 let tlsRetryTimer = null;
 
+// Health of the RELOAD PATH itself, which is a different question from which
+// certificate is being served. Keeping the previous certificate when a reload
+// fails is the right availability call and also the quiet one: renewal is dead
+// while every probe stays green, and the first visible symptom is every
+// handshake failing at once when the served leaf expires. So a failure is
+// recorded here, and while the path stays degraded the sentinel below
+// re-reports it as that leaf's expiry approaches. Identity, timestamps and
+// counts only - no key material, no certificate bytes.
+const tlsHealth = {
+	/** This process watches the cert directory itself (single-process only). */
+	watching: false,
+	/** null while renewals would be picked up, else WHY they would not be. */
+	degraded: null,
+	/** Successful in-place swaps on this worker, so a fleet can be compared. */
+	generation: 0,
+	failures: 0,
+	/** Wall-clock epoch ms, so an operator can read them against a cert's dates. */
+	lastReloadAt: null,
+	lastFailureAt: null,
+	lastFailure: null,
+	/** Expiry of the certificate currently being served. */
+	notAfter: null,
+	notAfterText: null
+};
+
+// How often the degraded sentinel re-checks the served leaf. Hourly: the alert
+// window is days wide and a broken renewal is fixed by a human, not by a retry,
+// so a tighter cadence would only add log noise.
+const TLS_DEGRADED_CHECK_MS = 3600000;
+let tlsExpirySentinel = null;
+
+/**
+ * Snapshot of this worker's certificate-reload path, for diagnostics: whether
+ * the watcher is live, whether renewals are being picked up at all, how many
+ * swaps this worker has done (a fleet-wide generation skew means one worker
+ * missed a renewal), and when the certificate it is serving expires.
+ * @returns {{ watching: boolean, degraded: string | null, generation: number, failures: number, lastReloadAt: number | null, lastFailureAt: number | null, lastFailure: string | null, notAfter: number | null, notAfterText: string | null }}
+ */
+export function tlsReloadState() {
+	return { ...tlsHealth };
+}
+
+/**
+ * Refresh the served leaf's expiry from the certificate on disk. One extra read
+ * of a file the process already opens, taken only at arm time and after a
+ * genuine swap - nothing else in the reload path carries the expiry, and the
+ * expiry is what makes a broken renewal path reportable at all.
+ */
+function recordServedCertExpiry() {
+	try {
+		const identity = readCertIdentity(ssl_cert, ssl_sni_hosts);
+		tlsHealth.notAfter = identity.notAfter;
+		tlsHealth.notAfterText = identity.notAfterText;
+	} catch {
+		// Unreadable right after a successful swap is a race with the next write:
+		// keep the previous value rather than blanking the only expiry we have.
+	}
+}
+
+/**
+ * Mark the reload path as unable to pick up a renewal, and arm the sentinel that
+ * re-reports it as the served certificate's expiry approaches. The immediate
+ * failure line is the caller's; this adds what the caller cannot know - how long
+ * the certificate it kept serving is still valid for.
+ * @param {string} reason
+ */
+function tlsDegraded(reason) {
+	tlsHealth.degraded = reason;
+	const alert = certExpiryAlert(tlsHealth, wallEpoch());
+	if (alert !== null) console.error(alert);
+	if (tlsExpirySentinel !== null) return;
+	tlsExpirySentinel = setIntervalTimer(() => {
+		const line = certExpiryAlert(tlsHealth, wallEpoch());
+		if (line !== null) console.error(line);
+	}, TLS_DEGRADED_CHECK_MS);
+	if (tlsExpirySentinel && tlsExpirySentinel.unref) tlsExpirySentinel.unref();
+}
+
+/** Clear the degraded mark once a reload has succeeded again, and disarm the sentinel. */
+function tlsRecovered() {
+	if (tlsHealth.degraded !== null) {
+		console.log(`[tls] certificate reload recovered (was: ${tlsHealth.degraded})`);
+		tlsHealth.degraded = null;
+	}
+	if (tlsExpirySentinel !== null) {
+		clearIntervalTimer(tlsExpirySentinel);
+		tlsExpirySentinel = null;
+	}
+}
+
 /**
  * Re-read the certificate on disk and - when it genuinely changed - swap the
  * SNI server name(s) in place so the renewed cert is served without re-binding
@@ -68,9 +158,19 @@ export function reloadTls() {
 		// resolves to a routeless router. Synchronous, so no request interleaves.
 		mirrorRoutes(app, result.hosts);
 		tlsState = { hosts: result.hosts, fingerprint: result.fingerprint };
-		console.log(`[tls] renewed certificate now served (SNI: ${result.hosts.join(', ')})`);
+		tlsHealth.generation++;
+		tlsHealth.lastReloadAt = wallEpoch();
+		recordServedCertExpiry();
+		console.log(
+			`[tls] renewed certificate now served (SNI: ${result.hosts.join(', ')}; expires ${tlsHealth.notAfterText ?? 'unknown'}; ` +
+			`generation ${tlsHealth.generation})`
+		);
+		tlsRecovered();
 	} catch (err) {
 		const msg = err && err.message ? err.message : err;
+		tlsHealth.failures++;
+		tlsHealth.lastFailureAt = wallEpoch();
+		tlsHealth.lastFailure = String(msg);
 		if (swappedHosts !== null || (err && err.tlsAppTouched)) {
 			// The app was already mutated (partial server-name swap, or a swap whose
 			// route mirror failed) - SNI-matched clients may be unroutable on some
@@ -80,6 +180,7 @@ export function reloadTls() {
 			// genuine renewal months away.
 			tlsState = { hosts: swappedHosts !== null ? swappedHosts : tlsState.hosts, fingerprint: null };
 			console.error('[tls] certificate swap failed MID-APPLY - some SNI hosts may be unroutable; retrying shortly:', msg);
+			tlsDegraded('a certificate swap failed mid-apply');
 			// Self-contained retry: the throw may have consumed the LAST fs event of
 			// the renewal burst, so waiting for the next watcher/broadcast event could
 			// mean waiting for the next renewal months away. One-shot, and each retry
@@ -93,6 +194,10 @@ export function reloadTls() {
 			// mismatch): the previous cert is fully intact, and the file write that
 			// completes the renewal fires the watcher again.
 			console.error('[tls] certificate reload skipped, kept the previous cert:', msg);
+			// Degraded rather than benign: the renewal on disk is NOT being served,
+			// and every probe stays green while the certificate that IS being served
+			// runs down. Cleared by the next reload that succeeds.
+			tlsDegraded('the certificate on disk did not validate, so the previous one is still being served');
 		}
 	}
 }
@@ -118,9 +223,14 @@ function initTlsReload() {
 	// A null capture (unreadable at app creation) bypasses the gate on the first
 	// event, which converges on the disk cert - safe in both directions.
 	tlsState = { hosts: [], fingerprint: boot_cert_fingerprint };
+	// The expiry of what this instance serves right now, so a later failure can
+	// be reported with the one number that says how urgent it is.
+	recordServedCertExpiry();
 	// Only a single-process server watches its own cert directory. A cluster worker
 	// (parentPort set) does not watch - the primary owns the watch and drives this
-	// worker's reload via a {type:'tls-reload'} broadcast (index.js).
+	// worker's reload via a {type:'tls-reload'} broadcast (index.js). Not watching
+	// is therefore NOT degraded on a worker: the primary is the one whose watcher
+	// has to be alive.
 	if (!parentPort) {
 		try {
 			certWatcher = createCertWatcher({
@@ -129,10 +239,14 @@ function initTlsReload() {
 				onChange: reloadTls
 			});
 			certWatcher.start();
+			tlsHealth.watching = true;
 			console.log(`[tls] watching ${dirname(ssl_cert)} for certificate renewals`);
 		} catch (err) {
 			certWatcher = null;
 			console.error('[tls] cert watch failed to start, hot-reload disabled (server keeps running):', err && err.message ? err.message : err);
+			// Nothing will ever retry this: without a watcher no renewal is seen, so
+			// this instance will serve its current certificate until it expires.
+			tlsDegraded('the certificate directory watch failed to start, so no renewal will be seen');
 		}
 	}
 	// Arm-time catch-up: swap now if the cert on disk already differs from the
@@ -142,13 +256,18 @@ function initTlsReload() {
 	reloadTls();
 }
 
-/** Stop the cert watcher and any pending retry (idempotent; no-op when never started). */
+/** Stop the cert watcher, the expiry sentinel and any pending retry (idempotent; no-op when never started). */
 export function stopTlsReload() {
 	certWatcher?.stop();
 	certWatcher = null;
+	tlsHealth.watching = false;
 	if (tlsRetryTimer !== null) {
 		clearTimer(tlsRetryTimer);
 		tlsRetryTimer = null;
+	}
+	if (tlsExpirySentinel !== null) {
+		clearIntervalTimer(tlsExpirySentinel);
+		tlsExpirySentinel = null;
 	}
 }
 
@@ -163,6 +282,109 @@ export function drain() {
 
 let listenSocket = null;
 
+// --- Lifecycle state ---------------------------------------------------
+// LIVE, READY and ACCEPTING are three different things, and every one of the
+// shutdown/boot defects this state machine replaces came from collapsing two of
+// them into one flag:
+//
+//   'starting'  the process is up and the listen socket may already be bound,
+//               but the app's `init` hook has not finished. LIVE and ACCEPTING
+//               (the kernel queues connections against the bound socket, which
+//               is what makes a restart lossless) but NOT READY - the readiness
+//               route answers 503 so a load balancer does not route here until
+//               the app's own boot work has committed.
+//   'ready'     `init` resolved. The only state in which readiness answers 200.
+//   'draining'  graceful shutdown has begun. NOT READY, so the balancer
+//               deregisters this instance - while the listen socket stays OPEN
+//               and in-flight work continues, which is exactly what the
+//               SHUTDOWN_DELAY_MS window is for.
+//   'closed'    the listen socket is closed; nothing new is accepted.
+//
+// Liveness (`healthCheckPath`) is none of these: it answers 200 for as long as
+// the process runs, so a readiness 503 can never trip a liveness probe into
+// restarting an instance that is deliberately draining.
+/** @type {'starting' | 'ready' | 'draining' | 'closed'} */
+let lifecycle_state = 'starting';
+
+/**
+ * The single writer of `lifecycle_state`, so the readiness flag on the shared
+ * counters cannot drift away from it. That flag is a mirror and nothing else -
+ * two places answering "is this instance taking traffic" with different values
+ * is the exact collapse this state machine exists to end, and it happens the
+ * moment one of them is written by hand at one transition only.
+ * @param {'starting' | 'ready' | 'draining' | 'closed'} next
+ */
+function setLifecycleState(next) {
+	lifecycle_state = next;
+	counters.draining = next !== 'ready';
+}
+// Boot state, mirrored from the first tick: a diagnostics surface that reads the
+// counter during startup has to see the same NOT-ready the readiness route does.
+setLifecycleState('starting');
+
+/**
+ * This instance's lifecycle state. Exported for diagnostics and for the boot /
+ * shutdown driver, which reports the transitions an operator has to reason
+ * from. This is also the value the readiness route should REPORT when it answers
+ * 503: `starting` and `draining` are both not-ready, but they mean opposite
+ * things to an operator watching a rolling deploy.
+ * @returns {'starting' | 'ready' | 'draining' | 'closed'}
+ */
+export function lifecycleState() {
+	return lifecycle_state;
+}
+
+/**
+ * The readiness gate the `/readyz` route reads: true whenever this instance
+ * must NOT be sent new traffic. That covers `starting` (bound but the app's
+ * `init` has not committed) as well as `draining` and `closed` - readiness is
+ * the balancer's routing signal, and the instance is unfit for new work in all
+ * three. Liveness and accepting-new-connections are deliberately NOT derived
+ * from it (see the state machine above).
+ * @returns {boolean}
+ */
+export function isDraining() {
+	return lifecycle_state !== 'ready';
+}
+
+/**
+ * Enter the draining state: readiness starts answering 503 so a fronting load
+ * balancer stops routing NEW traffic here, while the listen socket stays open
+ * and in-flight requests keep being served.
+ *
+ * Split from `shutdown()` on purpose. The SHUTDOWN_DELAY_MS wait exists so the
+ * balancer can deregister this instance BEFORE its sockets close, and that only
+ * works if the signal the balancer polls flips FIRST - flipping it together
+ * with the socket close (which is what a single shutdown step does) means new
+ * requests keep arriving for the whole propagation window and then meet a
+ * closed socket.
+ *
+ * Idempotent: returns false when draining had already begun.
+ * @returns {boolean}
+ */
+export function beginDrain() {
+	if (lifecycle_state === 'draining' || lifecycle_state === 'closed') return false;
+	setLifecycleState('draining');
+	return true;
+}
+
+/**
+ * Resolve when `signal` aborts, never otherwise. The shutdown budget is one
+ * AbortSignal shared by every phase, and a phase bounds itself by racing this
+ * against its own work rather than arming a timer of its own: per-phase timers
+ * would make the real bound the SUM of the phases, not the budget.
+ * A missing signal means the caller set no budget, so nothing ever aborts.
+ * @param {AbortSignal | null | undefined} signal
+ * @returns {Promise<void>}
+ */
+function whenAborted(signal) {
+	if (!signal) return new Promise(() => {});
+	if (signal.aborted) return Promise.resolve();
+	return new Promise((resolve) => {
+		signal.addEventListener('abort', () => resolve(), { once: true });
+	});
+}
+
 /**
  * Start the uWS server. Returns a promise that resolves once the listen
  * socket is bound AND the user's `hooks.ws.init` hook (if any) has
@@ -170,9 +392,17 @@ let listenSocket = null;
  * signal that includes app-level boot work (cron registration, warmup
  * tasks, external pubsub bridges).
  *
+ * Readiness follows that same boundary rather than the socket bind: the
+ * instance stays `starting` (readiness 503) from the bind until the init hook
+ * resolves, so a load balancer cannot route to a server whose DB pools, warmup
+ * or cron registration are still in flight. The socket is deliberately bound
+ * BEFORE init anyway - the kernel queues arriving connections instead of
+ * refusing them, which is what makes a rolling restart lossless.
+ *
  * Listen failure logs and exits the process (preserves prior behavior).
  * Init-hook failure rejects the promise - boot is loud or nothing; the
- * caller decides whether to abort or recover.
+ * caller decides whether to abort or recover. A rejected init leaves the
+ * instance `starting`, so readiness never turns green for it.
  *
  * @param {string} host
  * @param {number} port
@@ -193,7 +423,10 @@ export async function start(host, port, opts) {
 				if (socket) {
 					listenSocket = socket;
 					const startup = (monotonicNow() - _t_app).toFixed(0);
-					console.log(`Listening on ${is_tls ? 'https' : 'http'}://${host}:${port} (ready in ${startup}ms)`);
+					// Bound, not ready: readiness stays 503 until the init hook commits
+					// below, and saying "ready" here is what let a balancer route into
+					// an instance whose app boot work had not run.
+					console.log(`Listening on ${is_tls ? 'https' : 'http'}://${host}:${port} (bound in ${startup}ms)`);
 					resolve();
 				} else {
 					console.error(`Failed to listen on ${host}:${port}`);
@@ -218,48 +451,83 @@ export async function start(host, port, opts) {
 	if (WS_ENABLED && typeof wsModule.init === 'function') {
 		await wsModule.init({ platform, workerData: workerData?.app ?? null });
 	}
+
+	// Readiness commits here, and only from `starting`: a shutdown that raced
+	// boot (a SIGTERM during a slow init) already moved this instance on, and
+	// must not be pulled back into rotation by its own init finishing.
+	if (lifecycle_state === 'starting') {
+		setLifecycleState('ready');
+		if (doListen) console.log(`Ready for traffic (${(monotonicNow() - _t_app).toFixed(0)}ms since boot)`);
+	}
 }
 
 /**
  * Stop the server gracefully.
  *
  * Order of operations:
- *   1. Fire the user's `hooks.ws.shutdown` hook (if any) so app-level code
+ *   1. Enter the draining state (readiness 503) if the caller has not already
+ *      done so before its load-balancer delay.
+ *   2. Fire the user's `hooks.ws.shutdown` hook (if any) so app-level code
  *      can flush cron state, last metrics, external bridge teardown, etc.
- *      Async hooks are awaited; throws are logged and ignored (we cannot
- *      refuse to shut down).
- *   2. Close the listen socket - stops accepting new connections.
- *   3. Gracefully `end()` every WebSocket with `code 1001 (Going Away)` so any
+ *      Async hooks are awaited, but only until `ctx.signal` aborts - with no
+ *      budget configured there is no signal and the await is unbounded. A hook that
+ *      never settles (an await on a dependency that is already gone) used to
+ *      hold the listen socket open, the drain race unarmed and the process
+ *      alive until the supervisor's SIGKILL - the shutdown timeout bounded
+ *      everything except the one step an application controls. Throws are
+ *      logged and ignored (we cannot refuse to shut down).
+ *   3. Close the listen socket - stops accepting new connections.
+ *   4. Gracefully `end()` every WebSocket with `code 1001 (Going Away)` so any
  *      buffered outbound frames flush before the socket closes and the client
  *      gets a clean close frame, then reconnects to the new instance. (Forceful
  *      `close()` would drop the send buffer and, taking no args, send no code.)
  *
  * In-flight HTTP requests continue until `drain()` resolves - the caller
- * (index.js) typically races `drain()` against a shutdown timeout.
+ * (index.js) races `drain()` against the same budget.
  *
+ * @param {{ reason?: string, signal?: AbortSignal | null, deadline?: number | null }} [ctx]
+ *   The shutdown budget, forwarded to the app's hook: `reason` is the signal or
+ *   message that started it, `signal` aborts when the budget is spent, and
+ *   `deadline` is the wall-clock epoch ms it expires at. Both are null when the
+ *   caller set no budget - SHUTDOWN_TIMEOUT=0, or a test harness closing a
+ *   server - and then the hook is awaited for as long as it takes, exactly as an
+ *   unbounded await did.
  * @returns {Promise<void>}
  */
-/**
- * True once graceful shutdown has begun. The readiness route reports a 503
- * while draining so a fronting load balancer stops routing NEW traffic to this
- * instance (it stays live - the process is up - but is no longer ready) while
- * in-flight requests finish. Liveness (`healthCheckPath`) is unaffected.
- * @returns {boolean}
- */
-export function isDraining() {
-	return counters.draining;
-}
-
-export async function shutdown() {
-	// Flip readiness to NOT-ready at the very start of shutdown so the readiness
-	// route reports 503 and a fronting load balancer drains this instance before
-	// its connections are closed below. Idempotent (a second shutdown is a no-op
-	// on this flag). Liveness stays 200 - the process is still up.
-	counters.draining = true;
+export async function shutdown(ctx) {
+	// Readiness first, and idempotent: the signal handler normally flips it
+	// before its load-balancer delay, so this only fires for callers that close
+	// the server directly.
+	beginDrain();
+	const signal = ctx?.signal ?? null;
+	const hookContext = {
+		platform,
+		reason: ctx?.reason ?? null,
+		signal,
+		deadline: ctx?.deadline ?? null
+	};
 	if (WS_ENABLED && typeof wsModule.shutdown === 'function') {
+		const started = monotonicNow();
 		try {
-			await wsModule.shutdown({ platform });
+			// The failure handler is attached before the race, not after it: once the
+			// race is lost nothing awaits the hook any more, and a late rejection
+			// would surface as an unhandled rejection in the middle of the exit.
+			const hook = Promise.resolve(wsModule.shutdown(hookContext)).then(
+				() => true,
+				(err) => { console.error('[ws] shutdown hook threw:', err); return true; }
+			);
+			// The hook keeps running after the budget expires - user code cannot be
+			// interrupted - but it no longer holds the close path. Its `signal` is
+			// how a hook that wants to give up cleanly can.
+			const settled = await Promise.race([hook, whenAborted(signal).then(() => false)]);
+			if (!settled) {
+				console.error(
+					`[ws] shutdown hook has not settled after ${(monotonicNow() - started).toFixed(0)}ms and the shutdown budget is spent; ` +
+					'closing the listen socket anyway - whatever the hook was flushing did NOT finish.'
+				);
+			}
 		} catch (err) {
+			// A hook that throws synchronously, before it ever returned a promise.
 			// Log-and-continue: shutdown is best-effort, we cannot refuse.
 			console.error('[ws] shutdown hook threw:', err);
 		}
@@ -268,6 +536,9 @@ export async function shutdown() {
 		uWS.us_listen_socket_close(listenSocket);
 		listenSocket = null;
 	}
+	// Accepting stops here, not when readiness flipped - the two are separate
+	// states and the window between them is the whole point of the drain delay.
+	setLifecycleState('closed');
 	stopPressureSampling();
 	// Close the posture export socket (no-op when never configured) so the
 	// socket file does not outlive the process and consumers see a clean EOF.

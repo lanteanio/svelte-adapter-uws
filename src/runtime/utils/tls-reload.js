@@ -67,19 +67,91 @@ export function parseSniHosts(certPem) {
 
 /**
  * Read the identity of the certificate on disk without touching any app: its
- * fingerprint256 (the change-detection key for the fingerprint gate) and the
- * host list it serves. Throws on an unreadable / unparseable cert, so callers
- * can disable hot-reload loudly at boot instead of failing on the first renewal.
+ * fingerprint256 (the change-detection key for the fingerprint gate), the host
+ * list it serves, and when it expires. Throws on an unreadable / unparseable
+ * cert, so callers can disable hot-reload loudly at boot instead of failing on
+ * the first renewal.
+ *
+ * The expiry is carried in both forms on purpose: `notAfterText` is the
+ * certificate's own rendering (what an operator sees from `openssl x509`) and
+ * goes into log lines verbatim, while `notAfter` is the epoch form the
+ * remaining-validity arithmetic needs, and is null for a certificate whose date
+ * this platform cannot parse.
  *
  * @param {string} certPath
  * @param {string[]} [overrideHosts] overrides SAN auto-discovery (SSL_SNI_HOSTS)
- * @returns {{ fingerprint: string, hosts: string[] }}
+ * @returns {{ fingerprint: string, hosts: string[], notAfter: number | null, notAfterText: string }}
  */
 export function readCertIdentity(certPath, overrideHosts) {
 	const certPem = readFileSync(certPath, 'utf8');
 	const cert = new X509Certificate(certPem);
 	const hosts = (overrideHosts && overrideHosts.length > 0) ? overrideHosts : parseSniHosts(certPem);
-	return { fingerprint: cert.fingerprint256, hosts };
+	const notAfter = Date.parse(cert.validTo);
+	return {
+		fingerprint: cert.fingerprint256,
+		hosts,
+		notAfter: Number.isNaN(notAfter) ? null : notAfter,
+		notAfterText: cert.validTo
+	};
+}
+
+/**
+ * How close to expiry a certificate has to be before a broken reload path is
+ * worth waking someone over. Two weeks: longer than every automated renewal
+ * cadence in use (certbot renews at 30 days, cert-manager at a third of the
+ * lifetime), so reaching this window means renewal has already failed several
+ * times over, and short enough that the line is not permanent background noise.
+ */
+const CERT_EXPIRY_ALERT_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * Remaining validity in the form an operator reads at 3am.
+ * @param {number} ms
+ * @returns {string}
+ */
+function formatRemaining(ms) {
+	if (ms <= 0) return 'ALREADY EXPIRED';
+	const days = Math.floor(ms / 86400000);
+	const hours = Math.floor((ms % 86400000) / 3600000);
+	if (days > 0) return `${days}d ${hours}h left`;
+	const minutes = Math.floor((ms % 3600000) / 60000);
+	return `${hours}h ${minutes}m left`;
+}
+
+/**
+ * The line an operator needs when certificate hot-reload is broken AND the
+ * certificate still being served is running out - or null when there is nothing
+ * to say.
+ *
+ * This is the reporting half of "a failed reload keeps the previous cert". That
+ * choice protects availability, and it also hides the failure: every probe
+ * stays green, the renewed certificate on disk is never served, and the first
+ * symptom is every handshake failing at once. Nothing else in the process knows
+ * both halves - that renewal is dead, and how long the served leaf has left -
+ * so nothing else can raise this.
+ *
+ * Deliberately NOT wired to readiness: taking a fleet out of rotation because
+ * its certificate is near expiry removes a service that is still serving fine,
+ * at the exact moment it can least afford it. Report loudly, keep serving.
+ *
+ * Pure, so the rule (only while degraded, only inside the window) is testable
+ * without a clock, a watcher or a certificate.
+ *
+ * @param {{ degraded?: string | null, notAfter?: number | null, notAfterText?: string | null }} state
+ * @param {number} now wall-clock epoch ms
+ * @param {number} [withinMs] alert window before expiry
+ * @returns {string | null}
+ */
+export function certExpiryAlert(state, now, withinMs = CERT_EXPIRY_ALERT_MS) {
+	if (!state || !state.degraded) return null;
+	if (typeof state.notAfter !== 'number' || !Number.isFinite(state.notAfter)) return null;
+	const remaining = state.notAfter - now;
+	if (remaining > withinMs) return null;
+	return (
+		`[tls] certificate hot-reload is DEGRADED (${state.degraded}) and the certificate being served expires ` +
+		`${state.notAfterText || state.notAfter} (${formatRemaining(remaining)}). A failed reload keeps the PREVIOUS ` +
+		'certificate, so a renewal landing on disk will not fix this by itself: check the certificate files and restart this instance.'
+	);
 }
 
 /**
@@ -224,14 +296,15 @@ export function createCertWatcher(config) {
  * @param {{
  *   workers: Iterable<{ postMessage: (msg: any) => void }>,
  *   source?: { certPath: string, hosts?: string[] },
- *   state?: { hosts: string[], fingerprint: string | null },
+ *   state?: { hosts: string[], fingerprint: string | null, notAfter?: number | null, notAfterText?: string | null },
  *   onError?: (err: any) => void
  * }} args
- * @returns {{ hosts: string[], fingerprint: string | null }} the refreshed cert
- *   identity (the input `state` unchanged when there is no source or the read threw)
+ * @returns {{ hosts: string[], fingerprint: string | null, notAfter?: number | null, notAfterText?: string | null }}
+ *   the refreshed cert identity, expiry included (the input `state` unchanged
+ *   when there is no source or the read threw)
  */
 export function reloadClusterTls({ workers, source, state, onError }) {
-	let next = state || { hosts: [], fingerprint: null };
+	let next = state || { hosts: [], fingerprint: null, notAfter: null, notAfterText: null };
 	if (source) {
 		try {
 			next = readCertIdentity(source.certPath, source.hosts);

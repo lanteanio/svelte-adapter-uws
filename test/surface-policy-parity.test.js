@@ -427,16 +427,37 @@ describe('no surface re-derives a decision the policy owns', () => {
 		});
 	}
 
-	it('the cap constant is a real finite number, declared once', () => {
-		// The cap rule above is the ONLY defence this decision has: the cap is
-		// 1,000,000, so no behavioural test can reach it. Editing caps.js is
-		// therefore a way to disable it that every other rule would miss.
+	// The cap's VALUE, not merely its shape. The rule above is the ONLY defence
+	// this decision has - the cap is 1,000,000, so no behavioural test can reach
+	// it - and asserting only "a finite number above zero" left the constant
+	// itself as the way to disable it: raising caps.js to a number no connection
+	// can ever hit removes the limit while every other rule in this file stays
+	// green. Moving the cap is a deliberate act and must move this line with it.
+	const SUBSCRIPTION_CAP = 1_000_000;
+
+	it('the cap constant is one numeric literal, pinned at its reviewed value', async () => {
 		const src = read('src/runtime/utils/caps.js');
-		const m = src.match(/export const MAX_SUBSCRIPTIONS_PER_CONNECTION\s*=\s*([0-9_]+);/);
-		expect(m, 'caps.js must declare MAX_SUBSCRIPTIONS_PER_CONNECTION as a numeric literal').not.toBeNull();
-		const value = Number(m[1].replace(/_/g, ''));
-		expect(Number.isFinite(value), `the cap must be finite, got ${m[1]}`).toBe(true);
-		expect(value, 'a cap of 0 or below would refuse every subscribe').toBeGreaterThan(0);
+		const declared = [...src.matchAll(/export const MAX_SUBSCRIPTIONS_PER_CONNECTION\s*=\s*([^;]+);/g)];
+		expect(
+			declared.map((d) => d[1].trim()),
+			'caps.js must declare MAX_SUBSCRIPTIONS_PER_CONNECTION exactly once - a second declaration is what a ' +
+			'source-level pin cannot see past'
+		).toHaveLength(1);
+
+		const literal = declared[0][1].trim();
+		// A literal, so the value is readable HERE. `Number.MAX_SAFE_INTEGER`,
+		// `Infinity` and `1e9` all satisfy "finite number above zero" while
+		// putting the cap out of reach of anything.
+		expect(literal, 'the cap must be a plain numeric literal, not an expression').toMatch(/^[0-9][0-9_]*$/);
+		expect(Number(literal.replace(/_/g, '')), 'the per-connection subscription cap moved').toBe(SUBSCRIPTION_CAP);
+
+		// And what the runtime LOADS, so a re-export or a shadowing module cannot
+		// leave the source pinned while the surfaces read something else.
+		const caps = await import('../src/runtime/utils/caps.js');
+		expect(
+			caps.MAX_SUBSCRIPTIONS_PER_CONNECTION,
+			'the value caps.js exports disagrees with the literal it declares'
+		).toBe(SUBSCRIPTION_CAP);
 	});
 
 	// THE PLUGIN CARVE-OUT. It stands the wire gate aside, and is safe only

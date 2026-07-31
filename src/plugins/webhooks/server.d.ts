@@ -104,6 +104,49 @@ export type WebhookDeliveryOutcome =
 	| { ok: true }
 	| { ok: false; err: Error; attempts: number };
 
+/** A first-attempt admission gate: `take` consumes one unit of a DESTINATION's
+ * allowance, returning whether a delivery may start. In-process (sync) or
+ * cluster-shared (async).
+ *
+ * A destination is `<address>:<port>` (IPv6 bracketed) - an address
+ * `deliverWebhook`'s SSRF gate resolved and pinned the socket to, not
+ * `WebhookDeliveryHooks.key` and not the URL. Callers name endpoints, so a key
+ * or a URL origin can be multiplied by inventing names; a pinned address cannot
+ * be renamed. `take` is called once for EVERY address in the pin, because which
+ * of them the socket lands on is decided by the connect logic and the caller
+ * orders its own DNS answer - so whichever address the request goes to has paid
+ * for it. Registrations, aliases and per-event `url` callbacks that land on one
+ * address therefore share that address's allowance.
+ *
+ * What that costs, stated here rather than left to be discovered:
+ *
+ * - A delivery to a host answering with several addresses spends one unit at
+ *   EACH of them, so such an endpoint holds several allowances.
+ * - A caller controlling its own DNS answer can pad it and spend UNRELATED
+ *   addresses' allowances without sending them any traffic. The answer is capped
+ *   at 32 addresses, so one admitted delivery can charge up to 32 buckets while
+ *   one request goes out. Those addresses need not belong to the caller, so this
+ *   is usable to exhaust a co-tenant's admission bucket; lower the cap or key
+ *   deliveries per tenant if that matters to your deployment.
+ * - A REDIRECT hop is not charged. The gate is consulted once, at hop zero,
+ *   because charging a hop chosen by the endpoint being delivered to would let
+ *   any registration drain a bystander. That leaves up to `maxRedirects`
+ *   requests per admitted delivery unmetered by this gate (the address checks
+ *   still run on every hop).
+ * - A refusal part-way through a set keeps the units already taken, since the
+ *   interface only takes, so a refused delivery can cost more than it sent,
+ *   never less.
+ *
+ * What holds without qualification is narrower than any of the above: a request
+ * cannot be put on an address at hop zero without spending that address's unit.
+ *
+ * Only a definite `false` (or the `0` a Lua-scripted shared backend replies
+ * with) refuses a delivery. Throwing, or answering with nothing, admits: a
+ * shared gate having a bad minute must not become an outbound outage. */
+export interface WebhookAdmission {
+	take(destination: string): boolean | Promise<boolean>;
+}
+
 /** A retry budget: `take` consumes one token, returning whether a retry may
  * proceed. In-process (sync) or cluster-shared (async); the key scopes the
  * budget per endpoint. */
@@ -122,12 +165,44 @@ export interface WebhookBreaker {
 }
 
 /** Optional delivery controls injected into {@link deliverWebhook}. `key` scopes
- * both collaborators to one endpoint (the realtime layer passes the webhook's
- * registration id). */
+ * the budget and the breaker to one endpoint (the realtime layer passes the
+ * webhook's registration id); `admission` ignores it and is keyed by the pinned
+ * destination addresses, so registering one endpoint several times, or under
+ * several names, does not multiply its first-attempt allowance. */
 export interface WebhookDeliveryHooks {
+	admission?: WebhookAdmission;
 	budget?: RetryBudget;
 	breaker?: WebhookBreaker;
 	key?: string;
+}
+
+/** Options for {@link createWebhookAdmission}. Together they set the aggregate
+ * ceiling as well as the per-destination one: see {@link createWebhookAdmission}. */
+export interface WebhookAdmissionOptions {
+	/** Max tokens per destination (default 100). */
+	capacity?: number;
+	/** Continuous refill rate in tokens/second (default 10). */
+	refillPerSec?: number;
+	/** How many destinations hold an allowance at once (default 1024). At the
+	 * cap, a destination whose bucket has refilled to full is dropped (dropping
+	 * it changes nothing - it would be recreated full); if none has, a further
+	 * destination is REFUSED rather than admitted untracked. That is what makes
+	 * `maxKeys * capacity` an actual aggregate bound, and lowering `maxKeys` is
+	 * how the aggregate is lowered. */
+	maxKeys?: number;
+}
+
+/** The in-process {@link WebhookAdmission} returned by {@link createWebhookAdmission}. */
+export interface InProcessWebhookAdmission extends WebhookAdmission {
+	take(destination?: string): boolean;
+	/** Remaining allowance for a destination. Read-only: a destination with no
+	 * live bucket has spent nothing and reports `capacity`. It answers that
+	 * destination's allowance only and says nothing about slot availability, so
+	 * the two disagree at the cap: with `maxKeys` destinations tracked and none
+	 * reclaimable, an untracked destination reports `capacity` while `take`
+	 * refuses it for want of a slot. */
+	tokensFor(destination?: string): number;
+	reset(destination?: string): void;
 }
 
 /** Options for {@link createRetryBudget}. */
@@ -136,7 +211,10 @@ export interface RetryBudgetOptions {
 	capacity?: number;
 	/** Continuous refill rate in tokens/second (default 10). */
 	refillPerSec?: number;
-	/** Distinct-key cap before the oldest keyed bucket is evicted (default 1024). */
+	/** How many keys hold a budget at once (default 1024). At the cap, only a
+	 * bucket that has refilled to full is dropped; a further key whose budget
+	 * cannot be tracked is refused rather than granted an untracked one, so
+	 * churning keys cannot hand a drained key its tokens back. */
 	maxKeys?: number;
 }
 
@@ -153,12 +231,19 @@ export interface WebhookBreakerOptions {
 	failureThreshold?: number;
 	/** Ms an open key waits before allowing a half-open probe (default 30000). */
 	resetMs?: number;
-	/** Distinct-key cap before the oldest keyed slot is evicted (default 1024). */
+	/** How many keys hold breaker state at once (default 1024). At the cap, only
+	 * a key that is healthy with no failures recorded is dropped; when every
+	 * tracked key carries a failure record, a further key goes UNTRACKED (it can
+	 * never be ejected) rather than an ejected endpoint being forgotten and let
+	 * back in. */
 	maxKeys?: number;
 }
 
 /** The in-process {@link WebhookBreaker} returned by {@link createWebhookBreaker}. */
 export interface InProcessWebhookBreaker extends WebhookBreaker {
+	/** A key's circuit state. Read-only: a key with no tracked state has recorded
+	 * no failure and reports `'healthy'`, rather than being created and spending
+	 * one of the `maxKeys` slots because something asked. */
 	stateOf(key?: string): 'healthy' | 'broken' | 'probing';
 	reset(key?: string): void;
 }
@@ -167,6 +252,43 @@ export interface InProcessWebhookBreaker extends WebhookBreaker {
 export declare class WebhookCircuitOpenError extends Error {
 	readonly code: 'WEBHOOK_CIRCUIT_OPEN';
 }
+
+/**
+ * Carried by the outcome of a delivery {@link WebhookDeliveryHooks.admission}
+ * refused. Nothing was sent and the endpoint said nothing, so requeue the event
+ * rather than dead-lettering it as a rejected delivery.
+ */
+export declare class WebhookAdmissionDeniedError extends Error {
+	readonly code: 'WEBHOOK_ADMISSION_DENIED';
+}
+
+/**
+ * Create the in-process first-attempt admission gate - the single-instance
+ * default for `deliverWebhook`'s `hooks.admission`. A token bucket per PINNED
+ * DESTINATION ADDRESS, so the ceiling belongs to the thing being protected:
+ * extra registrations, extra hostnames for one address and per-event `url`
+ * callbacks all draw on the same bucket.
+ *
+ * Stated exactly, because the difference matters when sizing an outbound path:
+ * - Per destination: `capacity` deliveries in a burst, `refillPerSec` per second
+ *   sustained, for deliveries that reach that address.
+ * - Aggregate per instance: `maxKeys * capacity` admitted deliveries in a burst
+ *   and `maxKeys * refillPerSec` per second - 102,400 and 10,240 on the
+ *   defaults. This is a bound, not an estimate: a bucket is dropped only once
+ *   refilled to full, so no allowance is ever handed back by churning
+ *   destinations.
+ * - In REQUESTS rather than deliveries, which is what an outbound path carries:
+ *   one admitted delivery may issue up to `retry.attempts` x (`maxRedirects` +
+ *   1) HTTP requests - 18 on the delivery defaults - so size the path off that
+ *   multiple of the figures above, or lower `retry.attempts` / `maxRedirects`.
+ * - NOT covered: one endpoint published on several addresses (separate IPv4 and
+ *   IPv6 literals, or DNS answers with differing address sets) is several
+ *   destinations and gets one allowance each, and a delivery to it spends one
+ *   unit at each of its addresses. And the gate is per process, so a cluster
+ *   multiplies by replica count until a shared gate is injected through the same
+ *   seam.
+ */
+export function createWebhookAdmission(options?: WebhookAdmissionOptions): InProcessWebhookAdmission;
 
 /**
  * Create the in-process retry budget - the single-instance default for
@@ -234,7 +356,11 @@ export function verifyWebhookSignature(
  *
  * Pass `hooks` to inject delivery controls: `hooks.breaker` fast-fails an
  * ejected endpoint and records the terminal result, `hooks.budget` rations retry
- * amplification, both scoped by `hooks.key`. Omit `hooks` for bare delivery.
+ * amplification, both scoped by `hooks.key`; `hooks.admission` rations first
+ * attempts per pinned destination address and refuses over-allowance deliveries
+ * with a terminal `attempts: 0` outcome carrying
+ * {@link WebhookAdmissionDeniedError}.
+ * Omit `hooks` for bare delivery.
  */
 export function deliverWebhook<Event = string, Data = any>(
 	config: WebhookDeliveryConfig<Event, Data>,

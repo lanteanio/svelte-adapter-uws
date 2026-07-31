@@ -12,6 +12,9 @@ name: test
 # design, and absent it the real-runtime suites skip and report PASSED with
 # zero assertions - which as a gate result is worse than a failure, because it
 # looks like proof.
+#
+# Three jobs, because they fail for three different reasons: the suite, the
+# advisory state of the locked dependencies, and the declared support floor.
 
 on:
   pull_request:
@@ -23,6 +26,24 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'vitest.config.js'
+      - '.nvmrc'
+      # The wire contract and its machine-checkable artifacts. PROTOCOL.md says
+      # these are validated in CI against the reference implementation, and two
+      # suites do exactly that - but a pull request touching only the schema, a
+      # recorded vector or the spec used to trigger nothing at all, so the
+      # published promise held only for changes that happened to touch src/.
+      - 'PROTOCOL.md'
+      - 'protocol.schema.json'
+      - 'test-vectors/**'
+      # The shipped documentation, because `npm run check` reads it. The link
+      # checker resolves every internal anchor in these four files, and a pull
+      # request that only rewords a heading - orphaning the links that point at
+      # it - matched none of the filters above, so the one gate that can see a
+      # dead anchor would have run on every change EXCEPT the change that
+      # breaks one. A gate that cannot fire on its own subject is not a gate.
+      - 'README.md'
+      - 'MIGRATION.md'
+      - 'CONTRIBUTING.md'
       - '.github/workflows/test.yml'
   push:
     branches: [main, dev]
@@ -47,16 +68,23 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Actions are pinned to a commit, never a tag: `@v4` re-resolves on every
+      # run, so a moved tag changes the code that checks this tree out and runs
+      # it without changing anything in this repository. The trailing comment is
+      # the human-readable release the commit is.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # The runtime baseline is `.nvmrc`, so `nvm use` on a contributor's machine
+      # and this job read the same file. A floating major here was the version
+      # nobody could name when a native ABI difference had to be reproduced.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '22'
+          node-version-file: '.nvmrc'
           cache: 'npm'
 
       # Restore the source-keyed built fixture variants. The helper validates
       # each restored stamp against file CONTENTS before trusting it.
       - name: Cache built fixture variants
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: 'test/fixture/build*'
           key: fixture-${{ runner.os }}-${{ hashFiles('src/**', 'test/fixture/src/**', 'test/fixture/static/**', 'test/fixture/variants.js', 'test/fixture/svelte.config.js', 'test/fixture/vite.config.js', 'test/fixture/package.json', 'test/fixture/package-lock.json', 'package.json') }}
@@ -72,13 +100,101 @@ jobs:
         working-directory: test/fixture
         run: npm ci
 
-      # Fail loudly here rather than letting the suites skip their way to green.
-      - name: Verify the native runtime is installed
-        run: node -e "require('uWebSockets.js'); console.log('uWebSockets.js OK')"
+      # One lane, published as `npm run verify:suite`, so this job and the
+      # command a contributor is told to run are the same command rather than
+      # two sequences that agree today. The lane runs the doctor with
+      # `--require-uws` (a missing addon fails instead of letting every
+      # real-runtime suite skip its way to green), then the static gates and the
+      # whole test run under REQUIRE_UWS.
+      - name: Verify
+        run: npm run verify:suite
 
-      # `pretest` runs the check scripts (types, determinism, slugs, scope,
-      # syntax), so this one command is the whole gate.
-      - name: Test
-        run: npm test
-        env:
-          REQUIRE_UWS: '1'
+  # Advisories against the LOCKED tree, which is the tree every contributor and
+  # this gate actually install. It was clean when the locks were last swept, and
+  # nothing kept it that way: an advisory published after that sweep reaches the
+  # tree through a plain `npm ci`, silently, and the suite has no opinion about
+  # it. Reading the lock is enough, so this needs no install and no addon.
+  #
+  # SCOPE IS THE WHOLE DESIGN HERE, and the level is the smaller half of it.
+  # Only the first step fails the workflow, and it reads the SHIPPED tree
+  # (`--omit=dev`), because that is the tree a consumer of this package installs
+  # and the only one where an advisory describes exposure somebody else has.
+  #
+  # The development tree is reported and does not block. An advisory against a
+  # transitive dependency of a benchmarking or browser-automation tool that
+  # ships to nobody would otherwise turn every unrelated pull request red, with
+  # no in-repo remedy and on a schedule set outside this repository - and a gate
+  # that goes red for reasons the maintainer cannot act on is a gate that gets
+  # ignored and then deleted. Reported, it is still visible in the run, and
+  # promoting a step back to blocking is deleting one line.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+      - name: Audit the shipped dependency tree
+        run: npm audit --audit-level=high --package-lock-only --omit=dev
+      - name: Report advisories in the development tree
+        continue-on-error: true
+        run: npm audit --audit-level=high --package-lock-only
+      # The fixture resolves its own tree. Nothing in it is published - it is a
+      # SvelteKit app the suites build and boot - so it is reported on the same
+      # terms as the development tree above.
+      - name: Report advisories in the fixture tree
+        continue-on-error: true
+        working-directory: test/fixture
+        run: npm audit --audit-level=high --package-lock-only
+
+  # The DECLARED support floor, installed and run. `peerDependencies` publishes
+  # `svelte ^4.0.0`, and every other lane installs whatever the lockfile
+  # resolves - which is a current svelte 5 - so the floor half of that published
+  # range had never been executed once. Either it works and this proves it, or
+  # it does not and the range is wrong; both are answers, and neither was
+  # available from a green suite.
+  #
+  # Scoped to the suites that load the browser client (the only code in this
+  # package importing a peer at runtime), so the lane stays a few minutes rather
+  # than a second full matrix leg. `test/ci-workflows.test.js` fails if a suite
+  # that loads the client is not covered by the filters.
+  #
+  # The selection is NOT addon-free, which the word "pure" would wrongly imply.
+  # It builds no fixture - that is asserted by the guard suite, and it is what
+  # the wall time depends on - but one selected file drives a real socket
+  # through the published in-process test server, and its module-level gate
+  # REFUSES to skip while `CI` is set, on purpose: a skipped real-runtime suite
+  # reports PASSED having proved nothing. So a failed optional install has to be
+  # caught here, before the suites run, or this lane answers a question about
+  # svelte 4 with a message about a missing addon.
+  floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - run: npm ci
+      # The addon is optional, so `npm ci` succeeds without it. Say so here
+      # rather than from inside a suite. The doctor is deliberately not used
+      # here: it also demands the fixture install, which this lane neither needs
+      # nor does, so it would fail the job on a question it was not asked.
+      - name: Verify the native runtime installed
+        run: node -e "require('uWebSockets.js')"
+      # Exactly the floor of each published range, not a range that resolves to
+      # the head again. Not written to the manifest: this is one job's tree, and
+      # `--no-save` also keeps the rest of it on the locked versions, so a
+      # failure here is about the floor rather than about a whole tree that
+      # re-resolved at the same time.
+      #
+      # `@sveltejs/kit` is absent on purpose - the package names it as a peer but
+      # imports it nowhere (a JSDoc type only), so there is no floor code path of
+      # it to run, and installing it would prove a resolution rather than a
+      # behaviour.
+      - name: Install the declared minimum peers
+        run: npm install --no-save svelte@4.0.0 ws@8.0.0
+      - name: Run the suites that load the client
+        run: npm run test:floor

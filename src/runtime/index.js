@@ -5,8 +5,8 @@ import { isMainThread, parentPort, threadId, Worker, workerData } from 'node:wor
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 import { env } from 'ENV';
-import { createCertWatcher, readCertIdentity, reloadClusterTls } from './utils/tls-reload.js';
-import { monotonicNow, setTimer, setIntervalTimer, clearTimer } from './runtime.js';
+import { certExpiryAlert, createCertWatcher, readCertIdentity, reloadClusterTls } from './utils/tls-reload.js';
+import { monotonicNow, wallEpoch, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 import { createRelayRingBuffer, RingWriter, RingReader, decodeRelayFrame } from './relay-ring.js';
 import { createStateHashDetector } from './state-hash-detector.js';
 import { createRestartSupervisor } from './restart-supervisor.js';
@@ -38,6 +38,17 @@ function parseIntEnv(name, raw, min) {
 }
 
 const port = parseIntEnv('PORT', port_raw, 0);
+// Seconds allowed for the WHOLE graceful shutdown sequence: the app's ws
+// `shutdown` hook, the in-flight drain, and the `sveltekit:shutdown` listeners.
+//
+// 0 is the spelling for NO BUDGET - wait as long as it takes. It has to have a
+// spelling: application code runs in two of those three phases, an app that
+// flushes a ledger or closes a pool on the way out is entitled to say "never cut
+// me off", and every positive value is a cut-off. 0 was chosen for it because
+// that is what a disabled timeout is spelled as everywhere else in Node (a 0
+// `server.timeout`, `requestTimeout`, `headersTimeout` all mean "no limit").
+// The trade is explicit and is announced on the shutdown path: with no budget a
+// wedged hook holds the process until the supervisor kills it.
 const shutdown_timeout = parseIntEnv('SHUTDOWN_TIMEOUT', env('SHUTDOWN_TIMEOUT', '30'), 0);
 const shutdown_delay = parseIntEnv('SHUTDOWN_DELAY_MS', env('SHUTDOWN_DELAY_MS', '0'), 0);
 const cluster_workers = env('CLUSTER_WORKERS', '');
@@ -592,21 +603,65 @@ if (is_primary) {
 	// (the SSLApp default context is not swappable) - the documented caveat
 	// covering the SNI-sending majority.
 	let primaryCertWatcher = null;
-	let primaryTlsState = { hosts: [], fingerprint: null };
+	let primaryTlsState = { hosts: [], fingerprint: null, notAfter: null, notAfterText: null };
+
+	// Reload-path health, mirroring the per-worker record (handler/lifecycle.js).
+	// The primary is the only thing watching the cert directory in cluster mode,
+	// so a primary whose watcher never started broadcasts nothing and NO worker
+	// ever picks up a renewal - while every probe in the fleet stays green until
+	// the served leaf expires and every handshake fails at once. Hourly sentinel,
+	// armed only while degraded, silent until the leaf is inside the alert window.
+	const TLS_DEGRADED_CHECK_MS = 3600000;
+	const primaryTlsHealth = { degraded: null, notAfter: null, notAfterText: null };
+	let primaryTlsSentinel = null;
+	/** @param {string} reason */
+	function primaryTlsDegraded(reason) {
+		primaryTlsHealth.degraded = reason;
+		const alert = certExpiryAlert(primaryTlsHealth, wallEpoch());
+		if (alert !== null) console.error(alert);
+		if (primaryTlsSentinel !== null) return;
+		primaryTlsSentinel = setIntervalTimer(() => {
+			const line = certExpiryAlert(primaryTlsHealth, wallEpoch());
+			if (line !== null) console.error(line);
+		}, TLS_DEGRADED_CHECK_MS);
+		if (primaryTlsSentinel && primaryTlsSentinel.unref) primaryTlsSentinel.unref();
+	}
+	function primaryTlsRecovered() {
+		if (primaryTlsHealth.degraded !== null) {
+			console.log(`[tls] primary certificate read recovered (was: ${primaryTlsHealth.degraded})`);
+			primaryTlsHealth.degraded = null;
+		}
+		if (primaryTlsSentinel !== null) {
+			clearIntervalTimer(primaryTlsSentinel);
+			primaryTlsSentinel = null;
+		}
+	}
 	function onCertChange() {
+		let failure = null;
 		primaryTlsState = reloadClusterTls({
 			workers: workers.keys(),
 			source: { certPath: ssl_cert, hosts: ssl_sni_hosts },
 			state: primaryTlsState,
-			onError: (err) => console.error('[tls] renewed certificate unreadable on the primary (workers keep the previous cert):', err && err.message ? err.message : err)
+			onError: (err) => { failure = err && err.message ? err.message : String(err); }
 		});
+		primaryTlsHealth.notAfter = primaryTlsState.notAfter ?? null;
+		primaryTlsHealth.notAfterText = primaryTlsState.notAfterText ?? null;
+		if (failure !== null) {
+			console.error('[tls] renewed certificate unreadable on the primary (workers keep the previous cert):', failure);
+			primaryTlsDegraded('the renewed certificate is unreadable on the primary');
+		} else {
+			primaryTlsRecovered();
+		}
 	}
 	if (is_tls && ssl_watch) {
 		// Record the boot cert's identity so the reload broadcast has a baseline to
-		// report against. A parse failure only degrades primary-side observability -
-		// the workers gate on their own reads.
+		// report against, and its expiry so a later failure can be reported with the
+		// number that says how urgent it is. A parse failure only degrades
+		// primary-side observability - the workers gate on their own reads.
 		try {
 			primaryTlsState = readCertIdentity(ssl_cert, ssl_sni_hosts);
+			primaryTlsHealth.notAfter = primaryTlsState.notAfter;
+			primaryTlsHealth.notAfterText = primaryTlsState.notAfterText;
 		} catch (err) {
 			console.error('[tls] boot certificate unreadable on the primary (hot-reload broadcast stays armed):', err && err.message ? err.message : err);
 		}
@@ -626,6 +681,10 @@ if (is_primary) {
 		} catch (err) {
 			primaryCertWatcher = null;
 			console.error('[tls] primary cert watch failed to start, cluster hot-reload disabled (server keeps running):', err && err.message ? err.message : err);
+			// Nothing retries this: with no watcher on the primary, no worker is ever
+			// told to reload, so the whole cluster serves its current certificate
+			// until it expires.
+			primaryTlsDegraded('the primary certificate directory watch failed to start, so no worker will be told to reload');
 		}
 	}
 
@@ -646,7 +705,19 @@ if (is_primary) {
 		// broadcast at exiting workers.
 		if (primaryCertWatcher) { primaryCertWatcher.stop(); primaryCertWatcher = null; }
 
-		// Step 1: Keep accepting connections until the load balancer has
+		// Step 1: readiness OFF on every worker, BEFORE the delay below. The
+		// workers own the readiness route, so this is what makes the delay do its
+		// job: a load balancer polls readiness, and it can only deregister this
+		// instance during the propagation window if the answer flips at the START
+		// of that window. Draining is not closing - every worker keeps its listen
+		// socket open and keeps serving, so the requests the balancer has not
+		// stopped sending yet are still answered.
+		for (const [worker] of workers) {
+			try { worker.postMessage({ type: 'drain' }); } catch { /* worker already exiting */ }
+		}
+		console.log(`[primary] Readiness now reports NOT ready on ${workers.size} worker(s); still accepting.`);
+
+		// Step 2: Keep accepting connections until the load balancer has
 		// had time to remove this pod from rotation (Kubernetes rolling updates).
 		// SHUTDOWN_DELAY_MS=0 (default) skips this and is correct for non-k8s deploys.
 		if (shutdown_delay > 0) {
@@ -654,7 +725,7 @@ if (is_primary) {
 			await new Promise((resolve) => setTimer(resolve, shutdown_delay));
 		}
 
-		// Step 2: Stop accepting new connections (acceptor mode only)
+		// Step 3: Stop accepting new connections (acceptor mode only)
 		if (cluster_mode === 'acceptor' && listen_socket) {
 			uWS.us_listen_socket_close(listen_socket);
 			listen_socket = null;
@@ -665,15 +736,24 @@ if (is_primary) {
 			worker.postMessage({ type: 'shutdown' });
 		}
 
-		// Force-exit after timeout: ask any still-running worker to close its App
+		// Force-exit after the budget: ask any still-running worker to close its App
 		// and exit itself (worker.terminate() would abort the process; a bare
 		// primary process.exit(0) with live uWS workers would too). Each request
 		// carries its own SIGKILL fallback for a genuinely wedged worker; the last
 		// worker's exit handler (workers.size === 0) performs the clean primary
 		// process.exit(0).
-		setTimer(() => {
-			for (const [worker] of workers) requestWorkerExit(worker, 0);
-		}, shutdown_timeout * 1000).unref();
+		//
+		// SHUTDOWN_TIMEOUT=0 is the no-budget spelling, so there is no force-exit
+		// to arm: each worker awaits its own hook, drain and cleanup listeners for
+		// as long as they take, and cutting them off from here would be the same
+		// deadline by another name.
+		if (shutdown_timeout > 0) {
+			setTimer(() => {
+				for (const [worker] of workers) requestWorkerExit(worker, 0);
+			}, shutdown_timeout * 1000).unref();
+		} else {
+			console.log('[primary] SHUTDOWN_TIMEOUT=0: no shutdown budget - workers exit when their own teardown finishes, however long that takes.');
+		}
 	}
 
 	process.on('SIGTERM', () => graceful_shutdown('SIGTERM'));
@@ -682,6 +762,11 @@ if (is_primary) {
 	// ── Worker thread or single-process mode ─────────────────────────────
 
 	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls, setRelayRingWriter, markRelayAttached } = await import('HANDLER');
+	// The readiness/drain state machine lives in the lifecycle module, imported
+	// here directly (the same instance the handler graph above loaded) because
+	// entering the draining state and closing the sockets are two separate acts
+	// at two separate moments - see the drain-before-delay ordering below.
+	const { beginDrain } = await import('./handler/lifecycle.js');
 
 	// Clean worker-thread exit. A worker thread holds uWS's untracked libuv socket
 	// handles, so a bare process.exit() aborts the whole process
@@ -711,6 +796,70 @@ if (is_primary) {
 	// declared ahead of both branches rather than after them.
 	let shutting_down = false;
 
+	// Node stores a timer delay in a signed 32-bit int and silently rearms
+	// anything larger to 1ms, so this is the longest "never" a timer can express.
+	const MAX_TIMER_MS = 2147483647;
+
+	/**
+	 * Resolve when `signal` aborts, never otherwise. Every phase of the shutdown
+	 * below bounds itself against the SAME signal, which is what makes
+	 * SHUTDOWN_TIMEOUT a budget for the whole sequence instead of one timer that
+	 * a step running before it can walk past. A null signal is the no-budget
+	 * configuration: nothing ever aborts, so every phase is simply awaited.
+	 * @param {AbortSignal | null} signal
+	 * @returns {Promise<void>}
+	 */
+	function whenAborted(signal) {
+		if (!signal) return new Promise(() => {});
+		if (signal.aborted) return Promise.resolve();
+		return new Promise((resolve) => {
+			signal.addEventListener('abort', () => resolve(), { once: true });
+		});
+	}
+
+	/**
+	 * Fire the process-level `sveltekit:shutdown` event and AWAIT what its
+	 * listeners return.
+	 *
+	 * EventEmitter throws away a listener's return value, so an `async` listener -
+	 * the documented shape for closing a database pool - never resumed past its
+	 * first `await`: the process exited underneath it and the final writes were
+	 * lost with nothing logged. The listeners are therefore invoked directly (what
+	 * `emit` does, minus the discarded value) and anything thenable they return is
+	 * awaited under the shared budget. A listener that throws, rejects or never
+	 * settles is reported and cannot hold the exit.
+	 *
+	 * @param {string} reason
+	 * @param {AbortSignal | null} signal null when no budget is configured
+	 * @param {number | null} deadline wall-clock epoch ms the budget expires at,
+	 *   null when no budget is configured
+	 * @param {string} prefix
+	 * @returns {Promise<boolean>} false when the budget expired first
+	 */
+	async function runShutdownCleanup(reason, signal, deadline, prefix) {
+		const listeners = process.listeners('sveltekit:shutdown');
+		if (listeners.length === 0) return true;
+		/** @type {Promise<void>[]} */
+		const pending = [];
+		for (const listener of listeners) {
+			try {
+				const result = listener.call(process, reason, { reason, signal, deadline });
+				if (result && typeof result.then === 'function') {
+					pending.push(Promise.resolve(result).catch((err) => {
+						console.error(`${prefix}a sveltekit:shutdown listener rejected:`, err);
+					}));
+				}
+			} catch (err) {
+				console.error(`${prefix}a sveltekit:shutdown listener threw:`, err);
+			}
+		}
+		if (pending.length === 0) return true;
+		return await Promise.race([
+			Promise.all(pending).then(() => true),
+			whenAborted(signal).then(() => false)
+		]);
+	}
+
 	/** @param {'SIGINT' | 'SIGTERM' | 'shutdown'} reason */
 	async function graceful_shutdown(reason) {
 		if (shutting_down) return;
@@ -722,27 +871,112 @@ if (is_primary) {
 		const prefix = isMainThread ? '' : `[worker ${threadId}] `;
 		console.log(`${prefix}Received ${reason}, shutting down gracefully...`);
 
-		// Step 1: Load balancer drain delay (only for OS signals, not when the
+		// Step 1: readiness OFF, BEFORE the delay below. The delay exists so a load
+		// balancer can deregister this instance before its sockets close, and the
+		// balancer polls readiness to decide - so flipping readiness together with
+		// the socket close (which is what a single shutdown step does) means new
+		// requests keep being routed here for the whole propagation window and then
+		// meet a closed socket. Draining is not closing: the listen socket stays
+		// open and in-flight and newly arriving requests are still served.
+		if (beginDrain()) console.log(`${prefix}Readiness now reports NOT ready (draining); still accepting.`);
+
+		// Step 2: Load balancer drain delay (only for OS signals, not when the
 		// primary tells us to shutdown  - the primary already waited its own delay).
 		if (shutdown_delay > 0 && (reason === 'SIGTERM' || reason === 'SIGINT')) {
 			console.log(`${prefix}Waiting ${shutdown_delay}ms for load balancer drain...`);
 			await new Promise((resolve) => setTimer(resolve, shutdown_delay));
 		}
 
-		// Awaiting `shutdown()` lets the hooks.ws `shutdown` hook flush app
-		// state (last metrics, cron drain, external bridge teardown) before
-		// the listen socket closes. Throws are logged-and-ignored inside
-		// shutdown() since we cannot refuse to stop.
-		await shutdown();
-		await Promise.race([
-			drain(),
-			new Promise((resolve) => setTimer(resolve, shutdown_timeout * 1000).unref())
-		]);
-		// Emit after drain so handlers can safely close DB pools etc.
-		// @ts-expect-error custom events cannot be typed
-		process.emit('sveltekit:shutdown', reason);
-		console.log(`${prefix}Shutdown complete.`);
-		exitWorkerClean(0);
+		// ONE budget for everything that follows. Application code runs in two of
+		// the three phases below, and an app hook that never settles used to hold
+		// the process indefinitely: the timeout only ever bounded the drain, which
+		// is the one phase the adapter controls. Now every phase races the same
+		// AbortSignal, so SHUTDOWN_TIMEOUT is what it claims to be - a bound on the
+		// whole sequence - and the phase that ran out of it is named in the log.
+		// The delay above is deliberately outside the budget: it is a wait the
+		// operator asked for, not work that can overrun.
+		//
+		// SHUTDOWN_TIMEOUT=0 means NO budget: nothing aborts, and every phase is
+		// awaited to completion the way an unbounded await always did. It is the
+		// only way to say "never cut my cleanup off", so it has to exist - and it
+		// must not be spelled by accident, which is why the line below says so.
+		//
+		// The timer is deliberately NOT unref'd, and is cleared the moment the
+		// sequence finishes. It is what keeps the process alive across the awaited
+		// teardown: a pending promise does not hold Node's event loop open, so an
+		// unref'd budget would let the process exit out from under an app's cleanup
+		// the instant the loop went idle - abandoning exactly the work these phases
+		// exist to wait for, and doing it silently. With no budget the timer still
+		// exists for exactly that reason, and only for it: it is armed as far out
+		// as Node will take (a longer delay silently becomes 1ms), so it never
+		// fires - it only holds the loop open while the awaits run.
+		const budget_ms = shutdown_timeout * 1000;
+		const bounded = budget_ms > 0;
+		const expiry = new AbortController();
+		const budget_timer = bounded
+			? setTimer(() => expiry.abort(), budget_ms)
+			: setTimer(() => {}, MAX_TIMER_MS);
+		// Wall-clock, so an app hook can compare it against its own Date.now();
+		// null with no budget, which is how a hook reads "nothing will cut me off"
+		// rather than having to guess from a far-future number.
+		const deadline = bounded ? wallEpoch() + budget_ms : null;
+		// Handed to app code and raced by the phases below only when it can
+		// actually fire. With no budget every phase simply awaits.
+		const signal = bounded ? expiry.signal : null;
+		if (!bounded) {
+			console.log(
+				`${prefix}SHUTDOWN_TIMEOUT=0: no shutdown budget - the shutdown hook, the in-flight drain and the ` +
+				'cleanup listeners are awaited for as long as they take, so a wedged one holds this process until it is killed.'
+			);
+		}
+		const t_close = monotonicNow();
+
+		// Steps 3 to 5 run under try/catch/finally. The budget timer is REF'D and
+		// this path is invoked unawaited from the signal handler, so a throw that
+		// escaped would both skip the clear and surface as an unhandled rejection:
+		// the process would either die on that rejection with the clean teardown
+		// never reached, or - if the app installs an unhandledRejection handler, as
+		// plenty do - keep running on the ref'd timer with no exit path left at all.
+		// Neither of those is an exit, which is what this function owes its caller.
+		let drained = false;
+		let cleaned = false;
+		try {
+			// Step 3: the hooks.ws `shutdown` hook flushes app state (last metrics,
+			// cron drain, external bridge teardown), then the listen socket closes and
+			// WebSocket clients get their 1001. The hook is bounded inside shutdown()
+			// by the signal below, so a wedged hook no longer keeps the socket open.
+			await shutdown({ reason, signal, deadline });
+
+			// Step 4: in-flight requests finish.
+			drained = await Promise.race([drain().then(() => true), whenAborted(signal).then(() => false)]);
+			if (!drained) {
+				console.error(
+					`${prefix}in-flight requests did not finish within the ${budget_ms}ms shutdown budget; ` +
+					'closing anyway - the requests still open at this point are dropped.'
+				);
+			}
+
+			// Step 5: process-level cleanup, after the drain so a listener closing a
+			// pool or writing a final record sees no request still using it.
+			cleaned = await runShutdownCleanup(reason, signal, deadline, prefix);
+			if (!cleaned) {
+				console.error(
+					`${prefix}sveltekit:shutdown listeners did not settle within the ${budget_ms}ms shutdown budget; ` +
+					'exiting anyway - their cleanup did NOT finish.'
+				);
+			}
+		} catch (err) {
+			// Nothing above is allowed to refuse the shutdown, and this path is
+			// invoked unawaited from the signal handler - an escaping rejection would
+			// surface as an unhandled rejection instead of an exit.
+			console.error(`${prefix}graceful shutdown failed:`, err);
+		} finally {
+			clearTimer(budget_timer);
+			const spent = (monotonicNow() - t_close).toFixed(0);
+			if (drained && cleaned) console.log(`${prefix}Shutdown complete in ${spent}ms.`);
+			else console.error(`${prefix}Shutdown finished in ${spent}ms but was NOT clean (see the lines above).`);
+			exitWorkerClean(0);
+		}
 	}
 
 	if (isMainThread) {
@@ -769,6 +1003,18 @@ if (is_primary) {
 		let booted = false;
 		/** @type {any[]} */
 		const boot_backlog = [];
+
+		/**
+		 * Leave the ready rotation. Safe from the FIRST tick of this worker: it
+		 * touches only the lifecycle state, which the handler graph imported above
+		 * has already built, and never a route, a socket or the relay.
+		 */
+		function applyDrain() {
+			if (beginDrain()) console.log(`[worker ${threadId}] Readiness now reports NOT ready (draining); still accepting.`);
+		}
+
+		// Control messages that need the handler graph. `drain` is deliberately NOT
+		// one of them - it is handled ahead of this gate, see the message router.
 		function dispatchControl(msg) {
 			if (msg.type === 'shutdown') {
 				graceful_shutdown('shutdown');
@@ -785,6 +1031,18 @@ if (is_primary) {
 			}
 		}
 		parentPort.on('message', (msg) => {
+			if (msg.type === 'drain') {
+				// Applied NOW, never buffered, even mid-boot. Buffering it would replay
+				// it after `start()` has already committed this worker to `ready` and
+				// logged that it is taking traffic - for an instance the primary put
+				// into shutdown before it finished booting. Leaving the rotation is
+				// exactly the kind of decision that must not wait for the boot it is
+				// overtaking, and applying it here is what makes `start()`'s
+				// commit-only-from-starting guard real on the cluster path: a worker
+				// drained mid-boot never announces itself ready at all.
+				applyDrain();
+				return;
+			}
 			const action = routeWorkerMessage(msg.type, booted);
 			if (action === 'ack') {
 				// Liveness ack - answered even mid-init (this handler is live before

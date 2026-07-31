@@ -12,9 +12,15 @@ on:
       - 'src/**'
       - 'scripts/sim-swarm.js'
       - 'scripts/sim-golden.js'
+      - 'scripts/verify.js'
       - 'test/dst-goldens/**'
       - 'test/**'
       - 'package.json'
+      # A dependency move changes what the simulation runs, and the workflow
+      # file changes what it means, so neither may pass unexamined.
+      - 'package-lock.json'
+      - '.nvmrc'
+      - '.github/workflows/sim-swarm.yml'
   # A deeper nightly sweep that explores far more interleavings than a PR can.
   # 04:17 UTC: off the top-of-hour stampede.
   schedule:
@@ -38,37 +44,40 @@ jobs:
   swarm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Actions are pinned to a commit, never a tag: `@v4` re-resolves on every
+      # run, so a moved tag changes the code that checks this tree out without
+      # changing anything in it. The trailing comment is the human-readable
+      # release the commit is.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '22'
+          node-version-file: '.nvmrc'
           cache: 'npm'
       - run: npm ci
-      # A PR runs a fast gate; the nightly schedule runs a deep sweep; a manual
-      # dispatch uses its inputs. The job exits non-zero on any failing seed.
-      - name: Run seed swarm
+      # One lane, published as `npm run verify:sim`, so this job and the command
+      # a contributor is told to run are the same command. The lane runs the
+      # seed swarm and then the golden corpus: the swarm only proves each seed
+      # reproduces ITSELF, so a deterministic behaviour change sails through it
+      # and the golden gate is what catches it. An intentional change is blessed
+      # with `npm run sim:golden -- --update` and the corpus diff committed.
+      #
+      # A pull request runs a fast gate; the nightly schedule runs a deep sweep;
+      # a manual dispatch uses its inputs. The lane defaults DST_COUNT only when
+      # nothing set it, so the values below are kept. The job exits non-zero on
+      # any failing seed.
+      - name: Verify
         env:
           GIT_COMMIT: ${{ github.sha }}
           DST_COUNT: ${{ github.event_name == 'pull_request' && '300' || github.event.inputs.count || '5000' }}
           DST_FAULTS: ${{ github.event.inputs.faultMode || 'random' }}
           DST_CHECK_RATIO: '0.05'
           DST_OUT: 'sim-swarm-result.json'
-        run: npm run sim:swarm
-      # Golden-set regression gate: re-run the committed corpus seeds and fail if
-      # any fingerprint drifted from its blessed baseline. This is the cross-commit
-      # companion to the swarm above (which only proves each seed reproduces
-      # ITSELF); it runs here because this workflow, not `npm test`, is the CI that
-      # executes on a PR. An intentional behavior change is blessed by re-running
-      # `npm run sim:golden -- --update` and committing the corpus diff.
-      - name: Verify DST golden corpus
-        env:
-          GIT_COMMIT: ${{ github.sha }}
-        run: npm run sim:golden
+        run: npm run verify:sim
       # Always upload, even on failure, so a failing sweep still leaves the
       # result JSON (with the failing seeds) for inspection.
       - name: Upload result
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sim-swarm-result
           path: sim-swarm-result.json

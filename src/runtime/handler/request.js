@@ -1,5 +1,6 @@
 import { counters, staticCache } from './state.js';
 import { METHODS, send400 } from './http-helpers.js';
+import { collectRequestHeaders } from '../utils/request-headers.js';
 import { acquireState, releaseState } from './state-pool.js';
 import { resolveTransportAddress } from './config.js';
 import { serveStatic, tryPrerendered } from './static-assets.js';
@@ -54,12 +55,13 @@ export function handleRequest(res, req) {
 
 	const url = query ? `${pathname}?${query}` : pathname;
 
-	// Full header collection - only for SSR paths
+	// Full header collection - only for SSR paths. Repeated lines are merged per
+	// header class; a repeated framing / identity header is ambiguous rather than
+	// mergeable, and the request dies here instead of reaching the app with one
+	// of two possible meanings.
 	/** @type {Record<string, string>} */
 	const headers = {};
-	req.forEach((key, value) => {
-		headers[key] = value;
-	});
+	if (collectRequestHeaders(req, headers) !== null) return send400(res);
 
 	// Decode remote address eagerly - uWS may reuse the underlying buffer.
 	// `effective` applies the opt-in PROXY-protocol substitution; `direct` is

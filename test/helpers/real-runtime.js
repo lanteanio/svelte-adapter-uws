@@ -412,16 +412,25 @@ export async function connectRealClient(wsUrl, { headers } = {}) {
 }
 
 /**
- * One raw WebSocket upgrade request, for assertions about the handshake itself
- * (status line and response headers) rather than about WS frames.
+ * How many times {@link rawUpgrade} re-issues a request whose socket died before
+ * the server said anything. Small on purpose: this covers a listen backlog
+ * shedding a connection during a burst, not a server that is actually down.
+ */
+const RAW_UPGRADE_ATTEMPTS = 6;
+
+/**
+ * One attempt at a raw upgrade.
  *
- * Resets instead of closing, for the TIME_WAIT reason above.
+ * Resolves `{ status, raw }` once a response line arrived, or `{ error, raw }`
+ * when the socket ended first. `raw` is what separates the two failure kinds:
+ * bytes already received mean the server DID answer, so whatever happened next
+ * is a result rather than a request that never happened.
  *
  * @param {number} port
- * @param {Record<string,string>} [extraHeaders]
- * @returns {Promise<{ status: string, raw: string }>}
+ * @param {Record<string,string>} extraHeaders
+ * @returns {Promise<{ status?: string, error?: any, raw: string, timedOut?: boolean }>}
  */
-export function rawUpgrade(port, extraHeaders = {}) {
+function attemptRawUpgrade(port, extraHeaders) {
 	return new Promise((resolve) => {
 		const lines = [
 			'GET /ws HTTP/1.1',
@@ -436,16 +445,78 @@ export function rawUpgrade(port, extraHeaders = {}) {
 
 		const sock = net.connect(port, '127.0.0.1', () => sock.write(lines.join('\r\n')));
 		let buf = '';
+		let settled = false;
 		sock.on('data', (d) => {
 			buf += d.toString('latin1');
-			if (buf.indexOf('\r\n\r\n') !== -1) {
-				const status = (buf.slice(0, buf.indexOf('\r\n')).match(/HTTP\/1\.1 (\d{3})/) || [, '???'])[1];
-				if (typeof sock.resetAndDestroy === 'function') sock.resetAndDestroy();
-				else sock.destroy();
-				resolve({ status, raw: buf });
-			}
+			if (settled || buf.indexOf('\r\n\r\n') === -1) return;
+			settled = true;
+			const status = (buf.slice(0, buf.indexOf('\r\n')).match(/HTTP\/1\.1 (\d{3})/) || [, '???'])[1];
+			if (typeof sock.resetAndDestroy === 'function') sock.resetAndDestroy();
+			else sock.destroy();
+			resolve({ status, raw: buf });
 		});
-		sock.on('error', () => resolve({ status: 'ERR', raw: buf }));
-		sock.setTimeout(15000, () => { sock.destroy(); resolve({ status: 'TIMEOUT', raw: buf }); });
+		sock.on('error', (error) => {
+			// The reset above makes the socket emit too; that one is ours.
+			if (settled) return;
+			settled = true;
+			sock.destroy();
+			resolve({ error, raw: buf });
+		});
+		sock.setTimeout(15000, () => {
+			if (settled) return;
+			settled = true;
+			sock.destroy();
+			resolve({ error: new Error('no response line within 15s'), raw: buf, timedOut: true });
+		});
 	});
+}
+
+/**
+ * One raw WebSocket upgrade request, for assertions about the handshake itself
+ * (status line and response headers) rather than about WS frames.
+ *
+ * Resets instead of closing, for the TIME_WAIT reason above.
+ *
+ * RETRIES A CONNECT-LEVEL FAILURE INSTEAD OF REPORTING IT. A socket that dies
+ * before a single response byte arrived never reached the server's decision, so
+ * handing the caller a sentinel status for it mixes kernel weather into a
+ * protocol tally. A suite opening thousands of connections overflows the listen
+ * backlog now and then, the odd RST used to be counted alongside the real 101s
+ * and 429s, and a strict count then failed roughly one run in three for reasons
+ * that had nothing to do with the code under test. Re-issuing the request is the
+ * only honest reading of "this one never happened".
+ *
+ * What is NOT retried, because both are real results: a failure once the server
+ * has started answering - those bytes are evidence - and a request that keeps
+ * failing past the attempt budget. Both THROW, carrying the transport error, so
+ * a genuine regression cannot be absorbed as a status a caller might tally or
+ * skip past.
+ *
+ * @param {number} port
+ * @param {Record<string,string>} [extraHeaders]
+ * @returns {Promise<{ status: string, raw: string }>}
+ */
+export async function rawUpgrade(port, extraHeaders = {}) {
+	/** @type {{ status?: string, error?: any, raw: string, timedOut?: boolean }} */
+	let last = { raw: '' };
+	for (let attempt = 1; attempt <= RAW_UPGRADE_ATTEMPTS; attempt++) {
+		last = await attemptRawUpgrade(port, extraHeaders);
+		if (last.status !== undefined) return { status: last.status, raw: last.raw };
+		if (last.raw.length > 0 || last.timedOut) break;
+		// Linear backoff. The backlog drains in milliseconds, and a longer wait
+		// would turn a suite that opens ten thousand connections into a slow one.
+		await new Promise((r) => setTimeout(r, 10 * attempt));
+	}
+
+	const why = last.raw.length > 0
+		? `the server had already sent ${last.raw.length} byte(s), so this is an answer cut short`
+		: last.timedOut
+			? 'the connection opened and nothing was ever answered on it'
+			: `no response byte arrived across ${RAW_UPGRADE_ATTEMPTS} attempts`;
+	throw new Error(
+		`raw upgrade to 127.0.0.1:${port} produced no status line (${last.error?.code ?? last.error?.message}) - ${why}. ` +
+		'A failure with nothing received is retried and never reported, so reaching this means either a real ' +
+		'regression or a machine out of ephemeral ports: check `Get-NetTCPConnection -State TimeWait`, which ' +
+		'stays full for ~120s after a socket-heavy run and makes every suite here fail the same way.'
+	);
 }

@@ -44,8 +44,9 @@ registerPluginOwnedPrefix(TOPIC_PREFIX);
 
 /**
  * @typedef {Object} GroupOptions
- * @property {number} [maxMembers=Infinity] - Maximum members allowed.
+ * @property {number} [maxMembers=1_000_000] - Maximum members allowed.
  *   When the group is full, `join()` returns `false` and calls `onFull`.
+ *   Pass `Infinity` to disable the cap (not recommended at uWS scale).
  * @property {Record<string, any>} [meta] - Initial group metadata (shallow-copied).
  * @property {(ws: any, role: GroupRole) => GroupRole | false | void} [onJoin] -
  *   Synchronous admission hook. Return false to reject, a role to override the
@@ -66,6 +67,7 @@ registerPluginOwnedPrefix(TOPIC_PREFIX);
 /**
  * @typedef {Object} Group
  * @property {string} name - The group name (read-only).
+ * @property {number} maxMembers - The resolved member cap (read-only).
  * @property {Record<string, any>} meta - Group metadata (get/set).
  * @property {(ws: any, platform: import('../../index.js').Platform, role?: GroupRole) => boolean} join -
  *   Add a member. Returns `true` on success, `false` if full or closed.
@@ -120,7 +122,14 @@ export function createGroup(name, options = {}) {
 		throw new Error('group: name must be a non-empty string');
 	}
 
-	const maxMembers = options.maxMembers ?? Infinity;
+	// Membership is a Map keyed by the socket, and every join broadcasts to
+	// everyone already in it, so an unbounded group is both a memory site and a
+	// fan-out multiplier. The default matches the rest of the plugin caps:
+	// 1,000,000 is the connection ceiling of the process, so it cannot bite a
+	// real group, but it still stops entries piling up past it when an app wires
+	// `subscribe` without `close` and departed sockets never leave. `Infinity`
+	// stays available as an explicit opt-out.
+	const maxMembers = options.maxMembers ?? 1_000_000;
 	const onJoin = options.onJoin ?? null;
 	const onLeave = options.onLeave ?? null;
 	const onFull = options.onFull ?? null;
@@ -163,6 +172,8 @@ export function createGroup(name, options = {}) {
 	/** @type {Group} */
 	const grp = {
 		get name() { return name; },
+
+		get maxMembers() { return maxMembers; },
 
 		get meta() { return metadata; },
 		set meta(val) { metadata = val; },
