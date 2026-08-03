@@ -46,8 +46,28 @@ const PACK_RUN = [
 	"if ($filename -notmatch '^[a-z0-9._-]+\\.tgz$') { throw 'npm pack returned an unsafe artifact name' }",
 	"$tarball = 'release-artifacts/' + $filename",
 	"if (-not (Test-Path -LiteralPath $tarball -PathType Leaf)) { throw 'retained tarball is missing' }",
+	'$sha256 = (Get-FileHash -LiteralPath $tarball -Algorithm SHA256).Hash.ToLowerInvariant()',
 	"'tarball=' + $tarball >> $env:GITHUB_OUTPUT",
-	"'filename=' + $filename >> $env:GITHUB_OUTPUT"
+	"'filename=' + $filename >> $env:GITHUB_OUTPUT",
+	"'sha256=' + $sha256 >> $env:GITHUB_OUTPUT"
+].join(' ');
+
+// The transfer between the two jobs is the one place the verified bytes leave
+// this workflow's control. download-artifact's own digest check reports a
+// mismatch as a warning and lets the job continue, so only an explicit
+// comparison can stop a publication. Whole-body equality again: an added line
+// here could overwrite the tarball after the comparison and before the publish.
+const DIGEST_RUN = [
+	"$ErrorActionPreference = 'Stop'",
+	"$expected = '${{ needs.verify.outputs.sha256 }}'",
+	"if ($expected -notmatch '^[0-9a-f]{64}$') { throw 'the verify job produced no usable digest' }",
+	"$filename = '${{ needs.verify.outputs.filename }}'",
+	"if ($filename -notmatch '^[a-z0-9._-]+\\.tgz$') { throw 'refusing an unsafe artifact name' }",
+	"$tarball = 'release-artifacts/' + $filename",
+	"if (-not (Test-Path -LiteralPath $tarball -PathType Leaf)) { throw 'downloaded tarball is missing' }",
+	'$actual = (Get-FileHash -LiteralPath $tarball -Algorithm SHA256).Hash.ToLowerInvariant()',
+	"if ($actual -ne $expected) { throw 'downloaded tarball is not the verified artifact' }",
+	"'verified digest ' + $actual"
 ].join(' ');
 
 // Each entry is the COMPLETE step: its key inventory is closed to exactly the
@@ -55,7 +75,9 @@ const PACK_RUN = [
 // makes its refusal advisory, `env:` (NODE_OPTIONS, npm_config_registry)
 // preloads code into an exact-matched command, and `shell:` replaces the
 // interpreter with an arbitrary command template - none of which touch a name,
-// an order, or a body. Only `Pack retained artifact` may carry `id`/`shell`.
+// an order, or a body. Only `Pack retained artifact` may carry `id`/`shell`,
+// and only `Refuse to publish anything but the verified bytes` may carry
+// `shell` - both need pwsh, and neither may acquire anything else.
 const VERIFY_STEPS = [
 	{ name: 'Check out immutable tag', uses: CHECKOUT, with: { ref: '${{ github.sha }}', 'fetch-depth': 0, 'persist-credentials': false } },
 	{ name: 'Set up pinned Node and npm registry', uses: SETUP_NODE, with: { 'node-version-file': '.nvmrc', 'registry-url': 'https://registry.npmjs.org' } },
@@ -80,6 +102,7 @@ const PUBLISH_STEPS = [
 	{ name: 'Set up pinned Node and npm registry', uses: SETUP_NODE, with: { 'node-version-file': '.nvmrc', 'registry-url': 'https://registry.npmjs.org' } },
 	{ name: 'Install OIDC-capable npm', run: 'npm install --global npm@11.5.1' },
 	{ name: 'Download the retained publication artifact', uses: DOWNLOAD_ARTIFACT, with: { name: ARTIFACT_NAME, path: 'release-artifacts' } },
+	{ name: 'Refuse to publish anything but the verified bytes', shell: 'pwsh', run: DIGEST_RUN },
 	{ name: 'Publish exact tarball to quarantine with trusted OIDC', run: 'npm publish "release-artifacts/${{ needs.verify.outputs.filename }}" --tag candidate' }
 ];
 
@@ -156,8 +179,14 @@ export function validateReleaseWorkflow(source, pkg, policy) {
 	if (!same(verify.permissions, { contents: 'read' })) {
 		errors.push('verify job permissions must be exactly contents read - it must never hold a publication identity');
 	}
-	if (!same(verify.outputs, { filename: '${{ steps.pack.outputs.filename }}' })) {
-		errors.push('verify job must publish exactly the packed filename as its output');
+	// The digest is an output, not a file beside the tarball: an output is
+	// written by the verify job and read by the publish job through the run
+	// context, so it does not travel inside the artifact it authenticates.
+	if (!same(verify.outputs, {
+		filename: '${{ steps.pack.outputs.filename }}',
+		sha256: '${{ steps.pack.outputs.sha256 }}'
+	})) {
+		errors.push('verify job must publish exactly the packed filename and its digest as outputs');
 	}
 	checkSteps(errors, 'verify job', verify, VERIFY_STEPS);
 

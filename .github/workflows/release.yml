@@ -34,6 +34,7 @@ jobs:
       contents: read
     outputs:
       filename: ${{ steps.pack.outputs.filename }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
     steps:
       - name: Check out immutable tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -77,8 +78,10 @@ jobs:
           if ($filename -notmatch '^[a-z0-9._-]+\.tgz$') { throw 'npm pack returned an unsafe artifact name' }
           $tarball = 'release-artifacts/' + $filename
           if (-not (Test-Path -LiteralPath $tarball -PathType Leaf)) { throw 'retained tarball is missing' }
+          $sha256 = (Get-FileHash -LiteralPath $tarball -Algorithm SHA256).Hash.ToLowerInvariant()
           'tarball=' + $tarball >> $env:GITHUB_OUTPUT
           'filename=' + $filename >> $env:GITHUB_OUTPUT
+          'sha256=' + $sha256 >> $env:GITHUB_OUTPUT
 
       - name: Retain exact publication artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -119,6 +122,25 @@ jobs:
         with:
           name: npm-candidate-${{ github.run_attempt }}
           path: release-artifacts
+
+      # download-artifact checks the artifact digest itself, but a mismatch is
+      # only a warning in the run log - the job keeps going and publishes. The
+      # two-job split moved the publication identity away from the test suite;
+      # without this, the artifact handed between the jobs reopens the same hole
+      # from the other side. Nothing but a byte comparison closes it.
+      - name: Refuse to publish anything but the verified bytes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = '${{ needs.verify.outputs.sha256 }}'
+          if ($expected -notmatch '^[0-9a-f]{64}$') { throw 'the verify job produced no usable digest' }
+          $filename = '${{ needs.verify.outputs.filename }}'
+          if ($filename -notmatch '^[a-z0-9._-]+\.tgz$') { throw 'refusing an unsafe artifact name' }
+          $tarball = 'release-artifacts/' + $filename
+          if (-not (Test-Path -LiteralPath $tarball -PathType Leaf)) { throw 'downloaded tarball is missing' }
+          $actual = (Get-FileHash -LiteralPath $tarball -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw 'downloaded tarball is not the verified artifact' }
+          'verified digest ' + $actual
 
       - name: Publish exact tarball to quarantine with trusted OIDC
         run: npm publish "release-artifacts/${{ needs.verify.outputs.filename }}" --tag candidate

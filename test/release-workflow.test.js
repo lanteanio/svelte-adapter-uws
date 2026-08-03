@@ -257,6 +257,105 @@ describe('trusted release workflow', () => {
 		expect(verifyFirst).not.toBe(workflow);
 		expect(validateReleaseWorkflow(verifyFirst, pkg, policy).join('\n')).toContain('exactly, in order');
 	});
+
+	// The structural mutations below prove the comparison cannot be REMOVED. This
+	// proves it WORKS, by running the step's own script text - lifted out of the
+	// workflow rather than retyped, so the two cannot drift - against real files.
+	// A comparison that is present but wrong satisfies every structural check.
+	//
+	// Skipped only where no PowerShell exists. GitHub's Ubuntu and Windows
+	// runners both ship one, so the hosted gate always executes this.
+	it('refuses, as a real process, any bytes that are not the verified ones', async () => {
+		const { spawnSync } = await import('node:child_process');
+		const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+		const { tmpdir } = await import('node:os');
+		const { join } = await import('node:path');
+		const { createHash } = await import('node:crypto');
+		const { parse } = await import('yaml');
+
+		const shell = ['pwsh', 'powershell'].find((bin) => {
+			try {
+				return spawnSync(bin, ['-NoProfile', '-Command', 'exit 0'], { stdio: 'ignore' }).status === 0;
+			} catch { return false; }
+		});
+		if (!shell) {
+			console.warn('[release-workflow] no PowerShell interpreter; digest execution not verified here');
+			return;
+		}
+
+		const step = parse(workflow).jobs.publish.steps
+			.find((entry) => entry.name === 'Refuse to publish anything but the verified bytes');
+		expect(step?.run, 'the digest comparison step is gone').toBeTruthy();
+
+		const filename = 'svelte-adapter-uws-0.0.0-probe.tgz';
+		// Passed as -Command rather than written to a .ps1 and run with -File:
+		// Windows blocks script FILES under the default execution policy, which
+		// would have made every case below exit non-zero and turned the tamper
+		// assertions green for a reason that has nothing to do with the digest.
+		const gate = (bytes, expectedDigest) => {
+			const dir = mkdtempSync(join(tmpdir(), 'adapter-uws-digest-'));
+			mkdirSync(join(dir, 'release-artifacts'), { recursive: true });
+			writeFileSync(join(dir, 'release-artifacts', filename), bytes);
+			const script = step.run
+				.replaceAll('${{ needs.verify.outputs.sha256 }}', expectedDigest)
+				.replaceAll('${{ needs.verify.outputs.filename }}', filename);
+			return spawnSync(shell, ['-NoProfile', '-Command', script], { cwd: dir, encoding: 'utf8' });
+		};
+
+		const verified = Buffer.from('the bytes the verify job packed');
+		const digest = createHash('sha256').update(verified).digest('hex');
+
+		expect(gate(verified, digest).status, 'the verified bytes were refused').toBe(0);
+		// One flipped byte is the entire attack.
+		expect(gate(Buffer.from('the bytes the verify job packeD'), digest).status).not.toBe(0);
+		expect(gate(Buffer.concat([verified, Buffer.from('x')]), digest).status).not.toBe(0);
+		// A verify job that produced no digest must not be publishable either,
+		// or removing the digest becomes the way around the comparison.
+		expect(gate(verified, '').status).not.toBe(0);
+	}, 60_000);
+
+	it('cannot lose the digest boundary between the two jobs', () => {
+		// The two-job split keeps the publication identity away from npm ci and
+		// the suite. The artifact handed between them is where the verified bytes
+		// leave this workflow's control, and download-artifact's own digest check
+		// only WARNS on a mismatch - the job continues and publishes. Each mutation
+		// below is a way to be left publishing bytes nobody verified.
+		const mutations = [
+			// The comparison step deleted outright.
+			workflow.replace(/      # download-artifact checks[\s\S]*?'verified digest ' \+ \$actual\n\n/, ''),
+			// The digest no longer crosses the job boundary, so nothing can compare.
+			workflow.replace('      sha256: ${{ steps.pack.outputs.sha256 }}\n', ''),
+			// Never computed in the first place.
+			workflow.replace(
+				"          $sha256 = (Get-FileHash -LiteralPath $tarball -Algorithm SHA256).Hash.ToLowerInvariant()\n",
+				''
+			),
+			// The comparison inverted - passes precisely when the bytes differ.
+			workflow.replace(
+				"if ($actual -ne $expected) { throw 'downloaded tarball is not the verified artifact' }",
+				"if ($actual -eq $expected) { throw 'downloaded tarball is not the verified artifact' }"
+			),
+			// Compared, then reported instead of refused.
+			workflow.replace(
+				"if ($actual -ne $expected) { throw 'downloaded tarball is not the verified artifact' }",
+				"if ($actual -ne $expected) { Write-Host 'digest mismatch' }"
+			),
+			// Compared after the publish it was supposed to guard.
+			workflow.replace(
+				'      - name: Refuse to publish anything but the verified bytes',
+				'      - name: Publish exact tarball to quarantine with trusted OIDC\n' +
+				'        run: npm publish "release-artifacts/${{ needs.verify.outputs.filename }}" --tag candidate\n\n' +
+				'      - name: Refuse to publish anything but the verified bytes'
+			)
+		];
+		for (const [index, mutated] of mutations.entries()) {
+			expect(mutated, 'mutation ' + index + ' did not change the workflow').not.toBe(workflow);
+			expect(
+				validateReleaseWorkflow(mutated, pkg, policy).length,
+				'mutation ' + index + ' was accepted'
+			).toBeGreaterThan(0);
+		}
+	});
 });
 
 describe('release source identity', () => {

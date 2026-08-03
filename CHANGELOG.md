@@ -472,6 +472,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Publication refuses any tarball that is not the verified bytes.** The
+  release path packs and retains the artifact in a job holding no publication
+  identity, then publishes it from a job that does. Only the filename crossed
+  that boundary. `download-artifact` does check the artifact digest, but a
+  mismatch is reported as a warning and the job continues, so the transfer
+  between the two jobs was the one place a swapped artifact could still be
+  published - reopening from the other side the gap the split had closed. The
+  verify job now exposes the tarball's SHA-256 as a job output, and the publish
+  job recomputes it after download and refuses to continue on a mismatch, on a
+  missing or malformed digest, or on an unsafe artifact name.
 - **A fixture build that produces no runnable handler fails instead of
   silently reusing the last one.** The shared fixture build reran Vite whenever
   the source digest changed, but it never cleared the variant's output
