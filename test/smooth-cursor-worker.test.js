@@ -151,6 +151,28 @@ describe('smoothing handshake', () => {
 });
 
 describe('interpolated rendering', () => {
+	it('reduced motion paints one discrete wire state and suppresses synthetic frames', () => {
+		const { scope, ctrl, canvas, sock } = boot({ reducedMotion: true });
+		const serverBase = 900_000;
+		const wire = openSmoothed(ctrl, sock(), serverBase);
+		wire.sendStamped(0, 0, serverBase);
+		wire.sendStamped(100, 0, serverBase + 100);
+		wire.sendStamped(100, 0, serverBase + 200);
+
+		sleepFrames(1);
+		expect(arcs(canvas)).toHaveLength(1);
+		expect(arcs(canvas)[0][1]).toBeCloseTo(100, 5);
+		const opsAfterDiscretePaint = canvas.ctx.ops.length;
+		sleepFrames(20);
+		expect(canvas.ctx.ops.length).toBe(opsAfterDiscretePaint);
+		expect(scope.__cursorWorkerDebug.smoothing).toBe(true);
+		expect(scope.__cursorWorkerDebug.reducedMotion).toBe(true);
+
+		ctrl.handleMessage({ type: 'motion', reduced: false });
+		expect(scope.__cursorWorkerDebug.reducedMotion).toBe(false);
+		expect(ctrl._smoother.size).toBe(0);
+	});
+
 	it('paints frames BETWEEN wire frames and settles when motion is played out', () => {
 		const { ctrl, canvas, sock } = boot();
 		const serverBase = 1_000_000;

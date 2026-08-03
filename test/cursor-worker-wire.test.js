@@ -149,6 +149,8 @@ describeUWS('cursor render worker against a real server', () => {
 			phoneNumber: '+1-555-0100',
 			userphone: '+1-555-0101',
 			msisdn: '15550102',
+			medicalDiagnosis: 'private',
+			rawHeaders: ['authorization', 'Bearer secret', 'cookie', 'sid=secret'],
 			ip: '203.0.113.9',
 			remoteAddress: '203.0.113.9'
 		});
@@ -164,7 +166,7 @@ describeUWS('cursor render worker against a real server', () => {
 		const { ctrl } = bootWorker(server.wsUrl);
 		await until(() => ctrl._state.userMap.size === 1);
 		const [user] = [...ctrl._state.userMap.values()];
-		expect(user).toEqual({ id: 'u-1', name: 'Ada' });
+		expect(user).toEqual({ id: 'u-1' });
 		expect(ctrl._wireIds.size).toBeGreaterThanOrEqual(1);
 
 		mover.ws.close();

@@ -177,7 +177,10 @@ export interface CursorCanvasOptions extends CursorStoreOptions {
 	 * motion snaps constantly); `0` turns both off. It is a speed and not a
 	 * distance so a dropped frame, whose pair legitimately spans several
 	 * intervals, does not read as a jump. Requires a canvas (the plain store
-	 * has no render loop). Off by default.
+	 * has no render loop). Off by default. When the browser's
+	 * `prefers-reduced-motion: reduce` query matches, interpolation pauses
+	 * automatically and the renderer paints only discrete wire changes. The
+	 * live preference is restored without replacing the handle.
 	 */
 	smooth?: boolean | {
 		interpolationMs?: 'auto' | number;

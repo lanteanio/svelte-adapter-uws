@@ -762,6 +762,58 @@ function cursorOnCanvas(topic, options) {
 	// Fallback internals.
 	let fallback = null;
 
+	// Motion preference is a live browser setting, not a construction-time
+	// hint. The renderer keeps ingesting the latest cursor state while reduced
+	// motion is active, but paints only discrete wire changes and never plays
+	// interpolated frames between them. This also makes a preference change
+	// take effect without replacing the canvas handle.
+	let reducedMotion = false;
+	let motionQuery = null;
+	let motionQueryListener = null;
+
+	function applyMotionPreference(reduced) {
+		const next = reduced === true;
+		if (next === reducedMotion) return;
+		reducedMotion = next;
+		if (host.worker && initSent) {
+			host.worker.postMessage({ type: 'motion', reduced: reducedMotion });
+		}
+		if (fallback) {
+			if (fallback.smoother) fallback.smoother.reset();
+			fallback.reducedMotion = reducedMotion;
+			fallback.dirty = true;
+		}
+	}
+
+	function watchMotionPreference() {
+		if (motionQuery !== null || typeof window.matchMedia !== 'function') return;
+		try {
+			motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+			applyMotionPreference(motionQuery.matches === true);
+			motionQueryListener = (event) => applyMotionPreference(event.matches === true);
+			if (typeof motionQuery.addEventListener === 'function') {
+				motionQuery.addEventListener('change', motionQueryListener);
+			} else if (typeof motionQuery.addListener === 'function') {
+				motionQuery.addListener(motionQueryListener);
+			}
+		} catch {
+			motionQuery = null;
+			motionQueryListener = null;
+		}
+	}
+
+	function unwatchMotionPreference() {
+		if (motionQuery && motionQueryListener) {
+			if (typeof motionQuery.removeEventListener === 'function') {
+				motionQuery.removeEventListener('change', motionQueryListener);
+			} else if (typeof motionQuery.removeListener === 'function') {
+				motionQuery.removeListener(motionQueryListener);
+			}
+		}
+		motionQuery = null;
+		motionQueryListener = null;
+	}
+
 	function ensureWorker() {
 		if (host.worker) return host.worker;
 		// Throws InvalidStateError when the surface was already transferred
@@ -867,6 +919,7 @@ function cursorOnCanvas(topic, options) {
 			maxAge,
 			feedRate,
 			smooth,
+			reducedMotion,
 			hideSelf
 		};
 		if (!host.canvasSent) {
@@ -919,6 +972,7 @@ function cursorOnCanvas(topic, options) {
 		return function teardown() {
 			if (--refCount > 0) return;
 			stopPump();
+			unwatchMotionPreference();
 			unwatchSelf();
 			if (statusUnsub) { statusUnsub(); statusUnsub = null; }
 			if (host.worker && initSent) host.worker.postMessage({ type: 'pause' });
@@ -948,7 +1002,9 @@ function cursorOnCanvas(topic, options) {
 			feedTimer: null,
 			unsub: null,
 			tapUnsub: null,
-			statusUnsub: null
+			statusUnsub: null,
+			smoother: null,
+			reducedMotion
 		};
 		fallback = fb;
 
@@ -977,6 +1033,7 @@ function cursorOnCanvas(topic, options) {
 				if (s === 'open') smoother.reset();
 			});
 		}
+		fb.smoother = smoother;
 		fb.unsub = source.subscribe((map) => {
 			fb.merged = map;
 			fb.dirty = true;
@@ -1010,12 +1067,13 @@ function cursorOnCanvas(topic, options) {
 			if (sig !== fb.rectSig) { fb.rectSig = sig; fb.dirty = true; }
 			// Same widened gate as the worker loop: keep painting while any
 			// ring holds un-played motion, close again once everything settles.
-			if (!fb.dirty && !(smoother !== null && smoother.motionPending)) return;
+			const sampleMotion = smoother !== null && !fb.reducedMotion;
+			if (!fb.dirty && !(sampleMotion && smoother.motionPending)) return;
 			fb.dirty = false;
 			fb.renderer = selectRenderer(canvas, { gpu, gpuThreshold, devicePixelRatio: dpr, lastCount: fb.lastCount }, fb.renderer);
 			fb.renderer.resize(rect.w * zoom, rect.h * zoom, dpr);
 			visible.length = 0;
-			const renderTime = smoother !== null ? smoother.beginFrame(monotonicNow()) : 0;
+			const renderTime = sampleMotion ? smoother.beginFrame(monotonicNow()) : 0;
 			const pad = 8 / zoom;
 			const minX = rect.x - pad, maxX = rect.x + rect.w + pad;
 			const minY = rect.y - pad, maxY = rect.y + rect.h + pad;
@@ -1028,7 +1086,7 @@ function cursorOnCanvas(topic, options) {
 				if (data === null || typeof data !== 'object') continue;
 				let x = data.x, y = data.y;
 				if (typeof x !== 'number' || typeof y !== 'number') continue;
-				if (smoother !== null && smoother.sampleInto(key, renderTime, fbSample) !== SAMPLE_EMPTY) {
+				if (sampleMotion && smoother.sampleInto(key, renderTime, fbSample) !== SAMPLE_EMPTY) {
 					x = fbSample.x;
 					y = fbSample.y;
 				}
@@ -1080,6 +1138,7 @@ function cursorOnCanvas(topic, options) {
 
 		return function teardown() {
 			if (--refCount > 0) return;
+			unwatchMotionPreference();
 			unwatchSelf();
 			if (fb.unsub) fb.unsub();
 			if (fb.tapUnsub) fb.tapUnsub();
@@ -1120,16 +1179,19 @@ function cursorOnCanvas(topic, options) {
 			}
 			everMounted = true;
 			if (refCount++ > 0) return teardownOnce();
+			watchMotionPreference();
 			const workerViable =
 				typeof Worker !== 'undefined' &&
 				typeof OffscreenCanvas !== 'undefined' &&
 				typeof canvas.transferControlToOffscreen === 'function';
 			if (rendering === 'worker' && !workerViable) {
 				refCount--;
+				unwatchMotionPreference();
 				throw new Error('cursor: rendering "worker" requires Worker, OffscreenCanvas and transferControlToOffscreen; this browser lacks them - use rendering "auto" to fall back to main-thread rendering');
 			}
 			if (host.activeTopic !== null && host.activeTopic !== topic) {
 				refCount--;
+				unwatchMotionPreference();
 				throw new Error('cursor: canvas is already rendering topic ' + JSON.stringify(host.activeTopic) + '; one canvas renders one topic at a time');
 			}
 			const useWorker = workerViable && rendering !== 'main';

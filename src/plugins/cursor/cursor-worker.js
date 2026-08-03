@@ -113,6 +113,10 @@ export function attachCursorWorker(scope) {
 	let smoothCfg = null;
 	/** @type {ReturnType<typeof createSmoother> | null} */
 	let smoother = null;
+	// A reduced-motion pipeline still ingests the newest cursor position, but
+	// never synthesizes in-between frames. Wire changes remain visible as
+	// discrete updates and the render loop returns to its ordinary dirty gate.
+	let reducedMotion = false;
 	// Monotonic send time of the last snapshot request, pairing the server's
 	// time reply into a measurable round trip for the clock estimator.
 	let snapshotSentMono = -1;
@@ -378,11 +382,12 @@ export function attachCursorWorker(scope) {
 		// render time, live extrapolation) the loop must keep painting frames
 		// no new wire data produced - then the gate closes again once every
 		// entity settles.
-		if (!dirty && !(smoother !== null && smoother.motionPending)) return;
+		const sampleMotion = smoother !== null && !reducedMotion;
+		if (!dirty && !(sampleMotion && smoother.motionPending)) return;
 		const r = ensureRenderer();
 		if (!r) return;
 		dirty = false;
-		buildVisible(smoother !== null);
+		buildVisible(sampleMotion);
 		lastVisibleCount = visible.length;
 		r.render(visible, visible.length);
 	}
@@ -504,6 +509,7 @@ export function attachCursorWorker(scope) {
 				snapGapMs: typeof msg.smooth.snapGapMs === 'number' ? msg.smooth.snapGapMs : 500,
 				snapSpeedPerSec: typeof msg.smooth.snapSpeedPerSec === 'number' ? msg.smooth.snapSpeedPerSec : 'auto'
 			} : null;
+			reducedMotion = msg.reducedMotion === true;
 			hideSelf = msg.hideSelf === true;
 			renderOpts = {
 				gpu: msg.gpu === undefined ? 'auto' : msg.gpu,
@@ -554,6 +560,15 @@ export function attachCursorWorker(scope) {
 			return;
 		}
 
+		if (msg.type === 'motion') {
+			const next = msg.reduced === true;
+			if (next === reducedMotion) return;
+			reducedMotion = next;
+			if (smoother) smoother.reset();
+			markDirty();
+			return;
+		}
+
 		if (msg.type === 'pause') {
 			if (phase === 'running') stopRuntime();
 			phase = 'paused';
@@ -588,6 +603,7 @@ export function attachCursorWorker(scope) {
 				get hasRect() { return rect !== null; },
 				get lastVisible() { return lastVisibleCount; },
 				get smoothing() { return smoother !== null; },
+				get reducedMotion() { return reducedMotion; },
 				get smoothRings() { return smoother === null ? 0 : smoother.size; },
 				get smoothDelayMs() { return smoother === null ? 0 : smoother.delay; },
 				get smoothMotionPending() { return smoother !== null && smoother.motionPending; },

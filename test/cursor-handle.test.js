@@ -174,6 +174,42 @@ describe('self identity', () => {
 });
 
 describe('worker mount', () => {
+	it('tracks the live reduced-motion media query and forwards it to the worker', async () => {
+		const listeners = new Set();
+		const query = {
+			matches: true,
+			addEventListener(type, listener) {
+				if (type === 'change') listeners.add(listener);
+			},
+			removeEventListener(type, listener) {
+				if (type === 'change') listeners.delete(listener);
+			}
+		};
+		const previous = globalThis.window.matchMedia;
+		globalThis.window.matchMedia = (value) => {
+			expect(value).toBe('(prefers-reduced-motion: reduce)');
+			return query;
+		};
+		try {
+			const handle = cursorClient.cursor(freshTopic(), { canvas: makeCanvas(), smooth: true });
+			const teardown = handle.mount();
+			await flush();
+			const worker = MockWorker.instances[0];
+			expect(initsOf(worker)[0].msg.reducedMotion).toBe(true);
+			expect(listeners.size).toBe(1);
+
+			query.matches = false;
+			for (const listener of listeners) listener({ matches: false });
+			expect(ofType(worker, 'motion').at(-1).msg).toEqual({ type: 'motion', reduced: false });
+
+			teardown();
+			expect(listeners.size).toBe(0);
+		} finally {
+			if (previous === undefined) delete globalThis.window.matchMedia;
+			else globalThis.window.matchMedia = previous;
+		}
+	});
+
 	it('spawns one module worker after the main connection opens, transfers the canvas once, and pumps the viewport', async () => {
 		const canvas = makeCanvas();
 		const topic = freshTopic();
@@ -354,6 +390,39 @@ describe('feed, roster, and display config', () => {
 });
 
 describe('main-thread fallback', () => {
+	it('reduced motion keeps smoothing to discrete dirty paints on the main thread', async () => {
+		const previous = globalThis.window.matchMedia;
+		globalThis.window.matchMedia = () => ({
+			matches: true,
+			addEventListener() {},
+			removeEventListener() {}
+		});
+		try {
+			const canvas = makeCanvas();
+			const topic = freshTopic();
+			const handle = cursorClient.cursor(topic, { canvas, rendering: 'main', smooth: true });
+			const teardown = handle.mount();
+			await flush();
+
+			const mock = MockWebSocket._last;
+			mock.emit({ topic: '__cursor:' + topic, event: 'catalog', data: [{ key: 'u1', user: {} }] });
+			mock.emit({ topic: '__cursor:' + topic, event: 'update', data: { key: 'u1', data: { x: 10, y: 20 } } });
+			mock.emit({ topic: '__cursor:' + topic, event: 'update', data: { key: 'u1', data: { x: 50, y: 20 } } });
+			await flush(30);
+
+			const arcs = canvas.ctx.ops.filter((op) => op[0] === 'arc');
+			expect(arcs.length).toBeGreaterThanOrEqual(1);
+			expect(arcs.every((arc) => arc[1] === 100 && arc[2] === 40)).toBe(true);
+			const paints = arcs.length;
+			await flush(30);
+			expect(canvas.ctx.ops.filter((op) => op[0] === 'arc')).toHaveLength(paints);
+			teardown();
+		} finally {
+			if (previous === undefined) delete globalThis.window.matchMedia;
+			else globalThis.window.matchMedia = previous;
+		}
+	});
+
 	it('rendering "main" never spawns a worker, exposes the classic store, and paints via the shared renderers', async () => {
 		const canvas = makeCanvas();
 		const topic = freshTopic();

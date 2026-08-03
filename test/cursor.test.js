@@ -146,16 +146,16 @@ describe('cursor plugin - server', () => {
 			expect(join.data.user.secret).toBeUndefined();
 		});
 
-		it('without select, the join event carries userData minus sensitive keys', () => {
+		it('without select, the join event carries only a stable id', () => {
 			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({ id: '1', role: 'admin' });
 			c.update(ws, 'room', { x: 5, y: 5 }, platform);
 
 			const join = pubs(platform, 'join')[0];
-			expect(join.data.user).toEqual({ id: '1', role: 'admin' });
+			expect(join.data.user).toEqual({ id: '1' });
 		});
 
-		it('default select strips remoteAddress and credential-shaped keys, keeps id/name/position fields', () => {
+		it('default select omits profile, transport, medical, and credential fields', () => {
 			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			// Shaped like a real upgrade hook's userData plus the adapter's
 			// injected remoteAddress (src/runtime/handler.js).
@@ -164,27 +164,18 @@ describe('cursor plugin - server', () => {
 				name: 'Vera',
 				position: { x: 1, y: 2 },
 				remoteAddress: '203.0.113.7',
+				rawHeaders: ['authorization', 'Bearer secret', 'cookie', 'sid=secret'],
+				medicalDiagnosis: 'private',
 				sessionToken: 'sess_9f8e7d6c',
 				apiKey: 'ak_live_1234'
 			});
 			c.update(ws, 'room', { x: 5, y: 5 }, platform);
 
 			const join = pubs(platform, 'join')[0];
-			expect(join.data.user).toEqual({ id: 'u-7', name: 'Vera', position: { x: 1, y: 2 } });
+			expect(join.data.user).toEqual({ id: 'u-7' });
 		});
 
-		it('applies the same predicates as the presence default, apart from the key field', () => {
-			// Both defaults read plugins/_shared/sensitive.js. This pins the
-			// parity the doc blocks on both plugins claim, so a future tuning
-			// of one surface cannot silently diverge from the other.
-			//
-			// The presence tracker below uses a NON-exempt key (`id`) on
-			// purpose: presence exempts its configured dedup key field and
-			// cursor has no dedup key, so a credential-shaped key would make
-			// the two legitimately differ. The exemption itself is pinned
-			// separately, in the presence suite and in the divergence test
-			// below - a parity test run only on the default key would pass
-			// while the surfaces disagreed for every app that sets one.
+		it('matches presence on the shared identity-only zero-config contract', () => {
 			const userData = {
 				id: 'u-7',
 				name: 'Vera',
@@ -205,12 +196,8 @@ describe('cursor plugin - server', () => {
 			p.join(mockWs({ ...userData }), 'room', presencePlatform);
 			const presenceUser = presencePlatform.sent[0].data['u-7'];
 
-			expect(Object.keys(cursorUser).sort()).toEqual(Object.keys(presenceUser).sort());
-			expect(cursorUser).toEqual({
-				id: 'u-7', name: 'Vera',
-				primaryKey: 'pkey', foreignKey: 'fkey', sortKey: 'skey',
-				publicKey: 'ssh-ed25519', monkey: 'see', keyboard: 'cowboy'
-			});
+			expect(cursorUser).toEqual({ id: 'u-7' });
+			expect(presenceUser).toEqual({ id: 'u-7' });
 		});
 
 		it('default select strips sensitive keys from the snapshot catalog too', async () => {
@@ -223,7 +210,7 @@ describe('cursor plugin - server', () => {
 			await c.snapshot(reader, 'room', platform);
 
 			const catalog = platform.sent.find((s) => s.event === 'catalog');
-			expect(catalog.data).toEqual([{ key: expect.any(String), user: { id: '1', name: 'Alice' } }]);
+			expect(catalog.data).toEqual([{ key: expect.any(String), user: { id: '1' } }]);
 		});
 
 		it('does not retain flat contact identifiers in joins, list(), or the snapshot catalog', async () => {
@@ -239,16 +226,16 @@ describe('cursor plugin - server', () => {
 			});
 
 			c.update(writer, 'room', { x: 1, y: 1 }, platform);
-			expect(pubs(platform, 'join')[0].data.user).toEqual({ id: '1', name: 'Alice' });
-			expect(c.list('room')[0].user).toEqual({ id: '1', name: 'Alice' });
+			expect(pubs(platform, 'join')[0].data.user).toEqual({ id: '1' });
+			expect(c.list('room')[0].user).toEqual({ id: '1' });
 			platform.reset();
 
 			await c.snapshot(mockWs({ id: '2' }), 'room', platform);
 			const catalog = platform.sent.find((s) => s.event === 'catalog');
-			expect(catalog.data).toEqual([{ key: expect.any(String), user: { id: '1', name: 'Alice' } }]);
+			expect(catalog.data).toEqual([{ key: expect.any(String), user: { id: '1' } }]);
 		});
 
-		it('default select strips nested and __-prefixed keys recursively', () => {
+		it('default select does not inspect nested or __-prefixed profile data', () => {
 			const c = createCursor({ throttle: 0, topicThrottle: 0 });
 			const ws = mockWs({
 				id: '1',
@@ -258,7 +245,7 @@ describe('cursor plugin - server', () => {
 			c.update(ws, 'room', { x: 0, y: 0 }, platform);
 
 			const join = pubs(platform, 'join')[0];
-			expect(join.data.user).toEqual({ id: '1', meta: { color: 'red', nested: {} } });
+			expect(join.data.user).toEqual({ id: '1' });
 		});
 	});
 
