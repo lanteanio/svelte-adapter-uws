@@ -12,7 +12,7 @@ import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, W
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { createConnectionPermitCarrier } from './runtime/utils/connection-permit.js';
-import { assertWireSubscribeAuthorization } from './config-guards.js';
+import { assertWireSubscribeAuthorization, assertProtectiveNumber } from './config-guards.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
 import { runtimeVersionInfo } from './runtime/version-info.js';
 import { ADAPTER_ERROR_IDS, adapterErrorMessage } from './runtime/error-registry.js';
@@ -127,15 +127,15 @@ export async function createTestServer(options = {}) {
 	// The receiver stores its limit as a signed 32-bit integer, so a value
 	// above it (or a fractional one) is silently truncated by the native
 	// layer while the reported number keeps the caller's figure - the same
-	// report-versus-enforce split in the other direction. Same guard as the
-	// Vite dev plugin.
-	if (typeof maxPayloadLength !== 'number' || !Number.isSafeInteger(maxPayloadLength) ||
-		maxPayloadLength < 1 || maxPayloadLength > 0x7fffffff) {
-		throw new Error(
-			'createTestServer maxPayloadLength must be a positive integer no greater than 2147483647 bytes, ' +
-			'because the receiver stores its limit as a signed 32-bit integer, got ' + String(maxPayloadLength)
-		);
-	}
+	// report-versus-enforce split in the other direction. One guard, shared
+	// with the production and Vite surfaces, so the bound cannot drift.
+	assertProtectiveNumber(options, 'maxPayloadLength', 'the createTestServer option maxPayloadLength', {
+		allowZero: false,
+		ceiling: 0x7fffffff,
+		zeroMeans:
+			'the receiver reads a zero maximum payload as a refusal of all traffic, not as a ' +
+			'disabled limit. Raise the limit instead.'
+	});
 
 	// Lifecycle state, mirroring the production state machine
 	// (runtime/handler/lifecycle.js) rather than a boolean: `starting` while the

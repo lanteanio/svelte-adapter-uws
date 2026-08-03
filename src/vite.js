@@ -73,19 +73,15 @@ export default function uws(options = {}) {
 	// adapter's: a string from process.env does not become a resource bound.
 	assertProtectiveNumber(options, 'maxPayloadLength', 'the uws() dev plugin option maxPayloadLength', {
 		allowZero: false,
+		// ws stores the receiver limit in a signed 32-bit integer, exactly as uWS
+		// does on the production surface. The bound belongs to the shared guard so
+		// the three surfaces cannot drift: this one was previously a hand-rolled
+		// copy sitting after the call, and testing.js had a third spelling.
+		ceiling: 0x7fffffff,
 		zeroMeans:
 			'ws reads maxPayload 0 as UNLIMITED, the opposite of a zero-byte ceiling. ' +
 			'Use a positive byte limit instead.'
 	});
-	if (options.maxPayloadLength != null && (
-		!Number.isSafeInteger(options.maxPayloadLength) ||
-		options.maxPayloadLength > 0x7fffffff
-	)) {
-		throw new Error(
-			'the uws() dev plugin option maxPayloadLength must be a positive integer no greater ' +
-			'than 2147483647 bytes, because ws stores the receiver limit as a signed 32-bit integer'
-		);
-	}
 	// `timeoutMs: process.env.X` is a string when set, and every
 	// comparison against a non-number is false, so a misshaped value would not
 	// fall back to the default - it would disable the timeout. Other adapter

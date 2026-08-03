@@ -301,3 +301,43 @@ describe('an unknown key nested inside an option object is reported', () => {
 		}
 	});
 });
+
+describe('the payload ceiling is one guard, not three copies of it', () => {
+	// All three surfaces hand the receiver limit to something that stores it in
+	// a signed 32-bit integer, so a larger or fractional value is truncated
+	// there while the configured figure is what gets reported back. Each surface
+	// used to carry its own spelling of the check: production called the shared
+	// guard, the dev plugin called it WITHOUT a ceiling and then repeated the
+	// bound by hand afterwards, and createTestServer had a third hand-rolled
+	// copy. Three copies is three chances for the bound to drift, so the refusal
+	// message is asserted here too - a surface that stops routing through the
+	// shared guard can still refuse, but not in these words.
+	const SHARED_REFUSAL = /must be an integer no greater than 2147483647, because the receiver stores this bound in a fixed-width integer/;
+
+	for (const value of [2 ** 32 + 1024, 1024.5]) {
+		it(`production refuses ${value} through the shared guard`, () => {
+			expect(() => serializeWsOptions({ maxPayloadLength: value }, false)).toThrow(SHARED_REFUSAL);
+		});
+
+		it(`the dev plugin refuses ${value} through the shared guard`, () => {
+			expect(() => uws({ maxPayloadLength: value })).toThrow(SHARED_REFUSAL);
+		});
+
+		it(`createTestServer refuses ${value} through the shared guard`, async () => {
+			await expect(createTestServer({ maxPayloadLength: value })).rejects.toThrow(SHARED_REFUSAL);
+		});
+	}
+
+	// The boundary itself is admitted everywhere, so the guard is a ceiling and
+	// not a blanket refusal that would pass the cases above for the wrong reason.
+	it('every surface admits the exact ceiling', async () => {
+		expect(() => serializeWsOptions({ maxPayloadLength: 0x7fffffff }, false)).not.toThrow();
+		expect(() => uws({ maxPayloadLength: 0x7fffffff })).not.toThrow();
+		const server = await createTestServer({ maxPayloadLength: 0x7fffffff });
+		try {
+			expect(server.platform.maxPayloadLength).toBe(0x7fffffff);
+		} finally {
+			await server.close();
+		}
+	});
+});
