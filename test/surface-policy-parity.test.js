@@ -1290,6 +1290,43 @@ describe('every observer lane revalidates its grant after the async hook', () =>
 			expect(awaits, `${file} checkSubscribe should have one authorization await`).toHaveLength(1);
 			expect(calls[0].start).toBeLessThan(awaits[0].start);
 			expect(calls[1].start).toBeGreaterThan(awaits[0].end);
+
+			// Position alone is not enforcement. This lane has no second line
+			// of defence, and both gates can be left syntactically present but
+			// permanently inert - `denies(...) && x && !x` keeps the calls,
+			// the order and the await, and denies nothing. So each result must
+			// reach control flow, and its guard must not carry a contradictory
+			// conjunct that can never be true.
+			for (const call of calls) {
+				const entry = nodes.find(({ node }) => node === call);
+				expect(
+					resultIsConsumed(entry, nodes),
+					`${file} observer decision at ${call.loc.start.line} must reach control flow`
+				).toBe(true);
+
+				const guard = entry.ancestors.find((a) => a.type === 'IfStatement' || a.type === 'ConditionalExpression');
+				if (!guard) continue;
+				const negated = new Set();
+				const plain = new Set();
+				const walk = (n) => {
+					if (!n || typeof n.type !== 'string') return;
+					if (n.type === 'UnaryExpression' && n.operator === '!' && n.argument?.type === 'Identifier') {
+						// Record the negation and STOP: recursing would also
+						// record the same name as a plain use, making every
+						// ordinary `!flag` look self-contradictory.
+						negated.add(n.argument.name);
+						return;
+					}
+					if (n.type === 'Identifier') plain.add(n.name);
+					for (const child of childNodes(n)) walk(child);
+				};
+				walk(guard.test);
+				const contradictory = [...negated].filter((name) => plain.has(name));
+				expect(
+					contradictory,
+					`${file} observer guard at ${call.loc.start.line} carries a conjunct that is never true, so the gate is inert`
+				).toEqual([]);
+			}
 		});
 	}
 });
