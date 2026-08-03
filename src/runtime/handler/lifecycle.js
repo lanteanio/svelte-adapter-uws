@@ -452,7 +452,7 @@ export async function start(host, port, opts) {
 					// Bound, not ready: readiness stays 503 until the init hook commits
 					// below, and saying "ready" here is what let a balancer route into
 					// an instance whose app boot work had not run.
-					console.log(`Listening on ${is_tls ? 'https' : 'http'}://${host}:${port} (bound in ${startup}ms)`);
+					console.log(`[svelte-adapter-uws] Listening on ${is_tls ? 'https' : 'http'}://${host}:${port} (bound in ${startup}ms)`);
 					resolve();
 				} else {
 					emitOperationalDiagnostic(listenFailureDiagnostic(host, port));
@@ -483,7 +483,7 @@ export async function start(host, port, opts) {
 	// must not be pulled back into rotation by its own init finishing.
 	if (lifecycle_state === 'starting') {
 		setLifecycleState('ready');
-		if (doListen) console.log(`Ready for traffic (${(monotonicNow() - _t_app).toFixed(0)}ms since boot)`);
+		if (doListen) console.log(`[svelte-adapter-uws] Ready for traffic (${(monotonicNow() - _t_app).toFixed(0)}ms since boot)`);
 	}
 }
 

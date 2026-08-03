@@ -124,7 +124,7 @@ export function assert(cond, category, context) {
  * Hard-tier framework invariant, for genuinely unrecoverable worker state.
  * On violation: increments the SAME `assertionCounts` map as `assert` (one
  * namespace; the severity rides the structured log as `severity: 'fatal'`),
- * logs an `[oss-realtime/diagnostic source=svelte-adapter-uws component=runtime.assertion event=invariant.violated severity=fatal]` line, and - in production only - schedules a
+ * logs an `[lantean/diagnostic source=svelte-adapter-uws component=runtime.assertion event=invariant.violated severity=fatal]` line, and - in production only - schedules a
  * DEFERRED worker termination with exit code 78. The termination is deferred
  * to a microtask so the current callback frame (often a uWS C++ callback)
  * unwinds before the process goes down; a synchronous exit there risks the

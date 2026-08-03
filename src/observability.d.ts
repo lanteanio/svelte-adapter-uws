@@ -75,7 +75,7 @@ export interface Signal {
 
 export declare const OBSERVABILITY_SCHEMA_VERSION: 1;
 export declare const DIAGNOSTIC_SCHEMA_VERSION: 1;
-export declare const DIAGNOSTIC_PREFIX: 'oss-realtime/diagnostic';
+export declare const DIAGNOSTIC_PREFIX: 'lantean/diagnostic';
 export declare const TELEMETRY_LEVELS: readonly TelemetryLevel[];
 export declare const DATA_CLASSES: Readonly<Record<DataClass, Readonly<{
 	personalData: boolean;

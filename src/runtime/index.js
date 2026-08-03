@@ -189,7 +189,7 @@ if (is_primary) {
 	}
 
 	console.log(
-		`Primary thread starting ${num} workers ` +
+		`[svelte-adapter-uws] Primary thread starting ${num} workers ` +
 		`(${io_count} io${compute_count ? `, ${compute_count} compute` : ''}, ${cluster_mode} mode)...`
 	);
 
@@ -549,7 +549,7 @@ if (is_primary) {
 				meta.lastHeartbeat = monotonicNow();
 				meta.ready = true;
 				acceptorApp.addChildAppDescriptor(msg.descriptor);
-				console.log(`Worker thread ${worker.threadId} registered`);
+				console.log(`[svelte-adapter-uws] Worker thread ${worker.threadId} registered`);
 				// Worker started successfully - mark this slot ready and stamp its
 				// uptime clock. The backoff/attempt budget resets on the NEXT exit,
 				// and only after the worker has stayed up past the stable window.
@@ -562,7 +562,7 @@ if (is_primary) {
 					acceptorApp.listen(host, portNum, (socket) => {
 						if (socket) {
 							listen_socket = socket;
-							console.log(`Acceptor listening on ${is_tls ? 'https' : 'http'}://${host}:${portNum}`);
+							console.log(`[svelte-adapter-uws] Acceptor listening on ${is_tls ? 'https' : 'http'}://${host}:${portNum}`);
 							sdReadyOnce();
 						} else {
 							emitOperationalDiagnostic(listenFailureDiagnostic(host, portNum));
@@ -577,9 +577,9 @@ if (is_primary) {
 				// crash-restart budget resets on a later exit only if it stayed up.
 				meta.lastHeartbeat = monotonicNow();
 				meta.ready = true;
-				if (msg.role === 'compute') console.log(`Compute worker ${worker.threadId} ready`);
+				if (msg.role === 'compute') console.log(`[svelte-adapter-uws] Compute worker ${worker.threadId} ready`);
 				else {
-					console.log(`Worker thread ${worker.threadId} listening on :${port}`);
+					console.log(`[svelte-adapter-uws] Worker thread ${worker.threadId} listening on :${port}`);
 					// First listening worker = the service accepts traffic.
 					sdReadyOnce();
 				}
@@ -644,6 +644,7 @@ if (is_primary) {
 						component: 'runtime.divergence',
 						event: 'divergence.detected',
 						severity: 'error',
+						dataClass: 'pseudonymous',
 						message: 'Cross-worker state divergence was detected; evidence is retained behind the authenticated diagnostic lookup.',
 						attributes: { diagnosticId }
 					});
@@ -809,7 +810,7 @@ if (is_primary) {
 						uWS.us_listen_socket_close(listen_socket);
 						listen_socket = null;
 						listening = false;
-						console.log('All workers down, acceptor paused until a replacement is ready');
+						console.log('[svelte-adapter-uws] All workers down, acceptor paused until a replacement is ready');
 					}
 				}
 				// Charge the attempt against THIS slot only and schedule ITS own
@@ -819,7 +820,7 @@ if (is_primary) {
 				const outcome = restartSupervisor.noteExit(slot);
 				if (outcome && !('exhausted' in outcome)) {
 					console.log(
-						`Worker thread ${deadThreadId} (${slot.role}#${slot.index}) exited with code ${code}, ` +
+						`[svelte-adapter-uws] Worker thread ${deadThreadId} (${slot.role}#${slot.index}) exited with code ${code}, ` +
 						`restarting in ${outcome.delay}ms... (attempt ${outcome.attempts}/${RESTART_MAX_ATTEMPTS})`
 					);
 				}
@@ -956,7 +957,7 @@ if (is_primary) {
 		shutting_down = true;
 		sdNotify.stopping();
 		sdNotify.disarmWatchdog();
-		console.log(`Primary received ${reason}, shutting down ${workers.size} workers...`);
+		console.log(`[svelte-adapter-uws] Primary received ${reason}, shutting down ${workers.size} workers...`);
 
 		// Cancel all pending worker restarts so we don't spawn during shutdown.
 		// (The supervisor also re-checks shutting_down when a timer fires, so a
@@ -1131,7 +1132,7 @@ if (is_primary) {
 			sdNotify.disarmWatchdog();
 		}
 		const prefix = isMainThread ? '' : `[worker ${threadId}] `;
-		console.log(`${prefix}Received ${reason}, shutting down gracefully...`);
+		console.log(`[svelte-adapter-uws] ${prefix}Received ${reason}, shutting down gracefully...`);
 
 		// Step 1: readiness OFF, BEFORE the delay below. The delay exists so a load
 		// balancer can deregister this instance before its sockets close, and the
@@ -1140,12 +1141,12 @@ if (is_primary) {
 		// requests keep being routed here for the whole propagation window and then
 		// meet a closed socket. Draining is not closing: the listen socket stays
 		// open and in-flight and newly arriving requests are still served.
-		if (beginDrain()) console.log(`${prefix}Readiness now reports NOT ready (draining); still accepting.`);
+		if (beginDrain()) console.log(`[svelte-adapter-uws] ${prefix}Readiness now reports NOT ready (draining); still accepting.`);
 
 		// Step 2: Load balancer drain delay (only for OS signals, not when the
 		// primary tells us to shutdown  - the primary already waited its own delay).
 		if (shutdown_delay > 0 && (reason === 'SIGTERM' || reason === 'SIGINT')) {
-			console.log(`${prefix}Waiting ${shutdown_delay}ms for load balancer drain...`);
+			console.log(`[svelte-adapter-uws] ${prefix}Waiting ${shutdown_delay}ms for load balancer drain...`);
 			await new Promise((resolve) => setTimer(resolve, shutdown_delay));
 		}
 
@@ -1187,7 +1188,7 @@ if (is_primary) {
 		const signal = bounded ? expiry.signal : null;
 		if (!bounded) {
 			console.log(
-				`${prefix}SHUTDOWN_TIMEOUT=0: no shutdown budget - the shutdown hook, the in-flight drain and the ` +
+				`[svelte-adapter-uws] ${prefix}SHUTDOWN_TIMEOUT=0: no shutdown budget - the shutdown hook, the in-flight drain and the ` +
 				'cleanup listeners are awaited for as long as they take, so a wedged one holds this process until it is killed.'
 			);
 		}
@@ -1235,7 +1236,7 @@ if (is_primary) {
 		} finally {
 			clearTimer(budget_timer);
 			const spent = (monotonicNow() - t_close).toFixed(0);
-			if (drained && cleaned) console.log(`${prefix}Shutdown complete in ${spent}ms.`);
+			if (drained && cleaned) console.log(`[svelte-adapter-uws] ${prefix}Shutdown complete in ${spent}ms.`);
 			else console.error(`[svelte-adapter-uws] ${prefix}Shutdown finished in ${spent}ms but was NOT clean (see the lines above).`);
 			exitWorkerClean(0);
 		}

@@ -1,5 +1,6 @@
 import type { Adapter } from '@sveltejs/kit';
 import type { WebSocket } from 'uWebSockets.js';
+import type { TraceContext, TraceOperationOptions, TraceSpan } from './observability.js';
 // The upgrade-response helper lives on its own subpath ('svelte-adapter-uws/upgrade-response')
 // so runtime code can import it without pulling in this build-time module. Its type is imported
 // here only for the internal ReturnType<> reference in WebSocketHandler below; it is NOT re-exported.
@@ -72,6 +73,21 @@ export type { WebSocket } from 'uWebSockets.js';
  * the primary watches the cert directory and broadcasts the reload to every
  * worker, so a renewed cert is picked up live there too - no restart needed.
  */
+
+/** A path-specific cache policy for static build output. */
+export interface StaticCacheControlRule {
+	/**
+	 * Asset path relative to SvelteKit's configured base. A trailing slash
+	 * matches that directory tree; otherwise the path matches one exact file.
+	 * @example '/fonts/'
+	 * @example '/logo.v2.svg'
+	 */
+	pattern: string;
+
+	/** A complete Cache-Control field value. */
+	cacheControl: string;
+}
+
 export interface AdapterOptions {
 	/**
 	 * Output directory for the build.
@@ -127,8 +143,9 @@ export interface AdapterOptions {
 	 * Keys are case-insensitive. The handler's own transfer / caching / range
 	 * headers cannot be overridden (`content-type`, `content-encoding`, `etag`,
 	 * `cache-control`, `vary`, `accept-ranges`, ...); supplying one logs a
-	 * build warning and is ignored. Merged once at build/index time, so there
-	 * is zero per-request cost.
+	 * build warning and is ignored. Use `staticCacheControl` for path-specific
+	 * cache policies. Merged once at build/index time, so there is zero
+	 * per-request cost.
 	 *
 	 * @example
 	 * ```js
@@ -142,6 +159,54 @@ export interface AdapterOptions {
 	 * ```
 	 */
 	staticHeaders?: Record<string, string>;
+
+	/**
+	 * Path-specific Cache-Control policies for versioned custom assets. Rules
+	 * match build-output paths relative to SvelteKit's configured base. A
+	 * pattern ending in `/` selects that directory tree; another pattern
+	 * selects one exact file. When rules overlap, the most specific pattern
+	 * wins. SvelteKit's built-in `/_app/immutable/` policy always takes
+	 * precedence.
+	 *
+	 * Files outside these rules keep `Cache-Control: no-cache` and their ETag.
+	 * Configured files also retain their representation-specific ETag and byte
+	 * range support. Use immutable caching only when the filename changes with
+	 * the content.
+	 *
+	 * @example
+	 * ```js
+	 * adapter({
+	 *   staticCacheControl: [
+	 *     {
+	 *       pattern: '/fonts/',
+	 *       cacheControl: 'public, max-age=31536000, immutable'
+	 *     },
+	 *     {
+	 *       pattern: '/pictures/',
+	 *       cacheControl: 'public, max-age=86400'
+	 *     }
+	 *   ]
+	 * })
+	 * ```
+	 */
+	staticCacheControl?: StaticCacheControlRule[];
+
+	/**
+	 * Module path to an optional vendor-neutral tracing provider. The module's
+	 * default or named tracing export implements startSpan(name, options)
+	 * using the types from svelte-adapter-uws/observability. The adapter
+	 * extracts validated W3C traceparent / tracestate headers, keeps the
+	 * resulting context active across async native work, and exposes it through
+	 * platform.trace and platform.traceContext.
+	 *
+	 * The provider may return an OpenTelemetry Span directly: its
+	 * spanContext(), recordException(), and end() methods are recognized. When
+	 * omitted, tracing is a no-op and the native hot path does not allocate
+	 * spans.
+	 *
+	 * @example './src/lib/server/tracing.js'
+	 */
+	tracing?: string;
 
 	/**
 	 * Enable WebSocket support.
@@ -165,6 +230,38 @@ export interface AdapterOptions {
 	 * ```
 	 */
 	websocket?: boolean | WebSocketOptions;
+}
+
+export interface MessageAdmissionOptions {
+	/** Maximum application-work frames accepted per connection in `rateWindowMs`. `0` disables. */
+	perConnectionRate?: number;
+	/** Maximum application-work frames accepted across this worker in `rateWindowMs`. `0` disables. */
+	globalRate?: number;
+	/** Token-bucket refill window in milliseconds. @default 1000 */
+	rateWindowMs?: number;
+	/** Maximum concurrently-running application frames per connection. `0` disables. */
+	perConnectionConcurrent?: number;
+	/** Maximum concurrently-running application frames across this worker. `0` disables. */
+	globalConcurrent?: number;
+	/**
+	 * Maximum messages waiting for a concurrency permit across this worker.
+	 * `0` sheds immediately. Queued native payloads are copied before the
+	 * uWebSockets.js callback returns; the bound therefore also bounds retained
+	 * ingress memory by `maxQueue * maxPayloadLength`.
+	 * @default 0
+	 */
+	maxQueue?: number;
+}
+
+export type MessageOverloadReason = 'rate_limit' | 'concurrency_limit' | 'queue_full';
+
+/** Server response for an application message shed by `messageAdmission`. */
+export interface MessageOverloadedFrame {
+	type: 'message-overloaded';
+	reason: MessageOverloadReason;
+	scope: 'connection' | 'global';
+	/** Present only for a rate-limit response. */
+	retryAfterMs?: number;
 }
 
 export interface WebSocketOptions {
@@ -410,24 +507,46 @@ export interface WebSocketOptions {
 	authPathRateLimitWindow?: number;
 
 	/**
-	 * Admission control for WebSocket upgrades. Two independent layers,
-	 * both opt-in (omit or set to `0` to disable):
+	 * Server-enforced admission for established application messages. The gate
+	 * covers the app/plugin `message` hook, binary `0x03` ingress routes, and the
+	 * JSON `game` publish lane. Protocol-control frames stay outside the gate so
+	 * an overloaded client can still unsubscribe, replenish a lease, or recover.
+	 *
+	 * Rate overflow is shed immediately. Concurrency overflow waits only while
+	 * `maxQueue` has room; otherwise it is shed. Every shed receives a typed
+	 * `{ type: 'message-overloaded', reason, scope, retryAfterMs? }` response.
+	 * All limits are per worker and opt-in; zero or omitted means disabled.
+	 */
+	messageAdmission?: MessageAdmissionOptions;
+
+	/**
+	 * Admission control for WebSocket upgrades. Three independent layers are
+	 * opt-in (omit or set them to `0` to disable):
 	 *
 	 * - `maxConcurrent` caps how many upgrades may be in flight at once.
 	 *   Crossed requests get a fast `503 Service Unavailable` before any
 	 *   per-request work, so a connection storm can be shed without
 	 *   spending CPU on TLS / header parsing / cookie decoding.
+	 * - `maxConnections` caps reserved upgrades plus live WebSocket
+	 *   connections per worker. Its permit is acquired before per-request
+	 *   work and held through the socket's close callback, so sequential
+	 *   handshakes cannot bypass the ceiling. Crossed requests get `503`.
 	 * - `perTickBudget` caps how many `res.upgrade()` calls run per
 	 *   event-loop tick. Once the budget is spent, the actual upgrade
 	 *   call is deferred via `setImmediate` so the loop is not starved
 	 *   by 10K synchronous handshakes from one I/O batch. Pre-upgrade
 	 *   work (rate limit check, origin check, hook dispatch) still runs
 	 *   in the original tick; only the hand-off to the C++ upgrade
-	 *   path is paced.
+	 *   path is paced. Its deferred queue is finite and sheds overflow with
+	 *   `503 Service Unavailable`.
 	 *
-	 * Both default to `0` (disabled). Tune to your peak-load envelope:
+	 * The three layers default to `0` (disabled). `maxDeferred` applies only
+	 * when pacing is enabled, defaults to `1024`, and may be set to `0` to
+	 * retain no callbacks after the current tick's budget is spent. Tune to your
+	 * peak-load envelope:
 	 * `maxConcurrent` should be just above your steady-state in-flight
-	 * count to act as a circuit breaker; `perTickBudget` should be
+	 * handshake count; `maxConnections` should reflect the per-worker
+	 * socket/file-descriptor and memory budget; `perTickBudget` should be
 	 * small enough that one full burst does not block other I/O for
 	 * more than a few milliseconds (start with `64` and adjust).
 	 *
@@ -435,14 +554,33 @@ export interface WebSocketOptions {
 	 * ```js
 	 * adapter({
 	 *   websocket: {
-	 *     upgradeAdmission: { maxConcurrent: 1000, perTickBudget: 64 }
+	 *     upgradeAdmission: {
+	 *       maxConcurrent: 1000,
+	 *       maxConnections: 50000,
+	 *       perTickBudget: 64,
+	 *       maxDeferred: 1024
+	 *     }
 	 *   }
 	 * });
 	 * ```
 	 */
 	upgradeAdmission?: {
 		maxConcurrent?: number;
+		/**
+		 * Finite per-worker ceiling for reserved upgrades plus live WebSocket
+		 * connections. A permit is held until `close`; crossed requests receive
+		 * `503 Service Unavailable`. Must be a non-negative safe integer.
+		 * `0` or omitted keeps the backward-compatible unlimited default.
+		 */
+		maxConnections?: number;
 		perTickBudget?: number;
+		/**
+		 * Finite per-worker ceiling for callbacks waiting behind
+		 * `perTickBudget`. Must be a non-negative safe integer. Defaults to
+		 * `1024` while pacing is enabled; `0` rejects every attempt after the
+		 * current tick budget instead of retaining it.
+		 */
+		maxDeferred?: number;
 		/**
 		 * Reserve a fraction of `maxConcurrent` for a deprioritised cursor-only
 		 * upgrade lane (the worker's second WebSocket). A cursor upgrade is
@@ -460,12 +598,15 @@ export interface WebSocketOptions {
 		};
 		/**
 		 * Content-negotiated response when an upgrade is refused at capacity.
-		 * Defaults to ON whenever `maxConcurrent` is set: browser navigations
+		 * Defaults to ON whenever `maxConcurrent`, `maxConnections`, or
+		 * `perTickBudget` is set: browser navigations
 		 * get a self-polling holding page that reloads when a slot frees;
 		 * WebSocket upgrades and non-browser HTTP clients keep `503` with a
-		 * jittered `Retry-After`. Set `false` to force the bare `503` for
-		 * every client (today's behaviour). When `maxConcurrent` is unset the
-		 * gate never rejects, so the waiting room never engages.
+		 * jittered `Retry-After`. Set `false` to disable polling: an HTML
+		 * navigation still receives a minimal accessible `503` document, while
+		 * WebSocket and non-HTML clients retain the bare text `503`. When
+		 * all three admission layers are disabled the gate never rejects, so
+		 * the waiting room never engages.
 		 */
 		waitingRoom?: false | {
 			/** Holding-page route the adapter serves. Default `'/__waiting-room'`. */
@@ -477,19 +618,84 @@ export interface WebSocketOptions {
 			/** Page poll cadence in ms. Default `2000`. */
 			pollIntervalMs?: number;
 			/**
-			 * Override the built-in holding page with a full HTML document. This is
+			 * Optional application name shown above the capacity message and in
+			 * the document title. HTML-escaped before rendering.
+			 */
+			appName?: string;
+			/**
+			 * Optional HTTP(S) or relative service-status URL. Rendered as a
+			 * neutral "Service status" link and HTML-escaped.
+			 */
+			statusUrl?: string;
+			/**
+			 * Optional HTTP(S) or relative help URL. Rendered as a neutral
+			 * "Get help" link and HTML-escaped.
+			 */
+			supportUrl?: string;
+			/** Optional incident reference shown as escaped text. */
+			incidentId?: string;
+			/**
+			 * Module path for locale-aware per-request rendering. The module must
+			 * synchronously default-export a `WaitingRoomRenderer` (a named
+			 * `renderWaitingRoom` export is also accepted). It receives a safe
+			 * request facade with URL, method, and `headers.get(name)`, plus the
+			 * live waiting-room context. Return a full HTML document, BCP 47
+			 * `lang`, `dir`, and optional response headers. The adapter makes
+			 * `lang`/`dir` authoritative on `<html>`, writes
+			 * `Content-Language`, and writes `Vary: Accept-Language`.
+			 *
+			 * This is a build-serializable module path, not a live function.
+			 * Mutually exclusive with `template`.
+			 *
+			 * @example
+			 * ```js
+			 * // svelte.config.js
+			 * waitingRoom: { renderer: './src/lib/server/waiting-room.js' }
+			 *
+			 * // waiting-room.js
+			 * export function renderWaitingRoom({ request }) {
+			 *   const german = request.headers.get('accept-language')?.startsWith('de');
+			 *   return {
+			 *     body: '<!doctype html><html><head><title>...</title></head><body>' +
+			 *       '<main><h1>...</h1><p role="status" aria-live="polite">...</p>' +
+			 *       '<form method="get"><button>Try again</button></form></main></body></html>',
+			 *     lang: german ? 'de' : 'en',
+			 *     dir: 'ltr',
+			 *     headers: { 'content-security-policy': "default-src 'none'" }
+			 *   };
+			 * }
+			 * ```
+			 */
+			renderer?: string;
+			/**
+			 * Override the built-in holding page with a full HTML document. It must
+			 * satisfy `AccessibleWaitingDocument`: doctype, valid `html[lang]`
+			 * and `html[dir]`, a non-empty title and body, exposed main
+			 * landmark and non-empty status live region, plus an exposed enabled
+			 * named recovery control or non-empty safe link. The adapter validates this
+			 * at construction.
+			 * This is
 			 * a string (not a function): adapter options are serialized into the
 			 * build, so a function could never reach the production runtime. The
 			 * following `{{tokens}}` are substituted with the live, escaped values:
 			 * `{{queueDepth}}`, `{{estimatedSeconds}}`, `{{pollIntervalMs}}`,
-			 * `{{retryAfterSeconds}}`, `{{admitCheckPath}}`. Include your own poll
-			 * script (hitting `{{admitCheckPath}}`) if you want auto-reload; the
-			 * built-in page is recommended for that behaviour.
+			 * `{{retryAfterSeconds}}`, `{{admitCheckPath}}`, `{{appName}}`,
+			 * `{{statusUrl}}`, `{{supportUrl}}`, `{{incidentId}}`. Include your
+			 * own poll script (hitting `{{admitCheckPath}}`) if you want
+			 * auto-reload; the
+			 * built-in page is recommended for that behaviour. Templates are
+			 * compiled when the adapter is configured: an unknown token or unclosed
+			 * `{{` throws with the supported-token list. Repeat supported tokens as
+			 * needed. Write `{{{{token}}}}` to emit literal `{{token}}` text.
 			 *
 			 * @example
 			 * ```js
-			 * template: '<!doctype html><title>Hang tight</title>' +
-			 *   '<p>You are number {{queueDepth}} in line (~{{estimatedSeconds}}s).</p>'
+			 * template: '<!doctype html><html lang="en" dir="ltr"><head>' +
+			 *   '<title>Please wait</title></head><body><main><h1>Server at capacity</h1>' +
+			 *   '<p role="status" aria-live="polite" aria-atomic="true">' +
+			 *   'About {{queueDepth}} browsers are waiting.</p>' +
+			 *   '<form method="get"><button type="submit">Try again</button></form>' +
+			 *   '</main></body></html>'
 			 * ```
 			 */
 			template?: string;
@@ -513,7 +719,8 @@ export interface WebSocketOptions {
 	 * At `'elevated'` the waiting room widens its `Retry-After` jitter. At
 	 * `'siege'` new upgrades are refused at static-serve cost and
 	 * `/__admit-check` always reports busy. Requires
-	 * `upgradeAdmission.maxConcurrent` to be set for the gate to have anything
+	 * `upgradeAdmission.maxConcurrent` or `upgradeAdmission.maxConnections`
+	 * to be set for the gate to have anything
 	 * to coordinate; `'auto'` is inert without a ceiling.
 	 */
 	protection?: 'normal' | 'elevated' | 'siege' | 'auto';
@@ -522,12 +729,19 @@ export interface WebSocketOptions {
 	 * Prometheus-style registry for admission and posture observability.
 	 * Off by default; when set, the adapter registers and emits:
 	 *
+	 * - `http_requests_total{method,outcome}` - completed HTTP requests
+	 *   (counter), with a bounded verb and success/client-error/server-error/
+	 *   aborted outcome.
+	 * - `http_request_duration_seconds{method,outcome}` - HTTP completion
+	 *   duration (histogram with explicit fractional-second buckets).
 	 * - `upgrade_admitted_total` - upgrades accepted (counter).
 	 * - `upgrade_rejected_total{reason}` - upgrades rejected before open
 	 *   (counter). Reasons, in the order the upgrade path can reach them:
-	 *   `siege`, `over_capacity`, `cursor_lane`, `duplicate_header` (a
+	 *   `siege`, `over_capacity`, `cursor_lane`, `connection_capacity`,
+	 *   `duplicate_header` (a
 	 *   repeated `Host` / `Origin` / `Authorization` / framing header, which
 	 *   cannot be given one reading), `ip_rate_limit`, `bad_origin`,
+	 *   `deferred_overflow`,
 	 *   `auth_timeout`, `auth_rejected`, `hook_error`. One more reason,
 	 *   `auth_rate_limit`, is emitted on the `connect({ auth: true })`
 	 *   preflight POST rather than on an upgrade - it shares this counter
@@ -536,8 +750,19 @@ export interface WebSocketOptions {
 	 *   with a `400`, and THAT rejection is not counted on any series, so a
 	 *   dashboard built on this counter sees duplicate-header refusals from
 	 *   the upgrade path only.
+	 * - `upgrade_duration_seconds{outcome}` - admit/reject/abort/error decision
+	 *   duration (histogram with explicit seconds-valued buckets).
 	 * - `upgrade_inflight` - upgrades between admission and open (gauge,
 	 *   sampled once per pressure interval).
+	 * - `upgrade_deferred_depth` - callbacks retained by the bounded pacing
+	 *   queue (gauge).
+	 * - `upgrade_deferred_oldest_age_seconds` - live age of the oldest retained
+	 *   callback (gauge).
+	 * - `upgrade_deferred_rejected_total` - callbacks shed because that finite
+	 *   queue was full (counter).
+	 * - `ws_connection_headroom` - remaining reserved-or-live connection
+	 *   permits (gauge). Registered only when `maxConnections` is enabled
+	 *   and updated on each permit acquire/release.
 	 * - `waiting_room_queue_depth` - clients polling the waiting room
 	 *   (gauge, sampled; `0` when the room is off).
 	 * - `protection_posture_state` - `0` normal / `1` elevated / `2` siege
@@ -553,21 +778,39 @@ export interface WebSocketOptions {
 	 *   the map cap; `door` is `upgrade` or `auth` (counter).
 	 * - `ws_connections` - live WebSocket connections on this worker (gauge,
 	 *   sampled).
+	 * - `ws_connection_duration_seconds{outcome}` - clean/abnormal connection
+	 *   lifetime (histogram).
+	 * - `ws_messages_total{kind,outcome}` - completed inbound text/binary
+	 *   messages by success/error outcome (counter).
+	 * - `ws_message_admission_rejected_total{reason,scope}` - application
+	 *   messages shed by the established-message rate/concurrency/queue gate.
+	 * - `ws_message_duration_seconds{kind,outcome}` - awaited inbound handler
+	 *   duration (histogram with explicit fractional-second buckets).
 	 * - `ws_subscriptions` - live topic subscriptions across this worker's
 	 *   connections (gauge, sampled). Divide by `ws_connections` for the
 	 *   subscriber ratio; the two are exported separately because averaging
 	 *   per-worker ratios is not the cluster ratio.
 	 * - `ws_publishes_total` - publish calls on this worker (counter). Counts
 	 *   publishes, never per-recipient deliveries: uWS fans out in C++.
+	 * - `ws_publish_outcomes_total{outcome}` - native TopicTree publish calls
+	 *   classified as delivered/no-subscribers (counter), with no recipient walk.
 	 * - `ws_backpressure_max_bytes` - worst per-connection outbound buffered
 	 *   bytes over the sampled connection set (gauge, sampled; `0` when healthy).
 	 * - `ws_backpressure_connections` - sampled connections holding a
 	 *   backpressured outbound queue (gauge, sampled; `0` when healthy).
+	 * - `ws_dropped_frames_total` - exact outbound frames uWS shed at the
+	 *   configured backpressure limit (counter).
+	 * - `ws_dropped_bytes_total` - exact payload bytes in those shed frames
+	 *   (counter, bytes).
 	 * - `pressure_saturation` - worker saturation, `0` healthy to `1` at the
 	 *   configured thresholds (gauge, sampled).
 	 * - `pressure_reason` - the live pressure reason as a severity-ordered
 	 *   code: `0` none, `1` subscribers, `2` publish rate, `3` psi, `4` cpu
 	 *   quota, `5` capacity, `6` memory (gauge, sampled).
+	 * - `pressure_reason_transitions_total{from,to}` - pressure reason changes,
+	 *   including incident entry and recovery (counter). Both labels use the
+	 *   bounded reason vocabulary, so brief incidents remain visible without
+	 *   introducing unbounded cardinality.
 	 * - `pressure_sample_timestamp_seconds` - unix time of the most recent
 	 *   completed pressure sample (gauge). The sampling timer is `unref`'d; if
 	 *   it stops, every sampled gauge above keeps serving its last value while
@@ -577,11 +820,12 @@ export interface WebSocketOptions {
 	 * - `heap_used_ratio` - used fraction of this worker isolate's V8 heap
 	 *   (gauge, sampled). Per-isolate, so each worker has its own.
 	 * - `psi_cpu_some_avg10`, `psi_memory_full_avg10`, `psi_io_full_avg10` -
-	 *   kernel pressure-stall readings (gauges, sampled). Registered on first
-	 *   reading, so absent where the kernel does not expose PSI.
+	 *   kernel pressure-stall readings (gauges, sampled). Registered only when
+	 *   the startup probe finds PSI; a later transient read failure writes `NaN`
+	 *   instead of serving a stale reading beside a fresh sample timestamp.
 	 * - `cpu_throttled_ratio` - fraction of the sampled window the cgroup CPU
-	 *   quota held the process suspended (gauge, sampled). Same availability
-	 *   note as the PSI gauges.
+	 *   quota held the process suspended (gauge, sampled). Same startup-probe and
+	 *   transient-`NaN` semantics as the PSI gauges.
 	 * - `open_fds` / `fd_soft_limit` - open descriptors and the soft limit
 	 *   (gauges, sampled every ~5 pressure intervals). Registered only where
 	 *   the source exists (Linux, macOS). Whole-process values: every worker
@@ -591,6 +835,12 @@ export interface WebSocketOptions {
 	 *   hash, so no topic strings and no client identity.
 	 * - `relay_gap_frames_total` - relayed frames proven lost to this worker
 	 *   (counter). Counts frames, not incidents; a lower bound.
+	 * - `relay_spill_quarantines_total{reason}` - lagging relay peers quarantined
+	 *   at the finite pending-byte or pending-age ceiling (`bytes` or `age`).
+	 * - `relay_spill_dropped_bytes_total` - pending relay bytes discarded at
+	 *   quarantine (counter).
+	 * - `relay_spill_pending_age_seconds` - worst oldest-pending age observed by
+	 *   the reporting worker at quarantine (gauge).
 	 * - `framework_resource_growth_suspected_total{resource}` - sustained-growth
 	 *   suspicions from the optional resource-growth auditor (counter).
 	 *   Registered only when `resourceGrowthAuditIntervalMs` is set.
@@ -599,11 +849,14 @@ export interface WebSocketOptions {
 	 * executed, not merely documented: `platform.metricsSnapshot()` merges the
 	 * cluster with it. See the README metrics table for the per-metric column.
 	 *
-	 * Accept-path cost is one unlabelled counter increment per admitted
-	 * upgrade; rejection branches add one labelled increment each; gauges
-	 * ride the existing pressure sampler. With the option unset every site
-	 * is a single undefined check. Metric names are unprefixed - pass a
-	 * registry built with `createMetrics({ prefix })` to namespace them.
+	 * With metrics enabled, transport completion wrappers read a monotonic
+	 * timer and emit bounded-label counters/histograms; gauges ride the existing
+	 * pressure sampler. With the option unset the original handlers are
+	 * registered unchanged and native publish sites make only a null-hook check:
+	 * no timer, label, request closure, WeakMap entry, or recipient walk. A registry built with
+	 * `createMetrics({ prefix: 'app_' })` prefixes its own `serialize()` output;
+	 * `platform.metricsSnapshot()` deliberately stays on canonical, unprefixed
+	 * manifest names so its merge law is independent of registry rendering.
 	 * No client identity (IP, session) ever appears in a label.
 	 *
 	 * The two counters record server decisions, not client behaviour: a
@@ -632,7 +885,7 @@ export interface WebSocketOptions {
 	 * // svelte.config.js
 	 * adapter({
 	 *   websocket: {
-	 *     upgradeAdmission: { maxConcurrent: 1000 },
+	 *     upgradeAdmission: { maxConcurrent: 1000, maxConnections: 50000 },
 	 *     protection: 'auto',
 	 *     metrics: './src/lib/server/metrics.js'
 	 *   }
@@ -757,7 +1010,7 @@ export interface WebSocketOptions {
 	 * no client identity beyond the per-connection session id used as a log
 	 * label.
 	 *
-	 * A detected violation logs a structured `[adapter-uws/assert]` line and
+	 * A detected violation logs a package-attributed `[lantean/diagnostic ...]` line and
 	 * increments the queryable `platform.assertions` counter (the soft tier) - it
 	 * never terminates the worker. The single exception is a subscription slot
 	 * that has become a non-`Set` (heap or dispatch corruption that cannot heal):
@@ -977,6 +1230,10 @@ export interface WebSocketOptions {
 	 * authorized for that connection via `platform.subscribe` (recorded in its
 	 * subscription set), unless the app exports its own `subscribe` /
 	 * `subscribeBatch` hook - in which case that hook decides every topic.
+	 * Set `'strict'` for a hybrid framework/app: every topic must already have
+	 * a server grant AND the application hook must allow it. This preserves the
+	 * legacy `true` contract while preventing a permissive hybrid hook from
+	 * bypassing a framework's tenant or room grant.
 	 *
 	 * This closes the bypass where a client names a topic it was never granted
 	 * (a private room, another tenant's channel) and receives its fan-out,
@@ -997,7 +1254,7 @@ export interface WebSocketOptions {
 	 *
 	 * @default false
 	 */
-	authorizeWireSubscribe?: boolean;
+	authorizeWireSubscribe?: boolean | 'strict';
 
 	/**
 	 * Allow non-ASCII characters in wire-submitted topic names. Default
@@ -1066,14 +1323,18 @@ export interface WebSocketOptions {
  * shape SvelteKit uses for `cookies.set()`.
  */
 export interface CookieSerializeOptions {
-	path?: string;
+	/** Required by `authenticateCookies.set()` and `.delete()`. */
+	path: string;
 	domain?: string;
 	expires?: Date;
 	/** In seconds. */
 	maxAge?: number;
+	/** Defaults to `true`. */
 	httpOnly?: boolean;
+	/** Defaults to `true`, except on plain HTTP at `localhost`. */
 	secure?: boolean;
 	partitioned?: boolean;
+	/** Defaults to `'lax'`. Set to `false` to omit the attribute. */
 	sameSite?: 'strict' | 'lax' | 'none' | boolean;
 	/** Defaults to `true`. Set to `false` to skip URI-encoding the value. */
 	encode?: boolean;
@@ -1087,8 +1348,8 @@ export interface CookieSerializeOptions {
 export interface AuthenticateCookies {
 	get(name: string): string | undefined;
 	getAll(): Record<string, string>;
-	set(name: string, value: string, options?: CookieSerializeOptions): void;
-	delete(name: string, options?: Pick<CookieSerializeOptions, 'path' | 'domain'>): void;
+	set(name: string, value: string, options: CookieSerializeOptions): void;
+	delete(name: string, options: CookieSerializeOptions): void;
 }
 
 /**
@@ -1106,7 +1367,67 @@ export interface WaitingRoomContext {
 	retryAfterSeconds: number;
 	/** The poll endpoint path the page should fetch. */
 	admitCheckPath: string;
+	/** Configured application name, or an empty string when omitted. */
+	appName: string;
+	/** Configured service-status URL, or an empty string when omitted. */
+	statusUrl: string;
+	/** Configured support URL, or an empty string when omitted. */
+	supportUrl: string;
+	/** Configured incident reference, or an empty string when omitted. */
+	incidentId: string;
 }
+
+/** Synchronous request facade passed to a waiting-room renderer module. */
+export interface WaitingRoomRequestContext {
+	/** Uppercase request method. */
+	readonly method: string;
+	/** Path plus query string for the holding-page request. */
+	readonly url: string;
+	/** Case-insensitive request-header lookup; absent headers return `null`. */
+	readonly headers: {
+		get(name: string): string | null;
+	};
+}
+
+/** Per-request context passed to a locale-aware waiting-room renderer. */
+export interface WaitingRoomRendererContext extends WaitingRoomContext {
+	readonly request: WaitingRoomRequestContext;
+}
+
+/**
+ * One accessible document baseline for every custom waiting path.
+ *
+ * At runtime `body` is parsed and validated for a doctype; valid
+ * `html[lang]` and `html[dir]`; non-empty title and body; exposed main
+ * landmark and non-empty status live region; and an exposed enabled named recovery
+ * control or non-empty safe link. Comments and hidden, inert, template, script,
+ * and style subtrees cannot satisfy the contract. Renderer `lang` and
+ * `dir` are authoritative and are applied before that validation.
+ */
+export interface AccessibleWaitingDocument {
+	/**
+	 * A full HTML document containing an `<html>` element. This is trusted
+	 * application HTML; escape every request/configuration value you interpolate.
+	 */
+	body: string;
+	/** Valid BCP 47 language tag; emitted as `Content-Language` and `html[lang]`. */
+	lang: string;
+	/** Document direction; emitted as `html[dir]`. */
+	dir: 'ltr' | 'rtl' | 'auto';
+	/**
+	 * Optional extra response headers. Adapter-owned framing, cache, language,
+	 * and variation headers cannot be overridden.
+	 */
+	headers?: Record<string, string>;
+}
+
+/** Compatibility name for the document returned by a waiting-room renderer. */
+export interface WaitingRoomRendererResult extends AccessibleWaitingDocument {}
+
+/** Synchronous build-bundled renderer for a localized waiting-room document. */
+export type WaitingRoomRenderer = (
+	context: WaitingRoomRendererContext
+) => AccessibleWaitingDocument;
 
 /**
  * Minimal registry contract for the `metrics` option: the subset of a
@@ -1188,6 +1509,8 @@ export interface UpgradeContext {
 	 * `subscribe`, `drain`, `close`, etc.).
 	 */
 	requestId: string;
+	/** Validated W3C context active for this upgrade, or null when tracing is disabled. */
+	traceContext: TraceContext | null;
 }
 
 /**
@@ -1828,6 +2151,10 @@ export interface PressureSnapshot {
 	 * the same per-tick sample cap as `maxBufferedBytes`.
 	 */
 	readonly backpressuredConnections: number;
+	/** Exact frames reported by uWS as dropped during the last sample window. */
+	readonly droppedFrames: number;
+	/** Exact payload bytes reported by uWS as dropped during the last sample window. */
+	readonly droppedBytes: number;
 	/**
 	 * Top 5 topics by message rate during the last sample window, sorted
 	 * descending by `messagesPerSec`. Each entry is
@@ -1862,6 +2189,17 @@ export interface TopicPublishRate {
  * }
  * ```
  */
+export interface RuntimeVersionInfo {
+	/** Adapter version read from the package metadata that produced this runtime. */
+	adapter: string | null;
+	/** Frozen wire revision parsed from protocol.schema.json. */
+	protocolRevision: number | null;
+	/** Actually resolved svelte-realtime version, or null when it is not installed. */
+	realtime: string | null;
+	/** Actually resolved extensions version, or null when it is not installed. */
+	extensions: string | null;
+}
+
 export interface Platform {
 	/**
 	 * Per-request / per-connection correlation id, suitable for threading
@@ -1873,8 +2211,9 @@ export interface Platform {
 	 * header overrides the generated value when present (sanitized:
 	 * printable ASCII only, max 128 chars; invalid values are ignored).
 	 *
-	 * The adapter never writes a response header automatically - emitting
-	 * `X-Request-ID` on the response is an app-layer concern.
+	 * Application responses do not receive a header automatically. Adapter-owned
+	 * 500 responses (SSR, authentication endpoint, and WebSocket upgrade-hook
+	 * failures) echo the resolved id as `X-Request-ID` for operator correlation.
 	 *
 	 * @example
 	 * ```js
@@ -1886,6 +2225,28 @@ export interface Platform {
 	 * ```
 	 */
 	readonly requestId: string;
+
+	/**
+	 * Validated W3C context for the currently active HTTP, WebSocket, RPC, bus,
+	 * or durable-work operation. Concurrent operations on one connection remain
+	 * isolated. Null when tracing is not configured or no valid context exists.
+	 */
+	readonly traceContext: TraceContext | null;
+
+	/**
+	 * Vendor-neutral trace boundary. run() creates a provider span and keeps its
+	 * context active across async work; inject() writes traceparent/tracestate to
+	 * an outbound carrier. With no configured provider these methods are no-op
+	 * compatible and do not allocate spans.
+	 */
+	readonly trace: Readonly<{
+		readonly enabled: boolean;
+		current(): TraceContext | null;
+		extract(carrier: Headers | Record<string, unknown>): TraceContext | null;
+		inject<T extends Headers | Record<string, string>>(carrier: T, context?: TraceContext | null): T;
+		run<T>(name: string, options: TraceOperationOptions, fn: (span: TraceSpan | null) => T): T;
+		withContext<T>(context: TraceContext | null, fn: () => T): T;
+	}>;
 
 	/**
 	 * Publish a message to all WebSocket clients subscribed to a topic.
@@ -1901,10 +2262,10 @@ export interface Platform {
 	 * skip stamping for high-cardinality or perf-sensitive topics where
 	 * the counter map would grow unbounded.
 	 *
-	 * In clustered mode the seq is worker-local (each worker stamps its
-	 * own publishes; relayed messages pass through with the originating
-	 * worker's seq). For cluster-wide monotonic seq, wire up the Redis
-	 * Lua INCR variant from the extensions package.
+	 * A multi-worker runtime refuses that worker-local default because it
+	 * cannot preserve one monotonic sequence across multiple origins. Use
+	 * unsequenced frames or an external ordered sequencer and fan-out as
+	 * described by the options below.
 	 *
 	 * @param topic - Topic string (e.g. `'todos'`, `'user:123'`, `'org:456'`)
 	 * @param event - Event name (e.g. `'created'`, `'updated'`, `'deleted'`)
@@ -1921,6 +2282,11 @@ export interface Platform {
 	 *     a replay backend uses to put the broadcast frame and its buffer on
 	 *     one authoritative seq space (see the extensions replay layer). A
 	 *     legacy truthy `seq: true` still means the in-memory counter.
+	 *     In a multi-worker runtime, an omitted/`true` seq throws because each
+	 *     worker owns a different counter. Use `{ seq: false }`, or supply a
+	 *     positive externally-authoritative number together with `relay: false`
+	 *     so the external ordered source, not the built-in multi-origin relay,
+	 *     fans the frame to every process.
 	 *   - `compress: false` skips permessage-deflate for this frame. No-op
 	 *     unless `websocket.compression` is configured, where text frames
 	 *     compress by default; pass `false` for a high-frequency,
@@ -2048,6 +2414,9 @@ export interface Platform {
 	 * Each entry may carry its own `excludeWs` (per-entry author suppression).
 	 * Sequencing, accounting, and the cross-instance relay match N
 	 * `publishWire` calls (one seq and one relay envelope per entry).
+	 * In a multi-worker runtime, a multi-entry call must use `seq: false`;
+	 * externally authoritative numeric values must be published one entry at
+	 * a time with `relay: false` so each entry can carry a distinct value.
 	 * Degradation is per connection: a codec that declines the batch falls back
 	 * to per-entry encodes, a per-entry decline to that entry's JSON envelope,
 	 * and a dropped frame or announce poisons the capability to JSON until
@@ -2066,7 +2435,7 @@ export interface Platform {
 				onDetach?: (ws: WebSocket<any>, state: unknown) => void;
 			};
 		},
-		options?: { seq?: boolean; relay?: boolean; compress?: boolean }
+		options?: { seq?: boolean | number; relay?: boolean; compress?: boolean }
 	): boolean;
 
 	/**
@@ -2139,60 +2508,71 @@ export interface Platform {
 	 * }
 	 * ```
 	 */
-	batch(messages: { topic: string; event: string; data?: unknown }[]): boolean[];
+	batch(messages: {
+		topic: string;
+		event: string;
+		data?: unknown;
+		options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number };
+	}[]): boolean[];
 
 	/**
-	 * Publish a list of `{topic, event, data}` events as a single
-	 * `{type:'batch', events:[...]}` WebSocket frame per affected
-	 * subscriber. Each subscriber receives only the events whose topics
-	 * are in their subscription set, in submitted order. Subscribers
-	 * with no overlap with the batch's topics receive nothing.
+	 * <!-- API_DOC:platform.publishBatched:START -->
+	 * ### `platform.publishBatched(messages, options?)`
 	 *
-	 * Compared to a `publish()` loop, the wire savings are
-	 * one-frame-per-subscriber instead of N-frames-per-subscriber. The
-	 * benefit grows with N (events per call) and with subscriber-set
-	 * overlap; tiny batches with disjoint topics may pay a small
-	 * JS-fanout cost over the C++ TopicTree path used by `publish()`
-	 * (the receiver-side decode is faster regardless).
+	 * Publish a list of events as one `{type:'batch', events:[...]}` WebSocket
+	 * frame per affected subscriber when the local subscriber shape permits it.
+	 * The method returns `void`. Each message has `topic`, `event`, optional
+	 * `data`, optional `coalesceKey`, and per-message `options.relay` / `options.seq`;
+	 * call-level `options.compress` opts the resulting frames into compression.
 	 *
-	 * Capability gating: clients advertise `'batch'` support via a
-	 * `{type:'hello', caps:['batch']}` frame after open. The bundled
-	 * `svelte-adapter-uws/client` does this automatically. Connections
-	 * that have not advertised the capability fall back to N
-	 * individual frames - mixing old and new clients in the same call
-	 * is safe.
-	 *
-	 * Cross-worker relay: events are relayed individually through the
-	 * existing per-microtask relay path. Receiving workers see N
-	 * individual relayed publishes, not a batched delivery. Wire-level
-	 * batching applies to the originating worker's local fanout only.
-	 * Pass `{relay: false}` per-event to skip the relay (use when the
-	 * messages came from an external pub/sub source already fanning
-	 * out to every worker).
-	 *
-	 * Frame-size budget: a batched frame larger than 256 KB triggers a
-	 * throttled `console.warn`. Chunk large batches into multiple
-	 * `publishBatched` calls.
-	 *
-	 * Order guarantee: within one batched frame, events appear in call
-	 * order. Across batches, same subscriber-side ordering as today.
-	 *
-	 * Coalesce interaction: events submitted via `publishBatched` do
-	 * not interact with `sendCoalesced` per-key replacement; mixing
-	 * batched topics and sendCoalesced topics on the same subscriber
-	 * is supported but produces separate frames.
-	 *
-	 * @example
 	 * ```js
 	 * platform.publishBatched([
 	 *   { topic: 'org:42:items', event: 'updated', data: a },
 	 *   { topic: 'org:42:items', event: 'updated', data: b },
-	 *   { topic: 'org:42:audit', event: 'created', data: c }
-	 * ]);
-	 * // Subscribers of org:42:items only -> one frame, two events.
-	 * // Subscribers of both topics      -> one frame, three events.
-	 * // Subscribers of neither          -> no frame at all.
+	 *   { topic: 'org:42:audit', event: 'created', data: c, options: { seq: false } }
+	 * ], { compress: false });
 	 * ```
+	 *
+	 * Each subscriber receives only events for topics it holds, in surviving call
+	 * order; a subscriber with no overlap receives nothing. The fast path is used
+	 * when every interested local subscriber advertised the `batch` capability
+	 * and every interested subscriber sees the same event slice (a single topic
+	 * always has one slice). Otherwise that worker safely falls back to individual
+	 * event envelopes. The bundled client advertises `batch` automatically and
+	 * dispatches each contained event through the ordinary per-topic store path.
+	 *
+	 * **Cross-worker contract.** The relay mirrors the origin's own path
+	 * selection. When the origin takes the fast path, it sends one
+	 * `publish-batched` IPC frame carrying the complete relay-eligible event
+	 * list, and every receiving worker reruns capability and subscriber-slice
+	 * detection against its own sockets - so a peer may emit one local batch
+	 * frame or fall back locally. When the origin itself falls back (a
+	 * subscriber without the `batch` capability, or interested subscribers
+	 * seeing different event slices), each surviving event relays
+	 * individually and peers deliver individual event envelopes. An event
+	 * with `{ relay: false }` is kept in origin-local delivery and omitted
+	 * from the cross-worker list either way.
+	 *
+	 * **Coalescing, order, and sequence.** Events sharing a string `coalesceKey`
+	 * collapse before framing; only the latest survives at its latest occurrence,
+	 * while unkeyed events never collapse. Each survivor is independently stamped
+	 * like `publish()`. `{ seq: false }` omits the stamp; a positive integer stamps
+	 * that exact externally authoritative value. In a multi-worker runtime every
+	 * survivor must use `seq:false` or an authoritative number with `relay:false`;
+	 * the entire surviving batch is validated before any counter or delivery can
+	 * occur. `sendCoalesced` remains a separate per-connection queue and produces
+	 * separate frames.
+	 *
+	 * **Frame and compression budget.** A batch envelope larger than 256 KB emits
+	 * a throttled warning; split it into multiple calls. Compression defaults to
+	 * false. `{ compress: true }` applies consistently to the shared-frame fast
+	 * path and every individual-frame fallback when WebSocket compression is
+	 * configured.
+	 *
+	 * Do not confuse this with `platform.batch(messages)`: that method is a
+	 * `publish()` loop, returns one boolean per message, and always produces
+	 * individual event frames. Use `publishBatched()` for wire batching.
+	 * <!-- API_DOC:platform.publishBatched:END -->
 	 */
 	publishBatched(messages: Array<{
 		topic: string;
@@ -2218,7 +2598,7 @@ export interface Platform {
 		 * ```
 		 */
 		coalesceKey?: string;
-		/** Per-message `seq`: `false` omits it, a positive-integer `number` stamps that exact authoritative seq, omitted uses the in-memory counter. */
+		/** Per-message `seq`: `false` omits it, a positive-integer `number` stamps that exact authoritative seq, omitted uses the in-memory counter. Multi-worker runtimes require `false` or an authoritative number with `relay:false`. */
 		options?: { relay?: boolean; seq?: boolean | number };
 	}>, options?: {
 		/**
@@ -2466,9 +2846,9 @@ export interface Platform {
 	 * A PII-free snapshot of this worker's transport-layer health: connection
 	 * count, backpressure posture, protection level, payload cap, and the
 	 * framework-invariant counters. Counts and enums only - never a topic
-	 * name, never a user id, never a socket handle. Pure read (a fresh plain
-	 * object each call), so it is safe to expose behind an auth-gated admin
-	 * route or feed to a dashboard.
+	 * name, never a user id, never a socket handle. Counts, enums, and package
+	 * versions only. Pure read (a fresh plain object each call), so it is safe
+	 * to expose behind an auth-gated admin route or feed to a dashboard.
 	 *
 	 * The scalar pressure signals are reported but `topPublishers` is omitted
 	 * (topic names can embed ids); read `pressure` directly with your own
@@ -2490,6 +2870,7 @@ export interface Platform {
 		closedWsAborts: number;
 		protection: 'normal' | 'elevated' | 'siege';
 		maxPayloadLength: number;
+		versions: RuntimeVersionInfo;
 		pressure: {
 			active: boolean;
 			reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI' | 'CAPACITY';
@@ -2499,9 +2880,57 @@ export interface Platform {
 			memoryMB: number;
 			maxBufferedBytes: number;
 			backpressuredConnections: number;
+			droppedFrames: number;
+			droppedBytes: number;
 		};
 		assertions: Record<string, number>;
+		diagnostics: {
+			retained: number;
+			recent: Array<{
+				diagnosticId: string;
+				kind: 'state-divergence';
+				observedAt: number;
+				complete: boolean;
+				affectedStreamCount: number;
+				evidenceTruncated: boolean;
+			}>;
+		};
 	};
+
+	/**
+	 * Resolve a bounded state-divergence diagnostic by the opaque id emitted in
+	 * the primary log. The returned stream identifiers are process-lifetime
+	 * HMACs, never raw topic names. This is sensitive operational evidence:
+	 * expose it only through an authenticated admin route.
+	 */
+	diagnostic(diagnosticId: string): {
+		diagnosticId: string;
+		kind: 'state-divergence';
+		epoch: number;
+		observedAt: number;
+		complete: boolean;
+		evidenceTruncated: boolean;
+		explainedBySequenceSummary: boolean;
+		expectedWorkers: number;
+		reportingWorkers: number;
+		workers: Array<{
+			threadId: number;
+			role: 'majority' | 'minority';
+			totalStreams: number;
+			sampledStreams: number;
+			truncated: boolean;
+		}>;
+		affectedStreams: Array<{
+			streamId: string;
+			classification: 'tail-sequence-gap' | 'stream-presence-mismatch';
+			gapLowerBound: number | null;
+			workers: Array<{
+				threadId: number;
+				role: 'majority' | 'minority';
+				sequence: number | null;
+			}>;
+		}>;
+	} | null;
 
 	/**
 	 * Number of clients subscribed to a specific topic.
@@ -2713,7 +3142,9 @@ export interface Platform {
 	 * a CLIENT-initiated `subscribe` / `subscribe-batch` frame is honored only
 	 * for a topic the server already authorized for that connection via
 	 * `platform.subscribe`, unless the app exports its own `subscribe` /
-	 * `subscribeBatch` hook (which then decides). Server-side `platform.subscribe`
+	 * `subscribeBatch` hook (which then decides). Pass `'strict'` to require
+	 * BOTH that server grant and an application-hook allow; strict is latched and
+	 * cannot be downgraded by a later legacy call. Server-side `platform.subscribe`
 	 * is the trusted grant-establishing path and is never gated by this;
 	 * `platform.checkSubscribe(ws, topic, { requireGrant: true })` - the
 	 * observer-lane mode - additionally requires grant-set membership once
@@ -2726,7 +3157,8 @@ export interface Platform {
 	 * worker's startup hook rather than expecting one worker's call to mutate
 	 * another worker's JavaScript realm.
 	 */
-	authorizeWireSubscribe(): void;
+	authorizeWireSubscribe(): 'legacy' | 'strict';
+	authorizeWireSubscribe(mode: 'legacy' | 'strict'): 'legacy' | 'strict';
 
 	/**
 	 * Unsubscribe a connection from a topic from server-side code.
@@ -2767,6 +3199,10 @@ export interface Platform {
 	 *
 	 * Closed-WS safe: returns `false` (and bumps `platform.closedWsAborts`) if the
 	 * socket has already closed, otherwise binds and returns `true`.
+	 * Throws when the runtime has more than one I/O worker: this lane's sequencer
+	 * is deliberately single-home. A clustered deployment may keep one I/O
+	 * worker and use the remaining workers as compute workers, or supply an
+	 * external authoritative room sequencer instead.
 	 */
 	grantPublish(ws: WebSocket<unknown>, topic: string): boolean;
 
@@ -2792,6 +3228,8 @@ export interface Platform {
 	 * call it directly to inject a server-authored frame into the relay sequence
 	 * (e.g. a bot's input). Returns the stamped `seq` and the number of
 	 * subscribers delivered to.
+	 * Throws in a topology with more than one I/O worker for the same reason as
+	 * `grantPublish`: local fan-out cannot satisfy the cluster-wide contract.
 	 */
 	publishGame(
 		senderWs: WebSocket<unknown> | null,
@@ -2877,9 +3315,9 @@ export interface Platform {
 	 *
 	 * It reports the ADAPTER's metrics. What crosses the thread boundary is the
 	 * values the adapter itself wrote, keyed by its own declared names, never
-	 * your registry's rendered text - so namespacing the registry with
-	 * `createMetrics({ prefix })` does not stop it recognising them, and
-	 * `serialize()` is not required. A metric your app registered is not
+	 * your registry's rendered text. A prefix therefore affects only
+	 * `platform.metrics.serialize()`; this snapshot always emits unprefixed
+	 * adapter names, and `serialize()` is not required. A metric your app registered is not
 	 * included: the adapter cannot know whether yours should be summed, maxed
 	 * or averaged, and guessing would be a silent wrong number. Read those from
 	 * `platform.metrics` per worker.
@@ -2909,10 +3347,13 @@ export interface Platform {
 	 * collection interval of one worker's traffic. It does not go backwards.
 	 *
 	 * The document always carries `metrics_snapshot_workers_expected` and
-	 * `metrics_snapshot_workers_reporting`. When they differ the answer is
-	 * partial: a worker missed the deadline, and every summed series is
-	 * understated for that scrape. Alert on the difference rather than reading
-	 * the dip as a real drop in traffic.
+	 * `metrics_snapshot_workers_reporting`. Reporting means more than answering
+	 * IPC: every required counter factory must be registered and every required
+	 * worker gauge must have produced a numeric sample. An empty, restarted, or
+	 * partly initialized worker therefore lowers reporting instead of silently
+	 * omitting families from a document that claims completeness. When the two
+	 * values differ, alert on the partial answer rather than reading a summed
+	 * series dip as a real traffic drop.
 	 *
 	 * It also carries `metrics_snapshot_degraded`, `1` when the collection did
 	 * not complete at all and the document is this worker alone. That case
@@ -3113,19 +3554,19 @@ export interface Platform {
 
 export interface TopicHelper {
 	/** Publish a custom event to this topic. */
-	publish(event: string, data?: unknown): void;
+	publish(event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
 	/** Shorthand for `.publish('created', data)`. Pairs with `crud()` / `lookup()`. */
-	created(data?: unknown): void;
+	created(data?: unknown, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
 	/** Shorthand for `.publish('updated', data)`. Pairs with `crud()` / `lookup()`. */
-	updated(data?: unknown): void;
+	updated(data?: unknown, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
 	/** Shorthand for `.publish('deleted', data)`. Pairs with `crud()` / `lookup()`. */
-	deleted(data?: unknown): void;
+	deleted(data?: unknown, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
 	/** Shorthand for `.publish('set', value)`. Pairs with `count()`. */
-	set(value: number): void;
+	set(value: number, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
 	/** Shorthand for `.publish('increment', amount)`. Pairs with `count()`. */
-	increment(amount?: number): void;
+	increment(amount?: number, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
 	/** Shorthand for `.publish('decrement', amount)`. Pairs with `count()`. */
-	decrement(amount?: number): void;
+	decrement(amount?: number, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
 }
 
 // `upgradeResponse` is exported from the 'svelte-adapter-uws/upgrade-response' subpath, not

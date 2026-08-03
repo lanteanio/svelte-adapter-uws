@@ -5,8 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './runtime/cookies.js';
 import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
-import { deniesUngrantedObserve, isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
-import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap } from './runtime/utils/subscribe-policy.js';
+import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
+import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
 import { assertWireSubscribeAuthorization, assertProtectiveNumber, unknownOptionKeys } from './config-guards.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { snapshotUpgradeHeaders } from './runtime/utils/upgrade-headers.js';
@@ -1500,6 +1500,10 @@ export default function uws(options = {}) {
 						...viteDiagnosticEndpoint(server),
 						error: err
 					}));
+					// The structured record keeps a bounded name/code/message;
+					// the raw error is what carries the stack, Vite frame, and
+					// source location a developer needs to follow the action.
+					console.error('[adapter-uws] handler load error detail:', err);
 				}
 			})();
 
@@ -2443,7 +2447,7 @@ export default function uws(options = {}) {
 			// Re-load the handler on every HMR update - ssrLoadModule returns the
 			// cached module instantly when nothing was invalidated, so this is cheap.
 			// We compare function references to detect actual changes.
-			handlerReady = server.ssrLoadModule(resolvedHandlerPath).then((mod) => {
+			handlerReady = server.ssrLoadModule(resolvedHandlerPath).then(async (mod) => {
 				const recovered = handlerFailed;
 				handlerFailed = false;
 				let connectionsRestarted = false;
@@ -2466,6 +2470,14 @@ export default function uws(options = {}) {
 					console.log('[adapter-uws] WebSocket handler reloaded, existing connections closed');
 				}
 				if (recovered) {
+					// Recovery from an INITIAL load failure must also run the
+					// user's init hook, or the recovered event's "no operator
+					// action is required" would be false: init never ran at
+					// configureServer time (the load failed), and nothing else
+					// ever fires it. fireInitOnceV is a no-op after a normal
+					// startup; a throwing init falls into the catch below and
+					// reports as a reload failure - loud, not silent.
+					await fireInitOnceV();
 					emitOperationalDiagnostic(viteHandlerRecoveredDiagnostic({
 						...viteDiagnosticEndpoint(server),
 						connectionsRestarted
@@ -2479,6 +2491,9 @@ export default function uws(options = {}) {
 					...viteDiagnosticEndpoint(server),
 					error: err
 				}));
+				// The raw error carries the stack, Vite frame, and source
+				// location the structured record deliberately bounds away.
+				console.error('[adapter-uws] handler reload error detail:', err);
 			});
 		}
 	};

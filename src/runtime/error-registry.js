@@ -20,7 +20,7 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		component: 'runtime.listener',
 		severity: 'fatal',
 		problemPrefix: 'Could not bind the server listener on',
-		messagePrefix: '[oss-realtime/diagnostic source=svelte-adapter-uws component=runtime.listener event=runtime.listen.failed severity=fatal] runtime.listen.failed: Could not bind the server listener on',
+		messagePrefix: '[lantean/diagnostic source=svelte-adapter-uws component=runtime.listener event=runtime.listen.failed severity=fatal] runtime.listen.failed: Could not bind the server listener on',
 		cause: 'The configured address or port could not be bound, or the process lacks permission.',
 		consequence: 'The process never becomes ready and exits with status 1.',
 		automaticRecovery: 'None. The adapter does not retry a failed bind.',
@@ -36,14 +36,15 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		component: 'vite.websocket',
 		severity: 'error',
 		problemPrefix: 'Initial loading of the WebSocket handler',
-		messagePrefix: '[oss-realtime/diagnostic source=svelte-adapter-uws component=vite.websocket event=vite.handler.load-failed severity=error] vite.handler.load-failed: Initial loading of the WebSocket handler',
+		messagePrefix: '[lantean/diagnostic source=svelte-adapter-uws component=vite.websocket event=vite.handler.load-failed severity=error] vite.handler.load-failed: Initial loading of the WebSocket handler',
 		cause: 'The initial development WebSocket handler or one of its imports failed to load.',
 		consequence: 'The Vite HTTP server stays active, but WebSocket upgrades return HTTP 500 until a handler loads.',
 		automaticRecovery: 'Vite retries the handler when its module graph changes again.',
 		nextAction: 'Fix the reported module error and save the handler or one of its dependencies; a dev-server restart is not required.',
 		sources: Object.freeze(['src/vite.js']),
 		anchor: 'adapter-err-vite-load',
-		help: 'docs/errors.md#adapter-err-vite-load'
+		help: 'docs/errors.md#adapter-err-vite-load',
+		link: 'https://svti.me/ws-handler-load'
 	}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.VITE_RELOAD,
@@ -52,14 +53,15 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		component: 'vite.websocket',
 		severity: 'error',
 		problemPrefix: 'Hot reloading of the WebSocket handler',
-		messagePrefix: '[oss-realtime/diagnostic source=svelte-adapter-uws component=vite.websocket event=vite.handler.reload-failed severity=error] vite.handler.reload-failed: Hot reloading of the WebSocket handler',
+		messagePrefix: '[lantean/diagnostic source=svelte-adapter-uws component=vite.websocket event=vite.handler.reload-failed severity=error] vite.handler.reload-failed: Hot reloading of the WebSocket handler',
 		cause: 'A development handler hot reload failed after an earlier handler had loaded.',
 		consequence: 'Existing WebSocket connections keep the previous handler, but new upgrades return HTTP 500 until recovery.',
 		automaticRecovery: 'Vite retries the handler when its module graph changes again.',
 		nextAction: 'Fix the reported module error and save the handler or one of its dependencies; a dev-server restart is not required.',
 		sources: Object.freeze(['src/vite.js']),
 		anchor: 'adapter-err-vite-reload',
-		help: 'docs/errors.md#adapter-err-vite-reload'
+		help: 'docs/errors.md#adapter-err-vite-reload',
+		link: 'https://svti.me/ws-handler-load'
 	}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.NATIVE_LOAD,
@@ -118,7 +120,9 @@ export function adapterErrorDefinition(id) {
 
 export function adapterErrorHelpSuffix(id) {
 	const entry = adapterErrorDefinition(id);
-	return ' [' + entry.id + '] See: ' + entry.help;
+	// A dev console cannot resolve a repo-relative path; entries that
+	// carry an absolute link render it instead of the packaged doc route.
+	return ' [' + entry.id + '] See: ' + (entry.link ?? entry.help);
 }
 
 export function adapterErrorMessage(id, detail = '') {

@@ -37,9 +37,16 @@ describe('fatal', () => {
 	it('logs a structured line with severity: fatal', () => {
 		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		expect(() => fatal(false, 'test.fatal-log', { a: 1 })).toThrow();
-		const [tag, json] = errSpy.mock.calls[0];
-		expect(tag).toBe('[adapter-uws/fatal]');
-		expect(JSON.parse(json)).toEqual({ category: 'test.fatal-log', context: { a: 1 }, severity: 'fatal' });
+		const [line] = errSpy.mock.calls[0];
+		expect(line).toMatch(/^\[lantean\/diagnostic source=svelte-adapter-uws component=runtime\.assertion event=invariant\.violated severity=fatal\]/);
+		const record = JSON.parse(line.slice(line.indexOf('{')));
+		expect(record).toMatchObject({
+			source: 'svelte-adapter-uws',
+			component: 'runtime.assertion',
+			event: 'invariant.violated',
+			severity: 'fatal',
+			attributes: { category: 'test.fatal-log', context: { a: 1 } }
+		});
 		errSpy.mockRestore();
 	});
 

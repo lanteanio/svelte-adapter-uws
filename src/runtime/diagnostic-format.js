@@ -1,7 +1,7 @@
 import { DATA_CLASSES, OBSERVABILITY_SCHEMA_VERSION, TELEMETRY_LEVELS } from './observability-manifest.js';
 
 export const DIAGNOSTIC_SCHEMA_VERSION = OBSERVABILITY_SCHEMA_VERSION;
-export const DIAGNOSTIC_PREFIX = 'oss-realtime/diagnostic';
+export const DIAGNOSTIC_PREFIX = 'lantean/diagnostic';
 
 const MAX_TEXT = 512;
 const LEVELS = new Set(TELEMETRY_LEVELS);

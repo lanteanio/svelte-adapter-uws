@@ -27,7 +27,7 @@ import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './diagn
 import { privateValueMetadata } from './utils/observability-privacy.js';
 import { probeOsPressureSources, emitPressureMetricTelemetry } from './utils/os-pressure.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, deniesUngrantedObserve, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { registerGameIngress, gameLaneClusterSafe } from './handler/game-ingress.js';
@@ -52,7 +52,7 @@ import { joinSharedCohort, leaveSharedCohort } from './handler/cohort.js';
 import { beginResumeCapture, discardResumeCapture, flushResumeTopic, coveredSeqFor } from './handler/resume-buffer.js';
 import { releaseSharedWireId } from './handler/shared-wire-id.js';
 import { setCohortHooks } from './utils.js';
-import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap } from './utils/subscribe-policy.js';
+import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, deniesUngrantedObserve } from './utils/subscribe-policy.js';
 import { startPostureExport } from './utils/posture-export.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './utils/upgrade-headers.js';
 import { collectRequestHeaders, declareSingleValuedProxyHeaders } from './utils/request-headers.js';
@@ -217,7 +217,7 @@ setIntervalTimer(() => {
 
 cacheDir(path.join(clientDir, base), base, true, STATIC_HEADERS, STATIC_CACHE_CONTROL);
 cacheDir(path.join(prerenderedDir, base), base, false, STATIC_HEADERS, STATIC_CACHE_CONTROL);
-console.log(`Static files indexed in ${(monotonicNow() - _t_static).toFixed(1)}ms (${staticCache.size} entries)`);
+console.log(`[svelte-adapter-uws] Static files indexed in ${(monotonicNow() - _t_static).toFixed(1)}ms (${staticCache.size} entries)`);
 
 // - TLS config (must be before origin warning) ------------------------------
 
@@ -1388,7 +1388,7 @@ if (WS_ENABLED) {
 			});
 		});
 
-		console.log(`WebSocket auth endpoint registered at ${authPath}`);
+		console.log(`[svelte-adapter-uws] WebSocket auth endpoint registered at ${authPath}`);
 	}
 
 	// - Waiting-room poll + holding page ----------------------------------
@@ -2909,9 +2909,9 @@ if (WS_ENABLED) {
 		});
 	}
 
-	console.log(`WebSocket endpoint registered at ${WS_PATH}`);
+	console.log(`[svelte-adapter-uws] WebSocket endpoint registered at ${WS_PATH}`);
 	if (WS_PATH !== '/ws') {
-		console.log(`Client must match: connect({ path: '${WS_PATH}' })`);
+		console.log(`[svelte-adapter-uws] Client must match: connect({ path: '${WS_PATH}' })`);
 	}
 
 	startPressureSampling(wsOptions.pressure, OS_PRESSURE_SOURCES ?? undefined);
@@ -2968,7 +2968,7 @@ if (READINESS_CHECK_PATH) {
 const ADMIN_PATH = (WS_OPTIONS && WS_OPTIONS.adminPath !== undefined) ? WS_OPTIONS.adminPath : '/__realtime';
 if (WS_ENABLED && ADMIN_PATH !== false && typeof wsModule.admin === 'function') {
 	route('any', ADMIN_PATH + '/*', handleAdminRequest);
-	console.log(`Admin route registered at ${ADMIN_PATH}/*`);
+	console.log(`[svelte-adapter-uws] Admin route registered at ${ADMIN_PATH}/*`);
 	// The adapter cannot see whether the app's admin() handler gates its own
 	// requests, so it says so once at boot. An operator who HAS gated it sets
 	// `adminAuthAcknowledged: true` to silence the line - a warning that

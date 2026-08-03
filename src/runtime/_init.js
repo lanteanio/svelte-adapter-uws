@@ -46,4 +46,4 @@ await server.init({
 	read: (file) => /** @type {ReadableStream} */ (Readable.toWeb(fs.createReadStream(`${asset_dir}/${file}`)))
 });
 
-console.log(`SvelteKit server initialized in ${(monotonicNow() - _t_init).toFixed(1)}ms`);
+console.log(`[svelte-adapter-uws] SvelteKit server initialized in ${(monotonicNow() - _t_init).toFixed(1)}ms`);

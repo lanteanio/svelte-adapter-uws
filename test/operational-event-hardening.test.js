@@ -75,7 +75,9 @@ describe('operational event hardening', () => {
 		const offenders = [];
 		for (const file of walk(srcDir)) {
 			const source = readFileSync(file, 'utf8');
-			for (const match of source.matchAll(/dataClass:\s*'([a-z-]+)'/g)) {
+			// Either quote style, any casing: a quoted literal that is not a
+			// declared class is an offense regardless of how it is spelled.
+			for (const match of source.matchAll(/dataClass:\s*['"]([\w-]+)['"]/g)) {
 				if (!declared.has(match[1])) {
 					offenders.push(path.relative(srcDir, file) + ': ' + match[1]);
 				}

@@ -18,8 +18,8 @@ export { DIAGNOSTIC_PREFIX, DIAGNOSTIC_SCHEMA_VERSION, createDiagnostic, formatD
 
 // Symbol.for makes the sink process-wide even when more than one package (or
 // more than one installed copy) participates in the same server process.
-const OPERATIONAL_EVENT_SINK = Symbol.for('oss-realtime.operational-event-sink.v1');
-const OPERATIONAL_EVENT_SINK_REGISTRY = Symbol.for('oss-realtime.operational-event-sink-registry.v1');
+const OPERATIONAL_EVENT_SINK = Symbol.for('lantean.operational-event-sink.v1');
+const OPERATIONAL_EVENT_SINK_REGISTRY = Symbol.for('lantean.operational-event-sink-registry.v1');
 
 function defaultOperationalEventSink(record) {
 	const method = record.severity === 'debug' ? 'debug'
@@ -59,16 +59,23 @@ export function diagnosticError(error) {
 
 function sinkFailureFallback(record) {
 	// A broken observer must not erase the event it was meant to report.
-	defaultOperationalEventSink(record);
-	defaultOperationalEventSink(createDiagnostic({
-		source: 'svelte-adapter-uws',
-		component: 'runtime.observability',
-		event: 'operational.sink.failed',
-		severity: 'error',
-		message: 'The configured operational event sink failed; console fallback was restored for this event.',
-		occurredAt: wallIso(),
-		attributes: { originalSource: record.source, originalEvent: record.event }
-	}));
+	// This runs inside emitOperationalEvent's own catch (and in a rejection
+	// handler), so nothing here may throw either - not even with a broken
+	// injected clock underneath wallIso().
+	try {
+		defaultOperationalEventSink(record);
+		defaultOperationalEventSink(createDiagnostic({
+			source: 'svelte-adapter-uws',
+			component: 'runtime.observability',
+			event: 'operational.sink.failed',
+			severity: 'error',
+			message: 'The configured operational event sink failed; console fallback was restored for this event.',
+			occurredAt: wallIso(),
+			attributes: { originalSource: record.source, originalEvent: record.event }
+		}));
+	} catch {
+		try { console.error('[ws] operational sink failed and the fallback could not render:', record?.event); } catch { /* console gone */ }
+	}
 }
 
 function operationalEventSinkRegistry() {
@@ -197,7 +204,7 @@ function canonicalRecord(line) {
 	const close = line.indexOf(']');
 	if (close < 0 || !line.startsWith(`[${DIAGNOSTIC_PREFIX} `)) return null;
 	const prefix = line.slice(1, close);
-	const match = /^oss-realtime\/diagnostic source=([^ ]+) component=([^ ]+) event=([^ ]+) severity=([^ ]+)$/.exec(prefix);
+	const match = /^lantean\/diagnostic source=([^ ]+) component=([^ ]+) event=([^ ]+) severity=([^ ]+)$/.exec(prefix);
 	if (!match) return null;
 	const marker = line.lastIndexOf(' {"schemaVersion":');
 	if (marker <= close) return null;

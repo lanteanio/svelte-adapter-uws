@@ -65,22 +65,31 @@ export function createOperationalDiagnostic(input) {
 	};
 }
 
+/**
+ * Compose the single console line with per-part caps, so the ACTION - the
+ * field an operator needs most and the last one in the pattern - can never
+ * be the first thing truncated away by the record-level 512-char message
+ * bound. The full untruncated fields always ride in `attributes`.
+ *
+ * @param {ReturnType<typeof createOperationalDiagnostic>} record
+ */
+function composedMessage(record) {
+	const value = record.attributes;
+	const part = (text, cap) => (text.length > cap ? text.slice(0, cap - 3) + '...' : text);
+	return `${record.event}: ${part(value.problem, 150)}; ` +
+		`effect: ${part(value.effect, 80)}; ` +
+		`recovery: ${part(value.recovery, 80)}; ` +
+		`action: ${part(value.action, 140)}`;
+}
+
 export function formatOperationalDiagnostic(input) {
 	const record = createOperationalDiagnostic(input);
-	const value = record.attributes;
-	return formatDiagnostic({
-		...record,
-		message: `${record.event}: ${value.problem}; effect: ${value.effect}; recovery: ${value.recovery}; action: ${value.action}`
-	});
+	return formatDiagnostic({ ...record, message: composedMessage(record) });
 }
 
 export function emitOperationalDiagnostic(input) {
 	const record = createOperationalDiagnostic(input);
-	const value = record.attributes;
-	return emitOperationalEvent({
-		...record,
-		message: `${record.event}: ${value.problem}; effect: ${value.effect}; recovery: ${value.recovery}; action: ${value.action}`
-	});
+	return emitOperationalEvent({ ...record, message: composedMessage(record) });
 }
 
 export function listenFailureDiagnostic(host, port) {

@@ -77,17 +77,22 @@ describeUWS('production transport RED metrics', () => {
 			expect(values.get(name), name).toBeGreaterThan(0);
 		}
 
-		// A response with no body terminates through endWithoutBody (every
-		// redirect, 204, and HEAD). That path was once uninstrumented, which
-		// silently removed a whole class of ordinary traffic from the RED
-		// counters. The fixture registry aggregates labels away, so this is a
-		// delta assertion: the before-scrape completes (+1) and the HEAD must
-		// count too (+1); an uninstrumented endWithoutBody yields only +1.
+		// A response with no body terminates through endWithoutBody: a static
+		// asset answered to HEAD, a bodyless SSR response, an empty admin
+		// reply. That path was once uninstrumented, which silently removed a
+		// whole class of ordinary traffic from the RED counters. The probe
+		// must be a STATIC asset: SvelteKit renders SSR pages for HEAD with a
+		// body, so an SSR HEAD terminates through the already-counted end()
+		// and cannot prove this patch. The fixture registry aggregates labels
+		// away, so this is a delta assertion: the before-scrape completes
+		// (+1) and the static HEAD must count too (+1); with endWithoutBody
+		// uninstrumented the delta stays at +1 and this goes red.
 		const before = (await scrape(server.httpUrl)).get('http_requests_total');
-		const headResponse = await fetch(server.httpUrl + '/', { method: 'HEAD' });
+		const headResponse = await fetch(server.httpUrl + '/test.txt', { method: 'HEAD' });
 		expect(headResponse.status).toBe(200);
+		expect(await headResponse.text()).toBe('');
 		const after = (await scrape(server.httpUrl)).get('http_requests_total');
-		expect(after, 'a no-body HEAD completion must increment http_requests_total')
+		expect(after, 'a no-body static HEAD completion must increment http_requests_total')
 			.toBeGreaterThanOrEqual(before + 2);
 	}, 15_000);
 });
