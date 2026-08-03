@@ -1,0 +1,393 @@
+{
+  "schemaVersion": "privacy-data-flow-retention/v1",
+  "contractVersion": 1,
+  "publishedBy": "svelte-adapter-uws",
+  "scope": "Deployer-facing processing, retention, erasure, and transfer inventory for the svelte-adapter-uws ecosystem.",
+  "packages": [
+    {
+      "name": "svelte-adapter-uws",
+      "role": "HTTP/WebSocket runtime, browser transport client, in-process plugins, and telemetry boundary",
+      "repository": "https://github.com/lanteanio/svelte-adapter-uws"
+    },
+    {
+      "name": "svelte-realtime",
+      "role": "Realtime RPC/state framework, browser offline queue, durable-work seams, and erasure coordinator",
+      "repository": "https://github.com/lanteanio/svelte-realtime"
+    },
+    {
+      "name": "svelte-adapter-uws-extensions",
+      "role": "Redis and Postgres persistence, coordination, replay, dead-letter, alarm, job, and task stores",
+      "repository": "https://github.com/lanteanio/svelte-adapter-uws-extensions"
+    }
+  ],
+  "responsibilityModel": {
+    "ecosystem": "Supplies processing primitives and documented deletion controls; it is not a hosted processor and does not select a lawful basis or retention period for the deployment.",
+    "deployer": "Acts as controller or processor according to its service, configures data minimisation and retention, inventories infrastructure vendors, services data-subject requests, and verifies deletion across every configured store and sink.",
+    "infrastructureProvider": "May be a processor or subprocessor when Redis, Postgres, log, metric, trace, browser storage, backup, or hosting services receive personal data. The deployer must identify the provider and transfer mechanism."
+  },
+  "erasureBoundary": {
+    "coordinator": "svelte-realtime live.forget(userId)",
+    "covered": "Known in-process user-keyed realtime stores and a configured durable store exposing purgeUser(tenantId, userId, cascade).",
+    "notCovered": "Application databases, browser sessionStorage/IndexedDB, logs, metrics, traces, backups, unregistered custom stores, records without a user mapping, and adapter-only in-process stores.",
+    "completionRule": "Do not report erasure complete until the application has enumerated this manifest, run every applicable ecosystem and host deletion action, handled failures, and recorded evidence from external stores, sinks, replicas, and backups."
+  },
+  "activities": [
+    {
+      "id": "http-and-websocket-transit",
+      "packages": ["svelte-adapter-uws"],
+      "purpose": "Serve SvelteKit HTTP requests and authenticated/authorized WebSocket traffic.",
+      "data": ["URL and query", "headers and cookies", "request body", "remote address", "application payload", "requestId and trace context"],
+      "subjects": ["site visitors", "authenticated users", "operators"],
+      "storage": "Adapter request/connection objects and application handlers; the adapter does not durably persist the request or message body.",
+      "defaultRetention": {
+        "policy": "request or connection lifetime",
+        "automatic": true,
+        "limit": "Released after request completion, WebSocket close, or process termination; application code and sinks may copy it elsewhere."
+      },
+      "controls": ["authentication and topic authorization", "request/body and frame limits", "application field minimisation"],
+      "erasure": {
+        "mode": "host-owned",
+        "action": "Delete any copies made by application handlers, proxies, logs, traces, or downstream services.",
+        "limitations": "Closing a connection removes live adapter state but does not erase copied or exported records."
+      },
+      "hostActions": ["Document the lawful basis and recipient for request and message data.", "Classify proxy, application, and observability copies separately."],
+      "transfer": "Depends on deployment region, hosting, proxy, and downstream recipients.",
+      "sources": [
+        {"repository": "svelte-adapter-uws", "path": "README.md#websocket-handler-hooksws"},
+        {"repository": "svelte-adapter-uws", "path": "src/runtime/handler.js"}
+      ]
+    },
+    {
+      "id": "browser-connection-resume",
+      "packages": ["svelte-adapter-uws"],
+      "purpose": "Resume a previous WebSocket session after reconnecting.",
+      "data": ["opaque session identifier", "URL path namespace"],
+      "subjects": ["browser users"],
+      "storage": "Browser sessionStorage under svelte-adapter-uws.session.<path>.",
+      "defaultRetention": {
+        "policy": "browser tab session",
+        "automatic": true,
+        "limit": "Browser-defined sessionStorage lifetime; the client overwrites the identifier but does not expose an ecosystem-wide remote deletion control."
+      },
+      "controls": ["same-origin browser storage", "opaque identifier", "path-scoped key"],
+      "erasure": {
+        "mode": "host-owned",
+        "action": "Remove the sessionStorage key in the browser or instruct the user to clear site data/close the tab as appropriate.",
+        "limitations": "live.forget does not execute in each browser and cannot clear sessionStorage."
+      },
+      "hostActions": ["Disclose browser storage where required.", "Provide a sign-out/site-data path if the identifier is linked to an account."],
+      "transfer": "No third-party transfer by the storage primitive; network resume sends the identifier to the configured deployment.",
+      "sources": [
+        {"repository": "svelte-adapter-uws", "path": "src/client.js#L1014"}
+      ]
+    },
+    {
+      "id": "adapter-in-process-replay",
+      "packages": ["svelte-adapter-uws"],
+      "purpose": "Replay recent topic events after a transient subscriber gap.",
+      "data": ["topic", "event name", "application payload", "sequence and epoch"],
+      "subjects": ["application-defined users and entities represented in payloads"],
+      "storage": "Per-process memory, bounded by 100 topics and 1000 entries per topic by default.",
+      "defaultRetention": {
+        "policy": "capacity and process lifetime; no time TTL",
+        "automatic": true,
+        "limit": "Least-recently-used topic and oldest-entry eviction, explicit clear/clearTopic, or process termination."
+      },
+      "controls": ["size option", "maxTopics option", "clear()", "clearTopic(topic)"],
+      "erasure": {
+        "mode": "explicit",
+        "action": "Call clearTopic for every affected topic, or clear the store/restart the process when selective mapping is unavailable.",
+        "limitations": "The adapter replay store has no built-in user index and is not included in live.forget."
+      },
+      "hostActions": ["Avoid personal data in replay payloads where possible.", "Define a user-to-topic erasure mapping or choose a durable store with forgetUserId."],
+      "transfer": "None unless payloads are relayed or exported by application configuration.",
+      "sources": [
+        {"repository": "svelte-adapter-uws", "path": "src/plugins/replay/server.js"}
+      ]
+    },
+    {
+      "id": "adapter-session-and-dedup",
+      "packages": ["svelte-adapter-uws"],
+      "purpose": "Hold application session values and deduplication identifiers in one process.",
+      "data": ["session token", "application-defined session value", "deduplication identifier"],
+      "subjects": ["application-defined users"],
+      "storage": "Per-process memory; both APIs require a positive deployer-selected TTL and default to 10000 entries.",
+      "defaultRetention": {
+        "policy": "configured TTL and capacity",
+        "automatic": true,
+        "limit": "Sliding TTL for sessions, claim-window TTL for deduplication, capacity eviction, explicit delete/clear, or process termination."
+      },
+      "controls": ["required ttl", "maxEntries", "delete()", "clear()"],
+      "erasure": {
+        "mode": "explicit",
+        "action": "Delete the known token/id or clear the store; rotate credentials if the token may have escaped.",
+        "limitations": "These adapter stores are not registered with live.forget and user lookup is application-owned."
+      },
+      "hostActions": ["Set TTLs from the declared purpose, not only capacity needs.", "Maintain the user-to-token mapping needed for selective erasure."],
+      "transfer": "In-process unless application code exports values.",
+      "sources": [
+        {"repository": "svelte-adapter-uws", "path": "src/plugins/session/server.js"},
+        {"repository": "svelte-adapter-uws", "path": "src/plugins/dedup/server.js"}
+      ]
+    },
+    {
+      "id": "browser-offline-mutation-queue",
+      "packages": ["svelte-realtime"],
+      "purpose": "Queue RPC mutations while disconnected and replay them after reconnecting.",
+      "data": ["RPC path", "arguments/application payload", "queue timestamp", "sequence/checkpoint", "persistence namespace"],
+      "subjects": ["browser users", "users represented in queued payloads"],
+      "storage": "Browser memory by default; opt-in offline.persist=true uses IndexedDB. maxQueue defaults to 100, maxAge defaults to 0 (no age expiry), and persistKey defaults to default.",
+      "defaultRetention": {
+        "policy": "until replay/settlement, eviction, explicit browser-store deletion, or browser storage removal; no default age limit",
+        "automatic": false,
+        "limit": "Capacity bounds count but does not bound age. A positive maxAge must be configured for time-bounded retention."
+      },
+      "controls": ["offline.queue", "offline.persist", "maxQueue", "maxAge", "persistKey", "OfflineStore.delete/clear"],
+      "erasure": {
+        "mode": "host-owned",
+        "action": "Clear the account-specific offline-store prefix on sign-out/erasure and reject or discard queued mutations for the forgotten identity.",
+        "limitations": "live.forget runs on the server and does not clear IndexedDB in disconnected browsers; the default persistKey is not user-partitioned."
+      },
+      "hostActions": ["Use an account-specific persistKey.", "Set a positive maxAge.", "Clear old-user data before switching accounts on a shared browser."],
+      "transfer": "Stored locally until replay sends the payload to the configured server.",
+      "sources": [
+        {"repository": "svelte-realtime", "path": "src/client/offline.js"},
+        {"repository": "svelte-realtime", "path": "src/client/offline-store.js"}
+      ]
+    },
+    {
+      "id": "development-inspection",
+      "packages": ["svelte-realtime"],
+      "purpose": "Inspect realtime activity during development.",
+      "data": ["RPC/stream metadata", "topics", "timings", "errors", "optionally full arguments, results, and stream values"],
+      "subjects": ["developers", "test users", "users represented in captured payloads"],
+      "storage": "Browser/process memory in bounded development-tool collections; payload capture is off by default.",
+      "defaultRetention": {
+        "policy": "development session and bounded collection lifetime",
+        "automatic": true,
+        "limit": "Clear action, collection replacement, disabling unsafeCapturePayloads (which purges captured payload values), reload, or process termination."
+      },
+      "controls": ["metadata-only default", "redactKeys", "unsafeCapturePayloads", "clear events"],
+      "erasure": {
+        "mode": "explicit",
+        "action": "Disable unsafeCapturePayloads and clear the development event collection/reload the page.",
+        "limitations": "Screenshots, copied values, browser extensions, and external developer tooling are outside the purge boundary."
+      },
+      "hostActions": ["Do not enable payload capture against production personal data.", "Use synthetic or minimised development fixtures."],
+      "transfer": "Depends on browser, remote debugging, screen sharing, and developer tooling configuration.",
+      "sources": [
+        {"repository": "svelte-realtime", "path": "src/client/devtools-instrument.js"},
+        {"repository": "svelte-realtime", "path": "src/devtools.js"}
+      ]
+    },
+    {
+      "id": "realtime-in-process-state-and-erasure",
+      "packages": ["svelte-realtime"],
+      "purpose": "Coordinate presence, rate limits, idempotency, reactive cohorts, CRDT replicas, push subscriptions, smooth state, and dead-letter handling.",
+      "data": ["tenant and user identifiers", "topics and membership", "idempotency results", "application state/payload", "push subscription", "failure record"],
+      "subjects": ["authenticated users", "application-defined users and collaborators"],
+      "storage": "Process memory with surface-specific TTL/capacity/lifecycle rules; in-memory idempotency defaults to 48 hours and dead letters default to 1000 records with no TTL.",
+      "defaultRetention": {
+        "policy": "mixed surface-specific lifecycle; some stores have no time default",
+        "automatic": false,
+        "limit": "live.forget covers its registered user-keyed surface, but CRDT durable persistence, unmapped dead letters, and other application-owned copies require additional action."
+      },
+      "controls": ["live.forget", "configureForget", "surface TTL/capacity options", "forgetUserId", "clear/purge methods"],
+      "erasure": {
+        "mode": "configured",
+        "action": "Authenticate the caller, invoke live.forget, treat FORGET_STORE_FAILED as incomplete erasure, and run every application/browser/sink deletion leg.",
+        "limitations": "Coverage depends on configured durable purgeUser support and identity extractors; it is not a universal data-discovery mechanism."
+      },
+      "hostActions": ["Register the durable forget store and identity extractors.", "Test failure and retry behavior.", "Inventory custom stores outside the descriptor table."],
+      "transfer": "Depends on configured extension stores, push providers, webhook recipients, and application services.",
+      "sources": [
+        {"repository": "svelte-realtime", "path": "src/server/forget.js"},
+        {"repository": "svelte-realtime", "path": "src/server/idempotency.js"},
+        {"repository": "svelte-realtime", "path": "src/server/dead-letter.js"}
+      ]
+    },
+    {
+      "id": "durable-replay",
+      "packages": ["svelte-adapter-uws-extensions", "svelte-realtime"],
+      "purpose": "Persist topic events for reconnect replay across processes and restarts.",
+      "data": ["tenant/topic", "event name", "application payload", "sequence and epoch", "optional extracted user identifier"],
+      "subjects": ["users and entities represented in topics or payloads"],
+      "storage": "Redis or Postgres. Both replay stores default to 1000 entries per topic and ttl=0 (no expiry).",
+      "defaultRetention": {
+        "policy": "capacity-bounded but indefinite by time unless ttl is configured",
+        "automatic": false,
+        "limit": "Oldest-entry eviction, configured positive TTL, clearTopic/clear, purgeUser with forgetUserId, or infrastructure deletion."
+      },
+      "controls": ["size", "ttl", "clearTopic", "clear", "forgetUserId", "purgeUser"],
+      "erasure": {
+        "mode": "configured",
+        "action": "Configure forgetUserId, connect the store to live.forget, and verify purgeUser removed matching rows/events from every instance/store.",
+        "limitations": "Without forgetUserId, purgeUser is a no-op; capacity eviction is not an erasure deadline."
+      },
+      "hostActions": ["Set a positive TTL from the declared replay window.", "Keep payloads minimal and make user mapping deterministic.", "Address replicas and backups."],
+      "transfer": "Redis/Postgres and their hosting, replication, backup, and support regions may be subprocessors/transfers.",
+      "sources": [
+        {"repository": "svelte-adapter-uws-extensions", "path": "src/redis/replay.js"},
+        {"repository": "svelte-adapter-uws-extensions", "path": "src/postgres/replay.js"}
+      ]
+    },
+    {
+      "id": "durable-idempotency",
+      "packages": ["svelte-adapter-uws-extensions", "svelte-realtime"],
+      "purpose": "Return an original RPC outcome for duplicate mutation attempts.",
+      "data": ["hashed/scoped idempotency key", "serialized result or error", "tenant and user identifier when supplied", "status and expiry"],
+      "subjects": ["RPC callers", "users represented in cached results"],
+      "storage": "Redis or Postgres; completed-result ttl defaults to 172800 seconds (48 hours).",
+      "defaultRetention": {
+        "policy": "48-hour TTL by default",
+        "automatic": true,
+        "limit": "Redis key expiry or Postgres expiry plus cleanup interval; clear/purgeUser can remove earlier."
+      },
+      "controls": ["ttl", "acquireTtl", "cleanupInterval", "purgeUser", "clear"],
+      "erasure": {
+        "mode": "configured",
+        "action": "Pass tenant/user metadata, wire the durable store into live.forget, and verify purgeUser completion.",
+        "limitations": "Legacy/anonymous/unmapped rows cannot be selected by user and remain until expiry or broader deletion."
+      },
+      "hostActions": ["Reduce TTL if retry semantics permit.", "Ensure cached results exclude unnecessary personal data.", "Monitor cleanup when using Postgres."],
+      "transfer": "Redis/Postgres provider and replica/backup regions must be assessed.",
+      "sources": [
+        {"repository": "svelte-realtime", "path": "src/server/idempotency.js"},
+        {"repository": "svelte-adapter-uws-extensions", "path": "src/redis/idempotency.js"},
+        {"repository": "svelte-adapter-uws-extensions", "path": "src/postgres/idempotency.js"}
+      ]
+    },
+    {
+      "id": "durable-dead-letters",
+      "packages": ["svelte-adapter-uws-extensions", "svelte-realtime"],
+      "purpose": "Retain failed webhook deliveries for diagnosis or replay.",
+      "data": ["topic and event", "application payload", "failure details", "attempt/timestamp", "trace context", "optional extracted user identifier"],
+      "subjects": ["webhook subjects", "users represented in payloads"],
+      "storage": "In-memory, Redis, or Postgres dead-letter queue; default maximum is 1000 and ttlMs defaults to 0 (no time expiry).",
+      "defaultRetention": {
+        "policy": "capacity-bounded but indefinite by time unless ttlMs is configured",
+        "automatic": false,
+        "limit": "Oldest-record eviction, positive ttlMs, delete/clear, or purgeUser with forgetUserId."
+      },
+      "controls": ["max", "ttlMs", "cleanupInterval", "forgetUserId", "purgeUser", "delete", "clear"],
+      "erasure": {
+        "mode": "configured",
+        "action": "Configure forgetUserId before capture, call purgeUser/live.forget, and verify concurrent-delivery tombstone and durable deletion behavior.",
+        "limitations": "Records captured without a user extractor are not selectively purgeable; replaying a record creates a new downstream copy."
+      },
+      "hostActions": ["Set a positive ttlMs.", "Restrict operator access and redact failure data.", "Treat replay recipients as a new processing event."],
+      "transfer": "Store provider and webhook destination may be separate processors/recipients and transfers.",
+      "sources": [
+        {"repository": "svelte-realtime", "path": "src/server/dead-letter.js"},
+        {"repository": "svelte-adapter-uws-extensions", "path": "src/redis/dead-letter.js"},
+        {"repository": "svelte-adapter-uws-extensions", "path": "src/postgres/dead-letter.js"}
+      ]
+    },
+    {
+      "id": "durable-tasks-jobs-and-alarms",
+      "packages": ["svelte-adapter-uws-extensions", "svelte-realtime"],
+      "purpose": "Execute durable background work and scheduled room alarms.",
+      "data": ["task/job name and payload", "result/error/status", "tenant/user identifier when extracted", "request and trace context", "alarm topic/time/stable alarmId metadata"],
+      "subjects": ["users represented in work payloads", "operators"],
+      "storage": "Postgres tasks retain terminal rows for seven days by default; jobs delete completed rows; Redis/Postgres alarms remain until atomically claimed/fired, replaced, cleared, or deleted.",
+      "defaultRetention": {
+        "policy": "mixed: task terminal TTL, job completion deletion, and event-bounded alarm lifetime",
+        "automatic": true,
+        "limit": "Task rowTtl defaults to 604800 seconds; alarms have no independent maximum age and overdue/unresolvable records may persist until recovery or deletion."
+      },
+      "controls": ["rowTtl", "cleanupInterval", "clear queue", "forgetUserId", "purgeUser", "deleteAlarm", "alarm-store clear"],
+      "erasure": {
+        "mode": "configured",
+        "action": "Use task forgetUserId/purgeUser; remove or replace affected queued jobs and alarms using application identifiers; verify in-flight handlers and downstream effects separately.",
+        "limitations": "Jobs and alarms are not automatically user-indexed; deleting a work row cannot undo external side effects already performed."
+      },
+      "hostActions": ["Minimise payloads and results.", "Set task TTL from business need.", "Define cancellation/compensation and unresolved-alarm cleanup.", "Cover downstream effects in erasure workflows."],
+      "transfer": "Postgres/Redis providers, workers, and downstream services may be processors/recipients.",
+      "sources": [
+        {"repository": "svelte-adapter-uws-extensions", "path": "src/postgres/tasks.js"},
+        {"repository": "svelte-adapter-uws-extensions", "path": "src/postgres/jobs.js"},
+        {"repository": "svelte-adapter-uws-extensions", "path": "src/postgres/alarm-store.js"},
+        {"repository": "svelte-adapter-uws-extensions", "path": "src/redis/alarm-store.js"},
+        {"repository": "svelte-realtime", "path": "src/server/alarm.js"}
+      ]
+    },
+    {
+      "id": "cluster-ephemeral-state",
+      "packages": ["svelte-adapter-uws-extensions", "svelte-realtime", "svelte-adapter-uws"],
+      "purpose": "Coordinate presence, groups, cursors, locks, rate limits, and pub/sub across instances.",
+      "data": ["tenant/user/connection identifiers", "topic/group membership", "selected presence/cursor fields", "rate-limit and lock keys", "ephemeral application events"],
+      "subjects": ["connected users", "collaborators", "operators"],
+      "storage": "Process memory and Redis keys/pub-sub with surface-specific TTLs and leave/disconnect cleanup; application selectors can introduce additional personal fields.",
+      "defaultRetention": {
+        "policy": "connection, lease, configured TTL, or explicit leave lifecycle",
+        "automatic": true,
+        "limit": "Disconnect/lease expiry, rate-limit/lock TTL, explicit leave/clear, user purge where supported, or infrastructure deletion."
+      },
+      "controls": ["minimal projection selectors", "presence/lease TTL", "leave/disconnect", "rate-limit window", "lock TTL", "purgeUser/clear where exposed"],
+      "erasure": {
+        "mode": "configured",
+        "action": "Disconnect/remove the subject, invoke live.forget for registered state, delete application-defined keys, and wait for or explicitly remove leased Redis state.",
+        "limitations": "Pub/sub recipients and application consumers may retain copies; arbitrary selector fields cannot be discovered automatically."
+      },
+      "hostActions": ["Project only public fields.", "Keep TTLs finite.", "Prohibit raw personal values in metric labels and broad group/topic names."],
+      "transfer": "Redis provider and every subscribed application instance receive the routed identifiers/events.",
+      "sources": [
+        {"repository": "svelte-adapter-uws", "path": "README.md#presence"},
+        {"repository": "svelte-adapter-uws-extensions", "path": "src/redis/presence.js"},
+        {"repository": "svelte-adapter-uws-extensions", "path": "src/redis/groups.js"},
+        {"repository": "svelte-adapter-uws-extensions", "path": "src/redis/cursor.js"}
+      ]
+    },
+    {
+      "id": "logs-metrics-and-traces",
+      "packages": ["svelte-adapter-uws", "svelte-realtime", "svelte-adapter-uws-extensions"],
+      "purpose": "Operate, secure, diagnose, and measure the deployment.",
+      "data": ["structured operational events", "requestId", "traceparent/tracestate", "bounded operational metric labels", "application-supplied attributes", "span attributes and errors"],
+      "subjects": ["users correlated by identifiers", "operators", "developers"],
+      "storage": "Custom event sink or console, metric scraper/backend, and configured tracing provider/exporter. The ecosystem does not set backend retention.",
+      "defaultRetention": {
+        "policy": "host-defined; no ecosystem deletion or retention guarantee after export",
+        "automatic": false,
+        "limit": "The in-process metric registry is process-lifetime, but external logs, metrics, and spans follow each backend's policy."
+      },
+      "controls": ["structured data classes", "bounded payload-free metric labels", "custom sink", "optional trace provider", "backend TTL/access/redaction"],
+      "erasure": {
+        "mode": "host-owned",
+        "action": "Search and delete or irreversibly de-identify records in every sink/provider according to the deployment policy and legal basis.",
+        "limitations": "live.forget and store purgeUser do not reach logging, metrics, trace, SIEM, support, or backup systems."
+      },
+      "hostActions": ["Keep topics, user ids, addresses, cookies, tokens, and payloads out of metric labels.", "Classify custom attributes.", "Set backend retention/access and document any security-log exception."],
+      "transfer": "Every hosted logging, metric, tracing, SIEM, and support vendor must be evaluated as a recipient/subprocessor and for international transfer.",
+      "sources": [
+        {"repository": "svelte-adapter-uws", "path": "../../observability.md"},
+        {"repository": "svelte-adapter-uws", "path": "src/runtime/observability-manifest.js"},
+        {"repository": "svelte-realtime", "path": "src/server/forget.js"}
+      ]
+    },
+    {
+      "id": "application-and-backup-copies",
+      "packages": ["svelte-adapter-uws", "svelte-realtime", "svelte-adapter-uws-extensions"],
+      "purpose": "Persist application domain state, CRDT documents, exports, analytics, or disaster-recovery copies selected by the deployer.",
+      "data": ["application-defined records and payloads", "derived data", "backup snapshots", "audit evidence"],
+      "subjects": ["application-defined data subjects"],
+      "storage": "Application databases, object stores, analytics systems, caches, replicas, and backups outside the ecosystem's automatic inventory.",
+      "defaultRetention": {
+        "policy": "entirely host-defined",
+        "automatic": false,
+        "limit": "No ecosystem default, discovery, or deletion guarantee."
+      },
+      "controls": ["application data model", "provider lifecycle rules", "backup rotation", "custom live.forget onForget hook", "compaction/anonymisation"],
+      "erasure": {
+        "mode": "host-owned",
+        "action": "Run application-specific deletion/de-identification across primary, derived, replicated, cached, exported, and backed-up copies and retain non-personal completion evidence.",
+        "limitations": "An ecosystem success result cannot attest stores that were never registered or data that cannot be mapped to the subject."
+      },
+      "hostActions": ["Extend the generated RoPA with every application store and recipient.", "Document backup deletion/put-beyond-use timing.", "Test complete subject mapping."],
+      "transfer": "All application storage, analytics, backup, support, and recovery providers/regions are deployment-specific.",
+      "sources": [
+        {"repository": "svelte-realtime", "path": "src/server/forget.js"},
+        {"repository": "svelte-realtime", "path": "README.md"}
+      ]
+    }
+  ]
+}
