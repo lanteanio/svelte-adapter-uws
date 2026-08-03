@@ -8,7 +8,11 @@ import { fileURLToPath } from 'node:url';
 import { hasUWS } from './helpers/real-runtime.js';
 
 const root = JSON.parse(readFileSync(new URL('../protocol.schema.json', import.meta.url), 'utf8'));
-const protocol = readFileSync(new URL('../PROTOCOL.md', import.meta.url), 'utf8');
+// Line endings are a checkout property, not a contract property: git may hand
+// a Windows working tree CRLF for the same committed bytes, and a multi-line
+// prose pin joined with \n would then never match. Normalize on read so the
+// assertion tests the wording it claims to test.
+const protocol = readFileSync(new URL('../PROTOCOL.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const expectedJsTransportDecision = [
 	'**Reference-runtime transport decision (`js-transport-v1`):**',
 	'WebSocket/WSS remains the permanent default and complete transport for the',
