@@ -44,6 +44,25 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// The SAME handler as `grant`, with the wire-subscribe gate DISARMED - the
+	// default posture for most applications, and the only one in which the
+	// client-facing subscription-cap sites are reachable at all.
+	//
+	// With the gate armed, a client frame naming an ungranted topic is refused by
+	// the authorization check before the landing cap can apply, so the cap sites
+	// behind it are dead code for the armed suites. Disarmed, a client `subscribe`
+	// and `subscribe-batch` frame reach them with the topic not yet held, which is
+	// what lets a probe prove no private ceiling sits in front of the canonical
+	// one. Its own output directory keeps `grant`'s armed options unchanged.
+	capwire: {
+		out: 'build-cap-wire',
+		handler: './src/hooks.ws.grant.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
 	// A configured tracing module with the wrong export shape. The build itself
 	// succeeds, then importing the generated server runtime must fail loudly
 	// instead of silently disabling tracing.

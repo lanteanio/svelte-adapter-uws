@@ -748,7 +748,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decision modules may not hand that Set or its size to an opaque helper. A
   three-surface differential reaches sizes 16 and 1,000,000 without allocating
   a million entries, pinning new-topic denial at the canonical boundary and
-  admission for an already-held topic.
+  admission for an already-held topic. That differential now also drives the
+  cap sites a real client frame reaches, not only the trusted server lane. On
+  an authorizing deployment the pre-authorization site is proven to admit every
+  sub-canonical size and to refuse only at the ceiling, and with the gate in
+  its default disarmed posture a real `subscribe` and `subscribe-batch` frame
+  prove no lower private ceiling sits in front of the canonical one on either
+  lane.
 - **The public test-server declaration typechecks under strict consumers.** Its
   `primaryInit` option now has one authoritative `{ env }` signature instead of
   two conflicting interface members.

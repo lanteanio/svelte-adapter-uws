@@ -46,6 +46,27 @@ afterEach(async () => {
 // take the topic decision back from the server-grant model or disarm the gate.
 // A `message` hook provides the trusted server-side grant, mirroring
 // test/fixture/src/hooks.ws.grant.js so production runs the same shape.
+// Must stay identical to test/fixture/src/hooks.ws.grant.js. `size` alone is not
+// enough: a private cap that COUNTS by iterating the Set would read the real
+// (small) membership and evade the probe entirely, so the iteration protocol is
+// shadowed to agree with the reported size.
+function shadowSubscriptionSize(subscriptions, size) {
+	Object.defineProperty(subscriptions, 'size', { configurable: true, value: size });
+	const real = [...subscriptions];
+	Object.defineProperty(subscriptions, Symbol.iterator, {
+		configurable: true,
+		value: function* shadowedIterator() {
+			yield* real;
+			for (let index = real.length; index < size; index++) yield `__cap-probe-filler:${index}`;
+		}
+	});
+}
+
+function unshadowSubscriptionSize(subscriptions) {
+	delete subscriptions.size;
+	delete subscriptions[Symbol.iterator];
+}
+
 function grantHandler() {
 	const group = createGroup('policy-lobby');
 	const delayed = new WeakMap();
@@ -86,15 +107,30 @@ function grantHandler() {
 			if (msg?.type === 'cap-probe') {
 				const subscriptions = ws.getUserData()?.[SUBSCRIPTIONS_SLOT];
 				if (!(subscriptions instanceof Set)) throw new Error('cap probe has no subscription Set');
-				Object.defineProperty(subscriptions, 'size', { configurable: true, value: msg.size });
+				shadowSubscriptionSize(subscriptions, msg.size);
 				let denial;
 				try { denial = await platform.subscribe(ws, msg.topic); }
-				finally { delete subscriptions.size; }
+				finally { unshadowSubscriptionSize(subscriptions); }
 				platform.send(ws, 'probe', 'cap-result', {
 					topic: msg.topic,
 					denial: denial ?? null,
 					held: subscriptions.has(msg.topic)
 				});
+			}
+			// Arm/disarm WITHOUT subscribing, so the caller can drive the
+			// client-facing wire lanes at a chosen size. The platform lane above
+			// covers 2 of the 5 canonical cap call sites; the other three are only
+			// reachable from a client frame.
+			if (msg?.type === 'cap-arm') {
+				const subscriptions = ws.getUserData()?.[SUBSCRIPTIONS_SLOT];
+				if (!(subscriptions instanceof Set)) throw new Error('cap probe has no subscription Set');
+				shadowSubscriptionSize(subscriptions, msg.size);
+				platform.send(ws, 'probe', 'cap-armed', { size: msg.size });
+			}
+			if (msg?.type === 'cap-disarm') {
+				const subscriptions = ws.getUserData()?.[SUBSCRIPTIONS_SLOT];
+				if (subscriptions instanceof Set) unshadowSubscriptionSize(subscriptions);
+				platform.send(ws, 'probe', 'cap-disarmed', { held: [...subscriptions] });
 			}
 			if (msg?.type === 'observe-check') {
 				const denial = await platform.checkSubscribe(ws, msg.topic, { requireGrant: true });
@@ -213,6 +249,20 @@ function clientApi(raw) {
 			const data = (hit.parsed ?? hit).data;
 			return { denial: data?.denial ?? null, held: Boolean(data?.held) };
 		},
+		/**
+		 * Arm the shadowed subscription size WITHOUT subscribing, so the next real
+		 * wire frame is judged at `size`. `capProbe` above drives only the platform
+		 * lane; the cap sites reached from a client frame need the shadow to be in
+		 * place already when the frame arrives.
+		 */
+		async capArm(size) {
+			raw.send({ type: 'cap-arm', size });
+			return (await raw.waitFor((p) => p?.event === 'cap-armed', 2000)) !== null;
+		},
+		async capDisarm() {
+			raw.send({ type: 'cap-disarm' });
+			return (await raw.waitFor((p) => p?.event === 'cap-disarmed', 2000)) !== null;
+		},
 		/** The answer type for one topic of an already-sent batch frame. */
 		async awaitTopic(topic, ref) {
 			const hit = await raw.waitFor((p) => p?.ref === ref && p?.topic === topic, 2000);
@@ -311,6 +361,79 @@ const ADAPTERS = [
 	...(hasUWS ? [{ label: 'production', boot: bootProduction }] : []),
 	{ label: 'testing', boot: bootTesting },
 	{ label: 'dev', boot: bootDev }
+];
+
+// ---------------------------------------------------------------------------
+// The same three surfaces with the wire-subscribe gate DISARMED - the default
+// posture for most applications, and the only one in which the client-facing
+// LANDING cap sites are reachable. Armed, authorization refuses an ungranted
+// topic before the landing cap can apply, so a private ceiling there would sit
+// behind dead code for every armed suite and stay invisible.
+// ---------------------------------------------------------------------------
+
+async function bootProductionOpen() {
+	const server = await startRealRuntime({ variant: 'capwire' });
+	teardown.push(() => server.stop());
+	return {
+		async client() {
+			const c = await connectRealClient(server.wsUrl);
+			teardown.push(() => c.close());
+			return clientApi(c);
+		}
+	};
+}
+
+async function bootTestingOpen() {
+	const { createTestServer } = await import('../src/testing.js');
+	const server = await createTestServer({ handler: grantHandler() });
+	teardown.push(() => server.close());
+	return {
+		async client() {
+			const { WebSocket } = await import('ws');
+			const ws = new WebSocket(server.wsUrl);
+			const frames = [];
+			ws.on('message', (d) => frames.push(d.toString()));
+			await new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); });
+			teardown.push(() => { try { ws.terminate(); } catch { /* gone */ } });
+			return clientApi(wsClient(ws, frames));
+		}
+	};
+}
+
+async function bootDevOpen() {
+	const mod = await import('../src/vite.js');
+	const handler = grantHandler();
+	const plugin = mod.default({ allowedOrigins: '*', handler: '/virtual-ws-handler' });
+
+	const httpServer = createServer();
+	await new Promise((r) => httpServer.listen(0, '127.0.0.1', r));
+	const port = httpServer.address().port;
+	teardown.push(() => new Promise((r) => httpServer.close(() => r(undefined))));
+
+	await plugin.configureServer({
+		httpServer,
+		middlewares: { use() {} },
+		config: { root: process.cwd(), logger: { warn() {}, info() {}, error() {} }, server: {} },
+		async ssrLoadModule() { return { default: handler, ...handler }; }
+	});
+
+	return {
+		async client() {
+			const { WebSocket } = await import('ws');
+			const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+			const frames = [];
+			ws.on('message', (d) => frames.push(d.toString()));
+			await new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); });
+			teardown.push(() => { try { ws.terminate(); } catch { /* gone */ } });
+			return clientApi(wsClient(ws, frames));
+		}
+	};
+}
+
+const OPEN_ADAPTERS = [
+	...(hasUWS ? [{ label: 'production', boot: bootProductionOpen }] : []),
+	{ label: 'testing', boot: bootTestingOpen },
+	{ label: 'dev', boot: bootDevOpen }
 ];
 
 // ---------------------------------------------------------------------------
@@ -487,6 +610,40 @@ const SCENARIOS = [
 		}
 	},
 	{
+		name: 'the pre-authorization cap on the wire subscribe lane holds only at the canonical ceiling',
+		// `capProbe` above drives platform.subscribe only - 2 of the 5 canonical
+		// cap call sites. On the ARMED surfaces the first client-frame site runs
+		// BEFORE the authorization check, so it is reachable with an ungranted
+		// topic and the REASON is the discriminator: a sub-canonical size must
+		// still reach authorization and be refused FORBIDDEN, while the canonical
+		// size is refused RATE_LIMITED by the cap before authorization is asked.
+		//
+		// The canonical row is the positive control. Without it a private ceiling
+		// that denied everything would look the same as a cap that never fired.
+		// The landing cap sites sit behind authorization and are unreachable in
+		// this posture; they are covered by the disarmed differential below.
+		expected: [
+			'16:FORBIDDEN',
+			'17:FORBIDDEN',
+			'500:FORBIDDEN',
+			'4096:FORBIDDEN',
+			'65536:FORBIDDEN',
+			'999999:FORBIDDEN',
+			'1000000:RATE_LIMITED'
+		],
+		async run(surface) {
+			const results = [];
+			for (const [index, size] of [16, 17, 500, 4096, 65_536, 999_999, 1_000_000].entries()) {
+				const client = await surface.client();
+				expect(await client.capArm(size), `cap-arm ${size} was not acknowledged`).toBe(true);
+				const single = await client.subscribeAnswer(`wire-cap-single-${index}`, 700 + index);
+				await client.capDisarm();
+				results.push(`${size}:${single.reason}`);
+			}
+			return results;
+		}
+	},
+	{
 		name: 'the observer lane applies the configured wire topic alphabet',
 		// The ordinary Platform method is called by trusted server code and may
 		// accept non-ASCII. Observer mode is different: presence/cursor feed it a
@@ -500,38 +657,88 @@ const SCENARIOS = [
 	}
 ];
 
+/**
+ * Run one scenario against every surface and hold both halves of the
+ * differential: all surfaces agree, and the agreed answer is the right one.
+ * @param {Array<{label: string, boot: () => Promise<any>}>} adapters
+ * @param {{run: (surface: any) => Promise<any>, expected: any}} scenario
+ */
+async function assertDifferential(adapters, scenario) {
+	/** @type {Record<string, any>} */
+	const answers = {};
+	for (const { label, boot } of adapters) {
+		const surface = await boot();
+		answers[label] = await scenario.run(surface);
+		// Tear down between surfaces so ports and modules do not pile up.
+		for (const fn of teardown.reverse()) {
+			try { await fn(); } catch { /* already down */ }
+		}
+		teardown = [];
+	}
+
+	const labels = Object.keys(answers);
+	expect(labels.length, 'at least two surfaces must run for a differential to mean anything')
+		.toBeGreaterThanOrEqual(2);
+
+	// Every surface agrees with the first one. This is the half that catches a
+	// single-surface mutation whatever its spelling.
+	for (const label of labels.slice(1)) {
+		expect(
+			answers[label],
+			`${label} disagrees with ${labels[0]}: ${JSON.stringify(answers[label])} vs ${JSON.stringify(answers[labels[0]])}`
+		).toEqual(answers[labels[0]]);
+	}
+
+	// And the agreed answer is the right one, so neutering all three the same
+	// way is caught too.
+	expect(answers[labels[0]], 'all surfaces agree, but on the wrong answer').toEqual(scenario.expected);
+}
+
+// The landing cap sites - the ones a client `subscribe` and `subscribe-batch`
+// frame reach AFTER the hook chain, with the topic not yet held. A private
+// ceiling in front of the canonical one would refuse a sub-canonical size here
+// while every armed suite and every platform-lane probe stayed green.
+const OPEN_SCENARIOS = [
+	{
+		name: 'no private ceiling sits in front of the canonical subscription cap on either wire lane',
+		// Below the canonical cap every surface must admit, on the single-topic
+		// lane and the batch lane alike. The canonical row is the positive
+		// control: without it a probe that never reached a cap site at all would
+		// look identical to one that reached it and was correctly admitted.
+		expected: [
+			'16:subscribed/subscribed',
+			'17:subscribed/subscribed',
+			'500:subscribed/subscribed',
+			'4096:subscribed/subscribed',
+			'65536:subscribed/subscribed',
+			'999999:subscribed/subscribed',
+			'1000000:subscribe-denied/subscribe-denied'
+		],
+		async run(surface) {
+			const results = [];
+			for (const [index, size] of [16, 17, 500, 4096, 65_536, 999_999, 1_000_000].entries()) {
+				const client = await surface.client();
+				expect(await client.capArm(size), `cap-arm ${size} was not acknowledged`).toBe(true);
+				const batchTopic = `open-cap-batch-${index}`;
+				const single = await client.subscribeAnswer(`open-cap-single-${index}`, 900 + index);
+				const batch = await client.batchWithHookProbe([batchTopic], 950 + index);
+				await client.capDisarm();
+				results.push(`${size}:${single.type}/${batch[batchTopic].type}`);
+			}
+			return results;
+		}
+	}
+];
+
+describe('the three socket surfaces answer identically with the wire gate disarmed', () => {
+	for (const scenario of OPEN_SCENARIOS) {
+		it(scenario.name, () => assertDifferential(OPEN_ADAPTERS, scenario), 60000);
+	}
+});
+
 describe('the three socket surfaces answer identically', () => {
 	for (const scenario of SCENARIOS) {
-		it(scenario.name, async () => {
-			/** @type {Record<string, any>} */
-			const answers = {};
-			for (const { label, boot } of ADAPTERS) {
-				const surface = await boot();
-				answers[label] = await scenario.run(surface);
-				// Tear down between surfaces so ports and modules do not pile up.
-				for (const fn of teardown.reverse()) {
-					try { await fn(); } catch { /* already down */ }
-				}
-				teardown = [];
-			}
-
-			const labels = Object.keys(answers);
-			expect(labels.length, 'at least two surfaces must run for a differential to mean anything')
-				.toBeGreaterThanOrEqual(2);
-
-			// Every surface agrees with the first one. This is the half that
-			// catches a single-surface mutation whatever its spelling.
-			for (const label of labels.slice(1)) {
-				expect(
-					answers[label],
-					`${label} disagrees with ${labels[0]}: ${JSON.stringify(answers[label])} vs ${JSON.stringify(answers[labels[0]])}`
-				).toEqual(answers[labels[0]]);
-			}
-
-			// And the agreed answer is the right one, so neutering all three the
-			// same way is caught too.
-			expect(answers[labels[0]], `all surfaces agree, but on the wrong answer`).toEqual(scenario.expected);
-		}, 60000);
+		it(scenario.name, () => assertDifferential(ADAPTERS, scenario), 60000);
 	}
 
 	// Guard for the harness. Without the native binding this suite silently
