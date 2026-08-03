@@ -107,6 +107,38 @@ describeUWS('wire-subscribe authorization', () => {
 		ws.close();
 	});
 
+	it("strict mode requires both the server grant and the app hook's allow", async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		let capturedWs = null;
+		let denyNo = false;
+		server = await createTestServer({
+			authorizeWireSubscribe: 'strict',
+			handler: {
+				open(ws) { capturedWs = ws; },
+				subscribe(_ws, topic) { return topic.startsWith('no:') && denyNo ? 'FORBIDDEN' : undefined; }
+			}
+		});
+		const { ws, frames } = await connectClient(server.wsUrl);
+		await new Promise(r => setTimeout(r, 30));
+
+		// The hook alone cannot admit a tenant/room topic the server never granted.
+		expect(await subscribeAndAwait(ws, frames, 'ok:ungranted', 31))
+			.toMatchObject({ type: 'subscribe-denied', reason: 'FORBIDDEN' });
+
+		// A grant plus hook allow succeeds.
+		expect(await server.platform.subscribe(capturedWs, 'ok:granted')).toBeNull();
+		expect(await subscribeAndAwait(ws, frames, 'ok:granted', 32))
+			.toMatchObject({ type: 'subscribed', topic: 'ok:granted' });
+
+		// A grant cannot override an app-level denial either.
+		expect(await server.platform.subscribe(capturedWs, 'no:granted')).toBeNull();
+		denyNo = true;
+		expect(await subscribeAndAwait(ws, frames, 'no:granted', 33))
+			.toMatchObject({ type: 'subscribe-denied', reason: 'FORBIDDEN' });
+
+		ws.close();
+	});
+
 	it('off by default: a client may subscribe to any valid topic (standalone adapter contract)', async () => {
 		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({ handler: {} });
@@ -127,10 +159,71 @@ describeUWS('wire-subscribe authorization', () => {
 		expect(await subscribeAndAwait(ws, frames, 'free:1', 1)).toMatchObject({ type: 'subscribed' });
 
 		// Arm it (what svelte-realtime does at init).
-		server.platform.authorizeWireSubscribe();
+		expect(server.platform.authorizeWireSubscribe()).toBe('legacy');
 
 		// After arming: a never-authorized topic is denied.
 		expect(await subscribeAndAwait(ws, frames, 'free:2', 2)).toMatchObject({ type: 'subscribe-denied', reason: 'FORBIDDEN' });
+
+		ws.close();
+	});
+
+	it('strict runtime arming is latched and cannot be downgraded by a legacy caller', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer({ handler: {} });
+
+		expect(server.platform.authorizeWireSubscribe('strict')).toBe('strict');
+		expect(server.platform.authorizeWireSubscribe()).toBe('strict');
+		expect(() => server.platform.authorizeWireSubscribe('loose')).toThrow(/legacy.*strict/);
+	});
+
+	it('strict arming tightens an observer decision already parked in an app hook', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		let capturedWs = null;
+		let hookStarted;
+		let releaseHook;
+		const started = new Promise((resolve) => { hookStarted = resolve; });
+		const parked = new Promise((resolve) => { releaseHook = resolve; });
+		server = await createTestServer({
+			handler: {
+				open(ws) { capturedWs = ws; },
+				async subscribe() { hookStarted(); await parked; }
+			}
+		});
+		const { ws } = await connectClient(server.wsUrl);
+		await new Promise(r => setTimeout(r, 30));
+
+		const checking = server.platform.checkSubscribe(capturedWs, 'tenant:victim', { requireGrant: true });
+		await started;
+		expect(server.platform.authorizeWireSubscribe('strict')).toBe('strict');
+		releaseHook();
+		expect(await checking).toBe('FORBIDDEN');
+
+		ws.close();
+	});
+
+	it('strict arming tightens a subscribe batch already parked in an app hook', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		let hookStarted;
+		let releaseHook;
+		const started = new Promise((resolve) => { hookStarted = resolve; });
+		const parked = new Promise((resolve) => { releaseHook = resolve; });
+		server = await createTestServer({
+			handler: {
+				async subscribeBatch(_ws, topics) {
+					hookStarted();
+					await parked;
+					return Object.fromEntries(topics.map((topic) => [topic, null]));
+				}
+			}
+		});
+		const { ws, frames } = await connectClient(server.wsUrl);
+
+		ws.send(JSON.stringify({ type: 'subscribe-batch', topics: ['tenant:victim'], ref: 34 }));
+		await started;
+		expect(server.platform.authorizeWireSubscribe('strict')).toBe('strict');
+		releaseHook();
+		expect(await waitForAckTopic(frames, 34, 'tenant:victim'))
+			.toMatchObject({ type: 'subscribe-denied', reason: 'FORBIDDEN' });
 
 		ws.close();
 	});

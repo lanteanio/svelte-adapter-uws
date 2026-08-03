@@ -1,10 +1,36 @@
 // Fixture handler for the armed wire-subscribe variant.
 //
-// This module deliberately exports NO `subscribe` and NO `subscribeBatch`
-// hook. When an app exports either, it owns the topic decision and the
-// server-grant model steps aside - so a handler that exports one leaves an
-// armed gate inert, and a test driving it would pass against a server that
-// never denies anything. Keep the subscribe path hook-free here.
+// The exported `subscribe` below wraps a real groups-plugin side-effect hook
+// and preserves its marker. It therefore exercises a plugin-owned namespace
+// without taking the topic decision back from the server-grant model or
+// disarming the armed gate.
+
+import { createGroup } from 'svelte-adapter-uws/plugins/groups';
+
+const group = createGroup('policy-lobby');
+const delayed = new WeakMap();
+const pluginSubscribe = group.hooks.subscribe;
+const subscriptionsSlot = Symbol.for('adapter-uws.ws.subscriptions');
+
+async function subscribe(ws, topic, { platform }) {
+	platform.send(ws, 'probe', 'hook-entered', { topic });
+	if (topic === 'delayed-room') {
+		const gate = delayed.get(ws);
+		if (gate) await gate.promise;
+		return;
+	}
+	return pluginSubscribe(ws, topic, { platform });
+}
+
+// Preserve the plugin hook's side-effect-only marker. The instrumented hook
+// must not turn into an app authorization hook and disarm the policy under test.
+for (const symbol of Object.getOwnPropertySymbols(pluginSubscribe)) {
+	Object.defineProperty(subscribe, symbol, Object.getOwnPropertyDescriptor(pluginSubscribe, symbol));
+}
+
+export { subscribe };
+export const unsubscribe = group.hooks.unsubscribe;
+export const close = group.hooks.close;
 
 export function upgrade({ cookies }) {
 	const token = cookies?.token;
@@ -29,6 +55,19 @@ export async function message(ws, { data, platform }) {
 		const denial = await platform.subscribe(ws, msg.topic);
 		platform.send(ws, 'probe', 'granted', { topic: msg.topic, denial: denial ?? null });
 	}
+	if (msg.type === 'cap-probe') {
+		const subscriptions = ws.getUserData()?.[subscriptionsSlot];
+		if (!(subscriptions instanceof Set)) throw new Error('cap probe has no subscription Set');
+		Object.defineProperty(subscriptions, 'size', { configurable: true, value: msg.size });
+		let denial;
+		try { denial = await platform.subscribe(ws, msg.topic); }
+		finally { delete subscriptions.size; }
+		platform.send(ws, 'probe', 'cap-result', {
+			topic: msg.topic,
+			denial: denial ?? null,
+			held: subscriptions.has(msg.topic)
+		});
+	}
 	// The OBSERVER lane, exposed so a differential can compare it across the
 	// three surfaces. It has no second line of defence - the gate IS the answer -
 	// and its decision survived every source-level check the project had,
@@ -36,5 +75,20 @@ export async function message(ws, { data, platform }) {
 	if (msg.type === 'observe-check') {
 		const denial = await platform.checkSubscribe(ws, msg.topic, { requireGrant: true });
 		platform.send(ws, 'probe', 'observe-result', { topic: msg.topic, ref: msg.ref, denial: denial ?? null });
+	}
+	if (msg.type === 'start-delayed-grant') {
+		let release;
+		const promise = new Promise((resolve) => { release = resolve; });
+		delayed.set(ws, { promise, release });
+		void platform.subscribe(ws, msg.topic).then((denial) => {
+			platform.send(ws, 'probe', 'delayed-result', { topic: msg.topic, denial: denial ?? null });
+		});
+	}
+	if (msg.type === 'revoke-delayed') {
+		const revoked = platform.unsubscribe(ws, msg.topic);
+		const gate = delayed.get(ws);
+		gate?.release();
+		delayed.delete(ws);
+		platform.send(ws, 'probe', 'delayed-revoked', { topic: msg.topic, revoked });
 	}
 }

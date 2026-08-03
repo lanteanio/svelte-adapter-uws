@@ -1,10 +1,10 @@
-// Integration coverage for the content-negotiated waiting room that the
-// upgrade gate serves when it rejects an over-capacity upgrade. Complements
+// Integration coverage for the content-negotiated waiting room presented
+// alongside the upgrade gate when it reaches capacity. Complements
 // upgrade-admission-wiring.test.js (which proves the gate sheds with 503) by
-// asserting WHAT the rejection now looks like: a browser navigation gets a
-// 200 holding page, a library client keeps a 503 refined with a jittered
-// Retry-After, the opt-out keeps the original bare 503 byte-for-byte, and the
-// poll endpoint reports capacity without ever taking a gate slot.
+// asserting that a real HTTP navigation gets a holding document, every actual
+// WebSocket handshake keeps a retry response even with an HTML Accept header,
+// the opt-out navigation gets a minimal accessible 503, and the poll endpoint
+// reports capacity without ever taking a gate slot.
 
 import { describe, it, expect, afterEach } from 'vitest';
 
@@ -145,8 +145,8 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 		server = null;
 	});
 
-	describe('content negotiation on a rejected upgrade', () => {
-		it('serves a 200 HTML holding page to a browser navigation (Accept text/html)', async () => {
+	describe('content negotiation at capacity', () => {
+		it('serves a 200 HTML holding page to a real browser navigation', async () => {
 			const { createTestServer } = await import('../src/testing.js');
 			const held = makeHeldGate();
 			server = await createTestServer({
@@ -154,24 +154,27 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 				handler: held.hook
 			});
 
-			// One attempt parks in the hook and pins the only slot; the rest are
-			// rejected by the gate while it is full.
-			const results = await burst(server.wsUrl, 6, { accept: HTML_ACCEPT });
-			const page = results.find((r) => r.status === 200);
+			const pending = attemptUpgrade(server.wsUrl, { accept: LIB_ACCEPT });
+			await waitFor(() => held.inFlight >= 1);
+			const page = await fetch(server.url + '/__waiting-room', {
+				headers: { accept: HTML_ACCEPT }
+			});
+			const body = await page.text();
 
-			expect(page).toBeDefined();
 			expect(page.status).toBe(200);
-			expect(String(page.headers['content-type'])).toContain('text/html');
+			expect(page.headers.get('content-type')).toContain('text/html');
+			expect(page.headers.get('content-language')).toBe('en');
+			expect(page.headers.get('vary')).toBeNull();
 			// The holding page must wire the browser to the poll endpoint.
-			expect(page.body).toContain('/__admit-check');
+			expect(body).toContain('/__admit-check');
 			// A holding page is never a bare 503 refusal.
-			expect(page.headers['retry-after']).toBeUndefined();
+			expect(page.headers.get('retry-after')).toBeNull();
 
 			held.release();
-			closeAll(results);
+			closeAll([await pending]);
 		});
 
-		it('keeps a 503 with a jittered Retry-After for a non-HTML client', async () => {
+		it('keeps a 503 with Retry-After for a real WebSocket even with HTML Accept', async () => {
 			const { createTestServer } = await import('../src/testing.js');
 			const base = 10;
 			const held = makeHeldGate();
@@ -201,8 +204,8 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 		});
 	});
 
-	describe('opt-out preserves the original bare 503', () => {
-		it('serves the exact bare 503 with no Retry-After when waitingRoom is false', async () => {
+	describe('opt-out preserves one content-negotiated document baseline', () => {
+		it('serves a minimal accessible HTML 503 when waitingRoom is false', async () => {
 			const { createTestServer } = await import('../src/testing.js');
 			const held = makeHeldGate();
 			server = await createTestServer({
@@ -210,19 +213,44 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 				handler: held.hook
 			});
 
-			// Even a browser Accept must get the original refusal once opted out.
+			const pending = attemptUpgrade(server.wsUrl, { accept: LIB_ACCEPT });
+			await waitFor(() => held.inFlight >= 1);
+			const response = await fetch(server.url + '/ws', {
+				headers: { accept: HTML_ACCEPT }
+			});
+			const body = await response.text();
+
+			expect(response.status).toBe(503);
+			expect(response.headers.get('content-type')).toContain('text/html');
+			expect(response.headers.get('content-language')).toBe('en');
+			expect(body).toMatch(/^<!doctype html><html lang="en" dir="ltr"/);
+			expect(body).toContain('<title>Service unavailable</title>');
+			expect(body).toContain('<main>');
+			expect(body).toContain('role="status"');
+			expect(body).toContain('<form method="get">');
+			expect(response.headers.get('retry-after')).toBeNull();
+
+			held.release();
+			closeAll([await pending]);
+		});
+
+		it('keeps the exact bare text 503 for a non-HTML client', async () => {
+			const { createTestServer } = await import('../src/testing.js');
+			const held = makeHeldGate();
+			server = await createTestServer({
+				upgradeAdmission: { maxConcurrent: 1, waitingRoom: false },
+				handler: held.hook
+			});
+
 			const results = await burst(server.wsUrl, 6, { accept: HTML_ACCEPT });
 			const shed = results.filter((r) => r.status === 503);
-
 			expect(shed.length).toBeGreaterThan(0);
 			for (const r of shed) {
-				expect(r.status).toBe(503);
 				expect(r.body).toBe(BARE_503_BODY);
 				expect(String(r.headers['content-type'])).toContain('text/plain');
+				expect(r.headers['content-language']).toBeUndefined();
 				expect(r.headers['retry-after']).toBeUndefined();
 			}
-			// No browser ever received a 200 holding page on the opt-out path.
-			expect(results.some((r) => r.status === 200)).toBe(false);
 
 			held.release();
 			closeAll(results);
@@ -238,17 +266,21 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 				handler: held.hook
 			});
 
-			const results = await burst(server.wsUrl, 6, { accept: HTML_ACCEPT });
-			const page = results.find((r) => r.status === 200);
+			const pending = attemptUpgrade(server.wsUrl, { accept: LIB_ACCEPT });
+			await waitFor(() => held.inFlight >= 1);
+			const page = await fetch(server.url + '/__waiting-room', {
+				headers: { accept: HTML_ACCEPT }
+			});
+			const body = await page.text();
 
 			// Default-on: a browser navigation gets the holding page without any
 			// explicit waitingRoom config.
-			expect(page).toBeDefined();
-			expect(String(page.headers['content-type'])).toContain('text/html');
-			expect(page.body).toContain('/__admit-check');
+			expect(page.status).toBe(200);
+			expect(page.headers.get('content-type')).toContain('text/html');
+			expect(body).toContain('/__admit-check');
 
 			held.release();
-			closeAll(results);
+			closeAll([await pending]);
 		});
 
 		it('refines the non-HTML refusal with a Retry-After under zero config', async () => {
@@ -266,6 +298,98 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 			for (const r of shed) {
 				expect(r.headers['retry-after']).toBeDefined();
 				expect(Number.isInteger(Number(r.headers['retry-after']))).toBe(true);
+			}
+
+			held.release();
+			closeAll(results);
+		});
+	});
+
+	describe('per-request localization renderer', () => {
+		const renderer = ({ request }) => {
+			const acceptLanguage = request.headers.get('accept-language') || '';
+			const arabic = acceptLanguage.toLowerCase().startsWith('ar');
+			return {
+				body: '<!doctype html><html lang="stale" dir="ltr"><head><title>Hold</title></head>' +
+					'<body><main><h1>Hold</h1><p role="status" aria-live="polite">' +
+					(arabic ? 'Localized ar' : 'Localized en') + '</p>' +
+					'<form method="get"><button type="submit">Retry</button></form></main></body></html>',
+				lang: arabic ? 'ar' : 'en',
+				dir: arabic ? 'rtl' : 'ltr',
+				headers: {
+					'x-waiting-room-method': request.method,
+					'x-waiting-room-url': request.url
+				}
+			};
+		};
+
+		it('localizes direct holding-page navigation and writes language variation headers', async () => {
+			const { createTestServer } = await import('../src/testing.js');
+			server = await createTestServer({
+				upgradeAdmission: {
+					maxConcurrent: 1,
+					waitingRoom: { renderer }
+				}
+			});
+
+			const response = await fetch(server.url + '/__waiting-room?source=direct', {
+				headers: { 'accept-language': 'ar-EG,ar;q=0.9' }
+			});
+			const body = await response.text();
+			expect(response.status).toBe(200);
+			expect(response.headers.get('content-language')).toBe('ar');
+			expect(response.headers.get('vary')).toBe('Accept-Language');
+			expect(response.headers.get('x-waiting-room-method')).toBe('GET');
+			expect(response.headers.get('x-waiting-room-url')).toBe('/__waiting-room?source=direct');
+			expect(body).toContain('<html lang="ar" dir="rtl">');
+			expect(body).toContain('Localized ar');
+			expect(body).not.toContain('lang="stale"');
+		});
+
+		it('does not render localized HTML for a real WebSocket handshake', async () => {
+			const { createTestServer } = await import('../src/testing.js');
+			const held = makeHeldGate();
+			server = await createTestServer({
+				upgradeAdmission: {
+					maxConcurrent: 1,
+					waitingRoom: { renderer }
+				},
+				handler: held.hook
+			});
+
+			const results = await burst(server.wsUrl, 6, {
+				accept: HTML_ACCEPT,
+				'accept-language': 'ar'
+			});
+			const shed = results.filter((result) => result.status === 503);
+			expect(shed.length).toBeGreaterThan(0);
+			for (const refusal of shed) {
+				expect(String(refusal.headers['content-type'])).toContain('text/plain');
+				expect(refusal.headers['content-language']).toBeUndefined();
+				expect(refusal.headers['x-waiting-room-method']).toBeUndefined();
+				expect(refusal.body).toBe(BARE_503_BODY);
+			}
+
+			held.release();
+			closeAll(results);
+		});
+
+		it('keeps the exact bare text 503 for a non-HTML client', async () => {
+			const { createTestServer } = await import('../src/testing.js');
+			const held = makeHeldGate();
+			server = await createTestServer({
+				upgradeAdmission: { maxConcurrent: 1, waitingRoom: false },
+				handler: held.hook
+			});
+
+			const results = await burst(server.wsUrl, 6, { accept: LIB_ACCEPT });
+			const shed = results.filter((r) => r.status === 503);
+			expect(shed.length).toBeGreaterThan(0);
+			for (const r of shed) {
+				expect(r.body).toBe(BARE_503_BODY);
+				expect(String(r.headers['content-type'])).toContain('text/plain');
+				expect(r.headers['content-language']).toBeUndefined();
+				expect(r.headers['retry-after']).toBeUndefined();
 			}
 
 			held.release();

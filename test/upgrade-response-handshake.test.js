@@ -16,18 +16,20 @@ let server;
  * client and server. Resolves with the raw response as a latin1 string.
  * @param {number} port
  * @param {string} path
+ * @param {Record<string, string>} [headers]
  * @returns {Promise<string>}
  */
-function rawUpgrade(port, path) {
+function rawUpgrade(port, path, headers = {}) {
 	return new Promise((resolve, reject) => {
 		const key = Buffer.from('0123456789abcdef').toString('base64');
 		const chunks = [];
 		const sock = net.connect(port, '127.0.0.1', () => {
+			const extraHeaders = Object.entries(headers).map(([name, value]) => `${name}: ${value}\r\n`).join('');
 			sock.write(
 				`GET ${path} HTTP/1.1\r\n` +
 				`Host: 127.0.0.1:${port}\r\n` +
 				'Upgrade: websocket\r\nConnection: Upgrade\r\n' +
-				`Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`
+				`Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n${extraHeaders}\r\n`
 			);
 		});
 		sock.on('data', (d) => chunks.push(d));
@@ -171,12 +173,35 @@ describeUWS('upgradeResponse handshake', () => {
 		});
 
 		const port = Number(new URL(server.url).port);
-		const raw = await rawUpgrade(port, '/ws?reflect=x%250d%250aInjected%253A%2520crlf-worked');
+		const raw = await rawUpgrade(
+			port,
+			'/ws?reflect=x%250d%250aInjected%253A%2520crlf-worked',
+			{ 'X-Request-ID': 'upgrade-failed-1' }
+		);
 		// The invalid header takes the hook-error path: 500 before any byte of
 		// a 101 is written, and the injected header line never reaches the wire.
 		expect(raw).toContain('500 Internal Server Error');
+		expect(raw.toLowerCase()).toContain('x-request-id: upgrade-failed-1');
 		expect(raw).not.toContain('101 Switching Protocols');
 		expect(raw).not.toMatch(/\nInjected:/i);
+	});
+
+	it('still returns a correlated 500 when a thrown value resists inspection', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer({
+			handler: {
+				upgrade() {
+					throw new Proxy({}, {
+						get() { throw new Error('getter trap'); }
+					});
+				}
+			}
+		});
+
+		const port = Number(new URL(server.url).port);
+		const raw = await rawUpgrade(port, '/ws', { 'X-Request-ID': 'hostile-thrown-1' });
+		expect(raw).toContain('500 Internal Server Error');
+		expect(raw.toLowerCase()).toContain('x-request-id: hostile-thrown-1');
 	});
 
 	it('still upgrades normally when the reflected value carries no control bytes', async () => {

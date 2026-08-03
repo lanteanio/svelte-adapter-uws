@@ -92,6 +92,25 @@ describeUWS('upgrade-admission wiring on createTestServer', () => {
 		for (const r of opened) r.ws?.close();
 	});
 
+	it('sheds a pacing-only burst when the finite deferred queue is full', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer({
+			upgradeAdmission: { perTickBudget: 1, maxDeferred: 0 }
+		});
+
+		const results = await Promise.all(
+			Array.from({ length: 30 }, () => attemptUpgrade(server.wsUrl))
+		);
+		const opened = results.filter((r) => r.opened);
+		const shed = results.filter((r) => r.status === 503);
+
+		expect(opened.length).toBeGreaterThan(0);
+		expect(shed.length).toBeGreaterThan(0);
+		expect(opened.length + shed.length).toBe(results.length);
+
+		for (const r of opened) r.ws?.close();
+	});
+
 	it('sheds with 503 against a slow user upgrade hook (in-flight stays held while async)', async () => {
 		const { createTestServer } = await import('../src/testing.js');
 		server = await createTestServer({
@@ -161,6 +180,50 @@ describeUWS('upgrade-admission wiring on createTestServer', () => {
 		const fresh = await attemptUpgrade(server.wsUrl);
 		expect(fresh.opened).toBe(true);
 		fresh.ws?.close();
+	});
+
+	it('keeps maxConcurrent scoped to handshakes, so sequential held sockets still open', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer({
+			upgradeAdmission: { maxConcurrent: 1 }
+		});
+
+		// Each handshake completes before the next begins, but every accepted
+		// socket remains open. maxConcurrent is intentionally NOT a live-socket
+		// cap and must retain that established behavior.
+		const held = [];
+		for (let i = 0; i < 4; i++) held.push(await attemptUpgrade(server.wsUrl));
+		expect(held.every((result) => result.opened)).toBe(true);
+		for (const result of held) result.ws?.close();
+	});
+
+	it('holds maxConnections permits for the full socket lifetime and reopens after close', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer({
+			upgradeAdmission: { maxConcurrent: 1, maxConnections: 2 }
+		});
+
+		const first = await attemptUpgrade(server.wsUrl);
+		const second = await attemptUpgrade(server.wsUrl);
+		expect(first.opened).toBe(true);
+		expect(second.opened).toBe(true);
+
+		// Both handshakes are over, but their sockets are deliberately held.
+		// A handshake-only counter would now be zero and admit this third socket.
+		const crossed = await attemptUpgrade(server.wsUrl);
+		expect(crossed.opened).toBe(false);
+		expect(crossed.status).toBe(503);
+		expect(crossed.body).toBe('Server is at upgrade capacity, please retry');
+
+		await new Promise((resolve) => {
+			first.ws.once('close', resolve);
+			first.ws.close();
+		});
+
+		const replacement = await attemptUpgrade(server.wsUrl);
+		expect(replacement.opened).toBe(true);
+		second.ws?.close();
+		replacement.ws?.close();
 	});
 });
 

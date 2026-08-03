@@ -35,16 +35,12 @@ on:
       - 'PROTOCOL.md'
       - 'protocol.schema.json'
       - 'test-vectors/**'
-      # The shipped documentation, because `npm run check` reads it. The link
-      # checker resolves every internal anchor in these four files, and a pull
-      # request that only rewords a heading - orphaning the links that point at
-      # it - matched none of the filters above, so the one gate that can see a
-      # dead anchor would have run on every change EXCEPT the change that
-      # breaks one. A gate that cannot fire on its own subject is not a gate.
-      - 'README.md'
-      - 'MIGRATION.md'
-      - 'CONTRIBUTING.md'
+      # The link checker crawls every tracked and packaged Markdown document.
+      # A Markdown-only pull request must therefore run the gate it can break.
+      - '**/*.md'
       - '.github/workflows/test.yml'
+      - '.github/workflows/docs-links.yml'
+      - '.github/workflows/release.yml'
   push:
     branches: [main, dev]
 
@@ -57,6 +53,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  observability-rules:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Evaluate PromQL recording and alert drills
+        run: >-
+          docker run --rm
+          --entrypoint /bin/promtool
+          -v "$PWD/examples/observability:/rules:ro"
+          prom/prometheus@sha256:c6b27ea434f8389bfe233fbc7be381cf50587c286e871bc842008f5a1b1908a7
+          test rules /rules/rule-tests.v1.yml
+
+  # The clustered runtime intentionally SIGKILLs the whole process when a
+  # wedged worker cannot close its native uWS App. This lane runs that exact
+  # path under an independent OS-process supervisor, waits for readiness after
+  # the respawn, then SIGKILLs the replacement primary and proves readiness
+  # again. Unit tests cannot establish the external recovery contract.
+  respawner-drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - run: npm ci
+      - name: Install fixture dependencies
+        working-directory: test/fixture
+        run: npm ci
+      - name: Kill a wedged worker and primary under an external respawner
+        run: npm run drill:respawner
+
   suite:
     strategy:
       fail-fast: false
@@ -105,7 +135,8 @@ jobs:
       # two sequences that agree today. The lane runs the doctor with
       # `--require-uws` (a missing addon fails instead of letting every
       # real-runtime suite skip its way to green), then the static gates and the
-      # whole test run under REQUIRE_UWS.
+      # product smoke over real HTTP/WebSocket, packed export/type publishing
+      # checks, then the static gates and the whole test run under REQUIRE_UWS.
       - name: Verify
         run: npm run verify:suite
 
@@ -190,11 +221,34 @@ jobs:
       # failure here is about the floor rather than about a whole tree that
       # re-resolved at the same time.
       #
-      # `@sveltejs/kit` is absent on purpose - the package names it as a peer but
-      # imports it nowhere (a JSDoc type only), so there is no floor code path of
-      # it to run, and installing it would prove a resolution rather than a
-      # behaviour.
+      # `@sveltejs/kit` is absent from this root client-test slice on purpose -
+      # the independently locked application below owns the framework tuple and
+      # exercises it as a built server instead of contaminating this peer-floor
+      # install.
       - name: Install the declared minimum peers
         run: npm install --no-save svelte@4.0.0 ws@8.0.0
       - name: Run the suites that load the client
         run: npm run test:floor
+      # A public claim needs one copy-pasteable application, not only a peer
+      # override in the root dependency tree. --install-links packs the local
+      # adapter as a normal dependency so its svelte/store peer resolves from
+      # this exact Svelte 4 tree instead of following a source-directory link.
+      - name: Install the locked Svelte 4 application
+        working-directory: test/fixtures/svelte4
+        run: npm ci --install-links
+      # This is the same command the public newcomer route runs. The fixture is
+      # the minimum supported Svelte profile and installs the adapter as a
+      # normal packed dependency, so the package bin and native resolution are
+      # exercised from a fresh application rather than from the source root.
+      - name: Run the published newcomer preflight
+        working-directory: test/fixtures/svelte4
+        run: npm exec -- svelte-adapter-uws-preflight
+      - name: Check Svelte 4 types and store syntax
+        working-directory: test/fixtures/svelte4
+        run: npm run check
+      - name: Build the Svelte 4 application
+        working-directory: test/fixtures/svelte4
+        run: npm run build
+      - name: Exercise Svelte 4 HTTP, SSR store, and WebSocket behavior
+        working-directory: test/fixtures/svelte4
+        run: npm run smoke

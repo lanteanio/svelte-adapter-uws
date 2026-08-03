@@ -83,6 +83,9 @@ function recordingRegistry() {
 		reason(name, reason) {
 			const c = counters.get(name);
 			return c ? (c.series.get(JSON.stringify({ reason })) || 0) : 0;
+		},
+		gaugeValue(name) {
+			return gauges.get(name)?.value ?? null;
 		}
 	};
 }
@@ -133,6 +136,114 @@ describeUWS('admission metrics on createTestServer', () => {
 			.toBe(results.length);
 
 		for (const r of opened) r.ws?.close();
+	});
+
+	it('exports pacing queue overflow, depth, and oldest age', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const metrics = recordingRegistry();
+		server = await createTestServer({
+			upgradeAdmission: { perTickBudget: 1, maxDeferred: 0 },
+			metrics
+		});
+
+		const results = await Promise.all(
+			Array.from({ length: 30 }, () => attemptUpgrade(server.wsUrl))
+		);
+		const opened = results.filter((r) => r.opened);
+		const shed = results.filter((r) => r.status === 503);
+		expect(shed.length).toBeGreaterThan(0);
+		expect(metrics.reason('upgrade_rejected_total', 'deferred_overflow')).toBe(shed.length);
+		expect(metrics.counterTotal('upgrade_deferred_rejected_total')).toBe(shed.length);
+		expect(metrics.gaugeValue('upgrade_deferred_depth')).toBe(0);
+		expect(metrics.gaugeValue('upgrade_deferred_oldest_age_seconds')).toBe(0);
+
+		for (const r of opened) r.ws?.close();
+	});
+
+	it('exports exact live headroom and counts whole-lifetime cap sheds separately', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const metrics = recordingRegistry();
+		server = await createTestServer({
+			upgradeAdmission: { maxConnections: 2 },
+			metrics
+		});
+
+		expect(metrics.gaugeValue('ws_connection_headroom')).toBe(2);
+		const first = await attemptUpgrade(server.wsUrl);
+		expect(first.opened).toBe(true);
+		expect(metrics.gaugeValue('ws_connection_headroom')).toBe(1);
+		const second = await attemptUpgrade(server.wsUrl);
+		expect(second.opened).toBe(true);
+		expect(metrics.gaugeValue('ws_connection_headroom')).toBe(0);
+
+		const rejected = await attemptUpgrade(server.wsUrl);
+		expect(rejected.status).toBe(503);
+		expect(metrics.reason('upgrade_rejected_total', 'connection_capacity')).toBe(1);
+		expect(metrics.reason('upgrade_rejected_total', 'over_capacity')).toBe(0);
+		expect(metrics.gaugeValue('ws_connection_headroom')).toBe(0);
+
+		await new Promise((resolve) => {
+			first.ws.once('close', resolve);
+			first.ws.close();
+		});
+		expect(metrics.gaugeValue('ws_connection_headroom')).toBe(1);
+
+		const replacement = await attemptUpgrade(server.wsUrl);
+		expect(replacement.opened).toBe(true);
+		expect(metrics.gaugeValue('ws_connection_headroom')).toBe(0);
+		second.ws?.close();
+		replacement.ws?.close();
+	});
+
+	it('preserves application userData at the carrier key and releases its permit on close', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const metrics = recordingRegistry();
+		const appKey = '__adapter_uws_connection_permit__';
+		const appValue = Object.freeze({ owner: 'application' });
+		let openedDescriptor;
+		let openedNames;
+		let observeOpen;
+		const openObserved = new Promise((resolve) => { observeOpen = resolve; });
+		server = await createTestServer({
+			upgradeAdmission: { maxConnections: 1 },
+			handler: {
+				upgrade() {
+					const userData = {};
+					Object.defineProperty(userData, appKey, {
+						value: appValue,
+						writable: false,
+						enumerable: false,
+						configurable: false
+					});
+					return userData;
+				},
+				open(ws) {
+					const userData = ws.getUserData();
+					openedDescriptor = Object.getOwnPropertyDescriptor(userData, appKey);
+					openedNames = Object.getOwnPropertyNames(userData);
+					observeOpen();
+				}
+			},
+			metrics
+		});
+
+		const connection = await attemptUpgrade(server.wsUrl);
+		expect(connection.opened).toBe(true);
+		await openObserved;
+		expect(openedDescriptor).toEqual({
+			value: appValue,
+			writable: false,
+			enumerable: false,
+			configurable: false
+		});
+		expect(openedNames.filter((key) => key.startsWith(`${appKey}:`))).toEqual([]);
+		expect(metrics.gaugeValue('ws_connection_headroom')).toBe(0);
+
+		await new Promise((resolve) => {
+			connection.ws.once('close', resolve);
+			connection.ws.close();
+		});
+		expect(metrics.gaugeValue('ws_connection_headroom')).toBe(1);
 	});
 
 	it('counts a siege refusal under its own reason, not over_capacity', async () => {

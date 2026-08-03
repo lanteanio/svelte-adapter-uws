@@ -13,6 +13,7 @@ export default {
 	kit: {
 		adapter: adapter({
 			out: variant.out,
+			tracing: variant.tracing,
 			websocket: variant.handler
 				? { ...variant.websocket, handler: variant.handler }
 				: variant.websocket

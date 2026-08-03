@@ -22,6 +22,7 @@ import { fatal, readAssertionCounts, _resetAssertionCountsForTest } from '../src
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const handlerSrc = readFileSync(path.join(ROOT, 'src/runtime/handler.js'), 'utf8');
 const platformSrc = readFileSync(path.join(ROOT, 'src/runtime/handler/platform.js'), 'utf8');
+const testingSrc = readFileSync(path.join(ROOT, 'src/testing.js'), 'utf8');
 
 // Each promoted site: the source file it lives in and the structural-corruption
 // condition the site guards. The condition is the EXACT expression at the site,
@@ -38,6 +39,12 @@ const PROMOTED = [
 		src: () => handlerSrc,
 		corrupt: () => ({}).WS_PLATFORM,
 		healthy: () => ({ WS_PLATFORM: {} }).WS_PLATFORM
+	},
+	{
+		category: 'ws.connection-permit-carrier',
+		src: () => [handlerSrc, testingSrc],
+		corrupt: () => false,
+		healthy: () => true
 	},
 	{
 		category: 'subs.shape',
@@ -77,11 +84,19 @@ describe('promoted fatal sites - source wiring', () => {
 	});
 
 	it('subs.total-negative stays SOFT (a transient close-path dip must not kill a worker)', () => {
-		// Deliberately excluded from promotion and from hardCategories.
+		// Deliberately excluded from promotion and from hardCategories. Every
+		// membership lane now reaches the one accounting hook in handler.js, so
+		// platform.js must not carry a second copy of the assertion.
 		expect(/assert\([^;]*'subs\.total-negative'/.test(handlerSrc)).toBe(true);
-		expect(/assert\([^;]*'subs\.total-negative'/.test(platformSrc)).toBe(true);
+		expect(/assert\([^;]*'subs\.total-negative'/.test(platformSrc)).toBe(false);
 		expect(/fatal\([^;]*'subs\.total-negative'/.test(handlerSrc)).toBe(false);
 		expect(/fatal\([^;]*'subs\.total-negative'/.test(platformSrc)).toBe(false);
+	});
+
+	it('production and the test harness both stop before app open on a missing connection carrier', () => {
+		for (const source of [handlerSrc, testingSrc]) {
+			expect(source).toMatch(/fatal\(permitRestored, 'ws\.connection-permit-carrier', null\);\s*if \(!permitRestored\) return;/);
+		}
 	});
 
 	it('the send-site and batch envelope guards stay SOFT (distinct categories, out of scope)', () => {

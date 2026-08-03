@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { mergeStaticHeaders, RESERVED_STATIC_HEADER_KEYS } from '../src/runtime/utils/static-headers.js';
-import { normalizeStaticHeaders } from '../src/build-config.js';
+import {
+	mergeStaticHeaders,
+	RESERVED_STATIC_HEADER_KEYS,
+	resolveStaticCacheControl
+} from '../src/runtime/utils/static-headers.js';
+import { normalizeStaticCacheControl, normalizeStaticHeaders } from '../src/build-config.js';
 
 // Base header set as cacheDir builds it for a mutable (non-immutable) asset.
 function baseHeaders() {
@@ -123,5 +127,67 @@ describe('normalizeStaticHeaders (build)', () => {
 			expect(headers).toBeNull();
 			expect(dropped).toEqual([key]);
 		}
+	});
+});
+
+describe('staticCacheControl', () => {
+	it('normalizes rules by specificity and trims field values', () => {
+		expect(normalizeStaticCacheControl([
+			{ pattern: '/fonts/', cacheControl: ' public, max-age=86400 ' },
+			{ pattern: '/fonts/versioned/', cacheControl: 'public, max-age=31536000, immutable' }
+		])).toEqual([
+			{ pattern: '/fonts/versioned/', cacheControl: 'public, max-age=31536000, immutable' },
+			{ pattern: '/fonts/', cacheControl: 'public, max-age=86400' }
+		]);
+		expect(normalizeStaticCacheControl([])).toBeNull();
+		expect(normalizeStaticCacheControl(null)).toBeNull();
+	});
+
+	it('matches directory trees and exact files without broadening exact names', () => {
+		const rules = [
+			{ pattern: '/fonts/', cacheControl: 'font-policy' },
+			{ pattern: '/logo.v2.svg', cacheControl: 'logo-policy' }
+		];
+
+		expect(resolveStaticCacheControl('fonts/inter.woff2', rules)).toBe('font-policy');
+		expect(resolveStaticCacheControl('/logo.v2.svg', rules)).toBe('logo-policy');
+		expect(resolveStaticCacheControl('/logo.v2.svg.map', rules)).toBe('');
+		expect(resolveStaticCacheControl('/pictures/hero.webp', rules)).toBe('');
+	});
+
+	it('chooses the most specific matching directory independent of rule order', () => {
+		const rules = [
+			{ pattern: '/', cacheControl: 'fallback' },
+			{ pattern: '/fonts/private/', cacheControl: 'private' },
+			{ pattern: '/fonts/', cacheControl: 'font' }
+		];
+
+		expect(resolveStaticCacheControl('/fonts/private/account.woff2', rules)).toBe('private');
+		expect(resolveStaticCacheControl('/fonts/public.woff2', rules)).toBe('font');
+		expect(resolveStaticCacheControl('/logo.svg', rules)).toBe('fallback');
+	});
+
+	it('rejects ambiguous or unsafe configuration', () => {
+		expect(() => normalizeStaticCacheControl({ pattern: '/fonts/' })).toThrow(/must be an array/);
+		expect(() => normalizeStaticCacheControl([null])).toThrow(/must be an object/);
+		expect(() => normalizeStaticCacheControl([
+			{ pattern: 'fonts/', cacheControl: 'public' }
+		])).toThrow(/absolute/);
+		expect(() => normalizeStaticCacheControl([
+			{ pattern: '/fonts/?v=1', cacheControl: 'public' }
+		])).toThrow(/query-free/);
+		expect(() => normalizeStaticCacheControl([
+			{ pattern: '/fonts/*', cacheControl: 'public' }
+		])).toThrow(/query-free/);
+		expect(() => normalizeStaticCacheControl([
+			{ pattern: '/fonts/', cacheControl: 'public\r\nx-forged: yes' }
+		])).toThrow(/single-line/);
+		expect(() => normalizeStaticCacheControl([
+			{ pattern: '/fonts/', cacheControl: 'public', cacheContorl: 'typo' }
+		])).toThrow(/unknown key/);
+		expect(() => normalizeStaticCacheControl([
+			{ pattern: '/fonts/', cacheControl: 'public' },
+			{ pattern: '/fonts/', cacheControl: 'private' }
+		])).toThrow(/duplicate pattern/);
 	});
 });

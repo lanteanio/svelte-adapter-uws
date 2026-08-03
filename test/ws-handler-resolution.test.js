@@ -127,11 +127,12 @@ describeBuild('the built artifact honours websocket.handler through the Vite plu
 		expect(bundle).not.toContain('cork-test');
 	});
 
-	it('does not carry a subscribe hook, so the armed grant gate stays armed', () => {
-		// The security consequence, stated as an assertion. src/hooks.ws.js
-		// exports `subscribe`; the named handler deliberately does not. If the
-		// substitution comes back, this export appears and the wire-subscribe
-		// gate that this variant arms silently stands down.
+	it('carries the named handler plugin hook, not the auto-discovered authorization hook', () => {
+		// The named handler now wraps a real groups-plugin side-effect hook and
+		// preserves its marker. Its export is expected and does not disarm the
+		// grant model; the differential suite proves that behavior. These bundle
+		// markers distinguish it from src/hooks.ws.js, whose app authorization
+		// hook would stand the armed gate down.
 		expect(buildFixtureOnce('grant')).toBe(true);
 
 		const bundle = readFileSync(
@@ -147,6 +148,8 @@ describeBuild('the built artifact honours websocket.handler through the Vite plu
 			.filter(Boolean);
 
 		expect(names).toContain('upgrade');
-		expect(names).not.toContain('subscribe');
+		expect(names).toContain('subscribe');
+		expect(bundle).toContain('policy-lobby');
+		expect(bundle).toContain('hook-entered');
 	});
 });

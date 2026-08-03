@@ -173,6 +173,11 @@ describeUWS('platform.introspect transport snapshot', () => {
 		// assertions is a plain object snapshot (not the live Map).
 		expect(snap.assertions).toBeTypeOf('object');
 		expect(snap.assertions instanceof Map).toBe(false);
+
+		// Default introspection exposes only bounded diagnostic metadata. Detailed
+		// keyed stream evidence requires an exact opaque id through the admin gate.
+		expect(snap.diagnostics).toEqual({ retained: 0, recent: [] });
+		expect(server.platform.diagnostic('unknown')).toBeNull();
 	});
 
 	it('reflects the live connection count', async () => {

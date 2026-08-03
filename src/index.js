@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUuid } from './runtime/runtime.js';
@@ -6,9 +6,12 @@ import { rollup } from 'rollup';
 import { nodeResolve } from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 import json from '@rollup/plugin-json';
-import { normalizeStaticHeaders } from './build-config.js';
-import { assertRestrictiveBoolean, assertProtectiveNumber } from './config-guards.js';
+import { normalizeStaticCacheControl, normalizeStaticHeaders } from './build-config.js';
+import { assertWireSubscribeAuthorization, assertProtectiveNumber } from './config-guards.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
+import { writeAndCloseRollupBundle } from './build/rollup-lifecycle.js';
+import { compileAccessibleWaitingRoomTemplate } from './runtime/utils/waiting-room-template.js';
+import { normalizeMessageAdmission } from './runtime/utils/message-admission.js';
 
 const runtimeDir = fileURLToPath(new URL('./runtime', import.meta.url).href);
 
@@ -70,6 +73,7 @@ export const KNOWN_WEBSOCKET_OPTION_KEYS = new Set([
 	'maxPayloadLength', 'idleTimeout', 'maxBackpressure', 'closeOnBackpressureLimit',
 	'sendPingsAutomatically', 'compression', 'allowedOrigins',
 	'upgradeTimeout', 'upgradeRateLimit', 'upgradeRateLimitWindow', 'upgradeAdmission',
+	'messageAdmission',
 	'authPathRateLimit', 'authPathRateLimitWindow',
 	'pressure', 'protection', 'stateHashIntervalMs', 'consistencyAuditIntervalMs',
 	'resourceGrowthAuditIntervalMs', 'postureExport',
@@ -81,22 +85,25 @@ export const KNOWN_WEBSOCKET_OPTION_KEYS = new Set([
  * Object-valued options whose CONTENTS are also checked, keyed by dotted path.
  *
  * A top-level-only walk cannot see a typo one level down, and for
- * `upgradeAdmission` that is not cosmetic: every gate reads
- * `maxConcurrent > 0`, so `maxConcurent: 500` leaves the concurrency ceiling,
- * the cursor lane (which is sized from the same value) and the waiting room
- * all switched off, silently. The 1 MB `maxPayloadLength` default is
- * documented as safe BECAUSE that ceiling bounds it, so the typo also removes
- * the stated bound on the payload default.
+ * `upgradeAdmission` that is not cosmetic: `maxConcurent: 500` leaves the
+ * handshake ceiling and cursor lane switched off (and the waiting room too
+ * unless the separate `maxConnections` ceiling is enabled), silently. The
+ * whole-lifetime socket bound is a separate option by design.
  *
  * `pressure` is milder - its thresholds are merged over defaults, so a typo
  * leaves the default threshold rather than "off" - but a dropped key there
  * still means the operator's tuning silently did nothing.
  */
 export const KNOWN_NESTED_WEBSOCKET_OPTION_KEYS = {
-	upgradeAdmission: new Set(['maxConcurrent', 'perTickBudget', 'cursorLane', 'waitingRoom']),
+	upgradeAdmission: new Set(['maxConcurrent', 'maxConnections', 'perTickBudget', 'maxDeferred', 'cursorLane', 'waitingRoom']),
 	'upgradeAdmission.cursorLane': new Set(['fraction']),
 	'upgradeAdmission.waitingRoom': new Set([
-		'path', 'admitCheckPath', 'pollIntervalMs', 'retryAfterSeconds', 'template'
+		'path', 'admitCheckPath', 'pollIntervalMs', 'retryAfterSeconds', 'template',
+		'renderer', 'appName', 'statusUrl', 'supportUrl', 'incidentId'
+	]),
+	messageAdmission: new Set([
+		'perConnectionRate', 'globalRate', 'rateWindowMs',
+		'perConnectionConcurrent', 'globalConcurrent', 'maxQueue'
 	]),
 	pressure: new Set([
 		'memoryHeapUsedRatio', 'publishRatePerSec', 'subscriberRatio', 'sampleIntervalMs',
@@ -265,7 +272,7 @@ export function serializeWsOptions(websocket, adminPath) {
 	// permissive siblings (allowSystemTopicSubscribe, allowNonAsciiTopics) can
 	// coerce safely because coercing them yields the SAFE state; this one is
 	// the inverted case, so a misshaped value is a build error instead.
-	assertRestrictiveBoolean(websocket, 'authorizeWireSubscribe');
+	assertWireSubscribeAuthorization(websocket, 'authorizeWireSubscribe');
 	// The same inversion in the numeric options that size the two doors: a
 	// non-number does not fall back to the default, it disables the limiter.
 	assertProtectiveNumber(websocket, 'upgradeRateLimit');
@@ -311,6 +318,27 @@ export function serializeWsOptions(websocket, adminPath) {
 	// Documenting it is the fix; a guard would refuse a legitimate setting.
 	assertProtectiveNumber(websocket, 'idleTimeout');
 	assertProtectiveNumber(websocket, 'upgradeTimeout');
+	const maxConnections = websocket?.upgradeAdmission?.maxConnections;
+	if (
+		maxConnections !== undefined &&
+		(!Number.isSafeInteger(maxConnections) || maxConnections < 0)
+	) {
+		throw new Error(
+			'websocket.upgradeAdmission.maxConnections must be a non-negative safe integer. ' +
+			'Use 0 to disable the live-connection ceiling deliberately.'
+		);
+	}
+	const maxDeferred = websocket?.upgradeAdmission?.maxDeferred;
+	if (
+		maxDeferred !== undefined &&
+		(!Number.isSafeInteger(maxDeferred) || maxDeferred < 0)
+	) {
+		throw new Error(
+			'websocket.upgradeAdmission.maxDeferred must be a non-negative safe integer. ' +
+			'Use 0 to reject once the current tick budget is spent, without retaining a queue.'
+		);
+	}
+	normalizeMessageAdmission(websocket?.messageAdmission, 'websocket.messageAdmission');
 	return {
 		// Default raised from 16 KB to 1 MB in 0.5. uWS's own
 		// default is also 16 KB, which the adapter previously
@@ -318,8 +346,8 @@ export function serializeWsOptions(websocket, adminPath) {
 		// chunked-upload frameworks to use ~12 KB chunks (~9000
 		// chunks for a 100 MB file). 1 MB handles typical app
 		// payloads in a single frame without per-app tuning. DoS
-		// exposure is bounded by `upgradeAdmission.maxConcurrent`
-		// (connection count) and `maxBackpressure` (per-conn
+		// exposure can be bounded by `upgradeAdmission.maxConnections`
+		// (reserved plus live connection count) and `maxBackpressure` (per-conn
 		// outbound queue, also 1 MB), so per-frame cost stays
 		// predictable. Apps that want a stricter cap can pin via
 		// `websocket.maxPayloadLength` in svelte.config.js.
@@ -341,6 +369,7 @@ export function serializeWsOptions(websocket, adminPath) {
 		authPathRateLimit: websocket?.authPathRateLimit ?? 30,
 		authPathRateLimitWindow: websocket?.authPathRateLimitWindow ?? 10,
 		upgradeAdmission: websocket?.upgradeAdmission,
+		messageAdmission: websocket?.messageAdmission,
 		pressure: websocket?.pressure,
 		// Graduated protection posture ('normal' | 'auto' | 'elevated' |
 		// 'siege'). A plain string enum, so it rides the JSON placeholder
@@ -388,7 +417,9 @@ export function serializeWsOptions(websocket, adminPath) {
 		// `platform.subscribe`, unless the app exports its own subscribe
 		// hook. Serialized as a strict boolean like its siblings; the
 		// runtime arming lives in handler.js (`subscribeAuth.enabled`).
-		authorizeWireSubscribe: websocket?.authorizeWireSubscribe === true,
+		authorizeWireSubscribe: websocket?.authorizeWireSubscribe === 'strict'
+			? 'strict'
+			: websocket?.authorizeWireSubscribe === true,
 		// Wire-level subscribe topics default to printable ASCII
 		// only (0x20-0x7E, minus the always-illegal `"` and `\\`).
 		// This closes Unicode line separators, RTL override, and
@@ -438,6 +469,14 @@ export function serializeWsOptions(websocket, adminPath) {
 /** @type {import('./index.js').default} */
 export default function (opts = {}) {
 	const { out = 'build', precompress = true, envPrefix = '', healthCheckPath = '/healthz', readinessCheckPath = '/readyz' } = opts;
+	const tracingOption = opts.tracing;
+	if (tracingOption != null && (typeof tracingOption !== 'string' || tracingOption.trim() === '')) {
+		throw new Error(
+			"tracing must be a non-empty module path string (e.g. './src/lib/server/tracing.js') " +
+			'whose default or named tracing export implements startSpan(name, options).'
+		);
+	}
+	const tracingPath = typeof tracingOption === 'string' ? tracingOption.trim() : null;
 
 	// Readiness probe path (distinct from the `healthCheckPath` liveness probe):
 	// reports 503 once graceful shutdown begins so a load balancer drains the
@@ -463,12 +502,34 @@ export default function (opts = {}) {
 	// build work. The reserved-key warning needs builder.log, so it is emitted
 	// inside adapt(); the throw-on-bad-shape path runs here at factory time.
 	const staticHeadersResult = normalizeStaticHeaders(opts.staticHeaders);
+	const staticCacheControl = normalizeStaticCacheControl(opts.staticCacheControl);
 
 	// Normalize websocket config: true -> {}, false/undefined -> null
 	const websocket =
 		opts.websocket === true
 			? {}
 			: opts.websocket || null;
+	const waitingRoomTemplate = websocket?.upgradeAdmission?.waitingRoom?.template;
+	const waitingRoomRenderer = websocket?.upgradeAdmission?.waitingRoom?.renderer;
+	if (waitingRoomRenderer != null && typeof waitingRoomRenderer !== 'string') {
+		throw new Error(
+			`websocket.upgradeAdmission.waitingRoom.renderer must be a module path string ` +
+			`(e.g. './src/lib/server/waiting-room.js') - got ${JSON.stringify(waitingRoomRenderer)}.`
+		);
+	}
+	if (typeof waitingRoomRenderer === 'string' && waitingRoomRenderer.trim() === '') {
+		throw new Error(
+			'websocket.upgradeAdmission.waitingRoom.renderer must not be an empty module path.'
+		);
+	}
+	if (waitingRoomRenderer && waitingRoomTemplate != null) {
+		throw new Error(
+			'websocket.upgradeAdmission.waitingRoom.renderer and .template are mutually exclusive.'
+		);
+	}
+	if (typeof waitingRoomTemplate === 'string') {
+		compileAccessibleWaitingRoomTemplate(waitingRoomTemplate);
+	}
 
 	if (websocket?.handler != null && typeof websocket.handler !== 'string') {
 		throw new Error(
@@ -487,12 +548,11 @@ export default function (opts = {}) {
 		websocketHandler: websocket?.handler ?? null,
 
 		async adapt(builder) {
-			// Verify uWebSockets.js is installed - it's a native addon from GitHub,
-			// so install failures are common and produce confusing runtime errors
+			// Verify the native addon is present before starting build work.
 			try {
 				await import('uWebSockets.js');
-			} catch {
-				throw new Error(uwsLoadErrorMessage(readAdapterPackageJson()));
+			} catch (cause) {
+				throw new Error(uwsLoadErrorMessage(readAdapterPackageJson(), cause), { cause });
 			}
 
 			const tmp = builder.getBuildDirectory('adapter-uws');
@@ -677,6 +737,52 @@ export default function (opts = {}) {
 				writeFileSync(`${tmp}/metrics-registry.js`, 'export default null;\n');
 			}
 
+			// Optional vendor-neutral trace provider. Like the metrics registry,
+			// this is a module path because adapter options are serialized into the
+			// production build. A null stub keeps the runtime import monomorphic and
+			// makes the unconfigured hot path one branch with no span allocation.
+			if (tracingPath) {
+				const tracingEntry = `${tmp}/tracing-provider-entry-src.js`;
+				writeFileSync(
+					tracingEntry,
+					`import * as m from ${JSON.stringify(path.resolve(tracingPath))};\n` +
+					'const pick = (ns) => ns.default ?? ns.tracing ?? ns.provider ?? null;\n' +
+					'const selected = pick(m);\n' +
+					"if (!selected || typeof selected.startSpan !== 'function') {\n" +
+					"  throw new Error('[adapter-uws] configured tracing module must export a provider with startSpan(name, options).');\n" +
+					'}\n' +
+					'export default selected;\n'
+				);
+				await esbuildServerModule(tracingEntry, `${tmp}/tracing-provider.js`);
+				builder.log.minor(`Tracing provider: ${tracingPath}`);
+			} else {
+				writeFileSync(`${tmp}/tracing-provider.js`, 'export default null;\n');
+			}
+
+			// Per-request waiting-room renderer. This is a module path rather
+			// than a live function for the same serialization reason as metrics
+			// and primaryInit. Bundle the user's default or named
+			// renderWaitingRoom export into an isolated server entry; a null stub
+			// keeps the runtime bridge resolvable when the feature is unused.
+			const waitingRoomRendererPath =
+				websocket?.upgradeAdmission?.waitingRoom &&
+				typeof websocket.upgradeAdmission.waitingRoom === 'object'
+					? websocket.upgradeAdmission.waitingRoom.renderer
+					: null;
+			if (waitingRoomRendererPath) {
+				const rendererEntry = `${tmp}/waiting-room-renderer-entry-src.js`;
+				writeFileSync(
+					rendererEntry,
+					`import * as m from ${JSON.stringify(path.resolve(waitingRoomRendererPath))};\n` +
+					'const pick = (ns) => ns.default ?? ns.renderWaitingRoom ?? null;\n' +
+					'export default pick(m);\n'
+				);
+				await esbuildServerModule(rendererEntry, `${tmp}/waiting-room-renderer.js`);
+				builder.log.minor(`Waiting-room renderer: ${waitingRoomRendererPath}`);
+			} else {
+				writeFileSync(`${tmp}/waiting-room-renderer.js`, 'export default null;\n');
+			}
+
 			// primaryInit module. Like `metrics`, this is a module PATH, not a live
 			// function: adapter options are serialized into the build, so a function
 			// passed in svelte.config.js could never reach the runtime. The module's
@@ -745,6 +851,8 @@ export default function (opts = {}) {
 				manifest: `${tmp}/manifest.js`,
 				'ws-handler': `${tmp}/ws-handler.js`,
 				'metrics-registry': `${tmp}/metrics-registry.js`,
+				'tracing-provider': `${tmp}/tracing-provider.js`,
+				'waiting-room-renderer': `${tmp}/waiting-room-renderer.js`,
 				'primary-init': `${tmp}/primary-init.js`
 			};
 
@@ -786,7 +894,7 @@ export default function (opts = {}) {
 				]
 			});
 
-			await bundle.write({
+			await writeAndCloseRollupBundle(bundle, {
 				dir: `${out}/server`,
 				format: 'esm',
 				sourcemap: true,
@@ -911,7 +1019,8 @@ export default function (opts = {}) {
 					`[adapter-uws] staticHeaders ignored: ${staticHeadersResult.dropped.join(', ')}. ` +
 					'These transfer/caching/range headers are managed by the static file ' +
 					'handler and cannot be overridden (content-type, content-encoding, etag, ' +
-					'cache-control, vary, accept-ranges, ...). Every other header is applied.'
+					'cache-control, vary, accept-ranges, ...). Use staticCacheControl for ' +
+					'path-specific cache policies. Every other header is applied.'
 				);
 			}
 
@@ -923,7 +1032,8 @@ export default function (opts = {}) {
 				builder.log.warn(
 					'[adapter-uws] upgradeAdmission.waitingRoom.template must now be an HTML string ' +
 					'with {{queueDepth}} / {{estimatedSeconds}} / {{pollIntervalMs}} / ' +
-					'{{retryAfterSeconds}} / {{admitCheckPath}} tokens. A function cannot be serialized ' +
+					'{{retryAfterSeconds}} / {{admitCheckPath}} / {{appName}} / {{statusUrl}} / ' +
+					'{{supportUrl}} / {{incidentId}} tokens. A function cannot be serialized ' +
 					'into the build and was ignored; the built-in holding page is being used.'
 				);
 			}
@@ -945,11 +1055,43 @@ export default function (opts = {}) {
 					HEALTH_CHECK_PATH: JSON.stringify(healthCheckPath),
 					READINESS_CHECK_PATH: JSON.stringify(readinessCheckPath),
 					STATIC_HEADERS: JSON.stringify(staticHeadersResult.headers),
+					STATIC_CACHE_CONTROL: JSON.stringify(staticCacheControl),
 					METRICS_REGISTRY: './server/metrics-registry.js',
+					TRACING_PROVIDER: './server/tracing-provider.js',
+					WAITING_ROOM_RENDERER: './server/waiting-room-renderer.js',
 					PRIMARY_INIT: './server/primary-init.js',
 					WORKERS_CONFIG: JSON.stringify({ compute: computeWorkers })
 				}
 			});
+			const tracingRuntimePath = out + '/tracing.js';
+			const tracingRuntimeSource = readFileSync(tracingRuntimePath, 'utf8');
+			const generatedTracingRuntime = tracingRuntimeSource.replace(
+				"from '../trace-context.js';",
+				"from './trace-context.js';"
+			);
+			if (generatedTracingRuntime === tracingRuntimeSource) {
+				throw new Error('Failed to rewrite the generated tracing helper import.');
+			}
+			writeFileSync(tracingRuntimePath, generatedTracingRuntime);
+			writeFileSync(
+				out + '/trace-context.js',
+				readFileSync(new URL('./trace-context.js', import.meta.url), 'utf8')
+			);
+
+			// Runtime-readable identity metadata. Keep this as package/schema
+			// files beside the copied runtime rather than compiling version
+			// literals into JavaScript: diagnostics then report the adapter and
+			// protocol artifacts that actually produced this server build.
+			const metadataDir = out + '/meta/svelte-adapter-uws';
+			mkdirSync(metadataDir, { recursive: true });
+			writeFileSync(
+				metadataDir + '/package.json',
+				readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+			);
+			writeFileSync(
+				out + '/meta/protocol.schema.json',
+				readFileSync(new URL('../protocol.schema.json', import.meta.url), 'utf8')
+			);
 
 			// Import discovered __-prefixed entries so they execute at startup
 			if (extraEntries.length > 0) {

@@ -104,16 +104,16 @@ describe('message-hook exception containment', () => {
 				}
 				if (node.type === 'ImportDeclaration' &&
 					typeof node.source?.value === 'string' &&
-					node.source.value.endsWith('/hook-boundary.js')) {
+					node.source.value.endsWith('/message-admission.js')) {
 					imported = node.specifiers.some((specifier) =>
 						specifier.type === 'ImportSpecifier' &&
-						specifier.imported.name === 'runMessageHook' &&
-						specifier.local.name === 'runMessageHook'
+						specifier.imported.name === 'runAdmittedMessageHook' &&
+						specifier.local.name === 'runAdmittedMessageHook'
 					);
 				}
 				if (node.type === 'CallExpression' &&
 					node.callee?.type === 'Identifier' &&
-					node.callee.name === 'runMessageHook') {
+					node.callee.name === 'runAdmittedMessageHook') {
 					if (parent?.type === 'AwaitExpression' && parent.argument === node) awaited++;
 					else unawaited++;
 				}
@@ -125,7 +125,7 @@ describe('message-hook exception containment', () => {
 			visit(root);
 
 			expect(imported, `${file} must import the real shared boundary unaliased`).toBe(true);
-			expect(unawaited, `${file} has an unawaited message-hook boundary`).toBe(0);
+			expect(unawaited, `${file} has an unawaited admitted message-hook boundary`).toBe(0);
 			expect(awaited, `${file} must contain every app-message delegation`).toBe(expectedCalls);
 		}
 	});

@@ -24,9 +24,20 @@ type SharedAdapterOptions = Pick<
 	| 'allowNonAsciiTopics'
 	| 'authPathRequireOrigin'
 	| 'authorizeWireSubscribe'
+	| 'maxPayloadLength'
+	| 'messageAdmission'
 >;
 
 export interface UWSPluginOptions extends SharedAdapterOptions {
+	/**
+	 * Maximum inbound WebSocket message size in bytes. This is enforced by
+	 * the dev `ws` receiver and reported by `platform.maxPayloadLength`.
+	 * Must be a positive integer no greater than 2,147,483,647.
+	 *
+	 * @default 1048576 (1 MiB)
+	 */
+	maxPayloadLength?: number;
+
 	/**
 	 * Skip the dev plugin's `allowedOrigins` enforcement on WSS upgrades.
 	 * The dev plugin enforces origins the same way the production handler

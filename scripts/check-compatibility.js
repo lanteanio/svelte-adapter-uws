@@ -683,11 +683,43 @@ function renderedTableMatrices(document) {
 	return matrices;
 }
 
+// Hand-written matrices can restate manifest rows under short column labels
+// (Adapter | Realtime | Extensions | Native addon) instead of full package
+// names, which the full-identity counter cannot see. Those short labels only
+// identify the ecosystem when they appear as whole cells, so exact-cell
+// matching keeps prose tables that merely mention the word adapter somewhere
+// inside a longer cell out of scope.
+const SHORT_ECOSYSTEM_CELL_LABELS = [
+	"adapter",
+	"realtime",
+	"extensions",
+	"native addon",
+	"uwebsockets.js",
+	"uws",
+];
+
+function shortLabelIdentityCount(table) {
+	const labels = new Set();
+	for (const row of table) {
+		for (const cell of row) {
+			const normalized = cell
+				.replace(/`/g, "")
+				.replace(/\s+/g, " ")
+				.trim()
+				.toLowerCase();
+			if (SHORT_ECOSYSTEM_CELL_LABELS.includes(normalized))
+				labels.add(normalized);
+		}
+	}
+	return labels.size;
+}
+
 function tableClaimsCompatibility(table) {
 	const contents = table.flat().join(" ");
+	if (compatibilityFactCount(contents) < 2) return false;
 	return (
-		compatibilityFactCount(contents) >= 2 &&
-		ecosystemIdentityCount(contents) >= 2
+		ecosystemIdentityCount(contents) >= 2 ||
+		shortLabelIdentityCount(table) >= 2
 	);
 }
 
@@ -1180,7 +1212,17 @@ function hasInstallInstruction(visibleSource) {
 		return candidates.length === 1 && candidates[0] === "install-test";
 	};
 	const hasGovernedPackage = (command) => {
-		if (/\bsvelte-adapter-uws(?:@|\b)/i.test(command)) return true;
+		// The three ecosystem packages release in lockstep series, so an
+		// unqualified `npm install svelte-realtime` in packaged docs resolves
+		// the wrong dist-tag line exactly like an unqualified adapter install
+		// would. All three identities are governed, with or without a
+		// @tag/@version suffix.
+		if (
+			/\b(?:svelte-adapter-uws(?:-extensions)?|svelte-realtime)(?:@|\b)/i.test(
+				command,
+			)
+		)
+			return true;
 		for (const token of command.match(/[^\s;&|"'`<>]+/g) || []) {
 			let decoded;
 			try {
@@ -1493,6 +1535,149 @@ export function validateMigrationCompatibility(migration) {
 	}
 }
 
+export const MIGRATION_GUIDE_RELATIVE_PATH = "docs/migrations/0.5-to-0.6.md";
+const MIGRATION_GUIDE_TUPLE_HEADER = [
+	"purpose",
+	"adapter",
+	"realtime",
+	"extensions",
+	"native addon",
+];
+
+function markdownTableRowCells(line) {
+	const trimmed = line.trim();
+	if (
+		trimmed.length < 2 ||
+		!trimmed.startsWith("|") ||
+		!trimmed.endsWith("|")
+	)
+		return null;
+	return trimmed
+		.slice(1, -1)
+		.split("|")
+		.map((cell) => cell.replace(/`/g, "").replace(/\s+/g, " ").trim());
+}
+
+function cellVersionTokens(cell) {
+	return [
+		...cell.matchAll(/\bv?\d+\.\d+(?:\.(?:x|\d+))?(?:-[0-9A-Za-z.*]+)?/g),
+	].map((match) => match[0]);
+}
+
+/**
+ * The 0.5-to-0.6 guide restates manifest facts in a short-label tuple table
+ * so the guide stays readable offline. That restatement is only allowed
+ * because this binding drift-checks every version-bearing cell of both bound
+ * rows against docs/compatibility.v1.csv, then excises the bound table so the
+ * generic ownership detectors govern the rest of the guide. Any other
+ * short-label matrix in packaged docs is an unowned compatibility claim.
+ */
+export function validateMigrationGuideTupleTable(source, rows) {
+	const stable = rows.find((row) => row.channel === "stable");
+	const current = rows.find((row) => row.current === "true");
+	if (!stable || !current) return { errors: [], remainder: source };
+	const lines = source.split(/\r?\n/);
+	const headerIndex = lines.findIndex((line) => {
+		const cells = markdownTableRowCells(line);
+		return (
+			cells !== null &&
+			cells.map((cell) => cell.toLowerCase()).join("|") ===
+				MIGRATION_GUIDE_TUPLE_HEADER.join("|")
+		);
+	});
+	if (headerIndex === -1) return { errors: [], remainder: source };
+	let end = headerIndex + 1;
+	while (end < lines.length && lines[end].trim().startsWith("|")) end++;
+	const errors = [];
+	const label = MIGRATION_GUIDE_RELATIVE_PATH + " tuple table";
+	const expectations = new Map([
+		[
+			"rollback baseline",
+			[
+				stable.adapter_version,
+				stable.realtime,
+				stable.extensions,
+				uwsRefFromSpec(stable.uwebsockets),
+			],
+		],
+		[
+			"upgrade candidate",
+			[
+				current.adapter,
+				current.realtime,
+				current.extensions,
+				uwsRefFromSpec(current.uwebsockets),
+			],
+		],
+	]);
+	const seen = new Set();
+	for (const line of lines.slice(headerIndex + 1, end)) {
+		const cells = markdownTableRowCells(line);
+		if (cells === null) {
+			errors.push(label + " contains a malformed row: " + line.trim());
+			continue;
+		}
+		if (cells.every((cell) => /^:?-+:?$/.test(cell))) continue;
+		const rowName = cells[0].toLowerCase();
+		const expected = expectations.get(rowName);
+		if (!expected) {
+			errors.push(
+				label +
+					" row " +
+					(cells[0] || line.trim()) +
+					" is not bound to a compatibility channel",
+			);
+			continue;
+		}
+		seen.add(rowName);
+		if (cells.length !== MIGRATION_GUIDE_TUPLE_HEADER.length) {
+			errors.push(
+				label +
+					" " +
+					cells[0] +
+					" row must have exactly the bound columns",
+			);
+			continue;
+		}
+		for (let column = 0; column < expected.length; column++) {
+			// A wildcard suffix (0.6.0-next.*) restates a series; strip it
+			// before the exact comparison so a superstring like 0.5.80 cannot
+			// ride a substring check.
+			const tokens = cellVersionTokens(cells[column + 1]);
+			if (
+				tokens.length === 0 ||
+				tokens.some(
+					(token) =>
+						token.replace(/\.\*$/, "") !== expected[column],
+				)
+			) {
+				errors.push(
+					label +
+						" " +
+						cells[0] +
+						" " +
+						MIGRATION_GUIDE_TUPLE_HEADER[column + 1] +
+						" cell disagrees with docs/compatibility.v1.csv (expected " +
+						expected[column] +
+						")",
+				);
+			}
+		}
+	}
+	for (const rowName of expectations.keys()) {
+		if (!seen.has(rowName))
+			errors.push(label + " is missing its " + rowName + " row");
+	}
+	return {
+		errors,
+		remainder: [
+			...lines.slice(0, headerIndex),
+			"",
+			...lines.slice(end),
+		].join("\n"),
+	};
+}
+
 export function validatePublishedCompatibilityDocuments(documents, rows) {
 	const errors = [];
 	for (const [relative, source] of Object.entries(documents)) {
@@ -1502,6 +1687,14 @@ export function validatePublishedCompatibilityDocuments(documents, rows) {
 		}
 		if (relative === "MIGRATION.md") {
 			errors.push(...validateMigrationCompatibility(source));
+			continue;
+		}
+		if (relative === MIGRATION_GUIDE_RELATIVE_PATH) {
+			const bound = validateMigrationGuideTupleTable(source, rows);
+			errors.push(
+				...bound.errors,
+				...validateUnownedPublishedSource(relative, bound.remainder),
+			);
 			continue;
 		}
 		errors.push(...validateUnownedPublishedSource(relative, source));

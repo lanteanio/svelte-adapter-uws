@@ -96,6 +96,8 @@ describeMaybe('static assets: per-encoding representations', () => {
 	let immutableEntry;
 	/** @type {any} */
 	let configuredEntry;
+	/** @type {any} */
+	let customCacheEntry;
 	/** @type {Buffer} */
 	let brBytes;
 	/** @type {Buffer} */
@@ -128,12 +130,20 @@ describeMaybe('static assets: per-encoding representations', () => {
 		fs.writeFileSync(path.join(tmpDir, immutableRel + '.br'), brBytes);
 
 		cacheDir(tmpDir, '/negotiate-probe', false);
-		cacheDir(tmpDir, '/negotiate-immutable', true);
+		cacheDir(tmpDir, '/negotiate-immutable', true, null, [{
+			pattern: `/${manifest.appPath}/immutable/`,
+			cacheControl: 'no-store'
+		}]);
 		cacheDir(tmpDir, '/negotiate-configured', false, { 'x-frame-options': 'DENY' });
+		cacheDir(tmpDir, '/negotiate-custom-cache', true, null, [{
+			pattern: '/asset.txt',
+			cacheControl: 'public, max-age=31536000, immutable'
+		}]);
 
 		entry = staticCache.get('/negotiate-probe/asset.txt');
 		immutableEntry = staticCache.get(`/negotiate-immutable/${manifest.appPath}/immutable/chunk.js`);
 		configuredEntry = staticCache.get('/negotiate-configured/asset.txt');
+		customCacheEntry = staticCache.get('/negotiate-custom-cache/asset.txt');
 
 		serve = (target, opts = {}) => {
 			const rec = recorder();
@@ -353,6 +363,20 @@ describeMaybe('static assets: per-encoding representations', () => {
 		expect(header(serve(configuredEntry), 'x-frame-options')).toBe('DENY');
 		expect(header(serve(configuredEntry, { acceptEncoding: 'br' }), 'x-frame-options')).toBe('DENY');
 		expect(header(serve(configuredEntry, { acceptEncoding: 'gzip' }), 'x-frame-options')).toBe('DENY');
+	});
+
+	it('carries a matching custom cache policy across representations and 304', () => {
+		expect(customCacheEntry, 'the custom-cache probe asset must be indexed').toBeTruthy();
+		const identity = serve(customCacheEntry);
+		const br = serve(customCacheEntry, { acceptEncoding: 'br' });
+		const validated = serve(customCacheEntry, { ifNoneMatch: customCacheEntry.etag });
+
+		expect(header(identity, 'cache-control')).toBe('public, max-age=31536000, immutable');
+		expect(header(br, 'cache-control')).toBe('public, max-age=31536000, immutable');
+		expect(header(validated, 'cache-control')).toBe('public, max-age=31536000, immutable');
+		expect(validated.status).toBe('304 Not Modified');
+		expect(header(identity, 'etag')).toBe(customCacheEntry.etag);
+		expect(serve(customCacheEntry, { range: 'bytes=0-9' }).status).toBe('206 Partial Content');
 	});
 
 	it('leaves immutable assets without a validator on any coding', () => {

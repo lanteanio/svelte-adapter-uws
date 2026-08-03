@@ -115,7 +115,62 @@ describe('ring stream', () => {
 		await until(() => seen.length === 100);
 		expect(seen).toEqual(Array.from({ length: 100 }, (_, i) => i));
 		expect(writer.pendingBytes).toBe(0);
+		expect(writer.pendingHead).toBe(0);
+		expect(writer.pending).toHaveLength(0);
 		reader.close();
+	});
+
+	it('quarantines a stalled consumer before its pending-byte spill can grow without bound', () => {
+		const sab = createRelayRingBuffer(1024);
+		const overflows = [];
+		const writer = new RingWriter(sab, {
+			maxPendingBytes: 64,
+			maxPendingAgeMs: 5_000,
+			onOverflow: (event) => overflows.push(event)
+		});
+		writer.write(new Uint8Array(writer.cap));
+		const accepted = writer.write(new Uint8Array(65));
+
+		expect(accepted).toBe(false);
+		expect(writer.closed).toBe(true);
+		expect(writer.pendingBytes).toBe(0);
+		expect(overflows).toEqual([expect.objectContaining({
+			reason: 'bytes',
+			droppedBytes: 65,
+			maxPendingBytes: 64
+		})]);
+	});
+
+	it('quarantines an old spill even when no later publish arrives', () => {
+		const sab = createRelayRingBuffer(1024);
+		let now = 0;
+		let ageCallback = null;
+		const overflows = [];
+		const writer = new RingWriter(sab, {
+			maxPendingBytes: 4096,
+			maxPendingAgeMs: 50,
+			now: () => now,
+			setTimer: (callback) => {
+				ageCallback = callback;
+				return { unref() {} };
+			},
+			clearTimer: () => {},
+			onOverflow: (event) => overflows.push(event)
+		});
+		writer.write(new Uint8Array(writer.cap));
+		writer.write(new Uint8Array(32));
+		expect(writer.pendingBytes).toBe(32);
+		expect(ageCallback).toBeTypeOf('function');
+
+		now = 50;
+		ageCallback();
+		expect(writer.closed).toBe(true);
+		expect(overflows).toEqual([expect.objectContaining({
+			reason: 'age',
+			droppedBytes: 32,
+			pendingAgeMs: 50,
+			maxPendingAgeMs: 50
+		})]);
 	});
 
 	it('streams a frame LARGER than the whole ring through in pieces', async () => {

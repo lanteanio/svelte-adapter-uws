@@ -1,10 +1,119 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import adapter from '../src/index.js';
 import {
+	assertAccessibleWaitingDocument,
+	buildAccessibleCapacityRefusalPage,
 	buildWaitingRoomPage,
+	createWaitingRoomRequest,
+	negotiateRejection,
 	renderWaitingRoomTemplate,
 	resolveWaitingRoom,
 	waitingRoomStatusText
 } from '../src/runtime/utils.js';
+
+function accessibleDocument(content, htmlAttributes = 'lang="en" dir="ltr"') {
+	return '<!doctype html><html ' + htmlAttributes + '><head><meta charset="utf-8">' +
+		'<title>Please wait</title></head><body><main><h1>Server at capacity</h1>' +
+		'<p role="status" aria-live="polite" aria-atomic="true">' + content + '</p>' +
+		'<form method="get"><button type="submit">Try again</button></form>' +
+		'</main></body></html>';
+}
+
+describe('AccessibleWaitingDocument', () => {
+	it('accepts the shared baseline and the minimal opted-out response', () => {
+		expect(assertAccessibleWaitingDocument(accessibleDocument('Please wait.')))
+			.toEqual({ lang: 'en', dir: 'ltr' });
+		expect(assertAccessibleWaitingDocument(buildAccessibleCapacityRefusalPage()))
+			.toEqual({ lang: 'en', dir: 'ltr' });
+	});
+
+	it.each([
+		['doctype', (page) => page.replace('<!doctype html>', '')],
+		['html language', (page) => page.replace(' lang="en"', '')],
+		['text direction', (page) => page.replace(' dir="ltr"', '')],
+		['title', (page) => page.replace('<title>Please wait</title>', '')],
+		['main landmark', (page) => page.replace(/<\/?main>/g, '')],
+		['main role', (page) => page.replace('<main>', '<main role="region">')],
+		['status live region', (page) => page.replace(' role="status" aria-live="polite" aria-atomic="true"', '')],
+		['enabled live region', (page) => page.replace('aria-live="polite"', 'aria-live="off"')],
+		['recovery action', (page) => page.replace(/<form[\s\S]*?<\/form>/, '')]
+	])('rejects a document without its %s', (_name, remove) => {
+		expect(() => assertAccessibleWaitingDocument(remove(accessibleDocument('Please wait.'))))
+			.toThrow(/AccessibleWaitingDocument/);
+	});
+
+	it.each([
+		['comment-only structure', '<p>visible filler</p><!-- <main><p role="status">Wait</p><button>Retry</button></main> -->'],
+		['template-only structure', '<p>visible filler</p><template><main><p role="status">Wait</p><button>Retry</button></main></template>'],
+		['script-only structure', '<p>visible filler</p><script>"<main><p role=status>Wait</p><button>Retry</button></main>"</script>'],
+		['a hidden baseline', '<main hidden><p role="status">Wait</p><button>Retry</button></main><p>visible filler</p>'],
+		['an inert baseline', '<main inert><p role="status">Wait</p><button>Retry</button></main><p>visible filler</p>'],
+		['an aria-hidden baseline', '<main aria-hidden="true"><p role="status">Wait</p><button>Retry</button></main><p>visible filler</p>'],
+		['a visually hidden baseline', '<main style="display: none !important"><p role="status">Wait</p><button>Retry</button></main><p>visible filler</p>']
+	])('rejects %s outside the exposed accessibility tree', (_name, body) => {
+		const page = '<!doctype html><html lang="en" dir="ltr"><head><title>Wait</title></head><body>' +
+			body + '</body></html>';
+		expect(() => assertAccessibleWaitingDocument(page)).toThrow(/AccessibleWaitingDocument/);
+	});
+
+	it('does not treat later ARIA fallback roles as the effective baseline roles', () => {
+		const page = '<!doctype html><html lang="en" dir="ltr"><head><title>Wait</title></head>' +
+			'<body><div role="none main"><p role="none status">Wait</p>' +
+			'<button>Retry</button></div></body></html>';
+		expect(() => assertAccessibleWaitingDocument(page)).toThrow(/main landmark/);
+	});
+
+	it.each([
+		['a disabled button', '<button disabled>Retry</button>'],
+		['an aria-disabled button', '<button aria-disabled="true">Retry</button>'],
+		['a button in a disabled fieldset', '<fieldset disabled><button>Retry</button></fieldset>'],
+		['a link in an aria-disabled group', '<div aria-disabled="true"><a href="/retry">Retry</a></div>'],
+		['an empty form', '<form method="get"></form>'],
+		['an unsafe link', '<a href="javascript:location.reload()">Retry</a>'],
+		['an empty link', '<a href="/retry"></a>']
+	])('does not accept %s as the recovery action', (_name, recovery) => {
+		const page = '<!doctype html><html lang="en" dir="ltr"><head><title>Wait</title></head>' +
+			'<body><main><p role="status">Please wait.</p>' + recovery + '</main></body></html>';
+		expect(() => assertAccessibleWaitingDocument(page)).toThrow(/recovery control|safe link/);
+	});
+
+	it('validates and canonicalizes the document language tag', () => {
+		expect(assertAccessibleWaitingDocument(accessibleDocument('Wait.', 'lang="EN-us" dir="ltr"')))
+			.toEqual({ lang: 'en-US', dir: 'ltr' });
+		expect(() => assertAccessibleWaitingDocument(accessibleDocument('Wait.', 'lang="123" dir="ltr"')))
+			.toThrow(/valid html\[lang\]/);
+	});
+
+	it('accepts the user-agent label of an enabled submit input as recovery', () => {
+		const page = '<!doctype html><html lang="en" dir="ltr"><head><title>Wait</title></head>' +
+			'<body><main><p role="status">Please wait.</p><form><input type="submit"></form></main></body></html>';
+		expect(assertAccessibleWaitingDocument(page)).toEqual({ lang: 'en', dir: 'ltr' });
+	});
+});
+
+describe('negotiateRejection', () => {
+	it.each([
+		['text/html', 'html'],
+		['TEXT/HTML; charset=utf-8', 'html'],
+		['text/html;q=0.5,application/json', 'html'],
+		['text/html;q=0', 'retry'],
+		['text/html;q=0.000', 'retry'],
+		['text/html;q=bogus', 'retry'],
+		['text/html;profile="a,b";q=0', 'retry'],
+		['text/html;profile=";q=1";q=0', 'retry'],
+		['text/html;profile="unterminated;q=1', 'retry'],
+		['application/nottext/html', 'retry'],
+		['text/*,*/*', 'retry'],
+		['application/json', 'retry']
+	])('negotiates %s as %s', (accept, expected) => {
+		expect(negotiateRejection(accept)).toBe(expected);
+	});
+
+	it('never renders HTML for an actual WebSocket handshake', () => {
+		expect(negotiateRejection('text/html', 'websocket')).toBe('retry');
+		expect(negotiateRejection('text/html', 'h2c, WebSocket')).toBe('retry');
+	});
+});
 
 describe('renderWaitingRoomTemplate', () => {
 	const ctx = {
@@ -12,20 +121,42 @@ describe('renderWaitingRoomTemplate', () => {
 		estimatedSeconds: 12,
 		pollIntervalMs: 3000,
 		retryAfterSeconds: 4,
-		admitCheckPath: '/__admit-check'
+		admitCheckPath: '/__admit-check',
+		appName: 'Example App',
+		statusUrl: 'https://status.example.test',
+		supportUrl: '/help',
+		incidentId: 'INC-42'
 	};
 
 	it('substitutes every supported token', () => {
 		const out = renderWaitingRoomTemplate(
 			'q={{queueDepth}} eta={{estimatedSeconds}} poll={{pollIntervalMs}} ' +
-			'retry={{retryAfterSeconds}} check={{admitCheckPath}}',
+			'retry={{retryAfterSeconds}} check={{admitCheckPath}} app={{appName}} ' +
+			'status={{statusUrl}} support={{supportUrl}} incident={{incidentId}}',
 			ctx
 		);
-		expect(out).toBe('q=7 eta=12 poll=3000 retry=4 check=/__admit-check');
+		expect(out).toBe(
+			'q=7 eta=12 poll=3000 retry=4 check=/__admit-check app=Example App ' +
+			'status=https://status.example.test support=/help incident=INC-42'
+		);
 	});
 
-	it('leaves unknown tokens intact', () => {
-		expect(renderWaitingRoomTemplate('{{nope}} {{queueDepth}}', ctx)).toBe('{{nope}} 7');
+	it('rejects unknown tokens with the offending token and supported list', () => {
+		expect(() => renderWaitingRoomTemplate('{{estimatedSecond}} {{queueDepth}}', ctx))
+			.toThrow(/Unknown waiting-room template token "\{\{estimatedSecond\}\}".*Supported tokens:.*\{\{queueDepth\}\}/);
+	});
+
+	it('rejects unresolved opening syntax without rejecting ordinary closing braces', () => {
+		expect(() => renderWaitingRoomTemplate('{{queueDepth}', ctx))
+			.toThrow(/Unclosed waiting-room template token/);
+		expect(renderWaitingRoomTemplate('body{color:red}}', ctx)).toBe('body{color:red}}');
+	});
+
+	it('renders quadruple braces as literal double braces', () => {
+		expect(renderWaitingRoomTemplate(
+			'literal={{{{queueDepth}}}} live={{queueDepth}} close=}}}}',
+			ctx
+		)).toBe('literal={{queueDepth}} live=7 close=}}');
 	});
 
 	it('coerces numeric tokens to safe integers and clamps', () => {
@@ -49,6 +180,23 @@ describe('renderWaitingRoomTemplate', () => {
 		expect(out).toContain('&quot;');
 	});
 
+	it('HTML-escapes every optional identity token and drops script URLs', () => {
+		const out = renderWaitingRoomTemplate(
+			'{{appName}}|{{statusUrl}}|{{supportUrl}}|{{incidentId}}',
+			{
+				...ctx,
+				appName: '<b>Example & Co.</b>',
+				statusUrl: '/status?detail="<down>"',
+				supportUrl: 'javascript:alert(1)',
+				incidentId: 'INC-42<script>'
+			}
+		);
+		expect(out).toBe(
+			'&lt;b&gt;Example &amp; Co.&lt;/b&gt;|' +
+			'/status?detail=&quot;&lt;down&gt;&quot;||INC-42&lt;script&gt;'
+		);
+	});
+
 	it('replaces repeated occurrences of a token', () => {
 		expect(renderWaitingRoomTemplate('{{queueDepth}}-{{queueDepth}}', ctx)).toBe('7-7');
 	});
@@ -60,9 +208,51 @@ describe('resolveWaitingRoom with a string template', () => {
 	}
 
 	it('renders the operator string template via token substitution', () => {
-		const wr = resolved('<p>ahead: {{queueDepth}}</p>');
-		const page = wr.renderPage(3);
-		expect(page).toBe('<p>ahead: 3</p>');
+		const wr = resolved(accessibleDocument('ahead: {{queueDepth}}'));
+		const page = wr.renderResponse(3);
+		expect(page.body).toContain('ahead: 3');
+		expect(page.lang).toBe('en');
+	});
+
+	it('rejects a fragment at adapter construction and runtime resolution', () => {
+		expect(() => resolved('<p>ahead: {{queueDepth}}</p>'))
+			.toThrow(/AccessibleWaitingDocument/);
+		expect(() => adapter({
+			websocket: {
+				upgradeAdmission: {
+					maxConcurrent: 10,
+					waitingRoom: { template: '<p>ahead: {{queueDepth}}</p>' }
+				}
+			}
+		})).toThrow(/AccessibleWaitingDocument/);
+	});
+
+	it('rejects an empty string template identically at runtime and adapter construction', () => {
+		expect(() => resolved('')).toThrow(/AccessibleWaitingDocument/);
+		expect(() => adapter({
+			websocket: {
+				upgradeAdmission: {
+					maxConcurrent: 10,
+					waitingRoom: { template: '' }
+				}
+			}
+		})).toThrow(/AccessibleWaitingDocument/);
+	});
+
+	it('rejects an invalid template while resolving runtime configuration', () => {
+		expect(() => resolved('<p>{{queueDepht}}</p>'))
+			.toThrow(/Unknown waiting-room template token "\{\{queueDepht\}\}"/);
+	});
+
+	it('rejects invalid production templates when the adapter is constructed', () => {
+		expect(() => adapter({
+			websocket: {
+				upgradeAdmission: {
+					maxConcurrent: 10,
+					waitingRoom: { template: '<p>{{queueDepht}}</p>' }
+				}
+			}
+		})).toThrow(/Unknown waiting-room template token "\{\{queueDepht\}\}"/);
 	});
 
 	it('falls back to the built-in page when no template is set', () => {
@@ -72,12 +262,155 @@ describe('resolveWaitingRoom with a string template', () => {
 		expect(page).toContain('Server at capacity');
 	});
 
+	it('passes configured identity fields through the resolved waiting room', () => {
+		const wr = resolveWaitingRoom({
+			maxConcurrent: 10,
+			waitingRoom: {
+				appName: 'Example App',
+				statusUrl: '/status',
+				supportUrl: 'https://help.example.test',
+				incidentId: 'INC-42'
+			}
+		});
+		const page = wr.renderPage(2);
+		expect(page).toContain('<title>Example App - Waiting room</title>');
+		expect(page).toContain('<a href="/status">Service status</a>');
+		expect(page).toContain('<a href="https://help.example.test">Get help</a>');
+		expect(page).toContain('Incident reference: <code>INC-42</code>');
+	});
+
+	it('renders a full localized document from request headers and owns its metadata', () => {
+		let received;
+		const wr = resolveWaitingRoom({
+			maxConcurrent: 10,
+			waitingRoom: {
+				renderer(context) {
+					received = context;
+					const arabic = context.request.headers.get('accept-language')?.startsWith('ar');
+					return {
+						body: accessibleDocument('Localized ar', 'lang="wrong" dir="ltr" class="host"'),
+						lang: arabic ? 'ar' : 'en',
+						dir: arabic ? 'rtl' : 'ltr',
+						headers: { 'content-security-policy': "default-src 'none'" }
+					};
+				}
+			}
+		});
+		const request = createWaitingRoomRequest({
+			getMethod: () => 'get',
+			getUrl: () => '/hold',
+			getQuery: () => 'from=upgrade',
+			forEach(visitor) {
+				visitor('accept-language', 'ar-EG');
+				visitor('accept-language', 'ar;q=0.9');
+			}
+		});
+		const page = wr.renderResponse(3, request);
+		expect(received.request.method).toBe('GET');
+		expect(received.request.url).toBe('/hold?from=upgrade');
+		expect(received.request.headers.get('Accept-Language')).toBe('ar-EG, ar;q=0.9');
+		expect(received.request.headers.get('missing')).toBeNull();
+		expect(page.body).toContain('<html lang="ar" dir="rtl" class="host">');
+		expect(page.lang).toBe('ar');
+		expect(page.dir).toBe('rtl');
+		expect(page.varyAcceptLanguage).toBe(true);
+		expect(page.headers).toEqual([['content-security-policy', "default-src 'none'"]]);
+	});
+
+	it('falls back once to the built-in page when a renderer violates the synchronous contract', () => {
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const wr = resolveWaitingRoom({
+				maxConcurrent: 10,
+				waitingRoom: {
+					renderer: async () => ({
+						body: '<html></html>',
+						lang: 'en',
+						dir: 'ltr'
+					})
+				}
+			});
+			for (let index = 0; index < 2; index++) {
+				const page = wr.renderResponse();
+				expect(page.body).toContain('<title>Waiting room</title>');
+				expect(page.lang).toBe('en');
+				expect(page.varyAcceptLanguage).toBe(true);
+			}
+			expect(error).toHaveBeenCalledTimes(1);
+		} finally {
+			error.mockRestore();
+		}
+	});
+
+	it('falls back when a renderer tries to override locale ownership or returns a fragment', () => {
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const ownedHeader = resolveWaitingRoom({
+				maxConcurrent: 10,
+				waitingRoom: {
+					renderer: () => ({
+						body: '<html></html>',
+						lang: 'en',
+						dir: 'ltr',
+						headers: { vary: 'Origin' }
+					})
+				}
+			});
+			expect(ownedHeader.renderResponse().varyAcceptLanguage).toBe(true);
+
+			const fragment = resolveWaitingRoom({
+				maxConcurrent: 10,
+				waitingRoom: {
+					renderer: () => ({
+						body: '<main>Please wait</main>',
+						lang: 'en',
+						dir: 'ltr'
+					})
+				}
+			});
+			expect(fragment.renderResponse().body).toContain('<!doctype html>');
+			expect(error).toHaveBeenCalledTimes(2);
+		} finally {
+			error.mockRestore();
+		}
+	});
+
+	it('rejects ambiguous production renderer configuration at adapter construction', () => {
+		expect(() => adapter({
+			websocket: {
+				upgradeAdmission: {
+					maxConcurrent: 10,
+					waitingRoom: { renderer: '   ' }
+				}
+			}
+		})).toThrow(/must not be an empty module path/);
+		expect(() => adapter({
+			websocket: {
+				upgradeAdmission: {
+					maxConcurrent: 10,
+					waitingRoom: { renderer: () => ({}) }
+				}
+			}
+		})).toThrow(/renderer must be a module path string/);
+		expect(() => adapter({
+			websocket: {
+				upgradeAdmission: {
+					maxConcurrent: 10,
+					waitingRoom: {
+						renderer: './src/lib/server/waiting-room.js',
+						template: '<html></html>'
+					}
+				}
+			}
+		})).toThrow(/renderer and \.template are mutually exclusive/);
+	});
+
 	it('still honours a function template passed programmatically', () => {
 		const wr = resolveWaitingRoom({
 			maxConcurrent: 10,
-			waitingRoom: { template: (c) => `fn:${c.queueDepth}` }
+			waitingRoom: { template: (c) => accessibleDocument(`fn:${c.queueDepth}`) }
 		});
-		expect(wr.renderPage(5)).toBe('fn:5');
+		expect(wr.renderPage(5)).toContain('fn:5');
 	});
 });
 
@@ -252,8 +585,43 @@ describe('the built-in holding page', () => {
 
 	it('keeps the document baseline (language, title)', () => {
 		const page = buildWaitingRoomPage({});
-		expect(page).toContain('<html lang="en">');
+		expect(page).toContain('<html lang="en" dir="ltr">');
 		expect(page).toContain('<title>Waiting room</title>');
+	});
+
+	it('uses a neutral semantic light/dark palette with no adapter branding', () => {
+		const page = buildWaitingRoomPage({});
+		for (const name of [
+			'--waiting-room-page-background',
+			'--waiting-room-panel-background',
+			'--waiting-room-text',
+			'--waiting-room-muted-text',
+			'--waiting-room-border',
+			'--waiting-room-link',
+			'--waiting-room-focus-ring'
+		]) {
+			expect(page).toContain(name);
+		}
+		expect(page).toContain('@media(prefers-color-scheme:dark)');
+		expect(page).not.toMatch(/adapter-uws|lanteanio/i);
+	});
+
+	it('escapes built-in identity fields and omits unsafe links', () => {
+		const page = buildWaitingRoomPage({
+			appName: '<img src=x onerror=alert(1)>',
+			statusUrl: '/status?detail="<down>"',
+			supportUrl: 'javascript:alert(1)',
+			incidentId: 'INC-42</code><script>alert(1)</script>'
+		});
+		expect(page).toContain(
+			'<title>&lt;img src=x onerror=alert(1)&gt; - Waiting room</title>'
+		);
+		expect(page).toContain('<a href="/status?detail=&quot;&lt;down&gt;&quot;">Service status</a>');
+		expect(page).not.toContain('href="javascript:');
+		expect(page).toContain(
+			'Incident reference: <code>INC-42&lt;/code&gt;&lt;script&gt;alert(1)&lt;/script&gt;</code>'
+		);
+		expect(page).not.toContain('<img src=x');
 	});
 });
 

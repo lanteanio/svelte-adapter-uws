@@ -21,6 +21,7 @@ const testWorkflow = read('.github/workflows/test.yml');
 const simWorkflow = read('.github/workflows/sim-swarm.yml');
 const nvmrc = read('.nvmrc').trim();
 const pkg = JSON.parse(read('package.json'));
+const svelte4Lock = JSON.parse(read('test/fixtures/svelte4/package-lock.json'));
 
 /**
  * The quoted entries of one `paths:` list, identified by the trigger block it
@@ -89,6 +90,25 @@ describe('the suite lane demands the real runtime', () => {
 		const test = suite.find((step) => step.script === 'test');
 		expect(test.env.REQUIRE_UWS).toBe('1');
 	});
+
+	it('runs the visible product smoke after diagnosis and before the suite', () => {
+		const doctor = suite.find((step) => step.script === 'doctor');
+		const smoke = suite.find((step) => step.script === 'smoke');
+		const test = suite.find((step) => step.script === 'test');
+		expect(smoke).toBeTruthy();
+		expect(suite.indexOf(smoke)).toBeGreaterThan(suite.indexOf(doctor));
+		expect(suite.indexOf(smoke)).toBeLessThan(suite.indexOf(test));
+	});
+
+	it('runs both packed publishing analyzers before the test suite', () => {
+		const publish = suite.find((step) => step.script === 'check:publish');
+		const test = suite.find((step) => step.script === 'test');
+		expect(publish).toBeTruthy();
+		expect(suite.indexOf(publish)).toBeLessThan(suite.indexOf(test));
+		expect(pkg.scripts['check:publish']).toBe('publint && attw --pack . --profile esm-only');
+		expect(pkg.devDependencies.publint).toBeTruthy();
+		expect(pkg.devDependencies['@arethetypeswrong/cli']).toBeTruthy();
+	});
 });
 
 describe('third-party actions are pinned to an immutable commit', () => {
@@ -111,6 +131,10 @@ describe('the workflows cannot be bypassed by editing what they validate', () =>
 		for (const artifact of ['PROTOCOL.md', 'protocol.schema.json', 'test-vectors/**', 'examples/**']) {
 			expect(testPaths, `${artifact} triggers no job`).toContain(artifact);
 		}
+	});
+
+	it('covers every Markdown-only change read by the link gate', () => {
+		expect(testPaths).toContain('**/*.md');
 	});
 
 	it('covers a lock-only change in both workflows', () => {
@@ -179,6 +203,19 @@ describe('the declared support floor is executed, not just declared', () => {
 	it('installs the exact floor of every peer range it can run', () => {
 		expect(testWorkflow).toMatch(/npm install --no-save svelte@4\.0\.0 ws@8\.0\.0/);
 		expect(testWorkflow).toMatch(/run: npm run test:floor/);
+	});
+
+	it('runs the public prerequisite preflight from the freshly installed minimum-profile app', () => {
+		expect(testWorkflow).toMatch(
+			/name: Run the published newcomer preflight[\s\S]*working-directory: test\/fixtures\/svelte4[\s\S]*run: npm exec -- svelte-adapter-uws-preflight/
+		);
+		expect(read('README.md')).toContain('npm exec -- svelte-adapter-uws-preflight');
+		expect(pkg.bin?.['svelte-adapter-uws-preflight']).toBe('./scripts/preflight.js');
+		expect(
+			svelte4Lock.packages?.['node_modules/svelte-adapter-uws']?.bin?.[
+				'svelte-adapter-uws-preflight'
+			]
+		).toBe('scripts/preflight.js');
 	});
 
 	// The client is the only thing in this package that imports a peer at

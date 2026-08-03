@@ -131,6 +131,17 @@ describe('createPosture escalation and relaxation', () => {
 		expect(at_boundary.level).toBe('siege');
 	});
 
+	it('uses maxConnections as the capacity basis when the handshake ceiling is disabled', () => {
+		const posture = createPosture({
+			admission: createUpgradeAdmission({ maxConnections: 2 }),
+			getThresholds
+		});
+		tickActive(posture, 5, true);
+		expect(posture.level).toBe('elevated');
+		tickWithCapacityRejects(posture, 10, 4);
+		expect(posture.level).toBe('siege');
+	});
+
 	it('relaxes from elevated to normal only after a longer quiet dwell', () => {
 		const posture = createPosture({ admission: makeGate(), getThresholds });
 		tickActive(posture, 5, true);

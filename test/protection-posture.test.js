@@ -249,7 +249,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 	});
 
 	describe('siege drives the waiting room hard', () => {
-		it('serves the holding page or refuses every new browser upgrade under a pinned siege', async () => {
+		it('refuses every real WebSocket handshake under a pinned siege', async () => {
 			const { createTestServer } = await import('../src/testing.js');
 			server = await createTestServer({
 				upgradeAdmission: { maxConcurrent: 50 },
@@ -260,7 +260,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 			// new upgrades regardless: nothing in the burst gets a live socket.
 			const results = await burst(server.wsUrl, 6, { accept: HTML_ACCEPT });
 			expect(results.some((r) => r.opened)).toBe(false);
-			expect(results.every((r) => r.status === 200 || r.status === 503 || r.pending)).toBe(true);
+			expect(results.every((r) => r.status === 503 || r.pending)).toBe(true);
 
 			closeAll(results);
 		});
@@ -345,14 +345,15 @@ describeUWS('protection posture coupling on createTestServer', () => {
 				handler: held.hook
 			});
 
-			const results = await burst(server.wsUrl, 6, { accept: HTML_ACCEPT });
-			const page = results.find((r) => r.status === 200);
-			expect(page).toBeDefined();
-			expect(String(page.headers['content-type'])).toContain('text/html');
-			expect(page.body).toContain('/__admit-check');
+			const page = await fetch(server.url + '/__waiting-room', {
+				headers: { accept: HTML_ACCEPT }
+			});
+			const body = await page.text();
+			expect(page.status).toBe(200);
+			expect(page.headers.get('content-type')).toContain('text/html');
+			expect(body).toContain('/__admit-check');
 
 			held.release();
-			closeAll(results);
 		});
 
 		it('returns 200 admit:true from admit-check when the gate is idle at normal', async () => {

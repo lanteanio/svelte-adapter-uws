@@ -24,6 +24,7 @@ import {
 	NPM_FIXED_VALUE_SHORTHANDS,
 	NPM_VALUE_OPTIONS,
 	NPM_VALUE_SHORTHANDS,
+	MIGRATION_GUIDE_RELATIVE_PATH,
 	parseCompatibility,
 	renderCompatibility,
 	renderMigrationCompatibility,
@@ -31,6 +32,7 @@ import {
 	validateCompatibility,
 	validateLifecycleScripts,
 	validateMigrationCompatibility,
+	validateMigrationGuideTupleTable,
 	validateWorkspaceSiblings,
 	validatePublishedCompatibilityDocuments,
 	validateReadmeCompatibility,
@@ -1094,6 +1096,169 @@ describe("ecosystem compatibility manifest", () => {
 				rows,
 			),
 		).toEqual([]);
+	});
+
+	it("owns short-label matrices and binds the migration guide tuple table to the manifest", () => {
+		const guide = read(MIGRATION_GUIDE_RELATIVE_PATH);
+		// The shipped guide restates manifest facts under short column labels
+		// and stays green only because every version-bearing cell agrees with
+		// the manifest.
+		expect(
+			validatePublishedCompatibilityDocuments(
+				{ [MIGRATION_GUIDE_RELATIVE_PATH]: guide },
+				rows,
+			),
+		).toEqual([]);
+
+		// The same short-label shape anywhere else is an unowned claim.
+		const shortLabelMatrix =
+			"| Purpose | Adapter | Realtime | Extensions | Native addon |\n" +
+			"|---|---|---|---|---|\n" +
+			"| Rollback | `0.5.8` | `0.5.x` | `0.5.x` | `v20.67.0` |\n";
+		expect(
+			validatePublishedCompatibilityDocuments(
+				{ "docs/public-guide.md": shortLabelMatrix },
+				rows,
+			),
+		).toContain(
+			"docs/public-guide.md contains a compatibility presentation outside an owned generated block",
+		);
+		expect(
+			validateReadmeCompatibility(readme + "\n\n" + shortLabelMatrix, rows),
+		).toContain(
+			"README contains a competing compatibility presentation outside the generated block",
+		);
+		const twoLabelMatrix =
+			"| Adapter | Native addon |\n|---|---|\n| `0.5.8` | `v20.67.0` |\n";
+		expect(
+			validatePublishedCompatibilityDocuments(
+				{ "docs/public-guide.md": twoLabelMatrix },
+				rows,
+			),
+		).toContain(
+			"docs/public-guide.md contains a compatibility presentation outside an owned generated block",
+		);
+
+		// Versionless short-label tables and long-cell prose tables stay
+		// unowned.
+		for (const control of [
+			"| Purpose | Adapter | Realtime |\n|---|---|---|\n| Roles | transport | consumer |\n",
+			"| Failure | Owner |\n|---|---|\n| Unsupported binary | Adapter |\n" +
+				"| Version 1.2.3 of the tool | Build 4.5.6 notes |\n",
+		]) {
+			expect(
+				validatePublishedCompatibilityDocuments(
+					{ "docs/public-guide.md": control },
+					rows,
+				),
+				control,
+			).toEqual([]);
+		}
+
+		// Guide-side drift against the manifest fails the checker.
+		const driftedGuide = guide.replace("`v20.67.0`", "`v20.99.0`");
+		expect(driftedGuide).not.toBe(guide);
+		expect(
+			validatePublishedCompatibilityDocuments(
+				{ [MIGRATION_GUIDE_RELATIVE_PATH]: driftedGuide },
+				rows,
+			),
+		).toContain(
+			MIGRATION_GUIDE_RELATIVE_PATH +
+				" tuple table Rollback baseline native addon cell disagrees with docs/compatibility.v1.csv (expected v20.67.0)",
+		);
+
+		// Manifest-side drift against the unchanged guide fails too.
+		const driftedRows = rows.map((row) =>
+			row.channel === "stable" ? { ...row, realtime: "0.4.x" } : row,
+		);
+		expect(
+			validatePublishedCompatibilityDocuments(
+				{ [MIGRATION_GUIDE_RELATIVE_PATH]: guide },
+				driftedRows,
+			),
+		).toContain(
+			MIGRATION_GUIDE_RELATIVE_PATH +
+				" tuple table Rollback baseline realtime cell disagrees with docs/compatibility.v1.csv (expected 0.4.x)",
+		);
+
+		// A superstring or a second version in a bound cell is drift, not a
+		// substring match.
+		const superstring = guide.replace("exact `0.5.8`", "exact `0.5.80`");
+		expect(
+			validatePublishedCompatibilityDocuments(
+				{ [MIGRATION_GUIDE_RELATIVE_PATH]: superstring },
+				rows,
+			),
+		).toContain(
+			MIGRATION_GUIDE_RELATIVE_PATH +
+				" tuple table Rollback baseline adapter cell disagrees with docs/compatibility.v1.csv (expected 0.5.8)",
+		);
+
+		// Renaming a bound row away does not escape the binding.
+		const unbound = guide.replace("| Rollback baseline", "| Renamed baseline");
+		expect(
+			validatePublishedCompatibilityDocuments(
+				{ [MIGRATION_GUIDE_RELATIVE_PATH]: unbound },
+				rows,
+			),
+		).toContain(
+			MIGRATION_GUIDE_RELATIVE_PATH +
+				" tuple table is missing its rollback baseline row",
+		);
+
+		// Excision is exact: the binding removes only the bound table, and the
+		// remainder still flows through the generic ownership detectors.
+		const bound = validateMigrationGuideTupleTable(guide, rows);
+		expect(bound.errors).toEqual([]);
+		expect(bound.remainder).not.toContain("| Rollback baseline");
+		expect(bound.remainder).toContain("## Required source edits");
+		const smuggled =
+			guide +
+			"\n\n| svelte-adapter-uws | svelte-realtime |\n|---|---|\n| 0.4.x | 0.4.x |\n";
+		expect(
+			validatePublishedCompatibilityDocuments(
+				{ [MIGRATION_GUIDE_RELATIVE_PATH]: smuggled },
+				rows,
+			),
+		).toContain(
+			MIGRATION_GUIDE_RELATIVE_PATH +
+				" contains a compatibility presentation outside an owned generated block",
+		);
+	});
+
+	it("governs unqualified sibling ecosystem installs like adapter installs", () => {
+		for (const command of [
+			"npm install svelte-realtime",
+			"npm i svelte-realtime",
+			"pnpm add svelte-realtime@next",
+			"yarn add svelte-adapter-uws-extensions",
+			"npm install svelte-adapter-uws-extensions@0.6.0-next.91",
+			"bun add svelte-realtime@latest",
+		]) {
+			expect(
+				validatePublishedCompatibilityDocuments(
+					{ "docs/public-guide.md": "```sh\n" + command + "\n```\n" },
+					rows,
+				),
+				command,
+			).toContain(
+				"docs/public-guide.md contains an install instruction outside an owned generated block",
+			);
+		}
+		for (const control of [
+			"npm run install svelte-realtime\n",
+			"npm install svelte-realtimex\n",
+			"npm install some-other-package\n",
+		]) {
+			expect(
+				validatePublishedCompatibilityDocuments(
+					{ "docs/public-guide.md": control },
+					rows,
+				),
+				control,
+			).toEqual([]);
+		}
 	});
 
 	it("leaves versionless, negative, script, and hidden controls unowned", () => {

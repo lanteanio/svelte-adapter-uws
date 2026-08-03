@@ -186,6 +186,49 @@ describe('dev-server grant conjunct (src/vite.js)', () => {
 		expect(await platform.checkSubscribe(ws, 'never-granted', { requireGrant: true })).toBeNull();
 	});
 
+	it("strict mode requires both the server grant and the app hook's allow", async () => {
+		let denyNo = false;
+		const { ws } = await bootDev(
+			{ authorizeWireSubscribe: 'strict' },
+			{ subscribe: (_ws, topic) => topic.startsWith('no:') && denyNo ? 'FORBIDDEN' : null }
+		);
+		const platform = ws.getUserData()[WS_PLATFORM];
+
+		// The permissive hook does not replace the framework's grant.
+		expect(await platform.checkSubscribe(ws, 'ok:ungranted', { requireGrant: true })).toBe('FORBIDDEN');
+		const denied = waitClientFrame(
+			(frame) => frame?.type === 'subscribe-denied' && frame.topic === 'ok:wire-ungranted'
+		);
+		client.send(JSON.stringify({ type: 'subscribe', topic: 'ok:wire-ungranted', ref: 24 }));
+		expect(await denied).toMatchObject({ reason: 'FORBIDDEN', ref: 24 });
+
+		// Both authorities agree.
+		expect(await platform.subscribe(ws, 'ok:granted')).toBeNull();
+		expect(await platform.checkSubscribe(ws, 'ok:granted', { requireGrant: true })).toBeNull();
+
+		// A grant cannot override the app hook's denial.
+		expect(await platform.subscribe(ws, 'no:granted')).toBeNull();
+		denyNo = true;
+		expect(await platform.checkSubscribe(ws, 'no:granted', { requireGrant: true })).toBe('FORBIDDEN');
+	});
+
+	it('strict arming tightens an observer decision already parked in an app hook', async () => {
+		let hookStarted;
+		let releaseHook;
+		const started = new Promise((resolve) => { hookStarted = resolve; });
+		const parked = new Promise((resolve) => { releaseHook = resolve; });
+		const { ws } = await bootDev({}, {
+			async subscribe() { hookStarted(); await parked; }
+		});
+		const platform = ws.getUserData()[WS_PLATFORM];
+
+		const checking = platform.checkSubscribe(ws, 'tenant:victim', { requireGrant: true });
+		await started;
+		expect(platform.authorizeWireSubscribe('strict')).toBe('strict');
+		releaseHook();
+		expect(await checking).toBe('FORBIDDEN');
+	});
+
 	it('rechecks an observer grant after an async side-effect hook lands', async () => {
 		let observerPhase = false;
 		let releaseHook;

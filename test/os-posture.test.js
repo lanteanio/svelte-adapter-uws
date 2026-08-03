@@ -8,7 +8,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parsePsi, parseCpuStat, createOsPressureSampler } from '../src/runtime/utils/os-pressure.js';
+import { parsePsi, parseCpuStat, probeOsPressureSources, createOsPressureSampler, emitPressureMetricTelemetry } from '../src/runtime/utils/os-pressure.js';
 import { computePressureReason } from '../src/runtime/utils/pressure.js';
 import { samplePressureValue } from '../src/runtime/wire.js';
 import { startPostureExport } from '../src/runtime/utils/posture-export.js';
@@ -70,6 +70,117 @@ describe('os-pressure sampler', () => {
 		expect(reads).toBe(after); // no further reads once both probes failed
 	});
 
+	it('recovers when a successful startup probe is followed by one transient first-sample failure', () => {
+		const sourceFiles = {
+			'/proc/pressure/cpu': PSI_CPU,
+			'/proc/pressure/memory': PSI_MEM,
+			'/proc/pressure/io': PSI_IO,
+			'/sys/fs/cgroup/cpu.stat': CPU_STAT_V2
+		};
+		const sources = probeOsPressureSources(files(sourceFiles));
+		expect(sources).toEqual({ psi: true, cpuThrottle: true });
+
+		let fail = true;
+		let reads = 0;
+		const sampler = createOsPressureSampler({
+			sources,
+			readFile: (path) => {
+				reads++;
+				if (fail) throw new Error('transient EIO');
+				if (path in sourceFiles) return sourceFiles[path];
+				throw new Error('ENOENT ' + path);
+			}
+		});
+		expect(sampler.sample(1000)).toEqual({ psi: null, cpuThrottle: null });
+		const afterFailure = reads;
+
+		fail = false;
+		expect(sampler.sample(1000)).toEqual({
+			psi: { cpuSome10: 12.34, memoryFull10: 0.75, ioFull10: 22.5 },
+			cpuThrottle: { throttledRatio: 0, nrThrottledDelta: 0 }
+		});
+		expect(reads).toBeGreaterThan(afterFailure);
+	});
+
+	it('keeps a transient registration probe unknown and recovers on the sampler tick', () => {
+		const sourceFiles = {
+			'/proc/pressure/cpu': PSI_CPU,
+			'/proc/pressure/memory': PSI_MEM,
+			'/proc/pressure/io': PSI_IO,
+			'/sys/fs/cgroup/cpu.stat': CPU_STAT_V2
+		};
+		let fail = true;
+		const readFile = (path) => {
+			if (fail) {
+				const error = new Error('transient EIO');
+				error.code = 'EIO';
+				throw error;
+			}
+			if (path in sourceFiles) return sourceFiles[path];
+			const error = new Error('ENOENT ' + path);
+			error.code = 'ENOENT';
+			throw error;
+		};
+		const sources = probeOsPressureSources({ readFile });
+		expect(sources).toEqual({ psi: null, cpuThrottle: null });
+
+		fail = false;
+		const sampler = createOsPressureSampler({ sources, readFile });
+		expect(sampler.sample(1000)).toEqual({
+			psi: { cpuSome10: 12.34, memoryFull10: 0.75, ioFull10: 22.5 },
+			cpuThrottle: { throttledRatio: 0, nrThrottledDelta: 0 }
+		});
+	});
+
+	it('retries a transient lazy first tick when metrics did not run a startup probe', () => {
+		let fail = true;
+		let reads = 0;
+		const sampler = createOsPressureSampler({
+			readFile: (path) => {
+				reads++;
+				if (fail) {
+					const error = new Error('transient EIO');
+					error.code = 'EIO';
+					throw error;
+				}
+				if (path === '/proc/pressure/cpu') return PSI_CPU;
+				if (path === '/proc/pressure/memory') return PSI_MEM;
+				if (path === '/proc/pressure/io') return PSI_IO;
+				if (path === '/sys/fs/cgroup/cpu.stat') return CPU_STAT_V2;
+				const error = new Error('ENOENT ' + path);
+				error.code = 'ENOENT';
+				throw error;
+			}
+		});
+		expect(sampler.sample(1000)).toEqual({ psi: null, cpuThrottle: null });
+		const afterFailure = reads;
+
+		fail = false;
+		expect(sampler.sample(1000)).toEqual({
+			psi: { cpuSome10: 12.34, memoryFull10: 0.75, ioFull10: 22.5 },
+			cpuThrottle: { throttledRatio: 0, nrThrottledDelta: 0 }
+		});
+		expect(reads).toBeGreaterThan(afterFailure);
+	});
+
+	it('performs zero reads for sources whose startup probe confirmed absence', () => {
+		let probeReads = 0;
+		const sources = probeOsPressureSources({
+			readFile: () => { probeReads++; throw new Error('ENOENT'); }
+		});
+		expect(sources).toEqual({ psi: false, cpuThrottle: false });
+		expect(probeReads).toBeGreaterThan(0);
+
+		let sampleReads = 0;
+		const sampler = createOsPressureSampler({
+			sources,
+			readFile: () => { sampleReads++; throw new Error('must not read'); }
+		});
+		expect(sampler.sample(1000)).toEqual({ psi: null, cpuThrottle: null });
+		expect(sampler.sample(1000)).toEqual({ psi: null, cpuThrottle: null });
+		expect(sampleReads).toBe(0);
+	});
+
 	it('probes the v1 cgroup layouts when v2 is absent', () => {
 		const sampler = createOsPressureSampler(files({
 			'/sys/fs/cgroup/cpu,cpuacct/cpu.stat': CPU_STAT_V1
@@ -77,6 +188,90 @@ describe('os-pressure sampler', () => {
 		const s = sampler.sample(1000);
 		expect(s.psi).toBe(null);
 		expect(s.cpuThrottle).toEqual({ throttledRatio: 0, nrThrottledDelta: 0 });
+	});
+
+	it('exports an incident timeline and clears optional readings on a transient source failure', () => {
+		let phase = 'normal';
+		let failed = false;
+		let throttledUsec = 250000;
+		const sampler = createOsPressureSampler({
+			readFile: (path) => {
+				if (failed) throw new Error('transient EIO');
+				if (path === '/proc/pressure/cpu') {
+					return phase === 'incident'
+						? 'some avg10=90.00 avg60=0 avg300=0 total=1\n'
+						: 'some avg10=1.00 avg60=0 avg300=0 total=1\n';
+				}
+				if (path === '/proc/pressure/memory' || path === '/proc/pressure/io') {
+					return 'some avg10=0 avg60=0 avg300=0 total=1\nfull avg10=0 avg60=0 avg300=0 total=1\n';
+				}
+				if (path === '/sys/fs/cgroup/cpu.stat') {
+					return `nr_throttled 4\nthrottled_usec ${throttledUsec}\n`;
+				}
+				throw new Error('ENOENT');
+			}
+		});
+
+		const transitions = [];
+		const psiCpu = [];
+		const cpuThrottle = [];
+		const instruments = {
+			reasonTransitions: { inc: (labels) => transitions.push(labels) },
+			psiCpuSome: { set: (v) => psiCpu.push(v) },
+			psiMemoryFull: { set() {} },
+			psiIoFull: { set() {} },
+			cpuThrottled: { set: (v) => cpuThrottle.push(v) }
+		};
+		const thresholds = {
+			memoryHeapUsedRatio: 0.85,
+			publishRatePerSec: 10000,
+			subscriberRatio: 50,
+			psiCpuSome: 60,
+			psiMemoryFull: 15,
+			psiIoFull: 50,
+			cpuThrottledRatio: 0.25
+		};
+		let previous = 'NONE';
+		const sample = () => {
+			const os = sampler.sample(1000);
+			const readings = { heapUsedRatio: 0, publishRate: 0, subscriberRatio: 0 };
+			if (os.psi !== null) {
+				readings.psiCpuSome10 = os.psi.cpuSome10;
+				readings.psiMemoryFull10 = os.psi.memoryFull10;
+				readings.psiIoFull10 = os.psi.ioFull10;
+			}
+			if (os.cpuThrottle !== null) readings.cpuThrottledRatio = os.cpuThrottle.throttledRatio;
+			const reason = computePressureReason(readings, thresholds);
+			emitPressureMetricTelemetry({
+				transition: reason === previous ? null : { from: previous, to: reason },
+				os
+			}, instruments);
+			previous = reason;
+			return os;
+		};
+
+		expect(sample().psi.cpuSome10).toBe(1); // normal + CPU baseline
+		phase = 'incident';
+		throttledUsec += 500000;
+		expect(sample().cpuThrottle.throttledRatio).toBe(0.5);
+		phase = 'recovery';
+		expect(sample().psi.cpuSome10).toBe(1);
+		failed = true;
+		expect(sample()).toEqual({ psi: null, cpuThrottle: null });
+
+		expect(transitions).toEqual([
+			{ from: 'NONE', to: 'CPU_QUOTA' },
+			{ from: 'CPU_QUOTA', to: 'NONE' }
+		]);
+		expect(Number.isNaN(psiCpu.at(-1))).toBe(true);
+		expect(Number.isNaN(cpuThrottle.at(-1))).toBe(true);
+
+		// The source remains armed after the transient failure, and cgroup delta
+		// recovery establishes a new baseline rather than fabricating a multi-window
+		// throttle spike divided by this one-second interval.
+		failed = false;
+		throttledUsec += 500000;
+		expect(sample().cpuThrottle).toEqual({ throttledRatio: 0, nrThrottledDelta: 0 });
 	});
 });
 

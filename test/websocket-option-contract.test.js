@@ -9,6 +9,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'acorn';
+import ts from 'typescript';
 import {
 	KNOWN_WEBSOCKET_OPTION_KEYS,
 	serializeWsOptions,
@@ -20,22 +21,23 @@ const read = (rel) => readFileSync(path.join(ROOT, rel), 'utf8');
 
 /** Top-level property names declared by a named interface. */
 function interfaceProperties(src, name) {
-	const marker = `export interface ${name} `;
-	const start = src.indexOf(marker);
-	expect(start, `${name} declaration not found`).toBeGreaterThan(-1);
-	const open = src.indexOf('{', start);
-	let depth = 1;
+	const sourceFile = ts.createSourceFile(
+		'index.d.ts',
+		src,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
+	const declaration = sourceFile.statements.find(
+		(node) => ts.isInterfaceDeclaration(node) && node.name.text === name
+	);
+	expect(declaration, `${name} declaration not found`).toBeDefined();
 	const names = new Set();
-	for (const line of src.slice(open + 1).split(/\r?\n/)) {
-		// Read the property before accounting for an object-valued property's
-		// opening brace on this same line (upgradeAdmission/pressure/workers).
-		if (depth === 1) {
-			const match = line.match(/^\t([A-Za-z_][A-Za-z0-9_]*)\??\s*:/);
-			if (match) names.add(match[1]);
+	for (const member of declaration.members) {
+		if (!ts.isPropertySignature(member) || !member.name) continue;
+		if (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)) {
+			names.add(member.name.text);
 		}
-		depth += (line.match(/\{/g) || []).length;
-		depth -= (line.match(/\}/g) || []).length;
-		if (depth === 0) break;
 	}
 	return names;
 }

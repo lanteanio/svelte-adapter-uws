@@ -21,13 +21,14 @@ describe('a restrictive flag refuses a misshaped value rather than reading it as
 	for (const bad of ['1', 'true', 'yes', 1, 0, null, {}]) {
 		it(`refuses authorizeWireSubscribe = ${JSON.stringify(bad)}`, () => {
 			expect(() => serializeWsOptions({ authorizeWireSubscribe: bad }, false))
-				.toThrow(/must be true or false/);
+				.toThrow(/must be true, false, or 'strict'/);
 		});
 	}
 
-	it('accepts true, false and absent', () => {
+	it("accepts true, false, 'strict', and absent", () => {
 		expect(serializeWsOptions({ authorizeWireSubscribe: true }, false).authorizeWireSubscribe).toBe(true);
 		expect(serializeWsOptions({ authorizeWireSubscribe: false }, false).authorizeWireSubscribe).toBe(false);
+		expect(serializeWsOptions({ authorizeWireSubscribe: 'strict' }, false).authorizeWireSubscribe).toBe('strict');
 		expect(serializeWsOptions({}, false).authorizeWireSubscribe).toBe(false);
 	});
 
@@ -52,7 +53,7 @@ describe('a restrictive flag refuses a misshaped value rather than reading it as
 		} finally {
 			await server?.close();
 		}
-		expect(String(thrown)).toMatch(/must be true or false/);
+		expect(String(thrown)).toMatch(/must be true, false, or 'strict'/);
 	});
 });
 
@@ -62,7 +63,11 @@ describe('the dev plugin does not drop its options in silence', () => {
 	// so the mistake surfaces in production or not at all.
 
 	it('refuses a misshaped authorizeWireSubscribe', () => {
-		expect(() => uws({ authorizeWireSubscribe: 'true' })).toThrow(/must be true or false/);
+		expect(() => uws({ authorizeWireSubscribe: 'true' })).toThrow(/must be true, false, or 'strict'/);
+	});
+
+	it("accepts strict authorization on the dev surface", () => {
+		expect(() => uws({ authorizeWireSubscribe: 'strict' })).not.toThrow();
 	});
 
 	it('warns on an unrecognized option key', () => {
@@ -193,12 +198,60 @@ describe('an unknown key nested inside an option object is reported', () => {
 		expect(unknownWebsocketOptionKeys({
 			upgradeAdmission: {
 				maxConcurrent: 500,
+				maxConnections: 5000,
 				perTickBudget: 50,
+				maxDeferred: 1024,
 				cursorLane: { fraction: 0.25 },
-				waitingRoom: { path: '/q', admitCheckPath: '/a', pollIntervalMs: 2000, retryAfterSeconds: 2 }
+				waitingRoom: {
+					path: '/q',
+					admitCheckPath: '/a',
+					pollIntervalMs: 2000,
+					retryAfterSeconds: 2,
+					renderer: './src/lib/server/waiting-room.js',
+					appName: 'Example App',
+					statusUrl: '/status',
+					supportUrl: '/help',
+					incidentId: 'INC-42'
+				}
 			},
 			pressure: { memoryHeapUsedRatio: 0.9, psiCpuSome: 60 }
 		})).toEqual([]);
+	});
+
+	it.each([-1, 1.5, Number.POSITIVE_INFINITY, '500', null])(
+		'refuses upgradeAdmission.maxConnections = %p before serializing the build',
+		(value) => {
+			expect(() => serializeWsOptions({
+				upgradeAdmission: { maxConnections: value }
+			}, false)).toThrow(/maxConnections must be a non-negative safe integer/);
+		}
+	);
+
+	it('accepts a finite maxConnections ceiling and the explicit disabled value', () => {
+		expect(serializeWsOptions({
+			upgradeAdmission: { maxConnections: 5000 }
+		}, false).upgradeAdmission.maxConnections).toBe(5000);
+		expect(() => serializeWsOptions({
+			upgradeAdmission: { maxConnections: 0 }
+		}, false)).not.toThrow();
+	});
+
+	it.each([-1, 1.5, Number.POSITIVE_INFINITY, '1024', null])(
+		'refuses upgradeAdmission.maxDeferred = %p before serializing the build',
+		(value) => {
+			expect(() => serializeWsOptions({
+				upgradeAdmission: { perTickBudget: 64, maxDeferred: value }
+			}, false)).toThrow(/maxDeferred must be a non-negative safe integer/);
+		}
+	);
+
+	it('accepts a finite maxDeferred ceiling and explicit no-queue value', () => {
+		expect(serializeWsOptions({
+			upgradeAdmission: { perTickBudget: 64, maxDeferred: 1024 }
+		}, false).upgradeAdmission.maxDeferred).toBe(1024);
+		expect(() => serializeWsOptions({
+			upgradeAdmission: { perTickBudget: 64, maxDeferred: 0 }
+		}, false)).not.toThrow();
 	});
 
 	it('does not walk a section that was disabled outright', () => {

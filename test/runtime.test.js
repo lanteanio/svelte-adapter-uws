@@ -3,6 +3,7 @@ import {
 	now,
 	monotonicNow,
 	wallEpoch,
+	wallIso,
 	randomFloat,
 	randomU32,
 	randomUuid,
@@ -129,6 +130,11 @@ describe('setRuntimeEnv installs a virtual environment', () => {
 	it('installs a fake clock whose now() returns a fixed number', () => {
 		setRuntimeEnv({ clock: { now: () => 1234567890 } });
 		expect(now()).toBe(1234567890);
+	});
+
+	it('wallIso() formats the installed exact wall clock', () => {
+		setRuntimeEnv({ clock: { wallEpoch: () => 1700000000000 } });
+		expect(wallIso()).toBe('2023-11-14T22:13:20.000Z');
 	});
 
 	it('a partial env overriding the clock leaves rng and timers native', () => {

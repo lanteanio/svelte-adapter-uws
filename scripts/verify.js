@@ -10,8 +10,8 @@
  * the property that keeps them equal.
  *
  *   fast   the static gates. Seconds, no network, no fixture.
- *   suite  the doctor with the native runtime demanded, then the whole test run
- *          under REQUIRE_UWS - the ubuntu and windows job.
+ *   suite  the doctor with the native runtime demanded, the real HTTP/WS smoke,
+ *          packed publishing checks, then the whole REQUIRE_UWS test run.
  *   sim    the seed swarm and the golden corpus - the simulation job.
  *   pr     suite + sim: everything the hosted gate runs, and nothing it does not.
  *   full   pr + the Playwright e2e run, which no workflow runs, so whoever
@@ -42,6 +42,12 @@ export const LANES = {
 		// reads as a diagnosis here and as a Vite build failure ten minutes in
 		// otherwise.
 		{ script: 'doctor', args: ['--require-uws'] },
+		// Give contributors and CI the same short, visible proof that the native
+		// server can answer HTTP and deliver a WebSocket publish.
+		{ script: 'smoke' },
+		// Validate the packed ESM/export-map surface with the ecosystem tools
+		// consumers use, in addition to our source-tree declaration checker.
+		{ script: 'check:publish' },
 		// `npm test` is pretest (the static gates) plus the vitest run.
 		{ script: 'test', env: { REQUIRE_UWS: '1' } }
 	],

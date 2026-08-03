@@ -27,6 +27,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createServer } from 'node:http';
 import { hasUWS, startRealRuntime, connectRealClient } from './helpers/real-runtime.js';
+import { createGroup } from '../src/plugins/groups/server.js';
+
+const SUBSCRIPTIONS_SLOT = Symbol.for('adapter-uws.ws.subscriptions');
 
 /** Teardown registered by whichever adapters a scenario booted. */
 let teardown = [];
@@ -38,14 +41,35 @@ afterEach(async () => {
 	teardown = [];
 });
 
-// The app handler every surface is given: NO `subscribe` and NO `subscribeBatch`
-// export, because either one takes the topic decision back from the server-grant
-// model and would leave the armed gate inert - a test driving that would pass
-// against a server that never denies anything. A `message` hook provides the
-// trusted server-side grant, mirroring test/fixture/src/hooks.ws.grant.js so
-// production runs the same shape.
+// The app handler every surface is given. Its `subscribe` export is a real
+// groups-plugin side-effect hook and retains that hook's marker, so it does not
+// take the topic decision back from the server-grant model or disarm the gate.
+// A `message` hook provides the trusted server-side grant, mirroring
+// test/fixture/src/hooks.ws.grant.js so production runs the same shape.
 function grantHandler() {
+	const group = createGroup('policy-lobby');
+	const delayed = new WeakMap();
+	const pluginSubscribe = group.hooks.subscribe;
+	async function subscribe(ws, topic, { platform }) {
+		platform.send(ws, 'probe', 'hook-entered', { topic });
+		if (topic === 'delayed-room') {
+			const gate = delayed.get(ws);
+			if (gate) await gate.promise;
+			return;
+		}
+		return pluginSubscribe(ws, topic, { platform });
+	}
+	// Keep the real plugin hook's side-effect-only marker on the instrumented
+	// wrapper. Otherwise the wrapper itself would disarm the grant policy and
+	// the differential would be asking a different question.
+	for (const symbol of Object.getOwnPropertySymbols(pluginSubscribe)) {
+		Object.defineProperty(subscribe, symbol, Object.getOwnPropertyDescriptor(pluginSubscribe, symbol));
+	}
+
 	return {
+		subscribe,
+		unsubscribe: group.hooks.unsubscribe,
+		close: group.hooks.close,
 		// Mirrors test/fixture/src/hooks.ws.grant.js, which is what production
 		// runs. Both must stay the same shape or the differential is comparing
 		// three servers that were asked different questions.
@@ -59,9 +83,37 @@ function grantHandler() {
 				const denial = await platform.subscribe(ws, msg.topic);
 				platform.send(ws, 'probe', 'granted', { topic: msg.topic, denial: denial ?? null });
 			}
+			if (msg?.type === 'cap-probe') {
+				const subscriptions = ws.getUserData()?.[SUBSCRIPTIONS_SLOT];
+				if (!(subscriptions instanceof Set)) throw new Error('cap probe has no subscription Set');
+				Object.defineProperty(subscriptions, 'size', { configurable: true, value: msg.size });
+				let denial;
+				try { denial = await platform.subscribe(ws, msg.topic); }
+				finally { delete subscriptions.size; }
+				platform.send(ws, 'probe', 'cap-result', {
+					topic: msg.topic,
+					denial: denial ?? null,
+					held: subscriptions.has(msg.topic)
+				});
+			}
 			if (msg?.type === 'observe-check') {
 				const denial = await platform.checkSubscribe(ws, msg.topic, { requireGrant: true });
 				platform.send(ws, 'probe', 'observe-result', { topic: msg.topic, ref: msg.ref, denial: denial ?? null });
+			}
+			if (msg?.type === 'start-delayed-grant') {
+				let release;
+				const promise = new Promise((resolve) => { release = resolve; });
+				delayed.set(ws, { promise, release });
+				void platform.subscribe(ws, msg.topic).then((denial) => {
+					platform.send(ws, 'probe', 'delayed-result', { topic: msg.topic, denial: denial ?? null });
+				});
+			}
+			if (msg?.type === 'revoke-delayed') {
+				const revoked = platform.unsubscribe(ws, msg.topic);
+				const gate = delayed.get(ws);
+				gate?.release();
+				delayed.delete(ws);
+				platform.send(ws, 'probe', 'delayed-revoked', { topic: msg.topic, revoked });
 			}
 		}
 	};
@@ -81,6 +133,45 @@ function clientApi(raw) {
 			if (hit === null) return { type: '(no answer)', reason: null };
 			const p = hit.parsed ?? hit;
 			return { type: p.type, reason: p.reason ?? null };
+		},
+		/** Subscribe and prove whether the app/plugin hook chain was entered. */
+		async subscribeWithHookProbe(topic, ref) {
+			raw.send({ type: 'subscribe', topic, ref });
+			const answer = await raw.waitFor((p) => p?.ref === ref && p?.topic === topic, 2000);
+			const hook = await raw.waitFor((p) => p?.event === 'hook-entered' && p?.data?.topic === topic, 200);
+			const p = answer === null ? null : (answer.parsed ?? answer);
+			return {
+				type: p === null ? '(no answer)' : p.type,
+				reason: p?.reason ?? null,
+				hookEntered: hook !== null
+			};
+		},
+		/** Batch subscribe with one hook-entry bit per topic. */
+		async batchWithHookProbe(topics, ref) {
+			raw.send({ type: 'subscribe-batch', topics, ref });
+			const result = {};
+			for (const topic of topics) {
+				const answer = await raw.waitFor((p) => p?.ref === ref && p?.topic === topic, 2000);
+				const hook = await raw.waitFor((p) => p?.event === 'hook-entered' && p?.data?.topic === topic, 200);
+				result[topic] = {
+					type: answer === null ? '(no answer)' : (answer.parsed ?? answer).type,
+					hookEntered: hook !== null
+				};
+			}
+			return result;
+		},
+		/** Revoke a trusted subscribe while its plugin hook is awaiting. */
+		async revokeDelayedGrant(topic) {
+			raw.send({ type: 'start-delayed-grant', topic });
+			const entered = await raw.waitFor((p) => p?.event === 'hook-entered' && p?.data?.topic === topic, 2000);
+			raw.send({ type: 'revoke-delayed', topic });
+			const revoked = await raw.waitFor((p) => p?.event === 'delayed-revoked' && p?.data?.topic === topic, 2000);
+			const result = await raw.waitFor((p) => p?.event === 'delayed-result' && p?.data?.topic === topic, 2000);
+			return {
+				hookEntered: entered !== null,
+				revoked: revoked === null ? null : Boolean((revoked.parsed ?? revoked).data?.revoked),
+				denial: result === null ? '(no answer)' : ((result.parsed ?? result).data?.denial ?? null)
+			};
 		},
 		/**
 		 * Subscribe WITH a recover offset, and report both the answer and whether
@@ -113,6 +204,14 @@ function clientApi(raw) {
 			if (hit === null) return { granted: false, denial: '(no answer)' };
 			const p = hit.parsed ?? hit;
 			return { granted: p.data?.denial === null, denial: p.data?.denial ?? null };
+		},
+		/** Exercise the real cap branch without allocating a million Set entries. */
+		async capProbe(topic, size) {
+			raw.send({ type: 'cap-probe', topic, size });
+			const hit = await raw.waitFor((p) => p?.event === 'cap-result' && p?.data?.topic === topic, 2000);
+			if (hit === null) return { denial: '(no answer)', held: false };
+			const data = (hit.parsed ?? hit).data;
+			return { denial: data?.denial ?? null, held: Boolean(data?.held) };
 		},
 		/** The answer type for one topic of an already-sent batch frame. */
 		async awaitTopic(topic, ref) {
@@ -223,10 +322,12 @@ const SCENARIOS = [
 		name: 'an ungranted topic is refused under an armed gate',
 		// Kills: `armed: false` and `hasUserHook: true` at the pre-hook gate on
 		// any single surface, and `held: true` at either gate.
-		expected: { type: 'subscribe-denied', reason: 'FORBIDDEN' },
+		// The hook probe distinguishes a decisive pre-hook gate from a decorative
+		// policy call followed by a private inline decision at landing.
+		expected: { type: 'subscribe-denied', reason: 'FORBIDDEN', hookEntered: false },
 		async run(surface) {
 			const c = await surface.client();
-			return c.subscribeAnswer('private-room', 1);
+			return c.subscribeWithHookProbe('private-room', 1);
 		}
 	},
 	{
@@ -282,6 +383,37 @@ const SCENARIOS = [
 		}
 	},
 	{
+		name: 'a plugin-owned topic reaches its hook and lands only after membership is established',
+		expected: { type: 'subscribed', reason: null, hookEntered: true },
+		async run(surface) {
+			const c = await surface.client();
+			return c.subscribeWithHookProbe('__group:policy-lobby', 30);
+		}
+	},
+	{
+		name: 'the batch carve-out reaches only the plugin-owned topic hook',
+		expected: {
+			plugin: { type: 'subscribed', hookEntered: true },
+			private: { type: 'subscribe-denied', hookEntered: false }
+		},
+		async run(surface) {
+			const c = await surface.client();
+			const result = await c.batchWithHookProbe(['__group:policy-lobby', 'batch-private'], 31);
+			return {
+				plugin: result['__group:policy-lobby'],
+				private: result['batch-private']
+			};
+		}
+	},
+	{
+		name: 'platform unsubscribe cancels a trusted subscribe parked in its hook await',
+		expected: { hookEntered: true, revoked: true, denial: 'FORBIDDEN' },
+		async run(surface) {
+			const c = await surface.client();
+			return c.revokeDelayedGrant('delayed-room');
+		}
+	},
+	{
 		name: 'the recover lane refuses history for a topic the gate denies',
 		// Kills: `cancelled: false` and `hasResumeHook: false` at the recover
 		// site, and any mutation that opens the gap-fill for an ungranted topic.
@@ -315,6 +447,28 @@ const SCENARIOS = [
 			expect((await c.grant('observer-room')).granted).toBe(true);
 			const granted = await c.observe('observer-room', 21);
 			return { ungranted, granted };
+		}
+	},
+	{
+		name: 'the cap uses the canonical boundary and exempts an already-held topic',
+		// The Set remains real; only its inherited size accessor is shadowed for
+		// this disposable socket. Size 16 catches a private lowered cap without
+		// allocating entries, while the canonical boundary exercises the true
+		// denial branch and the held case pins idempotence.
+		expected: {
+			below: { denial: null, held: true },
+			at: { denial: 'RATE_LIMITED', held: false },
+			held: { denial: null, held: true }
+		},
+		async run(surface) {
+			const below = await surface.client();
+			const belowResult = await below.capProbe('cap-below', 16);
+			const at = await surface.client();
+			const atResult = await at.capProbe('cap-at', 1_000_000);
+			const held = await surface.client();
+			expect((await held.grant('cap-held')).granted).toBe(true);
+			const heldResult = await held.capProbe('cap-held', 1_000_000);
+			return { below: belowResult, at: atResult, held: heldResult };
 		}
 	},
 	{

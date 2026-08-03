@@ -115,3 +115,45 @@ describeUWS('wire-subscribe authorization (built runtime)', () => {
 		expect(denied.parsed.reason).toBe('FORBIDDEN');
 	});
 });
+
+describeUWS('strict hybrid wire-subscribe authorization (built runtime)', () => {
+	/** @type {Awaited<ReturnType<typeof startRealRuntime>> | null} */
+	let server = null;
+	/** @type {Awaited<ReturnType<typeof connectRealClient>> | null} */
+	let client = null;
+
+	beforeAll(async () => {
+		server = await startRealRuntime({
+			variant: 'strictgrant',
+			env: { ORIGIN: undefined, TRUSTED_PROXIES: undefined, CLUSTER_WORKERS: undefined }
+		});
+		client = await connectRealClient(server.wsUrl);
+	}, 400000);
+
+	afterAll(async () => {
+		client?.close();
+		await server?.stop();
+	});
+
+	it('does not let a permissive application hook replace the tenant grant', async () => {
+		client.send({ type: 'subscribe', topic: '@t/victim/secret', ref: 41 });
+		const denied = await client.waitFor(
+			(f) => f?.type === 'subscribe-denied' && f.topic === '@t/victim/secret'
+		);
+		expect(denied?.parsed).toMatchObject({
+			type: 'subscribe-denied',
+			topic: '@t/victim/secret',
+			ref: 41,
+			reason: 'FORBIDDEN'
+		});
+
+		client.send({ type: 'grant', topic: '@t/own/secret' });
+		expect(await client.waitFor(
+			(f) => f?.event === 'granted' && f?.data?.topic === '@t/own/secret'
+		)).not.toBeNull();
+		client.send({ type: 'subscribe', topic: '@t/own/secret', ref: 42 });
+		expect((await client.waitFor(
+			(f) => f?.type === 'subscribed' && f.topic === '@t/own/secret'
+		))?.parsed).toMatchObject({ type: 'subscribed', ref: 42 });
+	});
+});

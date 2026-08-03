@@ -658,7 +658,8 @@ describe('the detector is actually wired into the runtime', () => {
 
 	it('drains confirmed gaps and emits them from the SAME function (handler.js)', () => {
 		const src = read('../src/runtime/handler.js');
-		const hits = callsTo(astOf(src), 'takeConfirmedGaps');
+		const ast = astOf(src);
+		const hits = callsTo(ast, 'takeConfirmedGaps');
 		expect(hits.length, 'the reporter must drain the confirmed gaps').toBeGreaterThanOrEqual(1);
 		// Draining without reporting consumes the evidence and tells nobody, which
 		// is worse than not detecting. Parking the emission in a separate function
@@ -677,6 +678,23 @@ describe('the detector is actually wired into the runtime', () => {
 			}
 		}
 		expect(emitted, 'a drained gap must be reported from the function that drained it').toBe(true);
+
+		const diagnostics = callsTo(ast, 'emitOperationalEvent').filter(({ node }) => {
+			const input = node.arguments[0];
+			if (input?.type !== 'ObjectExpression') return false;
+			return input.properties.some((property) =>
+				property.type === 'Property' &&
+				property.key?.name === 'event' &&
+				property.value?.value === 'runtime.relay-gap.detected'
+			);
+		});
+		expect(diagnostics, 'relay gaps need one stable structured event identity').toHaveLength(1);
+		const input = diagnostics[0].node.arguments[0];
+		const attributes = input.properties.find((property) =>
+			property.type === 'Property' && property.key?.name === 'attributes'
+		)?.value;
+		expect(attributes?.type).toBe('ObjectExpression');
+		expect(attributes.properties.some((property) => property.key?.name === 'topic')).toBe(true);
 	});
 
 	it('latches the attach instant unconditionally (runtime/index.js)', () => {
