@@ -5,6 +5,7 @@ import { lookup as nodeDnsLookup } from 'node:dns';
 import { createHmac, createHash, timingSafeEqual } from 'node:crypto';
 import { checkUrl, classifyAddress } from '../../safe-url.js';
 import { randomFloat, setTimer, clearTimer, now, wallEpoch } from '../../runtime/runtime.js';
+import { injectTraceContext } from '../../trace-context.js';
 
 import { WebhookAdmissionDeniedError } from './controls.js';
 
@@ -815,7 +816,7 @@ async function deliverToUrl(initialUrl, headers, body, config, hooks) {
  *   previousSecret, retry, urlMode, validateUrl, resolve, allow, maxRedirects,
  *   timeoutMs, callbackTimeoutMs, idempotencyKey)
  * @param {string} topic @param {string} event @param {any} data
- * @param {{ admission?: { take: (destination: string) => boolean | Promise<boolean> }, budget?: { take: (key?: string) => boolean | Promise<boolean> }, breaker?: { guard: (key?: string) => void, success: (key?: string) => void, failure: (err: any, key?: string) => void }, key?: string }} [hooks]
+ * @param {{ admission?: { take: (destination: string) => boolean | Promise<boolean> }, budget?: { take: (key?: string) => boolean | Promise<boolean> }, breaker?: { guard: (key?: string) => void, success: (key?: string) => void, failure: (err: any, key?: string) => void }, key?: string, traceContext?: { traceparent: string, tracestate?: string } | null }} [hooks]
  * @returns {Promise<{ ok: true } | { ok: false, err: Error, attempts: number }>}
  */
 export async function deliverWebhook(config, topic, event, data, hooks) {
@@ -848,6 +849,7 @@ export async function deliverWebhook(config, topic, event, data, hooks) {
 
 		const body = JSON.stringify(payload);
 		const headers = { 'content-type': 'application/json' };
+		if (hooks?.traceContext) injectTraceContext(headers, hooks.traceContext);
 
 		// Stable idempotency key so receivers dedup retries and any
 		// leader-transition double-fire to effectively-once. Keyed (HMAC) when a

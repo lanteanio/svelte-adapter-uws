@@ -79,6 +79,21 @@ describe('deliverWebhook', () => {
 		expect(JSON.parse(srv.received[0].body)).toEqual({ event: 'created', data: { id: 1 } });
 	});
 
+	it('injects only a validated W3C trace context from delivery hooks', async () => {
+		const traceContext = {
+			traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+			tracestate: 'vendor=value'
+		};
+		expect((await deliverWebhook(cfg(), 'topic', 'created', {}, { traceContext })).ok).toBe(true);
+		expect(srv.received[0].headers.traceparent).toBe(traceContext.traceparent);
+		expect(srv.received[0].headers.tracestate).toBe(traceContext.tracestate);
+
+		expect((await deliverWebhook(cfg(), 'topic', 'created', {}, {
+			traceContext: { traceparent: 'invalid' }
+		})).ok).toBe(true);
+		expect(srv.received[1].headers.traceparent).toBeUndefined();
+	});
+
 	it('signs `<timestamp>.<body>` with HMAC, emitting x-webhook-timestamp, and attaches a keyed idempotency header', async () => {
 		const r = await deliverWebhook(cfg({ secret: 'sekret' }), 'topic', 'e', { n: 2 });
 		expect(r.ok).toBe(true);

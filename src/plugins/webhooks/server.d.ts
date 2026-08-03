@@ -7,6 +7,8 @@
  * @module svelte-adapter-uws/plugins/webhooks/server
  */
 
+import type { TraceContext } from '../../observability.js';
+
 /** A resolved DNS address the SSRF pin will accept for a connection. */
 export interface PinnedAddress {
 	address: string;
@@ -174,6 +176,8 @@ export interface WebhookDeliveryHooks {
 	budget?: RetryBudget;
 	breaker?: WebhookBreaker;
 	key?: string;
+	/** Validated W3C context injected as traceparent/tracestate headers. */
+	traceContext?: TraceContext | null;
 }
 
 /** Options for {@link createWebhookAdmission}. Together they set the aggregate
