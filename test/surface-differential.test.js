@@ -452,23 +452,38 @@ const SCENARIOS = [
 	{
 		name: 'the cap uses the canonical boundary and exempts an already-held topic',
 		// The Set remains real; only its inherited size accessor is shadowed for
-		// this disposable socket. Size 16 catches a private lowered cap without
-		// allocating entries, while the canonical boundary exercises the true
-		// denial branch and the held case pins idempotence.
+		// this disposable socket, so probing a huge size costs nothing.
+		//
+		// The spread is the point. Probing only 16 and the canonical boundary
+		// left the entire range between them byte-identical on all three
+		// surfaces, so a PRIVATE cap anywhere in 17..999,999 - the shape a
+		// helper in an unscanned module can introduce, which no static rule
+		// reliably sees - was invisible. Every sub-canonical size must be
+		// admitted; only the canonical boundary denies.
 		expected: {
-			below: { denial: null, held: true },
+			below: [
+				{ denial: null, held: true },
+				{ denial: null, held: true },
+				{ denial: null, held: true },
+				{ denial: null, held: true },
+				{ denial: null, held: true },
+				{ denial: null, held: true }
+			],
 			at: { denial: 'RATE_LIMITED', held: false },
 			held: { denial: null, held: true }
 		},
 		async run(surface) {
-			const below = await surface.client();
-			const belowResult = await below.capProbe('cap-below', 16);
+			const belowResults = [];
+			for (const [index, size] of [16, 17, 500, 4096, 65_536, 999_999].entries()) {
+				const client = await surface.client();
+				belowResults.push(await client.capProbe(`cap-below-${index}`, size));
+			}
 			const at = await surface.client();
 			const atResult = await at.capProbe('cap-at', 1_000_000);
 			const held = await surface.client();
 			expect((await held.grant('cap-held')).granted).toBe(true);
 			const heldResult = await held.capProbe('cap-held', 1_000_000);
-			return { below: belowResult, at: atResult, held: heldResult };
+			return { below: belowResults, at: atResult, held: heldResult };
 		}
 	},
 	{

@@ -40,7 +40,15 @@ export function validateReleaseWorkflow(source, pkg, policy) {
 	if (!same(workflow.on?.push?.tags, ['svelte-adapter-uws@*'])) {
 		errors.push('release workflow must trigger only on package version tags');
 	}
-	if (workflow.on?.push?.branches || source.includes('workflow_dispatch')) {
+	// The trigger filter is a closed inventory too. Defining only `tags` is
+	// what keeps branch pushes out; adding `branches-ignore` re-admits every
+	// branch, and the job would then run npm ci - which executes that
+	// branch's lifecycle scripts - inside the protected environment with
+	// id-token: write, BEFORE the identity verifier runs.
+	if (!same(Object.keys(workflow.on?.push || {}), ['tags'])) {
+		errors.push('release workflow push trigger must carry exactly the tags filter');
+	}
+	if (source.includes('workflow_dispatch')) {
 		errors.push('release workflow must not have a branch or manual-dispatch path');
 	}
 	if (!same(workflow.permissions, { contents: 'read' })) errors.push('workflow default permission must be contents read');

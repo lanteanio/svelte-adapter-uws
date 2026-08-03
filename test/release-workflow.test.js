@@ -99,6 +99,30 @@ describe('trusted release workflow', () => {
 			.toContain('disallowed keys: env');
 	});
 
+	it('rejects trigger-filter widening that re-admits branch pushes', () => {
+		// Defining only `tags` is what keeps branch events out. Adding
+		// branches-ignore re-admits every branch not listed, so the job runs
+		// npm ci - executing that branch's lifecycle scripts - inside the
+		// protected environment with id-token: write, before the verifier.
+		const readmitted = workflow.replace(
+			"    tags:\n      - 'svelte-adapter-uws@*'",
+			"    tags:\n      - 'svelte-adapter-uws@*'\n    branches-ignore:\n      - 'no-such-branch'"
+		);
+		expect(readmitted).not.toBe(workflow);
+		expect(validateReleaseWorkflow(readmitted, pkg, policy).join('\n'))
+			.toContain('push trigger must carry exactly the tags filter');
+
+		for (const widening of ['    tags-ignore:\n      - \'v*\'', "    paths:\n      - '**'"]) {
+			const mutant = workflow.replace(
+				"    tags:\n      - 'svelte-adapter-uws@*'",
+				"    tags:\n      - 'svelte-adapter-uws@*'\n" + widening
+			);
+			expect(mutant).not.toBe(workflow);
+			expect(validateReleaseWorkflow(mutant, pkg, policy).join('\n'), widening)
+				.toContain('push trigger must carry exactly the tags filter');
+		}
+	});
+
 	it('rejects job-level and workflow-level laundering keys the step inventory cannot see', () => {
 		// A job-level env is inherited by EVERY exact-matched run command -
 		// the step-level attack moved one indent up. The lead case.

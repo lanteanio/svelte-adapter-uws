@@ -48,18 +48,40 @@ function syntheticChangelog(version, entryKinds, sections) {
 }
 
 describe('consumer release summary', () => {
-	it('keeps the newest release action-first and bounded', () => {
+	it('keeps the newest release action-first, grouped, and completely enumerated', () => {
 		const entries = validateReleaseSummary(CHANGELOG);
-		expect(entries.length).toBeGreaterThan(0);
-		// Derived, not frozen: the law is that the summary's kinds are exactly
-		// the engineering sections the newest release actually contains. A
-		// hardcoded list only records what was written the day it was pinned,
-		// and turns every legitimate new entry into a false failure.
 		const newest = CHANGELOG.slice(CHANGELOG.indexOf('## [' + NEWEST_VERSION + ']'));
-		const body = newest.slice(0, newest.indexOf('\n## [', 1) === -1 ? undefined : newest.indexOf('\n## [', 1));
+		const nextRelease = newest.indexOf('\n## [', 1);
+		const body = nextRelease === -1 ? newest : newest.slice(0, nextRelease);
+
+		// Derived, not frozen: a hardcoded kind list only records what was
+		// written the day it was pinned and turns every legitimate new entry
+		// into a false failure. These three properties are what the frozen
+		// list was actually protecting.
+		//
+		// 1. Every entry is enumerated - the validator cannot silently skip a
+		//    lead it failed to parse.
+		const summary = body.slice(
+			body.indexOf('<!-- consumer-release-summary:start -->'),
+			body.indexOf('<!-- consumer-release-summary:end -->')
+		);
+		const leads = [...summary.matchAll(/^- \*\*(Added|Changed|Fixed|Removed|Deprecated|Security):/gm)]
+			.map((match) => match[1]);
+		expect(entries.map(({ kind }) => kind)).toEqual(leads);
+
+		// 2. Kinds are CONTIGUOUS in Keep-a-Changelog order. A consumer must
+		//    not read Changed, then Fixed, then Changed again - which is
+		//    exactly what happens when a new entry is appended to the end
+		//    instead of joining its group, and nothing else catches it.
+		const ORDER = ['Added', 'Changed', 'Deprecated', 'Removed', 'Fixed', 'Security'];
+		const ranks = leads.map((kind) => ORDER.indexOf(kind));
+		expect(ranks, 'summary entries must be grouped in Keep-a-Changelog order')
+			.toEqual([...ranks].sort((a, b) => a - b));
+
+		// 3. Coverage matches the engineering sections that exist.
 		const sections = [...body.matchAll(/^### (Added|Changed|Fixed|Removed|Deprecated|Security)$/gm)]
 			.map((match) => match[1]);
-		expect(new Set(entries.map(({ kind }) => kind))).toEqual(new Set(sections));
+		expect(new Set(leads)).toEqual(new Set(sections));
 	});
 
 	it('rejects short or multi-sentence outcome blocks', () => {

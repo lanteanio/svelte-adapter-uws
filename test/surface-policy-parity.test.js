@@ -215,10 +215,32 @@ function exportedPolicyNames(nodes) {
 			for (const declaration of node.declaration.declarations) addPatternBindings(declaration.id, names);
 		}
 		for (const specifier of node.specifiers ?? []) {
-			if (specifier.type === 'ExportSpecifier') names.add(specifier.exported.name ?? specifier.exported.value);
+			if (specifier.type !== 'ExportSpecifier') continue;
+			// BOTH sides count. `export { deniesUngrantedObserve as x }`
+			// re-publishes the policy under a name the exported-side filter
+			// would drop, which is a barrel by another spelling.
+			names.add(specifier.exported.name ?? specifier.exported.value);
+			names.add(specifier.local?.name ?? specifier.local?.value);
 		}
 	}
 	return new Set([...names].filter((name) => POLICY_NAMES.includes(name)));
+}
+
+/**
+ * Modules that re-publish a policy module wholesale. `export * from` names no
+ * specifier, so the specifier walk above cannot see it - but it republishes
+ * every policy name the target owns, which is exactly the barrel the
+ * exclusive-ownership rule exists to forbid.
+ */
+function starReexportedPolicySources(nodes, file) {
+	const sources = [];
+	for (const { node } of nodes) {
+		if (node.type !== 'ExportAllDeclaration') continue;
+		const target = resolvedImport(file, node.source?.value);
+		if (target === null) continue;
+		sources.push({ target, line: node.loc?.start?.line ?? 0 });
+	}
+	return sources;
 }
 
 const FUNCTION_TYPES = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression']);
@@ -1025,8 +1047,17 @@ describe('the oracle itself rejects the padding classes found by review', () => 
 describe('every socket surface routes its subscribe decisions through the shared policy', () => {
 	it('only the canonical policy module exports the policy decisions', () => {
 		const exporters = new Map(POLICY_NAMES.map((name) => [name, []]));
+		const policyPath = realpathSync(pathOf(POLICY));
 		for (const file of jsFiles('src')) {
 			for (const name of exportedPolicyNames(ast(file).nodes)) exporters.get(name).push(file);
+			// `export * from './subscribe-policy.js'` names no specifier, so
+			// the specifier walk cannot see it - yet it republishes every
+			// policy name the target owns. A barrel by another spelling.
+			if (file === POLICY) continue;
+			for (const { target } of starReexportedPolicySources(ast(file).nodes, file)) {
+				if (target !== policyPath) continue;
+				for (const name of POLICY_NAMES) exporters.get(name).push(file);
+			}
 		}
 		for (const name of POLICY_NAMES) {
 			expect(

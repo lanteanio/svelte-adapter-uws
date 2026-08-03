@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Intentional breaking default for implicit profile projection; explicit selectors retain their application-owned behavior.
   - **Detail:** [Changed engineering detail](#changed).
 
+- **Changed: the over-capacity waiting room is an accessible, host-identified, localizable surface.** Built-in and custom capacity pages now meet one validated document baseline, carry optional host identity and light/dark theming, can be localized per request through a server renderer, and answer a browser navigation to the WebSocket path for every enabled admission ceiling.
+  - **Affects:** Deployments that set any upgrade-admission ceiling, and any deployment shipping a custom `waitingRoom.template`.
+  - **Action:** Extend a custom template to the documented accessible baseline before upgrading, because one that lacks a required element now fails the build instead of shipping.
+  - **Requires:** Existing `upgradeAdmission` options; per-request localization additionally needs a server module path in `waitingRoom.renderer`.
+  - **Compatibility:** Breaking for a non-conforming custom template; built-in pages, WebSocket handshakes, and non-HTML clients keep their previous responses.
+  - **Detail:** [Changed engineering detail](#changed).
+
 - **Fixed: realtime delivery and lifecycle boundaries.** The adapter now rejects unsafe multi-worker sequence and game-relay modes, enforces the advertised development payload ceiling, counts exact backpressure drops, closes Rollup handles, and balances logical subscriptions, turning silent divergence, oversized development frames, stale build resources, and misleading loss telemetry into explicit bounded behavior.
   - **Affects:** Clustered realtime deployments, Vite WebSocket development, programmatic builds, and pressure monitoring.
   - **Action:** Configure an external ordered sequence or single-worker game lane where required, and align any custom development payload ceiling with production.
@@ -44,13 +51,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** Node 22 or newer and a published binary for the current Node ABI, CPU, OS, and, on Linux, glibc 2.38 or newer; no runtime API migration.
   - **Compatibility:** Clean server installs fail earlier when the native addon is unavailable; other corrections tighten validation and stale-data behavior without renaming documented public signals.
   - **Detail:** [Fixed engineering detail](#fixed).
-
-- **Changed: the over-capacity waiting room is an accessible, host-identified, localizable surface.** Built-in and custom capacity pages now meet one validated document baseline, carry optional host identity and light/dark theming, can be localized per request through a server renderer, and answer a browser navigation to the WebSocket path for every enabled admission ceiling.
-  - **Affects:** Deployments that set any upgrade-admission ceiling, and any deployment shipping a custom `waitingRoom.template`.
-  - **Action:** Extend a custom template to the documented accessible baseline before upgrading, because one that lacks a required element now fails the build instead of shipping.
-  - **Requires:** Existing `upgradeAdmission` options; per-request localization additionally needs a server module path in `waitingRoom.renderer`.
-  - **Compatibility:** Breaking for a non-conforming custom template; built-in pages, WebSocket handshakes, and non-HTML clients keep their previous responses.
-  - **Detail:** [Changed engineering detail](#changed).
 
 <!-- consumer-release-summary:end -->
 
