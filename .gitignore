@@ -7,11 +7,14 @@ bench/_tmp_static
 .DS_Store
 *.log
 source
+# Kit's generated output, wherever a fixture app lives. This was two
+# path-specific entries, which is why a third fixture app committed 84 build
+# artifacts: the rule has to be about the directory, not about the two places
+# that happened to exist when it was written.
+.svelte-kit
 test/fixture/node_modules
-test/fixture/.svelte-kit
 test/fixture/build
 test/fixture/build-*
 test/fixture/.build-lock
-test/e2e/.svelte-kit
 test-results
 playwright-report
