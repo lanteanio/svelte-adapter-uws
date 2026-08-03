@@ -1,0 +1,62 @@
+{
+  "description": "Byte-exact WebTransport reliable-stream transcript for PROTOCOL.md section 15. Each record is canonical unsigned-LEB128 message length plus the unchanged WebSocket message bytes. fragmentLengths deliberately split the first length/body, place a read boundary one byte before the first record ends, and coalesce later records.",
+  "connectQuery": "lantean-cap=lantean.reliable%3A1&lantean-cap=game.fanout%3A1",
+  "decodedConnectCapabilities": ["lantean.reliable:1", "game.fanout:1"],
+  "fragmentLengths": [1, 2, 7, 3, 19, 5, 31, 1, 64, 8],
+  "records": [
+    {
+      "direction": "s->c",
+      "kind": "text",
+      "length": 69,
+      "frame": {
+        "type": "welcome",
+        "sessionId": "00000000-0000-4000-8000-000000000001"
+      },
+      "payloadHex": "7b2274797065223a2277656c636f6d65222c2273657373696f6e4964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031227d",
+      "recordHex": "457b2274797065223a2277656c636f6d65222c2273657373696f6e4964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031227d"
+    },
+    {
+      "direction": "c->s",
+      "kind": "text",
+      "length": 57,
+      "frame": {
+        "type": "hello",
+        "caps": ["batch", "lease", "game.fanout:1"]
+      },
+      "payloadHex": "7b2274797065223a2268656c6c6f222c2263617073223a5b226261746368222c226c65617365222c2267616d652e66616e6f75743a31225d7d",
+      "recordHex": "397b2274797065223a2268656c6c6f222c2263617073223a5b226261746368222c226c65617365222c2267616d652e66616e6f75743a31225d7d"
+    },
+    {
+      "direction": "s->c",
+      "kind": "binary",
+      "length": 12,
+      "decoded": {
+        "tag": 3,
+        "schemaVersion": 1,
+        "topicId": 4294967297,
+        "seq": 300,
+        "payloadHex": "aabbcc"
+      },
+      "payloadHex": "03018180808010ac02aabbcc",
+      "recordHex": "0c03018180808010ac02aabbcc"
+    }
+  ],
+  "concatenatedHex": "457b2274797065223a2277656c636f6d65222c2273657373696f6e4964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031227d397b2274797065223a2268656c6c6f222c2263617073223a5b226261746368222c226c65617365222c2267616d652e66616e6f75743a31225d7d0c03018180808010ac02aabbcc",
+  "invalidPrefixes": [
+    {
+      "reason": "zero-length record",
+      "hex": "00",
+      "error": "PROTOCOL_ERROR"
+    },
+    {
+      "reason": "non-canonical encoding of length 1",
+      "hex": "8100",
+      "error": "PROTOCOL_ERROR"
+    },
+    {
+      "reason": "length 1048577 exceeds 1 MiB",
+      "hex": "818040",
+      "error": "RECORD_TOO_LARGE"
+    }
+  ]
+}

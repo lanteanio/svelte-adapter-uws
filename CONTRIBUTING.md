@@ -5,6 +5,10 @@ sign-off ceremony and no response-time promise - issues and pull requests go to
 the [issue tracker](https://github.com/lanteanio/svelte-adapter-uws/issues) and
 one person reads them.
 
+Choose the bug, feature, or usage-question form in that tracker so the report
+arrives with the evidence needed to answer it. Security findings use the
+private advisory route linked by the chooser, never a public form.
+
 What this file is for is the part you cannot get by reading the README: how to
 get from a clone to a run that actually proves something, which commands the
 project treats as required, which directories own what, and the conventions a
@@ -16,9 +20,12 @@ this documents how to change it.
 - [Clone to green](#clone-to-green)
 - [The native dependency, and how a green run can prove nothing](#the-native-dependency-and-how-a-green-run-can-prove-nothing)
 - [What each command runs](#what-each-command-runs)
+- [Documentation contributions](#documentation-contributions)
 - [What to run before you propose a change](#what-to-run-before-you-propose-a-change)
 - [Where things live](#where-things-live)
 - [What moves together](#what-moves-together)
+- [Review routing](#review-routing)
+- [Issue lifecycle and backlog contract](#issue-lifecycle-and-backlog-contract)
 - [House conventions](#house-conventions)
 - [Proposing the change](#proposing-the-change)
 
@@ -29,6 +36,7 @@ git clone https://github.com/lanteanio/svelte-adapter-uws.git
 cd svelte-adapter-uws
 
 npm run bootstrap   # root deps, the fixture's own deps, then the doctor
+npm run smoke       # real HTTP health + WebSocket subscribe/publish checkpoint
 npm run verify:fast # seconds - the static gates
 npm run verify:pr   # exactly what the hosted gate runs
 ```
@@ -58,13 +66,14 @@ can disagree are worse than one.
 
 ## The native dependency, and how a green run can prove nothing
 
-`uWebSockets.js` is a native C++ addon fetched from **GitHub, not npm**, and it
-is an **optional** dependency. Read that as: `npm install` skips it silently
-when the fetch or the compile fails. Your install succeeds, your test run goes
-green, and every suite that boots the real built runtime over real sockets
-reported as skipped - which in a summary looks exactly like a suite that ran and
-proved something. Those are the suites standing behind the authorization,
-revocation and handshake claims.
+`uWebSockets.js` is a native C++ addon acquired from an exact **GitHub HTTPS tag
+archive, not the npm registry**, and it is an **optional** dependency. npm can
+omit a failed optional dependency, so this package's postinstall check imports
+the addon immediately and turns a missing archive or incompatible native binary
+into a failed installation with the original loader cause. That check requires
+lifecycle scripts: an `ignore-scripts` package-manager setting or
+`SVELTE_ADAPTER_UWS_SKIP_NATIVE_CHECK=1` leaves a client-only installation
+explicitly unverified.
 
 Check whether you actually have it, and everything else a run depends on:
 
@@ -74,11 +83,11 @@ npm run doctor
 
 That answers whether a green run on this machine proves anything: the Node
 version against `engines` and against the pinned baseline, whether the running
-npm can write the committed lockfile format, whether your platform/arch/libc
-has a prebuilt binary at all, `git` on PATH (the addon is fetched with it), the
-root and fixture installs, whether a loopback listener can bind, and whether
-Playwright's browser is present. `npm run doctor -- --require-uws` makes a
-missing addon a failure instead of a warning.
+npm can write the committed lockfile format, whether your Node ABI, OS, CPU and
+libc have a prebuilt binary at all, the root and fixture installs, whether a
+loopback listener can bind, and whether Playwright's browser is present. `npm
+run doctor -- --require-uws` makes a missing addon a failure instead of a
+warning.
 
 Force the honest result - absence becomes a hard failure instead of a skip:
 
@@ -90,21 +99,24 @@ REQUIRE_UWS=1 npm test
 without the addon. If you are contributing anything that touches the runtime,
 run with `REQUIRE_UWS=1` at least once before you propose it.
 
-If it will not install:
+If it will not load:
 
-- It needs `git` on your PATH.
-- Linux: `build-essential`, and a glibc >= 2.38 distribution. Alpine/musl is
-  not supported, and neither are Bookworm-based images (the README's Docker
-  section has the working base image).
-- Windows: the Visual C++ Build Tools ("Desktop development with C++").
-- The pinned version lives in `optionalDependencies` in `package.json` and
-  every install hint the adapter prints is derived from that pin, so
-  `npm install uNetworking/uWebSockets.js#<the pinned tag>` is always what the
-  error message tells you.
+- Linux requires x64 or arm64 and glibc >= 2.38. Alpine/musl and
+  Bookworm-based images are unsupported. There is no source build fallback, so
+  `build-essential` does not repair an unsupported binary target.
+- Windows requires x64; no Windows arm64 binary is published. Installing the
+  Visual C++ Build Tools does not create one.
+- The supported Node majors are the ABIs with published binaries in the pinned
+  archive, currently Node 22, 24 and 26. `engines` alone cannot guarantee an ABI
+  binary exists.
+- The exact HTTPS archive lives in `optionalDependencies` in `package.json`.
+  Every generated install command and runtime recovery hint is derived from
+  that pin, so no Git client or SSH credential is required.
 
 Without the addon you can still work on the client, the plugins' pure logic,
 the simulator and anything in `src/runtime/utils/**` - the pure suites run
-normally. You cannot verify a runtime behaviour claim.
+normally. Set `SVELTE_ADAPTER_UWS_SKIP_NATIVE_CHECK=1` only for that intentional
+client-only case. You cannot verify a runtime behaviour claim.
 
 ## What each command runs
 
@@ -112,11 +124,13 @@ normally. You cannot verify a runtime behaviour claim.
 |---|---|
 | `npm run bootstrap` | Root dependencies, the fixture's own dependencies, then the doctor. What a fresh clone needs. |
 | `npm run doctor` | Whether this machine can prove anything. `-- --require-uws` makes a missing native addon fatal. |
-| `npm run check` | Eight dependency-free static gates, described below. Seconds, no network, no fixture. |
+| `npm run smoke` | Starts a real uWS loopback server, checks `/healthz`, completes a WebSocket subscribe/publish exchange, prints resolved adapter/native/Node versions, and tears down. The hosted suite runs this same command. |
+| `npm run check:publish` | Packs the package through `publint` and `attw --profile esm-only` so export-map and type-resolution failures are caught before release. The hosted suite runs this command. |
+| `npm run check` | Dependency-free static and generated-parity gates, described below. Seconds, no network, no fixture. |
 | `npm run check:links` | Every `](#anchor)` in the shipped docs names a heading that exists, and every relative file link names a file that exists. External links are not fetched. |
 | `npm test` | `pretest` runs `npm run check`, then `vitest run` over `test/**/*.test.js`. Excludes `test/e2e/**` and `test/fixture/**`. |
 | `npm run verify:fast` | `npm run check`, named as a lane. |
-| `npm run verify:suite` | The doctor with `--require-uws`, then `npm test` under `REQUIRE_UWS=1`. What the suite job runs, verbatim. |
+| `npm run verify:suite` | The doctor with `--require-uws`, real HTTP/WebSocket smoke, packed publishing checks, then `npm test` under `REQUIRE_UWS=1`. What the suite job runs, verbatim. |
 | `npm run verify:sim` | The seed swarm and the golden corpus. What the simulation job runs, verbatim. |
 | `npm run verify:pr` | `verify:suite` and `verify:sim`. Exactly the hosted lanes, and nothing they do not run. |
 | `npm run verify:full` | `verify:pr` plus the Playwright run, which no workflow runs. |
@@ -126,10 +140,20 @@ normally. You cannot verify a runtime behaviour claim.
 | `npm run sim:swarm` | Deterministic simulation: many seeded interleavings of the in-memory server under the fault engine. Exits non-zero on any invariant violation, fatal, or determinism regression. |
 | `npm run sim:golden` | Re-runs the committed golden corpus (`test/dst-goldens/`) and fails when a fingerprint drifted from its blessed baseline. |
 | `node bench/<file>.mjs` | The benchmark harness. Files ending `-ab.mjs` are before/after comparisons for a single hot path. |
+| `node scripts/generate-api-docs.js` | Rebuild bounded README API-reference regions from their canonical declaration JSDoc. Edit `src/index.d.ts`, never the generated README body. |
 
-The eight gates in `npm run check`, each of which answers exactly one question
+The gates in `npm run check`, each of which answers exactly one question
 and has no config:
 
+- **check-compatibility** - the versioned compatibility manifest owns install
+  commands and the adapter/extensions/realtime version matrix; generated README
+  and migration blocks must match it exactly.
+- **generate-api-docs --check** - every bounded public API block in README is
+  byte-generated from the matching `API_DOC` JSDoc in the public declaration.
+  Change the declaration, then run `node scripts/generate-api-docs.js`; a manual
+  README edit is overwritten and fails the ordinary gate.
+- **generate-observability --check** - public observability prose, reference
+  queries, and literal declaration types match the runtime signal manifest.
 - **check-types** - every `exports` target exists, every `types` condition is a
   real `.d.ts`, every target is covered by the `files` publish allowlist, and
   every named runtime export has a matching declaration. This is what catches
@@ -141,24 +165,87 @@ and has no config:
   the dev server is never replayed.
 - **check-slugs** - every `svti.me/<slug>` short link referenced from `src/`,
   `README.md` or `MIGRATION.md` is registered in `scripts/known-slugs.txt`.
-- **check-uws-pin** - every copy-pasteable `uWebSockets.js#<ref>` install spec in
+- **check-uws-pin** - every copy-pasteable uWebSockets.js HTTPS tag archive in
   a tracked file names the tag `optionalDependencies` pins, so no document hands
-  a reader a version the tree is not tested against. Prose about a past version
-  is not matched, `CHANGELOG.md` is skipped, and a lockfile is reported rather
-  than enforced.
+  a reader a version the tree is not tested against. Legacy Git specs remain
+  detectable during migration. Prose about a past version is not matched,
+  `CHANGELOG.md` is skipped, and a lockfile is reported rather than enforced.
 - **check-uws-binaries** - the installed native addon is the tree this
-  repository accepted: the resolved commit, the upstream source commit, and a
-  SHA-256 per shipped file. The pin is a mutable Git TAG on a package with no
-  registry integrity hash, so a retag serves different bytes under an identical
-  version string. Without the addon installed it prints a visible SKIP and
-  passes; under `REQUIRE_UWS=1` or `CI` the skip is a failure. Re-accept a
-  deliberate pin bump with `node scripts/check-uws-binaries.js --update` and
-  review the diff - it is the record of which binaries changed.
+  repository accepted: the exact archive URL, npm lockfile integrity, upstream
+  source commit, and a SHA-256 per shipped file. A retagged archive has different
+  integrity even when its version string is unchanged. Without the addon
+  installed it prints a visible SKIP and passes; under `REQUIRE_UWS=1` or `CI`
+  the skip is a failure. Re-accept a deliberate pin bump with
+  `node scripts/check-uws-binaries.js --update` and review the diff - it is the
+  record of which binaries changed.
+- **check-links** - every owned Markdown link and anchor resolves, and a link in
+  a packaged document cannot point at a repository-only file missing from the
+  npm tarball.
 - **check-scope** - every identifier a tracked source file reads resolves to
   something: a declaration, an import, or a declared global. Catches the name
   that parses fine and throws only when the line runs.
 - **check-syntax** - every tracked `.js`/`.mjs` parses as a native ES module,
   not merely under vitest's transform pipeline.
+
+Consequential copy is gated too. `test/copy-prerequisites.test.js` inspects the
+onboarding, transport-security, and dedup decision surfaces for absolute words.
+Put the prerequisite in the same bullet or paragraph as the assurance: WSS is
+TLS transport, not authentication or topic authorization; retry suppression is
+bounded by process, window, capacity, and caller-supplied identity. Moving the
+condition to a later limitations section does not satisfy the gate.
+
+## Documentation contributions
+
+The package repository and the documentation site have different canonical
+jobs. This README owns package identity, installation, support status, and
+versioned companion routes. Versioned migration guides, `PROTOCOL.md`, the
+schema/vectors, and `CHANGELOG.md` remain normative in this repository. The
+[svelte-realtime-docs source](https://github.com/lanteanio/svelte-realtime-docs)
+owns the long-form ecosystem tutorial, how-to, reference, explanation, and
+operations quadrants rendered at `svelte-realtime.dev`.
+
+Do not repair drift by maintaining the same fact twice. Change the canonical
+package declaration, manifest, vector, or guide first; regenerate bounded
+README regions from that source. A site page should link or import the owned
+fact where its build supports that, and otherwise its pull request must name
+the package source and exact package head it synchronized from. Runnable
+snippets live in fixtures/tests; prose fences that are fragments must not be
+presented as copy-paste programs.
+
+The README reader-path table is generated from `docs/documentation.v1.json`.
+Edit that manifest when a package or site route changes, then run
+`node scripts/check-documentation-contract.js --write` and
+`npm run check:documentation`. The normal check also rejects an entry surface
+that exceeds its line budget or a native-version fact copied outside the
+generated compatibility block.
+
+Every README fence is classified in `docs/code-blocks.v1.json`. Standalone
+JavaScript, TypeScript, Svelte, JSON, and YAML blocks compile in the normal
+check; intentional fragments, manual commands, configuration, and output have
+separate visible coverage channels. After changing a fence, review its role and
+run `node scripts/check-doc-code.js --write`, then run `npm run check:docs-code`.
+The writer updates only the manifest under `docs/`; it does not create scratch
+files in the repository root.
+
+For an adapter documentation change:
+
+1. Edit the canonical source and any generated output named by its marker.
+2. Run `npm run verify:docs`. It checks GitHub-compatible anchors and paths,
+   packaged destinations, entry-point/API generation (each catalog entry's
+   stability drawn from supported | experimental | deprecated, its guide anchor
+   resolving to the README section that documents that entry's specifier, and a
+   README home for every public `svelte-adapter-uws/sim` export), classified
+   and compiled README fences, runnable packed README snippets, versioned
+   migration routes/rehearsal, and compatibility imports.
+3. If the site mirrors or explains the changed fact, make the sibling
+   `svelte-realtime-docs` change from its own checkout. Use `npm run dev` for
+   preview and `npm run verify` for its acceptance gate.
+4. Report both repository heads and every command run. An adapter-only green
+   result is not evidence that the site copy is current.
+
+The external URL crawl is deliberately not part of the pull-request lane:
+`.github/workflows/docs-links.yml` runs it weekly and on demand so remote
+uptime cannot make local documentation nondeterministic.
 
 Notes on the slow parts:
 
@@ -181,6 +268,23 @@ The hosted gate runs `npm run verify:suite` on Ubuntu **and** Windows, and
 so "it passed locally" and "CI is green" cannot drift into meaning different
 things. `npm run verify:pr` is exactly those two lanes and is the local
 equivalent of an accepted pull request.
+
+### Lane duration and exception map
+
+These duration classes are planning guidance, not benchmark claims: dependency
+download, native compilation, fixture cache state, browser installation, and
+machine load dominate wall time. Record the actual commands and gaps in the
+pull request instead of treating a duration as proof.
+
+| Lane | Typical duration | Required setup | Scope and exception |
+|---|---|---|---|
+| `npm run bootstrap` | First-run minutes; warm installs are shorter | Network, root and fixture lockfiles, native toolchain where needed | Run once per clone or dependency change; it prepares proof but is not itself a test result. |
+| `npm run verify:fast` | Seconds | Installed root dependencies | Static/generated/document gates only; appropriate for iteration, never a substitute for a runtime lane. |
+| `npm run verify:suite` | Minutes; cold fixture builds dominate | Native uWS must load; fixture dependencies installed | Required for source/runtime changes. A missing addon is a failure, not an accepted skip. |
+| `npm run verify:sim` | Minutes | Root dependencies; no browser | Required when behavior can change scheduling, delivery, recovery, or invariants; deterministic seeds are the reproducer. |
+| `npm run verify:pr` | Sum of suite and simulation lanes | Everything required by both lanes | Normal pre-PR default and the hosted-gate equivalent. A platform you cannot run must be named as a gap. |
+| `npm run test:e2e` | Minutes after browser setup | Chromium, fixture dependencies, and native uWS for production | Required for socket-reachable or browser-client behavior; not hosted, so omission must be explicit. |
+| `npm run test:coverage` | Longest local lane | Unit, browser, fixture, and native prerequisites | Coverage work only; it does not replace the change-specific real-runtime, simulation, or benchmark evidence. |
 
 Two more jobs run on the test workflow and have no local lane, because neither
 asks a question about your machine: an **advisory** job, which reads both
@@ -287,6 +391,94 @@ plugin-owned - and a registered namespace is only safe because the subscribe
 landing re-tests real membership behind it. Do not copy that carve-out into a
 lane that has no landing re-check.
 
+## Review routing
+
+`.github/CODEOWNERS` requests the maintainer on every path and keeps the
+highest-risk families explicit. This table tells a contributor what evidence
+and companion surfaces that review will expect; ownership is not permission to
+omit a leg.
+
+| Change family | Primary paths | Required companions | Review focus |
+|---|---|---|---|
+| Adapter/build option | `src/index.js`, `src/vite.js` | `src/index.d.ts`, `src/vite.d.ts`, fixture variant, README/changelog | Production/dev parity, placeholder propagation, default compatibility |
+| Runtime behavior | `src/runtime/**` | testing/Vite/simulator parity, real-runtime test, declarations and docs | Authorization, lifecycle, backpressure, deterministic seams |
+| Wire or protocol | `src/runtime/wire*.js`, client/plugin codecs | `PROTOCOL.md`, schema, vectors, every encoder/decoder, conformance tests | Additive revision-1 compatibility and byte-exact evidence |
+| Public export/type | implementation and adjacent `.d.ts` | export map, package allowlist, entry-point catalog, consumer test | Packed resolution, runtime/type parity, environment boundary |
+| Plugin | `src/plugins/<name>/**` | server/client declarations, exports, focused tests, README/changelog | Opt-in cost, namespace authorization, mixed-client fallback |
+| Documentation/generator | canonical declaration, manifest, or Markdown owner | generated outputs, link/anchor/package checks | One source of truth, packed destinations, durable routes |
+| CI, dependency, release, or security | `.github/**`, lockfiles, release/security documents | pinned actions, publication gates, advisory/private-report path | Least privilege, provenance, reproducibility, disclosure safety |
+
+## Issue lifecycle and backlog contract
+
+The issue forms collect the evidence a first review needs. The labels below are
+the public state machine; a maintainer may apply them manually until repository
+automation exists.
+
+### Definition of Ready
+
+An issue is `status:ready` only when:
+
+- the observed problem and desired outcome are stated in user-visible terms;
+- the owning repository and affected surfaces are known, with sibling work and
+  external dependencies linked;
+- acceptance criteria and a verification plan name the real test level needed;
+- severity, confidence, compatibility risk, and cost of delay are recorded;
+- the work is not waiting on a product decision or inaccessible evidence; and
+- security-sensitive evidence has moved to the private route in
+  `SECURITY.md`.
+
+Needs-information issues stay `status:needs-info`; they are not counted as
+ready work.
+
+### Priority and work in progress
+
+Order ready work by risk and cost of delay: exploitable security or data-loss
+defects first, then release blockers and regressions, then confirmed correctness
+bugs, then compatibility and operational work, then documentation and
+convenience. Within one class, prefer high-confidence fixes and the smallest
+change that retires the most risk; record the rationale when an item jumps the
+queue.
+
+The provisional repository WIP limit is **three implementation issues** at
+once. Review-only work does not consume that limit. One contributor should
+normally own one implementation issue at a time unless a maintainer coordinates
+non-overlapping files. A live incident may exceed the limit, but the issue must
+say why.
+
+### Blocked and stale work
+
+Use `status:blocked` only for a concrete dependency, decision, permission, or
+external-state wait. The latest comment names the blocker, who or what can clear
+it, useful work already exhausted, and the next review date. A difficult task
+with an available next step is not blocked.
+
+Maintainers review the backlog at least every **30 days**: revalidate old
+facts, merge duplicates, close work whose premise disappeared, refresh blocked
+items, and promote only items that meet Ready. An item that receives no new
+evidence across two reviews may be closed as stale with a reopening condition.
+
+### Merge criteria
+
+Work is `status:in-review` after implementation and verification. It merges
+only when:
+
+- every acceptance criterion is met and no material known delta is hidden;
+- a regression test was observed failing without the fix and passing with it;
+- the required static, unit, real-runtime, simulation, browser, platform, and
+  benchmark lanes are green or an explicit reviewer accepts a named gap;
+- public docs, declarations, schema, vectors, generated files and lockfiles
+  agree with the implementation;
+- user-visible behavior has a SemVer-appropriate version and changelog entry;
+- an independent reviewer has checked the evidence and risk; and
+- the maintainer has accepted the change for merge.
+
+### Good first issues
+
+The `good first issue` label is curated, not a synonym for low priority. Use
+it only when the reproduction is complete, the expected files and test command
+are named, no security/wire/concurrency design decision remains, and the change
+fits one small review. Remove the label if investigation expands the scope.
+
 ## House conventions
 
 **Formatting.** Tabs. Match the surrounding file - its comment density, its
@@ -338,6 +530,11 @@ fix and watching it go red, and say in the pull request that you did.
 moves. `test/dst-goldens/**` is a blessed corpus with a documented re-bless
 command - never hand-edit it.
 
+**Contribution license and sign-off.** No CLA or DCO sign-off is required, and
+a missing `Signed-off-by` line is not a review failure. By submitting a
+contribution, you represent that you have the right to provide it under this
+repository's MIT license.
+
 **Commits.** Conventional Commits, as `git log` shows:
 `fix(cluster): ...`, `feat(game): ...`, `docs(readme): ...`. Describe the defect
 and the behaviour it now has. A reader a year from now has no access to
@@ -347,7 +544,9 @@ its own.
 **Changelog.** `CHANGELOG.md` follows Keep a Changelog and the project follows
 SemVer. Every shipped change gets an entry, written for someone who will read it
 a year from now with no other context: what was wrong, what it now does, and what
-they have to do about it.
+they have to do about it. Publication, promotion, hotfix and rollback follow
+[`releasing.md`](./docs/releasing.md), with immutable identities in
+[`release-manifest.md`](./docs/release-manifest.md).
 
 ## Proposing the change
 
@@ -360,8 +559,6 @@ with a test, a pull request is fine on its own. In the description, say:
 - for a hot-path change, the before/after benchmark numbers;
 - anything you could not run.
 
-For a security-sensitive report, keep the initial message short: enough to
-establish the class of problem and how to reach it, without a working exploit.
-If the repository carries a `SECURITY.md`, follow the route it names; otherwise
-open a tracker issue in that shortened form and expect the details to be asked
-for privately.
+For a security-sensitive report, follow [`SECURITY.md`](SECURITY.md) and use
+the private advisory form it names. Do not open a public issue with the
+vulnerability details, exploit, secrets, or affected deployment data.

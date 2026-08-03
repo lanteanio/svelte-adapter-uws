@@ -5,6 +5,756 @@ All notable changes to `svelte-adapter-uws` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.91] - 2026-08-01
+
+<!-- consumer-release-summary:start -->
+### Consumer summary
+
+- **Added: verifiable package and operations contracts.** Structured compatibility, migration, protocol, observability, contribution, security, and release surfaces now ship with executable drift checks, giving consumers one route to supported version tuples, production signals, incident guidance, and upgrade evidence instead of requiring source-code or CI archaeology.
+  - **Affects:** Package consumers, operators, contributors, and release maintainers.
+  - **Action:** Start from the README documentation map and select one complete generated compatibility row before installing or upgrading.
+  - **Requires:** No runtime option; operators must supply the deployment-specific alert, runbook, and release evidence named by the contracts.
+  - **Compatibility:** Additive documentation and verification surfaces; existing runtime imports remain available.
+  - **Detail:** [Added engineering detail](#added).
+
+- **Added: transport and performance evidence.** The WebTransport stream candidate, deterministic I/O budgets, cross-repository head checks, and benchmark or claim registers now state exactly what is frozen or measured, allowing adopters to distinguish protocol experiments and regression budgets from production transport availability or universal performance promises.
+  - **Affects:** Teams evaluating the prerelease transport, throughput, allocation, or cross-package claims.
+  - **Action:** Keep WebSocket as the permanent JavaScript runtime default, leave the WebTransport negotiation/fallback client lane unscheduled, and reproduce the workload-specific evidence before using a number as a deployment budget.
+  - **Requires:** The recorded toolchain and fixtures for any cited benchmark or cross-repository result.
+  - **Compatibility:** Additive evidence and a protocol freeze candidate; no JavaScript WebTransport server path or client negotiation ladder is enabled.
+  - **Detail:** [Added engineering detail](#added).
+
+- **Changed: presence and cursor projection defaults.** Connections now expose only the configured dedup key for presence and an own id for cursors unless an application supplies `select`, preventing accidental profile-field publication while preserving explicit projection policies and trusted server-side updates.
+  - **Affects:** Applications that previously relied on implicit names, avatars, colors, roles, or other profile fields in presence or cursor payloads.
+  - **Action:** Add an explicit `select` callback containing only the public display fields each client needs.
+  - **Requires:** The selected identity value must be a string or finite number.
+  - **Compatibility:** Intentional breaking default for implicit profile projection; explicit selectors retain their application-owned behavior.
+  - **Detail:** [Changed engineering detail](#changed).
+
+- **Fixed: realtime delivery and lifecycle boundaries.** The adapter now rejects unsafe multi-worker sequence and game-relay modes, enforces the advertised development payload ceiling, counts exact backpressure drops, closes Rollup handles, and balances logical subscriptions, turning silent divergence, oversized development frames, stale build resources, and misleading loss telemetry into explicit bounded behavior.
+  - **Affects:** Clustered realtime deployments, Vite WebSocket development, programmatic builds, and pressure monitoring.
+  - **Action:** Configure an external ordered sequence or single-worker game lane where required, and align any custom development payload ceiling with production.
+  - **Requires:** Existing cluster and payload options; no new dependency.
+  - **Compatibility:** Invalid multi-worker modes now fail closed, while valid single-worker and explicitly ordered deployments keep their public APIs.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: public contracts and verification coverage.** Strict consumer types, clean native-addon acquisition, repository-wide link checks, complete worker metrics, fresh optional-pressure samples, exact metric-contract parity, and hardened policy oracles now fail at the owned boundary, so missing or incompatible binaries, documentation drift, and observability regressions surface before publication instead of after installation.
+  - **Affects:** Server installers, strict TypeScript consumers, metric collectors, documentation maintainers, and policy-gate contributors.
+  - **Action:** Use the matched HTTPS native-addon archive from the generated compatibility row, then rerun the normal static and unit gates after changing public declarations, metrics, links, compatibility, or subscription policy.
+  - **Requires:** Node 22 or newer and a published binary for the current Node ABI, CPU, OS, and, on Linux, glibc 2.38 or newer; no runtime API migration.
+  - **Compatibility:** Clean server installs fail earlier when the native addon is unavailable; other corrections tighten validation and stale-data behavior without renaming documented public signals.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+<!-- consumer-release-summary:end -->
+
+### Added
+
+- **Server-enforced established-message admission.** The opt-in
+  `websocket.messageAdmission` gate bounds per-connection/global rate and
+  concurrent application work across the app hook, binary ingress, and JSON
+  game-publish lanes; retains at most `maxQueue` waiting frames; answers sheds
+  with typed `message-overloaded` responses; and records the bounded
+  `ws_message_admission_rejected_total{reason,scope}` counter; protocol control
+  frames remain serviceable and the zero-limit default remains disabled.
+
+- **Bounded cross-worker relay spill quarantine.** Shared-memory relay writers
+  now retain at most 4 MiB or five seconds of producer spill per receiving
+  worker by default. Crossing either finite ceiling closes that peer's ring and
+  routes the lagging worker through the existing clean-exit/restart supervisor,
+  so one stalled sibling cannot grow the primary without bound. The pending
+  queue drains as an O(1) deque, the limits are configurable with
+  `CLUSTER_RELAY_MAX_PENDING_KB` and `CLUSTER_RELAY_MAX_PENDING_MS`, and bounded
+  metrics report quarantine reason, discarded pending bytes, and worst pending
+  age without topic or client labels.
+
+- **Finite whole-lifetime WebSocket connection admission.** The new opt-in
+  `upgradeAdmission.maxConnections` ceiling is enforced per I/O worker across
+  reserved upgrades and established sockets: a permit is acquired before
+  per-request upgrade work, transferred across `res.upgrade()`, and released
+  exactly once from the close lifecycle. Crossed attempts receive `503`, the
+  waiting-room capacity probe observes both admission ceilings, and metrics
+  expose `upgrade_rejected_total{reason="connection_capacity"}` plus the
+  optional `ws_connection_headroom` gauge. `maxConcurrent` deliberately
+  remains a handshake-only circuit breaker, so existing configurations and the
+  unlimited default are unchanged; set the new non-negative safe integer when
+  a deployment needs a finite per-worker live-socket bound.
+
+- **Versioned production capacity launch gate.** A deployment-owned worksheet
+  now pins expected peak, weighted traffic mix, latency/error SLO, release
+  identity, environment, topology, backing stores, and autoscaling envelope.
+  Its open-arrival runner schedules work independently of completions, reports
+  achieved p50/p95/p99 and errors by phase and scenario, identifies the first
+  configured resource threshold crossed under deliberate overload, and proves
+  recovery under continuing traffic. The machine-readable v1 result fails
+  closed on missing saturation/recovery evidence or injector drops, drain
+  timeout, telemetry errors, and excessive scheduler lag; outputs are
+  create-new artifacts outside the repository root rather than scratch files.
+
+- **One deployer-facing privacy and retention contract across the ecosystem.**
+  A versioned machine-readable inventory now reconciles browser, process,
+  Redis, Postgres, telemetry, durable-work, and application-owned processing
+  across all three packages. Its generated integration guide names exact
+  default retention and erasure limitations, while a host-fillable RoPA, DPA,
+  and transfer worksheet prevents a successful `live.forget` call from being
+  mistaken for deletion from browsers, sinks, backups, or unregistered stores.
+  The normal check rejects missing activities, vague retention, incomplete
+  erasure boundaries, package omissions, or generated-document drift.
+
+- **Correlated resource-control incident response.** The versioned operations
+  pack now maps admission, protection posture, backpressure, host pressure,
+  metrics degradation, Redis breakers, state divergence, client degradation,
+  and recovery-wave load to safe actions, abort conditions, loss semantics, and
+  explicit recovery proof. Its cold drill combines overload with Redis latency
+  and rejects fleet restart, manual breaker reset, premature protection
+  relaxation, or an unbounded reconnect/rehydration wave.
+
+- **Explicit external recovery policies and a real-process drill.** Complete
+  systemd and container examples now pair readiness gates with restart and
+  termination-grace settings, making the supervisor dependency of fatal and
+  wedged-worker exits operationally explicit. A dedicated Linux CI lane wedges
+  a clustered worker through the built runtime, verifies the documented
+  whole-process `SIGKILL` is respawned and ready, then kills the replacement
+  primary and verifies readiness after a second external respawn.
+
+- **Executable coordinated release and rollback procedure.** The versioned
+  operations pack now includes an inclusive client/server protocol-range
+  matrix with baseline, range expansion, client cutover, minimum cutover, and
+  rollback outcomes. Its offline drill rejects an unsafe order or a missing
+  typed-rejection posture, and the same runbook stages stable alarm ids before
+  handler renames so retained work remains recoverable across mixed releases.
+
+- **Versioned cold-start operations pack.** The shipped `docs/operations/v1`
+  corpus provides one failure map and decision runbooks for process/drain and
+  bad-release recovery, Redis relay outages, Postgres durable work, and
+  replay/state divergence. Every runbook names ownership, loss semantics,
+  abort criteria, procedures, recovery checks, and handoff evidence. The
+  offline `npm run drill:operations` gate verifies the complete corpus and its
+  local links before publication; the included cold drill rejects unsafe
+  replay, queue clearing, breaker-reset-as-proof, uncoordinated package
+  rollback, and readiness-triggered restarts.
+
+- **Optional W3C distributed tracing across native and ecosystem work.** A
+  top-level `tracing` module path bundles one vendor-neutral provider whose
+  `startSpan()` may return an OpenTelemetry Span directly. The adapter
+  validates `traceparent` / `tracestate`, isolates concurrent async contexts,
+  spans SSR/static/admin, authentication, WebSocket admission/upgrade/message,
+  and injects outbound webhook carriers. `platform.traceContext` and the
+  frozen `platform.trace` surface let realtime, Redis/Postgres bus, and
+  durable-work integrations continue the same operation. The provider is
+  optional; without it native hot paths retain direct no-span branches. A
+  configured module with no `startSpan` export now fails generated-server
+  startup instead of silently disabling tracing.
+
+- **One production operational-event sink across the realtime stack.**
+  `svelte-adapter-uws/observability` now exports
+  `setOperationalEventSink()` and `emitOperationalEvent()`. The
+  process-wide sink receives structured adapter, extensions, and realtime
+  records, defaults to canonical JSON console lines, and fails over to console
+  if a custom sink throws or rejects. Listener, Vite, SSR, authentication,
+  upgrade, and relay failures now use that path.
+
+- **Externally supplied diagnostic values are structurally routable and
+  bidirectionally safe.** Client subscription topics, relay-gap topics,
+  Redis/Postgres channels and group names, RPC paths, correlation IDs, and
+  error details now live in structured `attributes` under stable event
+  identities instead of being interpolated into English console prose.
+  Canonical physical lines visibly escape controls, bidirectional formatting
+  characters, and non-ASCII text while preserving the exact attribute values
+  for `parseDiagnostic()`.
+
+- **One ecosystem translation boundary now separates machine identifiers from
+  human prose.** English is the declared package source and diagnostic fallback
+  locale, while applications own message keys, catalogs, formatting, escaping,
+  and bidirectional isolation. A shipped registry classifies structured
+  diagnostics, error references, denial and close reasons, waiting-room
+  placeholders, protocol fields, and telemetry vocabulary so consumers do not
+  parse or render unstable \`.message\` and \`.reason\` strings as UI contracts.
+
+- **An accessible cursor composition now ships as a compiled example.** It
+  pairs public names and deterministic shapes with color, exposes meaningful
+  board locations in a navigable collaborator roster, announces only joins
+  and leaves, and drives the same cursor update from pointer movement and
+  focusable board controls. Canvas users get an explicit presentation-only
+  boundary and a low-rate feed route for the semantic companion. Remote names,
+  roster bursts, colors, and visual coordinates are bounded before rendering
+  or announcement.
+
+- **Honest integrated-onboarding contract.** The adapter front door now states
+  that one process and port do not remove the native preflight, Vite plugin,
+  WebSocket option, authentication, authorization, or production-build
+  checkpoints. Ecosystem docs consume the coordinated candidate tuple and
+  show one current configuration instead of a zero-config promise followed by
+  contradictory setup steps.
+
+- **Official ecosystem links are now an explicit trust contract.** The package front door and versioned architecture identify the GitHub owner, canonical documentation, hosted demo, and `svti.me` runtime-help role, including the permanent-redirect and domain-retirement policy.
+
+- **Package-attributed structured diagnostics.** `svelte-adapter-uws/observability` now exports `formatDiagnostic`, `createDiagnostic`, and `parseDiagnostic`; canonical lines expose stable `source`, `component`, `event`, and `severity` routing fields before a versioned JSON record. Listener, Vite-handler, and framework-assertion emitters use that grammar. The parser also normalizes the previous adapter, extensions, and realtime prefixes during the documented migration window, so mixed-version collectors can move without a flag day.
+
+- **The public first-success route now stops at an executable native prerequisite boundary.** The shipped `svelte-adapter-uws-preflight` binary checks Node, OS, CPU, Linux libc, and a real load of the pinned uWebSockets.js addon before configuration or build work begins. The freshly installed minimum Svelte profile runs the exact public command in CI before its type, build, HTTP, SSR-store, and WebSocket checkpoints.
+
+- **A versioned ecosystem architecture and decision corpus now ships with the package.** It defines adapter, realtime, extensions, application, and documentation ownership; traces request and event flow through single-worker, worker-thread, and multi-instance topologies; assigns failure and persistence responsibility; records release order; and indexes accepted decisions for protocol compatibility, the native baseline, cluster fan-out, persistence, release coupling, and documentation canonicality. Focused tests and the repository link gate require every decision to remain packaged, indexed, and reachable from the public entry surface.
+
+- The README entry surface now renders a bounded reader-path table from a
+  packaged documentation manifest. Local identity, first-success, and
+  compatibility routes are separated from the site-owned tutorial, how-to,
+  reference, explanation, and operations routes; the normal check rejects
+  route drift, an overgrown entry surface, or native-version facts copied
+  outside the generated compatibility block.
+
+- **Operator-facing failures now have a generated, searchable error reference.** Production and Vite runtime emissions are built from one owning registry and include a stable ID plus package-local help route. Each entry records cause, consequence, automatic recovery, next action, and every owning source; normal checks reject missing sources, registry drift, stale generated output, and release-channel-incompatible ecosystem links.
+
+- Svelte 4 support now has an independently locked application profile with an
+  exact Svelte, SvelteKit, Vite plugin, Vite, and type-checker tuple. CI installs
+  it as a normal local package and runs type/store, production build, SSR/HTTP,
+  and WebSocket round-trip checks; the public support row is generated from the
+  same fixture metadata.
+- Applications can now assign `Cache-Control` policies to versioned custom
+  static paths with validated `staticCacheControl` exact-file and directory
+  rules. Policies are resolved once during static indexing, preserve ETag,
+  range, and compressed-representation correctness, and cannot override the
+  adapter's built-in `/_app/immutable/` policy.
+- A generated Public entry points catalog now assigns every export-map key a
+  role, environment, stability, guide, and deprecation state, and the normal
+  check rejects an unowned new subpath. Runnable homes now cover the standalone
+  upgrade-response helper, CRDT binary client sink, and deterministic smooth
+  random stream alongside the existing safe-URL and webhook guides.
+- The README now opens with the reader outcome and immediate install, HTTP,
+  and realtime paths; the project origin story lives in a later dedicated
+  section.
+- A packaged adapter claim register now requires visible
+  Measured/Conditions/Reproduce or Guarantee/Requires/Verified evidence for
+  consequential public copy. Current HTTP, WebSocket, batching, dedup,
+  presence-compression, and cursor-codec figures were rerun and bounded; stale
+  universal rankings, parity, zero-cost, and per-layer claims were withdrawn.
+- WebSocket onboarding now puts the required Vite step and default-open
+  authentication boundary beside setup, names WSS as TLS transport rather than
+  complete security, and qualifies in-process dedup before its convenience
+  examples. A copy-order gate rejects unbounded absolute wording in these
+  decision surfaces.
+- Cursor smoothing and prediction guidance now separates decisions, required
+  actions, reasons, limits, mechanics, and evidence into rendered prose units
+  of at most 80 words. The safety-critical authority, replay, health, snapping,
+  and event-fan-out actions appear before their implementation mechanics, and a
+  copy-structure gate prevents those jobs from collapsing together again.
+- The newest release now opens with bounded consumer outcomes and ordered
+  Affects/Action/Requires/Compatibility/Detail fields before the engineering
+  log. A release-note gate enforces one sentence, 40-60 lead words, exact field
+  order, visible source, category coverage, and valid detail routes while
+  leaving immutable historical narratives untouched.
+- Public API reference blocks can now be owned by declaration JSDoc and
+  generated into bounded README regions. The first governed contract,
+  `platform.publishBatched`, now reflects the actual single-frame cross-worker
+  relay, key coalescing, cluster sequence authority, local fallback, and
+  compression behavior; a blocking generator and real two-server parity test
+  prevent either copy from drifting again.
+- A packaged protocol-conformance index now joins the normative specification,
+  schema, vectors, minimal Core client, reference surfaces, and executable CI
+  proofs into one reciprocal task map. A repository-only benchmark index maps
+  every performance claim and all 62 scripts to exact commands, environment
+  requirements, reported outputs, and interpretation limits without adding
+  development tooling to the npm tarball.
+- A stable migration index now routes to permanent versioned 0.4-to-0.5 and
+  0.5-to-0.6 guides plus an ordered three-package ecosystem upgrade page; old
+  transitions are explicitly archived instead of masquerading as current.
+- A dependency-free `svelte-adapter-uws/connection` production subpath exposes
+  `connectionSessionId(ws)` without loading test helpers or publishing the
+  adapter's internal user-data slot.
+- **Transport RED telemetry now covers ordinary traffic, not only admission
+  and sampled pressure.** Bounded-label counters and explicit seconds-valued
+  histograms measure HTTP completion, WebSocket upgrade decisions, awaited
+  inbound message handling, and connection lifetime. Every native TopicTree
+  publish result is classified as delivered or no-subscribers without walking
+  recipients. Histogram buckets, counts, and sums merge across workers and
+  survive routine worker replacement with the same monotonicity as counters.
+  Registries without the optional histogram factory retain counter coverage;
+  with metrics disabled the original handlers are registered unchanged and
+  publish sites perform only a null-hook check.
+- **The reliable Lantean protocol now has a WebTransport bidirectional-stream
+  freeze candidate.** A repeated `lantean-cap` CONNECT query declaration gates
+  exactly one client-opened bidi stream; canonical unsigned-LEB128 lengths wrap
+  byte-identical WebSocket messages, so welcome/hello, subscription, batch,
+  lease, resume, and `0x03` codecs share their existing schemas and vectors.
+  The binding settles FIN/session-close and QUIC-migration lifecycle, independent
+  datagram membership, 1 MiB record and pending-byte bounds, slow-consumer
+  reset posture, and four registered stream errors. Machine-readable schema
+  constants plus a fragmented byte-exact transcript pin prefix, topology,
+  capability, and rejection behavior pending independent freeze review.
+- **Deterministic I/O budgets now gate hot paths on operation counts, never
+  timings.** The normal suite pins HTTP cork/write counts, outbound frame
+  allocation and copy counts, zero-copy inbound frame parsing, stateless
+  encode-once fan-out, and one stateful batch frame per subscriber. Sixfold
+  input and subscriber fixtures prove which counts must stay constant, and
+  deliberately scaling and zero-work controls prove the detector can fail.
+  Binary framing now exact-sizes its destination, reducing each outbound frame
+  to one allocation and one codec-payload copy. Lower budgets are welcome;
+  raising one requires a recorded design reason beside the changed number.
+- **Primary docs now expose their companion surfaces.** README, migration,
+  protocol, schema, vectors, source entry points, and stable GitHub release
+  history are reachable as links instead of requiring package-source path
+  knowledge. Companion documents link back to the primary entry points.
+- **Documentation ownership is explicit.** A visible, versioned ownership table
+  assigns adapter identity, installation, support status, and routing to the
+  package README, and long-form ecosystem guides, searchable reference, and
+  operations walkthroughs to the documentation site. The site is linked from
+  both the top-level map and related projects. The contract permits only bare
+  canonical Markdown links at those two route locations and rejects rendered
+  style elements, stylesheet links, inline styles, rendered event handlers,
+  raw scripts, browser-effective JavaScript URLs (including schemes split by
+  encoded ASCII tab, line-feed, or carriage-return characters), iframe source
+  documents, refresh redirects, and rendered base elements that rewrite
+  relative companion routes, so hidden, inert,
+  inaccessible, styled-away, retargeted, or non-canonical substitutes fail
+  closed. A bounded owner, authority, home, stewardship, maintenance, and
+  documentation-scope grammar permits active, passive, gerund, causal, colon,
+  slash, parenthetical, and dash-separated restatements consistent with the
+  table. It recognizes authority possession, stewardship, charge, residency,
+  explicit assignment, joint ownership, and joint responsibility. Visible
+  table rows, HTML cards, and split grids are evaluated as semantic containers,
+  so an owner and scope cannot evade the contract by occupying adjacent
+  elements. Package-qualified documentation compounds remain package scope in
+  either word order, including guides to installation and support references.
+  Mismatched, joint, or ambiguous ownership statements fail closed without
+  claiming arbitrary natural-language understanding.
+- **Compatibility data is packaged and generated.** A versioned CSV manifest
+  (`docs/compatibility.v1.csv`) is the single source of truth for the legacy,
+  stable, and prerelease ecosystem lines: sibling package series, install
+  dist-tags, the Node floor, and the native addon pin. The README and
+  MIGRATION.md compatibility blocks are generated from it byte-for-byte.
+  Every published stable fact is digest-bound to the immutable
+  `svelte-adapter-uws@0.5.8` npm identity, so its `v20.67.0` native pin stays
+  truthful while the current prerelease validates independently against
+  `v20.69.0`; the moving prerelease row is bound to the adapter's own
+  lockstep release series and additionally cross-checked against sibling
+  workspace checkouts whenever they are present. A hand-written compatibility
+  table, moving dist-tag advice, or a manual install command anywhere else in
+  the packaged documentation fails the gate, which classifies rendered
+  Markdown and HTML rather than raw text, so encoded, quoted, wrapped,
+  aliased, or visually hidden variants cannot introduce a second source of
+  version truth. The gate runs first in `npm run check`, and publication runs
+  that same fail-closed chain.
+- **README navigation is executable documentation.** The table of contents now
+  covers every major section and the public webhook, plugin, testing,
+  simulation, and leak-harness entry points. A focused test fails when a new
+  major section or one of those high-value subsections is no longer reachable
+  from the table of contents.
+- **A public security-reporting policy.** `SECURITY.md` names the supported
+  stable and prerelease channels, routes vulnerability reports through
+  GitHub's enabled private-advisory form, describes the evidence maintainers
+  need, and avoids promising a response-time SLA the project cannot guarantee.
+- **Pressure-reason transition telemetry.**
+  `pressure_reason_transitions_total{from,to}` retains brief pressure
+  incidents and recoveries that begin and end between scrapes. The bounded
+  reason vocabulary keeps its label matrix finite, and the generated query
+  sheet and runbook classify the new signal.
+- **A versioned observability dashboard and executable Prometheus drill corpus.**
+  The shipped Grafana dashboard preserves deployment-target labels. A
+  digest-pinned official `promtool` CI lane parses and evaluates the shipped
+  recording and alert expressions against low-volume math, per-target no-data,
+  completeness, sampler-stall, down-target, and unrelated-target fixtures.
+  Every raw and recorded selector is scoped to the adapter target label. Alert
+  runbook links use a deployer-provided absolute base URL.
+- **A public, versioned observability contract.** The exported
+  `svelte-adapter-uws/observability` manifest declares the event/log envelope,
+  levels, request and trace correlation fields, data classifications, bounded
+  metric label and enum domains, worker/process aggregation, and explicit
+  local-versus-snapshot no-data laws. `observability.md` and the query sheet
+  are generated from that runtime manifest, and a reusable validator lets
+  sibling packages reject partial schema copies.
+- **A pinned cross-repository heads workflow.** It packs the adapter,
+  extensions, and realtime repositories at recorded commits, installs their
+  tarballs into disposable consumers on Linux and Windows, checks peer and
+  public-type coherence, and overlays packed sibling heads into the component,
+  browser, and database source trees before the existing cross-repo harness
+  runs them. An adapter-owned direct `tsc` replay verifies every installed head
+  byte-for-byte against its lock-integrity-pinned tarball, then attests the
+  locked compiler tree, strict config, and generated import corpus. A separate
+  direct corpus expands shipped wildcard export patterns to their concrete
+  package files, so wildcard declarations are checked even though the sibling
+  harness reports only its concrete export-key count. It compiles that corpus
+  under Bundler ESM, NodeNext ESM, and NodeNext CJS and requires identical
+  process results, covering standard `node`, `import`, `require`, `default`, and
+  nested `types` declaration branches. The result
+  is recorded in a closed evidence frame and reconciled with the harness's full
+  provenance header and exact rung transcript. Only the
+  exact pinned fingerprint of the known extensions type defect is non-blocking; any
+  other type, pack, install, peer, harness, or
+  missing-evidence failure still fails the workflow.
+- **A public contribution and backlog contract.** Structured bug, feature, and
+  usage-question forms, a pull-request evidence checklist, EditorConfig, and an executable
+  contract test now expose the rules before review. `CONTRIBUTING.md` defines
+  Ready and Done, risk-first priority, a provisional WIP limit, blocked and
+  30-day review rules, curated good-first work, generated/lockfile handling,
+  and the explicit no-CLA/no-DCO policy.
+- **An explicit release, hotfix, abort and rollback contract.**
+  `releasing.md` defines branch roles, freeze and promotion gates, immutable
+  package-version Git tags, dependency-ordered ecosystem publication, stable
+  hotfix merge-back, and dist-tag rollback. The append-only
+  `release-manifest.md` starts with registry-verified stable and prerelease
+  rollback identities; a contract test guards candidate identity continuity,
+  channel-role routing, publication ordering, exact quarantine restoration,
+  exactly one quarantine opening per published identity, forward-route denial
+  after rollback across cleanup and every later public event kind, strictly
+  increasing SemVer for ordinary and corrected public routes, downgrade-only
+  rollback to a version previously routed on that channel, canonical npm SemVer
+  without build-metadata aliases,
+  canonical UTC instants, previously routed rollback targets, complete
+  correction chains, row shape and uniqueness.
+
+### Changed
+
+- Moved `OBSERVABILITY.md`, `PRIVACY-INTEGRATION.md`, `RELEASE-MANIFEST.md`, `RELEASING.md` and `TRANSLATING.md` into `docs/` under the lowercase naming the rest of `docs/` already uses. The root keeps only what npm, GitHub, or a named package contract reads from there. The canonicality decision now states the placement rule and a test enforces it.
+- **Client failure text is explicitly diagnostic.** Every non-null `failure`
+  value now includes `diagnosticReason`; the former `reason` property remains
+  as a deprecated byte-identical alias for the 0.6 compatibility window.
+  Applications should map stable `class`, `kind`, `code`, and `status` fields
+  to localized message keys instead of rendering external HTTP status text,
+  browser WebSocket close text, or adapter fallback English.
+- **Zero-config presence and cursor projection is now fail-closed.** Presence
+  publishes only its configured dedup key by default, and cursor publishes only
+  an own `id`; either value must be a string or finite number. Display names,
+  avatars, colors, roles, profile data, and other fields now require an explicit
+  `select`. An explicit selector remains an application-owned policy override
+  and is not redacted. This is an intentional breaking change for applications
+  that relied on implicit profile projection.
+- **Wire presence updates now require an allowlist.** With
+  `clientUpdateFields` omitted, client `presence-update` frames cannot add
+  durable fields. Rejected fields are removed before nested reads,
+  serialization, or depth traversal. Trusted server-side
+  `presence.update()` calls retain their existing contract.
+
+### Fixed
+
+- **Diagnostic lines carry the family's public name.** The canonical
+  structured log prefix is now `[lantean/diagnostic ...]` and the
+  process-wide operational sink registers under
+  `Symbol.for('lantean.operational-event-sink.v1')` - the Lantean protocol
+  is the family identity every shipped document already defines, replacing
+  an internal working label that no consumer could resolve. Sibling
+  packages rename in lockstep on the same unreleased line. The attribution
+  gate now also covers `console.log`/`console.info`, and every boot and
+  lifecycle line carries the package prefix (the version banner is
+  attributed by its own first token).
+- **The tag-push release path can actually publish.** The release workflow
+  ran the identity verifier before `npm ci`, and the verifier imports an
+  installed dependency at module load - so every tag push died with a
+  module-resolution error before any check ran. The install now precedes
+  the verifier, the workflow checker holds a closed, ordered, unique-name
+  step inventory (an interposed step between pack and publish is exactly
+  where an artifact swap would live), the event revision is bound to the
+  annotated tag object or the checked-out HEAD, and a test spawns the
+  verifier as a real process so a dead module graph can never again look
+  like a green gate.
+- **The test harness enforces the payload cap it reports.**
+  `createTestServer` enforced a 64 KiB receiver limit on its real socket
+  while `platform.maxPayloadLength` reported 1 MiB - the same
+  report-versus-enforce split the production and Vite surfaces were fixed
+  for. One value (a new `maxPayloadLength` option, defaulting to the
+  production 1 MiB) now drives both, and a test proves the boundary against
+  the real socket: a frame under the reported cap is delivered, a frame
+  over it closes the connection. Guard messages for options that refuse
+  zero now state the real floor.
+- **The subscription-cap oracle closes its laundering routes.** A shipped
+  module comparing the live subscription Set's size outside the canonical
+  policy is now an offense repo-wide at any threshold (previously only the
+  three wire surfaces were scanned and only the exact cap constant was
+  matched elsewhere), the observer-lane predicate moved into the canonical
+  policy module where exclusive export ownership and the shadow ban apply,
+  and the shared plugin lane carries the same no-private-threshold rule.
+- **Observer snapshots under strict wire authorization are documented as
+  requiring the server grant** even when an application authorization hook
+  exists - strict means both authorities, and the presence and cursor
+  observer sections now say so instead of describing the permissive-hook
+  model.
+- **The observability pack can prove its alerts fire.** Every alert now has
+  a positive firing case in the promtool corpus - previously 15 of the
+  alerts appeared only in stay-silent assertions, which a rule that can
+  never fire satisfies identically - and the isolation cases use foreign
+  values that would fire each rule without its target matcher. Transport
+  SLO series ship as recording rules (HTTP server-error ratio, WebSocket
+  message error ratio, p95 latency overall and by method) with dashboard
+  panels and disabled-by-default burn-rate alert templates. A new
+  `AdapterTargetMissing` meta-alert pages when no scrape target carries the
+  required `adapter` label, so a forgotten relabel surfaces as an alert
+  instead of permanent silence. `AdapterBackpressureSustained` now fires on
+  the backpressured share of connections and `AdapterWaitingRoomBacklog` on
+  a sustained depth above ten, with tuning rationale in the runbook, and
+  the generated histogram queries use the canonical target-preserving
+  quantile form.
+- **Dev handler failures keep their stack, and recovery keeps its word.**
+  The structured Vite handler load/reload failure events are joined by the
+  raw error on the dev console (the structured record deliberately bounds
+  away the stack and source location a developer needs), recovery from an
+  initial load failure now fires the user's `init` hook so the recovered
+  event's no-action claim is true, the composed diagnostic line caps each
+  field so the action can never be truncated away, and the dev-console help
+  pointer is an absolute short link again instead of a repository-relative
+  path a console cannot resolve.
+- **The batched-publish contract states both relay shapes.** The canonical
+  `publishBatched` documentation claimed the origin always sends one
+  cross-worker frame; that holds only when the origin itself takes the fast
+  path, and the fallback (a subscriber without the `batch` capability, or
+  interested subscribers seeing different event slices) relays each
+  surviving event individually. The declaration-owned block now states that
+  the relay mirrors the origin's own path selection, a parity test drives
+  the fallback branch end to end, and the generator refuses a README region
+  marked generated whose id has no owning source block.
+- **No-body HTTP responses are counted.** `res.endWithoutBody` is a terminal
+  call - static assets answered to `HEAD`, bodyless SSR responses such as
+  redirects, and empty admin replies complete through it - but the transport
+  RED wrapper only instrumented `end`, `close`, and aborts, so that whole
+  class of ordinary traffic was invisible to `http_requests_total` and
+  `http_request_duration_seconds` while the transport read healthy. The
+  wrapper now patches it like `end`, the unit mock carries the method so the
+  omission is observable, and the real-runtime test drives a production
+  static-asset `HEAD` (SSR pages carry a body even for `HEAD`) and asserts
+  the counter moved.
+- **A throwing pressure listener can no longer take the worker down.** The
+  two listener-failure diagnostics carried an undeclared data class, so
+  `createDiagnostic` threw a `TypeError` from inside a catch block on the
+  1 Hz pressure timer - a documented `platform.onPressure` callback that
+  threw crashed the process instead of producing one log line. The records
+  now use the declared pseudonymous class with a bounded shared error
+  classifier (name, code, message; never the stack), and the pipeline is
+  hardened one layer down: `emitOperationalEvent` is total - an invalid
+  record is dropped to a plain console line and an unserializable attribute
+  falls back to the envelope - so telemetry can never turn the failure it
+  reports into a crash. A static gate keeps every `dataClass` literal in the
+  runtime inside the declared set.
+- **Operational failures converge on the process sink.** The TLS swap,
+  reload, and watch failures, the cluster metrics mirror/merge/primary
+  paths, worker thread errors, the admin handler, the subscribe and
+  subscribeBatch hooks, the resume hook, and the divergence detection signal
+  now emit canonical structured events (console prose before), the relay-gap
+  event pseudonymizes its topic like its pressure siblings, and the three
+  duplicated per-file error classifiers were replaced by the shared bounded
+  one.
+- **`vite dev` mirrors production correlation and the platform surface.**
+  The dev platform now carries `traceContext`, `trace`, and `diagnostic`
+  (degrading to the same answers production gives when tracing or clustering
+  is not configured), and the two adapter-owned dev 500s - authenticate and
+  upgrade hook failures - echo `X-Request-ID` and emit the same structured
+  events as production instead of dev-only prose.
+- **Divergence detail is proven against the real cluster.** A real
+  two-worker runtime with the state-hash reporter armed now drives the whole
+  production round trip in tests - a forked stream, the aggregate detector,
+  the primary's bounded per-worker collection over the thread boundary, the
+  replicated store, and the `platform.diagnostic` lookup - and asserts no
+  topic name survives into the evidence. The worker honors the primary's
+  requested topic bound (capped by its own), and the primary's divergence
+  signal uses the canonical diagnostic grammar.
+- **The bundled plugins declare their own cluster sequence authority.** The
+  multi-worker sequence guard on `platform.publish`/`publishWire` previously
+  made cursor, presence, and groups throw on every broadcast in any clustered
+  runtime, because those internal callers passed no options - and an
+  application could not fix it, since the plugins own the options bag. All
+  three now declare `{ seq: false }` (their state is re-established by
+  snapshot, not by replaying missed frames), a real two-worker cluster test
+  drives the groups plugin end to end to a client-delivered frame, and a
+  static gate fails on any new plugin publish site that declares nothing. The
+  in-memory replay buffer now refuses creation in a multi-worker runtime with
+  the fix in the message - its history and counter are per-worker, so a
+  cluster would serve divergent replay histories; the shared-backend replay
+  in svelte-adapter-uws-extensions is the clustered form. The per-publish
+  topology check is hoisted to a module constant, so the single-worker hot
+  path pays one boolean read.
+- **The game lane refuses compute workers, not just multi-I/O topologies.**
+  `gameLaneClusterSafe` gated only on the I/O-worker count, so in the
+  supported one-I/O-plus-compute topology a compute worker could run
+  `publishGame` and sequence rooms into its own counters while fanning out to
+  zero sockets - a second, silently-empty room sequencer forked from the real
+  one. The gate now also checks the worker's role; a real cluster test boots
+  the single-home fixture and proves the compute worker is denied while the
+  socket-owning I/O worker still passes.
+- **The authenticate cookie API can no longer fail open.** `createCookies`
+  now requires the request URL instead of defaulting to `http://localhost`;
+  the default computed `secure: false`, so a call site that dropped the
+  argument silently produced session cookies without `Secure` and no test
+  could tell. Relative cookie paths now resolve against the request URL
+  before serialization, as SvelteKit resolves them (RFC 6265 clients discard
+  a relative `Path` attribute), and a real-runtime test drives the
+  production authenticate endpoint end to end, asserting the `Set-Cookie`
+  header a client actually receives on localhost and non-localhost request
+  URLs.
+- **Consumers no longer download publisher-only tooling.** `markdown-it` and
+  `semver` moved from production `dependencies` to `devDependencies`, and the
+  compatibility checker script is no longer shipped in the package: it is
+  publisher tooling that runs in the repository through `prepublishOnly`,
+  and declaring its imports as production dependencies made every consumer
+  install download the whole markdown-it tree for a gate only the publisher
+  ever executes. `parse5` remains a production dependency
+  because the runtime waiting-room template sanitizer imports it. Publication
+  also no longer runs the compatibility gate twice, and the check-chain
+  policy now accepts any repository script while still rejecting
+  short-circuit shapes.
+- **The pacing-queue metrics now reach cluster snapshots.**
+  `upgrade_deferred_depth`, `upgrade_deferred_oldest_age_seconds`, and
+  `upgrade_deferred_rejected_total` were registered and documented but missing
+  from the signal manifest, so `platform.metricsSnapshot()` silently dropped
+  them from every merged document while the README stated their cross-worker
+  aggregation law. All three are declared now (`sum`, `max`, `sum`), and the
+  exported `validateObservabilityContract` additionally enforces the unit and
+  naming conventions and the aggregation-law legality rules that previously
+  lived only in this repository's test suite, so sibling packages validating
+  their own signals fail closed on a millisecond-valued name, an unknown law,
+  or a summed process-scoped gauge.
+- **Healthy workers now satisfy the metrics snapshot completeness gate.**
+  `relay_spill_pending_age_seconds` was declared a required worker gauge but
+  written only when a relay spill quarantine fired, so no healthy worker ever
+  produced a complete report: `metrics_snapshot_workers_reporting` rendered
+  `0` against the expected worker count in every deployment - including the
+  zero-config single process - which fired the shipped alert pack out of the
+  box and kept the healthy-zero counter and histogram families from ever
+  rendering. The gauge is now written every sampler tick (an explicit `0`
+  until the first quarantine, then the observed peak), and a real-runtime
+  test boots the production build and asserts the merged document reports
+  complete, non-degraded, with the zero families present.
+- **Upgrade pacing now has bounded memory and bounded recovery work.**
+  `upgradeAdmission.perTickBudget` no longer retains an unlimited array of
+  response closures or drains it with front-removing `shift()`. Its O(1) FIFO
+  ring retains at most `maxDeferred` callbacks per worker (default `1024`
+  while pacing is enabled); overflow releases both admission permits and
+  responds with `503 Service Unavailable`. Set `maxDeferred: 0` to retain no
+  queue after the current tick budget. Live depth, oldest age, and rejection
+  counts are exported as `upgrade_deferred_depth`,
+  `upgrade_deferred_oldest_age_seconds`, and
+  `upgrade_deferred_rejected_total`, with the shared rejection counter using
+  reason `deferred_overflow`.
+- **A hybrid subscribe hook can no longer replace a framework's tenant or room
+  grant.** `authorizeWireSubscribe: 'strict'` and
+  `platform.authorizeWireSubscribe('strict')` require both existing
+  server-grant membership and an application-hook allow across single, batch,
+  replay, resume, and observer lanes. The legacy boolean/no-argument policy is
+  unchanged, strict arming cannot be downgraded, and realtime can feature-test
+  the returned policy and fail startup instead of silently running open.
+- **Cross-worker divergence signals now identify the affected stream without
+  exposing topic names in logs.** The aggregate hash remains the normal path;
+  only a proven mismatch triggers a bounded per-worker snapshot of
+  process-lifetime HMAC stream ids and sequence maxima. The primary log carries
+  one opaque diagnostic id, default introspection lists metadata only, and the
+  exact record resolves through svelte-realtime's mandatory-auth, no-store
+  admin endpoint. Tail sequence gaps carry a lower bound, while missing,
+  truncated, or incomplete evidence remains explicitly inconclusive.
+
+- **Default pressure and invariant logs no longer retain raw topics.** Topic
+  cardinality and runaway-publisher diagnostics now carry a process-local
+  keyed reference plus character/byte counts under `dataClass=pseudonymous`.
+  Assertion contexts omit topic/event values, and debug publish lines use the
+  same opaque references. `platform.onPublishRate()` still receives raw topics
+  as an explicit application-owned observability surface.
+
+- **Remote cursor smoothing now follows reduced-motion preferences.** The
+  worker and main-thread canvas renderers watch the live
+  `prefers-reduced-motion: reduce` query, suppress interpolated in-between
+  frames while it matches, and reset sample history when the preference
+  changes so stale motion cannot replay. The accessible cursor composition
+  also includes an application-owned pause/hide control that leaves the board
+  and collaborator roster available.
+
+- **Owned failures now keep their correlation key.** SSR, authentication
+  endpoint, and WebSocket upgrade-hook failures emit canonical diagnostics with
+  the resolved request id and echo it as `X-Request-ID` on the adapter-owned
+  `500`, so concurrent failures can be joined without exposing raw exceptions.
+
+- **Alternative capacity responses now preserve one accessible document baseline.** `waitingRoom: false` content-negotiates a minimal HTML `503` for browser navigation while leaving WebSocket and non-HTML clients byte-identical. Custom string templates and localized renderer output are parsed and validated for document language and direction, non-empty title/body, exposed main/status semantics, and an enabled named recovery control or safe link; comments and hidden/inert subtrees cannot impersonate the accessible tree. The public `AccessibleWaitingDocument` type and starter template make that contract reusable instead of accepting fragments as pages.
+
+- Every README fenced block now has a checked-in classification and content
+  fingerprint. Normal and documentation verification compile standalone
+  JavaScript, TypeScript, Svelte, JSON, and YAML examples, keep intentional
+  fragments/configuration/output explicit, execute the packed runtime example,
+  and report coverage by class and channel so an unreviewed fence cannot drift
+  into publication.
+- Waiting-room string templates now compile when the adapter is configured and
+  reject unknown or unclosed `{{token}}` syntax with the supported-token list,
+  instead of deploying typos as visible page text. Quadruple braces provide a
+  documented literal-token escape, while repeated valid tokens remain valid.
+- The WebSocket `authenticate` cookie API now matches SvelteKit's protective
+  defaults: `HttpOnly`, `SameSite=Lax`, and `Secure` except on plain HTTP at
+  `localhost`. Setters and deletions require an explicit `path`, the request
+  URL drives the `Secure` decision in production and Vite, and only explicit
+  `false` disables a protection.
+- Clean installs now acquire uWebSockets.js from one exact HTTPS tag archive
+  shared by package metadata, the compatibility manifest, generated install
+  commands, and runtime recovery hints. The package postinstall hook imports the
+  addon immediately and preserves the native loader cause, so missing binaries
+  and Node ABI, CPU, OS, or libc mismatches fail during installation instead of
+  surfacing at build time. Linux requires glibc >= 2.38 and musl remains
+  unsupported. `SVELTE_ADAPTER_UWS_SKIP_NATIVE_CHECK=1` is the explicit escape
+  hatch for intentional client-only installs; disabling lifecycle scripts has
+  the same unverified result. The lockfile archive integrity and accepted
+  per-file digests replace Git and SSH as both the acquisition path and byte
+  identity.
+- The public plugin-authorization example now constructs `createLock()` and
+  invokes its `withLock()` method instead of importing a nonexistent named
+  function. CI extracts that exact README fence, resolves its public subpath
+  from an npm tarball, and executes the authorized path.
+- Current `sv create` onboarding now configures the adapter through the
+  generated `vite.config.ts` and direct `sveltekit({ adapter })` path, with the
+  pre-2.62 two-file form explicitly scoped as legacy. A real fixture canary
+  requires that consolidated form to produce `build/index.js` and serve its
+  first HTTP response, preventing a green adapter-auto build with no runnable
+  adapter output.
+- WebSocket onboarding now promises and lists all four steps it actually
+  presents, while capacity guidance describes failure-resistant defaults by
+  their refusal and eviction behavior instead of labeling the reader.
+- Fatal listener and degraded Vite handler diagnostics now state the immediate
+  effect, retry behavior, recovery path, and operator action in both readable
+  text and the canonical structured event envelope. Bind failures include host,
+  port, bounded error fields, and `willRetry: false`; handler load/reload errors
+  report HTTP and socket impact, and successful hot recovery emits `info`.
+- Programmatic adapter builds now close their Rollup build handle after both a
+  successful write and a failed write, so plugin cleanup hooks always run.
+- Outbound backpressure loss is now counted from uWS's exact `dropped` callback,
+  with per-window frame/byte fields and cumulative metrics; the bounded socket
+  walk remains headroom telemetry instead of being treated as evidence of loss.
+- The Vite dev WebSocket receiver now enforces its reported 1 MiB payload ceiling (or the configured flat `maxPayloadLength`) instead of silently inheriting `ws`'s 100 MiB default.
+- Refuse per-worker implicit topic sequences and built-in-relayed numeric sequences in multi-worker runtimes, preserving the protocol's monotonic-per-connection guarantee.
+- Refuse the single-home game relay lane when sockets span multiple I/O workers, preventing silent worker-local fan-out and divergent room sequencing.
+
+- **The cross-surface subscribe oracle now follows the live subscription Set,
+  not merely a descendant expression.** Cap calls must read `size` and
+  `has(topic)` through the same exact `WS_SUBSCRIPTIONS` alias, and socket
+  decision modules may not hand that Set or its size to an opaque helper. A
+  three-surface differential reaches sizes 16 and 1,000,000 without allocating
+  a million entries, pinning new-topic denial at the canonical boundary and
+  admission for an already-held topic.
+- **The public test-server declaration typechecks under strict consumers.** Its
+  `primaryInit` option now has one authoritative `{ env }` signature instead of
+  two conflicting interface members.
+- **Ordinary Markdown links are checked across the whole owned surface.** The
+  normal static gate now crawls every tracked and packaged Markdown document,
+  including release policy, security guidance, observability docs, test
+  vectors, and the changelog. Two stale historical links now resolve, and a
+  Markdown-only pull request can no longer bypass the gate. Relative targets
+  must remain inside the repository, use exact path casing, and be present in
+  the actual npm dry-run inventory when their source document is packaged.
+- **Cluster metrics no longer call an empty or partial worker complete.**
+  Worker reports include a bounded registration inventory, required gauges need
+  numeric samples, and restarted or partially initialized workers make snapshot
+  completeness truthful instead of hiding behind a fresh sibling.
+- **Optional pressure gauges no longer retain stale kernel values under a fresh
+  sample timestamp.** PSI and cgroup read failures clear the live reading, and
+  cgroup recovery starts from a fresh baseline. Availability is tri-state:
+  transient registration or lazy first-tick errors remain retryable, while
+  only confirmed missing kernel paths switch to the zero-cost disabled state.
+- **Metric contract parity is exact rather than name-only.** Runtime factories,
+  metric types, labels, help, units, scope, aggregation, origin, and formulas
+  are checked bidirectionally against the manifest and public documentation.
+  `metricsSnapshot()` is explicitly canonical and unprefixed; registry
+  serialization remains allowed to apply an operator prefix.
+- **Logical WebSocket subscriptions are accounted exactly once.** Wire,
+  platform, and plugin-tracked membership now share one add/remove primitive;
+  duplicate joins add zero, async revoke/unwind paths balance, and close removes
+  only memberships still present. The live counter is clamped after a soft
+  negative assertion so one mismatch cannot poison pressure decisions.
+- **The shared subscribe-policy oracle now rejects copied policy modules,
+  shadows in every binding position, parked or decorative calls, and
+  statically dead padding.** Production differentials exercise real
+  plugin-owned single and batch topics plus a revoke-during-hook race, and the
+  built handler-resolution assertion follows the marked side-effect hook.
+- Projection screening also recognizes `rawHeaders` transport containers,
+  closing authorization and cookie-name variants without treating ordinary
+  display fields as sensitive.
+
 ## [0.6.0-next.90] - 2026-08-01
 
 ### Fixed
@@ -31,8 +781,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   place, and a name-only comparison cannot see it. The walk reads property-style members
   (`name?: (...) => ...`) as well as method syntax, and is pinned by a probe on the last member
   so a parser that stops halfway fails instead of passing vacuously.
-- The `0.6.0-next.89` entry below said `metricsSnapshot()` collects each worker's *exposition
-  text*, which its own next paragraph and the implementation both contradict: what crosses the
+- The `0.6.0-next.89` entry below said `metricsSnapshot()` collects each worker's _exposition
+  text_, which its own next paragraph and the implementation both contradict: what crosses the
   thread boundary is recorded values, never rendered text. Corrected in place.
 
 ## [0.6.0-next.89] - 2026-07-31
@@ -178,13 +928,11 @@ checklist.
 
 ### Added
 
-
 - `upgrade_rejected_total{reason="duplicate_header"}` counts upgrades refused for an
   ambiguous repeated header. The documented reason list now also names `auth_rate_limit`,
   which the authentication preflight has always emitted on this counter, and says which
   rejections it does NOT cover: the preflight's own duplicate-header `400` is counted on no
   series.
-
 
 - `hooks.ws` `shutdown` receives `{ platform, reason, signal, deadline }`: `reason` is the signal or
   message that started the shutdown, `signal` aborts when the shutdown budget is spent, and
@@ -203,7 +951,6 @@ checklist.
   `lifecycleState` and `tlsReloadState` alongside the existing `start` / `shutdown` / `drain` - so a
   caller reads them from the module the runtime imports instead of reaching into a submodule and
   depending on the file split.
-
 
 - The built-in waiting-room holding page now carries a persistent status region
   (`role="status" aria-live="polite" aria-atomic="true"`) that is present at
@@ -236,9 +983,7 @@ checklist.
   and the free-slot news still reach a screen reader.
 - `button:focus-visible` styling on the page, which had no focus indicator.
 
-
 - **`snapSpeedPerSec`, an absolute teleport ceiling, on `createSmoothChannel` options and on `smooth` for `cursor()`** (threaded to the cursor render worker as well as to the main-thread fallback). `'auto'`, the default, is the detection described above. A positive number adds an exact ceiling in world units per second on top, for a topic that knows its own scale; set it above anything the simulation can legitimately produce, since a ceiling below real motion snaps constantly. It is deliberately a speed and not a distance: a distance tuned for the steady cadence fires on every dropped frame, where an honest pair spans several intervals and covers several times the ground. `0` turns both the automatic test and the ceiling off and restores pure interpolation, for content whose motion genuinely arrives in isolated one-interval bursts.
-
 
 - **Queue plugin: aggregate bounds.** `createQueue()` accepts `maxKeys`,
   `maxPendingTotal` and `maxRunningTotal` alongside the existing per-key
@@ -267,7 +1012,6 @@ checklist.
   `reason: 'maxSize' | 'maxKeys' | 'maxPendingTotal'`, and now fires for every
   bound that sheds a task, not only `maxSize`.
 
-
 - `createRateLimit({ onEvict })` - called once per eviction with `{ key, banned }`. `key` is the
   stored bucket key (`tenantId + '\0' + key` when a `tenant` resolver is set). `banned: true`
   means every sampled candidate was still serving a ban and enforcement state had to be dropped
@@ -275,7 +1019,6 @@ checklist.
   bans in flight.
 - `createRateLimit({ evictionSample })` - how many entries an eviction inspects before choosing
   a victim, default 16. The whole map is inspected when it holds fewer entries than this.
-
 
 - **`plugins/webhooks` gains a first-attempt admission gate keyed by the PINNED DESTINATION ADDRESS,
   so an endpoint's outbound allowance stops being a product of how many things name it.** Until now
@@ -312,7 +1055,7 @@ checklist.
   after the whole answer has been range-checked, so a private address anywhere in it still rejects
   the delivery - the cap can only narrow where a socket may go), which bounds the buckets and the work
   one delivery can cost. `createWebhookAdmission({ capacity = 100, refillPerSec = 10,
-  maxKeys = 1024 })` ships as the in-process default, reading time only through the runtime seam so
+maxKeys = 1024 })` ships as the in-process default, reading time only through the runtime seam so
   refill stays deterministic under a seeded harness. Its AGGREGATE ceiling is `maxKeys * capacity`
   admitted deliveries in a burst and `maxKeys * refillPerSec` per second sustained - 102,400 and
   10,240 on the defaults, and lowering `maxKeys` is how that is lowered. Those figures bound admitted
@@ -335,7 +1078,6 @@ checklist.
   compatible: omit `hooks.admission` and delivery is byte-identical to before, first attempts
   unrationed as documented.
 
-
 - **CRDT: `persist.store` and `persist.load` receive the context they run in.** `store` is
   now called as `store(topic, bytes, { signal, deadline, attempt })` and `load` as
   `load(topic, { signal })`: `signal` aborts when a flush deadline expires, when the topic is
@@ -355,16 +1097,13 @@ checklist.
 - **CRDT: `destroy()` aborts the host I/O still in flight** rather than dropping the replicas
   and leaving the store and load calls running against nothing.
 
-
 - **`groups`: read-only `group.maxMembers`.** Reports the resolved cap, including the default,
   so an app can show remaining slots or refuse a queued join without duplicating the option it
   passed to `createGroup()`.
 
-
 - **`npm run check` now fails when any tracked file names a `uWebSockets.js#<ref>` install spec other than the `optionalDependencies` pin** (`scripts/check-uws-pin.js`, wired into the `check` chain and so into `pretest`). The addon is a GitHub-hosted native build pinned by tag, and because it is an OPTIONAL dependency npm says nothing when a different tag is fetched, so a stale install line in a doc, a snippet or a test harness silently sends people to a different binary than the one the adapter is built and tested against. That skew has now happened twice. The expected tag comes from `uwsInstallSpec()` in `src/uws-load-hint.js`, the same derivation the runtime install hints use, so the guard and the messages it protects cannot disagree about what the pin is.
 
   The guard only sees the copy-pasteable spec form (`uNetworking/uWebSockets.js#<tag>`), never a bare version named in prose, so `CHANGELOG.md` and `MIGRATION.md` keep describing past pin moves exactly as written - a guard that forced history to be rewritten on every bump would be worse than the drift. `CHANGELOG.md` is skipped whole as append-only history. Lockfiles are reported as a note rather than failing the build, since a stale one is corrected by rerunning `npm install` in that directory and never by editing it. A deliberately synthetic spec (a unit-test fixture, say) opts out with a `uws-pin-allow: <reason>` comment on its line.
-
 
 - **`npm run doctor`** - one command that answers whether a green run on this
   machine proves anything. It checks the Node version against `engines` and
@@ -442,20 +1181,20 @@ checklist.
   v20.79.0. Two upstream changes matter to this adapter:
   - Upgrading an HTTP socket to a WebSocket inside a `cork()` callback from an ASYNC context
     - a timer, or any callback uWS did not itself drive - was buggy upstream. The adapter has
-    always upgraded that way and still does: an `authenticate` hook resumes the corked upgrade
-    after an await, and the per-tick admission budget resumes it after a `setImmediate`. No
-    workaround is removed here, because none was carried - the pattern the adapter already
-    uses is simply correct upstream now.
+      always upgraded that way and still does: an `authenticate` hook resumes the corked upgrade
+      after an await, and the per-tick admission budget resumes it after a `setImmediate`. No
+      workaround is removed here, because none was carried - the pattern the adapter already
+      uses is simply correct upstream now.
   - A build compiled with `UWS_WITH_PROXY` sitting behind an L4 (TCP) proxy could be made to
     report an attacker-chosen `getProxiedRemoteAddress()`: an L4 proxy does not parse HTTP, so
     a remote client could simply send an extra PROXY v2 frame and uWS would update its record
     for the connection. Any IP-level blocking or rate limiting built on that value was
     spoofable. Fixed upstream. This affects only builds compiled with `UWS_WITH_PROXY`; the
     published prebuilt binaries the adapter installs are not compiled with it.
-  `beginWrite()` is also new upstream, for establishing the chunked write path before the
-  first chunk is known; the adapter does not use it yet. The full suite passes across the
-  bump with no adapter change, and `npm run check` now fails if any tracked file names a
-  different tag than the pin.
+    `beginWrite()` is also new upstream, for establishing the chunked write path before the
+    first chunk is known; the adapter does not use it yet. The full suite passes across the
+    bump with no adapter change, and `npm run check` now fails if any tracked file names a
+    different tag than the pin.
 
 - **A repeated single-valued header now refuses the request with `400 Bad Request`**, where
   the last line used to win silently: `host`, `content-length`, `transfer-encoding`,
@@ -474,7 +1213,6 @@ checklist.
   documented configuration and the case the merge exists for; every OTHER configured
   address header keeps the last line, because that is the one the resolver can read.
 
-
 - Each precompressed static representation carries its own `ETag`, derived from the uncompressed one
   with the coding appended inside the quotes. Existing caches holding an entry under the old shared
   validator revalidate once into a full `200`; nothing is served incorrectly in the meantime.
@@ -486,7 +1224,6 @@ checklist.
 - `304 Not Modified` responses for static assets now carry `ETag`, `Vary: Accept-Encoding` and
   `Cache-Control`. A 304 updates a stored response, and without those a shared cache can attach it
   to the wrong stored variant or keep it under a freshness policy the origin no longer applies.
-
 
 - **BREAKING (only for `SHUTDOWN_TIMEOUT=0`; the default 30 is unchanged): `SHUTDOWN_TIMEOUT=0` now
   means NO budget - wait as long as the shutdown takes.** The budget added above covers application
@@ -508,7 +1245,6 @@ checklist.
   carries how long the close took, or is replaced by a `was NOT clean` error line naming the phase
   that ran out of budget.
 
-
 - The built-in holding page no longer claims a queue position or a wait
   estimate. `You are in line`, `Ahead of you: N` and `Estimated wait: N seconds`
   are gone: upgrade admission is a concurrency gate that keeps no per-client
@@ -522,20 +1258,17 @@ checklist.
   precision the estimate has.
 - Rendering the page without a live count - which the upgrade-refusal path does
   - now shows `Waiting for a free slot.` instead of `Ahead of you: 0` and
-  `Estimated wait: 0 seconds`. A refused visitor no longer reads a fabricated
-  zero until the first poll lands.
+    `Estimated wait: 0 seconds`. A refused visitor no longer reads a fabricated
+    zero until the first poll lands.
 - `{{queueDepth}}` and `{{estimatedSeconds}}` remain supported template tokens
   with unchanged values, for operator pages written against them. Their meaning
   is now documented where they are substituted: a count of browsers polling the
   page, and that count at a nominal one slot per second - neither is a position
   or a measured wait.
 
-
 - **`smoothWorld.set()` now documents where a placement is rendered.** The replacement travels as an ordinary update on the ordinary cadence, so nothing on the wire marks it discontinuous; the docstring (and `plugins/smooth/server.d.ts`) now names `snapSpeedPerSec` as the knob that governs how it is drawn.
 
-
 - **The 256-topic-name cap is documented in the unit it has always been enforced in: UTF-16 code units.** No behaviour change - `topic.length` was and remains the measure. The unit is stated because it is load-bearing: the server-side `maxTopicLength` caps in the cursor and throttle plugins read the same `topic.length` against the same default of 256, so a wire boundary counting Unicode code points instead would admit up to 512 units and hand a client-named topic to a plugin that then refuses it (throttle by throwing out of the app's own publish call, cursor by dropping every frame with no signal, with the client picking which). The wire ceiling stays at or below the narrowest downstream cap, in the same unit.
-
 
 - **Queue plugin: O(1) dequeue.** The per-key waiting list is a linked FIFO
   instead of an array with `Array#shift`, which was O(n) in the backlog length
@@ -545,7 +1278,6 @@ checklist.
   implementation at default options, best of three runs each: one key with 200k
   tasks 7.7s -> 0.10s (-98%), 1000 keys x 200 tasks -1% to -6%, 50k keys x 4
   tasks -7% to -9% (lower is faster; no shape regressed).
-
 
 - **BREAKING (return type): `CrdtAuthority.persistNow()` resolves to a `CrdtFlushResult`
   instead of `undefined`.** Callers that `await` the flush and ignore the value are
@@ -567,7 +1299,6 @@ checklist.
   periodic flush, not traffic. The flush result is where a caller learns that, which is why a
   shutdown path should act on `dirty` rather than flush and exit.
 
-
 - **`groups` plugin: `maxMembers` now defaults to `1_000_000` instead of `Infinity`.** Groups
   were the one plugin whose internal state had no bound unless the app remembered to set one,
   even though the capacity model promises that every plugin cap is finite by default. The new
@@ -577,7 +1308,6 @@ checklist.
   leave. Apps that genuinely want an unbounded group opt out explicitly with
   `createGroup(name, { maxMembers: Infinity })`. Saturation behaviour is unchanged: `join()`
   returns `false` and `onFull` fires.
-
 
 - The test workflow now triggers on `PROTOCOL.md`, `protocol.schema.json` and
   `test-vectors/**`. The spec says those artifacts are validated in CI against
@@ -600,7 +1330,6 @@ checklist.
   hard-fail rule did not cover.
 
 ### Fixed
-
 
 - **Repeated request header lines are no longer last-wins.** Every entry point collected
   headers with `headers[key] = value` per line, so a second line of the same name silently
@@ -662,7 +1391,6 @@ checklist.
   documented. The refusal now names the first offender without altering any other header's
   class.
 
-
 - Static assets no longer hand a resumed download bytes from a different representation. Byte
   ranges were always cut out of the uncompressed buffer, whatever content-coding the request had
   negotiated. A client that fetched an asset with `Accept-Encoding: br` stored brotli bytes, and its
@@ -687,7 +1415,6 @@ checklist.
   using compressed bytes as if they were the decoded file. The conditional check now runs against
   the validator of the representation the request would actually receive, and answers `200` with
   the right body when they differ.
-
 
 - **Readiness no longer reports ready while the server is still starting up.** The listen socket is
   bound before the app's `hooks.ws` `init` hook runs (deliberately - the kernel queues arriving
@@ -775,7 +1502,6 @@ checklist.
   deliberately NOT wired to certificate expiry: taking a fleet out of rotation because its
   certificate is running out removes a service that is still serving.
 
-
 - The page rendered `Estimated wait: 1 seconds`. The status line now agrees its
   noun and verb with the count (`About 1 person is` / `About 2 people are`), and
   large counts are grouped with an explicit locale. The whole sentence is
@@ -793,7 +1519,6 @@ checklist.
   taken, or replace live news with a paused notice that contradicted the button
   still on screen.
 
-
 - **Remote interpolation renders a teleport as a teleport, with no configuration.** The smoother treated a straddling sample pair as a discontinuity only when the pair spanned more than `snapGapMs` (default 500) - a TIME test. A server-side placement (`world.set`, a warp, a respawn, a scripted move) is delivered on the ordinary tick, so its two samples sit one interval apart like any other pair, and the render frame lerped the entity the whole way to the new position: a streak across the board, and in cells mode a pop between cells. The interpolator now also judges a pair against the entity's OWN neighbouring samples and snaps one that outruns both of them by a wide factor. That comparison needs no knowledge of the topic's units, which is what makes it safe to have on by default - the same code renders cursors in CSS pixels and game entities in arbitrary world units, and an entity the app has never moved has no absolute baseline at all while it always has neighbouring samples.
 
   Ordinary motion is untouched by construction: a pair is a jump only if it outruns the pair BEHIND it and, once a later sample has arrived, the pair AHEAD of it. Uniform motion, hard acceleration, hard braking and a dead stop each keep an adjacent pair moving at a comparable speed, and the first pair of a ring has no baseline behind it and is never judged.
@@ -802,9 +1527,7 @@ checklist.
 
 - **A placement during a resync is snapped, not smeared across the resume window.** The resume ease slides each remote entity from where it was last drawn to the rebuilt basis over `resumeEaseMs` (default 150). It armed unconditionally, so a server-side placement during a short blackout was painted every frame of that window - the same defect as the straddle smear, stretched over 150ms instead of one sample interval. The ease now measures its own slide against the entity's peak honest speed from the history being discarded (captured by `renderedSnapshot`, once per resume) and snaps when the slide would outrun it. An entity that was at REST before the resume has a peak of zero, so any disagreement between the two bases snaps: two bases should agree about where a resting entity is.
 
-
 - **Unpaired surrogates are rejected in wire topic names.** With `websocket.allowNonAsciiTopics: true` a client could subscribe to a topic containing a lone high or low surrogate - reachable through a JSON `\uD83D` escape in the subscribe frame, which parses to a lone surrogate without the frame itself ever being ill-formed UTF-8. Such a name is not encodable as UTF-8, so it is replaced by U+FFFD on the way back out of the socket: the `subscribed` ack and every published frame carry a name the client's own dispatch does not recognise, and the subscription stays open while silently delivering nothing. The same rule now applies on the server-named `platform.subscribe` / `platform.checkSubscribe` APIs, which run the same widened alphabet - there a name sliced mid-pair by app code leaves the client with no name it could send back to unsubscribe again. Both are answered with `INVALID_TOPIC` at the point of subscribe.
-
 
 - **Queue plugin: a per-key bound did not bound the queue.** `maxSize` capped
   one key's backlog and `concurrency` capped one key's in-flight tasks, but
@@ -841,7 +1564,6 @@ checklist.
   checked before any per-key state is created, so a shed push cannot leave an
   empty key behind - which would itself have leaked the cardinality `maxKeys`
   exists to bound.
-
 
 - **Rate-limit plugin: bucket eviction can no longer be aimed at an active ban.** At
   `maxBuckets` the plugin deleted the oldest insertion-order entry with no reference to
@@ -890,7 +1612,6 @@ checklist.
   evicts another key's bucket, so an app that bans ids supplied by the traffic it is defending
   against hands the attacker one eviction of somebody else's rate-limit state per ban.
 
-
 - **`plugins/webhooks` delivery controls no longer hand back the state they are supposed to enforce
   when their key cap is reached.** `createRetryBudget` and `createWebhookBreaker` reclaimed a slot by
   deleting the oldest key in insertion order, and the next access recreated it - a drained budget
@@ -914,12 +1635,11 @@ checklist.
   availability, which the type now says out loud: at `maxKeys` with nothing reclaimable, an untracked
   destination reports `capacity` while `take` refuses it for want of a slot.
 
-
 - **CRDT: a graceful `persistNow()` flush no longer reports a failed or declined store as
   a durable one.** Every per-topic store chain ends in its own terminal `catch` (it reports
   through `onError`, marks the replica dirty and arms a retry), and `persistNow()` awaited
   exactly those already-caught chains before resolving `undefined` - so `await
-  authority.persistNow()` resolved successfully after every host `store` call had rejected,
+authority.persistNow()` resolved successfully after every host `store` call had rejected,
   and a store that resolved `false` to decline the write was indistinguishable from one that
   wrote. A shutdown path could destroy the authority believing the documents were safe. The
   flush now resolves to `{ ok, durable, declined, failed, timedOut, dirty }`, so the caller
@@ -997,14 +1717,12 @@ checklist.
 
 ### Security
 
-
 - Every third-party action in both workflows is pinned to a full commit SHA
   rather than a tag, with the release it corresponds to in a trailing comment.
   `@v4` re-resolves on every run: a moved tag changes the code that checks the
   tree out and runs it without changing anything in this repository.
 
 ### Internal
-
 
 - `SampleRing.sampleInto` takes one resolved bounds object instead of a positional argument list whose neighbouring entries were in different units (`snapGapMs` in milliseconds, the speed bound per millisecond). Each pair's jump verdict is resolved when its sample lands and stored as one bit per ring slot, so a render frame costs a single bit test. Measured on `bench/34-smooth-straddle-ab.mjs` (medians of 3 runs of 7 rounds): 29 ns/entity with detection on against 29 ns/entity with it off at 200 entities, 35 vs 35 at 1000. `bench/micro-smooth-alloc.mjs` reports 0.642 bytes/entity/frame against its gate of 2.
 
@@ -1052,37 +1770,37 @@ checklist.
 
 - **`websocket.idleTimeout: 0` is documented as disabling the idle timeout.** Its siblings `upgradeTimeout` and `upgradeRateLimit` both say what their zero does and this one did not, while `maxPayloadLength: 0` and `maxBackpressure: 0` are refused outright because there zero INVERTS the option. `idleTimeout: 0` genuinely disables, so a guard would refuse a legitimate setting - what was missing is the consequence: it also stands down the automatic ping, so a peer that vanished silently is never reaped and keeps its slot.
 
-- **The SSRF gate no longer mistakes an IPv4-embedding IPv6 address for a public destination.** NAT64 (`64:ff9b::/96`, RFC 6052) and 6to4 (`2002::/16`) are unwrapped to their embedded IPv4 and re-checked, and Teredo (`2001::/32`) is refused outright. The RFC 8215 local-use prefix `64:ff9b:1::/48` needed particular care: RFC 6052 section 2.2 splits the address *around* the reserved octet at bits 64-71, so a contiguous 32-bit read starts an octet late and shifts every octet after it - under that reading `64:ff9b:1:c0a8:0:101::` decodes to a public address when it is really 192.168.0.1. Because the address text does not say which prefix length produced it, all six lengths are decoded **unconditionally** and the address is blocked if any of them lands somewhere private. Nothing about the address is allowed to disqualify a reading, because everything that could - the reserved u-octet, the padding after the embedded address - is under the sender's control and is not part of the embedded address at that length. Gating on either one hands an attacker an off switch: dirty the bits a given reading does not use, that reading is discarded, and a public-looking reading at another length acquits the address. `64:ff9b:1:a9fe:a9:fe00:808:808` is 169.254.169.254 under the RFC 8215 `/48` with a junk suffix, and it is refused. The only reading ever skipped is one landing in `0.0.0.0/8`, which is an artifact rather than a destination - read short it picks up prefix bits, read long it reads into the zero padding - and it is skipped only while some other reading carries a real address. An address with nothing after the prefix at all is the translator prefix itself, which resolves to `0.0.0.0`, and is refused. The whole of `64:ff9b::/32` is covered rather than just the well-known `/96` and the RFC 8215 `/48`, including the `/32` and `/40` layouts: `64:ff9b:c0a8:101::` is 192.168.1.1 under a `/32` deployment. That span is a deliberate fail-closed choice over space no deployment is entitled to use, **not** a spec requirement - IANA assigns only `64:ff9b::/96` and `64:ff9b:1::/48` inside the `/32`, and RFC 6052 section 2.2 says the well-known prefix "can only be used in the last form of the table", i.e. at `/96`. An earlier draft of this entry called a `/32` deployment "the most literal reading of the registered prefix", which is backwards: there is no registered `/32`, and reading those two layouts is what buys the 35% figure below. One property of the address *can* be acted on, and is: RFC 6052 section 2.2 reserves bits 64-71 and requires them to be zero in every layout, so an address inside the prefix with a non-zero value there is not a legal encoding at any length and is refused outright. Note the polarity, which is the opposite of the rejected gates - *discarding a reading* when those bits are dirty would hand the sender an off switch, whereas *refusing the address* cannot be used that way. It is checked only after every reading, so a private destination still reports its own range rather than being flattened to a conformance error. What it closes is a divergence class: this reader steps around the reserved octet and a translator doing a contiguous 32-bit read would not. Two residuals remain irreducible, because the prefix length is simply not recoverable from the address text when no `nat64Prefix` is declared. An address can be a legal encoding under two lengths at once, so a public destination encoded at `/48` may also be a legal `/56` encoding of something reserved: measured over random public destinations that refuses about 25% at `/48` and 35% at `/32` and `/40`. The well-known `64:ff9b::/96` is unaffected (0.00%), but every other shape pays, and some pay everything. A `/96` sourced from the RFC 8215 `/48` carries a 16-bit subnet id that becomes the leading octets of the phantom address, so 16557 of the 65536 subnet ids (25.3%) refuse **every** public destination while the rest are entirely clean - a subnet is dead or fine, never partial. The same trap applies at other lengths and is not limited to `/96`: a `/56` on a poisonous subnet byte refuses 100%, and a `/40` averages 43.8% across subnet bytes for that reason. There is no way to tell from the prefix alone whether yours is one of the dead ones, which is the argument for declaring it. `allow` cannot be used to escape this - the range check runs before the allow-list by design, so allowlisting never re-opens a blocked address - and an earlier draft of this entry wrongly said it could. The escape is `nat64Prefix` below. And a destination inside `0.0.0.0/8` is allowed when another reading of the same bits looks public - including `0.0.0.0` itself, since the bare-prefix rule above requires groups 3 to 7 to be entirely zero and junk in a group the matching reading does not use switches it off, so `64:ff9b:1:0:0:0:8:8` reads `0.0.0.0` at `/48` and is allowed. What bounds that residual is the shape of the skip itself: it tests for a zero leading octet, which is exactly the condition reported as `unspecified` and no other reason's, so it cannot hide a loopback, RFC1918 or metadata address. The entire class it can suppress is `0.0.0.0/8`. That residual is real rather than theoretical, and an earlier draft of this entry wrongly called it harmless: reaching loopback by way of `0.0.0.0` is not merely a `connect(2)` quirk, because Linux substitutes the loopback route inside `__ip_route_output_key_hash`, the generic output-route lookup every in-kernel caller reaches. A NAT64 translator that routes its own translated packet through it - Jool does, without validating the destination - therefore lands on the translator's own loopback, and neither RFC 7915 (which requires no destination validation) nor RFC 6052 section 3.1 (whose MUST-drop is scoped to the well-known prefix, which none of the reachable shapes use) prevents it. The floor is blind SSRF against the translator appliance itself; what the range bound above guarantees is that it cannot reach the calling host's own metadata or RFC1918. Declaring `nat64Prefix` removes it entirely. ISATAP (RFC 5214) is unwrapped too: it carries its IPv4 in the low 32 bits behind a `0000:5efe` or `0200:5efe` interface identifier under any unicast prefix, so unlike 6to4 and NAT64 there is no prefix to recognise. A 6to4 address whose own embedded IPv4 is public no longer short-circuits that check, since 6to4 and ISATAP coexist on the same host in the standard Windows configuration and the private address hides in the identifier. On the IPv4 side, RFC 6598 carrier-grade NAT (`100.64.0.0/10`, which carries Alibaba Cloud's metadata endpoint at 100.100.100.200), benchmarking (`198.18.0.0/15`), multicast (`224.0.0.0/4`), reserved (`240.0.0.0/4`) and the IETF protocol block (`192.0.0.0/24`) are now classified. The IPv6 side gained the twins it was missing - multicast `ff00::/8`, deprecated site-local `fec0::/10`, and the RFC 2765 IPv4-translated form `::ffff:0:0:0/96` (one group longer than the IPv4-mapped `::ffff:0:0/96`, and not to be confused with it) - so an attacker-controlled AAAA record can no longer reach through a gate that blocks the IPv4 spelling of the same address. GCP's bare `metadata` hostname joins the fully-qualified form, since the instance search domain makes the short spelling resolve identically. A resolver returning zero addresses now fails closed instead of skipping the rebinding check entirely.
+- **The SSRF gate no longer mistakes an IPv4-embedding IPv6 address for a public destination.** NAT64 (`64:ff9b::/96`, RFC 6052) and 6to4 (`2002::/16`) are unwrapped to their embedded IPv4 and re-checked, and Teredo (`2001::/32`) is refused outright. The RFC 8215 local-use prefix `64:ff9b:1::/48` needed particular care: RFC 6052 section 2.2 splits the address _around_ the reserved octet at bits 64-71, so a contiguous 32-bit read starts an octet late and shifts every octet after it - under that reading `64:ff9b:1:c0a8:0:101::` decodes to a public address when it is really 192.168.0.1. Because the address text does not say which prefix length produced it, all six lengths are decoded **unconditionally** and the address is blocked if any of them lands somewhere private. Nothing about the address is allowed to disqualify a reading, because everything that could - the reserved u-octet, the padding after the embedded address - is under the sender's control and is not part of the embedded address at that length. Gating on either one hands an attacker an off switch: dirty the bits a given reading does not use, that reading is discarded, and a public-looking reading at another length acquits the address. `64:ff9b:1:a9fe:a9:fe00:808:808` is 169.254.169.254 under the RFC 8215 `/48` with a junk suffix, and it is refused. The only reading ever skipped is one landing in `0.0.0.0/8`, which is an artifact rather than a destination - read short it picks up prefix bits, read long it reads into the zero padding - and it is skipped only while some other reading carries a real address. An address with nothing after the prefix at all is the translator prefix itself, which resolves to `0.0.0.0`, and is refused. The whole of `64:ff9b::/32` is covered rather than just the well-known `/96` and the RFC 8215 `/48`, including the `/32` and `/40` layouts: `64:ff9b:c0a8:101::` is 192.168.1.1 under a `/32` deployment. That span is a deliberate fail-closed choice over space no deployment is entitled to use, **not** a spec requirement - IANA assigns only `64:ff9b::/96` and `64:ff9b:1::/48` inside the `/32`, and RFC 6052 section 2.2 says the well-known prefix "can only be used in the last form of the table", i.e. at `/96`. An earlier draft of this entry called a `/32` deployment "the most literal reading of the registered prefix", which is backwards: there is no registered `/32`, and reading those two layouts is what buys the 35% figure below. One property of the address _can_ be acted on, and is: RFC 6052 section 2.2 reserves bits 64-71 and requires them to be zero in every layout, so an address inside the prefix with a non-zero value there is not a legal encoding at any length and is refused outright. Note the polarity, which is the opposite of the rejected gates - _discarding a reading_ when those bits are dirty would hand the sender an off switch, whereas _refusing the address_ cannot be used that way. It is checked only after every reading, so a private destination still reports its own range rather than being flattened to a conformance error. What it closes is a divergence class: this reader steps around the reserved octet and a translator doing a contiguous 32-bit read would not. Two residuals remain irreducible, because the prefix length is simply not recoverable from the address text when no `nat64Prefix` is declared. An address can be a legal encoding under two lengths at once, so a public destination encoded at `/48` may also be a legal `/56` encoding of something reserved: measured over random public destinations that refuses about 25% at `/48` and 35% at `/32` and `/40`. The well-known `64:ff9b::/96` is unaffected (0.00%), but every other shape pays, and some pay everything. A `/96` sourced from the RFC 8215 `/48` carries a 16-bit subnet id that becomes the leading octets of the phantom address, so 16557 of the 65536 subnet ids (25.3%) refuse **every** public destination while the rest are entirely clean - a subnet is dead or fine, never partial. The same trap applies at other lengths and is not limited to `/96`: a `/56` on a poisonous subnet byte refuses 100%, and a `/40` averages 43.8% across subnet bytes for that reason. There is no way to tell from the prefix alone whether yours is one of the dead ones, which is the argument for declaring it. `allow` cannot be used to escape this - the range check runs before the allow-list by design, so allowlisting never re-opens a blocked address - and an earlier draft of this entry wrongly said it could. The escape is `nat64Prefix` below. And a destination inside `0.0.0.0/8` is allowed when another reading of the same bits looks public - including `0.0.0.0` itself, since the bare-prefix rule above requires groups 3 to 7 to be entirely zero and junk in a group the matching reading does not use switches it off, so `64:ff9b:1:0:0:0:8:8` reads `0.0.0.0` at `/48` and is allowed. What bounds that residual is the shape of the skip itself: it tests for a zero leading octet, which is exactly the condition reported as `unspecified` and no other reason's, so it cannot hide a loopback, RFC1918 or metadata address. The entire class it can suppress is `0.0.0.0/8`. That residual is real rather than theoretical, and an earlier draft of this entry wrongly called it harmless: reaching loopback by way of `0.0.0.0` is not merely a `connect(2)` quirk, because Linux substitutes the loopback route inside `__ip_route_output_key_hash`, the generic output-route lookup every in-kernel caller reaches. A NAT64 translator that routes its own translated packet through it - Jool does, without validating the destination - therefore lands on the translator's own loopback, and neither RFC 7915 (which requires no destination validation) nor RFC 6052 section 3.1 (whose MUST-drop is scoped to the well-known prefix, which none of the reachable shapes use) prevents it. The floor is blind SSRF against the translator appliance itself; what the range bound above guarantees is that it cannot reach the calling host's own metadata or RFC1918. Declaring `nat64Prefix` removes it entirely. ISATAP (RFC 5214) is unwrapped too: it carries its IPv4 in the low 32 bits behind a `0000:5efe` or `0200:5efe` interface identifier under any unicast prefix, so unlike 6to4 and NAT64 there is no prefix to recognise. A 6to4 address whose own embedded IPv4 is public no longer short-circuits that check, since 6to4 and ISATAP coexist on the same host in the standard Windows configuration and the private address hides in the identifier. On the IPv4 side, RFC 6598 carrier-grade NAT (`100.64.0.0/10`, which carries Alibaba Cloud's metadata endpoint at 100.100.100.200), benchmarking (`198.18.0.0/15`), multicast (`224.0.0.0/4`), reserved (`240.0.0.0/4`) and the IETF protocol block (`192.0.0.0/24`) are now classified. The IPv6 side gained the twins it was missing - multicast `ff00::/8`, deprecated site-local `fec0::/10`, and the RFC 2765 IPv4-translated form `::ffff:0:0:0/96` (one group longer than the IPv4-mapped `::ffff:0:0/96`, and not to be confused with it) - so an attacker-controlled AAAA record can no longer reach through a gate that blocks the IPv4 spelling of the same address. GCP's bare `metadata` hostname joins the fully-qualified form, since the instance search domain makes the short spelling resolve identically. A resolver returning zero addresses now fails closed instead of skipping the rebinding check entirely.
 - **A WebSocket subscribe that was revoked mid-authorization can no longer install its grant.** `platform.unsubscribe` cannot remove a subscription that does not exist yet, so a revocation arriving while an async authorization hook is parked used to be lost, and the subscribe completed afterwards against a permission that had already been withdrawn. Revocation now bumps a per-topic epoch that each in-flight attempt carries, and an attempt whose epoch is stale discards its grant and answers the client with a denial rather than an acknowledgement. The epoch is per attempt rather than a single per-topic flag because a flag has one slot: a client sending the same subscribe frame twice re-armed it, so the already-revoked attempt landed to find itself apparently permitted while the innocent one was denied - both halves wrong, and both driven from the wire.
 - **The auth preflight endpoint is rate limited (`authPathRateLimit`, default 30 per 10s per IP).** The upgrade door was metered and the preflight beside it was not, so the app's `authenticate` hook - typically a credential check against a database, the most expensive thing an app does per connection - was reachable at raw server capacity from a single address. Only an Origin gate and a body cap stood in front of it, and an Origin gate does not bound rate: a non-browser client sends whatever `Origin` it likes. The check runs after the cheap origin/CSRF predicate but before any body is read. Proofless or cross-origin traffic therefore cannot spend the shared per-IP budget of legitimate clients behind the same NAT; a non-browser client that supplies accepted origin proof is metered before body read and hook invocation. It does not save the header walk - resolving the client address needs `ADDRESS_HEADER` before there is an identity to meter by, so the headers are collected first. The default is deliberately higher than `upgradeRateLimit`: every reconnect that preflights also upgrades, so this door sees at least as much traffic during a deploy's reconnect wave, and matching them 1:1 would make the preflight the binding constraint and refuse traffic the upgrade limit would have admitted. `0` disables it. The sliding-window estimator, the entry cap and the eviction policy were extracted into one module for the new door to use rather than being written a second time by hand - the upgrade limiter had accumulated several non-obvious and individually load-bearing decisions (evict rather than refuse at the cap, sample rather than scan, bound the key length as well as the entry count) and a hand-written copy would have reproduced the shape while missing at least one. The upgrade door now runs that same module rather than its own inlined copy, so the two cannot drift; the copies were behaviourally identical when written, which is exactly why keeping both was a bad bet - the IPv6 key fold below had to land in one place, not two.
 - **A presence field is bounded by depth as well as size.** The byte cap does not bound nesting: a value roughly 8 KB on the wire can nest thousands of levels deep, which is about four times deeper than the `structuredClone` serializer the cluster relay publishes through can survive. Stored, it terminated the worker on the next relayed publish - far worse than a dropped frame, and not something any byte cap can prevent. Client-supplied fields nested past the projection depth cap are now dropped silently, like every other malformed update. The depth check is iterative rather than recursive, because a recursive one would blow its own stack on exactly the input it exists to reject.
 - **The default presence and cursor projections drop more personal data and transport metadata than credentials alone.** This is a best-effort DEFAULT, not a boundary: it is a denylist and it cannot close, so a novel credential name passes until it is added. An app that puts a user record on a peer-visible entry must select the fields it wants published; do not rely on this list to withhold anything in particular. The denylist covered credential shapes only, so a zero-config app whose `upgrade` hook returned a user record broadcast every peer's `email`, `phone`, `dob`, `ssn`, `iban`, card number and PIN on the roster - and again on every diff, heartbeat and snapshot. The set is now the runtime's own sensitive-name list, so one idea of "sensitive" covers logs and broadcasts alike. The client IP was also crossing under two spellings this project's own documentation endorses: the ratelimit plugin reads `ud.remoteAddress || ud.ip || ud.address` and documents all three, so matching only `remoteAddress` left an app following that convention publishing peer IPs. `ip`, `address`, `headers`, `url` and `requestId` are now dropped too - the case the denylist exists for is an upgrade hook that spreads its whole context, which puts `x-forwarded-for` and a token-bearing query string on the wire verbatim, and neither is credential-shaped. Short names (`ssn`, `dob`, `cc`, `pin`) are matched per word rather than as substrings of a separated name, so `account`, `success` and `spinner` are unaffected; `ssn` and `dob` additionally match inside a name carrying no separator and no hump, where there is no word boundary to find (see the compound entry above), while `cc` and `pin` deliberately do not, because flat `account` and `spinner` contain them. **`author`, `authorId`, `authorName` and `authoredAt` now pass**, where a bare `auth` substring match had been silently dropping them from every roster; `authorization`, `oauth` and `authToken` are still refused.
 - **The `resume` frame honours the server-grant model.** Resume is client-named - the frame carries the topics in `lastSeenSeqs` and the app's resume hook typically answers each one with that topic's replay buffer - and it was the one client-named lane with no grant check, which made it the largest of them: it yields a topic's message history, not a roster. Under the pure-grant model (armed, no app subscribe hook) topics the connection was never granted are now dropped before the hook sees them. Filtered rather than refused whole, because a reconnect names every topic the client held and it legitimately holds some of them - refusing the frame would break every legitimate reconnect while serving nothing extra. Untouched when the gate is off or an app hook owns the topic decision, which is the same condition the other lanes use.
 - **`presence.update()` charges a field name at its serialized size.** The budget counted the raw name while storing and re-broadcasting the JSON-escaped one, so a name of control characters cost a sixth of what it occupied - a client could retain roughly six times the documented `maxTotalFieldsBytes` with every frame staying under the per-frame cap, and every byte of it rode each subsequent snapshot and heartbeat. `presence` also gained `topicThrottle`, bounding how often a topic's diffs are published: the byte caps bound how much state one user retains, and this bounds how often it is re-broadcast, which is the other half of the same amplification. It defaults to 16 ms, matching cursor's roughly-60-Hz topic cadence; `0` explicitly restores the previous next-tick-only coalescing.
-- **Revoking a topic now releases the presence and cursor observer taps derived from it.** `__presence:<topic>` and `__cursor:<topic>` are separate subscriptions established on the connection's behalf, and both plugins keep them alive across a participant leave on purpose - a co-resident observer's roster would otherwise freeze - releasing them only on socket close. So `platform.unsubscribe(ws, topic)`, which is what a kick, ban or lease expiry runs, removed the grant and left the tap in place: the revoked client kept receiving the roster and every peer's cursor position, and for cursor kept *publishing* too, because that lane authorizes an outgoing frame by asking whether the socket still holds the tap. Plugins now declare their derived prefix and the platform releases it on revocation, so this is one release point rather than a rule each plugin has to remember. The registry is held under a `Symbol.for` key rather than a module binding, because the bundler gives the plugin package and the runtime separate instances of that module - with a plain binding the plugin registered into one registry while the platform read another, which passed in-process and did nothing in a real build.
-- **A plugin's subscribe hook no longer disarms the server-grant gate.** The gate steps aside when the app exports a `subscribe` hook, on the reasoning that an app which took over the topic decision owns it. Presence's hook is not that - it joins a roster and returns `undefined` on every path, so it never denies - yet the documented wiring re-exports it, which meant arming `authorizeWireSubscribe` and following the presence README produced *no enforcement at all*: any client could name any topic, be subscribed, and receive that topic's roster and live diffs. Plugin hooks are now marked as side effects and do not count as the app taking over authorization. They still run exactly as before, and an app that wraps a plugin hook in its own function is deliberately not marked, so the documented escape hatch keeps working.
+- **Revoking a topic now releases the presence and cursor observer taps derived from it.** `__presence:<topic>` and `__cursor:<topic>` are separate subscriptions established on the connection's behalf, and both plugins keep them alive across a participant leave on purpose - a co-resident observer's roster would otherwise freeze - releasing them only on socket close. So `platform.unsubscribe(ws, topic)`, which is what a kick, ban or lease expiry runs, removed the grant and left the tap in place: the revoked client kept receiving the roster and every peer's cursor position, and for cursor kept _publishing_ too, because that lane authorizes an outgoing frame by asking whether the socket still holds the tap. Plugins now declare their derived prefix and the platform releases it on revocation, so this is one release point rather than a rule each plugin has to remember. The registry is held under a `Symbol.for` key rather than a module binding, because the bundler gives the plugin package and the runtime separate instances of that module - with a plain binding the plugin registered into one registry while the platform read another, which passed in-process and did nothing in a real build.
+- **A plugin's subscribe hook no longer disarms the server-grant gate.** The gate steps aside when the app exports a `subscribe` hook, on the reasoning that an app which took over the topic decision owns it. Presence's hook is not that - it joins a roster and returns `undefined` on every path, so it never denies - yet the documented wiring re-exports it, which meant arming `authorizeWireSubscribe` and following the presence README produced _no enforcement at all_: any client could name any topic, be subscribed, and receive that topic's roster and live diffs. Plugin hooks are now marked as side effects and do not count as the app taking over authorization. They still run exactly as before, and an app that wraps a plugin hook in its own function is deliberately not marked, so the documented escape hatch keeps working.
 - **A flag that restricts access is refused when its value is not a boolean, and the dev plugin warns on options it does not recognize.** `authorizeWireSubscribe` is read as `=== true`, which treats every other value as "off" - so `websocket: { authorizeWireSubscribe: process.env.WS_AUTHZ }` built cleanly, emitted `false`, and left the gate disarmed. That is the same silent no-op as dropping the key, moved from the key to the value, and the unknown-key warning cannot catch it because the key is spelled correctly. A non-boolean value is now a build error naming the env-var conversion, matching how every other misshaped adapter option is treated. Permissive siblings like `allowSystemTopicSubscribe` still coerce, because for them coercing lands on the safe state; this one is the inverted case. Separately, the Vite dev plugin had no option checking at all, so `uws({ authorizeWireSubcribe: true })` ran dev wide open while the developer's own testing showed the app working - it now refuses the misshaped value and warns on an unrecognized key, and the message notes that the dev plugin takes these flags flat rather than under `websocket`. Both checks live in one shared module rather than a copy per surface. The adapter's three build-internal root exports also gained the declarations they were missing, so importing them typechecks instead of only running.
 - **The wire-subscribe security posture is explicit and validated on all three development surfaces.** `createTestServer({ authorizeWireSubscribe: 'true' })` used to silently run permissively even though production and Vite rejected the same misshaped value, creating a false-green authorization harness; it now uses the shared restrictive-boolean guard too. The Vite documentation now states the other parity requirement plainly: adapter `websocket` options are build configuration and are not copied into the separately-created dev plugin, so an app that arms production statically must repeat `uws({ authorizeWireSubscribe: true })` in `vite.config.js`. Real built-runtime and real Vite-server tests drive both `subscribe` and `subscribe-batch`, and the Vite option test derives equality between runtime reads, the known-key warning table and `UWSPluginOptions` instead of maintaining a one-way/manual list.
-- **A plugin leave or evict now cancels a subscribe that is still being authorized, and the grant gate is re-checked where the grant is installed.** The revocation epoch was bumped only by `platform.unsubscribe`, so the shared membership primitive behind presence leave, groups leave and cursor viewport changes removed a subscription while a subscribe parked in its authorization await sailed past it and re-installed the membership afterwards - leaving the socket subscribed to a topic it had just been evicted from. That primitive now tombstones the topic exactly as `platform.unsubscribe` does, which covers every plugin leave path at once rather than one call site at a time. Separately, the wire subscribe and subscribe-batch landings re-evaluate the server-grant gate against the *current* grant set rather than the reading taken before the awaits, so a revocation that drops a membership without bumping the epoch cannot be defeated by a decision made before it happened. Under the grant model that re-check can only refuse a topic whose grant disappeared mid-flight: a topic that was never authorized is already refused before the hook runs, and an authorized one takes the idempotent acknowledgement path. The in-process test server carries the same landing re-check, and the Vite dev server carries it on its batch path.
-- **`upgradeResponse()` rejects headers that would split the 101 response.** uWS writes header names and values verbatim into the handshake, so a CR, LF or NUL in a value (or a name outside the RFC 7230 token alphabet) let an app that composed untrusted data into a header inject arbitrary response lines. Validation happens at construction, so the failure surfaces inside the app's own upgrade hook, and independently in the runtime, which snapshots the headers and validates the snapshot it is about to write. Validating the app's live object would not have been enough: the object stays the app's own, and admission control can defer the write to a later macrotask, so a shared or module-level headers object rewritten by another connection's hook in that gap would have gone out unvalidated. Non-string values are refused too: uWS rejects them at write time, which is *after* the 101 status line has already been corked, so `{ 'x-ratelimit-remaining': 3 }` - an entirely natural mistake - left the client holding a half-written handshake instead of getting a clean refusal. Passing no headers at all is explicitly fine (`upgradeResponse(ud, needsRefresh ? h : undefined)`), since there is nothing to validate and the runtime skips the write. The refused character class is Node's own `checkInvalidHeaderChar` - tab, printable ASCII and the high range are accepted, everything else refused. Listing only CR, LF and NUL let VT, FF and DEL through to the wire verbatim, so a value this guard accepted was one `cookies.set()` in the same package refused, and one that would throw inside the first Node-based proxy in front of the app rather than being refused cleanly here.
+- **A plugin leave or evict now cancels a subscribe that is still being authorized, and the grant gate is re-checked where the grant is installed.** The revocation epoch was bumped only by `platform.unsubscribe`, so the shared membership primitive behind presence leave, groups leave and cursor viewport changes removed a subscription while a subscribe parked in its authorization await sailed past it and re-installed the membership afterwards - leaving the socket subscribed to a topic it had just been evicted from. That primitive now tombstones the topic exactly as `platform.unsubscribe` does, which covers every plugin leave path at once rather than one call site at a time. Separately, the wire subscribe and subscribe-batch landings re-evaluate the server-grant gate against the _current_ grant set rather than the reading taken before the awaits, so a revocation that drops a membership without bumping the epoch cannot be defeated by a decision made before it happened. Under the grant model that re-check can only refuse a topic whose grant disappeared mid-flight: a topic that was never authorized is already refused before the hook runs, and an authorized one takes the idempotent acknowledgement path. The in-process test server carries the same landing re-check, and the Vite dev server carries it on its batch path.
+- **`upgradeResponse()` rejects headers that would split the 101 response.** uWS writes header names and values verbatim into the handshake, so a CR, LF or NUL in a value (or a name outside the RFC 7230 token alphabet) let an app that composed untrusted data into a header inject arbitrary response lines. Validation happens at construction, so the failure surfaces inside the app's own upgrade hook, and independently in the runtime, which snapshots the headers and validates the snapshot it is about to write. Validating the app's live object would not have been enough: the object stays the app's own, and admission control can defer the write to a later macrotask, so a shared or module-level headers object rewritten by another connection's hook in that gap would have gone out unvalidated. Non-string values are refused too: uWS rejects them at write time, which is _after_ the 101 status line has already been corked, so `{ 'x-ratelimit-remaining': 3 }` - an entirely natural mistake - left the client holding a half-written handshake instead of getting a clean refusal. Passing no headers at all is explicitly fine (`upgradeResponse(ud, needsRefresh ? h : undefined)`), since there is nothing to validate and the runtime skips the write. The refused character class is Node's own `checkInvalidHeaderChar` - tab, printable ASCII and the high range are accepted, everything else refused. Listing only CR, LF and NUL let VT, FF and DEL through to the wire verbatim, so a value this guard accepted was one `cookies.set()` in the same package refused, and one that would throw inside the first Node-based proxy in front of the app rather than being refused cleanly here.
 - **Handshake header snapshots no longer execute app-controlled array hooks.** Calling an array value's `slice()` let it return a custom iterable that yielded safe bytes during validation and CRLF when the runtime iterated it again at the wire sink. Header arrays are now copied by index into native arrays and consumed by index in both production and the published test server, so overrides of `slice`, `Symbol.iterator`, and `Symbol.species` cannot create a validate/use split.
 - **The in-process test server enforces the same handshake, subscribe-authorization and revocation rules as production.** `svelte-adapter-uws/testing` is a published export, and it reimplemented these decisions by hand: it wrote upgrade-response headers with no validation at all, ignored the `requireGrant` mode of `checkSubscribe` that the shared `Platform` type advertises, and had no revocation tracking, so `platform.unsubscribe` racing an async authorization hook silently missed. An app verifying its own tenancy boundary or ban logic against it could therefore see a clean pass for behaviour production refuses - the worst possible direction for a test double to be wrong in. The header guard, the grant conjunct and the revocation epoch are now the same shared predicates the runtime uses rather than copies of them, and a parity suite drives one vector table through every surface so a future divergence fails a test instead of waiting for an audit. `platform.unsubscribe` there now returns `true` when it cancels an in-flight grant, matching production. The Vite dev server gained the grant conjunct for the same reason, and its own revocation tracking (see the dev entry below); it discards upgrade-response headers rather than writing them, so it was never a splitting sink.
 - **The presence and cursor default projections no longer broadcast credentials.** Both plugins previously passed the whole of `ws.getUserData()` to every peer on a topic, which for most apps means the session object. They now share one denylist (`plugins/_shared/sensitive.js`) that drops auth/session-shaped names, credential-shaped key names (`key` standing alone, or qualified as `apiKey`, `accessKey`, `privateKey`, `licenseKey` and similar - structural identifiers like `primaryKey`, `foreignKey` and `sortKey` still pass, as do `monkey` and `keyboard`), the adapter-injected `remoteAddress`, and the prototype gadgets; binary views become a `'[bytes: <len>]'` placeholder. `select: (ud) => ud` restores the old passthrough. The denylist covers the configured dedup `key` field with no exemption, because the resolved key is broadcast as the roster key in every frame - so a credential-shaped one is dropped and the tracker warns at construction rather than publishing it.
 - **`presence.update()` can no longer overwrite the identity its peers see, or grow without bound.** Server-reserved names (the dedup key field, `id`, `role`, `__`-prefixed, `constructor`/`prototype`, credential-shaped) are stripped from updates; `clientUpdateFields` replaces that guard with an explicit allowlist, though it can never re-admit the prototype gadgets. A fields blob over `maxFieldsBytes` (8 KB) is dropped, and one user's durable fields are held to `maxTotalFieldsBytes` (64 KB) cumulatively - counting field names and their JSON framing, not just values, since a client sending long names with one-byte values otherwise stored megabytes under the cap and every byte of it rode each subsequent snapshot and heartbeat. `maxTopicsPerConnection` (100) bounds the remaining cross-topic multiplier at about 6.25 MiB of retained dynamic fields per socket. Connection-cap eviction now releases the evicted roster entries too; previously it discarded only the connection lookup, orphaning those fields in snapshots and heartbeats with no later close path able to remove them.
 - **Binary decode paths define `__proto__` as an own property instead of assigning it.** The wire value codec, the presence roster codec and the smooth field-delta codec all reached the inherited setter, replacing the decoded object's prototype with wire-controlled data instead of creating the key - and in presence's case producing a roster member who was in every server-side count but invisible in every client-rendered list. The roster accumulators are null-prototype for the same reason, as is the subscribe-batch denial map, where a topic literally named `__proto__` could not be allowed even when the app's hook allowed it.
-- **The per-IP upgrade rate map is bounded at insertion.** It was previously trimmed only by the 60 s sweep, so a burst of rotating client identities grew it unbounded in between. At the cap the least active of a bounded rotating sample is evicted rather than the new client being refused: refusing looks like the fail-closed choice, but the map is a shared resource, and one host rotating `X-Forwarded-For` could otherwise fill it cheaply and lock out every other client until the next sweep - turning a slow leak into a total outage for new connections. A full scan per insertion would have been its own amplification, hence the sample. Evictions are counted on `upgrade_rate_map_evicted_total`. Keys are also truncated to 128 characters, matching the accepted single-address-header ceiling, which makes the entry cap bound *memory* rather than only entry count while preserving every identity the single-address resolver accepts. Longer `X-Forwarded-For` chains sharing a prefix collapse into one limiter bucket, so an oversized rotating flood rate-limits itself sooner.
+- **The per-IP upgrade rate map is bounded at insertion.** It was previously trimmed only by the 60 s sweep, so a burst of rotating client identities grew it unbounded in between. At the cap the least active of a bounded rotating sample is evicted rather than the new client being refused: refusing looks like the fail-closed choice, but the map is a shared resource, and one host rotating `X-Forwarded-For` could otherwise fill it cheaply and lock out every other client until the next sweep - turning a slow leak into a total outage for new connections. A full scan per insertion would have been its own amplification, hence the sample. Evictions are counted on `upgrade_rate_map_evicted_total`. Keys are also truncated to 128 characters, matching the accepted single-address-header ceiling, which makes the entry cap bound _memory_ rather than only entry count while preserving every identity the single-address resolver accepts. Longer `X-Forwarded-For` chains sharing a prefix collapse into one limiter bucket, so an oversized rotating flood rate-limits itself sooner.
 - **The `same-origin` WebSocket check honours the `ORIGIN` env.** The startup guard counts `ORIGIN` as a host pin, but the check itself compared the request `Origin` against the `Host` header - which a non-browser client controls, so two attacker-supplied headers were being compared. `ORIGIN` is now authoritative when set, including at both Vite auth and upgrade boundaries. Vite also resolves its handler before deciding whether a missing Origin may defer to `upgrade()`; an upgrade arriving while the module loaded previously observed no hook and returned 403 even though production and every later dev request admitted the hook-authenticated client. Deployments reachable under several hostnames should leave `ORIGIN` unset or list the origins explicitly; see the `allowedOrigins` documentation. The default-port strip is also anchored now, so `example.com:8080` is no longer rewritten to `example.com80`.
-- **`presence.sync()` and `cursor.snapshot()` honour the server-grant model.** Both are gated only by `platform.checkSubscribe`, which consulted the app's hook chain but never the grant set, so under a pure-grant deployment (armed, no app hook) they handed over a roster for any topic named. They now pass `{ requireGrant: true }`, which additionally requires the topic to already be in the connection's grant set. That mode is opt-in rather than the default because the ordinary use of `checkSubscribe` is to gate *before* establishing a grant, and it defers to an app subscribe hook exactly as the wire gate does.
+- **`presence.sync()` and `cursor.snapshot()` honour the server-grant model.** Both are gated only by `platform.checkSubscribe`, which consulted the app's hook chain but never the grant set, so under a pure-grant deployment (armed, no app hook) they handed over a roster for any topic named. They now pass `{ requireGrant: true }`, which additionally requires the topic to already be in the connection's grant set. That mode is opt-in rather than the default because the ordinary use of `checkSubscribe` is to gate _before_ establishing a grant, and it defers to an app subscribe hook exactly as the wire gate does.
 - **Plugin snapshot lanes respect the per-connection subscription cap**, and `presence.join()` rolls its roster entry back if the subscribe is refused rather than leaving a user visible to every peer on a channel they will never receive. Ingress bindings are capped per connection and by retained target size, measured in bytes.
 - **The Vite handler handoff reads SvelteKit's resolved configuration, including direct `sveltekit(config)` setups.** The first repair imported only `svelte.config.{js,mjs,cjs}` and assumed SvelteKit had cached that exact URL. Current SvelteKit can intentionally ignore those files when configuration is passed directly, and its file loader uses a cache-busting query, so the import could both miss the live adapter and evaluate app config a second time. Build and dev now take the validated adapter object from SvelteKit's resolved plugin API, with the file import retained only for older Kit releases. Adapter-owned handler paths also keep the adapter's project-working-directory base when Vite has an explicit `root`, instead of being silently reinterpreted relative to that root.
-- **`websocket.handler` is honoured when the Vite plugin is installed, and a build where the two disagree is refused.** The plugin resolves the WebSocket handler and emits it into the SSR output *before* the adapter runs, and the adapter then took that file as it stood - so with the plugin installed, which is the setup the adapter's own build warning tells you to adopt, a handler named in `websocket.handler` was never read and the auto-discovered `src/hooks.ws.js` was built instead. Silently, while the build log positively reported that a handler had been built. That is not a configuration nicety, because the module that wins decides which hooks the app has and an app-supplied `subscribe` hook stands the server-grant model down: an app that armed `authorizeWireSubscribe` and pointed `websocket.handler` at a deliberately hook-free module got a build whose serialized options said `"authorizeWireSubscribe":true` while an ungranted wire subscribe was admitted over a real socket, because the substituted module exported a `subscribe` hook and the gate stepped aside for it. The gate's own documented escape hatch became reachable by accident. The plugin now reads `websocket.handler` from the app's Svelte config, so one value drives the dev server and the build; naming a *different* module on the plugin as well is refused rather than settled by precedence, since there is no reading of the two under which one is meant to lose in silence. The adapter additionally records which module was bundled and refuses to build when that disagrees with its own option - the plugin honours the option, so this catches only the paths where it could not, such as an unreadable Svelte config or a second copy of the package - and the build log now names the module it built rather than only asserting that one exists, which is what kept the substitution invisible. The dev server resolved independently too, never consulting `websocket.handler` at all, so an app naming its handler there developed against one set of authorization hooks and shipped another; both surfaces now go through one resolver. A handler named explicitly but missing from disk is reported by name instead of surfacing as a bundler resolve error.
+- **`websocket.handler` is honoured when the Vite plugin is installed, and a build where the two disagree is refused.** The plugin resolves the WebSocket handler and emits it into the SSR output _before_ the adapter runs, and the adapter then took that file as it stood - so with the plugin installed, which is the setup the adapter's own build warning tells you to adopt, a handler named in `websocket.handler` was never read and the auto-discovered `src/hooks.ws.js` was built instead. Silently, while the build log positively reported that a handler had been built. That is not a configuration nicety, because the module that wins decides which hooks the app has and an app-supplied `subscribe` hook stands the server-grant model down: an app that armed `authorizeWireSubscribe` and pointed `websocket.handler` at a deliberately hook-free module got a build whose serialized options said `"authorizeWireSubscribe":true` while an ungranted wire subscribe was admitted over a real socket, because the substituted module exported a `subscribe` hook and the gate stepped aside for it. The gate's own documented escape hatch became reachable by accident. The plugin now reads `websocket.handler` from the app's Svelte config, so one value drives the dev server and the build; naming a _different_ module on the plugin as well is refused rather than settled by precedence, since there is no reading of the two under which one is meant to lose in silence. The adapter additionally records which module was bundled and refuses to build when that disagrees with its own option - the plugin honours the option, so this catches only the paths where it could not, such as an unreadable Svelte config or a second copy of the package - and the build log now names the module it built rather than only asserting that one exists, which is what kept the substitution invisible. The dev server resolved independently too, never consulting `websocket.handler` at all, so an app naming its handler there developed against one set of authorization hooks and shipped another; both surfaces now go through one resolver. A handler named explicitly but missing from disk is reported by name instead of surfacing as a bundler resolve error.
 
-- **A `subscribe-batch` frame no longer runs the app's subscribe hook for a topic the grant gate already refused.** The single-subscribe path denies before its hook; the batch path computed the same decision, ran the hooks over every valid topic anyway, and consulted the decision only when installing the membership. Hooks are not pure - the documented presence wiring joins a roster and opens a `__presence:` observer tap - so for a refused topic those side effects had already happened: in one frame, holding no grant, a caller was added to a private topic's roster, broadcast to its real members as a join, handed the full roster, and left holding a live tap that kept delivering, and only then told `FORBIDDEN`. The same request spelled as a single `subscribe` leaked nothing, and that asymmetry between two spellings of one thing was the defect. The batch resume/recover call between the hook and the landing was covered at the same time: it sits after the awaits and before the membership is installed, so it took its decision from the reading captured *before* the hook parked, and served a revoked topic's replay history - the largest thing any client-named lane yields - while the landing afterwards correctly refused the subscription. It now re-reads the current grant set and the revocation tombstone. Both mirrors carry the fix.
+- **A `subscribe-batch` frame no longer runs the app's subscribe hook for a topic the grant gate already refused.** The single-subscribe path denies before its hook; the batch path computed the same decision, ran the hooks over every valid topic anyway, and consulted the decision only when installing the membership. Hooks are not pure - the documented presence wiring joins a roster and opens a `__presence:` observer tap - so for a refused topic those side effects had already happened: in one frame, holding no grant, a caller was added to a private topic's roster, broadcast to its real members as a join, handed the full roster, and left holding a live tap that kept delivering, and only then told `FORBIDDEN`. The same request spelled as a single `subscribe` leaked nothing, and that asymmetry between two spellings of one thing was the defect. The batch resume/recover call between the hook and the landing was covered at the same time: it sits after the awaits and before the membership is installed, so it took its decision from the reading captured _before_ the hook parked, and served a revoked topic's replay history - the largest thing any client-named lane yields - while the landing afterwards correctly refused the subscription. It now re-reads the current grant set and the revocation tombstone. Both mirrors carry the fix.
 - **The `groups` plugin's documented wiring no longer stands the server-grant gate down.** The gate steps aside for the whole connection when the app exports a subscribe hook, and this plugin's README tells apps to re-export its own. That hook decides exactly one topic - the group's `__group:` channel - and returns nothing for every other topic, so arming `authorizeWireSubscribe` and following the plugin's README produced no enforcement anywhere: any client could name any topic and be subscribed. It is now marked a side effect, exactly as presence's was, which keeps the gate armed while the hook still runs and its `false` still refuses. Presence was fixed for this; groups was the identical unfixed instance beside it.
-- **Both rate limiters key IPv6 on the /64 rather than the full address.** A /64 is the smallest block a host is routinely *given* - the standard allocation from every major provider and most residential ISPs - so keying on the /128 let one ordinary attacker source every request from a fresh address, never collide with itself, and drive either door at full server speed while the limiter recorded one request per identity. Both `upgradeRateLimit` and `authPathRateLimit` were void against a single dual-stack host. IPv4 keeps its full address, and so does anything that is not unambiguously a global IPv6 address: IPv4-mapped (`::ffff:1.2.3.4`, which is what an IPv4 client looks like on a dual-stack listener and whose /64 is shared by the entire IPv4 internet), any address whose first four groups are zero, and a value that does not parse - with `ADDRESS_HEADER` set the key need not be an address at all. Merging distinct clients is the worse error, so every uncertain case declines to fold.
+- **Both rate limiters key IPv6 on the /64 rather than the full address.** A /64 is the smallest block a host is routinely _given_ - the standard allocation from every major provider and most residential ISPs - so keying on the /128 let one ordinary attacker source every request from a fresh address, never collide with itself, and drive either door at full server speed while the limiter recorded one request per identity. Both `upgradeRateLimit` and `authPathRateLimit` were void against a single dual-stack host. IPv4 keeps its full address, and so does anything that is not unambiguously a global IPv6 address: IPv4-mapped (`::ffff:1.2.3.4`, which is what an IPv4 client looks like on a dual-stack listener and whose /64 is shared by the entire IPv4 internet), any address whose first four groups are zero, and a value that does not parse - with `ADDRESS_HEADER` set the key need not be an address at all. Merging distinct clients is the worse error, so every uncertain case declines to fold.
   Shared translation prefixes are kept whole too: NAT64, Teredo, and link-local `/64`s can represent unrelated clients. Conversely, 6to4 gives one site `2002:V4ADDR::/48`, so its key folds to that `/48`; otherwise one site can rotate through 65,536 independently metered subnets. Scoped values and bracketed literals with malformed suffixes are left opaque so an attacker-controlled address header cannot alias a legitimate bucket by appending ignored text.
 - **An option that sizes a rate limit refuses a value that is not a number.** `authPathRateLimit: process.env.AUTH_LIMIT` is the natural way to write these, and what you get depends on how the variable is set: an empty or unset one produced `''`, which **disabled the limiter outright** (`'' > 0` is false, so the whole block was skipped), while `'30'` happened to work and `NaN`/`Infinity` fell back to the default. A door whose enforcement depends on which of those three you land on is refused at build time instead. `0` still disables a LIMIT deliberately; a zero WINDOW is now refused too, because it does not disable anything - it makes every request look like a fresh window, the sliding estimate evaluate to `NaN`, and `NaN >= limit` false, so everything is admitted.
-- **A typo nested inside an object-valued option is reported.** The unknown-key warning walked top-level `websocket.*` keys only, and for `upgradeAdmission` that was not cosmetic: every gate reads `maxConcurrent > 0`, so `maxConcurent: 500` left the concurrency ceiling, the cursor lane sized from it, and the waiting room all switched off with nothing said at build or boot - and the 1 MB `maxPayloadLength` default is documented as safe *because* that ceiling bounds it. `upgradeAdmission`, its `waitingRoom` and `cursorLane`, and the `pressure` thresholds are now walked too, and an unknown key is reported by its full path.
+- **A typo nested inside an object-valued option is reported.** The unknown-key warning walked top-level `websocket.*` keys only, and for `upgradeAdmission` that was not cosmetic: every gate reads `maxConcurrent > 0`, so `maxConcurent: 500` left the concurrency ceiling, the cursor lane sized from it, and the waiting room all switched off with nothing said at build or boot - and the 1 MB `maxPayloadLength` default is documented as safe _because_ that ceiling bounds it. `upgradeAdmission`, its `waitingRoom` and `cursorLane`, and the `pressure` thresholds are now walked too, and an unknown key is reported by its full path.
 - **`cursor.update()` bounds client data by depth as well as size.** Nesting costs about two bytes a level, so 8 KB of client JSON - comfortably inside the 8192-byte `maxDataBytes` default - reaches roughly 4000 levels, while the `structuredClone` the cluster relay publishes through overflows around 1834. Stored, the blob is re-serialized on every read: it threw out of `cursors.list()`, the documented SSR call, so every server render of that board returned 500 until the sender's socket closed, and on the relay path it terminated the worker rather than dropping one frame. Presence has bounded this since the same class was found there; cursor took client data on the identical path and did not.
 - **The default projections drop credential-shaped names that a closed qualifier list was letting through.** `key` qualified by a word was matched against a list of qualifiers that make it secret, so every unlisted one passed: `streamKey` (RTMP), `serverKey` (FCM), `hmacKey`, `deviceKey`, `webhookKey`, `signKey`, `cryptoKey`, `symmetricKey`, `recoveryKey`, `pairingKey`, `vapidKey`, `idempotencyKey` and `authorKey` all rode the roster - while their snake_case spellings were correctly dropped, because only the camelCase form lacked the separator the word rule needed. Same value, two spellings, opposite verdicts. The rule is inverted: `key` as a word is a credential unless its qualifier makes it an identifier (`primaryKey`, `foreignKey`, `sortKey`, `partitionKey`, `rowKey`, `cacheKey`, `publicKey`, `userKey`). The client IP was crossing under every qualified spelling for the same reason - only the bare `ip`, `address` and `remoteAddress` were matched, so `clientIp`, `ipAddress`, `remoteIp`, `peerIp`, `ip_address`, `ipv4`, `ipv6` and `remoteAddr` all published peer IPs - as were `x-forwarded-for`, `userAgent`, `host` and `referer`. Names whose words are ordinary on their own (`url`, `host`) are still matched whole, so `avatarUrl`, `imageUrl` and `hostId` keep riding a roster.
 - **An own `toJSON` can no longer replace a projected subtree at serialize time.** `typeof fn === 'object'` is false, so a function value was not projected - it took the pass-through branch and was copied to the wire verbatim. `JSON.stringify` then invoked it and substituted whatever it returned for the whole subtree, so every name check above it counted for nothing and a projection that had already dropped `email` and `sessionToken` published both. Function values are now dropped by both defaults.
@@ -1120,7 +1838,7 @@ checklist.
 - **`npm run check` now refuses a named runtime export that carries no declaration.** Three root exports shipped undeclared and were declared one at a time; nothing checked the class, so the next change re-broke it, and adding this gate immediately found a fourth and then two more on `./client`, the package's most imported subpath. A consumer importing an undeclared name gets `any` from a package whose whole premise is that the types ship, and nothing fails until somebody notices by hand. Every subpath in the `exports` map is paired automatically rather than from a hand-kept list, and the runtime side is read from acorn's AST: a hand-rolled scanner cannot tell a regex literal from division, and one that treated `/['"]/` as the start of a string silently swallowed 42,000 of `src/index.js`'s 47,420 characters and reported that file as having no exports at all.
 - `websocket.adminAuthAcknowledged` silences the boot warning that the auto-mounted admin route carries no adapter-level authentication, once an operator has confirmed the handler gates itself. A warning that cannot be turned off after it has been acted on is how a log learns to be ignored.
 - `presence` gained `maxFieldsBytes`, `maxTotalFieldsBytes` and `clientUpdateFields`.
-- **`safe-url` gained `nat64Prefix`**, so a deployment on a NAT64 network can state its exact prefix (`{ nat64Prefix: '64:ff9b::/96' }`, `'64:ff9b:1:a::/96'`, or one from its own address space) instead of paying for prefix-length ambiguity. With the exact value, one RFC 6052 reading is taken rather than all six, which takes both the over-block and the `0.0.0.0/8` residual described above to zero while still refusing private embedded addresses. For a Network-Specific Prefix outside the default-recognised `64:ff9b::/32`, the option is required for SSRF protection. **Treat it as a trusted assertion and declare the exact prefix your translator uses.** A parseable wrong length in either direction can turn a blocked address into an allowed one: a shorter declaration reads prefix bits as the destination, while a longer declaration reads destination and suffix bits. The real length is not recoverable from the address text, and trying every length would restore the false positives this option exists to remove. A non-zero suffix proves some mismatches and is refused, but a clean suffix does not prove the declaration correct. Only an *unparseable* value is safe by default - that one is ignored in favour of reading every length. At `/96` RFC 6052 additionally requires bits 64-71 of the prefix itself to be zero, and a declaration violating it refuses the whole range rather than none. Accepted by `isSafeUrl`, `checkUrl`, `checkUrlResolved`, `classifyAddress` and `isAddressSafe`.
+- **`safe-url` gained `nat64Prefix`**, so a deployment on a NAT64 network can state its exact prefix (`{ nat64Prefix: '64:ff9b::/96' }`, `'64:ff9b:1:a::/96'`, or one from its own address space) instead of paying for prefix-length ambiguity. With the exact value, one RFC 6052 reading is taken rather than all six, which takes both the over-block and the `0.0.0.0/8` residual described above to zero while still refusing private embedded addresses. For a Network-Specific Prefix outside the default-recognised `64:ff9b::/32`, the option is required for SSRF protection. **Treat it as a trusted assertion and declare the exact prefix your translator uses.** A parseable wrong length in either direction can turn a blocked address into an allowed one: a shorter declaration reads prefix bits as the destination, while a longer declaration reads destination and suffix bits. The real length is not recoverable from the address text, and trying every length would restore the false positives this option exists to remove. A non-zero suffix proves some mismatches and is refused, but a clean suffix does not prove the declaration correct. Only an _unparseable_ value is safe by default - that one is ignored in favour of reading every length. At `/96` RFC 6052 additionally requires bits 64-71 of the prefix itself to be zero, and a declaration violating it refuses the whole range rather than none. Accepted by `isSafeUrl`, `checkUrl`, `checkUrlResolved`, `classifyAddress` and `isAddressSafe`.
 
 ### Fixed
 
@@ -1145,7 +1863,7 @@ checklist.
 
 ### Fixed
 
-- **A relay frame lost to one worker mid-stream is now detected and reported; it used to be structurally invisible.** The cross-worker check compared each topic's highest delivered sequence, and a maximum can only ever reveal a lost *tail*: a worker that received frames 2 and 3 of a stream and one that received 1, 2 and 3 both top out at 3, so their hashes agreed exactly and nothing fired - `RESTART_ON_STATE_DIVERGENCE` could not repair what it could not see. What distinguishes those two workers is contiguity, so each worker now numbers the frames it hands to the relay, per topic, and a receiver that finds a hole in that numbering has lost data. That is reported directly, on a new `[adapter-uws/relay-gap]` log line naming the topic, the worker that sent the frames and the missing ordinals, and counted on `relay_gap_frames_total` when a `metrics` registry is configured. It is deliberately *not* folded into the divergence hash: a hole is decidable by the worker that finds it, because the numbering is dense at the sender by construction, so no majority is needed to establish it - and a vote would be actively wrong here, since a worker never receives its own relayed frames and so could never hold a view of a stream it publishes. `RESTART_ON_STATE_DIVERGENCE=1` covers the new case too, unambiguously: the reporter is the worker that lost the data. The numbering counts relayed frames rather than reusing the publish sequence, which is not dense over the relay and so cannot be checked for holes - a topic also published locally-only (`{ relay: false }` for an external pub/sub source, or the game lane) advances its sequence without relaying anything, an explicit `{ seq: n }` authority interleaves values from several workers at once, and a `{ seq: false }` topic carries no number at all, the last of which is now covered despite having no sequence to compare. Frames are numbered as they reach the wire rather than when they are queued, because a batched publish is written synchronously while a single publish defers a tick: a batch issued after a publish on the same topic overtakes it, and numbering at the wire is what keeps the numbering and the arrival order the same order. Separating a lost prefix from a legitimate mid-stream join needs to know whether a stream was already running when a worker attached, so frames carry the instant their sender opened the stream; that instant is read on the timeline the whole process shares rather than each worker's own epoch-anchored clock, whose anchor is snapshotted per module load and so drifts between workers loaded at different times by whatever NTP has since done to the wall clock. A hole is reported only once it has outlived any plausible in-process reorder, so a frame that is merely late is never called lost, and confirmation is by elapsed time rather than by how many frames followed it, so a drop on a quiet topic surfaces as promptly as one on a busy topic. Each loss is reported once and the stream then resumes clean tracking, so one lost frame is one event rather than a state restated forever. Steady state is unaffected: the tracker only runs when the cross-worker reporter is configured (so a default deployment pays one boolean test on the relay receive path and allocates nothing), it reads no clock while a stream is contiguous, and a stream sitting behind a lost frame stops buffering rather than retaining an entry per subsequent publish. Above the buffer cap the stream keeps the SMALLEST ordinals it has seen, because the report boundary is the lowest arrival above the hole; ordinals evicted there stop being individually auditable, so a second loss inside an already-reported window is folded into that report. The reported count is therefore frames *proven* lost - a lower bound, not a total. Measured against a real uWebSockets.js app fanning out to 200 real subscribers, the added tracking is unresolvable against the noise floor of that harness: repeated 8- and 16-round runs put the delta anywhere between -3.6% and -0.25% with a relative standard deviation of 5-7%, and in two of three runs the arm doing strictly *more* work measured faster than the baseline. The honest statement is that no effect is measurable at this precision, not a single sample quoted to two decimal places. Regression tests drive the real relay producer over a real shared-memory ring through the primary's forward loop into a decoding sibling: they assert the frames carry a dense per-topic ordinal from the worker that actually sent them, and that the numbering follows wire order when a batch overtakes a single publish (both red without the fix). The rest cover what must stay silent - late joiners, reordered delivery, duplicate re-delivery, a filled buffer that must not turn a straggler into a loss, and above all a worker that received everything.
+- **A relay frame lost to one worker mid-stream is now detected and reported; it used to be structurally invisible.** The cross-worker check compared each topic's highest delivered sequence, and a maximum can only ever reveal a lost _tail_: a worker that received frames 2 and 3 of a stream and one that received 1, 2 and 3 both top out at 3, so their hashes agreed exactly and nothing fired - `RESTART_ON_STATE_DIVERGENCE` could not repair what it could not see. What distinguishes those two workers is contiguity, so each worker now numbers the frames it hands to the relay, per topic, and a receiver that finds a hole in that numbering has lost data. That is reported directly, on a new `[adapter-uws/relay-gap]` log line naming the topic, the worker that sent the frames and the missing ordinals, and counted on `relay_gap_frames_total` when a `metrics` registry is configured. It is deliberately _not_ folded into the divergence hash: a hole is decidable by the worker that finds it, because the numbering is dense at the sender by construction, so no majority is needed to establish it - and a vote would be actively wrong here, since a worker never receives its own relayed frames and so could never hold a view of a stream it publishes. `RESTART_ON_STATE_DIVERGENCE=1` covers the new case too, unambiguously: the reporter is the worker that lost the data. The numbering counts relayed frames rather than reusing the publish sequence, which is not dense over the relay and so cannot be checked for holes - a topic also published locally-only (`{ relay: false }` for an external pub/sub source, or the game lane) advances its sequence without relaying anything, an explicit `{ seq: n }` authority interleaves values from several workers at once, and a `{ seq: false }` topic carries no number at all, the last of which is now covered despite having no sequence to compare. Frames are numbered as they reach the wire rather than when they are queued, because a batched publish is written synchronously while a single publish defers a tick: a batch issued after a publish on the same topic overtakes it, and numbering at the wire is what keeps the numbering and the arrival order the same order. Separating a lost prefix from a legitimate mid-stream join needs to know whether a stream was already running when a worker attached, so frames carry the instant their sender opened the stream; that instant is read on the timeline the whole process shares rather than each worker's own epoch-anchored clock, whose anchor is snapshotted per module load and so drifts between workers loaded at different times by whatever NTP has since done to the wall clock. A hole is reported only once it has outlived any plausible in-process reorder, so a frame that is merely late is never called lost, and confirmation is by elapsed time rather than by how many frames followed it, so a drop on a quiet topic surfaces as promptly as one on a busy topic. Each loss is reported once and the stream then resumes clean tracking, so one lost frame is one event rather than a state restated forever. Steady state is unaffected: the tracker only runs when the cross-worker reporter is configured (so a default deployment pays one boolean test on the relay receive path and allocates nothing), it reads no clock while a stream is contiguous, and a stream sitting behind a lost frame stops buffering rather than retaining an entry per subsequent publish. Above the buffer cap the stream keeps the SMALLEST ordinals it has seen, because the report boundary is the lowest arrival above the hole; ordinals evicted there stop being individually auditable, so a second loss inside an already-reported window is folded into that report. The reported count is therefore frames _proven_ lost - a lower bound, not a total. Measured against a real uWebSockets.js app fanning out to 200 real subscribers, the added tracking is unresolvable against the noise floor of that harness: repeated 8- and 16-round runs put the delta anywhere between -3.6% and -0.25% with a relative standard deviation of 5-7%, and in two of three runs the arm doing strictly _more_ work measured faster than the baseline. The honest statement is that no effect is measurable at this precision, not a single sample quoted to two decimal places. Regression tests drive the real relay producer over a real shared-memory ring through the primary's forward loop into a decoding sibling: they assert the frames carry a dense per-topic ordinal from the worker that actually sent them, and that the numbering follows wire order when a batch overtakes a single publish (both red without the fix). The rest cover what must stay silent - late joiners, reordered delivery, duplicate re-delivery, a filled buffer that must not turn a straggler into a loss, and above all a worker that received everything.
 
 ## [0.6.0-next.85] - 2026-07-17
 
@@ -1191,7 +1909,7 @@ checklist.
 
 ### Fixed
 
-- **A cluster worker whose `init` hook blocks the event loop is no longer stranded forever.** The primary's heartbeat watchdog only escalated a worker that had already confirmed ready (its liveness clock starts at zero and the sweep skipped a zero clock as "still starting"), and the per-slot restart supervisor deliberately leaves a still-booting slot alone. So a worker whose `init` hook blocked the event loop - a synchronous infinite loop, a native hang - never sent its first message, was never escalated, and sat booting forever: one slot of permanent capacity loss, reachable purely through a bad init. A naive boot-deadline would be worse, because a zero clock also covers a legitimately slow-but-healthy init (cron registration, dataset warmup, opening external connections), and killing those would crash-loop a healthy boot. The fix keeps both cases apart: each worker now answers the primary's liveness heartbeats from *before* its `init` hook runs, so a healthy async init - however slow - keeps acking and is never disturbed, while an init that blocks the event loop stops acking and is escalated after a separate, generously-defaulted boot deadline (`WORKER_BOOT_TIMEOUT_MS`, default 60s, `0` disables it, values below two heartbeat intervals are raised to that floor so a mis-sized knob cannot crash-loop a healthy slow boot) that is distinct from the 30s steady-state timeout so a slow warmup whose sync stretches exceed the tight timeout is not false-killed. The watchdog regime flips from boot deadline to steady-state at the ready/descriptor moment, not at the first ack. Relay and control traffic that arrives while a worker is still booting is buffered and replayed in order once the handler graph is live, never dispatched into a half-built graph. Escalation reuses the existing wedged-worker path - the worker is asked to close and exit, and a genuinely event-loop-blocked worker that cannot self-close falls through to the same whole-process `SIGKILL` fallback a steady-state wedge already uses (the orchestrator respawns), because a worker thread holding a uWS App cannot be force-terminated without aborting the process. Two boundaries by design: a warmup that *synchronously* blocks the event loop cannot ack and so still reads as wedged, and an `init` that hangs while keeping the event loop *free* (an `await` that never resolves) keeps acking and is treated as alive - catching that is a readiness concern, not a liveness one. The health verdict moved into a standalone, unit-tested module that the deterministic cluster simulator drives through the same decision it ships, with an init-wedge fault that reproduces the stranded slot and its recovery.
+- **A cluster worker whose `init` hook blocks the event loop is no longer stranded forever.** The primary's heartbeat watchdog only escalated a worker that had already confirmed ready (its liveness clock starts at zero and the sweep skipped a zero clock as "still starting"), and the per-slot restart supervisor deliberately leaves a still-booting slot alone. So a worker whose `init` hook blocked the event loop - a synchronous infinite loop, a native hang - never sent its first message, was never escalated, and sat booting forever: one slot of permanent capacity loss, reachable purely through a bad init. A naive boot-deadline would be worse, because a zero clock also covers a legitimately slow-but-healthy init (cron registration, dataset warmup, opening external connections), and killing those would crash-loop a healthy boot. The fix keeps both cases apart: each worker now answers the primary's liveness heartbeats from _before_ its `init` hook runs, so a healthy async init - however slow - keeps acking and is never disturbed, while an init that blocks the event loop stops acking and is escalated after a separate, generously-defaulted boot deadline (`WORKER_BOOT_TIMEOUT_MS`, default 60s, `0` disables it, values below two heartbeat intervals are raised to that floor so a mis-sized knob cannot crash-loop a healthy slow boot) that is distinct from the 30s steady-state timeout so a slow warmup whose sync stretches exceed the tight timeout is not false-killed. The watchdog regime flips from boot deadline to steady-state at the ready/descriptor moment, not at the first ack. Relay and control traffic that arrives while a worker is still booting is buffered and replayed in order once the handler graph is live, never dispatched into a half-built graph. Escalation reuses the existing wedged-worker path - the worker is asked to close and exit, and a genuinely event-loop-blocked worker that cannot self-close falls through to the same whole-process `SIGKILL` fallback a steady-state wedge already uses (the orchestrator respawns), because a worker thread holding a uWS App cannot be force-terminated without aborting the process. Two boundaries by design: a warmup that _synchronously_ blocks the event loop cannot ack and so still reads as wedged, and an `init` that hangs while keeping the event loop _free_ (an `await` that never resolves) keeps acking and is treated as alive - catching that is a readiness concern, not a liveness one. The health verdict moved into a standalone, unit-tested module that the deterministic cluster simulator drives through the same decision it ships, with an init-wedge fault that reproduces the stranded slot and its recovery.
 
 ## [0.6.0-next.77] - 2026-07-13
 
@@ -1332,7 +2050,7 @@ checklist.
 
 ### Added
 
-- **`plugins/webhooks` gains injectable delivery controls: a retry budget and an endpoint-ejection breaker.** Outbound webhooks fan out one fire-and-forget delivery per subscribed endpoint per publish, with no ceiling - so a busy topic pointed at a slow or failing endpoint can pile up unbounded in-flight retries. `deliverWebhook(config, topic, event, data, hooks)` now takes an optional fifth `hooks` argument to bound that: `hooks.breaker` fast-fails an ejected endpoint (an open circuit returns a terminal `attempts:0` outcome without touching the network, so the caller dead-letters it) and records each terminal result, and `hooks.budget` rations retry *amplification* - a token consumed before each backoff, distinct from the per-delivery `attempts` cap, so a storm of failing deliveries to one endpoint cannot launch unbounded retry work while every delivery's first attempt still proceeds unrationed. Both are scoped by `hooks.key` (the caller passes the endpoint's identity), so one endpoint cannot starve or trip another. Only outcomes that actually reached the network (`attempts > 0`) move the breaker - a pre-network rejection (SSRF block, redirect error, bad config) is a configuration signal, not an endpoint-health one. Two in-process defaults ship for single-instance use: `createRetryBudget({ capacity, refillPerSec })` (a per-key token bucket) and `createWebhookBreaker({ failureThreshold, resetMs })` (a per-key circuit breaker that half-opens a single probe after the reset window and closes on success). Both read time only through the runtime seam, so backoff, refill, and reset stay deterministic under a seeded harness; `WebhookCircuitOpenError` (`code: 'WEBHOOK_CIRCUIT_OPEN'`) marks an ejected delivery. A cluster deployment injects a shared (Redis-backed) budget/breaker with the same interface instead. Fully backward compatible: omit `hooks` and delivery is byte-identical to before.
+- **`plugins/webhooks` gains injectable delivery controls: a retry budget and an endpoint-ejection breaker.** Outbound webhooks fan out one fire-and-forget delivery per subscribed endpoint per publish, with no ceiling - so a busy topic pointed at a slow or failing endpoint can pile up unbounded in-flight retries. `deliverWebhook(config, topic, event, data, hooks)` now takes an optional fifth `hooks` argument to bound that: `hooks.breaker` fast-fails an ejected endpoint (an open circuit returns a terminal `attempts:0` outcome without touching the network, so the caller dead-letters it) and records each terminal result, and `hooks.budget` rations retry _amplification_ - a token consumed before each backoff, distinct from the per-delivery `attempts` cap, so a storm of failing deliveries to one endpoint cannot launch unbounded retry work while every delivery's first attempt still proceeds unrationed. Both are scoped by `hooks.key` (the caller passes the endpoint's identity), so one endpoint cannot starve or trip another. Only outcomes that actually reached the network (`attempts > 0`) move the breaker - a pre-network rejection (SSRF block, redirect error, bad config) is a configuration signal, not an endpoint-health one. Two in-process defaults ship for single-instance use: `createRetryBudget({ capacity, refillPerSec })` (a per-key token bucket) and `createWebhookBreaker({ failureThreshold, resetMs })` (a per-key circuit breaker that half-opens a single probe after the reset window and closes on success). Both read time only through the runtime seam, so backoff, refill, and reset stay deterministic under a seeded harness; `WebhookCircuitOpenError` (`code: 'WEBHOOK_CIRCUIT_OPEN'`) marks an ejected delivery. A cluster deployment injects a shared (Redis-backed) budget/breaker with the same interface instead. Fully backward compatible: omit `hooks` and delivery is byte-identical to before.
 
 ## [0.6.0-next.60] - 2026-07-06
 
@@ -1461,7 +2179,7 @@ checklist.
 
 ### Added
 
-- **Cross-worker subscribers in a clustered deployment now receive the compact binary `0x03` wire frame instead of JSON.** A binary wire publish (cursor positions, presence rosters) is encoded against the publishing worker's own connections and then relayed to sibling workers - which, until now, re-published it as the JSON envelope, so a binary-capable subscriber on a *different* worker than the publisher fell back to the larger JSON frame (on an N-worker box, roughly `(N-1)/N` of binary subscribers). The relay now carries the codec's capability and raw payload alongside the envelope, and each receiving worker re-derives the codec from a per-worker registry and re-encodes binary locally against its own connections - per connection for a stateful codec (the cursor short-id dictionary), once for a stateless one (presence). The origin sequence number rides through unchanged (no re-stamp), the local re-encode never re-relays (no cross-worker loop), and a worker with no binary subscribers for a codec - or no codec registered - keeps the cheaper single JSON fan-out. The bundled cursor and presence plugins register their codec automatically, so this is transparent and on by default; it is perf-only and fully backward-compatible (a single-process deployment, and a publish through an unregistered codec, are byte-identical to before). A relayed frame now also re-gates permessage-deflate on the receiving worker via its own compressor (the cross-worker compression intent was previously dropped).
+- **Cross-worker subscribers in a clustered deployment now receive the compact binary `0x03` wire frame instead of JSON.** A binary wire publish (cursor positions, presence rosters) is encoded against the publishing worker's own connections and then relayed to sibling workers - which, until now, re-published it as the JSON envelope, so a binary-capable subscriber on a _different_ worker than the publisher fell back to the larger JSON frame (on an N-worker box, roughly `(N-1)/N` of binary subscribers). The relay now carries the codec's capability and raw payload alongside the envelope, and each receiving worker re-derives the codec from a per-worker registry and re-encodes binary locally against its own connections - per connection for a stateful codec (the cursor short-id dictionary), once for a stateless one (presence). The origin sequence number rides through unchanged (no re-stamp), the local re-encode never re-relays (no cross-worker loop), and a worker with no binary subscribers for a codec - or no codec registered - keeps the cheaper single JSON fan-out. The bundled cursor and presence plugins register their codec automatically, so this is transparent and on by default; it is perf-only and fully backward-compatible (a single-process deployment, and a publish through an unregistered codec, are byte-identical to before). A relayed frame now also re-gates permessage-deflate on the receiving worker via its own compressor (the cross-worker compression intent was previously dropped).
 - **`platform.registerWireCodec(wire)`: register a plugin-author wire codec for the cross-worker relay.** The cursor and presence plugins call this automatically on first use; a custom codec published through `publishWire` registers under its capability so a clustered deployment can re-encode it binary on a receiving worker (without it, cross-worker subscribers of that codec get the JSON envelope). Idempotent (last registration per capability wins); a no-op in single-process mode and for a codec with no string capability. Mirrored on the dev (Vite) platform as a no-op (dev is single-process) and on the `createTestServer` platform.
 
 ## [0.6.0-next.41] - 2026-06-26
@@ -1711,7 +2429,7 @@ checklist.
 
 ### Added
 
-- **`upgradeAdmission.waitingRoom`: turn the over-capacity `503` into a content-negotiated waiting room.** When the upgrade gate is at capacity (`maxConcurrent` set), a browser navigation now gets a small self-polling HTML holding page that auto-reloads the moment capacity frees, while a WebSocket upgrade or a non-HTML client keeps a `503` - refined with a jittered `Retry-After` header. On by default whenever `maxConcurrent > 0`; opt out with `waitingRoom: false` for the exact bare `503` of before. The page polls a read-only `/__admit-check` endpoint that returns `202` with a queue-depth/ETA body while full and `200` when capacity exists, consuming no gate slot (the poll can never itself be rejected). Configure the routes, poll cadence, `Retry-After` base, and page template via `waitingRoom: { path, admitCheckPath, retryAfterSeconds, pollIntervalMs, template }`. HTTP-upgrade path only - no WebSocket frame or existing-connection behavior changes.
+- **`upgradeAdmission.waitingRoom`: turn the over-capacity `503` into a content-negotiated waiting room.** When the upgrade gate is at capacity (`maxConcurrent` set), a browser navigation now gets a small self-polling HTML holding page that auto-reloads the moment capacity frees, while a WebSocket upgrade or a non-HTML client keeps a `503` - refined with a jittered `Retry-After` header. On by default whenever `maxConcurrent > 0`; opt out with `waitingRoom: false` to disable polling. An opted-out HTML navigation receives a minimal accessible `503` document, while WebSocket and non-HTML clients retain the exact bare response. The page polls a read-only `/__admit-check` endpoint that returns `202` with a queue-depth/ETA body while full and `200` when capacity exists, consuming no gate slot (the poll can never itself be rejected). Configure the routes, poll cadence, `Retry-After` base, and page template via `waitingRoom: { path, admitCheckPath, retryAfterSeconds, pollIntervalMs, template }`. No WebSocket frame or existing-connection behavior changes.
 
 ## [0.6.0-next.10] - 2026-06-05
 
@@ -1899,7 +2617,7 @@ checklist.
 
 ### Fixed
 
-- **`WS_*` userData slot symbols in `files/utils.js` switched from `Symbol(...)` to `Symbol.for(...)` so handler.js, vite.js, testing.js, and downstream extensions (e.g. `svelte-adapter-uws-extensions/redis/registry`) resolve to the same global symbol regardless of how `utils.js` was loaded.** Pre-fix, each `Symbol('adapter-uws.ws.subscriptions')` call returned a fresh unique value. In a single-module-instance setup (everything imports the same `files/utils.js`) this was fine. But the adapter's build step bundles `handler.js` + `utils.js` into the SvelteKit build artifact (`build/handler.js`), so the bundled `utils.js` is a *different module instance* from the one a runtime extension loads via `node_modules/svelte-adapter-uws/files/utils.js`. Two instances meant two distinct symbols for each slot - the handler stamped subscriptions / session-id / stats under one symbol and a runtime-loaded extension (the cluster registry walks every `ws.getUserData()[WS_SUBSCRIPTIONS]` to rebuild routing tables) read under the other, silently dropping every cross-module lookup. The failure was invisible in single-process dev (only one instance ever loaded) and surfaced only in clustered + extension production where subscription rebuilds returned empty sets. Fix is one-character per export (`Symbol(x)` -> `Symbol.for(x)`) which routes via the V8 global symbol registry and gives identity-by-key across every module instance in the process. Trade-off: user code that calls `Symbol.for('adapter-uws.ws.subscriptions')` can now reach these slots; documented at the top of the symbol block as a deliberate accept since the alternative was a silent cluster-routing break.
+- **`WS_*` userData slot symbols in `files/utils.js` switched from `Symbol(...)` to `Symbol.for(...)` so handler.js, vite.js, testing.js, and downstream extensions (e.g. `svelte-adapter-uws-extensions/redis/registry`) resolve to the same global symbol regardless of how `utils.js` was loaded.** Pre-fix, each `Symbol('adapter-uws.ws.subscriptions')` call returned a fresh unique value. In a single-module-instance setup (everything imports the same `files/utils.js`) this was fine. But the adapter's build step bundles `handler.js` + `utils.js` into the SvelteKit build artifact (`build/handler.js`), so the bundled `utils.js` is a _different module instance_ from the one a runtime extension loads via `node_modules/svelte-adapter-uws/files/utils.js`. Two instances meant two distinct symbols for each slot - the handler stamped subscriptions / session-id / stats under one symbol and a runtime-loaded extension (the cluster registry walks every `ws.getUserData()[WS_SUBSCRIPTIONS]` to rebuild routing tables) read under the other, silently dropping every cross-module lookup. The failure was invisible in single-process dev (only one instance ever loaded) and surfaced only in clustered + extension production where subscription rebuilds returned empty sets. Fix is one-character per export (`Symbol(x)` -> `Symbol.for(x)`) which routes via the V8 global symbol registry and gives identity-by-key across every module instance in the process. Trade-off: user code that calls `Symbol.for('adapter-uws.ws.subscriptions')` can now reach these slots; documented at the top of the symbol block as a deliberate accept since the alternative was a silent cluster-routing break.
 
 ## [0.5.0-next.24] - 2026-05-16
 
@@ -1913,7 +2631,7 @@ checklist.
 
 - **`createLock()` gains `maxWaitersPerKey` option (default 1000) capping the per-key waiter queue.** Pre-fix, `createLock()` had `maxKeys` (cap on total tracked keys) but no cap on the queue length per single key. A hot key (e.g. every authenticated client racing for `lock-${roomId}` at once) could grow the waiter queue without bound, anchoring memory per pending caller until the contention chain drained. The new cap turns this failure mode from "OOM" into a typed synchronous rejection: when `state.queue.length >= maxWaitersPerKey`, the new arrival is rejected with `LockQueueFullError` (`code: 'LOCK_QUEUE_FULL'`, `.key`, `.maxWaitersPerKey`) and the caller can shed the request (503, retry-later) without blocking the chain further. The currently-holding caller and any waiters already queued continue normally; only new arrivals are shed. Default 1000 fits the operational shape of every realistic app (1000 simultaneous waiters on one key is already a sign of misbehavior); apps with legitimate fan-in can opt up. 5 new regression tests in `test/lock.test.js` cover the cap at 3, default 1000, per-key independence, and the initial-acquirer path (which doesn't create a waiter).
 
-- **SSR responses default-fill `x-content-type-options: nosniff` when the response did not already set one.** Pre-fix, the adapter only injected `nosniff` for static-asset responses ([files/handler.js:207](svelte-adapter-uws/files/handler.js#L207)); SSR responses produced by SvelteKit's response handler did not get the default. An SSR endpoint that returned an unexpected content-type (a JSON endpoint returning text, an image endpoint with a non-image mimetype, etc.) was vulnerable to MIME-sniffing by older browsers and a small class of polyglot file attacks. Fix: the SSR `writeHeaders` path now checks every response's headers for an existing `x-content-type-options` entry and adds `nosniff` only when one is absent. Apps that set their own value (via `+server.js` / `+page.server.js` headers, hooks, or middleware) see no change. Defense-in-depth - no live exploit on the demo or docs since both serve correct content-types - but closes the gap so a future SSR handler that forgets the header still gets MIME-sniffing protection. Other security-header defaults (CSP, X-Frame-Options, Referrer-Policy) intentionally NOT defaulted here because CSP needs app-specific care for inline-hydration / iframe shapes, X-Frame-Options breaks legitimate embeds, and Referrer-Policy choices vary by app. Those belong in `hooks.server.js`.
+- **SSR responses default-fill `x-content-type-options: nosniff` when the response did not already set one.** Pre-fix, the adapter only injected `nosniff` for static-asset responses ([runtime handler](./src/runtime/handler.js#L207)); SSR responses produced by SvelteKit's response handler did not get the default. An SSR endpoint that returned an unexpected content-type (a JSON endpoint returning text, an image endpoint with a non-image mimetype, etc.) was vulnerable to MIME-sniffing by older browsers and a small class of polyglot file attacks. Fix: the SSR `writeHeaders` path now checks every response's headers for an existing `x-content-type-options` entry and adds `nosniff` only when one is absent. Apps that set their own value (via `+server.js` / `+page.server.js` headers, hooks, or middleware) see no change. Defense-in-depth - no live exploit on the demo or docs since both serve correct content-types - but closes the gap so a future SSR handler that forgets the header still gets MIME-sniffing protection. Other security-header defaults (CSP, X-Frame-Options, Referrer-Policy) intentionally NOT defaulted here because CSP needs app-specific care for inline-hydration / iframe shapes, X-Frame-Options breaks legitimate embeds, and Referrer-Policy choices vary by app. Those belong in `hooks.server.js`.
 
 - **`dedup`, `lock`, `throttle`/`debounce`, and `queue` plugins cap user-supplied keys at 256 characters by default.** Pre-fix, all four plugins accepted arbitrarily long string keys at their main entry points (`dedup.claim/has/delete(id)`, `lock.withLock(key, ...)`, `throttle.publish(_, topic, ...)`, `queue.push(key, ...)`). With each plugin's default `maxEntries`/`maxKeys`/`maxTopics`/`maxSize` = 10k-1M, an attacker (or a buggy upstream that took client-controlled input straight into a plugin call) could anchor a 1 MB key per slot, pinning gigabytes of heap until the entry expired. The plugins are documented as in-process primitives, but their primary use sits one async layer above an authenticated WebSocket - that is exactly the trust boundary where a bounded cap belongs.
 
@@ -2051,7 +2769,7 @@ checklist.
 
 - **`$env/dynamic/private` (and `$env/dynamic/public`) returned empty values in modules reached via the ws-handler import graph after next.17.** Concrete pain point: `import { env } from '$env/dynamic/private'` followed by a top-level `env.DATABASE_URL` read in `src/lib/server/db.js` / `src/lib/server/redis.js` / `src/lib/server/tasks.js` / `src/hooks.ws.js` saw an empty proxy. The same variables were correctly visible via `process.env` at the same call site, which is the workaround users discovered (and which the demo's source comments cite). Failure mode was invisible: `createPgClient({ connectionString: env.DATABASE_URL })` silently became `createPgClient({ connectionString: undefined })` and `createRedisClient({ url: env.REDIS_URL })` silently fell through to the library default `redis://localhost:6379` - if a different Redis happened to be running on that port, the app silently wrote presence keys / cluster registry to a foreign database.
 
-  Root cause: SvelteKit's Vite plugin resolves `$env/dynamic/private` to `export { private_env as env } from '<runtime>/shared-server.js'` - a module-level mutable `private_env = {}` populated lazily by `Server.init({ env })` (`@sveltejs/kit/src/runtime/shared-server.js`). The pre-next.17 esbuild fallback path used a custom virtual-module resolver that substituted `export const env = process.env;` directly, sidestepping the runtime indirection entirely. Once next.17 made the Vite-plugin path actually work (modules now flow through SvelteKit's normal resolution), the runtime indirection became load-bearing: until `Server.init` runs, `private_env` is empty. handler.js's `await server.init({ env: process.env })` was at module-body level, AFTER the `import * as wsModule from 'WS_HANDLER'` had already evaluated - so the user's `src/lib/server/*` modules read env at module-load time, before init populated the proxy. ESM evaluates imported modules' bodies fully (including TLA) before the importer's body runs, which means *the server.init call literally cannot run before the user's env reads* if init is in handler.js's body.
+  Root cause: SvelteKit's Vite plugin resolves `$env/dynamic/private` to `export { private_env as env } from '<runtime>/shared-server.js'` - a module-level mutable `private_env = {}` populated lazily by `Server.init({ env })` (`@sveltejs/kit/src/runtime/shared-server.js`). The pre-next.17 esbuild fallback path used a custom virtual-module resolver that substituted `export const env = process.env;` directly, sidestepping the runtime indirection entirely. Once next.17 made the Vite-plugin path actually work (modules now flow through SvelteKit's normal resolution), the runtime indirection became load-bearing: until `Server.init` runs, `private_env` is empty. handler.js's `await server.init({ env: process.env })` was at module-body level, AFTER the `import * as wsModule from 'WS_HANDLER'` had already evaluated - so the user's `src/lib/server/*` modules read env at module-load time, before init populated the proxy. ESM evaluates imported modules' bodies fully (including TLA) before the importer's body runs, which means _the server.init call literally cannot run before the user's env reads_ if init is in handler.js's body.
 
   Fix moves Server instantiation + `await server.init({ env: process.env })` into a new `files/_init.js` module imported in `files/handler.js` IMMEDIATELY BEFORE the `WS_HANDLER` import. ESM evaluates imports in source order, depth-first; each imported module's body fully completes (including TLA) before the next import is processed. So `_init.js`'s top-level `await server.init(...)` blocks until SvelteKit's `private_env` and `public_env` are populated, and only then does the next import (`WS_HANDLER`) start evaluating. The user's `src/lib/server/*` modules now see populated env at module load. handler.js's body still uses `server.respond(...)` for SSR rendering - the only thing that moved is the construction + init. A multi-line comment in `handler.js` above the two imports spells out the load-order rationale and explicitly forbids reordering them; a similarly long block at the top of `_init.js` documents why this module exists at all so a future refactor doesn't accidentally inline it back. Behavior change in `handler.js`'s body is null: `server` is the same instance the previous code constructed, just imported from `_init.js` instead of declared inline.
 
@@ -2079,7 +2797,7 @@ checklist.
 
   Both `send` and `sendQueued` now route through a shared `serializeForSend(data)` helper that branches on `data instanceof ArrayBuffer || ArrayBuffer.isView(data)` and passes binary inputs through to `ws.send` unchanged. JSON-serializable inputs continue to pass through `JSON.stringify` exactly as before - this is a pure unblock for the binary path with zero behavior change for current text callers. The internal `sendQueue` now stores already-decided values (`string | ArrayBuffer | ArrayBufferView`) so the reconnect-flush path is trivially correct: each entry was serialized at enqueue time and reaches the wire verbatim, no per-flush type branching needed. Covers `Uint8Array`, `DataView`, and every other `ArrayBufferView`; deliberately does not introduce a `Blob` branch (YAGNI - `live.binary` builds an `ArrayBuffer` directly, no current consumer asks for `Blob`).
 
-  JSDoc on `send` and `sendQueued` (in both `client.js` and `client.d.ts`) now spells out the contract: *"Strings and JSON-serializable objects are sent as text frames after `JSON.stringify`. `ArrayBuffer` and any `ArrayBufferView` (Uint8Array, DataView, etc) are sent as binary frames unchanged."* The same wording on `sendQueued` adds: *"Queued binary payloads are kept as-is in the in-memory queue and flushed verbatim on reconnect."* Closes the same class of "I called this with X and got mystery behavior" bug for whatever the next binary use case is.
+  JSDoc on `send` and `sendQueued` (in both `client.js` and `client.d.ts`) now spells out the contract: _"Strings and JSON-serializable objects are sent as text frames after `JSON.stringify`. `ArrayBuffer` and any `ArrayBufferView` (Uint8Array, DataView, etc) are sent as binary frames unchanged."_ The same wording on `sendQueued` adds: _"Queued binary payloads are kept as-is in the in-memory queue and flushed verbatim on reconnect."_ Closes the same class of "I called this with X and got mystery behavior" bug for whatever the next binary use case is.
 
   No wire-format change for receivers - server-side `handleRpc` already accepted both binary and text frames; uWS hands binary frames as `ArrayBuffer` to the user's `message` hook with `isBinary: true`. Test coverage in new `test/client-binary.test.js` (7 tests): `send` + `ArrayBuffer` reaches the wire by reference (no `JSON.stringify`), `send` + `Uint8Array` and `DataView` likewise (covers all `ArrayBufferView` shapes), `send` still `JSON.stringify`s plain objects, `sendQueued` mirrors `send` for both shapes, and the load-bearing regression test that explicitly asserts a 200 KB `ArrayBuffer` no longer reaches the wire as the literal text `'{}'` (with the right `byteLength` preserved). The full 146-test client-real suite continues to pass under the refactor, confirming no behavior change for the JSON path.
 
@@ -2230,11 +2948,13 @@ checklist.
   - `'suspended'` - WS is technically open but the tab is in the background. Driven by `visibilitychange`; flips back to `'open'` automatically when the tab returns. Browsers may kill idle backgrounded sockets, so live data is best-effort while suspended.
 
   `ready()` now resolves on either `'open'` or `'suspended'` (both indicate an established WS). Apps that previously matched `$status === 'closed'` need to map to `'disconnected'` (transient) or `'failed'` (terminal) - or use `_permaClosed` if the only thing they cared about was the terminal case. Tests in `client-real.test.js` cover all five transitions.
+
 - **Presence plugin wire format switched to a compact diff protocol.** The five-event format (`list` / `join` / `updated` / `leave` / `heartbeat`) collapses to two diff-shaped events plus the existing heartbeat:
   - `{event: 'presence_state', data: {[key]: meta}}` - full snapshot, sent to a single connection on join or sync. Replaces the array-shaped `list`.
   - `{event: 'presence_diff', data: {joins: {[key]: meta}, leaves: {[key]: meta}}}` - changes, broadcast to topic subscribers. Replaces individual `join` / `updated` / `leave` frames.
 
   Diffs are now microtask-batched: multiple joins / leaves in the same tick collapse into one frame. Within a diff, leaves apply first then joins, so an update (same key in both) ends with the user present using the new data; if a key cycles join then leave in the same tick, the diff carries only the latest op (leave wins). `heartbeat` is unchanged. The `presence()` Svelte store API on the client is unchanged - the wire change is internal to the plugin's server <-> client round-trip. Hand-rolled clients that consume the wire directly need to switch decoders. Bundle ships server + client together so single-package upgrades are seamless; stale browser tabs from a previous deploy will see a blank presence list until refresh.
+
 - **`tracker.flushDiffs()` exposed on the presence tracker** for callers that need the buffered diff to land synchronously - tests are the primary user, but production code that needs presence state visible to other workers before its own block returns can call it explicitly. No-op when nothing is buffered.
 
 ### Added
@@ -2568,4 +3288,4 @@ Fully backwards compatible. No existing user code changes behavior:
 
 ## [0.3.9] and earlier
 
-See [git history](../../commits/master) for changes prior to 0.4.0.
+See [git history](https://github.com/lanteanio/svelte-adapter-uws/commits/master) for changes prior to 0.4.0.

@@ -2,7 +2,32 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:lantean-protocol:revision-1",
   "title": "The Lantean protocol, revision 1",
-  "description": "JSON Schema for every CORE-OWNED control frame and the data-event envelope of the Lantean protocol (PROTOCOL.md). Additional properties are permitted everywhere: the protocol is forward-compatible and a peer ignores fields it does not recognize (PROTOCOL.md section 10). The same rule holds at the frame level: an unrecognized application control frame passes through to the application handler, and higher layers define their own frames that way (svelte-realtime ships its companion schema as svelte-realtime/protocol.schema.json). A validator for mixed ecosystem traffic accepts a frame when it matches the core schema OR a composed layer schema. A core frame is one of the definitions in $defs; correlate control frames by their `type` const.",
+  "description": "JSON Schema for every CORE-OWNED control frame and the data-event envelope of the Lantean protocol (PROTOCOL.md). Additional properties are permitted everywhere: the protocol is forward-compatible and a peer ignores fields it does not recognize (PROTOCOL.md section 10). The same rule holds at the frame level: an unrecognized application control frame passes through to the application handler, and higher layers define their own frames that way (svelte-realtime ships its companion schema as svelte-realtime/protocol.schema.json). A validator for mixed ecosystem traffic accepts a frame when it matches the core schema OR a composed layer schema. A core frame is one of the definitions in $defs; correlate control frames by their `type` const. The x-webtransport annotation freezes the non-JSON carriage constants from PROTOCOL.md sections 14.7 and 15.",
+  "x-webtransport": {
+    "connectCapabilityQueryKey": "lantean-cap",
+    "connectCapabilities": {
+      "game.fanout:1": "compact-datagram-fanout",
+      "lantean.reliable:1": "reliable-bidirectional-stream"
+    },
+    "reliableStream": {
+      "opener": "client",
+      "bidirectionalStreamCount": 1,
+      "unidirectionalStreamCount": 0,
+      "lengthPrefix": "canonical-unsigned-leb128",
+      "minimumMessageBytes": 1,
+      "maximumMessageBytes": 1048576,
+      "maximumPendingBytes": 1048576,
+      "pendingByteAccounting": "message-bytes-excluding-length-prefix",
+      "firstServerFrame": "welcome",
+      "innerMessage": "websocket-message-bytes"
+    },
+    "streamErrors": {
+      "STREAM_LIMIT": 1,
+      "RECORD_TOO_LARGE": 2,
+      "PROTOCOL_ERROR": 3,
+      "SLOW_CONSUMER": 4
+    }
+  },
   "oneOf": [
     { "$ref": "#/$defs/welcome" },
     { "$ref": "#/$defs/hello" },
@@ -27,6 +52,7 @@
     { "$ref": "#/$defs/reconnect" },
     { "$ref": "#/$defs/game" },
     { "$ref": "#/$defs/game-denied" },
+    { "$ref": "#/$defs/message-overloaded" },
     { "$ref": "#/$defs/data-event" }
   ],
   "$defs": {
@@ -243,6 +269,17 @@
         "id": { "$ref": "#/$defs/ref" }
       },
       "required": ["type", "reason"]
+    },
+    "message-overloaded": {
+      "description": "Server -> client response for an application message shed by established-message admission (PROTOCOL.md section 3.11). Rate overflow includes retryAfterMs; concurrency/queue overflow does not imply the message was retained.",
+      "type": "object",
+      "properties": {
+        "type": { "const": "message-overloaded" },
+        "reason": { "enum": ["rate_limit", "concurrency_limit", "queue_full"] },
+        "scope": { "enum": ["connection", "global"] },
+        "retryAfterMs": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["type", "reason", "scope"]
     },
     "data-event": {
       "description": "The published-event carrier. No `type` field: identified by `topic` + `event`. `id` appears only on the fan-out of a `game`-lane frame (section 3.10), echoing the sender's input id.",

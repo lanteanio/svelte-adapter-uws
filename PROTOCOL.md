@@ -1,5 +1,10 @@
 # The Lantean protocol
 
+[README](./README.md) | [migration guide](./MIGRATION.md) |
+[conformance index](./docs/protocol-conformance.md) |
+[protocol schema](./protocol.schema.json) | [test vectors](./test-vectors/README.md) |
+[release history](./CHANGELOG.md)
+
 The Lantean protocol is the WebSocket wire contract spoken by
 `svelte-adapter-uws` and its client (`svelte-adapter-uws/client`). It is the
 contract a third-party client - in any language - implements against.
@@ -10,13 +15,27 @@ Vite dev server, the in-process test handler, and the deterministic simulator),
 and a third party may add more, so the contract is named for itself, not for
 one package.
 WebSocket is the protocol's canonical transport and the one every section
-assumes unless it says otherwise; section 14 additionally binds one lane - the
-client-driven relay of sections 3.10/6.6 - to WebTransport sessions over QUIC
-datagrams, reusing the frames frozen here rather than defining new ones.
+assumes unless it says otherwise. Section 14 additionally binds the
+client-driven relay of sections 3.10/6.6 to WebTransport QUIC datagrams.
+Section 15 binds the reliable protocol to one WebTransport bidirectional
+stream. A single WebTransport session may use either binding or both; both
+reuse the inner frames frozen here rather than defining transport-specific
+copies.
 
-The reference implementation is `src/client.js` (client) and
-`src/runtime/wire.js` + `src/runtime/handler.js` (server); `src/vite.js` (dev)
-and `src/testing.js` (test) speak the identical wire.
+**Reference-runtime transport decision (`js-transport-v1`):**
+WebSocket/WSS remains the permanent default and complete transport for the
+JavaScript adapter. No post-0.6 WebTransport client lane is scheduled for this
+package: a negotiate-WebTransport/fall-back-to-WebSocket ladder remains parked
+with no release target. Reopening it requires independent OSS demand, an
+available QUIC-terminating server surface, and conformance against sections 14
+and 15. A native runtime may implement those frozen bindings independently;
+that does not create a JavaScript server or client deliverable.
+
+The reference implementation is [src/client.js](./src/client.js) (client) and
+[src/runtime/wire.js](./src/runtime/wire.js) plus
+[src/runtime/handler.js](./src/runtime/handler.js) (server);
+[src/vite.js](./src/vite.js) (dev) and [src/testing.js](./src/testing.js) (test)
+speak the identical wire.
 
 ## Meta
 
@@ -455,6 +474,36 @@ simulation) rather than one server-side author.
   `revokePublish` / `publishGrant`), the trusted dual of the subscribe
   authorization of section 3.2. There is no client frame to request a grant: a
   client publishes only to a room the application already bound for it.
+- The reference JS adapter's in-memory sequencer is a **single-home** authority.
+  It permits this lane in a clustered process only when exactly one I/O worker
+  owns sockets (additional compute workers are harmless). With multiple I/O
+  workers it refuses server grants/publishes and answers client frames
+  `game-denied` / `FORBIDDEN`, rather than weakening the room-sequence promise
+  or silently omitting subscribers on sibling workers. A multi-home deployment
+  must place an external authoritative room sequencer ahead of this primitive.
+
+### 3.11 Established-message overload
+
+| Frame | Dir | Shape |
+|---|---|---|
+| `message-overloaded` | s->c | `{"type":"message-overloaded","reason":"<reason>","scope":"connection"|"global","retryAfterMs"?:<int>}` |
+
+When server-side established-message admission refuses an application message,
+the server sends `message-overloaded` and keeps the connection open. The refused
+message was **not** handled and is not retained for a later retry. `reason` is
+one of `rate_limit`, `concurrency_limit`, or `queue_full`; `scope` identifies
+whether the connection-local or worker-global limit bound the decision.
+`retryAfterMs` is present only for `rate_limit` and is a lower bound for another
+attempt. Retrying a non-idempotent application message remains the
+application's decision.
+
+The gate applies to every server-side application-work lane: frames delegated
+to the application `message` hook, client-to-server `0x03` binary ingress
+routes, and JSON `game` publishes. Core control frames remain outside it so an
+overloaded connection can unsubscribe, request another lease window, or
+perform recovery. A concurrency-limited frame may wait only in the configured
+bounded queue; once that queue is full, later frames receive `queue_full`
+immediately.
 
 ---
 
@@ -904,6 +953,10 @@ What the protocol PROMISES (a client MAY rely on these):
 
 - `welcome` is the first frame the server sends on a connection.
 - Per-topic `seq` is monotonic per connection while the epoch is unchanged.
+  A multi-worker reference server enforces this at publish time: an event is
+  either unsequenced, or its positive seq and ordered fan-out come from one
+  external authority. Independent worker counters and numeric seqs sent through
+  the built-in multi-origin relay are refused rather than weakening this promise.
 - A `wire-id` for an id arrives at or before the first `0x03` frame that uses
   that id (section 6.2).
 - On resume, a topic's gap-fill frames precede its `subscribed` ack (or the
@@ -987,6 +1040,12 @@ implement any token subset (binary without `lease`, for example) and remain
 fully conformant - it simply claims the highest class whose whole row it
 satisfies. The ladder mirrors the reference client's own build-up.
 
+These classes describe the inner reliable protocol. A WebSocket claimant
+carries them directly; a WebTransport reliable-stream claimant carries the
+same bytes through section 15's record layer and additionally conforms to
+section 15. A section-14 datagram-only claimant is not Core: it implements only
+the explicitly named `game` lane.
+
 ---
 
 ## 14. The WebTransport binding (the `game` lane over QUIC datagrams)
@@ -1021,17 +1080,21 @@ upgrade (section 2), and the same trust boundary:
   WebSocket. The path shape is application-defined; embedding the room key in
   it (for example `/game/<room>`) is RECOMMENDED, since a session is bound to
   one room at accept and the path is the natural place to say which.
-- Accepting the session (`:status 200`) binds it, server-side, to exactly ONE
-  room: the session is subscribed to that room's fan-out (14.3), and the
-  application MAY also bind the publish grant of section 3.10 (a granted
-  session is a *publisher*; an ungranted one is a *spectator* - its `game`
-  frames are answered `game-denied` `FORBIDDEN`, its fan-out delivery is
-  unaffected). One session holds at most one room and one grant, mirroring the
-  one-grant-per-connection rule; a non-200 response is a refusal and carries
-  no protocol meaning beyond HTTP semantics.
+- When the datagram `game` lane is requested, accepting the session
+  (`:status 200`) binds it, server-side, to exactly ONE room: the session is
+  subscribed to that room's fan-out (14.3), and the application MAY also bind
+  the publish grant of section 3.10 (a granted session is a *publisher*; an
+  ungranted one is a *spectator* - its `game` frames are answered
+  `game-denied` `FORBIDDEN`, its fan-out delivery is unaffected). One
+  session holds at most one datagram room and one grant. A session that
+  declares only the reliable binding of section 15 has no implicit room; its
+  memberships come from `subscribe` records on the stream. A non-200 response
+  is a refusal and carries no protocol meaning beyond HTTP semantics.
 - Closing the session (either end, or QUIC idle timeout) is the analogue of a
-  WebSocket close: the subscription and any grant are dropped. There is no
-  session resume; a client re-CONNECTs and re-joins.
+  WebSocket close: the datagram subscription and any grant are dropped. The
+  datagram membership has no resume; a client re-CONNECTs and re-joins.
+  Reliable-topic recovery, when section 15 is also active, is independently
+  carried on the new session's new stream (15.5).
 
 ### 14.2 Client-to-server datagrams
 
@@ -1048,11 +1111,13 @@ The binary form is byte-compatible with section 6.6's layout
 `[event, data, id]`), so one decoder and one set of conformance vectors serve
 both transports. The differences are carriage-level only:
 
-- **`ingressId` is `0`.** There is no `hello`, no capability negotiation, and
-  no `ingress-bind` on a WebTransport session; the session itself IS the
-  binding (one room, kind `game:1`), and id `0` - which the client-allocated
-  WebSocket ingress space of section 6.5 never uses (it starts at 1) - marks
-  that implicit binding. A datagram with any other `ingressId` is dropped.
+- **`ingressId` is `0`.** There is no `hello` or `ingress-bind` on the
+  datagram carriage; CONNECT declarations are its only capability carrier.
+  A `hello` on a section-15 stream does not alter datagram negotiation. The
+  datagram session itself IS the binding (one room, kind `game:1`), and id
+  `0` - which the client-allocated WebSocket ingress space of section 6.5
+  never uses (it starts at 1) - marks that implicit binding. A datagram with
+  any other `ingressId` is dropped.
 - **`seq`** is the per-session monotonic counter of section 6.5 (`0` allowed).
   It is diagnostic; the authoritative room order is the seq the server stamps
   on fan-out, exactly as on WebSocket.
@@ -1098,17 +1163,20 @@ receives.
 
 ### 14.4 What does not apply
 
-This binding carries the `game` lane and nothing else. There is no `welcome`,
-`hello`, or capability negotiation (section 5), no `subscribe` (membership
-comes from the CONNECT accept), no `batch`, no `lease`/`request-n`, no
-`resume` (section 7), and no server-to-client `0x03` topic frames (section 6) -
-except the compact `game` fan-out of section 14.6 when the session declared
-`game.fanout` decode capability at CONNECT.
+The datagram carriage carries the `game` lane and nothing else. It carries no
+`welcome`, `hello`, `subscribe`, `batch`, `lease`/`request-n`, or
+`resume`, and no server-to-client `0x03` topic frames except section 14.6's
+compact `game` fan-out. Membership comes from CONNECT acceptance and its
+carriage capabilities come only from section 14.7. A combined session may
+carry all of those reliable frames on section 15's stream; they never appear
+as datagrams.
 Liveness is the QUIC transport's own idle/keepalive machinery; the ping
 expectations of section 1.3 do not apply. WebTransport STREAMS are reserved:
-a client MUST NOT open them and a server ignores or closes any that appear -
-a future revision may bind reliable lanes (a join handshake, resume, or the
-full protocol) to streams, additively.
+a session that did not declare `lantean.reliable:1` at CONNECT MUST NOT open
+them and a server ignores or closes any that appear. Section 15 is the additive
+exception: a declaring session may open exactly one client-initiated
+bidirectional stream for the reliable protocol. Unidirectional streams and
+additional bidirectional streams remain reserved.
 
 ### 14.5 Security considerations
 
@@ -1120,9 +1188,10 @@ because datagrams are cheap to emit, a server SHOULD rate-limit per-session
 ingress the way it rate-limits WebSocket control traffic, and MAY close a
 session that persists past denial.
 
-A runtime claiming this binding implements sections 3.10, 6.6, and this
-section; the conformance classes of section 13 are WebSocket classes and do
-not apply to it.
+A runtime claiming this datagram binding implements sections 3.10, 6.6, and
+this section. The conformance classes of section 13 do not apply to the
+datagram-only lane; they do apply independently when the same session also
+implements section 15.
 
 ### 14.6 Compact fan-out (the `game.fanout:1` datagram carriage)
 
@@ -1154,19 +1223,215 @@ WebSocket carriage (section 6.7) so ONE decoder serves both transports.
   Applications SHOULD keep compact `game.fanout` payloads under a conservative
   path MTU (~1 KB), noting that the datagram's quarter-stream-ID varint consumes
   budget below this payload.
-- **Negotiation.** WebTransport has no `hello` (section 14.4), so a session
-  declares compact-decode capability at CONNECT (14.1's trust boundary) via the
-  CONNECT path's query component - the carrier every binding supports without
-  header plumbing. A session that does not declare it receives the JSON envelope
-  datagram (section 14.3), preserving the one-directional negotiation posture of
-  section 5. WHICH query key carries the declaration is the binding's to fix; the
-  requirement this section freezes is that the declaration is client-initiated at
-  CONNECT and the server falls back to the JSON envelope without it.
+- **Negotiation.** The session declares compact-decode capability at CONNECT
+  using the exact query carrier in section 14.7. A session that does not
+  declare `game.fanout:1` receives the JSON envelope datagram (section 14.3),
+  preserving the one-directional negotiation posture of section 5.
 
 A runtime MAY implement the WebSocket carriage (section 6.7) without this
 datagram carriage, and vice versa: the two are independently negotiated
 (`game.fanout:1` in `hello.caps` on WebSocket; the CONNECT query declaration on
 WebTransport) and share only the frozen payload and header shape above.
+
+### 14.7 CONNECT capability declarations
+
+WebTransport has no `hello` before CONNECT acceptance, so carriage-level
+capabilities use the CONNECT request's query component. The query key is
+**`lantean-cap`**, repeated once per token:
+
+```
+?lantean-cap=lantean.reliable%3A1&lantean-cap=game.fanout%3A1
+```
+
+The server applies normal URL query percent-decoding exactly once, then compares
+the decoded value case-sensitively. Repeating the key is the only list form;
+comma-separated values are one unknown token. Duplicate known tokens are
+idempotent. A malformed or unknown value is ignored and grants no capability.
+The registered CONNECT tokens are:
+
+| Token | Gates |
+|---|---|
+| `game.fanout:1` | Compact server-to-client datagram fan-out (14.6); absence falls back to JSON datagrams. |
+| `lantean.reliable:1` | Permission to open the one reliable bidirectional stream defined by section 15. |
+
+CONNECT declarations gate only WebTransport carriage. They do not populate the
+reliable lane's `hello.caps`: after the stream opens, `hello` still negotiates
+`batch`, `lease`, and binary codec tokens exactly as section 5 specifies.
+This separation prevents a CONNECT routing intermediary from silently enabling
+an inner codec the endpoint never advertised.
+
+---
+
+## 15. The WebTransport reliable-stream binding
+
+This section binds the reliable Lantean protocol to one long-lived
+client-initiated WebTransport bidirectional stream. The stream is an ordered
+byte stream, not a message transport, so it adds one record delimiter around
+the unchanged WebSocket message bytes. The same QUIC connection may
+simultaneously carry section 14's unreliable `game` datagrams.
+
+Section 14 remains the datagram binding and section 15 remains the reliable
+binding. A runtime may implement either or both. The reference
+`svelte-adapter-uws` runtime does not terminate QUIC; this section is
+normative for a runtime that claims the binding.
+
+**Wire status: freeze candidate.** The binding is additive within revision 1:
+only a session that declares `lantean.reliable:1` may open the stream, while
+an older client opens none and an older server keeps section 14.4's
+close-or-ignore behavior. The inner frames and their meanings do not change.
+After an independent conformance review this status becomes frozen; an
+incompatible future carriage requires a new CONNECT token.
+
+### 15.1 Record framing
+
+Each stream record is:
+
+```
+[messageLength:varint][messageBytes:messageLength]
+```
+
+- `messageLength` is canonical unsigned LEB128, using the primitive encoding
+  of section 6.3. It counts `messageBytes` only. A canonical encoding is the
+  shortest possible encoding; a redundant continuation byte is a protocol
+  error.
+- The length MUST be between **1 and 1,048,576 bytes**, inclusive. A receiver
+  MUST reject a zero length, a prefix that exceeds the limit, or a record whose
+  bytes are incomplete when the peer finishes its sending direction. The
+  1 MiB ceiling is the section 1.3 frame ceiling made transport-independent.
+- `messageBytes` are EXACTLY the bytes the corresponding WebSocket message
+  carries. No type byte, opcode, compression marker, checksum, or carriage
+  header is inserted inside them. Bytes beginning with a registered binary tag
+  from appendix C.3 are binary; every other core record MUST be valid UTF-8
+  JSON. In particular a control record still begins exactly `{"type`, and a
+  binary topic record still begins `0x03`.
+- Record boundaries are independent of QUIC read boundaries. A prefix or body
+  may arrive across any number of reads, and one read may contain any number of
+  complete records plus a partial next record. A receiver MUST parse
+  incrementally and MUST NOT treat a read boundary as a message boundary.
+
+The prefix is carriage, not an inner frame. Consequently every JSON schema,
+`0x03` codec, conformance vector, and unknown-frame rule remains shared with
+WebSocket after the prefix is removed.
+
+### 15.2 Negotiation and topology
+
+The client MUST declare `lantean.reliable:1` using section 14.7 before opening
+the stream. After a successful CONNECT response it MAY open exactly **one**
+bidirectional stream, and the first client-initiated bidirectional stream is the
+reliable lane. The stream is optional: a declaring session may still use only
+datagrams.
+
+The server MUST NOT open the reliable stream. A second client-initiated
+bidirectional stream, any unidirectional stream, or any stream from a session
+that omitted the token is not another protocol lane; the endpoint closes it
+with `STREAM_LIMIT` (appendix C.6) and leaves an already-open reliable lane
+unchanged. Once the reliable stream closes it cannot be replaced within the
+same WebTransport session; recovery opens a new CONNECT session (15.5). This
+single-stream topology preserves the ordering guarantees of section 11 and
+prevents control, subscription, and data records from acquiring cross-stream
+race rules.
+
+### 15.3 Inner protocol lifecycle
+
+Opening the stream creates one logical protocol connection:
+
+1. The server's first stream record MUST be the unchanged `welcome` frame.
+2. The client MAY send the unchanged `hello` frame. Inner capabilities are
+   negotiated solely by `hello.caps`, not copied from CONNECT declarations.
+3. Subscribe, batch, lease/request-n, resume, data-event, and `0x03` records
+   then behave exactly as sections 2-11 specify.
+
+The `welcome.sessionId`, capability set, wire-id space, ingress-id space,
+subscriptions, leases, and resume state belong to the reliable stream. The
+CONNECT-accepted datagram room and publish grant of section 14 belong to the
+datagram lane. They are independent:
+
+- a stream `subscribe` neither joins nor leaves the CONNECT datagram room;
+- a datagram-room grant does not authorize a stream subscription or ingress
+  binding;
+- subscribing on the stream to the same room as the datagram lane requests
+  both deliveries. The peer MAY observe the same logical room `seq` on both
+  carriages and must deduplicate if it wants only one.
+
+There is no cross-carriage ordering. Stream record order is total within the
+reliable lane; datagram order and loss remain section 14's. CONNECT acceptance
+and datagram membership may precede the first `welcome`, but no reliable
+protocol action exists before `welcome`.
+
+### 15.4 Liveness and closure
+
+Liveness uses QUIC/WebTransport idle timeout, keepalive, path validation, and
+connection health. The WebSocket ping behavior in section 1.3 does not become an
+inner record, and a peer MUST NOT invent a JSON heartbeat.
+
+A FIN or reset in either direction closes the whole logical reliable lane:
+both endpoints stop writing it, and the server drops its reliable
+subscriptions, leases, ids, and session id exactly as on WebSocket close. It
+does **not** close the surrounding WebTransport session or its datagram
+membership. Closing the CONNECT session or QUIC connection closes both lanes.
+An orderly application shutdown SHOULD finish queued complete records, send
+FIN, and then keep the WebTransport session only if its datagram lane remains
+useful.
+
+### 15.5 Resume and QUIC migration
+
+QUIC connection migration changes the network path of the SAME connection. It
+does not create a new protocol connection, does not emit a new `welcome`, and
+does not trigger resume; the open stream and both lane memberships continue.
+
+Recovery applies only after a different WebTransport CONNECT session is
+created. The client declares `lantean.reliable:1`, opens its new reliable
+stream, receives the new `welcome`, re-sends `hello`, and uses the unchanged
+resume-on-subscribe `recover` fields (or compatibility `resume` frame) from
+section 7. Offset and epoch comparison is identical to WebSocket. Datagram
+`game` membership is re-authorized independently at CONNECT and has no
+gap-fill.
+
+### 15.6 Flow control and slow consumers
+
+QUIC stream flow control and section 3.6 leases solve different layers and both
+apply:
+
+- QUIC flow control says how many bytes the transport currently accepts.
+- A negotiated `lease` says how many application messages the server permits;
+  `request-n` is still advisory and does not enlarge any byte limit.
+
+An endpoint MUST bound complete message bytes that have been framed for this
+lane but not yet accepted by the WebTransport send stream to **1,048,576 bytes
+per session**. The sum is over each queued record's `messageLength`; the
+1-3-byte length prefixes are fixed framing overhead and do not count. This lets
+one maximum-size message fit without making the pending bound ambiguous. The
+endpoint MUST stop pulling or producing optional work while the stream is
+blocked. If adding the next complete record would cross the bound, it resets the
+reliable lane with `SLOW_CONSUMER`; it MUST NOT drop a reliable record,
+silently skip a `seq`, or spill into a second stream. Recoverable topics then
+resume on a new connection by section 15.5; non-recoverable topics re-snapshot
+as section 7 already requires. The datagram lane may continue after the reset.
+
+An inbound declared record over the 1 MiB limit is stopped/reset with
+`RECORD_TOO_LARGE`. A non-canonical/zero prefix, invalid registered binary
+shape, invalid UTF-8 where JSON is required, or FIN inside a record is reset
+with `PROTOCOL_ERROR`. These errors close the reliable lane and its state, not
+the whole WebTransport session. Section 12's authorization and rate limits
+still apply after deframing.
+
+### 15.7 Conformance and coexistence
+
+A client or server claiming the reliable-stream binding MUST implement Core
+conformance from section 13 over this carriage, the framing/topology/lifecycle
+rules of section 15, and every optional inner capability it advertises or
+emits. Binary conformance continues to require JSON fallback. A datagram-only
+implementation claims section 14, not section 15.
+
+A session may therefore be:
+
+- datagram-only (section 14 declarations and room membership);
+- reliable-only (`lantean.reliable:1`, no implicit datagram room); or
+- combined (one reliable stream plus the unchanged datagram lane).
+
+Neither declaration implies the other. In particular `game.fanout:1` gates
+compact datagram fan-out only, while a `game.fanout:1` token inside
+`hello.caps` gates the identical compact payload on the reliable lane.
 
 ---
 
@@ -1269,7 +1534,8 @@ Framework-defined `type` values. An unrecognized `type` is passed through
 `welcome`, `hello`, `lease-ok`, `subscribe`, `subscribe-batch`, `unsubscribe`,
 `subscribed`, `subscribe-denied`, `batch`, `request`, `reply`, `wire-id`,
 `resume`, `resumed`, `lease`, `request-n`, `error`, `ingress-ok`,
-`ingress-bind`, `ingress-bound`, `reconnect`, `game`, `game-denied`, and the
+`ingress-bind`, `ingress-bound`, `reconnect`, `game`, `game-denied`,
+`message-overloaded`, and the
 plugin frames of section 8 (`cursor`,
 `cursor-snapshot`, `cursor-viewport`, `presence-update`, `presence-snapshot`,
 `replay`).
@@ -1310,9 +1576,36 @@ application MUST NOT define its own `__`-prefixed topics.
 |---|---|
 | `CONTROL_FRAME_TOO_LARGE` | A control-shaped frame exceeded the ceiling (sections 1.2, 3.7). |
 
+### C.5 WebTransport CONNECT capability registry
+
+The repeated query key is `lantean-cap` (section 14.7). Registered decoded
+values are:
+
+| Token | Meaning |
+|---|---|
+| `game.fanout:1` | Decode compact `game` fan-out datagrams (14.6). |
+| `lantean.reliable:1` | Permit the reliable bidirectional stream (15). |
+
+### C.6 WebTransport reliable-stream error registry
+
+These are WebTransport application error codes carried by RESET_STREAM and/or
+STOP_SENDING for section 15's stream. They close only the reliable lane unless
+the transport itself also closes.
+
+| Code | Name | Meaning |
+|---|---|---|
+| `0x01` | `STREAM_LIMIT` | A reserved, additional, wrong-direction, or undeclared stream was opened. |
+| `0x02` | `RECORD_TOO_LARGE` | A declared inner message length exceeded 1 MiB. |
+| `0x03` | `PROTOCOL_ERROR` | Record prefix/body or inner message was malformed. |
+| `0x04` | `SLOW_CONSUMER` | Pending framed bytes would exceed the 1 MiB per-session bound. |
+
 ---
 
 ## Appendix D. Design rationale (why the wire is shaped this way)
+
+This appendix is the wire-specific decision record. The cross-package index
+routes protocol evolution through
+[Protocol compatibility](./docs/decisions/protocol-compatibility.md).
 
 These non-choices are deliberate and are recorded so they are not relitigated:
 
@@ -1362,6 +1655,20 @@ These non-choices are deliberate and are recorded so they are not relitigated:
   the server has not (yet) registered gets silence rather than a rejection -
   handlers register lazily, so "unknown" is routinely transient (section 3.8),
   and the JSON fallback is already correct while it lasts.
+- **One ordered WebTransport stream, not one stream per topic.** The reliable
+  protocol already promises one ordering domain per connection and uses
+  control records as fences. Splitting it across QUIC streams would add
+  cross-stream races for welcome, hello, wire-id, resume, and subscribe acks.
+  One long-lived bidi stream preserves the WebSocket ordering model.
+- **Length prefix outside byte-identical inner messages.** A QUIC stream needs
+  record boundaries; placing only canonical varint length outside the message
+  lets every schema, codec, vector, and fallback stay shared across transports.
+  CONNECT capability gating makes the new carriage additive without
+  reinterpreting reserved streams for old sessions.
+- **QUIC flow control does not replace leases.** QUIC limits bytes accepted by
+  the transport; `lease` limits application messages according to server
+  pressure. The finite 1 MiB pending-record bound prevents either mechanism
+  from becoming an unbounded userspace queue.
 
 ---
 
@@ -1392,24 +1699,35 @@ These non-choices are deliberate and are recorded so they are not relitigated:
 | `reconnect` | s->c | 3.9 |
 | `game` | c->s | 3.10 |
 | `game-denied` | s->c | 3.10 |
+| `message-overloaded` | s->c | 3.11 |
 | data-event envelope | both | 4 |
 | `0x03` binary | both | 6 |
 | plugin ingress (`cursor`, `presence-*`, `replay`, ...) | c->s | 8 |
+| varint-length stream record (carriage; inner frame unchanged) | both | 15.1 |
 
 ---
 
 ## Appendix F. Companion artifacts
 
-Two machine-checkable artifacts live beside this document and are validated in CI
-against the reference implementation, so the spec cannot drift from the wire:
+The [conformance index](./docs/protocol-conformance.md) is the task-oriented
+entry point for these artifacts and their executable proofs. Three
+machine-checkable artifact families live beside this document and are validated
+in CI against the reference implementation, so the spec cannot drift from the
+wire:
 
-- **`protocol.schema.json`** - a JSON Schema for every control frame and the
+- **[`protocol.schema.json`](./protocol.schema.json)** - a JSON Schema for every control frame and the
   data-event envelope. A third-party implementer can validate captured frames
   against it.
-- **`test-vectors/`** - recorded transcripts (including a byte-exact `0x03`
-  frame) a third-party implementer can replay to check a decoder.
+- **[`test-vectors/`](./test-vectors/README.md)** - recorded transcripts (including a byte-exact `0x03`
+  frame and a fragmented WebTransport reliable-stream transcript) a third-party
+  implementer can replay to check a decoder.
+- **`protocol.schema.json#x-webtransport`** - machine-readable CONNECT token,
+  record-limit, topology, and stream-error constants for runtimes whose schema
+  tooling ignores prose.
 
-A minimal dependency-free Core client (`examples/minimal-client.mjs`, ~40 lines)
-implements connect, subscribe, data-event dispatch, and resume-on-subscribe - the
-complete Core class (section 13) by construction. It is exercised by one CI test
+A [minimal dependency-free Core client](./examples/minimal-client.mjs) (~40
+lines) implements connect, subscribe, data-event dispatch, and
+resume-on-subscribe - the complete Core class (section 13) by construction. It
+is exercised by the repository's
+[minimal-client conformance test](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/minimal-client.test.js)
 against the reference server.

@@ -1,0 +1,165 @@
+{
+  "schemaVersion": 1,
+  "sourceLocale": "en",
+  "catalogOwner": "application",
+  "defaultTextPolicy": "english-diagnostic-fallback",
+  "surfaces": [
+    {
+      "id": "structured-diagnostic",
+      "sourcePackages": [
+        "svelte-adapter-uws",
+        "svelte-realtime",
+        "svelte-adapter-uws-extensions"
+      ],
+      "classification": "diagnostic",
+      "machineFields": [
+        "schemaVersion",
+        "occurredAt",
+        "source",
+        "component",
+        "event",
+        "severity",
+        "level",
+        "dataClass"
+      ],
+      "humanFields": [
+        "message"
+      ],
+      "contextFields": [
+        "attributes"
+      ],
+      "translationOwner": "application",
+      "rule": "Route by machine fields; never parse or display message as trusted application prose."
+    },
+    {
+      "id": "adapter-error-reference",
+      "sourcePackages": [
+        "svelte-adapter-uws"
+      ],
+      "classification": "diagnostic",
+      "machineFields": [
+        "id",
+        "code",
+        "event",
+        "component",
+        "severity",
+        "sources",
+        "anchor",
+        "help"
+      ],
+      "humanFields": [
+        "problemPrefix",
+        "messagePrefix",
+        "cause",
+        "consequence",
+        "automaticRecovery",
+        "nextAction"
+      ],
+      "translationOwner": "application",
+      "rule": "Search and route by stable fields; English recovery text is operator guidance."
+    },
+    {
+      "id": "subscription-denial",
+      "sourcePackages": [
+        "svelte-adapter-uws",
+        "svelte-realtime"
+      ],
+      "classification": "mixed",
+      "machineFields": [
+        "type",
+        "SubscribeDenialReason"
+      ],
+      "humanFields": [
+        "custom reason"
+      ],
+      "translationOwner": "application",
+      "rule": "Only declared reason members select keys; custom reason strings are diagnostic text."
+    },
+    {
+      "id": "connection-failure",
+      "sourcePackages": [
+        "svelte-adapter-uws",
+        "svelte-realtime"
+      ],
+      "classification": "mixed",
+      "machineFields": [
+        "kind",
+        "class",
+        "code",
+        "status"
+      ],
+      "humanFields": [
+        "reason"
+      ],
+      "translationOwner": "application",
+      "rule": "Map kind, class, code, or status to a key; treat transport and response reasons as diagnostics."
+    },
+    {
+      "id": "waiting-room",
+      "sourcePackages": [
+        "svelte-adapter-uws"
+      ],
+      "classification": "application-ui",
+      "machineFields": [
+        "lang",
+        "dir",
+        "{{queueDepth}}",
+        "{{estimatedSeconds}}",
+        "{{pollIntervalMs}}",
+        "{{retryAfterSeconds}}",
+        "{{admitCheckPath}}",
+        "{{appName}}",
+        "{{statusUrl}}",
+        "{{supportUrl}}",
+        "{{incidentId}}"
+      ],
+      "humanFields": [
+        "body",
+        "template"
+      ],
+      "translationOwner": "application",
+      "rule": "The built-in document is the English fallback; localized renderers own prose and contextual escaping."
+    },
+    {
+      "id": "protocol-and-telemetry",
+      "sourcePackages": [
+        "svelte-adapter-uws",
+        "svelte-realtime",
+        "svelte-adapter-uws-extensions"
+      ],
+      "classification": "machine",
+      "machineFields": [
+        "frame types",
+        "field names",
+        "status values",
+        "metric names",
+        "label names",
+        "enumerated label values"
+      ],
+      "humanFields": [
+        "metric help",
+        "operator descriptions"
+      ],
+      "translationOwner": "application",
+      "rule": "Machine vocabulary remains byte-exact; dashboards may localize surrounding labels and help."
+    },
+    {
+      "id": "application-payload",
+      "sourcePackages": [
+        "application"
+      ],
+      "classification": "application-ui",
+      "machineFields": [
+        "application-declared discriminators"
+      ],
+      "humanFields": [
+        "names",
+        "content",
+        "errors",
+        "free text"
+      ],
+      "translationOwner": "application",
+      "rule": "The application defines its own stable keys, locale catalog, escaping, and bidirectional policy."
+    }
+  ]
+}
