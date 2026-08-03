@@ -21,6 +21,32 @@ describe('current sv consolidated configuration guidance', () => {
 		expect(quickStart).toMatch(/ignores?\s+a\s+separate `svelte\.config\.js`/i);
 		expect(quickStart).toContain('SvelteKit 2.61 and earlier');
 	});
+
+	it('never presents the sidecar as the only config, anywhere', () => {
+		// The HTTP quick start led with the consolidated form while the WSS
+		// quick start, the full worked example and the WebSocket-path answer
+		// still showed `**svelte.config.js**` as the sole config - so a reader
+		// who reached them created the file this same README forbids and got a
+		// green build with no runnable output. Every remaining mention has to
+		// carry its version scope.
+		const headings = [...README.matchAll(/^\*\*svelte\.config\.js\*\*$/gm)];
+		expect(
+			headings.map((match) => README.slice(0, match.index).split('\n').length),
+			'a section presents svelte.config.js as its own config block'
+		).toEqual([]);
+
+		// Prose that EXPLAINS the sidecar is fine and often necessary. What is
+		// not fine is a code comment naming it as the place to put the snippet
+		// below, because that is an instruction a current `sv` user will follow
+		// into an ignored file. Those must carry their scope inline.
+		for (const line of README.split('\n')) {
+			if (!/^\s*\/\/.*svelte\.config\.js/.test(line)) continue;
+			expect(
+				/legacy|2\.61|or the adapter call/i.test(line),
+				`this comment sends a reader to the sidecar without scoping it: ${line.trim()}`
+			).toBe(true);
+		}
+	});
 });
 
 const describeRuntime = hasUWS ? describe : describe.skip;

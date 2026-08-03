@@ -522,19 +522,28 @@ For native WSS, set both `SSL_CERT` and `SSL_KEY`; the upgrade then uses the
 same TLS listener as HTTPS. Configure [authentication](#authentication) and
 application authorization separately.
 
-**svelte.config.js**
+**vite.config.ts**
 
-```js
+```ts
 import adapter from "svelte-adapter-uws";
+import { sveltekit } from "@sveltejs/kit/vite";
+import { defineConfig } from "vite";
 
-export default {
-  kit: {
-    adapter: adapter({
-      websocket: true,
+export default defineConfig({
+  plugins: [
+    sveltekit({
+      adapter: adapter({
+        websocket: true,
+      }),
     }),
-  },
-};
+  ],
+});
 ```
+
+On SvelteKit 2.61 and earlier, put the same `adapter({ websocket: true })` call
+under `kit.adapter` in `svelte.config.js` instead. Do not add that sidecar to a
+current `sv` project: the value passed to `sveltekit(...)` takes precedence and
+the separate file is ignored.
 
 ```bash
 npm run build
@@ -792,7 +801,7 @@ export function renderWaitingRoom({ request, admitCheckPath }) {
   };
 }
 
-// svelte.config.js
+// vite.config.ts - inside sveltekit({ adapter: ... })
 adapter({
   websocket: {
     upgradeAdmission: {
@@ -880,7 +889,7 @@ It is a module path (like `handler`), not a live object: adapter options are ser
 import { createMetrics } from "svelte-adapter-uws-extensions/prometheus";
 export const metrics = createMetrics();
 
-// svelte.config.js
+// vite.config.ts - inside sveltekit({ adapter: ... })
 adapter({
   websocket: {
     upgradeAdmission: {
@@ -1185,7 +1194,7 @@ export function message(ws, ctx) {
   });
 }
 
-// In svelte.config.js
+// In vite.config.ts - inside sveltekit({ adapter: ... })
 adapter({
   websocket: {
     upgradeAdmission: {
@@ -2451,7 +2460,7 @@ When your WebSocket handler exports an `admin(request)` function - `svelte-realt
 Configure the prefix with `websocket.adminPath`:
 
 ```js
-// svelte.config.js
+// vite.config.ts - inside sveltekit({ adapter: ... })
 adapter({
   websocket: {
     adminPath: "/__ops", // relocate it (default '/__realtime')
@@ -2515,7 +2524,7 @@ export function close(ws) {
 **Thresholds are configurable per-deployment.** Defaults are conservative - a healthy small app should never trip them in steady state. Override via `WebSocketOptions.pressure`:
 
 ```js
-// svelte.config.js
+// vite.config.ts - inside sveltekit({ adapter: ... })
 import adapter from "svelte-adapter-uws";
 
 export default {
@@ -5413,7 +5422,7 @@ export default function primaryInit({ env }) {
   return { world }; // -> every worker's init({ workerData }) sees the same buffer
 }
 
-// svelte.config.js
+// vite.config.ts - inside sveltekit({ adapter: ... })
 adapter({
   websocket: {
     primaryInit: "./src/lib/server/cluster.js",
@@ -5442,7 +5451,7 @@ The relay carries each published message to every worker, so under healthy opera
 Enable it with `stateHashIntervalMs` (clustered mode only):
 
 ```js
-// svelte.config.js
+// vite.config.ts - inside sveltekit({ adapter: ... })
 adapter({
   websocket: {
     stateHashIntervalMs: 30000, // each worker reports a state hash every ~30s
@@ -5496,7 +5505,7 @@ It is built to be safe and cheap:
 The cadence is configurable, and `0` disables the auditor entirely:
 
 ```js
-// svelte.config.js
+// vite.config.ts - inside sveltekit({ adapter: ... })
 adapter({
   websocket: {
     consistencyAuditIntervalMs: 5000, // default; 0 disables the auditor and its timer
@@ -5661,7 +5670,7 @@ uWebSockets.js manages connection lifecycle at the C++ level. These are its buil
 **WebSocket ping/pong:** Set `idleTimeout` in the adapter's `websocket` option (in seconds) to have uWS send automatic WebSocket ping frames and close connections that don't respond. The default is 120 seconds. The client store handles pong automatically. Setting it to `0` disables the idle timeout, which also disables that liveness check: a connection whose peer has silently gone away is never reaped and keeps its slot.
 
 ```js
-// svelte.config.js
+// vite.config.ts - inside sveltekit({ adapter: ... })
 adapter({
   websocket: {
     idleTimeout: 120, // close WS connections silent for 120s
@@ -5835,28 +5844,22 @@ node bench/run-dedup.mjs    # SSR dedup render-call reduction
 
 Here's a complete example tying everything together.
 
-**svelte.config.js**
-
-```js
-import adapter from "svelte-adapter-uws";
-
-export default {
-  kit: {
-    adapter: adapter({
-      websocket: true,
-    }),
-  },
-};
-```
-
 **vite.config.js**
 
 ```js
+import adapter from "svelte-adapter-uws";
 import { sveltekit } from "@sveltejs/kit/vite";
 import uws from "svelte-adapter-uws/vite";
 
 export default {
-  plugins: [sveltekit(), uws()],
+  plugins: [
+    sveltekit({
+      adapter: adapter({
+        websocket: true,
+      }),
+    }),
+    uws(),
+  ],
 };
 ```
 
@@ -6215,9 +6218,9 @@ example.com {
 
 ### "I want to use a different WebSocket path"
 
-Set it in both the adapter config and the client:
-
-**svelte.config.js**
+Set it in both the adapter config and the client. The adapter call is the one
+you passed to `sveltekit(...)` in `vite.config.ts` (or, on SvelteKit 2.61 and
+earlier, the one under `kit.adapter` in `svelte.config.js`):
 
 ```js
 adapter({
