@@ -57,6 +57,46 @@ describe('trusted release workflow', () => {
 			"'tarball=package.json' >> $env:GITHUB_OUTPUT"
 		);
 		expect(validateReleaseWorkflow(laundered, pkg, policy).length).toBeGreaterThan(0);
+
+		// An INTERIOR line added to the pack body - no new step, no renamed
+		// step - swaps the tarball bytes after the checks ran. The body is
+		// exact-matched, so the injection must fail even though every required
+		// token is still present.
+		const injected = workflow.replace(
+			"'tarball=' + $tarball >> $env:GITHUB_OUTPUT",
+			"Copy-Item evil.tgz $tarball -Force\n          'tarball=' + $tarball >> $env:GITHUB_OUTPUT"
+		);
+		expect(injected).not.toBe(workflow);
+		expect(validateReleaseWorkflow(injected, pkg, policy).join('\n'))
+			.toContain('retained artifact pack body is not exact');
+	});
+
+	it('rejects step-level keys that neutralize a step without touching name, order, or body', () => {
+		// continue-on-error makes the identity verifier ADVISORY: it runs,
+		// refuses, and the job publishes anyway. The load-bearing case.
+		const advisory = workflow.replace(
+			'      - name: Verify tag, package, and source identity\n        run: node scripts/prepare-release.js',
+			'      - name: Verify tag, package, and source identity\n        continue-on-error: true\n        run: node scripts/prepare-release.js'
+		);
+		expect(advisory).not.toBe(workflow);
+		expect(validateReleaseWorkflow(advisory, pkg, policy).join('\n'))
+			.toContain('disallowed keys: continue-on-error');
+
+		const skipped = workflow.replace(
+			'      - name: Verify tag, package, and source identity\n        run: node scripts/prepare-release.js',
+			'      - name: Verify tag, package, and source identity\n        if: ${{ false }}\n        run: node scripts/prepare-release.js'
+		);
+		expect(skipped).not.toBe(workflow);
+		expect(validateReleaseWorkflow(skipped, pkg, policy).join('\n'))
+			.toContain('disallowed keys: if');
+
+		const preloaded = workflow.replace(
+			'      - name: Verify tag, package, and source identity\n        run: node scripts/prepare-release.js',
+			'      - name: Verify tag, package, and source identity\n        env:\n          NODE_OPTIONS: --require ./scripts/postinstall.js\n        run: node scripts/prepare-release.js'
+		);
+		expect(preloaded).not.toBe(workflow);
+		expect(validateReleaseWorkflow(preloaded, pkg, policy).join('\n'))
+			.toContain('disallowed keys: env');
 	});
 
 	it('rejects an interposed step, a duplicated step name, and verify-before-install', () => {

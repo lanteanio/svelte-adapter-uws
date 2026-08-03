@@ -71,6 +71,18 @@ export function validateReleaseWorkflow(source, pkg, policy) {
 			' - got: ' + stepNames.join(' -> ')
 		);
 	}
+	// A closed NAME inventory is not enough: a step-level `if:` skips the
+	// verifier, `continue-on-error:` makes its refusal advisory, and `env:`
+	// (NODE_OPTIONS, npm_config_registry) preloads code into an exact-matched
+	// command - all without touching name, order, or body. Every step is
+	// therefore also a closed KEY inventory.
+	const ALLOWED_STEP_KEYS = new Set(['name', 'uses', 'with', 'run', 'id', 'shell']);
+	for (const step of steps) {
+		const extra = Object.keys(step).filter((key) => !ALLOWED_STEP_KEYS.has(key));
+		if (extra.length > 0) {
+			errors.push('release step "' + step.name + '" carries disallowed keys: ' + extra.join(', '));
+		}
+	}
 	const named = new Map(steps.map((step) => [step.name, step]));
 	const checkout = named.get('Check out immutable tag');
 	if (!checkout || checkout.uses !== 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262' ||
@@ -102,15 +114,25 @@ export function validateReleaseWorkflow(source, pkg, policy) {
 	}
 	const pack = named.get('Pack retained artifact');
 	if (!pack || pack.id !== 'pack' || pack.shell !== 'pwsh') errors.push('retained artifact pack step is missing');
-	const packRun = pack?.run || '';
-	for (const token of [
-		'npm pack --json --pack-destination release-artifacts',
-		'$records.Count -ne 1',
-		"^[a-z0-9._-]+\\.tgz$",
-		'Test-Path -LiteralPath $tarball -PathType Leaf',
+	// The pack body is the one mutable script between verification and
+	// publication, so a single interior edit (an added download, an extra
+	// Copy-Item over the tarball) is an artifact swap. Substring checks cannot
+	// see an ADDED line; only whole-body equality closes that class.
+	const EXPECTED_PACK_RUN = [
+		"$ErrorActionPreference = 'Stop'",
+		'New-Item -ItemType Directory -Force release-artifacts | Out-Null',
+		'$packJson = npm pack --json --pack-destination release-artifacts',
+		"if ($LASTEXITCODE -ne 0) { throw 'npm pack failed' }",
+		'$records = @($packJson | ConvertFrom-Json)',
+		"if ($records.Count -ne 1) { throw 'npm pack did not return exactly one artifact' }",
+		'$filename = [IO.Path]::GetFileName([string]$records[0].filename)',
+		"if ($filename -notmatch '^[a-z0-9._-]+\\.tgz$') { throw 'npm pack returned an unsafe artifact name' }",
+		"$tarball = 'release-artifacts/' + $filename",
+		"if (-not (Test-Path -LiteralPath $tarball -PathType Leaf)) { throw 'retained tarball is missing' }",
 		"'tarball=' + $tarball >> $env:GITHUB_OUTPUT"
-	]) {
-		if (!packRun.includes(token)) errors.push('retained artifact step is missing: ' + token);
+	].join(' ');
+	if (normalized(pack?.run) !== EXPECTED_PACK_RUN) {
+		errors.push('retained artifact pack body is not exact');
 	}
 	const upload = named.get('Retain exact publication artifact');
 	if (!upload || upload.uses !== 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' ||
