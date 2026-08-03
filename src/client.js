@@ -2,6 +2,7 @@ import { writable, derived } from 'svelte/store';
 import { parseBinaryFrame, buildBinaryFrame, requestNFrame } from './runtime/wire.js';
 import { decodeValue } from './runtime/wire-value.js';
 import { now, monotonicNow, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer, microtask, nextReconnectDelay, dispersedReconnectDelay } from './client-runtime.js';
+import { formatDiagnostic } from './runtime/diagnostic-format.js';
 
 /** @type {ReturnType<typeof createConnection> | null} */
 let singleton = null;
@@ -305,6 +306,29 @@ export const failure = {
 		return ensureConnection().failure.subscribe(fn);
 	}
 };
+
+/**
+ * Latest established-message shed response from the server. A value names the
+ * exceeded worker/connection scope and, for rate limits, when a retry can be
+ * attempted. The connection remains open.
+ *
+ * @type {import('svelte/store').Readable<import('./client.js').MessageOverload | null>}
+ */
+export const overloads = {
+	subscribe(fn) {
+		return ensureConnection().overloads.subscribe(fn);
+	}
+};
+
+/**
+ * Keep the compatibility alias byte-identical to the explicit diagnostic field.
+ * This text can come from a browser, intermediary, or remote server and is not
+ * a localized application message.
+ * @param {string} diagnosticReason
+ */
+function failureDiagnosticText(diagnosticReason) {
+	return { diagnosticReason, reason: diagnosticReason };
+}
 
 /**
  * Install a handler for server-initiated requests. The server may call
@@ -1053,6 +1077,8 @@ function createConnection(options) {
 	let nextSubscribeRef = 1;
 	/** @type {import('svelte/store').Writable<{ topic: string, reason: string, ref: number | string } | null>} */
 	const denialsStore = writable(null);
+	/** @type {import('svelte/store').Writable<import('./client.js').MessageOverload | null>} */
+	const overloadsStore = writable(null);
 
 	// - Internal flow-control window (client mirror) -----------------------
 	// Off until the server echoes acceptance. While off, every send takes the
@@ -1357,7 +1383,7 @@ function createConnection(options) {
 						kind: 'auth-preflight',
 						class: 'AUTH',
 						status: result.status,
-						reason: result.reason
+						...failureDiagnosticText(result.reason)
 					});
 					statusStore.set('failed');
 					terminalClosed = true;
@@ -1372,7 +1398,7 @@ function createConnection(options) {
 						kind: 'auth-preflight',
 						class: 'AUTH',
 						status: result.status,
-						reason: result.reason
+						...failureDiagnosticText(result.reason)
 					});
 					statusStore.set('disconnected');
 					scheduleReconnect();
@@ -1629,7 +1655,14 @@ function createConnection(options) {
 					// can present it back on resume. Old servers omit it; the
 					// map entry is simply absent and resume treats it as a match.
 					if (typeof msg.epoch === 'number') lastSeenEpochs.set(msg.topic, msg.epoch);
-					if (debug) console.log('[ws] subscribed topic=%s ref=%s epoch=%s', msg.topic, msg.ref, msg.epoch);
+					if (debug) console.log(formatDiagnostic({
+						source: 'svelte-adapter-uws',
+						component: 'client.subscription',
+						event: 'client.subscription.accepted',
+						severity: 'debug',
+						message: 'The server accepted a topic subscription.',
+						attributes: { topic: msg.topic, ref: msg.ref, epoch: msg.epoch }
+					}));
 					return;
 				}
 				if (msg.type === 'wire-id' && typeof msg.topic === 'string' && typeof msg.id === 'number') {
@@ -1638,7 +1671,14 @@ function createConnection(options) {
 					// resolves to this topic name. Arrives before the first
 					// binary frame for the topic (same socket, ordered).
 					wireIdMap.set(msg.id, msg.topic);
-					if (debug) console.log('[ws] wire-id topic=%s id=%d', msg.topic, msg.id);
+					if (debug) console.log(formatDiagnostic({
+						source: 'svelte-adapter-uws',
+						component: 'client.wire',
+						event: 'client.wire-id.assigned',
+						severity: 'debug',
+						message: 'The server assigned a binary topic identifier.',
+						attributes: { topic: msg.topic, id: msg.id }
+					}));
 					return;
 				}
 				if (msg.type === 'ingress-ok') {
@@ -1646,19 +1686,62 @@ function createConnection(options) {
 					// destination now; each is confirmed by an `ingress-bound`.
 					// Absorbed here; never reaches the app surface.
 					onIngressOk();
-					if (debug) console.log('[ws] ingress-ok');
+					if (debug) console.log(formatDiagnostic({
+						source: 'svelte-adapter-uws',
+						component: 'client.ingress',
+						event: 'client.ingress.available',
+						severity: 'debug',
+						message: 'The server supports binary ingress.',
+						attributes: null
+					}));
 					return;
 				}
 				if (msg.type === 'ingress-bound' && typeof msg.id === 'number') {
 					// Server armed one ingress binding: promote it to binary so
 					// the consumer's next send goes as a 0x03 frame. Absorbed here.
 					onIngressBound(msg.id);
-					if (debug) console.log('[ws] ingress-bound id=%d', msg.id);
+					if (debug) console.log(formatDiagnostic({
+						source: 'svelte-adapter-uws',
+						component: 'client.ingress',
+						event: 'client.ingress.bound',
+						severity: 'debug',
+						message: 'The server bound a binary ingress destination.',
+						attributes: { id: msg.id }
+					}));
 					return;
 				}
 				if (msg.type === 'subscribe-denied' && typeof msg.topic === 'string' && typeof msg.reason === 'string') {
-					console.warn('[ws] subscribe denied topic=%s reason=%s\n  See: https://svti.me/subscribe-denied', msg.topic, msg.reason);
+					console.warn(formatDiagnostic({
+						source: 'svelte-adapter-uws',
+						component: 'client.subscription',
+						event: 'client.subscription.denied',
+						severity: 'warn',
+						message: 'The server denied a topic subscription.',
+						attributes: {
+							topic: msg.topic,
+							reason: msg.reason,
+							ref: msg.ref,
+							help: 'https://svti.me/subscribe-denied'
+						}
+					}));
 					denialsStore.set({ topic: msg.topic, reason: msg.reason, ref: msg.ref });
+					return;
+				}
+				if (msg.type === 'message-overloaded' && typeof msg.reason === 'string' &&
+					(msg.scope === 'connection' || msg.scope === 'global')) {
+					const overload = { reason: msg.reason, scope: msg.scope };
+					if (Number.isSafeInteger(msg.retryAfterMs) && msg.retryAfterMs > 0) {
+						overload.retryAfterMs = msg.retryAfterMs;
+					}
+					if (debug) console.warn(formatDiagnostic({
+						source: 'svelte-adapter-uws',
+						component: 'client.message',
+						event: 'client.message.overloaded',
+						severity: 'warn',
+						message: 'The server shed an application message at its established-message admission boundary.',
+						attributes: overload
+					}));
+					overloadsStore.set(overload);
 					return;
 				}
 				if (msg.type === 'error' && typeof msg.code === 'string') {
@@ -1669,9 +1752,18 @@ function createConnection(options) {
 					// `size` names the offending frame's byte length - the frame
 					// was rejected without parsing, so the size is the only handle
 					// a developer has on which frame overflowed.
-					console.warn('[ws] protocol error code=%s%s%s', msg.code,
-						typeof msg.limit === 'number' ? ' (limit ' + msg.limit + ' bytes)' : '',
-						typeof msg.size === 'number' ? ' (frame was ' + msg.size + ' bytes)' : '');
+					console.warn(formatDiagnostic({
+						source: 'svelte-adapter-uws',
+						component: 'client.protocol',
+						event: 'client.protocol.error',
+						severity: 'warn',
+						message: 'The server rejected a protocol frame.',
+						attributes: {
+							code: msg.code,
+							limit: typeof msg.limit === 'number' ? msg.limit : null,
+							size: typeof msg.size === 'number' ? msg.size : null
+						}
+					}));
 					return;
 				}
 				if (msg.type === 'request' && (typeof msg.ref === 'number' || typeof msg.ref === 'string') && typeof msg.event === 'string') {
@@ -1747,7 +1839,7 @@ function createConnection(options) {
 				if (debug) console.warn('[ws] connection permanently closed by server (code ' + event?.code + ')');
 				terminalClosed = true;
 				permaClosedStore.set(true);
-				failureStore.set({ kind: 'ws-close', class: 'TERMINAL', code, reason });
+				failureStore.set({ kind: 'ws-close', class: 'TERMINAL', code, ...failureDiagnosticText(reason) });
 				statusStore.set('failed');
 				return;
 			}
@@ -1762,7 +1854,7 @@ function createConnection(options) {
 			const advisory = reconnectAdvisory;
 			reconnectAdvisory = null;
 			if (advisory && now() < advisory.deadline) {
-				failureStore.set({ kind: 'ws-close', class: 'DRAIN', code, reason });
+				failureStore.set({ kind: 'ws-close', class: 'DRAIN', code, ...failureDiagnosticText(reason) });
 				statusStore.set('disconnected');
 				attempt = 0;
 				scheduleReconnect(dispersedReconnectDelay(advisory.afterMs, advisory.windowMs));
@@ -1772,9 +1864,9 @@ function createConnection(options) {
 			if (cls === 'THROTTLE') {
 				// Jump ahead in the backoff curve to avoid hammering a rate-limited server.
 				attempt = Math.max(attempt, 5);
-				failureStore.set({ kind: 'ws-close', class: 'THROTTLE', code, reason });
+				failureStore.set({ kind: 'ws-close', class: 'THROTTLE', code, ...failureDiagnosticText(reason) });
 			} else {
-				failureStore.set({ kind: 'ws-close', class: 'RETRY', code, reason });
+				failureStore.set({ kind: 'ws-close', class: 'RETRY', code, ...failureDiagnosticText(reason) });
 			}
 
 			statusStore.set('disconnected');
@@ -1793,7 +1885,7 @@ function createConnection(options) {
 				kind: 'ws-close',
 				class: 'EXHAUSTED',
 				code: lastCloseCode,
-				reason: lastCloseReason || 'max reconnect attempts exhausted'
+				...failureDiagnosticText(lastCloseReason || 'max reconnect attempts exhausted')
 			});
 			statusStore.set('failed');
 			terminalClosed = true;
@@ -2317,6 +2409,7 @@ function createConnection(options) {
 		events: { subscribe: eventsStore.subscribe },
 		status: { subscribe: statusStore.subscribe },
 		denials: { subscribe: denialsStore.subscribe },
+		overloads: { subscribe: overloadsStore.subscribe },
 		failure: { subscribe: failureStore.subscribe },
 		_permaClosed: { subscribe: permaClosedStore.subscribe },
 		_hasUrl: !!url,

@@ -269,6 +269,19 @@ export const denials: Readable<{
 	ref: number | string;
 } | null>;
 
+export type MessageOverloadReason = 'rate_limit' | 'concurrency_limit' | 'queue_full';
+
+/** A message shed by the server-side established-message admission gate. */
+export interface MessageOverload {
+	reason: MessageOverloadReason | string;
+	scope: 'connection' | 'global';
+	/** Present for rate-limit responses. */
+	retryAfterMs?: number;
+}
+
+/** Latest established-message overload response. The socket remains open. */
+export const overloads: Readable<MessageOverload | null>;
+
 /**
  * Coarse classification of the cause behind a non-open status transition.
  *
@@ -290,14 +303,26 @@ export const denials: Readable<{
 export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AUTH' | 'DRAIN';
 
 /**
+ * External diagnostic text carried by a failure. It may be HTTP status text,
+ * browser WebSocket close text, or a library fallback, so it is neither stable
+ * nor localized and must not be rendered directly as application UI.
+ */
+type FailureDiagnosticText = {
+	/** External diagnostic/support text; map stable failure fields to an application message key for UI. */
+	diagnosticReason: string;
+	/** @deprecated Use `diagnosticReason`. This exact alias remains for the 0.6 compatibility window. */
+	reason: string;
+};
+
+/**
  * Latest failure cause behind a non-open status transition. The `kind`
  * discriminator tells you whether the failure came from a WebSocket close
  * frame (`'ws-close'`, with a `code` field) or from the HTTP auth
  * preflight (`'auth-preflight'`, with a `status` field).
  */
 export type Failure =
-	| { kind: 'ws-close'; class: 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'DRAIN'; code: number; reason: string }
-	| { kind: 'auth-preflight'; class: 'AUTH'; status: number; reason: string };
+	| ({ kind: 'ws-close'; class: 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'DRAIN'; code: number } & FailureDiagnosticText)
+	| ({ kind: 'auth-preflight'; class: 'AUTH'; status: number } & FailureDiagnosticText);
 
 /**
  * Cause of the most recent non-open status transition. `null` while
@@ -556,6 +581,9 @@ export interface WSConnection {
 		reason: SubscribeDenialReason | string;
 		ref: number | string;
 	} | null>;
+
+	/** Latest established-message overload response. */
+	overloads: Readable<MessageOverload | null>;
 
 	/**
 	 * Readable store - cause of the most recent non-open status

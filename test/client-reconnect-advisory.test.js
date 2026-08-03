@@ -81,7 +81,7 @@ describe('client drain-advisory honoring', () => {
 		ws._receive({ type: 'reconnect', afterMs: 10000, windowMs: 5000 });
 		ws.close(1001, 'Server draining');
 
-		expect(getFailure()).toEqual({ kind: 'ws-close', class: 'DRAIN', code: 1001, reason: 'Server draining' });
+		expect(getFailure()).toEqual({ kind: 'ws-close', class: 'DRAIN', code: 1001, diagnosticReason: 'Server draining', reason: 'Server draining' });
 
 		// Normal backoff (rng 0) would reconnect at ~2250ms; the dispersed schedule
 		// (rng 0 -> the afterMs floor = 10000ms) must NOT have fired yet.
@@ -104,7 +104,7 @@ describe('client drain-advisory honoring', () => {
 		ws._receive({ type: 'reconnect', windowMs: 8000 });
 		ws.close(1001, 'Server shutting down');
 
-		expect(getFailure()).toEqual({ kind: 'ws-close', class: 'DRAIN', code: 1001, reason: 'Server shutting down' });
+		expect(getFailure()).toEqual({ kind: 'ws-close', class: 'DRAIN', code: 1001, diagnosticReason: 'Server shutting down', reason: 'Server shutting down' });
 		// rng 0 -> dispersed delay = afterMs floor = 0; the reconnect fires promptly
 		// (before the ~2250ms normal backoff would), proving the dispersed path ran.
 		await vi.advanceTimersByTimeAsync(0);

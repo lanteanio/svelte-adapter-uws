@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { installFakeRuntimeClock, releaseRuntimeClock } from './_helpers.js';
+import { parseDiagnostic } from '../src/runtime/diagnostic.js';
 
 // - Mock WebSocket -----------------------------------------------------------
 
@@ -2893,6 +2894,26 @@ describe('client.js (real module)', () => {
 			conn.close();
 		});
 
+		it('routes hostile denial values through structured ASCII-safe diagnostics', async () => {
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const topic = 'admin' + String.fromCodePoint(0x0007, 0x0085, 0x202e, 0x05d0);
+			const reason = 'denied' + String.fromCodePoint(0x2068, 0x05d1);
+			const conn = clientModule.connect();
+			await flush();
+			MockWebSocket._last._receive({ type: 'subscribe-denied', topic, ref: 17, reason });
+
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+			const line = warnSpy.mock.calls[0][0];
+			expect(line).toContain('event=client.subscription.denied severity=warn');
+			expect(/[\u0000-\u001f\u007f-\uffff]/u.test(line)).toBe(false);
+			const parsed = parseDiagnostic(line);
+			expect(parsed?.format).toBe('canonical');
+			expect(parsed?.record.attributes).toMatchObject({ topic, reason, ref: 17 });
+
+			warnSpy.mockRestore();
+			conn.close();
+		});
+
 		it('does not dispatch subscribed/denied as data events', async () => {
 			const store = clientModule.on('chat');
 			const events = [];
@@ -3369,6 +3390,60 @@ describe('client.js (real module)', () => {
 			conn.close();
 		});
 
+		it('sets diagnosticReason and the exact deprecated alias for auth preflight failures', async () => {
+			const originalFetch = globalThis.fetch;
+			globalThis.fetch = vi.fn(async () => ({ ok: false, status: 401, statusText: 'Unauthorized' }));
+			try {
+				const conn = clientModule.connect({ auth: true });
+				const seen = [];
+				const unsub = conn.failure.subscribe((v) => seen.push(v));
+				await flush();
+				const last = seen[seen.length - 1];
+				expect(last).toEqual({
+					kind: 'auth-preflight', class: 'AUTH', status: 401,
+					diagnosticReason: 'Unauthorized', reason: 'Unauthorized'
+				});
+				unsub();
+				conn.close();
+			} finally {
+				globalThis.fetch = originalFetch;
+			}
+		});
+
+		it.each([
+			{
+				name: 'server failure',
+				fetchResult: () => Promise.resolve({ ok: false, status: 503, statusText: 'Service Unavailable' }),
+				status: 503,
+				diagnosticReason: 'Service Unavailable'
+			},
+			{
+				name: 'network failure',
+				fetchResult: () => Promise.reject(new Error('offline')),
+				status: 0,
+				diagnosticReason: 'network error'
+			}
+		])('sets diagnosticReason and its exact alias for transient auth $name', async ({ fetchResult, status, diagnosticReason }) => {
+			const originalFetch = globalThis.fetch;
+			globalThis.fetch = vi.fn(fetchResult);
+			try {
+				const conn = clientModule.connect({ auth: true });
+				const seen = [];
+				const unsub = conn.failure.subscribe((v) => seen.push(v));
+				await flush();
+				const last = seen[seen.length - 1];
+				expect(last).toEqual({
+					kind: 'auth-preflight', class: 'AUTH', status,
+					diagnosticReason, reason: diagnosticReason
+				});
+				expect(last.reason).toBe(last.diagnosticReason);
+				unsub();
+				conn.close();
+			} finally {
+				globalThis.fetch = originalFetch;
+			}
+		});
+
 		it('sets class=TERMINAL on a 4401 close, includes the code and reason', async () => {
 			const conn = clientModule.connect();
 			await flush();
@@ -3383,8 +3458,10 @@ describe('client.js (real module)', () => {
 				kind: 'ws-close',
 				class: 'TERMINAL',
 				code: 4401,
+				diagnosticReason: 'session expired',
 				reason: 'session expired'
 			});
+			expect(last.reason).toBe(last.diagnosticReason);
 
 			unsub();
 			conn.close();
@@ -3405,6 +3482,7 @@ describe('client.js (real module)', () => {
 				kind: 'ws-close',
 				class: 'THROTTLE',
 				code: 4429,
+				diagnosticReason: 'rate limited',
 				reason: 'rate limited'
 			});
 
@@ -3421,14 +3499,17 @@ describe('client.js (real module)', () => {
 			const unsub = conn.failure.subscribe((v) => seen.push(v));
 
 			const ws = MockWebSocket._last;
-			ws.close(1006);
+			ws.close(1006, 'network blip');
 
 			const last = seen[seen.length - 1];
-			expect(last).toMatchObject({
+			expect(last).toEqual({
 				kind: 'ws-close',
 				class: 'RETRY',
-				code: 1006
+				code: 1006,
+				diagnosticReason: 'network blip',
+				reason: 'network blip'
 			});
+			expect(last.reason).toBe(last.diagnosticReason);
 
 			unsub();
 			conn.close();
@@ -3448,12 +3529,14 @@ describe('client.js (real module)', () => {
 			// EXHAUSTED. The RETRY value lands first then is replaced
 			// by EXHAUSTED on the same tick.
 			const last = seen[seen.length - 1];
-			expect(last).toMatchObject({
+			expect(last).toEqual({
 				kind: 'ws-close',
 				class: 'EXHAUSTED',
 				code: 1006,
+				diagnosticReason: 'transient blip',
 				reason: 'transient blip'
 			});
+			expect(last.reason).toBe(last.diagnosticReason);
 
 			unsub();
 			conn.close();
