@@ -437,8 +437,10 @@ function escapeWaitingRoomHtml(value) {
 
 /**
  * Keep status and support links useful without allowing an operator typo to
- * turn the holding page into a script URL. Relative URLs and HTTP(S) URLs are
- * accepted; other schemes are omitted.
+ * turn the holding page into a script URL. Relative URLs and the `http`,
+ * `https`, `mailto` and `tel` schemes are accepted - one safe-scheme set for
+ * every identity link, matching the accessibility validator's recovery-href
+ * policy; anything else is omitted.
  *
  * @param {unknown} value
  * @returns {string}

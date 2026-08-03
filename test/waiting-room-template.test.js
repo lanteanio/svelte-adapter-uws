@@ -293,6 +293,60 @@ describe('resolveWaitingRoom with a string template', () => {
 		expect(page).toContain('Incident reference: <code>INC-42</code>');
 	});
 
+	it('renders every safe link scheme and drops the unsafe ones, on both link fields', () => {
+		// mailto: and tel: are the natural values for a help link and are
+		// classified safe by the accessibility validator's own recovery-href
+		// policy. Dropping them silently - no link, no warning - is the exact
+		// failure class this card was bounced for, so both fields carry the
+		// same safe-scheme set and it is pinned here.
+		const safe = resolveWaitingRoom({
+			maxConcurrent: 10,
+			waitingRoom: {
+				statusUrl: 'tel:+41000000000',
+				supportUrl: 'mailto:support@example.test'
+			}
+		}).renderPage(1);
+		expect(safe).toContain('<a href="tel:+41000000000">Service status</a>');
+		expect(safe).toContain('<a href="mailto:support@example.test">Get help</a>');
+
+		for (const unsafe of ['javascript:alert(1)', 'data:text/html,<script>x</script>', 'file:///etc/passwd']) {
+			const page = resolveWaitingRoom({
+				maxConcurrent: 10,
+				waitingRoom: { statusUrl: unsafe, supportUrl: unsafe }
+			}).renderPage(1);
+			expect(page, unsafe).not.toContain('Service status</a>');
+			expect(page, unsafe).not.toContain('Get help</a>');
+		}
+	});
+
+	it('treats a whitespace-only identity field as absent rather than rendering empty chrome', () => {
+		// `appName: '   '` used to pass the truthiness test and produce a
+		// dangling-dash title plus an empty identity line.
+		const wr = resolveWaitingRoom({
+			maxConcurrent: 10,
+			waitingRoom: {
+				appName: '   ',
+				statusUrl: ' \t ',
+				supportUrl: '\n',
+				incidentId: '  '
+			}
+		});
+		const page = wr.renderPage(1);
+		expect(page).toContain('<title>Waiting room</title>');
+		expect(page).not.toContain(' - Waiting room');
+		expect(page).not.toContain('Service status</a>');
+		expect(page).not.toContain('Get help</a>');
+		expect(page).not.toContain('Incident reference');
+
+		// A padded real value is still honoured, trimmed.
+		const padded = resolveWaitingRoom({
+			maxConcurrent: 10,
+			waitingRoom: { appName: '  Example App  ', statusUrl: '  /status  ' }
+		}).renderPage(1);
+		expect(padded).toContain('<title>Example App - Waiting room</title>');
+		expect(padded).toContain('<a href="/status">Service status</a>');
+	});
+
 	it('renders a full localized document from request headers and owns its metadata', () => {
 		let received;
 		const wr = resolveWaitingRoom({

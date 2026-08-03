@@ -623,13 +623,15 @@ export interface WebSocketOptions {
 			 */
 			appName?: string;
 			/**
-			 * Optional HTTP(S) or relative service-status URL. Rendered as a
-			 * neutral "Service status" link and HTML-escaped.
+			 * Optional service-status URL: relative, or `http`, `https`,
+			 * `mailto`, `tel`. Rendered as a neutral "Service status" link,
+			 * trimmed and HTML-escaped. Any other scheme renders no link.
 			 */
 			statusUrl?: string;
 			/**
-			 * Optional HTTP(S) or relative help URL. Rendered as a neutral
-			 * "Get help" link and HTML-escaped.
+			 * Optional help URL: relative, or `http`, `https`, `mailto`,
+			 * `tel`. Rendered as a neutral "Get help" link, trimmed and
+			 * HTML-escaped. Any other scheme renders no link.
 			 */
 			supportUrl?: string;
 			/** Optional incident reference shown as escaped text. */

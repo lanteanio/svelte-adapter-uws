@@ -61,4 +61,24 @@ describe('built waiting-room renderer pipeline', () => {
 		const bridge = readFileSync(join(out, 'waiting-room-renderer-bridge.js'), 'utf8');
 		expect(bridge).toContain('./server/waiting-room-renderer.js');
 	});
+
+	it('feeds the bridge value into resolveWaitingRoom in the built handler', () => {
+		// The last hop: handler.js must pass the bridge import as the second
+		// argument. Replacing it with null breaks production localization
+		// while every renderer unit test stays green, so the BUILT handler is
+		// asserted to carry the feed - not the repo source, which a build
+		// could be configured to ignore.
+		const handler = readFileSync(join(out, 'handler.js'), 'utf8');
+		const feed = /resolveWaitingRoom\(\s*([A-Za-z_$][\w$]*)\??\.?[\w$]*\.?upgradeAdmission\s*,\s*([A-Za-z_$][\w$]*)\s*\)/
+			.exec(handler);
+		expect(feed, 'built handler does not call resolveWaitingRoom with two arguments').not.toBeNull();
+		const rendererBinding = feed[2];
+		expect(rendererBinding).not.toBe('null');
+		expect(rendererBinding).not.toBe('undefined');
+		// That binding must be the value imported from the bridge, not a
+		// local placeholder that happens to be named something plausible.
+		expect(handler).toMatch(
+			new RegExp('import\\s*\\{[^}]*\\b' + rendererBinding + '\\b[^}]*\\}\\s*from\\s*["\'][^"\']*waiting-room-renderer-bridge')
+		);
+	});
 });
