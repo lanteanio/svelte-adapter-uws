@@ -34,7 +34,7 @@ derive behavior by parsing their spelling.
 | Structured diagnostics | `schemaVersion`, `occurredAt`, `source`, `component`, `event`, `severity`, `level`, `dataClass` | `message`; each `attributes` member follows its owning schema |
 | Adapter error reference | `id`, nullable `code`, `event`, `component`, `severity`, source paths, anchors, and help routes | problem and message prefixes, cause, consequence, recovery, and next action |
 | Subscription denial | the declared `SubscribeDenialReason` members | custom hook `reason` values |
-| Connection failure | `kind`, `class`, numeric close `code`, or HTTP `status` | WebSocket and HTTP `reason` text |
+| Connection failure | `kind`, `class`, numeric close `code`, or HTTP `status` | WebSocket and HTTP `diagnosticReason` text (`reason` is its deprecated byte-identical alias) |
 | Waiting room | documented `{{token}}` names, BCP 47 `lang`, and `dir` values | the rendered document |
 | Protocol and telemetry | frame types, field names, status values, metric names, label names, and enumerated label values | metric help and operator descriptions |
 | Application payload | application-defined discriminators only when the application declares them stable | names, content, errors, and other free text |

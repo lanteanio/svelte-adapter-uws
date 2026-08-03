@@ -121,7 +121,8 @@ describe('ecosystem translation contract', () => {
 			'severity',
 			'sources',
 			'anchor',
-			'help'
+			'help',
+			'link'
 		]);
 		expect(entry.humanFields).toEqual([
 			'problemPrefix',
@@ -157,8 +158,12 @@ describe('ecosystem translation contract', () => {
 		const waitingRoom = surface('waiting-room');
 		expect(denial.machineFields).toContain('SubscribeDenialReason');
 		expect(denial.humanFields).toContain('custom reason');
-		expect(failure.humanFields).toEqual(['reason']);
+		// diagnosticReason is the canonical prose field; `reason` stays listed
+		// while the deprecated byte-identical alias still ships. Dropping the
+		// canonical name here would document the alias as the contract again.
+		expect(failure.humanFields).toEqual(['diagnosticReason', 'reason']);
 		expect(failure.machineFields).not.toContain('reason');
+		expect(failure.machineFields).not.toContain('diagnosticReason');
 		expect(waitingRoom.machineFields).toEqual([
 			'lang',
 			'dir',

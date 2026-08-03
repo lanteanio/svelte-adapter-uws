@@ -45,7 +45,8 @@
         "severity",
         "sources",
         "anchor",
-        "help"
+        "help",
+        "link"
       ],
       "humanFields": [
         "problemPrefix",
@@ -89,6 +90,7 @@
         "status"
       ],
       "humanFields": [
+        "diagnosticReason",
         "reason"
       ],
       "translationOwner": "application",
