@@ -170,6 +170,27 @@ describe('public contribution contract', () => {
 		expect(parseYaml(usage).name).toBe('Usage question');
 	});
 
+	it('every issue form carries the vulnerability and sensitive-data notice', () => {
+		// Counting required fields per form could not see this: the feature form
+		// shipped without either half while still satisfying its own count,
+		// because five required textareas met the threshold. The safety notice
+		// is a property of EVERY form, so it is asserted over all of them.
+		for (const form of ['bug_report', 'feature_request', 'usage_question']) {
+			const source = read(`.github/ISSUE_TEMPLATE/${form}.yml`);
+			expect(source, `${form} does not warn against reporting vulnerabilities`)
+				.toContain('Do not report vulnerabilities here.');
+			expect(source, `${form} does not ask the reporter to strip secrets`)
+				.toMatch(/Remove secrets, cookies, tokens, personal data/);
+
+			const parsed = parseYaml(source);
+			const checkboxes = (parsed.body ?? []).filter((block) => block.type === 'checkboxes');
+			const labels = checkboxes.flatMap((block) => (block.attributes?.options ?? []));
+			const confirmation = labels.find((option) => /no vulnerability details or sensitive data/.test(option.label ?? ''));
+			expect(confirmation, `${form} has no sensitive-data confirmation`).toBeDefined();
+			expect(confirmation.required, `${form}'s sensitive-data confirmation is optional`).toBe(true);
+		}
+	});
+
 	it('makes evidence, release, generated-file and security checks visible before review', () => {
 		const template = read('.github/pull_request_template.md');
 		for (const phrase of [
@@ -186,19 +207,35 @@ describe('public contribution contract', () => {
 		}
 	});
 
-	it('defines ready, done, priority, WIP, blocking and periodic review', () => {
+	it('defines ready, done, priority, blocking and staleness', () => {
 		const contributing = read('CONTRIBUTING.md');
 		for (const phrase of [
 			'Definition of Ready',
 			'Merge criteria',
-			'three implementation issues',
 			'status:blocked',
-			'30 days',
+			'closed as stale',
 			'good first issue',
 			'No CLA or DCO sign-off is required'
 		]) {
 			expect(contributing).toContain(phrase);
 		}
+	});
+
+	it('promises no cadence or quota the project cannot keep', () => {
+		// This file opens by stating there is no review board, no sign-off
+		// ceremony and no response-time promise. It then carried a public
+		// "at least every 30 days" backlog commitment with nothing automating
+		// it, and a numeric repository WIP limit nobody polices - both read as
+		// process a solo-maintainer project does not have. The lifecycle
+		// vocabulary stays; the unkeepable promises do not.
+		const contributing = read('CONTRIBUTING.md');
+		expect(contributing).toContain('no response-time promise');
+		expect(contributing).not.toMatch(/at least every \*\*\d+ days\*\*/);
+		expect(contributing).not.toContain('WIP limit is');
+		// And the merge bar must not imply a reviewer the contributor has to
+		// go and find.
+		expect(contributing).not.toContain('an independent reviewer has checked');
+		expect(contributing).toContain('someone other than the author has checked');
 	});
 
 	it('maps every verification lane to duration, setup, scope, and explicit exceptions', () => {

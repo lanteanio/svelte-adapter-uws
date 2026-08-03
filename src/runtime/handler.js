@@ -318,17 +318,12 @@ if (!origin && !host_header && !protocol_header && !is_tls) {
 // their own Response from the shared buffer. This eliminates redundant SSR work
 // during traffic spikes on public (non-personalized) pages.
 
-
- // 512 KB
-
 /**
  * @typedef {{ status: number, statusText: string, headers: [string, string][], body: Uint8Array }} SharedResponse
  */
 
 
 // - Body reading ------------------------------------------------------------
-
- // 64 KB
 
 
 // - Static file serving -----------------------------------------------------

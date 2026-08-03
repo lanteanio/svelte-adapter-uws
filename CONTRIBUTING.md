@@ -439,11 +439,9 @@ convenience. Within one class, prefer high-confidence fixes and the smallest
 change that retires the most risk; record the rationale when an item jumps the
 queue.
 
-The provisional repository WIP limit is **three implementation issues** at
-once. Review-only work does not consume that limit. One contributor should
-normally own one implementation issue at a time unless a maintainer coordinates
-non-overlapping files. A live incident may exceed the limit, but the issue must
-say why.
+Own one implementation issue at a time unless a maintainer has coordinated
+non-overlapping files with you. Review-only work does not count. This is
+advice about how to get a change merged rather than a quota anyone polices.
 
 ### Blocked and stale work
 
@@ -452,10 +450,12 @@ external-state wait. The latest comment names the blocker, who or what can clear
 it, useful work already exhausted, and the next review date. A difficult task
 with an available next step is not blocked.
 
-Maintainers review the backlog at least every **30 days**: revalidate old
-facts, merge duplicates, close work whose premise disappeared, refresh blocked
-items, and promote only items that meet Ready. An item that receives no new
-evidence across two reviews may be closed as stale with a reopening condition.
+A backlog review revalidates old facts, merges duplicates, closes work whose
+premise disappeared, refreshes blocked items, and promotes only items that meet
+Ready. An item that receives no new evidence across two such reviews may be
+closed as stale with a reopening condition. There is no promised interval: this
+file opens by saying the project makes no response-time promise, and a public
+cadence with nothing automating it would be one.
 
 ### Merge criteria
 
@@ -469,7 +469,9 @@ only when:
 - public docs, declarations, schema, vectors, generated files and lockfiles
   agree with the implementation;
 - user-visible behavior has a SemVer-appropriate version and changelog entry;
-- an independent reviewer has checked the evidence and risk; and
+- someone other than the author has checked the evidence and risk - on a
+  project this size that is normally the maintainer, not a separate reviewer
+  you need to find; and
 - the maintainer has accepted the change for merge.
 
 ### Good first issues
@@ -485,6 +487,15 @@ fits one small review. Remove the label if investigation expands the scope.
 naming idiom, its bracket style. There is no repo formatter and there will not
 be one: the tree is hand-laid and a whole-tree reflow would destroy `git blame`
 on files whose comments are load-bearing.
+
+What does exist is a non-destructive conformance check. `.editorconfig` is the
+source of truth for indent style, final newline, trailing whitespace and
+committed line endings, and `npm run check` runs `check-formatting`, which
+parses that file and holds every tracked file to what it declares. It never
+rewrites anything - it reports and fails. So an editor honouring `.editorconfig`
+and the gate agree by construction, which is the part that was missing: the
+declaration previously said two-space JSON while `package.json` and both
+`--write` generators used tabs, and nothing could see the contradiction.
 
 **Typography in source and docs.** ASCII hyphens, straight quotes, three dots
 for an ellipsis. No em dashes, no en dashes, no curly quotes, no ellipsis

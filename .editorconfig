@@ -10,9 +10,76 @@ trim_trailing_whitespace = true
 indent_style = tab
 indent_size = 4
 
-[*.{json,jsonc,yml,yaml}]
+# The capacity kit is the tree's one space-indented JavaScript island, and it is
+# internally consistent. It is DECLARED rather than reindented: between them
+# these three files carry 56 template literals whose leading whitespace is
+# string content, so a mechanical retab would silently change emitted output.
+# Declaring it pins it - the conformance check now holds these files to spaces
+# just as firmly as it holds the rest of the tree to tabs, so neither can drift
+# into the other. Retabbing them is a separate, reviewable change.
+[scripts/capacity/*.mjs]
 indent_style = space
 indent_size = 2
 
+[scripts/check-capacity-kit.js]
+indent_style = space
+indent_size = 2
+
+[test/capacity-kit.test.js]
+indent_style = space
+indent_size = 2
+
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+# JSON a person hand-edits, plus what this repo's own `--write` generators
+# emit: both call JSON.stringify(value, null, '\t'). A two-space default here
+# meant an EditorConfig-aware editor space-indented new lines inside
+# tab-indented files and the generators reverted them on the next run.
+[*.json]
+indent_style = tab
+
+# The two-space family. These are schemas, vectors, goldens and published data
+# compared byte-for-byte, so reindenting one is a diff against its own fixture.
+# npm owns the fixture package files and preserves whatever indentation the
+# file already has, so the declaration follows the file rather than the reverse.
+[protocol.schema.json]
+indent_style = space
+indent_size = 2
+
+[docs/messages.v1.json]
+indent_style = space
+indent_size = 2
+
+[docs/capacity/v1/*.json]
+indent_style = space
+indent_size = 2
+
+[docs/privacy/v1/*.json]
+indent_style = space
+indent_size = 2
+
+[examples/observability/*.json]
+indent_style = space
+indent_size = 2
+
+[test-vectors/*.json]
+indent_style = space
+indent_size = 2
+
+[test/dst-goldens/*.json]
+indent_style = space
+indent_size = 2
+
+[test/fixture/package.json]
+indent_style = space
+indent_size = 2
+
+[test/fixture/package-lock.json]
+indent_style = space
+indent_size = 2
+
+# Two trailing spaces are a hard line break in Markdown.
 [*.md]
 trim_trailing_whitespace = false

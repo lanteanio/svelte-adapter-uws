@@ -4,6 +4,11 @@ title: ''
 labels:
   - enhancement
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report vulnerabilities here. Use the private security link in the issue chooser.
+        Remove secrets, cookies, tokens, personal data, and private deployment details.
   - type: textarea
     id: problem
     attributes:
@@ -39,3 +44,10 @@ body:
       description: Name the tests, fixtures, platforms, and benchmarks that would prove the outcome.
     validations:
       required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: This request contains no vulnerability details or sensitive data.
+          required: true

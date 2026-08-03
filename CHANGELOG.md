@@ -136,6 +136,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release. Trusted publishing supplies short-lived OIDC authentication and
   automatic provenance.
 
+- **A non-destructive formatting conformance gate.** `.editorconfig` is now the
+  single source of truth for indent style, final newline, trailing whitespace
+  and committed line endings, and `npm run check` parses it and holds every
+  tracked file to what it declares. It reports and fails rather than rewriting,
+  so there is still no formatter and no whole-tree reflow. The declaration was
+  previously decoration: it specified two-space JSON while `package.json`, both
+  `--write` generator outputs and three fixture manifests are tab-indented, so
+  an editor honouring it fought the generators on every save and nothing could
+  see the contradiction. End-of-line is read from the git index rather than the
+  working copy, so a normalized Windows checkout is not reported as violating
+  its own declaration.
+
 - **Executable coordinated release and rollback procedure.** The versioned
   operations pack now includes an inclusive client/server protocol-range
   matrix with baseline, range expansion, client cutover, minimum cutover, and
