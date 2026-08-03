@@ -58,7 +58,19 @@ function expression(signal) {
 		return `rate(${signal.name}{${targetMatcher}}[5m])`;
 	}
 	if (signal.type === 'histogram') {
-		return `histogram_quantile(0.95, rate(${signal.name}_bucket{${targetMatcher}}[5m]))`;
+		// Canonical quantile form: aggregate the bucket rates before
+		// histogram_quantile. Removing only the metric's own bounded labels is
+		// the target-preserving equivalent of the textbook `sum by (le)` - `le`
+		// and every job/instance/cluster label survive, so independent
+		// deployments are never merged.
+		// A histogram with no bounded labels needs no aggregation at all: the
+		// bucket series already carry le plus every job/instance/cluster label,
+		// and a `sum by (le)` here would erase the target labels and merge
+		// independent deployments - the exact failure the without-form avoids.
+		const aggregated = signal.labels.length > 0
+			? `sum without (${signal.labels.join(', ')}) (rate(${signal.name}_bucket{${targetMatcher}}[5m]))`
+			: `rate(${signal.name}_bucket{${targetMatcher}}[5m])`;
+		return `histogram_quantile(0.95, ${aggregated})`;
 	}
 	return `${signal.name}{${targetMatcher}}`;
 }
@@ -127,6 +139,15 @@ export function render() {
 	out.push('# target still reports up. This is the only thing that tells you.');
 	out.push(`time() - pressure_sample_timestamp_seconds{${targetMatcher}}`);
 	out.push('```');
+	out.push('');
+	out.push('All four ship as recording rules in `rules.yml` - `adapter:subscriber_ratio`,');
+	out.push('`adapter:fd_headroom_ratio`, `adapter:upgrade_reject_ratio:rate5m` and');
+	out.push('`adapter:pressure_sample_age_seconds` - alongside the transport SLO series');
+	out.push('`adapter:http_error_ratio:rate5m`, `adapter:ws_message_error_ratio:rate5m`,');
+	out.push('`adapter:http_request_duration_seconds:p95_5m`,');
+	out.push('`adapter:http_request_duration_seconds:p95_by_method_5m` and');
+	out.push('`adapter:ws_message_duration_seconds:p95_5m`. Chart and alert on the recorded');
+	out.push('names; the dashboard already does.');
 	out.push('');
 	return out.join('\n') + '\n';
 }

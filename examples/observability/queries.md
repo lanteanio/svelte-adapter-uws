@@ -15,10 +15,10 @@ Import `dashboard.v1.json` for a compact Grafana view of these target-preserving
 | Metric | Type | Unit | Query | Cross-worker law |
 | --- | --- | --- | --- | --- |
 | `http_requests_total` | counter | count | `rate(http_requests_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
-| `http_request_duration_seconds` | histogram | seconds | `histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{adapter="svelte-adapter-uws"}[5m]))` | Per-worker quantity; the snapshot has already summed it across workers. (not always registered) |
+| `http_request_duration_seconds` | histogram | seconds | `histogram_quantile(0.95, sum without (method, outcome) (rate(http_request_duration_seconds_bucket{adapter="svelte-adapter-uws"}[5m])))` | Per-worker quantity; the snapshot has already summed it across workers. (not always registered) |
 | `upgrade_admitted_total` | counter | count | `rate(upgrade_admitted_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `upgrade_rejected_total` | counter | count | `rate(upgrade_rejected_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
-| `upgrade_duration_seconds` | histogram | seconds | `histogram_quantile(0.95, rate(upgrade_duration_seconds_bucket{adapter="svelte-adapter-uws"}[5m]))` | Per-worker quantity; the snapshot has already summed it across workers. (not always registered) |
+| `upgrade_duration_seconds` | histogram | seconds | `histogram_quantile(0.95, sum without (outcome) (rate(upgrade_duration_seconds_bucket{adapter="svelte-adapter-uws"}[5m])))` | Per-worker quantity; the snapshot has already summed it across workers. (not always registered) |
 | `upgrade_rate_map_evicted_total` | counter | count | `rate(upgrade_rate_map_evicted_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `upgrade_inflight` | gauge | count | `upgrade_inflight{adapter="svelte-adapter-uws"}` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `upgrade_deferred_depth` | gauge | count | `upgrade_deferred_depth{adapter="svelte-adapter-uws"}` | Per-worker quantity; the snapshot has already summed it across workers. |
@@ -29,10 +29,10 @@ Import `dashboard.v1.json` for a compact Grafana view of these target-preserving
 | `protection_posture_transitions_total` | counter | count | `rate(protection_posture_transitions_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `protection_posture_state` | gauge | enumerated state (see the description) | `protection_posture_state{adapter="svelte-adapter-uws"}` | The snapshot reports the worst worker. |
 | `ws_connections` | gauge | count | `ws_connections{adapter="svelte-adapter-uws"}` | Per-worker quantity; the snapshot has already summed it across workers. |
-| `ws_connection_duration_seconds` | histogram | seconds | `histogram_quantile(0.95, rate(ws_connection_duration_seconds_bucket{adapter="svelte-adapter-uws"}[5m]))` | Per-worker quantity; the snapshot has already summed it across workers. (not always registered) |
+| `ws_connection_duration_seconds` | histogram | seconds | `histogram_quantile(0.95, sum without (outcome) (rate(ws_connection_duration_seconds_bucket{adapter="svelte-adapter-uws"}[5m])))` | Per-worker quantity; the snapshot has already summed it across workers. (not always registered) |
 | `ws_messages_total` | counter | count | `rate(ws_messages_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `ws_message_admission_rejected_total` | counter | count | `rate(ws_message_admission_rejected_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
-| `ws_message_duration_seconds` | histogram | seconds | `histogram_quantile(0.95, rate(ws_message_duration_seconds_bucket{adapter="svelte-adapter-uws"}[5m]))` | Per-worker quantity; the snapshot has already summed it across workers. (not always registered) |
+| `ws_message_duration_seconds` | histogram | seconds | `histogram_quantile(0.95, sum without (kind, outcome) (rate(ws_message_duration_seconds_bucket{adapter="svelte-adapter-uws"}[5m])))` | Per-worker quantity; the snapshot has already summed it across workers. (not always registered) |
 | `ws_subscriptions` | gauge | count | `ws_subscriptions{adapter="svelte-adapter-uws"}` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `ws_publishes_total` | counter | count | `rate(ws_publishes_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `ws_publish_outcomes_total` | counter | count | `rate(ws_publish_outcomes_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
@@ -98,4 +98,13 @@ open_fds{adapter="svelte-adapter-uws"} / clamp_min(fd_soft_limit{adapter="svelte
 # target still reports up. This is the only thing that tells you.
 time() - pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws"}
 ```
+
+All four ship as recording rules in `rules.yml` - `adapter:subscriber_ratio`,
+`adapter:fd_headroom_ratio`, `adapter:upgrade_reject_ratio:rate5m` and
+`adapter:pressure_sample_age_seconds` - alongside the transport SLO series
+`adapter:http_error_ratio:rate5m`, `adapter:ws_message_error_ratio:rate5m`,
+`adapter:http_request_duration_seconds:p95_5m`,
+`adapter:http_request_duration_seconds:p95_by_method_5m` and
+`adapter:ws_message_duration_seconds:p95_5m`. Chart and alert on the recorded
+names; the dashboard already does.
 

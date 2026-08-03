@@ -6,13 +6,19 @@
 # adapter target with its own `up` series. Expressions preserve every external
 # target label and never globally merge independent deployments.
 #
+# The target label is load-bearing: without it every rule in this file
+# evaluates over an empty set and the whole pack is silent. The meta group at
+# the end of this file alerts on exactly that state (AdapterTargetMissing), so
+# a forgotten relabel pages instead of disappearing.
+#
 # Every alert names a section of ./runbook.md. A test in this repository fails
 # if an alert points at a section that does not exist, or if a metric ships with
 # neither an alert nor an explicit entry in the runbook's no-alert list - so a
 # new signal cannot arrive without someone deciding whether it needs a response.
 #
-# Thresholds are a starting point, not a claim about your workload. The two you
-# should tune first are the descriptor headroom and the upgrade reject ratio.
+# Thresholds are a starting point, not a claim about your workload. The ones
+# you should tune first are the descriptor headroom, the upgrade reject ratio,
+# the backpressured-connection share, and the waiting-room depth.
 
 groups:
   - name: svelte-adapter-uws.recording
@@ -45,6 +51,43 @@ groups:
 
       - record: adapter:pressure_sample_age_seconds
         expr: time() - pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws"}
+
+      # Transport SLO inputs. The error term is the adapter-owned bounded
+      # outcome label: server_error for HTTP (client_error and aborted are the
+      # client's own story), error for inbound WebSocket message handling.
+      # Each aggregation removes only the metric's own bounded labels and
+      # keeps every target label, in the same shape as the reject ratio above;
+      # grouping by (le) or by nothing would merge independent deployments,
+      # which no expression in this file does.
+      - record: adapter:http_error_ratio:rate5m
+        expr: |
+          (
+            sum without (method, outcome) (rate(http_requests_total{adapter="svelte-adapter-uws",outcome="server_error"}[5m]))
+              or (0 * sum without (method, outcome) (rate(http_requests_total{adapter="svelte-adapter-uws"}[5m])))
+          )
+            /
+          sum without (method, outcome) (rate(http_requests_total{adapter="svelte-adapter-uws"}[5m]))
+
+      - record: adapter:ws_message_error_ratio:rate5m
+        expr: |
+          (
+            sum without (kind, outcome) (rate(ws_messages_total{adapter="svelte-adapter-uws",outcome="error"}[5m]))
+              or (0 * sum without (kind, outcome) (rate(ws_messages_total{adapter="svelte-adapter-uws"}[5m])))
+          )
+            /
+          sum without (kind, outcome) (rate(ws_messages_total{adapter="svelte-adapter-uws"}[5m]))
+
+      # Transport p95 latency. The bucket aggregation removes only the
+      # metric's own bounded labels, so `le` and every target label survive
+      # into histogram_quantile.
+      - record: adapter:http_request_duration_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum without (method, outcome) (rate(http_request_duration_seconds_bucket{adapter="svelte-adapter-uws"}[5m])))
+
+      - record: adapter:http_request_duration_seconds:p95_by_method_5m
+        expr: histogram_quantile(0.95, sum without (outcome) (rate(http_request_duration_seconds_bucket{adapter="svelte-adapter-uws"}[5m])))
+
+      - record: adapter:ws_message_duration_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum without (kind, outcome) (rate(ws_message_duration_seconds_bucket{adapter="svelte-adapter-uws"}[5m])))
 
   - name: svelte-adapter-uws.pipeline
     rules:
@@ -195,15 +238,26 @@ groups:
           description: A quarter of the sampled window was spent suspended by the quota.
           runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adaptercputhrottled'
 
+      # A share, not a raw count: on a large fleet a handful of slow consumers
+      # is normal at any instant, and a raw `> 0` pages on the healthiest day
+      # the deployment ever has. One percent sustained for fifteen minutes is
+      # a real drain problem at any fleet size; tune the share to your client
+      # mix.
       - alert: AdapterBackpressureSustained
-        expr: ws_backpressure_connections{adapter="svelte-adapter-uws"} > 0
+        expr: |
+          (
+            ws_backpressure_connections{adapter="svelte-adapter-uws"}
+              / clamp_min(ws_connections{adapter="svelte-adapter-uws"}, 1)
+          ) > 0.01
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: Connections are holding an outbound queue
           description: >-
-            Sustained backpressure means clients are not draining as fast as you publish.
+            More than one percent of live connections have held a backpressured
+            outbound queue for fifteen minutes; clients are not draining as fast
+            as you publish.
           runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterbackpressuresustained'
 
       - alert: AdapterUpgradeRejectRatioHigh
@@ -227,14 +281,20 @@ groups:
             Rotating client identities are filling a limiter faster than the sweep reclaims it.
           runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterratemapchurn'
 
+      # Above zero, not `> 0`: one client stuck in a retry loop can hold a
+      # depth of 1 forever without an incident. Ten waiting clients sustained
+      # for fifteen minutes means the gate is closed against real demand; tune
+      # the depth to your reconnect envelope.
       - alert: AdapterWaitingRoomBacklog
-        expr: waiting_room_queue_depth{adapter="svelte-adapter-uws"} > 0
+        expr: waiting_room_queue_depth{adapter="svelte-adapter-uws"} > 10
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: Clients have been waiting to connect for a sustained period
-          description: The waiting room is not draining.
+          description: >-
+            More than ten clients have been polling the waiting room for
+            fifteen minutes; admission is not draining it.
           runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterwaitingroombacklog'
 
   - name: svelte-adapter-uws.integrity
@@ -303,3 +363,89 @@ groups:
           summary: Sustained resource growth suspected
           description: The optional growth auditor saw a resource climb without plateauing.
           runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterresourcegrowth'
+
+  # ---------------------------------------------------------------------------
+  # Transport SLO burn-rate alerts - SHIPPED DISABLED.
+  #
+  # The error budget is an application decision, so these ship as comments
+  # rather than as live rules a fresh install would page on with an objective
+  # nobody chose. The recording rules they read from
+  # (adapter:http_error_ratio:rate5m, adapter:ws_message_error_ratio:rate5m)
+  # are live above, so the ratios are already on your dashboard before you
+  # commit to a budget.
+  #
+  # To enable: pick an objective, replace 0.001 below with your allowed error
+  # ratio (0.001 is 99.9 percent), uncomment the group, and keep BOTH windows
+  # in each expression - the short window makes the alert stop promptly once
+  # the burn ends, the long window keeps a brief spike from paging. The 14.4
+  # factor pages when the monthly budget would be gone in about two days.
+  # Tuning guidance lives in the runbook sections the alerts link to.
+  #
+  # - name: svelte-adapter-uws.slo
+  #   rules:
+  #     - alert: AdapterHttpErrorBudgetBurn
+  #       expr: |
+  #         (adapter:http_error_ratio:rate5m{adapter="svelte-adapter-uws"} > (14.4 * 0.001))
+  #           and
+  #         (
+  #           (
+  #             sum without (method, outcome) (rate(http_requests_total{adapter="svelte-adapter-uws",outcome="server_error"}[1h]))
+  #               or (0 * sum without (method, outcome) (rate(http_requests_total{adapter="svelte-adapter-uws"}[1h])))
+  #           )
+  #             /
+  #           sum without (method, outcome) (rate(http_requests_total{adapter="svelte-adapter-uws"}[1h]))
+  #             > (14.4 * 0.001)
+  #         )
+  #       for: 2m
+  #       labels:
+  #         severity: critical
+  #       annotations:
+  #         summary: HTTP server-error budget is burning at page speed
+  #         description: >-
+  #           The five-minute and one-hour server-error ratios both exceed 14.4
+  #           times the configured objective.
+  #         runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterhttperrorbudgetburn'
+  #
+  #     - alert: AdapterWsMessageErrorBudgetBurn
+  #       expr: |
+  #         (adapter:ws_message_error_ratio:rate5m{adapter="svelte-adapter-uws"} > (14.4 * 0.001))
+  #           and
+  #         (
+  #           (
+  #             sum without (kind, outcome) (rate(ws_messages_total{adapter="svelte-adapter-uws",outcome="error"}[1h]))
+  #               or (0 * sum without (kind, outcome) (rate(ws_messages_total{adapter="svelte-adapter-uws"}[1h])))
+  #           )
+  #             /
+  #           sum without (kind, outcome) (rate(ws_messages_total{adapter="svelte-adapter-uws"}[1h]))
+  #             > (14.4 * 0.001)
+  #         )
+  #       for: 2m
+  #       labels:
+  #         severity: critical
+  #       annotations:
+  #         summary: WebSocket message-handler error budget is burning at page speed
+  #         description: >-
+  #           The five-minute and one-hour message-handler error ratios both
+  #           exceed 14.4 times the configured objective.
+  #         runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterwsmessageerrorbudgetburn'
+  # ---------------------------------------------------------------------------
+
+  - name: svelte-adapter-uws.meta
+    rules:
+      # The only expression in this file that is not per-target, on purpose:
+      # if no scrape target carries the adapter label at all, every other rule
+      # here evaluates over an empty set and the pack is silent. absent() is
+      # the one construct that can see that state.
+      - alert: AdapterTargetMissing
+        expr: absent(up{adapter="svelte-adapter-uws"})
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: No scrape target carries the adapter label
+          description: >-
+            No up series carries the adapter="svelte-adapter-uws" target label,
+            so every alert in this pack is evaluating an empty set. Add the
+            constant label in the scrape config; see the runbook's deployment
+            contract.
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adaptertargetmissing'

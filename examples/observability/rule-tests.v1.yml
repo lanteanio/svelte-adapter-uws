@@ -8,6 +8,7 @@ group_eval_order:
   - svelte-adapter-uws.pipeline
   - svelte-adapter-uws.capacity
   - svelte-adapter-uws.integrity
+  - svelte-adapter-uws.meta
 
 tests:
   - name: low-rate rejection math and target isolation
@@ -182,9 +183,359 @@ tests:
               summary: Adapter metrics have disappeared
               description: The scrape target is up but the adapter's own series are gone - a metrics registry that stopped being configured, or a route no longer reaching it.
               runbook_url: https://ops.example.com/adapter#adaptermetricsabsent
+      # Marked targets exist, so the meta alert must stay silent even while
+      # individual targets are degraded, stalled or down.
+      - eval_time: 15m
+        alertname: AdapterTargetMissing
+        exp_alerts: []
+
+  - name: capacity alerts fire for marked adapter targets
+    interval: 1m
+    external_labels:
+      adapter_runbook_url: https://ops.example.com/adapter
+    input_series:
+      - series: 'open_fds{adapter="svelte-adapter-uws",job="websocket",instance="fd-warn"}'
+        values: '85+0x20'
+      - series: 'fd_soft_limit{adapter="svelte-adapter-uws",job="websocket",instance="fd-warn"}'
+        values: '100+0x20'
+      - series: 'open_fds{adapter="svelte-adapter-uws",job="websocket",instance="fd-crit"}'
+        values: '95+0x20'
+      - series: 'fd_soft_limit{adapter="svelte-adapter-uws",job="websocket",instance="fd-crit"}'
+        values: '100+0x20'
+      - series: 'protection_posture_state{adapter="svelte-adapter-uws",job="websocket",instance="siege"}'
+        values: '2+0x20'
+      - series: 'protection_posture_state{adapter="svelte-adapter-uws",job="websocket",instance="elevated"}'
+        values: '1+0x20'
+      - series: 'pressure_saturation{adapter="svelte-adapter-uws",job="websocket",instance="sat"}'
+        values: '0.9+0x20'
+      - series: 'heap_used_ratio{adapter="svelte-adapter-uws",job="websocket",instance="heap"}'
+        values: '0.95+0x20'
+      - series: 'cpu_throttled_ratio{adapter="svelte-adapter-uws",job="websocket",instance="cpu"}'
+        values: '0.5+0x20'
+      - series: 'ws_backpressure_connections{adapter="svelte-adapter-uws",job="websocket",instance="bp"}'
+        values: '5+0x20'
+      - series: 'ws_connections{adapter="svelte-adapter-uws",job="websocket",instance="bp"}'
+        values: '100+0x20'
+      - series: 'upgrade_rate_map_evicted_total{adapter="svelte-adapter-uws",job="websocket",instance="churn",door="upgrade"}'
+        # 25 samples, not 20: rate() extrapolation over the part-filled 10m
+        # window keeps this series below the threshold until t=5m, so with
+        # for: 15m the pending-to-firing transition lands exactly on a 20m
+        # evaluation boundary - the pinned evaluator reports that as not yet
+        # firing. The positive case therefore evaluates at 21m with slack.
+        values: '0+120x25'
+      - series: 'waiting_room_queue_depth{adapter="svelte-adapter-uws",job="websocket",instance="room"}'
+        values: '25+0x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AdapterDescriptorHeadroomLow
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: fd-crit
+              job: websocket
+              severity: warning
+            exp_annotations:
+              summary: Approaching the file-descriptor limit
+              description: New sockets fail with EMFILE at the soft limit.
+              runbook_url: https://ops.example.com/adapter#adapterdescriptorheadroomlow
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: fd-warn
+              job: websocket
+              severity: warning
+            exp_annotations:
+              summary: Approaching the file-descriptor limit
+              description: New sockets fail with EMFILE at the soft limit.
+              runbook_url: https://ops.example.com/adapter#adapterdescriptorheadroomlow
+      - eval_time: 20m
+        alertname: AdapterDescriptorHeadroomCritical
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: fd-crit
+              job: websocket
+              severity: critical
+            exp_annotations:
+              summary: About to exhaust file descriptors
+              description: New connections will start failing with EMFILE.
+              runbook_url: https://ops.example.com/adapter#adapterdescriptorheadroomlow
+      - eval_time: 20m
+        alertname: AdapterProtectionSiege
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: siege
+              job: websocket
+              severity: critical
+            exp_annotations:
+              summary: Protection posture is at siege
+              description: New upgrades are being refused at static-serve cost.
+              runbook_url: https://ops.example.com/adapter#adapterprotectionsiege
+      - eval_time: 20m
+        alertname: AdapterProtectionElevated
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: elevated
+              job: websocket
+              severity: warning
+            exp_annotations:
+              summary: Protection posture has been elevated for a while
+              description: Sustained pressure; the waiting room is widening its retry jitter.
+              runbook_url: https://ops.example.com/adapter#adapterprotectionsiege
+      - eval_time: 20m
+        alertname: AdapterSaturationHigh
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: sat
+              job: websocket
+              severity: warning
+            exp_annotations:
+              summary: Worker saturation is near the configured thresholds
+              description: The worst worker is at 85 percent of its pressure thresholds.
+              runbook_url: https://ops.example.com/adapter#adaptersaturationhigh
+      - eval_time: 20m
+        alertname: AdapterHeapPressure
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: heap
+              job: websocket
+              severity: warning
+            exp_annotations:
+              summary: A worker isolate heap is nearly full
+              description: Heap is per-isolate, so this is the worst single worker.
+              runbook_url: https://ops.example.com/adapter#adapterheappressure
+      - eval_time: 20m
+        alertname: AdapterCpuThrottled
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: cpu
+              job: websocket
+              severity: warning
+            exp_annotations:
+              summary: The cgroup CPU quota is throttling this process
+              description: A quarter of the sampled window was spent suspended by the quota.
+              runbook_url: https://ops.example.com/adapter#adaptercputhrottled
+      - eval_time: 20m
+        alertname: AdapterBackpressureSustained
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: bp
+              job: websocket
+              severity: warning
+            exp_annotations:
+              summary: Connections are holding an outbound queue
+              description: More than one percent of live connections have held a backpressured outbound queue for fifteen minutes; clients are not draining as fast as you publish.
+              runbook_url: https://ops.example.com/adapter#adapterbackpressuresustained
+      - eval_time: 21m
+        alertname: AdapterRateMapChurn
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              door: upgrade
+              instance: churn
+              job: websocket
+              severity: warning
+            exp_annotations:
+              summary: Rate-limit maps are churning at their cap
+              description: Rotating client identities are filling a limiter faster than the sweep reclaims it.
+              runbook_url: https://ops.example.com/adapter#adapterratemapchurn
+      - eval_time: 20m
+        alertname: AdapterWaitingRoomBacklog
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: room
+              job: websocket
+              severity: warning
+            exp_annotations:
+              summary: Clients have been waiting to connect for a sustained period
+              description: More than ten clients have been polling the waiting room for fifteen minutes; admission is not draining it.
+              runbook_url: https://ops.example.com/adapter#adapterwaitingroombacklog
+
+  - name: integrity alerts fire for marked adapter targets
+    interval: 1m
+    external_labels:
+      adapter_runbook_url: https://ops.example.com/adapter
+    input_series:
+      - series: 'state_divergence_total{adapter="svelte-adapter-uws",job="websocket",instance="div",role="minority"}'
+        values: '0+1x20'
+      - series: 'relay_gap_frames_total{adapter="svelte-adapter-uws",job="websocket",instance="gap"}'
+        values: '0+1x20'
+      - series: 'framework_assertion_violations_total{adapter="svelte-adapter-uws",job="websocket",instance="fatal",severity="fatal",category="relay"}'
+        values: '0+1x20'
+      - series: 'framework_assertion_violations_total{adapter="svelte-adapter-uws",job="websocket",instance="soft",severity="soft",category="wire"}'
+        values: '0+1x20'
+      - series: 'framework_resource_growth_suspected_total{adapter="svelte-adapter-uws",job="websocket",instance="growth",resource="decodeCache"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: AdapterStateDivergence
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: div
+              job: websocket
+              role: minority
+              severity: critical
+            exp_annotations:
+              summary: Workers disagree about delivered state
+              description: Two workers folded different state hashes for the same epoch. Clients on different workers are seeing different data.
+              runbook_url: https://ops.example.com/adapter#adapterstatedivergence
+      - eval_time: 15m
+        alertname: AdapterRelayGap
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: gap
+              job: websocket
+              severity: critical
+            exp_annotations:
+              summary: A worker lost relayed frames its siblings received
+              description: Frames were proven lost to one worker. Its clients are missing state.
+              runbook_url: https://ops.example.com/adapter#adapterrelaygap
+      - eval_time: 15m
+        alertname: AdapterFatalAssertion
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              category: relay
+              instance: fatal
+              job: websocket
+              severity: critical
+            exp_annotations:
+              summary: A framework invariant failed at the fatal tier
+              description: A fatal assertion terminates the worker; the category label names which.
+              runbook_url: https://ops.example.com/adapter#adapterfatalassertion
+      - eval_time: 15m
+        alertname: AdapterAssertionViolations
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              category: wire
+              instance: soft
+              job: websocket
+              severity: warning
+            exp_annotations:
+              summary: A framework invariant failed at the recoverable tier
+              description: Recoverable, but it indicates a state the framework did not expect.
+              runbook_url: https://ops.example.com/adapter#adapterfatalassertion
+      - eval_time: 15m
+        alertname: AdapterResourceGrowth
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: growth
+              job: websocket
+              resource: decodeCache
+              severity: warning
+            exp_annotations:
+              summary: Sustained resource growth suspected
+              description: The optional growth auditor saw a resource climb without plateauing.
+              runbook_url: https://ops.example.com/adapter#adapterresourcegrowth
+
+  - name: recorded ratios freshness and quantiles evaluate to exact values
+    interval: 1m
+    start_timestamp: 1700000000
+    external_labels:
+      adapter_runbook_url: https://ops.example.com/adapter
+    input_series:
+      - series: 'ws_subscriptions{adapter="svelte-adapter-uws",job="websocket",instance="quiet"}'
+        values: '30+0x12'
+      - series: 'ws_connections{adapter="svelte-adapter-uws",job="websocket",instance="quiet"}'
+        values: '10+0x12'
+      - series: 'pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws",job="websocket",instance="quiet"}'
+        values: '1700000000+0x12'
+      - series: 'http_requests_total{adapter="svelte-adapter-uws",job="websocket",instance="web",method="get",outcome="ok"}'
+        values: '0+57x12'
+      - series: 'http_requests_total{adapter="svelte-adapter-uws",job="websocket",instance="web",method="get",outcome="server_error"}'
+        values: '0+3x12'
+      - series: 'ws_messages_total{adapter="svelte-adapter-uws",job="websocket",instance="web",kind="text",outcome="ok"}'
+        values: '0+19x12'
+      - series: 'ws_messages_total{adapter="svelte-adapter-uws",job="websocket",instance="web",kind="text",outcome="error"}'
+        values: '0+1x12'
+      - series: 'http_request_duration_seconds_bucket{adapter="svelte-adapter-uws",job="websocket",instance="web",method="get",outcome="ok",le="0.1"}'
+        values: '0+9x12'
+      - series: 'http_request_duration_seconds_bucket{adapter="svelte-adapter-uws",job="websocket",instance="web",method="get",outcome="ok",le="0.5"}'
+        values: '0+10x12'
+      - series: 'http_request_duration_seconds_bucket{adapter="svelte-adapter-uws",job="websocket",instance="web",method="get",outcome="ok",le="+Inf"}'
+        values: '0+10x12'
+      - series: 'ws_message_duration_seconds_bucket{adapter="svelte-adapter-uws",job="websocket",instance="web",kind="text",outcome="ok",le="0.05"}'
+        values: '0+9x12'
+      - series: 'ws_message_duration_seconds_bucket{adapter="svelte-adapter-uws",job="websocket",instance="web",kind="text",outcome="ok",le="0.25"}'
+        values: '0+10x12'
+      - series: 'ws_message_duration_seconds_bucket{adapter="svelte-adapter-uws",job="websocket",instance="web",kind="text",outcome="ok",le="+Inf"}'
+        values: '0+10x12'
+    promql_expr_test:
+      - expr: adapter:subscriber_ratio
+        eval_time: 10m
+        exp_samples:
+          - labels: 'adapter:subscriber_ratio{adapter="svelte-adapter-uws",job="websocket",instance="quiet"}'
+            value: 3
+      - expr: adapter:pressure_sample_age_seconds
+        eval_time: 10m
+        exp_samples:
+          - labels: 'adapter:pressure_sample_age_seconds{adapter="svelte-adapter-uws",job="websocket",instance="quiet"}'
+            value: 600
+      - expr: adapter:http_error_ratio:rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'adapter:http_error_ratio:rate5m{adapter="svelte-adapter-uws",job="websocket",instance="web"}'
+            value: 0.05
+      - expr: adapter:ws_message_error_ratio:rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'adapter:ws_message_error_ratio:rate5m{adapter="svelte-adapter-uws",job="websocket",instance="web"}'
+            value: 0.05
+      - expr: adapter:http_request_duration_seconds:p95_5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'adapter:http_request_duration_seconds:p95_5m{adapter="svelte-adapter-uws",job="websocket",instance="web"}'
+            value: 0.3
+      - expr: adapter:http_request_duration_seconds:p95_by_method_5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'adapter:http_request_duration_seconds:p95_by_method_5m{adapter="svelte-adapter-uws",job="websocket",instance="web",method="get"}'
+            value: 0.3
+      - expr: adapter:ws_message_duration_seconds:p95_5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'adapter:ws_message_duration_seconds:p95_5m{adapter="svelte-adapter-uws",job="websocket",instance="web"}'
+            value: 0.15
+
+  - name: a fleet with no adapter-labelled target pages the meta alert
+    interval: 1m
+    external_labels:
+      adapter_runbook_url: https://ops.example.com/adapter
+    input_series:
+      # A foreign up series proves the matcher inside absent() does its job:
+      # other targets being up does not satisfy the adapter's own requirement.
+      - series: 'up{adapter="another-service",job="foreign",instance="one"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: AdapterTargetMissing
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              severity: warning
+            exp_annotations:
+              summary: No scrape target carries the adapter label
+              description: No up series carries the adapter="svelte-adapter-uws" target label, so every alert in this pack is evaluating an empty set. Add the constant label in the scrape config; see the runbook's deployment contract.
+              runbook_url: https://ops.example.com/adapter#adaptertargetmissing
 
   - name: unrelated targets cannot page adapter alerts
     interval: 1m
+    # Every foreign series carries a value that WOULD fire the corresponding
+    # rule if the adapter matcher were dropped, so silence here constrains the
+    # matcher, not the threshold. In particular: posture 1 for the == 1 rule
+    # and 2 for the >= 2 rule, a backpressure share above one percent, a
+    # waiting-room depth above ten, a degraded/incomplete/stalled pipeline
+    # behind a foreign up == 1, and a bare up == 1 with no witnesses at all.
     input_series:
       - series: 'open_fds{adapter="another-service",job="foreign",instance="one"}'
         values: '99+0x20'
@@ -192,6 +543,8 @@ tests:
         values: '100+0x20'
       - series: 'protection_posture_state{adapter="another-service",job="foreign",instance="one"}'
         values: '2+0x20'
+      - series: 'protection_posture_state{adapter="another-service",job="foreign",instance="two"}'
+        values: '1+0x20'
       - series: 'pressure_saturation{adapter="another-service",job="foreign",instance="one"}'
         values: '1+0x20'
       - series: 'heap_used_ratio{adapter="another-service",job="foreign",instance="one"}'
@@ -199,11 +552,27 @@ tests:
       - series: 'cpu_throttled_ratio{adapter="another-service",job="foreign",instance="one"}'
         values: '1+0x20'
       - series: 'ws_backpressure_connections{adapter="another-service",job="foreign",instance="one"}'
-        values: '1+0x20'
-      - series: 'upgrade_rate_map_evicted_total{adapter="another-service",job="foreign",instance="one"}'
+        values: '5+0x20'
+      - series: 'ws_connections{adapter="another-service",job="foreign",instance="one"}'
+        values: '100+0x20'
+      - series: 'ws_subscriptions{adapter="another-service",job="foreign",instance="one"}'
+        values: '50+0x20'
+      - series: 'upgrade_rate_map_evicted_total{adapter="another-service",job="foreign",instance="one",door="upgrade"}'
         values: '0+120x20'
       - series: 'waiting_room_queue_depth{adapter="another-service",job="foreign",instance="one"}'
-        values: '1+0x20'
+        values: '25+0x20'
+      - series: 'upgrade_admitted_total{adapter="another-service",job="foreign",instance="one"}'
+        values: '0+0x20'
+      - series: 'upgrade_rejected_total{adapter="another-service",job="foreign",instance="one",reason="overload"}'
+        values: '0+10x20'
+      - series: 'http_requests_total{adapter="another-service",job="foreign",instance="one",method="get",outcome="ok"}'
+        values: '0+10x20'
+      - series: 'http_requests_total{adapter="another-service",job="foreign",instance="one",method="get",outcome="server_error"}'
+        values: '0+10x20'
+      - series: 'ws_messages_total{adapter="another-service",job="foreign",instance="one",kind="text",outcome="ok"}'
+        values: '0+10x20'
+      - series: 'ws_messages_total{adapter="another-service",job="foreign",instance="one",kind="text",outcome="error"}'
+        values: '0+10x20'
       - series: 'state_divergence_total{adapter="another-service",job="foreign",instance="one"}'
         values: '0+1x20'
       - series: 'relay_gap_frames_total{adapter="another-service",job="foreign",instance="one"}'
@@ -216,7 +585,42 @@ tests:
         values: '0+1x20'
       - series: 'framework_resource_growth_suspected_total{adapter="another-service",job="foreign",instance="one"}'
         values: '0+1x20'
+      - series: 'up{adapter="another-service",job="foreign",instance="pipeline"}'
+        values: '1+0x20'
+      - series: 'metrics_snapshot_degraded{adapter="another-service",job="foreign",instance="pipeline"}'
+        values: '1+0x20'
+      - series: 'metrics_snapshot_workers_expected{adapter="another-service",job="foreign",instance="pipeline"}'
+        values: '4+0x20'
+      - series: 'metrics_snapshot_workers_reporting{adapter="another-service",job="foreign",instance="pipeline"}'
+        values: '2+0x20'
+      - series: 'pressure_sample_timestamp_seconds{adapter="another-service",job="foreign",instance="pipeline"}'
+        values: '0+0x20'
+      - series: 'up{adapter="another-service",job="foreign",instance="bare"}'
+        values: '1+0x20'
+    promql_expr_test:
+      # Foreign traffic must not materialise recorded adapter series either.
+      - expr: adapter:subscriber_ratio
+        eval_time: 20m
+        exp_samples: []
+      - expr: adapter:http_error_ratio:rate5m
+        eval_time: 20m
+        exp_samples: []
+      - expr: adapter:ws_message_error_ratio:rate5m
+        eval_time: 20m
+        exp_samples: []
     alert_rule_test:
+      - eval_time: 20m
+        alertname: AdapterMetricsSnapshotDegraded
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterMetricsSnapshotIncomplete
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterPressureSamplerStalled
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterMetricsAbsent
+        exp_alerts: []
       - eval_time: 20m
         alertname: AdapterDescriptorHeadroomLow
         exp_alerts: []
@@ -240,6 +644,9 @@ tests:
         exp_alerts: []
       - eval_time: 20m
         alertname: AdapterBackpressureSustained
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterUpgradeRejectRatioHigh
         exp_alerts: []
       - eval_time: 20m
         alertname: AdapterRateMapChurn

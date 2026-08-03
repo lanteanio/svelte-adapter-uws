@@ -89,7 +89,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "up{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "expr": "up{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
           "legendFormat": "{{job}} / {{instance}}",
           "range": true,
           "refId": "A"
@@ -134,21 +134,21 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "metrics_snapshot_degraded{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "expr": "metrics_snapshot_degraded{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
           "legendFormat": "degraded {{job}} / {{instance}}",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "metrics_snapshot_workers_reporting{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022} / metrics_snapshot_workers_expected{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "expr": "metrics_snapshot_workers_reporting{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"} / metrics_snapshot_workers_expected{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
           "legendFormat": "worker completeness {{job}} / {{instance}}",
           "range": true,
           "refId": "B"
         },
         {
           "editorMode": "code",
-          "expr": "time() - pressure_sample_timestamp_seconds{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "expr": "adapter:pressure_sample_age_seconds{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
           "legendFormat": "sample age {{job}} / {{instance}}",
           "range": true,
           "refId": "C"
@@ -190,21 +190,21 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "pressure_saturation{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "expr": "pressure_saturation{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
           "legendFormat": "saturation {{job}} / {{instance}}",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "heap_used_ratio{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "expr": "heap_used_ratio{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
           "legendFormat": "heap {{job}} / {{instance}}",
           "range": true,
           "refId": "B"
         },
         {
           "editorMode": "code",
-          "expr": "cpu_throttled_ratio{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "expr": "cpu_throttled_ratio{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
           "legendFormat": "cpu throttled {{job}} / {{instance}}",
           "range": true,
           "refId": "C"
@@ -246,24 +246,31 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "ws_connections{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "expr": "ws_connections{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
           "legendFormat": "connections {{job}} / {{instance}}",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "ws_subscriptions{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "expr": "ws_subscriptions{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
           "legendFormat": "subscriptions {{job}} / {{instance}}",
           "range": true,
           "refId": "B"
         },
         {
           "editorMode": "code",
-          "expr": "ws_backpressure_connections{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "expr": "ws_backpressure_connections{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
           "legendFormat": "backpressured {{job}} / {{instance}}",
           "range": true,
           "refId": "C"
+        },
+        {
+          "editorMode": "code",
+          "expr": "adapter:subscriber_ratio{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
+          "legendFormat": "subscriber ratio {{job}} / {{instance}}",
+          "range": true,
+          "refId": "D"
         }
       ],
       "title": "WebSocket load",
@@ -324,7 +331,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "adapter:fd_headroom_ratio{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "expr": "adapter:fd_headroom_ratio{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
           "legendFormat": "{{job}} / {{instance}}",
           "range": true,
           "refId": "A"
@@ -389,14 +396,14 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "adapter:upgrade_reject_ratio:rate5m{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "expr": "adapter:upgrade_reject_ratio:rate5m{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
           "legendFormat": "ratio {{job}} / {{instance}}",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "rate(upgrade_rejected_total{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}[5m])",
+          "expr": "rate(upgrade_rejected_total{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}[5m])",
           "legendFormat": "{{reason}} {{job}} / {{instance}}",
           "range": true,
           "refId": "B"
@@ -438,41 +445,256 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(framework_assertion_violations_total{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}[5m])",
+          "expr": "rate(framework_assertion_violations_total{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}[5m])",
           "legendFormat": "assertion {{severity}} / {{category}} / {{job}} / {{instance}}",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "rate(state_divergence_total{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}[5m])",
+          "expr": "rate(state_divergence_total{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}[5m])",
           "legendFormat": "divergence {{job}} / {{instance}}",
           "range": true,
           "refId": "B"
         },
         {
           "editorMode": "code",
-          "expr": "rate(relay_gap_frames_total{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}[5m])",
+          "expr": "rate(relay_gap_frames_total{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}[5m])",
           "legendFormat": "relay gap {{job}} / {{instance}}",
           "range": true,
           "refId": "C"
         },
         {
           "editorMode": "code",
-          "expr": "rate(framework_resource_growth_suspected_total{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}[5m])",
+          "expr": "rate(framework_resource_growth_suspected_total{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}[5m])",
           "legendFormat": "growth {{resource}} / {{job}} / {{instance}}",
           "range": true,
           "refId": "D"
         },
         {
           "editorMode": "code",
-          "expr": "rate(relay_spill_quarantines_total{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}[5m])",
+          "expr": "rate(relay_spill_quarantines_total{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}[5m])",
           "legendFormat": "relay spill {{reason}} / {{job}} / {{instance}}",
           "range": true,
           "refId": "E"
         }
       ],
       "title": "Integrity and growth events",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(http_requests_total{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}[5m])",
+          "legendFormat": "{{method}} {{outcome}} {{job}} / {{instance}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "adapter:http_error_ratio:rate5m{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
+          "legendFormat": "error ratio {{job}} / {{instance}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "HTTP traffic and error ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "adapter:http_request_duration_seconds:p95_5m{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
+          "legendFormat": "p95 {{job}} / {{instance}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "adapter:http_request_duration_seconds:p95_by_method_5m{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
+          "legendFormat": "p95 {{method}} {{job}} / {{instance}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "HTTP latency p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "mps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(ws_messages_total{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}[5m])",
+          "legendFormat": "{{kind}} {{outcome}} {{job}} / {{instance}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "adapter:ws_message_error_ratio:rate5m{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
+          "legendFormat": "error ratio {{job}} / {{instance}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "WebSocket message traffic and error ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "adapter:ws_message_duration_seconds:p95_5m{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}",
+          "legendFormat": "p95 {{job}} / {{instance}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "WebSocket message handler latency p95",
       "type": "timeseries"
     }
   ],
@@ -490,14 +712,14 @@
           "type": "prometheus",
           "uid": "${DS_PROMETHEUS}"
         },
-        "definition": "label_values(up{adapter=\u0022svelte-adapter-uws\u0022}, job)",
+        "definition": "label_values(up{adapter=\"svelte-adapter-uws\"}, job)",
         "includeAll": true,
         "label": "Job",
         "multi": true,
         "name": "job",
         "options": [],
         "query": {
-          "query": "label_values(up{adapter=\u0022svelte-adapter-uws\u0022}, job)",
+          "query": "label_values(up{adapter=\"svelte-adapter-uws\"}, job)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 1,
@@ -510,14 +732,14 @@
           "type": "prometheus",
           "uid": "${DS_PROMETHEUS}"
         },
-        "definition": "label_values(up{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022}, instance)",
+        "definition": "label_values(up{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\"}, instance)",
         "includeAll": true,
         "label": "Instance",
         "multi": true,
         "name": "instance",
         "options": [],
         "query": {
-          "query": "label_values(up{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022}, instance)",
+          "query": "label_values(up{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\"}, instance)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 1,

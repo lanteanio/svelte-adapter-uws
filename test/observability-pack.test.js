@@ -29,6 +29,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
 
 const RULES = read('examples/observability/rules.yml');
+// The rules file carries a deliberately commented-out burn-rate group; scans
+// that count alerts or runbook links must not read the disabled text.
+const ACTIVE_RULES = RULES.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
 const RUNBOOK = read('examples/observability/runbook.md');
 const DASHBOARD = JSON.parse(read('examples/observability/dashboard.v1.json'));
 const RULE_DOCUMENT = parseYaml(RULES);
@@ -81,10 +84,10 @@ describe('shipped observability pack', () => {
 	});
 
 	it('every alert names a runbook section that exists', () => {
-		const alerts = [...RULES.matchAll(/^\s*- alert:\s*(\S+)/gm)].map((m) => m[1]);
+		const alerts = [...ACTIVE_RULES.matchAll(/^\s*- alert:\s*(\S+)/gm)].map((m) => m[1]);
 		expect(alerts.length, 'no alerts parsed - the rules file or this parser changed shape').toBeGreaterThan(10);
 
-		const links = [...RULES.matchAll(
+		const links = [...ACTIVE_RULES.matchAll(
 			/runbook_url:\s*'\{\{ \$externalLabels\.adapter_runbook_url \}\}#([^']+)'/g
 		)].map((m) => m[1]);
 		expect(links.length, 'every alert must carry a runbook_url').toBe(alerts.length);
@@ -99,13 +102,13 @@ describe('shipped observability pack', () => {
 	it('uses a configurable absolute runbook URL contract for every alert', () => {
 		expect(RULES).not.toContain('runbook_url: ./');
 		expect(RUNBOOK).toContain('adapter_runbook_url: https://ops.example.com/');
-		const templated = RULES.match(/\$externalLabels\.adapter_runbook_url/g) || [];
-		const alerts = RULES.match(/^\s*- alert:/gm) || [];
+		const templated = ACTIVE_RULES.match(/\$externalLabels\.adapter_runbook_url/g) || [];
+		const alerts = ACTIVE_RULES.match(/^\s*- alert:/gm) || [];
 		expect(templated).toHaveLength(alerts.length);
 	});
 
 	it('every alert name is unique', () => {
-		const alerts = [...RULES.matchAll(/^\s*- alert:\s*(\S+)/gm)].map((m) => m[1]);
+		const alerts = [...ACTIVE_RULES.matchAll(/^\s*- alert:\s*(\S+)/gm)].map((m) => m[1]);
 		expect(alerts).toEqual([...new Set(alerts)]);
 	});
 
@@ -113,7 +116,7 @@ describe('shipped observability pack', () => {
 		const excluded = noAlertList();
 		const undecided = SIGNALS
 			.map((s) => s.name)
-			.filter((name) => !RULES.includes(name) && !excluded.has(name))
+			.filter((name) => !ACTIVE_RULES.includes(name) && !excluded.has(name))
 			.sort();
 		expect(
 			undecided,
@@ -139,7 +142,7 @@ describe('shipped observability pack', () => {
 
 	it('parses every rule with the official grammar and scopes every vector selector', () => {
 		const rules = RULE_DOCUMENT.groups.flatMap((group) => group.rules);
-		expect(rules).toHaveLength(25);
+		expect(rules).toHaveLength(31);
 		for (const rule of rules) {
 			const selectors = vectorSelectors(rule.expr);
 			for (const selector of selectors) {
@@ -170,8 +173,30 @@ describe('shipped observability pack', () => {
 		expect(DASHBOARD.schemaVersion).toBeGreaterThanOrEqual(39);
 		expect(DASHBOARD.version).toBe(1);
 		expect(DASHBOARD.uid).toBe('svelte-adapter-uws-v1');
-		expect(DASHBOARD.panels.length).toBeGreaterThanOrEqual(6);
-		expect(DASHBOARD.panels.length).toBeLessThanOrEqual(8);
+		expect(DASHBOARD.panels.length).toBeGreaterThanOrEqual(8);
+		expect(DASHBOARD.panels.length).toBeLessThanOrEqual(12);
+
+		// Every shipped recording rule with a charted meaning is consumed here,
+		// so none of the recorded series is write-only.
+		const expressions = DASHBOARD.panels.flatMap((panel) => panel.targets.map((target) => target.expr));
+		for (const series of [
+			'adapter:subscriber_ratio',
+			'adapter:pressure_sample_age_seconds',
+			'adapter:fd_headroom_ratio',
+			'adapter:upgrade_reject_ratio:rate5m',
+			'adapter:http_error_ratio:rate5m',
+			'adapter:http_request_duration_seconds:p95_5m',
+			'adapter:http_request_duration_seconds:p95_by_method_5m',
+			'adapter:ws_message_error_ratio:rate5m',
+			'adapter:ws_message_duration_seconds:p95_5m',
+			'rate(http_requests_total',
+			'rate(ws_messages_total'
+		]) {
+			expect(
+				expressions.some((expr) => expr.includes(series)),
+				`no dashboard panel consumes ${series}`
+			).toBe(true);
+		}
 
 		const variables = new Set(DASHBOARD.templating.list.map((entry) => entry.name));
 		expect(variables).toEqual(new Set(['job', 'instance', 'runbook_url']));
@@ -192,24 +217,222 @@ describe('shipped observability pack', () => {
 		expect(PROMTOOL_DRILLS.tests.map((test) => test.name)).toEqual([
 			'low-rate rejection math and target isolation',
 			'pipeline completeness absence freshness and up correlation',
+			'capacity alerts fire for marked adapter targets',
+			'integrity alerts fire for marked adapter targets',
+			'recorded ratios freshness and quantiles evaluate to exact values',
+			'a fleet with no adapter-labelled target pages the meta alert',
 			'unrelated targets cannot page adapter alerts'
 		]);
-		const [ratio, pipeline, unrelated] = PROMTOOL_DRILLS.tests;
+		const [ratio, pipeline, , , recorded, , unrelated] = PROMTOOL_DRILLS.tests;
 		expect(ratio.promql_expr_test[0].exp_samples.map((sample) => sample.value)).toEqual([0.4, 0.2]);
 		expect(ratio.alert_rule_test[0].exp_alerts[0].exp_labels.instance).toBe('high');
 		expect(ratio.alert_rule_test[1].exp_alerts[0].exp_labels.instance).toBe('lagging');
-		expect(pipeline.alert_rule_test.map((test) => test.exp_alerts[0].exp_labels.instance)).toEqual([
-			'degraded',
-			'incomplete',
-			'stalled',
-			'missing'
+		expect(pipeline.alert_rule_test
+			.filter((test) => test.exp_alerts.length > 0)
+			.map((test) => test.exp_alerts[0].exp_labels.instance)
+		).toEqual(['degraded', 'incomplete', 'stalled', 'missing']);
+		expect(
+			pipeline.alert_rule_test.some(
+				(test) => test.alertname === 'AdapterTargetMissing' && test.exp_alerts.length === 0
+			),
+			'a present marked up series must keep the meta alert silent'
+		).toBe(true);
+		// The recorded series are consumed, so the corpus must prove they
+		// evaluate - subscriber ratio, freshness age, both error ratios, and
+		// all three p95 quantiles, each to an exact expected value.
+		const recordedNames = recorded.promql_expr_test.map((test) => test.expr).sort();
+		expect(recordedNames).toEqual([
+			'adapter:http_error_ratio:rate5m',
+			'adapter:http_request_duration_seconds:p95_5m',
+			'adapter:http_request_duration_seconds:p95_by_method_5m',
+			'adapter:pressure_sample_age_seconds',
+			'adapter:subscriber_ratio',
+			'adapter:ws_message_duration_seconds:p95_5m',
+			'adapter:ws_message_error_ratio:rate5m'
 		]);
-		expect(unrelated.alert_rule_test).toHaveLength(16);
+		for (const test of recorded.promql_expr_test) {
+			expect(test.exp_samples.length, `${test.expr} must assert at least one exact sample`).toBeGreaterThan(0);
+		}
 		expect(unrelated.alert_rule_test.every((test) => test.exp_alerts.length === 0)).toBe(true);
+		expect(
+			unrelated.promql_expr_test.every((test) => test.exp_samples.length === 0),
+			'foreign traffic must not materialise recorded adapter series'
+		).toBe(true);
 		expect(CI_WORKFLOW).toContain(
 			'prom/prometheus@sha256:c6b27ea434f8389bfe233fbc7be381cf50587c286e871bc842008f5a1b1908a7'
 		);
 		expect(CI_WORKFLOW).toContain('test rules /rules/rule-tests.v1.yml');
+	});
+
+	it('every alert has a positive firing case, so a rule that can never fire fails the corpus', () => {
+		const alerts = RULE_DOCUMENT.groups
+			.flatMap((group) => group.rules)
+			.filter((rule) => rule.alert)
+			.map((rule) => rule.alert);
+		expect(alerts.length).toBeGreaterThan(10);
+		const entries = PROMTOOL_DRILLS.tests.flatMap((test) => test.alert_rule_test ?? []);
+		const unfired = alerts
+			.filter((alert) => !entries.some(
+				(entry) => entry.alertname === alert && entry.exp_alerts.length > 0
+			))
+			.sort();
+		expect(
+			unfired,
+			'these alerts have no corpus case that proves they can fire - a broken expression would pass ' +
+			'every silence assertion identically: ' + JSON.stringify(unfired)
+		).toEqual([]);
+		// Positive cases must pin the full contract, not just existence.
+		for (const entry of entries) {
+			for (const alert of entry.exp_alerts) {
+				expect(alert.exp_labels.adapter, `${entry.alertname} must carry the target label`).toBe('svelte-adapter-uws');
+				expect(alert.exp_labels.severity, `${entry.alertname} must pin its severity`).toMatch(/^(warning|critical)$/);
+				expect(alert.exp_annotations.runbook_url, `${entry.alertname} must pin its runbook link`)
+					.toMatch(/^https:\/\/ops\.example\.com\/adapter#[a-z]+$/);
+				expect(alert.exp_annotations.summary, `${entry.alertname} must pin its summary`).toBeTruthy();
+			}
+		}
+	});
+
+	it('every alert keeps a negative case proving foreign targets stay silent', () => {
+		const alerts = RULE_DOCUMENT.groups
+			.flatMap((group) => group.rules)
+			.filter((rule) => rule.alert)
+			.map((rule) => rule.alert);
+		const unrelated = PROMTOOL_DRILLS.tests.find(
+			(test) => test.name === 'unrelated targets cannot page adapter alerts'
+		);
+		const silenced = new Set(
+			unrelated.alert_rule_test
+				.filter((entry) => entry.exp_alerts.length === 0)
+				.map((entry) => entry.alertname)
+		);
+		// The meta alert is the one deliberate exception: with no marked target
+		// in the isolation corpus it SHOULD fire, so its negative case lives in
+		// the pipeline test where marked up series exist.
+		const missing = alerts
+			.filter((alert) => alert !== 'AdapterTargetMissing' && !silenced.has(alert))
+			.sort();
+		expect(
+			missing,
+			'these alerts have no isolation case: ' + JSON.stringify(missing)
+		).toEqual([]);
+		const phantom = [...silenced].filter((alert) => !alerts.includes(alert)).sort();
+		expect(phantom, 'the isolation test names alerts the rules file does not declare: ' + JSON.stringify(phantom)).toEqual([]);
+	});
+
+	it('isolation series carry values that would fire each rule without its matcher', () => {
+		const unrelated = PROMTOOL_DRILLS.tests.find(
+			(test) => test.name === 'unrelated targets cannot page adapter alerts'
+		);
+		/** metric name -> [{ labels, start, step }] for the foreign constant/linear series. */
+		const foreign = new Map();
+		for (const entry of unrelated.input_series) {
+			const parsedSeries = /^([a-zA-Z_:][\w:]*)\{([^}]*)\}$/.exec(entry.series);
+			const parsedValues = /^(-?[\d.]+)\+(-?[\d.]+)x\d+$/.exec(entry.values);
+			expect(parsedSeries, entry.series).toBeTruthy();
+			expect(parsedValues, `${entry.series} values must stay linear so the property below is checkable`).toBeTruthy();
+			expect(parsedSeries[2]).toContain('adapter="another-service"');
+			const list = foreign.get(parsedSeries[1]) ?? [];
+			list.push({
+				labels: parsedSeries[2],
+				start: Number(parsedValues[1]),
+				step: Number(parsedValues[2])
+			});
+			foreign.set(parsedSeries[1], list);
+		}
+
+		// Simple gauge-threshold alerts: at least one foreign series of the
+		// same metric must satisfy the comparison, so removing the adapter
+		// matcher would page. This is what makes the silence meaningful.
+		const signalNames = new Set(SIGNALS.map((signal) => signal.name));
+		const simple = [...ACTIVE_RULES.matchAll(
+			/^\s*expr:\s*([a-z_][\w]*)\{adapter="svelte-adapter-uws"\}\s*(>=|>|==)\s*([\d.]+)\s*$/gm
+		)];
+		expect(simple.length, 'the simple-threshold parser found nothing - the rules file changed shape').toBeGreaterThanOrEqual(4);
+		for (const [, metric, comparator, thresholdRaw] of simple) {
+			if (!signalNames.has(metric)) continue;
+			const threshold = Number(thresholdRaw);
+			const satisfied = (foreign.get(metric) ?? []).some(({ start }) =>
+				comparator === '>' ? start > threshold
+				: comparator === '>=' ? start >= threshold
+				: start === threshold
+			);
+			expect(
+				satisfied,
+				`no foreign ${metric} series satisfies "${comparator} ${threshold}" - the isolation case cannot ` +
+				'distinguish the matcher from the threshold'
+			).toBe(true);
+		}
+		// Both posture rules must be constrained: == 1 needs a foreign 1, >= 2
+		// a foreign 2. The generic walk above proves each, but pin the pair so
+		// neither alert can lose its counterpart silently.
+		const postures = (foreign.get('protection_posture_state') ?? []).map(({ start }) => start).sort();
+		expect(postures).toEqual([1, 2]);
+
+		// Ratio rules: the foreign numerator/denominator pairs must cross the
+		// shipped thresholds.
+		const value = (metric) => foreign.get(metric)?.[0]?.start;
+		expect(value('open_fds') / value('fd_soft_limit'), 'foreign descriptor pair must exceed the critical ratio')
+			.toBeGreaterThan(0.92);
+		expect(
+			value('ws_backpressure_connections') / Math.max(value('ws_connections'), 1),
+			'foreign backpressure pair must exceed the sustained share'
+		).toBeGreaterThan(0.01);
+
+		// Rate/increase rules: each referenced counter needs a foreign series
+		// that actually increases; churn must exceed one eviction per second.
+		for (const metric of [
+			'upgrade_rejected_total', 'upgrade_rate_map_evicted_total', 'state_divergence_total',
+			'relay_gap_frames_total', 'relay_spill_quarantines_total',
+			'framework_assertion_violations_total', 'framework_resource_growth_suspected_total'
+		]) {
+			expect(
+				(foreign.get(metric) ?? []).some(({ step }) => step > 0),
+				`no increasing foreign ${metric} series - its rate rule is not constrained`
+			).toBe(true);
+		}
+		expect(
+			(foreign.get('upgrade_rate_map_evicted_total') ?? []).some(({ step }) => step > 60),
+			'foreign eviction churn must exceed one per second at the 1m sample interval'
+		).toBe(true);
+		// The pipeline rules are up-correlated, so their isolation needs a
+		// foreign target that is up while degraded, incomplete and stale, plus
+		// a bare foreign up series for the absence rule.
+		const ups = foreign.get('up') ?? [];
+		expect(ups.length).toBeGreaterThanOrEqual(2);
+		expect(ups.every(({ start }) => start === 1)).toBe(true);
+		expect(value('metrics_snapshot_degraded')).toBeGreaterThan(0);
+		expect(value('metrics_snapshot_workers_reporting')).toBeLessThan(value('metrics_snapshot_workers_expected'));
+	});
+
+	it('ships the transport SLO half: live recording rules, disabled burn-rate alerts, meta alert', () => {
+		const rules = RULE_DOCUMENT.groups.flatMap((group) => group.rules);
+		const recorded = rules.filter((rule) => rule.record).map((rule) => rule.record);
+		for (const name of [
+			'adapter:http_error_ratio:rate5m',
+			'adapter:ws_message_error_ratio:rate5m',
+			'adapter:http_request_duration_seconds:p95_5m',
+			'adapter:http_request_duration_seconds:p95_by_method_5m',
+			'adapter:ws_message_duration_seconds:p95_5m'
+		]) {
+			expect(recorded, 'missing transport SLO recording rule').toContain(name);
+		}
+		// The burn-rate pair ships disabled: present as commented rule text an
+		// operator can uncomment, absent from the parsed document, and backed
+		// by real runbook sections.
+		for (const alert of ['AdapterHttpErrorBudgetBurn', 'AdapterWsMessageErrorBudgetBurn']) {
+			expect(RULES, `${alert} must ship as commented-out rule text`).toContain(`- alert: ${alert}`);
+			expect(ACTIVE_RULES, `${alert} must not be enabled by default`).not.toContain(`- alert: ${alert}`);
+			expect(runbookAnchors.has(alert.toLowerCase()), `${alert} needs a runbook section`).toBe(true);
+			expect(RUNBOOK).toContain(`## ${alert}`);
+		}
+		expect(RULES).toContain('SHIPPED DISABLED');
+		// The meta alert is the single legitimate non-per-target expression.
+		const meta = rules.find((rule) => rule.alert === 'AdapterTargetMissing');
+		expect(meta.expr.trim()).toBe('absent(up{adapter="svelte-adapter-uws"})');
+		const absentUsers = rules.filter((rule) => rule.expr.includes('absent('));
+		expect(absentUsers.map((rule) => rule.alert)).toEqual(['AdapterTargetMissing']);
+		expect(runbookAnchors.has('adaptertargetmissing')).toBe(true);
 	});
 
 	it('keeps adapter and sibling-extension artifact ownership explicit', () => {

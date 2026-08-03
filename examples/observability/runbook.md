@@ -27,6 +27,11 @@ scrape_configs:
           adapter: svelte-adapter-uws
 ```
 
+This label is load-bearing: without it every rule in the pack evaluates over an
+empty set and never fires. [`AdapterTargetMissing`](#adaptertargetmissing)
+exists to page on exactly that state, so a forgotten relabel is an alert rather
+than permanent silence.
+
 Alert links use Prometheus's rule-template external-label map instead of a local
 relative path. Configure the absolute URL where your deployed copy of this
 runbook lives:
@@ -142,6 +147,29 @@ target label instead of collapsing several deployments into one alert.
 
 ---
 
+## AdapterTargetMissing
+
+**Means:** no scrape target anywhere carries the `adapter="svelte-adapter-uws"`
+label. Every other rule in this pack starts from that label, so in this state
+the whole pack evaluates over an empty set: nothing fires, ever, no matter what
+the adapter does. This is the failure the per-target rules cannot see about
+themselves, which is why this one alert deliberately uses `absent()` and is not
+per-target.
+
+**Check:** the scrape config against the [deployment contract](#deployment-contract)
+above. The label must be a constant target label (static `labels:` or a
+`relabel_configs` rule), not something the application emits.
+
+**Do:** add the label and confirm the dashboard's "Adapter targets up" panel
+shows your targets again. If you intentionally decommissioned every adapter
+target, remove the pack along with them.
+
+**Do not** silence this and keep the rest of the pack. A silenced
+`AdapterTargetMissing` with no labelled target is indistinguishable from a
+perfectly healthy fleet.
+
+---
+
 ## AdapterDescriptorHeadroomLow
 
 **Means:** open descriptors are approaching the soft limit. New sockets fail with
@@ -214,8 +242,16 @@ can recover time the kernel took away.
 
 ## AdapterBackpressureSustained
 
-**Means:** connections are holding an outbound queue - clients are not draining
-as fast as you publish.
+**Means:** a meaningful share of connections are holding an outbound queue -
+clients are not draining as fast as you publish.
+
+**Threshold:** the rule fires when more than one percent of live connections
+(`ws_backpressure_connections / ws_connections`) stay backpressured for fifteen
+minutes. A share rather than a raw count on purpose: on a large fleet a handful
+of slow consumers is always present, so a `> 0` rule would page permanently on
+a healthy deployment, while on a small one a single wedged client is exactly
+one percent territory. Tune the share to your client mix - lossy telemetry
+consumers tolerate more than request/response lanes.
 
 **Check:** `ws_backpressure_max_bytes` for sampled headroom against your
 configured `maxBackpressure`, then `rate(ws_dropped_frames_total[5m])` and
@@ -264,6 +300,13 @@ promise that churn can never reach a ban.
 
 **Means:** clients have been sitting in the waiting room for a sustained period,
 so admission is not draining them.
+
+**Threshold:** more than ten waiting clients for fifteen minutes. Not `> 0`: a
+single client in a stuck retry loop can hold a depth of one indefinitely
+without any incident, and paging on it teaches everyone to ignore the alert.
+Ten sustained means the gate is closed against real demand. Tune the depth to
+your reconnect envelope - a deployment that routinely absorbs thousand-client
+reconnect waves should sit well above ten.
 
 **Check:** the posture and the admission ceiling. The room is a symptom of the
 gate being closed, not a fault of its own.
@@ -355,6 +398,66 @@ the curve, so act on the trend rather than waiting for an absolute limit.
 
 ---
 
+## AdapterHttpErrorBudgetBurn
+
+**Ships disabled.** The rule text lives commented out at the end of
+[`rules.yml`](./rules.yml); the recording rules it reads from are live.
+
+**Means:** the HTTP server-error ratio is consuming the error budget fast
+enough that, at the current rate, a month's budget is gone in about two days.
+The error term is the adapter-owned bounded `outcome` label on
+`http_requests_total`: only `server_error` counts, because `client_error` and
+`aborted` are the client's own behaviour, not budget spend.
+
+**Inputs, always recorded:** `adapter:http_error_ratio:rate5m` (server-error
+share of all requests, per target), `adapter:http_request_duration_seconds:p95_5m`
+and `adapter:http_request_duration_seconds:p95_by_method_5m` (p95 latency from
+the optional duration histogram). Each aggregates away only the metric's own
+bounded labels, so every target label survives - the recorded series are safe
+to alert on per deployment. With zero traffic the ratio is 0/0 and reports no
+number rather than a fake zero; with errors and no successes it reports 1.
+
+**To enable:** pick an objective, substitute your allowed error ratio for the
+`0.001` placeholder (0.001 is 99.9 percent), and uncomment the group. Keep both
+windows: the five-minute term makes the alert stop promptly when the burn
+stops, the one-hour term keeps a single bad minute from paging. The `14.4`
+factor is the classic fast-burn multiplier (budget exhausted in roughly two
+days); add a slower ticket-severity pair on `[6h]`/`[30m]` windows with factor
+`6` once the fast pair has earned trust. This is deliberately not enabled with
+a default budget: an objective nobody chose pages nobody who can act.
+
+**Check/Do:** break `http_requests_total` down by `method` and `outcome`, and
+read the p95 beside it - a burn with flat latency is usually a deploy, a burn
+with climbing p95 is capacity.
+
+---
+
+## AdapterWsMessageErrorBudgetBurn
+
+**Ships disabled.** Same pattern as
+[`AdapterHttpErrorBudgetBurn`](#adapterhttperrorbudgetburn), for the WebSocket
+message plane.
+
+**Means:** inbound message handlers are failing fast enough to exhaust the
+budget at page speed. The error term is the bounded `outcome="error"` on
+`ws_messages_total` - handler outcomes the adapter itself recorded, never a
+client-declared status.
+
+**Inputs, always recorded:** `adapter:ws_message_error_ratio:rate5m` and
+`adapter:ws_message_duration_seconds:p95_5m`, both per target with only the
+bounded `kind`/`outcome` labels aggregated away.
+
+**To enable:** as above - choose the budget, uncomment, keep both windows.
+Message lanes differ from HTTP in what an error costs: an idempotent telemetry
+lane can run a far looser budget than a request/response lane, so set the
+objective per deployment rather than copying the HTTP number.
+
+**Check/Do:** split `ws_messages_total` by `kind`, correlate with
+`ws_message_admission_rejected_total` (shed load is not handler failure), and
+read the p95 for whether failing handlers are also slow handlers.
+
+---
+
 ## Acceptance drill
 
 Run the official Prometheus evaluator after changing the pack:
@@ -365,14 +468,23 @@ promtool test rules examples/observability/rule-tests.v1.yml
 
 CI runs this exact command from a digest-pinned official Prometheus image. The
 test file imports `rules.yml`, so mutations change the expressions Prometheus
-actually parses and evaluates. It covers low-volume rejection ratios,
-two targets with different outcomes, incomplete and degraded snapshots, a
-missing degraded flag, a stalled sampler, and a down target that must not receive
-a duplicate no-data alert. It also feeds triggering same-named metrics from an
-unrelated target and requires every adapter alert to remain silent. The Vitest
-contract uses the official Prometheus grammar to validate every selector and
-also parses the dashboard as JSON to validate its version, datasource
-variables, selectors and target-bearing legends.
+actually parses and evaluates. Every alert in the pack has at least one
+POSITIVE case - input series that cross its threshold and an expectation that
+it fires with its exact labels and annotations - so a rule that can never fire
+fails the corpus instead of passing it silently. It also covers low-volume
+rejection ratios, two targets with different outcomes, incomplete and degraded
+snapshots, a missing degraded flag, a stalled sampler, a down target that must
+not receive a duplicate no-data alert, a fleet with no adapter-labelled target
+raising `AdapterTargetMissing`, and the recorded ratio, freshness and p95
+series evaluated to exact values. Finally it feeds same-named metrics from an
+unrelated target, each carrying a value that WOULD fire the corresponding rule
+if the `adapter` matcher were dropped, and requires every adapter alert to
+remain silent - so the isolation cases constrain the matchers rather than the
+thresholds. The Vitest contract uses the official Prometheus grammar to
+validate every selector, requires the positive case per alert and the
+would-fire property of the foreign values, and also parses the dashboard as
+JSON to validate its version, datasource variables, selectors and
+target-bearing legends.
 
 For a staging drill, scrape two marked targets with distinct instances, then:
 
@@ -396,9 +508,13 @@ These are charted, not alerted. Each is either a raw input to an alert above, or
 a quantity whose meaning is entirely workload-specific and would produce a
 threshold nobody could justify.
 
-- `http_requests_total` - workload-specific traffic and status mix.
-- `http_request_duration_seconds` - chart its p95 by method/outcome; the
-  acceptable latency threshold belongs to the application SLO.
+- `http_requests_total` - workload-specific traffic and status mix. Its
+  server-error share is recorded as `adapter:http_error_ratio:rate5m`, and the
+  disabled-by-default `AdapterHttpErrorBudgetBurn` shows how to page on it once
+  a budget is chosen.
+- `http_request_duration_seconds` - recorded as
+  `adapter:http_request_duration_seconds:p95_5m` (and `:p95_by_method_5m`);
+  the acceptable latency threshold belongs to the application SLO.
 - `upgrade_admitted_total` - the denominator of the reject ratio; alerting on
   traffic volume is a capacity-planning question, not an incident.
 - `upgrade_duration_seconds` - handshake latency is charted; authentication
@@ -424,15 +540,20 @@ threshold nobody could justify.
 - `ws_connections` - workload-specific. Chart it; alert on the constraints
   (descriptors, saturation, backpressure) instead.
 - `ws_connection_duration_seconds` - connection lifetime is workload-specific.
-- `ws_messages_total` - message throughput/error mix is charted; applications
-  decide which handler error rate pages.
+- `ws_messages_total` - message throughput/error mix is charted; the handler
+  error share is recorded as `adapter:ws_message_error_ratio:rate5m`, and the
+  disabled-by-default `AdapterWsMessageErrorBudgetBurn` shows how to page on it
+  once a budget is chosen.
 - `ws_message_admission_rejected_total` - exact established-message shed rate,
   split by bounded reason and scope. Chart it beside handler latency and set an
   application SLO; an actionable threshold depends on whether the lane is
   idempotent, lossy, or request/response.
-- `ws_message_duration_seconds` - chart handler p95 by kind/outcome; the
-  application owns its latency SLO.
-- `ws_subscriptions` - as above; the derived subscriber ratio is the useful form.
+- `ws_message_duration_seconds` - recorded as
+  `adapter:ws_message_duration_seconds:p95_5m`; the application owns its
+  latency SLO.
+- `ws_subscriptions` - as above; the derived subscriber ratio is the useful
+  form, recorded as `adapter:subscriber_ratio` and charted on the dashboard's
+  WebSocket load panel.
 - `ws_publishes_total` - throughput, not health.
 - `ws_publish_outcomes_total` - delivery/no-subscriber outcome mix is
   application-specific; a no-subscriber publish can be intentional.
@@ -454,7 +575,9 @@ threshold nobody could justify.
   triaging rather than alerted on.
 - `pressure_reason_transitions_total` - the incident timeline behind that
   categorical explanation. The saturation and posture gauges own paging.
-- `pressure_sample_timestamp_seconds` - alerted through its AGE, not its value.
+- `pressure_sample_timestamp_seconds` - alerted through its AGE, not its
+  value; the age is recorded as `adapter:pressure_sample_age_seconds` and
+  charted on the dashboard's pipeline-health panel.
 - `resident_memory_bytes` - process-wide; container memory limits are the right
   place to alert on this, and your platform already does.
 - `psi_cpu_some_avg10` - host-level kernel pressure. Useful context while
