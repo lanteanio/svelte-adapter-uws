@@ -1,6 +1,6 @@
 {
 	"name": "svelte-adapter-uws",
-	"version": "0.6.0-next.90",
+	"version": "0.6.0-next.91",
 	"publishConfig": {
 		"tag": "next"
 	},
@@ -16,6 +16,9 @@
 		"url": "https://github.com/lanteanio/svelte-adapter-uws/issues"
 	},
 	"type": "module",
+	"bin": {
+		"svelte-adapter-uws-preflight": "./scripts/preflight.js"
+	},
 	"exports": {
 		".": {
 			"types": "./src/index.d.ts",
@@ -24,6 +27,10 @@
 		"./upgrade-response": {
 			"types": "./src/upgrade-response.d.ts",
 			"default": "./src/upgrade-response.js"
+		},
+		"./connection": {
+			"types": "./src/connection.d.ts",
+			"default": "./src/connection.js"
 		},
 		"./client": {
 			"types": "./src/client.d.ts",
@@ -44,6 +51,10 @@
 		"./safe-url": {
 			"types": "./src/safe-url.d.ts",
 			"default": "./src/safe-url.js"
+		},
+		"./observability": {
+			"types": "./src/observability.d.ts",
+			"default": "./src/observability.js"
 		},
 		"./plugins/replay": {
 			"types": "./src/plugins/replay/server.d.ts",
@@ -152,17 +163,44 @@
 		"LICENSE",
 		"THIRD-PARTY-LICENSES",
 		"README.md",
+		"CHANGELOG.md",
+		"CONTRIBUTING.md",
+		"SECURITY.md",
 		"MIGRATION.md",
 		"PROTOCOL.md",
 		"protocol.schema.json",
 		"test-vectors",
-		"examples"
+		"examples",
+		"docs",
+		"scripts/check-native-install.js",
+		"scripts/preflight.js",
+		"scripts/doctor.js",
+		"scripts/check-operations-pack.js",
+		"scripts/capacity/open-arrival.mjs",
+		"scripts/require-uws.js",
+		"scripts/smoke.js"
 	],
 	"scripts": {
-		"check": "node scripts/check-types.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node scripts/check-uws-pin.js && node scripts/check-uws-binaries.js && node scripts/check-links.js && node scripts/check-scope.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+		"check": "node scripts/check-compatibility.js && node scripts/check-svelte-support.js && node scripts/generate-error-reference.js --check && node scripts/check-migration-freshness.js && node scripts/check-release-notes.js && node scripts/check-release-workflow.js && node scripts/generate-api-docs.js --check && node scripts/check-doc-code.js && node scripts/check-documentation-contract.js && node scripts/check-operations-pack.js && node scripts/check-capacity-kit.js && node scripts/generate-observability.js --check && node scripts/generate-privacy-integration.js --check && node scripts/check-types.js && node scripts/check-entry-points.js && node scripts/check-diagnostic-attribution.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node scripts/check-uws-pin.js && node scripts/check-uws-binaries.js && node scripts/check-related-projects.js && node scripts/check-links.js && node scripts/check-scope.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
 		"pretest": "npm run check",
+		"postinstall": "node scripts/check-native-install.js",
+		"prepublishOnly": "npm run check",
+		"check:publish": "publint && attw --pack . --profile esm-only",
 		"check:links": "node scripts/check-links.js",
+		"check:entry-points": "node scripts/check-entry-points.js",
+		"check:docs-code": "node scripts/check-doc-code.js",
+		"check:documentation": "node scripts/check-documentation-contract.js",
+		"check:operations": "node scripts/check-operations-pack.js",
+		"check:capacity": "node scripts/check-capacity-kit.js",
+		"capacity:run": "node scripts/capacity/open-arrival.mjs",
+		"check:privacy": "node scripts/generate-privacy-integration.js --check",
+		"privacy:generate": "node scripts/generate-privacy-integration.js",
+		"drill:operations": "node scripts/check-operations-pack.js",
+		"drill:respawner": "node scripts/drill-respawner.js",
+		"check:errors": "node scripts/generate-error-reference.js --check",
+		"check:migration": "node scripts/check-migration-freshness.js",
 		"doctor": "node scripts/doctor.js",
+		"smoke": "node scripts/smoke.js",
 		"bootstrap": "node scripts/bootstrap.js",
 		"test": "vitest run",
 		"test:watch": "vitest",
@@ -172,6 +210,7 @@
 		"sim:swarm": "node scripts/sim-swarm.js",
 		"sim:golden": "node scripts/sim-golden.js",
 		"verify:fast": "node scripts/verify.js fast",
+		"verify:docs": "node scripts/check-related-projects.js && node scripts/check-links.js && node scripts/check-entry-points.js && node scripts/generate-api-docs.js --check && node scripts/check-doc-code.js && node scripts/check-documentation-contract.js && node scripts/generate-error-reference.js --check && node scripts/check-migration-freshness.js && vitest run test/related-projects.test.js test/docs-map.test.js test/api-docs-contract.test.js test/entry-point-catalog.test.js test/doc-code-contract.test.js test/documentation-contract.test.js test/error-reference.test.js test/packed-readme-examples.test.js test/migration-lifecycle.test.js test/migration-rehearsal.test.js test/compatibility-contract.test.js",
 		"verify:suite": "node scripts/verify.js suite",
 		"verify:sim": "node scripts/verify.js sim",
 		"verify:pr": "npm run verify:suite && npm run verify:sim",
@@ -197,6 +236,7 @@
 		"@rollup/plugin-commonjs": "^28.0.0",
 		"@rollup/plugin-json": "^6.0.0",
 		"@rollup/plugin-node-resolve": "^16.0.0",
+		"parse5": "^8.0.0",
 		"rollup": "^4.0.0",
 		"yjs": "^13.6.31"
 	},
@@ -210,19 +250,30 @@
 		"websocket"
 	],
 	"devDependencies": {
+		"@arethetypeswrong/cli": "^0.18.5",
+		"@lezer/highlight": "^1.2.3",
+		"@lezer/lr": "^1.4.10",
 		"@playwright/test": "^1.59.1",
+		"@prometheus-io/lezer-promql": "^0.313.1",
 		"@vitest/coverage-v8": "^4.0.18",
 		"acorn": "^8.16.0",
+		"ajv": "^8.17.1",
+		"ajv-formats": "^3.0.1",
 		"autocannon": "^8.0.0",
 		"c8": "^11.0.0",
+		"markdown-it": "^15.0.0",
 		"polka": "^0.5.2",
+		"publint": "^0.3.22",
+		"semver": "^7.7.4",
 		"socket.io": "^4.8.3",
 		"socket.io-client": "^4.8.3",
+		"typescript": "^6.0.3",
 		"vitest": "^4.0.18",
-		"ws": "^8.19.0"
+		"ws": "^8.19.0",
+		"yaml": "^2.9.0"
 	},
 	"optionalDependencies": {
-		"uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.69.0"
+		"uWebSockets.js": "https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz"
 	},
 	"overrides": {
 		"cookie": "^0.7.2",
