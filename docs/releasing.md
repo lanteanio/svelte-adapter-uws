@@ -97,16 +97,23 @@ npm-release environment with required reviewers and a deployment rule limited
 to tags matching svelte-adapter-uws@*. Protect the same tag pattern against
 unreviewed creation.
 
-The workflow has no manual or branch trigger and no token fallback. Its publish
-job receives only contents: read and id-token: write, runs on a GitHub-hosted
-runner, installs the pinned OIDC-capable npm CLI, and rejects any tag that is
-not the exact annotated svelte-adapter-uws@<package version> tag on its clean
-commit or is outside the required dev prerelease / main stable lineage. It then
-runs the complete pull-request verification contract and
-prepublishOnly, retains one npm-pack tarball, and publishes that exact file to
-the quarantine candidate dist-tag. Trusted publishing supplies short-lived OIDC
-authentication and automatic provenance; never add NODE_AUTH_TOKEN or a
-long-lived npm secret as fallback.
+The workflow has no manual or branch trigger and no token fallback. It runs as
+two jobs on GitHub-hosted runners, because id-token: write is granted per job
+and would otherwise cover every dependency install and test in the same job.
+
+The verify job holds only contents: read, so it can mint no publication
+identity at all. It rejects any tag that is not the exact annotated
+svelte-adapter-uws@<package version> tag on its clean commit or is outside the
+required dev prerelease / main stable lineage, runs the complete pull-request
+verification contract and prepublishOnly, packs exactly one npm-pack tarball,
+and retains it as a build artifact.
+
+The publish job receives contents: read and id-token: write. It never installs
+a dependency tree and never executes repository code: it installs the pinned
+OIDC-capable npm CLI, downloads the artifact the verify job retained, and
+publishes that exact file to the quarantine candidate dist-tag. Trusted
+publishing supplies short-lived OIDC authentication and automatic provenance;
+never add NODE_AUTH_TOKEN or a long-lived npm secret as fallback.
 
 The npm trusted publisher and protected environment are external controls. Set
 them before the first tag; without them the job must fail closed. Once the OIDC

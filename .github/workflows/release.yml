@@ -4,6 +4,14 @@ name: release
 # npm trusted-publisher identity and protected GitHub environment are external
 # prerequisites documented in releasing.md. Without either, publication fails
 # closed; there is deliberately no token fallback or manual dispatch path.
+#
+# The two jobs exist for one reason: `id-token: write` is a JOB-scoped grant,
+# so any job that can mint an OIDC token grants it to everything that runs
+# there. `verify` installs dependencies and runs the suite - thousands of
+# third-party lifecycle scripts - and therefore holds no publication identity
+# at all. `publish` holds the identity but never installs a dependency tree or
+# executes repository code; it only downloads the artifact `verify` retained
+# and hands that exact file to npm.
 
 on:
   push:
@@ -18,14 +26,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: verify and publish retained tarball
+  verify:
+    name: verify tag identity and retain the exact tarball
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    environment: npm-release
     permissions:
       contents: read
-      id-token: write
+    outputs:
+      filename: ${{ steps.pack.outputs.filename }}
     steps:
       - name: Check out immutable tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -39,9 +47,6 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           registry-url: 'https://registry.npmjs.org'
-
-      - name: Install OIDC-capable npm
-        run: npm install --global npm@11.5.1
 
       - name: Install locked root dependencies
         run: npm ci
@@ -73,6 +78,7 @@ jobs:
           $tarball = 'release-artifacts/' + $filename
           if (-not (Test-Path -LiteralPath $tarball -PathType Leaf)) { throw 'retained tarball is missing' }
           'tarball=' + $tarball >> $env:GITHUB_OUTPUT
+          'filename=' + $filename >> $env:GITHUB_OUTPUT
 
       - name: Retain exact publication artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -82,5 +88,37 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  publish:
+    name: publish the retained tarball with trusted OIDC
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out immutable tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up pinned Node and npm registry
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install OIDC-capable npm
+        run: npm install --global npm@11.5.1
+
+      - name: Download the retained publication artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: npm-candidate-${{ github.run_attempt }}
+          path: release-artifacts
+
       - name: Publish exact tarball to quarantine with trusted OIDC
-        run: npm publish "${{ steps.pack.outputs.tarball }}" --tag candidate
+        run: npm publish "release-artifacts/${{ needs.verify.outputs.filename }}" --tag candidate

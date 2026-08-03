@@ -123,6 +123,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole-process `SIGKILL` is respawned and ready, then kills the replacement
   primary and verifies readiness after a second external respawn.
 
+- **Source-attested publication path.** The package now publishes only through
+  a tag-triggered workflow with no branch, manual-dispatch, or token fallback.
+  It runs as two jobs because `id-token: write` is granted per job: the job
+  that installs dependencies and runs the suite holds no publication identity,
+  and the job that holds it never installs a dependency tree or executes
+  repository code - it publishes the exact tarball the first job packed and
+  retained. A structural gate holds closed key inventories at workflow, job,
+  and step level, pins every action to a full commit, and exact-matches each
+  command body, so an added step, an inherited `env`, a replaced `shell`
+  interpreter, or an edited pack script fails the check rather than the
+  release. Trusted publishing supplies short-lived OIDC authentication and
+  automatic provenance.
+
 - **Executable coordinated release and rollback procedure.** The versioned
   operations pack now includes an inclusive client/server protocol-range
   matrix with baseline, range expansion, client cutover, minimum cutover, and
