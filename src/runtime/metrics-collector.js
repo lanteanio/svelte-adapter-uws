@@ -30,10 +30,9 @@ import { SIGNALS_BY_NAME } from './observability-manifest.js';
  *   roster. A worker that is down or restarting is exactly what an operator
  *   needs to see, and counting only live workers would report a shrunken
  *   cluster as complete.
- * @property {number} answered How many workers replied at all. Tracked apart
- *   from `reports.length` because a worker with nothing mirrored - a compute
- *   worker, or one still warming up - answers correctly and contributes no
- *   series. Conflating the two would show a permanent false shortfall.
+ * @property {number} answered How many workers replied at all. Every reply is
+ *   retained in `reports`, including an empty one, so the merge can separately
+ *   decide whether its required factories and sampled gauges are complete.
  * @property {number} pending How many are still owed.
  * @property {any} timer Deadline handle, owned by the caller.
  */
@@ -54,8 +53,8 @@ export function createMetricsCollections() {
 	/** @type {Collection | null} */
 	let open = null;
 
-	// The last report each live worker gave, and the accumulated counter totals
-	// of workers that have since exited.
+	// The last report each live worker gave, and the accumulated monotone
+	// counter/histogram totals of workers that have since exited.
 	//
 	// Without this, a respawned worker restarts its counters at zero and the
 	// cluster sum DROPS by whatever that worker had accumulated. Prometheus
@@ -65,36 +64,51 @@ export function createMetricsCollections() {
 	// totals forward keeps the sum monotonic, which is the actual contract of a
 	// counter.
 	//
-	// Only counters are carried. A gauge describes a live worker (its
-	// connections, its heap) and a dead one contributes nothing to it.
+	// Counters and cumulative histogram buckets/count/sum are carried. A gauge
+	// describes a live worker (its connections, its heap) and a dead one
+	// contributes nothing to it.
 	//
 	// The residual is bounded and one-directional: activity between a worker's
 	// last report and its death is not counted, so the total can lag by at most
 	// one collection interval of one worker's traffic. It never decreases.
-	/** @type {Map<number, Array<{ name: string, labels: Record<string, string>, value: number }>>} */
+	/** @type {Map<number, any[]>} */
 	const lastByThread = new Map();
-	/** @type {Map<string, { name: string, labels: Record<string, string>, value: number }>} */
+	/** @type {Map<string, any>} */
 	const retired = new Map();
 
 	/**
-	 * The counter-typed samples of a report. Gauges are never carried forward
-	 * from a worker that is absent: a gauge describes a live worker, and a stale
+	 * The cumulative samples of a report. Gauges are never carried forward from
+	 * a worker that is absent: a gauge describes a live worker, and a stale
 	 * connection count is a wrong number rather than a lagging one.
 	 *
 	 * @param {any[]} samples
 	 */
-	const counterSamplesOf = (samples) => {
+	const cumulativeSamplesOf = (samples) => {
 		const out = [];
 		for (const sample of samples) {
 			if (sample === null || typeof sample !== 'object') continue;
 			const signal = SIGNALS_BY_NAME.get(sample.name);
-			if (signal === undefined || signal.type !== 'counter') continue;
-			if (typeof sample.value !== 'number' || Number.isNaN(sample.value)) continue;
-			out.push({
-				name: sample.name,
-				labels: sample.labels !== null && typeof sample.labels === 'object' ? sample.labels : {},
-				value: sample.value
-			});
+			if (signal?.type === 'counter') {
+				if (typeof sample.value !== 'number' || Number.isNaN(sample.value)) continue;
+				out.push({
+					name: sample.name,
+					labels: sample.labels !== null && typeof sample.labels === 'object' ? sample.labels : {},
+					value: sample.value
+				});
+			} else if (signal?.type === 'histogram' && sample.histogram !== null &&
+				typeof sample.histogram === 'object' && Array.isArray(sample.histogram.buckets) &&
+				Array.isArray(sample.histogram.counts)) {
+				out.push({
+					name: sample.name,
+					labels: sample.labels !== null && typeof sample.labels === 'object' ? sample.labels : {},
+					histogram: {
+						buckets: sample.histogram.buckets.slice(),
+						counts: sample.histogram.counts.slice(),
+						count: sample.histogram.count,
+						sum: sample.histogram.sum
+					}
+				});
+			}
 		}
 		return out;
 	};
@@ -175,18 +189,24 @@ export function createMetricsCollections() {
 			if (open.answeredThreads.has(threadId)) return false;
 			open.answeredThreads.add(threadId);
 			open.answered++;
-			if (Array.isArray(samples) && samples.length > 0) {
-				open.reports.push({ worker: threadId, samples });
+			const reportSamples = Array.isArray(samples) ? samples : [];
+			// Preserve even an empty report. The merge must be able to distinguish
+			// "this worker answered with no initialized metric families" from "this
+			// worker never answered"; collapsing both to absence made the global
+			// reporting count claim completeness during worker warm-up.
+			open.reports.push({ worker: threadId, samples: reportSamples });
+			if (reportSamples.length > 0) {
 				// Retained so this worker's counter totals survive its death.
-				lastByThread.set(threadId, samples);
+				lastByThread.set(threadId, reportSamples);
 			}
 			open.pending--;
 			return open.pending <= 0;
 		},
 
 		/**
-		 * Fold an exited worker's final counter totals into the carried set, so
-		 * the cluster sum does not drop when its replacement starts from zero.
+		 * Fold an exited worker's final counter and histogram totals into the
+		 * carried set, so cumulative families do not drop when its replacement
+		 * starts from zero.
 		 * Idempotent: a second call for the same thread has nothing left to fold.
 		 */
 		retire(threadId) {
@@ -205,11 +225,20 @@ export function createMetricsCollections() {
 				const at = open.reports.findIndex((r) => r.worker === threadId);
 				if (at !== -1) open.reports.splice(at, 1);
 			}
-			for (const sample of counterSamplesOf(samples)) {
+			for (const sample of cumulativeSamplesOf(samples)) {
 				const key = keyOf(sample.name, sample.labels);
 				const existing = retired.get(key);
-				if (existing === undefined) retired.set(key, sample);
-				else existing.value += sample.value;
+				if (existing === undefined) {
+					retired.set(key, sample);
+				} else if (sample.histogram !== undefined && existing.histogram !== undefined) {
+					for (let i = 0; i < existing.histogram.counts.length; i++) {
+						existing.histogram.counts[i] += sample.histogram.counts[i];
+					}
+					existing.histogram.count += sample.histogram.count;
+					existing.histogram.sum += sample.histogram.sum;
+				} else {
+					existing.value += sample.value;
+				}
 			}
 		},
 
@@ -219,7 +248,19 @@ export function createMetricsCollections() {
 		 */
 		retiredReport() {
 			if (retired.size === 0) return null;
-			return { worker: 'retired', samples: [...retired.values()].map((s) => ({ ...s })) };
+			return {
+				worker: 'retired',
+				samples: [...retired.values()].map((sample) => sample.histogram === undefined
+					? { ...sample }
+					: {
+						...sample,
+						histogram: {
+							...sample.histogram,
+							buckets: sample.histogram.buckets.slice(),
+							counts: sample.histogram.counts.slice()
+						}
+					})
+			};
 		},
 
 		/**
@@ -244,7 +285,8 @@ export function createMetricsCollections() {
 		/**
 		 * Remove and return the open collection, or null if there is none.
 		 *
-		 * Attaches `stale`: the last known COUNTER totals of every worker that was
+		 * Attaches `stale`: the last known cumulative counter/histogram totals of
+		 * every worker that was
 		 * asked and did not answer. Without it, a worker that merely misses the
 		 * deadline - a long synchronous stretch, a major GC, no death involved -
 		 * drops out of the sum entirely, and the cluster counter falls and then
@@ -263,7 +305,7 @@ export function createMetricsCollections() {
 				if (entry.answeredThreads.has(threadId)) continue;
 				const samples = lastByThread.get(threadId);
 				if (samples === undefined) continue;
-				for (const sample of counterSamplesOf(samples)) stale.push(sample);
+				for (const sample of cumulativeSamplesOf(samples)) stale.push(sample);
 			}
 			entry.stale = stale;
 			return entry;

@@ -20,6 +20,8 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parser as promqlParser } from '@prometheus-io/lezer-promql';
+import { parse as parseYaml } from 'yaml';
 import { SIGNALS } from '../src/runtime/observability-manifest.js';
 import { render } from '../scripts/generate-observability.js';
 
@@ -28,6 +30,10 @@ const read = (rel) => readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g
 
 const RULES = read('examples/observability/rules.yml');
 const RUNBOOK = read('examples/observability/runbook.md');
+const DASHBOARD = JSON.parse(read('examples/observability/dashboard.v1.json'));
+const RULE_DOCUMENT = parseYaml(RULES);
+const PROMTOOL_DRILLS = parseYaml(read('examples/observability/rule-tests.v1.yml'));
+const CI_WORKFLOW = read('.github/workflows/test.yml');
 
 /** GitHub's heading-anchor slug: lowercase, drop punctuation, spaces to hyphens. */
 function slug(heading) {
@@ -50,6 +56,22 @@ function noAlertList() {
 	return new Set([...section.matchAll(/^- `([a-z_0-9]+)`/gm)].map((m) => m[1]));
 }
 
+function vectorSelectors(expression) {
+	const tree = promqlParser.parse(expression);
+	const errors = [];
+	const selectors = [];
+	tree.iterate({
+		enter(node) {
+			if (node.type.isError) errors.push(expression.slice(node.from, node.to));
+			if (node.type.name === 'VectorSelector') {
+				selectors.push(expression.slice(node.from, node.to));
+			}
+		}
+	});
+	expect(errors, `invalid PromQL: ${expression}`).toEqual([]);
+	return selectors;
+}
+
 describe('shipped observability pack', () => {
 	it('queries.md is exactly what the manifest generates', () => {
 		expect(
@@ -62,7 +84,9 @@ describe('shipped observability pack', () => {
 		const alerts = [...RULES.matchAll(/^\s*- alert:\s*(\S+)/gm)].map((m) => m[1]);
 		expect(alerts.length, 'no alerts parsed - the rules file or this parser changed shape').toBeGreaterThan(10);
 
-		const links = [...RULES.matchAll(/runbook_url:\s*\.\/runbook\.md#(\S+)/g)].map((m) => m[1]);
+		const links = [...RULES.matchAll(
+			/runbook_url:\s*'\{\{ \$externalLabels\.adapter_runbook_url \}\}#([^']+)'/g
+		)].map((m) => m[1]);
 		expect(links.length, 'every alert must carry a runbook_url').toBe(alerts.length);
 
 		const dangling = [...new Set(links)].filter((a) => !runbookAnchors.has(a)).sort();
@@ -70,6 +94,14 @@ describe('shipped observability pack', () => {
 			dangling,
 			'these alerts point at runbook sections that do not exist: ' + JSON.stringify(dangling)
 		).toEqual([]);
+	});
+
+	it('uses a configurable absolute runbook URL contract for every alert', () => {
+		expect(RULES).not.toContain('runbook_url: ./');
+		expect(RUNBOOK).toContain('adapter_runbook_url: https://ops.example.com/');
+		const templated = RULES.match(/\$externalLabels\.adapter_runbook_url/g) || [];
+		const alerts = RULES.match(/^\s*- alert:/gm) || [];
+		expect(templated).toHaveLength(alerts.length);
 	});
 
 	it('every alert name is unique', () => {
@@ -94,6 +126,95 @@ describe('shipped observability pack', () => {
 		const known = new Set(SIGNALS.map((s) => s.name));
 		const phantom = [...noAlertList()].filter((n) => !known.has(n)).sort();
 		expect(phantom, 'the no-alert list names metrics the manifest does not declare: ' + JSON.stringify(phantom)).toEqual([]);
+	});
+
+	it('keeps low-rate reject math exact and preserves external target labels', () => {
+		expect(RULES).toContain('sum without (reason) (rate(upgrade_rejected_total{adapter="svelte-adapter-uws"}[5m]))');
+		expect(RULES).toContain('or (0 * rate(upgrade_admitted_total{adapter="svelte-adapter-uws"}[5m]))');
+		expect(RULES).not.toMatch(/clamp_min\([^\n]*upgrade_/);
+		expect(RULES).not.toContain('sum(rate(upgrade_rejected_total');
+		expect(RULES).not.toContain('sum(rate(upgrade_rate_map_evicted_total');
+		expect(read('examples/observability/queries.md')).not.toContain('sum by (reason)');
+	});
+
+	it('parses every rule with the official grammar and scopes every vector selector', () => {
+		const rules = RULE_DOCUMENT.groups.flatMap((group) => group.rules);
+		expect(rules).toHaveLength(25);
+		for (const rule of rules) {
+			const selectors = vectorSelectors(rule.expr);
+			for (const selector of selectors) {
+				const adapterMatchers = selector.match(/\badapter\s*(?:=|!=|=~|!~)/g) || [];
+				expect(adapterMatchers, `${rule.alert || rule.record}: ${selector}`).toHaveLength(1);
+				expect(selector, `${rule.alert || rule.record}: ${selector}`).toMatch(
+					/\badapter\s*=\s*"svelte-adapter-uws"\s*(?:,|})/
+				);
+			}
+		}
+	});
+
+	it('correlates every pipeline failure with each marked target up series', () => {
+		const pipeline = RULES.slice(
+			RULES.indexOf('- name: svelte-adapter-uws.pipeline'),
+			RULES.indexOf('- name: svelte-adapter-uws.capacity')
+		);
+		expect(pipeline).not.toContain('absent(');
+		expect(pipeline).toContain('(metrics_snapshot_degraded{adapter="svelte-adapter-uws"} > 0)');
+		expect(pipeline).toContain('unless metrics_snapshot_degraded{adapter="svelte-adapter-uws"}');
+		expect(pipeline).toContain('unless metrics_snapshot_workers_expected{adapter="svelte-adapter-uws"}');
+		expect(pipeline).toContain('unless metrics_snapshot_workers_reporting{adapter="svelte-adapter-uws"}');
+		expect(pipeline).toContain('unless pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws"}');
+		expect(pipeline.match(/up\{adapter="svelte-adapter-uws"\} == 1/g)).toHaveLength(7);
+	});
+
+	it('ships a compact versioned dashboard with target-bearing queries and legends', () => {
+		expect(DASHBOARD.schemaVersion).toBeGreaterThanOrEqual(39);
+		expect(DASHBOARD.version).toBe(1);
+		expect(DASHBOARD.uid).toBe('svelte-adapter-uws-v1');
+		expect(DASHBOARD.panels.length).toBeGreaterThanOrEqual(6);
+		expect(DASHBOARD.panels.length).toBeLessThanOrEqual(8);
+
+		const variables = new Set(DASHBOARD.templating.list.map((entry) => entry.name));
+		expect(variables).toEqual(new Set(['job', 'instance', 'runbook_url']));
+		expect(DASHBOARD.links[0].url).toBe('${runbook_url}');
+		for (const panel of DASHBOARD.panels) {
+			for (const target of panel.targets) {
+				expect(target.expr, `${panel.title} must select only adapter targets`).toContain('adapter="svelte-adapter-uws"');
+				expect(target.expr, `${panel.title} must retain the job filter`).toContain('${job:regex}');
+				expect(target.expr, `${panel.title} must retain the instance filter`).toContain('${instance:regex}');
+				expect(target.legendFormat, `${panel.title} must expose target identity`).toContain('{{job}}');
+				expect(target.legendFormat, `${panel.title} must expose target identity`).toContain('{{instance}}');
+			}
+		}
+	});
+
+	it('wires a non-vacuous promtool corpus into a digest-pinned CI evaluator', () => {
+		expect(PROMTOOL_DRILLS.rule_files).toEqual(['rules.yml']);
+		expect(PROMTOOL_DRILLS.tests.map((test) => test.name)).toEqual([
+			'low-rate rejection math and target isolation',
+			'pipeline completeness absence freshness and up correlation',
+			'unrelated targets cannot page adapter alerts'
+		]);
+		const [ratio, pipeline, unrelated] = PROMTOOL_DRILLS.tests;
+		expect(ratio.promql_expr_test[0].exp_samples.map((sample) => sample.value)).toEqual([0.4, 0.2]);
+		expect(ratio.alert_rule_test[0].exp_alerts[0].exp_labels.instance).toBe('high');
+		expect(ratio.alert_rule_test[1].exp_alerts[0].exp_labels.instance).toBe('lagging');
+		expect(pipeline.alert_rule_test.map((test) => test.exp_alerts[0].exp_labels.instance)).toEqual([
+			'degraded',
+			'incomplete',
+			'stalled',
+			'missing'
+		]);
+		expect(unrelated.alert_rule_test).toHaveLength(16);
+		expect(unrelated.alert_rule_test.every((test) => test.exp_alerts.length === 0)).toBe(true);
+		expect(CI_WORKFLOW).toContain(
+			'prom/prometheus@sha256:c6b27ea434f8389bfe233fbc7be381cf50587c286e871bc842008f5a1b1908a7'
+		);
+		expect(CI_WORKFLOW).toContain('test rules /rules/rule-tests.v1.yml');
+	});
+
+	it('keeps adapter and sibling-extension artifact ownership explicit', () => {
+		expect(RUNBOOK).toContain('This repository\'s pack covers adapter-owned metrics only.');
+		expect(RUNBOOK).toContain('sibling extension repositories');
 	});
 
 	it('does not tell operators to re-aggregate an already-merged document', () => {

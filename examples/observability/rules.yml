@@ -1,9 +1,10 @@
 # Prometheus recording and alerting rules for svelte-adapter-uws.
 #
 # These assume you scrape `platform.metricsSnapshot()`, which returns one
-# already-merged document for the whole cluster. See ./queries.md - and do NOT
-# wrap these in another sum(), because the cross-worker aggregation has already
-# been applied by the law each metric declares.
+# already-merged document for one deployment target. Add the target label
+# `adapter="svelte-adapter-uws"`; pipeline alerts use it to correlate each
+# adapter target with its own `up` series. Expressions preserve every external
+# target label and never globally merge independent deployments.
 #
 # Every alert names a section of ./runbook.md. A test in this repository fails
 # if an alert points at a section that does not exist, or if a metric ships with
@@ -20,25 +21,38 @@ groups:
       # Averaging per-worker ratios is not the cluster ratio, which is why the
       # adapter exports the numerator and denominator separately.
       - record: adapter:subscriber_ratio
-        expr: ws_subscriptions / clamp_min(ws_connections, 1)
+        expr: ws_subscriptions{adapter="svelte-adapter-uws"} / clamp_min(ws_connections{adapter="svelte-adapter-uws"}, 1)
 
       # Both sides are whole-process maxima already.
       - record: adapter:fd_headroom_ratio
-        expr: open_fds / clamp_min(fd_soft_limit, 1)
+        expr: open_fds{adapter="svelte-adapter-uws"} / clamp_min(fd_soft_limit{adapter="svelte-adapter-uws"}, 1)
 
       - record: adapter:upgrade_reject_ratio:rate5m
         expr: |
-          sum(rate(upgrade_rejected_total[5m]))
-            / clamp_min(sum(rate(upgrade_admitted_total[5m])) + sum(rate(upgrade_rejected_total[5m])), 1)
+          (
+            sum without (reason) (rate(upgrade_rejected_total{adapter="svelte-adapter-uws"}[5m]))
+              or (0 * rate(upgrade_admitted_total{adapter="svelte-adapter-uws"}[5m]))
+          )
+            /
+          (
+            rate(upgrade_admitted_total{adapter="svelte-adapter-uws"}[5m])
+              +
+              (
+                sum without (reason) (rate(upgrade_rejected_total{adapter="svelte-adapter-uws"}[5m]))
+                  or (0 * rate(upgrade_admitted_total{adapter="svelte-adapter-uws"}[5m]))
+              )
+          )
 
       - record: adapter:pressure_sample_age_seconds
-        expr: time() - pressure_sample_timestamp_seconds
+        expr: time() - pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws"}
 
   - name: svelte-adapter-uws.pipeline
     rules:
       # Trust the pipeline before you trust anything it reports.
       - alert: AdapterMetricsSnapshotDegraded
-        expr: metrics_snapshot_degraded > 0
+        expr: |
+          (metrics_snapshot_degraded{adapter="svelte-adapter-uws"} > 0)
+            and (up{adapter="svelte-adapter-uws"} == 1)
         for: 5m
         labels:
           severity: critical
@@ -47,10 +61,13 @@ groups:
           description: >-
             The collection did not complete, so this document reports a single worker.
             Every other alert in this file is now reading a fraction of the cluster.
-          runbook_url: ./runbook.md#adaptermetricssnapshotdegraded
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adaptermetricssnapshotdegraded'
 
       - alert: AdapterMetricsSnapshotIncomplete
-        expr: metrics_snapshot_workers_reporting < metrics_snapshot_workers_expected
+        expr: |
+          (metrics_snapshot_workers_reporting{adapter="svelte-adapter-uws"}
+            < metrics_snapshot_workers_expected{adapter="svelte-adapter-uws"})
+            and (up{adapter="svelte-adapter-uws"} == 1)
         for: 10m
         labels:
           severity: warning
@@ -59,10 +76,12 @@ groups:
           description: >-
             Every summed series is understated by whatever the missing worker was carrying.
             Do not read the dip as a real drop in traffic.
-          runbook_url: ./runbook.md#adaptermetricssnapshotincomplete
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adaptermetricssnapshotincomplete'
 
       - alert: AdapterPressureSamplerStalled
-        expr: time() - pressure_sample_timestamp_seconds > 60
+        expr: |
+          (time() - pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws"} > 60)
+            and (up{adapter="svelte-adapter-uws"} == 1)
         for: 2m
         labels:
           severity: critical
@@ -71,10 +90,29 @@ groups:
           description: >-
             Every sampled gauge is frozen at its last value while the target still reports up.
             Saturation, posture, connections and backpressure are all stale.
-          runbook_url: ./runbook.md#adapterpressuresamplerstalled
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterpressuresamplerstalled'
 
       - alert: AdapterMetricsAbsent
-        expr: absent(pressure_sample_timestamp_seconds)
+        expr: |
+          (
+            (up{adapter="svelte-adapter-uws"} == 1)
+              unless pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws"}
+          )
+          or
+          (
+            (up{adapter="svelte-adapter-uws"} == 1)
+              unless metrics_snapshot_degraded{adapter="svelte-adapter-uws"}
+          )
+          or
+          (
+            (up{adapter="svelte-adapter-uws"} == 1)
+              unless metrics_snapshot_workers_expected{adapter="svelte-adapter-uws"}
+          )
+          or
+          (
+            (up{adapter="svelte-adapter-uws"} == 1)
+              unless metrics_snapshot_workers_reporting{adapter="svelte-adapter-uws"}
+          )
         for: 10m
         labels:
           severity: warning
@@ -83,82 +121,82 @@ groups:
           description: >-
             The scrape target is up but the adapter's own series are gone - a metrics
             registry that stopped being configured, or a route no longer reaching it.
-          runbook_url: ./runbook.md#adaptermetricsabsent
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adaptermetricsabsent'
 
   - name: svelte-adapter-uws.capacity
     rules:
       - alert: AdapterDescriptorHeadroomLow
-        expr: adapter:fd_headroom_ratio > 0.8
+        expr: adapter:fd_headroom_ratio{adapter="svelte-adapter-uws"} > 0.8
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: Approaching the file-descriptor limit
           description: New sockets fail with EMFILE at the soft limit.
-          runbook_url: ./runbook.md#adapterdescriptorheadroomlow
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterdescriptorheadroomlow'
 
       - alert: AdapterDescriptorHeadroomCritical
-        expr: adapter:fd_headroom_ratio > 0.92
+        expr: adapter:fd_headroom_ratio{adapter="svelte-adapter-uws"} > 0.92
         for: 2m
         labels:
           severity: critical
         annotations:
           summary: About to exhaust file descriptors
           description: New connections will start failing with EMFILE.
-          runbook_url: ./runbook.md#adapterdescriptorheadroomlow
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterdescriptorheadroomlow'
 
       - alert: AdapterProtectionSiege
-        expr: protection_posture_state >= 2
+        expr: protection_posture_state{adapter="svelte-adapter-uws"} >= 2
         for: 2m
         labels:
           severity: critical
         annotations:
           summary: Protection posture is at siege
           description: New upgrades are being refused at static-serve cost.
-          runbook_url: ./runbook.md#adapterprotectionsiege
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterprotectionsiege'
 
       - alert: AdapterProtectionElevated
-        expr: protection_posture_state == 1
+        expr: protection_posture_state{adapter="svelte-adapter-uws"} == 1
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: Protection posture has been elevated for a while
           description: Sustained pressure; the waiting room is widening its retry jitter.
-          runbook_url: ./runbook.md#adapterprotectionsiege
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterprotectionsiege'
 
       - alert: AdapterSaturationHigh
-        expr: pressure_saturation > 0.85
+        expr: pressure_saturation{adapter="svelte-adapter-uws"} > 0.85
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: Worker saturation is near the configured thresholds
           description: The worst worker is at 85 percent of its pressure thresholds.
-          runbook_url: ./runbook.md#adaptersaturationhigh
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adaptersaturationhigh'
 
       - alert: AdapterHeapPressure
-        expr: heap_used_ratio > 0.9
+        expr: heap_used_ratio{adapter="svelte-adapter-uws"} > 0.9
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: A worker isolate heap is nearly full
           description: Heap is per-isolate, so this is the worst single worker.
-          runbook_url: ./runbook.md#adapterheappressure
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterheappressure'
 
       - alert: AdapterCpuThrottled
-        expr: cpu_throttled_ratio > 0.25
+        expr: cpu_throttled_ratio{adapter="svelte-adapter-uws"} > 0.25
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: The cgroup CPU quota is throttling this process
           description: A quarter of the sampled window was spent suspended by the quota.
-          runbook_url: ./runbook.md#adaptercputhrottled
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adaptercputhrottled'
 
       - alert: AdapterBackpressureSustained
-        expr: ws_backpressure_connections > 0
+        expr: ws_backpressure_connections{adapter="svelte-adapter-uws"} > 0
         for: 15m
         labels:
           severity: warning
@@ -166,20 +204,20 @@ groups:
           summary: Connections are holding an outbound queue
           description: >-
             Sustained backpressure means clients are not draining as fast as you publish.
-          runbook_url: ./runbook.md#adapterbackpressuresustained
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterbackpressuresustained'
 
       - alert: AdapterUpgradeRejectRatioHigh
-        expr: adapter:upgrade_reject_ratio:rate5m > 0.25
+        expr: adapter:upgrade_reject_ratio:rate5m{adapter="svelte-adapter-uws"} > 0.25
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: A quarter of upgrade attempts are being refused
           description: Break it down by the reason label before acting.
-          runbook_url: ./runbook.md#adapterupgraderejectratiohigh
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterupgraderejectratiohigh'
 
       - alert: AdapterRateMapChurn
-        expr: sum(rate(upgrade_rate_map_evicted_total[10m])) > 1
+        expr: rate(upgrade_rate_map_evicted_total{adapter="svelte-adapter-uws"}[10m]) > 1
         for: 15m
         labels:
           severity: warning
@@ -187,22 +225,22 @@ groups:
           summary: Rate-limit maps are churning at their cap
           description: >-
             Rotating client identities are filling a limiter faster than the sweep reclaims it.
-          runbook_url: ./runbook.md#adapterratemapchurn
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterratemapchurn'
 
       - alert: AdapterWaitingRoomBacklog
-        expr: waiting_room_queue_depth > 0
+        expr: waiting_room_queue_depth{adapter="svelte-adapter-uws"} > 0
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: Clients have been waiting to connect for a sustained period
           description: The waiting room is not draining.
-          runbook_url: ./runbook.md#adapterwaitingroombacklog
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterwaitingroombacklog'
 
   - name: svelte-adapter-uws.integrity
     rules:
       - alert: AdapterStateDivergence
-        expr: increase(state_divergence_total[15m]) > 0
+        expr: increase(state_divergence_total{adapter="svelte-adapter-uws"}[15m]) > 0
         for: 0m
         labels:
           severity: critical
@@ -211,10 +249,10 @@ groups:
           description: >-
             Two workers folded different state hashes for the same epoch. Clients on
             different workers are seeing different data.
-          runbook_url: ./runbook.md#adapterstatedivergence
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterstatedivergence'
 
       - alert: AdapterRelayGap
-        expr: increase(relay_gap_frames_total[15m]) > 0
+        expr: increase(relay_gap_frames_total{adapter="svelte-adapter-uws"}[15m]) > 0
         for: 0m
         labels:
           severity: critical
@@ -222,34 +260,46 @@ groups:
           summary: A worker lost relayed frames its siblings received
           description: >-
             Frames were proven lost to one worker. Its clients are missing state.
-          runbook_url: ./runbook.md#adapterrelaygap
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterrelaygap'
+
+      - alert: AdapterRelaySpillQuarantine
+        expr: increase(relay_spill_quarantines_total{adapter="svelte-adapter-uws"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: A lagging relay peer was quarantined
+          description: >-
+            A worker exceeded its finite relay spill ceiling, pending bytes were
+            discarded, and the supervisor was asked to replace it.
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterrelayspillquarantine'
 
       - alert: AdapterFatalAssertion
-        expr: increase(framework_assertion_violations_total{severity="fatal"}[15m]) > 0
+        expr: increase(framework_assertion_violations_total{adapter="svelte-adapter-uws",severity="fatal"}[15m]) > 0
         for: 0m
         labels:
           severity: critical
         annotations:
           summary: A framework invariant failed at the fatal tier
           description: A fatal assertion terminates the worker; the category label names which.
-          runbook_url: ./runbook.md#adapterfatalassertion
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterfatalassertion'
 
       - alert: AdapterAssertionViolations
-        expr: increase(framework_assertion_violations_total{severity="soft"}[1h]) > 0
+        expr: increase(framework_assertion_violations_total{adapter="svelte-adapter-uws",severity="soft"}[1h]) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
           summary: A framework invariant failed at the recoverable tier
           description: Recoverable, but it indicates a state the framework did not expect.
-          runbook_url: ./runbook.md#adapterfatalassertion
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterfatalassertion'
 
       - alert: AdapterResourceGrowth
-        expr: increase(framework_resource_growth_suspected_total[1h]) > 0
+        expr: increase(framework_resource_growth_suspected_total{adapter="svelte-adapter-uws"}[1h]) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
           summary: Sustained resource growth suspected
           description: The optional growth auditor saw a resource climb without plateauing.
-          runbook_url: ./runbook.md#adapterresourcegrowth
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterresourcegrowth'

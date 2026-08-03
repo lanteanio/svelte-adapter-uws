@@ -40,10 +40,25 @@
  * @module
  */
 
+import { SIGNALS_BY_NAME } from '../observability-manifest.js';
+
+// One bounded metadata record rides each worker report. It is never rendered
+// as a metric: the merge consumes it before looking at samples. A value alone
+// can prove that an instrument exists, but a counter that has correctly stayed
+// at zero has no value to mirror. Without this inventory, "not registered yet"
+// and "registered, zero incidents" are indistinguishable during worker boot.
+export const METRIC_REGISTRATIONS_SAMPLE = '__adapter_metrics_registrations__';
+
+let registryWrapped = false;
+
 /**
- * name -> labelKey -> { labels, value }
+ * name -> labelKey -> counter/gauge value or cumulative histogram state
  *
- * @type {Map<string, Map<string, { labels: Record<string, string>, value: number }>>}
+ * @type {Map<string, Map<string, {
+ *   labels: Record<string, string>,
+ *   value?: number,
+ *   histogram?: { buckets: number[], counts: number[], count: number, sum: number }
+ * }>>}
  */
 const mirror = new Map();
 
@@ -92,17 +107,75 @@ function record(name, labels, delta, absolute) {
 }
 
 /**
+ * Mirror one histogram observation as cumulative finite buckets plus count and
+ * sum. The explicit bucket list is copied once per label set; later observes
+ * mutate only numeric slots.
+ *
+ * @param {string} name
+ * @param {Record<string, string> | undefined} labels
+ * @param {number} value
+ * @param {readonly number[]} buckets
+ */
+function recordHistogram(name, labels, value, buckets) {
+	if (!Number.isFinite(value) || !Array.isArray(buckets) || buckets.length === 0) return;
+	let series = mirror.get(name);
+	if (series === undefined) mirror.set(name, (series = new Map()));
+	const key = labelKey(labels);
+	let entry = series.get(key);
+	if (entry === undefined || entry.histogram === undefined) {
+		entry = {
+			labels: labels === undefined || labels === null ? {} : { ...labels },
+			histogram: {
+				buckets: [...buckets],
+				counts: new Array(buckets.length).fill(0),
+				count: 0,
+				sum: 0
+			}
+		};
+		series.set(key, entry);
+	}
+	const histogram = entry.histogram;
+	for (let i = 0; i < histogram.buckets.length; i++) {
+		if (value <= histogram.buckets[i]) histogram.counts[i]++;
+	}
+	histogram.count++;
+	histogram.sum += value;
+}
+
+/**
  * This worker's mirrored values, as a structured-clone-friendly array. Only
  * the adapter's own metrics are here; an app's metrics live on its registry
  * and are never collected across the thread boundary.
  *
- * @returns {Array<{ name: string, labels: Record<string, string>, value: number }>}
+ * @returns {Array<
+ *   { name: string, labels: Record<string, string>, value: number } |
+ *   { name: typeof METRIC_REGISTRATIONS_SAMPLE, families: string[] }
+ * >}
  */
 export function readMetricMirror() {
 	const out = [];
+	if (registryWrapped) {
+		out.push({
+			name: METRIC_REGISTRATIONS_SAMPLE,
+			families: [...mirror.keys()].filter((name) => SIGNALS_BY_NAME.has(name)).sort()
+		});
+	}
 	for (const [name, series] of mirror) {
 		for (const entry of series.values()) {
-			out.push({ name, labels: entry.labels, value: entry.value });
+			if (entry.histogram !== undefined) {
+				out.push({
+					name,
+					labels: entry.labels,
+					histogram: {
+						buckets: entry.histogram.buckets.slice(),
+						counts: entry.histogram.counts.slice(),
+						count: entry.histogram.count,
+						sum: entry.histogram.sum
+					}
+				});
+			} else {
+				out.push({ name, labels: entry.labels, value: entry.value });
+			}
 		}
 	}
 	return out;
@@ -111,6 +184,7 @@ export function readMetricMirror() {
 /** Drop every mirrored value. For tests and for a harness that rebuilds a server. */
 export function resetMetricMirror() {
 	mirror.clear();
+	registryWrapped = false;
 }
 
 /**
@@ -143,15 +217,20 @@ export function mirrorRegistry(registry) {
 			typeof registry + '. Metrics are disabled.');
 		return null;
 	}
+	registryWrapped = true;
 	/**
 	 * @param {string} kind
-	 * @param {(name: string, instrument: any) => any} shape
+	 * @param {(name: string, instrument: any, args: any[]) => any} shape
 	 */
 	const factory = (kind, shape) => (/** @type {any[]} */ ...args) => {
 		const name = args[0];
 		const instrument = typeof registry[kind] === 'function' ? registry[kind](...args) : undefined;
 		if (typeof name !== 'string') return instrument;
-		return shape(name, instrument);
+		// Registration is data in its own right for a zero-valued counter. Keep
+		// an empty family map even before the first emit so the collection can
+		// distinguish that healthy zero from a worker still part-way through boot.
+		if (SIGNALS_BY_NAME.has(name) && !mirror.has(name)) mirror.set(name, new Map());
+		return shape(name, instrument, args);
 	};
 	// A PLAIN object carrying only the three factories, never a prototype chain
 	// onto the caller's registry. `Object.create(registry)` plus assignment
@@ -176,11 +255,19 @@ export function mirrorRegistry(registry) {
 		}
 	}));
 	if (typeof registry.histogram === 'function') {
-		wrapped.histogram = factory('histogram', (name, instrument) => ({
-			observe(/** @type {any} */ labels, /** @type {any} */ value) {
-				instrument?.observe(labels, value);
-			}
-		}));
+		wrapped.histogram = factory('histogram', (name, instrument, args) => {
+			const buckets = Array.isArray(args[2]?.buckets) ? args[2].buckets : null;
+			return {
+				observe(/** @type {any} */ labels, /** @type {any} */ value) {
+					const observedValue = typeof labels === 'number' && value === undefined ? labels : value;
+					const observedLabels = typeof labels === 'number' && value === undefined ? undefined : labels;
+					if (typeof observedValue === 'number' && buckets !== null) {
+						recordHistogram(name, observedLabels, observedValue, buckets);
+					}
+					instrument?.observe(labels, value);
+				}
+			};
+		});
 	}
 	return wrapped;
 }

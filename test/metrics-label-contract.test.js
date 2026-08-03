@@ -23,7 +23,10 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'acorn';
-import { SIGNALS } from '../src/runtime/observability-manifest.js';
+import {
+	SIGNALS,
+	validateObservabilityContract
+} from '../src/runtime/observability-manifest.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -50,6 +53,33 @@ function readmeTableMetrics() {
 		if (m) names.add(m[1]);
 	}
 	return names;
+}
+
+/** Exact, bidirectional signal contract from the README's canonical table. */
+function readmeSignalContract() {
+	const lines = readFileSync(path.join(ROOT, 'README.md'), 'utf8').split(/\r?\n/);
+	const header = lines.findIndex((l) => l.trim().startsWith('| Metric | Factory/type | Labels | Unit | Scope | Aggregate | Origin | Formula | Help |'));
+	expect(header, 'the README canonical signal contract table was not found').toBeGreaterThan(-1);
+	const contract = new Map();
+	for (let i = header + 2; i < lines.length; i++) {
+		const line = lines[i].trim();
+		if (!line.startsWith('|')) break;
+		const cells = line.split('|').map((cell) => cell.trim());
+		const metric = /^`([a-z][a-z0-9_]*)`$/.exec(cells[1] ?? '');
+		if (!metric) continue;
+		expect(contract.has(metric[1]), `the canonical README table lists ${metric[1]} twice`).toBe(false);
+		contract.set(metric[1], {
+			type: cells[2],
+			labels: cells[3] === '-' ? [] : cells[3].split(','),
+			unit: cells[4] === 'count' ? null : cells[4],
+			scope: cells[5],
+			aggregate: cells[6],
+			merged: cells[7] === 'merge',
+			formula: cells[8] === '-' ? undefined : cells[8].replace(/^`|`$/g, ''),
+			help: cells[9]
+		});
+	}
+	return contract;
 }
 
 /**
@@ -307,7 +337,26 @@ function scan(file) {
 		if (varName && init) {
 			const factory = unwrapFactory(init);
 			if (factory && factory.arguments[0]?.type === 'Literal' && typeof factory.arguments[0].value === 'string') {
-				const labelsArg = factory.arguments[2];
+				const factoryType = memberName(factory.callee);
+				let labelsArg = factory.arguments[2];
+				if (factoryType === 'histogram') {
+					const options = factory.arguments[2];
+					expect(
+						options?.type === 'ObjectExpression',
+						`${file}: ${factory.arguments[0].value} histogram options must be a literal object`
+					).toBe(true);
+					const optionProperty = (name) => options.properties.find((property) =>
+						property.type === 'Property' && !property.computed &&
+						((property.key.type === 'Identifier' && property.key.name === name) ||
+						(property.key.type === 'Literal' && property.key.value === name))
+					);
+					labelsArg = optionProperty('labelNames')?.value;
+					const bucketsArg = optionProperty('buckets')?.value;
+					expect(
+						bucketsArg?.type === 'Identifier' || bucketsArg?.type === 'ArrayExpression',
+						`${file}: ${factory.arguments[0].value} must pass explicit buckets`
+					).toBe(true);
+				}
 				const labels = new Set();
 				if (labelsArg) {
 					// Declared labelNames must be a literal array of strings - anything
@@ -319,7 +368,18 @@ function scan(file) {
 					).toBe(true);
 					for (const el of labelsArg.elements) labels.add(el.value);
 				}
-				registrations.set(varName, { metric: factory.arguments[0].value, labels, file });
+				const helpArg = factory.arguments[1];
+				expect(
+					helpArg?.type === 'Literal' && typeof helpArg.value === 'string',
+					`${file}: ${factory.arguments[0].value} help must be a literal string so parity is auditable`
+				).toBe(true);
+				registrations.set(varName, {
+					metric: factory.arguments[0].value,
+					type: factoryType,
+					help: helpArg.value,
+					labels,
+					file
+				});
 			}
 		}
 
@@ -392,21 +452,28 @@ describe('metrics label contract', () => {
 	// cannot know whether the code actually registers what it declares, so the
 	// two are complementary and each catches what the other cannot see.
 	describe('signal manifest and documentation parity', () => {
-		/** Metric name -> declared labels, as the code actually registers them. */
+		it('the shared observability schema is complete', () => {
+			expect(validateObservabilityContract()).toEqual([]);
+		});
+
+		/** Metric name -> exact factory contract, as the code registers it. */
 		const registered = new Map();
 		for (const reg of registrations.values()) {
 			const existing = registered.get(reg.metric);
 			// The same metric is registered by both the production handler and the
 			// test harness; the declarations must not disagree.
 			if (existing !== undefined) {
-				expect([...reg.labels].sort(), `"${reg.metric}" is registered twice with different labels`).toEqual([...existing].sort());
+				expect(
+					{ type: reg.type, help: reg.help, labels: [...reg.labels] },
+					`"${reg.metric}" is registered twice with different factory contracts`
+				).toEqual({ type: existing.type, help: existing.help, labels: [...existing.labels] });
 			}
-			registered.set(reg.metric, reg.labels);
+			registered.set(reg.metric, reg);
 		}
 		const manifest = new Map(SIGNALS.map((s) => [s.name, s]));
 		const fromRegistry = SIGNALS.filter((s) => s.merged !== true).map((s) => s.name);
 
-		it('every registered metric is declared in the manifest, with matching labels', () => {
+		it('every registered metric exactly matches manifest factory type, labels, and help', () => {
 			const undeclared = [...registered.keys()].filter((n) => !manifest.has(n)).sort();
 			expect(
 				undeclared,
@@ -415,14 +482,12 @@ describe('metrics label contract', () => {
 			).toEqual([]);
 
 			const mismatched = [];
-			for (const [name, labels] of registered) {
+			for (const [name, reg] of registered) {
 				const signal = manifest.get(name);
 				if (signal === undefined) continue;
-				const declared = [...labels].sort();
-				const claimed = [...signal.labels].sort();
-				if (JSON.stringify(declared) !== JSON.stringify(claimed)) {
-					mismatched.push(`${name}: code ${JSON.stringify(declared)} vs manifest ${JSON.stringify(claimed)}`);
-				}
+				const code = { type: reg.type, labels: [...reg.labels], help: reg.help };
+				const claimed = { type: signal.type, labels: [...signal.labels], help: signal.help };
+				if (JSON.stringify(code) !== JSON.stringify(claimed)) mismatched.push(`${name}: code ${JSON.stringify(code)} vs manifest ${JSON.stringify(claimed)}`);
 			}
 			expect(mismatched).toEqual([]);
 		});
@@ -444,6 +509,33 @@ describe('metrics label contract', () => {
 			expect(phantom, 'the README metrics table lists names no code registers: ' + JSON.stringify(phantom)).toEqual([]);
 		});
 
+		it('the canonical README table exactly matches every manifest field and formula, bidirectionally', () => {
+			const documented = readmeSignalContract();
+			const missing = SIGNALS.map((s) => s.name).filter((name) => !documented.has(name));
+			const phantom = [...documented.keys()].filter((name) => !manifest.has(name));
+			expect(missing, 'manifest signals missing from the canonical README contract: ' + JSON.stringify(missing)).toEqual([]);
+			expect(phantom, 'canonical README contract rows absent from the manifest: ' + JSON.stringify(phantom)).toEqual([]);
+			const mismatched = [];
+			for (const signal of SIGNALS) {
+				const docs = documented.get(signal.name);
+				if (docs === undefined) continue;
+				const expected = {
+					type: signal.type,
+					labels: [...signal.labels],
+					unit: signal.unit,
+					scope: signal.scope,
+					aggregate: signal.aggregate,
+					merged: signal.merged === true,
+					formula: signal.formula,
+					help: signal.help
+				};
+				if (JSON.stringify(docs) !== JSON.stringify(expected)) {
+					mismatched.push(`${signal.name}: README ${JSON.stringify(docs)} vs manifest ${JSON.stringify(expected)}`);
+				}
+			}
+			expect(mismatched).toEqual([]);
+		});
+
 		it('every registry-registered signal appears in the metrics option JSDoc', () => {
 			const listed = dtsListedMetrics();
 			const missing = fromRegistry.filter((n) => !listed.has(n)).sort();
@@ -452,10 +544,32 @@ describe('metrics label contract', () => {
 			expect(phantom, 'the `metrics` option list names metrics no code registers: ' + JSON.stringify(phantom)).toEqual([]);
 		});
 
+		it('the testing declaration names every harness metric and distinguishes event-driven headroom', () => {
+			const text = readFileSync(path.join(ROOT, 'src/testing.d.ts'), 'utf8');
+			const declaration = text.indexOf('metrics?: MetricsRegistry;');
+			expect(declaration, 'the testing metrics option declaration was not found').toBeGreaterThan(-1);
+			const start = text.lastIndexOf('/**', declaration);
+			const docs = text.slice(start, declaration);
+			const harnessMetrics = new Set(
+				[...scanned.find((entry) => [...entry.registrations.values()].some((reg) => reg.file === 'src/testing.js')).registrations.values()]
+					.filter((reg) => reg.file === 'src/testing.js')
+					.map((reg) => reg.metric)
+			);
+			for (const metric of harnessMetrics) {
+				expect(
+					new RegExp('`' + metric + '(?:\\{[^}]*\\})?`').test(docs),
+					`src/testing.d.ts does not name the harness metric ${metric}`
+				).toBe(true);
+			}
+			expect(harnessMetrics).toContain('ws_connection_headroom');
+			expect(docs).toMatch(/event-driven `ws_connection_headroom` gauge/);
+			expect(docs).toMatch(/pressure-sampled gauges[\s\S]*production-only/);
+		});
+
 		it('the manifest is internally coherent', () => {
 			const problems = [];
 			for (const s of SIGNALS) {
-				if (!['counter', 'gauge'].includes(s.type)) problems.push(`${s.name}: unknown type ${s.type}`);
+				if (!['counter', 'gauge', 'histogram'].includes(s.type)) problems.push(`${s.name}: unknown type ${s.type}`);
 				if (!['sum', 'max', 'min'].includes(s.aggregate)) problems.push(`${s.name}: unknown aggregation ${s.aggregate}`);
 				if (!['worker', 'process'].includes(s.scope)) problems.push(`${s.name}: unknown scope ${s.scope}`);
 				// A process-wide reading is the same number on every worker, so
@@ -468,10 +582,17 @@ describe('metrics label contract', () => {
 				if (s.type === 'counter' && s.aggregate !== 'sum') {
 					problems.push(`${s.name}: counters must sum across workers, not ${s.aggregate}`);
 				}
+				if (s.type === 'histogram' && s.aggregate !== 'sum') {
+					problems.push(`${s.name}: histograms must sum across workers, not ${s.aggregate}`);
+				}
 				if (s.name.endsWith('_total') !== (s.type === 'counter')) {
 					problems.push(`${s.name}: the _total suffix and the counter type must agree`);
 				}
-				if (s.unit === 'bytes' && !s.name.endsWith('_bytes')) problems.push(`${s.name}: byte-valued metrics end in _bytes`);
+				if (s.unit === 'bytes' && !(s.type === 'counter'
+					? s.name.endsWith('_bytes_total')
+					: s.name.endsWith('_bytes'))) {
+					problems.push(`${s.name}: byte-valued metrics end in _bytes (before _total for counters)`);
+				}
 				if (s.unit === 'seconds' && !s.name.endsWith('_seconds')) problems.push(`${s.name}: second-valued metrics end in _seconds`);
 				// The house convention is no millisecond-valued metric at all -
 				// a mixed-unit metric set is how a dashboard silently reads 1000x.

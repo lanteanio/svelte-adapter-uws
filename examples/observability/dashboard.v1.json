@@ -1,0 +1,552 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "description": "svelte-adapter-uws observability pack v1. Queries preserve independent target labels.",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "targetBlank": true,
+      "title": "Runbook",
+      "type": "link",
+      "url": "${runbook_url}"
+    }
+  ],
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "up{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "legendFormat": "{{job}} / {{instance}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Adapter targets up",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 16,
+        "x": 8,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "metrics_snapshot_degraded{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "legendFormat": "degraded {{job}} / {{instance}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "metrics_snapshot_workers_reporting{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022} / metrics_snapshot_workers_expected{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "legendFormat": "worker completeness {{job}} / {{instance}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "time() - pressure_sample_timestamp_seconds{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "legendFormat": "sample age {{job}} / {{instance}}",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "Metrics pipeline health",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "pressure_saturation{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "legendFormat": "saturation {{job}} / {{instance}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "heap_used_ratio{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "legendFormat": "heap {{job}} / {{instance}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "cpu_throttled_ratio{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "legendFormat": "cpu throttled {{job}} / {{instance}}",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "Pressure ratios",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "ws_connections{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "legendFormat": "connections {{job}} / {{instance}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "ws_subscriptions{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "legendFormat": "subscriptions {{job}} / {{instance}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "ws_backpressure_connections{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "legendFormat": "backpressured {{job}} / {{instance}}",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "WebSocket load",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "red",
+                "value": 0.92
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 13
+      },
+      "id": 5,
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto"
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "adapter:fd_headroom_ratio{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "legendFormat": "{{job}} / {{instance}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Descriptor use",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "reqps"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 16,
+        "x": 8,
+        "y": 13
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "adapter:upgrade_reject_ratio:rate5m{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}",
+          "legendFormat": "ratio {{job}} / {{instance}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(upgrade_rejected_total{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}[5m])",
+          "legendFormat": "{{reason}} {{job}} / {{instance}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Upgrade rejection ratio and reasons",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(framework_assertion_violations_total{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}[5m])",
+          "legendFormat": "assertion {{severity}} / {{category}} / {{job}} / {{instance}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(state_divergence_total{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}[5m])",
+          "legendFormat": "divergence {{job}} / {{instance}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(relay_gap_frames_total{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}[5m])",
+          "legendFormat": "relay gap {{job}} / {{instance}}",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(framework_resource_growth_suspected_total{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}[5m])",
+          "legendFormat": "growth {{resource}} / {{job}} / {{instance}}",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(relay_spill_quarantines_total{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022,instance=~\u0022${instance:regex}\u0022}[5m])",
+          "legendFormat": "relay spill {{reason}} / {{job}} / {{instance}}",
+          "range": true,
+          "refId": "E"
+        }
+      ],
+      "title": "Integrity and growth events",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "svelte-adapter-uws",
+    "websocket"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(up{adapter=\u0022svelte-adapter-uws\u0022}, job)",
+        "includeAll": true,
+        "label": "Job",
+        "multi": true,
+        "name": "job",
+        "options": [],
+        "query": {
+          "query": "label_values(up{adapter=\u0022svelte-adapter-uws\u0022}, job)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(up{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022}, instance)",
+        "includeAll": true,
+        "label": "Instance",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": {
+          "query": "label_values(up{adapter=\u0022svelte-adapter-uws\u0022,job=~\u0022${job:regex}\u0022}, instance)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "https://example.invalid/runbooks/svelte-adapter-uws",
+          "value": "https://example.invalid/runbooks/svelte-adapter-uws"
+        },
+        "hide": 0,
+        "label": "Runbook URL",
+        "name": "runbook_url",
+        "options": [],
+        "query": "https://example.invalid/runbooks/svelte-adapter-uws",
+        "skipUrlSync": false,
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "svelte-adapter-uws / Operations",
+  "uid": "svelte-adapter-uws-v1",
+  "version": 1,
+  "weekStart": ""
+}

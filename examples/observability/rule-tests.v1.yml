@@ -1,0 +1,267 @@
+rule_files:
+  - rules.yml
+
+evaluation_interval: 1m
+fuzzy_compare: true
+group_eval_order:
+  - svelte-adapter-uws.recording
+  - svelte-adapter-uws.pipeline
+  - svelte-adapter-uws.capacity
+  - svelte-adapter-uws.integrity
+
+tests:
+  - name: low-rate rejection math and target isolation
+    interval: 1m
+    external_labels:
+      adapter_runbook_url: https://ops.example.com/adapter
+    input_series:
+      - series: 'upgrade_admitted_total{adapter="svelte-adapter-uws",job="websocket",instance="low"}'
+        values: '0+4x20'
+      - series: 'upgrade_rejected_total{adapter="svelte-adapter-uws",job="websocket",instance="low",reason="origin"}'
+        values: '0+1x20'
+      - series: 'upgrade_admitted_total{adapter="svelte-adapter-uws",job="websocket",instance="high"}'
+        values: '0+3x20'
+      - series: 'upgrade_rejected_total{adapter="svelte-adapter-uws",job="websocket",instance="high",reason="siege"}'
+        values: '0+2x20'
+      - series: 'upgrade_admitted_total{adapter="another-service",job="websocket",instance="foreign"}'
+        values: '0+0x20'
+      - series: 'upgrade_rejected_total{adapter="another-service",job="websocket",instance="foreign",reason="overload"}'
+        values: '0+10x20'
+      - series: 'relay_spill_quarantines_total{adapter="svelte-adapter-uws",job="websocket",instance="lagging",reason="age"}'
+        values: '0+1x20'
+    promql_expr_test:
+      - expr: adapter:upgrade_reject_ratio:rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'adapter:upgrade_reject_ratio:rate5m{adapter="svelte-adapter-uws",job="websocket",instance="high"}'
+            value: 0.4
+          - labels: 'adapter:upgrade_reject_ratio:rate5m{adapter="svelte-adapter-uws",job="websocket",instance="low"}'
+            value: 0.2
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: AdapterUpgradeRejectRatioHigh
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: high
+              job: websocket
+              severity: warning
+            exp_annotations:
+              summary: A quarter of upgrade attempts are being refused
+              description: Break it down by the reason label before acting.
+              runbook_url: https://ops.example.com/adapter#adapterupgraderejectratiohigh
+      - eval_time: 15m
+        alertname: AdapterRelaySpillQuarantine
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: lagging
+              job: websocket
+              reason: age
+              severity: critical
+            exp_annotations:
+              summary: A lagging relay peer was quarantined
+              description: A worker exceeded its finite relay spill ceiling, pending bytes were discarded, and the supervisor was asked to replace it.
+              runbook_url: https://ops.example.com/adapter#adapterrelayspillquarantine
+
+  - name: pipeline completeness absence freshness and up correlation
+    interval: 1m
+    start_timestamp: 1700000000
+    external_labels:
+      adapter_runbook_url: https://ops.example.com/adapter
+    input_series:
+      - series: 'up{adapter="svelte-adapter-uws",job="websocket",instance="healthy"}'
+        values: '1+0x20'
+      - series: 'metrics_snapshot_degraded{adapter="svelte-adapter-uws",job="websocket",instance="healthy"}'
+        values: '0+0x20'
+      - series: 'metrics_snapshot_workers_expected{adapter="svelte-adapter-uws",job="websocket",instance="healthy"}'
+        values: '4+0x20'
+      - series: 'metrics_snapshot_workers_reporting{adapter="svelte-adapter-uws",job="websocket",instance="healthy"}'
+        values: '4+0x20'
+      - series: 'pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws",job="websocket",instance="healthy"}'
+        values: '1700000000+60x20'
+
+      - series: 'up{adapter="svelte-adapter-uws",job="websocket",instance="incomplete"}'
+        values: '1+0x20'
+      - series: 'metrics_snapshot_degraded{adapter="svelte-adapter-uws",job="websocket",instance="incomplete"}'
+        values: '0+0x20'
+      - series: 'metrics_snapshot_workers_expected{adapter="svelte-adapter-uws",job="websocket",instance="incomplete"}'
+        values: '4+0x20'
+      - series: 'metrics_snapshot_workers_reporting{adapter="svelte-adapter-uws",job="websocket",instance="incomplete"}'
+        values: '3+0x20'
+      - series: 'pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws",job="websocket",instance="incomplete"}'
+        values: '1700000000+60x20'
+
+      - series: 'up{adapter="svelte-adapter-uws",job="websocket",instance="degraded"}'
+        values: '1+0x20'
+      - series: 'metrics_snapshot_degraded{adapter="svelte-adapter-uws",job="websocket",instance="degraded"}'
+        values: '1+0x20'
+      - series: 'metrics_snapshot_workers_expected{adapter="svelte-adapter-uws",job="websocket",instance="degraded"}'
+        values: '1+0x20'
+      - series: 'metrics_snapshot_workers_reporting{adapter="svelte-adapter-uws",job="websocket",instance="degraded"}'
+        values: '1+0x20'
+      - series: 'pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws",job="websocket",instance="degraded"}'
+        values: '1700000000+60x20'
+
+      - series: 'up{adapter="svelte-adapter-uws",job="websocket",instance="missing"}'
+        values: '1+0x20'
+      - series: 'metrics_snapshot_workers_expected{adapter="svelte-adapter-uws",job="websocket",instance="missing"}'
+        values: '4+0x20'
+      - series: 'metrics_snapshot_workers_reporting{adapter="svelte-adapter-uws",job="websocket",instance="missing"}'
+        values: '4+0x20'
+      - series: 'pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws",job="websocket",instance="missing"}'
+        values: '1700000000+60x20'
+
+      - series: 'up{adapter="svelte-adapter-uws",job="websocket",instance="stalled"}'
+        values: '1+0x20'
+      - series: 'metrics_snapshot_degraded{adapter="svelte-adapter-uws",job="websocket",instance="stalled"}'
+        values: '0+0x20'
+      - series: 'metrics_snapshot_workers_expected{adapter="svelte-adapter-uws",job="websocket",instance="stalled"}'
+        values: '4+0x20'
+      - series: 'metrics_snapshot_workers_reporting{adapter="svelte-adapter-uws",job="websocket",instance="stalled"}'
+        values: '4+0x20'
+      - series: 'pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws",job="websocket",instance="stalled"}'
+        values: '1700000000+0x20'
+
+      - series: 'up{adapter="svelte-adapter-uws",job="websocket",instance="down"}'
+        values: '0+0x20'
+      - series: 'metrics_snapshot_degraded{adapter="svelte-adapter-uws",job="websocket",instance="down"}'
+        values: '1+0x20'
+      - series: 'metrics_snapshot_workers_expected{adapter="svelte-adapter-uws",job="websocket",instance="down"}'
+        values: '4+0x20'
+      - series: 'metrics_snapshot_workers_reporting{adapter="svelte-adapter-uws",job="websocket",instance="down"}'
+        values: '1+0x20'
+      - series: 'pressure_sample_timestamp_seconds{adapter="svelte-adapter-uws",job="websocket",instance="down"}'
+        values: '1700000000+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: AdapterMetricsSnapshotDegraded
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: degraded
+              job: websocket
+              severity: critical
+            exp_annotations:
+              summary: Metrics snapshot is one worker, not the cluster
+              description: The collection did not complete, so this document reports a single worker. Every other alert in this file is now reading a fraction of the cluster.
+              runbook_url: https://ops.example.com/adapter#adaptermetricssnapshotdegraded
+      - eval_time: 15m
+        alertname: AdapterMetricsSnapshotIncomplete
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: incomplete
+              job: websocket
+              severity: warning
+            exp_annotations:
+              summary: A worker is missing from the metrics snapshot
+              description: Every summed series is understated by whatever the missing worker was carrying. Do not read the dip as a real drop in traffic.
+              runbook_url: https://ops.example.com/adapter#adaptermetricssnapshotincomplete
+      - eval_time: 15m
+        alertname: AdapterPressureSamplerStalled
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: stalled
+              job: websocket
+              severity: critical
+            exp_annotations:
+              summary: Pressure sampler has stopped
+              description: Every sampled gauge is frozen at its last value while the target still reports up. Saturation, posture, connections and backpressure are all stale.
+              runbook_url: https://ops.example.com/adapter#adapterpressuresamplerstalled
+      - eval_time: 15m
+        alertname: AdapterMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: missing
+              job: websocket
+              severity: warning
+            exp_annotations:
+              summary: Adapter metrics have disappeared
+              description: The scrape target is up but the adapter's own series are gone - a metrics registry that stopped being configured, or a route no longer reaching it.
+              runbook_url: https://ops.example.com/adapter#adaptermetricsabsent
+
+  - name: unrelated targets cannot page adapter alerts
+    interval: 1m
+    input_series:
+      - series: 'open_fds{adapter="another-service",job="foreign",instance="one"}'
+        values: '99+0x20'
+      - series: 'fd_soft_limit{adapter="another-service",job="foreign",instance="one"}'
+        values: '100+0x20'
+      - series: 'protection_posture_state{adapter="another-service",job="foreign",instance="one"}'
+        values: '2+0x20'
+      - series: 'pressure_saturation{adapter="another-service",job="foreign",instance="one"}'
+        values: '1+0x20'
+      - series: 'heap_used_ratio{adapter="another-service",job="foreign",instance="one"}'
+        values: '1+0x20'
+      - series: 'cpu_throttled_ratio{adapter="another-service",job="foreign",instance="one"}'
+        values: '1+0x20'
+      - series: 'ws_backpressure_connections{adapter="another-service",job="foreign",instance="one"}'
+        values: '1+0x20'
+      - series: 'upgrade_rate_map_evicted_total{adapter="another-service",job="foreign",instance="one"}'
+        values: '0+120x20'
+      - series: 'waiting_room_queue_depth{adapter="another-service",job="foreign",instance="one"}'
+        values: '1+0x20'
+      - series: 'state_divergence_total{adapter="another-service",job="foreign",instance="one"}'
+        values: '0+1x20'
+      - series: 'relay_gap_frames_total{adapter="another-service",job="foreign",instance="one"}'
+        values: '0+1x20'
+      - series: 'relay_spill_quarantines_total{adapter="another-service",job="foreign",instance="one",reason="bytes"}'
+        values: '0+1x20'
+      - series: 'framework_assertion_violations_total{adapter="another-service",job="foreign",instance="one",severity="fatal"}'
+        values: '0+1x20'
+      - series: 'framework_assertion_violations_total{adapter="another-service",job="foreign",instance="one",severity="soft"}'
+        values: '0+1x20'
+      - series: 'framework_resource_growth_suspected_total{adapter="another-service",job="foreign",instance="one"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AdapterDescriptorHeadroomLow
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterDescriptorHeadroomCritical
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterProtectionSiege
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterProtectionElevated
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterSaturationHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterHeapPressure
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterCpuThrottled
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterBackpressureSustained
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterRateMapChurn
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterWaitingRoomBacklog
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterStateDivergence
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterRelayGap
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterRelaySpillQuarantine
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterFatalAssertion
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterAssertionViolations
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterResourceGrowth
+        exp_alerts: []

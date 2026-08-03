@@ -19,7 +19,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { Worker } from 'node:worker_threads';
 import { mergeSamples, formatValue } from '../src/runtime/utils/metrics-merge.js';
 import { createMetricsCollections } from '../src/runtime/metrics-collector.js';
-import { mirrorRegistry, containMetricInstrument, readMetricMirror, resetMetricMirror } from '../src/runtime/utils/metrics.js';
+import { mirrorRegistry, containMetricInstrument, readMetricMirror, resetMetricMirror, METRIC_REGISTRATIONS_SAMPLE } from '../src/runtime/utils/metrics.js';
 import { SIGNALS, SIGNALS_BY_NAME, aggregationFor } from '../src/runtime/observability-manifest.js';
 
 /** Pull one series' value out of a merged document. */
@@ -34,29 +34,56 @@ function lines(text, name) {
 	return text.split('\n').filter((l) => l.startsWith(name + ' ') || l.startsWith(name + '{'));
 }
 
+/** Strip the worker-report registration inventory, leaving rendered values. */
+function metricValues(samples) {
+	return samples.filter((sample) => sample.name !== METRIC_REGISTRATIONS_SAMPLE);
+}
+
+/** A minimal registry that satisfies the documented contract. */
+function fakeRegistry(prefix = '') {
+	const seen = [];
+	return {
+		seen,
+		counter: (name) => {
+			seen.push(prefix + name);
+			return { inc() {} };
+		},
+		gauge: (name) => {
+			seen.push(prefix + name);
+			return { set() {} };
+		},
+		histogram: (name) => {
+			seen.push(prefix + name);
+			return { observe() {} };
+		}
+	};
+}
+
 /** One worker's report. */
 function report(worker, samples) {
 	return { worker, samples: samples.map(([name, value, labels]) => ({ name, labels: labels ?? {}, value })) };
 }
 
+/** A current worker report with a complete required registration inventory. */
+function completeReport(worker, samples) {
+	const values = report(worker, samples).samples;
+	const sampled = new Set(values.map((sample) => sample.name));
+	const required = SIGNALS.filter((signal) =>
+		signal.merged !== true && signal.optional !== true && signal.scope === 'worker'
+	);
+	return {
+		worker,
+		samples: [
+			{ name: METRIC_REGISTRATIONS_SAMPLE, families: required.map((signal) => signal.name) },
+			...required.filter((signal) => signal.type === 'gauge' && !sampled.has(signal.name))
+				.map((signal) => ({ name: signal.name, labels: {}, value: 0 })),
+			...values
+		]
+	};
+}
+
 describe('the mirror records what the adapter writes', () => {
 	beforeEach(() => resetMetricMirror());
-
-	/** A minimal registry that satisfies the documented contract. */
-	function fakeRegistry(prefix = '') {
-		const seen = [];
-		return {
-			seen,
-			counter: (name, help, labelNames) => {
-				seen.push(prefix + name);
-				return { inc() {} };
-			},
-			gauge: (name) => {
-				seen.push(prefix + name);
-				return { set() {} };
-			}
-		};
-	}
 
 	it('accumulates counters and replaces gauges, keyed by the declared name', () => {
 		const registry = mirrorRegistry(fakeRegistry());
@@ -82,6 +109,30 @@ describe('the mirror records what the adapter writes', () => {
 		expect(mirror).toContainEqual({ name: 'upgrade_rejected_total', labels: { reason: 'bad_origin' }, value: 1 });
 	});
 
+	it('mirrors explicit cumulative histogram buckets, count, and sum', () => {
+		const registry = mirrorRegistry(fakeRegistry());
+		const h = containMetricInstrument(registry.histogram(
+			'http_request_duration_seconds',
+			'h',
+			{ labelNames: ['method', 'outcome'], buckets: [0.001, 0.01, 0.1] }
+		));
+		h.observe({ method: 'get', outcome: 'ok' }, 0.005);
+		h.observe({ method: 'get', outcome: 'ok' }, 0.05);
+		const sample = readMetricMirror().find((entry) =>
+			entry.name === 'http_request_duration_seconds'
+		);
+		expect(sample).toEqual({
+			name: 'http_request_duration_seconds',
+			labels: { method: 'get', outcome: 'ok' },
+			histogram: {
+				buckets: [0.001, 0.01, 0.1],
+				counts: [0, 1, 2],
+				count: 2,
+				sum: 0.055
+			}
+		});
+	});
+
 	it('mirrors under the ADAPTER name even when the registry namespaces its own output', () => {
 		// The failure this design exists to prevent. `createMetrics({ prefix })`
 		// is the documented way to namespace, and it renames at registration. A
@@ -92,7 +143,11 @@ describe('the mirror records what the adapter writes', () => {
 		const registry = mirrorRegistry(inner);
 		containMetricInstrument(registry.gauge('open_fds', 'h')).set(900);
 		expect(inner.seen).toContain('app_open_fds');
-		expect(readMetricMirror()).toEqual([{ name: 'open_fds', labels: {}, value: 900 }]);
+		const mirror = readMetricMirror();
+		expect(metricValues(mirror)).toEqual([{ name: 'open_fds', labels: {}, value: 900 }]);
+		const merged = mergeSamples([{ worker: 1, samples: mirror }], { expected: 1, reporting: 1 });
+		expect(merged).toContain('open_fds 900');
+		expect(merged).not.toContain('app_open_fds');
 	});
 
 	it('still records the value when the underlying registry throws on emit', () => {
@@ -102,7 +157,7 @@ describe('the mirror records what the adapter writes', () => {
 		});
 		const c = containMetricInstrument(registry.counter('upgrade_admitted_total', 'h'));
 		expect(() => c.inc({}, 3)).not.toThrow();
-		expect(readMetricMirror()).toEqual([{ name: 'upgrade_admitted_total', labels: {}, value: 3 }]);
+		expect(metricValues(readMetricMirror())).toEqual([{ name: 'upgrade_admitted_total', labels: {}, value: 3 }]);
 	});
 
 	it('passes a null registry through untouched, so metrics stay opt-in', () => {
@@ -113,6 +168,40 @@ describe('the mirror records what the adapter writes', () => {
 });
 
 describe('cluster merge applies the declared aggregation law', () => {
+	it('sums histogram buckets/count/sum across workers without re-bucketing', () => {
+		const buckets = SIGNALS_BY_NAME.get('http_request_duration_seconds').buckets;
+		const makeHistogram = (count, sum, first) => ({
+			name: 'http_request_duration_seconds',
+			labels: { method: 'get', outcome: 'ok' },
+			histogram: {
+				buckets: [...buckets],
+				counts: buckets.map((_bound, index) => index === 0 ? first : count),
+				count,
+				sum
+			}
+		});
+		const merged = mergeSamples([
+			{ worker: 1, samples: [makeHistogram(2, 0.012, 1)] },
+			{ worker: 2, samples: [makeHistogram(3, 0.018, 2)] }
+		], { expected: 2, reporting: 2 });
+		expect(value(
+			merged,
+			'http_request_duration_seconds_bucket{le="0.001",method="get",outcome="ok"}'
+		)).toBe('3');
+		expect(value(
+			merged,
+			'http_request_duration_seconds_bucket{le="+Inf",method="get",outcome="ok"}'
+		)).toBe('5');
+		expect(value(
+			merged,
+			'http_request_duration_seconds_count{method="get",outcome="ok"}'
+		)).toBe('5');
+		expect(value(
+			merged,
+			'http_request_duration_seconds_sum{method="get",outcome="ok"}'
+		)).toBe('0.03');
+	});
+
 	it('sums counters across workers', () => {
 		const merged = mergeSamples([
 			report(1, [['upgrade_admitted_total', 10]]),
@@ -274,8 +363,8 @@ describe('the merge never touches what it does not declare', () => {
 describe('cluster merge reports its own completeness', () => {
 	it('states expected and reporting on every document', () => {
 		const merged = mergeSamples([
-			report(1, [['ws_connections', 1]]),
-			report(2, [['ws_connections', 1]])
+			completeReport(1, [['ws_connections', 1]]),
+			completeReport(2, [['ws_connections', 1]])
 		], { expected: 3, reporting: 2 });
 		expect(value(merged, 'metrics_snapshot_workers_expected')).toBe('3');
 		expect(value(merged, 'metrics_snapshot_workers_reporting')).toBe('2');
@@ -284,14 +373,110 @@ describe('cluster merge reports its own completeness', () => {
 		expect(value(merged, 'ws_connections')).toBe('2');
 	});
 
-	it('counts a worker that answered with nothing as having answered', () => {
-		// A compute worker mirrors no traffic metrics, and a worker still
-		// warming up has nothing yet. Deriving `reporting` from the number of
-		// contributing reports would show a permanent shortfall on any cluster
-		// running one, training the operator to ignore the signal.
-		const merged = mergeSamples([report(1, [['ws_connections', 5]])], { expected: 2, reporting: 2 });
-		expect(value(merged, 'metrics_snapshot_workers_reporting')).toBe('2');
+	it('does not call an empty worker report complete', () => {
+		const c = createMetricsCollections();
+		c.begin('requester', 'id', [1, 2]);
+		c.note('id', 1, []);
+		c.note('id', 2, completeReport(2, [['ws_connections', 5]]).samples);
+		const entry = c.take();
+		const merged = mergeSamples(entry.reports, { expected: 2, reporting: entry.answered });
+		expect(value(merged, 'metrics_snapshot_workers_reporting')).toBe('1');
 		expect(value(merged, 'metrics_snapshot_degraded')).toBe('0');
+	});
+
+	it('fails closed when a marker-free legacy report contains only one required family', () => {
+		const merged = mergeSamples([
+			report(1, [['ws_connections', 5]])
+		], { expected: 1, reporting: 1 });
+		expect(value(merged, 'metrics_snapshot_workers_expected')).toBe('1');
+		expect(value(merged, 'metrics_snapshot_workers_reporting')).toBe('0');
+		expect(value(merged, 'metrics_snapshot_degraded')).toBe('0');
+		// Keep the value that was actually observed, but do not infer any
+		// zero-event counter family from an inventory the worker never sent.
+		expect(value(merged, 'ws_connections')).toBe('5');
+		for (const signal of SIGNALS) {
+			if (signal.type === 'counter' && signal.optional !== true && signal.scope === 'worker') {
+				expect(merged).not.toContain(`# TYPE ${signal.name} counter`);
+			}
+		}
+	});
+
+	it('drives partial initialization through the real mirror, collector, and merge', () => {
+		const registry = mirrorRegistry(fakeRegistry());
+		registry.counter('upgrade_admitted_total', 'h');
+		const partialSamples = readMetricMirror();
+		expect(partialSamples.find((s) => s.name === METRIC_REGISTRATIONS_SAMPLE)?.families)
+			.toEqual(['upgrade_admitted_total']);
+
+		const c = createMetricsCollections();
+		c.begin('requester', 'partial', [1]);
+		c.note('partial', 1, partialSamples);
+		const partial = c.take();
+		expect(value(mergeSamples(partial.reports, {
+			expected: 1,
+			reporting: partial.answered
+		}), 'metrics_snapshot_workers_reporting')).toBe('0');
+
+		resetMetricMirror();
+		const completeRegistry = mirrorRegistry(fakeRegistry());
+		for (const signal of SIGNALS) {
+			if (signal.merged === true || signal.optional === true || signal.scope !== 'worker') continue;
+			const instrument = completeRegistry[signal.type](signal.name, signal.help, signal.labels);
+			if (signal.type === 'gauge') instrument.set(0);
+		}
+		c.begin('requester', 'complete', [2]);
+		c.note('complete', 2, readMetricMirror());
+		const complete = c.take();
+		expect(value(mergeSamples(complete.reports, {
+			expected: 1,
+			reporting: complete.answered
+		}), 'metrics_snapshot_workers_reporting')).toBe('1');
+	});
+
+	it('renders every required registered zero-counter family only in a healthy snapshot', () => {
+		resetMetricMirror();
+		const registry = mirrorRegistry(fakeRegistry());
+		const requiredCounters = [];
+		for (const signal of SIGNALS) {
+			if (signal.merged === true || signal.optional === true || signal.scope !== 'worker') continue;
+			const instrument = registry[signal.type](signal.name, signal.help, signal.labels);
+			if (signal.type === 'gauge') instrument.set(0);
+			else requiredCounters.push(signal);
+		}
+
+		const samples = readMetricMirror();
+		const healthy = mergeSamples([
+			{ worker: 1, samples },
+			{ worker: 2, samples }
+		], { expected: 2, reporting: 2 });
+		expect(value(healthy, 'metrics_snapshot_workers_expected')).toBe('2');
+		expect(value(healthy, 'metrics_snapshot_workers_reporting')).toBe('2');
+		expect(value(healthy, 'metrics_snapshot_degraded')).toBe('0');
+		for (const signal of requiredCounters) {
+			expect(healthy, `${signal.name} lost its registered zero-valued family`).toContain(
+				`# HELP ${signal.name} ${signal.help}\n# TYPE ${signal.name} counter`
+			);
+			if (signal.labels.length === 0) expect(lines(healthy, signal.name)).toEqual([`${signal.name} 0`]);
+			else expect(lines(healthy, signal.name), `${signal.name} must not invent label values`).toEqual([]);
+		}
+
+		// One worker with the full inventory cannot lend completeness to a
+		// sibling that omitted just one required family. The reporting gap remains
+		// the truth, and no zero counter is fabricated for the partial snapshot.
+		const partialSamples = samples.map((sample) => sample.name === METRIC_REGISTRATIONS_SAMPLE
+			? { ...sample, families: sample.families.filter((name) => name !== 'upgrade_admitted_total') }
+			: sample
+		);
+		const partial = mergeSamples([
+			{ worker: 1, samples },
+			{ worker: 2, samples: partialSamples }
+		], { expected: 2, reporting: 2 });
+		expect(value(partial, 'metrics_snapshot_workers_reporting')).toBe('1');
+		for (const signal of requiredCounters) {
+			if (!metricValues(samples).some((sample) => sample.name === signal.name)) {
+				expect(partial).not.toContain(`# TYPE ${signal.name} counter`);
+			}
+		}
 	});
 
 	it('flags a collection that never completed, which the expected/reporting pair cannot express', () => {
@@ -300,7 +485,7 @@ describe('cluster merge reports its own completeness', () => {
 		// with no other signal, an operator alerting on `reporting < expected`
 		// would see a healthy-looking document that is one worker's view of an
 		// N-worker cluster - the loudest possible failure, silently.
-		const degraded = mergeSamples([report(4, [['ws_connections', 10]])], { expected: 1, reporting: 1, degraded: true });
+		const degraded = mergeSamples([completeReport(4, [['ws_connections', 10]])], { expected: 1, reporting: 1, degraded: true });
 		expect(value(degraded, 'metrics_snapshot_degraded')).toBe('1');
 		expect(value(degraded, 'metrics_snapshot_workers_expected')).toBe('1');
 		expect(value(degraded, 'metrics_snapshot_workers_reporting')).toBe('1');
@@ -419,7 +604,8 @@ describe('primary-side collection bookkeeping', () => {
 		c.note('id', 1, []);
 		expect(c.note('id', 2, [{ name: 'ws_connections', labels: {}, value: 2 }])).toBe(true);
 		const entry = c.take();
-		expect(entry?.reports).toHaveLength(1);
+		expect(entry?.reports).toHaveLength(2);
+		expect(entry?.reports[0]).toEqual({ worker: 1, samples: [] });
 		expect(entry?.answered).toBe(2);
 	});
 
@@ -534,17 +720,35 @@ describe('primary-side collection bookkeeping', () => {
 		expect(entry.reports).toHaveLength(1);
 	});
 
-	it('carries counters only - a dead worker contributes no gauge', () => {
+	it('carries cumulative counters and histograms only - a dead worker contributes no gauge', () => {
+		const buckets = SIGNALS_BY_NAME.get('upgrade_duration_seconds').buckets;
+		const histogram = {
+			buckets: [...buckets],
+			counts: buckets.map(() => 2),
+			count: 2,
+			sum: 0.03
+		};
 		const c = createMetricsCollections();
 		c.begin('r', 'id', [1]);
 		c.note('id', 1, [
 			{ name: 'upgrade_admitted_total', labels: {}, value: 7 },
+			{ name: 'upgrade_duration_seconds', labels: { outcome: 'admitted' }, histogram },
 			{ name: 'ws_connections', labels: {}, value: 40 }
 		]);
 		c.take();
 		c.retire(1);
 		const carried = c.retiredReport();
-		expect(carried?.samples).toEqual([{ name: 'upgrade_admitted_total', labels: {}, value: 7 }]);
+		expect(carried?.samples).toEqual([
+			{ name: 'upgrade_admitted_total', labels: {}, value: 7 },
+			{
+				name: 'upgrade_duration_seconds',
+				labels: { outcome: 'admitted' },
+				histogram
+			}
+		]);
+		// The carry is a deep copy: a later report cannot mutate retained totals.
+		histogram.counts[0] = 999;
+		expect(carried.samples[1].histogram.counts[0]).toBe(2);
 	});
 
 	it('accumulates across successive deaths and is idempotent per worker', () => {
