@@ -1,0 +1,86 @@
+name: release
+
+# This workflow is the only supported publisher for this package. The matching
+# npm trusted-publisher identity and protected GitHub environment are external
+# prerequisites documented in releasing.md. Without either, publication fails
+# closed; there is deliberately no token fallback or manual dispatch path.
+
+on:
+  push:
+    tags:
+      - 'svelte-adapter-uws@*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: verify and publish retained tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out immutable tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pinned Node and npm registry
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install OIDC-capable npm
+        run: npm install --global npm@11.5.1
+
+      - name: Install locked root dependencies
+        run: npm ci
+
+      - name: Verify tag, package, and source identity
+        run: node scripts/prepare-release.js
+
+      - name: Install locked fixture dependencies
+        run: npm ci --prefix test/fixture
+
+      - name: Run the complete pull-request verification contract
+        run: npm run verify:pr
+
+      - name: Run the publication lifecycle gate
+        run: npm run prepublishOnly
+
+      - name: Pack retained artifact
+        id: pack
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force release-artifacts | Out-Null
+          $packJson = npm pack --json --pack-destination release-artifacts
+          if ($LASTEXITCODE -ne 0) { throw 'npm pack failed' }
+          $records = @($packJson | ConvertFrom-Json)
+          if ($records.Count -ne 1) { throw 'npm pack did not return exactly one artifact' }
+          $filename = [IO.Path]::GetFileName([string]$records[0].filename)
+          if ($filename -notmatch '^[a-z0-9._-]+\.tgz$') { throw 'npm pack returned an unsafe artifact name' }
+          $tarball = 'release-artifacts/' + $filename
+          if (-not (Test-Path -LiteralPath $tarball -PathType Leaf)) { throw 'retained tarball is missing' }
+          'tarball=' + $tarball >> $env:GITHUB_OUTPUT
+
+      - name: Retain exact publication artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-candidate-${{ github.run_attempt }}
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish exact tarball to quarantine with trusted OIDC
+        run: npm publish "${{ steps.pack.outputs.tarball }}" --tag candidate

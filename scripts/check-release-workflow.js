@@ -42,6 +42,35 @@ export function validateReleaseWorkflow(source, pkg, policy) {
 		errors.push('release job permissions must be exactly contents read and id-token write');
 	}
 	const steps = Array.isArray(job.steps) ? job.steps : [];
+	// A duplicate step name would silently shadow the first occurrence in the
+	// name-keyed lookups below, letting an inserted twin carry a different
+	// command while every exact-command assertion still passes.
+	const stepNames = steps.map((step) => step.name);
+	if (new Set(stepNames).size !== stepNames.length) {
+		errors.push('release job step names must be unique');
+	}
+	// The job is a closed inventory: an EXTRA step is an unreviewed command
+	// running with the release identity (an interposed step between pack and
+	// publish could swap the artifact), so the allowed sequence is exact.
+	const EXPECTED_STEP_ORDER = [
+		'Check out immutable tag',
+		'Set up pinned Node and npm registry',
+		'Install OIDC-capable npm',
+		'Install locked root dependencies',
+		'Verify tag, package, and source identity',
+		'Install locked fixture dependencies',
+		'Run the complete pull-request verification contract',
+		'Run the publication lifecycle gate',
+		'Pack retained artifact',
+		'Retain exact publication artifact',
+		'Publish exact tarball to quarantine with trusted OIDC'
+	];
+	if (JSON.stringify(stepNames) !== JSON.stringify(EXPECTED_STEP_ORDER)) {
+		errors.push(
+			'release job steps must be exactly, in order: ' + EXPECTED_STEP_ORDER.join(' -> ') +
+			' - got: ' + stepNames.join(' -> ')
+		);
+	}
 	const named = new Map(steps.map((step) => [step.name, step]));
 	const checkout = named.get('Check out immutable tag');
 	if (!checkout || checkout.uses !== 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262' ||
