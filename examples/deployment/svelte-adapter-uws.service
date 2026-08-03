@@ -1,0 +1,30 @@
+[Unit]
+Description=SvelteKit application served by svelte-adapter-uws
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=10
+
+[Service]
+Type=notify
+NotifyAccess=all
+WorkingDirectory=/srv/app
+Environment=NODE_ENV=production
+Environment=SHUTDOWN_DELAY_MS=5000
+Environment=SHUTDOWN_TIMEOUT=30
+ExecStart=/usr/bin/node build/index.js
+
+# READY=1 is the startup/readiness gate; a blocked event loop stops watchdog
+# pings. Both a watchdog failure and the adapter's fatal/SIGKILL paths restart.
+TimeoutStartSec=90s
+WatchdogSec=30s
+Restart=on-failure
+RestartSec=2s
+
+# Keep the process on its graceful path and give the 5s routing delay plus the
+# 30s shutdown budget time to finish before systemd escalates.
+KillSignal=SIGTERM
+TimeoutStopSec=45s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,36 @@
+services:
+  app:
+    image: ghcr.io/your-org/your-app:latest
+    init: true
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 45s
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      SHUTDOWN_DELAY_MS: 5000
+      SHUTDOWN_TIMEOUT: 30
+    expose:
+      - "3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3000/readyz')
+          .then((response) => { if (!response.ok) process.exit(1); })
+          .catch(() => process.exit(1))
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    deploy:
+      replicas: 4
+      restart_policy:
+        condition: any
+        delay: 2s
+      update_config:
+        order: start-first
+        monitor: 45s
