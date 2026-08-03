@@ -80,13 +80,23 @@ describe('migration freshness follows public surface and schema changes', () => 
 		// chore(release) bump and trained reflexive --write re-stamps.
 		const projected = versionIndependentCompatibilitySurface(compatibilityCsv);
 		expect(projected).not.toContain('adapter_version');
-		const bumped = compatibilityCsv.replace('0.6.0-next.91', '0.6.0-next.999');
+		// Derive every probe from the manifest itself: a literal version here
+		// would silently no-op (or fail) on the next release bump - the exact
+		// event this projection exists to make a non-event.
+		const currentRow = parseCompatibility(compatibilityCsv).find((row) => row.current === 'true');
+		const bumped = compatibilityCsv.replace(currentRow.adapter_version, currentRow.adapter_version + '9');
 		expect(bumped).not.toBe(compatibilityCsv);
 		expect(versionIndependentCompatibilitySurface(bumped)).toBe(projected);
 		// The digest still moves for the columns a migration guide is about.
-		const movedPin = compatibilityCsv.replace('v20.69.0.tar.gz', 'v20.99.0.tar.gz');
+		const currentRef = uwsRefFromSpec(currentRow.uwebsockets);
+		const movedPin = compatibilityCsv.replace(currentRef, 'v99.99.0');
+		expect(movedPin).not.toBe(compatibilityCsv);
 		expect(versionIndependentCompatibilitySurface(movedPin)).not.toBe(projected);
-		const movedSeries = compatibilityCsv.replace(',0.6.0-next,0.6.0-next,', ',9.9.x,0.6.0-next,');
+		const movedSeries = compatibilityCsv.replace(
+			',' + currentRow.realtime + ',' + currentRow.extensions + ',',
+			',9.9.x,' + currentRow.extensions + ','
+		);
+		expect(movedSeries).not.toBe(compatibilityCsv);
 		expect(versionIndependentCompatibilitySurface(movedSeries)).not.toBe(projected);
 		// A restructured CSV (no adapter_version column) digests as itself, so
 		// structural change cannot hide behind the projection.
