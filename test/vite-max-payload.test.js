@@ -71,7 +71,10 @@ describe('Vite dev max payload parity', () => {
 		expect(globalThis.__uws_dev_platform.maxPayloadLength).toBe(4096);
 		expect(() => uws({ maxPayloadLength: 0 })).toThrow('greater than 0');
 		expect(() => uws({ maxPayloadLength: '4096' })).toThrow('must be a number');
-		expect(() => uws({ maxPayloadLength: 1.5 })).toThrow('positive integer');
+		// The dev plugin, production and createTestServer share ONE guard, so
+		// they share its wording. Asserting the older plugin-local phrasing here
+		// would mean the consolidation had left two messages behind.
+		expect(() => uws({ maxPayloadLength: 1.5 })).toThrow('integer no greater than 2147483647');
 		expect(() => uws({ maxPayloadLength: 0x80000000 })).toThrow('2147483647');
 	});
 

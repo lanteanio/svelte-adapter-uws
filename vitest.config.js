@@ -17,7 +17,13 @@ export default defineConfig({
 	test: {
 		pool: 'vmForks',
 		include: ['test/**/*.test.js'],
-		exclude: ['source/**', 'node_modules/**', 'bench/**', 'test/e2e/**', 'test/fixture/**'],
+		// `**/node_modules/**`, not `node_modules/**`: the Svelte 4 profile under
+		// test/fixtures/ installs its own dependency tree, and a bare top-level
+		// pattern let vitest collect third-party suites out of it (devalue's own
+		// tests ran, and failed, as part of this repository's run). Note the
+		// singular `test/fixture/**` below does not cover `test/fixtures/` - the
+		// same one-letter gap that once let that profile commit its build output.
+		exclude: ['source/**', '**/node_modules/**', 'bench/**', 'test/e2e/**', 'test/fixture/**', 'test/fixtures/**'],
 		// Build the fixture variants once, serially, before any worker starts.
 		// Without this every suite that needs a build races the others for one
 		// on-disk lock, and the losers sleep-poll through somebody else's
