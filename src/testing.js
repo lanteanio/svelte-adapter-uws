@@ -12,7 +12,11 @@ import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, W
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { createConnectionPermitCarrier } from './runtime/utils/connection-permit.js';
-import { assertWireSubscribeAuthorization, assertProtectiveNumber } from './config-guards.js';
+import {
+	assertWireSubscribeAuthorization,
+	assertProtectiveNumber,
+	DEFAULT_MAX_PAYLOAD_LENGTH
+} from './config-guards.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
 import { runtimeVersionInfo } from './runtime/version-info.js';
 import { ADAPTER_ERROR_IDS, adapterErrorMessage } from './runtime/error-registry.js';
@@ -118,7 +122,13 @@ export async function createTestServer(options = {}) {
 		'authorizeWireSubscribe',
 		'the createTestServer option authorizeWireSubscribe'
 	);
-	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, messageAdmission: messageAdmissionOptions, protection, metrics, adminPath = '/__realtime', readinessCheckPath = '/readyz', healthCheckPath = '/healthz', primaryInit, maxPayloadLength = 1024 * 1024 } = options;
+	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, messageAdmission: messageAdmissionOptions, protection, metrics, adminPath = '/__realtime', readinessCheckPath = '/readyz', healthCheckPath = '/healthz', primaryInit } = options;
+	// Read with `??`, not as a destructuring default. Every other surface folds
+	// `null` into the default - assertProtectiveNumber returns early for it as an
+	// absent value, and the adapter and Vite both use `??`. A destructuring
+	// default replaces only `undefined`, so this surface alone reported `null`
+	// from platform.maxPayloadLength and handed `null` to the receiver.
+	const maxPayloadLength = options.maxPayloadLength ?? DEFAULT_MAX_PAYLOAD_LENGTH;
 	// One constant drives BOTH the enforced uWS receiver cap and the reported
 	// platform.maxPayloadLength. The harness once enforced 64 KiB while
 	// reporting 1 MiB - the exact report-versus-enforce split the production

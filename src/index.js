@@ -7,7 +7,11 @@ import { nodeResolve } from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 import json from '@rollup/plugin-json';
 import { normalizeStaticCacheControl, normalizeStaticHeaders } from './build-config.js';
-import { assertWireSubscribeAuthorization, assertProtectiveNumber } from './config-guards.js';
+import {
+	assertWireSubscribeAuthorization,
+	assertProtectiveNumber,
+	DEFAULT_MAX_PAYLOAD_LENGTH
+} from './config-guards.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
 import { writeAndCloseRollupBundle } from './build/rollup-lifecycle.js';
 import { compileAccessibleWaitingRoomTemplate } from './runtime/utils/waiting-room-template.js';
@@ -352,7 +356,7 @@ export function serializeWsOptions(websocket, adminPath) {
 		// outbound queue, also 1 MB), so per-frame cost stays
 		// predictable. Apps that want a stricter cap can pin via
 		// `websocket.maxPayloadLength` in svelte.config.js.
-		maxPayloadLength: websocket?.maxPayloadLength ?? 1024 * 1024,
+		maxPayloadLength: websocket?.maxPayloadLength ?? DEFAULT_MAX_PAYLOAD_LENGTH,
 		idleTimeout: websocket?.idleTimeout ?? 120,
 		maxBackpressure: websocket?.maxBackpressure ?? 1024 * 1024,
 		// When true, uWS closes a connection that stays pinned over

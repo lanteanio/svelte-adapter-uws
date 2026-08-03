@@ -11,6 +11,23 @@
 // `src`), so both published entry points can import it.
 
 /**
+ * The receiver cap every surface falls back to when an application configures
+ * none.
+ *
+ * It existed as three separate `1024 * 1024` literals - the build-time adapter,
+ * the dev plugin, and the test double - which is precisely what let them
+ * disagree. The guard that VALIDATES this option was already shared; the value
+ * it falls back to was not.
+ *
+ * Read it with `??`, never as a destructuring default. `assertProtectiveNumber`
+ * treats `null` as absent, so `null` has to arrive at this default by the same
+ * route `undefined` does. A destructuring default replaces only `undefined`,
+ * and that is exactly how the test double came to report `null` from
+ * `platform.maxPayloadLength` while handing `null` to the receiver.
+ */
+export const DEFAULT_MAX_PAYLOAD_LENGTH = 1024 * 1024;
+
+/**
  * Refuse a non-boolean value for a flag whose purpose is to RESTRICT access.
  *
  * Restrictive flags are read with `=== true`, which silently treats every other

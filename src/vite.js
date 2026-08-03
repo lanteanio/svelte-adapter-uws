@@ -7,7 +7,12 @@ import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelp
 import { createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
-import { assertWireSubscribeAuthorization, assertProtectiveNumber, unknownOptionKeys } from './config-guards.js';
+import {
+	assertWireSubscribeAuthorization,
+	assertProtectiveNumber,
+	unknownOptionKeys,
+	DEFAULT_MAX_PAYLOAD_LENGTH
+} from './config-guards.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { snapshotUpgradeHeaders } from './runtime/utils/upgrade-headers.js';
 import { emitOperationalDiagnostic, viteHandlerFailureDiagnostic, viteHandlerRecoveredDiagnostic } from './runtime/utils/operational-diagnostic.js';
@@ -102,7 +107,7 @@ export default function uws(options = {}) {
 	const wsAuthPath = options.authPath || '/__ws/auth';
 	// One source of truth for both the actual ws receiver cap and the value app
 	// code reads from platform. Production uses the same 1 MiB default.
-	const MAX_PAYLOAD_LENGTH_V = options.maxPayloadLength ?? 1024 * 1024;
+	const MAX_PAYLOAD_LENGTH_V = options.maxPayloadLength ?? DEFAULT_MAX_PAYLOAD_LENGTH;
 	const messageAdmission = createMessageAdmission(options.messageAdmission);
 	const rejectApplicationMessageV = (wrapped, rejection) => {
 		const frame = messageOverloadedFrame(rejection);

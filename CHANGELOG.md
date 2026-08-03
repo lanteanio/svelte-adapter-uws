@@ -472,6 +472,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `null` payload cap reaches the receiver as the numeric default, on
+  every surface.** The shared guard treats `null` as an absent value and
+  returns early, and both the adapter and the Vite plugin fold it into the
+  default with `??`. `createTestServer` instead read the option as a
+  destructuring default, which replaces only `undefined`, so `null` survived:
+  the harness reported `null` from `platform.maxPayloadLength` and handed
+  `null` to the receiver, breaking the documented numeric contract and
+  disconnecting enforcement from the reported value. The three surfaces also
+  carried three separate `1024 * 1024` literals, which is what allowed them
+  to disagree; they now read one shared `DEFAULT_MAX_PAYLOAD_LENGTH` and
+  resolve `null` and `undefined` identically. An explicit cap still wins on
+  every surface.
 - **The locked Svelte 4 profile installs the dependency set the adapter
   actually declares.** The fixture installs this checkout as a packed
   dependency, so its lockfile carries a second copy of the adapter's own
