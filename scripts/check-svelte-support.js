@@ -15,12 +15,26 @@ function readJson(path) {
 	return JSON.parse(readFileSync(path, 'utf8'));
 }
 
+// The public reproduce sequence and the CI job are two spellings of the same
+// first success, so they are generated and checked from one list. The preflight
+// sits between install and check in both: it is what makes an unmet native
+// prerequisite fail at the prerequisite boundary instead of several steps later
+// inside an unrelated command.
+const setupSequence = [
+	'npm ci --install-links',
+	'npm exec -- svelte-adapter-uws-preflight',
+	'npm run check',
+	'npm run build',
+	'npm run smoke'
+];
+
 export function loadSvelte4Profile(base = root) {
 	const fixture = join(base, 'test', 'fixtures', 'svelte4');
 	const pkg = readJson(join(fixture, 'package.json'));
 	const lock = readJson(join(fixture, 'package-lock.json'));
+	const rootPkg = readJson(join(base, 'package.json'));
 	const node = readFileSync(join(base, '.nvmrc'), 'utf8').trim();
-	return { fixture, pkg, lock, node };
+	return { fixture, pkg, lock, rootPkg, node };
 }
 
 export function renderSvelte4Support(profile) {
@@ -34,14 +48,13 @@ export function renderSvelte4Support(profile) {
 			'` | `' + dev['@sveltejs/vite-plugin-svelte'] + '` | `' +
 			dev.vite + '` | `' + dev['svelte-check'] + '` | `' + profile.node + '` |',
 		'',
-		'Reproduce the type/store, build, HTTP, and WebSocket checks from a clean tree:',
+		'Reproduce the type/store, build, HTTP, and WebSocket checks from a clean tree.',
+		'The preflight runs before the first check so an unmet Node, platform or native',
+		'prerequisite stops here rather than inside a later build:',
 		'',
 		'```bash',
 		'cd test/fixtures/svelte4',
-		'npm ci --install-links',
-		'npm run check',
-		'npm run build',
-		'npm run smoke',
+		...setupSequence,
 		'```',
 		endMarker
 	].join('\n');
@@ -55,6 +68,44 @@ function replaceBlock(source, block) {
 		throw new Error('README must contain one ordered Svelte support block');
 	}
 	return source.slice(0, start) + block + source.slice(end + endMarker.length);
+}
+
+// npm records a bin path without the leading './' a manifest may carry, and
+// neither file has to order its keys. Normalise both sides so the comparison
+// reports real drift rather than formatting.
+function normalizeManifestField(value) {
+	const normalized = {};
+	for (const key of Object.keys(value || {}).sort()) {
+		normalized[key] = typeof value[key] === 'object' && value[key] !== null
+			? JSON.stringify(value[key])
+			: String(value[key]).replace(/^\.\//, '');
+	}
+	return normalized;
+}
+
+// Presence alone is not the contract - a preflight that runs after the build
+// has already missed the boundary it exists to enforce. Position is checked by
+// first occurrence, so a repeated step is rejected rather than measured.
+function sequenceErrors(source, prefix, label) {
+	const errors = [];
+	let previousAt = -1;
+	let previousStep = '';
+	for (const step of setupSequence) {
+		const needle = prefix + step;
+		const at = source.indexOf(needle);
+		if (at < 0) {
+			errors.push(label + ' is missing the step: ' + step);
+			continue;
+		}
+		if (source.indexOf(needle, at + 1) >= 0) {
+			errors.push(label + ' repeats the step ' + step + ', so its position cannot be checked');
+			continue;
+		}
+		if (at < previousAt) errors.push(label + ' runs ' + step + ' before ' + previousStep);
+		previousAt = at;
+		previousStep = step;
+	}
+	return errors;
 }
 
 export function validateSvelte4Profile(profile, readme, workflow) {
@@ -96,17 +147,41 @@ export function validateSvelte4Profile(profile, readme, workflow) {
 	}
 	if (profile.pkg.scripts?.build !== 'vite build') errors.push('fixture build script must run Vite');
 	if (profile.pkg.scripts?.smoke !== 'node smoke.mjs') errors.push('fixture smoke script must be executable');
+	// The fixture installs this checkout as a packed dependency, so its lock
+	// records the adapter's own manifest. Nothing compared the two, which let the
+	// locked profile keep installing a dependency set the adapter no longer
+	// declares - the published corner then reproduces a package no consumer gets.
+	const packed = profile.lock.packages?.['node_modules/svelte-adapter-uws'];
+	const regenerate = '; regenerate with npm install --install-links --package-lock-only in test/fixtures/svelte4';
+	if (!packed) {
+		errors.push('fixture lock has no packed svelte-adapter-uws entry' + regenerate);
+	} else {
+		if (packed.resolved !== 'file:../../..') {
+			errors.push('packed adapter lock entry resolves to ' + packed.resolved + ' instead of file:../../..');
+		}
+		if (packed.version !== profile.rootPkg.version) {
+			errors.push('packed adapter lock version ' + packed.version +
+				' disagrees with the root manifest version ' + profile.rootPkg.version + regenerate);
+		}
+		for (const field of [
+			'dependencies', 'peerDependencies', 'optionalDependencies',
+			'peerDependenciesMeta', 'bin', 'engines'
+		]) {
+			const declared = JSON.stringify(normalizeManifestField(profile.rootPkg[field]));
+			const locked = JSON.stringify(normalizeManifestField(packed[field]));
+			if (declared !== locked) {
+				errors.push('packed adapter lock ' + field + ' disagrees with the root manifest' +
+					regenerate + '\n  manifest: ' + declared + '\n  lock:     ' + locked);
+			}
+		}
+	}
 	const rendered = renderSvelte4Support(profile);
 	if (!readme.includes(rendered)) errors.push('README Svelte support block is stale; run node scripts/check-svelte-support.js --write');
-	for (const needle of [
-		"working-directory: test/fixtures/svelte4",
-		"run: npm ci --install-links",
-		"run: npm run check",
-		"run: npm run build",
-		"run: npm run smoke"
-	]) {
-		if (!workflow.includes(needle)) errors.push('test workflow missing Svelte 4 step: ' + needle);
+	errors.push(...sequenceErrors(rendered, '', 'the published reproduce sequence'));
+	if (!workflow.includes('working-directory: test/fixtures/svelte4')) {
+		errors.push('test workflow never enters test/fixtures/svelte4');
 	}
+	errors.push(...sequenceErrors(workflow, 'run: ', 'the Svelte 4 CI job'));
 	return errors;
 }
 

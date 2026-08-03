@@ -1634,11 +1634,14 @@ profile. This row is generated from that fixture's package metadata:
 |---|---|---|---|---|---|---|
 | Locked Svelte 4 | `4.2.20` | `2.70.2` | `3.1.2` | `5.4.21` | `3.8.6` | `22.23.2` |
 
-Reproduce the type/store, build, HTTP, and WebSocket checks from a clean tree:
+Reproduce the type/store, build, HTTP, and WebSocket checks from a clean tree.
+The preflight runs before the first check so an unmet Node, platform or native
+prerequisite stops here rather than inside a later build:
 
 ```bash
 cd test/fixtures/svelte4
 npm ci --install-links
+npm exec -- svelte-adapter-uws-preflight
 npm run check
 npm run build
 npm run smoke

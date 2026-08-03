@@ -472,6 +472,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The locked Svelte 4 profile installs the dependency set the adapter
+  actually declares.** The fixture installs this checkout as a packed
+  dependency, so its lockfile carries a second copy of the adapter's own
+  manifest, and nothing compared the two. The lock still required
+  `markdown-it` and `semver` as runtime dependencies after both moved to
+  development dependencies, so the published oldest-supported corner
+  installed seven packages no consumer receives.
+  `check-svelte-support` now compares the packed lock entry against the root
+  manifest version, dependencies, peer and optional dependencies, `bin` and
+  `engines`. Both sides are normalized first, because npm records a bin path
+  without the leading `./` a manifest may carry and neither file has to order
+  its keys, so the gate reports real drift rather than formatting.
+- **The published Svelte 4 setup sequence stops at the prerequisite
+  boundary.** The generated reproduce block ran `npm ci`, `check`, `build`
+  and `smoke` with no preflight, while CI ran the preflight between install
+  and check. They are two spellings of the same first success, and the
+  published one skipped the native prerequisite check, so an unmet
+  requirement surfaced later inside an unrelated build instead of at the
+  boundary that exists to catch it. The block now runs
+  `svelte-adapter-uws-preflight` immediately after install, and the gate
+  checks the order of the published sequence and of the CI job rather than
+  only the presence of their steps. A step that appears twice is rejected,
+  because its position cannot be determined.
 - **Diagnostic lines carry the family's public name.** The canonical
   structured log prefix is now `[lantean/diagnostic ...]` and the
   process-wide operational sink registers under
