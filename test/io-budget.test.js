@@ -449,10 +449,16 @@ const EXTERNAL_THUNK_CLONE_TAG = 'function hiddenThunkCloneTag(_strings, thunk) 
 // frame bytes. The semantic checks below explain known copy paths and keep safe
 // near-misses usable, while this closed boundary makes every new syntax form a
 // deliberate budget review instead of an unmodeled parser escape.
+// Re-pinned after review of the diagnostics/tracing wiring that moved them:
+// the drift is added imports, an `activeTraceContext()` getter, cluster
+// sequence-authority assertions, and promise handling around the ingress
+// route call. No copy primitive entered either body - the only byte
+// construction on the ingress path is the pre-existing zero-copy
+// `new Uint8Array(message)` VIEW over an ArrayBuffer argument.
 const COPY_AUTHORITY_SYNTAX = Object.freeze({
-	publishWire: 'b67ff37e1abe9f706c83288d2b5520b032327b7f2e9c4da8ee8f70230d21e19e',
+	publishWire: '7c1abe91f3ecfb8b8b28f31451f06b7fd0529efc027dd508137ae4a8ea79cc49',
 	deliverStatelessWireFanout: '98c4246e4bea446d1647f6bf0b13fb0e0cde521ac27dfe899eff42b884113afa',
-	dispatchIngressFrame: '6fae94f107a137a1339ee236574fc0725cd16218f78b7f753a2f2fcd9dad2062',
+	dispatchIngressFrame: '5ff5ed75d331620ed0bbdd4ffd9fe57ecb993b3b3d97923bdb7edf48e7483e5b',
 	send: 'c900028ed26614f6a0d83b1d57a6649a52db522503def86eee3000541d285b11',
 	encodeStatelessWirePayload: 'fcacd501dd3d1bdcc14a5eff364da905f2b5e65999d12c1e8b8ad197ec2fd062',
 	allocate: 'd76794d74a23fee1aa0913a38cc231f8dc42793accba687e0167bedd5d6ab1ba',
@@ -470,9 +476,9 @@ const COPY_AUTHORITY_SYNTAX = Object.freeze({
 // Comments, locations, and inert unreferenced function bodies remain free to
 // change; executable module edits require a deliberate copy-budget review.
 const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
-	ingress: 'fec767d1996cb44c0f9e7fd1933701a1490e35a903fb3046f60b74e812aae585',
-	platform: 'f43b82ae8db6797b5588e2eba3cc2f6e80c9a865aefce60e85d531ab9a37e577',
-	'wire-fanout': 'b2a9215ccde4eadac1b88dd2ee307406452e0ed0c866a93f9edadca33ff77d05',
+	ingress: '710472f02ddefa6220afa4e9a17da05c8a47cb7a20468826c75a4e30c1f1f75e',
+	platform: '9712858e848445b9ac9bf07495174fdfae6ac79577587ea16ddd8edbc6324b04',
+	'wire-fanout': 'cfca189a1066c59a0f04a99ee2eab60d3a51e8024200a39626cd321a8b4d3d7b',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({
