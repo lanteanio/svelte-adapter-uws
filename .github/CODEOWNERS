@@ -1,0 +1,13 @@
+# One-maintainer project: the default keeps every new path review-routed.
+* @lanteanio
+
+# High-risk families stay explicit so future ownership changes cannot silently
+# leave runtime, wire, declarations, or publication without a reviewer.
+/src/runtime/ @lanteanio
+/src/plugins/ @lanteanio
+/src/*.d.ts @lanteanio
+/PROTOCOL.md @lanteanio
+/protocol.schema.json @lanteanio
+/test-vectors/ @lanteanio
+/scripts/ @lanteanio
+/.github/ @lanteanio
