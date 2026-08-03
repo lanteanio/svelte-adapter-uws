@@ -281,6 +281,28 @@ function loadDocs() {
  * @returns {string | null} the failure, or null when it resolves
  */
 export function checkLink(rel, target, docs, options = {}) {
+	// A single-slash scheme typo (https:/example.com) parses as a relative
+	// path in a browser but matches the scheme regex below, so it would be
+	// waved through as external while being dead in both worlds.
+	if (/^https?:\/(?!\/)/i.test(target)) {
+		return `malformed scheme (single slash) in link: ${target}`;
+	}
+	// Same-repo GitHub source routes are checkable locally: the ref must be
+	// the canonical main branch (the tree every release fast-forwards onto),
+	// and the path must exist in this working tree - a typo'd or moved path
+	// is dead the day main receives this tree, so it fails now.
+	const sameRepo = /^https:\/\/github\.com\/lanteanio\/svelte-adapter-uws\/(blob|tree|raw)\/([^/]+)\/([^#?]*)/i.exec(target);
+	if (sameRepo) {
+		const [, , ref, blobPath] = sameRepo;
+		if (ref !== 'main') {
+			return `same-repo source link must use the canonical main ref, not ${ref}: ${target}`;
+		}
+		const decoded = decodeURIComponent(blobPath.replace(/\/+$/, ''));
+		if (decoded !== '' && !existsSync(resolve(root, decoded))) {
+			return `same-repo source link names a path absent from this tree: ${target}`;
+		}
+		return null;
+	}
 	if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith('//')) return null; // external or mailto
 	if (target.startsWith('#')) {
 		let anchor;

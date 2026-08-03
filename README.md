@@ -3172,6 +3172,7 @@ Handles `set`, `increment`, and `decrement` events:
 
 Server (from any hook or handler that has `platform`):
 
+<!-- doc-code: ambient names="platform" -->
 ```js
 // In hooks.ws.js - track connected users:
 export function open(ws, { platform }) {
@@ -3376,6 +3377,7 @@ The client handles several edge cases automatically, with no configuration requi
 
 By default, the client derives the WebSocket URL from `window.location`. If your client runs on a different origin - a mobile app (Svelte Native, React Native), a standalone Node.js script, or any context where the backend lives elsewhere - pass a `url` to connect to it directly:
 
+<!-- doc-code: no-run reason="external-service: opens a live WebSocket connection" -->
 ```js
 import { connect, on } from "svelte-adapter-uws/client";
 
@@ -4503,7 +4505,7 @@ A cursor layer never replaces the board's own semantics. Treat visual markers
 as supplementary presence: keep the underlying board operable with ordinary
 links, buttons, form controls, and focus order, and publish the local cursor
 from those same keyboard interactions. The
-[complete Svelte composition](./examples/cursor-accessible.svelte) demonstrates
+[complete Svelte composition](https://github.com/lanteanio/svelte-adapter-uws/blob/main/examples/cursor-accessible.svelte) demonstrates
 the contract using the existing `cursor()` store and `move()` function:
 
 - Every collaborator has an application-selected public name plus a
@@ -4544,10 +4546,28 @@ At high cursor density the DOM `{#each}` above stops being the bottleneck you ca
   import { cursor, move } from 'svelte-adapter-uws/plugins/cursor/client';
   let canvas = $state();
   $effect(() => cursor('board:42', { canvas }).mount());
+
+  function share(x, y) {
+    move('board:42', { x, y });
+  }
 </script>
 
-<canvas bind:this={canvas} class="cursor-layer"></canvas>
-<div onpointermove={(e) => move('board:42', { x: e.clientX, y: e.clientY })}> ... </div>
+<!-- The painted layer is presentation only: hide it from the accessibility
+     tree and expose collaborators through a roster (see the composition
+     linked above). Focusable regions share the same publish path as the
+     pointer, so keyboard users are visible collaborators too. -->
+<canvas bind:this={canvas} class="cursor-layer" aria-hidden="true"></canvas>
+<div
+  role="button"
+  tabindex="0"
+  onpointermove={(e) => share(e.clientX, e.clientY)}
+  onfocus={(e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    share(r.x + r.width / 2, r.y + r.height / 2);
+  }}
+>
+  ...
+</div>
 ```
 
 That is the whole zero-config path. `mount()` returns its teardown, so the `$effect` one-liner is the complete lifecycle; unmounting pauses the pipeline (socket closed, state cleared) and a remount on the same canvas resumes it, same or different topic. `move()` is unchanged - sending stays on the main thread (pointer events only exist there); only receiving and rendering move off it. On a browser without the worker pipeline (no `OffscreenCanvas`, an old Safari) the identical call renders on the main thread through the same renderer backends: same visuals, lower ceiling, no API difference, no thrown error.

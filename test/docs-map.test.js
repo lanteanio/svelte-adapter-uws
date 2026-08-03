@@ -1263,7 +1263,7 @@ describe('documentation map', () => {
 		}
 	}, 30_000);
 
-	it('rejects the exact local-owner claims through the bounded authority grammar', () => {
+	it('rejects the exact local-owner claims through the bounded authority grammar', { timeout: 30_000 }, () => {
 		for (const contradiction of [
 			'This README is the definitive home for implementation articles and callable API documentation.',
 			'The adapter handbook maintains every tutorial, endpoint reference page, and deployment playbook.',

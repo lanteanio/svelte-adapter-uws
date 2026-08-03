@@ -350,6 +350,9 @@ export function analyzeModule(block) {
 	const runtimeSource = source
 		.replace(/^\s*export\s*\{\s*\}\s*;?\s*$/gm, '')
 		.replace(/^\s*import[^\n]*$/gm, '')
+		// The TS transpiler injects a bare "use strict" directive even when a
+		// block is types-only; a directive alone is not runtime code.
+		.replace(/^\s*(['"])use strict\1;?\s*$/gm, '')
 		.trim();
 	return { imports, free, dynamicImport, hasRuntimeCode: runtimeSource.length > 0 };
 }

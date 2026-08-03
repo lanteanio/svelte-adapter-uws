@@ -44,6 +44,27 @@ A generated document declares its output path under `docs/` in the generator.
 `test/root-doc-placement.test.js` fails when a markdown file appears in the root
 outside that list, so a new contract cannot silently land there.
 
+## Size
+
+The README is one comprehensive reference by design: a single searchable
+document a consumer reads offline with the installed version, rather than a
+thin landing page that defers every fact to the site. The cost of that choice
+is growth, and growth is governed by a ratchet rather than a split:
+
+- `docs/documentation.v1.json` pins `readmeMaxLines`; the documentation
+  contract gate fails when the README exceeds it.
+- The pin only moves DOWN as sections migrate to the site, or up through a
+  reviewed edit of the pinned value - never implicitly.
+- Long-form teaching material (tutorials, walkthroughs, multi-page guides)
+  belongs to the site from the start and does not enter the README.
+
+A physical split of the existing reference sections is deliberately not the
+accepted mechanism: it would break the fence classification manifest, the
+entry-point ownership map, and several hundred stable deep links for a
+navigational gain the section map already provides. If the site's searchable
+reference reaches parity for a section, that section moves and the ratchet
+tightens by its size.
+
 ## Consequences
 
 - The installed package carries the contracts needed to operate that version.

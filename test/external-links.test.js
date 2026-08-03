@@ -216,7 +216,7 @@ describe('scheduled external link ownership', () => {
 		for (const relative of documentationFiles()) {
 			const text = readFileSync(new URL(relative.split('/').map(encodeURIComponent).join('/'), root), 'utf8');
 			for (const link of linksOf(text)) {
-				if (/github\.com\/[^/]+\/[^/]+\/blob\/master(?:\/|$)/i.test(link.target)) {
+				if (/github\.com\/[^/]+\/[^/]+\/(?:blob|tree|raw|commits|blame)\/master(?:\/|$)/i.test(link.target)) {
 					stale.push(`${relative}:${link.line} ${link.target}`);
 				}
 			}
