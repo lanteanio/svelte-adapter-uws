@@ -209,7 +209,7 @@ Choose one complete adapter/native-addon tuple; do not mix rows:
 
 ```bash
 # stable 0.5.8 (@latest)
-npm install svelte-adapter-uws@latest https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.67.0.tar.gz
+npm install svelte-adapter-uws@latest github:uNetworking/uWebSockets.js#v20.67.0
 # prerelease 0.6.0-next.91 (staged; run only after coordinated publication)
 npm install svelte-adapter-uws@0.6.0-next.91 https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
 # @next is moving and may still resolve an earlier published candidate.

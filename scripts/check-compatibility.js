@@ -24,6 +24,7 @@ const manifestPath = join(root, "docs", "compatibility.v1.csv");
 const packagePath = join(root, "package.json");
 const readmePath = join(root, "README.md");
 const migrationPath = join(root, "MIGRATION.md");
+const claimRegisterPath = join(root, "docs", "claim-register.md");
 
 export const COMPATIBILITY_START = "<!-- compatibility:start -->";
 export const COMPATIBILITY_END = "<!-- compatibility:end -->";
@@ -214,17 +215,31 @@ export function uwsRefFromSpec(spec) {
 	);
 }
 
-export function uwsArchiveInstallSpec(spec) {
-	const ref = uwsRefFromSpec(spec);
-	if (ref === null)
+/**
+ * The install spec for a row, which must be EXACTLY what that row's adapter
+ * version declares as its optional dependency.
+ *
+ * This used to rewrite every spec into an archive URL. For the prerelease row
+ * that is a no-op, because the manifest already records the archive form - but
+ * the stable row records a `github:` git spec, which is what that published
+ * version actually declares. npm does not dedupe two DIFFERENT non-registry
+ * specs for the same name, so the rewritten line installed the archive at the
+ * top level while the adapter went on resolving the nested copy from its own
+ * git spec: two acquisitions, and the pinned one is the copy that never loads.
+ * Under a caption reading "do not mix rows".
+ *
+ * The ref is still validated, so a row naming something other than an exact
+ * tagged GitHub source is refused rather than published.
+ *
+ * Unrelated to `uwsInstallSpec` in src/uws-load-hint.js, which reads THIS
+ * package's own optional dependency at runtime; this one echoes a manifest row.
+ */
+export function uwsDeclaredInstallSpec(spec) {
+	if (uwsRefFromSpec(spec) === null)
 		throw new Error(
 			"uWebSockets.js must name an exact tagged GitHub source",
 		);
-	return (
-		"https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/" +
-		ref +
-		".tar.gz"
-	);
+	return spec;
 }
 
 export function parseCompatibility(text) {
@@ -1460,7 +1475,7 @@ export function renderCompatibility(rows) {
 				"@" +
 				(staged ? row.adapter_version : row.dist_tag) +
 				" " +
-				uwsArchiveInstallSpec(row.uwebsockets),
+				uwsDeclaredInstallSpec(row.uwebsockets),
 		);
 		if (staged)
 			lines.push(
@@ -1795,16 +1810,72 @@ function readWorkspaceSibling(name) {
 	}
 }
 
+/**
+ * Adapter version literals written by hand OUTSIDE the generated block must
+ * still agree with the manifest.
+ *
+ * The generated block is regenerated on every bump, so it cannot drift - but
+ * the same versions were also typed into surrounding prose, a release link and
+ * the claim register, where nothing checked them. Only one prose fact (the Node
+ * range) was bound, so a `-next.N` bump silently left four stale mentions
+ * pointing at a candidate that no longer exists.
+ *
+ * Series like `0.5.x` are deliberately not matched: those name a line, not a
+ * release, and are correct across bumps.
+ *
+ * @param {Array<{path: string, text: string}>} documents - with any generated
+ *   block already removed
+ * @param {Array<Record<string, string>>} rows
+ */
+export function validateUnownedVersionLiterals(documents, rows) {
+	const errors = [];
+	const current = rows.find((row) => row.current === "true");
+	const stable = rows.find((row) => row.channel === "stable");
+	const expected = [
+		[/\b0\.6\.0-next\.\d+\b/g, current?.adapter_version, "prerelease"],
+		[/\b0\.5\.\d+\b/g, stable?.adapter_version, "stable"],
+	];
+	for (const { path, text } of documents) {
+		for (const [pattern, want, channel] of expected) {
+			if (!want) continue;
+			for (const match of text.matchAll(pattern)) {
+				if (match[0] === want) continue;
+				const line = text.slice(0, match.index).split("\n").length;
+				errors.push(
+					path + ":" + line + " names " + channel + " " + match[0] +
+						", but the manifest records " + want,
+				);
+			}
+		}
+	}
+	return errors;
+}
+
 function main() {
 	const pkg = JSON.parse(readFileSync(packagePath, "utf8"));
 	const rows = parseCompatibility(readFileSync(manifestPath, "utf8"));
 	const readme = readFileSync(readmePath, "utf8");
 	const migration = readFileSync(migrationPath, "utf8");
 	const publishedDocuments = publishedMarkdownDocuments(pkg);
+	// The generated block regenerates on every bump, so only the prose AROUND
+	// it can go stale; strip the block before scanning.
+	const withoutBlock = (text) => {
+		const start = text.indexOf(COMPATIBILITY_START);
+		const end = text.indexOf(COMPATIBILITY_END);
+		if (start === -1 || end === -1) return text;
+		return text.slice(0, start) + text.slice(end);
+	};
 	const errors = [
 		...validateCompatibility(rows, pkg),
 		...validateWorkspaceSiblings(rows, readWorkspaceSibling),
 		...validatePublishedCompatibilityDocuments(publishedDocuments, rows),
+		...validateUnownedVersionLiterals(
+			[
+				{ path: "README.md", text: withoutBlock(readme) },
+				{ path: "docs/claim-register.md", text: readFileSync(claimRegisterPath, "utf8") },
+			],
+			rows,
+		),
 	];
 	if (errors.length) {
 		console.error("check-compatibility FAILED:");

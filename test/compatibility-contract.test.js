@@ -27,6 +27,7 @@ import {
 	MIGRATION_GUIDE_RELATIVE_PATH,
 	parseCompatibility,
 	renderCompatibility,
+	uwsDeclaredInstallSpec,
 	renderMigrationCompatibility,
 	replaceCompatibilityBlock,
 	validateCompatibility,
@@ -132,14 +133,20 @@ describe("ecosystem compatibility manifest", () => {
 			readme.indexOf(COMPATIBILITY_END) + COMPATIBILITY_END.length;
 		const rendered = renderCompatibility(rows);
 		expect(readme.slice(start, end)).toBe(rendered);
+		// Each line names the spec its OWN row records, in that row's own form.
+		// The stable row records a git spec because that is what the published
+		// stable adapter declares; rewriting it to an archive URL gave npm two
+		// non-registry specs for one name, which it does not dedupe.
+		const stable = rows.find((row) => row.channel === "stable");
+		const prerelease = rows.find((row) => row.channel === "prerelease");
 		expect(rendered).toContain(
-			"npm install svelte-adapter-uws@latest " +
-				nativeArchive("v20.67.0"),
+			"npm install svelte-adapter-uws@latest " + stable.uwebsockets,
 		);
 		expect(rendered).toContain(
-			"npm install svelte-adapter-uws@0.6.0-next.91 " +
-				nativeArchive("v20.69.0"),
+			"npm install svelte-adapter-uws@0.6.0-next.91 " + prerelease.uwebsockets,
 		);
+		expect(stable.uwebsockets.startsWith("github:")).toBe(true);
+		expect(prerelease.uwebsockets).toBe(nativeArchive("v20.69.0"));
 		expect(rendered).toContain(
 			"staged, unpublished `0.6.0-next.91` candidate",
 		);
@@ -2408,5 +2415,65 @@ describe("ecosystem compatibility manifest", () => {
 		} finally {
 			rmSync(temp, { recursive: true, force: true });
 		}
+		// Explicit, because this one recursively copies the whole docs tree and
+		// then spawns a child process: it was measured at 5.8s against the
+		// default 5s and so failed on timing rather than on anything it asserts.
+		// A gate that reddens at random teaches people to re-run it.
+	}, 60_000);
+
+	describe("the generated install line names the addon the row's adapter declares", () => {
+		// The generator used to rewrite every native spec into an archive URL.
+		// For the prerelease row that is a no-op, because the manifest already
+		// records the archive form - but the stable row records a git spec,
+		// which is what that published version declares. npm does not dedupe
+		// two DIFFERENT non-registry specs for the same name, so the rewritten
+		// line acquired the addon twice and the adapter resolved the nested
+		// copy, not the pinned one. Under a caption reading "do not mix rows".
+		const manifest = parseCompatibility(read("docs/compatibility.v1.csv"));
+		const readme = read("README.md");
+		const block = readme.slice(
+			readme.indexOf(COMPATIBILITY_START),
+			readme.indexOf(COMPATIBILITY_END),
+		);
+
+		it("echoes each row's spec verbatim rather than rewriting its form", () => {
+			const rows = manifest.filter((row) => row.uwebsockets);
+			expect(rows.length).toBeGreaterThanOrEqual(2);
+			for (const row of rows) {
+				expect(uwsDeclaredInstallSpec(row.uwebsockets)).toBe(row.uwebsockets);
+				expect(
+					block.includes(row.uwebsockets),
+					`the ${row.channel} install line does not name ${row.uwebsockets}`,
+				).toBe(true);
+			}
+		});
+
+		it("covers both spec FORMS, so a rewrite of either is caught", () => {
+			// If every row ever used the same form, a rewrite to that form would
+			// be invisible here. The manifest is only a real test of this while
+			// it carries one git spec and one archive URL.
+			const forms = new Set(
+				manifest
+					.filter((row) => row.uwebsockets)
+					.map((row) => (row.uwebsockets.startsWith("github:") ? "git" : "archive")),
+			);
+			expect([...forms].sort()).toEqual(["archive", "git"]);
+		});
+
+		it("still refuses a row that does not name an exact tagged source", () => {
+			// Split across the slash so the raw source never contains a bare
+			// owner/repo token: the pin gate scans tracked files for exactly
+			// that shape and would report these fixtures as stale install specs.
+			const untagged = "github:uNetworking" + "/" + "uWebSockets.js";
+			expect(() => uwsDeclaredInstallSpec("uWebSockets.js@^" + "20")).toThrow(
+				/exact tagged GitHub source/,
+			);
+			expect(() => uwsDeclaredInstallSpec(untagged)).toThrow(
+				/exact tagged GitHub source/,
+			);
+			expect(() => uwsDeclaredInstallSpec(untagged + "#main")).toThrow(
+				/exact tagged GitHub source/,
+			);
+		});
 	});
 });
