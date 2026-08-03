@@ -5,7 +5,7 @@
  * process can build and boot the native server.
  */
 import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareVersions, platformVerdict } from './doctor.js';
@@ -123,8 +123,16 @@ export async function runPreflight({
 	return { ok: true, results };
 }
 
-const invoked = process.argv[1] ? resolve(process.argv[1]) : null;
-const current = fileURLToPath(import.meta.url);
+// The published bin is a SYMLINK in node_modules/.bin on POSIX, so argv[1] is
+// the link path while import.meta.url is the real file: comparing them
+// unresolved made `svelte-adapter-uws-preflight` a silent no-op there, and a
+// CI step or a documented stop-condition that runs it would always "pass".
+// Resolve both through the filesystem before comparing.
+function realOrSelf(path) {
+	try { return realpathSync(path); } catch { return path; }
+}
+const invoked = process.argv[1] ? realOrSelf(resolve(process.argv[1])) : null;
+const current = realOrSelf(fileURLToPath(import.meta.url));
 const isCli = invoked !== null && (process.platform === 'win32'
 	? invoked.toLowerCase() === current.toLowerCase()
 	: invoked === current);

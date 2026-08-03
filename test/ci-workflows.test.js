@@ -11,7 +11,7 @@
 // gates read what they check.
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { LANES } from '../scripts/verify.js';
 
@@ -91,13 +91,19 @@ describe('the suite lane demands the real runtime', () => {
 		expect(test.env.REQUIRE_UWS).toBe('1');
 	});
 
-	it('runs the visible product smoke after diagnosis and before the suite', () => {
+	it('runs the product smoke exactly once, inside the test run', () => {
+		// The smoke checkpoint boots the real built runtime, which the test
+		// run already does; spawning it as its own lane step ran the same
+		// build and the same exchange a second time. It lives in
+		// test/smoke-command.test.js, so the lane must NOT repeat it.
+		expect(suite.some((step) => step.script === 'smoke')).toBe(false);
+		expect(
+			existsSync(new URL('./smoke-command.test.js', import.meta.url)),
+			'the smoke checkpoint must still be covered by the suite it moved into'
+		).toBe(true);
 		const doctor = suite.find((step) => step.script === 'doctor');
-		const smoke = suite.find((step) => step.script === 'smoke');
 		const test = suite.find((step) => step.script === 'test');
-		expect(smoke).toBeTruthy();
-		expect(suite.indexOf(smoke)).toBeGreaterThan(suite.indexOf(doctor));
-		expect(suite.indexOf(smoke)).toBeLessThan(suite.indexOf(test));
+		expect(suite.indexOf(doctor)).toBeLessThan(suite.indexOf(test));
 	});
 
 	it('runs both packed publishing analyzers before the test suite', () => {

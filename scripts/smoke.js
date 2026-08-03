@@ -13,7 +13,6 @@ import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
-import { createTestServer } from '../src/testing.js';
 
 const require = createRequire(import.meta.url);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -70,6 +69,34 @@ function waitForFrame(ws, predicate, label, timeoutMs = 5000) {
 }
 
 /**
+ * Boot the REAL built adapter runtime, the way a deployed app boots it.
+ *
+ * This deliberately does NOT use `createTestServer`: that harness is a second
+ * implementation of the server's plumbing, and this checkpoint exists to prove
+ * the shipped runtime answers - a checkpoint built on the reimplementation
+ * proves the reimplementation. The fixture is built once and reused (the
+ * builder is source-digest keyed), then its generated handler is imported and
+ * listened exactly as production does.
+ *
+ * @returns {Promise<{ url: string, wsUrl: string, platform: any, track: (ws: any) => any, close: () => Promise<void> }>}
+ */
+async function startServer() {
+	const { startRealRuntime } = await import('../test/helpers/real-runtime.js');
+	const runtime = await startRealRuntime();
+	const sockets = [];
+	return {
+		url: runtime.httpUrl,
+		wsUrl: runtime.wsUrl,
+		platform: runtime.handler.platform,
+		track(ws) { sockets.push(ws); return ws; },
+		async close() {
+			for (const ws of sockets) { try { ws.close(); } catch { /* already closed */ } }
+			await runtime.stop();
+		}
+	};
+}
+
+/**
  * Run the contributor smoke checkpoint.
  *
  * @param {{ log?: (line: string) => void }} [options]
@@ -86,7 +113,7 @@ export async function runSmoke({ log = console.log } = {}) {
 	let server;
 	let result;
 	try {
-		server = await createTestServer();
+		server = await startServer();
 
 		const health = await fetch(server.url + '/healthz', {
 			signal: AbortSignal.timeout(5000)
@@ -108,12 +135,22 @@ export async function runSmoke({ log = console.log } = {}) {
 		client.send(JSON.stringify({ type: 'subscribe', topic: 'smoke', ref: 'smoke-subscribe' }));
 		await subscribed;
 
+		// The publish is triggered BY THE CLIENT and delivered back to it, so
+		// this is a full client -> real server -> client round trip through
+		// the deployed runtime rather than a server-side call the client
+		// merely observes.
 		const delivered = waitForFrame(
 			client,
 			(frame) => frame?.topic === 'smoke' && frame.event === 'checkpoint' && frame.data?.ok === true,
 			'published checkpoint'
 		);
-		server.platform.publish('smoke', 'checkpoint', { ok: true });
+		client.send(JSON.stringify({
+			type: 'broadcast',
+			topic: 'smoke',
+			event: 'checkpoint',
+			payload: { ok: true },
+			options: { seq: false }
+		}));
 		await delivered;
 
 		result = {

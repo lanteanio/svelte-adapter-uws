@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { posix } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import pkg from '../package.json' with { type: 'json' };
 import { evaluatePreflight, runPreflight } from '../scripts/preflight.js';
@@ -71,5 +74,43 @@ describe('consumer native preflight', () => {
 		]) {
 			expect(pkg.files).toContain(file);
 		}
+
+		// The bin's own file list must be derived from what it actually
+		// imports, not from a hand-kept trio: a new internal import that is
+		// not published turns the published bin into a module-not-found.
+		const source = readFileSync(new URL('../scripts/preflight.js', import.meta.url), 'utf8');
+		const localImports = [...source.matchAll(/from\s+'(\.[^']+)'/g)].map((m) => m[1]);
+		expect(localImports.length).toBeGreaterThan(0);
+		for (const specifier of localImports) {
+			// Normalize against the bin's own directory: an import may climb
+			// out of scripts/ (../src/...), and `files` publishes whole
+			// directories as well as individual paths.
+			const relative = posix.normalize(posix.join('scripts', specifier));
+			const published = pkg.files.some((entry) =>
+				entry === relative || relative.startsWith(entry.replace(/\/$/, '') + '/'));
+			expect(published, `${relative} is imported by the bin but not published`).toBe(true);
+		}
 	});
+
+	it('runs as a real spawned process, not a silently skipped module', async () => {
+		// The CLI guard compares argv[1] to import.meta.url. Before it
+		// resolved symlinks, the POSIX node_modules/.bin link made the
+		// published bin a no-op that exited 0 having checked nothing - so a
+		// CI step or a documented stop-condition built on it always passed.
+		// Only spawning it proves the guard fires.
+		const { execFileSync } = await import('node:child_process');
+		const script = fileURLToPath(new URL('../scripts/preflight.js', import.meta.url));
+		let output = '';
+		let status = 0;
+		try {
+			output = execFileSync(process.execPath, [script], { encoding: 'utf8', timeout: 120000 });
+		} catch (error) {
+			output = String(error.stdout || '') + String(error.stderr || '');
+			status = error.status ?? 1;
+		}
+		// Either verdict is legitimate here (the native addon may be absent);
+		// what must never happen is silent success with no report at all.
+		expect(output, 'the bin produced no preflight report, so its CLI guard did not fire').toMatch(/preflight/i);
+		expect([0, 1]).toContain(status);
+	}, 130000);
 });

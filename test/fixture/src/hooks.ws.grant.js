@@ -12,6 +12,34 @@ const delayed = new WeakMap();
 const pluginSubscribe = group.hooks.subscribe;
 const subscriptionsSlot = Symbol.for('adapter-uws.ws.subscriptions');
 
+/**
+ * Simulate a large membership without allocating one.
+ *
+ * `size` alone is not enough: a private cap that COUNTS by iterating the Set
+ * would read the real (small) membership and evade the probe entirely, so the
+ * iteration protocol is shadowed to agree with the reported size.
+ *
+ * @param {Set<string>} subscriptions
+ * @param {number} size
+ */
+function shadowSubscriptionSize(subscriptions, size) {
+	Object.defineProperty(subscriptions, 'size', { configurable: true, value: size });
+	const real = [...subscriptions];
+	Object.defineProperty(subscriptions, Symbol.iterator, {
+		configurable: true,
+		value: function* shadowedIterator() {
+			yield* real;
+			for (let index = real.length; index < size; index++) yield `__cap-probe-filler:${index}`;
+		}
+	});
+}
+
+/** @param {Set<string>} subscriptions */
+function unshadowSubscriptionSize(subscriptions) {
+	delete subscriptions.size;
+	delete subscriptions[Symbol.iterator];
+}
+
 async function subscribe(ws, topic, { platform }) {
 	platform.send(ws, 'probe', 'hook-entered', { topic });
 	if (topic === 'delayed-room') {
@@ -58,15 +86,32 @@ export async function message(ws, { data, platform }) {
 	if (msg.type === 'cap-probe') {
 		const subscriptions = ws.getUserData()?.[subscriptionsSlot];
 		if (!(subscriptions instanceof Set)) throw new Error('cap probe has no subscription Set');
-		Object.defineProperty(subscriptions, 'size', { configurable: true, value: msg.size });
+		shadowSubscriptionSize(subscriptions, msg.size);
 		let denial;
 		try { denial = await platform.subscribe(ws, msg.topic); }
-		finally { delete subscriptions.size; }
+		finally { unshadowSubscriptionSize(subscriptions); }
 		platform.send(ws, 'probe', 'cap-result', {
 			topic: msg.topic,
 			denial: denial ?? null,
 			held: subscriptions.has(msg.topic)
 		});
+	}
+	// Arm/disarm the shadow WITHOUT subscribing, so the caller can drive the
+	// CLIENT-FACING wire lanes (a real `subscribe` frame and a real
+	// `subscribe-batch` frame) at a chosen size. The platform lane above
+	// covers 2 of the 5 canonical cap call sites; the other three are only
+	// reachable from a client frame, so a private cap could hide there while
+	// every probe stayed green.
+	if (msg.type === 'cap-arm') {
+		const subscriptions = ws.getUserData()?.[subscriptionsSlot];
+		if (!(subscriptions instanceof Set)) throw new Error('cap probe has no subscription Set');
+		shadowSubscriptionSize(subscriptions, msg.size);
+		platform.send(ws, 'probe', 'cap-armed', { size: msg.size });
+	}
+	if (msg.type === 'cap-disarm') {
+		const subscriptions = ws.getUserData()?.[subscriptionsSlot];
+		if (subscriptions instanceof Set) unshadowSubscriptionSize(subscriptions);
+		platform.send(ws, 'probe', 'cap-disarmed', { held: [...subscriptions] });
 	}
 	// The OBSERVER lane, exposed so a differential can compare it across the
 	// three surfaces. It has no second line of defence - the gate IS the answer -
