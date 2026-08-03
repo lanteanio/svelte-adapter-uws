@@ -101,31 +101,36 @@ describe("accessible cursor example", () => {
 		);
 	});
 
-	it("ships a compilable composition with semantic and keyboard equivalents", () => {
+	it("ships a runes-mode composition whose reactive features survive a runes-forced project", () => {
 		const source = readFileSync(
 			new URL("../examples/cursor-accessible.svelte", import.meta.url),
 			"utf8",
 		);
+		// Compile under FORCED runes and accept no warning of any kind. The
+		// previous a11y-only filter silently dropped non_reactive_update -
+		// which meant the live-region announcement and the pause control, the
+		// two features this composition exists to demonstrate, compiled to
+		// inert code in a runes project while the gate stayed green.
 		const result = compile(source, {
 			filename: "examples/cursor-accessible.svelte",
 			generate: "server",
+			runes: true,
 		});
-		expect(
-			result.warnings.filter((warning) =>
-				warning.code.startsWith("a11y"),
-			),
-		).toEqual([]);
+		expect(result.warnings.map((w) => w.code + ": " + w.message)).toEqual([]);
+		// The two template-driving flags must be declared reactive state.
+		expect(source).toMatch(/let announcement = \$state\(/);
+		expect(source).toMatch(/let cursorMotionVisible = \$state\(/);
+		expect(source).not.toMatch(/\bon:[a-z]/);
 		expect(result.js.code).toMatch(/escape\(\s*cursorName/);
 		expect(source).not.toContain("{@html");
 		expect(source).toContain("{#if hasFiniteCursorPosition(data)}");
 		expect(source).toContain('aria-live="polite"');
 		expect(source).toContain('aria-hidden="true"');
-		expect(source).toContain("Pause remote cursor motion");
 		expect(source).toContain('aria-controls="remote-cursor-layer"');
 		expect(source).toContain("{#if cursorMotionVisible}");
 		expect(source).toContain("@media (prefers-reduced-motion: reduce)");
-		expect(source).toContain("on:focus={() => moveToCell(cell)}");
-		expect(source).toContain("on:pointermove={moveFromPointer}");
+		expect(source).toContain("onfocus={() => moveToCell(cell)}");
+		expect(source).toContain("onpointermove={moveFromPointer}");
 		expect(source).toContain("describeBoardPosition(data, cells)");
 	});
 
@@ -134,8 +139,12 @@ describe("accessible cursor example", () => {
 			new URL("../README.md", import.meta.url),
 			"utf8",
 		);
+		// The composition is repository-only (the library ships primitives,
+		// reference UI stays out of the tarball), so the README reaches it
+		// through the stable source route rather than a packaged-relative
+		// link that would be dead in an installed copy.
 		expect(readme).toContain(
-			"[complete Svelte composition](./examples/cursor-accessible.svelte)",
+			"[complete Svelte composition](https://github.com/lanteanio/svelte-adapter-uws/blob/main/examples/cursor-accessible.svelte)",
 		);
 		expect(readme).toMatch(
 			/Do not put continuous\s+position updates in an `aria-live` region/,

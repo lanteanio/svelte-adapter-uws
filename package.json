@@ -171,6 +171,7 @@
 		"protocol.schema.json",
 		"test-vectors",
 		"examples",
+		"!examples/*.svelte",
 		"docs",
 		"scripts/check-native-install.js",
 		"scripts/preflight.js",

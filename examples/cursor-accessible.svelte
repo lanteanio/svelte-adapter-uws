@@ -18,10 +18,10 @@
 	];
 	const cursors = cursor(topic);
 
-	let board;
-	let announcement = '';
+	let board = $state();
+	let announcement = $state('');
 	let previous = null;
-	let cursorMotionVisible = true;
+	let cursorMotionVisible = $state(true);
 
 	const unsubscribe = cursors.subscribe((current) => {
 		const summary = summarizeCursorRosterChange(previous, current);
@@ -64,7 +64,7 @@
 <button
 	type="button"
 	aria-controls="remote-cursor-layer"
-	on:click={toggleCursorMotion}
+	onclick={toggleCursorMotion}
 >
 	{cursorMotionVisible ? 'Pause remote cursor motion' : 'Show remote cursors'}
 </button>
@@ -80,9 +80,9 @@
 		<button
 			type="button"
 			class="cell"
-			on:focus={() => moveToCell(cell)}
-			on:click={() => moveToCell(cell)}
-			on:pointermove={moveFromPointer}
+			onfocus={() => moveToCell(cell)}
+			onclick={() => moveToCell(cell)}
+			onpointermove={moveFromPointer}
 		>
 			<span class="cell-title">{cell.label}</span>
 		</button>
