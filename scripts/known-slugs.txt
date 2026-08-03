@@ -16,8 +16,12 @@ client-queue
 cluster-mode
 dev-101-headers
 fd-limit
+listen-failed
+native-load
 pressure
 publish-batched
+request-closed
+request-timeout
 send-dropped
 sendto-async
 subscribe-denied

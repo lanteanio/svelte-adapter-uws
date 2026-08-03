@@ -181,6 +181,15 @@ describe('generated operational error reference', () => {
 		const message = adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_TIMEOUT);
 		expect(message.startsWith(byId.get(ADAPTER_ERROR_IDS.REQUEST_TIMEOUT).messagePrefix)).toBe(true);
 		expect(message).toContain('[' + ADAPTER_ERROR_IDS.REQUEST_TIMEOUT + ']');
-		expect(message).toContain(byId.get(ADAPTER_ERROR_IDS.REQUEST_TIMEOUT).help);
+		// Consumer-visible text carries the ABSOLUTE short link - a console
+		// cannot resolve a repository-relative route.
+		expect(message).toContain(byId.get(ADAPTER_ERROR_IDS.REQUEST_TIMEOUT).link);
+		expect(byId.get(ADAPTER_ERROR_IDS.REQUEST_TIMEOUT).link).toMatch(/^https:\/\/svti\.me\//);
+	});
+
+	it('gives every stable registry entry an absolute short link for runtime text', () => {
+		for (const entry of byId.values()) {
+			expect(entry.link, entry.id).toMatch(/^https:\/\/svti\.me\/[a-z0-9-]+$/);
+		}
 	});
 });

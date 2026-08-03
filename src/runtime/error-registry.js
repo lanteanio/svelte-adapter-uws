@@ -27,8 +27,9 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		nextAction: 'Check address availability, port conflicts, and bind permissions, then restart the process.',
 		sources: Object.freeze(['src/runtime/index.js', 'src/runtime/handler/lifecycle.js']),
 		anchor: 'adapter-err-listen',
-		help: 'docs/errors.md#adapter-err-listen'
-	}),
+		help: 'docs/errors.md#adapter-err-listen',
+		link: 'https://svti.me/listen-failed'
+}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.VITE_LOAD,
 		code: null,
@@ -76,7 +77,8 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		nextAction: 'Install the exact supported archive and a binary for the active OS, CPU, Node ABI, and documented Linux libc floor.',
 		sources: Object.freeze(['src/uws-load-hint.js']),
 		anchor: 'adapter-err-native-load',
-		help: 'docs/errors.md#adapter-err-native-load'
+		help: 'docs/errors.md#adapter-err-native-load',
+		link: 'https://svti.me/native-load'
 	}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.REQUEST_TIMEOUT,
@@ -91,7 +93,8 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		nextAction: 'Reconcile application state first, or retry only through an idempotent operation; then investigate the handler, connection, and measured timeout budget.',
 		sources: Object.freeze(['src/runtime/handler/platform.js', 'src/vite.js']),
 		anchor: 'adapter-err-request-timeout',
-		help: 'docs/errors.md#adapter-err-request-timeout'
+		help: 'docs/errors.md#adapter-err-request-timeout',
+		link: 'https://svti.me/request-timeout'
 	}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.REQUEST_CLOSED,
@@ -106,7 +109,8 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		nextAction: 'Reconcile application state first, or retry only through an idempotent operation after the connection recovers.',
 		sources: Object.freeze(['src/runtime/handler/platform.js', 'src/runtime/handler.js', 'src/vite.js']),
 		anchor: 'adapter-err-request-closed',
-		help: 'docs/errors.md#adapter-err-request-closed'
+		help: 'docs/errors.md#adapter-err-request-closed',
+		link: 'https://svti.me/request-closed'
 	})
 ]);
 
