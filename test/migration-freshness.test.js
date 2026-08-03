@@ -111,6 +111,11 @@ describe('migration freshness follows public surface and schema changes', () => 
 	it('binds the guide tuple table to the compatibility manifest', () => {
 		// The prerequisites table duplicates manifest facts by design (a guide
 		// must be readable offline); this is what keeps the copies honest.
+		// Every version-bearing cell must carry exactly the manifest fact and
+		// nothing else: a substring check would let a superstring such as
+		// 0.5.80 or an extra second version ride a green gate. A trailing
+		// wildcard (0.6.0-next.*) restates a series and is stripped before
+		// the exact comparison.
 		const rows = parseCompatibility(compatibilityCsv);
 		const stable = rows.find((row) => row.channel === 'stable');
 		const current = rows.find((row) => row.current === 'true');
@@ -119,16 +124,19 @@ describe('migration freshness follows public surface and schema changes', () => 
 			expect(match, `guide tuple table row "${label}" not found`).toBeTruthy();
 			return match.split('|').map((cell) => cell.trim());
 		};
+		const cellTokens = (cell) =>
+			(cell.match(/\bv?\d+\.\d+(?:\.(?:x|\d+))?(?:-[0-9A-Za-z.*]+)?/g) || [])
+				.map((token) => token.replace(/\.\*$/, ''));
 		const rollback = tableRow('Rollback baseline');
-		expect(rollback[2]).toContain(stable.adapter_version);
-		expect(rollback[3]).toContain(stable.realtime);
-		expect(rollback[4]).toContain(stable.extensions);
-		expect(rollback[5]).toContain(uwsRefFromSpec(stable.uwebsockets));
+		expect(cellTokens(rollback[2])).toEqual([stable.adapter_version]);
+		expect(cellTokens(rollback[3])).toEqual([stable.realtime]);
+		expect(cellTokens(rollback[4])).toEqual([stable.extensions]);
+		expect(cellTokens(rollback[5])).toEqual([uwsRefFromSpec(stable.uwebsockets)]);
 		const upgrade = tableRow('Upgrade candidate');
-		expect(upgrade[2]).toContain(current.adapter);
-		expect(upgrade[3]).toContain(current.realtime);
-		expect(upgrade[4]).toContain(current.extensions);
-		expect(upgrade[5]).toContain(uwsRefFromSpec(current.uwebsockets));
+		expect(cellTokens(upgrade[2])).toEqual([current.adapter]);
+		expect(cellTokens(upgrade[3])).toEqual([current.realtime]);
+		expect(cellTokens(upgrade[4])).toEqual([current.extensions]);
+		expect(cellTokens(upgrade[5])).toEqual([uwsRefFromSpec(current.uwebsockets)]);
 	});
 
 	it('updates exactly one marker and rejects missing or duplicated authority', () => {
