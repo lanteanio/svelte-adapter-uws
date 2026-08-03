@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, globSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import MarkdownIt from 'markdown-it';
 import { parse as parseYaml } from 'yaml';
@@ -25,6 +25,23 @@ function inlineText(children = []) {
 		else if (child.children) text += inlineText(child.children);
 	}
 	return text;
+}
+
+/**
+ * The rows of the lane table, as cell arrays. Anchoring assertions to this
+ * table is the difference between "the lane is mentioned somewhere in the file"
+ * and "the lane has a row here".
+ */
+function laneTableRows(source) {
+	const lines = source.split('\n');
+	const header = lines.findIndex((line) => line.startsWith('| Lane | Typical duration |'));
+	if (header === -1) return [];
+	const rows = [];
+	// +2 skips the header and its separator row.
+	for (let index = header + 2; index < lines.length && lines[index].startsWith('|'); index++) {
+		rows.push(lines[index].split('|').slice(1, -1));
+	}
+	return rows;
 }
 
 function levelTwoHeadings(source) {
@@ -133,7 +150,7 @@ describe('public contribution contract', () => {
 			.replace('npm run bootstrap   # root deps, the fixture\'s own deps, then the doctor', 'npm run not-bootstrap')
 			.replace('npm run smoke       # real HTTP health + WebSocket subscribe/publish checkpoint', 'npm run not-smoke')
 			.replace('npm run verify:fast # seconds - the static gates', 'npm run not-fast')
-			.replace('npm run verify:pr   # exactly what the hosted gate runs', 'npm run not-pr');
+			.replace('npm run verify:pr   # the strongest local signal, but not the whole hosted gate', 'npm run not-pr');
 		for (const command of cloneCommands.slice(2)) expect(corrupted).toContain(command);
 		expect(cloneJourney(corrupted)).toEqual({
 			language: 'bash',
@@ -242,6 +259,12 @@ describe('public contribution contract', () => {
 		const contributing = read('CONTRIBUTING.md');
 		const pkg = JSON.parse(read('package.json'));
 		expect(contributing).toContain('| Lane | Typical duration | Required setup | Scope and exception |');
+
+		// Anchored INSIDE the lane table. A file-wide substring check passed on
+		// every lane name because all of them also appear in the "What each
+		// command runs" table, which meant two of the rows could be deleted
+		// outright with this test still green.
+		const rows = laneTableRows(contributing);
 		for (const lane of [
 			'verify:fast',
 			'verify:suite',
@@ -251,7 +274,12 @@ describe('public contribution contract', () => {
 			'test:coverage'
 		]) {
 			expect(pkg.scripts[lane], lane).toBeTruthy();
-			expect(contributing, lane).toContain('`npm run ' + lane + '`');
+			const row = rows.find((cells) => cells[0].includes('`npm run ' + lane + '`'));
+			expect(row, `${lane} has no row in the lane table`).toBeDefined();
+			// Every column carries content, so a row cannot be reduced to its name.
+			for (const [index, cell] of row.entries()) {
+				expect(cell.trim().length, `${lane} column ${index} is empty`).toBeGreaterThan(0);
+			}
 		}
 		for (const phrase of [
 			'missing addon is a failure',
@@ -267,20 +295,26 @@ describe('public contribution contract', () => {
 	it('routes every path and makes high-risk propagation reviewable without archaeology', () => {
 		const contributing = read('CONTRIBUTING.md');
 		const owners = read('.github/CODEOWNERS');
+		// The catch-all is what actually routes a new path. The explicit
+		// families exist to make the high-risk ones visible, and every one of
+		// them must still NAME SOMETHING THAT EXISTS - pinning the literal
+		// strings could not fail if a family moved, which is the only case
+		// worth guarding.
 		expect(owners).toMatch(/^\* @lanteanio$/m);
-		for (const pattern of [
-			'/src/runtime/ @lanteanio',
-			'/src/plugins/ @lanteanio',
-			'/src/*.d.ts @lanteanio',
-			'/PROTOCOL.md @lanteanio',
-			'/protocol.schema.json @lanteanio',
-			'/test-vectors/ @lanteanio',
-			'/scripts/ @lanteanio',
-			'/.github/ @lanteanio'
-		]) {
-			expect(owners).toContain(pattern);
+		const entries = owners
+			.split('\n')
+			.map((line) => line.replace(/#.*$/, '').trim())
+			.filter((line) => line !== '' && !line.startsWith('*'))
+			.map((line) => line.split(/\s+/)[0]);
+		expect(entries.length, 'no explicit CODEOWNERS families').toBeGreaterThanOrEqual(8);
+		for (const pattern of entries) {
+			const relative = pattern.replace(/^\//, '').replace(/\/$/, '');
+			const matches = pattern.includes('*')
+				? globSync(relative, { cwd: fileURLToPath(new URL('..', import.meta.url)) })
+				: [relative].filter((candidate) => existsSync(fileURLToPath(new URL('../' + candidate, import.meta.url))));
+			expect(matches.length, `CODEOWNERS routes ${pattern}, which matches nothing in the tree`).toBeGreaterThan(0);
 		}
-		expect(contributing).toContain('| Change family | Primary paths | Required companions | Review focus |');
+		expect(contributing).toContain('| Change family | Primary paths | Review focus |');
 		for (const family of [
 			'Adapter/build option',
 			'Runtime behavior',

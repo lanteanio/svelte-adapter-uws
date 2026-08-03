@@ -136,6 +136,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release. Trusted publishing supplies short-lived OIDC authentication and
   automatic provenance.
 
+- **The contributor map is derived from the repository, not maintained beside
+  it.** A gate now checks that every gate in `npm run check` is documented,
+  every hosted workflow job is named, and every `npm run` lane the guide sends
+  a reader to exists. All three inventories had gone stale as prose: the gate
+  list described 11 of 24 under a heading that read as complete, two CI jobs
+  were undocumented, and the guide promised `verify:pr` was "exactly the hosted
+  lanes" when it omits four jobs and includes a simulation lane no job runs.
+  That promise is now stated accurately, so a green local run followed by a red
+  CI is explained rather than surprising.
+
 - **A non-destructive formatting conformance gate.** `.editorconfig` is now the
   single source of truth for indent style, final newline, trailing whitespace
   and committed line endings, and `npm run check` parses it and holds every

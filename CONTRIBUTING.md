@@ -38,7 +38,7 @@ cd svelte-adapter-uws
 npm run bootstrap   # root deps, the fixture's own deps, then the doctor
 npm run smoke       # real HTTP health + WebSocket subscribe/publish checkpoint
 npm run verify:fast # seconds - the static gates
-npm run verify:pr   # exactly what the hosted gate runs
+npm run verify:pr   # the strongest local signal, but not the whole hosted gate
 ```
 
 `npm run bootstrap` exists because a root install is not enough: the e2e
@@ -131,8 +131,11 @@ client-only case. You cannot verify a runtime behaviour claim.
 | `npm test` | `pretest` runs `npm run check`, then `vitest run` over `test/**/*.test.js`. Excludes `test/e2e/**` and `test/fixture/**`. |
 | `npm run verify:fast` | `npm run check`, named as a lane. |
 | `npm run verify:suite` | The doctor with `--require-uws`, real HTTP/WebSocket smoke, packed publishing checks, then `npm test` under `REQUIRE_UWS=1`. What the suite job runs, verbatim. |
-| `npm run verify:sim` | The seed swarm and the golden corpus. What the simulation job runs, verbatim. |
-| `npm run verify:pr` | `verify:suite` and `verify:sim`. Exactly the hosted lanes, and nothing they do not run. |
+| `npm run verify:sim` | The seed swarm and the golden corpus. No workflow runs this, so you are the only person who will. |
+| `npm run verify:pr` | `verify:suite` and `verify:sim`. The strongest single local signal, but not the hosted gate - see the job list below for the four jobs it does not cover. |
+| `npm run verify:docs` | The documentation gates plus the eleven suites that execute and route documented examples. Use this for a docs-only change. |
+| `npm run drill:respawner` | The external-respawner drill. What the respawner-drill job runs, verbatim. |
+| `npm run drill:operations` | The operations-pack gate, as a named lane. |
 | `npm run verify:full` | `verify:pr` plus the Playwright run, which no workflow runs. |
 | `npm run test:watch` | The same vitest run, watching. |
 | `npm run test:e2e` | Playwright, two projects: `dev` (`vite dev` plus the Vite plugin) and `prod` (`vite build` plus the built server through real uWS). Needs extra setup, see below. |
@@ -148,6 +151,42 @@ and has no config:
 - **check-compatibility** - the versioned compatibility manifest owns install
   commands and the adapter/extensions/realtime version matrix; generated README
   and migration blocks must match it exactly.
+- **check-formatting** - every tracked file matches what `.editorconfig`
+  declares for it: indent style, final newline, trailing whitespace, and the
+  committed line ending. It reports and refuses; it never rewrites.
+- **check-contributor-map** - this file's three inventories are derived from
+  their real sources: every gate below runs in `npm run check`, every hosted
+  job is named, and every `npm run` lane it sends you to exists. It is why the
+  map can be relied on rather than merely written carefully.
+- **check-svelte-support** - the published Svelte support row is generated from
+  the locked Svelte 4 fixture's own metadata, so the claim and the tested tuple
+  cannot disagree.
+- **generate-error-reference --check** - every emitted diagnostic has a stable
+  id and a `docs/errors.md` entry naming cause, consequence, recovery and next
+  action, generated from the owning registry.
+- **check-migration-freshness** - the migration guide carries a digest of the
+  public surface it describes. Change a declaration, review what moved, then
+  re-pin with `npm run check:migration -- --write`.
+- **check-release-notes** - the newest changelog entry is action-first and
+  bounded, and its release page and routes exist.
+- **check-release-workflow** - the tag-only trusted-publishing path is
+  structurally closed: closed key inventories at workflow, job and step level,
+  full-commit action pins, and exact command bodies.
+- **check-doc-code** - every README fence is classified, and every fence
+  claiming to be runnable is executed against the packed tarball.
+- **check-documentation-contract** - reader paths, ownership and the README
+  line budget hold.
+- **check-operations-pack** - the versioned operations corpus is complete and
+  its local links resolve.
+- **check-capacity-kit** - the capacity kit's phases and launch gates are
+  present and internally consistent.
+- **generate-privacy-integration --check** - the documented processing
+  activities match the generated privacy docs.
+- **check-entry-points** - every public export has an owned README route.
+- **check-diagnostic-attribution** - every diagnostic is attributed to a
+  canonical area rather than an ad-hoc string.
+- **check-related-projects** - the related-projects snapshot and its import
+  path are valid.
 - **generate-api-docs --check** - every bounded public API block in README is
   byte-generated from the matching `API_DOC` JSDoc in the public declaration.
   Change the declaration, then run `node scripts/generate-api-docs.js`; a manual
@@ -278,7 +317,7 @@ pull request instead of treating a duration as proof.
 
 | Lane | Typical duration | Required setup | Scope and exception |
 |---|---|---|---|
-| `npm run bootstrap` | First-run minutes; warm installs are shorter | Network, root and fixture lockfiles, native toolchain where needed | Run once per clone or dependency change; it prepares proof but is not itself a test result. |
+| `npm run bootstrap` | First-run minutes; warm installs are shorter | Network, plus the root and fixture lockfiles. No compiler: the native addon is a pinned prebuilt archive with no source-build fallback | Run once per clone or dependency change; it prepares proof but is not itself a test result. |
 | `npm run verify:fast` | Seconds | Installed root dependencies | Static/generated/document gates only; appropriate for iteration, never a substitute for a runtime lane. |
 | `npm run verify:suite` | Minutes; cold fixture builds dominate | Native uWS must load; fixture dependencies installed | Required for source/runtime changes. A missing addon is a failure, not an accepted skip. |
 | `npm run verify:sim` | Minutes | Root dependencies; no browser | Required when behavior can change scheduling, delivery, recovery, or invariants; deterministic seeds are the reproducer. |
@@ -286,18 +325,36 @@ pull request instead of treating a duration as proof.
 | `npm run test:e2e` | Minutes after browser setup | Chromium, fixture dependencies, and native uWS for production | Required for socket-reachable or browser-client behavior; not hosted, so omission must be explicit. |
 | `npm run test:coverage` | Longest local lane | Unit, browser, fixture, and native prerequisites | Coverage work only; it does not replace the change-specific real-runtime, simulation, or benchmark evidence. |
 
-Two more jobs run on the test workflow and have no local lane, because neither
-asks a question about your machine: an **advisory** job, which reads both
-lockfiles and fails on a high advisory in the SHIPPED dependency tree while
-reporting the development tree without blocking; and a **support-floor** job,
-which installs `svelte@4.0.0` and `ws@8.0.0` exactly - the floor of the
-published peer range, which every other lane resolves past - and runs the
-suites that load the browser client.
+The test workflow runs five jobs, and only one of them has an exact local
+equivalent:
 
-Still nothing else runs in CI: **`npm run test:e2e` and `npm run test:coverage`
-are not hosted**, so if your change is covered by them you are the only person
-who will ever run them. `npm run verify:full` is the only command that includes
-the e2e run.
+- **suite** runs `npm run verify:suite`, verbatim. This is the lane you can
+  reproduce exactly.
+- **respawner-drill** runs `npm run drill:respawner`, the external-respawner
+  drill. It has a local lane, but it is not part of `verify:pr`.
+- **observability-rules** runs `promtool` over
+  `examples/observability/rule-tests.v1.yml` inside a digest-pinned container.
+  It has no local lane because it asks a question about the alert rules, not
+  about your machine, and it needs Docker rather than your source tree.
+- **audit** reads both lockfiles and fails on a high advisory in the SHIPPED
+  dependency tree, while reporting the development tree without blocking.
+- **floor** installs `svelte@4.0.0` and `ws@8.0.0` exactly - the floor of the
+  published peer range, which every other lane resolves past - and runs the
+  suites that load the browser client. It then installs the locked Svelte 4
+  application under `test/fixtures/svelte4` with `npm ci --install-links` and
+  runs its preflight, `check`, `build` and `smoke`, so a break in the oldest
+  supported profile or in the published bin surfaces here.
+
+**`npm run verify:pr` is not the hosted gate.** It is `verify:suite` plus
+`verify:sim`, which makes it the strongest single local signal - but
+`verify:sim` is not hosted at all, and the respawner drill, the promtool rules,
+the advisory audit and the support-floor job are not in it. A green
+`verify:pr` followed by a red CI is therefore a normal outcome rather than a
+surprise; the failing job name tells you which of the five above to run.
+
+**`npm run test:e2e` and `npm run test:coverage` are not hosted either**, so if
+your change is covered by them you are the only person who will ever run them.
+`npm run verify:full` is the only command that includes the e2e run.
 
 | You changed | Run |
 |---|---|
@@ -306,7 +363,7 @@ the e2e run.
 | The browser client (`src/client.js`, a plugin's `client.js`) | the above, plus `npm run test:e2e` (it drives the real client in Chromium) |
 | The wire format | the above, plus `test/protocol-schema.test.js`, and see [What moves together](#what-moves-together) |
 | A per-request, per-message or per-render hot path | the above, plus the matching `bench/*-ab.mjs`, before and after. Quote the numbers. |
-| Only `README.md` / `MIGRATION.md` / `PROTOCOL.md` / `CONTRIBUTING.md` | `npm run check:links` and `npm run check` - check-slugs and check-links both read these files. All four now trigger the test workflow, so a docs-only change is gated like any other |
+| Only Markdown | `npm run verify:docs` - the documentation gates plus the suites that execute and route documented examples. It is a superset of what `check:links` and `check` would tell you here. Every `**/*.md` path triggers the test workflow, so a docs-only change is gated like any other |
 
 If you cannot run one of these - no native addon, no browser, no Windows box -
 say so in the pull request. An unstated gap reads as a pass.
@@ -331,7 +388,7 @@ replays that exact interleaving bit-for-bit.
 | `test/e2e/` | Playwright specs and the dev/prod server launchers. |
 | `test/dst-goldens/` | The blessed simulation fingerprint corpus. Generated, committed, and reviewed as a diff. |
 | `test-vectors/` | Machine-checkable protocol vectors, validated against `protocol.schema.json`. |
-| `scripts/` | The eight static gates, the two simulation runners, the doctor, the bootstrap and the verify lanes. Deliberately outside the determinism seam, so they may read the clock and the environment. |
+| `scripts/` | The static gates, the two simulation runners, the doctor, the bootstrap and the verify lanes. Deliberately outside the determinism seam, so they may read the clock and the environment. |
 | `bench/` | Benchmarks. `run.mjs` and `run-compare.mjs` are the suites; `*-ab.mjs` files are single-question before/after comparisons. |
 
 ## What moves together
@@ -394,19 +451,23 @@ lane that has no landing re-check.
 ## Review routing
 
 `.github/CODEOWNERS` requests the maintainer on every path and keeps the
-highest-risk families explicit. This table tells a contributor what evidence
-and companion surfaces that review will expect; ownership is not permission to
-omit a leg.
+highest-risk families explicit. This table says what a review of each family
+looks *for*; ownership is not permission to omit a leg.
 
-| Change family | Primary paths | Required companions | Review focus |
-|---|---|---|---|
-| Adapter/build option | `src/index.js`, `src/vite.js` | `src/index.d.ts`, `src/vite.d.ts`, fixture variant, README/changelog | Production/dev parity, placeholder propagation, default compatibility |
-| Runtime behavior | `src/runtime/**` | testing/Vite/simulator parity, real-runtime test, declarations and docs | Authorization, lifecycle, backpressure, deterministic seams |
-| Wire or protocol | `src/runtime/wire*.js`, client/plugin codecs | `PROTOCOL.md`, schema, vectors, every encoder/decoder, conformance tests | Additive revision-1 compatibility and byte-exact evidence |
-| Public export/type | implementation and adjacent `.d.ts` | export map, package allowlist, entry-point catalog, consumer test | Packed resolution, runtime/type parity, environment boundary |
-| Plugin | `src/plugins/<name>/**` | server/client declarations, exports, focused tests, README/changelog | Opt-in cost, namespace authorization, mixed-client fallback |
-| Documentation/generator | canonical declaration, manifest, or Markdown owner | generated outputs, link/anchor/package checks | One source of truth, packed destinations, durable routes |
-| CI, dependency, release, or security | `.github/**`, lockfiles, release/security documents | pinned actions, publication gates, advisory/private-report path | Least privilege, provenance, reproducibility, disclosure safety |
+It deliberately does not repeat which companion surfaces move with a change -
+[What moves together](#what-moves-together) above owns that, in the detail a
+contributor actually needs, and this file's own rule is not to maintain the
+same fact twice.
+
+| Change family | Primary paths | Review focus |
+|---|---|---|
+| Adapter/build option | `src/index.js`, `src/vite.js` | Production/dev parity, placeholder propagation, default compatibility |
+| Runtime behavior | `src/runtime/**` | Authorization, lifecycle, backpressure, deterministic seams |
+| Wire or protocol | `src/runtime/wire*.js`, client/plugin codecs | Additive revision-1 compatibility and byte-exact evidence |
+| Public export/type | implementation and adjacent `.d.ts` | Packed resolution, runtime/type parity, environment boundary |
+| Plugin | `src/plugins/<name>/**` | Opt-in cost, namespace authorization, mixed-client fallback |
+| Documentation/generator | canonical declaration, manifest, or Markdown owner | One source of truth, packed destinations, durable routes |
+| CI, dependency, release, or security | `.github/**`, lockfiles, release/security documents | Least privilege, provenance, reproducibility, disclosure safety |
 
 ## Issue lifecycle and backlog contract
 
