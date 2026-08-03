@@ -472,6 +472,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The contributor map no longer calls `verify:pr` the hosted gate.** Its
+  preamble and its lane table both described `verify:pr` as the hosted-gate
+  equivalent, while the inventory immediately below them correctly stated that
+  `verify:sim` is not hosted at all and that four of the five hosted jobs are
+  absent from it. A contributor following the first claim under-tests. Both
+  statements are corrected, and `check-contributor-map` now settles the
+  question against the two real lists rather than trusting prose: it expands
+  `verify:pr` through `package.json` and reads the hosted lanes out of the
+  workflow, ignoring steps that run another package's scripts. It rejects the
+  stale wording and, separately, a map that simply drops the disclaimer.
 - **A `null` payload cap reaches the receiver as the numeric default, on
   every surface.** The shared guard treats `null` as an absent value and
   returns early, and both the adapter and the Vite plugin fold it into the

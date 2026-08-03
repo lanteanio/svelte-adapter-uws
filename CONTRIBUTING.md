@@ -302,11 +302,15 @@ Notes on the slow parts:
 
 ## What to run before you propose a change
 
-The hosted gate runs `npm run verify:suite` on Ubuntu **and** Windows, and
-`npm run verify:sim` on Ubuntu - the same commands, not a re-spelling of them,
-so "it passed locally" and "CI is green" cannot drift into meaning different
-things. `npm run verify:pr` is exactly those two lanes and is the local
-equivalent of an accepted pull request.
+The hosted gate is five jobs. `npm run verify:suite` is the only one you can
+reproduce verbatim: it runs on Ubuntu **and** Windows as that same command, not
+a re-spelling of it, so for that lane "it passed locally" and "CI is green"
+cannot drift into meaning different things. `npm run verify:pr` adds
+`npm run verify:sim` on top of it, which makes it the strongest single local
+signal - but it is not the hosted gate, because `verify:sim` is not hosted at
+all and four of the five hosted jobs are absent from it. The full inventory is
+below, and it is worth reading before you treat a green `verify:pr` as a green
+pull request.
 
 ### Lane duration and exception map
 
@@ -321,7 +325,7 @@ pull request instead of treating a duration as proof.
 | `npm run verify:fast` | Seconds | Installed root dependencies | Static/generated/document gates only; appropriate for iteration, never a substitute for a runtime lane. |
 | `npm run verify:suite` | Minutes; cold fixture builds dominate | Native uWS must load; fixture dependencies installed | Required for source/runtime changes. A missing addon is a failure, not an accepted skip. |
 | `npm run verify:sim` | Minutes | Root dependencies; no browser | Required when behavior can change scheduling, delivery, recovery, or invariants; deterministic seeds are the reproducer. |
-| `npm run verify:pr` | Sum of suite and simulation lanes | Everything required by both lanes | Normal pre-PR default and the hosted-gate equivalent. A platform you cannot run must be named as a gap. |
+| `npm run verify:pr` | Sum of suite and simulation lanes | Everything required by both lanes | Normal pre-PR default and the strongest single local signal, but NOT the hosted gate: `verify:sim` is not hosted and four hosted jobs are absent from it. A platform you cannot run must be named as a gap. |
 | `npm run test:e2e` | Minutes after browser setup | Chromium, fixture dependencies, and native uWS for production | Required for socket-reachable or browser-client behavior; not hosted, so omission must be explicit. |
 | `npm run test:coverage` | Longest local lane | Unit, browser, fixture, and native prerequisites | Coverage work only; it does not replace the change-specific real-runtime, simulation, or benchmark evidence. |
 

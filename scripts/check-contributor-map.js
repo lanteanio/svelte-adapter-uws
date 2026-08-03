@@ -48,6 +48,42 @@ export function referencedLanes(contributing) {
 	return [...lanes];
 }
 
+/**
+ * The lanes `npm run verify:pr` actually chains, expanded through package.json
+ * rather than read from prose.
+ */
+export function verifyPrLanes(scripts) {
+	const seen = new Set();
+	const walk = (name) => {
+		for (const match of (scripts[name] ?? '').matchAll(/npm run ([a-z0-9:-]+)/g)) {
+			if (seen.has(match[1])) continue;
+			seen.add(match[1]);
+			walk(match[1]);
+		}
+	};
+	walk('verify:pr');
+	return [...seen];
+}
+
+/**
+ * The lanes of THIS package that the hosted workflow runs.
+ *
+ * A step carrying a `working-directory` runs another package's scripts - the
+ * support-floor job runs `npm run check`, `build` and `smoke` inside the locked
+ * Svelte 4 application, and counting those as this repository's lanes would
+ * report a difference that does not exist.
+ */
+export function hostedLanes(workflow) {
+	const lanes = new Set();
+	for (const job of Object.values(workflow.jobs ?? {})) {
+		for (const step of job.steps ?? []) {
+			if (typeof step.run !== 'string' || step['working-directory']) continue;
+			for (const match of step.run.matchAll(/npm run ([a-z0-9:-]+)/g)) lanes.add(match[1]);
+		}
+	}
+	return [...lanes];
+}
+
 export function findProblems({ contributing, pkg, workflow }) {
 	const problems = [];
 
@@ -88,6 +124,38 @@ export function findProblems({ contributing, pkg, workflow }) {
 	}
 
 	const scripts = pkg.scripts ?? {};
+
+	// The map called `verify:pr` the hosted-gate equivalent in its preamble and
+	// its lane table while the inventory three paragraphs below correctly said
+	// the opposite. Two prose claims on one page cannot be trusted to agree, so
+	// the equivalence is settled against the two real lists instead.
+	const prLanes = new Set(verifyPrLanes(scripts));
+	const hosted = new Set(hostedLanes(workflow));
+	const localOnly = [...prLanes].filter((lane) => !hosted.has(lane));
+	const hostedOnly = [...hosted].filter((lane) => !prLanes.has(lane));
+	if (localOnly.length > 0 || hostedOnly.length > 0) {
+		const delta = `verify:pr runs ${localOnly.join(', ') || 'nothing'} that the workflow does not, ` +
+			`and the workflow runs ${hostedOnly.join(', ') || 'nothing'} that verify:pr does not`;
+		// Blocklisting the phrasings that already went stale, so they cannot
+		// return...
+		for (const claim of [
+			/hosted[- ]gate equivalent/i,
+			/`npm run verify:pr` is exactly/i,
+			/local equivalent of an accepted pull request/i
+		]) {
+			const found = contributing.match(claim);
+			if (found) problems.push(`the contributor map still says "${found[0].trim()}", but ${delta}`);
+		}
+		// ...and requiring the disclaimer outright, because a blocklist only
+		// catches wording someone already wrote. This half fails on a NEW way of
+		// claiming the same wrong thing, which the blocklist above cannot.
+		if (!/verify:pr`? is not the hosted gate/i.test(contributing)) {
+			problems.push(
+				`the contributor map never states that verify:pr is not the hosted gate, but ${delta}`
+			);
+		}
+	}
+
 	for (const lane of referencedLanes(contributing)) {
 		if (!(lane in scripts)) {
 			problems.push(`the contributor map tells a reader to run npm run ${lane}, which package.json does not define`);
