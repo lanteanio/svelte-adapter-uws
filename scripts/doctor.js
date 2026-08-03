@@ -2,9 +2,9 @@
 /**
  * `npm run doctor` - does a green run on this machine prove anything?
  *
- * The failure this exists for: uWebSockets.js is an OPTIONAL dependency fetched
- * from GitHub rather than npm, so `npm install` skips it SILENTLY when the fetch
- * or the compile fails. The install succeeds, `npm test` goes green, and every
+ * The failure this exists for: uWebSockets.js is an OPTIONAL native dependency,
+ * so package-manager scripts can be disabled or the platform binary can fail to
+ * load. The install can otherwise look green while every
  * suite that boots the real built runtime over real sockets reported as skipped
  * - which in a summary is indistinguishable from a suite that ran and proved
  * something. The same shape appears one layer out: the test fixture is a
@@ -38,8 +38,8 @@ import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
-import { execFileSync } from 'node:child_process';
 import { requiredMode } from './require-uws.js';
+import { uwsInstallSpec } from '../src/uws-load-hint.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -202,7 +202,7 @@ export function uwsVerdict({ version, error, pinned, required }) {
 			fix: `npm install ${pinned} - until then every real-runtime suite SKIPS and the run reports PASSED having proved nothing`
 		};
 	}
-	const want = pinned.slice(pinned.indexOf('#') + 1).replace(/^v/, '');
+	const want = (pinned.match(/v(\d+\.\d+\.\d+)(?:\.tar\.gz)?$/) || [])[1] || '';
 	if (want && version !== want) {
 		return {
 			name: 'uWebSockets.js', status: 'warn', detail: `${version} installed, pin is ${want}`,
@@ -266,17 +266,6 @@ async function main() {
 	results.push(npmVerdict(runningNpm(), lock.lockfileVersion));
 	results.push(platformVerdict(process.platform, process.arch, detectLibc()));
 
-	// The addon is a git dependency, so its install shells out to git. Without
-	// it `npm ci` reports a resolution failure for an OPTIONAL package, which npm
-	// treats as nothing to report.
-	let git = null;
-	try {
-		git = execFileSync('git', ['--version'], { encoding: 'utf8' }).trim();
-	} catch { /* not on PATH */ }
-	results.push(git
-		? { name: 'git', status: 'ok', detail: git }
-		: { name: 'git', status: 'fail', detail: 'not on PATH', fix: 'uWebSockets.js is fetched with git; without it the install silently skips the addon' });
-
 	const rootDeps = existsSync(join(root, 'node_modules', 'vitest'));
 	results.push(rootDeps
 		? { name: 'dependencies', status: 'ok', detail: 'node_modules present' }
@@ -295,7 +284,7 @@ async function main() {
 	} catch (e) {
 		error = String(e && e.message || e).split('\n')[0];
 	}
-	const pinned = (pkg.optionalDependencies && pkg.optionalDependencies['uWebSockets.js'] || '').replace(/^github:/, '');
+	const pinned = uwsInstallSpec(pkg) || '';
 	results.push(uwsVerdict({ version, error, pinned, required }));
 
 	// The fixture is a separate app with a separate lockfile. When the addon IS

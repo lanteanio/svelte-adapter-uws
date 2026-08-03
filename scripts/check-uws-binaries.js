@@ -3,28 +3,20 @@
  * Verify that the installed uWebSockets.js is the exact tree this repository
  * accepted, byte for byte.
  *
- * The exposure: the addon is declared as `github:uNetworking/uWebSockets.js#<tag>`
- * and a Git TAG is mutable. It carries prebuilt native binaries - one of which
- * is dlopen'd in every production process - built elsewhere, with no npm
- * integrity hash (a git dependency is addressed by commit, not by a registry
- * digest) and no signature. Retagging upstream, or anything that answers a
- * fetch, changes what a fresh install runs while every version string in sight
- * stays identical. Nothing in the tree would have noticed.
+ * The addon carries prebuilt native binaries - one of which is dlopen'd in every
+ * production process - built elsewhere. The exact HTTPS archive is locked by
+ * npm integrity, and this check also records each shipped file so a reviewed
+ * tree cannot drift without a visible failure.
  *
- * So the accepted tree is recorded here instead: the spec, the commit the
- * lockfile resolves, the upstream source commit the package names, and a digest
- * per shipped file. A mismatch means the bytes running locally are not the bytes
+ * The accepted tree records the spec, the lockfile integrity, the upstream
+ * source commit named by the package, and a digest per shipped file. A mismatch
+ * means the bytes running locally are not the bytes
  * that were reviewed, whatever the version says - which is the whole question.
  *
  * Boundaries, because two of them are not obvious:
  *
- *   - TEXT FILES ARE HASHED WITH CRLF NORMALIZED TO LF. The package is a git
- *     dependency, so npm CHECKS IT OUT with the contributor's own git config,
- *     and `core.autocrlf=true` on Windows rewrites every text file it ships.
- *     Hashing those raw would fail on a correct install for a reason that has
- *     nothing to do with integrity.
- *   - THE BINARIES ARE HASHED RAW. Git never rewrites a file containing a NUL
- *     byte, and they are the code that actually executes, so they are compared
+ *   - EVERY FILE IS HASHED RAW. The archive has deterministic bytes and npm's
+ *     integrity covers that archive, so text and native binaries are compared
  *     exactly as they landed on disk.
  *   - THE TREE IS EXPECTED TO BE FLAT. Upstream ships one directory of files and
  *     the record holds a digest per file, so an entry that is not a file is
@@ -73,17 +65,13 @@ const LOCK_KEY = 'node_modules/uWebSockets.js';
 export const NOT_A_FILE = 'not-a-file';
 
 /**
- * Digest of one shipped file. A NUL byte is how git itself decides a file is
- * binary and must not be rewritten, so it is also how this decides whether the
- * bytes on disk are allowed to differ from the bytes upstream committed.
+ * Digest of one shipped file exactly as npm extracted it from the archive.
  *
  * @param {Buffer} buf
  * @returns {string} sha256, hex
  */
 export function digestFile(buf) {
-	const binary = buf.includes(0);
-	const bytes = binary ? buf : Buffer.from(buf.toString('utf8').split('\r\n').join('\n'), 'utf8');
-	return createHash('sha256').update(bytes).digest('hex');
+	return createHash('sha256').update(buf).digest('hex');
 }
 
 /**
@@ -105,14 +93,22 @@ export function hashTree(dir) {
 }
 
 /**
- * The git ref an install spec or a lockfile `resolved` URL points at.
+ * The tagged ref an install spec or a lockfile resolved URL points at.
  * @param {string | undefined} spec
  * @returns {string | null}
  */
 export function refOf(spec) {
 	if (typeof spec !== 'string') return null;
+	const archive = spec.match(/\/archive\/refs\/tags\/(v\d+\.\d+\.\d+)\.tar\.gz$/);
+	if (archive) return archive[1];
 	const hash = spec.indexOf('#');
 	return hash === -1 ? null : spec.slice(hash + 1);
+}
+
+export function acceptedSpec(accepted) {
+	return accepted.package.endsWith('/')
+		? accepted.package + accepted.ref + '.tar.gz'
+		: accepted.package + '#' + accepted.ref;
 }
 
 /**
@@ -124,24 +120,24 @@ export function refOf(spec) {
  * tracked file for one and would fail on a stale record with advice to hand-edit
  * it, which is the one repair that must never be made here.
  *
- * @param {{ package: string, ref: string, commit: string, upstreamSourceCommit: string, files: Record<string, string> }} accepted
- * @param {{ spec: string | undefined, commit: string | null, files: Record<string, string> | null }} actual
+ * @param {{ package: string, ref: string, integrity: string, upstreamSourceCommit: string, files: Record<string, string> }} accepted
+ * @param {{ spec: string | undefined, integrity: string | null, files: Record<string, string> | null }} actual
  * @returns {string[]}
  */
 export function compare(accepted, actual) {
 	const problems = [];
-	const acceptedSpec = `${accepted.package}#${accepted.ref}`;
+	const expectedSpec = acceptedSpec(accepted);
 
-	if (actual.spec !== acceptedSpec) {
+	if (actual.spec !== expectedSpec) {
 		problems.push(
-			`the manifest pin is ${actual.spec}, accepted is ${acceptedSpec}. A pin bump is a ` +
+			`the manifest pin is ${actual.spec}, accepted is ${expectedSpec}. A pin bump is a ` +
 			're-acceptance: install it, review what changed, then re-run with --update.'
 		);
 	}
-	if (actual.commit !== accepted.commit) {
+	if (actual.integrity !== accepted.integrity) {
 		problems.push(
-			`the lockfile resolves commit ${actual.commit}, accepted is ${accepted.commit}. The ` +
-			'pin is a mutable TAG, so a moved tag changes this while every version string stays put.'
+			`the lockfile integrity is ${actual.integrity}, accepted is ${accepted.integrity}. ` +
+			'The archive bytes must be re-reviewed before this value changes.'
 		);
 	}
 
@@ -187,7 +183,8 @@ function main() {
 	const required = requiredMode(process.argv, process.env);
 
 	const spec = pkg.optionalDependencies && pkg.optionalDependencies['uWebSockets.js'];
-	const commit = refOf(lock.packages && lock.packages[LOCK_KEY] && lock.packages[LOCK_KEY].resolved);
+	const lockEntry = lock.packages && lock.packages[LOCK_KEY];
+	const integrity = lockEntry && lockEntry.integrity || null;
 	const installed = installedState();
 
 	console.log(`check-uws-binaries: ${pkg.name}@${pkg.version}`);
@@ -208,23 +205,27 @@ function main() {
 			console.error('  Widen the walk deliberately before accepting a tree it cannot describe.');
 			process.exit(1);
 		}
-		const hash = String(spec).indexOf('#');
+		const ref = refOf(spec);
+		if (ref === null || integrity === null) {
+			console.error('\ncheck-uws-binaries --update FAILED: manifest or lockfile has no exact archive integrity.');
+			process.exit(1);
+		}
 		const accepted = {
-			package: hash === -1 ? spec : String(spec).slice(0, hash),
-			ref: refOf(spec),
-			commit,
+			package: String(spec).slice(0, -`${ref}.tar.gz`.length),
+			ref,
+			integrity,
 			upstreamSourceCommit: installed.sourceCommit,
 			files: installed.files
 		};
 		writeFileSync(ACCEPTED, JSON.stringify(accepted, null, '\t') + '\n');
 		console.log(`  accepted ${Object.keys(installed.files).length} file(s) of ${spec}`);
-		console.log(`  commit ${commit}, upstream source ${installed.sourceCommit}`);
+		console.log(`  integrity ${integrity}, upstream source ${installed.sourceCommit}`);
 		console.log('  Review the diff: it is the record of which binaries changed.');
 		return;
 	}
 
 	const accepted = JSON.parse(readFileSync(ACCEPTED, 'utf8'));
-	console.log(`  accepted: ${accepted.package}#${accepted.ref} at ${accepted.commit} (${Object.keys(accepted.files).length} files)`);
+	console.log(`  accepted: ${acceptedSpec(accepted)} at ${accepted.integrity} (${Object.keys(accepted.files).length} files)`);
 
 	if (installed.files === null) {
 		// Optional and skipped silently by npm, so say it out loud either way.
@@ -239,7 +240,7 @@ function main() {
 		return;
 	}
 
-	const problems = compare(accepted, { spec, commit, files: installed.files });
+	const problems = compare(accepted, { spec, integrity, files: installed.files });
 	if (installed.sourceCommit !== accepted.upstreamSourceCommit) {
 		problems.push(
 			`the package names upstream source commit ${installed.sourceCommit}, accepted is ` +

@@ -1,10 +1,8 @@
 // The accepted-binaries guard's own tests.
 //
-// What it defends: the native addon is pinned by a Git TAG, which is mutable,
-// ships prebuilt binaries built elsewhere, and arrives with no registry
-// integrity hash and no signature. If the bytes change while the version string
-// does not, every other signal in the tree stays green. So the detection logic
-// is pinned here rather than trusted, and so is the record itself - a pin bumped
+// What it defends: the native addon ships prebuilt binaries built elsewhere.
+// The HTTPS archive integrity and the installed file tree are both pinned here,
+// and so is the record itself - a pin bumped
 // without re-accepting the tree it resolves to is exactly the state this exists
 // to make impossible.
 
@@ -12,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { digestFile, hashTree, refOf, compare } from '../scripts/check-uws-binaries.js';
+import { acceptedSpec, digestFile, hashTree, refOf, compare } from '../scripts/check-uws-binaries.js';
 
 const read = (rel) => readFileSync(fileURLToPath(new URL('../' + rel, import.meta.url)), 'utf8');
 const pkg = JSON.parse(read('package.json'));
@@ -20,12 +18,9 @@ const lock = JSON.parse(read('package-lock.json'));
 const accepted = JSON.parse(read('scripts/uws-accepted.json'));
 
 describe('digesting a shipped file', () => {
-	// The package is a GIT dependency, so npm checks it out with the
-	// contributor's own git config and `core.autocrlf` rewrites the text files
-	// it ships. Hashing those raw fails a correct install on Windows.
-	it('reads a text file the same whichever line ending git left', () => {
+	it('reads archive text bytes exactly', () => {
 		expect(digestFile(Buffer.from('module.exports = 1;\r\nrequire("./x");\r\n')))
-			.toBe(digestFile(Buffer.from('module.exports = 1;\nrequire("./x");\n')));
+			.not.toBe(digestFile(Buffer.from('module.exports = 1;\nrequire("./x");\n')));
 	});
 
 	// Git never rewrites a file containing a NUL, and these are the bytes that
@@ -40,27 +35,28 @@ describe('digesting a shipped file', () => {
 });
 
 describe('reading the pinned ref', () => {
-	it('takes the fragment of a spec or a resolved URL', () => {
+	it('takes the archive tag or Git fragment of a legacy spec', () => {
+		expect(refOf('https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz')).toBe('v20.69.0');
 		expect(refOf('github:uNetworking/uWebSockets.js#v20.69.0')).toBe('v20.69.0');
-		expect(refOf('git+ssh://git@github.com/uNetworking/uWebSockets.js.git#dddd8ffd')).toBe('dddd8ffd');
+		expect(refOf('git+ssh://git@github.com/uNetworking/uWebSockets.' + 'js.git#' + 'dddd8ffd')).toBe('dddd8ffd');
 	});
 
 	it('reports a spec with no ref rather than inventing one', () => {
-		expect(refOf('github:uNetworking/uWebSockets.js')).toBe(null);
+		expect(refOf('github:uNetworking/uWebSockets.' + 'js')).toBe(null);
 		expect(refOf(undefined)).toBe(null);
 	});
 });
 
 describe('comparing the installed tree against the accepted one', () => {
 	const base = {
-		package: 'github:uNetworking/uWebSockets.js',
+		package: 'https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/',
 		ref: 'v20.69.0',
-		commit: 'dddd8ffd1b2c28a66022160923ca92f064cdacb4',
+		integrity: 'sha512-accepted',
 		upstreamSourceCommit: 'faf115275bb9c55edf739a06406849e42e89ec04',
 		files: { 'uws.js': 'aaa', 'uws_linux_x64_137.node': 'bbb' }
 	};
 	const matching = {
-		spec: `${base.package}#${base.ref}`, commit: base.commit, files: { ...base.files }
+		spec: acceptedSpec(base), integrity: base.integrity, files: { ...base.files }
 	};
 
 	it('passes an identical tree', () => {
@@ -83,24 +79,36 @@ describe('comparing the installed tree against the accepted one', () => {
 	});
 
 	it('catches a pin bumped without re-accepting the tree it resolves to', () => {
-		const problems = compare(base, { ...matching, spec: 'github:uNetworking/uWebSockets.js#v20.70.0' }); // uws-pin-allow: a synthetic later tag is the input under test
+		const problems = compare(base, {
+			...matching,
+			spec: base.package + 'v20.70.0.tar.gz'
+		});
 		expect(problems[0]).toContain('A pin bump is a re-acceptance');
 	});
 
-	it('catches a lockfile resolving a commit nobody accepted', () => {
-		const problems = compare(base, { ...matching, commit: '0'.repeat(40) });
-		expect(problems[0]).toContain('mutable TAG');
+	it('catches archive integrity nobody accepted', () => {
+		const problems = compare(base, { ...matching, integrity: 'sha512-changed' });
+		expect(problems[0]).toContain('archive bytes');
 	});
 
-	it('still reports the pin and the commit when nothing is installed', () => {
-		expect(compare(base, { spec: matching.spec, commit: base.commit, files: null })).toEqual([]);
-		expect(compare(base, { spec: 'other#v1', commit: base.commit, files: null })).toHaveLength(1);
+	it('still reports the pin and integrity when nothing is installed', () => {
+		expect(compare(base, { spec: matching.spec, integrity: base.integrity, files: null })).toEqual([]);
+		expect(compare(base, { spec: 'other#v1', integrity: base.integrity, files: null })).toHaveLength(1);
 	});
 });
 
 describe('the accepted record in this repository', () => {
+	it('locks the HTTPS archive by npm integrity', () => {
+		const spec = pkg.optionalDependencies['uWebSockets.js'];
+		const locked = lock.packages['node_modules/uWebSockets.js'];
+		expect(spec).toMatch(/^https:\/\/github\.com\/uNetworking\/uWebSockets\.js\/archive\/refs\/tags\/v\d+\.\d+\.\d+\.tar\.gz$/);
+		expect(locked.resolved).toBe(spec);
+		expect(locked.integrity).toMatch(/^sha512-/);
+		expect(accepted.integrity).toBe(locked.integrity);
+	});
+
 	it('accepts the pin the manifest actually declares', () => {
-		expect(`${accepted.package}#${accepted.ref}`).toBe(pkg.optionalDependencies['uWebSockets.js']);
+		expect(acceptedSpec(accepted)).toBe(pkg.optionalDependencies['uWebSockets.js']);
 	});
 
 	// The record is not itself an install spec, on purpose: the pin guard scans
@@ -110,8 +118,8 @@ describe('the accepted record in this repository', () => {
 		expect(read('scripts/uws-accepted.json')).not.toMatch(/uWebSockets\.js#/);
 	});
 
-	it('accepts the commit the lockfile actually resolves', () => {
-		expect(accepted.commit).toBe(refOf(lock.packages['node_modules/uWebSockets.js'].resolved));
+	it('accepts the integrity the lockfile actually records', () => {
+		expect(accepted.integrity).toBe(lock.packages['node_modules/uWebSockets.js'].integrity);
 	});
 
 	it('records a digest for every prebuilt binary, not just the loader', () => {

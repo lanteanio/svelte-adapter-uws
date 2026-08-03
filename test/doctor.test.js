@@ -122,12 +122,12 @@ describe('doctor platform verdict', () => {
 });
 
 describe('doctor native runtime verdict', () => {
-	const pinned = 'uNetworking/uWebSockets.js#v20.69.0';
+	const pinned = 'https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz';
 
 	it('warns when the addon is absent and nothing demanded it', () => {
 		const v = uwsVerdict({ version: null, error: 'Cannot find module', pinned, required: false });
 		expect(v.status).toBe('warn');
-		expect(v.fix).toContain('npm install uNetworking/uWebSockets.js#v20.69.0');
+		expect(v.fix).toContain('npm install ' + pinned);
 	});
 
 	it('fails when the addon is absent and the run is being treated as a gate', () => {
