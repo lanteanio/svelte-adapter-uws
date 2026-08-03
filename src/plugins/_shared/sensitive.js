@@ -1,13 +1,12 @@
 /**
- * Sensitive field-name matching, shared by the plugins whose default
- * projection broadcasts a connection's userData to peers (presence `select`,
- * cursor `select`). Both surfaces must drop the same names: a field that is
- * unsafe to broadcast on a presence roster is equally unsafe on a cursor
- * catalog frame, and two independent regexes drift the moment one is tuned.
+ * Sensitive field-name matching shared by presence and cursor. Their
+ * zero-configuration projections are deliberately minimal: presence copies
+ * only its configured identity key, and cursor copies only `id`. These
+ * predicates remain defense in depth for configured identity names and for
+ * dynamic presence fields, where two independent matchers would drift.
  *
- * These are DEFAULTS, not a security boundary. They are a denylist safety net
- * for the common case where an app hands its whole session object to the
- * upgrade hook; an app that cares passes an explicit allowlist `select`.
+ * An explicit `select` is an application-owned policy override. Its return
+ * value is used as-is, so applications should make it an allowlist.
  */
 
 /**
@@ -26,9 +25,9 @@
  * and `sessionCount` go too. That direction is deliberate: the alternative is
  * an allowlist of benign compounds that can never be complete, and a missed
  * entry there leaks a credential while a missed entry here loses a display
- * field. Such a drop is reported once by name (see noteDroppedField) so an app
- * can see the field it is missing - though note that only NAME drops are
- * reported; a value dropped for its shape or depth is still silent.
+ * field. A caller that uses this matcher as a redactor can report such a drop
+ * once by name via noteDroppedField; the identity-only defaults do not
+ * enumerate non-identity fields and therefore do not emit drop warnings.
  */
 const SENSITIVE_WORDS = new Set([
 	'token', 'tokens', 'secret', 'secrets', 'password', 'passwords', 'passwd', 'pwd',
@@ -888,7 +887,7 @@ export function noteDroppedField(name, surface) {
 
 	if (warned.size === MAX_DROPPED_FIELD_WARNINGS) {
 		console.warn(
-			`[${surface}] dropped the field '${safeName}' from the default projection, and has now ` +
+			`[svelte-adapter-uws] [${surface}] dropped the field '${safeName}' from the default projection, and has now ` +
 			`reported ${MAX_DROPPED_FIELD_WARNINGS} distinct dropped names - further ones are ` +
 			'suppressed. A flood of distinct names here means they are coming from the wire ' +
 			'(an upgrade hook spreading the request context), not from your own fields.'
@@ -896,7 +895,7 @@ export function noteDroppedField(name, surface) {
 		return;
 	}
 	console.warn(
-		`[${surface}] dropped the field '${safeName}' from the default projection - its name reads ` +
+		`[svelte-adapter-uws] [${surface}] dropped the field '${safeName}' from the default projection - its name reads ` +
 		'as credentials, personal data or transport metadata, and the default never broadcasts ' +
 		'those to peers. If this field is safe to share, pass an explicit select, e.g. ' +
 		// Always `key: ud.key`, never the `{ key }` shorthand. Shorthand reads as
@@ -1115,6 +1114,7 @@ const TRANSPORT_EXACT_NAMES = new Set([
 	// `walletAddress` and `addressBook`. Only the bare and transport-qualified
 	// spellings are the request metadata this guard is for.
 	'headers', 'header', 'httpheaders', 'requestheaders',
+	'rawheaders', 'rawheader', 'requestrawheaders', 'httprawheaders',
 	'address', 'addresses', 'remoteaddress', 'clientaddress', 'peeraddress',
 	'socketaddress', 'ipaddress', 'ipaddr'
 ]);

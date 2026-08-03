@@ -18,41 +18,23 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	 * Extract the public presence data from a connection's userData.
 	 * Only the returned fields are broadcast to other clients.
 	 *
-	 * Defaults to the recursive denylist shared with cursor. It drops
-	 * internal/prototype names; request and transport metadata (`remoteAddress`,
-	 * `ip`, `address`, `headers`, bare `url`, `requestId`); and credential- or
-	 * personal-data-shaped names such as tokens, passwords, sessions, cookies,
-	 * email/phone/payment identifiers and credential keys. Structural id-like
-	 * names pass through unchanged - `primaryKey`, `foreignKey`, `sortKey`,
-	 * `partitionKey`, `publicKey` - as do `monkey` and `keyboard`. Binary views
-	 * (Buffer, TypedArray, DataView, ArrayBuffer) are substituted with the
-	 * placeholder string `'[bytes: <len>]'` so raw bytes do not land in presence
-	 * frames. Every other field passes through unchanged.
+	 * By default, only the configured {@link PresenceOptions.key} field is
+	 * copied, and only when the field name is structurally safe and its value is
+	 * a string or finite number. Names, avatars, profiles, transport metadata
+	 * and every other field require an explicit `select` allowlist.
 	 *
-	 * The denylist covers the {@link PresenceOptions.key} field too, with no
+	 * The sensitive-name guard covers the {@link PresenceOptions.key} field too, with no
 	 * exemption: the resolved dedup key becomes the roster key in every wire
 	 * frame, so a credential-shaped one must not survive the projection.
 	 * Nominating `key: 'sessionId'` warns at construction and falls back to
 	 * per-connection entries (no multi-tab dedup) rather than broadcasting the
 	 * value - dedup on a non-secret identifier, or pass an explicit `select`.
 	 *
-	 * The cursor plugin's default `select` drops exactly the same names.
-	 * The cluster-aware Redis presence plugin
-	 * (`svelte-adapter-uws-extensions/redis/presence`) applies the same
-	 * denylist on its default projection, including the fallback to
-	 * per-connection entries when the dedup key field is itself a dropped
-	 * name. Two screening differences remain. Dynamic fields: this plugin's
-	 * `update()` refuses identity and denylisted field names, while the Redis
-	 * plugin's `update()` currently rejects only reserved and prototype
-	 * names, so client-supplied dynamic field names are not screened for
-	 * personal or credential data there. And an explicit `select`: this
-	 * plugin uses its return value as-is, while the Redis plugin still runs
-	 * an explicit select's result through its credential redactor before
-	 * anything is broadcast or persisted.
-	 *
-	 * To override:
-	 * - tighter (allowlist): `select: (ud) => ({ id: ud.id, name: ud.name })`
-	 * - looser (passthrough, pre-this-default behavior): `select: (ud) => ud`
+	 * The cursor plugin follows the same fail-closed rule, with `id` as its sole
+	 * default identity field.
+	 * An explicit selector is an application-owned policy override and its
+	 * return value is used as-is. Prefer an allowlist such as
+	 * `select: (ud) => ({ id: ud.id, name: ud.name })`.
 	 *
 	 * Should return JSON-serializable data (plain objects, arrays, strings,
 	 * numbers, booleans, null) since the result is sent over WebSocket.
@@ -206,25 +188,23 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	maxTopicsPerConnection?: number;
 
 	/**
-	 * Opt-in allowlist for {@link PresenceTracker.update} field names.
+	 * Allowlist for dynamic fields accepted from wire `presence-update` frames.
 	 *
-	 * Unset (the default), updates may set any field EXCEPT the
-	 * server-reserved names: the dedup key field, `id`, `role`, `__`-prefixed,
-	 * `constructor`, `prototype`, and anything the default `select` denylist
-	 * treats as credential-shaped. Reserved names are stripped so a client
-	 * cannot overwrite the server-selected identity its peers see
-	 * (impersonation).
+	 * Unset (the default), client frames cannot add any durable or transient
+	 * fields. Set this to accept only the listed names. Listing a reserved name
+	 * is a deliberate application policy decision; prototype gadget names are
+	 * always removed from the allowlist.
 	 *
-	 * Set this to accept ONLY the listed names. Listing a reserved name is
-	 * the deliberate escape hatch - e.g. an app that lets users pick their
-	 * own display `role`.
+	 * Direct server calls to {@link PresenceTracker.update} retain the existing
+	 * reserved-name guard when this option is omitted. When configured, the same
+	 * allowlist also applies to direct calls.
 	 *
 	 * @example
 	 * ```js
 	 * const presence = createPresence({ clientUpdateFields: ['typing', 'selection'] });
 	 * ```
 	 *
-	 * @default undefined // all fields except the server-reserved names
+	 * @default undefined // wire presence-update frames accept no fields
 	 */
 	clientUpdateFields?: string[];
 }
@@ -303,11 +283,11 @@ export interface PresenceTracker<Selected extends Record<string, any> = Record<s
 	 * so a reconnecting client never inherits a stale value. Other `update()`
 	 * fields are durable and ride the snapshot.
 	 *
-	 * Server-reserved field names (the dedup key field, `id`, `role`,
-	 * `__`-prefixed, `constructor`, `prototype`, credential-shaped names) are
-	 * stripped from updates by default so a client cannot overwrite the
-	 * server-selected identity its peers see; the `clientUpdateFields` option
-	 * replaces that guard with an explicit allowlist. The whole update is
+	 * This method is the trusted server-side path. Server-reserved field names
+	 * (the dedup key field, `id`, `role`, `__`-prefixed, `constructor`,
+	 * `prototype`, credential-shaped names) are stripped by default. The
+	 * `clientUpdateFields` option replaces that guard with an explicit allowlist
+	 * and independently gates wire `presence-update` frames. The whole update is
 	 * silently dropped when it exceeds `maxFieldsBytes` or the user's
 	 * `maxTotalFieldsBytes` cumulative budget.
 	 *

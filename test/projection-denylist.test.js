@@ -1,4 +1,4 @@
-// What the default presence / cursor projections broadcast to every peer.
+// Field-name defense in depth plus the zero-config identity-only projections.
 //
 // Two failure directions, and both are real. Letting a credential through is a
 // leak; dropping an ordinary display field is a product bug an app debugs from
@@ -279,7 +279,10 @@ describe('transport identity', () => {
 	});
 
 	it('still drops the bare transport spellings those rules exist for', () => {
-		for (const name of ['address', 'addresses', 'remoteAddress', 'ipAddress', 'headers', 'header']) {
+		for (const name of [
+			'address', 'addresses', 'remoteAddress', 'ipAddress', 'headers', 'header',
+			'rawHeaders', 'rawHeader', 'requestRawHeaders', 'httpRawHeaders'
+		]) {
 			expect(dropped(name), name).toBe(true);
 		}
 	});
@@ -356,7 +359,9 @@ describe('the default projections', () => {
 			JSON.stringify(platform.sent);
 		expect(wire).not.toContain('victim@example.com');
 		expect(wire).not.toContain('sk_live_deadbeef');
-		expect(wire).toContain('safe');
+		expect(wire).not.toContain('safe');
+		expect(p.list('room')).toEqual([{ id: 'p1' }]);
+		expect(cursors.list('board')[0].user).toEqual({ id: 'c1' });
 	});
 
 	it('contains hostile object-introspection traps on both projection paths', () => {
@@ -404,12 +409,10 @@ describe('the default projections', () => {
 		}
 	});
 
-	it('sends a Date as an ISO string rather than an empty object', () => {
-		// The previous passthrough default produced an ISO string; the recursive
-		// walk saw no enumerable own keys and produced `{}`.
+	it('does not project a Date without an explicit selector', () => {
 		const p = createPresence({ heartbeat: 0 });
 		p.join(mockWs({ id: 'u1', joinedAt: new Date('2026-07-27T10:00:00.000Z') }), 'room', platform);
-		expect(p.list('room')[0].joinedAt).toBe('2026-07-27T10:00:00.000Z');
+		expect(p.list('room')[0]).toEqual({ id: 'u1' });
 	});
 
 	it('drops a Map or Set rather than misrepresenting it as {}', () => {
@@ -420,30 +423,33 @@ describe('the default projections', () => {
 		expect(entry.meta).toBeUndefined();
 	});
 
-	it('reports a dropped field once instead of dropping it in silence', () => {
-		// The warn-once latch is deliberately PROCESS-global and capped at 32
-		// distinct names - correct for a server, where the point is to say it
-		// once and never let a client-influenced name drive an unbounded log.
-		// That makes it shared state across test FILES: vitest reuses a worker
-		// process, so a suite that ran earlier and dropped 32 names of its own
-		// leaves this one observing silence. It passed alone and failed in a
-		// full serial run, which is the worst shape a failure can have. Clearing
-		// it here asserts against a known starting point rather than against
-		// whatever ran first.
-		delete (/** @type {any} */ (globalThis))[Symbol.for('adapter-uws.projection.dropped-field-warnings')];
-		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-		try {
-			const p = createPresence({ heartbeat: 0 });
-			// A name the rules drop conservatively - nothing secret in it, which
-			// is exactly why an app needs to be told.
-			p.join(mockWs({ id: 'u1', tokenCount: 12 }), 'room', platform);
-			p.join(mockWs({ id: 'u2', tokenCount: 13 }), 'room', platform);
-			const mentions = warn.mock.calls.filter((c) => String(c[0]).includes('tokenCount'));
-			expect(mentions.length, 'expected exactly one warning for the dropped field').toBe(1);
-			expect(String(mentions[0][0])).toContain('select');
-		} finally {
-			warn.mockRestore();
-		}
+	it('does not enumerate or read non-identity fields', () => {
+		const p = createPresence({ heartbeat: 0 });
+		const cursors = createCursor({ throttle: 0, topicThrottle: 0 });
+		const getter = vi.fn(() => { throw new Error('must not be read'); });
+		const userData = { id: 'u1' };
+		Object.defineProperty(userData, 'profile', { enumerable: true, get: getter });
+
+		expect(() => p.join(mockWs(userData), 'room', platform)).not.toThrow();
+		expect(() => cursors.update(mockWs(userData), 'board', { x: 1, y: 2 }, platform)).not.toThrow();
+		expect(getter).not.toHaveBeenCalled();
+	});
+
+	it('explicit selectors remain application-owned overrides', () => {
+		const p = createPresence({
+			heartbeat: 0,
+			select: (ud) => ({ id: ud.id, medicalDiagnosis: ud.medicalDiagnosis })
+		});
+		const cursors = createCursor({
+			throttle: 0,
+			topicThrottle: 0,
+			select: (ud) => ({ id: ud.id, rawHeaders: ud.rawHeaders })
+		});
+		p.join(mockWs({ id: 'p1', medicalDiagnosis: 'shared-by-policy' }), 'room', platform);
+		cursors.update(mockWs({ id: 'c1', rawHeaders: ['shared-by-policy'] }), 'board', { x: 1 }, platform);
+
+		expect(p.list('room')).toEqual([{ id: 'p1', medicalDiagnosis: 'shared-by-policy' }]);
+		expect(cursors.list('board')[0].user).toEqual({ id: 'c1', rawHeaders: ['shared-by-policy'] });
 	});
 });
 

@@ -879,304 +879,68 @@ describe('presence plugin - server', () => {
 		});
 	});
 
-	describe('default select strips known-sensitive fields (denylist)', () => {
-		it('drops personal data, not just credentials', () => {
-			// The denylist covered the credential half only, so a zero-config app
-			// whose upgrade hook returned a user record published every peer's
-			// email, phone and date of birth on the roster, and again on every
-			// diff, heartbeat and snapshot. The names here are the runtime's own
-			// sensitive list, so one idea of "sensitive" covers logs and broadcasts.
-			const p = createPresence({ key: 'id' });
+	describe('default select is identity-only', () => {
+		it('copies only the stable configured key across JSON join, list, and state paths', () => {
+			const p = createPresence({ key: 'id', heartbeat: 0 });
 			const ws = mockWs({
 				id: '1',
 				name: 'Alice',
-				email: 'alice@example.com',
-				phoneNumber: '+41 79 000 00 00',
-				dob: '1990-01-01',
-				ssn: '123-45-6789',
-				iban: 'CH93 0076 2011 6238 5295 7',
-				ccNumber: '4111111111111111',
-				pinCode: '1234'
+				medicalDiagnosis: 'private',
+				rawHeaders: ['authorization', 'Bearer secret', 'cookie', 'sid=secret'],
+				profile: { avatar: 'a.png', sessionToken: 'inner-secret' },
+				primaryKey: 'ordinary-identifier'
 			});
 
 			p.join(ws, 'room', platform);
 			p.flushDiffs();
 
-			const stateData = platform.sent[0].data['1'];
-			expect(stateData.name, 'ordinary identity still rides the roster').toBe('Alice');
-			for (const leaked of ['email', 'phoneNumber', 'dob', 'ssn', 'iban', 'ccNumber', 'pinCode']) {
-				expect(stateData[leaked], `${leaked} must not be broadcast`).toBeUndefined();
-			}
+			expect(platform.sent[0].data['1']).toEqual({ id: '1' });
+			expect(platform.published[0].data.joins['1']).toEqual({ id: '1' });
+			expect(p.list('room')).toEqual([{ id: '1' }]);
+			const wire = JSON.stringify(platform.sent) + JSON.stringify(platform.published);
+			expect(wire).not.toContain('private');
+			expect(wire).not.toContain('Bearer secret');
+			expect(wire).not.toContain('sid=secret');
+			expect(wire).not.toContain('inner-secret');
+			expect(wire).not.toContain('ordinary-identifier');
 		});
 
-		it('keeps the author family, which is ordinary display identity', () => {
-			// A bare `auth` substring match dropped these from every roster. They
-			// are what a collaborative surface shows next to a document.
-			const p = createPresence({ key: 'id' });
-			const ws = mockWs({
-				id: '1',
-				author: 'Alice',
-				authorId: 'u-1',
-				authorName: 'Alice A',
-				authoredAt: '2026-01-01',
-				accountId: 'acct-9',
-				authToken: 'must-go'
-			});
+		it('uses a structurally safe configured key and rejects non-scalar identity values', () => {
+			const byUserKey = createPresence({ key: 'userKey', heartbeat: 0 });
+			byUserKey.join(mockWs({ userKey: 42, name: 'Ada' }), 'room', platform);
+			expect(byUserKey.list('room')).toEqual([{ userKey: 42 }]);
 
-			p.join(ws, 'room', platform);
-			p.flushDiffs();
-
-			const stateData = platform.sent[0].data['1'];
-			expect(stateData.author).toBe('Alice');
-			expect(stateData.authorId).toBe('u-1');
-			expect(stateData.authorName).toBe('Alice A');
-			expect(stateData.authoredAt).toBe('2026-01-01');
-			expect(stateData.accountId, 'account contains cc but is not a card number').toBe('acct-9');
-			expect(stateData.authToken, 'genuine auth material still goes').toBeUndefined();
+			const p = createPresence({ heartbeat: 0 });
+			const id = { toJSON: () => 'secret-id' };
+			p.join(mockWs({ id, name: 'Alice' }), 'other', platform);
+			const state = platform.sent.at(-1).data;
+			const fallbackKey = Object.keys(state)[0];
+			expect(fallbackKey.startsWith('__conn:')).toBe(true);
+			expect(state[fallbackKey]).toEqual({});
+			expect(JSON.stringify(state)).not.toContain('secret-id');
 		});
 
-		it('drops the client IP under every name this project documents for it', () => {
-			// The ratelimit plugin reads `ud.remoteAddress || ud.ip || ud.address`
-			// and documents all three as client-IP slots, so matching only
-			// remoteAddress left an app following our own convention publishing
-			// every peer's IP. `headers` and `url` are here for the same reason:
-			// the case this denylist exists for is an upgrade hook that spreads
-			// its whole context, which puts x-forwarded-for and a token-bearing
-			// query string on the wire.
-			const p = createPresence({ key: 'id' });
-			const ws = mockWs({
-				id: '1',
-				name: 'Alice',
-				ip: '203.0.113.9',
-				address: '203.0.113.9',
-				remoteAddress: '203.0.113.9',
-				headers: { 'x-forwarded-for': '203.0.113.9', 'user-agent': 'Firefox/128' },
-				url: '/ws?token=abc123',
-				requestId: 'req-1'
-			});
-
-			p.join(ws, 'room', platform);
-			p.flushDiffs();
-
-			const stateData = platform.sent[0].data['1'];
-			expect(stateData.name).toBe('Alice');
-			for (const leaked of ['ip', 'address', 'remoteAddress', 'headers', 'url', 'requestId']) {
-				expect(stateData[leaked], `${leaked} must not be broadcast`).toBeUndefined();
-			}
-		});
-
-		it('drops credential families that do not literally say token or password', () => {
-			// These are all real credential spellings from the hostile review. The
-			// first fix widened only the `key` qualifier list, so product-qualified
-			// keys, authentication codes and signed request material still rode a
-			// real presence frame unchanged.
-			const p = createPresence({ key: 'id' });
-			const ws = mockWs({
-				id: '1',
-				name: 'Alice',
-				awsKey: 'AKIA...',
-				stripeKey: 'sk_live_...',
-				hostKey: 'private-host-key',
-				hmac: 'signed-mac',
-				signature: 'captured-signature',
-				sig: 'captured-short-signature',
-				nonce: 'one-time-value',
-				csrf: 'csrf-value',
-				xsrf: 'xsrf-value',
-				recoveryCode: 'recover-me',
-				backupCode: 'backup-me',
-				inviteCode: 'invite-me',
-				magicLink: '/login?code=secret',
-				api2Key: 'versioned-api-key',
-				access2Key: 'versioned-access-key',
-				API2KEY: 'flat-versioned-api-key',
-				clientSort2Key: 'sort-2',
-				nonceHashKey: 'hash-id',
-				hmacRouteKey: 'route-id',
-				signatureRowKey: 'row-id'
-			});
-
-			p.join(ws, 'room', platform);
-			p.flushDiffs();
-
-			const stateData = platform.sent[0].data['1'];
-			expect(stateData.name).toBe('Alice');
-			for (const leaked of [
-				'awsKey', 'stripeKey', 'hostKey', 'hmac', 'signature', 'sig', 'nonce',
-				'csrf', 'xsrf', 'recoveryCode', 'backupCode', 'inviteCode', 'magicLink',
-				'api2Key', 'access2Key', 'API2KEY'
-			]) {
-				expect(stateData[leaked], `${leaked} must not be broadcast`).toBeUndefined();
-			}
-			expect(stateData.clientSort2Key).toBe('sort-2');
-			expect(stateData.nonceHashKey).toBe('hash-id');
-			expect(stateData.hmacRouteKey).toBe('route-id');
-			expect(stateData.signatureRowKey).toBe('row-id');
-		});
-
-		it('drops token / secret / password / auth / session / cookie / jwt / credential keys', () => {
-			const p = createPresence({ key: 'id' });
-			const ws = mockWs({
-				id: '1',
-				name: 'Alice',
-				color: 'red',
-				sessionToken: 'bearer-abc',
-				PASSWORD: 'hunter2',
-				apiSecret: 'shh',
-				authHeader: 'Basic xxx',
-				csrfCookie: 'c',
-				idToken: 'jwt-xyz',
-				userCredential: 'pkcs',
-				role: 'admin'
-			});
-
-			p.join(ws, 'room', platform);
-			p.flushDiffs();
-
-			const stateData = platform.sent[0].data['1'];
-			// id/name/color/role pass through (denylist allows non-matching keys)
-			expect(stateData.id).toBe('1');
-			expect(stateData.name).toBe('Alice');
-			expect(stateData.color).toBe('red');
-			expect(stateData.role).toBe('admin');
-			// sensitive keys are stripped
-			expect(stateData.sessionToken).toBeUndefined();
-			expect(stateData.PASSWORD).toBeUndefined();
-			expect(stateData.apiSecret).toBeUndefined();
-			expect(stateData.authHeader).toBeUndefined();
-			expect(stateData.csrfCookie).toBeUndefined();
-			expect(stateData.idToken).toBeUndefined();
-			expect(stateData.userCredential).toBeUndefined();
-		});
-
-		it('drops __-prefixed keys (defense against proto pollution + internal markers)', () => {
-			const p = createPresence({ key: 'id' });
-			const ws = mockWs({
-				id: '1',
-				name: 'Alice',
-				__subscriptions: new Set(['room']),
-				__remoteAddress: '203.0.113.1'
-			});
-
-			p.join(ws, 'room', platform);
-
-			const stateData = platform.sent[0].data['1'];
-			expect(stateData.id).toBe('1');
-			expect(stateData.name).toBe('Alice');
-			expect(stateData.__subscriptions).toBeUndefined();
-			expect(stateData.__remoteAddress).toBeUndefined();
-		});
-
-		it('drops constructor and prototype as own properties', () => {
-			const p = createPresence({ key: 'id' });
-			const ws = mockWs({
-				id: '1',
-				name: 'Alice',
-				constructor: 'evil',
-				prototype: 'also evil'
-			});
-
-			p.join(ws, 'room', platform);
-
-			const stateData = platform.sent[0].data['1'];
-			expect(Object.prototype.hasOwnProperty.call(stateData, 'constructor')).toBe(false);
-			expect(Object.prototype.hasOwnProperty.call(stateData, 'prototype')).toBe(false);
-			expect(stateData.id).toBe('1');
-			expect(stateData.name).toBe('Alice');
-		});
-
-		it('strips sensitive keys recursively (nested objects)', () => {
-			const p = createPresence({ key: 'id' });
-			const ws = mockWs({
-				id: '1',
-				name: 'Alice',
-				profile: {
-					avatar: 'a.png',
-					sessionToken: 'inner-bearer',
-					nested: { password: 'inner-secret', visible: 'ok' }
-				}
-			});
-
-			p.join(ws, 'room', platform);
-
-			const stateData = platform.sent[0].data['1'];
-			expect(stateData.profile.avatar).toBe('a.png');
-			expect(stateData.profile.sessionToken).toBeUndefined();
-			expect(stateData.profile.nested.password).toBeUndefined();
-			expect(stateData.profile.nested.visible).toBe('ok');
-		});
-
-		it('substitutes binary views with a length placeholder', () => {
-			const p = createPresence({ key: 'id' });
-			const ws = mockWs({
-				id: '1',
-				name: 'Alice',
-				avatar: Buffer.from([0xde, 0xad, 0xbe, 0xef])
-			});
-
-			p.join(ws, 'room', platform);
-
-			const stateData = platform.sent[0].data['1'];
-			expect(stateData.avatar).toBe('[bytes: 4]');
-		});
-
-		it('walks arrays element-by-element', () => {
-			const p = createPresence({ key: 'id' });
-			const ws = mockWs({
-				id: '1',
-				name: 'Alice',
-				tags: ['admin', { name: 'role', token: 'strip-me' }, 'beta']
-			});
-
-			p.join(ws, 'room', platform);
-
-			const stateData = platform.sent[0].data['1'];
-			expect(stateData.tags).toEqual(['admin', { name: 'role' }, 'beta']);
-		});
-
-		it('does not blow the stack on cyclic userData', () => {
-			const p = createPresence({ key: 'id' });
-			const ud = { id: '1', name: 'Alice' };
-			ud.self = ud;
-			const ws = mockWs(ud);
-
-			expect(() => p.join(ws, 'room', platform)).not.toThrow();
-			const stateData = platform.sent[0].data['1'];
-			expect(stateData.id).toBe('1');
-			expect(stateData.name).toBe('Alice');
-		});
-
-		it('explicit select still wins - default does not interfere', () => {
+		it('explicit select remains an intentional policy override', () => {
 			const p = createPresence({
 				key: 'id',
-				select: (ud) => ({ id: ud.id, color: ud.color })
+				select: (ud) => ({ id: ud.id, name: ud.name, medicalDiagnosis: ud.medicalDiagnosis })
 			});
-			const ws = mockWs({ id: '1', name: 'Alice', color: 'red', sessionToken: 'bypassed-by-explicit' });
+			p.join(mockWs({ id: '1', name: 'Alice', medicalDiagnosis: 'shared-by-policy' }), 'room', platform);
 
-			p.join(ws, 'room', platform);
-
-			// Explicit select: returns only what the user asked for, regardless of denylist
-			expect(platform.sent[0].data['1']).toEqual({ id: '1', color: 'red' });
+			expect(platform.sent[0].data['1']).toEqual({
+				id: '1',
+				name: 'Alice',
+				medicalDiagnosis: 'shared-by-policy'
+			});
 		});
 
-		it('returns a plain object when userData is empty', () => {
-			const p = createPresence();
-			const ws = mockWs({});
-
-			expect(() => p.join(ws, 'room', platform)).not.toThrow();
+		it('returns a plain object and a per-connection key when identity is absent', () => {
+			const p = createPresence({ heartbeat: 0 });
+			expect(() => p.join(mockWs({}), 'room', platform)).not.toThrow();
 			const state = platform.sent[0].data;
 			const onlyKey = Object.keys(state)[0];
 			expect(onlyKey.startsWith('__conn:')).toBe(true);
 			expect(state[onlyKey]).toEqual({});
-		});
-
-		it('opt-back-in pattern: select: (ud) => ud restores pre-this-default passthrough', () => {
-			const p = createPresence({ key: 'id', select: (ud) => ud });
-			const ws = mockWs({ id: '1', name: 'Alice', sessionToken: 'now-leaks' });
-
-			p.join(ws, 'room', platform);
-
-			expect(platform.sent[0].data['1'].sessionToken).toBe('now-leaks');
 		});
 	});
 
@@ -1726,22 +1490,26 @@ describe('presence plugin - binary wire', () => {
 		expect(platform.publishedWire.every((m) => m.options && m.options.compress === true)).toBe(true);
 	});
 
-	it('the binary path never carries denied / credential fields (select runs before encode)', () => {
-		// Default select drops credential-looking keys and substitutes binary views;
-		// the codec only ever sees post-select data, so nothing sensitive can reach
-		// the wire even on the binary path.
-		const presence = createPresence(); // default select (denylist)
+	it('the binary state path carries only the default identity field', () => {
+		const presence = createPresence();
 		const platform = binaryMockPlatform();
-		presence.join(mockWs({ id: '1', name: 'Alice', sessionToken: 'secret-abc', avatar: new Uint8Array(8) }), 'room', platform);
+		presence.join(mockWs({
+			id: '1',
+			name: 'Alice',
+			medicalDiagnosis: 'private',
+			rawHeaders: ['authorization', 'Bearer secret', 'cookie', 'sid=secret'],
+			avatar: new Uint8Array(8)
+		}), 'room', platform);
 		presence.flushDiffs();
 
 		const state = platform.sentWire.find((m) => m.event === 'state');
 		const entry = state.data['1'];
-		expect('sessionToken' in entry).toBe(false);
-		expect(entry.avatar).toBe('[bytes: 8]');
-		// And the actual encoded bytes carry no credential.
+		expect(entry).toEqual({ id: '1' });
 		const payload = encodePresence(state.event, state.data);
-		expect(Buffer.from(payload).toString('latin1')).not.toContain('secret-abc');
+		const wire = Buffer.from(payload).toString('latin1');
+		expect(wire).not.toContain('private');
+		expect(wire).not.toContain('Bearer secret');
+		expect(wire).not.toContain('sid=secret');
 	});
 
 	it('multi-tab dedup: the encoded roster carries each key once regardless of tab count', () => {
@@ -2005,6 +1773,7 @@ describe('presence plugin - client presence-update message frame', () => {
 			key: 'id',
 			select: (ud) => ({ id: ud.id, name: ud.name }),
 			transient: ['typing', 'selection'],
+			clientUpdateFields: ['typing', 'selection'],
 			heartbeat: 0
 		});
 		platform = mockPlatform();
@@ -2074,6 +1843,40 @@ describe('presence plugin - client presence-update message frame', () => {
 
 		expect(handled).toBeUndefined();
 		expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(0);
+	});
+
+	it('accepts no client-owned fields when clientUpdateFields is omitted', () => {
+		const failClosed = createPresence({ heartbeat: 0 });
+		const ws = mockWs({ id: '1', name: 'Alice' });
+		const nestedToJSON = vi.fn(() => { throw new Error('must not be serialized'); });
+		const rawHeadersGetter = vi.fn(() => { throw new Error('must not be read'); });
+		const fields = {
+			status: 'away',
+			profile: { medicalDiagnosis: 'private', toJSON: nestedToJSON }
+		};
+		Object.defineProperty(fields, 'rawHeaders', {
+			enumerable: true,
+			get: rawHeadersGetter
+		});
+		failClosed.join(ws, 'room', platform);
+		failClosed.flushDiffs();
+		platform.reset();
+
+		const handled = failClosed.hooks.message(ws, {
+			data: {
+				type: 'presence-update',
+				topic: 'room',
+				fields
+			},
+			platform
+		});
+		failClosed.flushDiffs();
+
+		expect(handled).toBe(true);
+		expect(nestedToJSON).not.toHaveBeenCalled();
+		expect(rawHeadersGetter).not.toHaveBeenCalled();
+		expect(platform.published.filter((e) => e.event === 'diff')).toHaveLength(0);
+		expect(failClosed.list('room')).toEqual([{ id: '1' }]);
 	});
 });
 
@@ -2387,75 +2190,6 @@ describe('presence plugin - security hardening', () => {
 		});
 	});
 
-	describe('default select denylist broadening', () => {
-		it('drops the adapter-injected remoteAddress transport field', () => {
-			const p = createPresence({ key: 'id', heartbeat: 0 });
-			const ws = mockWs({ id: '1', name: 'Alice', remoteAddress: '203.0.113.7' });
-
-			p.join(ws, 'room', platform);
-
-			const stateData = platform.sent[0].data['1'];
-			expect(stateData.id).toBe('1');
-			expect(stateData.name).toBe('Alice');
-			expect(stateData.remoteAddress).toBeUndefined();
-		});
-
-		it('drops credential-shaped key names (apiKey, api_key, key, KEY, accessKey, licenseKey)', () => {
-			const p = createPresence({ key: 'id', heartbeat: 0 });
-			const ws = mockWs({
-				id: '1',
-				name: 'Alice',
-				apiKey: 'ak_live_1234',
-				api_key: 'ak_snake',
-				key: 'k',
-				KEY: 'K',
-				accessKey: 'AKIA',
-				privateKey: '-----BEGIN',
-				licenseKey: 'lic'
-			});
-
-			p.join(ws, 'room', platform);
-
-			const stateData = platform.sent[0].data['1'];
-			expect(stateData.apiKey).toBeUndefined();
-			expect(stateData.api_key).toBeUndefined();
-			expect(stateData.key).toBeUndefined();
-			expect(stateData.KEY).toBeUndefined();
-			expect(stateData.accessKey).toBeUndefined();
-			expect(stateData.privateKey).toBeUndefined();
-			expect(stateData.licenseKey).toBeUndefined();
-			expect(stateData.name).toBe('Alice');
-		});
-
-		it('keeps structural id-like names and words that merely contain "key"', () => {
-			// The split between credential-shaped and structural is the whole
-			// reason this is not a bare substring match: an app legitimately
-			// shows peers a primaryKey / sortKey, and a publicKey is public.
-			const p = createPresence({ key: 'id', heartbeat: 0 });
-			const ws = mockWs({
-				id: '1',
-				monkey: 'see',
-				keyboard: 'cowboy',
-				turnkey: 'solution',
-				primaryKey: 'pk',
-				foreignKey: 'fk',
-				sortKey: 'sk',
-				publicKey: 'ssh-ed25519'
-			});
-
-			p.join(ws, 'room', platform);
-
-			const stateData = platform.sent[0].data['1'];
-			expect(stateData.monkey).toBe('see');
-			expect(stateData.keyboard).toBe('cowboy');
-			expect(stateData.turnkey).toBe('solution');
-			expect(stateData.primaryKey).toBe('pk');
-			expect(stateData.foreignKey).toBe('fk');
-			expect(stateData.sortKey).toBe('sk');
-			expect(stateData.publicKey).toBe('ssh-ed25519');
-		});
-	});
-
 	describe('reserved-field warning is bounded', () => {
 		it('warns once for a finite reserved name, never twice', () => {
 			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -2491,7 +2225,7 @@ describe('presence plugin - security hardening', () => {
 		});
 	});
 
-	describe('default select depth cap', () => {
+	describe('default select input complexity', () => {
 		it('does not throw on a pathologically nested userData', () => {
 			let deep = {};
 			const root = deep;
@@ -2502,10 +2236,10 @@ describe('presence plugin - security hardening', () => {
 			expect(p.list('room')[0].id).toBe('u-1');
 		});
 
-		it('keeps normally-nested data intact', () => {
+		it('does not project normally-nested profile data without an explicit select', () => {
 			const p = createPresence({ key: 'id', heartbeat: 0 });
 			p.join(mockWs({ id: 'u-1', a: { b: { c: { d: 'deep enough' } } } }), 'room', platform);
-			expect(p.list('room')[0].a.b.c.d).toBe('deep enough');
+			expect(p.list('room')[0]).toEqual({ id: 'u-1' });
 		});
 	});
 
@@ -2623,8 +2357,12 @@ describe('presence plugin - security hardening', () => {
 	});
 
 	describe('client update reserved-fields guard (identity impersonation)', () => {
-		it('strips id / role / credential-shaped fields from a client presence-update', async () => {
-			const presence = createPresence({ heartbeat: 0 }); // default select
+		it('an explicit client allowlist cannot write unlisted identity or credential fields', async () => {
+			const presence = createPresence({
+				heartbeat: 0,
+				select: (ud) => ({ id: ud.id, role: ud.role, name: ud.name }),
+				clientUpdateFields: ['name', 'typing']
+			});
 			const ws = mockWs({ id: 'mallory', role: 'user', name: 'Mallory' });
 			presence.join(ws, 'room', platform);
 			presence.flushDiffs();
