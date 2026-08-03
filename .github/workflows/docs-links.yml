@@ -1,0 +1,24 @@
+name: documentation links
+
+on:
+  # Network state is deliberately not a pull-request gate. The deterministic
+  # local-route checker runs on every normal test job; this scheduled lane owns
+  # remote redirects, hard failures, and soft-404 pages.
+  schedule:
+    - cron: '43 5 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  external-links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+      - name: Crawl external documentation targets
+        run: node scripts/check-external-links.js --concurrency=4 --timeout-ms=15000 --max-redirects=6

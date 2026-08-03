@@ -1,0 +1,17 @@
+{
+	"schemaVersion": 1,
+	"owner": "svelte-adapter-uws",
+	"compatibilitySource": "docs/compatibility.v1.csv",
+	"entryBudgetLines": 120,
+	"readmeMaxLines": 7116,
+	"paths": [
+		{"key":"identity","type":"Identity","need":"Decide whether the adapter fits","label":"What you get","destination":"#what-you-get","owner":"README.md"},
+		{"key":"first-success","type":"First success","need":"Serve the first HTTP route","label":"Quick start: HTTP","destination":"#quick-start-http","owner":"README.md"},
+		{"key":"compatibility","type":"Compatibility","need":"Choose a supported version tuple","label":"Version compatibility","destination":"#version-compatibility","owner":"README.md"},
+		{"key":"tutorial","type":"Tutorial","need":"Learn the ecosystem end to end","label":"Interactive tutorial","destination":"https://svelte-realtime.dev/tutorial","owner":"svelte-realtime.dev"},
+		{"key":"how-to","type":"How-to","need":"Solve a deployment or application task","label":"Guides","destination":"https://svelte-realtime.dev/guides","owner":"svelte-realtime.dev"},
+		{"key":"reference","type":"Reference","need":"Look up adapter behavior and APIs","label":"Adapter reference","destination":"https://svelte-realtime.dev/docs/ecosystem/adapter","owner":"svelte-realtime.dev"},
+		{"key":"explanation","type":"Explanation","need":"Understand boundaries and architecture","label":"Architecture","destination":"https://svelte-realtime.dev/docs/architecture","owner":"svelte-realtime.dev"},
+		{"key":"operations","type":"Operations","need":"Run the adapter in production","label":"Adapter deployment","destination":"https://svelte-realtime.dev/docs/ecosystem/adapter/deployment","owner":"svelte-realtime.dev"}
+	]
+}
