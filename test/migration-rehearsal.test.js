@@ -31,12 +31,22 @@ function compatibilityRows() {
 	return lines.map((line) => Object.fromEntries(line.split(',').map((value, index) => [headers[index], value])));
 }
 
+// Windows has no `npm` executable on PATH that execFile can spawn directly,
+// so npm is driven through its own CLI entry under the running node.
+function npmCommand() {
+	return process.platform === 'win32' ? process.execPath : 'npm';
+}
+
+function npmArgs() {
+	return process.platform === 'win32'
+		? [path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')]
+		: [];
+}
+
 function packInto(temp) {
 	const packArgs = ['pack', '--json', '--pack-destination', temp];
-	const command = process.platform === 'win32' ? process.execPath : 'npm';
-	const args = process.platform === 'win32'
-		? [path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'), ...packArgs]
-		: packArgs;
+	const command = npmCommand();
+	const args = [...npmArgs(), ...packArgs];
 	const packed = JSON.parse(execFileSync(command, args, {
 		cwd: root,
 		encoding: 'utf8',
@@ -95,12 +105,23 @@ describe('0.5 to 0.6 executable migration route', () => {
 
 			const tarball = packInto(temp);
 			expect(existsSync(tarball)).toBe(true);
-			const installed = path.join(consumer, 'node_modules', 'svelte-adapter-uws');
-			mkdirSync(installed, { recursive: true });
-			execFileSync('tar', ['-xzf', tarball, '-C', installed, '--strip-components=1'], {
+			// A REAL install, not a tar extraction: extracting the tarball
+			// gives the package's files without its declared dependency tree,
+			// so a runtime module importing a production dependency fails at
+			// import time and the rehearsal proves nothing about what a
+			// consumer actually gets. npm resolves the same graph a consumer
+			// would; --no-audit/--no-fund keep it offline-fast, and the
+			// optional native addon is skipped because the rehearsal only
+			// exercises pure-JS plugin and publish paths.
+			execFileSync(npmCommand(), [...npmArgs(), 'install', tarball,
+				'--no-audit', '--no-fund', '--omit=optional', '--ignore-scripts'
+			], {
+				cwd: consumer,
 				encoding: 'utf8',
-				timeout: 120000
+				timeout: 300000
 			});
+			const installed = path.join(consumer, 'node_modules', 'svelte-adapter-uws');
+			expect(existsSync(path.join(installed, 'package.json')), 'tarball did not install').toBe(true);
 
 			const hooks = await import(pathToFileURL(path.join(consumer, 'hooks.ws.js')).href);
 			const subscriptions = new Set();
