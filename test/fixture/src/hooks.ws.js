@@ -1,3 +1,4 @@
+import { workerData as threadWorkerData } from 'node:worker_threads';
 import { createCursor } from 'svelte-adapter-uws/plugins/cursor';
 
 const cursors = createCursor({
@@ -12,6 +13,21 @@ const cursors = createCursor({
 export function init({ platform }) {
 	if (process.env.ACCEPTOR_INIT_PROBE === '1') {
 		console.log(`__ACCEPTOR_INIT_RAN__ connections=${platform.connections}`);
+	}
+	if (process.env.GAME_POLICY_INIT_PROBE === '1') {
+		// Attempt the game lane from every worker and log role + outcome, so a
+		// real-cluster test can prove the compute worker is denied while the
+		// socket-owning I/O worker is not - a source assertion cannot. The role
+		// comes from the thread's own workerData: that is the same value the
+		// production gate reads.
+		let outcome;
+		try {
+			platform.publishGame(null, 'arena:probe', 'tick', {});
+			outcome = 'ok';
+		} catch (error) {
+			outcome = 'error=' + (error instanceof Error ? error.message : String(error));
+		}
+		console.log(`__GAME_POLICY_INIT__ role=${threadWorkerData?.role} ${outcome}`);
 	}
 }
 
@@ -100,6 +116,41 @@ export function message(ws, ctx) {
 				error: error instanceof Error ? error.message : String(error)
 			});
 		}
+	}
+	if (msg.type === 'plugin-cluster-probe') {
+		// Drives the REAL bundled-plugin publish paths under whatever topology
+		// this server booted with. The regression this exists to catch: a
+		// bundled plugin publishing without declaring its sequence authority
+		// throws in every multi-worker runtime, which is invisible to any test
+		// that only probes the fixture's direct publish entries.
+		(async () => {
+			try {
+				if (msg.entry === 'replay-create') {
+					const { createReplay } = await import('svelte-adapter-uws/plugins/replay');
+					const replay = createReplay({ size: 8 });
+					platform.send(ws, 'probe', 'plugin-cluster', {
+						nonce: msg.nonce, ok: true, seq: replay.seq('probe-topic')
+					});
+					return;
+				}
+				if (msg.entry === 'group-roundtrip') {
+					const { createGroup } = await import('svelte-adapter-uws/plugins/groups');
+					const group = createGroup('policy-probe-' + msg.nonce);
+					await group.join(ws, platform);
+					group.publish(platform, 'group-probe', { nonce: msg.nonce });
+					return;
+				}
+				platform.send(ws, 'probe', 'plugin-cluster', {
+					nonce: msg.nonce, ok: false, error: 'unknown entry'
+				});
+			} catch (error) {
+				platform.send(ws, 'probe', 'plugin-cluster', {
+					nonce: msg.nonce,
+					ok: false,
+					error: error instanceof Error ? error.message : String(error)
+				});
+			}
+		})();
 	}
 	if (msg.type === 'sendto') {
 		platform.sendTo(

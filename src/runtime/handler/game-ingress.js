@@ -24,6 +24,7 @@
 import { registerIngress } from './ingress.js';
 import { decodeValue, encodeValue } from '../wire-value.js';
 import { WS_PUBLISH_GRANT, WS_STATS } from '../utils.js';
+import { workerData } from 'node:worker_threads';
 
 /** The ingress kind a client binds to publish `game` frames as `0x03`. */
 export const GAME_INGRESS_KIND = 'game:1';
@@ -40,6 +41,41 @@ export const GAME_INGRESS_SCHEMA_VERSION = 1;
 export const GAME_FANOUT_CAP = 'game.fanout:1';
 /** The fan-out frame schema version. Shares the `game:1` layout, so it shares its version. */
 export const GAME_FANOUT_SCHEMA_VERSION = GAME_INGRESS_SCHEMA_VERSION;
+
+/**
+ * The adapter's game lane owns an in-memory per-room sequencer and local
+ * sender-excluding fan-out. It is correct in a cluster only when THIS worker
+ * is the single socket-owning home: with one I/O worker plus N compute
+ * workers, a compute worker running publishGame would stamp seqs in its own
+ * topicSeqs and fan out to zero sockets - a second, silently-empty room
+ * sequencer forked from the real one. So the gate checks the worker's ROLE,
+ * not merely the I/O-worker count.
+ *
+ * @param {any} [data]
+ * @returns {boolean}
+ */
+function computeGameLaneClusterSafe(data) {
+	const ioWorkers = data?.ioWorkers;
+	if (Number.isInteger(ioWorkers) && ioWorkers > 1) return false;
+	// Single process (no cluster metadata) has no role and is always safe.
+	return data?.role !== 'compute';
+}
+
+// Immutable for the worker's lifetime, so the per-frame gates read one
+// hoisted boolean instead of re-deriving the topology on the 60 Hz path.
+const GAME_LANE_SAFE_HERE = computeGameLaneClusterSafe(workerData);
+
+export function gameLaneClusterSafe(data = workerData) {
+	return data === workerData ? GAME_LANE_SAFE_HERE : computeGameLaneClusterSafe(data);
+}
+
+export const GAME_LANE_CLUSTER_ERROR =
+	'game lane requires the single socket-owning I/O worker; configure websocket.workers.compute so one I/O worker accepts sockets and call publishGame from it (not from a compute worker), or use an external authoritative room sequencer';
+
+/** Fail before a server grants or publishes into an unsafe game topology. */
+export function assertGameLaneClusterSafe(data = workerData) {
+	if (!gameLaneClusterSafe(data)) throw new Error(GAME_LANE_CLUSTER_ERROR);
+}
 
 /**
  * Encode a game fan-out payload: the byte-inverse of {@link decodeGameFrame}.
@@ -89,13 +125,18 @@ export function decodeGameFrame(payload) {
  * @param {{ event: unknown, data: unknown, id: number | string | undefined }} value
  * @param {any} platform
  * @param {number} _seq  the per-binding ingress seq - unused (the room seq is stamped on fan-out)
+ * @param {any} [clusterData] testable worker topology; production uses workerData
  */
-export function routeGameFrame(ws, _target, value, platform, _seq) {
+export function routeGameFrame(ws, _target, value, platform, _seq, clusterData = workerData) {
 	let ud;
 	try { ud = ws.getUserData(); } catch { return; }
 	const grantTopic = ud[WS_PUBLISH_GRANT];
-	if (!grantTopic || typeof value.event !== 'string') {
-		const reason = grantTopic ? 'INVALID' : 'FORBIDDEN';
+	const clusterSafe = gameLaneClusterSafe(clusterData);
+	if (!clusterSafe || !grantTopic || typeof value.event !== 'string') {
+		// Keep the frozen denial vocabulary. An unsafe clustered topology has no
+		// valid grant: treating it as FORBIDDEN is both accurate and understood by
+		// existing clients, which already stop sending until they re-join.
+		const reason = clusterSafe && grantTopic ? 'INVALID' : 'FORBIDDEN';
 		const denied = value.id === undefined
 			? JSON.stringify({ type: 'game-denied', reason })
 			: JSON.stringify({ type: 'game-denied', reason, id: value.id });

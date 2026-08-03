@@ -40,7 +40,7 @@ registerDerivedTopicPrefix(TOPIC_PREFIX);
 import { encodePresence, PRESENCE_CAPABILITY, PRESENCE_SCHEMA_VERSION } from './codec.js';
 import { setTimer, clearTimer, setIntervalTimer, clearIntervalTimer } from '../../runtime/runtime.js';
 import { trackedSubscribe, trackedUnsubscribe, registerDerivedTopicPrefix, markSideEffectHooks, authorizeDerivedSubscribe } from '../../runtime/utils.js';
-import { isSensitiveFieldName, isStructurallyUnsafeFieldName, MAX_PROJECTION_DEPTH, exceedsDepth, noteDroppedField, isUnsafeProjectionFieldName } from '../_shared/sensitive.js';
+import { isSensitiveFieldName, isStructurallyUnsafeFieldName, MAX_PROJECTION_DEPTH, exceedsDepth, isUnsafeProjectionFieldName } from '../_shared/sensitive.js';
 
 /**
  * @typedef {Object} PresenceOptions
@@ -49,17 +49,13 @@ import { isSensitiveFieldName, isStructurallyUnsafeFieldName, MAX_PROJECTION_DEP
  *   presence entry. If the field is missing from the data, each connection is tracked separately.
  * @property {(userData: any) => Record<string, any>} [select] - Function to extract the public
  *   presence data from the connection's userData (whatever your `upgrade` handler returned).
- *   Only the selected fields are broadcast to other clients. Defaults to a recursive
- *   denylist shared with cursor. It drops internal/prototype names; request and
- *   transport metadata (`remoteAddress`, `ip`, `address`, `headers`, bare
- *   `url`, `requestId`); and credential- or personal-data-shaped names such as
- *   tokens, passwords, sessions, cookies, email/phone/payment identifiers and
- *   credential keys. Structural ids like `primaryKey`, `foreignKey` and
- *   `sortKey` pass through, as do `monkey` / `keyboard`. Binary views (Buffer,
- *   TypedArray, DataView, ArrayBuffer) are substituted with
- *   `'[bytes: <len>]'` so raw bytes do not land in presence frames.
+ *   Only the selected fields are broadcast to other clients. By default the
+ *   projection copies only the configured `key` field, and only when its name
+ *   is structurally safe and its value is a string or finite number. Display
+ *   names, profiles, transport metadata and every other field require an
+ *   explicit `select` allowlist.
  *
- *   The denylist applies to the `key` field too, with no exemption: the
+ *   The sensitive-name guard applies to the `key` field too, with no exemption: the
  *   resolved dedup key is broadcast as the roster key in every frame, so a
  *   credential-shaped one must not survive. Nominating `key: 'sessionId'`
  *   logs a warning at construction and falls back to per-connection entries
@@ -67,24 +63,11 @@ import { isSensitiveFieldName, isStructurallyUnsafeFieldName, MAX_PROJECTION_DEP
  *   non-secret identifier, or pass an explicit `select` if the field really
  *   is one.
  *
- *   The cursor plugin's default `select` drops exactly the same names (both
- *   read `plugins/_shared/sensitive.js`).
- *   The cluster-aware Redis presence plugin
- *   (`svelte-adapter-uws-extensions/redis/presence`) applies the same
- *   denylist on its default projection, including the fallback to
- *   per-connection entries when the dedup key field is itself a dropped
- *   name. Two screening differences remain. Dynamic fields: this plugin's
- *   `update()` refuses identity and denylisted field names, while the Redis
- *   plugin's `update()` currently rejects only reserved and prototype
- *   names, so client-supplied dynamic field names are not screened for
- *   personal or credential data there. And an explicit `select`: this
- *   plugin uses its return value as-is, while the Redis plugin still runs
- *   an explicit select's result through its credential redactor before
- *   anything is broadcast or persisted.
- *
- *   To override:
- *   - tighter (allowlist): `select: (ud) => ({ id: ud.id, name: ud.name })`
- *   - looser (passthrough, pre-this-default behavior): `select: (ud) => ud`
+ *   Cursor follows the same fail-closed rule, with `id` as its sole default
+ *   identity field.
+ *   An explicit selector is an application-owned policy override and its
+ *   return value is used as-is. Prefer an allowlist such as
+ *   `select: (ud) => ({ id: ud.id, name: ud.name })`.
  *
  *   Should return JSON-serializable data (plain objects, arrays, strings, numbers,
  *   booleans, null) since the result is sent over WebSocket.
@@ -131,14 +114,11 @@ import { isSensitiveFieldName, isStructurallyUnsafeFieldName, MAX_PROJECTION_DEP
  *   one connection's retained dynamic-field footprint at about 6.25 MiB by
  *   default instead of allowing the global one-million-topic registry limit to
  *   multiply the per-entry budget. A join beyond the cap is a silent no-op.
- * @property {string[]} [clientUpdateFields] - Opt-in allowlist for `update()`
- *   field names. Unset (the default), updates may set any field EXCEPT the
- *   server-reserved names: the dedup key field, `id`, `role`, `__`-prefixed,
- *   `constructor`, `prototype`, and anything the default denylist treats as
- *   credential-shaped - those are stripped so a client cannot overwrite the
- *   server-selected identity its peers see. Set this to accept ONLY the
- *   listed names; listing a reserved name is the deliberate escape hatch
- *   (e.g. an app that lets users pick their own display `role`).
+ * @property {string[]} [clientUpdateFields] - Allowlist for field names accepted
+ *   from wire `presence-update` frames. Unset (the default), client frames may
+ *   not add any dynamic fields. Set it to accept only the listed names. Direct
+ *   server calls to `update()` retain the reserved-name guard; when this option
+ *   is set, the same allowlist also applies to direct calls.
  */
 
 /**
@@ -332,162 +312,47 @@ function deepEqual(a, b, seen, depth) {
 }
 
 /**
- * Build the default `select` for one tracker.
+ * Build the fail-closed default selector for one tracker. Only the configured
+ * dedup key is copied, and only when the field name is safe and its value is a
+ * stable JSON scalar (string or finite number). Every display/profile field
+ * requires an explicit application allowlist.
  *
- * Recursively drops internal-looking and credential-looking keys, substitutes
- * binary views with a `'[bytes: <len>]'` placeholder, and passes everything
- * else through. Apps that want the old full-userData passthrough back can
- * restate it (`select: (ud) => ud`); apps that want a tighter strict allowlist
- * pass their own (`select: (ud) => ({ id: ud.id })`).
- *
- * The denylist is ABSOLUTE - the configured dedup key field gets no exemption.
- * That looks unhelpful (a credential-shaped `key` is dropped, so dedup falls
- * back to the per-connection key and multi-tab dedup is lost) but exempting it
- * is worse: the resolved key is not just stored, it becomes the roster map key
- * in every wire frame, so exempting `key: 'sessionId'` would broadcast the
- * session token to every peer twice over. A secret cannot be a dedup key. The
- * tracker warns at construction when the configured key is credential-shaped,
- * so the fallback is loud instead of silent - see createPresence.
- *
- * Cycle-safe via a per-call WeakSet of the CURRENT PATH, and depth-capped
- * (MAX_PROJECTION_DEPTH) so a pathologically nested object is dropped rather
- * than recursed into.
- *
- * A second per-call WeakMap memoises nodes already projected. The path set
- * alone bounds depth but not WORK: it is cleared on the way out, so an object
- * graph that reaches the same child by several paths (a DAG, not a cycle) gets
- * re-expanded once per path - twenty levels of a node holding the same child
- * twice is 2^20 expansions from twenty-one distinct objects. The memo makes
- * each node cost once. Sharing one output object between positions is
- * harmless here because the result is immediately serialized to JSON.
- *
- * @returns {(obj: unknown, ancestors?: WeakSet<object>, depth?: number, memo?: WeakMap<object, any>) => any}
+ * @param {string} keyField
+ * @returns {(obj: unknown) => Record<string, string | number>}
  */
-function makeDefaultPresenceSelect() {
-	/**
-	 * @param {unknown} obj
-	 * @param {WeakSet<object>} [ancestors]
-	 * @param {number} [depth]
-	 * @param {WeakMap<object, any>} [memo]
-	 */
-	return function defaultPresenceSelect(obj, ancestors, depth = 0, memo) {
-		// Only the outermost call is the identity object resolveKey reads.
-		const top = ancestors === undefined;
-		// A function is never projected. `typeof fn === 'object'` is false, so
-		// one used to be copied to the wire verbatim - and `JSON.stringify`
-		// calls an own enumerable `toJSON`, which REPLACES the whole projected
-		// subtree with whatever that function returns. Every name check below
-		// then counts for nothing: the value that reaches the wire was never
-		// projected at all.
-		if (typeof obj === 'function') return top ? {} : undefined;
-		if (!obj || typeof obj !== 'object') {
-			// Primitive / null / undefined - wrap as empty plain object so the
-			// downstream "must return a plain object" check passes. The plugin
-			// then falls back to the auto-generated __conn:N key for dedup.
-			return top ? {} : obj;
-		}
-		// Built-ins carrying no enumerable own keys. The key walk below projects
-		// them to `{}`, so `joinedAt: new Date()` - an ordinary thing for an
-		// upgrade hook to return, and one the previous passthrough default sent
-		// as an ISO string - silently became an empty object on every roster. A
-		// Date has a canonical wire form; a Map or Set does not, so it is
-		// dropped rather than misrepresented as an empty object.
-		// Tag-checked rather than `instanceof`: these arrive from an app's upgrade
-		// hook, and `instanceof` is realm-bound - a Date created in a worker or a
-		// vm context fails it and falls through to the key walk, which produces
-		// the very `{}` this exists to prevent.
-		let builtinTag;
+function makeDefaultPresenceSelect(keyField) {
+	return function defaultPresenceSelect(obj) {
+		const selected = {};
+		if (
+			!obj ||
+			typeof obj !== 'object' ||
+			isSensitiveFieldName(keyField) ||
+			isStructurallyUnsafeFieldName(keyField)
+		) return selected;
+
+		let value;
 		try {
-			if (ArrayBuffer.isView(obj) || obj instanceof ArrayBuffer) {
-				const len = /** @type {{ byteLength: number }} */ (obj).byteLength;
-				return '[bytes: ' + len + ']';
-			}
-			// `Object#toString` reads Symbol.toStringTag. An app-authored getter
-			// can throw here before any field is projected; dropping that subtree
-			// is safer than letting a fire-and-forget join escape into the worker.
-			builtinTag = Object.prototype.toString.call(obj);
+			if (!Object.prototype.hasOwnProperty.call(obj, keyField)) return selected;
+			value = obj[keyField];
 		} catch {
-			return top ? {} : undefined;
+			return selected;
 		}
-		if (builtinTag === '[object Date]') {
-			// The tag is FORGEABLE - `Symbol.toStringTag: 'Date'` on a plain
-			// object reaches here and makes `getTime` throw "this is not a Date
-			// object", out of a fire-and-forget `join()`. The realm-safe read and
-			// the spoof-safe read are the same one: try it and fall through when
-			// it is not really a Date, which also keeps a Proxy or an exotic
-			// wrapper from turning a roster update into an exception.
-			try {
-				const ms = Date.prototype.getTime.call(obj);
-				return Number.isNaN(ms) ? undefined : Date.prototype.toISOString.call(obj);
-			} catch { return undefined; }
+		if (typeof value !== 'string' && !(typeof value === 'number' && Number.isFinite(value))) {
+			return selected;
 		}
-		if (builtinTag === '[object Map]' || builtinTag === '[object Set]') return undefined;
-		// Drop past the cap. The top-level object is never dropped: it must
-		// stay a plain object for the downstream select-shape check.
-		if (depth > MAX_PROJECTION_DEPTH) return top ? {} : undefined;
-		if (!ancestors) ancestors = new WeakSet();
-		if (!memo) memo = new WeakMap();
-		if (ancestors.has(obj)) return undefined; // cycle: this node is on the current path
-		if (memo.has(obj)) return memo.get(obj);  // DAG: already projected, reuse it
-		ancestors.add(obj);
-		let result;
-		if (Array.isArray(obj)) {
-			// An index loop, not `map`: `Array.prototype.map` honours
-			// `Symbol.species`, so an app-authored Array subclass can name a
-			// constructor whose instances carry a `toJSON` - and that toJSON then
-			// replaces this whole projected subtree at serialize time, which is
-			// the bypass the function drop below closes everywhere else.
-			let length;
-			try { length = obj.length; } catch {
-				ancestors.delete(obj);
-				return top ? {} : undefined;
-			}
-			result = new Array(length);
-			for (let i = 0; i < length; i++) {
-				let v;
-				try { v = obj[i]; } catch { continue; }
-				result[i] = (v && typeof v === 'object')
-					? defaultPresenceSelect(v, ancestors, depth + 1, memo)
-					: typeof v === 'function' ? undefined : v;
-			}
-		} else {
-			result = {};
-			let keys;
-			try { keys = Object.keys(obj); } catch {
-				// Proxies can throw from ownKeys/getOwnPropertyDescriptor. This
-				// is the same hostile-object boundary as a throwing value getter.
-				ancestors.delete(obj);
-				return top ? {} : undefined;
-			}
-			for (const k of keys) {
-				if (isUnsafeProjectionFieldName(k)) {
-					noteDroppedField(k, 'presence');
-					continue;
-				}
-				// The read itself can throw: this default touches every
-				// enumerable own key, so a userData carrying an accessor that
-				// throws would surface out of presence.join(). Skip the field.
-				let v;
-				try { v = obj[k]; } catch { continue; }
-				// Dropped HERE, not in the recursive call: `typeof fn` is
-				// 'function', so a function value never reaches the projector at
-				// all - it took the pass-through branch below and was copied to
-				// the wire verbatim. An own enumerable `toJSON` is then invoked
-				// by JSON.stringify and REPLACES this whole subtree with whatever
-				// it returns, so every name check above counted for nothing.
-				if (typeof v === 'function') continue;
-				result[k] = (v && typeof v === 'object') ? defaultPresenceSelect(v, ancestors, depth + 1, memo) : v;
-			}
-		}
-		ancestors.delete(obj);
-		memo.set(obj, result);
-		return result;
+		Object.defineProperty(selected, keyField, {
+			value,
+			enumerable: true,
+			configurable: true,
+			writable: true
+		});
+		return selected;
 	};
 }
 
 export function createPresence(options = {}) {
 	const keyField = options.key || 'id';
-	const select = options.select || makeDefaultPresenceSelect();
+	const select = options.select || makeDefaultPresenceSelect(keyField);
 
 	// A credential-shaped dedup key cannot work with the default projection,
 	// and must not be made to: the resolved key becomes the roster map key in
@@ -497,7 +362,7 @@ export function createPresence(options = {}) {
 	// dedup is what made this hard to diagnose before.
 	if (!options.select && (isSensitiveFieldName(keyField) || isStructurallyUnsafeFieldName(keyField))) {
 		console.warn(
-			`presence: key field '${keyField}' is credential-shaped, so the default select() drops it ` +
+			`[svelte-adapter-uws] presence: key field '${keyField}' is credential-shaped, so the default select() drops it ` +
 			'and each connection gets its own presence entry (no multi-tab dedup). The dedup key is ' +
 			'broadcast as the roster key, so it must not be a secret: dedup on a non-secret identifier ' +
 			`(e.g. a user id), or pass an explicit select() that returns '${keyField}' if it really is one.`
@@ -559,16 +424,15 @@ export function createPresence(options = {}) {
 		throw new Error('presence: topicThrottle must be a non-negative number');
 	}
 
-	// Opt-in allowlist for update() fields. Unset (the default), update()
-	// strips the server-reserved field names (see isReservedField) and
-	// accepts everything else; set, ONLY the listed field names are
-	// accepted - which is also the deliberate escape hatch for an app that
-	// lets clients write a name the default guard reserves (e.g. a display
-	// `role`).
+	// Wire presence-update frames are fail closed: without an explicit
+	// allowlist they cannot add durable or transient fields. Direct server calls
+	// retain the reserved-name guard for compatibility. When configured, the
+	// allowlist applies to both paths and is the deliberate escape hatch for an
+	// app that accepts a client-owned display field such as `role`.
 	if (options.clientUpdateFields !== undefined && !Array.isArray(options.clientUpdateFields)) {
-		// A bare string is the obvious typo, and silently ignoring it WIDENS
-		// what clients may write (no allowlist = the denylist default), so this
-		// has to be loud like every other option here.
+		// A bare string is the obvious typo. Silently treating it as the omitted
+		// fail-closed default would make the requested client update disappear,
+		// so this stays loud like every other malformed option here.
 		throw new Error('presence: clientUpdateFields must be an array of field names');
 	}
 	const clientUpdateFields = Array.isArray(options.clientUpdateFields)
@@ -584,11 +448,10 @@ export function createPresence(options = {}) {
 		}
 	}
 
-	// update() cannot tell a client-driven call from server-owned code calling
-	// it directly, so a legitimate `presence.update(ws, topic, { role })` from
-	// an app's own logic is silently dropped by the guard above - the exact
-	// shape of bug that costs an afternoon. Say so once per name, outside
-	// production only.
+	// A trusted direct `presence.update(ws, topic, { role })` is still subject
+	// to the historical reserved-name guard. Say so once per finite reserved
+	// name outside production, so an intentional server-owned field is easy to
+	// diagnose and opt into.
 	//
 	// Deliberately limited to the FINITE reserved names. The credential-shaped
 	// and `__`-prefixed rules match an unbounded name space, so warning on
@@ -612,7 +475,7 @@ export function createPresence(options = {}) {
 			if (!WARNABLE_RESERVED.has(foldName(k)) || warnedReservedFields.has(k)) return;
 			warnedReservedFields.add(k);
 			console.warn(
-				`presence.update(): field '${k}' is reserved and was dropped. ` +
+				`[svelte-adapter-uws] presence.update(): field '${k}' is reserved and was dropped. ` +
 				'Reserved names are the dedup key field, id, role, __-prefixed, ' +
 				'constructor/prototype and credential-shaped names, so a client ' +
 				'cannot overwrite the identity its peers see. If this call is ' +
@@ -622,13 +485,13 @@ export function createPresence(options = {}) {
 		};
 
 	/**
-	 * Field names update() may never write on a client's behalf by default:
+	 * Field names a direct update() may not write by default:
 	 * the identity the server's own `select` produced (the dedup key field,
 	 * `id`, `role` - a client-written value would impersonate it to peers),
 	 * anything the default denylist treats as credential-shaped, and the
 	 * `__`-prefixed / prototype-gadget names that must never become
-	 * wire-object properties. Overridden wholesale by the
-	 * `clientUpdateFields` allowlist.
+	 * wire-object properties. A configured `clientUpdateFields` allowlist
+	 * replaces this guard for direct calls and independently gates wire calls.
 	 * @param {string} k
 	 */
 	function isReservedField(k) {
@@ -651,13 +514,8 @@ export function createPresence(options = {}) {
 			folded === 'role' ||
 			folded === 'roles' ||
 			folded === 'userrole' ||
-			// MEMOISED. This runs once per client-chosen field name on every
-			// `presence-update` FRAME, which is the per-message path - unlike the
-			// projection, which runs once per connection. Calling the predicates
-			// directly cost 560ns per name against 7.5ns for the single regex
-			// they replaced, so one legal 8 KB frame spent 459us classifying
-			// names: a client-reachable amplifier sitting behind the memo rather
-			// than in front of it.
+			// MEMOISED in the shared predicate: direct update paths may reuse the
+			// same dynamic field names at high frequency.
 			isUnsafeProjectionFieldName(k)
 		);
 	}
@@ -741,15 +599,20 @@ export function createPresence(options = {}) {
 	 * @param {import('../../index.js').Platform} platform
 	 */
 	function emit(fullTopic, event, data, platform) {
+		// `seq: false` declares this lane's ordering contract to the cluster
+		// sequence guard: presence broadcasts are roster snapshots and diffs
+		// whose consistency is re-established by the state snapshot on join,
+		// so they make no monotonic promise and must not consume per-worker
+		// topic counters that would fork across a multi-worker relay.
 		if (wireCodec && typeof platform.publishWire === 'function') {
 			registerWireCodecOnce(platform);
 			// Presence frames are low-frequency (a diff on join/leave; one heartbeat
 			// per interval), so opting into permessage-deflate is a cheap bandwidth
 			// win - the opposite of the 60 Hz cursor hot path, which stays
 			// uncompressed. No-op unless a compressor is configured.
-			platform.publishWire(fullTopic, event, data, wireCodec, { compress: true });
+			platform.publishWire(fullTopic, event, data, wireCodec, { compress: true, seq: false });
 		} else {
-			platform.publish(fullTopic, event, data);
+			platform.publish(fullTopic, event, data, { seq: false });
 		}
 	}
 
@@ -1216,10 +1079,25 @@ export function createPresence(options = {}) {
 			emitTo(ws, presenceTopic, 'state', snapshotState(users), platform);
 		},
 
-		update(ws, topic, fields, platform) {
+		update(ws, topic, fields, platform, fromClient = false) {
 			capturePlatform(platform);
 			if (topic.startsWith('__')) return;
 			if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return;
+			// Filter client-owned names before JSON serialization or depth walking.
+			// With no allowlist this returns without touching nested values at all;
+			// with one, unlisted getters and toJSON hooks remain unreachable.
+			let effectiveFields = fields;
+			if (fromClient) {
+				if (!clientUpdateFields) return;
+				effectiveFields = Object.create(null);
+				let accepted = false;
+				for (const k of Object.keys(fields)) {
+					if (!clientUpdateFields.has(k)) continue;
+					effectiveFields[k] = fields[k];
+					accepted = true;
+				}
+				if (!accepted) return;
+			}
 			// Resolve the user this connection represents on the topic. A
 			// connection that is not present (never joined, or the socket closed
 			// mid-await) is a silent no-op - presence is best-effort. The update
@@ -1239,7 +1117,7 @@ export function createPresence(options = {}) {
 			// frame's O(subscribers) fan-out bounded.
 			let fieldsBytes;
 			try {
-				fieldsBytes = Buffer.byteLength(JSON.stringify(fields));
+				fieldsBytes = Buffer.byteLength(JSON.stringify(effectiveFields));
 			} catch {
 				return;
 			}
@@ -1249,7 +1127,7 @@ export function createPresence(options = {}) {
 			// structuredClone serializer overflows about four times shallower than
 			// 8 KB admits - and a worker exit is a much worse outcome than a
 			// dropped frame. Rejected silently, like every other malformed update.
-			if (exceedsDepth(fields, MAX_PROJECTION_DEPTH)) return;
+			if (exceedsDepth(effectiveFields, MAX_PROJECTION_DEPTH)) return;
 			if (!entry.fields) {
 				entry.fields = Object.create(null); // client-controlled field names - see flushDiffs
 				entry.fieldsBytes = 0;
@@ -1265,15 +1143,18 @@ export function createPresence(options = {}) {
 			// cumulative budget (durable fields ride every future snapshot and
 			// heartbeat, so the per-frame cap alone is not enough).
 			let deltaBytes = 0;
-			for (const k of Object.keys(fields)) {
-				// Strip the server-reserved field names (identity, credentials,
-				// prototype gadgets) from client-pushed updates; the
-				// `clientUpdateFields` allowlist replaces this guard outright.
-				if (clientUpdateFields ? !clientUpdateFields.has(k) : isReservedField(k)) {
+			for (const k of Object.keys(effectiveFields)) {
+				// Wire updates accept nothing until the application names the
+				// writable fields. Trusted direct calls keep the historical reserved
+				// field guard; a configured allowlist narrows both paths.
+				const refused = fromClient
+					? (!clientUpdateFields || !clientUpdateFields.has(k))
+					: (clientUpdateFields ? !clientUpdateFields.has(k) : isReservedField(k));
+				if (refused) {
 					if (warnOnReservedField) warnOnReservedField(k);
 					continue;
 				}
-				const v = fields[k];
+				const v = effectiveFields[k];
 				if (deepEqual(entry.fields[k], v)) continue;
 				let valueBytes;
 				let oldBytes = 0;
@@ -1423,7 +1304,7 @@ export function createPresence(options = {}) {
 					// on membership (a connection that has not joined the topic is a
 					// silent no-op) and on field shape, so an unsubscribed socket
 					// cannot inject fields.
-					tracker.update(ws, env.topic, env.fields, platform);
+					/** @type {any} */ (tracker).update(ws, env.topic, env.fields, platform, true);
 					return true;
 				}
 			},

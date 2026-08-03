@@ -227,7 +227,9 @@ export function createGroup(name, options = {}) {
 			members.set(ws, { role });
 
 			// Publish join BEFORE subscribing so joiner doesn't see own join
-			platform.publish(internalTopic, 'join', { role, count: members.size });
+			// `seq: false`: membership notifications are per-worker roster events with
+			// no monotonic promise; see the cluster sequence guard.
+			platform.publish(internalTopic, 'join', { role, count: members.size }, { seq: false });
 
 			// Callers reach `join` after their own async auth chain; the
 			// socket may have closed in the meantime. Roll back the
@@ -252,7 +254,7 @@ export function createGroup(name, options = {}) {
 			members.delete(ws);
 			trackedUnsubscribe(ws, internalTopic);
 
-			platform.publish(internalTopic, 'leave', { role: entry.role, count: members.size });
+			platform.publish(internalTopic, 'leave', { role: entry.role, count: members.size }, { seq: false });
 
 			if (onLeave) onLeave(ws, entry.role);
 		},
@@ -262,7 +264,7 @@ export function createGroup(name, options = {}) {
 
 			if (role == null) {
 				// Broadcast to all members via the internal topic
-				platform.publish(internalTopic, event, data);
+				platform.publish(internalTopic, event, data, { seq: false });
 				return;
 			}
 
@@ -301,7 +303,7 @@ export function createGroup(name, options = {}) {
 			if (closed) return;
 			closed = true;
 
-			platform.publish(internalTopic, 'close', null);
+			platform.publish(internalTopic, 'close', null, { seq: false });
 
 			for (const [ws] of members) {
 				trackedUnsubscribe(ws, internalTopic);

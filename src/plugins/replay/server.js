@@ -17,8 +17,15 @@
  * tenant scope. Same recommendation for the `presence`, `groups`, and
  * `cursor` plugins.
  *
+ * CLUSTER NOTE
+ * The buffer is per-worker memory, so `createReplay` refuses to run in a
+ * multi-worker runtime; the shared-backend replay in
+ * svelte-adapter-uws-extensions is the clustered form.
+ *
  * @module svelte-adapter-uws/plugins/replay
  */
+
+import { workerData } from 'node:worker_threads';
 
 const TOPIC_PREFIX = '__replay:';
 
@@ -119,6 +126,19 @@ const TOPIC_PREFIX = '__replay:';
  * ```
  */
 export function createReplay(options = {}) {
+	// The buffer and its sequence counter live in this worker's memory. In a
+	// multi-worker runtime every worker would hold a divergent history and a
+	// divergent counter for the same topic, so a resuming client gap-fills
+	// against whichever worker answers - refusing at creation turns that
+	// silent divergence into a startup error with the fix in hand.
+	if (Number.isInteger(workerData?.totalWorkers) && workerData.totalWorkers > 1) {
+		throw new Error(
+			'replay: the in-memory replay buffer is per-worker, so a multi-worker ' +
+			'runtime serves divergent histories for the same topic. Use the ' +
+			'shared-backend replay from svelte-adapter-uws-extensions, or run a ' +
+			'single worker.'
+		);
+	}
 	if (options.size !== undefined) {
 		if (typeof options.size !== 'number' || options.size < 1 || !Number.isInteger(options.size)) {
 			throw new Error(`replay: size must be a positive integer, got ${options.size}`);
