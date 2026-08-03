@@ -84,6 +84,23 @@ describe('throttle plugin', () => {
 			expect(platform.published[1].data).toEqual({ x: 30 });
 		});
 
+		it('preserves the selected publish options on leading and trailing sends', () => {
+			const calls = [];
+			const platform = { publish: (...args) => { calls.push(args); return true; } };
+			const t = throttle(100);
+			const leading = { seq: false };
+			const trailing = { seq: 42, relay: false };
+
+			t.publish(platform, 'cursor', 'move', { x: 1 }, leading);
+			t.publish(platform, 'cursor', 'move', { x: 2 }, trailing);
+			vi.advanceTimersByTime(100);
+
+			expect(calls).toEqual([
+				['cursor', 'move', { x: 1 }, leading],
+				['cursor', 'move', { x: 2 }, trailing]
+			]);
+		});
+
 		it('discards intermediate values (latest wins)', () => {
 			const platform = mockPlatform();
 			const t = throttle(100);
@@ -328,6 +345,18 @@ describe('throttle plugin', () => {
 				event: 'query',
 				data: { q: 'hello' }
 			});
+		});
+
+		it('preserves publish options through the debounce timer', () => {
+			const calls = [];
+			const platform = { publish: (...args) => { calls.push(args); return true; } };
+			const d = debounce(100);
+			const options = { seq: false, compress: true };
+
+			d.publish(platform, 'search', 'query', { q: 'hello' }, options);
+			vi.advanceTimersByTime(100);
+
+			expect(calls).toEqual([['search', 'query', { q: 'hello' }, options]]);
 		});
 
 		it('resets timer on each new call', () => {

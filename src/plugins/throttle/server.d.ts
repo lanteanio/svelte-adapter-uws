@@ -17,8 +17,15 @@ export interface Limiter {
 	 * @param topic - Topic to publish to
 	 * @param event - Event name
 	 * @param data - Payload
+	 * @param options - Forwarded unchanged to `platform.publish()`
 	 */
-	publish(platform: Platform, topic: string, event: string, data?: unknown): void;
+	publish(
+		platform: Platform,
+		topic: string,
+		event: string,
+		data?: unknown,
+		options?: Parameters<Platform['publish']>[3]
+	): void;
 
 	/**
 	 * Send all pending data immediately and clear timers.

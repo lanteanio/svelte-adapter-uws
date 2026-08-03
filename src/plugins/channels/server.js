@@ -135,10 +135,11 @@ export function createChannel(topic, events) {
 		 * @param {import('../../index.js').Platform} platform
 		 * @param {string} event - Must be one of the defined event names
 		 * @param {any} data - Validated against the event's schema
+		 * @param {{ relay?: boolean, seq?: boolean | number, compress?: boolean, jitterMs?: number }} [options]
 		 */
-		publish(platform, event, data) {
+		publish(platform, event, data, options) {
 			const validated = validate(event, data);
-			return platform.publish(topic, event, validated);
+			return platform.publish(topic, event, validated, options);
 		},
 
 		/**

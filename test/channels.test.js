@@ -62,6 +62,24 @@ describe('channels plugin - server', () => {
 			});
 		});
 
+		it('forwards publish options unchanged after validation', () => {
+			const calls = [];
+			const platform = {
+				publish(...args) {
+					calls.push(args);
+					return true;
+				}
+			};
+			const ch = createChannel('todos', {
+				created: (d) => ({ id: d.id })
+			});
+			const options = { seq: 17, relay: false, compress: true };
+
+			ch.publish(platform, 'created', { id: '1', ignored: true }, options);
+
+			expect(calls).toEqual([['todos', 'created', { id: '1' }, options]]);
+		});
+
 		it('throws on unknown event name', () => {
 			const platform = mockPlatform();
 			const ch = createChannel('todos', {

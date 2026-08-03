@@ -32,7 +32,7 @@ function flushOne(topics, topic) {
 	if (state.timer) clearTimer(state.timer);
 	if (state.pending) {
 		const p = state.pending;
-		p.platform.publish(topic, p.event, p.data);
+		p.platform.publish(topic, p.event, p.data, p.options);
 	}
 	topics.delete(topic);
 }
@@ -46,7 +46,7 @@ function flushAll(topics) {
 		if (state.timer) clearTimer(state.timer);
 		if (state.pending) {
 			const p = state.pending;
-			p.platform.publish(t, p.event, p.data);
+			p.platform.publish(t, p.event, p.data, p.options);
 		}
 	}
 	topics.clear();
@@ -150,7 +150,7 @@ function validateTopic(topic, maxTopicLength, name) {
  * trailing-edge contract still holds for that topic, just earlier than
  * its scheduled fire time.
  *
- * @param {Map<string, { timer: any, pending: { platform: any, event: string, data: any } | null }>} topics
+ * @param {Map<string, { timer: any, pending: { platform: any, event: string, data: any, options?: any } | null }>} topics
  * @param {number} maxTopics
  */
 function evictOldestIfAtCap(topics, maxTopics) {
@@ -162,7 +162,7 @@ function evictOldestIfAtCap(topics, maxTopics) {
 		if (state.timer) clearTimer(state.timer);
 		if (state.pending) {
 			const p = state.pending;
-			try { p.platform.publish(oldestKey, p.event, p.data); } catch {}
+			try { p.platform.publish(oldestKey, p.event, p.data, p.options); } catch {}
 		}
 	}
 	topics.delete(oldestKey);
@@ -218,13 +218,13 @@ export function throttle(interval, options) {
 	const maxTopics = resolveMaxTopics(options, 'throttle');
 	const maxTopicLength = resolveMaxTopicLength(options, 'throttle');
 
-	/** @type {Map<string, { timer: any, pending: { platform: any, event: string, data: any } | null }>} */
+	/** @type {Map<string, { timer: any, pending: { platform: any, event: string, data: any, options?: any } | null }>} */
 	const topics = new Map();
 
 	return {
 		interval,
 
-		publish(platform, topic, event, data) {
+		publish(platform, topic, event, data, publishOptions) {
 			validateTopic(topic, maxTopicLength, 'throttle');
 			let state = topics.get(topic);
 			if (!state) {
@@ -235,13 +235,13 @@ export function throttle(interval, options) {
 
 			if (!state.timer) {
 				// Idle: send immediately (leading edge), start cooldown
-				platform.publish(topic, event, data);
+				platform.publish(topic, event, data, publishOptions);
 				state.pending = null;
 				state.timer = setTimer(function tick() {
 					if (state.pending) {
 						const p = state.pending;
 						state.pending = null;
-						p.platform.publish(topic, p.event, p.data);
+						p.platform.publish(topic, p.event, p.data, p.options);
 						state.timer = setTimer(tick, interval);
 					} else {
 						state.timer = null;
@@ -250,7 +250,7 @@ export function throttle(interval, options) {
 				}, interval);
 			} else {
 				// Cooling down: store latest value (overwrites previous)
-				state.pending = { platform, event, data };
+				state.pending = { platform, event, data, options: publishOptions };
 			}
 		},
 
@@ -301,13 +301,13 @@ export function debounce(interval, options) {
 	const maxTopics = resolveMaxTopics(options, 'debounce');
 	const maxTopicLength = resolveMaxTopicLength(options, 'debounce');
 
-	/** @type {Map<string, { timer: any, pending: { platform: any, event: string, data: any } | null }>} */
+	/** @type {Map<string, { timer: any, pending: { platform: any, event: string, data: any, options?: any } | null }>} */
 	const topics = new Map();
 
 	return {
 		interval,
 
-		publish(platform, topic, event, data) {
+		publish(platform, topic, event, data, publishOptions) {
 			validateTopic(topic, maxTopicLength, 'debounce');
 			let state = topics.get(topic);
 			if (!state) {
@@ -317,12 +317,12 @@ export function debounce(interval, options) {
 			}
 
 			// Always overwrite pending and restart timer
-			state.pending = { platform, event, data };
+			state.pending = { platform, event, data, options: publishOptions };
 			if (state.timer) clearTimer(state.timer);
 			state.timer = setTimer(() => {
 				const p = state.pending;
 				if (p) {
-					p.platform.publish(topic, p.event, p.data);
+					p.platform.publish(topic, p.event, p.data, p.options);
 					state.pending = null;
 				}
 				state.timer = null;

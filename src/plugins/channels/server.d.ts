@@ -34,7 +34,12 @@ export interface Channel<E extends EventMap = EventMap> {
 	 * todos.publish(platform, 'created', newTodo);
 	 * ```
 	 */
-	publish<K extends keyof E & string>(platform: Platform, event: K, data: any): boolean;
+	publish<K extends keyof E & string>(
+		platform: Platform,
+		event: K,
+		data: any,
+		options?: Parameters<Platform['publish']>[3]
+	): boolean;
 
 	/**
 	 * Validate and send an event to a single connection.
