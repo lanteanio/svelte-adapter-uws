@@ -5,7 +5,7 @@
 // even at uWS's million-connection scale - so they catch obvious bugs
 // (subscribe-in-a-loop, request-without-await, coalesce-key-leak) without
 // ever biting real apps. Aggregate memory is bounded separately by
-// `upgradeAdmission.maxConcurrent`; per-conn caps are not the right place
+// `upgradeAdmission.maxConnections`; per-conn caps are not the right place
 // to defend against a 1M-connection DoS.
 
 /** Max distinct topics one connection may be subscribed to before further subscribes are denied with `RATE_LIMITED`. */

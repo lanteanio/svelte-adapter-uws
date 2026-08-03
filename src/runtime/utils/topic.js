@@ -130,21 +130,23 @@ function isValidNonAsciiWireTopic(topic) {
 /**
  * Build the `platform.topic(name)` scoped publisher: a small object that
  * forwards each named action (created / updated / deleted / set /
- * increment / decrement) and a generic `publish(event, data)` to the
- * supplied `publish(topic, event, data)` with `topic` bound.
+ * increment / decrement) and a generic `publish(event, data, options)` to the
+ * supplied `publish(topic, event, data, options)` with `topic` bound. Options
+ * are forwarded so clustered callers can make the required seq-authority
+ * choice without abandoning the scoped helper.
  *
  * @param {(topic: string, event: string, data: unknown) => unknown} publish
  * @param {string} name
  */
 export function createScopedTopic(publish, name) {
 	return {
-		publish: (event, data) => publish(name, event, data),
-		created: (data) => publish(name, 'created', data),
-		updated: (data) => publish(name, 'updated', data),
-		deleted: (data) => publish(name, 'deleted', data),
-		set: (value) => publish(name, 'set', value),
-		increment: (amount = 1) => publish(name, 'increment', amount),
-		decrement: (amount = 1) => publish(name, 'decrement', amount)
+		publish: (event, data, options) => publish(name, event, data, options),
+		created: (data, options) => publish(name, 'created', data, options),
+		updated: (data, options) => publish(name, 'updated', data, options),
+		deleted: (data, options) => publish(name, 'deleted', data, options),
+		set: (value, options) => publish(name, 'set', value, options),
+		increment: (amount = 1, options) => publish(name, 'increment', amount, options),
+		decrement: (amount = 1, options) => publish(name, 'decrement', amount, options)
 	};
 }
 

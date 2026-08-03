@@ -65,6 +65,7 @@ let current = defaultEnv;
 export const now = () => current.clock.now();
 export const monotonicNow = () => current.clock.monotonic();
 export const wallEpoch = () => current.clock.wallEpoch();
+export const wallIso = () => new Date(current.clock.wallEpoch()).toISOString();
 
 /**
  * A monotonic reading on the timeline the WHOLE PROCESS shares, so two worker

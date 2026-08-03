@@ -18,11 +18,12 @@
  *   contended, it is stopped - PSI "some" can miss it entirely, which is
  *   why it is a distinct signal with its own reason.
  *
- * Both sources are probed once: a read failure (non-Linux, PSI compiled
+ * Availability is probed once. A confirmed absence (non-Linux, PSI compiled
  * out, no cgroup limits) permanently disables that source at zero further
- * cost, so the zero-config path off-Linux is a single failed read per
- * source at startup. Parsers are pure and exported for tests; the sampler
- * takes an injectable read function so tests drive fixture strings.
+ * cost. Once a source has been confirmed, a transient sample failure reports
+ * no reading for that tick and keeps recovery armed. Parsers are pure and
+ * exported for tests; the sampler takes an injectable read function so tests
+ * drive fixture strings.
  *
  * Determinism: no clock, no RNG, no timers - the caller's 1 Hz sampler
  * drives `sample(intervalMs)` and supplies the window length for the
@@ -46,6 +47,40 @@ const CPU_STAT_PATHS = [
 	'/sys/fs/cgroup/cpu,cpuacct/cpu.stat'
 ];
 
+function isConfirmedAbsence(error) {
+	const code = error?.code ?? String(error?.message ?? error).split(/[:\s]/, 1)[0];
+	return code === 'ENOENT' || code === 'ENOTDIR' || code === 'ENOSYS';
+}
+
+/**
+ * Publish the low-cardinality incident timeline and the optional kernel
+ * readings for one completed pressure sample. A transient source failure
+ * writes NaN deliberately: leaving the previous value untouched while the
+ * generic sample timestamp advances makes a stale reading look current.
+ *
+ * @param {{ transition: { from: string, to: string } | null, os: { psi: { cpuSome10: number, memoryFull10: number, ioFull10: number } | null, cpuThrottle: { throttledRatio: number } | null } }} telemetry
+ * @param {{ reasonTransitions?: any, psiCpuSome?: any, psiMemoryFull?: any, psiIoFull?: any, cpuThrottled?: any }} instruments
+ */
+export function emitPressureMetricTelemetry(telemetry, instruments) {
+	if (telemetry.transition !== null) {
+		instruments.reasonTransitions?.inc({
+			from: telemetry.transition.from,
+			to: telemetry.transition.to
+		});
+	}
+	if (telemetry.os.psi === null) {
+		instruments.psiCpuSome?.set(NaN);
+		instruments.psiMemoryFull?.set(NaN);
+		instruments.psiIoFull?.set(NaN);
+	} else {
+		instruments.psiCpuSome?.set(telemetry.os.psi.cpuSome10);
+		instruments.psiMemoryFull?.set(telemetry.os.psi.memoryFull10);
+		instruments.psiIoFull?.set(telemetry.os.psi.ioFull10);
+	}
+	if (telemetry.os.cpuThrottle === null) instruments.cpuThrottled?.set(NaN);
+	else instruments.cpuThrottled?.set(telemetry.os.cpuThrottle.throttledRatio);
+}
+
 /**
  * Which kernel pressure sources this host exposes.
  *
@@ -60,7 +95,9 @@ const CPU_STAT_PATHS = [
  * Two file reads on Linux, two failed opens elsewhere, once per worker.
  *
  * @param {{ readFile?: (path: string) => string }} [deps]
- * @returns {{ psi: boolean, cpuThrottle: boolean }}
+ * @returns {{ psi: boolean | null, cpuThrottle: boolean | null }} true when
+ *   present, false only for a confirmed absence, null after a transient probe
+ *   failure that the sampler must retry
  */
 export function probeOsPressureSources(deps) {
 	const readFile = deps?.readFile ?? ((path) => readFileSync(path, 'utf8'));
@@ -70,16 +107,22 @@ export function probeOsPressureSources(deps) {
 		readFile(PSI_FILES.memory);
 		readFile(PSI_FILES.io);
 		psi = true;
-	} catch { /* not a PSI-enabled kernel */ }
+	} catch (error) {
+		psi = isConfirmedAbsence(error) ? false : null;
+	}
 	let cpuThrottle = false;
+	let cpuThrottleUncertain = false;
 	for (const path of CPU_STAT_PATHS) {
 		try {
 			if (parseCpuStat(readFile(path)) !== null) {
 				cpuThrottle = true;
 				break;
 			}
-		} catch { /* try the next layout */ }
+		} catch (error) {
+			if (!isConfirmedAbsence(error)) cpuThrottleUncertain = true;
+		}
 	}
+	if (!cpuThrottle && cpuThrottleUncertain) cpuThrottle = null;
 	return { psi, cpuThrottle };
 }
 
@@ -141,15 +184,21 @@ export function parseCpuStat(content) {
  * null marks a source that is unavailable on this host. The first
  * cpu.stat sample establishes the delta baseline and reports zeros.
  *
- * @param {{ readFile?: (path: string) => string }} [deps]
+ * @param {{
+ *   readFile?: (path: string) => string,
+ *   sources?: { psi: boolean | null, cpuThrottle: boolean | null }
+ * }} [deps] `sources` is the result of a registration-time availability
+ *   probe. A confirmed source stays armed across a transient first sample;
+ *   a confirmed absence performs no reads.
  */
 export function createOsPressureSampler(deps) {
 	const readFile = deps?.readFile ?? ((path) => readFileSync(path, 'utf8'));
 
 	/** @type {boolean | null} null = not probed yet */
-	let psiAvailable = null;
+	let psiAvailable = deps?.sources?.psi ?? null;
 	/** @type {string | null | false} false = probed, none found */
-	let cpuStatPath = null;
+	let cpuStatPath = deps?.sources?.cpuThrottle === false ? false : null;
+	const cpuThrottleConfirmed = deps?.sources?.cpuThrottle === true;
 	/** @type {{ nrThrottled: number, throttledUsec: number } | null} */
 	let lastCpuStat = null;
 
@@ -161,11 +210,11 @@ export function createOsPressureSampler(deps) {
 			const io = parsePsi(readFile(PSI_FILES.io));
 			psiAvailable = true;
 			return { cpuSome10: cpu.some10, memoryFull10: memory.full10, ioFull10: io.full10 };
-		} catch {
+		} catch (error) {
 			// Only the startup probe may disable the source for good; a later
 			// transient read error keeps the source armed and reports nothing
 			// for this sample.
-			if (psiAvailable === null) psiAvailable = false;
+			if (psiAvailable === null && isConfirmedAbsence(error)) psiAvailable = false;
 			return null;
 		}
 	}
@@ -173,6 +222,7 @@ export function createOsPressureSampler(deps) {
 	function readCpuStat() {
 		if (cpuStatPath === false) return null;
 		if (cpuStatPath === null) {
+			let uncertain = false;
 			for (const path of CPU_STAT_PATHS) {
 				try {
 					const parsed = parseCpuStat(readFile(path));
@@ -180,9 +230,15 @@ export function createOsPressureSampler(deps) {
 						cpuStatPath = path;
 						return parsed;
 					}
-				} catch { /* try the next layout */ }
+				} catch (error) {
+					if (!isConfirmedAbsence(error)) uncertain = true;
+				}
 			}
-			cpuStatPath = false;
+			// A registration-time probe already proved the source exists. Failure
+			// to rediscover its path on this tick is transient, so leave discovery
+			// armed for the next sample. Without that evidence, this was the lazy
+			// startup probe and a full miss is a confirmed zero-cost absence.
+			if (!cpuThrottleConfirmed && !uncertain) cpuStatPath = false;
 			return null;
 		}
 		try {
@@ -212,6 +268,11 @@ export function createOsPressureSampler(deps) {
 					cpuThrottle = { throttledRatio: 0, nrThrottledDelta: 0 };
 				}
 				lastCpuStat = stat;
+			} else {
+				// A later successful read must establish a fresh baseline. Retaining
+				// the pre-failure stat would divide a multi-window delta by one sample
+				// interval and fabricate a throttle spike on recovery.
+				lastCpuStat = null;
 			}
 			return { psi, cpuThrottle };
 		}

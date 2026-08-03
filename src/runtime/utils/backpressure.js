@@ -133,6 +133,35 @@ export const BACKPRESSURE_SAMPLE_CAP = 1024;
 export const BACKPRESSURE_SAMPLE_THRESHOLD_BYTES = 64 * 1024;
 
 /**
+ * Record one exact uWS `dropped` callback into the current pressure window.
+ * The callback's ArrayBuffer is valid only for that synchronous callback, so
+ * retain only its byte length and never the buffer itself.
+ *
+ * @param {{ droppedFramesWindow: number, droppedBytesWindow: number }} target
+ * @param {{ byteLength: number }} message
+ */
+export function recordBackpressureDrop(target, message) {
+	target.droppedFramesWindow++;
+	target.droppedBytesWindow += message.byteLength;
+}
+
+/**
+ * Close and reset the exact drop window. Kept separate from the bounded queue
+ * sampler: a drop that drains before the next tick, or occurs beyond the
+ * sampler's 1,024-connection cap, must still be counted.
+ *
+ * @param {{ droppedFramesWindow: number, droppedBytesWindow: number }} target
+ * @returns {{ droppedFrames: number, droppedBytes: number }}
+ */
+export function takeBackpressureDropWindow(target) {
+	const droppedFrames = target.droppedFramesWindow;
+	const droppedBytes = target.droppedBytesWindow;
+	target.droppedFramesWindow = 0;
+	target.droppedBytesWindow = 0;
+	return { droppedFrames, droppedBytes };
+}
+
+/**
  * Walk up to `cap` connections, reading each one's outbound queue depth via
  * `getBufferedAmount()`, and fold the readings into two aggregate telemetry
  * figures: the worst queue depth seen, and the count of connections holding

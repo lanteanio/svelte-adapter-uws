@@ -1,6 +1,8 @@
 import { resumeBuffers, maxSeenSeq, counters } from './state.js';
 import { WS_COMPRESSION_ON } from './config.js';
 import { bumpOut } from './pressure-metrics.js';
+import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
+import { privateValueMetadata } from '../utils/observability-privacy.js';
 
 // Live-frame buffering for the replay-to-live cutover. When a connection
 // gap-fills a topic on subscribe (a recover offset), the server reads the
@@ -144,7 +146,15 @@ export function coveredSeqFor(covered, topic) {
 			const v = /** @type {Record<string, unknown>} */ (covered)[topic];
 			return typeof v === 'number' ? v : undefined;
 		} catch (err) {
-			console.error('[ws] resume hook result read threw for topic', topic, err);
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.resume',
+				event: 'resume.hook-read-failed',
+				severity: 'error',
+				dataClass: 'pseudonymous',
+				message: 'Reading the resume hook result threw for a topic; that topic is treated as covering nothing.',
+				attributes: { topic: privateValueMetadata(topic, 'topic'), error: diagnosticError(err) }
+			});
 			return undefined;
 		}
 	}

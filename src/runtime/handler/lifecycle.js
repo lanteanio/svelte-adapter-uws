@@ -13,6 +13,8 @@ import { applyServerNames, certExpiryAlert, createCertWatcher, readCertIdentity 
 import { mirrorRoutes } from './route-registry.js';
 import { parentPort } from 'node:worker_threads';
 import { dirname } from 'node:path';
+import { emitOperationalDiagnostic, listenFailureDiagnostic } from '../utils/operational-diagnostic.js';
+import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
 
 /** @type {Array<() => void>} */
 let drainResolvers = [];
@@ -113,11 +115,11 @@ function recordServedCertExpiry() {
 function tlsDegraded(reason) {
 	tlsHealth.degraded = reason;
 	const alert = certExpiryAlert(tlsHealth, wallEpoch());
-	if (alert !== null) console.error(alert);
+	if (alert !== null) console.error('[svelte-adapter-uws] ' + alert);
 	if (tlsExpirySentinel !== null) return;
 	tlsExpirySentinel = setIntervalTimer(() => {
 		const line = certExpiryAlert(tlsHealth, wallEpoch());
-		if (line !== null) console.error(line);
+		if (line !== null) console.error('[svelte-adapter-uws] ' + line);
 	}, TLS_DEGRADED_CHECK_MS);
 	if (tlsExpirySentinel && tlsExpirySentinel.unref) tlsExpirySentinel.unref();
 }
@@ -179,7 +181,15 @@ export function reloadTls() {
 			// re-runs the full swap + mirror instead of no-opping until the next
 			// genuine renewal months away.
 			tlsState = { hosts: swappedHosts !== null ? swappedHosts : tlsState.hosts, fingerprint: null };
-			console.error('[tls] certificate swap failed MID-APPLY - some SNI hosts may be unroutable; retrying shortly:', msg);
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.tls',
+				event: 'tls.swap-failed',
+				severity: 'error',
+				dataClass: 'pseudonymous',
+				message: 'A certificate swap failed mid-apply; some SNI hosts may be unroutable until the retry succeeds.',
+				attributes: { error: diagnosticError(err) }
+			});
 			tlsDegraded('a certificate swap failed mid-apply');
 			// Self-contained retry: the throw may have consumed the LAST fs event of
 			// the renewal burst, so waiting for the next watcher/broadcast event could
@@ -193,7 +203,15 @@ export function reloadTls() {
 			// Validation threw before the app was touched (half-written cert, key
 			// mismatch): the previous cert is fully intact, and the file write that
 			// completes the renewal fires the watcher again.
-			console.error('[tls] certificate reload skipped, kept the previous cert:', msg);
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.tls',
+				event: 'tls.reload-skipped',
+				severity: 'warn',
+				dataClass: 'pseudonymous',
+				message: 'A certificate reload was skipped and the previous certificate was kept; the renewal on disk is not being served.',
+				attributes: { error: diagnosticError(err) }
+			});
 			// Degraded rather than benign: the renewal on disk is NOT being served,
 			// and every probe stays green while the certificate that IS being served
 			// runs down. Cleared by the next reload that succeeds.
@@ -243,7 +261,15 @@ function initTlsReload() {
 			console.log(`[tls] watching ${dirname(ssl_cert)} for certificate renewals`);
 		} catch (err) {
 			certWatcher = null;
-			console.error('[tls] cert watch failed to start, hot-reload disabled (server keeps running):', err && err.message ? err.message : err);
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.tls',
+				event: 'tls.watch-failed',
+				severity: 'error',
+				dataClass: 'pseudonymous',
+				message: 'The certificate directory watch failed to start; hot reload is disabled and no renewal will be seen.',
+				attributes: { error: diagnosticError(err) }
+			});
 			// Nothing will ever retry this: without a watcher no renewal is seen, so
 			// this instance will serve its current certificate until it expires.
 			tlsDegraded('the certificate directory watch failed to start, so no renewal will be seen');
@@ -429,7 +455,7 @@ export async function start(host, port, opts) {
 					console.log(`Listening on ${is_tls ? 'https' : 'http'}://${host}:${port} (bound in ${startup}ms)`);
 					resolve();
 				} else {
-					console.error(`Failed to listen on ${host}:${port}`);
+					emitOperationalDiagnostic(listenFailureDiagnostic(host, port));
 					process.exit(1);
 				}
 			});
@@ -675,7 +701,8 @@ export function relayPublish(topic, envelope, compress, seq, capability, event, 
 	// resuming subscriber would receive from this cross-worker frame. The codec
 	// re-encode path above delivers through publishWire, which captures there.
 	if (resumeBuffers.size > 0) captureResumeFrame(topic, seq, envelope, compress === true);
-	app.publish(topic, envelope, false, WS_COMPRESSION_ON && compress === true);
+	const result = app.publish(topic, envelope, false, WS_COMPRESSION_ON && compress === true);
+	counters.publishOutcomeHook?.(result);
 }
 
 /**
@@ -757,7 +784,8 @@ export function relayPublishBatched(events, compress) {
 		// originator had taken its slow path too.
 		for (let i = 0; i < events.length; i++) {
 			if (resumeBuffers.size > 0) captureResumeFrame(events[i].topic, events[i].seq, events[i].env, compress === true);
-			app.publish(events[i].topic, events[i].env, false, WS_COMPRESSION_ON && compress === true);
+			const result = app.publish(events[i].topic, events[i].env, false, WS_COMPRESSION_ON && compress === true);
+			counters.publishOutcomeHook?.(result);
 		}
 		return;
 	}
@@ -773,5 +801,6 @@ export function relayPublishBatched(events, compress) {
 	for (let i = 0; i < events.length; i++) slice[i] = events[i].env;
 	const sharedBatchEnv = wrapBatchEnvelope(slice);
 	const fanoutTopic = allSameTopic ? firstTopic : events[0].topic;
-	app.publish(fanoutTopic, sharedBatchEnv, false, WS_COMPRESSION_ON && compress === true);
+	const result = app.publish(fanoutTopic, sharedBatchEnv, false, WS_COMPRESSION_ON && compress === true);
+	counters.publishOutcomeHook?.(result);
 }

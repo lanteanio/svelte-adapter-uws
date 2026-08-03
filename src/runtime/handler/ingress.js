@@ -66,7 +66,7 @@ function registry() {
  * @param {string} kind - the binding kind (e.g. `'smooth.command:1'`)
  * @param {{
  *   decode: (payload: Uint8Array, schemaVersion: number, seq: number, state: any) => any,
- *   route: (ws: any, target: any, value: any, platform: any, seq: number) => void,
+ *   route: (ws: any, target: any, value: any, platform: any, seq: number) => unknown | Promise<unknown>,
  *   state?: { onAttach?: (ws: any) => any }
  * }} handler
  *   `decode` turns a frame payload into the routed value (return null/undefined
@@ -183,7 +183,11 @@ export function dispatchIngressFrame(ws, ud, message, platform) {
 	}
 	if (value === null || value === undefined) return;
 	try {
-		binding.route(ws, binding.target, value, platform, parsed.seq);
+		const routed = binding.route(ws, binding.target, value, platform, parsed.seq);
+		if (routed && typeof routed.then === 'function') {
+			return Promise.resolve(routed).catch(() => undefined);
+		}
+		return routed;
 	} catch {
 		/* one bad frame never crashes the demux */
 	}

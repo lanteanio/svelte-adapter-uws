@@ -20,6 +20,7 @@ import { metricsRegistry } from '../metrics-bridge.js';
 import { mergeSamples } from '../utils/metrics-merge.js';
 import { readMetricMirror } from '../utils/metrics.js';
 import { randomUuid, setTimer, clearTimer } from '../runtime.js';
+import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
 
 /** Requests this worker is waiting on, keyed by correlation id. */
 const pending = new Map();
@@ -57,7 +58,15 @@ export function collectLocalMetrics() {
 		// The mirror is ours and cannot normally throw; a worker asked for a
 		// report must never die because of one. It shows up as a gap between
 		// expected and reporting.
-		console.error('[ws] metrics mirror read failed during cluster collection:', err);
+		emitOperationalEvent({
+			source: 'svelte-adapter-uws',
+			component: 'runtime.metrics',
+			event: 'metrics.mirror-read-failed',
+			severity: 'error',
+			dataClass: 'pseudonymous',
+			message: 'The metrics mirror read failed during cluster collection; this worker reports as a gap between expected and reporting.',
+			attributes: { error: diagnosticError(err) }
+		});
 		return [];
 	}
 }
@@ -96,7 +105,15 @@ export function resolveMetricsSnapshot(id, reports, expected, reporting) {
 			}
 		));
 	} catch (err) {
-		console.error('[ws] metrics snapshot merge failed:', err);
+		emitOperationalEvent({
+			source: 'svelte-adapter-uws',
+			component: 'runtime.metrics',
+			event: 'metrics.merge-failed',
+			severity: 'error',
+			dataClass: 'pseudonymous',
+			message: 'The cluster metrics merge failed; this scrape answers with the local worker only.',
+			attributes: { error: diagnosticError(err) }
+		});
 		try {
 			entry.resolve(localOnly(true));
 		} catch {
@@ -144,7 +161,15 @@ export function metricsSnapshot(options) {
 		} catch (err) {
 			pending.delete(id);
 			clearTimer(timer);
-			console.error('[ws] metrics snapshot could not reach the primary:', err);
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.metrics',
+				event: 'metrics.primary-unreachable',
+				severity: 'error',
+				dataClass: 'pseudonymous',
+				message: 'The metrics snapshot request could not reach the primary; this scrape answers degraded with the local worker only.',
+				attributes: { error: diagnosticError(err) }
+			});
 			resolve(localOnly(true));
 		}
 	});

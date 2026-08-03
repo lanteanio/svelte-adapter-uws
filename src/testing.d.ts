@@ -1,5 +1,12 @@
 import type { WebSocket } from 'uWebSockets.js';
-import type { MetricsRegistry, Platform, WebSocketHandler, UpgradeContext } from './index.js';
+import type {
+	MetricsRegistry,
+	MessageAdmissionOptions,
+	Platform,
+	WaitingRoomRenderer,
+	WebSocketHandler,
+	UpgradeContext
+} from './index.js';
 
 export interface TestServerOptions {
 	/** Port to listen on. Defaults to 0 (random available port). */
@@ -19,10 +26,10 @@ export interface TestServerOptions {
 	 * it a TypeScript caller writes `createTestServer({})`, the grant conjunct
 	 * never fires, and the double answers permissively where production denies -
 	 * the exact shape of green false negative this harness exists to avoid.
-	 * A present non-boolean value throws, matching the adapter and Vite surfaces;
-	 * it is never silently read as `false`.
+	 * Use `'strict'` to require BOTH the server grant and an application-hook
+	 * allow. Any other non-boolean value throws, matching adapter and Vite.
 	 */
-	authorizeWireSubscribe?: boolean;
+	authorizeWireSubscribe?: boolean | 'strict';
 	/**
 	 * Allow clients to subscribe to `__`-prefixed system topics, mirroring
 	 * `adapter({ websocket: { allowSystemTopicSubscribe: true } })`.
@@ -46,21 +53,20 @@ export interface TestServerOptions {
 	 */
 	reconnectDispersalMs?: number;
 	/**
-	 * Hook run once before the server begins listening, for a test that needs to
-	 * seed state the way a primary would.
-	 */
-	primaryInit?: (...args: any[]) => any;
-	/**
-	 * Two-layer admission control on the WebSocket upgrade path. Same
+	 * Three-layer admission control on the WebSocket upgrade path. Same
 	 * wiring as the production handler's `wsOptions.upgradeAdmission`
-	 * setting. Both layers are opt-in; both default to disabled (`0`).
+	 * setting. The layers are opt-in and default to disabled (`0`);
+	 * `maxDeferred` defaults to `1024` only while pacing is enabled.
 	 *
 	 * - `maxConcurrent` caps how many upgrades may be in flight at once.
 	 *   Crossed requests get a fast `503 Service Unavailable` before
 	 *   any per-request work (no header walk, no cookie parsing).
+	 * - `maxConnections` caps reserved upgrades plus live sockets and
+	 *   holds each permit through the close callback.
 	 * - `perTickBudget` caps how many `res.upgrade()` calls run per
 	 *   event-loop tick. Once spent, subsequent calls are deferred via
-	 *   `setImmediate`.
+	 *   `setImmediate`; `maxDeferred` bounds those retained callbacks and
+	 *   sheds overflow with `503 Service Unavailable`.
 	 *
 	 * Useful in integration tests that want to assert the admission
 	 * shed-shape under a real connection storm without booting a full
@@ -69,8 +75,31 @@ export interface TestServerOptions {
 	 */
 	upgradeAdmission?: {
 		maxConcurrent?: number;
+		maxConnections?: number;
 		perTickBudget?: number;
+		/** Finite pacing-queue ceiling; default `1024`, and `0` retains none. */
+		maxDeferred?: number;
+		waitingRoom?: false | {
+			path?: string;
+			admitCheckPath?: string;
+			retryAfterSeconds?: number;
+			pollIntervalMs?: number;
+			appName?: string;
+			statusUrl?: string;
+			supportUrl?: string;
+			incidentId?: string;
+			/** Full HTML document satisfying the public `AccessibleWaitingDocument` baseline. */
+			template?: string;
+			/**
+			 * In-process equivalent of the production renderer module. The
+			 * production adapter accepts a module path; the test server accepts
+			 * the renderer function itself so locale behavior can be exercised.
+			 */
+			renderer?: WaitingRoomRenderer;
+		};
 	};
+	/** Established-message admission, identical to `WebSocketOptions.messageAdmission`. */
+	messageAdmission?: MessageAdmissionOptions;
 	/**
 	 * Protection posture, mirroring the production handler's `protection`
 	 * option: `'elevated'`/`'siege'` pin a level (siege refuses every new
@@ -82,12 +111,17 @@ export interface TestServerOptions {
 	 * Prometheus-style registry, mirroring the production handler's
 	 * `metrics` option at the upgrade branches this harness mirrors:
 	 * `upgrade_admitted_total` and `upgrade_rejected_total` with reasons
-	 * `siege`, `over_capacity`, `cursor_lane`, `auth_rejected`,
-	 * `hook_error` and `duplicate_header`. The sampled gauges and the
-	 * `ip_rate_limit`,
+	 * `siege`, `over_capacity`, `connection_capacity`, `cursor_lane`, `auth_rejected`,
+	 * `hook_error`, `duplicate_header` and `deferred_overflow`, plus the
+	 * pacing-queue trio `upgrade_deferred_depth`,
+	 * `upgrade_deferred_oldest_age_seconds` (event-driven here) and
+	 * `upgrade_deferred_rejected_total`. When `maxConnections` is enabled,
+	 * the harness also emits the event-driven `ws_connection_headroom` gauge.
+	 * The pressure-sampled gauges and the `ip_rate_limit`,
 	 * `bad_origin` and `auth_timeout` reasons are production-only - the
 	 * harness runs no pressure sampler, no per-IP limiter, no origin
-	 * check, and no upgrade timeout.
+	 * check, and no upgrade timeout. Established-message sheds emit
+	 * `ws_message_admission_rejected_total{reason,scope}` exactly as production.
 	 */
 	metrics?: MetricsRegistry;
 	/**

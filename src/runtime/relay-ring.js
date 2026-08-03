@@ -33,7 +33,7 @@
 // The wire format is process-internal (both ends are always the same build in
 // the same process), so it carries no version negotiation.
 
-import { microtask } from './runtime.js';
+import { clearTimer, microtask, monotonicNow, setTimer } from './runtime.js';
 
 const HEADER_BYTES = 64;
 const WRITE_IDX = 0; // Int32Array index of the write position (own cache line)
@@ -61,16 +61,37 @@ export function createRelayRingBuffer(dataBytes) {
  * The producing side of one ring. Exactly one writer may exist per buffer.
  */
 export class RingWriter {
-	/** @param {SharedArrayBuffer} sab */
-	constructor(sab) {
+	/**
+	 * @param {SharedArrayBuffer} sab
+	 * @param {{
+	 *   maxPendingBytes?: number,
+	 *   maxPendingAgeMs?: number,
+	 *   now?: () => number,
+	 *   setTimer?: (callback: () => void, delayMs: number) => any,
+	 *   clearTimer?: (handle: any) => void,
+	 *   onOverflow?: (event: { reason: 'bytes' | 'age', droppedBytes: number, pendingAgeMs: number, maxPendingBytes: number, maxPendingAgeMs: number }) => void
+	 * }} [options]
+	 */
+	constructor(sab, options = {}) {
 		this.i32 = new Int32Array(sab, 0, 16);
 		this.data = new Uint8Array(sab, HEADER_BYTES);
 		this.cap = this.data.length;
 		this.mask = this.cap - 1;
-		/** Bytes accepted but not yet in the ring (consumer lagging). @type {Array<Uint8Array>} */
+		/** Bytes accepted but not yet in the ring (consumer lagging). @type {Array<Uint8Array | undefined>} */
 		this.pending = [];
+		// Deque head: completed entries are cleared and advanced in O(1), then the
+		// array is reset when empty. Array.shift() made a long spill drain O(n^2).
+		this.pendingHead = 0;
 		this.pendingOffset = 0; // consumed prefix of pending[0]
 		this.pendingBytes = 0;
+		this.pendingSince = 0;
+		this.maxPendingBytes = options.maxPendingBytes ?? Infinity;
+		this.maxPendingAgeMs = options.maxPendingAgeMs ?? Infinity;
+		this._now = options.now ?? monotonicNow;
+		this._setTimer = options.setTimer ?? setTimer;
+		this._clearTimer = options.clearTimer ?? clearTimer;
+		this.onOverflow = options.onOverflow ?? null;
+		this.ageTimer = null;
 		this.flushArmed = false;
 		this.closed = false;
 		/**
@@ -90,21 +111,34 @@ export class RingWriter {
 	 * @param {Uint8Array} bytes
 	 */
 	write(bytes) {
-		if (this.closed) return;
+		if (this.closed) return false;
 		if (this.pendingBytes > 0) {
+			if (this._pendingAge() >= this.maxPendingAgeMs) {
+				return this._overflow('age', bytes.length);
+			}
+			if (this.pendingBytes + bytes.length > this.maxPendingBytes) {
+				return this._overflow('bytes', bytes.length);
+			}
 			// Something is already queued: append behind it (order).
 			this.pending.push(bytes);
 			this.pendingBytes += bytes.length;
 			this._armFlush();
-			return;
+			return true;
 		}
 		const n = this._push(bytes, 0);
 		if (n < bytes.length) {
+			const remaining = bytes.length - n;
+			if (remaining > this.maxPendingBytes) {
+				return this._overflow('bytes', remaining);
+			}
 			this.pending.push(bytes);
 			this.pendingOffset = n;
-			this.pendingBytes = bytes.length - n;
+			this.pendingBytes = remaining;
+			this.pendingSince = this._now();
+			this._armAgeLimit();
 			this._armFlush();
 		}
+		return true;
 	}
 
 	/** Wake the reader. One notify covers every write since the last one. */
@@ -116,9 +150,45 @@ export class RingWriter {
 	close() {
 		this.closed = true;
 		this.pending.length = 0;
+		this.pendingHead = 0;
+		this.pendingOffset = 0;
 		this.pendingBytes = 0;
+		this.pendingSince = 0;
+		if (this.ageTimer !== null) {
+			this._clearTimer(this.ageTimer);
+			this.ageTimer = null;
+		}
 		// Wake our own read-position wait so the armed flush observes `closed`.
 		Atomics.notify(this.i32, READ_IDX);
+	}
+
+	_pendingAge() {
+		return this.pendingBytes > 0 ? Math.max(0, this._now() - this.pendingSince) : 0;
+	}
+
+	_overflow(reason, incomingBytes) {
+		const event = {
+			reason,
+			droppedBytes: this.pendingBytes + incomingBytes,
+			pendingAgeMs: this._pendingAge(),
+			maxPendingBytes: this.maxPendingBytes,
+			maxPendingAgeMs: this.maxPendingAgeMs
+		};
+		this.close();
+		try { this.onOverflow?.(event); } catch {}
+		return false;
+	}
+
+	_armAgeLimit() {
+		if (this.ageTimer !== null || this.closed || this.pendingBytes === 0 || !Number.isFinite(this.maxPendingAgeMs)) return;
+		const remaining = Math.max(0, this.maxPendingAgeMs - this._pendingAge());
+		this.ageTimer = this._setTimer(() => {
+			this.ageTimer = null;
+			if (this.closed || this.pendingBytes === 0) return;
+			if (this._pendingAge() >= this.maxPendingAgeMs) this._overflow('age', 0);
+			else this._armAgeLimit();
+		}, remaining);
+		if (this.ageTimer?.unref) this.ageTimer.unref();
 	}
 
 	/**
@@ -147,15 +217,30 @@ export class RingWriter {
 	}
 
 	_flushPending() {
+		if (this._pendingAge() >= this.maxPendingAgeMs) {
+			this._overflow('age', 0);
+			return;
+		}
 		while (this.pendingBytes > 0) {
-			const head = this.pending[0];
+			const head = this.pending[this.pendingHead];
+			if (head === undefined) break;
 			const n = this._push(head, this.pendingOffset);
 			if (n === 0) break;
 			this.pendingOffset += n;
 			this.pendingBytes -= n;
 			if (this.pendingOffset >= head.length) {
-				this.pending.shift();
+				this.pending[this.pendingHead] = undefined;
+				this.pendingHead++;
 				this.pendingOffset = 0;
+			}
+		}
+		if (this.pendingBytes === 0) {
+			this.pending.length = 0;
+			this.pendingHead = 0;
+			this.pendingSince = 0;
+			if (this.ageTimer !== null) {
+				this._clearTimer(this.ageTimer);
+				this.ageTimer = null;
 			}
 		}
 		this.notify();

@@ -76,7 +76,7 @@ export function warnUntrustedClaim(directIp, kind) {
 	if (warnedUntrustedClaim) return;
 	warnedUntrustedClaim = true;
 	console.warn(
-		`[adapter] Ignored a ${kind} client-address claim from untrusted peer ${directIp}: ` +
+		`[svelte-adapter-uws] Ignored a ${kind} client-address claim from untrusted peer ${directIp}: ` +
 		'the peer is not in TRUSTED_PROXIES, so the socket address was used instead. ' +
 		'If this peer is a legitimate proxy, add its address (or CIDR range) to TRUSTED_PROXIES.'
 	);

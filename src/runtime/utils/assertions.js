@@ -1,4 +1,27 @@
 import { microtask } from '../runtime.js';
+import { formatDiagnostic } from '../diagnostic.js';
+
+function assertionDiagnostic(severity, category, context, message = category) {
+	try {
+		return formatDiagnostic({
+			source: 'svelte-adapter-uws',
+			component: 'runtime.assertion',
+			event: 'invariant.violated',
+			severity,
+			message,
+			attributes: { category, context: context ?? null }
+		});
+	} catch {
+		return formatDiagnostic({
+			source: 'svelte-adapter-uws',
+			component: 'runtime.assertion',
+			event: 'invariant.violated',
+			severity,
+			message,
+			attributes: { category, context: null, contextSerializationFailed: true }
+		});
+	}
+}
 
 // - Framework-internal assertions ------------------------------------------
 // Library-author defensive coding only. App developers do not call these
@@ -94,22 +117,14 @@ export function assert(cond, category, context) {
 		err.context = context ?? null;
 		throw err;
 	}
-	try {
-		console.error('[adapter-uws/assert]', JSON.stringify({
-			category,
-			context: context ?? null
-		}));
-	} catch {
-		// JSON.stringify can fail on circular context; fall back to bare log
-		console.error('[adapter-uws/assert]', category);
-	}
+	console.error(assertionDiagnostic('warn', category, context));
 }
 
 /**
  * Hard-tier framework invariant, for genuinely unrecoverable worker state.
  * On violation: increments the SAME `assertionCounts` map as `assert` (one
  * namespace; the severity rides the structured log as `severity: 'fatal'`),
- * logs a `[adapter-uws/fatal]` line, and - in production only - schedules a
+ * logs an `[oss-realtime/diagnostic source=svelte-adapter-uws component=runtime.assertion event=invariant.violated severity=fatal]` line, and - in production only - schedules a
  * DEFERRED worker termination with exit code 78. The termination is deferred
  * to a microtask so the current callback frame (often a uWS C++ callback)
  * unwinds before the process goes down; a synchronous exit there risks the
@@ -125,15 +140,7 @@ export function assert(cond, category, context) {
 export function fatal(cond, category, context) {
 	if (cond) return;
 	recordViolation(category, 'fatal');
-	try {
-		console.error('[adapter-uws/fatal]', JSON.stringify({
-			category,
-			context: context ?? null,
-			severity: 'fatal'
-		}));
-	} catch {
-		console.error('[adapter-uws/fatal]', category);
-	}
+	console.error(assertionDiagnostic('fatal', category, context));
 	if (isTestEnvNow()) {
 		const err = new Error('adapter-uws fatal: ' + category);
 		// @ts-ignore augment with context for test diagnostics
@@ -183,14 +190,7 @@ export function devAssert(cond, message, context) {
 	const err = new Error('adapter-uws devAssert: ' + message);
 	// @ts-ignore
 	err.context = context ?? null;
-	try {
-		console.error('[adapter-uws/devAssert]', JSON.stringify({
-			message,
-			context: context ?? null
-		}));
-	} catch {
-		console.error('[adapter-uws/devAssert]', message);
-	}
+	console.error(assertionDiagnostic('error', 'development.assertion', context, message));
 	throw err;
 }
 

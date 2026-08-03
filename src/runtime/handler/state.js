@@ -7,6 +7,7 @@
 
 import { createCapCounts } from '../wire.js';
 import { now, processMonotonicNow } from '../runtime.js';
+import { createDivergenceDiagnosticStore } from '../divergence-diagnostics.js';
 
 /** Pooled HttpResponse abort-flag objects, reused to avoid per-request allocation. @type {{ aborted: boolean }[]} */
 export const statePool = [];
@@ -43,6 +44,15 @@ export const topicSeqs = new Map();
  * @type {Map<string, number>}
  */
 export const maxSeenSeq = new Map();
+
+/**
+ * Bounded replica of primary-completed state-divergence diagnostics. The
+ * primary broadcasts a record only after the aggregate detector has fired and
+ * the bounded keyed sequence snapshots have been collected. `platform` exposes
+ * metadata by default and exact-id lookup separately for the authenticated
+ * admin plane.
+ */
+export const divergenceDiagnostics = createDivergenceDiagnosticStore();
 
 /**
  * Record an observed `seq` for `topic` into a max-seen map, keeping the highest.
@@ -485,7 +495,7 @@ export const sharedTopics = new Map();
 /**
  * Coarse 1 Hz pressure snapshot exposed as platform.pressure. Mutated in place
  * by the sampler; read by the platform getter.
- * @type {{ active: boolean, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI' | 'CAPACITY', maxBufferedBytes: number, backpressuredConnections: number, psi: { cpuSome10: number, memoryFull10: number, ioFull10: number } | null, cpuThrottle: { throttledRatio: number, nrThrottledDelta: number } | null, topPublishers: { topic: string, messagesPerSec: number, bytesPerSec: number }[] }}
+ * @type {{ active: boolean, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI' | 'CAPACITY', maxBufferedBytes: number, backpressuredConnections: number, droppedFrames: number, droppedBytes: number, psi: { cpuSome10: number, memoryFull10: number, ioFull10: number } | null, cpuThrottle: { throttledRatio: number, nrThrottledDelta: number } | null, topPublishers: { topic: string, messagesPerSec: number, bytesPerSec: number }[] }}
  */
 export const pressureSnapshot = {
 	active: false,
@@ -496,6 +506,8 @@ export const pressureSnapshot = {
 	reason: 'NONE',
 	maxBufferedBytes: 0,
 	backpressuredConnections: 0,
+	droppedFrames: 0,
+	droppedBytes: 0,
 	psi: null,
 	cpuThrottle: null,
 	topPublishers: []
@@ -507,7 +519,9 @@ export const pressureSnapshot = {
  * server already authorized for that connection (i.e. a prior
  * `platform.subscribe`, recorded in the connection's `WS_SUBSCRIPTIONS` set) -
  * unless the app exports an explicit `subscribe` / `subscribeBatch` hook, which
- * still decides. Server-initiated `platform.subscribe` is unaffected (it is the
+ * still decides in legacy mode. When `strict` is true, application hooks narrow
+ * the server grant instead: BOTH grant membership and hook allow are required.
+ * Server-initiated `platform.subscribe` is unaffected (it is the
  * trusted authorization path); `platform.checkSubscribe` with
  * `{ requireGrant: true }` - the mode presence.sync / cursor.snapshot use -
  * additionally requires grant-set membership while this is enabled, so those
@@ -515,9 +529,9 @@ export const pressureSnapshot = {
  * the adapter's standalone "any client may subscribe to any topic" contract is
  * unchanged; a framework (svelte-realtime) or an app opts in. A holder object,
  * not `export let`, so a runtime enable in one module is visible to the wire
- * handler in another. @type {{ enabled: boolean }}
+ * handler in another. @type {{ enabled: boolean, strict: boolean }}
  */
-export const subscribeAuth = { enabled: false };
+export const subscribeAuth = { enabled: false, strict: false };
 
 /** platform.onPressure transition callbacks. @type {Set<(snapshot: typeof pressureSnapshot) => void>} */
 export const pressureListeners = new Set();
@@ -549,6 +563,10 @@ export const counters = {
 	sendToAsyncWarned: false,
 	// Publishes in the current pressure window (reset each sample).
 	publishCountWindow: 0,
+	// Exact uWS backpressure drops in the current pressure window. Unlike the
+	// queue-depth sampler these are event counters and cannot miss short spikes.
+	droppedFramesWindow: 0,
+	droppedBytesWindow: 0,
 	// Live total subscriptions across all connections (for the subscriber-ratio pressure signal).
 	totalSubscriptions: 0,
 	// Worst per-connection send-gate saturation since the last sample (decayed each tick).
@@ -559,6 +577,10 @@ export const counters = {
 	activePosture: null,
 	// Admission-gauge sampling hook, called by the 1 Hz sampler (null when no metrics registry).
 	metricsSampleHook: null,
+	// Aggregate native publish outcome hook (null when metrics are disabled).
+	// Publish sites pass only the uWS boolean result, so the disabled path
+	// allocates nothing and never walks the subscriber set.
+	publishOutcomeHook: null,
 	// Posture-export push hook, called by the 1 Hz sampler (null when no export is configured).
 	postureExportHook: null,
 	// Live posture exporter (null when no export is configured); lifecycle closes it on shutdown.
@@ -569,10 +591,11 @@ export const counters = {
 	// metrics hook that runs later in the same tick. The hook cannot recompute
 	// them: the publish window is zeroed as it is read, and the heap/resident
 	// figures come from one process.memoryUsage() call the sampler already paid
-	// for. Retained here rather than widened onto pressureSnapshot, which is a
-	// documented public shape (platform.pressure, introspect, the posture export)
-	// that this internal handoff has no business changing.
+	// for. Drop counts are also copied here so the metrics hook can advance its
+	// cumulative counters from the exact just-completed public snapshot window.
 	lastPublishCount: 0,
+	lastDroppedFrames: 0,
+	lastDroppedBytes: 0,
 	lastConnections: 0,
 	lastHeapUsedRatio: 0,
 	lastResidentBytes: 0,

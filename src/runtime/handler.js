@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
-import { parentPort, threadId } from 'node:worker_threads';
+import { parentPort, threadId, workerData } from 'node:worker_threads';
 import uWS from 'uWebSockets.js';
 import { manifest, prerendered, base } from 'MANIFEST';
 import { env } from 'ENV';
@@ -20,16 +20,21 @@ import { env } from 'ENV';
 import { server } from './_init.js';
 import * as wsModule from 'WS_HANDLER';
 import { metricsRegistry } from './metrics-bridge.js';
+import { waitingRoomRenderer } from './waiting-room-renderer-bridge.js';
 import { PRESSURE_REASON_CODES } from './observability-manifest.js';
-import { probeOsPressureSources } from './utils/os-pressure.js';
+import { ADAPTER_ERROR_IDS, adapterErrorMessage } from './error-registry.js';
+import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './diagnostic.js';
+import { privateValueMetadata } from './utils/observability-privacy.js';
+import { probeOsPressureSources, emitPressureMetricTelemetry } from './utils/os-pressure.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, deniesUngrantedObserve, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, deniesUngrantedObserve, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
-import { registerGameIngress } from './handler/game-ingress.js';
+import { registerGameIngress, gameLaneClusterSafe } from './handler/game-ingress.js';
 import { now, monotonicNow, processMonotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
-import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, sharedTopics, subscribeAuth, originStreams, streamTracking, takeConfirmedGaps, GAP_CONFIRM_MS } from './handler/state.js';
+import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, divergenceDiagnostics, sharedTopics, subscribeAuth, originStreams, streamTracking, takeConfirmedGaps, GAP_CONFIRM_MS } from './handler/state.js';
 import { computeStateHash } from './invariants.js';
+import { DIVERGENCE_TOPIC_LIMIT, summarizeTopicSequences } from './divergence-diagnostics.js';
 import { createConsistencyAuditor } from './auditor.js';
 import { buildConnectionAuditSnapshot } from './audit-snapshot.js';
 import { structuralResourceProbes, createResourceGrowthAuditor } from './leak-probes.js';
@@ -52,7 +57,38 @@ import { startPostureExport } from './utils/posture-export.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './utils/upgrade-headers.js';
 import { collectRequestHeaders, declareSingleValuedProxyHeaders } from './utils/request-headers.js';
 import { createSlidingWindowLimiter } from './utils/rate-limiter.js';
-import { runMessageHook } from './utils/hook-boundary.js';
+import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './utils/message-admission.js';
+import { createConnectionPermitCarrier } from './utils/connection-permit.js';
+import { recordBackpressureDrop } from './utils/backpressure.js';
+import {
+	createTransportMetricHooks,
+	HTTP_DURATION_BUCKETS,
+	UPGRADE_DURATION_BUCKETS,
+	WS_MESSAGE_DURATION_BUCKETS,
+	WS_CONNECTION_DURATION_BUCKETS
+} from './transport-metrics.js';
+import { activeTraceContext, extractTraceContext, traceOperation, tracingEnabled } from './tracing.js';
+
+const WS_TRACE_CONTEXT_KEY = '__uwsTraceContext';
+
+function traceUpgradeRejection(req, headers, reason) {
+	if (!tracingEnabled) return;
+	const parent = headers === null
+		? null
+		: extractTraceContext(headers ?? {
+			traceparent: req.getHeader('traceparent'),
+			tracestate: req.getHeader('tracestate')
+		});
+	traceOperation('adapter.websocket.admission', {
+		kind: 'server',
+		parent,
+		attributes: {
+			'network.protocol.name': 'websocket',
+			'admission.outcome': 'rejected',
+			'admission.reason': reason
+		}
+	}, () => undefined);
+}
 
 // Make the low-level membership primitive (trackedSubscribe / trackedUnsubscribe,
 // used by plugins to establish server-side membership) cohort-aware: a tracked
@@ -64,6 +100,22 @@ setCohortHooks(
 	(ws, ud, topic) => { if (sharedTopics.has(topic)) joinSharedCohort(ws, ud, topic, sharedTopics.get(topic)); },
 	(ws, ud, topic) => { if (sharedTopics.has(topic)) leaveSharedCohort(ws, ud, topic); }
 );
+
+// Every logical membership mutation (wire, platform, or tracked plugin lane)
+// routes through add/removeLogicalSubscription. Keep the counter non-negative
+// even if a pre-existing mismatch is encountered; the assertion makes that
+// corruption visible while the clamp prevents it from poisoning pressure and
+// every subsequent close.
+function adjustTotalSubscriptions(delta) {
+	const next = counters.totalSubscriptions + delta;
+	if (next < 0) {
+		assert(false, 'subs.total-negative', { totalSubscriptions: next });
+		counters.totalSubscriptions = 0;
+		return;
+	}
+	counters.totalSubscriptions = next;
+}
+setSubscriptionAccountingHook(adjustTotalSubscriptions);
 import { platform } from './handler/platform.js';
 import { readBody, handleSSR } from './handler/ssr.js';
 import { requestDone, isDraining, lifecycleState } from './handler/lifecycle.js';
@@ -87,7 +139,18 @@ import { registerRoute } from './handler/route-registry.js';
 // (route-registry.js) - a uWS server name carries its own empty router that
 // force-closes anything it cannot route, so an unrecorded route would vanish
 // for every SNI-matched connection after the first cert renewal.
-const route = (method, ...args) => registerRoute(app, method, ...args);
+let transportMetricHooks = null;
+const route = (method, ...args) => {
+	if (transportMetricHooks !== null) {
+		const last = args.length - 1;
+		if (method === 'ws' && args[last] !== null && typeof args[last] === 'object') {
+			args[last] = transportMetricHooks.instrumentWebSocket(args[last]);
+		} else if (typeof args[last] === 'function') {
+			args[last] = transportMetricHooks.instrumentHttp(args[last], method);
+		}
+	}
+	registerRoute(app, method, ...args);
+};
 
 // Tell the shared header collector which names THIS deployment reads as a
 // single value, before anything listens. Repeated lines of a header the
@@ -110,6 +173,7 @@ declareSingleValuedProxyHeaders([protocol_header, host_header, port_header, addr
 /* global HEALTH_CHECK_PATH */
 /* global READINESS_CHECK_PATH */
 /* global STATIC_HEADERS */
+/* global STATIC_CACHE_CONTROL */
 
 
 // - Error response helpers ---------------------------------------------------
@@ -151,8 +215,8 @@ setIntervalTimer(() => {
 }, 1000).unref();
 
 
-cacheDir(path.join(clientDir, base), base, true, STATIC_HEADERS);
-cacheDir(path.join(prerenderedDir, base), base, false, STATIC_HEADERS);
+cacheDir(path.join(clientDir, base), base, true, STATIC_HEADERS, STATIC_CACHE_CONTROL);
+cacheDir(path.join(prerenderedDir, base), base, false, STATIC_HEADERS, STATIC_CACHE_CONTROL);
 console.log(`Static files indexed in ${(monotonicNow() - _t_static).toFixed(1)}ms (${staticCache.size} entries)`);
 
 // - TLS config (must be before origin warning) ------------------------------
@@ -183,7 +247,7 @@ if (isNaN(body_size_limit)) {
 
 if (!origin && !host_header && !protocol_header && !is_tls) {
 	console.warn(
-		'Warning: No ORIGIN, HOST_HEADER, or PROTOCOL_HEADER configured. ' +
+		'[svelte-adapter-uws] Warning: No ORIGIN, HOST_HEADER, or PROTOCOL_HEADER configured. ' +
 		'The server will use http:// with the request Host header. ' +
 		'For production, either:\n' +
 		'  SSL_CERT + SSL_KEY for native TLS (no proxy needed)\n' +
@@ -300,7 +364,7 @@ if (WS_ENABLED) {
 	for (const name of Object.keys(wsModule)) {
 		if (!knownWsExports.has(name)) {
 			console.warn(
-				`Warning: WebSocket handler exports unknown "${name}". ` +
+				`[svelte-adapter-uws] Warning: WebSocket handler exports unknown "${name}". ` +
 				`Did you mean one of: ${[...knownWsExports].join(', ')}?\n` +
 				'  See: https://svti.me/ws-hooks'
 			);
@@ -369,7 +433,10 @@ if (WS_ENABLED) {
 	// server-initiated subscribe, not the client's wire frame. A framework whose
 	// subscriptions are all server-initiated (svelte-realtime) turns this on via
 	// `platform.authorizeWireSubscribe()`; a direct adapter app can set it here.
-	if (wsOptions.authorizeWireSubscribe === true) subscribeAuth.enabled = true;
+	if (wsOptions.authorizeWireSubscribe === true || wsOptions.authorizeWireSubscribe === 'strict') {
+		subscribeAuth.enabled = true;
+		if (wsOptions.authorizeWireSubscribe === 'strict') subscribeAuth.strict = true;
+	}
 
 	// Keys that suggest sensitive or personally-identifying data being
 	// stored in userData. userData is accessible to every server-side
@@ -451,17 +518,42 @@ if (WS_ENABLED) {
 	// gateway address, so the rate map has one key for the whole site.
 	let warnedRateLimitProxyCollapse = false;
 
-	// Upgrade admission control. Both layers opt-in via WebSocketOptions
-	// (`upgradeAdmission: { maxConcurrent, perTickBudget }`); zero or unset
-	// means disabled. State + queue live inside the factory closure.
+	// Upgrade admission control opts in through WebSocketOptions. Concurrency,
+	// connection, cursor-lane, and per-tick pacing limits are independent; the
+	// pacing queue is bounded by maxDeferred. State + queue live inside the
+	// factory closure.
 	const admission = createUpgradeAdmission(wsOptions.upgradeAdmission);
+	const connectionPermitCarrier = createConnectionPermitCarrier();
 	const ADMISSION_PER_TICK_BUDGET = wsOptions.upgradeAdmission?.perTickBudget ?? 0;
+	const messageAdmission = createMessageAdmission(wsOptions.messageAdmission);
+	const rejectApplicationMessage = (ws, rejection) => {
+		mMessageAdmissionRejected?.inc({ reason: rejection.reason, scope: rejection.scope });
+		const frame = messageOverloadedFrame(rejection);
+		try { ws.send(frame, false, false); bumpOut(ws, frame); } catch { counters.closedWsAborts++; }
+	};
+	const runIngressApplicationWork = (ws, context) =>
+		dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform);
+	const runGameApplicationWork = (ws, context) => {
+		const msg = context.msg;
+		const gud = ws.getUserData();
+		const grantTopic = gud[WS_PUBLISH_GRANT];
+		const clusterSafe = gameLaneClusterSafe(workerData);
+		if (!clusterSafe || !grantTopic || typeof msg.event !== 'string') {
+			const reason = clusterSafe && grantTopic ? 'INVALID' : 'FORBIDDEN';
+			const denied = msg.id === undefined
+				? JSON.stringify({ type: 'game-denied', reason })
+				: JSON.stringify({ type: 'game-denied', reason, id: msg.id });
+			try { ws.send(denied, false, false); bumpOut(ws, denied); } catch { counters.closedWsAborts++; }
+			return;
+		}
+		context.platform.publishGame(ws, grantTopic, msg.event, msg.data, msg.id);
+	};
 
 	// Content-negotiated rejection for over-capacity upgrades. Resolved once
 	// here (or null when off); when null the gate emits today's bare 503.
-	// On by default whenever the gate can reject (`maxConcurrent > 0`); the
+	// On by default whenever any ceiling or bounded pacing can reject; the
 	// escape is `waitingRoom: false`.
-	const WAITING_ROOM = resolveWaitingRoom(wsOptions.upgradeAdmission);
+	const WAITING_ROOM = resolveWaitingRoom(wsOptions.upgradeAdmission, waitingRoomRenderer);
 
 	// Admission observability. Opt-in via the `metrics` option - a module path
 	// (`websocket.metrics`) whose default export is a registry shaped like the
@@ -485,8 +577,12 @@ if (WS_ENABLED) {
 	const mUpgradeRejected = containMetricInstrument(METRICS?.counter(
 		'upgrade_rejected_total', 'WebSocket upgrades rejected before open', ['reason']
 	));
+	const mUpgradeDeferredRejected = containMetricInstrument(METRICS?.counter(
+		'upgrade_deferred_rejected_total',
+		'Upgrade callbacks shed because the bounded deferral queue was full'
+	));
 	const mUpgradeRateEvicted = containMetricInstrument(METRICS?.counter(
-		'upgrade_rate_map_evicted_total', 'Rate-limit entries evicted to make room at the map cap (door: upgrade | auth)', ['door']
+		'upgrade_rate_map_evicted_total', 'Rate-limit entries evicted at the map cap', ['door']
 	));
 	const mPostureTransitions = containMetricInstrument(METRICS?.counter(
 		'protection_posture_transitions_total', 'Protection posture level changes', ['from', 'to']
@@ -495,8 +591,28 @@ if (WS_ENABLED) {
 		'protection_posture_state', 'Current protection posture (0 normal, 1 elevated, 2 siege)'
 	));
 	const gUpgradeInflight = containMetricInstrument(METRICS?.gauge(
-		'upgrade_inflight', 'Upgrades currently in flight between admission and open'
+		'upgrade_inflight', 'Upgrades currently between admission and open'
 	));
+	const gUpgradeDeferredDepth = containMetricInstrument(METRICS?.gauge(
+		'upgrade_deferred_depth', 'Upgrade callbacks waiting in the bounded pacing queue'
+	));
+	const gUpgradeDeferredOldestAge = containMetricInstrument(METRICS?.gauge(
+		'upgrade_deferred_oldest_age_seconds',
+		'Age of the oldest callback in the bounded upgrade pacing queue'
+	));
+	if (gUpgradeDeferredDepth !== undefined || gUpgradeDeferredOldestAge !== undefined) {
+		admission.setDeferredObserver((depth, oldestAgeMs) => {
+			gUpgradeDeferredDepth?.set(depth);
+			gUpgradeDeferredOldestAge?.set(oldestAgeMs / 1000);
+		});
+	}
+	const gConnectionHeadroom = admission.maxConnections > 0
+		? containMetricInstrument(METRICS?.gauge(
+			'ws_connection_headroom',
+			'Remaining reserved-or-live WebSocket connection permits'
+		))
+		: undefined;
+	gConnectionHeadroom?.set(admission.connectionHeadroom);
 	const gQueueDepth = containMetricInstrument(METRICS?.gauge(
 		'waiting_room_queue_depth', 'Clients currently polling the waiting room'
 	));
@@ -504,20 +620,26 @@ if (WS_ENABLED) {
 	// Worst per-connection buffered bytes seen over the sampled connection set,
 	// and the count of sampled connections holding a notable outbound queue.
 	const gBackpressureMaxBytes = containMetricInstrument(METRICS?.gauge(
-		'ws_backpressure_max_bytes', 'Worst per-connection outbound buffered bytes over the sampled connection set'
+		'ws_backpressure_max_bytes', 'Worst per-connection outbound buffered bytes over the sampled set'
 	));
 	const gBackpressureConnections = containMetricInstrument(METRICS?.gauge(
 		'ws_backpressure_connections', 'Sampled connections holding a backpressured outbound queue'
+	));
+	const mDroppedFrames = containMetricInstrument(METRICS?.counter(
+		'ws_dropped_frames_total', 'Outbound WebSocket frames dropped by the native backpressure limit', []
+	));
+	const mDroppedBytes = containMetricInstrument(METRICS?.counter(
+		'ws_dropped_bytes_total', 'Outbound WebSocket payload bytes dropped by the native backpressure limit', []
 	));
 	// The rest of what the 1 Hz sampler already computes. These are scalars the
 	// fold produces and then discarded before this hook existed - exporting them
 	// adds gauge writes to a callback that already runs, and no new work to any
 	// per-request or per-message path.
 	const gConnections = containMetricInstrument(METRICS?.gauge(
-		'ws_connections', 'Live WebSocket connections on this worker'
+		'ws_connections', 'Live WebSocket connections'
 	));
 	const gSubscriptions = containMetricInstrument(METRICS?.gauge(
-		'ws_subscriptions', 'Live topic subscriptions across this worker\'s connections; divide by ws_connections for the subscriber ratio'
+		'ws_subscriptions', 'Live topic subscriptions; divide by ws_connections for the subscriber ratio'
 	));
 	// A counter, not the sampler's precomputed rate: a rate baked at our cadence
 	// cannot be re-windowed by the query, and reads wrong whenever the scrape
@@ -525,19 +647,68 @@ if (WS_ENABLED) {
 	// out in C++, so per-recipient counting would mean walking the subscriber
 	// set in JS on every publish.
 	const mPublishes = containMetricInstrument(METRICS?.counter(
-		'ws_publishes_total', 'Publish calls made on this worker (fan-out happens in C++; this counts publishes, not deliveries)', []
+		'ws_publishes_total', 'Publish calls made (fan-out happens in C++; not per-recipient deliveries)', []
 	));
+	const mHttpRequests = containMetricInstrument(METRICS?.counter(
+		'http_requests_total', 'Completed HTTP requests by bounded method and outcome', ['method', 'outcome']
+	));
+	const hHttpDuration = containMetricInstrument(METRICS?.histogram?.(
+		'http_request_duration_seconds', 'HTTP request completion duration in seconds', {
+			labelNames: ['method', 'outcome'],
+			buckets: [...HTTP_DURATION_BUCKETS]
+		}
+	));
+	const hUpgradeDuration = containMetricInstrument(METRICS?.histogram?.(
+		'upgrade_duration_seconds', 'WebSocket upgrade decision duration in seconds', {
+			labelNames: ['outcome'],
+			buckets: [...UPGRADE_DURATION_BUCKETS]
+		}
+	));
+	const mWsMessages = containMetricInstrument(METRICS?.counter(
+		'ws_messages_total', 'Completed inbound WebSocket messages by kind and outcome', ['kind', 'outcome']
+	));
+	const mMessageAdmissionRejected = containMetricInstrument(METRICS?.counter(
+		'ws_message_admission_rejected_total', 'Application WebSocket messages shed by established-message admission', ['reason', 'scope']
+	));
+	const hWsMessageDuration = containMetricInstrument(METRICS?.histogram?.(
+		'ws_message_duration_seconds', 'Inbound WebSocket message handling duration in seconds', {
+			labelNames: ['kind', 'outcome'],
+			buckets: [...WS_MESSAGE_DURATION_BUCKETS]
+		}
+	));
+	const hWsConnectionDuration = containMetricInstrument(METRICS?.histogram?.(
+		'ws_connection_duration_seconds', 'WebSocket connection lifetime in seconds', {
+			labelNames: ['outcome'],
+			buckets: [...WS_CONNECTION_DURATION_BUCKETS]
+		}
+	));
+	const mPublishOutcomes = containMetricInstrument(METRICS?.counter(
+		'ws_publish_outcomes_total', 'Native publish calls by aggregate delivery outcome', ['outcome']
+	));
+	transportMetricHooks = createTransportMetricHooks({
+		httpRequests: mHttpRequests,
+		httpDuration: hHttpDuration,
+		upgradeDuration: hUpgradeDuration,
+		wsMessages: mWsMessages,
+		wsMessageDuration: hWsMessageDuration,
+		wsConnectionDuration: hWsConnectionDuration,
+		publishOutcomes: mPublishOutcomes
+	}, monotonicNow);
+	counters.publishOutcomeHook = transportMetricHooks?.publishOutcome ?? null;
 	const gPressureSaturation = containMetricInstrument(METRICS?.gauge(
-		'pressure_saturation', 'Worker saturation scalar, 0 healthy to 1 at the configured thresholds'
+		'pressure_saturation', 'Worker saturation, 0 healthy to 1 at the configured thresholds'
 	));
 	const gPressureReason = containMetricInstrument(METRICS?.gauge(
-		'pressure_reason', 'Current pressure reason as a severity-ordered code (0 none, 1 subscribers, 2 publish rate, 3 psi, 4 cpu quota, 5 capacity, 6 memory)'
+		'pressure_reason', 'Pressure reason as a severity-ordered code (0 none to 6 memory)'
+	));
+	const mPressureReasonTransitions = containMetricInstrument(METRICS?.counter(
+		'pressure_reason_transitions_total', 'Pressure reason changes, including incidents and recoveries', ['from', 'to']
 	));
 	const gResidentBytes = containMetricInstrument(METRICS?.gauge(
-		'resident_memory_bytes', 'Resident set size of the process; worker threads share one address space, so every worker reports the same value'
+		'resident_memory_bytes', 'Resident set size of the process'
 	));
 	const gHeapUsedRatio = containMetricInstrument(METRICS?.gauge(
-		'heap_used_ratio', 'Used fraction of this worker isolate\'s V8 heap'
+		'heap_used_ratio', 'Used fraction of this worker isolate V8 heap'
 	));
 	// Freshness of the sample the gauges above were written from. The pressure
 	// timer is unref'd and driven from one interval; if it ever stops, every
@@ -545,7 +716,7 @@ if (WS_ENABLED) {
 	// up. Alerting on the age of this timestamp is what separates "healthy and
 	// steady" from "frozen".
 	const gSampleTimestamp = containMetricInstrument(METRICS?.gauge(
-		'pressure_sample_timestamp_seconds', 'Unix time of the most recent completed pressure sample; alert on its age to catch a wedged sampler'
+		'pressure_sample_timestamp_seconds', 'Unix time of the most recent pressure sample; alert on its age'
 	));
 	// Kernel pressure readings. Availability is probed ONCE here rather than
 	// discovered on the first sample, so these register at startup like every
@@ -553,26 +724,33 @@ if (WS_ENABLED) {
 	// configuration fault (a registry that throws on registration, which is
 	// meant to fail loudly at boot) into a timer callback that repeats forever.
 	// A host without the source registers nothing, so the gauges are absent
-	// rather than serving a zero that reads as "no pressure".
-	const OS_PRESSURE_SOURCES = METRICS == null ? { psi: false, cpuThrottle: false } : probeOsPressureSources();
-	const gPsiCpuSome = OS_PRESSURE_SOURCES.psi
+	// rather than serving a zero that reads as "no pressure". A transient probe
+	// error registers the gauge but leaves the source unknown so sampling can
+	// recover into it instead of permanently erasing the signal.
+	// Keep `null` distinct from a confirmed absence: when metrics are disabled,
+	// the protection sampler retains its existing lazy probe rather than being
+	// told the sources do not exist. When this probe does run, the same result is
+	// handed to the sampler below so one transient first-tick failure cannot
+	// overturn a source that was just proven available.
+	const OS_PRESSURE_SOURCES = METRICS == null ? null : probeOsPressureSources();
+	const gPsiCpuSome = OS_PRESSURE_SOURCES?.psi !== false
 		? containMetricInstrument(METRICS?.gauge(
-			'psi_cpu_some_avg10', 'Kernel pressure-stall CPU some avg10, percent of the last 10s any task was stalled on CPU'
+			'psi_cpu_some_avg10', 'Kernel pressure-stall CPU some avg10'
 		))
 		: undefined;
-	const gPsiMemoryFull = OS_PRESSURE_SOURCES.psi
+	const gPsiMemoryFull = OS_PRESSURE_SOURCES?.psi !== false
 		? containMetricInstrument(METRICS?.gauge(
-			'psi_memory_full_avg10', 'Kernel pressure-stall memory full avg10, percent of the last 10s all tasks were stalled on memory'
+			'psi_memory_full_avg10', 'Kernel pressure-stall memory full avg10'
 		))
 		: undefined;
-	const gPsiIoFull = OS_PRESSURE_SOURCES.psi
+	const gPsiIoFull = OS_PRESSURE_SOURCES?.psi !== false
 		? containMetricInstrument(METRICS?.gauge(
-			'psi_io_full_avg10', 'Kernel pressure-stall IO full avg10, percent of the last 10s all tasks were stalled on IO'
+			'psi_io_full_avg10', 'Kernel pressure-stall IO full avg10'
 		))
 		: undefined;
-	const gCpuThrottled = OS_PRESSURE_SOURCES.cpuThrottle
+	const gCpuThrottled = OS_PRESSURE_SOURCES?.cpuThrottle !== false
 		? containMetricInstrument(METRICS?.gauge(
-			'cpu_throttled_ratio', 'Fraction of the sampled window the cgroup CPU quota held this process suspended'
+			'cpu_throttled_ratio', 'Fraction of the window the cgroup CPU quota held the process suspended'
 		))
 		: undefined;
 	// Descriptor observability. Worker threads share one process-wide fd
@@ -606,8 +784,33 @@ if (WS_ENABLED) {
 	// burst it was. No topic strings and no client identity cross into the
 	// registry - the topic is named only in the local log line.
 	const mRelayGap = containMetricInstrument(METRICS?.counter(
-		'relay_gap_frames_total', 'Relayed frames PROVEN lost to this worker (interior relay gaps); a lower bound, since losses inside an already-reported window are folded into that report', []
+		'relay_gap_frames_total', 'Relayed frames proven lost to this worker', []
 	));
+	// Primary-owned spill incidents are attributed exactly once to a healthy
+	// worker registry. Counts remain cluster-summable without pretending the
+	// primary has its own metrics registry.
+	const mRelaySpillQuarantines = containMetricInstrument(METRICS?.counter(
+		'relay_spill_quarantines_total', 'Workers quarantined after a relay spill ceiling', ['reason']
+	));
+	const mRelaySpillDroppedBytes = containMetricInstrument(METRICS?.counter(
+		'relay_spill_dropped_bytes_total', 'Pending relay bytes discarded when a lagging worker was quarantined', []
+	));
+	const gRelaySpillPendingAge = containMetricInstrument(METRICS?.gauge(
+		'relay_spill_pending_age_seconds', 'Worst oldest-pending age observed at relay spill quarantine', []
+	));
+	let relaySpillPendingAgePeak = 0;
+	if (parentPort) {
+		parentPort.on('message', (msg) => {
+			if (!msg || msg.type !== 'relay-spill-overflow') return;
+			const reason = msg.reason === 'age' ? 'age' : 'bytes';
+			const droppedBytes = Number.isFinite(msg.droppedBytes) ? Math.max(0, msg.droppedBytes) : 0;
+			const pendingAgeMs = Number.isFinite(msg.pendingAgeMs) ? Math.max(0, msg.pendingAgeMs) : 0;
+			mRelaySpillQuarantines?.inc({ reason });
+			mRelaySpillDroppedBytes?.inc({}, droppedBytes);
+			relaySpillPendingAgePeak = Math.max(relaySpillPendingAgePeak, pendingAgeMs / 1000);
+			gRelaySpillPendingAge?.set(relaySpillPendingAgePeak);
+		});
+	}
 	// Route the framework's own invariant violations (assert/fatal) into the
 	// same registry, labelled by category and severity, so the `metrics` option
 	// lights up `framework_assertion_violations_total` without the app touching
@@ -645,9 +848,21 @@ if (WS_ENABLED) {
 			// comparison could tell it more. Each hole is drained once, so this is
 			// silent until something is actually lost.
 			for (const gap of takeConfirmedGaps(originStreams, processMonotonicNow(), GAP_CONFIRM_MS)) {
-				console.error('[adapter-uws/relay-gap] lost %d relayed frame(s) for topic=%s from worker=%d (ordinals %d-%d). ' +
-					'This worker is missing state its siblings received.',
-					gap.count, gap.topic, gap.origin, gap.from, gap.to);
+				emitOperationalEvent({
+					source: 'svelte-adapter-uws',
+					component: 'runtime.relay-gap',
+					event: 'runtime.relay-gap.detected',
+					severity: 'error',
+					dataClass: 'pseudonymous',
+					message: 'This worker is missing relayed state that sibling workers received.',
+					attributes: {
+						count: gap.count,
+						topic: privateValueMetadata(gap.topic, 'topic'),
+						originWorker: gap.origin,
+						fromOrdinal: gap.from,
+						toOrdinal: gap.to
+					}
+				});
 				mRelayGap?.inc({}, gap.count);
 				parentPort.postMessage({ type: 'relay-gap', threadId, count: gap.count });
 			}
@@ -677,6 +892,32 @@ if (WS_ENABLED) {
 		parentPort.on('message', (msg) => {
 			if (msg && msg.type === 'state-divergence') {
 				mStateDivergence?.inc({ role: msg.role === 'minority' ? 'minority' : 'majority' });
+				// The aggregate detector deliberately carries no topic names. Only
+				// after it fires does the primary request this bounded, keyed
+				// high-water snapshot. The shared random key lives in workerData and
+				// never appears in a message, log, metric, or admin response.
+				if (
+					typeof msg.diagnosticId === 'string' && msg.diagnosticId.length <= 128 &&
+					workerData?.divergenceDiagnosticKey
+				) {
+					parentPort.postMessage({
+						type: 'state-divergence-detail',
+						diagnosticId: msg.diagnosticId,
+						threadId,
+						summary: summarizeTopicSequences(
+							maxSeenSeq,
+							workerData.divergenceDiagnosticKey,
+							// Honor the primary's requested bound, capped by this
+							// worker's own limit so a compromised primary message
+							// cannot inflate the snapshot.
+							Number.isInteger(msg.topicLimit) && msg.topicLimit > 0
+								? Math.min(msg.topicLimit, DIVERGENCE_TOPIC_LIMIT)
+								: DIVERGENCE_TOPIC_LIMIT
+						)
+					});
+				}
+			} else if (msg && msg.type === 'state-divergence-diagnostic') {
+				divergenceDiagnostics.set(msg.diagnostic);
 			}
 		});
 	}
@@ -737,7 +978,7 @@ if (WS_ENABLED) {
 	if (RESOURCE_GROWTH_AUDIT_INTERVAL_MS > 0) {
 		const mResourceGrowth = containMetricInstrument(METRICS?.counter(
 			'framework_resource_growth_suspected_total',
-			'Bookkeeping collections whose size trended monotonically upward (suspected leak)',
+			'Sustained resource-growth suspicions raised by the optional auditor',
 			['resource']
 		));
 		let growthWarned = false;
@@ -844,15 +1085,24 @@ if (WS_ENABLED) {
 	// itself, so it rides every 5th sample (~5s) instead of every tick. Seeded
 	// one below the modulus so the very first sample publishes a value.
 	let fdSampleTick = 4;
-	counters.metricsSampleHook = METRICS == null ? null : () => {
+	counters.metricsSampleHook = METRICS == null ? null : (telemetry) => {
 		const lvl = postureLevel();
 		gPostureState?.set(lvl === 'siege' ? 2 : lvl === 'elevated' ? 1 : 0);
 		gUpgradeInflight?.set(admission.inFlight);
+		gUpgradeDeferredDepth?.set(admission.deferredDepth);
+		gUpgradeDeferredOldestAge?.set(admission.deferredOldestAgeMs / 1000);
 		gQueueDepth?.set(queueDepthProbe !== null ? queueDepthProbe() : 0);
 		// Read the snapshot the sampler just folded (this hook runs later in the
 		// same tick), so these track the current window's backpressure figures.
 		gBackpressureMaxBytes?.set(pressureSnapshot.maxBufferedBytes);
 		gBackpressureConnections?.set(pressureSnapshot.backpressuredConnections);
+		// Healthy workers publish an explicit zero, so absent-vs-zero stays
+		// queryable and the completeness gate can be satisfied by a worker that
+		// has never seen a quarantine. The IPC handler raises the peak the
+		// moment a spill happens; this rewrite never lowers it.
+		gRelaySpillPendingAge?.set(relaySpillPendingAgePeak);
+		if (counters.lastDroppedFrames > 0) mDroppedFrames?.inc({}, counters.lastDroppedFrames);
+		if (counters.lastDroppedBytes > 0) mDroppedBytes?.inc({}, counters.lastDroppedBytes);
 		gConnections?.set(counters.lastConnections);
 		gSubscriptions?.set(counters.totalSubscriptions);
 		gPressureSaturation?.set(pressureSnapshot.value);
@@ -865,12 +1115,13 @@ if (WS_ENABLED) {
 		gHeapUsedRatio?.set(counters.lastHeapUsedRatio);
 		if (counters.lastSampleWallMs > 0) gSampleTimestamp?.set(counters.lastSampleWallMs / 1000);
 		if (counters.lastPublishCount > 0) mPublishes?.inc({}, counters.lastPublishCount);
-		if (pressureSnapshot.psi !== null) {
-			gPsiCpuSome?.set(pressureSnapshot.psi.cpuSome10);
-			gPsiMemoryFull?.set(pressureSnapshot.psi.memoryFull10);
-			gPsiIoFull?.set(pressureSnapshot.psi.ioFull10);
-		}
-		if (pressureSnapshot.cpuThrottle !== null) gCpuThrottled?.set(pressureSnapshot.cpuThrottle.throttledRatio);
+		emitPressureMetricTelemetry(telemetry, {
+			reasonTransitions: mPressureReasonTransitions,
+			psiCpuSome: gPsiCpuSome,
+			psiMemoryFull: gPsiMemoryFull,
+			psiIoFull: gPsiIoFull,
+			cpuThrottled: gCpuThrottled
+		});
 		if (gOpenFds !== undefined && ++fdSampleTick >= 5) {
 			fdSampleTick = 0;
 			const openFds = countOpenFds();
@@ -1019,6 +1270,7 @@ if (WS_ENABLED) {
 			// out - the response is ended first, so uWS will not call onAborted
 			// against a state object that now belongs to another request.
 			let request;
+			let cookies;
 			try {
 				request = new Request(base_origin + url, {
 					method,
@@ -1027,13 +1279,16 @@ if (WS_ENABLED) {
 					// @ts-expect-error
 					duplex: 'half'
 				});
+				// Inside the same guard: createCookies throws when handed no
+				// usable URL, and an unguarded throw here is a hung request
+				// plus a leaked pooled state. Request.url is absolute by spec
+				// today; the guard is what keeps that a 400 if this ever moves.
+				cookies = createCookies(authHeaders['cookie'], request.url);
 			} catch {
 				send400(res);
 				releaseState(state);
 				return;
 			}
-
-			const cookies = createCookies(authHeaders['cookie']);
 
 			const authRequestId = resolveRequestId(authHeaders['x-request-id']) || randomUuid();
 			const authPlatform = Object.create(platform);
@@ -1049,7 +1304,7 @@ if (WS_ENABLED) {
 				platform: authPlatform
 			};
 
-			Promise.resolve()
+			const authenticate = (span = null) => Promise.resolve()
 				.then(() => wsModule.authenticate(event))
 				.then(async (result) => {
 					if (state.aborted) return;
@@ -1090,15 +1345,36 @@ if (WS_ENABLED) {
 					});
 				})
 				.catch((err) => {
+					try { span?.recordException?.(err); } catch {}
 					if (state.aborted) return;
 					if (err instanceof PayloadTooLargeError) {
 						send413(res);
 						return;
 					}
-					console.error('[adapter-uws] authenticate error:', err);
-					if (!state.aborted) send500(res);
+					emitOperationalEvent({
+						source: 'svelte-adapter-uws',
+						component: 'runtime.authenticate',
+						event: 'runtime.authenticate.failed',
+						severity: 'error',
+						dataClass: 'pseudonymous',
+						message: 'The WebSocket authentication endpoint failed.',
+						attributes: { requestId: authRequestId, error: diagnosticError(err) }
+					});
+					if (!state.aborted) send500(res, authRequestId);
 				})
 				.finally(() => { releaseState(state); });
+			if (tracingEnabled) {
+				traceOperation('adapter.http.websocket-authenticate', {
+					kind: 'server',
+					parent: extractTraceContext(authHeaders),
+					attributes: {
+						'http.request.method': method,
+						'network.protocol.name': 'http'
+					}
+				}, authenticate);
+			} else {
+				authenticate(null);
+			}
 		});
 
 		// Reject non-POST verbs on the auth path so GET/HEAD do not fall through
@@ -1170,15 +1446,13 @@ if (WS_ENABLED) {
 
 		// Direct navigation to the configured path renders the same page the
 		// gate serves on rejection, seeded from the live poll counter.
-		route('get', WAITING_ROOM.path, (res) => {
+		route('get', WAITING_ROOM.path, (res, req) => {
 			res.onAborted(() => {});
-			const body = WAITING_ROOM.renderPage(currentQueueDepth());
-			res.cork(() => {
-				res.writeStatus('200 OK');
-				res.writeHeader('content-type', 'text/html; charset=utf-8');
-				res.writeHeader('cache-control', 'no-store');
-				res.end(body);
-			});
+			const page = WAITING_ROOM.renderResponse(
+				currentQueueDepth(),
+				createWaitingRoomRequest(req)
+			);
+			sendWaitingRoomPage(res, page);
 		});
 	}
 
@@ -1204,9 +1478,22 @@ if (WS_ENABLED) {
 			// `503` - never the holding page - and skips the Accept negotiation.
 			const serveUpgradeRefusal = () => {
 				if (WAITING_ROOM === null || isCursor) {
-					// `waitingRoom: false` (or maxConcurrent unset): the exact
-					// bare 503 - same status, single content-type header, same
-					// body, no Retry-After.
+					// An HTML navigation keeps a minimal document baseline even
+					// when the interactive room is disabled. Cursor upgrades are
+					// never navigations and retain the byte-identical bare refusal.
+					if (!isCursor && negotiateRejection(
+						req.getHeader('accept'),
+						req.getHeader('upgrade')
+					) === 'html') {
+						sendWaitingRoomPage(res, {
+							body: buildAccessibleCapacityRefusalPage(),
+							lang: 'en',
+							dir: 'ltr',
+							headers: [],
+							varyAcceptLanguage: false
+						}, '503 Service Unavailable');
+						return;
+					}
 					res.cork(() => {
 						res.writeStatus('503 Service Unavailable');
 						res.writeHeader('content-type', 'text/plain');
@@ -1217,15 +1504,13 @@ if (WS_ENABLED) {
 
 				// One header read, no full walk on the reject path.
 				const accept = req.getHeader('accept');
-				if (negotiateRejection(accept) === 'html') {
+				if (negotiateRejection(accept, req.getHeader('upgrade')) === 'html') {
 					// Browser navigation: serve the self-polling holding page.
-					const body = WAITING_ROOM.renderPage();
-					res.cork(() => {
-						res.writeStatus('200 OK');
-						res.writeHeader('content-type', 'text/html; charset=utf-8');
-						res.writeHeader('cache-control', 'no-store');
-						res.end(body);
-					});
+					const page = WAITING_ROOM.renderResponse(
+						undefined,
+						createWaitingRoomRequest(req)
+					);
+					sendWaitingRoomPage(res, page);
 					return;
 				}
 
@@ -1250,6 +1535,7 @@ if (WS_ENABLED) {
 			if (postureLevel() === 'siege') {
 				if (counters.activePosture !== null) counters.activePosture.recordCapacityReject();
 				mUpgradeRejected?.inc({ reason: 'siege' });
+				traceUpgradeRejection(req, undefined, 'siege');
 				serveUpgradeRefusal();
 				return;
 			}
@@ -1261,22 +1547,52 @@ if (WS_ENABLED) {
 			// upgrade is admitted through its reserved sub-budget so it can
 			// never starve main-WS admission; a saturated cursor lane is real
 			// capacity pressure, so it counts as an over-capacity reject too.
-			const acquired = isCursor ? admission.tryAcquireCursor() : admission.tryAcquire();
-			if (!acquired) {
+			const handshakeAcquired = isCursor ? admission.tryAcquireCursor() : admission.tryAcquire();
+			if (!handshakeAcquired) {
 				// Count the over-capacity reject (and only this one) so the
 				// posture's rolling reject rate reflects true gate pressure.
 				if (counters.activePosture !== null) counters.activePosture.recordCapacityReject();
 				mUpgradeRejected?.inc({ reason: isCursor ? 'cursor_lane' : 'over_capacity' });
+				traceUpgradeRejection(req, undefined, isCursor ? 'cursor_lane' : 'over_capacity');
 				serveUpgradeRefusal();
 				return;
 			}
 			let inFlightReleased = false;
-			function releaseInFlight() {
-				if (inFlightReleased) return;
-				inFlightReleased = true;
-				if (isCursor) admission.releaseCursorInFlight();
-				else admission.release();
+			let connectionPermitHeld = false;
+			let connectionPermitTransferred = false;
+			function releaseConnectionPermit() {
+				if (!connectionPermitHeld || connectionPermitTransferred) return;
+				connectionPermitHeld = false;
+				admission.releaseConnection();
+				gConnectionHeadroom?.set(admission.connectionHeadroom);
 			}
+			function releaseInFlight() {
+				if (!inFlightReleased) {
+					inFlightReleased = true;
+					if (isCursor) admission.releaseCursorInFlight();
+					else admission.release();
+				}
+				releaseConnectionPermit();
+			}
+			function rejectDeferredOverflow(headers) {
+				if (counters.activePosture !== null) counters.activePosture.recordCapacityReject();
+				mUpgradeRejected?.inc({ reason: 'deferred_overflow' });
+				mUpgradeDeferredRejected?.inc();
+				traceUpgradeRejection(req, headers, 'deferred_overflow');
+				releaseInFlight();
+				serveUpgradeRefusal();
+			}
+
+			if (!admission.tryAcquireConnection()) {
+				if (counters.activePosture !== null) counters.activePosture.recordCapacityReject();
+				mUpgradeRejected?.inc({ reason: 'connection_capacity' });
+				traceUpgradeRejection(req, undefined, 'connection_capacity');
+				releaseInFlight();
+				serveUpgradeRefusal();
+				return;
+			}
+			connectionPermitHeld = admission.maxConnections > 0;
+			gConnectionHeadroom?.set(admission.connectionHeadroom);
 
 			// Read everything synchronously - uWS req is stack-allocated.
 			// Repeated lines are merged per header class; a repeated framing /
@@ -1287,6 +1603,7 @@ if (WS_ENABLED) {
 			const headers = {};
 			if (collectRequestHeaders(req, headers) !== null) {
 				mUpgradeRejected?.inc({ reason: 'duplicate_header' });
+				traceUpgradeRejection(req, null, 'duplicate_header');
 				send400(res);
 				releaseInFlight();
 				return;
@@ -1318,6 +1635,7 @@ if (WS_ENABLED) {
 					// never escalate the protection posture toward siege.
 					if (counters.activePosture !== null) counters.activePosture.recordRateLimitReject();
 					mUpgradeRejected?.inc({ reason: 'ip_rate_limit' });
+					traceUpgradeRejection(req, headers, 'ip_rate_limit');
 					res.cork(() => {
 						res.writeStatus('429 Too Many Requests');
 						res.writeHeader('content-type', 'text/plain');
@@ -1358,6 +1676,23 @@ if (WS_ENABLED) {
 			const secKey = req.getHeader('sec-websocket-key');
 			const secProtocol = req.getHeader('sec-websocket-protocol');
 			const secExtensions = req.getHeader('sec-websocket-extensions');
+			const upgradeWithConnectionPermit = (userData) => {
+				let carrier = null;
+				if (connectionPermitHeld) {
+					carrier = connectionPermitCarrier.install(userData);
+					connectionPermitTransferred = true;
+				}
+				try {
+					res.upgrade(userData, secKey, secProtocol, secExtensions, context);
+				} catch (error) {
+					if (connectionPermitTransferred) {
+						connectionPermitTransferred = false;
+						connectionPermitCarrier.rollback(userData, carrier);
+					}
+					releaseConnectionPermit();
+					throw error;
+				}
+			};
 
 			// Origin validation - reject cross-origin WebSocket connections.
 			// Requests without an Origin header are also rejected unless the
@@ -1377,6 +1712,7 @@ if (WS_ENABLED) {
 				hasUpgradeHook: !!wsModule.upgrade
 			})) {
 				mUpgradeRejected?.inc({ reason: 'bad_origin' });
+				traceUpgradeRejection(req, headers, 'bad_origin');
 				res.cork(() => {
 					res.writeStatus('403 Forbidden');
 					res.writeHeader('content-type', 'text/plain');
@@ -1393,6 +1729,7 @@ if (WS_ENABLED) {
 			// userData to the WS binding). The `open` hook promotes this
 			// string into the Symbol-keyed per-connection platform clone.
 			const wsRequestId = resolveRequestId(headers['x-request-id']) || randomUuid();
+			const wsTraceParent = tracingEnabled ? extractTraceContext(headers) : null;
 
 			// No user upgrade handler - accept synchronously (no microtask yield,
 			// no cookie parsing). Inject remoteAddress so plugins/ratelimit can
@@ -1405,14 +1742,35 @@ if (WS_ENABLED) {
 				if (ADMISSION_PER_TICK_BUDGET > 0) {
 					res.onAborted(() => { fastPathAborted = true; releaseInFlight(); });
 				}
-				admission.admit(() => {
+				const pacingOutcome = admission.admit(() => {
 					if (fastPathAborted) return;
-					res.cork(() => {
-						res.upgrade({ remoteAddress: clientIp, [WS_REQUEST_ID_KEY]: wsRequestId }, secKey, secProtocol, secExtensions, context);
-					});
-					mUpgradeAdmitted?.inc();
-					releaseInFlight();
+					try {
+						const acceptUpgrade = () => {
+							const connectionTraceContext = activeTraceContext() ?? wsTraceParent;
+							res.cork(() => {
+								upgradeWithConnectionPermit({
+									remoteAddress: clientIp,
+									[WS_REQUEST_ID_KEY]: wsRequestId,
+									[WS_TRACE_CONTEXT_KEY]: connectionTraceContext
+								});
+							});
+						};
+						if (tracingEnabled) {
+							traceOperation('adapter.websocket.upgrade', {
+								kind: 'server',
+								parent: wsTraceParent,
+								attributes: { 'network.protocol.name': 'websocket' }
+							}, acceptUpgrade);
+						} else {
+							acceptUpgrade();
+						}
+						mUpgradeAdmitted?.inc();
+					} finally {
+						// Also releases both permits if the native upgrade throws.
+						releaseInFlight();
+					}
 				});
+				if (pacingOutcome === null) rejectDeferredOverflow(headers);
 				return;
 			}
 
@@ -1435,6 +1793,7 @@ if (WS_ENABLED) {
 					timedOut = true;
 					if (!aborted) {
 						mUpgradeRejected?.inc({ reason: 'auth_timeout' });
+						traceUpgradeRejection(req, headers, 'auth_timeout');
 						res.cork(() => {
 							res.writeStatus('504 Gateway Timeout');
 							res.writeHeader('content-type', 'text/plain');
@@ -1450,8 +1809,26 @@ if (WS_ENABLED) {
 			// catch below exists, serving no response and leaking the in-flight
 			// slot (releaseInFlight would never run).
 			let upgradeHookResult;
+			let connectionTraceContext = wsTraceParent;
+			const callUpgradeHook = () => {
+				connectionTraceContext = activeTraceContext() ?? wsTraceParent;
+				return wsModule.upgrade({
+					headers,
+					cookies,
+					url,
+					remoteAddress: clientIp,
+					requestId: wsRequestId,
+					traceContext: connectionTraceContext
+				});
+			};
 			try {
-				upgradeHookResult = wsModule.upgrade({ headers, cookies, url, remoteAddress: clientIp, requestId: wsRequestId });
+				upgradeHookResult = tracingEnabled
+					? traceOperation('adapter.websocket.upgrade', {
+						kind: 'server',
+						parent: wsTraceParent,
+						attributes: { 'network.protocol.name': 'websocket' }
+					}, callUpgradeHook)
+					: callUpgradeHook();
 			} catch (err) {
 				upgradeHookResult = Promise.reject(err);
 			}
@@ -1461,6 +1838,7 @@ if (WS_ENABLED) {
 					if (aborted || timedOut) return;
 					if (result === false) {
 						mUpgradeRejected?.inc({ reason: 'auth_rejected' });
+						traceUpgradeRejection(req, headers, 'auth_rejected');
 						res.cork(() => {
 							res.writeStatus('401 Unauthorized');
 							res.writeHeader('content-type', 'text/plain');
@@ -1499,6 +1877,7 @@ if (WS_ENABLED) {
 					const ud = userData || {};
 					if (!ud.remoteAddress) ud.remoteAddress = clientIp;
 					ud[WS_REQUEST_ID_KEY] = wsRequestId;
+					ud[WS_TRACE_CONTEXT_KEY] = connectionTraceContext;
 					// Headers actually written to the 101. This is a SNAPSHOT, not the
 					// app's object, and the snapshot is what gets validated and what
 					// gets written. The object belongs to the app and stays mutable,
@@ -1511,49 +1890,59 @@ if (WS_ENABLED) {
 					// validated.
 					const safeHeaders = snapshotUpgradeHeaders(responseHeaders);
 					if (safeHeaders) warnSetCookieOnUpgradeOnce(safeHeaders);
-					admission.admit(() => {
+					const pacingOutcome = admission.admit(() => {
 						// Recheck after possible setImmediate defer: the client
 						// may have hung up between admission and execution.
 						if (aborted || timedOut) { releaseInFlight(); return; }
-						res.cork(() => {
-							if (safeHeaders) {
-								// Write the switching-protocols status line BEFORE any
-								// header. uWS emits an implicit "200 OK" on the first
-								// writeHeader, and a 200 makes spec-compliant WebSocket
-								// clients reject the handshake ("Unexpected server
-								// response: 200"). res.upgrade() below tolerates the
-								// pre-written 101 and appends Sec-WebSocket-Accept to it.
-								res.writeStatus('101 Switching Protocols');
-								for (const [hk, hv] of Object.entries(safeHeaders)) {
-									if (Array.isArray(hv)) {
-										// Index the trusted snapshot; never invoke an
-										// app-controlled Symbol.iterator at the wire sink.
-										for (let i = 0; i < hv.length; i++) res.writeHeader(hk, hv[i]);
-									} else {
-										res.writeHeader(hk, hv);
+						try {
+							res.cork(() => {
+								if (safeHeaders) {
+									// Write the switching-protocols status line BEFORE any
+									// header. uWS emits an implicit "200 OK" on the first
+									// writeHeader, and a 200 makes spec-compliant WebSocket
+									// clients reject the handshake ("Unexpected server
+									// response: 200"). res.upgrade() below tolerates the
+									// pre-written 101 and appends Sec-WebSocket-Accept to it.
+									res.writeStatus('101 Switching Protocols');
+									for (const [hk, hv] of Object.entries(safeHeaders)) {
+										if (Array.isArray(hv)) {
+											// Index the trusted snapshot; never invoke an
+											// app-controlled Symbol.iterator at the wire sink.
+											for (let i = 0; i < hv.length; i++) res.writeHeader(hk, hv[i]);
+										} else {
+											res.writeHeader(hk, hv);
+										}
 									}
 								}
-							}
-							res.upgrade(
-								ud,
-								secKey,
-								secProtocol,
-								secExtensions,
-								context
-							);
-						});
-						mUpgradeAdmitted?.inc();
-						releaseInFlight();
+								upgradeWithConnectionPermit(ud);
+							});
+							mUpgradeAdmitted?.inc();
+						} finally {
+							// The deferred drain catches native throws outside this
+							// promise chain, so release locally as well.
+							releaseInFlight();
+						}
 					});
+					if (pacingOutcome === null) rejectDeferredOverflow(headers);
 				})
 				.catch((err) => {
 					clearTimer(timer);
-					console.error('WebSocket upgrade error:', err);
+					emitOperationalEvent({
+						source: 'svelte-adapter-uws',
+						component: 'runtime.websocket-upgrade',
+						event: 'runtime.websocket-upgrade.failed',
+						severity: 'error',
+						dataClass: 'pseudonymous',
+						message: 'The WebSocket upgrade hook failed.',
+						attributes: { requestId: wsRequestId, error: diagnosticError(err) }
+					});
 					if (!aborted && !timedOut) {
 						mUpgradeRejected?.inc({ reason: 'hook_error' });
+						traceUpgradeRejection(req, headers, 'hook_error');
 						res.cork(() => {
 							res.writeStatus('500 Internal Server Error');
 							res.writeHeader('content-type', 'text/plain');
+							res.writeHeader('x-request-id', wsRequestId);
 							res.end('Internal Server Error');
 						});
 					}
@@ -1566,6 +1955,11 @@ if (WS_ENABLED) {
 			// Used to populate CloseContext.subscriptions for the user's close handler,
 			// enabling deterministic cleanup of per-subscription server state.
 			const userData = ws.getUserData();
+			if (admission.maxConnections > 0) {
+				const permitRestored = connectionPermitCarrier.restore(userData);
+				fatal(permitRestored, 'ws.connection-permit-carrier', null);
+				if (!permitRestored) return;
+			}
 			// A platform slot already set on a fresh open is unrecoverable structural
 			// corruption: a re-entrant or duplicate open on the same handle. Continuing
 			// would overwrite live per-connection state, so escalate to the hard tier.
@@ -1577,8 +1971,12 @@ if (WS_ENABLED) {
 			// the string slot so userData stays clean for hook code.
 			const wsPlatform = Object.create(platform);
 			wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
+			Object.defineProperty(wsPlatform, 'connectionTraceContext', {
+				value: userData[WS_TRACE_CONTEXT_KEY] ?? null
+			});
 			userData[WS_PLATFORM] = wsPlatform;
 			delete userData[WS_REQUEST_ID_KEY];
+			delete userData[WS_TRACE_CONTEXT_KEY];
 			assert(userData[WS_REQUEST_ID_KEY] === undefined, 'ws.request-id-leak', null);
 			// Stamp a fresh session id and announce it. The client stores it
 			// in sessionStorage and presents it back via { type: 'resume' }
@@ -1621,7 +2019,7 @@ if (WS_ENABLED) {
 				const iud = ws.getUserData();
 				const icaps = iud[WS_CAPS];
 				if (icaps !== undefined && icaps.has(WIRE_INGRESS_CAP)) {
-					dispatchIngressFrame(ws, iud, message, iud[WS_PLATFORM]);
+					await runAdmittedMessageWork(messageAdmission, ws, { data: message, platform: iud[WS_PLATFORM] }, runIngressApplicationWork, rejectApplicationMessage);
 					return;
 				}
 			}
@@ -1673,7 +2071,7 @@ if (WS_ENABLED) {
 				if (parsed === null || typeof parsed !== 'object') {
 					// Not a JSON object envelope (parse failed, or parsed to
 					// null / primitive / array). Forward raw bytes only.
-					await runMessageHook(wsModule.message, ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
+					await runAdmittedMessageHook(messageAdmission, wsModule.message, ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] }, rejectApplicationMessage);
 					return;
 				}
 				msg = parsed;
@@ -1703,7 +2101,7 @@ if (WS_ENABLED) {
 					// granted is hard-denied here UNLESS the app ships its own subscribe
 					// hook, which then decides via `runUserSubscribeGate` below. `isNew`
 					// is exactly "not already server-authorized on this connection".
-					if (deniesWireSubscribePreHook({ armed: subscribeAuth.enabled, hasUserHook: hasUserSubscribeHook(), held: !isNew, topic: msg.topic })) {
+					if (deniesWireSubscribePreHook({ armed: subscribeAuth.enabled, hasUserHook: hasUserSubscribeHook() && !subscribeAuth.strict, held: !isNew, topic: msg.topic })) {
 						sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
 						return;
 					}
@@ -1734,7 +2132,7 @@ if (WS_ENABLED) {
 					// Post-await re-check: a concurrent subscribe (single or batch)
 					// may have raced through and already added the topic while
 					// the user hook awaited. Idempotent ack and skip the
-					// counters.totalSubscriptions++ to avoid double-counting.
+					// logical accounting add to avoid double-counting.
 					// NOT when a gap-fill was requested. Live membership arriving during
 					// the await - a re-grant, a concurrent subscribe - carries no
 					// HISTORY, so acking here left a client that asked to recover from
@@ -1799,7 +2197,7 @@ if (WS_ENABLED) {
 					// rather than acked-and-silently-dropped.
 					const _recoverRevoked = recoverIsRevoked({
 						held: subs instanceof Set && subs.has(msg.topic),
-						wireAuthz: subscribeAuth.enabled && !hasUserSubscribeHook(),
+						wireAuthz: subscribeAuth.enabled && (subscribeAuth.strict || !hasUserSubscribeHook()),
 						cancelled: isPendingSubscribeCancelled(pendingUd, msg.topic, pendingToken),
 						topic: msg.topic
 					});
@@ -1835,7 +2233,7 @@ if (WS_ENABLED) {
 					// post-revocation authority and then refusing the install left a
 					// revoked sibling's landing reading that mark as current. The batch
 					// and dev lanes already check first; this makes the single lane agree.
-					if (deniesWireSubscribeLanding({ armed: subscribeAuth.enabled, hasUserHook: hasUserSubscribeHook(), held: subs.has(msg.topic), topic: msg.topic })) {
+					if (deniesWireSubscribeLanding({ armed: subscribeAuth.enabled, hasUserHook: hasUserSubscribeHook() && !subscribeAuth.strict, held: subs.has(msg.topic), topic: msg.topic })) {
 						settlePendingSubscribe(pendingUd, msg.topic, pendingToken);
 						if (_cap) discardResumeCapture(_cap);
 						sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
@@ -1848,8 +2246,7 @@ if (WS_ENABLED) {
 					}
 					try { ws.subscribe(msg.topic); }
 					catch { if (_cap) discardResumeCapture(_cap); counters.closedWsAborts++; return; }
-					subs.add(msg.topic);
-					counters.totalSubscriptions++;
+					addLogicalSubscription(subs, msg.topic);
 					// Live membership is installed: flush any frames held during the resume
 					// window to this connection, in order, skipping what the resume already
 					// covered, before the ack.
@@ -1858,7 +2255,14 @@ if (WS_ENABLED) {
 					// into the right cohort (announcing the server-wide id now) so the
 					// next cohort-split publish reaches it. No-op for an ordinary topic.
 					if (sharedTopics.has(msg.topic)) joinSharedCohort(ws, ws.getUserData(), msg.topic, sharedTopics.get(msg.topic));
-					if (wsDebug) console.log('[ws] subscribe topic=%s', msg.topic);
+					if (wsDebug) console.log(formatDiagnostic({
+						source: 'svelte-adapter-uws',
+						component: 'runtime.subscription',
+						event: 'runtime.subscription.accepted',
+						severity: 'debug',
+						message: 'A client topic subscription was installed.',
+						attributes: { topic: msg.topic }
+					}));
 					sendSubscribed(ws, msg.topic, ref);
 					return;
 				}
@@ -1879,10 +2283,7 @@ if (WS_ENABLED) {
 					ws.unsubscribe(msg.topic);
 					const udSubs = ws.getUserData()[WS_SUBSCRIPTIONS];
 					assert(udSubs instanceof Set, 'subs.shape-unsubscribe', null);
-					if (udSubs.delete(msg.topic)) {
-						counters.totalSubscriptions--;
-						assert(counters.totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions: counters.totalSubscriptions });
-					}
+					removeLogicalSubscription(udSubs, msg.topic);
 					// Read and write are granted together and are dropped together,
 					// on this path as on platform.unsubscribe and the plugin evict
 					// primitive. The client-driven `game` lane carries no topic, so
@@ -1896,7 +2297,14 @@ if (WS_ENABLED) {
 					// shared topic, so an unsubscribed client stops receiving its
 					// cohort-split publishes. No-op for an ordinary topic.
 					if (sharedTopics.has(msg.topic)) leaveSharedCohort(ws, ws.getUserData(), msg.topic);
-					if (wsDebug) console.log('[ws] unsubscribe topic=%s', msg.topic);
+					if (wsDebug) console.log(formatDiagnostic({
+						source: 'svelte-adapter-uws',
+						component: 'runtime.subscription',
+						event: 'runtime.subscription.removed',
+						severity: 'debug',
+						message: 'A client topic subscription was removed.',
+						attributes: { topic: msg.topic }
+					}));
 					wsModule.unsubscribe?.(ws, msg.topic, { platform: ws.getUserData()[WS_PLATFORM] });
 					return;
 				}
@@ -1943,9 +2351,9 @@ if (WS_ENABLED) {
 					// NOT hoisted: the ARM flag. `subscribeAuth.enabled` is
 					// runtime-mutable and is read fresh at each decision below.
 					const _hasUserHook = hasUserSubscribeHook();
-					const _wireAuthz = subscribeAuth.enabled && !_hasUserHook;
+					const _wireAuthz = subscribeAuth.enabled && (subscribeAuth.strict || !_hasUserHook);
 					const authzDenied = _wireAuthz
-						? valid.map((t) => deniesWireSubscribePreHook({ armed: subscribeAuth.enabled, hasUserHook: _hasUserHook, held: userData[WS_SUBSCRIPTIONS].has(t), topic: t }))
+						? valid.map((t) => deniesWireSubscribePreHook({ armed: subscribeAuth.enabled, hasUserHook: _hasUserHook && !subscribeAuth.strict, held: userData[WS_SUBSCRIPTIONS].has(t), topic: t }))
 						: null;
 
 					// Pass 2: gather denial decisions. If a batch hook is exported,
@@ -2054,7 +2462,7 @@ if (WS_ENABLED) {
 								// fresh at both; `hasUserHook` is the frame's single reading at
 								// both, because an app hook appearing or vanishing mid-await must
 								// not split one batch across two authorization models.
-								wireAuthz: subscribeAuth.enabled && !_hasUserHook,
+								wireAuthz: subscribeAuth.enabled && (subscribeAuth.strict || !_hasUserHook),
 								cancelled: isPendingSubscribeCancelled(batchUd, _t, batchTokens[i]),
 								topic: _t
 							});
@@ -2100,7 +2508,7 @@ if (WS_ENABLED) {
 						// here and the subscribe mutates `subs` for this topic, and the
 						// inline spelling this replaces asked the same Set twice.
 						const held = subs.has(topic);
-						const denial = (deniesWireSubscribeLanding({ armed: subscribeAuth.enabled, hasUserHook: _hasUserHook, held, topic }) ? 'FORBIDDEN' : null)
+						const denial = (deniesWireSubscribeLanding({ armed: subscribeAuth.enabled, hasUserHook: _hasUserHook && !subscribeAuth.strict, held, topic }) ? 'FORBIDDEN' : null)
 							?? (batchDenials !== null
 								? (batchDenials[topic] ?? null)
 								: (perTopicDenials !== null ? perTopicDenials[i] : null));
@@ -2150,8 +2558,7 @@ if (WS_ENABLED) {
 						}
 						try { ws.subscribe(topic); }
 						catch { counters.closedWsAborts++; continue; }
-						subs.add(topic);
-						counters.totalSubscriptions++;
+						addLogicalSubscription(subs, topic);
 						subscribed++;
 						// Flush frames held for this topic during the resume window, in
 						// order, before it starts receiving live frames.
@@ -2274,7 +2681,7 @@ if (WS_ENABLED) {
 					// Untouched when the gate is off or an app hook owns the topic
 					// decision, which is the same condition the other lanes use.
 					let resumeSeqs = msg.lastSeenSeqs;
-					if (subscribeAuth.enabled && !hasUserSubscribeHook()) {
+					if (subscribeAuth.enabled && (subscribeAuth.strict || !hasUserSubscribeHook())) {
 						const _grants = ws.getUserData()[WS_SUBSCRIPTIONS];
 						/** @type {Record<string, unknown>} */
 						const _allowed = Object.create(null);
@@ -2302,7 +2709,15 @@ if (WS_ENABLED) {
 								platform: ws.getUserData()[WS_PLATFORM]
 							});
 						} catch (err) {
-							console.error('[ws] resume hook threw:', err);
+							emitOperationalEvent({
+								source: 'svelte-adapter-uws',
+								component: 'runtime.resume',
+								event: 'resume.hook-failed',
+								severity: 'error',
+								dataClass: 'pseudonymous',
+								message: 'The resume hook threw; the client falls back to a fresh subscribe.',
+								attributes: { error: diagnosticError(err) }
+							});
 						}
 					}
 					// No recovery barrier here: this frame installs no live membership (it
@@ -2360,24 +2775,20 @@ if (WS_ENABLED) {
 					// never publish to a room it did not join. Ungranted (or a malformed
 					// event) -> game-denied. Granted -> stamp the per-room seq, fan out to
 					// the room excluding this sender, and echo the client id.
-					const gud = ws.getUserData();
-					const grantTopic = gud[WS_PUBLISH_GRANT];
-					if (!grantTopic || typeof msg.event !== 'string') {
-						const reason = grantTopic ? 'INVALID' : 'FORBIDDEN';
-						const denied = msg.id === undefined
-							? JSON.stringify({ type: 'game-denied', reason })
-							: JSON.stringify({ type: 'game-denied', reason, id: msg.id });
-						try { ws.send(denied, false, false); bumpOut(ws, denied); } catch { counters.closedWsAborts++; }
-						return;
-					}
-					platform.publishGame(ws, grantTopic, msg.event, msg.data, msg.id);
+					await runAdmittedMessageWork(messageAdmission, ws, { msg, platform }, runGameApplicationWork, rejectApplicationMessage);
 					return;
 				}
 			}
 			// Delegate everything else to the user's handler (if provided).
 			// `msg` is the JSON-parsed envelope when the prefix matched + parsed
 			// to an object + no control type matched; otherwise undefined.
-			await runMessageHook(wsModule.message, ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
+			await runAdmittedMessageHook(messageAdmission, wsModule.message, ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] }, rejectApplicationMessage);
+		},
+
+		dropped: (_ws, message) => {
+			// uWS owns `message` and guarantees it only for this callback. Retain
+			// the exact event and byte count, never the transient ArrayBuffer.
+			recordBackpressureDrop(counters, message);
 		},
 
 		drain: (ws) => {
@@ -2390,6 +2801,7 @@ if (WS_ENABLED) {
 
 		close: (ws, code, message) => {
 			const userData = ws.getUserData();
+			messageAdmission.close(ws);
 			assert(userData[WS_PLATFORM], 'ws.platform-missing-in-close', null);
 			const subscriptions = userData[WS_SUBSCRIPTIONS] || new Set();
 			// Reject any in-flight server-initiated requests so callers stop
@@ -2400,7 +2812,7 @@ if (WS_ENABLED) {
 			if (pending && pending.size > 0) {
 				for (const entry of pending.values()) {
 					clearTimer(entry.timer);
-					try { entry.reject(new Error('connection closed')); } catch {}
+					try { entry.reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED))); } catch {}
 				}
 				pending.clear();
 			}
@@ -2426,8 +2838,12 @@ if (WS_ENABLED) {
 			try {
 				wsModule.close?.(ws, ctx);
 			} finally {
-				counters.totalSubscriptions -= subscriptions.size;
-				assert(counters.totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions: counters.totalSubscriptions });
+				if (userData[WS_CONNECTION_PERMIT]) {
+					userData[WS_CONNECTION_PERMIT] = undefined;
+					admission.releaseConnection();
+					gConnectionHeadroom?.set(admission.connectionHeadroom);
+				}
+				accountClosedLogicalSubscriptions(subscriptions);
 				// Release this connection's advertised capabilities from the
 				// live counts so the binary publish fast path stays accurate.
 				capCounts.adjust(userData[WS_CAPS], null);
@@ -2459,12 +2875,46 @@ if (WS_ENABLED) {
 				: uWS.DISABLED
 	});
 
+	// app.ws handles real handshakes. Register this GET afterwards so a direct
+	// browser navigation can receive the opted-out accessible refusal without
+	// shadowing upgrades. When the gate is open, this endpoint is not a
+	// capacity page and retains the ordinary Upgrade Required response.
+	if (WAITING_ROOM === null && (admission.maxConcurrent > 0 || admission.maxConnections > 0)) {
+		route('get', WS_PATH, (res, req) => {
+			res.onAborted(() => {});
+			const atCapacity = postureLevel() === 'siege' || !admission.hasCapacity();
+			if (!atCapacity) {
+				res.cork(() => {
+					res.writeStatus('426 Upgrade Required');
+					res.writeHeader('content-type', 'text/plain');
+					res.end('WebSocket upgrade required');
+				});
+				return;
+			}
+			if (negotiateRejection(req.getHeader('accept'), req.getHeader('upgrade')) === 'html') {
+				sendWaitingRoomPage(res, {
+					body: buildAccessibleCapacityRefusalPage(),
+					lang: 'en',
+					dir: 'ltr',
+					headers: [],
+					varyAcceptLanguage: false
+				}, '503 Service Unavailable');
+				return;
+			}
+			res.cork(() => {
+				res.writeStatus('503 Service Unavailable');
+				res.writeHeader('content-type', 'text/plain');
+				res.end('Server is at upgrade capacity, please retry');
+			});
+		});
+	}
+
 	console.log(`WebSocket endpoint registered at ${WS_PATH}`);
 	if (WS_PATH !== '/ws') {
 		console.log(`Client must match: connect({ path: '${WS_PATH}' })`);
 	}
 
-	startPressureSampling(wsOptions.pressure);
+	startPressureSampling(wsOptions.pressure, OS_PRESSURE_SOURCES ?? undefined);
 }
 
 // Health check endpoint (before catch-all so it never hits SSR). This is a
@@ -2526,7 +2976,7 @@ if (WS_ENABLED && ADMIN_PATH !== false && typeof wsModule.admin === 'function') 
 	// learns to be ignored, which costs more than it buys.
 	if (!(WS_OPTIONS && WS_OPTIONS.adminAuthAcknowledged)) {
 		console.warn(
-			`Warning: Admin route ${ADMIN_PATH}/* is mounted with NO adapter-level ` +
+			`[svelte-adapter-uws] Warning: Admin route ${ADMIN_PATH}/* is mounted with NO adapter-level ` +
 			'authentication. It is publicly reachable unless the app\'s admin() ' +
 			'handler gates it (e.g. by validating a session cookie or bearer token). ' +
 			'Set websocket.adminAuthAcknowledged: true once it is gated to silence this.'

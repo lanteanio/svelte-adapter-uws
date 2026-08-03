@@ -30,6 +30,34 @@ export const WIRE_BINARY_TAG = 0x03;
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
+const FRAME_IO = Object.freeze({
+	allocate: (length) => new Uint8Array(length),
+	copy: (target, source, offset) => target.set(source, offset)
+});
+
+let activeFrameIO = FRAME_IO;
+
+/**
+ * Replace the default binary-frame allocation boundary in a controlled test or
+ * simulation. Calls that pass an explicit `io` object remain unaffected. The
+ * production runtime keeps the frozen native boundary and refuses replacement.
+ *
+ * @param {{ allocate: (length: number) => Uint8Array, copy: (target: Uint8Array, source: Uint8Array, offset: number) => void }} io
+ */
+export function setBinaryFrameIO(io) {
+	if (typeof process !== 'undefined' && process.env && process.env.NODE_ENV === 'production') {
+		throw new Error('wire: setBinaryFrameIO refused in production');
+	}
+	if (!io || typeof io.allocate !== 'function' || typeof io.copy !== 'function') {
+		throw new TypeError('wire: binary frame I/O requires allocate and copy functions');
+	}
+	activeFrameIO = io;
+}
+
+/** Restore the native binary-frame allocation boundary. */
+export function resetBinaryFrameIO() {
+	activeFrameIO = FRAME_IO;
+}
 
 /**
  * Growable byte buffer with varint / float32 / length-prefixed-string writers.
@@ -192,16 +220,39 @@ export class ByteReader {
  * @param {number} topicId - per-connection short topic id
  * @param {number} seq - per-topic monotonic seq, or 0 for "no seq"
  * @param {Uint8Array} payload - bytes returned by the plugin's `wire.encode`
+ * @param {{ allocate: (length: number) => Uint8Array, copy: (target: Uint8Array, source: Uint8Array, offset: number) => void }} [io]
+ *   Injectable counting boundary for deterministic I/O-budget tests. Production
+ *   omits it and takes the monomorphic native allocation/copy implementation.
  * @returns {Uint8Array}
  */
-export function buildBinaryFrame(schemaVersion, topicId, seq, payload) {
-	const w = new ByteWriter(8 + payload.length);
-	w.u8(WIRE_BINARY_TAG);
-	w.u8(schemaVersion & 0xff);
-	w.varint(topicId);
-	w.varint(seq);
-	w.bytes(payload);
-	return w.take();
+export function buildBinaryFrame(schemaVersion, topicId, seq, payload, io = activeFrameIO) {
+	// Exact sizing avoids ByteWriter's grow-buffer allocation plus take() copy.
+	// One outbound frame is one allocation and one bulk copy of the codec payload;
+	// the four small header fields are written directly into the destination.
+	const lengthOfVarint = (value) => {
+		let length = 1;
+		while (value > 0x7f) {
+			value = Math.floor(value / 128);
+			length++;
+		}
+		return length;
+	};
+	const headerLength = 2 + lengthOfVarint(topicId) + lengthOfVarint(seq);
+	const frame = io.allocate(headerLength + payload.length);
+	let at = 0;
+	frame[at++] = WIRE_BINARY_TAG;
+	frame[at++] = schemaVersion & 0xff;
+	const writeVarint = (value) => {
+		while (value > 0x7f) {
+			frame[at++] = (value & 0x7f) | 0x80;
+			value = Math.floor(value / 128);
+		}
+		frame[at++] = value & 0x7f;
+	};
+	writeVarint(topicId);
+	writeVarint(seq);
+	io.copy(frame, payload, at);
+	return frame;
 }
 
 /**

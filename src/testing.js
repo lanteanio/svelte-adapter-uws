@@ -1,17 +1,23 @@
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders } from './runtime/utils/request-headers.js';
-import { stampSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, isCursorLaneUpgrade, resolveWaitingRoom, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
+import { stampSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
+import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
 import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap } from './runtime/utils/subscribe-policy.js';
 import { deniesUngrantedObserve, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, isAuthorizationHook, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
-import { runMessageHook } from './runtime/utils/hook-boundary.js';
-import { assertRestrictiveBoolean } from './config-guards.js';
-import { uwsInstallSpec, readAdapterPackageJson } from './uws-load-hint.js';
+import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
+import { createConnectionPermitCarrier } from './runtime/utils/connection-permit.js';
+import { assertWireSubscribeAuthorization } from './config-guards.js';
+import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
+import { runtimeVersionInfo } from './runtime/version-info.js';
+import { ADAPTER_ERROR_IDS, adapterErrorMessage } from './runtime/error-registry.js';
+import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './runtime/diagnostic.js';
+import { createDivergenceDiagnosticStore } from './runtime/divergence-diagnostics.js';
 
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
@@ -103,15 +109,16 @@ function whenAbortedT(signal) {
  * @returns {Promise<import('./testing.js').TestServer>}
  */
 export async function createTestServer(options = {}) {
+	const divergenceDiagnosticsT = createDivergenceDiagnosticStore();
 	// A permissive test double for a restrictive production deployment creates a
 	// false-green authorization test. Apply the same value guard as the adapter
 	// and Vite surfaces before the option is normalized with `=== true`.
-	assertRestrictiveBoolean(
+	assertWireSubscribeAuthorization(
 		options,
 		'authorizeWireSubscribe',
 		'the createTestServer option authorizeWireSubscribe'
 	);
-	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, protection, metrics, adminPath = '/__realtime', readinessCheckPath = '/readyz', healthCheckPath = '/healthz', primaryInit } = options;
+	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, messageAdmission: messageAdmissionOptions, protection, metrics, adminPath = '/__realtime', readinessCheckPath = '/readyz', healthCheckPath = '/healthz', primaryInit } = options;
 
 	// Lifecycle state, mirroring the production state machine
 	// (runtime/handler/lifecycle.js) rather than a boolean: `starting` while the
@@ -138,7 +145,8 @@ export async function createTestServer(options = {}) {
 	// method `authorizeWireSubscribe()` can arm it at runtime, exactly like the
 	// framework does in production. Seeded from the config option for the
 	// static-config path.
-	let SUBSCRIBE_AUTHZ_T = options.authorizeWireSubscribe === true;
+	let SUBSCRIBE_AUTHZ_T = options.authorizeWireSubscribe === true || options.authorizeWireSubscribe === 'strict';
+	let SUBSCRIBE_AUTHZ_STRICT_T = options.authorizeWireSubscribe === 'strict';
 	// A plugin's side-effect hook does not count as the app taking over the topic
 	// decision, matching production - otherwise exporting presence's subscribe
 	// hook disarms the grant gate. See WS_HOOK_SIDE_EFFECT_ONLY.
@@ -148,9 +156,32 @@ export async function createTestServer(options = {}) {
 	// Same wiring shape as the production handler: a per-instance
 	// admission state instantiated once, consulted at the top of the
 	// upgrade hook (`tryAcquire` -> 503), and paced via `admit()` around
-	// the actual `res.upgrade()` call. Off when both knobs are 0/unset.
+	// the actual `res.upgrade()` call. The pacing queue is finite even when
+	// perTickBudget is the only enabled admission control.
 	const admission = createUpgradeAdmission(upgradeAdmission);
+	const connectionPermitCarrier = createConnectionPermitCarrier();
 	const ADMISSION_PER_TICK_BUDGET = upgradeAdmission?.perTickBudget || 0;
+	const messageAdmission = createMessageAdmission(messageAdmissionOptions);
+	const rejectApplicationMessageT = (ws, rejection) => {
+		mMessageAdmissionRejectedT?.inc({ reason: rejection.reason, scope: rejection.scope });
+		sendOutboundT(ws, messageOverloadedFrame(rejection));
+	};
+	const runIngressApplicationWorkT = (ws, context) =>
+		dispatchIngressFrame(ws, ws.getUserData(), context.data, context.platform);
+	const runGameApplicationWorkT = (ws, context) => {
+		const msg = context.msg;
+		const gud = ws.getUserData();
+		const grantTopic = gud[WS_PUBLISH_GRANT];
+		if (!grantTopic || typeof msg.event !== 'string') {
+			const reason = grantTopic ? 'INVALID' : 'FORBIDDEN';
+			const denied = msg.id === undefined
+				? JSON.stringify({ type: 'game-denied', reason })
+				: JSON.stringify({ type: 'game-denied', reason, id: msg.id });
+			sendOutboundT(ws, denied);
+			return;
+		}
+		context.platform.publishGame(ws, grantTopic, msg.event, msg.data, msg.id);
+	};
 
 	// Content-negotiated rejection for over-capacity upgrades. Mirrors the
 	// production handler exactly: resolved once (or null when off); null keeps
@@ -158,11 +189,40 @@ export async function createTestServer(options = {}) {
 	const WAITING_ROOM = resolveWaitingRoom(upgradeAdmission);
 
 	// Admission counters, mirroring the production handler at the upgrade
-	// branches this harness mirrors (same names, same reasons). The sampled
-	// gauges and the per-IP/origin reasons are production-only: the harness
-	// runs no pressure sampler, no per-IP limiter, and no origin check.
+	// branches this harness mirrors (same names, same reasons). Queue gauges are
+	// event-driven here; the other sampled gauges and per-IP/origin reasons are
+	// production-only because the harness runs no pressure sampler or limiters.
 	const mUpgradeAdmittedT = containMetricInstrument(metrics?.counter('upgrade_admitted_total', 'WebSocket upgrades accepted'));
 	const mUpgradeRejectedT = containMetricInstrument(metrics?.counter('upgrade_rejected_total', 'WebSocket upgrades rejected before open', ['reason']));
+	const mUpgradeDeferredRejectedT = containMetricInstrument(metrics?.counter(
+		'upgrade_deferred_rejected_total',
+		'Upgrade callbacks shed because the bounded deferral queue was full'
+	));
+	const mMessageAdmissionRejectedT = containMetricInstrument(metrics?.counter(
+		'ws_message_admission_rejected_total',
+		'Application WebSocket messages shed by established-message admission',
+		['reason', 'scope']
+	));
+	const gConnectionHeadroomT = admission.maxConnections > 0
+		? containMetricInstrument(metrics?.gauge(
+			'ws_connection_headroom',
+			'Remaining reserved-or-live WebSocket connection permits'
+		))
+		: undefined;
+	gConnectionHeadroomT?.set(admission.connectionHeadroom);
+	const gUpgradeDeferredDepthT = containMetricInstrument(metrics?.gauge(
+		'upgrade_deferred_depth', 'Upgrade callbacks waiting in the bounded pacing queue'
+	));
+	const gUpgradeDeferredOldestAgeT = containMetricInstrument(metrics?.gauge(
+		'upgrade_deferred_oldest_age_seconds',
+		'Age of the oldest callback in the bounded upgrade pacing queue'
+	));
+	if (gUpgradeDeferredDepthT !== undefined || gUpgradeDeferredOldestAgeT !== undefined) {
+		admission.setDeferredObserver((depth, oldestAgeMs) => {
+			gUpgradeDeferredDepthT?.set(depth);
+			gUpgradeDeferredOldestAgeT?.set(oldestAgeMs / 1000);
+		});
+	}
 
 	// Graduated protection posture, mirroring the production handler. Absent or
 	// `'normal'` leaves the posture inert so the reject path, pressure reason,
@@ -286,10 +346,10 @@ export async function createTestServer(options = {}) {
 	if (!uWS) {
 		try {
 			uWS = (await import('uWebSockets.js')).default;
-		} catch {
+		} catch (cause) {
 			throw new Error(
-				'createTestServer requires uWebSockets.js to be installed.\n' +
-				'  npm install ' + uwsInstallSpec(readAdapterPackageJson())
+				'createTestServer: ' + uwsLoadErrorMessage(readAdapterPackageJson(), cause),
+				{ cause }
 			);
 		}
 	}
@@ -406,6 +466,10 @@ export async function createTestServer(options = {}) {
 		catch { closedWsAbortsT++; return 2; }
 		bumpOutT(ws, frame);
 		return result;
+	}
+
+	function sendWireFanoutT(ws, value, binary) {
+		return binary ? sendOutboundBinaryT(ws, value) : sendOutboundT(ws, value);
 	}
 
 	// Binary wire (0x03) capability accounting + topic-id assignment, mirroring
@@ -771,7 +835,7 @@ export async function createTestServer(options = {}) {
 				return delivered;
 			}
 			// Stateless codec: encode once, send many.
-			const payload = wire.encode(event, data);
+			const payload = encodeStatelessWirePayload(wire, event, data);
 			if (payload == null) {
 				if (excludeWs === null) {
 					if (chaos.scenario === null) return app.publish(topic, env, false, false);
@@ -785,17 +849,11 @@ export async function createTestServer(options = {}) {
 				}
 				// Declined frame with sender exclusion: per-subscriber JSON walk,
 				// skipping the excluded socket. Mirrors handler.js.
-				let delivered = false;
-				for (const ws of wsConnections) {
-					if (ws === excludeWs) continue;
-					let ud;
-					try { ud = ws.getUserData(); } catch { continue; }
-					const subs = ud[WS_SUBSCRIPTIONS];
-					if (!subs || !subs.has(topic)) continue;
-					sendOutboundT(ws, env);
-					delivered = true;
-				}
-				return delivered;
+				return deliverStatelessWireFanout(wire, payload, {
+					topic, envelope: env, seq: seqOnWire, excludeWs, connections: wsConnections,
+					ensureId: ensureWireIdT, isPoisoned: wireStatePoisonedT,
+					poison: poisonWireStateT, send: sendWireFanoutT
+				});
 			}
 			// Shared binary fan-out (mirror of handler.js): the first shared publish
 			// migrates current subscribers into cohorts, then the publish is two native
@@ -828,41 +886,11 @@ export async function createTestServer(options = {}) {
 				}
 				return true;
 			}
-			/** @type {Map<number, Uint8Array>} */
-			const frameById = new Map();
-			let delivered = false;
-			for (const ws of wsConnections) {
-				if (ws === excludeWs) continue;
-				let ud;
-				try { ud = ws.getUserData(); } catch { continue; }
-				const subs = ud[WS_SUBSCRIPTIONS];
-				if (!subs || !subs.has(topic)) continue;
-				const caps = ud[WS_CAPS];
-				if (caps && caps.has(wire.capability) && !wireStatePoisonedT(ud, wire.capability)) {
-					const id = ensureWireIdT(ws, ud, topic);
-					if (id === -1) {
-						// Dropped wire-id announce: the topic-id mapping is itself
-						// per-connection state the client now permanently lacks.
-						// JSON for this frame + poison. A dropped binary FRAME
-						// below needs no such handling - the shared payload
-						// carries no per-connection state.
-						poisonWireStateT(ws, ud, wire.capability);
-						sendOutboundT(ws, env);
-						delivered = true;
-						continue;
-					}
-					let frame = frameById.get(id);
-					if (!frame) {
-						frame = buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload);
-						frameById.set(id, frame);
-					}
-					sendOutboundBinaryT(ws, frame);
-				} else {
-					sendOutboundT(ws, env);
-				}
-				delivered = true;
-			}
-			return delivered;
+			return deliverStatelessWireFanout(wire, payload, {
+				topic, envelope: env, seq: seqOnWire, excludeWs, connections: wsConnections,
+				ensureId: ensureWireIdT, isPoisoned: wireStatePoisonedT,
+				poison: poisonWireStateT, send: sendWireFanoutT
+			});
 		},
 		publishWireBatch(topic, event, entries, wire, options) {
 			// Mirror of handler/platform.js publishWireBatch: one binary frame per
@@ -917,15 +945,16 @@ export async function createTestServer(options = {}) {
 				if (!subs || !subs.has(topic)) continue;
 				let list = entries;
 				let envList = envs;
-				let lastSeq = seqs[entries.length - 1];
+				let seqList = seqs;
 				if (anyExclude) {
 					list = [];
 					envList = [];
+					seqList = [];
 					for (let i = 0; i < entries.length; i++) {
 						if (entries[i].excludeWs === ws) continue;
 						list.push(entries[i]);
 						envList.push(envs[i]);
-						lastSeq = seqs[i];
+						seqList.push(seqs[i]);
 					}
 					if (list.length === 0) continue;
 				}
@@ -933,34 +962,11 @@ export async function createTestServer(options = {}) {
 				if (!caps || !caps.has(wire.capability)) { sendJsonT(ws, envList); delivered = true; continue; }
 				const state = ensureWireStateT(ws, ud, wire);
 				if (state == null) { sendJsonT(ws, envList); delivered = true; continue; }
-				const updates = new Array(list.length);
-				for (let i = 0; i < list.length; i++) updates[i] = list[i].data;
-				const payload = wire.encode(event + '-batch', { updates }, state);
-				const sv = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
-				if (payload == null) {
-					// The codec declined the batch: the per-entry bodies instead.
-					for (let i = 0; i < list.length; i++) {
-						const p = wire.encode(event, list[i].data, state);
-						if (p == null) { sendOutboundT(ws, envList[i]); continue; }
-						const id = ensureWireIdT(ws, ud, topic);
-						if (id === -1) { poisonWireStateT(ws, ud, wire.capability); sendJsonT(ws, envList.slice(i)); break; }
-						const result = sendOutboundBinaryT(ws, buildBinaryFrame(sv, id, seqs[i], p));
-						if (result === 2) { poisonWireStateT(ws, ud, wire.capability); sendJsonT(ws, envList.slice(i + 1)); break; }
-					}
-					delivered = true;
-					continue;
-				}
-				const id = ensureWireIdT(ws, ud, topic);
-				if (id === -1) {
-					// Dropped wire-id announce: the batch encode already advanced this
-					// connection's dictionaries - poison, JSON for these entries.
-					poisonWireStateT(ws, ud, wire.capability);
-					sendJsonT(ws, envList);
-					delivered = true;
-					continue;
-				}
-				const result = sendOutboundBinaryT(ws, buildBinaryFrame(sv, id, lastSeq, payload));
-				if (result === 2) poisonWireStateT(ws, ud, wire.capability);
+				deliverStatefulWireBatch({
+					wire, event, entries: list, envelopes: envList, seqs: seqList,
+					state, ws, ud, topic, ensureId: ensureWireIdT,
+					poison: poisonWireStateT, send: sendWireFanoutT
+				});
 				delivered = true;
 			}
 			return delivered;
@@ -1118,9 +1124,9 @@ export async function createTestServer(options = {}) {
 		get assertions() { return readAssertionCounts(); },
 		get closedWsAborts() { return closedWsAbortsT; },
 		// PII-free transport-layer snapshot, mirroring the production platform.
-		// Scalar pressure signals only (topPublishers is omitted, topic names can
-		// embed ids). svelte-realtime's introspect() composes this under a
-		// `transport` key when present.
+		// Scalar pressure signals and package versions only (topPublishers is
+		// omitted; topic names can embed ids). svelte-realtime's introspect()
+		// composes this under a `transport` key when present.
 		introspect() {
 			const p = platform.pressure;
 			return {
@@ -1128,6 +1134,7 @@ export async function createTestServer(options = {}) {
 				closedWsAborts: platform.closedWsAborts,
 				protection: platform.protection,
 				maxPayloadLength: platform.maxPayloadLength,
+				versions: { ...runtimeVersionInfo },
 				pressure: {
 					active: p.active,
 					reason: p.reason,
@@ -1136,11 +1143,18 @@ export async function createTestServer(options = {}) {
 					publishRate: p.publishRate,
 					memoryMB: p.memoryMB,
 					maxBufferedBytes: p.maxBufferedBytes,
-					backpressuredConnections: p.backpressuredConnections
+					backpressuredConnections: p.backpressuredConnections,
+					droppedFrames: p.droppedFrames,
+					droppedBytes: p.droppedBytes
 				},
-				assertions: Object.fromEntries(platform.assertions)
+				assertions: Object.fromEntries(platform.assertions),
+				diagnostics: {
+					retained: divergenceDiagnosticsT.size,
+					recent: divergenceDiagnosticsT.list()
+				}
 			};
 		},
+		diagnostic(diagnosticId) { return divergenceDiagnosticsT.get(diagnosticId); },
 		subscribers(topic) { return app.numSubscribers(topic); },
 		// Mirror production handler.js: walk the local subscriber set so
 		// per-subscriber culling / backpressure paths are exercised by
@@ -1241,7 +1255,7 @@ export async function createTestServer(options = {}) {
 				let granted;
 				try { granted = ws.getUserData()[WS_SUBSCRIPTIONS]; }
 				catch { closedWsAbortsT++; return 'FORBIDDEN'; }
-				if (deniesUngrantedObserve(SUBSCRIBE_AUTHZ_T, observerHasUserHook, granted, topic)) {
+				if (deniesUngrantedObserve(SUBSCRIBE_AUTHZ_T, observerHasUserHook && !SUBSCRIBE_AUTHZ_STRICT_T, granted, topic)) {
 					return 'FORBIDDEN';
 				}
 			}
@@ -1253,15 +1267,20 @@ export async function createTestServer(options = {}) {
 				let granted;
 				try { granted = ws.getUserData()[WS_SUBSCRIPTIONS]; }
 				catch { closedWsAbortsT++; return 'FORBIDDEN'; }
-				if (deniesUngrantedObserve(SUBSCRIBE_AUTHZ_T, observerHasUserHook, granted, topic)) {
+				if (deniesUngrantedObserve(SUBSCRIBE_AUTHZ_T, observerHasUserHook && !SUBSCRIBE_AUTHZ_STRICT_T, granted, topic)) {
 					return 'FORBIDDEN';
 				}
 			}
 			return null;
 		},
-		authorizeWireSubscribe() {
+		authorizeWireSubscribe(mode = 'legacy') {
 			// Mirror production: arm wire-subscribe authorization at runtime.
+			if (mode !== 'legacy' && mode !== 'strict') {
+				throw new TypeError("authorizeWireSubscribe mode must be 'legacy' or 'strict'");
+			}
 			SUBSCRIBE_AUTHZ_T = true;
+			if (mode === 'strict') SUBSCRIBE_AUTHZ_STRICT_T = true;
+			return SUBSCRIBE_AUTHZ_STRICT_T ? 'strict' : 'legacy';
 		},
 		unsubscribe(ws, topic) {
 			let ud;
@@ -1376,7 +1395,7 @@ export async function createTestServer(options = {}) {
 			return { seq, delivered };
 		},
 		batch(messages) {
-			return messages.map(({ topic, event, data }) => platform.publish(topic, event, data));
+			return messages.map(({ topic, event, data, options }) => platform.publish(topic, event, data, options));
 		},
 		publishBatched(messages, options) {
 			void options; // Platform-shape parity; the test server configures no compressor.
@@ -1475,7 +1494,7 @@ export async function createTestServer(options = {}) {
 			try { userData = ws.getUserData(); }
 			catch {
 				closedWsAbortsT++;
-				return Promise.reject(new Error('connection closed'));
+				return Promise.reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED)));
 			}
 			let pending = userData[WS_PENDING_REQUESTS];
 			if (!pending) {
@@ -1492,7 +1511,7 @@ export async function createTestServer(options = {}) {
 			const timeoutMs = (options && options.timeoutMs) || 5000;
 			return new Promise((resolve, reject) => {
 				const timer = setTimer(() => {
-					if (pending.delete(ref)) reject(new Error('request timed out'));
+					if (pending.delete(ref)) reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_TIMEOUT)));
 				}, timeoutMs);
 				pending.set(ref, { resolve, reject, timer });
 				const payload = JSON.stringify({ type: 'request', ref, event, data: data ?? null });
@@ -1507,7 +1526,7 @@ export async function createTestServer(options = {}) {
 					closedWsAbortsT++;
 					clearTimer(timer);
 					pending.delete(ref);
-					reject(new Error('connection closed'));
+					reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED)));
 					return;
 				}
 				bumpOutT(ws, payload);
@@ -1588,6 +1607,8 @@ export async function createTestServer(options = {}) {
 				reason,
 				maxBufferedBytes: 0,
 				backpressuredConnections: 0,
+				droppedFrames: 0,
+				droppedBytes: 0,
 				topPublishers: []
 			};
 		},
@@ -1741,8 +1762,19 @@ export async function createTestServer(options = {}) {
 			// today's exact band). A cursor-lane upgrade always gets the bare 503.
 			const serveUpgradeRefusal = () => {
 				if (WAITING_ROOM === null || isCursor) {
-					// `waitingRoom: false` (or maxConcurrent unset): the exact
-					// bare 503 - no Retry-After. Matches production byte-for-byte.
+					if (!isCursor && negotiateRejection(
+						req.getHeader('accept'),
+						req.getHeader('upgrade')
+					) === 'html') {
+						sendWaitingRoomPage(res, {
+							body: buildAccessibleCapacityRefusalPage(),
+							lang: 'en',
+							dir: 'ltr',
+							headers: [],
+							varyAcceptLanguage: false
+						}, '503 Service Unavailable');
+						return;
+					}
 					res.cork(() => {
 						res.writeStatus('503 Service Unavailable');
 						res.writeHeader('content-type', 'text/plain');
@@ -1753,14 +1785,12 @@ export async function createTestServer(options = {}) {
 
 				// One header read, no full walk on the reject path.
 				const accept = req.getHeader('accept');
-				if (negotiateRejection(accept) === 'html') {
-					const body = WAITING_ROOM.renderPage();
-					res.cork(() => {
-						res.writeStatus('200 OK');
-						res.writeHeader('content-type', 'text/html; charset=utf-8');
-						res.writeHeader('cache-control', 'no-store');
-						res.end(body);
-					});
+				if (negotiateRejection(accept, req.getHeader('upgrade')) === 'html') {
+					const page = WAITING_ROOM.renderResponse(
+						undefined,
+						createWaitingRoomRequest(req)
+					);
+					sendWaitingRoomPage(res, page);
 					return;
 				}
 
@@ -1792,20 +1822,47 @@ export async function createTestServer(options = {}) {
 			// admitted through its reserved sub-budget so it cannot starve
 			// main-WS admission; a saturated cursor lane still counts as an
 			// over-capacity reject.
-			const acquired = isCursor ? admission.tryAcquireCursor() : admission.tryAcquire();
-			if (!acquired) {
+			const handshakeAcquired = isCursor ? admission.tryAcquireCursor() : admission.tryAcquire();
+			if (!handshakeAcquired) {
 				if (activePostureT !== null) activePostureT.recordCapacityReject();
 				mUpgradeRejectedT?.inc({ reason: isCursor ? 'cursor_lane' : 'over_capacity' });
 				serveUpgradeRefusal();
 				return;
 			}
 			let inFlightReleased = false;
-			function releaseInFlight() {
-				if (inFlightReleased) return;
-				inFlightReleased = true;
-				if (isCursor) admission.releaseCursorInFlight();
-				else admission.release();
+			let connectionPermitHeld = false;
+			let connectionPermitTransferred = false;
+			function releaseConnectionPermit() {
+				if (!connectionPermitHeld || connectionPermitTransferred) return;
+				connectionPermitHeld = false;
+				admission.releaseConnection();
+				gConnectionHeadroomT?.set(admission.connectionHeadroom);
 			}
+			function releaseInFlight() {
+				if (!inFlightReleased) {
+					inFlightReleased = true;
+					if (isCursor) admission.releaseCursorInFlight();
+					else admission.release();
+				}
+				releaseConnectionPermit();
+			}
+			function rejectDeferredOverflow() {
+				if (activePostureT !== null) activePostureT.recordCapacityReject();
+				mUpgradeRejectedT?.inc({ reason: 'deferred_overflow' });
+				mUpgradeDeferredRejectedT?.inc();
+				releaseInFlight();
+				serveUpgradeRefusal();
+			}
+
+			if (!admission.tryAcquireConnection()) {
+				if (activePostureT !== null) activePostureT.recordCapacityReject();
+				mUpgradeRejectedT?.inc({ reason: 'connection_capacity' });
+				releaseInFlight();
+				serveUpgradeRefusal();
+				return;
+			}
+			connectionPermitHeld = admission.maxConnections > 0;
+			gConnectionHeadroomT?.set(admission.connectionHeadroom);
 
 			// Repeated header lines are merged per header class, and a repeated
 			// framing / identity header refuses the upgrade - the production
@@ -1826,6 +1883,23 @@ export async function createTestServer(options = {}) {
 			const secKey = req.getHeader('sec-websocket-key');
 			const secProtocol = req.getHeader('sec-websocket-protocol');
 			const secExtensions = req.getHeader('sec-websocket-extensions');
+			const upgradeWithConnectionPermit = (userData) => {
+				let carrier = null;
+				if (connectionPermitHeld) {
+					carrier = connectionPermitCarrier.install(userData);
+					connectionPermitTransferred = true;
+				}
+				try {
+					res.upgrade(userData, secKey, secProtocol, secExtensions, context);
+				} catch (error) {
+					if (connectionPermitTransferred) {
+						connectionPermitTransferred = false;
+						connectionPermitCarrier.rollback(userData, carrier);
+					}
+					releaseConnectionPermit();
+					throw error;
+				}
+			};
 			const query = req.getQuery();
 			const url = query ? req.getUrl() + '?' + query : req.getUrl();
 			const rawIp = new TextDecoder().decode(res.getRemoteAddressAsText());
@@ -1837,14 +1911,19 @@ export async function createTestServer(options = {}) {
 				if (ADMISSION_PER_TICK_BUDGET > 0) {
 					res.onAborted(() => { fastPathAborted = true; releaseInFlight(); });
 				}
-				admission.admit(() => {
+				const pacingOutcome = admission.admit(() => {
 					if (fastPathAborted) return;
-					res.cork(() => {
-						res.upgrade({ remoteAddress: rawIp, [WS_REQUEST_ID_KEY]: wsRequestId }, secKey, secProtocol, secExtensions, context);
-					});
-					mUpgradeAdmittedT?.inc();
-					releaseInFlight();
+					try {
+						res.cork(() => {
+							upgradeWithConnectionPermit({ remoteAddress: rawIp, [WS_REQUEST_ID_KEY]: wsRequestId });
+						});
+						mUpgradeAdmittedT?.inc();
+					} finally {
+						// Also releases both permits if the native upgrade throws.
+						releaseInFlight();
+					}
 				});
+				if (pacingOutcome === null) rejectDeferredOverflow();
 				return;
 			}
 
@@ -1902,30 +1981,36 @@ export async function createTestServer(options = {}) {
 					}
 					if (!userData.remoteAddress) userData.remoteAddress = rawIp;
 					userData[WS_REQUEST_ID_KEY] = wsRequestId;
-					admission.admit(() => {
+					const pacingOutcome = admission.admit(() => {
 						if (aborted) { releaseInFlight(); return; }
-						res.cork(() => {
-							if (responseHeaders) {
-								// Status line first: uWS emits an implicit "200 OK" on
-								// the first writeHeader, and a 200 makes spec-compliant
-								// WebSocket clients reject the handshake. Mirrors the
-								// production handler.js fix.
-								res.writeStatus('101 Switching Protocols');
-								for (const [hk, hv] of Object.entries(responseHeaders)) {
-									if (Array.isArray(hv)) {
-										// Index the trusted snapshot; never invoke an
-										// app-controlled Symbol.iterator at the wire sink.
-										for (let i = 0; i < hv.length; i++) res.writeHeader(hk, hv[i]);
-									} else {
-										res.writeHeader(hk, hv);
+						try {
+							res.cork(() => {
+								if (responseHeaders) {
+									// Status line first: uWS emits an implicit "200 OK" on
+									// the first writeHeader, and a 200 makes spec-compliant
+									// WebSocket clients reject the handshake. Mirrors the
+									// production handler.js fix.
+									res.writeStatus('101 Switching Protocols');
+									for (const [hk, hv] of Object.entries(responseHeaders)) {
+										if (Array.isArray(hv)) {
+											// Index the trusted snapshot; never invoke an
+											// app-controlled Symbol.iterator at the wire sink.
+											for (let i = 0; i < hv.length; i++) res.writeHeader(hk, hv[i]);
+										} else {
+											res.writeHeader(hk, hv);
+										}
 									}
 								}
-							}
-							res.upgrade(userData, secKey, secProtocol, secExtensions, context);
-						});
-						mUpgradeAdmittedT?.inc();
-						releaseInFlight();
+								upgradeWithConnectionPermit(userData);
+							});
+							mUpgradeAdmittedT?.inc();
+						} finally {
+							// The deferred drain catches native throws outside this
+							// promise chain, so release locally as well.
+							releaseInFlight();
+						}
 					});
+					if (pacingOutcome === null) rejectDeferredOverflow();
 				})
 				.catch((err) => {
 					// Say WHY, as the production handler does. This path now also
@@ -1933,12 +2018,21 @@ export async function createTestServer(options = {}) {
 					// whole point is naming the offending header - discarding that on
 					// the surface an app uses to debug its handshake leaves it with a
 					// bare 500 and nothing to go on.
-					console.error('WebSocket upgrade error:', err);
+					emitOperationalEvent({
+						source: 'svelte-adapter-uws',
+						component: 'runtime.websocket-upgrade',
+						event: 'runtime.websocket-upgrade.failed',
+						severity: 'error',
+						dataClass: 'pseudonymous',
+						message: 'The WebSocket upgrade hook failed.',
+						attributes: { requestId: wsRequestId, error: diagnosticError(err) }
+					});
 					if (!aborted) {
 						mUpgradeRejectedT?.inc({ reason: 'hook_error' });
 						res.cork(() => {
 							res.writeStatus('500 Internal Server Error');
 							res.writeHeader('content-type', 'text/plain');
+							res.writeHeader('x-request-id', wsRequestId);
 							res.end('Internal Server Error');
 						});
 					}
@@ -1948,6 +2042,11 @@ export async function createTestServer(options = {}) {
 
 		open(ws) {
 			const userData = ws.getUserData();
+			if (admission.maxConnections > 0) {
+				const permitRestored = connectionPermitCarrier.restore(userData);
+				fatal(permitRestored, 'ws.connection-permit-carrier', null);
+				if (!permitRestored) return;
+			}
 			userData[WS_SUBSCRIPTIONS] = new Set();
 			// Promote the upgrade-time requestId into a Symbol-keyed
 			// per-connection platform clone (parity with the production
@@ -1986,7 +2085,7 @@ export async function createTestServer(options = {}) {
 				const iud = ws.getUserData();
 				const icaps = iud[WS_CAPS];
 				if (icaps !== undefined && icaps.has(WIRE_INGRESS_CAP)) {
-					dispatchIngressFrame(ws, iud, message, iud[WS_PLATFORM]);
+					await runAdmittedMessageWork(messageAdmission, ws, { data: message, platform: iud[WS_PLATFORM] }, runIngressApplicationWorkT, rejectApplicationMessageT);
 					return;
 				}
 			}
@@ -2055,7 +2154,7 @@ export async function createTestServer(options = {}) {
 							// documented group join worked or failed on microtask
 							// coalescing. Safe here for the same reason as production: the
 							// landing re-check below re-tests real membership.
-							if (deniesWireSubscribePreHook({ armed: SUBSCRIBE_AUTHZ_T, hasUserHook: hasUserSubscribeHookT(), held: subs.has(msg.topic), topic: msg.topic })) {
+							if (deniesWireSubscribePreHook({ armed: SUBSCRIBE_AUTHZ_T, hasUserHook: hasUserSubscribeHookT() && !SUBSCRIBE_AUTHZ_STRICT_T, held: subs.has(msg.topic), topic: msg.topic })) {
 								sendDeniedT(ws, msg.topic, ref, 'FORBIDDEN');
 								return;
 							}
@@ -2125,7 +2224,7 @@ export async function createTestServer(options = {}) {
 							// one await window is still served.
 							const _recoverRevokedT = recoverIsRevoked({
 								held: subs instanceof Set && subs.has(msg.topic),
-								wireAuthz: SUBSCRIBE_AUTHZ_T && !hasUserSubscribeHookT(),
+								wireAuthz: SUBSCRIBE_AUTHZ_T && (SUBSCRIBE_AUTHZ_STRICT_T || !hasUserSubscribeHookT()),
 								cancelled: isPendingSubscribeCancelled(pendingUd, msg.topic, pendingToken),
 								topic: msg.topic
 							});
@@ -2168,7 +2267,7 @@ export async function createTestServer(options = {}) {
 							// the platform.subscribe helper above, which is the trusted
 							// server-side path that MINTS grants - a grant check there would
 							// refuse every server-initiated subscribe.
-							if (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_T, hasUserHook: hasUserSubscribeHookT(), held: subs.has(msg.topic), topic: msg.topic })) {
+							if (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_T, hasUserHook: hasUserSubscribeHookT() && !SUBSCRIBE_AUTHZ_STRICT_T, held: subs.has(msg.topic), topic: msg.topic })) {
 								if (_cap) discardResumeCaptureT(_cap);
 								sendDeniedT(ws, msg.topic, ref, 'FORBIDDEN');
 								return;
@@ -2261,9 +2360,9 @@ export async function createTestServer(options = {}) {
 							// handler object and may mutate it, which is exactly why the
 							// reading is taken once here rather than per topic.
 							const _hasUserHookT = hasUserSubscribeHookT();
-							const _wireAuthzT = SUBSCRIBE_AUTHZ_T && !_hasUserHookT;
+							const _wireAuthzT = SUBSCRIBE_AUTHZ_T && (SUBSCRIBE_AUTHZ_STRICT_T || !_hasUserHookT);
 							const authzDeniedT = _wireAuthzT
-								? valid.map((t) => deniesWireSubscribePreHook({ armed: SUBSCRIBE_AUTHZ_T, hasUserHook: _hasUserHookT, held: ws.getUserData()[WS_SUBSCRIPTIONS].has(t), topic: t }))
+								? valid.map((t) => deniesWireSubscribePreHook({ armed: SUBSCRIBE_AUTHZ_T, hasUserHook: _hasUserHookT && !SUBSCRIBE_AUTHZ_STRICT_T, held: ws.getUserData()[WS_SUBSCRIPTIONS].has(t), topic: t }))
 								: null;
 							// Track every topic in this batch as in-flight, for the same reason
 							// the single path does: platform.unsubscribe cannot remove a
@@ -2322,7 +2421,7 @@ export async function createTestServer(options = {}) {
 									// hook pass, so nothing downstream would catch it), and both halves
 									// of wireAuthz read exactly as the landing reads them.
 									const _denial = (authzDeniedT !== null && authzDeniedT[i] ? 'FORBIDDEN' : null)
-										?? (recoverIsRevoked({ held: _heldT, wireAuthz: SUBSCRIBE_AUTHZ_T && !_hasUserHookT, cancelled: isPendingSubscribeCancelled(batchUd, _t, batchTokens[i]), topic: _t }) ? 'FORBIDDEN' : null)
+										?? (recoverIsRevoked({ held: _heldT, wireAuthz: SUBSCRIBE_AUTHZ_T && (SUBSCRIBE_AUTHZ_STRICT_T || !_hasUserHookT), cancelled: isPendingSubscribeCancelled(batchUd, _t, batchTokens[i]), topic: _t }) ? 'FORBIDDEN' : null)
 										?? (batchDenials !== null ? (batchDenials[_t] ?? null) : (perTopicDenials !== null ? perTopicDenials[i] : null));
 									if (_denial !== null) continue;
 									const _rec = msg.recover[_t];
@@ -2350,7 +2449,7 @@ export async function createTestServer(options = {}) {
 								// Read once and handed to both decisions below; nothing between
 								// here and the subscribe mutates the set for this topic.
 								const held = udSubs.has(topic);
-								const denial = (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_T, hasUserHook: _hasUserHookT, held, topic }) ? 'FORBIDDEN' : null)
+								const denial = (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_T, hasUserHook: _hasUserHookT && !SUBSCRIBE_AUTHZ_STRICT_T, held, topic }) ? 'FORBIDDEN' : null)
 									?? (batchDenials !== null
 										? (batchDenials[topic] ?? null)
 										: (perTopicDenials !== null ? perTopicDenials[i] : null));
@@ -2442,7 +2541,7 @@ export async function createTestServer(options = {}) {
 							// hands the app's replay backend topics production
 							// refuses passes exactly the case it exists to catch.
 							let resumeSeqsT = msg.lastSeenSeqs;
-							if (SUBSCRIBE_AUTHZ_T && !hasUserSubscribeHookT() && resumeSeqsT && typeof resumeSeqsT === 'object') {
+							if (SUBSCRIBE_AUTHZ_T && (SUBSCRIBE_AUTHZ_STRICT_T || !hasUserSubscribeHookT()) && resumeSeqsT && typeof resumeSeqsT === 'object') {
 								const grantsT = ws.getUserData()[WS_SUBSCRIPTIONS];
 								/** @type {Record<string, unknown>} */
 								const allowedT = Object.create(null);
@@ -2496,17 +2595,7 @@ export async function createTestServer(options = {}) {
 							// the connection's publish grant, never client-supplied.
 							// Ungranted or a non-string event -> game-denied; granted ->
 							// stamp seq, fan out to the room excluding this sender, echo id.
-							const gud = ws.getUserData();
-							const grantTopic = gud[WS_PUBLISH_GRANT];
-							if (!grantTopic || typeof msg.event !== 'string') {
-								const reason = grantTopic ? 'INVALID' : 'FORBIDDEN';
-								const denied = msg.id === undefined
-									? JSON.stringify({ type: 'game-denied', reason })
-									: JSON.stringify({ type: 'game-denied', reason, id: msg.id });
-								sendOutboundT(ws, denied);
-								return;
-							}
-							platform.publishGame(ws, grantTopic, msg.event, msg.data, msg.id);
+							await runAdmittedMessageWork(messageAdmission, ws, { msg, platform }, runGameApplicationWorkT, rejectApplicationMessageT);
 							return;
 						}
 					} catch {
@@ -2527,17 +2616,18 @@ export async function createTestServer(options = {}) {
 
 			// `msg` is the JSON-parsed envelope when the prefix matched + parsed
 			// to an object + no control type matched; otherwise undefined.
-			await runMessageHook(handler.message, ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] });
+			await runAdmittedMessageHook(messageAdmission, handler.message, ws, { data: message, isBinary, msg, platform: ws.getUserData()[WS_PLATFORM] }, rejectApplicationMessageT);
 		},
 
 		close(ws, code, message) {
 			const ud = ws.getUserData() || {};
+			messageAdmission.close(ws);
 			const subs = ud[WS_SUBSCRIPTIONS] || new Set();
 			const pending = ud[WS_PENDING_REQUESTS];
 			if (pending && pending.size > 0) {
 				for (const entry of pending.values()) {
 					clearTimer(entry.timer);
-					try { entry.reject(new Error('connection closed')); } catch {}
+					try { entry.reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED))); } catch {}
 				}
 				pending.clear();
 			}
@@ -2565,6 +2655,11 @@ export async function createTestServer(options = {}) {
 			try {
 				handler.close?.(ws, ctx);
 			} finally {
+				if (ud[WS_CONNECTION_PERMIT]) {
+					ud[WS_CONNECTION_PERMIT] = undefined;
+					admission.releaseConnection();
+					gConnectionHeadroomT?.set(admission.connectionHeadroom);
+				}
 				capCountsT.adjust(ud[WS_CAPS], null);
 				detachWireStatesT(ws, ud);
 				const sc = ud[WS_SHARED_COHORTS];
@@ -2574,6 +2669,39 @@ export async function createTestServer(options = {}) {
 			}
 		}
 	});
+
+	// app.ws handles real handshakes. Register this GET afterwards so direct
+	// browser navigation exercises the same opted-out accessible capacity
+	// response as production without shadowing WebSocket upgrades.
+	if (WAITING_ROOM === null && (admission.maxConcurrent > 0 || admission.maxConnections > 0)) {
+		app.get(wsPath, (res, req) => {
+			res.onAborted(() => {});
+			const atCapacity = postureLevelT() === 'siege' || !admission.hasCapacity();
+			if (!atCapacity) {
+				res.cork(() => {
+					res.writeStatus('426 Upgrade Required');
+					res.writeHeader('content-type', 'text/plain');
+					res.end('WebSocket upgrade required');
+				});
+				return;
+			}
+			if (negotiateRejection(req.getHeader('accept'), req.getHeader('upgrade')) === 'html') {
+				sendWaitingRoomPage(res, {
+					body: buildAccessibleCapacityRefusalPage(),
+					lang: 'en',
+					dir: 'ltr',
+					headers: [],
+					varyAcceptLanguage: false
+				}, '503 Service Unavailable');
+				return;
+			}
+			res.cork(() => {
+				res.writeStatus('503 Service Unavailable');
+				res.writeHeader('content-type', 'text/plain');
+				res.end('Server is at upgrade capacity, please retry');
+			});
+		});
+	}
 
 	// Waiting-room poll + holding page. Mirrors the production handler routes:
 	// read-only, registered whenever the waiting room is enabled, and the poll
@@ -2615,15 +2743,13 @@ export async function createTestServer(options = {}) {
 			});
 		});
 
-		app.get(WAITING_ROOM.path, (res) => {
+		app.get(WAITING_ROOM.path, (res, req) => {
 			res.onAborted(() => {});
-			const body = WAITING_ROOM.renderPage(currentQueueDepth());
-			res.cork(() => {
-				res.writeStatus('200 OK');
-				res.writeHeader('content-type', 'text/html; charset=utf-8');
-				res.writeHeader('cache-control', 'no-store');
-				res.end(body);
-			});
+			const page = WAITING_ROOM.renderResponse(
+				currentQueueDepth(),
+				createWaitingRoomRequest(req)
+			);
+			sendWaitingRoomPage(res, page);
 		});
 	}
 

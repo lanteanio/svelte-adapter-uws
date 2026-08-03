@@ -224,13 +224,11 @@ export function settleDeniedSubscribe(ud, topic, token, held) {
  * the 'deny-unwind' half of {@link settleHeldSubscribe} and
  * {@link settleDeniedSubscribe}.
  *
- * NOT platform.unsubscribe, on purpose. A membership installed mid-window via
- * trackedSubscribe was never counted in the runtime's totalSubscriptions
- * (only wire landings count their own installs), and platform.unsubscribe
- * decrements unconditionally - so unwinding through it drove the counter
- * negative on the very first revoked group join (caught by the
- * subs.total-negative invariant in the built-runtime suite). The removal here
- * is counter-neutral for exactly that reason.
+ * NOT platform.unsubscribe, on purpose. The tracked primitive removes the
+ * logical Set entry and charges the shared accounting hook exactly once,
+ * without re-entering the app-facing unsubscribe hook. This keeps a
+ * hook-installed membership balanced when an async authorization attempt is
+ * revoked and unwound before its wire/platform landing.
  *
  * Covers everything the revoked attempt could have installed: derived
  * observer taps first (mirroring platform.unsubscribe's order), then the
@@ -472,6 +470,11 @@ export const WS_PUBLISH_GRANT = Symbol.for('adapter-uws.ws.publish-grant');
 // that is never assigned in that copy, tree-shakes the call away entirely. A
 // slot on globalThis is one slot however many copies of the module exist.
 const COHORT_HOOKS = Symbol.for('adapter-uws.cohort-hooks');
+// Logical-subscription accounting has the same duplicated-bundle constraint as
+// cohort hooks: plugins and the runtime can hold separate copies of this
+// module, while every copy mutates the same connection Set. One global hook
+// lets every add/remove charge the production worker's single counter.
+const SUBSCRIPTION_ACCOUNTING_HOOK = Symbol.for('adapter-uws.subscription-accounting-hook');
 
 /**
  * @returns {{ join: ((ws: any, ud: any, topic: string) => void) | null, leave: ((ws: any, ud: any, topic: string) => void) | null }}
@@ -498,8 +501,64 @@ export function setCohortHooks(onJoin, onLeave) {
 }
 
 /**
+ * Install the worker-local logical-subscription delta sink. The production
+ * handler supplies the counter update; focused tests can supply a number.
+ * @param {((delta: number) => void) | null} onChange
+ */
+export function setSubscriptionAccountingHook(onChange) {
+	/** @type {any} */ (globalThis)[SUBSCRIPTION_ACCOUNTING_HOOK] =
+		typeof onChange === 'function' ? onChange : null;
+}
+
+/** @param {number} delta */
+function accountSubscriptionDelta(delta) {
+	const hook = /** @type {any} */ (globalThis)[SUBSCRIPTION_ACCOUNTING_HOOK];
+	if (typeof hook === 'function') hook(delta);
+}
+
+/**
+ * Add one logical topic exactly once and charge accounting only on growth.
+ * @param {Set<string>} subscriptions
+ * @param {string} topic
+ * @returns {boolean} true only when the Set grew
+ */
+export function addLogicalSubscription(subscriptions, topic) {
+	if (subscriptions.has(topic)) return false;
+	subscriptions.add(topic);
+	accountSubscriptionDelta(1);
+	return true;
+}
+
+/**
+ * Remove one logical topic exactly once and charge accounting only on removal.
+ * @param {Set<string>} subscriptions
+ * @param {string} topic
+ * @returns {boolean} true only when the Set shrank
+ */
+export function removeLogicalSubscription(subscriptions, topic) {
+	if (!subscriptions.delete(topic)) return false;
+	accountSubscriptionDelta(-1);
+	return true;
+}
+
+/**
+ * Charge the still-live logical memberships released by one socket close.
+ * The Set is intentionally left intact because it is the documented snapshot
+ * passed to the app's close hook; the runtime calls this exactly once after
+ * that hook returns.
+ * @param {Set<string>} subscriptions
+ * @returns {number} number of memberships released
+ */
+export function accountClosedLogicalSubscriptions(subscriptions) {
+	const count = subscriptions.size;
+	if (count > 0) accountSubscriptionDelta(-count);
+	return count;
+}
+
+/**
  * Subscribe a socket the way the wire-level subscribe path does: the uWS
- * native call PLUS the connection's subscription registry. The registry is
+ * native call PLUS the connection's subscription registry and its exactly-once
+ * accounting delta. The registry is
  * what `platform.publishWire`'s per-subscriber walk delivers by (native
  * membership is not enumerable from JS), so a plugin that subscribes a
  * socket natively but skips the registry silently excludes that socket from
@@ -525,7 +584,7 @@ export function trackedSubscribe(ws, topic) {
 	if (subs instanceof Set && exceedsSubscriptionCap({ held: subs.has(topic), size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) return false;
 	try { ws.subscribe(topic); } catch { return false; }
 	try {
-		if (subs) subs.add(topic);
+		if (subs instanceof Set) addLogicalSubscription(subs, topic);
 		// Join the shared fan-out cohort if the topic is already shared.
 		const _join = cohortHooks().join;
 		if (_join) _join(ws, ud, topic);
@@ -556,7 +615,7 @@ export function trackedUnsubscribe(ws, topic) {
 	try {
 		const ud = ws.getUserData();
 		const subs = ud[WS_SUBSCRIPTIONS];
-		if (subs) subs.delete(topic);
+		if (subs instanceof Set) removeLogicalSubscription(subs, topic);
 		// Withdraw WRITE access with read access, as platform.unsubscribe does.
 		// The client-driven `game` lane carries no topic and publishes to
 		// whatever binding it holds, so a plugin evict that took the
@@ -849,6 +908,14 @@ export const WS_WIRE_STATE = Symbol.for('adapter-uws.ws.wire-state');
  * never joins a shared topic's binary cohort.
  */
 export const WS_SHARED_COHORTS = Symbol.for('adapter-uws.ws.shared-cohorts');
+
+/**
+ * Marks a WebSocket that owns one `upgradeAdmission.maxConnections` permit.
+ * The upgrade callback reserves it, `open` promotes the temporary string
+ * carrier to this Symbol, and `close` releases it exactly once. Absent when
+ * the whole-lifetime connection gate is disabled.
+ */
+export const WS_CONNECTION_PERMIT = Symbol.for('adapter-uws.ws.connection-permit');
 
 /**
  * Per-connection inbound binary-ingress bindings for `0x03` client->server

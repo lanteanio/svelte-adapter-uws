@@ -5,10 +5,10 @@ import { metricsRegistry } from '../metrics-bridge.js';
 import { metricsSnapshot } from './metrics-snapshot.js';
 import { parentPort } from 'node:worker_threads';
 import { exceedsSubscriptionCap } from '../utils/subscribe-policy.js';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, deniesUngrantedObserve, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, wrapBatchEnvelope } from '../utils.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, deniesUngrantedObserve, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
-import { capCounts, captureResumeFrame, counters, maxSeenSeq, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, resumeBuffers, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
+import { capCounts, captureResumeFrame, counters, maxSeenSeq, divergenceDiagnostics, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, resumeBuffers, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
 import { app, wsDebug, WS_COMPRESSION_ON, ALLOW_NON_ASCII_TOPICS } from './config.js';
 import { envelopePrefix } from './envelope-cache.js';
 import { batchRelay, relayBatched } from './relay.js';
@@ -16,10 +16,16 @@ import { readHlc } from './hlc.js';
 import { BATCH_FRAME_WARN_BYTES, bumpOut, maybeWarnTopicRegistry, warnLargeBatchFrame } from './pressure-metrics.js';
 import { flushCoalescedFor, runUserSubscribeGate, hasUserSubscribeHook } from './subscribe-hooks.js';
 import { ensureWireId, ensureWireState, poisonWireState, wireStatePoisoned } from './wire-state.js';
-import { GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './game-ingress.js';
+import { GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload, assertGameLaneClusterSafe } from './game-ingress.js';
+import { assertClusterSequenceAuthority, assertClusterSequenceBatchAuthority } from './cluster-sequence-policy.js';
 import { registerWireCodec as _registerWireCodec, getWireCodec } from './codec-registry.js';
 import { cohortTopics, joinSharedCohort, leaveSharedCohort } from './cohort.js';
 import { getSharedWireId } from './shared-wire-id.js';
+import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './wire-fanout.js';
+import { runtimeVersionInfo } from '../version-info.js';
+import { ADAPTER_ERROR_IDS, adapterErrorMessage } from '../error-registry.js';
+import { privateValueMetadata } from '../utils/observability-privacy.js';
+import { activeTraceContext, trace } from '../tracing.js';
 
 // Lazily-built LRU cache of scoped topic helpers, bound to platform.publish once
 // on first platform.topic() call (platform.publish exists by then). Reuses one
@@ -29,6 +35,20 @@ let _topicHelperCache = null;
 
 /** @type {import('../../index.js').Platform} */
 export const platform = {
+	/**
+	 * The active operation context, or the connection context outside an active
+	 * child operation. AsyncLocalStorage keeps concurrent RPCs on one socket
+	 * isolated; the per-connection fallback is inherited by Platform clones.
+	 */
+	get traceContext() {
+		return activeTraceContext() ?? this.connectionTraceContext ?? null;
+	},
+
+	// One frozen vendor-neutral tracing surface shared by every Platform clone.
+	// Providers are configured at build time; without one its run() path is a
+	// direct callback and current() remains null.
+	trace,
+
 	// The observer lane's deny-unwind (authorizeDerivedSubscribe) runs the
 	// app's unsubscribe hook through this slot - the shared primitive has no
 	// module reference to wsModule. Symbol-keyed: invisible to Object.keys /
@@ -42,6 +62,7 @@ export const platform = {
 	 * No-op if no clients are subscribed - safe to call unconditionally.
 	 */
 	publish(topic, event, data, options) {
+		assertClusterSequenceAuthority(options);
 		counters.publishCountWindow++;
 		const seq = stampSeq(options, topicSeqs, topic);
 		// Record the highest seq this worker has observed for the topic. An
@@ -64,7 +85,7 @@ export const platform = {
 		// A zero-length frame at a send site would broadcast garbage to every
 		// subscriber - unrecoverable framing corruption. One length guard, identical
 		// in cost to the assert it replaces.
-		fatal(envelope.length > 0, 'envelope.empty', { topic, event });
+		fatal(envelope.length > 0, 'envelope.empty', null);
 		// Per-topic counter for runaway-publisher detection. Allocates
 		// one entry per topic on first publish, then mutates two int
 		// fields in place forever. Sampler drains and resets at 1 Hz.
@@ -77,7 +98,10 @@ export const platform = {
 			// touching the steady-state hot path.
 			maybeWarnTopicRegistry();
 		} else {
-			assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape', { topic });
+			assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape', {
+				messagesType: typeof s.m,
+				bytesType: typeof s.b
+			});
 		}
 		s.m++;
 		s.b += envelope.length;
@@ -91,6 +115,7 @@ export const platform = {
 		// is lost. Empty in the common case: one size check guards the hot path.
 		if (resumeBuffers.size > 0) captureResumeFrame(topic, seq, envelope, compress);
 		const result = app.publish(topic, envelope, false, compress);
+		counters.publishOutcomeHook?.(result);
 		// Relay to other workers via main thread (no-op in single-process mode).
 		// Pass { relay: false } when the message originates from an external
 		// pub/sub source (Redis, Postgres, etc.) that already fans out to
@@ -103,8 +128,10 @@ export const platform = {
 			batchRelay(topic, envelope, compress, seq);
 		}
 		if (wsDebug) {
-			console.log('[ws] publish topic=%s event=%s bytes=%d delivered=%s',
-				topic, event, envelope.length, result || relayed);
+			console.log('[ws] publish topicRef=%s eventRef=%s bytes=%d delivered=%s',
+				privateValueMetadata(topic, 'topic').ref,
+				privateValueMetadata(event, 'event').ref,
+				envelope.length, result || relayed);
 		}
 		// In clustered mode, subscribers may be on other workers. Return true
 		// when the relay fires even if the local worker has no subscribers,
@@ -118,7 +145,7 @@ export const platform = {
 	 */
 	send(ws, topic, event, data, options) {
 		const payload = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
-		assert(payload.length > 0, 'envelope.send-empty', { topic, event });
+		assert(payload.length > 0, 'envelope.send-empty', null);
 		const compress = WS_COMPRESSION_ON && (!options || options.compress !== false);
 		// `ws.send` throws on a freed native handle (callers may reach
 		// here after an `await` that outlasted the socket). Return 2
@@ -174,6 +201,7 @@ export const platform = {
 		// frame; counting it on every receiving worker would inflate one logical
 		// publisher into N and trip the runaway-publisher signal.
 		const isRelay = !!(options && options._isRelay);
+		if (!isRelay) assertClusterSequenceAuthority(options);
 		if (!isRelay) counters.publishCountWindow++;
 		const seq = isRelay
 			? (typeof options._relaySeq === 'number' ? options._relaySeq : null)
@@ -190,7 +218,7 @@ export const platform = {
 		// A zero-length frame at a send site would broadcast garbage to every
 		// subscriber - unrecoverable framing corruption. One length guard, identical
 		// in cost to the assert it replaces.
-		fatal(envelope.length > 0, 'envelope.empty', { topic, event });
+		fatal(envelope.length > 0, 'envelope.empty', null);
 		if (!isRelay) {
 			let s = topicPublishStats.get(topic);
 			if (!s) {
@@ -198,7 +226,10 @@ export const platform = {
 				topicPublishStats.set(topic, s);
 				maybeWarnTopicRegistry();
 			} else {
-				assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape', { topic });
+				assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape', {
+					messagesType: typeof s.m,
+					bytesType: typeof s.b
+				});
 			}
 			s.m++;
 			s.b += envelope.length;
@@ -246,6 +277,7 @@ export const platform = {
 		// never enters the per-subscriber walk or touches the codec at all.
 		if (excludeWs === null && !capCounts.has(wire.capability)) {
 			const result = app.publish(topic, envelope, false, compress);
+			counters.publishOutcomeHook?.(result);
 			if (relayed) batchRelay(topic, envelope, compressIntent, seq, relayCap, relayEvent, relayData);
 			return result || relayed;
 		}
@@ -340,25 +372,22 @@ export const platform = {
 		// is shared across recipients; only the tiny per-connection frame header
 		// (topic-id + seq) differs, memoized per distinct id so the common
 		// all-same-id case builds one frame and reuses it for every binary send.
-		const payload = wire.encode(event, data);
+		const payload = encodeStatelessWirePayload(wire, event, data);
 		if (payload == null) {
 			if (excludeWs === null) {
 				const result = app.publish(topic, envelope, false, compress);
+				counters.publishOutcomeHook?.(result);
 				if (relayed) batchRelay(topic, envelope, compressIntent, seq);
 				return result || relayed;
 			}
 			// Declined frame with sender exclusion: the same JSON envelope the
 			// single fan-out would have sent, delivered per subscriber so the
 			// excluded socket is skipped.
-			let delivered = false;
-			for (const ws of wsConnections) {
-				if (ws === excludeWs) continue;
-				let ud;
-				try { ud = ws.getUserData(); } catch { continue; }
-				const subs = ud[WS_SUBSCRIPTIONS];
-				if (!subs || !subs.has(topic)) continue;
-				try { ws.send(envelope, false, compress); delivered = true; } catch { counters.closedWsAborts++; }
-			}
+			const delivered = deliverStatelessWireFanout(wire, payload, {
+				topic, envelope, seq: seqOnWire, excludeWs, connections: wsConnections,
+				ensureId: ensureWireId, isPoisoned: wireStatePoisoned,
+				poison: poisonWireState, compress, counters
+			});
 			if (relayed) batchRelay(topic, envelope, compressIntent, seq);
 			return delivered || relayed;
 		}
@@ -391,9 +420,11 @@ export const platform = {
 			// subscribers and skips the binary fan-out entirely.
 			const id = getSharedWireId(topic);
 			if (id !== undefined) {
-				app.publish(bin, buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload), true, compress);
+				const binaryResult = app.publish(bin, buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload), true, compress);
+				counters.publishOutcomeHook?.(binaryResult);
 			}
-			app.publish(json, envelope, false, compress);
+			const jsonResult = app.publish(json, envelope, false, compress);
+			counters.publishOutcomeHook?.(jsonResult);
 			// Cross-worker subscribers: each receiving worker re-derives the shared
 			// codec from its registry (relayPublishWire) and runs ITS OWN cohort split
 			// with its own server-wide id, so the single-instance path needs no
@@ -402,44 +433,20 @@ export const platform = {
 			return true;
 		}
 
-		/** @type {Map<number, Uint8Array>} */
-		const frameById = new Map();
-		for (const ws of wsConnections) {
-			if (ws === excludeWs) continue;
-			let ud;
-			try { ud = ws.getUserData(); } catch { continue; }
-			const subs = ud[WS_SUBSCRIPTIONS];
-			if (!subs || !subs.has(topic)) continue;
-			const caps = ud[WS_CAPS];
-			if (caps && caps.has(wire.capability) && !wireStatePoisoned(ud, wire.capability)) {
-				const id = ensureWireId(ws, ud, topic);
-				if (id === -1) {
-					// Dropped wire-id announce: the topic-id mapping is itself
-					// per-connection state the client now permanently lacks, so
-					// even a stateless codec's frames would be undecodable. JSON
-					// for this frame + poison. A dropped binary FRAME below needs
-					// no such handling - the shared payload carries no
-					// per-connection state, so a lost frame cannot desync.
-					poisonWireState(ws, ud, wire.capability);
-					try { ws.send(envelope, false, compress); } catch { counters.closedWsAborts++; }
-					continue;
-				}
-				let frame = frameById.get(id);
-				if (!frame) {
-					frame = buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload);
-					frameById.set(id, frame);
-				}
-				try { ws.send(frame, true, compress); } catch { counters.closedWsAborts++; }
-			} else {
-				try { ws.send(envelope, false, compress); } catch { counters.closedWsAborts++; }
-			}
-		}
+		deliverStatelessWireFanout(wire, payload, {
+			topic, envelope, seq: seqOnWire, excludeWs, connections: wsConnections,
+			ensureId: ensureWireId, isPoisoned: wireStatePoisoned,
+			poison: poisonWireState, compress, counters
+		});
 		// Cross-worker subscribers with a binary capability for this codec re-encode
 		// it locally on their worker (relayPublishWire); those without the capability,
 		// and workers with no codec registered for it, receive the JSON envelope.
 		if (relayed) batchRelay(topic, envelope, compressIntent, seq, relayCap, relayEvent, relayData);
 		if (wsDebug) {
-			console.log('[ws] publishWire topic=%s event=%s payloadBytes=%d', topic, event, payload.length);
+			console.log('[ws] publishWire topicRef=%s eventRef=%s payloadBytes=%d',
+				privateValueMetadata(topic, 'topic').ref,
+				privateValueMetadata(event, 'event').ref,
+				payload.length);
 		}
 		return true;
 	},
@@ -475,6 +482,7 @@ export const platform = {
 	 */
 	publishWireBatch(topic, event, entries, wire, options) {
 		if (!Array.isArray(entries) || entries.length === 0) return false;
+		assertClusterSequenceBatchAuthority(options, entries.length);
 		// A stateless codec gains nothing from a batched walk (encode-once
 		// already amortizes it) - route through the per-entry path unchanged.
 		if (!wire || !wire.state) {
@@ -509,7 +517,7 @@ export const platform = {
 			if (seq !== null) maxSeenSeq.set(topic, seq);
 			seqs[i] = seq == null ? 0 : seq;
 			const envelope = completeEnvelope(envelopePrefix(topic, event), entries[i].data, seq);
-			fatal(envelope.length > 0, 'envelope.empty', { topic, event });
+			fatal(envelope.length > 0, 'envelope.empty', null);
 			stats.m++;
 			stats.b += envelope.length;
 			envs[i] = envelope;
@@ -531,7 +539,10 @@ export const platform = {
 		// entry excludes a socket - N native fan-outs, byte-identical to N
 		// publishWire calls.
 		if (!anyExclude && !capCounts.has(wire.capability)) {
-			for (let i = 0; i < entries.length; i++) app.publish(topic, envs[i], false, compress);
+			for (let i = 0; i < entries.length; i++) {
+				const result = app.publish(topic, envs[i], false, compress);
+				counters.publishOutcomeHook?.(result);
+			}
 		} else {
 			for (const ws of wsConnections) {
 				let ud;
@@ -542,15 +553,16 @@ export const platform = {
 				// The no-exclusion common case reuses the shared arrays.
 				let list = entries;
 				let envList = envs;
-				let lastSeq = seqs[entries.length - 1];
+				let seqList = seqs;
 				if (anyExclude) {
 					list = [];
 					envList = [];
+					seqList = [];
 					for (let i = 0; i < entries.length; i++) {
 						if (entries[i].excludeWs === ws) continue;
 						list.push(entries[i]);
 						envList.push(envs[i]);
-						lastSeq = seqs[i];
+						seqList.push(seqs[i]);
 					}
 					if (list.length === 0) continue;
 				}
@@ -566,53 +578,11 @@ export const platform = {
 					sendJson(ws, envList);
 					continue;
 				}
-				const updates = new Array(list.length);
-				for (let i = 0; i < list.length; i++) updates[i] = list[i].data;
-				const payload = wire.encode(event + '-batch', { updates }, state);
-				const sv = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
-				if (payload == null) {
-					// The codec declined the batch (older codec, unrepresentable
-					// entry): per-entry encodes with per-entry JSON fallback - the
-					// N publishWire bodies this call replaces.
-					for (let i = 0; i < list.length; i++) {
-						const p = wire.encode(event, list[i].data, state);
-						if (p == null) {
-							try { ws.send(envList[i], false, compress); } catch { counters.closedWsAborts++; break; }
-							continue;
-						}
-						const id = ensureWireId(ws, ud, topic);
-						if (id === -1) {
-							poisonWireState(ws, ud, wire.capability);
-							sendJson(ws, envList.slice(i));
-							break;
-						}
-						const frame = buildBinaryFrame(sv, id, seqs[i], p);
-						let result;
-						try { result = ws.send(frame, true, compress); } catch { counters.closedWsAborts++; break; }
-						if (result === 2) {
-							poisonWireState(ws, ud, wire.capability);
-							sendJson(ws, envList.slice(i + 1));
-							break;
-						}
-					}
-					continue;
-				}
-				const id = ensureWireId(ws, ud, topic);
-				if (id === -1) {
-					// Dropped wire-id announce: binary is permanently undecodable
-					// here, and the batch encode already advanced this connection's
-					// dictionaries - the desync poisoning exists for.
-					poisonWireState(ws, ud, wire.capability);
-					sendJson(ws, envList);
-					continue;
-				}
-				const frame = buildBinaryFrame(sv, id, lastSeq, payload);
-				let result;
-				try { result = ws.send(frame, true, compress); } catch { counters.closedWsAborts++; continue; }
-				// 2 = dropped past maxBackpressure: the encode mutated the
-				// dictionaries for a frame the client never saw - JSON until
-				// reconnect.
-				if (result === 2) poisonWireState(ws, ud, wire.capability);
+				deliverStatefulWireBatch({
+					wire, event, entries: list, envelopes: envList, seqs: seqList,
+					state, ws, ud, topic, ensureId: ensureWireId,
+					poison: poisonWireState, compress, counters
+				});
 			}
 		}
 		if (relayed) {
@@ -964,7 +934,7 @@ export const platform = {
 	 * process; non-empty entries indicate a regression in the
 	 * framework or a third-party plugin and should be reported as a
 	 * GitHub issue with the category string. The structured
-	 * `[adapter-uws/assert]` log lines accompanying each violation
+	 * `[oss-realtime/diagnostic source=svelte-adapter-uws component=runtime.assertion event=invariant.violated severity=warn]` log lines accompanying each violation
 	 * carry the context payload needed to reproduce.
 	 *
 	 * @returns {Map<string, number>}
@@ -1001,9 +971,9 @@ export const platform = {
 	 * A PII-free snapshot of this worker's transport-layer health:
 	 * connection count, backpressure posture, protection level, payload cap,
 	 * and the framework-invariant counters. Counts and enums only - never a
-	 * topic name, never a user id, never a socket handle. Pure read (a fresh
-	 * plain object each call), so it is safe to expose behind an auth-gated
-	 * admin route or feed to a dashboard.
+	 * topic name, never a user id, never a socket handle. Counts, enums, and
+	 * package versions only. Pure read (a fresh plain object each call), so it
+	 * is safe to expose behind an auth-gated admin route or feed to a dashboard.
 	 *
 	 * The scalar pressure signals are reported but `topPublishers` is omitted:
 	 * topic names can embed ids, and this snapshot is PII-free by
@@ -1019,8 +989,10 @@ export const platform = {
 	 *   closedWsAborts: number,
 	 *   protection: 'normal' | 'elevated' | 'siege',
 	 *   maxPayloadLength: number,
-	 *   pressure: { active: boolean, reason: string, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, maxBufferedBytes: number, backpressuredConnections: number },
-	 *   assertions: Record<string, number>
+	 *   versions: { adapter: string | null, protocolRevision: number | null, realtime: string | null, extensions: string | null },
+	 *   pressure: { active: boolean, reason: string, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, maxBufferedBytes: number, backpressuredConnections: number, droppedFrames: number, droppedBytes: number },
+	 *   assertions: Record<string, number>,
+	 *   diagnostics: { retained: number, recent: Array<{ diagnosticId: string, kind: string, observedAt: number, complete: boolean, affectedStreamCount: number, evidenceTruncated: boolean }> }
 	 * }}
 	 */
 	introspect() {
@@ -1030,6 +1002,7 @@ export const platform = {
 			closedWsAborts: platform.closedWsAborts,
 			protection: platform.protection,
 			maxPayloadLength: platform.maxPayloadLength,
+			versions: { ...runtimeVersionInfo },
 			pressure: {
 				active: p.active,
 				reason: p.reason,
@@ -1038,10 +1011,32 @@ export const platform = {
 				publishRate: p.publishRate,
 				memoryMB: p.memoryMB,
 				maxBufferedBytes: p.maxBufferedBytes,
-				backpressuredConnections: p.backpressuredConnections
+				backpressuredConnections: p.backpressuredConnections,
+				droppedFrames: p.droppedFrames,
+				droppedBytes: p.droppedBytes
 			},
-			assertions: Object.fromEntries(platform.assertions)
+			assertions: Object.fromEntries(platform.assertions),
+			// Metadata only. Keyed stream ids and sequence evidence require an
+			// exact opaque id through `platform.diagnostic()`, which
+			// svelte-realtime exposes only after its mandatory admin auth gate.
+			diagnostics: {
+				retained: divergenceDiagnostics.size,
+				recent: divergenceDiagnostics.list()
+			}
 		};
+	},
+
+	/**
+	 * Resolve one bounded state-divergence record by opaque id. Topic names are
+	 * never present; affected streams are per-primary-lifetime HMAC ids. Do not
+	 * expose this method on a public route. svelte-realtime's authenticated
+	 * admin handler provides the supported HTTP surface.
+	 *
+	 * @param {string} diagnosticId
+	 * @returns {any | null}
+	 */
+	diagnostic(diagnosticId) {
+		return divergenceDiagnostics.get(diagnosticId);
 	},
 
 	/**
@@ -1241,8 +1236,7 @@ export const platform = {
 		// fire-and-forget without per-site try/catch.
 		try { ws.subscribe(topic); }
 		catch { counters.closedWsAborts++; return null; }
-		subs.add(topic);
-		counters.totalSubscriptions++;
+		addLogicalSubscription(subs, topic);
 		// Programmatic join of an already-shared topic cohorts the socket too.
 		if (sharedTopics.has(topic)) joinSharedCohort(ws, ws.getUserData(), topic, sharedTopics.get(topic));
 		return null;
@@ -1327,15 +1321,14 @@ export const platform = {
 		const requireGrant = Boolean(options && options.requireGrant);
 		let observerHasUserHook = false;
 		if (requireGrant) {
-			// One authorization-model reading for the entire async decision. The
-			// production module is static, but the mirrors hot-swap/mutate handlers;
-			// taking a second reading after the await could judge one call under two
-			// different authorities.
+			// Snapshot hook presence for the async decision, but read the latched
+			// strict policy fresh at each grant check. Strict may be armed while the
+			// hook is parked and must tighten that in-flight decision.
 			observerHasUserHook = hasUserSubscribeHook();
 			let granted;
 			try { granted = ws.getUserData()[WS_SUBSCRIPTIONS]; }
 			catch { counters.closedWsAborts++; return 'FORBIDDEN'; }
-			if (deniesUngrantedObserve(subscribeAuth.enabled, observerHasUserHook, granted, topic)) {
+			if (deniesUngrantedObserve(subscribeAuth.enabled, observerHasUserHook && !subscribeAuth.strict, granted, topic)) {
 				return 'FORBIDDEN';
 			}
 		}
@@ -1349,7 +1342,7 @@ export const platform = {
 			let granted;
 			try { granted = ws.getUserData()[WS_SUBSCRIPTIONS]; }
 			catch { counters.closedWsAborts++; return 'FORBIDDEN'; }
-			if (deniesUngrantedObserve(subscribeAuth.enabled, observerHasUserHook, granted, topic)) {
+			if (deniesUngrantedObserve(subscribeAuth.enabled, observerHasUserHook && !subscribeAuth.strict, granted, topic)) {
 				return 'FORBIDDEN';
 			}
 		}
@@ -1362,7 +1355,9 @@ export const platform = {
 	 * for a topic the server already authorized for that connection via
 	 * `platform.subscribe` (recorded in the connection's subscription set),
 	 * unless the app exports its own `subscribe` / `subscribeBatch` hook - in
-	 * which case that hook decides, exactly as today. Server-side
+	 * which case that hook decides in the legacy mode. Pass `'strict'` to
+	 * require the topic to be server-granted AND allowed by the app hook.
+	 * Server-side
 	 * `platform.subscribe` is the trusted grant-establishing path and is
 	 * never gated by this; `platform.checkSubscribe` (the observer-lane
 	 * gate) additionally requires the topic to be in the connection's
@@ -1384,10 +1379,16 @@ export const platform = {
 	 * connections arrive. A call in one worker does not mutate another worker's
 	 * JavaScript realm.
 	 *
-	 * @returns {void}
+	 * @param {'legacy' | 'strict'} [mode]
+	 * @returns {'legacy' | 'strict'} the active (latched) policy
 	 */
-	authorizeWireSubscribe() {
+	authorizeWireSubscribe(mode = 'legacy') {
+		if (mode !== 'legacy' && mode !== 'strict') {
+			throw new TypeError("authorizeWireSubscribe mode must be 'legacy' or 'strict'");
+		}
 		subscribeAuth.enabled = true;
+		if (mode === 'strict') subscribeAuth.strict = true;
+		return subscribeAuth.strict ? 'strict' : 'legacy';
 	},
 
 	/**
@@ -1405,8 +1406,14 @@ export const platform = {
 	 * @param {import('uWebSockets.js').WebSocket<any>} ws
 	 * @param {string} topic
 	 * @returns {boolean} `true` on success, `false` if the socket had already closed
+	 * @throws {Error} when sockets span more than one I/O worker and no single
+	 *   authoritative game-lane home exists
 	 */
 	grantPublish(ws, topic) {
+		// The per-room seq and sender-excluding walk are worker-local. Refuse the
+		// first grant in a multi-I/O-worker topology instead of authorizing a lane
+		// that would silently omit remote participants and fork its sequence.
+		assertGameLaneClusterSafe();
 		let ud;
 		try { ud = ws.getUserData(); } catch { counters.closedWsAborts++; return false; }
 		ud[WS_PUBLISH_GRANT] = topic;
@@ -1464,13 +1471,18 @@ export const platform = {
 	 * @param {unknown} data
 	 * @param {number | string} [id]  the sender's client input id, echoed to the other receivers
 	 * @returns {{ seq: number | null, delivered: number }}
+	 * @throws {Error} when sockets span more than one I/O worker
 	 */
 	publishGame(senderWs, topic, event, data, id) {
+		// Server-authored frames can bypass grantPublish, so guard this primitive
+		// independently as well. One I/O worker plus any number of compute workers
+		// is safe; more than one socket-owning worker needs an external authority.
+		assertGameLaneClusterSafe();
 		counters.publishCountWindow++;
 		const seq = stampSeq(undefined, topicSeqs, topic);
 		if (seq !== null) maxSeenSeq.set(topic, seq);
 		const envelope = completeGameEnvelope(envelopePrefix(topic, event), data, seq, id);
-		fatal(envelope.length > 0, 'envelope.empty', { topic, event });
+		fatal(envelope.length > 0, 'envelope.empty', null);
 		let s = topicPublishStats.get(topic);
 		if (!s) { s = { m: 0, b: 0 }; topicPublishStats.set(topic, s); maybeWarnTopicRegistry(); }
 		s.m++;
@@ -1597,9 +1609,7 @@ export const platform = {
 		if (!subs.has(topic)) return cancelledPending;
 		try { ws.unsubscribe(topic); }
 		catch { counters.closedWsAborts++; return false; }
-		subs.delete(topic);
-		counters.totalSubscriptions--;
-		assert(counters.totalSubscriptions >= 0, 'subs.total-negative', { totalSubscriptions: counters.totalSubscriptions });
+		removeLogicalSubscription(subs, topic);
 		if (sharedTopics.has(topic)) leaveSharedCohort(ws, ws.getUserData(), topic);
 		wsModule.unsubscribe?.(ws, topic, { platform: ws.getUserData()[WS_PLATFORM] });
 		return true;
@@ -1622,81 +1632,29 @@ export const platform = {
 	 * - `publishBatched(messages)` -> 1 frame per subscriber (events array),
 	 *   returns void; opt-in by client capability ('batch').
 	 *
-	 * @param {{ topic: string, event: string, data?: unknown }[]} messages
+	 * @param {{ topic: string, event: string, data?: unknown, options?: { relay?: boolean, seq?: boolean | number, compress?: boolean, jitterMs?: number } }[]} messages
 	 * @returns {boolean[]} publish result for each message (false = no subscribers)
 	 */
 	batch(messages) {
+		// All-or-nothing authority validation: do not publish a safe prefix and
+		// then discover an implicit sequence later in the same cluster batch.
+		for (let i = 0; i < messages.length; i++) {
+			assertClusterSequenceAuthority(messages[i].options);
+		}
 		const results = [];
 		for (let i = 0; i < messages.length; i++) {
-			const { topic, event, data } = messages[i];
-			results.push(platform.publish(topic, event, data));
+			const { topic, event, data, options } = messages[i];
+			results.push(platform.publish(topic, event, data, options));
 		}
 		return results;
 	},
 
 	/**
-	 * Publish a list of `{topic, event, data}` events as a single
-	 * `{type:'batch',events:[...]}` WebSocket frame per affected
-	 * subscriber. Each subscriber receives only the events whose topics
-	 * are in their subscription set, in submitted order. Subscribers
-	 * with no overlap with the batch's topics receive nothing.
-	 *
-	 * Compared to a `publish()` loop, the wire savings are
-	 * one-frame-per-subscriber instead of N-frames-per-subscriber. The
-	 * benefit grows with N (events per call) and with the
-	 * subscriber-set overlap; tiny batches with disjoint topics may pay
-	 * a small JS-fanout cost over the C++ TopicTree path used by
-	 * `publish()` (the receiver decode is faster regardless).
-	 *
-	 * Capability gating: clients advertise `'batch'` support via a
-	 * `{type:'hello', caps:['batch']}` frame after open. Connections
-	 * that have not advertised the capability fall back to N
-	 * individual frames automatically - mixing old and new clients in
-	 * the same call is safe.
-	 *
-	 * Per-event seq stamping: every event in the batch is independently
-	 * stamped with a per-topic monotonic seq, identical to `publish()`.
-	 * Pass `{seq: false}` in an event's `options` to skip stamping for
-	 * that one event.
-	 *
-	 * Cross-worker relay: events are relayed individually through the
-	 * existing per-microtask relay path, so receiving workers see N
-	 * relayed publishes (not a batched delivery). The wire-level
-	 * batching applies to the originating worker's local fanout only.
-	 * Pass `{relay: false}` in an event's `options` to skip the relay
-	 * for messages that came from an external pub/sub source already
-	 * fanning out to every worker.
-	 *
-	 * Frame-size budget: a batched frame larger than 256 KB triggers a
-	 * throttled console warning (uWS per-message-deflate kicks in over
-	 * a configurable threshold and large frames may surprise CPU
-	 * budgets). Chunk large batches into multiple `publishBatched`
-	 * calls to stay under the cap.
-	 *
-	 * Order guarantee: within one batched frame, events appear in call
-	 * order. Across batches, same subscriber-side ordering as today.
-	 *
-	 * Coalesce interaction (v1): events submitted via `publishBatched`
-	 * do NOT interact with `sendCoalesced` per-key replacement. The
-	 * batch is delivered as-is, in submitted order, with no coalesce
-	 * filtering. Mixing batched topics with sendCoalesced topics on
-	 * the same subscriber is supported but the two paths produce
-	 * separate frames.
-	 *
-	 * @example
-	 * ```js
-	 * platform.publishBatched([
-	 *   { topic: 'org:42:items', event: 'updated', data: a },
-	 *   { topic: 'org:42:items', event: 'updated', data: b },
-	 *   { topic: 'org:42:audit', event: 'created', data: c }
-	 * ]);
-	 * // Subscribers of org:42:items only -> one frame, two events.
-	 * // Subscribers of both topics      -> one frame, three events.
-	 * // Subscribers of neither          -> no frame at all.
-	 * ```
-	 *
-	 * @param {Array<{ topic: string, event: string, data?: unknown, options?: { relay?: boolean, seq?: boolean } }>} messages
-	 * @returns {void}
+	 * Wire-batching implementation. The editable public contract lives on
+	 * `Platform.publishBatched` in `src/index.d.ts`; its bounded JSDoc region
+	 * generates the README via `scripts/generate-api-docs.js`. Keep only
+	 * implementation mechanics here so this file cannot become a third manual
+	 * API reference.
 	 */
 	publishBatched(messages, options) {
 		if (!Array.isArray(messages) || messages.length === 0) return;
@@ -1717,6 +1675,12 @@ export const platform = {
 		// same user delivers only the latest.
 		messages = collapseByCoalesceKey(messages);
 		if (messages.length === 0) return;
+		// Validate the WHOLE batch before one event can mutate counters or reach a
+		// subscriber. A mixed safe/unsafe batch must fail atomically rather than
+		// partially publishing its prefix.
+		for (let i = 0; i < messages.length; i++) {
+			assertClusterSequenceAuthority(messages[i].options);
+		}
 
 		// Pick the fanout strategy before allocating per-event envelopes.
 		// uWS's C++ TopicTree dispatch via app.publish is genuinely faster
@@ -1811,7 +1775,10 @@ export const platform = {
 				topicPublishStats.set(m.topic, s);
 				maybeWarnTopicRegistry();
 			} else {
-				assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape-batch', { topic: m.topic });
+				assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape-batch', {
+					messagesType: typeof s.m,
+					bytesType: typeof s.b
+				});
 			}
 			s.m++;
 			s.b += env.length;
@@ -1861,10 +1828,13 @@ export const platform = {
 		// (single-topic is the trivial sub-case).
 		const fanoutTopic = allSameTopic ? firstTopic : messages[0].topic;
 		const result = app.publish(fanoutTopic, sharedBatchEnv, false, WS_COMPRESSION_ON && compressOptIn);
+		counters.publishOutcomeHook?.(result);
 
 		if (wsDebug) {
-			console.log('[ws] publishBatched events=%d single-topic=%s fanoutTopic=%s delivered=%s',
-				events.length, allSameTopic, fanoutTopic, result);
+			console.log('[ws] publishBatched events=%d single-topic=%s fanoutTopicRef=%s delivered=%s',
+				events.length, allSameTopic,
+				fanoutTopic === null ? 'mixed' : privateValueMetadata(fanoutTopic, 'topic').ref,
+				result);
 		}
 	},
 
@@ -1886,7 +1856,7 @@ export const platform = {
 		try { userData = ws.getUserData(); }
 		catch {
 			counters.closedWsAborts++;
-			return Promise.reject(new Error('connection closed'));
+			return Promise.reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED)));
 		}
 		let pending = userData[WS_PENDING_REQUESTS];
 		if (!pending) {
@@ -1904,7 +1874,7 @@ export const platform = {
 		const timeoutMs = (options && options.timeoutMs) || 5000;
 		return new Promise((resolve, reject) => {
 			const timer = setTimer(() => {
-				if (pending.delete(ref)) reject(new Error('request timed out'));
+				if (pending.delete(ref)) reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_TIMEOUT)));
 			}, timeoutMs);
 			pending.set(ref, { resolve, reject, timer });
 			const payload = JSON.stringify({ type: 'request', ref, event, data: data ?? null });
@@ -1913,7 +1883,7 @@ export const platform = {
 				counters.closedWsAborts++;
 				clearTimer(timer);
 				pending.delete(ref);
-				reject(new Error('connection closed'));
+				reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED)));
 				return;
 			}
 			bumpOut(ws, payload);

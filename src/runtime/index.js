@@ -6,14 +6,19 @@ import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 import { env } from 'ENV';
 import { certExpiryAlert, createCertWatcher, readCertIdentity, reloadClusterTls } from './utils/tls-reload.js';
-import { monotonicNow, wallEpoch, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
+import { monotonicNow, wallEpoch, randomUuid, randomBytes as runtimeRandomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 import { createRelayRingBuffer, RingWriter, RingReader, decodeRelayFrame } from './relay-ring.js';
+import { createRelaySpillQuarantine } from './relay-spill-policy.js';
 import { createStateHashDetector } from './state-hash-detector.js';
+import { buildDivergenceDiagnostic, DIVERGENCE_DIAGNOSTIC_LIMIT, DIVERGENCE_TOPIC_LIMIT } from './divergence-diagnostics.js';
 import { createRestartSupervisor } from './restart-supervisor.js';
 import { createMetricsCollections } from './metrics-collector.js';
 import { classifyWorkerHealth, resolveBootTimeout, routeWorkerMessage } from './worker-watchdog.js';
 import { readFdLimits, fdPreflightWarning } from './utils/fd-limit.js';
 import { createSdNotify } from './utils/sd-notify.js';
+import { emitOperationalDiagnostic, listenFailureDiagnostic } from './utils/operational-diagnostic.js';
+import { emitOperationalEvent, diagnosticError } from './diagnostic.js';
+import { formatVersionBanner, runtimeVersionInfo } from './version-info.js';
 
 // systemd readiness + watchdog (auto-detected from NOTIFY_SOCKET; a no-op
 // everywhere else). Only the main thread talks to systemd - it owns the
@@ -63,6 +68,16 @@ const cluster_workers = env('CLUSTER_WORKERS', '');
 // pending queue and flushes as the consumer drains - order always preserved.
 // 0 disables the rings (every relay rides postMessage exactly as before).
 const relay_ring_kb = parseIntEnv('CLUSTER_RELAY_RING_KB', env('CLUSTER_RELAY_RING_KB', '256'), 0);
+// A receiving worker that stops draining its ring must not turn the primary
+// into an unbounded spill buffer. These finite per-peer ceilings quarantine
+// that worker through the normal clean-exit/restart supervisor. Bytes bound
+// memory immediately; age catches a small spill that otherwise sits forever.
+const relay_pending_max_bytes = parseIntEnv(
+	'CLUSTER_RELAY_MAX_PENDING_KB', env('CLUSTER_RELAY_MAX_PENDING_KB', '4096'), 1
+) * 1024;
+const relay_pending_max_ms = parseIntEnv(
+	'CLUSTER_RELAY_MAX_PENDING_MS', env('CLUSTER_RELAY_MAX_PENDING_MS', '5000'), 1
+);
 
 // Cross-worker state-hash divergence ACTION gate. The primary owns
 // worker.terminate() and never sees the per-build websocket options, so the
@@ -78,6 +93,10 @@ const state_hash_epoch_ms = parseIntEnv('STATE_HASH_EPOCH_MS', env('STATE_HASH_E
 
 const is_primary = cluster_workers && isMainThread;
 
+// Exactly once per process. Worker threads share the primary's package graph,
+// so only their main thread announces the resolved ecosystem tuple.
+if (isMainThread) console.log(formatVersionBanner(runtimeVersionInfo));
+
 // Descriptor-budget preflight: fires once per process (main thread only -
 // worker threads share the single process fd table, so per-worker repeats
 // would be noise) when the soft limit is EMFILE-low for a socket server.
@@ -85,7 +104,7 @@ const is_primary = cluster_workers && isMainThread;
 // silent no-op there.
 if (isMainThread) {
 	const fdWarning = fdPreflightWarning(readFdLimits());
-	if (fdWarning !== null) console.warn(fdWarning);
+	if (fdWarning !== null) console.warn('[svelte-adapter-uws] ' + fdWarning);
 }
 
 if (is_primary) {
@@ -98,7 +117,7 @@ if (is_primary) {
 		: parseInt(cluster_workers, 10);
 
 	if (isNaN(num) || num < 1) {
-		console.error(`Invalid CLUSTER_WORKERS value: '${cluster_workers}'. Use a positive integer or 'auto'.`);
+		console.error(`[svelte-adapter-uws] Invalid CLUSTER_WORKERS value: '${cluster_workers}'. Use a positive integer or 'auto'.`);
 		process.exit(1);
 	}
 
@@ -110,7 +129,7 @@ if (is_primary) {
 	const workers_config = WORKERS_CONFIG;
 	const compute_count = Math.max(0, Math.floor(workers_config?.compute ?? 0));
 	if (compute_count >= num) {
-		console.error(`websocket.workers.compute (${compute_count}) must be less than the total worker count (${num}).`);
+		console.error(`[svelte-adapter-uws] websocket.workers.compute (${compute_count}) must be less than the total worker count (${num}).`);
 		process.exit(1);
 	}
 	const io_count = num - compute_count;
@@ -136,7 +155,7 @@ if (is_primary) {
 
 	if (cluster_mode === 'reuseport' && process.platform !== 'linux') {
 		console.error(
-			`CLUSTER_MODE=reuseport requires Linux (SO_REUSEPORT is not reliable on ${process.platform}). ` +
+			`[svelte-adapter-uws] CLUSTER_MODE=reuseport requires Linux (SO_REUSEPORT is not reliable on ${process.platform}). ` +
 			'Remove CLUSTER_MODE to use the default acceptor mode.\n' +
 			'  See: https://svti.me/cluster-mode'
 		);
@@ -144,7 +163,7 @@ if (is_primary) {
 	}
 
 	if (cluster_mode !== 'reuseport' && cluster_mode !== 'acceptor') {
-		console.error(`Invalid CLUSTER_MODE: '${cluster_mode}'. Use 'reuseport' or 'acceptor'.`);
+		console.error(`[svelte-adapter-uws] Invalid CLUSTER_MODE: '${cluster_mode}'. Use 'reuseport' or 'acceptor'.`);
 		process.exit(1);
 	}
 
@@ -190,6 +209,59 @@ if (is_primary) {
 	// (which they only do when stateHashIntervalMs is configured), so an
 	// unconfigured cluster never pays for it beyond an empty Map.
 	const stateHashDetector = createStateHashDetector({ epochMs: state_hash_epoch_ms > 0 ? state_hash_epoch_ms : 60000, monotonicNow });
+	// One random key is shared with every worker and every respawn in this
+	// primary lifetime. Workers use it only to HMAC topic names for a cold-path
+	// diagnostic snapshot; the key itself never crosses back into logs, metrics,
+	// or the admin response. A restart rotates all stream identifiers.
+	const divergenceDiagnosticKey = runtimeRandomBytes(32);
+	/** @type {Map<string, { epoch: number, observedAt: number, expectedThreadIds: number[], minorityThreadIds: number[], reports: Map<number, any>, timer: any }>} */
+	const divergenceCollections = new Map();
+	/** @type {Map<string, any>} */
+	const completedDivergenceDiagnostics = new Map();
+
+	/** Finish one collection with complete or explicitly-partial evidence. */
+	function finishDivergenceCollection(diagnosticId) {
+		const entry = divergenceCollections.get(diagnosticId);
+		if (!entry) return;
+		divergenceCollections.delete(diagnosticId);
+		clearTimer(entry.timer);
+		const diagnostic = buildDivergenceDiagnostic({
+			diagnosticId,
+			epoch: entry.epoch,
+			observedAt: entry.observedAt,
+			expectedThreadIds: entry.expectedThreadIds,
+			minorityThreadIds: entry.minorityThreadIds,
+			reports: [...entry.reports.values()]
+		});
+		completedDivergenceDiagnostics.delete(diagnosticId);
+		completedDivergenceDiagnostics.set(diagnosticId, diagnostic);
+		while (completedDivergenceDiagnostics.size > DIVERGENCE_DIAGNOSTIC_LIMIT) {
+			completedDivergenceDiagnostics.delete(completedDivergenceDiagnostics.keys().next().value);
+		}
+		for (const [target] of workers) {
+			try { target.postMessage({ type: 'state-divergence-diagnostic', diagnostic }); } catch {}
+		}
+	}
+
+	/** Begin the bounded second stage after the aggregate detector fires. */
+	function beginDivergenceCollection(divergence, liveThreadIds) {
+		if (divergenceCollections.size >= DIVERGENCE_DIAGNOSTIC_LIMIT) {
+			finishDivergenceCollection(divergenceCollections.keys().next().value);
+		}
+		const diagnosticId = randomUuid();
+		const entry = {
+			epoch: divergence.epoch,
+			observedAt: wallEpoch(),
+			expectedThreadIds: liveThreadIds.slice().sort((a, b) => a - b),
+			minorityThreadIds: divergence.minorityThreadIds.slice(),
+			reports: new Map(),
+			timer: null
+		};
+		divergenceCollections.set(diagnosticId, entry);
+		entry.timer = setTimer(() => finishDivergenceCollection(diagnosticId), 1000);
+		if (entry.timer?.unref) entry.timer.unref();
+		return diagnosticId;
+	}
 
 	// Cluster metrics collection. Every worker holds its own registry and they
 	// all serve one port, so a scrape can only see the whole cluster by asking
@@ -255,7 +327,7 @@ if (is_primary) {
 		spawn: (slot) => spawn_worker(slot),
 		onExhausted: (slot) => {
 			console.error(
-				`Worker restart limit reached for ${slot.role}#${slot.index} (${RESTART_MAX_ATTEMPTS}). Exiting.\n` +
+				`[svelte-adapter-uws] Worker restart limit reached for ${slot.role}#${slot.index} (${RESTART_MAX_ATTEMPTS}). Exiting.\n` +
 				'  See: https://svti.me/worker-restart-limit'
 			);
 			primaryHardExit(1);
@@ -389,7 +461,20 @@ if (is_primary) {
 			// `app` is the retained primaryInit output, replayed identically on every
 			// spawn and respawn so a compute worker's replacement rejoins the same
 			// shared-memory world.
-			workerData: { mode: cluster_mode, role, app: app_worker_data, relayRing: relay_ring }
+			// `ioWorkers` is a correctness input, not diagnostics: worker-local
+			// features that promise one authoritative in-memory home (notably the
+			// game lane) must reject a topology in which sockets can land on more
+			// than one I/O worker. Passing the resolved count also handles `auto`
+			// without asking a worker to guess from the original env spelling.
+			workerData: {
+				mode: cluster_mode,
+				role,
+				totalWorkers: num,
+				ioWorkers: io_count,
+				app: app_worker_data,
+				relayRing: relay_ring,
+				divergenceDiagnosticKey
+			}
 		});
 		// lastHeartbeat starts at 0  - worker is confirmed alive only after the
 		// first 'descriptor' / 'ready' / 'heartbeat-ack' message arrives. spawnedAt
@@ -399,9 +484,30 @@ if (is_primary) {
 		// exit handler. Node nulls the worker's handle before emitting 'exit', and
 		// `worker.threadId` degrades to -1 from that point on - so any cleanup that
 		// keys on the thread id silently addresses a worker that never existed.
-		const meta = { threadId: worker.threadId, descriptor: null, lastHeartbeat: 0, spawnedAt: monotonicNow(), ready: false, role, slot, ringWriter: null, ringReader: null };
+		const meta = {
+			threadId: worker.threadId,
+			descriptor: null,
+			lastHeartbeat: 0,
+			spawnedAt: monotonicNow(),
+			ready: false,
+			role,
+			slot,
+			ringWriter: null,
+			ringReader: null,
+			relayQuarantined: false
+		};
 		if (relay_ring !== null) {
-			meta.ringWriter = new RingWriter(relay_ring.down);
+			const quarantineRelaySpill = createRelaySpillQuarantine({
+				worker,
+				meta,
+				workers,
+				requestWorkerExit
+			});
+			meta.ringWriter = new RingWriter(relay_ring.down, {
+				maxPendingBytes: relay_pending_max_bytes,
+				maxPendingAgeMs: relay_pending_max_ms,
+				onOverflow: quarantineRelaySpill
+			});
 			// Forward each inbound frame VERBATIM to every other worker's ring -
 			// the primary never parses relay traffic, it moves bytes. Ring
 			// activity also proves the worker alive (the same reasoning as the
@@ -410,15 +516,25 @@ if (is_primary) {
 			meta.ringReader = new RingReader(relay_ring.up, (frame) => {
 				meta.lastHeartbeat = monotonicNow();
 				for (const [w, m] of workers) {
-					if (w !== worker && m.ringWriter !== null) {
-						m.ringWriter.write(frame);
-						m.ringWriter.notify();
+					if (w !== worker && m.ringWriter !== null && !m.relayQuarantined) {
+						const accepted = m.ringWriter.write(frame);
+						if (accepted) {
+							m.ringWriter.notify();
+						}
 					}
 				}
 			});
 			meta.ringReader.start();
 		}
 		workers.set(worker, meta);
+		const replayDivergenceDiagnostics = () => {
+			// Ready means the handler graph has installed its diagnostic listener.
+			// Replaying earlier would let the boot-time control backlog consume an
+			// otherwise-unknown message before that listener exists.
+			for (const diagnostic of completedDivergenceDiagnostics.values()) {
+				worker.postMessage({ type: 'state-divergence-diagnostic', diagnostic });
+			}
+		};
 
 		worker.on('message', (msg) => {
 			const meta = workers.get(worker);
@@ -438,6 +554,7 @@ if (is_primary) {
 				// uptime clock. The backoff/attempt budget resets on the NEXT exit,
 				// and only after the worker has stayed up past the stable window.
 				if (meta.slot) restartSupervisor.noteReady(meta.slot);
+				replayDivergenceDiagnostics();
 				// Start (or resume) listening once a worker is ready to handle requests
 				if (!listening) {
 					listening = true;
@@ -448,7 +565,7 @@ if (is_primary) {
 							console.log(`Acceptor listening on ${is_tls ? 'https' : 'http'}://${host}:${portNum}`);
 							sdReadyOnce();
 						} else {
-							console.error(`Failed to listen on ${host}:${portNum}`);
+							emitOperationalDiagnostic(listenFailureDiagnostic(host, portNum));
 							primaryHardExit(1);
 						}
 					});
@@ -467,6 +584,7 @@ if (is_primary) {
 					sdReadyOnce();
 				}
 				if (meta.slot) restartSupervisor.noteReady(meta.slot);
+				replayDivergenceDiagnostics();
 			} else if (msg.type === 'heartbeat-ack') {
 				if (meta) meta.lastHeartbeat = monotonicNow();
 			} else if (msg.type === 'publish') {
@@ -517,23 +635,32 @@ if (is_primary) {
 				const divergence = stateHashDetector.record(msg.threadId, msg.hash, liveThreadIds, epochMs);
 				if (divergence) {
 					const minoritySet = new Set(divergence.minorityThreadIds);
-					// One structured log line: the operator's divergence signal.
-					// Event name + epoch + per-thread hash + the majority/minority
-					// split; no topic strings, no payloads (the hash is structure
-					// only). This is the PRIMARY signal; the metric is supplementary
-					// (it round-trips through a worker and can under-count if the
-					// divergent worker is the one that died).
-					console.error(
-						'[primary] state-divergence epoch=%d majorityHash=%d minority=%o hashes=%o',
-						divergence.epoch, divergence.majorityHash, divergence.minorityThreadIds, divergence.hashesByThread
-					);
+					const diagnosticId = beginDivergenceCollection(divergence, liveThreadIds);
+					// The production signal references ONLY an opaque diagnostic id.
+					// Per-thread hashes, roles, and keyed sequence summaries are retained
+					// behind the authenticated admin lookup, not copied into logs.
+					emitOperationalEvent({
+						source: 'svelte-adapter-uws',
+						component: 'runtime.divergence',
+						event: 'divergence.detected',
+						severity: 'error',
+						message: 'Cross-worker state divergence was detected; evidence is retained behind the authenticated diagnostic lookup.',
+						attributes: { diagnosticId }
+					});
 					// Notice each live worker so it increments its own registry
 					// counter with its role (the primary holds no registry over the
 					// thread boundary). Epoch-deduped at the detector, so one
 					// increment per role per divergent epoch.
-					for (const [w] of workers) {
-						const role = minoritySet.has(w.threadId) ? 'minority' : 'majority';
-						w.postMessage({ type: 'state-divergence', epoch: divergence.epoch, role });
+					for (const [w, workerMeta] of workers) {
+						if (!liveThreadIds.includes(workerMeta.threadId)) continue;
+						const role = minoritySet.has(workerMeta.threadId) ? 'minority' : 'majority';
+						w.postMessage({
+							type: 'state-divergence',
+							epoch: divergence.epoch,
+							role,
+							diagnosticId,
+							topicLimit: DIVERGENCE_TOPIC_LIMIT
+						});
 					}
 					// Action gate (default OFF): only when explicitly enabled does
 					// the primary terminate the minority worker(s); the existing
@@ -547,6 +674,19 @@ if (is_primary) {
 								requestWorkerExit(w, 1);
 							}
 						}
+					}
+				}
+			} else if (msg.type === 'state-divergence-detail') {
+				if (meta) meta.lastHeartbeat = monotonicNow();
+				const entry = divergenceCollections.get(msg.diagnosticId);
+				const reporter = meta?.threadId;
+				if (entry && Number.isInteger(reporter) && entry.expectedThreadIds.includes(reporter)) {
+					entry.reports.set(reporter, {
+						threadId: reporter,
+						summary: msg.summary
+					});
+					if (entry.reports.size === entry.expectedThreadIds.length) {
+						finishDivergenceCollection(msg.diagnosticId);
 					}
 				}
 			} else if (msg.type === 'metrics-request') {
@@ -691,7 +831,15 @@ if (is_primary) {
 		});
 
 		worker.on('error', (err) => {
-			console.error('Worker thread error:', err);
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.cluster',
+				event: 'cluster.worker-error',
+				severity: 'error',
+				dataClass: 'pseudonymous',
+				message: 'A worker thread reported an error.',
+				attributes: { error: diagnosticError(err) }
+			});
 		});
 	}
 
@@ -732,11 +880,11 @@ if (is_primary) {
 	function primaryTlsDegraded(reason) {
 		primaryTlsHealth.degraded = reason;
 		const alert = certExpiryAlert(primaryTlsHealth, wallEpoch());
-		if (alert !== null) console.error(alert);
+		if (alert !== null) console.error('[svelte-adapter-uws] ' + alert);
 		if (primaryTlsSentinel !== null) return;
 		primaryTlsSentinel = setIntervalTimer(() => {
 			const line = certExpiryAlert(primaryTlsHealth, wallEpoch());
-			if (line !== null) console.error(line);
+			if (line !== null) console.error('[svelte-adapter-uws] ' + line);
 		}, TLS_DEGRADED_CHECK_MS);
 		if (primaryTlsSentinel && primaryTlsSentinel.unref) primaryTlsSentinel.unref();
 	}
@@ -960,11 +1108,11 @@ if (is_primary) {
 				const result = listener.call(process, reason, { reason, signal, deadline });
 				if (result && typeof result.then === 'function') {
 					pending.push(Promise.resolve(result).catch((err) => {
-						console.error(`${prefix}a sveltekit:shutdown listener rejected:`, err);
+						console.error(`[svelte-adapter-uws] ${prefix}a sveltekit:shutdown listener rejected:`, err);
 					}));
 				}
 			} catch (err) {
-				console.error(`${prefix}a sveltekit:shutdown listener threw:`, err);
+				console.error(`[svelte-adapter-uws] ${prefix}a sveltekit:shutdown listener threw:`, err);
 			}
 		}
 		if (pending.length === 0) return true;
@@ -1065,7 +1213,7 @@ if (is_primary) {
 			drained = await Promise.race([drain().then(() => true), whenAborted(signal).then(() => false)]);
 			if (!drained) {
 				console.error(
-					`${prefix}in-flight requests did not finish within the ${budget_ms}ms shutdown budget; ` +
+					`[svelte-adapter-uws] ${prefix}in-flight requests did not finish within the ${budget_ms}ms shutdown budget; ` +
 					'closing anyway - the requests still open at this point are dropped.'
 				);
 			}
@@ -1075,7 +1223,7 @@ if (is_primary) {
 			cleaned = await runShutdownCleanup(reason, signal, deadline, prefix);
 			if (!cleaned) {
 				console.error(
-					`${prefix}sveltekit:shutdown listeners did not settle within the ${budget_ms}ms shutdown budget; ` +
+					`[svelte-adapter-uws] ${prefix}sveltekit:shutdown listeners did not settle within the ${budget_ms}ms shutdown budget; ` +
 					'exiting anyway - their cleanup did NOT finish.'
 				);
 			}
@@ -1083,12 +1231,12 @@ if (is_primary) {
 			// Nothing above is allowed to refuse the shutdown, and this path is
 			// invoked unawaited from the signal handler - an escaping rejection would
 			// surface as an unhandled rejection instead of an exit.
-			console.error(`${prefix}graceful shutdown failed:`, err);
+			console.error(`[svelte-adapter-uws] ${prefix}graceful shutdown failed:`, err);
 		} finally {
 			clearTimer(budget_timer);
 			const spent = (monotonicNow() - t_close).toFixed(0);
 			if (drained && cleaned) console.log(`${prefix}Shutdown complete in ${spent}ms.`);
-			else console.error(`${prefix}Shutdown finished in ${spent}ms but was NOT clean (see the lines above).`);
+			else console.error(`[svelte-adapter-uws] ${prefix}Shutdown finished in ${spent}ms but was NOT clean (see the lines above).`);
 			exitWorkerClean(0);
 		}
 	}

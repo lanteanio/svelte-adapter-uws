@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { manifest, prerendered } from '../manifest-bridge.js';
-import { mimeLookup, mergeStaticHeaders } from '../utils.js';
+import { mimeLookup, mergeStaticHeaders, resolveStaticCacheControl } from '../utils.js';
 import { monotonicNow } from '../runtime.js';
 import { counters, staticCache, prerenderedDirStyle, decodeCache } from './state.js';
 import { send400 } from './http-helpers.js';
@@ -139,8 +139,10 @@ function headerValue(tuples, name) {
  *   headers merged into every static (and prerendered) response. See
  *   `mergeStaticHeaders`; reserved transfer/caching headers are never
  *   overridden.
+ * @param {{ pattern: string, cacheControl: string }[] | null} [staticCacheControl]
+ *   prevalidated path-specific cache policies, resolved once per file.
  */
-export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null) {
+export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, staticCacheControl = null) {
 	walk(dir, (relPath, absPath) => {
 		if (relPath.endsWith('.br') || relPath.endsWith('.gz')) return;
 
@@ -160,7 +162,8 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null) {
 			headers.push(['cache-control', 'public, max-age=31536000, immutable']);
 		} else {
 			etag = `W/"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`;
-			headers.push(['cache-control', 'no-cache'], ['etag', etag]);
+			const configuredCacheControl = resolveStaticCacheControl(relPath, staticCacheControl);
+			headers.push(['cache-control', configuredCacheControl || 'no-cache'], ['etag', etag]);
 		}
 
 		const ext = path.extname(relPath).toLowerCase();

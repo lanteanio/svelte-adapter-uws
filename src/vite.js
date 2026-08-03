@@ -7,9 +7,13 @@ import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelp
 import { createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { deniesUngrantedObserve, isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap } from './runtime/utils/subscribe-policy.js';
-import { assertRestrictiveBoolean, assertProtectiveNumber, unknownOptionKeys } from './config-guards.js';
-import { runMessageHook } from './runtime/utils/hook-boundary.js';
+import { assertWireSubscribeAuthorization, assertProtectiveNumber, unknownOptionKeys } from './config-guards.js';
+import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { snapshotUpgradeHeaders } from './runtime/utils/upgrade-headers.js';
+import { emitOperationalDiagnostic, viteHandlerFailureDiagnostic, viteHandlerRecoveredDiagnostic } from './runtime/utils/operational-diagnostic.js';
+import { trace } from './runtime/tracing.js';
+import { emitOperationalEvent, diagnosticError } from './runtime/diagnostic.js';
+import { ADAPTER_ERROR_IDS, adapterErrorMessage } from './runtime/error-registry.js';
 
 /**
  * Options the dev plugin honors, mirroring `UWSPluginOptions` in vite.d.ts.
@@ -30,9 +34,19 @@ const KNOWN_PLUGIN_OPTION_KEYS = new Set([
 	'allowNonAsciiTopics',
 	'authPathRequireOrigin',
 	'authorizeWireSubscribe',
+	'maxPayloadLength',
+	'messageAdmission',
 	'devSkipOriginCheck',
 	'timeoutMs'
 ]);
+
+function viteDiagnosticEndpoint(server) {
+	const configured = server?.config?.server ?? {};
+	return {
+		host: typeof configured.host === 'string' ? configured.host : null,
+		port: Number.isInteger(configured.port) ? configured.port : null
+	};
+}
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { registerGameIngress } from './runtime/handler/game-ingress.js';
 import { now, monotonicNow, randomFloat, randomU32, randomUuid, randomBytes } from './runtime/runtime.js';
@@ -54,13 +68,29 @@ export default function uws(options = {}) {
 	// leaves dev wide open while the developer's own manual testing shows the
 	// app working, so the misconfiguration is discovered in production or not
 	// at all.
-	assertRestrictiveBoolean(options, 'authorizeWireSubscribe', 'the uws() dev plugin option authorizeWireSubscribe');
-	// The dev plugin's only numeric option, guarded on the same terms as the
-	// adapter's: `timeoutMs: process.env.X` is a string when set, and every
+	assertWireSubscribeAuthorization(options, 'authorizeWireSubscribe', 'the uws() dev plugin option authorizeWireSubscribe');
+	// The dev plugin's numeric options are guarded on the same terms as the
+	// adapter's: a string from process.env does not become a resource bound.
+	assertProtectiveNumber(options, 'maxPayloadLength', 'the uws() dev plugin option maxPayloadLength', {
+		allowZero: false,
+		zeroMeans:
+			'ws reads maxPayload 0 as UNLIMITED, the opposite of a zero-byte ceiling. ' +
+			'Use a positive byte limit instead.'
+	});
+	if (options.maxPayloadLength != null && (
+		!Number.isSafeInteger(options.maxPayloadLength) ||
+		options.maxPayloadLength > 0x7fffffff
+	)) {
+		throw new Error(
+			'the uws() dev plugin option maxPayloadLength must be a positive integer no greater ' +
+			'than 2147483647 bytes, because ws stores the receiver limit as a signed 32-bit integer'
+		);
+	}
+	// `timeoutMs: process.env.X` is a string when set, and every
 	// comparison against a non-number is false, so a misshaped value would not
-	// fall back to the default - it would disable the timeout. The adapter's
-	// size and timeout options are NOT guarded here because they are not dev
-	// plugin options at all; passing one to `uws()` already warns as unknown.
+	// fall back to the default - it would disable the timeout. Other adapter
+	// size and timeout options are not dev-plugin options; passing one to
+	// `uws()` warns as unknown.
 	assertProtectiveNumber(options, 'timeoutMs', 'the uws() dev plugin option timeoutMs');
 	const unknownPluginKeys = unknownOptionKeys(options, KNOWN_PLUGIN_OPTION_KEYS);
 	if (unknownPluginKeys.length) {
@@ -74,6 +104,31 @@ export default function uws(options = {}) {
 
 	const wsPath = options.path || '/ws';
 	const wsAuthPath = options.authPath || '/__ws/auth';
+	// One source of truth for both the actual ws receiver cap and the value app
+	// code reads from platform. Production uses the same 1 MiB default.
+	const MAX_PAYLOAD_LENGTH_V = options.maxPayloadLength ?? 1024 * 1024;
+	const messageAdmission = createMessageAdmission(options.messageAdmission);
+	const rejectApplicationMessageV = (wrapped, rejection) => {
+		const frame = messageOverloadedFrame(rejection);
+		try { wrapped.send(frame, false, false); bumpOutV(wrapped.getUserData(), frame); } catch {}
+	};
+	const runIngressApplicationWorkV = (wrapped, context) =>
+		dispatchIngressFrame(wrapped, wrapped.getUserData(), context.data, context.platform);
+	const runGameApplicationWorkV = (wrapped, context) => {
+		const msg = context.msg;
+		const gud = wrapped.getUserData();
+		const grantTopic = gud?.[WS_PUBLISH_GRANT];
+		if (!grantTopic || typeof msg.event !== 'string') {
+			const reason = grantTopic ? 'INVALID' : 'FORBIDDEN';
+			const denied = msg.id === undefined
+				? JSON.stringify({ type: 'game-denied', reason })
+				: JSON.stringify({ type: 'game-denied', reason, id: msg.id });
+			wrapped.send(denied);
+			bumpOutV(gud, denied);
+			return;
+		}
+		context.platform.publishGame(wrapped, grantTopic, msg.event, msg.data, msg.id);
+	};
 	// Mirror production: block client-initiated subscribes to `__`-prefixed
 	// system topics by default. A registered plugin namespace may reach its hook,
 	// but landing still requires tracked membership. Apps that need the broad
@@ -84,7 +139,8 @@ export default function uws(options = {}) {
 	// Mirror production wire-subscribe authorization (see handler.js). `let` so
 	// `platform.authorizeWireSubscribe()` can arm it at runtime the way the
 	// framework does; seeded from the config option for the static path.
-	let SUBSCRIBE_AUTHZ_V = options.authorizeWireSubscribe === true;
+	let SUBSCRIBE_AUTHZ_V = options.authorizeWireSubscribe === true || options.authorizeWireSubscribe === 'strict';
+	let SUBSCRIBE_AUTHZ_STRICT_V = options.authorizeWireSubscribe === 'strict';
 	// A plugin's side-effect hook does not count as the app taking over the topic
 	// decision, matching production. See WS_HOOK_SIDE_EFFECT_ONLY.
 	const hasUserSubscribeHookV = () =>
@@ -404,7 +460,7 @@ export default function uws(options = {}) {
 		const timeoutMs = (options && options.timeoutMs) || defaultRequestTimeoutMs;
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
-				if (pending.delete(ref)) reject(new Error('request timed out'));
+				if (pending.delete(ref)) reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_TIMEOUT)));
 			}, timeoutMs);
 			pending.set(ref, { resolve, reject, timer });
 			const payload = JSON.stringify({ type: 'request', ref, event, data: data ?? null });
@@ -582,6 +638,26 @@ export default function uws(options = {}) {
 		},
 		request,
 		get connections() { return connections.size; },
+		/**
+		 * Dev mirror of the production tracing context. The dev server wires
+		 * no tracing provider and keeps no per-connection context, so this is
+		 * the same `null` production answers when tracing is not configured -
+		 * present so `platform.traceContext` reads identically in both modes
+		 * instead of being `undefined` under `vite dev`.
+		 */
+		get traceContext() { return null; },
+		// The frozen vendor-neutral tracing surface. Without a provider its
+		// run() path is a direct callback and current() stays null - the
+		// exact production behavior when `tracing` is unset.
+		trace,
+		/**
+		 * Dev mirror of the production divergence-diagnostic lookup. Dev runs
+		 * a single process and records no divergence diagnostics, so every id
+		 * answers `undefined`, exactly as production answers an unknown or
+		 * expired id.
+		 * @param {string} _diagnosticId
+		 */
+		diagnostic(_diagnosticId) { return undefined; },
 		get pressure() {
 			// Zero-valued snapshot rather than null so downstream code that
 			// destructures `pressure.active` / `.reason` / `.topPublishers`
@@ -594,6 +670,8 @@ export default function uws(options = {}) {
 				reason: 'NONE',
 				maxBufferedBytes: 0,
 				backpressuredConnections: 0,
+				droppedFrames: 0,
+				droppedBytes: 0,
 				topPublishers: []
 			};
 		},
@@ -698,7 +776,7 @@ export default function uws(options = {}) {
 				let granted;
 				try { granted = ws.getUserData()[WS_SUBSCRIPTIONS]; }
 				catch { return 'FORBIDDEN'; }
-				if (deniesUngrantedObserve(SUBSCRIBE_AUTHZ_V, observerHasUserHook, granted, topic)) {
+				if (deniesUngrantedObserve(SUBSCRIBE_AUTHZ_V, observerHasUserHook && !SUBSCRIBE_AUTHZ_STRICT_V, granted, topic)) {
 					return 'FORBIDDEN';
 				}
 			}
@@ -710,15 +788,20 @@ export default function uws(options = {}) {
 				let granted;
 				try { granted = ws.getUserData()[WS_SUBSCRIPTIONS]; }
 				catch { return 'FORBIDDEN'; }
-				if (deniesUngrantedObserve(SUBSCRIBE_AUTHZ_V, observerHasUserHook, granted, topic)) {
+				if (deniesUngrantedObserve(SUBSCRIBE_AUTHZ_V, observerHasUserHook && !SUBSCRIBE_AUTHZ_STRICT_V, granted, topic)) {
 					return 'FORBIDDEN';
 				}
 			}
 			return null;
 		},
-		authorizeWireSubscribe() {
+		authorizeWireSubscribe(mode = 'legacy') {
 			// Mirror production: arm wire-subscribe authorization at runtime.
+			if (mode !== 'legacy' && mode !== 'strict') {
+				throw new TypeError("authorizeWireSubscribe mode must be 'legacy' or 'strict'");
+			}
 			SUBSCRIBE_AUTHZ_V = true;
+			if (mode === 'strict') SUBSCRIBE_AUTHZ_STRICT_V = true;
+			return SUBSCRIBE_AUTHZ_STRICT_V ? 'strict' : 'legacy';
 		},
 		unsubscribe(ws, topic) {
 			const ud = ws.getUserData();
@@ -832,7 +915,9 @@ export default function uws(options = {}) {
 					publishRate: p.publishRate,
 					memoryMB: p.memoryMB,
 					maxBufferedBytes: p.maxBufferedBytes ?? 0,
-					backpressuredConnections: p.backpressuredConnections ?? 0
+					backpressuredConnections: p.backpressuredConnections ?? 0,
+					droppedFrames: p.droppedFrames ?? 0,
+					droppedBytes: p.droppedBytes ?? 0
 				},
 				assertions: Object.fromEntries(platform.assertions)
 			};
@@ -870,11 +955,9 @@ export default function uws(options = {}) {
 					.catch((err) => ({ ok: false, error: (err && err.message) ? err.message : String(err) }))
 			));
 		},
-		// Dev mode runs over the `ws` library which does not enforce a
-		// per-frame cap; report the production default (1 MB) so app code
-		// that branches on `platform.maxPayloadLength` sees a consistent
-		// number across dev / prod.
-		get maxPayloadLength() { return 1024 * 1024; },
+		// The same value is installed as WebSocketServer.maxPayload below, so
+		// application sizing logic observes the limit the dev server enforces.
+		get maxPayloadLength() { return MAX_PAYLOAD_LENGTH_V; },
 		// `ws` library exposes `bufferedAmount` as a property, not a method.
 		// Wrap so the surface matches production exactly.
 		bufferedAmount(ws) {
@@ -1374,6 +1457,7 @@ export default function uws(options = {}) {
 
 			wss = new WebSocketServer({
 				noServer: true,
+				maxPayload: MAX_PAYLOAD_LENGTH_V,
 				// Echo the client's offered subprotocol. The production upgrade
 				// passes Sec-WebSocket-Protocol straight through, and a client
 				// that offered one (the cursor render worker dials with the
@@ -1410,11 +1494,12 @@ export default function uws(options = {}) {
 					applyHandlers(mod);
 				} catch (err) {
 					handlerFailed = true;
-					console.error(
-						`[adapter-uws] Failed to load WebSocket handler (${resolvedHandler.from}):`,
-						err,
-						'\n  See: https://svti.me/ws-handler-load'
-					);
+					emitOperationalDiagnostic(viteHandlerFailureDiagnostic({
+						phase: 'load',
+						source: resolvedHandler.from,
+						...viteDiagnosticEndpoint(server),
+						error: err
+					}));
 				}
 			})();
 
@@ -1488,7 +1573,7 @@ export default function uws(options = {}) {
 				}
 				const bodyBuf = Buffer.concat(chunks);
 
-				const origin = 'http://' + (headers['host'] || 'localhost');
+				const origin = (req.socket?.encrypted ? 'https://' : 'http://') + (headers['host'] || 'localhost');
 				const url = req.url || wsAuthPath;
 				const request = new Request(origin + url, {
 					method: 'POST',
@@ -1498,7 +1583,7 @@ export default function uws(options = {}) {
 					duplex: 'half'
 				});
 
-				const cookies = createCookies(headers['cookie']);
+				const cookies = createCookies(headers['cookie'], request.url);
 				const clientIp = req.socket?.remoteAddress || '';
 				const authRequestId = resolveRequestId(headers['x-request-id']) || randomUUID();
 				const authPlatform = Object.create(platform);
@@ -1548,9 +1633,22 @@ export default function uws(options = {}) {
 					if (outCookies.length > 0) res.setHeader('set-cookie', outCookies);
 					res.end();
 				} catch (err) {
-					console.error('[adapter-uws] authenticate error:', err);
+					// Same event and echo as the production endpoint: a
+					// developer verifying correlation under `vite dev` must
+					// see the id and the structured record, not dev-only
+					// prose.
+					emitOperationalEvent({
+						source: 'svelte-adapter-uws',
+						component: 'runtime.authenticate',
+						event: 'runtime.authenticate.failed',
+						severity: 'error',
+						dataClass: 'pseudonymous',
+						message: 'The WebSocket authentication endpoint failed.',
+						attributes: { requestId: authRequestId, error: diagnosticError(err) }
+					});
 					res.statusCode = 500;
 					res.setHeader('content-type', 'text/plain');
+					if (authRequestId) res.setHeader('x-request-id', authRequestId);
 					res.end('Internal Server Error');
 				}
 			});
@@ -1660,8 +1758,20 @@ export default function uws(options = {}) {
 							userData = result || {};
 						}
 					} catch (err) {
-						console.error('[adapter-uws] WebSocket upgrade error:', err);
-						socket.write('HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nInternal Server Error');
+						emitOperationalEvent({
+							source: 'svelte-adapter-uws',
+							component: 'runtime.websocket-upgrade',
+							event: 'runtime.websocket-upgrade.failed',
+							severity: 'error',
+							dataClass: 'pseudonymous',
+							message: 'The WebSocket upgrade hook failed.',
+							attributes: { requestId: wsRequestId, error: diagnosticError(err) }
+						});
+						socket.write(
+							'HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n' +
+							(wsRequestId ? 'X-Request-ID: ' + wsRequestId + '\r\n' : '') +
+							'\r\nInternal Server Error'
+						);
 						socket.destroy();
 						return;
 					}
@@ -1684,6 +1794,14 @@ export default function uws(options = {}) {
 			wss.on('connection', (ws) => {
 				connections.add(ws);
 				subscriptions.set(ws, new Set());
+				// `ws` emits a connection-level error before closing with 1009 when
+				// maxPayload is exceeded. Consume that expected boundary event so an
+				// oversized dev frame cannot become an uncaught process exception.
+				ws.on('error', (err) => {
+					if (err?.code !== 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH') {
+						console.error('[ws] dev connection error:', err);
+					}
+				});
 
 				const userData = /** @type {any} */ (ws).__userData || {};
 				userData[WS_SUBSCRIPTIONS] = new Set();
@@ -1725,7 +1843,7 @@ export default function uws(options = {}) {
 					if (isBinary && buf[0] === 0x03) {
 						const icaps = userData[WS_CAPS];
 						if (icaps !== undefined && icaps.has(WIRE_INGRESS_CAP)) {
-							dispatchIngressFrame(wrapped, userData, buf, userData[WS_PLATFORM]);
+							await runAdmittedMessageWork(messageAdmission, wrapped, { data: buf, platform: userData[WS_PLATFORM] }, runIngressApplicationWorkV, rejectApplicationMessageV);
 							return;
 						}
 					}
@@ -1801,7 +1919,7 @@ export default function uws(options = {}) {
 								// on microtask coalescing. Paired with the landing re-check
 								// below, which is what keeps the exemption from BEING the
 								// gate here.
-								if (deniesWireSubscribePreHook({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: hasUserSubscribeHookV(), held: !isNew, topic: msg.topic })) {
+								if (deniesWireSubscribePreHook({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: hasUserSubscribeHookV() && !SUBSCRIBE_AUTHZ_STRICT_V, held: !isNew, topic: msg.topic })) {
 									sendDenied(ws, msg.topic, ref, 'FORBIDDEN');
 									return;
 								}
@@ -1861,7 +1979,7 @@ export default function uws(options = {}) {
 								// socket, or the exemption is the entire gate. Scoped to a
 								// topic the socket does NOT already hold, so the recover
 								// fall-through above cannot be refused by it.
-								if (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: hasUserSubscribeHookV(), held: subs.has(msg.topic), topic: msg.topic })) {
+								if (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: hasUserSubscribeHookV() && !SUBSCRIBE_AUTHZ_STRICT_V, held: subs.has(msg.topic), topic: msg.topic })) {
 									settlePendingSubscribe(pendingUdV, msg.topic, pendingTokenV);
 									sendDenied(ws, msg.topic, ref, 'FORBIDDEN');
 									return;
@@ -1879,7 +1997,7 @@ export default function uws(options = {}) {
 								// afterwards - by which time the messages have gone out.
 								const _recoverRevokedV = recoverIsRevoked({
 									held: subs instanceof Set && subs.has(msg.topic),
-									wireAuthz: SUBSCRIBE_AUTHZ_V && !hasUserSubscribeHookV(),
+									wireAuthz: SUBSCRIBE_AUTHZ_V && (SUBSCRIBE_AUTHZ_STRICT_V || !hasUserSubscribeHookV()),
 									cancelled: isPendingSubscribeCancelled(pendingUdV, msg.topic, pendingTokenV),
 									topic: msg.topic
 								});
@@ -2001,7 +2119,7 @@ export default function uws(options = {}) {
 								// REASSIGNED by the hook-reload path, so a per-topic read could
 								// split a single frame across two versions of the app's hooks.
 								const _hasUserHookV = hasUserSubscribeHookV();
-								const _wireAuthzV = SUBSCRIBE_AUTHZ_V && !_hasUserHookV;
+								const _wireAuthzV = SUBSCRIBE_AUTHZ_V && (SUBSCRIBE_AUTHZ_STRICT_V || !_hasUserHookV);
 								// Fails CLOSED when the grant set is missing. Requiring a
 								// truthy `_authzSubsV` made an absent or malformed slot
 								// skip the gate entirely, so dev admitted what production
@@ -2011,7 +2129,7 @@ export default function uws(options = {}) {
 								// has authorized nothing on this connection".
 								const _authzSubsV = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS];
 								const authzDeniedV = _wireAuthzV
-									? valid.map((t) => deniesWireSubscribePreHook({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: _hasUserHookV, held: _authzSubsV instanceof Set && _authzSubsV.has(t), topic: t }))
+									? valid.map((t) => deniesWireSubscribePreHook({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: _hasUserHookV && !SUBSCRIBE_AUTHZ_STRICT_V, held: _authzSubsV instanceof Set && _authzSubsV.has(t), topic: t }))
 									: null;
 								// A topic the grant gate already denied must not reach the
 								// hook, as on the single path. Calling the hook first and
@@ -2068,7 +2186,7 @@ export default function uws(options = {}) {
 										// reads them - otherwise the two sites disagree inside one
 										// frame, which is how this repair failed the first time.
 										const _denial = (authzDeniedV !== null && authzDeniedV[i] ? 'FORBIDDEN' : null)
-											?? (recoverIsRevoked({ held: _heldV, wireAuthz: SUBSCRIBE_AUTHZ_V && !_hasUserHookV, cancelled: batchTokensV === null || isPendingSubscribeCancelled(batchUdV, _t, batchTokensV[i]), topic: _t }) ? 'FORBIDDEN' : null)
+											?? (recoverIsRevoked({ held: _heldV, wireAuthz: SUBSCRIBE_AUTHZ_V && (SUBSCRIBE_AUTHZ_STRICT_V || !_hasUserHookV), cancelled: batchTokensV === null || isPendingSubscribeCancelled(batchUdV, _t, batchTokensV[i]), topic: _t }) ? 'FORBIDDEN' : null)
 											?? (batchDenials !== null ? (batchDenials[_t] ?? null) : (perTopicDenials !== null ? perTopicDenials[i] : null));
 										if (_denial !== null) continue;
 										const _rec = msg.recover[_t];
@@ -2114,7 +2232,7 @@ export default function uws(options = {}) {
 									// Read once and handed to both decisions below; nothing
 									// between here and the subscribe mutates it for this topic.
 									const held = udSubs.has(topic);
-									const denial = (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: _hasUserHookV, held, topic }) ? 'FORBIDDEN' : null)
+									const denial = (deniesWireSubscribeLanding({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: _hasUserHookV && !SUBSCRIBE_AUTHZ_STRICT_V, held, topic }) ? 'FORBIDDEN' : null)
 										?? (batchDenials !== null
 											? (batchDenials[topic] ?? null)
 											: (perTopicDenials !== null ? perTopicDenials[i] : null));
@@ -2197,7 +2315,7 @@ export default function uws(options = {}) {
 								// looser rule than production is how an app ends up
 								// developing against a gate that is not there.
 								let resumeSeqsV = msg.lastSeenSeqs;
-								if (SUBSCRIBE_AUTHZ_V && !hasUserSubscribeHookV() && resumeSeqsV && typeof resumeSeqsV === 'object') {
+								if (SUBSCRIBE_AUTHZ_V && (SUBSCRIBE_AUTHZ_STRICT_V || !hasUserSubscribeHookV()) && resumeSeqsV && typeof resumeSeqsV === 'object') {
 									const grantsV = /** @type {any} */ (ws).__userData?.[WS_SUBSCRIPTIONS];
 									/** @type {Record<string, unknown>} */
 									const allowedV = Object.create(null);
@@ -2257,18 +2375,7 @@ export default function uws(options = {}) {
 								// is the connection's publish grant, never client-supplied.
 								// Ungranted or a non-string event -> game-denied; granted
 								// -> stamp seq, fan out to the room excluding this sender.
-								const gud = /** @type {any} */ (ws).__userData;
-								const grantTopic = gud?.[WS_PUBLISH_GRANT];
-								if (!grantTopic || typeof msg.event !== 'string') {
-									const reason = grantTopic ? 'INVALID' : 'FORBIDDEN';
-									const denied = msg.id === undefined
-										? JSON.stringify({ type: 'game-denied', reason })
-										: JSON.stringify({ type: 'game-denied', reason, id: msg.id });
-									ws.send(denied);
-									bumpOutV(gud, denied);
-									return;
-								}
-								platform.publishGame(ws, grantTopic, msg.event, msg.data, msg.id);
+								await runAdmittedMessageWork(messageAdmission, wrapped, { msg, platform }, runGameApplicationWorkV, rejectApplicationMessageV);
 								return;
 							}
 						} catch {
@@ -2284,19 +2391,20 @@ export default function uws(options = {}) {
 					// when the prefix matched + parsed to an object + no control
 					// type matched; otherwise undefined.
 					await handlerReady;
-					await runMessageHook(userHandlers.message, wrapped, { data: arrayBuffer, isBinary: !!isBinary, msg, platform: wrapped.getUserData()[WS_PLATFORM] });
+					await runAdmittedMessageHook(messageAdmission, userHandlers.message, wrapped, { data: arrayBuffer, isBinary: !!isBinary, msg, platform: wrapped.getUserData()[WS_PLATFORM] }, rejectApplicationMessageV);
 				});
 
 				ws.on('close', (code, reason) => {
 					const reasonBuf = reason || Buffer.alloc(0);
 					const reasonAB = reasonBuf.buffer.slice(reasonBuf.byteOffset, reasonBuf.byteOffset + reasonBuf.byteLength);
 					const ud = /** @type {any} */ (ws).__userData || {};
+					messageAdmission.close(wrapped);
 					const subs = ud[WS_SUBSCRIPTIONS] || new Set();
 					const pending = ud[WS_PENDING_REQUESTS];
 					if (pending && pending.size > 0) {
 						for (const entry of pending.values()) {
 							clearTimeout(entry.timer);
-							try { entry.reject(new Error('connection closed')); } catch {}
+							try { entry.reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED))); } catch {}
 						}
 						pending.clear();
 					}
@@ -2336,7 +2444,9 @@ export default function uws(options = {}) {
 			// cached module instantly when nothing was invalidated, so this is cheap.
 			// We compare function references to detect actual changes.
 			handlerReady = server.ssrLoadModule(resolvedHandlerPath).then((mod) => {
+				const recovered = handlerFailed;
 				handlerFailed = false;
+				let connectionsRestarted = false;
 				if (mod.upgrade !== userHandlers.upgrade ||
 					mod.open !== userHandlers.open ||
 					mod.message !== userHandlers.message ||
@@ -2347,6 +2457,7 @@ export default function uws(options = {}) {
 					mod.unsubscribe !== userHandlers.unsubscribe ||
 					mod.resume !== userHandlers.resume) {
 					applyHandlers(mod);
+					connectionsRestarted = connections.size > 0;
 					// Close existing connections so they reconnect with the new handler.
 					// 1012 = "Service Restart" - clients with auto-reconnect will reconnect.
 					for (const ws of connections) {
@@ -2354,9 +2465,20 @@ export default function uws(options = {}) {
 					}
 					console.log('[adapter-uws] WebSocket handler reloaded, existing connections closed');
 				}
+				if (recovered) {
+					emitOperationalDiagnostic(viteHandlerRecoveredDiagnostic({
+						...viteDiagnosticEndpoint(server),
+						connectionsRestarted
+					}));
+				}
 			}).catch((err) => {
 				handlerFailed = true;
-				console.error('[adapter-uws] Failed to reload WebSocket handler:', err.message);
+				emitOperationalDiagnostic(viteHandlerFailureDiagnostic({
+					phase: 'reload',
+					source: path.relative(server.config.root, resolvedHandlerPath).replaceAll(path.sep, '/') || path.basename(resolvedHandlerPath),
+					...viteDiagnosticEndpoint(server),
+					error: err
+				}));
 			});
 		}
 	};

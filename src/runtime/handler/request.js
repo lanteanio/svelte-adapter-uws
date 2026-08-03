@@ -6,6 +6,14 @@ import { resolveTransportAddress } from './config.js';
 import { serveStatic, tryPrerendered } from './static-assets.js';
 import { handleSSR } from './ssr.js';
 import { requestDone } from './lifecycle.js';
+import { extractTraceContext, traceOperation, tracingEnabled } from '../tracing.js';
+
+function requestTraceContext(req) {
+	return extractTraceContext({
+		traceparent: req.getHeader('traceparent'),
+		tracestate: req.getHeader('tracestate')
+	});
+}
 
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
@@ -24,14 +32,28 @@ export function handleRequest(res, req) {
 	// no query string handling, no remoteAddress decode.
 	const staticFile = staticCache.get(pathname);
 	if (staticFile && (method === 'get' || method === 'head')) {
-		return serveStatic(
+		if (!tracingEnabled) {
+			return serveStatic(
+				res, staticFile,
+				req.getHeader('accept-encoding'),
+				req.getHeader('if-none-match'),
+				method === 'head',
+				req.getHeader('range'),
+				req.getHeader('if-range')
+			);
+		}
+		return traceOperation('adapter.http.static', {
+			kind: 'server',
+			parent: requestTraceContext(req),
+			attributes: { 'http.request.method': method, 'http.route.type': 'static' }
+		}, () => serveStatic(
 			res, staticFile,
 			req.getHeader('accept-encoding'),
 			req.getHeader('if-none-match'),
 			method === 'head',
 			req.getHeader('range'),
 			req.getHeader('if-range')
-		);
+		));
 	}
 
 	// Windows: reject paths with : (Alternate Data Streams) or ~ (8.3 short names)
@@ -46,9 +68,18 @@ export function handleRequest(res, req) {
 	// === PRERENDERED CHECK ===
 	// Lightweight: only 4 header reads, no full collection, no remoteAddress decode
 	if (METHOD === 'GET' || METHOD === 'HEAD') {
-		if (tryPrerendered(res, pathname, query ? `?${query}` : '',
-			req.getHeader('accept-encoding'), req.getHeader('if-none-match'), METHOD === 'HEAD',
-			req.getHeader('range'), req.getHeader('if-range'))) {
+		const served = tracingEnabled
+			? traceOperation('adapter.http.prerendered', {
+				kind: 'server',
+				parent: requestTraceContext(req),
+				attributes: { 'http.request.method': METHOD, 'http.route.type': 'prerendered' }
+			}, () => tryPrerendered(res, pathname, query ? `?${query}` : '',
+				req.getHeader('accept-encoding'), req.getHeader('if-none-match'), METHOD === 'HEAD',
+				req.getHeader('range'), req.getHeader('if-range')))
+			: tryPrerendered(res, pathname, query ? `?${query}` : '',
+				req.getHeader('accept-encoding'), req.getHeader('if-none-match'), METHOD === 'HEAD',
+				req.getHeader('range'), req.getHeader('if-range'));
+		if (served) {
 			return;
 		}
 	}

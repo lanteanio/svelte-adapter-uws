@@ -152,6 +152,33 @@ export function message(ws, ctx) {
 			}
 		})();
 	}
+	if (msg.type === 'divergence-probe') {
+		// Force this worker's delivered-seq map ahead of its siblings
+		// (an externally sequenced publish with relay off never reaches the
+		// other workers), then let the state-hash reporter detect it. The
+		// 'diagnostics' entry reads the REAL replicated store through the
+		// platform, so a test can assert the production collection round
+		// trip end to end.
+		try {
+			if (msg.entry === 'diverge') {
+				platform.publish('divergence:room', 'probe', { n: 1 }, { seq: msg.seq || 7, relay: false });
+				platform.send(ws, 'probe', 'divergence', { nonce: msg.nonce, ok: true });
+			} else {
+				const info = platform.introspect().diagnostics;
+				const detail = info.recent.length > 0
+					? platform.diagnostic(info.recent[info.recent.length - 1].diagnosticId)
+					: null;
+				platform.send(ws, 'probe', 'divergence', {
+					nonce: msg.nonce, ok: true, retained: info.retained, recent: info.recent, detail
+				});
+			}
+		} catch (error) {
+			platform.send(ws, 'probe', 'divergence', {
+				nonce: msg.nonce, ok: false,
+				error: error instanceof Error ? error.message : String(error)
+			});
+		}
+	}
 	if (msg.type === 'sendto') {
 		platform.sendTo(
 			(ud) => ud.token === msg.token,

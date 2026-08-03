@@ -1,16 +1,18 @@
 import { computePressureReason, computeTopPublishers, applyCapacityReason, WS_STATS, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from '../utils.js';
-import { foldConnectionBackpressure, BACKPRESSURE_SAMPLE_CAP, BACKPRESSURE_SAMPLE_THRESHOLD_BYTES } from '../utils/backpressure.js';
+import { foldConnectionBackpressure, takeBackpressureDropWindow, BACKPRESSURE_SAMPLE_CAP, BACKPRESSURE_SAMPLE_THRESHOLD_BYTES } from '../utils/backpressure.js';
 import { DEFAULT_GRANT, leaseGrantSize, samplePressureValue } from '../wire.js';
 import { now, setIntervalTimer, clearIntervalTimer } from '../runtime.js';
 import { createOsPressureSampler } from '../utils/os-pressure.js';
 import { counters, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt } from './state.js';
 import { closeHookRegistered } from './config.js';
+import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
+import { privateValueMetadata } from '../utils/observability-privacy.js';
 
 // Kernel pressure sources (PSI + cgroup CPU quota), sampled on the same 1 Hz
 // tick as the process-local counters. Probes once; on hosts without the
 // source (non-Linux, PSI compiled out, no cgroup limits) the sampler returns
 // nulls at zero further cost and the pressure math is byte-identical.
-const osPressure = createOsPressureSampler();
+let osPressure = createOsPressureSampler();
 
 /**
  * Bump the per-connection inbound counters. No-op when no `close` hook
@@ -59,17 +61,29 @@ export function maybeWarnTopicRegistry() {
 	if (topicSeqsWarnFired) return;
 	if (topicSeqs.size < TOPIC_SEQS_WARN_THRESHOLD) return;
 	topicSeqsWarnFired = true;
-	let top;
-	try { top = computeTopPublishers(topicPublishStats, 0).slice(0, 5); }
-	catch { top = []; }
-	console.warn(
-		'[ws] topic registry has grown to ' + topicSeqs.size +
-		' distinct topics. Each entry persists for the process lifetime ' +
-		'(required by the resume protocol). Reduce topic cardinality or ' +
-		'opt out of seq stamping for high-cardinality publishes via ' +
-		'{ seq: false }. Top recent publishers: ' + JSON.stringify(top) +
-		'\n  See: https://svti.me/topic-cardinality'
-	);
+	let topPublishers;
+	try {
+		topPublishers = computeTopPublishers(topicPublishStats, 0).slice(0, 5).map((entry) => ({
+			topic: privateValueMetadata(entry.topic, 'topic'),
+			messagesPerSec: entry.messagesPerSec,
+			bytesPerSec: entry.bytesPerSec
+		}));
+	}
+	catch { topPublishers = []; }
+	emitOperationalEvent({
+		source: 'svelte-adapter-uws',
+		component: 'runtime.pressure',
+		event: 'pressure.topic-registry-high',
+		severity: 'warn',
+		dataClass: 'pseudonymous',
+		message: 'The topic registry crossed its cardinality warning threshold.',
+		attributes: {
+			topicCount: topicSeqs.size,
+			topPublishers,
+			action: 'Reduce topic cardinality or publish high-cardinality topics with sequence stamping disabled.',
+			help: 'https://svti.me/topic-cardinality'
+		}
+	});
 }
 
 // Soft cap on a single batched WebSocket frame produced by
@@ -161,6 +175,12 @@ function samplePressure(thresholds) {
 	const { maxBufferedBytes, backpressuredConnections } = foldConnectionBackpressure(
 		wsConnections, BACKPRESSURE_SAMPLE_CAP, BACKPRESSURE_SAMPLE_THRESHOLD_BYTES
 	);
+	// uWS reports every frame it sheds through `dropped`. Close that exact event
+	// window independently of the bounded queue-depth walk above: a queue can
+	// drain before this tick, and a dropping socket can sit beyond the walk cap.
+	const { droppedFrames, droppedBytes } = takeBackpressureDropWindow(counters);
+	counters.lastDroppedFrames = droppedFrames;
+	counters.lastDroppedBytes = droppedBytes;
 
 	const mem = process.memoryUsage();
 	const heapUsedRatio = mem.heapTotal > 0 ? mem.heapUsed / mem.heapTotal : 0;
@@ -218,7 +238,8 @@ function samplePressure(thresholds) {
 	);
 	counters.leaseSaturationPeak *= 0.5;
 
-	const transitioned = effectiveReason !== pressureSnapshot.reason;
+	const previousReason = pressureSnapshot.reason;
+	const transitioned = effectiveReason !== previousReason;
 	pressureSnapshot.value = value;
 	pressureSnapshot.subscriberRatio = subscriberRatio;
 	pressureSnapshot.publishRate = publishRate;
@@ -233,6 +254,8 @@ function samplePressure(thresholds) {
 	// notable queue. Both read 0 in the healthy steady state.
 	pressureSnapshot.maxBufferedBytes = maxBufferedBytes;
 	pressureSnapshot.backpressuredConnections = backpressuredConnections;
+	pressureSnapshot.droppedFrames = droppedFrames;
+	pressureSnapshot.droppedBytes = droppedBytes;
 	// Kernel readings ride the snapshot (platform.pressure / introspect /
 	// the posture export) as small stable objects; null when unavailable.
 	pressureSnapshot.psi = os.psi;
@@ -254,7 +277,12 @@ function samplePressure(thresholds) {
 
 	// Sample the admission gauges on the same cadence. Null unless a metrics
 	// registry is configured, so the zero-config sampler is unchanged.
-	if (counters.metricsSampleHook !== null) counters.metricsSampleHook();
+	if (counters.metricsSampleHook !== null) {
+		counters.metricsSampleHook({
+			transition: transitioned ? { from: previousReason, to: effectiveReason } : null,
+			os
+		});
+	}
 
 	// Push the posture line to export subscribers on the same cadence (the
 	// 1 Hz heartbeat is the export contract: silence means the adapter is
@@ -266,7 +294,18 @@ function samplePressure(thresholds) {
 			try {
 				cb(pressureSnapshot);
 			} catch (err) {
-				console.error('[pressure] listener threw:', err);
+				// The emit sits in a catch on the 1 Hz timer: a user callback
+				// error must come out as one structured event, never as an
+				// exception that escapes the interval and kills the worker.
+				emitOperationalEvent({
+					source: 'svelte-adapter-uws',
+					component: 'runtime.pressure',
+					event: 'pressure.listener-failed',
+					severity: 'error',
+					dataClass: 'pseudonymous',
+					message: 'A pressure listener failed.',
+					attributes: { error: diagnosticError(err) }
+				});
 			}
 		}
 	}
@@ -277,7 +316,15 @@ function samplePressure(thresholds) {
 				try {
 					cb(overThreshold);
 				} catch (err) {
-					console.error('[pressure] publish-rate listener threw:', err);
+					emitOperationalEvent({
+						source: 'svelte-adapter-uws',
+						component: 'runtime.pressure',
+						event: 'pressure.publish-rate-listener-failed',
+						severity: 'error',
+						dataClass: 'pseudonymous',
+						message: 'A publish-rate listener failed.',
+						attributes: { error: diagnosticError(err) }
+					});
 				}
 			}
 		} else {
@@ -298,10 +345,20 @@ function samplePressure(thresholds) {
 					if (oldest !== undefined) lastPublishWarnAt.delete(oldest);
 				}
 				lastPublishWarnAt.set(e.topic, t);
-				console.warn(
-					'[ws] runaway publisher topic=%s msg/s=%d bytes/s=%d\n  See: https://svti.me/pressure',
-					e.topic, Math.round(e.messagesPerSec), Math.round(e.bytesPerSec)
-				);
+				emitOperationalEvent({
+					source: 'svelte-adapter-uws',
+					component: 'runtime.pressure',
+					event: 'pressure.runaway-publisher',
+					severity: 'warn',
+					dataClass: 'pseudonymous',
+					message: 'A publisher crossed a configured per-topic pressure threshold.',
+					attributes: {
+						topic: privateValueMetadata(e.topic, 'topic'),
+						messagesPerSec: Math.round(e.messagesPerSec),
+						bytesPerSec: Math.round(e.bytesPerSec),
+						help: 'https://svti.me/pressure'
+					}
+				});
 			}
 		}
 	}
@@ -346,10 +403,15 @@ export function resolvePressureThresholds(opts) {
  * existing timer with a new one using the supplied thresholds.
  *
  * @param {Parameters<typeof resolvePressureThresholds>[0]} opts
+ * @param {{ psi: boolean | null, cpuThrottle: boolean | null } | undefined} sources
+ *   Availability already established while optional metric instruments were
+ *   registered. Passing it prevents a transient first timer read from
+ *   overturning that successful probe forever.
  */
-export function startPressureSampling(opts) {
+export function startPressureSampling(opts, sources) {
 	const thresholds = resolvePressureThresholds(opts);
 	if (pressureTimer) clearIntervalTimer(pressureTimer);
+	if (sources !== undefined) osPressure = createOsPressureSampler({ sources });
 	pressureTimer = setIntervalTimer(() => samplePressure(thresholds), thresholds.sampleIntervalMs);
 	if (typeof pressureTimer.unref === 'function') pressureTimer.unref();
 }

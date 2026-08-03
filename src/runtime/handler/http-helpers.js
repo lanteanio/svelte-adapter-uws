@@ -27,11 +27,15 @@ export function send413(res) {
 	});
 }
 
-/** @param {import('uWebSockets.js').HttpResponse} res */
-export function send500(res) {
+/**
+ * @param {import('uWebSockets.js').HttpResponse} res
+ * @param {string} [requestId]
+ */
+export function send500(res, requestId) {
 	res.cork(() => {
 		res.writeStatus('500 Internal Server Error');
 		res.writeHeader('content-type', 'text/plain');
+		if (requestId) res.writeHeader('x-request-id', requestId);
 		res.end('Internal Server Error');
 	});
 }

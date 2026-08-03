@@ -23,17 +23,17 @@ export const FIXTURE_VARIANTS = {
 
 	// Wire-subscribe authorization ARMED.
 	//
-	// Pointed at a handler that exports no `subscribe` hook on purpose: an
-	// app-supplied subscribe hook takes the topic decision back from the
-	// server-grant model, so a fixture exporting one (as src/hooks.ws.js does)
-	// leaves the armed gate inert. A test built against that would pass against
-	// a server enforcing nothing, which is worse than no test.
+	// Pointed at a handler whose `subscribe` export wraps a real groups-plugin
+	// side-effect hook and preserves its marker. Unlike an app authorization
+	// hook, that export does not take the topic decision back from the
+	// server-grant model, so the armed gate remains decisive while the fixture
+	// can exercise a plugin-owned namespace.
 	//
 	// The handler is named only through the adapter's `websocket.handler` (see
 	// svelte.config.js), which is what an app would do. That also makes this
 	// variant the regression test for the option surviving the Vite plugin: if
 	// the plugin stops honoring it, auto-discovery builds src/hooks.ws.js, its
-	// `subscribe` export stands the armed gate down, and the grant suites fail.
+	// authorization hook stands the armed gate down, and the grant suites fail.
 	grant: {
 		out: 'build-grant',
 		handler: './src/hooks.ws.grant.js',
@@ -41,6 +41,44 @@ export const FIXTURE_VARIANTS = {
 			allowedOrigins: '*',
 			upgradeRateLimit: 100,
 			authorizeWireSubscribe: true
+		}
+	},
+
+	// A configured tracing module with the wrong export shape. The build itself
+	// succeeds, then importing the generated server runtime must fail loudly
+	// instead of silently disabling tracing.
+	badtracing: {
+		out: 'build-bad-tracing',
+		handler: null,
+		tracing: './src/tracing.invalid.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
+	// Linux external-respawner drill: a dedicated handler can wedge exactly one
+	// clustered I/O worker on an authenticated test token. Its separate output
+	// keeps the fault-injection hook out of every ordinary fixture build.
+	respawner: {
+		out: 'build-respawner',
+		handler: './src/hooks.ws.respawner.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 0
+		}
+	},
+
+	// Strict wire authorization with an ordinary application subscribe hook.
+	// The hook allows every topic, so only the server-grant half can refuse a
+	// cross-tenant raw subscribe - the hybrid permissive-hook bypass.
+	strictgrant: {
+		out: 'build-strict-grant',
+		handler: './src/hooks.ws.strict-grant.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100,
+			authorizeWireSubscribe: 'strict'
 		}
 	},
 
@@ -168,6 +206,49 @@ export const FIXTURE_VARIANTS = {
 			allowedOrigins: '*',
 			upgradeRateLimit: 100,
 			metrics: './src/metrics.js'
+		}
+	},
+
+	// Cross-worker state-hash reporting armed on a tight interval, so a real
+	// clustered runtime can prove the aggregate detector, the primary's
+	// bounded detail collection, and the replicated diagnostic store - the
+	// production wiring the pure divergence-diagnostics unit tests cannot
+	// reach.
+	divergence: {
+		out: 'build-divergence',
+		handler: null,
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100,
+			stateHashIntervalMs: 50
+		}
+	},
+
+	// Current `sv create` projects pass SvelteKit configuration directly to
+	// `sveltekit(...)` in Vite config. This is deliberately the same runtime
+	// posture as default but has its own output/module identity and exercises
+	// that consolidated configuration path end to end.
+	consolidated: {
+		out: 'build-consolidated',
+		configStyle: 'consolidated',
+		handler: null,
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
+	// Two total workers with one compute worker leave exactly one socket-owning
+	// I/O worker. This is the supported clustered topology for the adapter's
+	// single-home game sequencer and provides the positive control for the
+	// multi-I/O rejection test.
+	gamehome: {
+		out: 'build-gamehome',
+		handler: null,
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100,
+			workers: { compute: 1 }
 		}
 	}
 };

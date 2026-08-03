@@ -12,6 +12,7 @@ export * from './utils/ws-symbols.js';
 export * from './utils/caps.js';
 export * from './utils/request-id.js';
 export * from './utils/upgrade-admission.js';
+export * from './utils/waiting-room-template.js';
 export * from './utils/metrics.js';
 export * from './utils/fd-limit.js';
 export * from './utils/topic.js';

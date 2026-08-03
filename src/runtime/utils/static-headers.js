@@ -53,3 +53,30 @@ export function mergeStaticHeaders(baseHeaders, staticHeaders) {
 	}
 	return merged;
 }
+
+/**
+ * Resolve a prevalidated custom Cache-Control value for one build output path.
+ * Paths are relative to the configured SvelteKit base. A trailing slash is a
+ * directory-tree selector; any other pattern is an exact asset selector.
+ *
+ * @param {string} relPath - slash-separated path relative to the indexed directory
+ * @param {{ pattern: string, cacheControl: string }[] | null | undefined} rules
+ * @returns {string}
+ */
+export function resolveStaticCacheControl(relPath, rules) {
+	if (!rules?.length) return '';
+	const assetPath = relPath[0] === '/' ? relPath : `/${relPath}`;
+	let best = '';
+	let bestLength = -1;
+	for (let index = 0; index < rules.length; index++) {
+		const { pattern, cacheControl } = rules[index];
+		const matches = pattern.endsWith('/')
+			? assetPath.startsWith(pattern)
+			: assetPath === pattern;
+		if (matches && pattern.length > bestLength) {
+			best = cacheControl;
+			bestLength = pattern.length;
+		}
+	}
+	return best;
+}

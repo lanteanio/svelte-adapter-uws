@@ -1,3 +1,22 @@
+import { traceOperation, tracingEnabled } from '../tracing.js';
+
+async function invokeMessageHook(hook, ws, context, span) {
+	try {
+		await hook(ws, context);
+	} catch (err) {
+		try { span?.recordException?.(err); } catch {}
+		// Preserve the cause server-side without exposing it to the client.
+		console.error('[ws] message hook threw:', err);
+		try {
+			if (typeof ws.end === 'function') ws.end(1011, 'Message handler error');
+			else if (typeof ws.close === 'function') ws.close(1011, 'Message handler error');
+		} catch {
+			// The socket may have closed while the hook was awaiting. There is
+			// nothing left to contain once this connection is already gone.
+		}
+	}
+}
+
 /**
  * Invoke the app/plugin message hook inside the runtime's exception boundary.
  *
@@ -14,17 +33,12 @@
  */
 export async function runMessageHook(hook, ws, context) {
 	if (typeof hook !== 'function') return;
-	try {
-		await hook(ws, context);
-	} catch (err) {
-		// Preserve the cause server-side without exposing it to the client.
-		console.error('[ws] message hook threw:', err);
-		try {
-			if (typeof ws.end === 'function') ws.end(1011, 'Message handler error');
-			else if (typeof ws.close === 'function') ws.close(1011, 'Message handler error');
-		} catch {
-			// The socket may have closed while the hook was awaiting. There is
-			// nothing left to contain once this connection is already gone.
-		}
-	}
+	if (!tracingEnabled) return invokeMessageHook(hook, ws, context, null);
+	await traceOperation('adapter.websocket.message', {
+		kind: 'server',
+		parent: context?.platform?.traceContext,
+		attributes: { 'network.protocol.name': 'websocket' }
+	}, async (span) => {
+		await invokeMessageHook(hook, ws, context, span);
+	});
 }

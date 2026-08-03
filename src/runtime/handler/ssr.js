@@ -3,12 +3,14 @@
 /* global ENV_PREFIX */
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
 import { server } from '../_init.js';
+import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
 import { resolveRequestId, writeChunkWithBackpressure } from '../utils.js';
 import { randomUuid } from '../runtime.js';
 import { PayloadTooLargeError, send413, send500 } from './http-helpers.js';
 import { origin, address_header, xff_depth, body_size_limit, get_origin, WS_COMPRESSION_ON, trusted_proxies, warnUntrustedClaim } from './config.js';
 import { platform } from './platform.js';
 import { isDedupBufferable } from './ssr-dedup.js';
+import { extractTraceContext, traceOperation, tracingEnabled } from '../tracing.js';
 
 // Maximum number of in-flight dedup keys tracked simultaneously.
 const MAX_SSR_DEDUP = 500;
@@ -142,7 +144,22 @@ export function readBody(res, limit, state, contentLength) {
  * @param {{ aborted: boolean }} state
  * @param {string} [directAddress] - Direct socket peer; decides ADDRESS_HEADER trust
  */
-export async function handleSSR(res, method, url, headers, remoteAddress, state, directAddress = remoteAddress) {
+export function handleSSR(res, method, url, headers, remoteAddress, state, directAddress = remoteAddress) {
+	if (!tracingEnabled) {
+		return handleSSRTraced(res, method, url, headers, remoteAddress, state, directAddress, null);
+	}
+	return traceOperation('adapter.http.ssr', {
+		kind: 'server',
+		parent: extractTraceContext(headers),
+		attributes: {
+			'http.request.method': method,
+			'network.protocol.name': 'http'
+		}
+	}, (span) => handleSSRTraced(res, method, url, headers, remoteAddress, state, directAddress, span));
+}
+
+async function handleSSRTraced(res, method, url, headers, remoteAddress, state, directAddress, span) {
+	const requestId = resolveRequestId(headers['x-request-id']) || randomUuid();
 	try {
 		const base_origin = origin || get_origin(headers);
 
@@ -218,7 +235,6 @@ export async function handleSSR(res, method, url, headers, remoteAddress, state,
 		// logging. Object.create keeps the live-getters intact via the
 		// prototype chain - a flat spread would freeze `connections` and
 		// `pressure` to their snapshot value at clone time.
-		const requestId = resolveRequestId(headers['x-request-id']) || randomUuid();
 		const requestPlatform = Object.create(platform);
 		requestPlatform.requestId = requestId;
 
@@ -365,13 +381,22 @@ export async function handleSSR(res, method, url, headers, remoteAddress, state,
 		if (state.aborted) return;
 		await writeResponse(res, response, state, respAcceptEncoding);
 	} catch (err) {
+		try { span?.recordException?.(err); } catch {}
 		if (state.aborted) return;
 		if (err instanceof PayloadTooLargeError) {
 			send413(res);
 			return;
 		}
-		console.error('SSR error:', err);
-		if (!state.aborted) send500(res);
+		emitOperationalEvent({
+			source: 'svelte-adapter-uws',
+			component: 'runtime.ssr',
+			event: 'runtime.ssr.failed',
+			severity: 'error',
+			dataClass: 'pseudonymous',
+			message: 'SvelteKit request handling failed.',
+			attributes: { requestId, error: diagnosticError(err) }
+		});
+		if (!state.aborted) send500(res, requestId);
 	}
 }
 

@@ -3,6 +3,34 @@ import { METHODS } from './http-helpers.js';
 import { readBody } from './ssr.js';
 import { collectRequestHeaders } from '../utils/request-headers.js';
 import { wsModule } from '../ws-handler-bridge.js';
+import { extractTraceContext, traceOperation, tracingEnabled } from '../tracing.js';
+import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
+
+function runAdminHandler(request, res, state, span) {
+	return Promise.resolve()
+		.then(() => wsModule.admin(request))
+		.then((response) => {
+			if (state.aborted) return;
+			if (!(response instanceof Response)) {
+				sendAdminError(res, 500, 'internal error');
+				return;
+			}
+			return writeAdminResponse(res, response, state);
+		})
+		.catch((err) => {
+			try { span?.recordException?.(err); } catch {}
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.admin',
+				event: 'admin.handler-failed',
+				severity: 'error',
+				dataClass: 'pseudonymous',
+				message: 'The admin handler failed; the request was answered 500.',
+				attributes: { error: diagnosticError(err) }
+			});
+			if (!state.aborted) sendAdminError(res, 500, 'internal error');
+		});
+}
 
 // Reserved admin / observability route. The app's WebSocket handler may export
 // an `admin(request)` function (svelte-realtime's auth-gated introspection
@@ -158,18 +186,13 @@ export function handleAdminRequest(res, req) {
 	// === ASYNC PHASE ===
 	// Resolve through Promise.resolve so a synchronous throw inside the app
 	// handler is caught here too, not just a rejected promise.
-	Promise.resolve()
-		.then(() => wsModule.admin(request))
-		.then((response) => {
-			if (state.aborted) return;
-			if (!(response instanceof Response)) {
-				sendAdminError(res, 500, 'internal error');
-				return;
-			}
-			return writeAdminResponse(res, response, state);
-		})
-		.catch((err) => {
-			console.error('[adapter-uws] admin handler error:', err);
-			if (!state.aborted) sendAdminError(res, 500, 'internal error');
-		});
+	if (!tracingEnabled) {
+		void runAdminHandler(request, res, state, null);
+		return;
+	}
+	traceOperation('adapter.http.admin', {
+		kind: 'server',
+		parent: extractTraceContext(headers),
+		attributes: { 'http.request.method': METHOD, 'http.route.type': 'admin' }
+	}, (span) => runAdminHandler(request, res, state, span));
 }

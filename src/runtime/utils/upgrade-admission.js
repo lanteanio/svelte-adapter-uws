@@ -1,18 +1,32 @@
-import { randomFloat, setImmediateTimer } from '../runtime.js';
+import { monotonicNow, randomFloat, setImmediateTimer } from '../runtime.js';
+import {
+	assertAccessibleWaitingDocument,
+	compileAccessibleWaitingRoomTemplate,
+	compileWaitingRoomTemplate
+} from './waiting-room-template.js';
+import { collectRequestHeaders } from './request-headers.js';
+
+const DEFAULT_MAX_DEFERRED = 1024;
 
 /**
  * Build a self-contained admission controller for WebSocket upgrades.
  *
- * Two independent layers, both opt-in (zero or unset = disabled):
+ * Three independent layers, all opt-in (zero or unset = disabled):
  *
  * - `maxConcurrent` caps how many upgrades may be in flight at once.
  *   Crossed requests get rejected before any per-request work, so a
  *   connection storm can be shed without spending CPU on TLS / header
  *   parsing.
+ * - `maxConnections` caps reserved upgrades plus live WebSocket connections.
+ *   A permit is acquired before per-request work and held until the socket's
+ *   close callback, so sequential handshakes cannot bypass the live-connection
+ *   ceiling.
  * - `perTickBudget` caps how many `res.upgrade()` calls run per
  *   event-loop tick. Once the budget is spent, subsequent calls are
  *   deferred via `setImmediate` so the loop is not starved by 10K
- *   synchronous handshakes from one I/O batch.
+ *   synchronous handshakes from one I/O batch. Its queue is always finite:
+ *   `maxDeferred` defaults to 1024 while pacing is enabled, and overflow is
+ *   refused instead of retaining another response closure.
  * - `cursorLane.fraction` reserves a fraction of `maxConcurrent` for a
  *   deprioritised cursor-only upgrade lane (the worker's second
  *   WebSocket). A cursor upgrade is admitted only while both the main
@@ -26,11 +40,29 @@ import { randomFloat, setImmediateTimer } from '../runtime.js';
  * state lives in the closure so multiple instances do not interfere
  * (relevant for testing.js / vite.js parity in future work).
  *
- * @param {{ maxConcurrent?: number, perTickBudget?: number, cursorLane?: { fraction?: number } }} [opts]
+ * @param {{ maxConcurrent?: number, maxConnections?: number, perTickBudget?: number, maxDeferred?: number, cursorLane?: { fraction?: number } }} [opts]
  */
 export function createUpgradeAdmission(opts) {
 	const maxConcurrent = (opts && opts.maxConcurrent) || 0;
+	const configuredMaxConnections = opts && opts.maxConnections;
+	if (
+		configuredMaxConnections !== undefined &&
+		(!Number.isSafeInteger(configuredMaxConnections) || configuredMaxConnections < 0)
+	) {
+		throw new TypeError('upgradeAdmission.maxConnections must be a non-negative safe integer.');
+	}
+	const maxConnections = configuredMaxConnections || 0;
 	const perTickBudget = (opts && opts.perTickBudget) || 0;
+	const configuredMaxDeferred = opts && opts.maxDeferred;
+	if (
+		configuredMaxDeferred !== undefined &&
+		(!Number.isSafeInteger(configuredMaxDeferred) || configuredMaxDeferred < 0)
+	) {
+		throw new TypeError('upgradeAdmission.maxDeferred must be a non-negative safe integer.');
+	}
+	const maxDeferred = perTickBudget > 0
+		? (configuredMaxDeferred === undefined ? DEFAULT_MAX_DEFERRED : configuredMaxDeferred)
+		: 0;
 	// Cursor-lane sub-budget: a fraction of the main ceiling reserved for the
 	// deprioritised cursor-only upgrade lane. Only meaningful when the gate has
 	// a ceiling to carve from; with no ceiling the lane stays at zero and the
@@ -44,23 +76,64 @@ export function createUpgradeAdmission(opts) {
 		: 0;
 	let inFlight = 0;
 	let cursorInFlight = 0;
+	let connectionPermits = 0;
 	let perTickCount = 0;
-	/** @type {Array<() => void>} */
+	/** @type {Array<{ fn: () => void, enqueuedAt: number } | undefined>} */
 	const deferred = [];
+	let deferredHead = 0;
+	let deferredTail = 0;
+	let deferredDepth = 0;
+	let deferredRejectedTotal = 0;
+	/** @type {null | ((depth: number, oldestAgeMs: number, rejectedTotal: number) => void)} */
+	let deferredObserver = null;
 	let drainScheduled = false;
+
+	function oldestDeferredAgeMs() {
+		if (deferredDepth === 0) return 0;
+		const oldest = deferred[deferredHead];
+		return oldest === undefined ? 0 : Math.max(0, monotonicNow() - oldest.enqueuedAt);
+	}
+
+	function notifyDeferredObserver() {
+		if (deferredObserver === null) return;
+		try {
+			deferredObserver(deferredDepth, oldestDeferredAgeMs(), deferredRejectedTotal);
+		} catch {
+			// Metrics are observe-only: an exporter must never break admission.
+		}
+	}
+
+	function scheduleDrain() {
+		if (drainScheduled) return;
+		drainScheduled = true;
+		setImmediateTimer(drain);
+	}
+
+	function dequeue() {
+		const entry = /** @type {{ fn: () => void, enqueuedAt: number }} */ (deferred[deferredHead]);
+		deferred[deferredHead] = undefined;
+		deferredHead = deferredHead + 1 === maxDeferred ? 0 : deferredHead + 1;
+		deferredDepth--;
+		if (deferredDepth === 0) {
+			deferredHead = 0;
+			deferredTail = 0;
+		}
+		return entry;
+	}
 
 	function drain() {
 		drainScheduled = false;
 		perTickCount = 0;
-		while (perTickCount < perTickBudget && deferred.length > 0) {
-			const fn = /** @type {() => void} */ (deferred.shift());
+		while (perTickCount < perTickBudget && deferredDepth > 0) {
+			const entry = dequeue();
 			perTickCount++;
-			try { fn(); } catch (err) { console.error('[ws] deferred upgrade failed:', err); }
+			try { entry.fn(); } catch (err) { console.error('[ws] deferred upgrade failed:', err); }
 		}
-		if (deferred.length > 0) {
-			drainScheduled = true;
-			setImmediateTimer(drain);
-		}
+		notifyDeferredObserver();
+		// A drain that ran callbacks consumed this tick's budget. Schedule one
+		// final empty turn after the queue empties so the counter resets before a
+		// later, otherwise-unrelated upgrade arrives.
+		if (deferredDepth > 0 || perTickCount > 0) scheduleDrain();
 	}
 
 	return {
@@ -71,6 +144,25 @@ export function createUpgradeAdmission(opts) {
 			return true;
 		},
 		release() { inFlight--; },
+		/**
+		 * Reserve one whole-lifetime connection permit. The reservation includes
+		 * the upgrade window, preventing concurrent handshakes from overshooting
+		 * the configured live-connection ceiling. Disabled ceilings are a no-op.
+		 */
+		tryAcquireConnection() {
+			if (maxConnections <= 0) return true;
+			if (connectionPermits >= maxConnections) return false;
+			connectionPermits++;
+			return true;
+		},
+		/** Release a permit acquired by `tryAcquireConnection()`. */
+		releaseConnection() {
+			if (maxConnections <= 0) return;
+			if (connectionPermits <= 0) {
+				throw new Error('upgradeAdmission connection permit released without an acquisition.');
+			}
+			connectionPermits--;
+		},
 		/**
 		 * Acquire a slot for a cursor-only upgrade (the worker's second
 		 * WebSocket). All-or-nothing, mirroring `tryAcquire()`: admitted only
@@ -100,6 +192,32 @@ export function createUpgradeAdmission(opts) {
 		get inFlight() { return inFlight; },
 		/** Configured concurrent-upgrade ceiling (`0` when the gate is open). */
 		get maxConcurrent() { return maxConcurrent; },
+		/** Configured reserved-or-live connection ceiling (`0` when disabled). */
+		get maxConnections() { return maxConnections; },
+		/** Effective finite deferred-callback ceiling (`0` when pacing is off). */
+		get maxDeferred() { return maxDeferred; },
+		/** Upgrade callbacks currently retained by the pacing queue. */
+		get deferredDepth() { return deferredDepth; },
+		/** Live age in milliseconds of the oldest retained callback, or `0`. */
+		get deferredOldestAgeMs() { return oldestDeferredAgeMs(); },
+		/** Callbacks refused because the finite pacing queue was full. */
+		get deferredRejectedTotal() { return deferredRejectedTotal; },
+		/**
+		 * Install the internal metrics observer. It receives an initial snapshot
+		 * and every later enqueue, overflow, and drain transition.
+		 *
+		 * @param {null | ((depth: number, oldestAgeMs: number, rejectedTotal: number) => void)} observer
+		 */
+		setDeferredObserver(observer) {
+			deferredObserver = typeof observer === 'function' ? observer : null;
+			notifyDeferredObserver();
+		},
+		/** Reserved upgrades plus live connections currently holding permits. */
+		get connectionPermits() { return connectionPermits; },
+		/** Remaining permits, or `null` when the live-connection gate is disabled. */
+		get connectionHeadroom() {
+			return maxConnections > 0 ? maxConnections - connectionPermits : null;
+		},
 		/** Live count of cursor-lane upgrades in flight. */
 		get cursorInFlight() { return cursorInFlight; },
 		/**
@@ -110,55 +228,127 @@ export function createUpgradeAdmission(opts) {
 		/**
 		 * Read-only: `true` if a `tryAcquire()` would currently succeed.
 		 * Acquires nothing and mutates no counter, so a capacity probe can
-		 * ask "is there room?" without ever consuming a slot. When
-		 * `maxConcurrent` is `0`/unset the gate never rejects, so this is
-		 * always `true`.
+		 * ask "is there room?" without ever consuming a slot. Pacing is full
+		 * only when this tick's synchronous budget AND the finite deferred queue
+		 * are both exhausted; a transient spent tick with queue room remains
+		 * admissible.
 		 *
 		 * @returns {boolean}
 		 */
-		hasCapacity() { return !(maxConcurrent > 0 && inFlight >= maxConcurrent); },
+		hasCapacity() {
+			return !(maxConcurrent > 0 && inFlight >= maxConcurrent) &&
+				!(maxConnections > 0 && connectionPermits >= maxConnections) &&
+				!(perTickBudget > 0 && perTickCount >= perTickBudget && deferredDepth >= maxDeferred);
+		},
 		/**
 		 * Run `fn` (the actual `res.upgrade()` call) under the per-tick
 		 * budget. Returns `true` if `fn` ran synchronously, `false` if
-		 * deferred to a later tick.
+		 * deferred to a later tick, or `null` when the finite queue is full.
 		 *
 		 * @param {() => void} fn
-		 * @returns {boolean}
+		 * @returns {boolean | null}
 		 */
 		admit(fn) {
 			if (perTickBudget <= 0) { fn(); return true; }
 			if (perTickCount < perTickBudget) {
 				perTickCount++;
+				// Reset on the next turn even when no request exceeds the budget;
+				// otherwise a quiet request much later is mistaken for this tick.
+				scheduleDrain();
 				fn();
 				return true;
 			}
-			deferred.push(fn);
-			if (!drainScheduled) {
-				drainScheduled = true;
-				setImmediateTimer(drain);
+			if (deferredDepth >= maxDeferred) {
+				deferredRejectedTotal++;
+				notifyDeferredObserver();
+				return null;
 			}
+			deferred[deferredTail] = { fn, enqueuedAt: monotonicNow() };
+			deferredTail = deferredTail + 1 === maxDeferred ? 0 : deferredTail + 1;
+			deferredDepth++;
+			notifyDeferredObserver();
+			scheduleDrain();
 			return false;
 		}
 	};
 }
 
 /**
- * Decide the shape of an at-capacity upgrade rejection from the request
- * `Accept` header. A browser navigation (Accept contains `text/html`) gets
- * the holding page; everything else - a real WebSocket upgrade, a library
- * client, `Accept: * / *` - keeps the `503` + `Retry-After` contract. A
- * WebSocket upgrade never renders HTML, so it must land in the `'retry'`
- * bucket; a normal upgrade carries an `Accept` without `text/html` (or no
- * `Accept` at all) and is handled correctly by that rule.
+ * String-keyed carrier used only across `res.upgrade()`. uWebSockets.js does
+ * not preserve Symbol keys in upgrade userData, so `open` immediately promotes
+ * this marker to the collision-safe `WS_CONNECTION_PERMIT` symbol and deletes
+ * the string property before application hooks observe the object.
+ */
+export const WS_CONNECTION_PERMIT_KEY = '__adapter_uws_connection_permit__';
+
+/**
+ * Decide the shape of an at-capacity request rejection. Only an explicitly
+ * acceptable `text/html` media range on a non-WebSocket request gets HTML.
+ * Lookalike media types, q=0 exclusions, library requests, and actual
+ * WebSocket handshakes keep the bare retry response.
  *
  * @param {string | undefined | null} accept
+ * @param {string | undefined | null} [upgrade]
  * @returns {'html' | 'retry'}
  */
-export function negotiateRejection(accept) {
+export function negotiateRejection(accept, upgrade) {
+	if (typeof upgrade === 'string' && upgrade.split(',').some((token) => token.trim().toLowerCase() === 'websocket')) {
+		return 'retry';
+	}
 	if (typeof accept !== 'string' || accept.length === 0) return 'retry';
-	// Case-insensitive substring is sufficient: branch to HTML only when the
-	// client explicitly lists text/html, which browser navigations always do.
-	return accept.toLowerCase().indexOf('text/html') !== -1 ? 'html' : 'retry';
+	const ranges = splitHttpHeaderValue(accept, ',');
+	if (ranges === null) return 'retry';
+	for (const range of ranges) {
+		const rawSegments = splitHttpHeaderValue(range, ';');
+		if (rawSegments === null) continue;
+		const segments = rawSegments.map((segment) => segment.trim());
+		if (segments.shift()?.toLowerCase() !== 'text/html') continue;
+		const quality = segments.find((segment) => /^q\s*=/i.test(segment));
+		if (quality === undefined) return 'html';
+		const raw = quality.slice(quality.indexOf('=') + 1).trim();
+		if (!/^(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/.test(raw)) continue;
+		if (Number(raw) > 0) return 'html';
+	}
+	return 'retry';
+}
+
+/**
+ * Split an HTTP list only at delimiters outside quoted strings. Accept
+ * parameters may legally quote commas and semicolons; treating those bytes as
+ * separators can hide a later q=0 exclusion. Malformed unclosed quotes fail
+ * closed instead of selecting HTML.
+ *
+ * @param {string} value
+ * @param {',' | ';'} delimiter
+ * @returns {string[] | null}
+ */
+function splitHttpHeaderValue(value, delimiter) {
+	const parts = [];
+	let start = 0;
+	let quoted = false;
+	let escaped = false;
+	for (let index = 0; index < value.length; index++) {
+		const character = value[index];
+		if (quoted && escaped) {
+			escaped = false;
+			continue;
+		}
+		if (quoted && character === '\\') {
+			escaped = true;
+			continue;
+		}
+		if (character === '"') {
+			quoted = !quoted;
+			continue;
+		}
+		if (!quoted && character === delimiter) {
+			parts.push(value.slice(start, index));
+			start = index + 1;
+		}
+	}
+	if (quoted || escaped) return null;
+	parts.push(value.slice(start));
+	return parts;
 }
 
 /**
@@ -233,6 +423,201 @@ export function waitingRoomStatusText(waiting) {
 }
 
 /**
+ * Escape operator-supplied identity text before it enters the built-in page or
+ * a custom template token.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+function escapeWaitingRoomHtml(value) {
+	return String(value == null ? '' : value).replace(/[&<>"']/g, (c) => (
+		c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
+	));
+}
+
+/**
+ * Keep status and support links useful without allowing an operator typo to
+ * turn the holding page into a script URL. Relative URLs and HTTP(S) URLs are
+ * accepted; other schemes are omitted.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+function waitingRoomHref(value) {
+	if (typeof value !== 'string' || value.trim() === '') return '';
+	const raw = value.trim();
+	try {
+		const parsed = new URL(raw, 'https://waiting-room.invalid/');
+		if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+		return escapeWaitingRoomHtml(raw);
+	} catch {
+		return '';
+	}
+}
+
+const WAITING_ROOM_OWNED_HEADERS = new Set([
+	'cache-control',
+	'connection',
+	'content-language',
+	'content-length',
+	'content-type',
+	'transfer-encoding',
+	'vary'
+]);
+
+/**
+ * Snapshot the request shape a localized renderer may inspect. A uWS request
+ * object is valid only during its callback, so the facade is detached from it:
+ * retaining the renderer context cannot retain or later touch native state.
+ *
+ * @param {{ getMethod?: () => string, getUrl?: () => string, getQuery?: () => string, forEach?: (visitor: (name: string, value: string) => void) => void } | null | undefined} req
+ * @returns {{ method: string, url: string, headers: { get(name: string): string | null } }}
+ */
+export function createWaitingRoomRequest(req) {
+	const method = typeof req?.getMethod === 'function'
+		? String(req.getMethod() || 'GET').toUpperCase()
+		: 'GET';
+	const pathname = typeof req?.getUrl === 'function' ? String(req.getUrl() || '/') : '/';
+	const query = typeof req?.getQuery === 'function' ? String(req.getQuery() || '') : '';
+	const snapshot = Object.create(null);
+	if (typeof req?.forEach === 'function') collectRequestHeaders(req, snapshot);
+	const get = (name) => {
+		if (typeof name !== 'string' || !/^[a-z0-9-]+$/i.test(name)) return null;
+		const key = name.toLowerCase();
+		if (!Object.prototype.hasOwnProperty.call(snapshot, key)) return null;
+		return String(snapshot[key]);
+	};
+	return Object.freeze({
+		method,
+		url: query ? pathname + '?' + query : pathname,
+		headers: Object.freeze({ get })
+	});
+}
+
+/**
+ * Make renderer language metadata authoritative for the document as well as
+ * the HTTP response. A renderer module must return a full HTML document; the
+ * adapter replaces any pre-existing lang/dir attributes so the body cannot
+ * contradict Content-Language.
+ *
+ * @param {string} body
+ * @param {string} lang
+ * @param {'ltr' | 'rtl' | 'auto'} dir
+ * @returns {string}
+ */
+function applyWaitingRoomDocumentLanguage(body, lang, dir) {
+	const html = /^(\s*(?:<!doctype html>\s*)?)<html\b((?:"[^"]*"|'[^']*'|[^'">])*)>/i;
+	if (!html.test(body)) {
+		throw new TypeError('waiting-room renderer result.body must contain a full <html> document.');
+	}
+	return body.replace(html, (_whole, prefix, attrs) => {
+		const retained = String(attrs).replace(
+			/\s+(?:lang|dir)(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?/gi,
+			''
+		);
+		return prefix + '<html lang="' + escapeWaitingRoomHtml(lang) + '" dir="' + dir + '"' + retained + '>';
+	});
+}
+
+/**
+ * Validate one renderer result before any value reaches uWS response headers.
+ *
+ * @param {unknown} value
+ * @returns {{ body: string, lang: string, dir: 'ltr' | 'rtl' | 'auto', headers: Array<[string, string]>, varyAcceptLanguage: true }}
+ */
+function normalizeWaitingRoomRendererResult(value) {
+	if (!value || typeof value !== 'object' || typeof value.then === 'function') {
+		throw new TypeError('waiting-room renderer must synchronously return { body, lang, dir, headers? }.');
+	}
+	const result = /** @type {Record<string, unknown>} */ (value);
+	if (typeof result.body !== 'string') {
+		throw new TypeError('waiting-room renderer result.body must be a string.');
+	}
+	let lang;
+	try {
+		const canonical = typeof result.lang === 'string'
+			? Intl.getCanonicalLocales(result.lang.trim())
+			: [];
+		if (canonical.length !== 1) throw new RangeError('missing language');
+		lang = canonical[0];
+	} catch {
+		throw new TypeError('waiting-room renderer result.lang must be a valid BCP 47 language tag.');
+	}
+	if (result.dir !== 'ltr' && result.dir !== 'rtl' && result.dir !== 'auto') {
+		throw new TypeError('waiting-room renderer result.dir must be "ltr", "rtl", or "auto".');
+	}
+	if (
+		result.headers != null &&
+		(typeof result.headers !== 'object' || Array.isArray(result.headers))
+	) {
+		throw new TypeError('waiting-room renderer result.headers must be a string record.');
+	}
+	const headers = [];
+	for (const [rawName, rawValue] of Object.entries(result.headers || {})) {
+		const name = rawName.toLowerCase();
+		if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(name)) {
+			throw new TypeError('waiting-room renderer returned an invalid response header name.');
+		}
+		if (WAITING_ROOM_OWNED_HEADERS.has(name)) {
+			throw new TypeError('waiting-room renderer cannot override adapter-owned header "' + name + '".');
+		}
+		if (typeof rawValue !== 'string' || /[\r\n]/.test(rawValue)) {
+			throw new TypeError('waiting-room renderer response header values must be strings without newlines.');
+		}
+		headers.push([name, rawValue]);
+	}
+	const dir = result.dir;
+	const body = applyWaitingRoomDocumentLanguage(result.body, lang, dir);
+	assertAccessibleWaitingDocument(body, 'waiting-room renderer result.body');
+	return {
+		body,
+		lang,
+		dir,
+		headers,
+		varyAcceptLanguage: true
+	};
+}
+
+/**
+ * Minimal accessible document for an HTML navigation when the interactive
+ * waiting room is disabled. It intentionally remains a 503 and performs no
+ * polling; the manual form is the recovery path, while the persistent status
+ * region gives the refusal one announced state instead of a plain-text orphan.
+ *
+ * @returns {string}
+ */
+export function buildAccessibleCapacityRefusalPage() {
+	return '<!doctype html><html lang="en" dir="ltr"><head>' +
+		'<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
+		'<title>Service unavailable</title></head><body><main>' +
+		'<h1>Server at capacity</h1>' +
+		'<p role="status" aria-live="polite" aria-atomic="true">' +
+		'New connections cannot be opened right now. Try again later.</p>' +
+		'<form method="get"><button type="submit">Try again</button></form>' +
+		'</main></body></html>';
+}
+
+/**
+ * Write a normalized holding-page response through the shared uWS-shaped API.
+ *
+ * @param {{ cork(fn: () => void): void, writeStatus(status: string): unknown, writeHeader(name: string, value: string): unknown, end(body: string): unknown }} res
+ * @param {{ body: string, lang: string | null, headers: Array<[string, string]>, varyAcceptLanguage: boolean }} page
+ * @param {string} [status]
+ * @returns {void}
+ */
+export function sendWaitingRoomPage(res, page, status = '200 OK') {
+	res.cork(() => {
+		res.writeStatus(status);
+		res.writeHeader('content-type', 'text/html; charset=utf-8');
+		res.writeHeader('cache-control', 'no-store');
+		if (page.lang) res.writeHeader('content-language', page.lang);
+		if (page.varyAcceptLanguage) res.writeHeader('vary', 'Accept-Language');
+		for (const [name, value] of page.headers) res.writeHeader(name, value);
+		res.end(page.body);
+	});
+}
+
+/**
  * Build the default self-contained holding page served when an upgrade is
  * refused at capacity. No framework, no external fetch beyond the poll
  * endpoint. The inline script polls `admitCheckPath` on a jittered interval,
@@ -272,27 +657,62 @@ export function waitingRoomStatusText(waiting) {
  * HTML or the inline script unescaped; the status line is composed from a
  * coerced integer through a fixed template, so it carries no markup either.
  *
- * @param {{ queueDepth?: number, estimatedSeconds?: number, pollIntervalMs?: number, retryAfterSeconds?: number, admitCheckPath?: string }} ctx
+ * @param {{ queueDepth?: number, estimatedSeconds?: number, pollIntervalMs?: number, retryAfterSeconds?: number, admitCheckPath?: string, appName?: string, statusUrl?: string, supportUrl?: string, incidentId?: string }} ctx
  * @returns {string}
  */
 export function buildWaitingRoomPage(ctx) {
 	const queueDepth = Math.max(0, Math.floor(Number(ctx && ctx.queueDepth) || 0));
 	const pollIntervalMs = Math.max(250, Math.floor(Number(ctx && ctx.pollIntervalMs) || 2000));
 	const checkPath = JSON.stringify((ctx && ctx.admitCheckPath) || '/__admit-check');
+	const appName = escapeWaitingRoomHtml(ctx && ctx.appName);
+	const statusUrl = waitingRoomHref(ctx && ctx.statusUrl);
+	const supportUrl = waitingRoomHref(ctx && ctx.supportUrl);
+	const incidentId = escapeWaitingRoomHtml(ctx && ctx.incidentId);
+	const title = appName ? appName + ' - Waiting room' : 'Waiting room';
+	const identity = appName ? '<p class="app-name">' + appName + '</p>' : '';
+	const resources = statusUrl || supportUrl
+		? '<nav class="links" aria-label="Service resources">' +
+			(statusUrl ? '<a href="' + statusUrl + '">Service status</a>' : '') +
+			(supportUrl ? '<a href="' + supportUrl + '">Get help</a>' : '') +
+			'</nav>'
+		: '';
+	const incident = incidentId
+		? '<p class="incident">Incident reference: <code>' + incidentId + '</code></p>'
+		: '';
 	return '<!doctype html>' +
-		'<html lang="en"><head><meta charset="utf-8">' +
+		'<html lang="en" dir="ltr"><head><meta charset="utf-8">' +
 		'<meta name="viewport" content="width=device-width, initial-scale=1">' +
-		'<title>Waiting room</title>' +
-		'<style>body{font-family:system-ui,sans-serif;margin:0;display:flex;min-height:100vh;' +
-		'align-items:center;justify-content:center;background:#0b0c10;color:#e8e8e8}' +
-		'main{text-align:center;max-width:30rem;padding:2rem}h1{font-size:1.4rem;margin:0 0 .75rem}' +
-		'p{margin:.4rem 0;color:#a9b0bd}' +
-		'button{font:inherit;margin:.75rem .25rem 0;padding:.5rem 1rem;border:1px solid #4a5162;' +
-		'border-radius:.4rem;background:#171a21;color:#e8e8e8;cursor:pointer}' +
-		'button:hover{background:#222733}' +
-		'button:focus-visible{outline:3px solid #9ab4f8;outline-offset:2px}' +
+		'<title>' + title + '</title>' +
+		'<style>:root{color-scheme:light dark;' +
+		'--waiting-room-page-background:#f4f4f5;--waiting-room-panel-background:#fff;' +
+		'--waiting-room-text:#18181b;--waiting-room-muted-text:#52525b;' +
+		'--waiting-room-border:#d4d4d8;--waiting-room-link:#1d4ed8;' +
+		'--waiting-room-control-background:#fff;--waiting-room-control-hover:#e4e4e7;' +
+		'--waiting-room-focus-ring:#2563eb}' +
+		'@media(prefers-color-scheme:dark){:root{' +
+		'--waiting-room-page-background:#09090b;--waiting-room-panel-background:#18181b;' +
+		'--waiting-room-text:#fafafa;--waiting-room-muted-text:#a1a1aa;' +
+		'--waiting-room-border:#3f3f46;--waiting-room-link:#93c5fd;' +
+		'--waiting-room-control-background:#27272a;--waiting-room-control-hover:#3f3f46;' +
+		'--waiting-room-focus-ring:#93c5fd}}' +
+		'body{font-family:system-ui,sans-serif;margin:0;display:flex;min-height:100vh;' +
+		'align-items:center;justify-content:center;background:var(--waiting-room-page-background);' +
+		'color:var(--waiting-room-text)}' +
+		'main{text-align:center;max-width:30rem;margin:1rem;padding:2rem;' +
+		'background:var(--waiting-room-panel-background);border:1px solid var(--waiting-room-border);' +
+		'border-radius:.75rem}h1{font-size:1.4rem;margin:0 0 .75rem}' +
+		'p{margin:.4rem 0;color:var(--waiting-room-muted-text)}' +
+		'.app-name{font-weight:600;color:var(--waiting-room-text)}' +
+		'.links{margin-top:1rem}.links a{color:var(--waiting-room-link)}' +
+		'.links a+a{margin-left:1rem}.incident code{color:var(--waiting-room-text)}' +
+		'button{font:inherit;margin:.75rem .25rem 0;padding:.5rem 1rem;' +
+		'border:1px solid var(--waiting-room-border);border-radius:.4rem;' +
+		'background:var(--waiting-room-control-background);color:var(--waiting-room-text);cursor:pointer}' +
+		'button:hover{background:var(--waiting-room-control-hover)}' +
+		'button:focus-visible{outline:3px solid var(--waiting-room-focus-ring);outline-offset:2px}' +
 		'[hidden]{display:none}</style></head>' +
 		'<body><main>' +
+		identity +
 		'<h1>Server at capacity</h1>' +
 		'<p>New connections cannot be opened right now. This page checks for a free slot ' +
 		'and reloads by itself as soon as one opens.</p>' +
@@ -300,6 +720,8 @@ export function buildWaitingRoomPage(ctx) {
 		waitingRoomStatusText(queueDepth) + '</p>' +
 		'<p><button type="button" id="p" aria-pressed="false">Pause live updates</button>' +
 		'<button type="button" id="c" hidden>Reload now</button></p>' +
+		resources +
+		incident +
 		'</main>' +
 		'<script>' +
 		'(function(){' +
@@ -397,12 +819,13 @@ export function buildWaitingRoomPage(ctx) {
  * Substitute the supported `{{token}}` placeholders in an operator-supplied
  * waiting-room template string. Numeric context values are coerced to integers
  * and the string value is HTML-escaped, so no token value reaches the page
- * unescaped; unknown tokens are left intact. A template is a JSON-serializable
- * string (not a function) so it survives the build-time options serialization
- * and reaches the production runtime.
+ * unescaped. The compiler rejects unknown or incomplete token syntax. A
+ * template is a JSON-serializable string (not a function) so it survives the
+ * build-time options serialization and reaches the production runtime.
  *
  * Supported tokens: `{{queueDepth}}`, `{{estimatedSeconds}}`,
- * `{{pollIntervalMs}}`, `{{retryAfterSeconds}}`, `{{admitCheckPath}}`.
+ * `{{pollIntervalMs}}`, `{{retryAfterSeconds}}`, `{{admitCheckPath}}`,
+ * `{{appName}}`, `{{statusUrl}}`, `{{supportUrl}}`, `{{incidentId}}`.
  *
  * What the two estimate tokens actually carry, so an operator page does not
  * repeat a claim the runtime cannot back: `{{queueDepth}}` is a rolling count
@@ -413,25 +836,30 @@ export function buildWaitingRoomPage(ctx) {
  * estimate at all.
  *
  * @param {string} tpl
- * @param {{ queueDepth: number, estimatedSeconds: number, pollIntervalMs: number, retryAfterSeconds: number, admitCheckPath: string }} ctx
+ * @param {{ queueDepth: number, estimatedSeconds: number, pollIntervalMs: number, retryAfterSeconds: number, admitCheckPath: string, appName?: string, statusUrl?: string, supportUrl?: string, incidentId?: string }} ctx
  * @returns {string}
  */
 export function renderWaitingRoomTemplate(tpl, ctx) {
-	const htmlEsc = (s) => String(s).replace(/[&<>"']/g, (c) => (
-		c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
-	));
-	/** @type {Record<string, string>} */
-	const values = {
+	return compileWaitingRoomTemplate(tpl)(waitingRoomTemplateValues(ctx));
+}
+
+/**
+ * Normalize and escape one live template context.
+ * @param {{ queueDepth: number, estimatedSeconds: number, pollIntervalMs: number, retryAfterSeconds: number, admitCheckPath: string, appName?: string, statusUrl?: string, supportUrl?: string, incidentId?: string }} ctx
+ * @returns {Record<string, string>}
+ */
+function waitingRoomTemplateValues(ctx) {
+	return {
 		queueDepth: String(Math.max(0, Math.floor(Number(ctx && ctx.queueDepth) || 0))),
 		estimatedSeconds: String(Math.max(0, Math.floor(Number(ctx && ctx.estimatedSeconds) || 0))),
 		pollIntervalMs: String(Math.max(250, Math.floor(Number(ctx && ctx.pollIntervalMs) || 2000))),
 		retryAfterSeconds: String(Math.max(1, Math.floor(Number(ctx && ctx.retryAfterSeconds) || 1))),
-		admitCheckPath: htmlEsc((ctx && ctx.admitCheckPath) || '/__admit-check')
+		admitCheckPath: escapeWaitingRoomHtml((ctx && ctx.admitCheckPath) || '/__admit-check'),
+		appName: escapeWaitingRoomHtml(ctx && ctx.appName),
+		statusUrl: waitingRoomHref(ctx && ctx.statusUrl),
+		supportUrl: waitingRoomHref(ctx && ctx.supportUrl),
+		incidentId: escapeWaitingRoomHtml(ctx && ctx.incidentId)
 	};
-	return tpl.replace(
-		/\{\{(queueDepth|estimatedSeconds|pollIntervalMs|retryAfterSeconds|admitCheckPath)\}\}/g,
-		(_, k) => values[k]
-	);
 }
 
 /**
@@ -440,19 +868,22 @@ export function renderWaitingRoomTemplate(tpl, ctx) {
  * resolved settings) or `null` when the waiting room is off.
  *
  * The waiting room is on by default whenever the gate can actually reject -
- * that is, `maxConcurrent > 0` - unless the operator opts out with
- * `waitingRoom: false`. When it is off, the caller emits today's exact bare
- * `503`. The shape mirrors the gate's own "> 0 means active" rule so the
+ * that is, `maxConcurrent > 0`, `maxConnections > 0`, or bounded pacing via
+ * `perTickBudget > 0` - unless the operator opts out with `waitingRoom: false`.
+ * When it is off, an HTML navigation gets the
+ * minimal accessible `503`; WebSocket and non-HTML clients keep the exact
+ * bare response. The shape mirrors the gate's own "> 0 means active" rule so the
  * waiting room can only engage in a deployment that has opted into admission
  * control (there is nothing to queue for otherwise).
  *
- * @param {{ maxConcurrent?: number, perTickBudget?: number, waitingRoom?: false | { path?: string, admitCheckPath?: string, retryAfterSeconds?: number, pollIntervalMs?: number, template?: string } } | undefined} upgradeAdmission
- * @returns {null | { path: string, admitCheckPath: string, pollIntervalMs: number, retryAfterSeconds: number, jitteredRetryAfter(spread?: number): number, estimateSeconds(queueDepth: number): number, renderPage(queueDepth?: number): string }}
+ * @param {{ maxConcurrent?: number, maxConnections?: number, perTickBudget?: number, maxDeferred?: number, waitingRoom?: false | { path?: string, admitCheckPath?: string, retryAfterSeconds?: number, pollIntervalMs?: number, template?: string, renderer?: string | Function, appName?: string, statusUrl?: string, supportUrl?: string, incidentId?: string } } | undefined} upgradeAdmission
+ * @param {Function | null} [rendererModule] bundled production renderer
+ * @returns {null | { path: string, admitCheckPath: string, pollIntervalMs: number, retryAfterSeconds: number, jitteredRetryAfter(spread?: number): number, estimateSeconds(queueDepth: number): number, renderPage(queueDepth?: number): string, renderResponse(queueDepth?: number, request?: { method: string, url: string, headers: { get(name: string): string | null } }): { body: string, lang: string | null, dir: string | null, headers: Array<[string, string]>, varyAcceptLanguage: boolean } }}
  */
-export function resolveWaitingRoom(upgradeAdmission) {
+export function resolveWaitingRoom(upgradeAdmission, rendererModule = null) {
 	const ua = upgradeAdmission;
 	const wr = ua && ua.waitingRoom;
-	if (!(ua && ua.maxConcurrent > 0 && wr !== false)) return null;
+	if (!(ua && (ua.maxConcurrent > 0 || ua.maxConnections > 0 || ua.perTickBudget > 0) && wr !== false)) return null;
 
 	const cfg = (wr && typeof wr === 'object') ? wr : {};
 	const path = typeof cfg.path === 'string' ? cfg.path : '/__waiting-room';
@@ -461,6 +892,13 @@ export function resolveWaitingRoom(upgradeAdmission) {
 		? Math.floor(cfg.pollIntervalMs) : 2000;
 	const retryAfterSeconds = Number.isFinite(cfg.retryAfterSeconds) && cfg.retryAfterSeconds > 0
 		? Math.floor(cfg.retryAfterSeconds) : Math.max(1, Math.round(pollIntervalMs / 1000));
+	const appName = typeof cfg.appName === 'string' ? cfg.appName : '';
+	const statusUrl = typeof cfg.statusUrl === 'string' ? cfg.statusUrl : '';
+	const supportUrl = typeof cfg.supportUrl === 'string' ? cfg.supportUrl : '';
+	const incidentId = typeof cfg.incidentId === 'string' ? cfg.incidentId : '';
+	if (cfg.template != null && (cfg.renderer != null || rendererModule != null)) {
+		throw new TypeError('waitingRoom.template and waitingRoom.renderer are mutually exclusive.');
+	}
 	// Operator override page. A string is the supported, serializable form
 	// (token-substituted via renderWaitingRoomTemplate). A function is still
 	// honoured if one is passed programmatically (e.g. the test harness), but it
@@ -468,6 +906,50 @@ export function resolveWaitingRoom(upgradeAdmission) {
 	// option is a string.
 	const templateStr = typeof cfg.template === 'string' ? cfg.template : null;
 	const templateFn = typeof cfg.template === 'function' ? cfg.template : null;
+	const compiledTemplate = templateStr !== null
+		? compileAccessibleWaitingRoomTemplate(templateStr)
+		: null;
+	const renderer = typeof rendererModule === 'function'
+		? rendererModule
+		: typeof cfg.renderer === 'function'
+			? cfg.renderer
+			: null;
+	if (typeof cfg.renderer === 'string' && renderer === null) {
+		throw new TypeError(
+			'waitingRoom.renderer was configured, but its bundled module did not export a renderer function.'
+		);
+	}
+	let rendererFailureReported = false;
+
+	const renderContext = (queueDepth) => {
+		const normalizedDepth = Math.max(0, Math.floor(Number(queueDepth) || 0));
+		return {
+			queueDepth: normalizedDepth,
+			estimatedSeconds: normalizedDepth,
+			pollIntervalMs,
+			retryAfterSeconds,
+			admitCheckPath,
+			appName,
+			statusUrl,
+			supportUrl,
+			incidentId
+		};
+	};
+	const templateDocument = compiledTemplate
+		? assertAccessibleWaitingDocument(
+			compiledTemplate(waitingRoomTemplateValues(renderContext(0))),
+			'waitingRoom.template'
+		)
+		: null;
+	assertAccessibleWaitingDocument(buildWaitingRoomPage(renderContext(0)), 'built-in waiting-room page');
+
+	const builtInResponse = (ctx, varyAcceptLanguage = false) => ({
+		body: buildWaitingRoomPage(ctx),
+		lang: 'en',
+		dir: 'ltr',
+		headers: [],
+		varyAcceptLanguage
+	});
 
 	return {
 		path,
@@ -517,16 +999,60 @@ export function resolveWaitingRoom(upgradeAdmission) {
 		 * @returns {string}
 		 */
 		renderPage(queueDepth) {
-			const ctx = {
-				queueDepth: queueDepth || 0,
-				estimatedSeconds: this.estimateSeconds(queueDepth || 0),
-				pollIntervalMs,
-				retryAfterSeconds,
-				admitCheckPath
-			};
-			if (templateStr) return renderWaitingRoomTemplate(templateStr, ctx);
-			if (templateFn) return templateFn(ctx);
-			return buildWaitingRoomPage(ctx);
+			return this.renderResponse(queueDepth).body;
+		},
+		/**
+		 * Render body plus response metadata. A bundled renderer receives the
+		 * live request facade and may choose a locale per request. Invalid or
+		 * throwing renderer output falls back to the built-in English page so a
+		 * translation defect cannot turn overload protection into an outage.
+		 *
+		 * @param {number} [queueDepth]
+		 * @param {{ method: string, url: string, headers: { get(name: string): string | null } }} [request]
+		 * @returns {{ body: string, lang: string | null, dir: string | null, headers: Array<[string, string]>, varyAcceptLanguage: boolean }}
+		 */
+		renderResponse(queueDepth, request) {
+			const ctx = renderContext(queueDepth);
+			if (compiledTemplate) {
+				return {
+					body: compiledTemplate(waitingRoomTemplateValues(ctx)),
+					lang: templateDocument.lang,
+					dir: templateDocument.dir,
+					headers: [],
+					varyAcceptLanguage: false
+				};
+			}
+			if (templateFn) {
+				const body = String(templateFn(ctx));
+				const { lang, dir } = assertAccessibleWaitingDocument(
+					body,
+					'waitingRoom.template function result'
+				);
+				return {
+					body,
+					lang,
+					dir,
+					headers: [],
+					varyAcceptLanguage: false
+				};
+			}
+			if (renderer) {
+				try {
+					return normalizeWaitingRoomRendererResult(renderer({
+						...ctx,
+						request: request || createWaitingRoomRequest(null)
+					}));
+				} catch (error) {
+					if (!rendererFailureReported) {
+						rendererFailureReported = true;
+						console.error(
+							'[adapter-uws] waiting-room renderer failed; using the built-in English page:',
+							error
+						);
+					}
+				}
+			}
+			return builtInResponse(ctx, renderer !== null);
 		}
 	};
 }

@@ -3,6 +3,7 @@ import { WS_COALESCED, WS_PLATFORM, assert, drainCoalesced, isAuthorizationHook,
 import { counters } from './state.js';
 import { bumpOut } from './pressure-metrics.js';
 import { envelopePrefix } from './envelope-cache.js';
+import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
 
 /**
  * True when `ref` is a usable handle for subscribe acks. Numeric refs
@@ -43,7 +44,15 @@ export async function runSubscribeHook(ws, topic) {
 		// 'INTERNAL_ERROR' reason on the wire so the client can distinguish
 		// it from 'FORBIDDEN' / 'UNAUTHENTICATED' / etc. Logging the actual
 		// error keeps the cause visible without blowing up the message handler.
-		console.error('[ws] subscribe hook threw:', err);
+		emitOperationalEvent({
+			source: 'svelte-adapter-uws',
+			component: 'runtime.subscribe',
+			event: 'subscribe.hook-failed',
+			severity: 'error',
+			dataClass: 'pseudonymous',
+			message: 'The subscribe hook threw; the subscribe was denied INTERNAL_ERROR.',
+			attributes: { error: diagnosticError(err) }
+		});
 		return 'INTERNAL_ERROR';
 	}
 }
@@ -74,7 +83,15 @@ export async function runSubscribeBatchHook(ws, topics) {
 		// Fail closed: deny every topic in the batch with 'INTERNAL_ERROR'
 		// so a throwing (or rejecting) hook cannot let unauthorized
 		// subscribes through.
-		console.error('[ws] subscribeBatch hook threw:', err);
+		emitOperationalEvent({
+			source: 'svelte-adapter-uws',
+			component: 'runtime.subscribe',
+			event: 'subscribe.batch-hook-failed',
+			severity: 'error',
+			dataClass: 'pseudonymous',
+			message: 'The subscribeBatch hook threw; every topic in the batch was denied INTERNAL_ERROR.',
+			attributes: { error: diagnosticError(err) }
+		});
 		// Null-prototype: the keys are client-supplied topic names, and
 		// `failed['__proto__'] = '...'` on a normal object hits the inherited
 		// setter and stores nothing. The lookup then reads Object.prototype
@@ -101,7 +118,15 @@ export async function runSubscribeBatchHook(ws, topics) {
 			// truthy / true / undefined -> allow (skip)
 		}
 	} catch (err) {
-		console.error('[ws] subscribeBatch result read threw:', err);
+		emitOperationalEvent({
+			source: 'svelte-adapter-uws',
+			component: 'runtime.subscribe',
+			event: 'subscribe.batch-result-read-failed',
+			severity: 'error',
+			dataClass: 'pseudonymous',
+			message: 'Reading the subscribeBatch result threw; every topic in the batch was denied INTERNAL_ERROR.',
+			attributes: { error: diagnosticError(err) }
+		});
 		/** @type {Record<string, string>} */
 		const broken = Object.create(null);
 		for (let i = 0; i < topics.length; i++) broken[topics[i]] = 'INTERNAL_ERROR';
