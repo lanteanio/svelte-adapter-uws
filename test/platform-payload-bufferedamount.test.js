@@ -37,6 +37,47 @@ describeUWS('platform.maxPayloadLength', () => {
 		expect(server.platform.maxPayloadLength).toBe(1024 * 1024);
 	});
 
+	it('enforces the exact cap it reports, against the real socket', async () => {
+		// The harness once enforced 64 KiB while reporting 1 MiB - the same
+		// report-versus-enforce split the production and Vite surfaces were
+		// fixed for. One constant drives both now, and this drives it for
+		// real: a frame just under the reported cap is delivered, a frame
+		// over it closes the connection at the receiver.
+		const { createTestServer } = await import('../src/testing.js');
+		const { WebSocket } = await import('ws');
+		server = await createTestServer({
+			maxPayloadLength: 32 * 1024,
+			handler: {
+				message(ws, { data, platform }) {
+					platform.send(ws, 'probe', 'echo-size', { size: data.byteLength });
+				}
+			}
+		});
+		expect(server.platform.maxPayloadLength).toBe(32 * 1024);
+
+		const frames = [];
+		let closed = false;
+		const ws = new WebSocket(server.wsUrl);
+		ws.on('message', (d) => { try { frames.push(JSON.parse(d.toString())); } catch {} });
+		ws.on('close', () => { closed = true; });
+		await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
+
+		ws.send(Buffer.alloc(31 * 1024, 0x61));
+		const until = async (predicate) => {
+			const deadline = Date.now() + 3000;
+			while (!predicate()) {
+				if (Date.now() >= deadline) throw new Error('timed out');
+				await new Promise((r) => setTimeout(r, 10));
+			}
+		};
+		await until(() => frames.some((f) => f.event === 'echo-size' && f.data?.size === 31 * 1024));
+
+		ws.send(Buffer.alloc(33 * 1024, 0x61));
+		await until(() => closed);
+		expect(frames.filter((f) => f.data?.size === 33 * 1024)).toHaveLength(0);
+		try { ws.terminate(); } catch { /* closed */ }
+	});
+
 	it('the value is a snapshot of the configured cap, not a live channel for changes', async () => {
 		// Reading twice returns the same value; nothing else mutates it.
 		const { createTestServer } = await import('../src/testing.js');

@@ -27,10 +27,12 @@ import {
 	trackedUnsubscribe,
 	beginPendingSubscribe,
 	settlePendingSubscribe,
-	deniesUngrantedObserve,
 	tombstonePendingSubscribe,
 	markSideEffectHooks
 } from '../src/runtime/utils.js';
+// The observer gate lives in the canonical policy module, whose exclusive
+// export ownership the surface-policy oracle enforces.
+import { deniesUngrantedObserve } from '../src/runtime/utils/subscribe-policy.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const handlerSrc = readFileSync(path.join(ROOT, 'src/runtime/handler.js'), 'utf8');
@@ -293,7 +295,10 @@ describe('grant-model wiring - source guards', () => {
 	});
 
 	it('authorizeWireSubscribe is serialized into wsOpts and unknown keys warn at build time', () => {
-		expect(indexSrc).toContain('authorizeWireSubscribe: websocket?.authorizeWireSubscribe === true');
+		// The strict tri-state serializes verbatim: 'strict' survives as the
+		// string, true stays boolean, anything else is false. A bare
+		// `=== true` would silently downgrade a documented 'strict' build.
+		expect(indexSrc).toContain("authorizeWireSubscribe: websocket?.authorizeWireSubscribe === 'strict'");
 		expect(indexSrc).toContain('const wsOpts = serializeWsOptions(websocket, adminPath);');
 		expect(indexSrc).toContain('unknown websocket option(s)');
 	});

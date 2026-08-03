@@ -44,7 +44,9 @@
 // cannot satisfy any rule here, because comments are not in the tree.
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parse } from 'acorn';
 
 // ONE list. `SURFACES` and a separate file list used to sit side by side here,
@@ -75,16 +77,37 @@ const SHARED = [
 ];
 
 const POLICY = 'src/runtime/utils/subscribe-policy.js';
+const SUBSCRIPTION_CAP = 1_000_000;
 const POLICY_NAMES = [
 	'deniesWireSystemTopicSubscribe',
 	'deniesWireSubscribePreHook',
 	'deniesWireSubscribeLanding',
 	'wantsRecover',
 	'recoverIsRevoked',
-	'exceedsSubscriptionCap'
+	'exceedsSubscriptionCap',
+	// The observer lane's grant recheck. Listed so the export-ownership rule
+	// and the binding-shadow ban apply to the ONE predicate whose lane has no
+	// second line of defence - a nested-scope shadow of this name could
+	// otherwise satisfy the two-calls-around-one-await structure while the
+	// real predicate is never asked.
+	'deniesUngrantedObserve'
 ];
 
 const read = (f) => readFileSync(new URL(`../${f}`, import.meta.url), 'utf8');
+const rootDir = fileURLToPath(new URL('../', import.meta.url));
+const pathOf = (f) => fileURLToPath(new URL(`../${f}`, import.meta.url));
+const policyRealpath = realpathSync(pathOf(POLICY));
+
+/** Every JavaScript module below a directory, as repository-relative paths. */
+function jsFiles(dir, prefix = dir) {
+	const out = [];
+	for (const entry of readdirSync(join(rootDir, dir), { withFileTypes: true })) {
+		const relative = `${prefix}/${entry.name}`;
+		if (entry.isDirectory()) out.push(...jsFiles(`${dir}/${entry.name}`, relative));
+		else if (entry.isFile() && entry.name.endsWith('.js')) out.push(relative);
+	}
+	return out;
+}
 
 /**
  * Every node paired with its ancestor chain, nearest first.
@@ -115,13 +138,23 @@ function nodesWithAncestors(src) {
 	return out;
 }
 
-/** Names this file imports from the policy module, as {local -> imported}. */
-function policyImports(nodes) {
+/** Resolve one relative module specifier to the canonical file it names. */
+function resolvedImport(file, specifier) {
+	if (typeof specifier !== 'string' || !specifier.startsWith('.')) return null;
+	try {
+		return realpathSync(fileURLToPath(new URL(specifier, new URL(`../${file}`, import.meta.url))));
+	} catch {
+		return null;
+	}
+}
+
+/** Names this file imports from the canonical policy module, as {local -> imported}. */
+function policyImports(nodes, file) {
 	/** @type {Map<string, string>} */
 	const found = new Map();
 	for (const { node } of nodes) {
 		if (node.type !== 'ImportDeclaration') continue;
-		if (typeof node.source?.value !== 'string' || !node.source.value.includes('subscribe-policy.js')) continue;
+		if (resolvedImport(file, node.source?.value) !== policyRealpath) continue;
 		for (const spec of node.specifiers) {
 			if (spec.type === 'ImportSpecifier') found.set(spec.local.name, spec.imported.name);
 		}
@@ -129,15 +162,708 @@ function policyImports(nodes) {
 	return found;
 }
 
-/** Every local binding name declared in this file (function, const/let/var, class). */
+/** Add every identifier declared by a binding pattern. */
+function addPatternBindings(pattern, names) {
+	if (pattern === null || pattern === undefined) return;
+	if (pattern.type === 'Identifier') {
+		names.add(pattern.name);
+		return;
+	}
+	if (pattern.type === 'RestElement') {
+		addPatternBindings(pattern.argument, names);
+		return;
+	}
+	if (pattern.type === 'AssignmentPattern') {
+		addPatternBindings(pattern.left, names);
+		return;
+	}
+	if (pattern.type === 'ArrayPattern') {
+		for (const element of pattern.elements) addPatternBindings(element, names);
+		return;
+	}
+	if (pattern.type === 'ObjectPattern') {
+		for (const property of pattern.properties) {
+			if (property.type === 'RestElement') addPatternBindings(property.argument, names);
+			else addPatternBindings(property.value, names);
+		}
+	}
+}
+
+/** Every non-import binding declared in this file, including params and patterns. */
 function localBindings(nodes) {
 	const names = new Set();
 	for (const { node } of nodes) {
-		if (node.type === 'FunctionDeclaration' && node.id) names.add(node.id.name);
-		else if (node.type === 'ClassDeclaration' && node.id) names.add(node.id.name);
-		else if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier') names.add(node.id.name);
+		if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression') && node.id) names.add(node.id.name);
+		if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') {
+			for (const param of node.params) addPatternBindings(param, names);
+		} else if (node.type === 'ClassDeclaration' && node.id) names.add(node.id.name);
+		else if (node.type === 'VariableDeclarator') addPatternBindings(node.id, names);
+		else if (node.type === 'CatchClause') addPatternBindings(node.param, names);
 	}
 	return names;
+}
+
+/** Policy names this module exports, including export-list aliases. */
+function exportedPolicyNames(nodes) {
+	const names = new Set();
+	for (const { node } of nodes) {
+		if (node.type !== 'ExportNamedDeclaration') continue;
+		if (node.declaration?.type === 'FunctionDeclaration' && node.declaration.id) {
+			names.add(node.declaration.id.name);
+		}
+		if (node.declaration?.type === 'VariableDeclaration') {
+			for (const declaration of node.declaration.declarations) addPatternBindings(declaration.id, names);
+		}
+		for (const specifier of node.specifiers ?? []) {
+			if (specifier.type === 'ExportSpecifier') names.add(specifier.exported.name ?? specifier.exported.value);
+		}
+	}
+	return new Set([...names].filter((name) => POLICY_NAMES.includes(name)));
+}
+
+const FUNCTION_TYPES = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression']);
+
+function nearestFunction(ancestors) {
+	return ancestors.find((node) => FUNCTION_TYPES.has(node.type)) ?? null;
+}
+
+function staticBoolean(node) {
+	if (node?.type === 'Literal' && typeof node.value === 'boolean') return node.value;
+	if (node?.type === 'UnaryExpression' && node.operator === '!') {
+		const value = staticBoolean(node.argument);
+		return value === null ? null : !value;
+	}
+	if (node?.type === 'LogicalExpression') {
+		const left = staticBoolean(node.left);
+		const right = staticBoolean(node.right);
+		if (node.operator === '&&') {
+			if (left === false || right === false) return false;
+			if (left === true && right === true) return true;
+		}
+		if (node.operator === '||') {
+			if (left === true || right === true) return true;
+			if (left === false && right === false) return false;
+		}
+	}
+	return null;
+}
+
+/** False when a constant ancestor proves this expression can never execute. */
+function staticallyReachable(entry) {
+	const { node, ancestors } = entry;
+	for (let index = 0; index < ancestors.length; index++) {
+		const ancestor = ancestors[index];
+		if (FUNCTION_TYPES.has(ancestor.type)) break;
+		if (ancestor.type === 'BlockStatement') {
+			const child = index === 0 ? node : ancestors[index - 1];
+			const statementIndex = ancestor.body.indexOf(child);
+			if (statementIndex > 0 && ancestor.body.slice(0, statementIndex).some((statement) =>
+				statement.type === 'ReturnStatement' || statement.type === 'ThrowStatement' ||
+				statement.type === 'BreakStatement' || statement.type === 'ContinueStatement')) return false;
+		}
+		if (ancestor.type === 'IfStatement' || ancestor.type === 'ConditionalExpression') {
+			const fixed = staticBoolean(ancestor.test);
+			if (fixed === false && node.start >= ancestor.consequent.start && node.end <= ancestor.consequent.end) return false;
+			if (fixed === true && ancestor.alternate && node.start >= ancestor.alternate.start && node.end <= ancestor.alternate.end) return false;
+		}
+		if ((ancestor.type === 'WhileStatement' || ancestor.type === 'ForStatement') && staticBoolean(ancestor.test) === false) return false;
+		if (ancestor.type === 'LogicalExpression') {
+			const other = node.start >= ancestor.right.start ? ancestor.left : ancestor.right;
+			const fixed = staticBoolean(other);
+			if (ancestor.operator === '&&' && fixed === false) return false;
+			if (ancestor.operator === '||' && fixed === true) return false;
+		}
+	}
+	return true;
+}
+
+/**
+ * Functions reachable from a module export, a top-level registration callback,
+ * or a call/object returned by a reachable function. A parked helper that is
+ * never called, returned or registered is deliberately absent.
+ */
+function reachableFunctions(nodes) {
+	const reachable = new Set();
+	const byName = new Map();
+	for (const { node, ancestors } of nodes) {
+		if (!FUNCTION_TYPES.has(node.type)) continue;
+		if (node.id?.name) byName.set(node.id.name, node);
+		const parent = ancestors[0];
+		if (parent?.type === 'VariableDeclarator' && parent.id?.type === 'Identifier') byName.set(parent.id.name, node);
+		const beforeOuterFunction = [];
+		for (const ancestor of ancestors) {
+			if (FUNCTION_TYPES.has(ancestor.type)) break;
+			beforeOuterFunction.push(ancestor);
+		}
+		if (beforeOuterFunction.some((ancestor) => ancestor.type === 'ExportNamedDeclaration' || ancestor.type === 'ExportDefaultDeclaration')) {
+			reachable.add(node);
+			continue;
+		}
+		const topLevelCall = beforeOuterFunction.find((ancestor) => ancestor.type === 'CallExpression');
+		if (topLevelCall?.arguments.some((argument) => node.start >= argument.start && node.end <= argument.end)) reachable.add(node);
+	}
+
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (const { node, ancestors } of nodes) {
+			const owner = nearestFunction(ancestors);
+			if (owner === null || !reachable.has(owner)) continue;
+			if (node.type === 'CallExpression' && node.callee?.type === 'Identifier') {
+				const target = byName.get(node.callee.name);
+				if (target && !reachable.has(target)) {
+					reachable.add(target);
+					changed = true;
+				}
+			}
+			if (!FUNCTION_TYPES.has(node.type) || node === owner || reachable.has(node)) continue;
+			const beforeOwner = [];
+			for (const ancestor of ancestors) {
+				if (ancestor === owner) break;
+				beforeOwner.push(ancestor);
+			}
+			const registered = beforeOwner.some((ancestor) =>
+				ancestor.type === 'CallExpression' && ancestor.arguments.some((argument) => node.start >= argument.start && node.end <= argument.end));
+			const returned = beforeOwner.some((ancestor) => ancestor.type === 'ReturnStatement');
+			const objectMethod = beforeOwner.some((ancestor) => ancestor.type === 'Property') &&
+				beforeOwner.some((ancestor) => ancestor.type === 'ObjectExpression');
+			if (registered || returned || objectMethod) {
+				reachable.add(node);
+				changed = true;
+			}
+		}
+	}
+	return reachable;
+}
+
+function identifierControlsDecision(nodes, name, owner, after) {
+	for (const { node, ancestors } of nodes) {
+		if (node.type !== 'Identifier' || node.name !== name || node.start <= after) continue;
+		if (nearestFunction(ancestors) !== owner) continue;
+		let child = node;
+		for (const parent of ancestors) {
+			if (parent === owner) break;
+			if ((parent.type === 'IfStatement' || parent.type === 'ConditionalExpression' || parent.type === 'WhileStatement' || parent.type === 'DoWhileStatement') && parent.test === child) return true;
+			if (parent.type === 'ForStatement' && parent.test === child) return true;
+			if (parent.type === 'SwitchStatement' && parent.discriminant === child) return true;
+			if (parent.type === 'ReturnStatement') return true;
+			if (parent.type === 'ExpressionStatement') break;
+			child = parent;
+		}
+	}
+	return false;
+}
+
+/** True when a policy result reaches control flow instead of decorative code. */
+function resultIsConsumed(entry, nodes) {
+	const { node, ancestors } = entry;
+	const owner = nearestFunction(ancestors);
+	let child = node;
+	for (const parent of ancestors) {
+		if (parent === owner) {
+			if (parent?.type === 'ArrowFunctionExpression' && parent.body === child) return true;
+			break;
+		}
+		if ((parent.type === 'IfStatement' || parent.type === 'ConditionalExpression' || parent.type === 'WhileStatement' || parent.type === 'DoWhileStatement') && parent.test === child) return true;
+		if (parent.type === 'ForStatement' && parent.test === child) return true;
+		if (parent.type === 'SwitchStatement' && parent.discriminant === child) return true;
+		if (parent.type === 'ReturnStatement') return true;
+		if (parent.type === 'VariableDeclarator' && parent.init === child && parent.id?.type === 'Identifier') {
+			return identifierControlsDecision(nodes, parent.id.name, owner, parent.end);
+		}
+		if (parent.type === 'AssignmentExpression' && parent.right === child && parent.left?.type === 'Identifier') {
+			return identifierControlsDecision(nodes, parent.left.name, owner, parent.end);
+		}
+		if (parent.type === 'ExpressionStatement') return false;
+		child = parent;
+	}
+	return false;
+}
+
+const ORDER_COMPARISONS = new Set(['<', '<=', '>', '>=']);
+
+function propertyName(node) {
+	if (node === null || node === undefined) return null;
+	if (!node.computed && node.property?.type === 'Identifier') return node.property.name;
+	if (node.computed && node.property?.type === 'Literal') return node.property.value;
+	if (node.type === 'Property') return node.key?.name ?? node.key?.value ?? null;
+	return null;
+}
+
+function objectField(node, name) {
+	if (node?.type !== 'ObjectExpression') return null;
+	const fields = node.properties.filter((property) => property.type === 'Property' && propertyName(property) === name);
+	return fields.length === 1 ? fields[0].value : null;
+}
+
+/** Nearest same-function initializer visible before one identifier use. */
+function bindingInitializer(nodes, name, owner, before) {
+	let found = null;
+	for (const entry of nodes) {
+		const { node, ancestors } = entry;
+		if (node.end > before || nearestFunction(ancestors) !== owner) continue;
+		let value = null;
+		if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier' && node.id.name === name) {
+			value = node.init;
+		} else if (node.type === 'AssignmentExpression' && node.left?.type === 'Identifier' && node.left.name === name) {
+			value = node.right;
+		} else if (node.type === 'VariableDeclarator' && node.id?.type === 'ObjectPattern' && node.init !== null) {
+			const property = node.id.properties.find((candidate) =>
+				candidate.type === 'Property' && candidate.value?.type === 'Identifier' && candidate.value.name === name);
+			if (property !== undefined) {
+				value = {
+					type: 'MemberExpression',
+					object: node.init,
+					property: property.key,
+					computed: property.computed,
+					optional: false,
+					start: node.init.start,
+					end: node.end,
+					loc: node.loc
+				};
+			}
+		}
+		if (value !== null && (found === null || node.start > found.node.start)) found = { node, value };
+	}
+	return found?.value ?? null;
+}
+
+function childNodes(node) {
+	const children = [];
+	for (const key of Object.keys(node ?? {})) {
+		if (key === 'start' || key === 'end' || key === 'loc') continue;
+		const value = node[key];
+		if (Array.isArray(value)) {
+			for (const item of value) if (item && typeof item.type === 'string') children.push(item);
+		} else if (value && typeof value.type === 'string') children.push(value);
+	}
+	return children;
+}
+
+function expressionContains(node, predicate, nodes, owner, before = node?.start ?? Infinity, seen = new Set()) {
+	if (node === null || node === undefined) return false;
+	if (predicate(node)) return true;
+	if (node.type === 'Identifier') {
+		const key = `${owner?.start ?? 'top'}:${node.name}`;
+		if (seen.has(key)) return false;
+		const init = bindingInitializer(nodes, node.name, owner, before);
+		if (init !== null) {
+			seen.add(key);
+			const found = expressionContains(init, predicate, nodes, owner, init.start, seen);
+			seen.delete(key);
+			if (found) return true;
+		}
+	}
+	return childNodes(node).some((child) => expressionContains(child, predicate, nodes, owner, child.start, seen));
+}
+
+function isSubscriptionSlot(node) {
+	return (node.type === 'Identifier' && node.name === 'WS_SUBSCRIPTIONS') ||
+		(node.type === 'MemberExpression' && propertyName(node) === 'WS_SUBSCRIPTIONS');
+}
+
+/** Nearest lexical initializer, including a closure's enclosing function. */
+const lexicalBindingCache = new WeakMap();
+function lexicalBindingInitializer(nodes, name, owner, before) {
+	let byName = lexicalBindingCache.get(nodes);
+	if (byName === undefined) {
+		byName = new Map();
+		for (const entry of nodes) {
+			const { node, ancestors } = entry;
+			let bindingName = null;
+			let value = null;
+			if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier') {
+				bindingName = node.id.name;
+				value = node.init;
+			} else if (node.type === 'VariableDeclarator' && node.id?.type === 'ObjectPattern' && node.init !== null) {
+				for (const property of node.id.properties) {
+					if (property.type !== 'Property' || property.value?.type !== 'Identifier') continue;
+					const member = {
+						type: 'MemberExpression', object: node.init, property: property.key,
+						computed: property.computed, optional: false,
+						start: node.init.start, end: node.end, loc: node.loc
+					};
+					if (!byName.has(property.value.name)) byName.set(property.value.name, []);
+					const declarationOwner = nearestFunction(ancestors);
+					const width = declarationOwner === null ? Infinity : declarationOwner.end - declarationOwner.start;
+					byName.get(property.value.name).push({ node, value: member, declarationOwner, width });
+				}
+				continue;
+			} else if (node.type === 'AssignmentExpression' && node.left?.type === 'Identifier') {
+				bindingName = node.left.name;
+				value = node.right;
+			}
+			if (bindingName === null || value === null) continue;
+			const declarationOwner = nearestFunction(ancestors);
+			const width = declarationOwner === null ? Infinity : declarationOwner.end - declarationOwner.start;
+			if (!byName.has(bindingName)) byName.set(bindingName, []);
+			byName.get(bindingName).push({ node, value, declarationOwner, width });
+		}
+		lexicalBindingCache.set(nodes, byName);
+	}
+
+	const candidates = [];
+	for (const entry of byName.get(name) ?? []) {
+		const { node, ancestors } = entry;
+		const { declarationOwner } = entry;
+		const visibleOwner = declarationOwner === owner ||
+			(declarationOwner === null && owner !== null) ||
+			(declarationOwner !== null && owner !== null &&
+				declarationOwner.start <= owner.start && declarationOwner.end >= owner.end);
+		if (!visibleOwner) continue;
+		if (declarationOwner === owner && node.end > before) continue;
+		candidates.push(entry);
+	}
+	candidates.sort((a, b) => a.width - b.width || b.node.start - a.node.start);
+	return candidates[0]?.value ?? null;
+}
+
+/**
+ * Identity of an exact alias to `userData[WS_SUBSCRIPTIONS]`.
+ * Descendants do not count: `{ original: subs, size: 0 }` is a wrapper, not an
+ * alias to the Set, even though a provenance substring exists below it.
+ */
+function exactSubscriptionRoot(node, nodes, owner, seen = new Set()) {
+	if (node?.type === 'ChainExpression') return exactSubscriptionRoot(node.expression, nodes, owner, seen);
+	if (node?.type === 'Identifier') {
+		const key = `${owner?.start ?? 'top'}:${node.name}`;
+		if (seen.has(key)) return null;
+		const init = lexicalBindingInitializer(nodes, node.name, owner, node.start);
+		if (init === null) return null;
+		seen.add(key);
+		const root = exactSubscriptionRoot(init, nodes, owner, seen);
+		seen.delete(key);
+		return root;
+	}
+	if (node?.type === 'MemberExpression' && isSubscriptionSlot(node.property)) {
+		return `slot:${node.start}:${node.end}`;
+	}
+	return null;
+}
+
+function collectExactHasRoots(node, nodes, owner, out = new Set(), seen = new Set()) {
+	if (node === null || node === undefined) return out;
+	if (node.type === 'Identifier') {
+		const key = `${owner?.start ?? 'top'}:${node.name}`;
+		if (!seen.has(key)) {
+			const init = lexicalBindingInitializer(nodes, node.name, owner, node.start);
+			if (init !== null) {
+				seen.add(key);
+				collectExactHasRoots(init, nodes, owner, out, seen);
+				seen.delete(key);
+			}
+		}
+	}
+	if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression' &&
+		propertyName(node.callee) === 'has' && node.arguments.length === 1) {
+		const root = exactSubscriptionRoot(node.callee.object, nodes, owner);
+		const topic = node.arguments[0];
+		const topicShaped = topic?.type === 'Identifier' ||
+			(topic?.type === 'MemberExpression' && propertyName(topic) === 'topic');
+		if (root !== null && topicShaped) out.add(root);
+	}
+	for (const child of childNodes(node)) collectExactHasRoots(child, nodes, owner, out, seen);
+	return out;
+}
+
+function expressionUsesExactSubscriptionSize(node, nodes, owner, seen = new Set()) {
+	if (node === null || node === undefined) return false;
+	if (node.type === 'MemberExpression' && propertyName(node) === 'size' &&
+		exactSubscriptionRoot(node.object, nodes, owner) !== null) return true;
+	if (node.type === 'Identifier') {
+		const key = `${owner?.start ?? 'top'}:${node.name}`;
+		if (!seen.has(key)) {
+			const init = lexicalBindingInitializer(nodes, node.name, owner, node.start);
+			if (init !== null) {
+				seen.add(key);
+				const found = expressionUsesExactSubscriptionSize(init, nodes, owner, seen);
+				seen.delete(key);
+				if (found) return true;
+			}
+		}
+	}
+	return childNodes(node).some((child) => expressionUsesExactSubscriptionSize(child, nodes, owner, seen));
+}
+
+/** Raw Set/size data leaving for an opaque callee can hide a private cap. */
+function expressionCarriesSubscriptionData(node, nodes, owner, seen = new Set()) {
+	if (node === null || node === undefined) return false;
+	if (exactSubscriptionRoot(node, nodes, owner) !== null) return true;
+	if (node.type === 'MemberExpression' && propertyName(node) === 'size' &&
+		exactSubscriptionRoot(node.object, nodes, owner) !== null) return true;
+	if (node.type === 'Identifier') {
+		const key = `${owner?.start ?? 'top'}:${node.name}`;
+		if (seen.has(key)) return false;
+		const init = lexicalBindingInitializer(nodes, node.name, owner, node.start);
+		if (init === null) return false;
+		seen.add(key);
+		const carries = expressionCarriesSubscriptionData(init, nodes, owner, seen);
+		seen.delete(key);
+		return carries;
+	}
+	if (node.type === 'ObjectExpression') {
+		return node.properties.some((property) =>
+			property.type === 'SpreadElement'
+				? expressionCarriesSubscriptionData(property.argument, nodes, owner, seen)
+				: expressionCarriesSubscriptionData(property.value, nodes, owner, seen));
+	}
+	if (node.type === 'ArrayExpression') {
+		return node.elements.some((element) => expressionCarriesSubscriptionData(element, nodes, owner, seen));
+	}
+	if (node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression') return false;
+	if (node.type === 'AssignmentExpression') return expressionCarriesSubscriptionData(node.right, nodes, owner, seen);
+	if (node.type === 'ConditionalExpression') {
+		return expressionCarriesSubscriptionData(node.consequent, nodes, owner, seen) ||
+			expressionCarriesSubscriptionData(node.alternate, nodes, owner, seen);
+	}
+	if (node.type === 'SequenceExpression') {
+		return expressionCarriesSubscriptionData(node.expressions.at(-1), nodes, owner, seen);
+	}
+	if (node.type === 'UnaryExpression' || node.type === 'BinaryExpression') {
+		if (ORDER_COMPARISONS.has(node.operator) || ['===', '!==', '==', '!=', 'instanceof', 'in'].includes(node.operator)) return false;
+		return childNodes(node).some((child) => expressionCarriesSubscriptionData(child, nodes, owner, seen));
+	}
+	return false;
+}
+
+function receiverKey(node, nodes, owner, seen = new Set()) {
+	if (node?.type === 'ChainExpression') return receiverKey(node.expression, nodes, owner, seen);
+	if (node?.type === 'Identifier') {
+		const key = `${owner?.start ?? 'top'}:${node.name}`;
+		if (!seen.has(key)) {
+			const init = bindingInitializer(nodes, node.name, owner, node.start);
+			if (init?.type === 'Identifier') {
+				seen.add(key);
+				return receiverKey(init, nodes, owner, seen);
+			}
+		}
+		return `id:${node.name}`;
+	}
+	if (node?.type === 'MemberExpression') {
+		return `member:${receiverKey(node.object, nodes, owner, seen)}:${String(propertyName(node))}`;
+	}
+	return `expr:${node?.start ?? '?'}:${node?.end ?? '?'}`;
+}
+
+function collectHasReceivers(node, nodes, owner, out = new Set(), seen = new Set()) {
+	if (node === null || node === undefined) return out;
+	if (node.type === 'Identifier') {
+		const key = `${owner?.start ?? 'top'}:${node.name}`;
+		if (!seen.has(key)) {
+			const init = bindingInitializer(nodes, node.name, owner, node.start);
+			if (init !== null) {
+				seen.add(key);
+				collectHasReceivers(init, nodes, owner, out, seen);
+				seen.delete(key);
+			}
+		}
+	}
+	if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression' && propertyName(node.callee) === 'has') {
+		out.add(receiverKey(node.callee.object, nodes, owner));
+	}
+	for (const child of childNodes(node)) collectHasReceivers(child, nodes, owner, out, seen);
+	return out;
+}
+
+function constantNumber(node, nodes, owner, seen = new Set()) {
+	if (node?.type === 'Literal' && typeof node.value === 'number') return node.value;
+	if (node?.type === 'Identifier') {
+		if (node.name === 'MAX_SUBSCRIPTIONS_PER_CONNECTION') return SUBSCRIPTION_CAP;
+		const key = `${owner?.start ?? 'top'}:${node.name}`;
+		if (seen.has(key)) return null;
+		const init = bindingInitializer(nodes, node.name, owner, node.start);
+		if (init === null) return null;
+		seen.add(key);
+		const value = constantNumber(init, nodes, owner, seen);
+		seen.delete(key);
+		return value;
+	}
+	if (node?.type === 'UnaryExpression' && (node.operator === '+' || node.operator === '-')) {
+		const value = constantNumber(node.argument, nodes, owner, seen);
+		return value === null ? null : (node.operator === '-' ? -value : value);
+	}
+	if (node?.type !== 'BinaryExpression') return null;
+	const left = constantNumber(node.left, nodes, owner, seen);
+	const right = constantNumber(node.right, nodes, owner, seen);
+	if (left === null || right === null) return null;
+	switch (node.operator) {
+		case '+': return left + right;
+		case '-': return left - right;
+		case '*': return left * right;
+		case '/': return right === 0 ? null : left / right;
+		case '%': return right === 0 ? null : left % right;
+		case '**': return left ** right;
+		case '<<': return left << right;
+		case '>>': return left >> right;
+		case '>>>': return left >>> right;
+		case '|': return left | right;
+		case '&': return left & right;
+		case '^': return left ^ right;
+		default: return null;
+	}
+}
+
+function resolvedPolicyCallEntries(nodes, imports, fnName) {
+	return nodes.filter(({ node }) =>
+		node.type === 'CallExpression' && node.callee?.type === 'Identifier' && imports.get(node.callee.name) === fnName);
+}
+
+function expressionUsesSubscriptionSize(node, nodes, owner) {
+	return expressionContains(node, (candidate) =>
+		candidate.type === 'MemberExpression' && propertyName(candidate) === 'size' &&
+		expressionContains(candidate.object, isSubscriptionSlot, nodes, owner), nodes, owner);
+}
+
+function expressionUsesAnySize(node, nodes, owner) {
+	return expressionContains(node, (candidate) =>
+		candidate.type === 'MemberExpression' && propertyName(candidate) === 'size', nodes, owner);
+}
+
+function hasLiveRateLimitExit(entry, nodes) {
+	const { node, ancestors } = entry;
+	const owner = nearestFunction(ancestors);
+	const decision = ancestors.find((parent) => parent.type === 'IfStatement' && parent.test === node);
+	if (decision === undefined) return false;
+	const branchEntries = nodes.filter((candidate) =>
+		candidate.node.start >= decision.consequent.start && candidate.node.end <= decision.consequent.end &&
+		nearestFunction(candidate.ancestors) === owner && staticallyReachable(candidate));
+	const hasReason = branchEntries.some(({ node: candidate }) => candidate.type === 'Literal' && candidate.value === 'RATE_LIMITED');
+	const hasExit = branchEntries.some(({ node: candidate }) =>
+		candidate.type === 'ReturnStatement' || candidate.type === 'ContinueStatement' || candidate.type === 'ThrowStatement');
+	return hasReason && hasExit;
+}
+
+function capCallContractOffenders(nodes, imports, file = '(synthetic)') {
+	const offenders = [];
+	for (const entry of resolvedPolicyCallEntries(nodes, imports, 'exceedsSubscriptionCap')) {
+		const { node, ancestors } = entry;
+		const owner = nearestFunction(ancestors);
+		const held = objectField(node.arguments[0], 'held');
+		const size = objectField(node.arguments[0], 'size');
+		const max = objectField(node.arguments[0], 'max');
+		const where = `${file}:${node.loc.start.line}`;
+		const sizeReceiver = size?.type === 'MemberExpression' && propertyName(size) === 'size'
+			? exactSubscriptionRoot(size.object, nodes, owner)
+			: null;
+		if (sizeReceiver === null) {
+			offenders.push(`${where} size must read the live WS_SUBSCRIPTIONS collection`);
+		}
+		if (held === null || sizeReceiver === null || !collectExactHasRoots(held, nodes, owner).has(sizeReceiver)) {
+			offenders.push(`${where} held must derive from has(topic) on the same collection as size`);
+		}
+		if (max?.type !== 'Identifier' || max.name !== 'MAX_SUBSCRIPTIONS_PER_CONNECTION') {
+			offenders.push(`${where} max must be the canonical subscription cap`);
+		}
+		if (!hasLiveRateLimitExit(entry, nodes)) {
+			offenders.push(`${where} result must directly guard a live RATE_LIMITED exit`);
+		}
+	}
+	return offenders;
+}
+
+function privateSubscriptionOrderOffenders(nodes, file = '(synthetic)') {
+	const offenders = [];
+	for (const entry of nodes) {
+		const { node, ancestors } = entry;
+		if (node.type !== 'BinaryExpression' || !ORDER_COMPARISONS.has(node.operator)) continue;
+		const owner = nearestFunction(ancestors);
+		if (expressionUsesExactSubscriptionSize(node.left, nodes, owner) || expressionUsesExactSubscriptionSize(node.right, nodes, owner)) {
+			offenders.push(`${file}:${node.loc.start.line}`);
+		}
+	}
+	return offenders;
+}
+
+const SAFE_SUBSCRIPTION_CALLEES = new Set([
+	'addLogicalSubscription',
+	'removeLogicalSubscription',
+	'accountClosedLogicalSubscriptions',
+	'deniesUngrantedObserve'
+]);
+
+function importedMembershipMutators(nodes, file) {
+	const allowed = new Set();
+	for (const { node } of nodes) {
+		if (node.type !== 'ImportDeclaration') continue;
+		const target = resolvedImport(file, node.source?.value);
+		if (target !== realpathSync(pathOf('src/runtime/utils.js')) &&
+			target !== realpathSync(pathOf('src/runtime/utils/ws-symbols.js'))) continue;
+		for (const specifier of node.specifiers) {
+			if (specifier.type === 'ImportSpecifier' && specifier.local.name === specifier.imported.name &&
+				SAFE_SUBSCRIPTION_CALLEES.has(specifier.imported.name)) allowed.add(specifier.local.name);
+		}
+	}
+	return allowed;
+}
+
+function subscriptionDataEscapeOffenders(nodes, imports, file = '(synthetic)') {
+	const offenders = [];
+	const allowedMutators = file === '(synthetic)' ? new Set() : importedMembershipMutators(nodes, file);
+	const candidateNames = new Set();
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (const { node } of nodes) {
+			if (node.type !== 'VariableDeclarator' || node.id?.type !== 'Identifier' || node.init === null ||
+				candidateNames.has(node.id.name)) continue;
+			const carriesCandidate = (() => {
+				const pending = [node.init];
+				while (pending.length) {
+					const current = pending.pop();
+					if (current?.type === 'FunctionExpression' || current?.type === 'ArrowFunctionExpression') continue;
+					if (current?.type === 'MemberExpression' && isSubscriptionSlot(current.property)) return true;
+					if (current?.type === 'Identifier' && candidateNames.has(current.name)) return true;
+					pending.push(...childNodes(current));
+				}
+				return false;
+			})();
+			if (carriesCandidate) {
+				candidateNames.add(node.id.name);
+				changed = true;
+			}
+		}
+	}
+	for (const { node, ancestors } of nodes) {
+		if (node.type !== 'CallExpression') continue;
+		const canonicalPolicy = node.callee?.type === 'Identifier' &&
+			(imports.get(node.callee.name) === 'exceedsSubscriptionCap' ||
+				imports.get(node.callee.name) === 'deniesUngrantedObserve');
+		const canonicalMutator = node.callee?.type === 'Identifier' && SAFE_SUBSCRIPTION_CALLEES.has(node.callee.name) &&
+			(allowedMutators.has(node.callee.name) || file === 'src/runtime/utils/ws-symbols.js');
+		if (canonicalPolicy || canonicalMutator) continue;
+		const possible = node.arguments.some((argument) => {
+			const pending = [argument];
+			while (pending.length) {
+				const current = pending.pop();
+				if (current?.type === 'FunctionExpression' || current?.type === 'ArrowFunctionExpression') continue;
+				if (current?.type === 'MemberExpression' && isSubscriptionSlot(current.property)) return true;
+				if (current?.type === 'Identifier' && candidateNames.has(current.name)) return true;
+				pending.push(...childNodes(current));
+			}
+			return false;
+		});
+		if (!possible) continue;
+		const owner = nearestFunction(ancestors);
+		if (node.arguments.some((argument) => expressionCarriesSubscriptionData(argument, nodes, owner))) {
+			offenders.push(`${file}:${node.loc.start.line}`);
+		}
+	}
+	return offenders;
+}
+
+function capEquivalentSizeComparisonOffenders(nodes, file = '(synthetic)', cap = SUBSCRIPTION_CAP) {
+	const offenders = [];
+	for (const entry of nodes) {
+		const { node, ancestors } = entry;
+		if (node.type !== 'BinaryExpression' || !ORDER_COMPARISONS.has(node.operator)) continue;
+		const owner = nearestFunction(ancestors);
+		const leftSize = expressionUsesAnySize(node.left, nodes, owner);
+		const rightSize = expressionUsesAnySize(node.right, nodes, owner);
+		const leftValue = constantNumber(node.left, nodes, owner);
+		const rightValue = constantNumber(node.right, nodes, owner);
+		if ((leftSize && rightValue === cap) || (rightSize && leftValue === cap)) offenders.push(`${file}:${node.loc.start.line}`);
+	}
+	return offenders;
 }
 
 /**
@@ -147,13 +873,18 @@ function localBindings(nodes) {
  * local shadow scores zero rather than satisfying the minimum. Text in a
  * comment scores zero because comments are not nodes.
  */
-function realCallCount(nodes, imports, fnName) {
+function realCallCount(nodes, imports, fnName, reachable) {
 	let local = null;
 	for (const [localName, imported] of imports) if (imported === fnName) local = localName;
 	if (local === null) return 0;
 	let n = 0;
-	for (const { node } of nodes) {
-		if (node.type === 'CallExpression' && node.callee?.type === 'Identifier' && node.callee.name === local) n++;
+	for (const entry of nodes) {
+		const { node, ancestors } = entry;
+		if (node.type !== 'CallExpression' || node.callee?.type !== 'Identifier' || node.callee.name !== local) continue;
+		const owner = nearestFunction(ancestors);
+		if (owner !== null && !reachable.has(owner)) continue;
+		if (!staticallyReachable(entry)) continue;
+		if (resultIsConsumed(entry, nodes)) n++;
 	}
 	return n;
 }
@@ -163,12 +894,148 @@ const parsed = new Map();
 function ast(f) {
 	if (!parsed.has(f)) {
 		const nodes = nodesWithAncestors(read(f));
-		parsed.set(f, { nodes, imports: policyImports(nodes), locals: localBindings(nodes) });
+		parsed.set(f, { nodes, imports: policyImports(nodes, f), locals: localBindings(nodes), reachable: reachableFunctions(nodes) });
 	}
 	return parsed.get(f);
 }
 
+describe('the oracle itself rejects the padding classes found by review', () => {
+	it('finds policy-name shadows in parameters and destructuring patterns', () => {
+		const nodes = nodesWithAncestors(`
+			function shadow({ deniesWireSubscribePreHook }, [recoverIsRevoked], exceedsSubscriptionCap) {
+				return { deniesWireSubscribePreHook, recoverIsRevoked, exceedsSubscriptionCap };
+			}
+		`);
+		const bindings = localBindings(nodes);
+		expect([...bindings].filter((name) => POLICY_NAMES.includes(name)).sort()).toEqual([
+			'deniesWireSubscribePreHook',
+			'exceedsSubscriptionCap',
+			'recoverIsRevoked'
+		]);
+	});
+
+	it('counts only reachable, consumed calls and rejects decorative or constant-dead padding', () => {
+		const nodes = nodesWithAncestors(`
+			export function live(value) {
+				if (predicate(value)) return true;
+			}
+			function parked(value) {
+				predicate(value);
+			}
+			export function padded(value) {
+				if (false) {
+					if (predicate(value)) return true;
+				}
+				predicate(value);
+				return false;
+			}
+			export function afterReturn(value) {
+				return false;
+				if (predicate(value)) return true;
+			}
+		`);
+		const imports = new Map([['predicate', 'deniesWireSubscribePreHook']]);
+		expect(realCallCount(nodes, imports, 'deniesWireSubscribePreHook', reachableFunctions(nodes))).toBe(1);
+	});
+
+	it('rejects the reviewed inert cap call plus constant-expression private decision', () => {
+		const nodes = nodesWithAncestors(`
+			export function subscribe(ud, topic) {
+				const subs = ud[WS_SUBSCRIPTIONS];
+				const isNew = !subs.has(topic);
+				if (exceedsSubscriptionCap({ held: true, size: 0, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) {
+					throw new Error('padding');
+				}
+				if (isNew && subs.size >= (10 ** 6)) return 'RATE_LIMITED';
+			}
+		`);
+		const imports = new Map([['exceedsSubscriptionCap', 'exceedsSubscriptionCap']]);
+		expect(realCallCount(nodes, imports, 'exceedsSubscriptionCap', reachableFunctions(nodes))).toBe(1);
+		expect(capCallContractOffenders(nodes, imports)).not.toEqual([]);
+		expect(privateSubscriptionOrderOffenders(nodes)).toHaveLength(1);
+		expect(capEquivalentSizeComparisonOffenders(nodes)).toHaveLength(1);
+	});
+
+	it('follows folded thresholds and count aliases without banning unrelated or empty checks', () => {
+		const folded = nodesWithAncestors(`
+			export function subscribe(ud, topic) {
+				const subs = ud[WS_SUBSCRIPTIONS];
+				const held = subs.has(topic);
+				const base = 10;
+				const foldedCap = base ** 6;
+				const count0 = subs.size;
+				const count = count0;
+				if (foldedCap <= count) return 'RATE_LIMITED';
+				const { size: destructuredCount } = subs;
+				let assignedCount = 0;
+				assignedCount = destructuredCount;
+				if (assignedCount >= foldedCap) return 'RATE_LIMITED';
+				if (exceedsSubscriptionCap({ held, size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) return 'RATE_LIMITED';
+			}
+		`);
+		const imports = new Map([['exceedsSubscriptionCap', 'exceedsSubscriptionCap']]);
+		expect(privateSubscriptionOrderOffenders(folded)).toHaveLength(2);
+		expect(capEquivalentSizeComparisonOffenders(folded)).toHaveLength(2);
+		expect(capCallContractOffenders(folded, imports)).toEqual([]);
+
+		const legitimate = nodesWithAncestors(`
+			export function subscribe(ud, topic, queue) {
+				const subs = ud[WS_SUBSCRIPTIONS];
+				if (subs.size === 0) return null;
+				if (queue.size > 10) return 'QUEUE_FULL';
+				if (exceedsSubscriptionCap({ held: subs.has(topic), size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) return 'RATE_LIMITED';
+			}
+		`);
+		expect(privateSubscriptionOrderOffenders(legitimate)).toEqual([]);
+		expect(capEquivalentSizeComparisonOffenders(legitimate)).toEqual([]);
+		expect(capCallContractOffenders(legitimate, imports)).toEqual([]);
+	});
+
+	it('rejects object laundering and opaque helper escapes of the live Set or its size', () => {
+		const nodes = nodesWithAncestors(`
+			const thresholdParts = { base: 4, power: 2 };
+			export function subscribe(ud, topic) {
+				const subs = ud[WS_SUBSCRIPTIONS];
+				const capOracleView = { original: subs, has() { return true; }, size: 0 };
+				if (exceedsSubscriptionCap({
+					held: capOracleView.has(topic),
+					size: capOracleView.size,
+					max: MAX_SUBSCRIPTIONS_PER_CONNECTION
+				})) return 'RATE_LIMITED';
+				if (privateSubscriptionCapReached(subs.size)) return 'RATE_LIMITED';
+			}
+			export function privateSubscriptionCapReached(count) {
+				return count >= thresholdParts.base ** thresholdParts.power;
+			}
+		`);
+		const imports = new Map([['exceedsSubscriptionCap', 'exceedsSubscriptionCap']]);
+		expect(capCallContractOffenders(nodes, imports)).not.toEqual([]);
+		expect(subscriptionDataEscapeOffenders(nodes, imports)).not.toEqual([]);
+
+		const wholeSet = nodesWithAncestors(`
+			export function subscribe(ud) {
+				const subs = ud[WS_SUBSCRIPTIONS];
+				return privateSubscriptionCapReached({ original: subs });
+			}
+		`);
+		expect(subscriptionDataEscapeOffenders(wholeSet, new Map())).not.toEqual([]);
+	});
+});
+
 describe('every socket surface routes its subscribe decisions through the shared policy', () => {
+	it('only the canonical policy module exports the policy decisions', () => {
+		const exporters = new Map(POLICY_NAMES.map((name) => [name, []]));
+		for (const file of jsFiles('src')) {
+			for (const name of exportedPolicyNames(ast(file).nodes)) exporters.get(name).push(file);
+		}
+		for (const name of POLICY_NAMES) {
+			expect(
+				exporters.get(name),
+				`${name} must be exported by exactly the canonical policy module; a second exporter restores a private policy copy`
+			).toEqual([POLICY]);
+		}
+	});
+
 	for (const { label, files } of SURFACES) {
 		it(`${label} imports the policy through a real import, unaliased`, () => {
 			const importing = files.filter((f) => ast(f).imports.size > 0);
@@ -185,18 +1052,28 @@ describe('every socket surface routes its subscribe decisions through the shared
 			}
 		});
 
-		it(`${label} does not shadow a policy name with its own binding`, () => {
+		it(`${label} does not redeclare a policy name in any binding position`, () => {
 			// A local `function exceedsSubscriptionCap(...)` would satisfy every
 			// call count while the real decision never runs. This is the shape a
 			// reviewer used to give the dev surface private copies of all five.
 			for (const f of files) {
-				const { imports, locals } = ast(f);
-				const shadowed = POLICY_NAMES.filter((n) => locals.has(n) && !imports.has(n));
+				const { locals } = ast(f);
+				const shadowed = POLICY_NAMES.filter((n) => locals.has(n));
 				expect(
 					shadowed,
 					`${f} declares its own ${shadowed.join(', ')} - the surface would be asking itself, not the policy`
 				).toEqual([]);
 			}
+		});
+	}
+
+	for (const file of SHARED) {
+		it(`${file} does not redeclare a policy name in any binding position`, () => {
+			const shadowed = POLICY_NAMES.filter((name) => ast(file).locals.has(name));
+			expect(
+				shadowed,
+				`${file} declares its own ${shadowed.join(', ')} instead of asking the canonical policy`
+			).toEqual([]);
 		});
 	}
 
@@ -220,14 +1097,14 @@ describe('every socket surface routes its subscribe decisions through the shared
 		for (const { fn, min } of PREDICATE_MINIMUMS) {
 			it(`${label} really calls ${fn} at least ${min}x`, () => {
 				const n = files.reduce((acc, f) => {
-					const { nodes, imports } = ast(f);
-					return acc + realCallCount(nodes, imports, fn);
+					const { nodes, imports, reachable } = ast(f);
+					return acc + realCallCount(nodes, imports, fn, reachable);
 				}, 0);
 				expect(
 					n,
 					`${label} has ${n} RESOLVED call(s) to ${fn} across ${files.join(', ')}, expected >= ${min}. ` +
-					'Only a call whose callee is the imported binding counts - a comment, a dead call or a local ' +
-					'shadow does not.'
+					'Only a reachable call whose callee is the canonical imported binding and whose result reaches ' +
+					'control flow counts - comments, parked helpers, decorative calls and local shadows do not.'
 				).toBeGreaterThanOrEqual(min);
 			});
 		}
@@ -388,6 +1265,81 @@ describe('every observer lane revalidates its grant after the async hook', () =>
 
 describe('no surface re-derives a decision the policy owns', () => {
 	const SCANNED = [...SURFACES.flatMap((s) => s.files), ...SHARED];
+	const CAP_DECISION_FILES = jsFiles('src');
+
+	for (const { label, files } of SURFACES) {
+		it(`${label} gives every cap call live membership axes and a decisive rate-limit exit`, () => {
+			const offenders = files.flatMap((file) => {
+				const { nodes, imports } = ast(file);
+				return capCallContractOffenders(nodes, imports, file);
+			});
+			expect(
+				offenders,
+				`${label} can pad the call count with a semantically inert cap decision: ${offenders.join('; ')}`
+			).toEqual([]);
+		});
+
+		it(`${label} has no private ordered decision driven by subscription membership size`, () => {
+			const offenders = files.flatMap((file) => privateSubscriptionOrderOffenders(ast(file).nodes, file));
+			expect(
+				offenders,
+				`${label} compares WS_SUBSCRIPTIONS size outside exceedsSubscriptionCap: ${offenders.join(', ')}`
+			).toEqual([]);
+		});
+	}
+
+	it('no shipped module reconstructs the cap through a folded size comparison', () => {
+		const offenders = CAP_DECISION_FILES.flatMap((file) =>
+			capEquivalentSizeComparisonOffenders(ast(file).nodes, file, SUBSCRIPTION_CAP));
+		expect(
+			offenders,
+			`a helper rebuilt the million-subscription decision under a constant expression: ${offenders.join(', ')}`
+		).toEqual([]);
+	});
+
+	it('no shipped module holds a private ordered decision on subscription membership size', () => {
+		// The surface-scoped rule above cannot see a helper the surface hands
+		// its userData to: `const ud = ws.getUserData()` then
+		// `ud[WS_SUBSCRIPTIONS].size >= 500` in any src file was invisible to
+		// every rule (the repo-wide rule is value-specific to the cap constant,
+		// and the escape tracker has no CallExpression branch). This rule is
+		// threshold-agnostic and repo-wide, so a private cap of ANY value in
+		// ANY shipped module is an offense, wherever the Set came from.
+		const offenders = CAP_DECISION_FILES.flatMap((file) =>
+			privateSubscriptionOrderOffenders(ast(file).nodes, file));
+		expect(
+			offenders,
+			`a shipped module compares WS_SUBSCRIPTIONS size outside exceedsSubscriptionCap: ${offenders.join(', ')}`
+		).toEqual([]);
+	});
+
+	it('the shared plugin lane holds no private ordered decision either', () => {
+		// trackedSubscribe in the shared symbols module makes the same cap
+		// call the three surfaces make. Its exit shape is a boolean refusal
+		// rather than a wire RATE_LIMITED denial, so the surface call
+		// contract does not apply verbatim; the inert-call mutation for this
+		// lane is owned behaviourally by the grant-model suite, which drives
+		// trackedSubscribe at the cap, at the cap while holding the topic,
+		// and one below it. What must hold statically here is the same
+		// no-private-threshold rule the surfaces carry.
+		const offenders = SHARED.flatMap((file) =>
+			privateSubscriptionOrderOffenders(ast(file).nodes, file));
+		expect(
+			offenders,
+			`a shared module compares WS_SUBSCRIPTIONS size outside exceedsSubscriptionCap: ${offenders.join(', ')}`
+		).toEqual([]);
+	});
+
+	it('no socket decision module sends the live subscription Set or its size to an opaque callee', () => {
+		const offenders = SCANNED.flatMap((file) => {
+			const { nodes, imports } = ast(file);
+			return subscriptionDataEscapeOffenders(nodes, imports, file);
+		});
+		expect(
+			offenders,
+			`an opaque helper can hide a private or changed cap after subscription data escapes: ${offenders.join(', ')}`
+		).toEqual([]);
+	});
 
 	// THE CAP. The constant may be imported, and READ only as the `max` property
 	// of an `exceedsSubscriptionCap` argument. Anything else is a surface
@@ -398,7 +1350,7 @@ describe('no surface re-derives a decision the policy owns', () => {
 	// version exempted any node nested in an argument, which let a reviewer
 	// smuggle the whole comparison in as a different property -
 	// `exceedsSubscriptionCap({ held: subs.size >= MAX_..., size: 0, max: 1 })`.
-	for (const file of SCANNED) {
+	for (const file of CAP_DECISION_FILES) {
 		it(`${file} reads the subscription cap only as exceedsSubscriptionCap's max`, () => {
 			const { nodes, imports } = ast(file);
 			let capLocal = 'MAX_SUBSCRIPTIONS_PER_CONNECTION';
@@ -427,14 +1379,28 @@ describe('no surface re-derives a decision the policy owns', () => {
 		});
 	}
 
+	// Banning only the constant NAME left the same decision available under a
+	// local spelling: `const cap = 1_000_000; if (subs.size >= cap)`. The shared
+	// caps module legitimately contains several independent one-million bounds;
+	// every consumer module must receive this one through the named import.
+	for (const file of SCANNED.filter((candidate) => candidate !== 'src/runtime/utils/caps.js')) {
+		it(`${file} does not re-declare the subscription cap value`, () => {
+			const offenders = ast(file).nodes
+				.filter(({ node }) => node.type === 'Literal' && node.value === SUBSCRIPTION_CAP)
+				.map(({ node }) => `${file}:${node.loc.start.line}`);
+			expect(
+				offenders,
+				`the reviewed cap value must enter through MAX_SUBSCRIPTIONS_PER_CONNECTION, not a local copy: ${offenders.join(', ')}`
+			).toEqual([]);
+		});
+	}
+
 	// The cap's VALUE, not merely its shape. The rule above is the ONLY defence
 	// this decision has - the cap is 1,000,000, so no behavioural test can reach
 	// it - and asserting only "a finite number above zero" left the constant
 	// itself as the way to disable it: raising caps.js to a number no connection
 	// can ever hit removes the limit while every other rule in this file stays
 	// green. Moving the cap is a deliberate act and must move this line with it.
-	const SUBSCRIPTION_CAP = 1_000_000;
-
 	it('the cap constant is one numeric literal, pinned at its reviewed value', async () => {
 		const src = read('src/runtime/utils/caps.js');
 		const declared = [...src.matchAll(/export const MAX_SUBSCRIPTIONS_PER_CONNECTION\s*=\s*([^;]+);/g)];

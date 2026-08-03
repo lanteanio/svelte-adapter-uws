@@ -4,8 +4,8 @@ import { wsModule } from '../ws-handler-bridge.js';
 import { metricsRegistry } from '../metrics-bridge.js';
 import { metricsSnapshot } from './metrics-snapshot.js';
 import { parentPort } from 'node:worker_threads';
-import { exceedsSubscriptionCap } from '../utils/subscribe-policy.js';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, deniesUngrantedObserve, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
+import { exceedsSubscriptionCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
 import { capCounts, captureResumeFrame, counters, maxSeenSeq, divergenceDiagnostics, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, resumeBuffers, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
@@ -934,7 +934,7 @@ export const platform = {
 	 * process; non-empty entries indicate a regression in the
 	 * framework or a third-party plugin and should be reported as a
 	 * GitHub issue with the category string. The structured
-	 * `[oss-realtime/diagnostic source=svelte-adapter-uws component=runtime.assertion event=invariant.violated severity=warn]` log lines accompanying each violation
+	 * `[lantean/diagnostic source=svelte-adapter-uws component=runtime.assertion event=invariant.violated severity=warn]` log lines accompanying each violation
 	 * carry the context payload needed to reproduce.
 	 *
 	 * @returns {Map<string, number>}

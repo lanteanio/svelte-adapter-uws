@@ -133,6 +133,16 @@ export interface TestServerOptions {
 	 * `null`, matching single-process mode.
 	 */
 	primaryInit?: (ctx: { env: NodeJS.ProcessEnv }) => any;
+	/**
+	 * Inbound WebSocket payload ceiling in bytes, enforced by the harness's
+	 * real uWS socket AND reported by `platform.maxPayloadLength` from the
+	 * same value - the two can never disagree. Defaults to `1048576` (1 MiB),
+	 * the production default, so chunking code sized off the report survives
+	 * against the real receiver.
+	 *
+	 * @default 1048576
+	 */
+	maxPayloadLength?: number;
 }
 
 /**

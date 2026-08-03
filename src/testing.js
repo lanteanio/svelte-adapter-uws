@@ -6,8 +6,8 @@ import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createL
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
-import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap } from './runtime/utils/subscribe-policy.js';
-import { deniesUngrantedObserve, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, isAuthorizationHook, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
+import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
+import { beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, isAuthorizationHook, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
@@ -118,7 +118,15 @@ export async function createTestServer(options = {}) {
 		'authorizeWireSubscribe',
 		'the createTestServer option authorizeWireSubscribe'
 	);
-	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, messageAdmission: messageAdmissionOptions, protection, metrics, adminPath = '/__realtime', readinessCheckPath = '/readyz', healthCheckPath = '/healthz', primaryInit } = options;
+	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, messageAdmission: messageAdmissionOptions, protection, metrics, adminPath = '/__realtime', readinessCheckPath = '/readyz', healthCheckPath = '/healthz', primaryInit, maxPayloadLength = 1024 * 1024 } = options;
+	// One constant drives BOTH the enforced uWS receiver cap and the reported
+	// platform.maxPayloadLength. The harness once enforced 64 KiB while
+	// reporting 1 MiB - the exact report-versus-enforce split the production
+	// and Vite surfaces were fixed for, certified by its own tests. Chunking
+	// code sized off the report must survive against the real socket.
+	if (typeof maxPayloadLength !== 'number' || !Number.isFinite(maxPayloadLength) || maxPayloadLength < 1) {
+		throw new Error('createTestServer maxPayloadLength must be a number greater than 0, got ' + String(maxPayloadLength));
+	}
 
 	// Lifecycle state, mirroring the production state machine
 	// (runtime/handler/lifecycle.js) rather than a boolean: `starting` while the
@@ -1166,10 +1174,10 @@ export async function createTestServer(options = {}) {
 				if (subs && subs.has(topic)) fn(ws, ud);
 			}
 		},
-		// Mirror production: report a numeric cap and a constant-time
+		// Mirror production: report the ENFORCED numeric cap and a constant-time
 		// bufferedAmount so test code can exercise the same backpressure-
 		// aware branches it uses in production.
-		get maxPayloadLength() { return 1024 * 1024; },
+		get maxPayloadLength() { return maxPayloadLength; },
 		bufferedAmount(ws) {
 			try { return ws.getBufferedAmount(); } catch { return 0; }
 		},
@@ -1743,7 +1751,7 @@ export async function createTestServer(options = {}) {
 	let nextRequestRefT = 1;
 
 	app.ws(wsPath, {
-		maxPayloadLength: 64 * 1024,
+		maxPayloadLength,
 		idleTimeout: 120,
 		sendPingsAutomatically: true,
 

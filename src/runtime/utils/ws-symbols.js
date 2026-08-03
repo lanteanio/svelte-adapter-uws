@@ -382,45 +382,6 @@ export async function authorizeDerivedSubscribe(ws, topic, authorize) {
 	return settlePendingSubscribe(ud, topic, token);
 }
 
-/**
- * Whether an observer-lane gate (`platform.checkSubscribe` with
- * `requireGrant`) must refuse `topic` before the app's hook chain is even
- * consulted, under the pure-grant model.
- *
- * A pure function of the four inputs so it can be tested directly - the
- * modules that hold those inputs are built against rollup-injected globals
- * and cannot be imported in a unit run.
- *
- * The `hasUserHook` term mirrors the wire-level gate exactly. An app that
- * exports its own `subscribe` / `subscribeBatch` hook is documented as
- * deciding every topic itself, so hard-denying before that hook runs would
- * silently break the presence / cursor snapshot lanes for precisely the apps
- * that took control of authorization.
- *
- * @param {boolean} armed - `subscribeAuth.enabled`
- * @param {boolean} hasUserHook - app exports a subscribe / subscribeBatch hook
- * @param {unknown} grants - the connection's WS_SUBSCRIPTIONS slot
- * @param {string} topic
- * @returns {boolean} true when the gate must deny
- */
-export function deniesUngrantedObserve(armed, hasUserHook, grants, topic) {
-	if (!armed || hasUserHook) return false;
-	// NO plugin-owned exemption here, deliberately. This predicate answers for
-	// two lanes that have no second line of defence: the observer gate and the
-	// client-named RESUME filter, where the filter IS the gate. Exempting a
-	// plugin-owned prefix here therefore served `__group:private-lobby`'s
-	// buffered history to any client that simply named it in a resume frame -
-	// refused on the live-subscribe path and served on the message-history path,
-	// same server, same connection, same topic.
-	//
-	// The wire-subscribe pre-gate keeps its carve-out because it is the only
-	// lane with a landing re-check behind it: it exempts the topic just long
-	// enough for the plugin's hook to run, then re-tests real membership before
-	// the subscription stands. Nothing is lost here, because a client the plugin
-	// legitimately admitted is IN the subscription registry by then, so the
-	// grant test below passes on its own.
-	return !(grants instanceof Set) || !grants.has(topic);
-}
 
 /**
  * Revocation side of {@link beginPendingSubscribe}: bump `topic`'s revocation

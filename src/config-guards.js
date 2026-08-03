@@ -43,6 +43,26 @@ export function assertRestrictiveBoolean(bag, key, surface = `websocket.${key}`)
 }
 
 /**
+ * Validate the wire-subscribe authorization policy. In addition to the legacy
+ * boolean modes, `strict` requires BOTH an existing server grant and an
+ * application subscribe-hook allow.
+ *
+ * @param {Record<string, any> | null | undefined} bag
+ * @param {string} key
+ * @param {string} [surface]
+ * @returns {void}
+ */
+export function assertWireSubscribeAuthorization(bag, key, surface = `websocket.${key}`) {
+	const value = bag?.[key];
+	if (value === undefined || typeof value === 'boolean' || value === 'strict') return;
+	throw new Error(
+		`${surface} must be true, false, or 'strict' - got ${JSON.stringify(value)} (${typeof value}). ` +
+		'An unrecognized value is refused because silently reading it as off would disable subscription authorization. ' +
+		"If the value comes from the environment, convert it explicitly (e.g. process.env.WS_AUTHZ === 'strict' ? 'strict' : false)."
+	);
+}
+
+/**
  * Refuse a non-numeric value for an option that sizes a PROTECTION.
  *
  * The rate limits are read as `wsOptions.x ?? default` and then compared with
@@ -95,7 +115,7 @@ export function assertProtectiveNumber(
 	// says nothing about the option that was wrong.
 	const shown = typeof value === 'bigint' ? `${value}n` : describeValue(value);
 	throw new Error(
-		`${surface} must be a number >= 0 - got ${shown} (${typeof value}). ` +
+		`${surface} must be a number >= ${floor} - got ${shown} (${typeof value}). ` +
 		`This option bounds a resource, and every comparison against a non-number is false, ` +
 		`so an unrecognized value would disable the bound entirely rather than fall back to ` +
 		`the default. If the value comes from the ` +
