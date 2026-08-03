@@ -44,6 +44,11 @@ const COOKIE_ATTR_INVALID = /[,;\s\u0000-\u001f\u007f]/;
 const VALID_SAMESITE = new Set(['strict', 'lax', 'none']);
 
 /**
+ * The public contract (`src/index.d.ts` CookieSerializeOptions) requires
+ * `path` on `cookies.set()` / `.delete()`; that requirement is enforced by
+ * `createCookies`. This internal shape leaves `path` optional because
+ * `serializeCookie` is the low-level attribute serializer shared by both.
+ *
  * @typedef {object} CookieSerializeOptions
  * @property {string} [path]
  * @property {string} [domain]
@@ -58,8 +63,8 @@ const VALID_SAMESITE = new Set(['strict', 'lax', 'none']);
 
 /**
  * Serialize a cookie name/value/options triple into a Set-Cookie header string.
- * Mirrors the cookie semantics SvelteKit applies via its cookies.set() API so
- * users writing an authenticate hook get the same behavior as in +server.js.
+ * `createCookies()` applies the SvelteKit defaults and required-path contract
+ * before calling this attribute serializer.
  *
  * @param {string} name
  * @param {string} value
@@ -97,8 +102,8 @@ export function serializeCookie(name, value, options = {}) {
 	if (options.httpOnly) out += '; HttpOnly';
 	if (options.secure) out += '; Secure';
 	if (options.partitioned) out += '; Partitioned';
-	if (options.sameSite !== undefined) {
-		const raw = options.sameSite === true ? 'strict' : options.sameSite === false ? 'lax' : options.sameSite;
+	if (options.sameSite !== undefined && options.sameSite !== false) {
+		const raw = options.sameSite === true ? 'strict' : options.sameSite;
 		const normalized = String(raw).toLowerCase();
 		if (!VALID_SAMESITE.has(normalized)) {
 			throw new Error(`Invalid SameSite for cookie '${name}': ${options.sameSite}`);
@@ -113,15 +118,42 @@ export function serializeCookie(name, value, options = {}) {
  * Reads from the incoming request's Cookie header and accumulates Set-Cookie
  * strings that the caller writes onto the response.
  *
- * @param {string} [cookieHeader] - raw Cookie header from the request
+ * The request URL is REQUIRED, exactly as in SvelteKit's own cookie factory:
+ * the `Secure` default and relative `Path` resolution are both derived from
+ * it. A fallback default here was a fail-open shape - a caller that forgot
+ * the argument silently produced session cookies without `Secure`.
+ *
+ * @param {string | undefined} cookieHeader - raw Cookie header from the request
+ * @param {string | URL} requestUrl - request URL; drives the Secure default
+ *   and resolves relative cookie paths
  */
-export function createCookies(cookieHeader) {
+export function createCookies(cookieHeader, requestUrl) {
+	if (requestUrl === undefined || requestUrl === null || requestUrl === '') {
+		throw new Error(
+			'createCookies requires the request URL: the Secure default and ' +
+			'relative Path resolution are derived from it'
+		);
+	}
 	const parsed = parseCookies(cookieHeader);
+	const url = requestUrl instanceof URL ? requestUrl : new URL(requestUrl);
+	/** @type {CookieSerializeOptions} */
+	const defaults = {
+		httpOnly: true,
+		sameSite: 'lax',
+		secure: !(url.hostname === 'localhost' && url.protocol === 'http:')
+	};
 	/** @type {Map<string, string>} keyed by name + path + domain so repeated set() with the same scope overwrites */
 	const outgoing = new Map();
 
 	function key(name, path, domain) {
 		return name + '\0' + (path || '') + '\0' + (domain || '');
+	}
+
+	/** @param {CookieSerializeOptions | undefined} options */
+	function requirePath(options) {
+		if (options?.path === undefined) {
+			throw new Error('You must specify a `path` when setting or deleting cookies');
+		}
 	}
 
 	const api = {
@@ -136,17 +168,27 @@ export function createCookies(cookieHeader) {
 		/**
 		 * @param {string} name
 		 * @param {string} value
-		 * @param {CookieSerializeOptions} [options]
+		 * @param {CookieSerializeOptions & { path: string }} options
 		 */
-		set(name, value, options = {}) {
-			outgoing.set(key(name, options.path, options.domain), serializeCookie(name, value, options));
+		set(name, value, options) {
+			requirePath(options);
+			const resolved = { ...defaults, ...options };
+			// SvelteKit resolves a relative path against the request URL
+			// before serializing; without this, `Path=sub` reaches the
+			// browser, which discards it for the RFC 6265 default path -
+			// a silent scope change from what the caller asked for.
+			if (typeof resolved.path === 'string' && resolved.path[0] !== '/') {
+				resolved.path = new URL(resolved.path, url).pathname;
+			}
+			outgoing.set(key(name, resolved.path, resolved.domain), serializeCookie(name, value, resolved));
 			parsed[name] = value;
 		},
 		/**
 		 * @param {string} name
-		 * @param {Pick<CookieSerializeOptions, 'path' | 'domain'>} [options]
+		 * @param {CookieSerializeOptions & { path: string }} options
 		 */
-		delete(name, options = {}) {
+		delete(name, options) {
+			requirePath(options);
 			api.set(name, '', {
 				...options,
 				expires: new Date(0), // determinism-allow: fixed Unix-epoch sentinel that forces immediate cookie deletion, not a wall-clock read

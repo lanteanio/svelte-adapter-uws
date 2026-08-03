@@ -18,8 +18,16 @@ export function init({ platform }) {
 // Exporting this is what makes the adapter register the auth preflight route
 // (`connect({ auth: true })` POSTs it before upgrading), so it is required for
 // any test of that endpoint. Accepts everything: the tests here are about the
-// door in front of the hook, not about the hook's own decision.
-export function authenticate() {
+// door in front of the hook, not about the hook's own decision. The
+// cookie-probe lane exists because the adapter's cookie defaults (the Secure
+// derivation from the request URL, relative-path resolution) are only
+// observable on a real response's Set-Cookie header.
+export function authenticate({ cookies, headers }) {
+	if (headers['x-set-cookie-probe'] === '1') {
+		cookies.set('probe_session', 'probe-value', {
+			path: headers['x-cookie-path'] || '/'
+		});
+	}
 	return { userId: 'fixture-user' };
 }
 
@@ -40,12 +48,14 @@ export function subscribe(ws, topic, { platform }) {
 }
 
 export function open(ws, { platform }) {
-	platform.publish('test-topic', 'connected', { ts: Date.now() });
+	// The fixture is also booted with several cluster topologies. This startup
+	// pulse is intentionally volatile and needs no replay sequence.
+	platform.publish('test-topic', 'connected', { ts: Date.now() }, { seq: false });
 	// Exercise platform.connections and topic() helpers
 	const _ = platform.connections;
 	const t = platform.topic('test-topic');
-	t.increment(1);
-	t.decrement(1);
+	t.increment(1, { seq: false });
+	t.decrement(1, { seq: false });
 }
 
 export function message(ws, ctx) {
@@ -58,7 +68,38 @@ export function message(ws, ctx) {
 		platform.send(ws, 'test-topic', 'echo', msg.payload);
 	}
 	if (msg.type === 'broadcast') {
-		platform.publish(msg.topic || 'test-topic', msg.event || 'broadcast', msg.payload);
+		platform.publish(msg.topic || 'test-topic', msg.event || 'broadcast', msg.payload, msg.options ?? { seq: false });
+	}
+	if (msg.type === 'sequence-policy-probe') {
+		try {
+			const topic = msg.topic || 'sequence-policy:room';
+			const event = 'probe';
+			const options = msg.options;
+			let result;
+			if (msg.entry === 'wire') {
+				result = platform.publishWire(topic, event, { n: 1 }, {
+					capability: 'fixture.sequence:1', schemaVersion: 1, encode: () => null
+				}, options);
+			} else if (msg.entry === 'wire-batch') {
+				result = platform.publishWireBatch(topic, event, [{ data: { n: 1 } }, { data: { n: 2 } }], {
+					capability: 'fixture.sequence-batch:1', schemaVersion: 1, state: {}, encode: () => null
+				}, options);
+			} else if (msg.entry === 'batch') {
+				platform.publishBatched([{ topic, event, data: { n: 1 }, options }]);
+				result = true;
+			} else if (msg.entry === 'loop-batch') {
+				result = platform.batch([{ topic, event, data: { n: 1 }, options }])[0];
+			} else {
+				result = platform.publish(topic, event, { n: 1 }, options);
+			}
+			platform.send(ws, 'probe', 'sequence-policy', { nonce: msg.nonce, ok: true, result });
+		} catch (error) {
+			platform.send(ws, 'probe', 'sequence-policy', {
+				nonce: msg.nonce,
+				ok: false,
+				error: error instanceof Error ? error.message : String(error)
+			});
+		}
 	}
 	if (msg.type === 'sendto') {
 		platform.sendTo(
@@ -106,9 +147,25 @@ export function message(ws, ctx) {
 			msg.exclude === false ? undefined : { excludeWs: ws }
 		);
 	}
+	if (msg.type === 'game-policy-probe') {
+		// Real clustered-runtime probe: unlike a source assertion, this reaches
+		// workerData -> platform.grantPublish in the built handler. The result is
+		// returned on the wire so the test cannot pass while the production guard
+		// is disconnected.
+		try {
+			platform.grantPublish(ws, msg.topic || 'game-policy:room');
+			platform.revokePublish(ws);
+			platform.send(ws, 'probe', 'game-policy', { ok: true });
+		} catch (error) {
+			platform.send(ws, 'probe', 'game-policy', {
+				ok: false,
+				error: error instanceof Error ? error.message : String(error)
+			});
+		}
+	}
 }
 
 export function close(ws, ctx) {
 	cursors.hooks.close(ws, ctx);
-	ctx.platform.publish('test-topic', 'disconnected', { code: ctx.code });
+	ctx.platform.publish('test-topic', 'disconnected', { code: ctx.code }, { seq: false });
 }

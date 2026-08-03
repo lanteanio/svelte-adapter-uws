@@ -1232,7 +1232,7 @@ describe('serializeCookie', () => {
 
 	it('maps SameSite boolean to string', () => {
 		expect(serializeCookie('s', 'x', { sameSite: true })).toBe('s=x; SameSite=Strict');
-		expect(serializeCookie('s', 'x', { sameSite: false })).toBe('s=x; SameSite=Lax');
+		expect(serializeCookie('s', 'x', { sameSite: false })).toBe('s=x');
 	});
 
 	it('rejects invalid SameSite values', () => {
@@ -1320,33 +1320,100 @@ describe('serializeCookie', () => {
 // - createCookies ----------------------------------------------------------
 
 describe('createCookies', () => {
+	// Plain HTTP on localhost: the one shape where the Secure default is
+	// intentionally omitted, so exact-string assertions stay stable.
+	const LOCAL_URL = 'http://localhost:5173/__ws/auth';
+
 	it('reads cookies from the request Cookie header', () => {
-		const c = createCookies('session=abc; theme=dark');
+		const c = createCookies('session=abc; theme=dark', LOCAL_URL);
 		expect(c.get('session')).toBe('abc');
 		expect(c.get('theme')).toBe('dark');
 		expect(c.get('missing')).toBeUndefined();
 	});
 
 	it('returns all cookies via getAll()', () => {
-		const c = createCookies('a=1; b=2');
+		const c = createCookies('a=1; b=2', LOCAL_URL);
 		expect(c.getAll()).toEqual({ a: '1', b: '2' });
 	});
 
 	it('set() accumulates outgoing Set-Cookie strings', () => {
-		const c = createCookies();
-		c.set('a', '1');
+		const c = createCookies(undefined, LOCAL_URL);
+		c.set('a', '1', { path: '/' });
 		c.set('b', '2', { path: '/' });
-		expect(c._serialize()).toEqual(['a=1', 'b=2; Path=/']);
+		expect(c._serialize()).toEqual([
+			'a=1; Path=/; HttpOnly; SameSite=Lax',
+			'b=2; Path=/; HttpOnly; SameSite=Lax'
+		]);
 	});
 
 	it('set() makes subsequent get() return the new value', () => {
-		const c = createCookies('a=old');
-		c.set('a', 'new');
+		const c = createCookies('a=old', LOCAL_URL);
+		c.set('a', 'new', { path: '/' });
 		expect(c.get('a')).toBe('new');
 	});
 
+	it('matches SvelteKit protective defaults using the request URL', () => {
+		const c = createCookies(undefined, 'https://example.com/__ws/auth');
+		c.set('session', 'abc', { path: '/' });
+		expect(c._serialize()).toEqual([
+			'session=abc; Path=/; HttpOnly; Secure; SameSite=Lax'
+		]);
+	});
+
+	it('omits Secure only for plain HTTP on localhost', () => {
+		const local = createCookies(undefined, 'http://localhost:5173/__ws/auth');
+		local.set('session', 'abc', { path: '/' });
+		expect(local._serialize()[0]).not.toContain('; Secure');
+
+		const localTls = createCookies(undefined, 'https://localhost/__ws/auth');
+		localTls.set('session', 'abc', { path: '/' });
+		expect(localTls._serialize()[0]).toContain('; Secure');
+
+		const nonLocalHttp = createCookies(undefined, 'http://dev.example.com/__ws/auth');
+		nonLocalHttp.set('session', 'abc', { path: '/' });
+		expect(nonLocalHttp._serialize()[0]).toContain('; Secure');
+	});
+
+	it('refuses to run without the request URL', () => {
+		// The URL drives the Secure default and relative-path resolution; a
+		// fallback default here is a fail-open shape (session cookies without
+		// Secure for every caller that forgets the argument).
+		expect(() => createCookies('a=1')).toThrow('requires the request URL');
+		expect(() => createCookies('a=1', '')).toThrow('requires the request URL');
+	});
+
+	it('resolves a relative path against the request URL like SvelteKit', () => {
+		const c = createCookies(undefined, 'https://example.com/__ws/auth');
+		c.set('rel', 'v', { path: 'sub' });
+		c.set('up', 'v', { path: '../elsewhere' });
+		c.set('abs', 'v', { path: '/kept' });
+		const out = c._serialize();
+		expect(out[0]).toContain('; Path=/__ws/sub');
+		expect(out[1]).toContain('; Path=/elsewhere');
+		expect(out[2]).toContain('; Path=/kept');
+	});
+
+	it('requires explicit false to weaken protective defaults', () => {
+		const c = createCookies(undefined, 'https://example.com/__ws/auth');
+		c.set('session', 'abc', {
+			path: '/',
+			httpOnly: false,
+			secure: false,
+			sameSite: false
+		});
+		expect(c._serialize()).toEqual(['session=abc; Path=/']);
+	});
+
+	it('requires a path when setting or deleting cookies', () => {
+		const c = createCookies(undefined, LOCAL_URL);
+		// @ts-expect-error intentional missing path
+		expect(() => c.set('session', 'abc')).toThrow('specify a `path`');
+		// @ts-expect-error intentional missing path
+		expect(() => c.delete('session')).toThrow('specify a `path`');
+	});
+
 	it('set() on the same name + path + domain overwrites', () => {
-		const c = createCookies();
+		const c = createCookies(undefined, LOCAL_URL);
 		c.set('session', 'first', { path: '/', httpOnly: true });
 		c.set('session', 'second', { path: '/', httpOnly: true });
 		const out = c._serialize();
@@ -1355,33 +1422,35 @@ describe('createCookies', () => {
 	});
 
 	it('set() on the same name but different path does NOT overwrite', () => {
-		const c = createCookies();
+		const c = createCookies(undefined, LOCAL_URL);
 		c.set('session', 'a', { path: '/' });
 		c.set('session', 'b', { path: '/admin' });
 		expect(c._serialize()).toHaveLength(2);
 	});
 
 	it('delete() emits a zero-Max-Age, expired Set-Cookie', () => {
-		const c = createCookies('session=abc');
+		const c = createCookies('session=abc', LOCAL_URL);
 		c.delete('session', { path: '/' });
 		const out = c._serialize();
 		expect(out).toHaveLength(1);
 		expect(out[0]).toContain('session=');
 		expect(out[0]).toContain('Max-Age=0');
 		expect(out[0]).toContain('Expires=Thu, 01 Jan 1970');
+		expect(out[0]).toContain('HttpOnly');
+		expect(out[0]).toContain('SameSite=Lax');
 		expect(c.get('session')).toBeUndefined();
 	});
 
 	it('_serialize() returns a fresh array (no mutation leakage)', () => {
-		const c = createCookies();
-		c.set('a', '1');
+		const c = createCookies(undefined, LOCAL_URL);
+		c.set('a', '1', { path: '/' });
 		const snapshot = c._serialize();
-		c.set('b', '2');
-		expect(snapshot).toEqual(['a=1']);
+		c.set('b', '2', { path: '/' });
+		expect(snapshot).toEqual(['a=1; Path=/; HttpOnly; SameSite=Lax']);
 	});
 
 	it('handles empty or missing cookie header', () => {
-		const c = createCookies();
+		const c = createCookies(undefined, LOCAL_URL);
 		expect(c.getAll()).toEqual({});
 		expect(c._serialize()).toEqual([]);
 	});
@@ -2245,6 +2314,24 @@ describe('createScopedTopic', () => {
 		expect(calls).toEqual([{ topic: 'chat', event: 'typing', data: { user: 'a' } }]);
 	});
 
+	it('forwards publish options through every scoped spelling', () => {
+		const calls = [];
+		const t = createScopedTopic((topic, event, data, options) => calls.push({ topic, event, data, options }), 'clustered');
+		const unsequenced = { seq: false };
+		const authoritative = { seq: 9, relay: false };
+		t.publish('custom', 1, unsequenced);
+		t.created(2, authoritative);
+		t.updated(3, unsequenced);
+		t.deleted(4, authoritative);
+		t.set(5, unsequenced);
+		t.increment(6, authoritative);
+		t.decrement(7, unsequenced);
+		expect(calls.map((call) => call.options)).toEqual([
+			unsequenced, authoritative, unsequenced, authoritative,
+			unsequenced, authoritative, unsequenced
+		]);
+	});
+
 	it('created/updated/deleted use fixed event names', () => {
 		const { fn, calls } = recorder();
 		const t = createScopedTopic(fn, 'todos');
@@ -2650,6 +2737,58 @@ describe('createUpgradeAdmission', () => {
 			a.tryAcquire();
 			expect(a.tryAcquire()).toBe(false);
 			expect(a.inFlight).toBe(1);
+		});
+	});
+
+	describe('maxConnections', () => {
+		it('holds a finite permit until releaseConnection()', () => {
+			const a = createUpgradeAdmission({ maxConnections: 2 });
+			expect(a.maxConnections).toBe(2);
+			expect(a.connectionHeadroom).toBe(2);
+			expect(a.tryAcquireConnection()).toBe(true);
+			expect(a.tryAcquireConnection()).toBe(true);
+			expect(a.tryAcquireConnection()).toBe(false);
+			expect(a.connectionPermits).toBe(2);
+			expect(a.connectionHeadroom).toBe(0);
+			expect(a.hasCapacity()).toBe(false);
+			a.releaseConnection();
+			expect(a.connectionPermits).toBe(1);
+			expect(a.connectionHeadroom).toBe(1);
+			expect(a.hasCapacity()).toBe(true);
+		});
+
+		it('is an allocation-free no-op when disabled', () => {
+			const a = createUpgradeAdmission();
+			expect(a.tryAcquireConnection()).toBe(true);
+			expect(a.connectionPermits).toBe(0);
+			expect(a.connectionHeadroom).toBeNull();
+			a.releaseConnection();
+			expect(a.connectionPermits).toBe(0);
+		});
+
+		it('does not change maxConcurrent handshake semantics', () => {
+			const a = createUpgradeAdmission({ maxConcurrent: 1 });
+			expect(a.tryAcquire()).toBe(true);
+			a.release();
+			expect(a.tryAcquire()).toBe(true);
+			a.release();
+			expect(a.tryAcquireConnection()).toBe(true);
+			expect(a.connectionPermits).toBe(0);
+		});
+
+		it.each([-1, 1.5, Number.POSITIVE_INFINITY, '2', null])(
+			'rejects invalid finite-cap value %p',
+			(value) => {
+				expect(() => createUpgradeAdmission({ maxConnections: value })).toThrow(
+					'upgradeAdmission.maxConnections must be a non-negative safe integer'
+				);
+			}
+		);
+
+		it('rejects an unmatched release instead of underflowing the counter', () => {
+			const a = createUpgradeAdmission({ maxConnections: 1 });
+			expect(() => a.releaseConnection()).toThrow('released without an acquisition');
+			expect(a.connectionPermits).toBe(0);
 		});
 	});
 
