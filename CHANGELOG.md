@@ -472,6 +472,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A fixture build that produces no runnable handler fails instead of
+  silently reusing the last one.** The shared fixture build reran Vite whenever
+  the source digest changed, but it never cleared the variant's output
+  directory and treated exit code 0 as success on its own. An adapter
+  misconfiguration lets the build exit 0 while writing no handler, so the
+  suites booted the *previous* build and passed - including the check written
+  to catch precisely that regression, which could therefore never fail once an
+  artifact existed. The output directory is now removed before the build runs,
+  and a build that leaves no `index.js` fails with a diagnostic naming the
+  variant.
 - **The contributor map no longer calls `verify:pr` the hosted gate.** Its
   preamble and its lane table both described `verify:pr` as the hosted-gate
   equivalent, while the inventory immediately below them correctly stated that

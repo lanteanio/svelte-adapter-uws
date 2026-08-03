@@ -16,7 +16,7 @@
 
 import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { variantOut } from '../fixture/variants.js';
@@ -132,6 +132,15 @@ export function buildFixtureOnce(variant = 'default') {
 				return true; // another suite already built this exact source state
 			}
 		} catch { /* no stamp yet - build below */ }
+		// Clear this variant's output BEFORE building. Reaching here means the
+		// digest changed, so whatever sits on disk was produced by different
+		// sources - and a build that exits 0 without emitting a handler would
+		// otherwise leave it there for the suites to boot. That is not
+		// hypothetical: an adapter misconfiguration lets adapter-auto succeed
+		// while writing no runnable output, and the check meant to catch exactly
+		// that passed against the PREVIOUS build. Only this variant's directory
+		// goes; each variant owns its own, and the lock serializes them.
+		rmSync(join(fixtureDir, outDir), { recursive: true, force: true });
 		try {
 			execSync('npx vite build', {
 				cwd: fixtureDir,
@@ -139,6 +148,17 @@ export function buildFixtureOnce(variant = 'default') {
 				timeout: 180000,
 				env: { ...process.env, FIXTURE_VARIANT: variant }
 			});
+			// Exit code 0 is not the contract - a runnable handler is. Requiring
+			// one here is what turns a no-output build into a failure instead of
+			// a silent fall-through onto stale artifacts.
+			if (!existsSync(join(fixtureDir, outDir, 'index.js'))) {
+				console.error(
+					`[fixture-build] variant "${variant}" exited 0 but produced no ` +
+					`${outDir}/index.js - the adapter wrote no runnable handler. Check that ` +
+					'the fixture config still selects this adapter for this variant.'
+				);
+				return false;
+			}
 			// Stamp only when OUR lock survived the whole build: a missing lock dir,
 			// or one whose mtime moved past our acquire, means a racer reclaimed it
 			// mid-build (the suspend/resume residual above) and another build may
