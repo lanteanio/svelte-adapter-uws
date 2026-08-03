@@ -153,6 +153,24 @@ describe('an option that sizes a rate limit refuses a misshaped value', () => {
 			it(`${key} accepts a positive number`, () => {
 				expect(() => serializeWsOptions({ [key]: 4096 }, false)).not.toThrow();
 			});
+			if (key === 'maxPayloadLength') {
+				// The receiver stores this bound in a fixed-width integer, so a
+				// larger or fractional value is truncated there while the
+				// configured figure is what gets reported - a ~4-million-fold
+				// lie in the measured 2**32 case, the report-versus-enforce
+				// split in the opposite direction.
+				it(`${key} refuses a value above the 32-bit ceiling`, () => {
+					expect(() => serializeWsOptions({ [key]: 2 ** 32 + 1024 }, false))
+						.toThrow(/integer no greater than 2147483647/);
+				});
+				it(`${key} refuses a fractional value`, () => {
+					expect(() => serializeWsOptions({ [key]: 1024.5 }, false))
+						.toThrow(/integer no greater than 2147483647/);
+				});
+				it(`${key} accepts the exact ceiling`, () => {
+					expect(() => serializeWsOptions({ [key]: 0x7fffffff }, false)).not.toThrow();
+				});
+			}
 		} else if (key.endsWith('Window')) {
 			it(`${key} refuses 0, which breaks the limiter rather than disabling it`, () => {
 				// A zero window makes every request look like a fresh window, so

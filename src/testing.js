@@ -124,8 +124,17 @@ export async function createTestServer(options = {}) {
 	// reporting 1 MiB - the exact report-versus-enforce split the production
 	// and Vite surfaces were fixed for, certified by its own tests. Chunking
 	// code sized off the report must survive against the real socket.
-	if (typeof maxPayloadLength !== 'number' || !Number.isFinite(maxPayloadLength) || maxPayloadLength < 1) {
-		throw new Error('createTestServer maxPayloadLength must be a number greater than 0, got ' + String(maxPayloadLength));
+	// The receiver stores its limit as a signed 32-bit integer, so a value
+	// above it (or a fractional one) is silently truncated by the native
+	// layer while the reported number keeps the caller's figure - the same
+	// report-versus-enforce split in the other direction. Same guard as the
+	// Vite dev plugin.
+	if (typeof maxPayloadLength !== 'number' || !Number.isSafeInteger(maxPayloadLength) ||
+		maxPayloadLength < 1 || maxPayloadLength > 0x7fffffff) {
+		throw new Error(
+			'createTestServer maxPayloadLength must be a positive integer no greater than 2147483647 bytes, ' +
+			'because the receiver stores its limit as a signed 32-bit integer, got ' + String(maxPayloadLength)
+		);
 	}
 
 	// Lifecycle state, mirroring the production state machine

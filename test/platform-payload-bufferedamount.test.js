@@ -78,6 +78,18 @@ describeUWS('platform.maxPayloadLength', () => {
 		try { ws.terminate(); } catch { /* closed */ }
 	});
 
+	it('refuses a cap the receiver would silently truncate rather than reporting a lie', async () => {
+		// Measured against the real socket before this guard existed:
+		// maxPayloadLength: 2**32 + 1024 reported ~4 GiB while uWS enforced
+		// 1 KiB. Refusing loudly at construction is the only way the reported
+		// value can keep meaning the enforced one.
+		const { createTestServer } = await import('../src/testing.js');
+		await expect(createTestServer({ maxPayloadLength: 2 ** 32 + 1024 }))
+			.rejects.toThrow(/no greater than 2147483647/);
+		await expect(createTestServer({ maxPayloadLength: 1024.5 }))
+			.rejects.toThrow(/no greater than 2147483647/);
+	});
+
 	it('the value is a snapshot of the configured cap, not a live channel for changes', async () => {
 		// Reading twice returns the same value; nothing else mutates it.
 		const { createTestServer } = await import('../src/testing.js');

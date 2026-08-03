@@ -94,11 +94,23 @@ export function assertProtectiveNumber(
 	bag,
 	key,
 	surface = `websocket.${key}`,
-	{ allowZero = true, zeroMeans = '' } = {}
+	{ allowZero = true, zeroMeans = '', ceiling = 0 } = {}
 ) {
 	const value = bag?.[key];
 	if (value === undefined || value === null) return;
 	const floor = allowZero ? 0 : 1;
+	// A ceiling'd option is stored by the native layer in a fixed-width
+	// integer: a larger or fractional value is silently truncated there while
+	// the configured figure is what gets reported back, which is the same
+	// report-versus-enforce split in the opposite direction.
+	if (ceiling > 0 && typeof value === 'number' && Number.isFinite(value) && value >= floor &&
+		(!Number.isSafeInteger(value) || value > ceiling)) {
+		throw new Error(
+			`${surface} must be an integer no greater than ${ceiling}, because the receiver ` +
+			`stores this bound in a fixed-width integer and silently truncates anything larger ` +
+			`- got ${describeValue(value)}.`
+		);
+	}
 	if (typeof value === 'number' && Number.isFinite(value) && value >= floor) return;
 	if (!allowZero && value === 0) {
 		// The reason zero is refused differs per option, so the caller supplies

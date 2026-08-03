@@ -300,6 +300,7 @@ export function serializeWsOptions(websocket, adminPath) {
 	// them zero INVERTS the option.
 	assertProtectiveNumber(websocket, 'maxPayloadLength', 'websocket.maxPayloadLength', {
 		allowZero: false,
+		ceiling: 0x7fffffff,
 		zeroMeans:
 			'uWS closes the connection on any message when the maximum payload is 0, so it does ' +
 			'not disable the limit - it refuses all traffic. Raise the limit instead.'

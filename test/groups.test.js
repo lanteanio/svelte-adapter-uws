@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createGroup } from '../src/plugins/groups/server.js';
-import { isAuthorizationHook, deniesUngrantedObserve, isPluginOwnedTopic, registerPluginOwnedPrefix } from '../src/runtime/utils/ws-symbols.js';
+import { isAuthorizationHook, isPluginOwnedTopic, registerPluginOwnedPrefix } from '../src/runtime/utils/ws-symbols.js';
+import { deniesUngrantedObserve } from '../src/runtime/utils/subscribe-policy.js';
 import { mockWs, mockPlatform } from './_helpers.js';
 
 describe('groups plugin - server', () => {
