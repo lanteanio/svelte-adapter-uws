@@ -1,0 +1,447 @@
+name: cross-repo-heads
+
+# Compatibility is a property of the three packed packages, not of any one
+# source checkout. This workflow delegates that proof to the extensions repo's
+# cross-repo gate and records the exact revisions it exercised.
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'scripts/**'
+      - 'README.md'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.nvmrc'
+      - '.github/workflows/cross-repo-heads.yml'
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cross-repo-heads-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  EXTENSIONS_REF: '90c9f887b888cef96a44c2113950f00e0b8f7f33'
+  REALTIME_REF: 'c76a05892aa6f95222644583f49ab22843d29e5c'
+
+jobs:
+  packed-heads:
+    name: packed heads (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Check out adapter event revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: heads/svelte-adapter-uws
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check out extensions revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: lanteanio/svelte-adapter-uws-extensions
+          path: heads/svelte-adapter-uws-extensions
+          ref: ${{ env.EXTENSIONS_REF }}
+          persist-credentials: false
+      - name: Check out realtime revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: lanteanio/svelte-realtime
+          path: heads/svelte-realtime
+          ref: ${{ env.REALTIME_REF }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: 'heads/svelte-adapter-uws/.nvmrc'
+
+      - name: Record resolved revisions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force provenance, logs | Out-Null
+          $refs = [ordered]@{}
+          foreach ($name in @('svelte-adapter-uws', 'svelte-adapter-uws-extensions', 'svelte-realtime')) {
+            $refs[$name] = (git -C "heads/$name" rev-parse HEAD).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "could not resolve $name HEAD" }
+          }
+          [ordered]@{
+            repository = '${{ github.repository }}'
+            event = '${{ github.event_name }}'
+            workflow_sha = '${{ github.sha }}'
+            run_id = '${{ github.run_id }}'
+            run_attempt = '${{ github.run_attempt }}'
+            runner = '${{ runner.os }}'
+            node = (node --version)
+            npm = (npm --version)
+            refs = $refs
+          } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8NoBOM "provenance/${{ runner.os }}.json"
+
+      # This blocking rung proves that all three publish-shaped tarballs install
+      # into an empty consumer and resolve one coherent peer graph.
+      - name: Pack and install heads; verify peers
+        shell: pwsh
+        run: |
+          & node heads/svelte-adapter-uws-extensions/scripts/cross-repo-gate.js `
+            --repo heads/svelte-adapter-uws `
+            --repo heads/svelte-adapter-uws-extensions `
+            --repo heads/svelte-realtime `
+            --rungs peers `
+            --work-dir cross-repo-gate `
+            --require-clean --strict --clean 2>&1 |
+            Tee-Object -FilePath "logs/${{ runner.os }}-pack-install-peers.log"
+          exit $LASTEXITCODE
+
+      - name: Verify related-project cards against exact heads
+        shell: pwsh
+        run: >
+          node heads/svelte-adapter-uws/scripts/check-related-projects.js
+          --extensions-package heads/svelte-adapter-uws-extensions/package.json
+          --realtime-package heads/svelte-realtime/package.json
+
+      # Keep the one pinned declaration defect visible without making that
+      # exact debt a release gate. The classifier below checks its full
+      # diagnostic fingerprint; any other type or harness failure blocks CI.
+      - name: Exercise strict packed-head type parity
+        id: strict-types
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & node heads/svelte-adapter-uws-extensions/scripts/cross-repo-gate.js `
+            --repo heads/svelte-adapter-uws `
+            --repo heads/svelte-adapter-uws-extensions `
+            --repo heads/svelte-realtime `
+            --rungs types `
+            --work-dir cross-repo-gate `
+            --require-clean --strict --clean 2>&1 |
+            Tee-Object -FilePath "logs/${{ runner.os }}-strict-types.log"
+          exit $LASTEXITCODE
+
+      - name: Classify strict type result
+        if: always()
+        shell: pwsh
+        env:
+          TYPE_STEP_OUTCOME: ${{ steps.strict-types.outcome }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $logPath = "logs/${{ runner.os }}-strict-types.log"
+          $evidencePath = "logs/${{ runner.os }}-direct-types.log"
+          if ($env:TYPE_STEP_OUTCOME -notin @('success', 'failure') -or -not (Test-Path $logPath)) {
+            throw "strict type step ended as '$env:TYPE_STEP_OUTCOME' without a classifiable log"
+          }
+          $classificationLines = @(& node heads/svelte-adapter-uws/scripts/classify-cross-repo-types.js `
+            $logPath cross-repo-gate/consumer $evidencePath $env:TYPE_STEP_OUTCOME
+          )
+          $classifierExit = $LASTEXITCODE
+          if ($classifierExit -ne 0) {
+            throw 'strict type run and independent direct tsc did not form one closed, exact proof; see the uploaded logs'
+          }
+          if ($classificationLines.Count -ne 1) {
+            throw 'strict type classifier did not emit exactly one canonical result line'
+          }
+          $classification = $classificationLines[0]
+          if ($env:TYPE_STEP_OUTCOME -eq 'success' -and $classification -eq 'strict-type-proof: clean') {
+            "### ${{ runner.os }} strict packed-head types: PASS`n`nThe tracked declaration debt may now be ready to resolve." >> $env:GITHUB_STEP_SUMMARY
+            Write-Output '::notice title=Strict packed-head types pass::The tracked declaration debt may now be ready to resolve.'
+            exit 0
+          }
+          if ($env:TYPE_STEP_OUTCOME -ne 'failure' -or $classification -ne 'strict-type-proof: known') {
+            throw "strict type classifier returned an inconsistent result: $classification"
+          }
+          "### ${{ runner.os }} strict packed-head types: KNOWN FAILURE`n`nThe tracked declaration debt remains open. Pack and install passed; only its exact strict-type fingerprint is intentionally non-blocking." >> $env:GITHUB_STEP_SUMMARY
+          "`nHarness tail:`n" >> $env:GITHUB_STEP_SUMMARY
+          $log = Get-Content -LiteralPath $logPath -Raw
+          ($log -split '\r?\n' | Select-Object -Last 22 | ForEach-Object { "    $_" }) >> $env:GITHUB_STEP_SUMMARY
+          Write-Output '::warning title=Tracked strict type parity debt::Packed heads install, but their strict public type surface still has the exact known declaration defect. See the log artifact.'
+
+      - name: Upload packed-head evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: packed-heads-${{ runner.os }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            provenance/${{ runner.os }}.json
+            logs/${{ runner.os }}-*.log
+            cross-repo-gate/tarballs/*.tgz
+            cross-repo-gate/consumer/package.json
+            cross-repo-gate/consumer/package-lock.json
+            cross-repo-gate/consumer/consumer.ts
+            cross-repo-gate/consumer/tsconfig.json
+
+  own-tree-check-unit:
+    name: own-tree checks and unit suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out adapter event revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: heads/svelte-adapter-uws
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check out extensions revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: lanteanio/svelte-adapter-uws-extensions
+          path: heads/svelte-adapter-uws-extensions
+          ref: ${{ env.EXTENSIONS_REF }}
+          persist-credentials: false
+      - name: Check out realtime revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: lanteanio/svelte-realtime
+          path: heads/svelte-realtime
+          ref: ${{ env.REALTIME_REF }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: 'heads/svelte-adapter-uws/.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: |
+            heads/svelte-adapter-uws/package-lock.json
+            heads/svelte-adapter-uws/test/fixture/package-lock.json
+            heads/svelte-adapter-uws-extensions/package-lock.json
+            heads/svelte-realtime/package-lock.json
+            heads/svelte-realtime/test/fixture/package-lock.json
+      - name: Install own-tree dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix heads/svelte-adapter-uws
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm ci --prefix heads/svelte-adapter-uws/test/fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm ci --prefix heads/svelte-adapter-uws-extensions
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm ci --prefix heads/svelte-realtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm ci --prefix heads/svelte-realtime/test/fixture
+          exit $LASTEXITCODE
+      - name: Pack heads for source-tree overlays
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force logs | Out-Null
+          & node heads/svelte-adapter-uws-extensions/scripts/cross-repo-gate.js `
+            --repo heads/svelte-adapter-uws `
+            --repo heads/svelte-adapter-uws-extensions `
+            --repo heads/svelte-realtime `
+            --rungs pack `
+            --work-dir cross-repo-gate `
+            --require-clean --strict --clean 2>&1 |
+            Tee-Object -FilePath logs/check-unit-pack.log
+          exit $LASTEXITCODE
+      - name: Overlay packed sibling heads into source trees
+        shell: pwsh
+        run: |
+          & node heads/svelte-adapter-uws/scripts/install-cross-repo-overlays.js `
+            --tarballs cross-repo-gate/tarballs `
+            --target heads/svelte-adapter-uws-extensions=svelte-adapter-uws `
+            --target heads/svelte-realtime=svelte-adapter-uws,svelte-adapter-uws-extensions `
+            --target heads/svelte-realtime/test/fixture=svelte-adapter-uws,svelte-adapter-uws-extensions,svelte-realtime 2>&1 |
+            Tee-Object -FilePath logs/check-unit-overlays.log
+          exit $LASTEXITCODE
+      - name: Run checks and unit suites with packed-head overlays
+        shell: pwsh
+        run: |
+          & node heads/svelte-adapter-uws-extensions/scripts/cross-repo-gate.js `
+            --repo heads/svelte-adapter-uws `
+            --repo heads/svelte-adapter-uws-extensions `
+            --repo heads/svelte-realtime `
+            --rungs check,unit `
+            --work-dir cross-repo-suite `
+            --require-clean --strict --clean 2>&1 |
+            Tee-Object -FilePath logs/check-unit.log
+          exit $LASTEXITCODE
+      - name: Upload check and unit log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cross-repo-check-unit-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            logs/check-unit*.log
+            cross-repo-gate/tarballs/*.tgz
+
+  realtime-e2e:
+    name: realtime browser E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out adapter event revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: heads/svelte-adapter-uws
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check out extensions revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: lanteanio/svelte-adapter-uws-extensions
+          path: heads/svelte-adapter-uws-extensions
+          ref: ${{ env.EXTENSIONS_REF }}
+          persist-credentials: false
+      - name: Check out realtime revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: lanteanio/svelte-realtime
+          path: heads/svelte-realtime
+          ref: ${{ env.REALTIME_REF }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: 'heads/svelte-adapter-uws/.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: |
+            heads/svelte-realtime/package-lock.json
+            heads/svelte-realtime/test/fixture/package-lock.json
+      - name: Install realtime and fixture dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix heads/svelte-realtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm ci --prefix heads/svelte-realtime/test/fixture
+          exit $LASTEXITCODE
+      - name: Pack heads for realtime overlays
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force logs | Out-Null
+          & node heads/svelte-adapter-uws-extensions/scripts/cross-repo-gate.js `
+            --repo heads/svelte-adapter-uws `
+            --repo heads/svelte-adapter-uws-extensions `
+            --repo heads/svelte-realtime `
+            --rungs pack `
+            --work-dir cross-repo-gate `
+            --require-clean --strict --clean 2>&1 |
+            Tee-Object -FilePath logs/realtime-e2e-pack.log
+          exit $LASTEXITCODE
+      - name: Overlay packed heads into realtime and its fixture
+        shell: pwsh
+        run: |
+          & node heads/svelte-adapter-uws/scripts/install-cross-repo-overlays.js `
+            --tarballs cross-repo-gate/tarballs `
+            --target heads/svelte-realtime=svelte-adapter-uws,svelte-adapter-uws-extensions `
+            --target heads/svelte-realtime/test/fixture=svelte-adapter-uws,svelte-adapter-uws-extensions,svelte-realtime 2>&1 |
+            Tee-Object -FilePath logs/realtime-e2e-overlays.log
+          exit $LASTEXITCODE
+      - name: Install Chromium
+        working-directory: heads/svelte-realtime
+        run: npm exec -- playwright install --with-deps chromium
+      - name: Run realtime E2E rung
+        shell: pwsh
+        run: |
+          & node heads/svelte-adapter-uws-extensions/scripts/cross-repo-gate.js `
+            --repo heads/svelte-adapter-uws `
+            --repo heads/svelte-adapter-uws-extensions `
+            --repo heads/svelte-realtime `
+            --rungs realtime-e2e `
+            --work-dir cross-repo-suite `
+            --require-clean --strict --clean 2>&1 |
+            Tee-Object -FilePath logs/realtime-e2e.log
+          exit $LASTEXITCODE
+      - name: Upload realtime E2E evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: realtime-e2e-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            logs/realtime-e2e*.log
+            cross-repo-gate/tarballs/*.tgz
+            heads/svelte-realtime/test/e2e/test-results/**
+
+  extensions-integration:
+    name: extensions Redis and Postgres integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out adapter event revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: heads/svelte-adapter-uws
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check out extensions revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: lanteanio/svelte-adapter-uws-extensions
+          path: heads/svelte-adapter-uws-extensions
+          ref: ${{ env.EXTENSIONS_REF }}
+          persist-credentials: false
+      - name: Check out realtime revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: lanteanio/svelte-realtime
+          path: heads/svelte-realtime
+          ref: ${{ env.REALTIME_REF }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: 'heads/svelte-adapter-uws/.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: heads/svelte-adapter-uws-extensions/package-lock.json
+      - name: Install extensions dependencies
+        run: npm ci --prefix heads/svelte-adapter-uws-extensions
+      - name: Pack heads for extensions integration overlay
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force logs | Out-Null
+          & node heads/svelte-adapter-uws-extensions/scripts/cross-repo-gate.js `
+            --repo heads/svelte-adapter-uws `
+            --repo heads/svelte-adapter-uws-extensions `
+            --repo heads/svelte-realtime `
+            --rungs pack `
+            --work-dir cross-repo-gate `
+            --require-clean --strict --clean 2>&1 |
+            Tee-Object -FilePath logs/extensions-integration-pack.log
+          exit $LASTEXITCODE
+      - name: Overlay packed adapter into extensions
+        shell: pwsh
+        run: |
+          & node heads/svelte-adapter-uws/scripts/install-cross-repo-overlays.js `
+            --tarballs cross-repo-gate/tarballs `
+            --target heads/svelte-adapter-uws-extensions=svelte-adapter-uws 2>&1 |
+            Tee-Object -FilePath logs/extensions-integration-overlays.log
+          exit $LASTEXITCODE
+      - name: Verify Docker daemon
+        run: docker info
+      - name: Run extensions integration rung
+        shell: pwsh
+        run: |
+          & node heads/svelte-adapter-uws-extensions/scripts/cross-repo-gate.js `
+            --repo heads/svelte-adapter-uws `
+            --repo heads/svelte-adapter-uws-extensions `
+            --repo heads/svelte-realtime `
+            --rungs extensions-integration `
+            --work-dir cross-repo-suite `
+            --require-clean --strict --clean 2>&1 |
+            Tee-Object -FilePath logs/extensions-integration.log
+          exit $LASTEXITCODE
+      - name: Tear down integration backends
+        if: always()
+        working-directory: heads/svelte-adapter-uws-extensions
+        shell: pwsh
+        run: |
+          docker compose -p svelte-adapter-uws-ext-int-redis -f test/integration/docker-compose.yml down -v
+          docker compose -p svelte-adapter-uws-ext-int-postgres -f test/integration/docker-compose.yml down -v
+      - name: Upload extensions integration evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: extensions-integration-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            logs/extensions-integration*.log
+            cross-repo-gate/tarballs/*.tgz
