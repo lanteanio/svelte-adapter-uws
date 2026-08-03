@@ -1,0 +1,383 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/capacity/v1/result.schema.json",
+  "title": "svelte-adapter-uws ecosystem capacity result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "runId",
+    "profile",
+    "runtime",
+    "timing",
+    "phases",
+    "firstSaturatedResource",
+    "recovery",
+    "telemetry",
+    "integrity",
+    "gates",
+    "pass"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "runId": { "type": "string", "format": "uuid" },
+    "profile": { "$ref": "#/$defs/profile" },
+    "runtime": { "$ref": "#/$defs/runtime" },
+    "timing": { "$ref": "#/$defs/timing" },
+    "phases": {
+      "type": "array",
+      "prefixItems": [
+        { "$ref": "#/$defs/warmupSummary" },
+        { "$ref": "#/$defs/expectedPeakSummary" },
+        { "$ref": "#/$defs/overloadSummary" },
+        { "$ref": "#/$defs/recoverySummary" }
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "firstSaturatedResource": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/saturationWitness" }
+      ]
+    },
+    "recovery": { "$ref": "#/$defs/recoveryEvidence" },
+    "telemetry": { "$ref": "#/$defs/telemetry" },
+    "integrity": { "$ref": "#/$defs/integrity" },
+    "gates": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": { "$ref": "#/$defs/gate" }
+    },
+    "pass": { "type": "boolean" }
+  },
+  "$defs": {
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "numberOrNull": { "type": ["number", "null"] },
+    "expectedPeak": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["arrivalsPerSecond", "liveConnections", "messagesPerSecond"],
+      "properties": {
+        "arrivalsPerSecond": { "type": "number", "exclusiveMinimum": 0 },
+        "liveConnections": { "type": "number", "minimum": 0 },
+        "messagesPerSecond": { "type": "number", "minimum": 0 }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["appRevision", "imageDigest", "worktree", "packages"],
+      "properties": {
+        "appRevision": { "$ref": "#/$defs/nonEmptyString" },
+        "imageDigest": { "type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$" },
+        "worktree": { "$ref": "#/$defs/nonEmptyString" },
+        "packages": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["svelte-adapter-uws", "svelte-realtime", "svelte-adapter-uws-extensions"],
+          "properties": {
+            "svelte-adapter-uws": { "$ref": "#/$defs/nonEmptyString" },
+            "svelte-realtime": { "$ref": "#/$defs/nonEmptyString" },
+            "svelte-adapter-uws-extensions": { "$ref": "#/$defs/nonEmptyString" }
+          }
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["location", "hostClass", "osImage", "powerProfile", "networkPath"],
+      "properties": {
+        "location": { "$ref": "#/$defs/nonEmptyString" },
+        "hostClass": { "$ref": "#/$defs/nonEmptyString" },
+        "osImage": { "$ref": "#/$defs/nonEmptyString" },
+        "powerProfile": { "$ref": "#/$defs/nonEmptyString" },
+        "networkPath": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "autoscaling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minInstances", "maxInstances", "signal", "target", "cooldownSeconds"],
+      "properties": {
+        "minInstances": { "type": "number", "exclusiveMinimum": 0 },
+        "maxInstances": { "type": "number", "exclusiveMinimum": 0 },
+        "signal": { "$ref": "#/$defs/nonEmptyString" },
+        "target": { "type": "number", "exclusiveMinimum": 0 },
+        "cooldownSeconds": { "type": "number", "minimum": 0 }
+      }
+    },
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["regions", "instancesPerRegion", "workersPerInstance", "cpuPerInstance", "memoryMiBPerInstance", "loadBalancer", "dataStores", "autoscaling"],
+      "properties": {
+        "regions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/nonEmptyString" } },
+        "instancesPerRegion": { "type": "number", "exclusiveMinimum": 0 },
+        "workersPerInstance": { "type": "number", "exclusiveMinimum": 0 },
+        "cpuPerInstance": { "type": "number", "exclusiveMinimum": 0 },
+        "memoryMiBPerInstance": { "type": "number", "exclusiveMinimum": 0 },
+        "loadBalancer": { "$ref": "#/$defs/nonEmptyString" },
+        "dataStores": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/nonEmptyString" } },
+        "autoscaling": { "$ref": "#/$defs/autoscaling" }
+      }
+    },
+    "slo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["p95MsMax", "p99MsMax", "errorRateMax", "recoveryP95MsMax", "recoveryErrorRateMax", "recoveryWindowMs", "recoveryWithinMs"],
+      "properties": {
+        "p95MsMax": { "type": "number", "exclusiveMinimum": 0 },
+        "p99MsMax": { "type": "number", "exclusiveMinimum": 0 },
+        "errorRateMax": { "type": "number", "minimum": 0, "maximum": 1 },
+        "recoveryP95MsMax": { "type": "number", "exclusiveMinimum": 0 },
+        "recoveryErrorRateMax": { "type": "number", "minimum": 0, "maximum": 1 },
+        "recoveryWindowMs": { "type": "number", "exclusiveMinimum": 0 },
+        "recoveryWithinMs": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "phaseConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "durationMs", "arrivalRate"],
+      "properties": {
+        "name": { "enum": ["warmup", "expected_peak", "overload", "recovery"] },
+        "durationMs": { "type": "number", "exclusiveMinimum": 0 },
+        "arrivalRate": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "trafficMixItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "weight", "description"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonEmptyString" },
+        "weight": { "type": "number", "exclusiveMinimum": 0 },
+        "description": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "threshold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource", "metric", "operator", "threshold", "unit"],
+      "properties": {
+        "resource": { "$ref": "#/$defs/nonEmptyString" },
+        "metric": { "$ref": "#/$defs/nonEmptyString" },
+        "operator": { "enum": ["gte", "lte"] },
+        "threshold": { "type": "number" },
+        "unit": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxInFlight", "operationTimeoutMs", "sampleIntervalMs", "drainTimeoutMs", "maxSchedulerLagMs"],
+      "properties": {
+        "maxInFlight": { "type": "number", "exclusiveMinimum": 0 },
+        "operationTimeoutMs": { "type": "number", "exclusiveMinimum": 0 },
+        "sampleIntervalMs": { "type": "number", "exclusiveMinimum": 0 },
+        "drainTimeoutMs": { "type": "number", "exclusiveMinimum": 0 },
+        "maxSchedulerLagMs": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "target", "expectedPeak", "trafficMix", "release", "environment", "topology", "slo", "generator", "phases", "saturation"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonEmptyString" },
+        "target": { "$ref": "#/$defs/nonEmptyString" },
+        "expectedPeak": { "$ref": "#/$defs/expectedPeak" },
+        "trafficMix": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/trafficMixItem" } },
+        "release": { "$ref": "#/$defs/release" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "topology": { "$ref": "#/$defs/topology" },
+        "slo": { "$ref": "#/$defs/slo" },
+        "generator": { "$ref": "#/$defs/generator" },
+        "phases": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "$ref": "#/$defs/phaseConfig" } },
+        "saturation": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/threshold" } }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node", "npmUserAgent", "platform", "release", "architecture", "cpuModel", "logicalCpuCount", "availableParallelism", "totalMemoryBytes"],
+      "properties": {
+        "node": { "$ref": "#/$defs/nonEmptyString" },
+        "npmUserAgent": { "type": ["string", "null"] },
+        "platform": { "$ref": "#/$defs/nonEmptyString" },
+        "release": { "$ref": "#/$defs/nonEmptyString" },
+        "architecture": { "$ref": "#/$defs/nonEmptyString" },
+        "cpuModel": { "$ref": "#/$defs/nonEmptyString" },
+        "logicalCpuCount": { "type": "integer", "minimum": 1 },
+        "availableParallelism": { "type": "integer", "minimum": 1 },
+        "totalMemoryBytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startedAt", "finishedAt", "durationMs"],
+      "properties": {
+        "startedAt": { "type": "string", "format": "date-time" },
+        "finishedAt": { "type": "string", "format": "date-time" },
+        "durationMs": { "type": "number", "minimum": 0 }
+      }
+    },
+    "latency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["p50", "p95", "p99", "max"],
+      "properties": {
+        "p50": { "$ref": "#/$defs/numberOrNull" },
+        "p95": { "$ref": "#/$defs/numberOrNull" },
+        "p99": { "$ref": "#/$defs/numberOrNull" },
+        "max": { "$ref": "#/$defs/numberOrNull" }
+      }
+    },
+    "phaseSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "targetArrivalRate", "durationMs", "scheduled", "started", "completed", "succeeded", "failed", "injectorDropped", "achievedStartRate", "completionRate", "errorRate", "latencyMs", "scenarios", "errors"],
+      "properties": {
+        "name": { "enum": ["warmup", "expected_peak", "overload", "recovery"] },
+        "targetArrivalRate": { "type": "number", "exclusiveMinimum": 0 },
+        "durationMs": { "type": "number", "exclusiveMinimum": 0 },
+        "scheduled": { "type": "integer", "minimum": 0 },
+        "started": { "type": "integer", "minimum": 0 },
+        "completed": { "type": "integer", "minimum": 0 },
+        "succeeded": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "injectorDropped": { "type": "integer", "minimum": 0 },
+        "achievedStartRate": { "type": "number", "minimum": 0 },
+        "completionRate": { "type": "number", "minimum": 0 },
+        "errorRate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "latencyMs": { "$ref": "#/$defs/latency" },
+        "scenarios": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/scenarioSummary" } },
+        "errors": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 1 } }
+      }
+    },
+    "scenarioSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "targetWeight", "scheduled", "started", "succeeded", "failed", "errorRate", "latencyMs"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonEmptyString" },
+        "targetWeight": { "type": "number", "exclusiveMinimum": 0 },
+        "scheduled": { "type": "integer", "minimum": 0 },
+        "started": { "type": "integer", "minimum": 0 },
+        "succeeded": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "errorRate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "latencyMs": { "$ref": "#/$defs/latency" }
+      }
+    },
+    "warmupSummary": { "allOf": [{ "$ref": "#/$defs/phaseSummary" }, { "type": "object", "properties": { "name": { "const": "warmup" } } }] },
+    "expectedPeakSummary": { "allOf": [{ "$ref": "#/$defs/phaseSummary" }, { "type": "object", "properties": { "name": { "const": "expected_peak" } } }] },
+    "overloadSummary": { "allOf": [{ "$ref": "#/$defs/phaseSummary" }, { "type": "object", "properties": { "name": { "const": "overload" } } }] },
+    "recoverySummary": { "allOf": [{ "$ref": "#/$defs/phaseSummary" }, { "type": "object", "properties": { "name": { "const": "recovery" } } }] },
+    "saturationWitness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["atMs", "phase", "offeredArrivalRate", "resource", "metric", "value", "operator", "threshold", "unit"],
+      "properties": {
+        "atMs": { "type": "number", "minimum": 0 },
+        "phase": { "const": "overload" },
+        "offeredArrivalRate": { "type": "number", "exclusiveMinimum": 0 },
+        "resource": { "$ref": "#/$defs/nonEmptyString" },
+        "metric": { "$ref": "#/$defs/nonEmptyString" },
+        "value": { "type": "number" },
+        "operator": { "enum": ["gte", "lte"] },
+        "threshold": { "type": "number" },
+        "unit": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "recoveryEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recovered", "recoveredAtMs", "windowStartMs", "windowEndMs", "attempts", "p95Ms", "errorRate"],
+      "properties": {
+        "recovered": { "type": "boolean" },
+        "recoveredAtMs": { "$ref": "#/$defs/numberOrNull" },
+        "windowStartMs": { "$ref": "#/$defs/numberOrNull" },
+        "windowEndMs": { "$ref": "#/$defs/numberOrNull" },
+        "attempts": { "type": "integer", "minimum": 0 },
+        "p95Ms": { "$ref": "#/$defs/numberOrNull" },
+        "errorRate": { "$ref": "#/$defs/numberOrNull" }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["samples", "sampleErrors"],
+      "properties": {
+        "samples": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["atMs", "phase", "durationMs", "metrics"],
+            "properties": {
+              "atMs": { "type": "number", "minimum": 0 },
+              "phase": { "type": ["string", "null"] },
+              "durationMs": { "type": "number", "minimum": 0 },
+              "metrics": { "type": "object" }
+            }
+          }
+        },
+        "sampleErrors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["atMs", "phase", "code", "message"],
+            "properties": {
+              "atMs": { "type": "number", "minimum": 0 },
+              "phase": { "type": ["string", "null"] },
+              "code": { "$ref": "#/$defs/nonEmptyString" },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["injectorDropped", "drainTimedOut", "sampleErrors", "missingTelemetryPhases", "maximumSampleDurationMs", "telemetryTicks", "schedulerLagMs"],
+      "properties": {
+        "injectorDropped": { "type": "integer", "minimum": 0 },
+        "drainTimedOut": { "type": "boolean" },
+        "sampleErrors": { "type": "integer", "minimum": 0 },
+        "missingTelemetryPhases": { "type": "array", "items": { "enum": ["warmup", "expected_peak", "overload", "recovery"] }, "uniqueItems": true },
+        "maximumSampleDurationMs": { "$ref": "#/$defs/numberOrNull" },
+        "telemetryTicks": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expected", "started", "missed", "schedulerLagMs"],
+          "properties": {
+            "expected": { "type": "integer", "minimum": 1 },
+            "started": { "type": "integer", "minimum": 0 },
+            "missed": { "type": "integer", "minimum": 0 },
+            "schedulerLagMs": { "$ref": "#/$defs/latency" }
+          }
+        },
+        "schedulerLagMs": { "$ref": "#/$defs/latency" }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "pass", "actual", "limit"],
+      "properties": {
+        "name": { "enum": ["expected_peak_p95", "expected_peak_p99", "expected_peak_error_rate", "overload_saturation_witness", "recovery_window", "injector_integrity"] },
+        "pass": { "type": "boolean" },
+        "actual": {},
+        "limit": {}
+      }
+    }
+  }
+}
