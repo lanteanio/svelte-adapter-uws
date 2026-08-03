@@ -47,6 +47,19 @@ describe('declaration-owned API documentation', () => {
 		expect(() => renderReadme(duplicateReadmeStart, extractApiDocs(SOURCE))).toThrow('duplicated');
 	});
 
+	it('refuses an orphan generated region made by copy-pasting a real marker', () => {
+		// The natural way an orphan appears: someone copies the full marker
+		// readmeStart() emits (provenance note included) under a new id and
+		// hand-writes "generated" content nothing owns. The scan must match
+		// that long form, not only a bare short marker nothing produces.
+		const orphan = README +
+			'\n' + readmeStart('platform.ghost') +
+			'\nHand-written text wearing the generated label.\n' +
+			readmeEnd('platform.ghost') + '\n';
+		expect(() => renderReadme(orphan, extractApiDocs(SOURCE)))
+			.toThrow('API_DOC:platform.ghost has no owning source block');
+	});
+
 	it('pins the high-risk batching facts in the one editable source', () => {
 		const canonical = extractApiDocs(SOURCE).get(ID);
 		const canonicalWords = canonical.replace(/\s+/g, ' ');

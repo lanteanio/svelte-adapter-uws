@@ -89,8 +89,11 @@ export function renderReadme(readme, docs) {
 	// A README region marked GENERATED whose id has no source block would be
 	// hand-editable while wearing the generated label - the silent-duplication
 	// class this generator exists to remove. The id sets must match exactly.
+	// The marker regex must tolerate the trailing provenance note that
+	// readmeStart() itself emits - matching only the bare short form would
+	// accept an orphan made the natural way, by copy-pasting a real marker.
 	const readmeIds = new Set();
-	for (const match of rendered.matchAll(/<!-- GENERATED API_DOC:([^:]+):START -->/g)) {
+	for (const match of rendered.matchAll(/<!-- GENERATED API_DOC:([^:]+):START[^>]*-->/g)) {
 		readmeIds.add(match[1]);
 	}
 	for (const id of readmeIds) {

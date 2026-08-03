@@ -1623,14 +1623,9 @@ export const platform = {
 	 * N WebSocket frames per subscribed connection. The cross-worker
 	 * relay coalesces per microtask (one postMessage no matter how many
 	 * publish() calls the loop makes), but the client still pays N
-	 * onmessage dispatches.
-	 *
-	 * For one-frame-per-subscriber wire batching, use `publishBatched()`
-	 * instead. Two distinct contracts:
-	 *
-	 * - `batch(messages)` -> N frames per subscriber, returns boolean[].
-	 * - `publishBatched(messages)` -> 1 frame per subscriber (events array),
-	 *   returns void; opt-in by client capability ('batch').
+	 * onmessage dispatches. For one-frame-per-subscriber wire batching,
+	 * use `publishBatched()` - its declaration-owned block in
+	 * `src/index.d.ts` is the canonical contract comparison.
 	 *
 	 * @param {{ topic: string, event: string, data?: unknown, options?: { relay?: boolean, seq?: boolean | number, compress?: boolean, jitterMs?: number } }[]} messages
 	 * @returns {boolean[]} publish result for each message (false = no subscribers)

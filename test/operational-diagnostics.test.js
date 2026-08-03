@@ -152,6 +152,77 @@ describe('action-oriented operational diagnostics', () => {
 			level: 'info',
 			attributes: { willRetry: false, host: '127.0.0.1', port: 5173, error: null }
 		});
+
+		// The bounded structured record deliberately drops the stack and Vite
+		// frame; the raw evidence must still reach the console beside it.
+		expect(errorLog.mock.calls.flat()).toContain('[adapter-uws] handler load error detail:');
+	});
+
+	it('runs the user init on recovery from an initial load failure, exactly once', async () => {
+		vi.spyOn(console, 'error').mockImplementation(() => {});
+		const infoLog = vi.spyOn(console, 'info').mockImplementation(() => {});
+		vi.spyOn(console, 'log').mockImplementation(() => {});
+		const init = vi.fn();
+		const ssrLoadModule = vi.fn()
+			.mockRejectedValueOnce(Object.assign(new Error('bad handler'), { code: 'ERR_MODULE' }))
+			.mockResolvedValue({ message() {}, init });
+		const server = viteServer(ssrLoadModule);
+		const { default: uws } = await import('../src/vite.js');
+		const plugin = uws();
+
+		await plugin.configureServer(server);
+		await settle();
+		expect(init).not.toHaveBeenCalled();
+
+		// Recovery must fire init: it never ran at configureServer time, and
+		// the recovered event claims no operator action is required.
+		plugin.handleHotUpdate({ server });
+		await settle();
+		await settle();
+		expect(init).toHaveBeenCalledTimes(1);
+		recordFromCalls(infoLog, 'vite.handler.recovered');
+
+		// A later ordinary reload must NOT re-run a completed init.
+		plugin.handleHotUpdate({ server });
+		await settle();
+		await settle();
+		expect(init).toHaveBeenCalledTimes(1);
+	});
+
+	it('retries a failed init on the next recovery instead of latching it away', async () => {
+		const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const infoLog = vi.spyOn(console, 'info').mockImplementation(() => {});
+		vi.spyOn(console, 'log').mockImplementation(() => {});
+		const init = vi.fn()
+			.mockRejectedValueOnce(new Error('init exploded'))
+			.mockResolvedValueOnce(undefined);
+		const ssrLoadModule = vi.fn()
+			.mockRejectedValueOnce(Object.assign(new Error('bad handler'), { code: 'ERR_MODULE' }))
+			.mockResolvedValue({ message() {}, init });
+		const server = viteServer(ssrLoadModule);
+		const { default: uws } = await import('../src/vite.js');
+		const plugin = uws();
+
+		await plugin.configureServer(server);
+		await settle();
+
+		// First recovery attempt: init throws. That must be a LOUD reload
+		// failure with the raw detail line, and no recovered event.
+		plugin.handleHotUpdate({ server });
+		await settle();
+		await settle();
+		const failed = recordFromCalls(errorLog, 'vite.handler.reload-failed');
+		expect(failed.attributes.error.message).toContain('init exploded');
+		expect(errorLog.mock.calls.flat()).toContain('[adapter-uws] handler reload error detail:');
+		expect(() => recordFromCalls(infoLog, 'vite.handler.recovered')).toThrow();
+
+		// Second attempt: the once-latch must NOT have burned on the throw -
+		// init runs again, completes, and only now recovery is reported.
+		plugin.handleHotUpdate({ server });
+		await settle();
+		await settle();
+		expect(init).toHaveBeenCalledTimes(2);
+		recordFromCalls(infoLog, 'vite.handler.recovered');
 	});
 
 	it('reports a real hot-reload failure as old-handler degradation', async () => {

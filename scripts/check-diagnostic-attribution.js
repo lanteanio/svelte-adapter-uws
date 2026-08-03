@@ -49,7 +49,7 @@ for (const path of files(sourceRoot)) {
 	const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
 	walk(ast, (node) => {
 		if (node.type !== 'CallExpression' || node.callee?.type !== 'MemberExpression' ||
-			node.callee.object?.name !== 'console' || !['warn', 'error', 'log', 'info'].includes(node.callee.property?.name)) return;
+			node.callee.object?.name !== 'console' || !['warn', 'error', 'log', 'info', 'debug'].includes(node.callee.property?.name)) return;
 		const first = node.arguments[0];
 		if (first?.type === 'CallExpression' && first.callee?.type === 'Identifier' && formatters.has(first.callee.name)) {
 			counts.set('canonical', counts.get('canonical') + 1);

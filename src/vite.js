@@ -1169,10 +1169,14 @@ export default function uws(options = {}) {
 	let initFired = false;
 	async function fireInitOnceV() {
 		if (initFired) return;
-		initFired = true;
 		if (typeof userHandlers.init === 'function') {
+			// Latch only on COMPLETION. Latching before the await would burn
+			// the once-guard when init throws, so a later recovery would
+			// report "no operator action is required" while the user's init
+			// never ran.
 			await userHandlers.init({ platform });
 		}
+		initFired = true;
 	}
 
 	/**
