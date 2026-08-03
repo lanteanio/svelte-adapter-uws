@@ -225,15 +225,22 @@ export function compileWaitingRoomTemplate(template) {
 	};
 
 	while (cursor < template.length) {
+		// The ONLY literal-brace escape is the atomic form {{{{name}}}}, which
+		// renders the literal text {{name}}. Escaping `}}}}` independently was
+		// wrong: a run of four-plus closing braces is ordinary nested CSS or
+		// minified JavaScript, and collapsing it silently corrupted both. The
+		// closing side needs no escape at all - every `}` outside a token
+		// passes through verbatim.
 		if (template.startsWith('{{{{', cursor)) {
-			literal += '{{';
-			cursor += 4;
-			continue;
-		}
-		if (template.startsWith('}}}}', cursor)) {
-			literal += '}}';
-			cursor += 4;
-			continue;
+			const close = template.indexOf('}}}}', cursor + 4);
+			const inner = close < 0 ? null : template.slice(cursor + 4, close);
+			if (inner !== null && TOKEN_SET.has(inner)) {
+				literal += '{{' + inner + '}}';
+				cursor = close + 4;
+				continue;
+			}
+			// Not an atomic token escape: handled by the `{{` branch below,
+			// which throws with the supported-token list - loud beats corrupt.
 		}
 		if (template.startsWith('{{', cursor)) {
 			const end = template.indexOf('}}', cursor + 2);
@@ -247,20 +254,13 @@ export function compileWaitingRoomTemplate(template) {
 			if (!TOKEN_SET.has(token)) {
 				throw new Error(
 					`Unknown waiting-room template token "{{${token}}}" at character ${cursor}. ` +
-					`Supported tokens: ${SUPPORTED}. Use "{{{{" and "}}}}" for literal braces.`
+					`Supported tokens: ${SUPPORTED}. Write "{{{{${TOKEN_SET.values().next().value}}}}}"-style ` +
+					'atomic escapes for a literal token; any other "{{" is a template error.'
 				);
 			}
 			flush();
 			segments.push({ token });
 			cursor = end + 2;
-			continue;
-		}
-		// A closing pair does not begin template syntax, so preserve it. This
-		// keeps ordinary CSS and JavaScript blocks valid; only `{{` must either
-		// begin a supported token or use the literal-brace escape.
-		if (template.startsWith('}}', cursor)) {
-			literal += '}}';
-			cursor += 2;
 			continue;
 		}
 		literal += template[cursor];

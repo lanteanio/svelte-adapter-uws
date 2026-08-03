@@ -2879,7 +2879,13 @@ if (WS_ENABLED) {
 	// browser navigation can receive the opted-out accessible refusal without
 	// shadowing upgrades. When the gate is open, this endpoint is not a
 	// capacity page and retains the ordinary Upgrade Required response.
-	if (WAITING_ROOM === null && (admission.maxConcurrent > 0 || admission.maxConnections > 0)) {
+	// uWS routes a GET without sec-websocket-key PAST the ws() handler
+	// (req.setYield on a non-handshake), so a real browser NAVIGATION to the
+	// WS path never reaches serveUpgradeRefusal - without this route it would
+	// fall through to the SSR catch-all. Registered for EVERY enabled ceiling
+	// resolveWaitingRoom() honors, including perTickBudget, whether the
+	// waiting room is on (holding page) or opted out (accessible 503).
+	if (admission.maxConcurrent > 0 || admission.maxConnections > 0 || ADMISSION_PER_TICK_BUDGET > 0) {
 		route('get', WS_PATH, (res, req) => {
 			res.onAborted(() => {});
 			const atCapacity = postureLevel() === 'siege' || !admission.hasCapacity();
@@ -2892,6 +2898,15 @@ if (WS_ENABLED) {
 				return;
 			}
 			if (negotiateRejection(req.getHeader('accept'), req.getHeader('upgrade')) === 'html') {
+				if (WAITING_ROOM !== null) {
+					// Same page the refusal path serves: no seeded count, the
+					// first poll fills it in.
+					sendWaitingRoomPage(res, WAITING_ROOM.renderResponse(
+						undefined,
+						createWaitingRoomRequest(req)
+					));
+					return;
+				}
 				sendWaitingRoomPage(res, {
 					body: buildAccessibleCapacityRefusalPage(),
 					lang: 'en',

@@ -170,14 +170,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   placeholders, protocol fields, and telemetry vocabulary so consumers do not
   parse or render unstable \`.message\` and \`.reason\` strings as UI contracts.
 
-- **An accessible cursor composition now ships as a compiled example.** It
+- **An accessible cursor composition, written in runes.** It
   pairs public names and deterministic shapes with color, exposes meaningful
   board locations in a navigable collaborator roster, announces only joins
   and leaves, and drives the same cursor update from pointer movement and
   focusable board controls. Canvas users get an explicit presentation-only
-  boundary and a low-rate feed route for the semantic companion. Remote names,
-  roster bursts, colors, and visual coordinates are bounded before rendering
-  or announcement.
+  boundary (the promoted canvas example is `aria-hidden` with a keyboard
+  publish path) and a low-rate feed route for the semantic companion. Remote
+  names, roster bursts, colors, and visual coordinates are bounded before
+  rendering or announcement. The pure helpers ship in the package; the
+  `.svelte` composition itself is repository-only (the library ships
+  primitives, reference UI lives with the docs), reached from the README by
+  its stable source route, and its compile gate runs under forced runes
+  accepting no warning at all.
 
 - **Honest integrated-onboarding contract.** The adapter front door now states
   that one process and port do not remove the native preflight, Vite plugin,
@@ -243,10 +248,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaving immutable historical narratives untouched.
 - Public API reference blocks can now be owned by declaration JSDoc and
   generated into bounded README regions. The first governed contract,
-  `platform.publishBatched`, now reflects the actual single-frame cross-worker
-  relay, key coalescing, cluster sequence authority, local fallback, and
-  compression behavior; a blocking generator and real two-server parity test
-  prevent either copy from drifting again.
+  `platform.publishBatched`, documents the cross-worker relay's key
+  coalescing, cluster sequence authority, local fallback, and compression
+  behavior (both relay shapes - fast path and per-event fallback - are
+  stated by the later entry in this section); a blocking generator and real
+  two-server parity test prevent either copy from drifting again.
 - A packaged protocol-conformance index now joins the normative specification,
   schema, vectors, minimal Core client, reference surfaces, and executable CI
   proofs into one reciprocal task map. A repository-only benchmark index maps
@@ -440,7 +446,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   module-resolution error before any check ran. The install now precedes
   the verifier, the workflow checker holds a closed, ordered, unique-name
   step inventory (an interposed step between pack and publish is exactly
-  where an artifact swap would live), the event revision is bound to the
+  where an artifact swap would live), the pack step's script body is
+  matched whole rather than by substring (an added interior line is the
+  other place that swap could hide), the event revision is bound to the
   annotated tag object or the checked-out HEAD, and a test spawns the
   verifier as a real process so a dead module graph can never again look
   like a green gate.
@@ -655,7 +663,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the resolved request id and echo it as `X-Request-ID` on the adapter-owned
   `500`, so concurrent failures can be joined without exposing raw exceptions.
 
-- **Alternative capacity responses now preserve one accessible document baseline.** `waitingRoom: false` content-negotiates a minimal HTML `503` for browser navigation while leaving WebSocket and non-HTML clients byte-identical. Custom string templates and localized renderer output are parsed and validated for document language and direction, non-empty title/body, exposed main/status semantics, and an enabled named recovery control or safe link; comments and hidden/inert subtrees cannot impersonate the accessible tree. The public `AccessibleWaitingDocument` type and starter template make that contract reusable instead of accepting fragments as pages.
+- **BREAKING: alternative capacity responses now preserve one accessible document baseline.** `waitingRoom: false` content-negotiates a minimal HTML `503` for browser navigation while leaving WebSocket and non-HTML clients byte-identical. Custom string templates and localized renderer output are parsed and validated for document language and direction, non-empty title/body, exposed main/status semantics, and an enabled named recovery control or safe link; comments and hidden/inert subtrees cannot impersonate the accessible tree. The public `AccessibleWaitingDocument` type and starter template make that contract reusable instead of accepting fragments as pages. A previously accepted plain branded template that lacks any required element now FAILS THE BUILD instead of shipping an inaccessible page; extend it to the documented baseline (the starter template is a compliant starting point). Document validation runs on the first rendered response per surface, not per request, so the overload route stays the cheap path. The template literal-brace escape is now the single atomic form `{{{{token}}}}` for a literal token; runs of closing braces (nested CSS, minified scripts) pass through verbatim, where the earlier independent `}}}}` escape silently corrupted them.
+
+- **Waiting-room host identity and theming.** `waitingRoom` accepts optional escaped `appName`, `statusUrl`, `supportUrl` (HTTP(S), `mailto:` or `tel:`), and `incidentId` fields (whitespace-trimmed; absent fields render no empty UI), the built-in page themes through semantic `--waiting-room-*` custom properties with light defaults and `prefers-color-scheme` dark, carries no adapter branding, and the same four identity fields ride custom templates as escaped tokens.
+
+- **Per-request waiting-room localization.** `waitingRoom.renderer` names a build-serializable server module whose synchronous `renderWaitingRoom` (or default) export receives the queue context plus a detached request snapshot and returns body, BCP 47 `lang`, `dir`, and optional extra headers; the adapter makes the metadata authoritative, emits `Content-Language` and `Vary: Accept-Language` on both navigation and rejection responses, rejects adapter-owned header overrides, and falls back once-logged to the built-in English document on any invalid output. A browser NAVIGATION to the WebSocket path itself now serves the same negotiated response for every enabled admission ceiling - including `perTickBudget` - whether the waiting room is on (holding page) or opted out (accessible `503`); previously an enabled waiting room sent navigations to the SSR catch-all.
 
 - Every README fenced block now has a checked-in classification and content
   fingerprint. Normal and documentation verification compile standalone
@@ -3288,4 +3300,4 @@ Fully backwards compatible. No existing user code changes behavior:
 
 ## [0.3.9] and earlier
 
-See [git history](https://github.com/lanteanio/svelte-adapter-uws/commits/master) for changes prior to 0.4.0.
+See [git history](https://github.com/lanteanio/svelte-adapter-uws/commits/main) for changes prior to 0.4.0.

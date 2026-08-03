@@ -250,6 +250,24 @@ export const FIXTURE_VARIANTS = {
 			upgradeRateLimit: 100,
 			workers: { compute: 1 }
 		}
+	},
+
+	// A configured waitingRoom.renderer module path drives the whole
+	// production pipeline: build-side validation, the isolated esbuild
+	// renderer entry, the pick(default/renderWaitingRoom) selection, and the
+	// bridge the runtime imports. Live-function renderer tests cannot reach
+	// any of that - production refuses functions.
+	waitingrenderer: {
+		out: 'build-waiting-renderer',
+		handler: null,
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100,
+			upgradeAdmission: {
+				maxConcurrent: 4,
+				waitingRoom: { renderer: './src/waiting-room.renderer.js' }
+			}
+		}
 	}
 };
 

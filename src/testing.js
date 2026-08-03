@@ -2678,10 +2678,12 @@ export async function createTestServer(options = {}) {
 		}
 	});
 
-	// app.ws handles real handshakes. Register this GET afterwards so direct
-	// browser navigation exercises the same opted-out accessible capacity
-	// response as production without shadowing WebSocket upgrades.
-	if (WAITING_ROOM === null && (admission.maxConcurrent > 0 || admission.maxConnections > 0)) {
+	// app.ws handles real handshakes; uWS yields a keyless GET past it, so
+	// browser NAVIGATION lands here. Mirrors the production handler: register
+	// for every enabled ceiling (including perTickBudget), serving the
+	// holding page when the waiting room is on and the accessible 503 when it
+	// is opted out.
+	if (admission.maxConcurrent > 0 || admission.maxConnections > 0 || ADMISSION_PER_TICK_BUDGET > 0) {
 		app.get(wsPath, (res, req) => {
 			res.onAborted(() => {});
 			const atCapacity = postureLevelT() === 'siege' || !admission.hasCapacity();
@@ -2694,6 +2696,13 @@ export async function createTestServer(options = {}) {
 				return;
 			}
 			if (negotiateRejection(req.getHeader('accept'), req.getHeader('upgrade')) === 'html') {
+				if (WAITING_ROOM !== null) {
+					sendWaitingRoomPage(res, WAITING_ROOM.renderResponse(
+						undefined,
+						createWaitingRoomRequest(req)
+					));
+					return;
+				}
 				sendWaitingRoomPage(res, {
 					body: buildAccessibleCapacityRefusalPage(),
 					lang: 'en',

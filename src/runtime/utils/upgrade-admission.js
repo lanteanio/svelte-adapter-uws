@@ -448,7 +448,11 @@ function waitingRoomHref(value) {
 	const raw = value.trim();
 	try {
 		const parsed = new URL(raw, 'https://waiting-room.invalid/');
-		if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+		// mailto: and tel: are the natural values for a support link and are
+		// classified safe by the same policy the accessibility validator
+		// applies to recovery hrefs - one safe-scheme set, not two.
+		if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:' &&
+			parsed.protocol !== 'mailto:' && parsed.protocol !== 'tel:') return '';
 		return escapeWaitingRoomHtml(raw);
 	} catch {
 		return '';
@@ -523,9 +527,10 @@ function applyWaitingRoomDocumentLanguage(body, lang, dir) {
  * Validate one renderer result before any value reaches uWS response headers.
  *
  * @param {unknown} value
+ * @param {{ validateDocument?: boolean }} [options]
  * @returns {{ body: string, lang: string, dir: 'ltr' | 'rtl' | 'auto', headers: Array<[string, string]>, varyAcceptLanguage: true }}
  */
-function normalizeWaitingRoomRendererResult(value) {
+function normalizeWaitingRoomRendererResult(value, options = {}) {
 	if (!value || typeof value !== 'object' || typeof value.then === 'function') {
 		throw new TypeError('waiting-room renderer must synchronously return { body, lang, dir, headers? }.');
 	}
@@ -568,7 +573,13 @@ function normalizeWaitingRoomRendererResult(value) {
 	}
 	const dir = result.dir;
 	const body = applyWaitingRoomDocumentLanguage(result.body, lang, dir);
-	assertAccessibleWaitingDocument(body, 'waiting-room renderer result.body');
+	// The full parse5 accessibility walk runs on the FIRST response only (the
+	// caller memoizes): the metadata and header checks above stay per call,
+	// but an unauthenticated overload route must not pay a document parse per
+	// request - overload protection has to be the cheap path.
+	if (options.validateDocument !== false) {
+		assertAccessibleWaitingDocument(body, 'waiting-room renderer result.body');
+	}
 	return {
 		body,
 		lang,
@@ -892,10 +903,12 @@ export function resolveWaitingRoom(upgradeAdmission, rendererModule = null) {
 		? Math.floor(cfg.pollIntervalMs) : 2000;
 	const retryAfterSeconds = Number.isFinite(cfg.retryAfterSeconds) && cfg.retryAfterSeconds > 0
 		? Math.floor(cfg.retryAfterSeconds) : Math.max(1, Math.round(pollIntervalMs / 1000));
-	const appName = typeof cfg.appName === 'string' ? cfg.appName : '';
-	const statusUrl = typeof cfg.statusUrl === 'string' ? cfg.statusUrl : '';
-	const supportUrl = typeof cfg.supportUrl === 'string' ? cfg.supportUrl : '';
-	const incidentId = typeof cfg.incidentId === 'string' ? cfg.incidentId : '';
+	// Trimmed at the boundary: a whitespace-only value must behave like an
+	// absent one, not render a dangling-dash title or an empty identity line.
+	const appName = typeof cfg.appName === 'string' ? cfg.appName.trim() : '';
+	const statusUrl = typeof cfg.statusUrl === 'string' ? cfg.statusUrl.trim() : '';
+	const supportUrl = typeof cfg.supportUrl === 'string' ? cfg.supportUrl.trim() : '';
+	const incidentId = typeof cfg.incidentId === 'string' ? cfg.incidentId.trim() : '';
 	if (cfg.template != null && (cfg.renderer != null || rendererModule != null)) {
 		throw new TypeError('waitingRoom.template and waitingRoom.renderer are mutually exclusive.');
 	}
@@ -920,6 +933,10 @@ export function resolveWaitingRoom(upgradeAdmission, rendererModule = null) {
 		);
 	}
 	let rendererFailureReported = false;
+	// First-render document-validation memos: the parse5 accessibility walk
+	// runs once per surface, not per request.
+	let templateFnDocument = null;
+	let rendererDocumentValidated = false;
 
 	const renderContext = (queueDepth) => {
 		const normalizedDepth = Math.max(0, Math.floor(Number(queueDepth) || 0));
@@ -995,6 +1012,12 @@ export function resolveWaitingRoom(upgradeAdmission, rendererModule = null) {
 		 * line and the first poll fills in the count. Nothing invents a zero
 		 * crowd for a visitor who was just refused.
 		 *
+		 * Request-less body render. With a localizing renderer configured this
+		 * DELIBERATELY yields the renderer's default locale (it is handed a
+		 * synthetic request with an empty header snapshot) - localized output
+		 * needs renderResponse(depth, request). Kept for template previews and
+		 * the poll route's seed, which have no negotiating request.
+		 *
 		 * @param {number} [queueDepth]
 		 * @returns {string}
 		 */
@@ -1024,24 +1047,32 @@ export function resolveWaitingRoom(upgradeAdmission, rendererModule = null) {
 			}
 			if (templateFn) {
 				const body = String(templateFn(ctx));
-				const { lang, dir } = assertAccessibleWaitingDocument(
-					body,
-					'waitingRoom.template function result'
-				);
+				// Validate the first rendered document, then reuse its
+				// metadata: the overload path must not pay a parse5 walk per
+				// request. The template function sees only queue context, so
+				// its language and direction do not vary per call.
+				if (templateFnDocument === null) {
+					templateFnDocument = assertAccessibleWaitingDocument(
+						body,
+						'waitingRoom.template function result'
+					);
+				}
 				return {
 					body,
-					lang,
-					dir,
+					lang: templateFnDocument.lang,
+					dir: templateFnDocument.dir,
 					headers: [],
 					varyAcceptLanguage: false
 				};
 			}
 			if (renderer) {
 				try {
-					return normalizeWaitingRoomRendererResult(renderer({
+					const normalized = normalizeWaitingRoomRendererResult(renderer({
 						...ctx,
 						request: request || createWaitingRoomRequest(null)
-					}));
+					}), { validateDocument: !rendererDocumentValidated });
+					rendererDocumentValidated = true;
+					return normalized;
 				} catch (error) {
 					if (!rendererFailureReported) {
 						rendererFailureReported = true;

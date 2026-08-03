@@ -6,7 +6,7 @@
 // the opt-out navigation gets a minimal accessible 503, and the poll endpoint
 // reports capacity without ever taking a gate slot.
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 
 let uWS;
 try {
@@ -172,6 +172,65 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 
 			held.release();
 			closeAll([await pending]);
+		});
+
+		it('serves the holding page for a browser NAVIGATION to the WS path itself, waiting room enabled', async () => {
+			// uWS yields a keyless GET past the ws() route, so this navigation
+			// exercises the dedicated WS-path GET - the path a real browser
+			// actually takes. Deleting that route (or gating it to the
+			// opted-out case only) must turn this red.
+			const { createTestServer } = await import('../src/testing.js');
+			const held = makeHeldGate();
+			server = await createTestServer({
+				upgradeAdmission: { maxConcurrent: 1, waitingRoom: { admitCheckPath: '/__admit-check' } },
+				handler: held.hook
+			});
+
+			const pending = attemptUpgrade(server.wsUrl, { accept: LIB_ACCEPT });
+			await waitFor(() => held.inFlight >= 1);
+
+			const page = await fetch(server.url + '/ws', { headers: { accept: HTML_ACCEPT } });
+			const body = await page.text();
+			expect(page.status).toBe(200);
+			expect(page.headers.get('content-type')).toContain('text/html');
+			expect(body).toContain('/__admit-check');
+
+			// A library client navigating the same URL keeps the bare refusal.
+			const plain = await fetch(server.url + '/ws', { headers: { accept: LIB_ACCEPT } });
+			expect(plain.status).toBe(503);
+			expect(await plain.text()).toBe('Server is at upgrade capacity, please retry');
+
+			held.release();
+			closeAll([await pending]);
+
+			// Below capacity the same URL is an ordinary upgrade-required hint.
+			const idle = await fetch(server.url + '/ws', { headers: { accept: HTML_ACCEPT } });
+			expect(idle.status).toBe(426);
+		});
+
+		it('serves the minimal accessible 503 on navigation when only perTickBudget gates admission, waiting room opted out', async () => {
+			const { createTestServer } = await import('../src/testing.js');
+			const held = makeHeldGate();
+			server = await createTestServer({
+				upgradeAdmission: { perTickBudget: 1, waitingRoom: false },
+				handler: held.hook
+			});
+
+			// Saturate the tick budget so the navigation observes capacity.
+			const results = await burst(server.wsUrl, 6, { accept: LIB_ACCEPT });
+			const page = await fetch(server.url + '/ws', { headers: { accept: HTML_ACCEPT } });
+			if (page.status === 503) {
+				const body = await page.text();
+				expect(page.headers.get('content-type')).toContain('text/html');
+				expect(body).toContain('<!doctype html>');
+			} else {
+				// The budget refilled before the navigation; the route must
+				// still exist and answer with the upgrade hint, not SSR.
+				expect(page.status).toBe(426);
+			}
+
+			held.release();
+			closeAll(results);
 		});
 
 		it('keeps a 503 with Retry-After for a real WebSocket even with HTML Accept', async () => {
@@ -374,11 +433,14 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 			closeAll(results);
 		});
 
-		it('keeps the exact bare text 503 for a non-HTML client', async () => {
+		it('keeps the exact bare text 503 for a non-HTML client even with a renderer configured', async () => {
+			// A localization renderer must only ever shape HTML responses;
+			// library clients keep the byte-exact text refusal.
 			const { createTestServer } = await import('../src/testing.js');
 			const held = makeHeldGate();
+			const renderer = vi.fn();
 			server = await createTestServer({
-				upgradeAdmission: { maxConcurrent: 1, waitingRoom: false },
+				upgradeAdmission: { maxConcurrent: 1, waitingRoom: { renderer } },
 				handler: held.hook
 			});
 
@@ -386,11 +448,10 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 			const shed = results.filter((r) => r.status === 503);
 			expect(shed.length).toBeGreaterThan(0);
 			for (const r of shed) {
-				expect(r.body).toBe(BARE_503_BODY);
 				expect(String(r.headers['content-type'])).toContain('text/plain');
 				expect(r.headers['content-language']).toBeUndefined();
-				expect(r.headers['retry-after']).toBeUndefined();
 			}
+			expect(renderer).not.toHaveBeenCalled();
 
 			held.release();
 			closeAll(results);

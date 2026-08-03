@@ -152,11 +152,25 @@ describe('renderWaitingRoomTemplate', () => {
 		expect(renderWaitingRoomTemplate('body{color:red}}', ctx)).toBe('body{color:red}}');
 	});
 
-	it('renders quadruple braces as literal double braces', () => {
+	it('renders the atomic token escape and passes every closing-brace run through verbatim', () => {
 		expect(renderWaitingRoomTemplate(
 			'literal={{{{queueDepth}}}} live={{queueDepth}} close=}}}}',
 			ctx
-		)).toBe('literal={{queueDepth}} live=7 close=}}');
+		)).toBe('literal={{queueDepth}} live=7 close=}}}}');
+
+		// Four-plus consecutive closing braces are ordinary nested CSS and
+		// minified JavaScript; the old independent }}}} escape silently ate
+		// two of them and broke both.
+		const css = '@media(a){@supports(b){.c{d:e;&:hover{f:g}}}}';
+		expect(renderWaitingRoomTemplate(css, ctx)).toBe(css);
+		const js = '(function(){if(a){for(;;){if(b){c()}}}})()';
+		expect(renderWaitingRoomTemplate(js, ctx)).toBe(js);
+		expect(renderWaitingRoomTemplate('x=}}}}}', ctx)).toBe('x=}}}}}');
+	});
+
+	it('rejects a non-token quadruple-brace opener loudly instead of corrupting it', () => {
+		expect(() => renderWaitingRoomTemplate('{{{{notatoken}}}}', ctx))
+			.toThrow(/Unknown waiting-room template token/);
 	});
 
 	it('coerces numeric tokens to safe integers and clamps', () => {
