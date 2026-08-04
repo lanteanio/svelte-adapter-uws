@@ -669,6 +669,12 @@ export default function uws(options = {}) {
 			// destructures `pressure.active` / `.reason` / `.topPublishers`
 			// does not crash on field access.
 			return {
+				// Permanently null: dev runs no pressure sampler, so these zeros are
+				// placeholders and never become readings. An ops dashboard developed
+				// against dev therefore sees the same "not sampled yet" state it must
+				// handle in production before the first tick, instead of believing
+				// this worker measured 0 MB of resident memory.
+				sampledAt: null,
 				active: false,
 				subscriberRatio: 0,
 				publishRate: 0,
@@ -914,6 +920,7 @@ export default function uws(options = {}) {
 				protection: platform.protection,
 				maxPayloadLength: platform.maxPayloadLength,
 				pressure: {
+					sampledAt: p.sampledAt ?? null,
 					active: p.active,
 					reason: p.reason,
 					value: p.value ?? 0,

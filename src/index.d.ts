@@ -2096,6 +2096,25 @@ export interface WebSocketHandler<UserData = unknown> {
  * `platform.onPressure(cb)` callbacks. All numbers are worker-local.
  */
 export interface PressureSnapshot {
+	/**
+	 * Wall-clock milliseconds of the most recent completed sample, or `null`
+	 * when the sampler has not folded yet - which is the only thing in this
+	 * shape that distinguishes a reading from the initial placeholder, since
+	 * every number below starts at `0` and `0` is a legitimate value for all of
+	 * them except `memoryMB`. Branch on it before rendering or alerting:
+	 *
+	 * ```js
+	 * const p = platform.pressure;
+	 * if (p.sampledAt === null) return 'not sampled yet';
+	 * ```
+	 *
+	 * It also dates the reading, so `Date.now() - sampledAt` growing past the
+	 * sample interval is a wedged sampler - the same condition the
+	 * `pressure_sample_timestamp_seconds` gauge exists to alert on. Always
+	 * `null` in the Vite dev plugin and in `createTestServer`, which fabricate
+	 * the snapshot and never sample.
+	 */
+	readonly sampledAt: number | null;
 	/** `true` when `reason !== 'NONE'`. Convenience flag for boolean checks. */
 	readonly active: boolean;
 	/**
@@ -2874,6 +2893,8 @@ export interface Platform {
 		maxPayloadLength: number;
 		versions: RuntimeVersionInfo;
 		pressure: {
+			/** `null` until the first sample; see `PressureSnapshot.sampledAt`. */
+			sampledAt: number | null;
 			active: boolean;
 			reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI' | 'CAPACITY';
 			value: number;

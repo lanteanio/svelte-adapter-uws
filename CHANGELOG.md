@@ -472,6 +472,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The pressure snapshot no longer presents un-sampled placeholders as
+  readings: `platform.pressure.sampledAt`.** Every field of the snapshot is
+  initialised to `0` and only overwritten when the ~1 Hz sampler folds, so
+  between process start and the first fold every consumer - `introspect()`,
+  `onPressure` listeners, an ops dashboard on the admin route - read a fully
+  populated object of zeros with nothing in its shape marking it unmeasured. A
+  dashboard opened in that window reported `0 MB` resident memory as fact, and
+  the only way to be honest was to hard-code "rss can never be `0`", which does
+  not generalise to the fields whose zero is legitimate. `sampledAt` is `null`
+  until the first sample completes and carries the wall-clock stamp of the most
+  recent one afterwards, so a consumer branches on it generically - and, since
+  it dates the reading, `Date.now() - sampledAt` exceeding the sample interval
+  is a wedged sampler, the condition the `pressure_sample_timestamp_seconds`
+  metric already alerts on. It is `null` for the process lifetime in the Vite
+  dev plugin and in `createTestServer`, which fabricate the snapshot and never
+  sample.
 - **A numeric `seq` on a multi-entry `publishWireBatch` is refused on every
   topology and every surface.** The batch stamps each entry by calling the
   sequence resolver once per entry with one shared options object, so a numeric

@@ -2449,7 +2449,7 @@ A PII-free snapshot of this worker's transport-layer health in one read: `connec
 export function GET({ platform }) {
   return json(platform.introspect());
   // { connections: 38, closedWsAborts: 0, protection: 'normal', maxPayloadLength: 1048576,
-  //   pressure: { active: false, reason: 'NONE', value: 0, subscriberRatio: 0, publishRate: 0, memoryMB: 0 },
+  //   pressure: { sampledAt: 1754289600123, active: false, reason: 'NONE', value: 0, subscriberRatio: 0, publishRate: 0, memoryMB: 128 },
   //   assertions: {} }
 }
 ```
@@ -2481,6 +2481,7 @@ Worker-local backpressure signal. The adapter samples once per second (configura
 ```js
 platform.pressure;
 // {
+//   sampledAt: 1754289600123,     // ms of the last completed sample; null before the first
 //   active: false,
 //   value: 0,                     // 0..1 saturation scalar (0 idle, 1 saturated)
 //   subscriberRatio: 12.4,        // total subscriptions / connections, on this worker
@@ -2491,6 +2492,8 @@ platform.pressure;
 //   backpressuredConnections: 0   // sampled connections holding a notable (>64 KB) outbound queue
 // }
 ```
+
+`sampledAt` is `null` until the first sample completes. Every other field starts at `0`, and `0` is a legitimate reading for all of them except `memoryMB`, so this is the one generic way to tell a measurement from the startup placeholder - branch on it before rendering a number or raising an alert, instead of inventing a per-field impossibility rule. Afterwards it carries the wall-clock time of the most recent completed sample, so `Date.now() - sampledAt` growing past the sample interval means the sampler is wedged - the same condition the `pressure_sample_timestamp_seconds` metric exists to alert on. In the Vite dev plugin and in `createTestServer` it stays `null` for the process lifetime: neither runs a sampler, so their zeros are placeholders that never become readings.
 
 `maxBufferedBytes` and `backpressuredConnections` are the outbound-queue view: `publish` fans out in C++ and drops silently past `maxBackpressure`, so these are how you SEE that shedding. The sampler reads `getBufferedAmount()` for a bounded sample of connections (up to 1024 per tick, so the cost is fixed even on a large worker); compare `maxBufferedBytes` against `maxBackpressure` (1 MB default) to gauge how close the worst consumer is to being shed, and set `closeOnBackpressureLimit` if you want a chronically wedged consumer dropped instead of shed forever.
 

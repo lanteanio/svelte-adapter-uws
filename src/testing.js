@@ -1169,6 +1169,7 @@ export async function createTestServer(options = {}) {
 				maxPayloadLength: platform.maxPayloadLength,
 				versions: { ...runtimeVersionInfo },
 				pressure: {
+					sampledAt: p.sampledAt ?? null,
 					active: p.active,
 					reason: p.reason,
 					value: p.value,
@@ -1632,6 +1633,11 @@ export async function createTestServer(options = {}) {
 		get pressure() {
 			const reason = applyCapacityReason('NONE', postureLevelT());
 			return {
+				// Permanently null: the harness fabricates this snapshot and never
+				// runs the sampler, so every number below is a placeholder rather
+				// than a reading. A test asserting on real pressure values needs the
+				// production runtime, and this is what says so.
+				sampledAt: null,
 				active: reason !== 'NONE',
 				value: 0,
 				subscriberRatio: 0,

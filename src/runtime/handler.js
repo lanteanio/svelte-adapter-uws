@@ -298,6 +298,7 @@ if (!origin && !host_header && !protocol_header && !is_tls) {
 
 /**
  * @typedef {{
+ *   sampledAt: number | null,
  *   active: boolean,
  *   value: number,
  *   subscriberRatio: number,

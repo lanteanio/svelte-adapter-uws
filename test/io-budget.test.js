@@ -485,7 +485,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// body: the single added `.set(` is `maxSeenSeq.set(topic, highestSeq)`, a
 	// Map of numbers, not `Uint8Array.prototype.set`, and no byte is read,
 	// allocated or copied by any of it.
-	platform: '841804cfe0bfe1d10b0262620417099ec4557134f3b5729676e61ddf5eaa8ff2',
+	//
+	// Re-pinned again for the pressure freshness field: the drift is one added
+	// property read, `sampledAt: p.sampledAt` in the introspect() literal. That
+	// path is off the fan-out entirely (one plain object per admin call), and a
+	// number-or-null property read owns no bytes and copies none.
+	platform: '61ba9db16426d8fa9fcd8edcd3b1ca37ad99e231d052ea93f7aec9faa2714e80',
 	'wire-fanout': 'cfca189a1066c59a0f04a99ee2eab60d3a51e8024200a39626cd321a8b4d3d7b',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });

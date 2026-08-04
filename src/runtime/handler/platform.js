@@ -1002,7 +1002,7 @@ export const platform = {
 	 *   protection: 'normal' | 'elevated' | 'siege',
 	 *   maxPayloadLength: number,
 	 *   versions: { adapter: string | null, protocolRevision: number | null, realtime: string | null, extensions: string | null },
-	 *   pressure: { active: boolean, reason: string, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, maxBufferedBytes: number, backpressuredConnections: number, droppedFrames: number, droppedBytes: number },
+	 *   pressure: { sampledAt: number | null, active: boolean, reason: string, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, maxBufferedBytes: number, backpressuredConnections: number, droppedFrames: number, droppedBytes: number },
 	 *   assertions: Record<string, number>,
 	 *   diagnostics: { retained: number, recent: Array<{ diagnosticId: string, kind: string, observedAt: number, complete: boolean, affectedStreamCount: number, evidenceTruncated: boolean }> }
 	 * }}
@@ -1016,6 +1016,9 @@ export const platform = {
 			maxPayloadLength: platform.maxPayloadLength,
 			versions: { ...runtimeVersionInfo },
 			pressure: {
+				// First, because it qualifies everything after it: null means the
+				// sampler has not folded yet and the numbers below are placeholders.
+				sampledAt: p.sampledAt,
 				active: p.active,
 				reason: p.reason,
 				value: p.value,

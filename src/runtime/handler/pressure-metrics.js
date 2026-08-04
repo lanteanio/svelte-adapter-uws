@@ -274,6 +274,13 @@ function samplePressure(thresholds) {
 	// Stamp the fold as complete BEFORE the hook publishes it, so the freshness
 	// gauge dates the sample it is exported with rather than the previous one.
 	counters.lastSampleWallMs = now();
+	// The same stamp on the snapshot itself. Every numeric field folded above
+	// starts at 0 and stays 0 on an idle worker, so nothing in the shape told a
+	// reader whether it holds measurements or the initial placeholder; this
+	// does, generically, without them inventing a per-field impossibility rule
+	// like "rss can never be 0". It also dates the reading, so a consumer sees a
+	// wedged sampler the same way the freshness gauge's alert does.
+	pressureSnapshot.sampledAt = counters.lastSampleWallMs;
 
 	// Sample the admission gauges on the same cadence. Null unless a metrics
 	// registry is configured, so the zero-config sampler is unchanged.

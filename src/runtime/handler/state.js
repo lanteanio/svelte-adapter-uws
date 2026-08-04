@@ -495,9 +495,17 @@ export const sharedTopics = new Map();
 /**
  * Coarse 1 Hz pressure snapshot exposed as platform.pressure. Mutated in place
  * by the sampler; read by the platform getter.
- * @type {{ active: boolean, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI' | 'CAPACITY', maxBufferedBytes: number, backpressuredConnections: number, droppedFrames: number, droppedBytes: number, psi: { cpuSome10: number, memoryFull10: number, ioFull10: number } | null, cpuThrottle: { throttledRatio: number, nrThrottledDelta: number } | null, topPublishers: { topic: string, messagesPerSec: number, bytesPerSec: number }[] }}
+ *
+ * `sampledAt` is null until the first fold completes, which is the only thing
+ * in the shape that separates a reading from the initial placeholder: every
+ * numeric field below starts at 0, and 0 is a legitimate value for all of them
+ * except rss - so a consumer that wants to be honest before the first tick has
+ * no generic signal without it. Same rule as the freshness gauge, which stays
+ * absent rather than publishing a zero timestamp (see counters.lastSampleWallMs).
+ * @type {{ sampledAt: number | null, active: boolean, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI' | 'CAPACITY', maxBufferedBytes: number, backpressuredConnections: number, droppedFrames: number, droppedBytes: number, psi: { cpuSome10: number, memoryFull10: number, ioFull10: number } | null, cpuThrottle: { throttledRatio: number, nrThrottledDelta: number } | null, topPublishers: { topic: string, messagesPerSec: number, bytesPerSec: number }[] }}
  */
 export const pressureSnapshot = {
+	sampledAt: null,
 	active: false,
 	value: 0,
 	subscriberRatio: 0,
