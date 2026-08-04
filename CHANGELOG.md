@@ -472,6 +472,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The contributor smoke checkpoint cannot hang on a stalled handshake.** It
+  waited for the WebSocket to open with an unbounded `once(ws, 'open')`, so a
+  server that accepted the socket and then neither completed nor rejected the
+  upgrade left `npm run smoke` waiting forever: it never reached its teardown
+  and reported nothing. Every later wait in the script was already bounded,
+  which made this one the outlier. The open is now bounded and the socket is
+  terminated on expiry - a close handshake on a connection that never opened
+  has nothing to negotiate with and can leave the handle alive - and teardown
+  terminates any socket still connecting. `handshakeTimeout` is set as well,
+  because it and the explicit bound cover different stalls: `ws` only arms its
+  timer for the HTTP response, so a server that answers `101` and then goes
+  silent is caught only by the second.
 - **Publication refuses any tarball that is not the verified bytes.** The
   release path packs and retains the artifact in a job holding no publication
   identity, then publishes it from a job that does. Only the filename crossed

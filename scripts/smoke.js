@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 /**
  * Short, visible proof that this checkout can run the adapter's real native
- * transport. This deliberately uses the public testing entry point: it binds a
- * real uWebSockets.js server, exercises the liveness route, opens a real ws
- * client, subscribes, and observes a publish before tearing everything down.
+ * transport. It boots the REAL BUILT runtime - not the public testing harness,
+ * which is a second implementation of the same plumbing - binds a real
+ * uWebSockets.js server, exercises the liveness route, opens a real ws client,
+ * subscribes, and observes a publish before tearing everything down. See
+ * `startServer` below for why the harness is deliberately not used.
+ *
+ * Every wait here is bounded. A checkpoint that hangs is worse than one that
+ * fails: it produces no diagnosis, never reaches teardown, and on a CI runner
+ * it burns the job timeout instead of naming what broke.
  *
  * @module scripts/smoke
  */
-import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -26,6 +31,63 @@ function versions() {
 	const nativeEntry = require.resolve('uWebSockets.js');
 	const native = readJson(join(dirname(nativeEntry), 'package.json')).version;
 	return { adapter, native, node: process.version };
+}
+
+/**
+ * Wait for the handshake to complete, bounded.
+ *
+ * `once(ws, 'open')` never settles when a server accepts the socket and then
+ * neither completes nor rejects the upgrade: the script hangs forever, never
+ * reaches its teardown, and reports nothing. A test-level timeout does not help,
+ * because it abandons the promise rather than cancelling it, so the pending
+ * work and its open handles survive the failed test.
+ *
+ * On expiry the socket is TERMINATED rather than closed. A close handshake on a
+ * connection that never finished opening has nothing to negotiate with, so it
+ * can leave the handle open - which is the hang this exists to prevent.
+ *
+ * @param {import('ws').WebSocket} ws
+ * @param {number} [timeoutMs]
+ * @returns {Promise<void>}
+ */
+export function waitForOpen(ws, timeoutMs = 5000) {
+	return new Promise((resolveOpen, rejectOpen) => {
+		const timer = setTimeout(() => {
+			cleanup();
+			// terminate() on a still-connecting socket makes ws emit 'error'
+			// ("closed before the connection was established"). Our listeners are
+			// detached by now, and an unhandled 'error' event is fatal to the
+			// process - so this would crash the run that the bound exists to keep
+			// diagnosable. Swallow that one deliberately.
+			ws.on('error', () => {});
+			try { ws.terminate(); } catch { /* already gone */ }
+			rejectOpen(new Error('timed out after ' + timeoutMs + 'ms waiting for the WebSocket handshake'));
+		}, timeoutMs);
+		timer.unref?.();
+
+		function cleanup() {
+			clearTimeout(timer);
+			ws.off('open', onOpen);
+			ws.off('error', onError);
+			ws.off('close', onClose);
+		}
+		function onOpen() {
+			cleanup();
+			resolveOpen();
+		}
+		function onError(error) {
+			cleanup();
+			rejectOpen(error);
+		}
+		function onClose(code) {
+			cleanup();
+			rejectOpen(new Error('WebSocket closed with code ' + code + ' before the handshake completed'));
+		}
+
+		ws.on('open', onOpen);
+		ws.on('error', onError);
+		ws.on('close', onClose);
+	});
 }
 
 function waitForFrame(ws, predicate, label, timeoutMs = 5000) {
@@ -90,7 +152,17 @@ async function startServer() {
 		platform: runtime.handler.platform,
 		track(ws) { sockets.push(ws); return ws; },
 		async close() {
-			for (const ws of sockets) { try { ws.close(); } catch { /* already closed */ } }
+			for (const ws of sockets) {
+				try {
+					// A socket still CONNECTING has no open connection to negotiate a
+					// close on, so close() can leave the handle alive and teardown
+					// never finishes. Terminate those outright.
+					if (ws.readyState === ws.CONNECTING) {
+						ws.on('error', () => {});
+						ws.terminate();
+					} else ws.close();
+				} catch { /* already closed */ }
+			}
 			await runtime.stop();
 		}
 	};
@@ -123,8 +195,12 @@ export async function runSmoke({ log = console.log } = {}) {
 			throw new Error('health check returned ' + health.status + ' ' + JSON.stringify(healthBody));
 		}
 
-		const client = server.track(new WebSocket(server.wsUrl));
-		await once(client, 'open');
+		// handshakeTimeout bounds the upgrade inside ws itself; waitForOpen bounds
+		// the wait here. Both, because they cover different stalls: ws only arms
+		// its timer for the HTTP response, so a server that answers 101 and then
+		// goes silent is caught by the second, not the first.
+		const client = server.track(new WebSocket(server.wsUrl, { handshakeTimeout: 5000 }));
+		await waitForOpen(client);
 
 		const subscribed = waitForFrame(
 			client,
