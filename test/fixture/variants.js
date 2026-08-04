@@ -153,6 +153,25 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// A SUSPENDING `resume` hook plus a deliberately tiny `maxBackpressure`, so a
+	// client that stops reading is past the limit within one gap-fill flush and
+	// uWS answers those sends with the DROPPED sentinel. That is the only way to
+	// reach the flush's close-and-report path against the real runtime: the
+	// refusal cannot be scripted here, it has to be earned from a real socket.
+	//
+	// Its own output directory because both options change what every suite
+	// built against them sees - the resume export opens the recover lane, and a
+	// 4 KiB backpressure ceiling would make unrelated wire suites flaky.
+	resumespill: {
+		out: 'build-resume-spill',
+		handler: './src/hooks.ws.resumespill.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100,
+			maxBackpressure: 4096
+		}
+	},
+
 	// Wire-subscribe authorization ARMED, with the documented presence wiring on
 	// top. Presence's subscribe hook is marked a side effect, so unlike an app's
 	// own hook it does NOT stand the gate down - which is what makes the batch

@@ -74,63 +74,80 @@ export function discardResumeCapture(handle) {
  * @param {ResumeCaptureHandle} handle
  * @param {string} topic
  * @param {number | undefined} coveredSeq
- * @returns {void}
+ * @returns {boolean} True when this connection is no longer usable - the flush
+ * closed it, or a send revealed it was already gone. The caller should stop:
+ * uWS runs the close handler synchronously inside `end()` and every later
+ * `send` on that handle throws, so anything the caller does afterwards is
+ * bookkeeping for a connection that no longer exists. (`getUserData` keeps
+ * working, and each call site already guards its own sends, so this is a
+ * correctness-and-noise boundary rather than a crash boundary.)
  */
 export function flushResumeTopic(handle, topic, coveredSeq) {
 	const entry = handle.entries.find((e) => e.topic === topic);
-	if (entry === undefined) return;
+	if (entry === undefined) return false;
 	const ws = handle.ws;
 	const truncationMarker = () =>
 		'{"topic":' + JSON.stringify('__replay:' + topic) + ',"event":"truncated","data":null}';
-	let signalled = false;
-	if (entry.buffer.overflow) {
-		// The window overflowed the frame cap: the tail past the cap was never
-		// captured, and the client has no gap detection, so trusting a partial flush
-		// would leave a silent hole. Signal a truncation on the replay channel FIRST
-		// - the same marker a replay backend emits for an uncoverable range - so this
-		// critical resync signal is not itself lost behind the backpressure the
-		// partial flush below would build. The client drops its stale per-topic
-		// offset and cold-resyncs; the partial frames are then a best-effort extra.
-		const marker = truncationMarker();
-		try { ws.send(marker, false, false); bumpOut(ws, marker); signalled = true; }
-		catch { counters.closedWsAborts++; }
-	}
-	const floor = typeof coveredSeq === 'number' ? coveredSeq : entry.before;
-	let refused = false;
-	for (const f of entry.buffer.frames) {
-		if (f.seq !== null && f.seq <= floor) continue; // already covered by the resume
-		const compress = WS_COMPRESSION_ON && f.compress;
+	// uWS send results, as everywhere else in this runtime: 0 = enqueued behind
+	// backpressure (delivers, in order - NOT a drop), 1 = sent, 2 = dropped past
+	// maxBackpressure. A refusal does not throw, so a flush that only caught
+	// throws kept handing frames to a socket that was discarding every one of
+	// them, charged each to bytesOut as delivered, and then let the client go
+	// live believing it was caught up with a hole in the middle it has no way to
+	// detect. Every send here asks the same question - did these bytes reach the
+	// client - so they share one answer. `gone` is what separates "refused" from
+	// "there is no socket any more": only the first is worth signalling to, and
+	// only the second must stop us calling end() on a corpse.
+	let gone = false;
+	/** @param {string} payload @param {boolean} compress @returns {boolean} */
+	const deliver = (payload, compress) => {
 		let result;
-		try { result = ws.send(f.envelope, false, compress); }
-		catch { counters.closedWsAborts++; break; }
-		// uWS send results, as everywhere else in this runtime: 0 = enqueued
-		// behind backpressure (delivers, in order - NOT a drop), 1 = sent,
-		// 2 = dropped past maxBackpressure. A refusal does not throw, so a flush
-		// that only caught throws kept handing frames to a socket that was
-		// discarding every one of them, charged each to bytesOut as delivered,
-		// and then let the client go live believing it was caught up with a hole
-		// in the middle it has no way to detect.
-		if (result === 2) { refused = true; break; }
-		bumpOut(ws, f.envelope);
+		try { result = ws.send(payload, false, compress); }
+		catch { counters.closedWsAborts++; gone = true; return false; }
+		if (result === 2) return false;
+		bumpOut(ws, payload);
+		return true;
+	};
+	// The window overflowed the frame cap: the tail past the cap was never
+	// captured, and the client has no gap detection, so trusting a partial flush
+	// would leave a silent hole. Signal a truncation on the replay channel FIRST
+	// - the same marker a replay backend emits for an uncoverable range - so this
+	// critical resync signal is not itself lost behind the backpressure the
+	// partial flush below would build. The client drops its stale per-topic
+	// offset and cold-resyncs; the partial frames are then a best-effort extra.
+	//
+	// The marker is only SIGNALLED if it was actually taken. Recording the intent
+	// instead let a dropped marker satisfy the check below, so the one case that
+	// most needs the escalation - a socket refusing from the very first byte -
+	// was the case that skipped it.
+	let needsSignal = entry.buffer.overflow;
+	let signalled = needsSignal && deliver(truncationMarker(), false);
+	const floor = typeof coveredSeq === 'number' ? coveredSeq : entry.before;
+	for (const f of entry.buffer.frames) {
+		if (gone) break;
+		if (f.seq !== null && f.seq <= floor) continue; // already covered by the resume
+		if (!deliver(f.envelope, WS_COMPRESSION_ON && f.compress)) {
+			// Same consequence as the overflow above - an uncoverable hole - so it
+			// earns the same signal. Stop here rather than keep feeding a socket
+			// that is discarding everything.
+			if (!gone) needsSignal = true;
+			break;
+		}
 	}
-	if (refused && !signalled) {
-		// Same consequence as the overflow above - an uncoverable hole - so it
-		// gets the same signal. The client drops its stale offset and cold-
-		// resyncs rather than trusting a window it only partly received.
-		const marker = truncationMarker();
-		let markerResult;
-		try { markerResult = ws.send(marker, false, false); }
-		catch { counters.closedWsAborts++; markerResult = 2; }
-		if (markerResult === 2) {
+	let closed = false;
+	if (needsSignal && !signalled && !gone) {
+		// Either the overflow marker above was itself dropped, or the flush was
+		// refused partway. The client drops its stale offset and cold-resyncs
+		// rather than trusting a window it only partly received.
+		if (!deliver(truncationMarker(), false) && !gone) {
 			// The socket is refusing even this: there is no way to tell the
 			// client it has a hole, and staying connected is the one outcome
 			// that leaves it silently wrong. Closing forces a reconnect, whose
 			// resume starts from the last seq the client actually received - so
 			// the missed tail is re-delivered rather than lost. 1013 is a RETRY
 			// class code for the client, not a terminal one.
-			try { ws.end(1013, 'Resume incomplete'); } catch { counters.closedWsAborts++; }
-		} else {
-			bumpOut(ws, marker);
+			try { ws.end(1013, 'Resume incomplete'); closed = true; }
+			catch { counters.closedWsAborts++; gone = true; }
 		}
 	}
 	unregister(handle, entry);
@@ -138,6 +155,7 @@ export function flushResumeTopic(handle, topic, coveredSeq) {
 	// no-op and the batch final-sweep discard only touches un-flushed topics.
 	const ei = handle.entries.indexOf(entry);
 	if (ei !== -1) handle.entries.splice(ei, 1);
+	return closed || gone;
 }
 
 /**

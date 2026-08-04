@@ -484,7 +484,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overflow path already emits, so the client drops its stale offset and
   cold-resyncs. If the socket refuses even that marker, the connection is closed
   with a retry-class code: a reconnect resumes from the last sequence the client
-  actually received, so the missed tail is re-delivered instead of lost.
+  actually received, so the missed tail is re-delivered instead of lost. The
+  overflow branch above it now reads its own send result too - it previously
+  recorded the marker as delivered without checking, so a socket refusing from
+  the very first byte was the one case that skipped the escalation and left the
+  client live with a hole it was never told about. A flush that closes the
+  connection now says so, and the subscribe lane stops there instead of cohorting
+  and acking a connection that has already gone.
 - **A batch reads each entry once, so a payload's `toJSON` cannot change what
   the rest of the batch delivers.** `publishWireBatch` built its JSON envelopes
   first and then went back to the caller's `entries[]` for the exclusion

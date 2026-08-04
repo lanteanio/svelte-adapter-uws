@@ -2246,7 +2246,16 @@ if (WS_ENABLED) {
 					// Live membership is installed: flush any frames held during the resume
 					// window to this connection, in order, skipping what the resume already
 					// covered, before the ack.
-					if (_cap) flushResumeTopic(_cap, msg.topic, coveredSeqFor(_covered, msg.topic));
+					// A flush that could not tell the client its window is incomplete
+					// closes the connection, and uWS runs the close handler inside that
+					// call - so everything below is bookkeeping for a connection that is
+					// already gone. The cohort join would take a shared wire-id reference
+					// and hand it straight back when its announce throws, and the ack
+					// would charge a closed-socket abort for a client that is not waiting
+					// for one. Both are individually guarded, so this is not a crash;
+					// stopping here is simply the honest answer, and it keeps the
+					// closed-socket counter reading real closes rather than our own.
+					if (_cap && flushResumeTopic(_cap, msg.topic, coveredSeqFor(_covered, msg.topic))) return;
 					// A topic already promoted to shared fan-out cohorts this new joiner
 					// into the right cohort (announcing the server-wide id now) so the
 					// next cohort-split publish reaches it. No-op for an ordinary topic.
@@ -2563,7 +2572,10 @@ if (WS_ENABLED) {
 							// across topics (it would apply one floor to all and could wrongly skip a
 							// lagging topic), so ignore it here - the pre-window floor covers that topic.
 							const _cov = (_batchCovered !== null && typeof _batchCovered === 'object') ? coveredSeqFor(_batchCovered, topic) : undefined;
-							flushResumeTopic(_batchCap, topic, _cov);
+							// A close here ends the connection, so the topics after this one
+							// have nobody to ack and nothing to flush to. Stop the loop; the
+							// sweep below still closes their buffers, and it reads no socket.
+							if (flushResumeTopic(_batchCap, topic, _cov)) break;
 						}
 						if (sharedTopics.has(topic)) joinSharedCohort(ws, userData, topic, sharedTopics.get(topic));
 						sendSubscribed(ws, topic, ref);

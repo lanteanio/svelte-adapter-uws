@@ -35,20 +35,33 @@ let resumeBuffers;
 
 /**
  * A socket that accepts `acceptCount` sends and then refuses everything, the
- * way uWS does once a connection is past maxBackpressure.
+ * way uWS does once a connection is past maxBackpressure - and that INVALIDATES
+ * ITSELF on end(), which is the half that matters here.
+ *
+ * uWS fires the close handler inside end() and every later access throws
+ * ('Invalid access of closed uWS.WebSocket'). A scripted socket that stays
+ * usable afterwards validates the close path in a world where closing is free,
+ * so a caller reading the socket after the flush closed it looks fine here and
+ * takes the worker down in production.
  */
 function refusingWs(acceptCount) {
 	const sent = [];
 	const closed = [];
+	let dead = false;
+	const alive = () => {
+		if (dead) throw new Error('Invalid access of closed uWS.WebSocket.');
+	};
 	return {
 		sent,
 		closed,
-		getUserData() { return {}; },
+		get dead() { return dead; },
+		getUserData() { alive(); return {}; },
 		send(payload) {
+			alive();
 			sent.push(String(payload));
 			return sent.length <= acceptCount ? 1 : 2;
 		},
-		end(code, reason) { closed.push({ code, reason }); }
+		end(code, reason) { alive(); closed.push({ code, reason }); dead = true; }
 	};
 }
 
@@ -145,5 +158,79 @@ describeUWS('resume gap-fill flush against a refusing socket', () => {
 		flushResumeTopic(handle, TOPIC, 0);
 
 		expect(markers(ws).length).toBe(1);
+	});
+
+	// The close is only half the answer. uWS invalidates the socket inside end(),
+	// so the flush has to TELL its caller - the subscribe lane goes on to read
+	// getUserData() for the shared-cohort join and to send the ack, and on a dead
+	// socket both throw into an un-awaited async callback, which kills the worker
+	// and every other connection on it.
+	it('reports the close to its caller, so no caller touches a dead socket', () => {
+		const ws = refusingWs(0);
+		const handle = beginResumeCapture([TOPIC], ws);
+		fill(4);
+
+		const unusable = flushResumeTopic(handle, TOPIC, 0);
+
+		expect(unusable, 'closed the connection but told the caller nothing').toBe(true);
+		expect(ws.dead).toBe(true);
+		// Exactly what the caller does next, and what it would get for it.
+		expect(() => ws.getUserData()).toThrow(/closed uWS/);
+	});
+
+	it('reports nothing to the caller when the connection survives', () => {
+		const ws = refusingWs(Infinity);
+		const handle = beginResumeCapture([TOPIC], ws);
+		fill(5);
+
+		expect(flushResumeTopic(handle, TOPIC, 0), 'a healthy flush must not stop the caller').toBe(false);
+	});
+
+	it('escalates when the overflow marker itself is dropped', () => {
+		// Refusing from the very first byte is the case that most needs the
+		// escalation, and it was the one case that skipped it: the overflow branch
+		// recorded the marker as signalled without reading its send result, so the
+		// client went live with a hole it was never told about.
+		const ws = refusingWs(0);
+		const handle = beginResumeCapture([TOPIC], ws);
+		fill(4);
+		handle.entries[0].buffer.overflow = true;
+
+		const unusable = flushResumeTopic(handle, TOPIC, 0);
+
+		expect(ws.closed.length, 'left the client live with an unsignalled hole').toBe(1);
+		expect(ws.closed[0].code).toBe(1013);
+		expect(unusable).toBe(true);
+	});
+
+	it('escalates on a dropped overflow marker even when the flush sends nothing', () => {
+		// Every captured frame is already covered by the resume, so the flush loop
+		// sends nothing and never discovers the refusal on its own. The overflow
+		// still has to reach the client, and it did not.
+		const ws = refusingWs(0);
+		const handle = beginResumeCapture([TOPIC], ws);
+		fill(3);
+		handle.entries[0].buffer.overflow = true;
+
+		const unusable = flushResumeTopic(handle, TOPIC, 99);
+
+		expect(ws.closed.length, 'a dropped overflow marker went unnoticed on an empty flush').toBe(1);
+		expect(unusable).toBe(true);
+	});
+
+	it('does not call end() on a socket that is already gone', () => {
+		// A send that THROWS means the socket has already closed under us - there
+		// is nothing left to signal to and nothing left to close. Reporting it as
+		// unusable is still correct, because the caller must not touch it either.
+		const ws = refusingWs(Infinity);
+		const handle = beginResumeCapture([TOPIC], ws);
+		fill(3);
+		ws.end(1000, 'gone');
+		ws.closed.length = 0;
+
+		const unusable = flushResumeTopic(handle, TOPIC, 0);
+
+		expect(ws.closed.length, 'called end() on an already-closed socket').toBe(0);
+		expect(unusable, 'let the caller keep using a socket that had gone').toBe(true);
 	});
 });
