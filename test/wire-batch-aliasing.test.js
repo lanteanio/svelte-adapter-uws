@@ -124,13 +124,23 @@ describeUWS('publishWireBatch reads each caller entry once', () => {
 
 	it('honours an exclusion that application code clears mid-batch', () => {
 		const topic = 'wire-batch-aliasing-exclude';
+		/** @type {any[]} */
+		const encoded = [];
 		const wire = {
 			capability: CAP,
 			schemaVersion: 1,
 			// A per-connection wire state, as ensureWireState expects: without an
 			// onAttach the state resolves null and every socket is served JSON.
 			state: { onAttach: () => ({ schemaVersion: 1 }) },
-			encode() { return new Uint8Array([1]); }
+			encode(event, data) {
+				// Snapshot the batch this socket's frame was actually built from.
+				// The capable socket is served BINARY, so its text channel only ever
+				// carries the wire-id announce - the entry payload cannot appear
+				// there on either code path, which is why asserting on text passed
+				// whether or not the exclusion held.
+				encoded.push(JSON.parse(JSON.stringify(data)));
+				return new Uint8Array([1]);
+			}
 		};
 
 		withSockets(topic, (capable, plain) => {
@@ -146,10 +156,15 @@ describeUWS('publishWireBatch reads each caller entry once', () => {
 
 			platform.publishWireBatch(topic, 'update', entries, wire, { seq: false });
 
-			// The excluded socket may receive entry 1, never entry 0.
-			const texts = capable.sent.text.join('|');
-			expect(texts.includes('"first"'), 'the excluded socket was served the entry it was excluded from')
-				.toBe(false);
+			// The batch must have reached the per-socket walk; the JSON fast path
+			// would never call the codec and the assertion below would pass vacuously.
+			expect(state.capCounts.has(CAP), 'capability not counted: the batch took the JSON fast path').toBe(true);
+			expect(encoded.length, 'the codec was never asked to encode for the excluded socket').toBe(1);
+			// The excluded socket may receive entry 1, never entry 0. Reading the
+			// exclusion live let entry 1's toJSON clear it in time for the walk, and
+			// the excluded socket got both entries inside its binary frame.
+			expect(encoded[0]?.updates, 'the excluded socket was served the entry it was excluded from')
+				.toEqual([{ v: 'trigger' }]);
 			// The included socket still gets both, so this is not "delivered nothing".
 			expect(plain.sent.text.length + plain.sent.binary.length).toBeGreaterThan(0);
 		});

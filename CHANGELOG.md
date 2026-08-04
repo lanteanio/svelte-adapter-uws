@@ -491,21 +491,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client live with a hole it was never told about. A flush that closes the
   connection now says so, and the subscribe lane stops there instead of cohorting
   and acking a connection that has already gone.
-- **A batch reads each entry once, so a payload's `toJSON` cannot change what
-  the rest of the batch delivers.** `publishWireBatch` built its JSON envelopes
+- **A batch reads each entry once, so a payload's `toJSON` cannot rewrite an
+  entry the batch has already built.** `publishWireBatch` built its JSON envelopes
   first and then went back to the caller's `entries[]` for the exclusion
   target, for the payload handed to the binary codec, and for the entry count.
   Serializing runs application `toJSON`, so those later reads could return
   values the earlier ones never saw: a binary subscriber received a different
   payload than the JSON subscribers **under the same seq**, and an exclusion
   cleared mid-batch delivered the entry to the socket it excluded. Both are
-  reproduced against the real runtime and pinned. The array, every `data`
-  reference, every `excludeWs` and the options object are now read once on
-  entry, and `sendWireBatch`, `createTestServer` and the Vite dev plugin follow
-  the same rule. Replacing a payload object's own fields still reaches the
-  codec - every path holds one reference and a per-message deep copy is not a
-  trade this adapter makes - so a payload handed to a publish must not be
-  mutated; this is now stated on the declaration.
+  reproduced against the real runtime and pinned. The array length and the
+  options object are pinned on entry, and each entry's `data` and `excludeWs`
+  are read exactly once and never read again afterwards, with `sendWireBatch`,
+  `createTestServer` and the Vite dev plugin following the same rule. What this
+  does not promise: a `toJSON` can still change a LATER entry the batch has not
+  reached, and that entry is delivered as it reads when its turn comes - a
+  stateless codec pre-reads the whole array and is stricter on that one point.
+  Replacing a payload object's own fields also still reaches the codec - every
+  path holds one reference and a per-message deep copy is not a trade this
+  adapter makes - so a payload handed to a publish must not be mutated; this is
+  now stated on the declaration. `sendWireBatch` pins at the same point
+  `publishWireBatch` does rather than at the top of the call, so the per-viewer
+  culled walk allocates nothing again for a viewer that is served JSON, and the
+  binary send hands its one payload array to the codec instead of copying it
+  into a second. A capable socket whose capability counter has already been
+  released - a connection leaving the live set while a codec's `onDetach`
+  publishes - is now served JSON instead of an empty binary batch under an
+  advanced sequence.
 - **A prose-only README edit fails the fast documentation gate instead of a
   slow unrelated suite.** `docs/code-blocks.v1.json` records a `fingerprint`
   and a `line` for every README fence, but `check-doc-code` validated only the

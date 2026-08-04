@@ -496,11 +496,35 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// (`datas`, and `excludes` only once an entry carries one) instead of
 	// re-reading the caller's objects after application toJSON has run. The
 	// arrays hold REFERENCES to payloads and sockets - no byte is read, copied
-	// or allocated by any of it, and the JSON fast path allocates nothing it did
-	// not allocate before (`datas` is skipped entirely unless a binary
-	// subscriber or the relay will read it). The added `.push(` calls are the
-	// existing per-socket exclusion filter now pushing payload references rather
-	// than entry objects, and `.set(` is unchanged.
+	// or allocated by any of it.
+	//
+	// Re-pinned again to make the allocation claim above TRUE of both functions.
+	// It was written for publishWireBatch, whose `needsData` gate really does
+	// skip `datas` unless a binary subscriber or the relay will read it - but it
+	// was recorded as covering sendWireBatch too, and that one allocated `datas`
+	// unconditionally, ABOVE its capability test. So a caps-less, poisoned or
+	// stateless-codec subscriber paid an N-array on the JSON-only send where it
+	// had paid none before, and the binary send paid two (a verbatim copy of an
+	// already-private array) where it had paid one. sendWireBatch now decides at
+	// the same place publishWireBatch does: the JSON-only send takes the pinned
+	// array when one exists and reads the caller's entry when it does not, so it
+	// allocates nothing again, and the binary send hands its one array to the
+	// codec instead of copying it. Both are back to the pre-rule allocation
+	// count. The drift here is a parameter on the inner JSON walk and one moved
+	// array construction - control flow and references only, no byte read,
+	// copied or allocated by any of it, and no copy primitive entered.
+	//
+	// Re-pinned again for one added condition on the per-socket capability test:
+	// `|| !needsData`. The counter that decides `needsData` and the per-socket
+	// caps set can disagree for one window while a connection releases its count
+	// before leaving the live set, and there are then no payloads to encode from;
+	// the socket takes the JSON branch instead of encoding an empty batch. Pure
+	// control flow - one boolean read - and it moves work AWAY from the binary
+	// path, never toward it. No byte read, copied or allocated, no copy primitive.
+	//
+	// The added `.push(` calls are the existing per-socket exclusion filter now
+	// pushing payload references rather than entry objects, and `.set(` is
+	// unchanged.
 	//
 	// Re-pinned again when the batch sequence check moved AHEAD of the entries
 	// inspection (the refusal is a property of the surface, not of the array):
@@ -508,7 +532,7 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// `Array.isArray` guard, and the assert losing its count argument. Pure
 	// control flow before any byte exists - nothing is read, allocated or copied
 	// by it.
-	platform: 'cdfd0370e07f2657bf71b6d844f63db2f65392af7d3df99c54d827914792229a',
+	platform: '314c0c6afa9c7f4f33bf1bd94ce64d47ee8cb0d01389828c20d133a005528f4d',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

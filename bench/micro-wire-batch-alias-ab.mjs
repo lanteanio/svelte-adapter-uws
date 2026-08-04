@@ -123,7 +123,14 @@ function normalisedIterator(entries, seqMap) {
 // known before the loop; `excludes` only once an entry actually carries one. The
 // JSON fast path - no capable subscriber, no exclusion - therefore allocates
 // exactly what it allocates today.
-function normalisedLazy(entries, seqMap, { needsData = false } = {}) {
+//
+// `needsData` is a PLAIN parameter, as the shipped code has it. It was written
+// as `{ needsData = false } = {}` here, which bound a fresh default object on
+// every call that the shipped code never pays - and since the runner passed no
+// third argument, the true branch never ran at all. D then read consistently
+// worse than B, which is the same shape without the extra parameter, and that
+// gap was the measurement artefact rather than the change.
+function normalisedLazy(entries, seqMap, needsData) {
 	const count = entries.length;
 	const envs = new Array(count);
 	const seqs = new Array(count);
@@ -153,11 +160,14 @@ function normalisedLazy(entries, seqMap, { needsData = false } = {}) {
 	return sink + (anyExclude ? 1 : 0);
 }
 
-function run(fn, entries, iterations) {
+// Every variant is called with the SAME arity, so none of them differs from the
+// others by an argument-shape the shipped code does not have. A, B and C ignore
+// the third argument; only D reads it.
+function run(fn, entries, iterations, needsData = false) {
 	const seqMap = new Map();
 	let sink = 0;
 	const start = performance.now();
-	for (let i = 0; i < iterations; i++) sink += fn(entries, seqMap);
+	for (let i = 0; i < iterations; i++) sink += fn(entries, seqMap, needsData);
 	const elapsed = performance.now() - start;
 	if (sink === -1) console.log('unreachable');
 	return elapsed;
@@ -173,26 +183,31 @@ for (const SIZE of [1, 8, 64]) {
 	const b = [];
 	const c = [];
 	const d = [];
+	const e = [];
 	// Warm every shape before measuring so none pays first-call compilation.
 	run(readThrough, entries, 2000);
 	run(normalised, entries, 2000);
 	run(normalisedIterator, entries, 2000);
-	run(normalisedLazy, entries, 2000);
+	run(normalisedLazy, entries, 2000, false);
+	run(normalisedLazy, entries, 2000, true);
 	for (let round = 0; round < ROUNDS; round++) {
 		a.push(run(readThrough, entries, iterations));
 		b.push(run(normalised, entries, iterations));
 		c.push(run(normalisedIterator, entries, iterations));
-		d.push(run(normalisedLazy, entries, iterations));
+		d.push(run(normalisedLazy, entries, iterations, false));
+		e.push(run(normalisedLazy, entries, iterations, true));
 	}
 	const ma = median(a);
 	const mb = median(b);
 	const mc = median(c);
 	const md = median(d);
+	const me = median(e);
 	const pct = (x) => ((x - ma) / ma) * 100;
 	const fmt = (x) => (pct(x) >= 0 ? '+' : '') + pct(x).toFixed(1) + '% vs A';
 	console.log(`${String(SIZE).padStart(3)} entries x ${iterations} batches:`);
 	console.log(`   A read-through           ${ma.toFixed(1)} ms`);
 	console.log(`   B normalised (eager)     ${mb.toFixed(1)} ms   ${fmt(mb)}`);
 	console.log(`   C Array.from mapper      ${mc.toFixed(1)} ms   ${fmt(mc)}`);
-	console.log(`   D normalised (lazy)      ${md.toFixed(1)} ms   ${fmt(md)}   <- shipped shape, JSON fast path\n`);
+	console.log(`   D normalised (lazy)      ${md.toFixed(1)} ms   ${fmt(md)}   <- shipped shape, JSON fast path`);
+	console.log(`   E normalised (lazy, bin) ${me.toFixed(1)} ms   ${fmt(me)}   <- shipped shape, binary/relay path\n`);
 }

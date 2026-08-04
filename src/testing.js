@@ -1090,42 +1090,48 @@ export async function createTestServer(options = {}) {
 			let ud;
 			try { ud = ws.getUserData(); } catch { closedWsAbortsT++; return 2; }
 			const caps = ud[WS_CAPS];
-			// Read once, mirroring production: the JSON path runs application
-			// toJSON and the codec encode is application code, so a later read of
-			// the caller's array could differ from what the earlier ones saw.
+			// Mirroring production: `source` is the pinned payload array once one
+			// exists and null while it does not, so a JSON-only send reads the
+			// caller's entry as it reaches it and allocates nothing. Pinning
+			// protects what has already been BUILT, and a JSON-only send to one
+			// socket builds nothing a later entry's toJSON could rewrite.
 			const count = entries.length;
-			const datas = new Array(count);
-			for (let i = 0; i < count; i++) datas[i] = entries[i].data;
-			const sendJsonFromT = (i) => {
+			const sendJsonFromT = (i, source) => {
 				let result = 1;
-				for (; i < count; i++) result = sendOutboundT(ws, envelope(topic, event, datas[i]));
+				for (; i < count; i++) {
+					result = sendOutboundT(ws, envelope(topic, event, source === null ? entries[i].data : source[i]));
+				}
 				return result;
 			};
 			if (!caps || !caps.has(wire.capability) || wireStatePoisonedT(ud, wire.capability) || !wire.state) {
-				return sendJsonFromT(0);
+				return sendJsonFromT(0, null);
 			}
 			const state = ensureWireStateT(ws, ud, wire);
-			if (state == null) return sendJsonFromT(0);
-			const updates = new Array(count);
-			for (let i = 0; i < count; i++) updates[i] = datas[i];
+			if (state == null) return sendJsonFromT(0, null);
+			// From here the payloads are pinned: the batch encode is application
+			// code handed the whole array, and a decline falls back to per-entry
+			// encodes that must see what the batch attempt saw. Handed to the codec
+			// directly rather than copied into a second array.
+			const datas = new Array(count);
+			for (let i = 0; i < count; i++) datas[i] = entries[i].data;
 			const schemaVersion = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
-			const payload = wire.encode(event + '-batch', { updates }, state);
+			const payload = wire.encode(event + '-batch', { updates: datas }, state);
 			if (payload == null) {
 				let result = 1;
 				for (let i = 0; i < count; i++) {
 					const p = wire.encode(event, datas[i], state);
 					if (p == null) { result = sendOutboundT(ws, envelope(topic, event, datas[i])); continue; }
 					const id = ensureWireIdT(ws, ud, topic);
-					if (id === -1) { poisonWireStateT(ws, ud, wire.capability); return sendJsonFromT(i); }
+					if (id === -1) { poisonWireStateT(ws, ud, wire.capability); return sendJsonFromT(i, datas); }
 					result = sendOutboundBinaryT(ws, buildBinaryFrame(schemaVersion, id, 0, p));
-					if (result === 2) { poisonWireStateT(ws, ud, wire.capability); return sendJsonFromT(i + 1); }
+					if (result === 2) { poisonWireStateT(ws, ud, wire.capability); return sendJsonFromT(i + 1, datas); }
 				}
 				return result;
 			}
 			const id = ensureWireIdT(ws, ud, topic);
 			if (id === -1) {
 				poisonWireStateT(ws, ud, wire.capability);
-				return sendJsonFromT(0);
+				return sendJsonFromT(0, datas);
 			}
 			const result = sendOutboundBinaryT(ws, buildBinaryFrame(schemaVersion, id, 0, payload));
 			if (result === 2) poisonWireStateT(ws, ud, wire.capability);

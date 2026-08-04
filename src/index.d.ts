@@ -2445,13 +2445,21 @@ export interface Platform {
 	 * and a dropped frame or announce poisons the capability to JSON until
 	 * reconnect. A stateless codec routes through the per-entry path unchanged.
 	 *
-	 * Every entry is read once, before any of it is serialized: the array, each
-	 * `data` reference, each `excludeWs`, and the options object are all pinned
-	 * on entry. Mutating the array or swapping an entry's fields from inside a
-	 * payload's `toJSON` (which runs during serialization) therefore cannot
-	 * change what this call delivers. Replacing a payload's own FIELDS still
-	 * can, because every path holds the same object - do not mutate a payload
-	 * that has been handed to a publish.
+	 * Every entry is read once. The array length and the options object are
+	 * pinned on entry, and each entry's `data` and `excludeWs` are read once,
+	 * when the batch reaches that entry, and never read again. So nothing
+	 * already built can be rewritten: no two subscribers can be handed different
+	 * bytes for the same entry, and an exclusion cannot be cleared out from
+	 * under the delivery walk.
+	 *
+	 * It does not freeze the whole array. A payload's `toJSON` runs during
+	 * serialization, so it can still change a LATER entry the batch has not
+	 * reached, and that entry is delivered as it reads when its turn comes.
+	 * (A stateless codec pre-reads the whole array and is stricter on that one
+	 * point.) Replacing a payload's own FIELDS also still reaches every
+	 * subscriber, because each path holds the same object. Do not mutate a
+	 * payload, or another entry, from inside one that has been handed to a
+	 * publish.
 	 */
 	publishWireBatch(
 		topic: string,
