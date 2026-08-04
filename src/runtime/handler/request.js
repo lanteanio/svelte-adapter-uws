@@ -1,5 +1,5 @@
 import { counters, staticCache } from './state.js';
-import { METHODS, send400 } from './http-helpers.js';
+import { METHODS, FORBIDDEN_METHODS, send400, send405 } from './http-helpers.js';
 import { collectRequestHeaders } from '../utils/request-headers.js';
 import { acquireState, releaseState } from './state-pool.js';
 import { resolveTransportAddress } from './config.js';
@@ -63,7 +63,12 @@ export function handleRequest(res, req) {
 
 	// Build full URL only for SSR - static files never reach here
 	const query = req.getQuery();
-	const METHOD = METHODS[method] || method.toUpperCase();
+	// One map lookup, exactly as before, for every method this adapter carries.
+	// Only a method the map does not know pays the forbidden-set check, so the
+	// hot path is unchanged.
+	const mapped = METHODS[method];
+	if (mapped === undefined && FORBIDDEN_METHODS.has(method)) return send405(res);
+	const METHOD = mapped || method.toUpperCase();
 
 	// === PRERENDERED CHECK ===
 	// Lightweight: only 4 header reads, no full collection, no remoteAddress decode

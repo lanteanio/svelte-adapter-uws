@@ -472,6 +472,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`TRACE`, `TRACK` and `CONNECT` are refused with `405`, not `500`.** The
+  fetch specification forbids these three methods, so `new Request()` throws a
+  `TypeError` for them and that throw reached the generic SSR failure path. The
+  status was wrong, and worse, every probe emitted a full error-severity
+  diagnostic carrying a request id - so sending `TRACE` in a loop filled an
+  operator's error log without involving the application at all. They are now
+  refused at the transport edge with an RFC-required `Allow` header and no
+  diagnostic. The refusal is scoped to exactly the three forbidden methods, so
+  any other method still reaches the application to be routed or rejected on
+  its own terms, and the check runs only for methods the internal method map
+  does not carry - every supported method costs exactly what it did before.
 - **The contributor smoke checkpoint cannot hang on a stalled handshake.** It
   waited for the WebSocket to open with an unbounded `once(ws, 'open')`, so a
   server that accepted the socket and then neither completed nor rejected the

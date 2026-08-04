@@ -9,6 +9,30 @@ export const METHODS = /** @type {Record<string, string>} */ ({
 	delete: 'DELETE', patch: 'PATCH', options: 'OPTIONS'
 });
 
+// The fetch specification forbids exactly these three methods, so `new Request()`
+// throws a TypeError for them. That throw surfaced as a generic 500 AND emitted a
+// full error-severity diagnostic per request, so probing TRACE was a one-line way
+// to fill an operator's error log. They can never reach an application route, so
+// they are refused at the edge with the status the RFC requires. The list is
+// fixed by the specification rather than by what a given Node happens to reject,
+// and it is checked only for methods the METHODS map does not carry, so no
+// supported method pays for it.
+export const FORBIDDEN_METHODS = new Set(['connect', 'trace', 'track']);
+
+// RFC 9110: a 405 response MUST generate an Allow header. These are the methods
+// METHODS carries, which is what this adapter can actually deliver to a route.
+const ALLOW_HEADER = 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS';
+
+/** @param {import('uWebSockets.js').HttpResponse} res */
+export function send405(res) {
+	res.cork(() => {
+		res.writeStatus('405 Method Not Allowed');
+		res.writeHeader('allow', ALLOW_HEADER);
+		res.writeHeader('content-type', 'text/plain');
+		res.end('Method Not Allowed');
+	});
+}
+
 /** @param {import('uWebSockets.js').HttpResponse} res */
 export function send400(res) {
 	res.cork(() => {

@@ -1,5 +1,5 @@
 import { origin, get_origin, body_size_limit } from './config.js';
-import { METHODS } from './http-helpers.js';
+import { METHODS, FORBIDDEN_METHODS, send405 } from './http-helpers.js';
 import { readBody } from './ssr.js';
 import { collectRequestHeaders } from '../utils/request-headers.js';
 import { wsModule } from '../ws-handler-bridge.js';
@@ -117,7 +117,11 @@ export function handleAdminRequest(res, req) {
 	const method = req.getMethod();
 	const pathname = req.getUrl();
 	const query = req.getQuery();
-	const METHOD = METHODS[method] || method.toUpperCase();
+	// Same refusal as the main request edge: this route builds a Request too, so
+	// a forbidden method would throw here for the same reason.
+	const mapped = METHODS[method];
+	if (mapped === undefined && FORBIDDEN_METHODS.has(method)) return send405(res);
+	const METHOD = mapped || method.toUpperCase();
 
 	// Repeated header lines are merged per header class. A repeated framing /
 	// identity header cannot be merged into one meaning, and the admin handler
