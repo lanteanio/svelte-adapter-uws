@@ -2466,7 +2466,7 @@ export interface Platform {
 				onDetach?: (ws: WebSocket<any>, state: unknown) => void;
 			};
 		},
-		options?: { seq?: boolean | number; relay?: boolean; compress?: boolean }
+		options?: { seq?: boolean; relay?: boolean; compress?: boolean }
 	): boolean;
 
 	/**

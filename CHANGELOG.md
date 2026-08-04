@@ -550,7 +550,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   throwing the day it produced two. The Vite dev plugin and `createTestServer`
   accepted the call silently and now apply the same refusal, so a test can no
   longer certify a wire shape production rejects. Publish through `publishWire`
-  when each frame needs its own authoritative number.
+  when each frame needs its own authoritative number. The declaration now says
+  so as well: `publishWireBatch`'s `seq` narrowed from `boolean | number` to
+  `boolean`, so a TypeScript caller passing a number gets a compile error rather
+  than a clean build and a throw on the first tick that reaches the call. The
+  number-accepting siblings are unchanged.
 - **`publishWireBatch` no longer advances authoritative state for a batch that
   reached no wire.** The topic watermark, the per-topic publish stats and the
   publish-rate counter moved per entry inside the stamping loop, and that loop

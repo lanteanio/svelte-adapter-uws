@@ -70,7 +70,12 @@ describe('cluster sequence authority policy', () => {
 		expect(() => assertBatchSequenceAuthority({ seq: 7, relay: false })).toThrow(BATCH_SEQUENCE_ERROR);
 		expect(() => assertBatchSequenceAuthority({ seq: 1, relay: false })).toThrow(BATCH_SEQUENCE_ERROR);
 		// The signature carries no count at all, so no caller can reintroduce one.
-		expect(assertBatchSequenceAuthority.length).toBeLessThanOrEqual(2);
+		// EXACTLY one: `data` has a default and so is not counted, leaving
+		// `options` as the only positional parameter. `<= 2` was the same
+		// assertion with one parameter of slack - precisely the count slot it
+		// claimed to exclude - so the bounced `(options, count, data = workerData)`
+		// passed it at length 2 and the pin proved nothing.
+		expect(assertBatchSequenceAuthority.length).toBe(1);
 	});
 
 	it('guards every production sequence-stamping entry point before mutation', () => {
