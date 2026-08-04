@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { inventoryMarkdown } from '../scripts/check-doc-code.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
@@ -20,15 +21,27 @@ function fencedSnippet(marker) {
 	return readme.slice(bodyAt, end) + '\n';
 }
 
-/** Fence body by its manifest record: `line` is the 1-based fence-open line. */
-function fenceBodyAt(line) {
-	const lines = readme.split('\n');
-	const open = line - 1;
-	if (!lines[open]?.startsWith('```')) throw new Error(`no fence opens at README.md:${line}`);
-	let end = open + 1;
-	while (end < lines.length && !lines[end].startsWith('```')) end++;
-	if (end >= lines.length) throw new Error(`fence at README.md:${line} never closes`);
-	return lines.slice(open + 1, end).join('\n') + '\n';
+// Fence bodies are located by CONTENT, not by the manifest's recorded line.
+// Reading by line coupled this suite to a number that only regeneration keeps
+// true, so a prose-only README edit landed here as `no fence opens at
+// README.md:6019` - a message naming neither the cause nor the fix, minutes into
+// a full run. check-doc-code now refuses a stale line, and this reads by the
+// fingerprint the manifest is keyed on, so neither half depends on the other.
+const FENCES_BY_KEY = new Map(
+	inventoryMarkdown(readme).map((fence) => [`${fence.fingerprint}:${fence.occurrence}`, fence])
+);
+
+/** Fence body by its manifest record. */
+function fenceBody(block) {
+	const fence = FENCES_BY_KEY.get(`${block.fingerprint}:${block.occurrence}`);
+	if (!fence) {
+		throw new Error(
+			`manifest record has no matching README fence: ${block.fingerprint}:${block.occurrence} ` +
+			`(recorded at README.md:${block.line} in ${block.section}); ` +
+			'rerun node scripts/check-doc-code.js --write'
+		);
+	}
+	return fence.content.endsWith('\n') ? fence.content : fence.content + '\n';
 }
 
 // Every block the manifest classifies as executed/packed-runtime names this
@@ -104,7 +117,7 @@ describe('packed README examples', () => {
 		const failures = [];
 		for (const block of EXECUTED) {
 			const file = path.join(consumer, `readme-${block.line}.mjs`);
-			const body = fenceBodyAt(block.line);
+			const body = fenceBody(block);
 			writeFileSync(file, block.language === 'ts'
 				? ts.transpileModule(body, {
 					compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }

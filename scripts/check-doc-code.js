@@ -937,8 +937,19 @@ export function validateManifest(manifest, sources, rootDirectory = root) {
 			}
 			const expected = outcome.record;
 			if (expected.classification === 'fragment') fragmentCount++;
-			for (const field of ['language', 'section']) {
-				if (record[field] !== block[field]) errors.push(`${key}: ${field} is stale`);
+			// `line` is enforced alongside the content fields because it is not
+			// decoration: consumers of this manifest read fence bodies by it.
+			// Fingerprint-only enforcement let a prose-only edit above a fence
+			// leave every later line stale while this gate stayed green, moving
+			// the failure to whichever suite reads by position - minutes later,
+			// under a message that names neither the cause nor the fix.
+			for (const field of ['language', 'section', 'line']) {
+				if (record[field] !== block[field]) {
+					errors.push(
+						`${key}: ${field} is stale (recorded ${JSON.stringify(record[field] ?? null)}, ` +
+						`actual ${JSON.stringify(block[field])}); rerun node scripts/check-doc-code.js --write`
+					);
+				}
 			}
 			for (const field of ['classification', 'channel', 'reason']) {
 				if ((record[field] ?? null) !== (expected[field] ?? null)) {

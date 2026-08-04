@@ -472,6 +472,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A prose-only README edit fails the fast documentation gate instead of a
+  slow unrelated suite.** `docs/code-blocks.v1.json` records a `fingerprint`
+  and a `line` for every README fence, but `check-doc-code` validated only the
+  fingerprint - so inserting a paragraph above existing fences left the gate
+  green with every later recorded line stale, and the failure surfaced minutes
+  into a full run as `no fence opens at README.md:6019`, a message naming
+  neither the cause nor the fix. The recorded line is now enforced alongside
+  the content fields, and every staleness error carries the regeneration
+  command. The packed-README suite that consumed those lines now locates each
+  fence by the fingerprint the manifest is keyed on, so the two halves no
+  longer depend on each other at all.
 - **The pressure snapshot no longer presents un-sampled placeholders as
   readings: `platform.pressure.sampledAt`.** Every field of the snapshot is
   initialised to `0` and only overwritten when the ~1 Hz sampler folds, so

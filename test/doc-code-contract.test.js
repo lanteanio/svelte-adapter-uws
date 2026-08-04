@@ -33,6 +33,22 @@ describe('README code-block contract', () => {
 		expect(validateManifest(MANIFEST, { 'README.md': changed }).length).toBeGreaterThan(0);
 	}, 60000);
 
+	it('refuses a manifest whose recorded lines drifted, without any fence changing', () => {
+		// A prose-only insert above a fence changes no content, so every
+		// fingerprint still matches and only positions move. That used to pass
+		// this gate and fail packed-readme-examples minutes later with a message
+		// naming neither the cause nor the fix.
+		const shifted = README.replace('\n## ', '\n<!-- prose -->\n\n## ');
+		expect(shifted).not.toBe(README);
+
+		const errors = validateManifest(MANIFEST, { 'README.md': shifted });
+		expect(errors.some((error) => error.includes('line is stale'))).toBe(true);
+		// The failure has to carry its own fix; that is the whole complaint.
+		expect(errors.some((error) => error.includes('node scripts/check-doc-code.js --write'))).toBe(true);
+		// Content is untouched, so nothing may be reported as reclassified.
+		expect(errors.some((error) => error.includes('unclassified'))).toBe(false);
+	}, 60000);
+
 	it('distinguishes standalone syntax, intentional fragments, and manual commands', () => {
 		const marker = '<!-- doc-code: fragment reason="deliberate excerpt" -->';
 		const source = [
