@@ -576,20 +576,35 @@ export default function uws(options = {}) {
 			// Same refusal as production and the harness. Dev routes every entry
 			// through publish() with one shared options object, so a numeric seq
 			// would stamp them all identically here as well.
-			assertClusterSequenceBatchAuthority(options, Array.isArray(entries) ? entries.length : 0);
+			const count = Array.isArray(entries) ? entries.length : 0;
+			assertClusterSequenceBatchAuthority(options, count);
+			// Same one-read rule as production: the first publish runs application
+			// toJSON, and every read for a later entry happens after it. Dev that
+			// re-read them would disagree with production about what was sent.
+			const opts = options == null ? options : { ...options };
+			const datas = new Array(count);
+			const excludes = new Array(count);
+			for (let i = 0; i < count; i++) {
+				const entry = entries[i];
+				datas[i] = entry.data;
+				excludes[i] = entry.excludeWs;
+			}
 			let ok = false;
-			for (let i = 0; i < entries.length; i++) {
-				const per = entries[i].excludeWs !== undefined
-					? { ...(options || {}), excludeWs: entries[i].excludeWs }
-					: options;
-				ok = publish(topic, event, entries[i].data, per) || ok;
+			for (let i = 0; i < count; i++) {
+				const per = excludes[i] !== undefined
+					? { ...(opts || {}), excludeWs: excludes[i] }
+					: opts;
+				ok = publish(topic, event, datas[i], per) || ok;
 			}
 			return ok;
 		},
 		sendWireBatch(ws, topic, event, entries, _wire) {
+			const count = entries.length;
+			const datas = new Array(count);
+			for (let i = 0; i < count; i++) datas[i] = entries[i].data;
 			let result = 1;
-			for (let i = 0; i < entries.length; i++) {
-				result = send(ws, topic, event, entries[i].data);
+			for (let i = 0; i < count; i++) {
+				result = send(ws, topic, event, datas[i]);
 			}
 			return result;
 		},

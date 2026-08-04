@@ -931,35 +931,59 @@ export async function createTestServer(options = {}) {
 			// envelopes for everyone else, per-entry sender exclusion, per-entry
 			// seq/relay, poison-on-drop. A stateless codec routes per entry.
 			if (!Array.isArray(entries) || entries.length === 0) return false;
+			// Same one-read rule as production (see platform.js publishWireBatch):
+			// a payload's toJSON runs during envelope building, so anything read
+			// out of the caller's entries afterwards could differ from what the
+			// earlier reads saw. A harness that re-read them would disagree with
+			// production about which bytes a subscriber gets.
+			const count = entries.length;
+			const opts = options == null ? options : { ...options };
 			if (!wire || !wire.state) {
+				const statelessDatas = new Array(count);
+				const statelessExcludes = new Array(count);
+				for (let i = 0; i < count; i++) {
+					const entry = entries[i];
+					statelessDatas[i] = entry.data;
+					statelessExcludes[i] = entry.excludeWs;
+				}
 				let ok = false;
-				for (let i = 0; i < entries.length; i++) {
-					const per = entries[i].excludeWs !== undefined
-						? { ...(options || {}), excludeWs: entries[i].excludeWs }
-						: options;
-					ok = platform.publishWire(topic, event, entries[i].data, wire, per) || ok;
+				for (let i = 0; i < count; i++) {
+					const per = statelessExcludes[i] !== undefined
+						? { ...(opts || {}), excludeWs: statelessExcludes[i] }
+						: opts;
+					ok = platform.publishWire(topic, event, statelessDatas[i], wire, per) || ok;
 				}
 				return ok;
 			}
-			const envs = new Array(entries.length);
-			const seqs = new Array(entries.length);
+			const envs = new Array(count);
+			const seqs = new Array(count);
+			const datas = new Array(count);
+			let excludes = null;
 			let anyExclude = false;
-			for (let i = 0; i < entries.length; i++) {
-				const seq = stampSeq(options, topicSeqs, topic);
+			for (let i = 0; i < count; i++) {
+				const entry = entries[i];
+				const data = entry.data;
+				const exclude = entry.excludeWs;
+				datas[i] = data;
+				if (exclude !== undefined && exclude !== null) {
+					if (excludes === null) excludes = new Array(count);
+					excludes[i] = exclude;
+					anyExclude = true;
+				}
+				const seq = stampSeq(opts, topicSeqs, topic);
 				seqs[i] = seq == null ? 0 : seq;
-				envs[i] = envelope(topic, event, entries[i].data, seq);
-				if (onPublishT && !(options && options.relay === false)) {
+				envs[i] = envelope(topic, event, data, seq);
+				if (onPublishT && !(opts && opts.relay === false)) {
 					onPublishT({ kind: 'publish', topic, envelope: envs[i], seq, compress: false });
 				}
-				if (entries[i].excludeWs !== undefined && entries[i].excludeWs !== null) anyExclude = true;
 			}
 			if (resumeBuffersT.size > 0) {
-				for (let i = 0; i < entries.length; i++) captureResumeFrameT(topic, seqs[i] === 0 ? null : seqs[i], envs[i]);
+				for (let i = 0; i < count; i++) captureResumeFrameT(topic, seqs[i] === 0 ? null : seqs[i], envs[i]);
 			}
 			const sendJsonT = (ws, list) => { for (let i = 0; i < list.length; i++) sendOutboundT(ws, list[i]); };
 			if (!anyExclude && !capCountsT.has(wire.capability)) {
 				if (chaos.scenario === null) {
-					for (let i = 0; i < entries.length; i++) app.publish(topic, envs[i], false, false);
+					for (let i = 0; i < count; i++) app.publish(topic, envs[i], false, false);
 					return true;
 				}
 				let delivered = false;
@@ -976,27 +1000,27 @@ export async function createTestServer(options = {}) {
 				try { ud = ws.getUserData(); } catch { continue; }
 				const subs = ud[WS_SUBSCRIPTIONS];
 				if (!subs || !subs.has(topic)) continue;
-				let list = entries;
+				let dataList = datas;
 				let envList = envs;
 				let seqList = seqs;
 				if (anyExclude) {
-					list = [];
+					dataList = [];
 					envList = [];
 					seqList = [];
-					for (let i = 0; i < entries.length; i++) {
-						if (entries[i].excludeWs === ws) continue;
-						list.push(entries[i]);
+					for (let i = 0; i < count; i++) {
+						if (excludes[i] === ws) continue;
+						dataList.push(datas[i]);
 						envList.push(envs[i]);
 						seqList.push(seqs[i]);
 					}
-					if (list.length === 0) continue;
+					if (envList.length === 0) continue;
 				}
 				const caps = ud[WS_CAPS];
 				if (!caps || !caps.has(wire.capability)) { sendJsonT(ws, envList); delivered = true; continue; }
 				const state = ensureWireStateT(ws, ud, wire);
 				if (state == null) { sendJsonT(ws, envList); delivered = true; continue; }
 				deliverStatefulWireBatch({
-					wire, event, entries: list, envelopes: envList, seqs: seqList,
+					wire, event, datas: dataList, envelopes: envList, seqs: seqList,
 					state, ws, ud, topic, ensureId: ensureWireIdT,
 					poison: poisonWireStateT, send: sendWireFanoutT
 				});
@@ -1063,9 +1087,15 @@ export async function createTestServer(options = {}) {
 			let ud;
 			try { ud = ws.getUserData(); } catch { closedWsAbortsT++; return 2; }
 			const caps = ud[WS_CAPS];
+			// Read once, mirroring production: the JSON path runs application
+			// toJSON and the codec encode is application code, so a later read of
+			// the caller's array could differ from what the earlier ones saw.
+			const count = entries.length;
+			const datas = new Array(count);
+			for (let i = 0; i < count; i++) datas[i] = entries[i].data;
 			const sendJsonFromT = (i) => {
 				let result = 1;
-				for (; i < entries.length; i++) result = sendOutboundT(ws, envelope(topic, event, entries[i].data));
+				for (; i < count; i++) result = sendOutboundT(ws, envelope(topic, event, datas[i]));
 				return result;
 			};
 			if (!caps || !caps.has(wire.capability) || wireStatePoisonedT(ud, wire.capability) || !wire.state) {
@@ -1073,15 +1103,15 @@ export async function createTestServer(options = {}) {
 			}
 			const state = ensureWireStateT(ws, ud, wire);
 			if (state == null) return sendJsonFromT(0);
-			const updates = new Array(entries.length);
-			for (let i = 0; i < entries.length; i++) updates[i] = entries[i].data;
+			const updates = new Array(count);
+			for (let i = 0; i < count; i++) updates[i] = datas[i];
 			const schemaVersion = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
 			const payload = wire.encode(event + '-batch', { updates }, state);
 			if (payload == null) {
 				let result = 1;
-				for (let i = 0; i < entries.length; i++) {
-					const p = wire.encode(event, entries[i].data, state);
-					if (p == null) { result = sendOutboundT(ws, envelope(topic, event, entries[i].data)); continue; }
+				for (let i = 0; i < count; i++) {
+					const p = wire.encode(event, datas[i], state);
+					if (p == null) { result = sendOutboundT(ws, envelope(topic, event, datas[i])); continue; }
 					const id = ensureWireIdT(ws, ud, topic);
 					if (id === -1) { poisonWireStateT(ws, ud, wire.capability); return sendJsonFromT(i); }
 					result = sendOutboundBinaryT(ws, buildBinaryFrame(schemaVersion, id, 0, p));

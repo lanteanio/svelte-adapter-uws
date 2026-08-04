@@ -472,6 +472,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A batch reads each entry once, so a payload's `toJSON` cannot change what
+  the rest of the batch delivers.** `publishWireBatch` built its JSON envelopes
+  first and then went back to the caller's `entries[]` for the exclusion
+  target, for the payload handed to the binary codec, and for the entry count.
+  Serializing runs application `toJSON`, so those later reads could return
+  values the earlier ones never saw: a binary subscriber received a different
+  payload than the JSON subscribers **under the same seq**, and an exclusion
+  cleared mid-batch delivered the entry to the socket it excluded. Both are
+  reproduced against the real runtime and pinned. The array, every `data`
+  reference, every `excludeWs` and the options object are now read once on
+  entry, and `sendWireBatch`, `createTestServer` and the Vite dev plugin follow
+  the same rule. Replacing a payload object's own fields still reaches the
+  codec - every path holds one reference and a per-message deep copy is not a
+  trade this adapter makes - so a payload handed to a publish must not be
+  mutated; this is now stated on the declaration.
 - **A prose-only README edit fails the fast documentation gate instead of a
   slow unrelated suite.** `docs/code-blocks.v1.json` records a `fingerprint`
   and a `line` for every README fence, but `check-doc-code` validated only the

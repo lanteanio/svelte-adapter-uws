@@ -2442,6 +2442,14 @@ export interface Platform {
 	 * to per-entry encodes, a per-entry decline to that entry's JSON envelope,
 	 * and a dropped frame or announce poisons the capability to JSON until
 	 * reconnect. A stateless codec routes through the per-entry path unchanged.
+	 *
+	 * Every entry is read once, before any of it is serialized: the array, each
+	 * `data` reference, each `excludeWs`, and the options object are all pinned
+	 * on entry. Mutating the array or swapping an entry's fields from inside a
+	 * payload's `toJSON` (which runs during serialization) therefore cannot
+	 * change what this call delivers. Replacing a payload's own FIELDS still
+	 * can, because every path holds the same object - do not mutate a payload
+	 * that has been handed to a publish.
 	 */
 	publishWireBatch(
 		topic: string,

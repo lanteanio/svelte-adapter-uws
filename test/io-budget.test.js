@@ -490,8 +490,24 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// property read, `sampledAt: p.sampledAt` in the introspect() literal. That
 	// path is off the fan-out entirely (one plain object per admin call), and a
 	// number-or-null property read owns no bytes and copies none.
-	platform: '61ba9db16426d8fa9fcd8edcd3b1ca37ad99e231d052ea93f7aec9faa2714e80',
-	'wire-fanout': 'cfca189a1066c59a0f04a99ee2eab60d3a51e8024200a39626cd321a8b4d3d7b',
+	//
+	// Re-pinned again for the batch one-read rule: publishWireBatch and
+	// sendWireBatch now read each caller entry's fields once into plain arrays
+	// (`datas`, and `excludes` only once an entry carries one) instead of
+	// re-reading the caller's objects after application toJSON has run. The
+	// arrays hold REFERENCES to payloads and sockets - no byte is read, copied
+	// or allocated by any of it, and the JSON fast path allocates nothing it did
+	// not allocate before (`datas` is skipped entirely unless a binary
+	// subscriber or the relay will read it). The added `.push(` calls are the
+	// existing per-socket exclusion filter now pushing payload references rather
+	// than entry objects, and `.set(` is unchanged.
+	platform: '1599d1acb53b738c930d61ab394bbe2e2a5e9660ff5bcce1ba77a4a7d6f92c46',
+	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
+	// payloads the batch already read (`io.datas`) instead of reaching back into
+	// the caller's entry objects for `.data`. Same count of encodes and writes,
+	// same buffers; the drift is which array the payload comes out of, and no
+	// copy primitive entered the body.
+	'wire-fanout': '4912f33348b9d7e27275da422ae55704c05c702df35a9fdb17843081003a3c62',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({
@@ -2715,7 +2731,9 @@ function measureStatefulBatch(entryCount) {
 	deliverStatefulWireBatch({
 		wire,
 		event: 'tick',
-		entries,
+		// Payloads, not caller entries: the fan-out is handed values the batch
+		// already read, so it never re-reads application-owned objects.
+		datas: entries.map(({ data }) => data),
 		envelopes: entries.map(({ data }) => JSON.stringify({ topic: TOPIC, event: 'tick', data })),
 		seqs: entries.map((_, index) => index + 1),
 		state: { schemaVersion: 1 },

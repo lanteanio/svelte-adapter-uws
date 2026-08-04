@@ -81,7 +81,7 @@ export function deliverStatelessWireFanout(wire, payload, io) {
  * @param {{
  *   wire: { capability: string, schemaVersion: number, encode: Function },
  *   event: string,
- *   entries: Array<{ data: unknown }>,
+ *   datas: unknown[],
  *   envelopes: string[],
  *   seqs: number[],
  *   state: any,
@@ -101,8 +101,12 @@ export function deliverStatefulWireBatch(io) {
 	const schemaVersion = typeof io.state.schemaVersion === 'number'
 		? io.state.schemaVersion
 		: io.wire.schemaVersion;
-	const updates = new Array(io.entries.length);
-	for (let i = 0; i < io.entries.length; i++) updates[i] = io.entries[i].data;
+	// Payloads arrive already read out of the caller's entries. Reading them
+	// here would be a SECOND read of application-owned objects, after the JSON
+	// envelopes above were built from the first - so a payload's toJSON could
+	// hand this codec something the JSON subscribers never saw, under one seq.
+	const updates = new Array(io.datas.length);
+	for (let i = 0; i < io.datas.length; i++) updates[i] = io.datas[i];
 	const payload = io.wire.encode(io.event + '-batch', { updates }, io.state);
 
 	const sendJsonFrom = (start) => {
@@ -116,8 +120,8 @@ export function deliverStatefulWireBatch(io) {
 
 	if (payload == null) {
 		let result = 1;
-		for (let i = 0; i < io.entries.length; i++) {
-			const entryPayload = io.wire.encode(io.event, io.entries[i].data, io.state);
+		for (let i = 0; i < io.datas.length; i++) {
+			const entryPayload = io.wire.encode(io.event, io.datas[i], io.state);
 			if (entryPayload == null) {
 				result = send(io, io.ws, io.envelopes[i], false);
 				continue;

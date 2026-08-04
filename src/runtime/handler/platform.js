@@ -482,23 +482,50 @@ export const platform = {
 	 */
 	publishWireBatch(topic, event, entries, wire, options) {
 		if (!Array.isArray(entries) || entries.length === 0) return false;
-		assertClusterSequenceBatchAuthority(options, entries.length);
+		// Everything application-owned is read ONCE, here, before any of it can
+		// run. completeEnvelope calls JSON.stringify, so a payload's toJSON
+		// executes while this call is still half-built; anything re-read after
+		// that point could be a value the earlier reads never saw - a payload
+		// swapped between the JSON envelope and the binary encode under one seq,
+		// an exclusion cleared between counting it and honouring it, or an entry
+		// count that changed mid-walk. The count and the options are pinned here;
+		// the per-entry fields are pinned in the stamping loop below.
+		//
+		// Not defended, because it cannot be without deep-copying every payload
+		// on a per-message path: mutating a payload object's own fields rather
+		// than replacing the reference. Every path holds the same object.
+		const count = entries.length;
+		const opts = options == null ? options : { ...options };
+		assertClusterSequenceBatchAuthority(opts, count);
 		// A stateless codec gains nothing from a batched walk (encode-once
 		// already amortizes it) - route through the per-entry path unchanged.
 		if (!wire || !wire.state) {
+			// Read every entry before publishing any of them: the first publish
+			// runs application toJSON, and the reads for entry i+1 come after it.
+			const datas = new Array(count);
+			const excludes = new Array(count);
+			for (let i = 0; i < count; i++) {
+				const entry = entries[i];
+				datas[i] = entry.data;
+				excludes[i] = entry.excludeWs;
+			}
 			let ok = false;
-			for (let i = 0; i < entries.length; i++) {
-				const per = entries[i].excludeWs !== undefined
-					? { ...(options || {}), excludeWs: entries[i].excludeWs }
-					: options;
-				ok = this.publishWire(topic, event, entries[i].data, wire, per) || ok;
+			for (let i = 0; i < count; i++) {
+				const per = excludes[i] !== undefined
+					? { ...(opts || {}), excludeWs: excludes[i] }
+					: opts;
+				ok = this.publishWire(topic, event, datas[i], wire, per) || ok;
 			}
 			return ok;
 		}
-		const compressIntent = !!(options && options.compress === true);
+		const compressIntent = !!(opts && opts.compress === true);
 		const compress = WS_COMPRESSION_ON && compressIntent;
-		const relayed = !!(parentPort && (!options || options.relay !== false));
+		const relayed = !!(parentPort && (!opts || opts.relay !== false));
 		const relayCap = relayed && getWireCodec(wire.capability) ? wire.capability : undefined;
+		// The payload array is read by the binary walk and by the relay, and by
+		// nothing else - so the JSON fast path (no binary-capable subscriber, no
+		// relay) allocates exactly what it allocated before this guard existed.
+		const needsData = relayed || capCounts.has(wire.capability);
 
 		// Per-entry seq, envelope, and stats - the exact bookkeeping N
 		// publishWire calls would have produced.
@@ -508,8 +535,13 @@ export const platform = {
 			topicPublishStats.set(topic, stats);
 			maybeWarnTopicRegistry();
 		}
-		const envs = new Array(entries.length);
-		const seqs = new Array(entries.length);
+		const envs = new Array(count);
+		const seqs = new Array(count);
+		const datas = needsData ? new Array(count) : null;
+		// Allocated on the first entry that actually carries an exclusion, so the
+		// common unexcluded batch pays nothing for it. An entry with no exclusion
+		// leaves a hole, which reads as undefined and matches no socket.
+		let excludes = null;
 		let anyExclude = false;
 		// Nothing AUTHORITATIVE moves until every entry has both stamped and
 		// serialised. completeEnvelope runs JSON.stringify, so a payload whose
@@ -520,26 +552,36 @@ export const platform = {
 		let highestSeq = null;
 		let batchMessages = 0;
 		let batchBytes = 0;
-		for (let i = 0; i < entries.length; i++) {
-			const seq = stampSeq(options, topicSeqs, topic);
+		for (let i = 0; i < count; i++) {
+			// One read of each application-owned field, before the toJSON below
+			// can run. Everything downstream reads these, never the caller again.
+			const entry = entries[i];
+			const data = entry.data;
+			const exclude = entry.excludeWs;
+			if (needsData) datas[i] = data;
+			if (exclude !== undefined && exclude !== null) {
+				if (excludes === null) excludes = new Array(count);
+				excludes[i] = exclude;
+				anyExclude = true;
+			}
+			const seq = stampSeq(opts, topicSeqs, topic);
 			seqs[i] = seq == null ? 0 : seq;
-			const envelope = completeEnvelope(envelopePrefix(topic, event), entries[i].data, seq);
+			const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
 			fatal(envelope.length > 0, 'envelope.empty', null);
 			if (seq !== null && (highestSeq === null || seq > highestSeq)) highestSeq = seq;
 			batchMessages++;
 			batchBytes += envelope.length;
 			envs[i] = envelope;
-			if (entries[i].excludeWs !== undefined && entries[i].excludeWs !== null) anyExclude = true;
 		}
 		if (highestSeq !== null) maxSeenSeq.set(topic, highestSeq);
 		stats.m += batchMessages;
 		stats.b += batchBytes;
-		counters.publishCountWindow += entries.length;
+		counters.publishCountWindow += count;
 
 		// Resume cutover in flight: hold the per-entry JSON envelopes a caps-less
 		// resuming subscriber would receive from this stateful batch.
 		if (resumeBuffers.size > 0) {
-			for (let i = 0; i < entries.length; i++) captureResumeFrame(topic, seqs[i] === 0 ? null : seqs[i], envs[i], compress);
+			for (let i = 0; i < count; i++) captureResumeFrame(topic, seqs[i] === 0 ? null : seqs[i], envs[i], compress);
 		}
 		const sendJson = (ws, list) => {
 			for (let i = 0; i < list.length; i++) {
@@ -551,7 +593,7 @@ export const platform = {
 		// entry excludes a socket - N native fan-outs, byte-identical to N
 		// publishWire calls.
 		if (!anyExclude && !capCounts.has(wire.capability)) {
-			for (let i = 0; i < entries.length; i++) {
+			for (let i = 0; i < count; i++) {
 				const result = app.publish(topic, envs[i], false, compress);
 				counters.publishOutcomeHook?.(result);
 			}
@@ -563,20 +605,20 @@ export const platform = {
 				if (!subs || !subs.has(topic)) continue;
 				// The subset this socket receives: entries not excluded for it.
 				// The no-exclusion common case reuses the shared arrays.
-				let list = entries;
+				let dataList = datas;
 				let envList = envs;
 				let seqList = seqs;
 				if (anyExclude) {
-					list = [];
+					dataList = [];
 					envList = [];
 					seqList = [];
-					for (let i = 0; i < entries.length; i++) {
-						if (entries[i].excludeWs === ws) continue;
-						list.push(entries[i]);
+					for (let i = 0; i < count; i++) {
+						if (excludes[i] === ws) continue;
+						if (needsData) dataList.push(datas[i]);
 						envList.push(envs[i]);
 						seqList.push(seqs[i]);
 					}
-					if (list.length === 0) continue;
+					if (envList.length === 0) continue;
 				}
 				const caps = ud[WS_CAPS];
 				if (!caps || !caps.has(wire.capability)) {
@@ -591,17 +633,17 @@ export const platform = {
 					continue;
 				}
 				deliverStatefulWireBatch({
-					wire, event, entries: list, envelopes: envList, seqs: seqList,
+					wire, event, datas: dataList, envelopes: envList, seqs: seqList,
 					state, ws, ud, topic, ensureId: ensureWireId,
 					poison: poisonWireState, compress, counters
 				});
 			}
 		}
 		if (relayed) {
-			for (let i = 0; i < entries.length; i++) {
+			for (let i = 0; i < count; i++) {
 				batchRelay(topic, envs[i], compressIntent, seqs[i] === 0 ? null : seqs[i], relayCap,
 					relayCap !== undefined ? event : undefined,
-					relayCap !== undefined ? entries[i].data : undefined);
+					relayCap !== undefined ? datas[i] : undefined);
 			}
 		}
 		return true;
@@ -719,10 +761,17 @@ export const platform = {
 		try { ud = ws.getUserData(); } catch { counters.closedWsAborts++; return 2; }
 		const caps = ud[WS_CAPS];
 		const compress = WS_COMPRESSION_ON && !!(options && options.compress === true);
+		// Read once, for the same reason publishWireBatch does: the JSON path
+		// below runs application toJSON, and the codec encode is application code
+		// too, so any later read of the caller's array could return something the
+		// earlier reads never saw - inside one batch, to one socket.
+		const count = entries.length;
+		const datas = new Array(count);
+		for (let i = 0; i < count; i++) datas[i] = entries[i].data;
 		const sendJsonFrom = (i) => {
 			let result = 1;
-			for (; i < entries.length; i++) {
-				const json = envelopePrefix(topic, event) + JSON.stringify(entries[i].data ?? null) + '}';
+			for (; i < count; i++) {
+				const json = envelopePrefix(topic, event) + JSON.stringify(datas[i] ?? null) + '}';
 				try { result = ws.send(json, false, compress); } catch { counters.closedWsAborts++; return 2; }
 				bumpOut(ws, json);
 			}
@@ -733,18 +782,18 @@ export const platform = {
 		}
 		const state = ensureWireState(ws, ud, wire);
 		if (state == null) return sendJsonFrom(0);
-		const updates = new Array(entries.length);
-		for (let i = 0; i < entries.length; i++) updates[i] = entries[i].data;
+		const updates = new Array(count);
+		for (let i = 0; i < count; i++) updates[i] = datas[i];
 		const schemaVersion = typeof state.schemaVersion === 'number' ? state.schemaVersion : wire.schemaVersion;
 		const payload = wire.encode(event + '-batch', { updates }, state);
 		if (payload == null) {
 			// The codec declined the batch (older codec, unrepresentable entry):
 			// the N sendWire bodies this call replaces.
 			let result = 1;
-			for (let i = 0; i < entries.length; i++) {
-				const p = wire.encode(event, entries[i].data, state);
+			for (let i = 0; i < count; i++) {
+				const p = wire.encode(event, datas[i], state);
 				if (p == null) {
-					const json = envelopePrefix(topic, event) + JSON.stringify(entries[i].data ?? null) + '}';
+					const json = envelopePrefix(topic, event) + JSON.stringify(datas[i] ?? null) + '}';
 					try { result = ws.send(json, false, compress); } catch { counters.closedWsAborts++; return 2; }
 					bumpOut(ws, json);
 					continue;

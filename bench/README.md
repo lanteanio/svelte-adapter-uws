@@ -93,6 +93,7 @@ command; if you change them, the changed command is the profile identity.
 | Request construction | `node bench/micro-request.mjs` | JS | `Request` construction cost; isolated primitive, not SSR latency. |
 | Sequence stamping | `node bench/micro-seq-stamp-ab.mjs` | JS | alternating sequence-path cost; local synthetic topics. |
 | Delivered-sequence tracker | `node bench/micro-seq-tracker.mjs` | JS | marginal tracker/fan-out cost; no production multiworker IPC. |
+| Batch entry reads | `node bench/micro-wire-batch-alias-ab.mjs` | JS | alternating per-entry read shapes at 1/8/64 entries; run-to-run spread exceeds the A/B delta, so treat a single run as inconclusive. |
 | Smoother allocation | `node --expose-gc bench/micro-smooth-alloc.mjs` | GC | allocation/heap deltas; garbage collection and heap accounting are runtime-sensitive. |
 | Replay allocation | `node --expose-gc bench/micro-smooth-replay-alloc.mjs` | GC | allocation/heap deltas by replay window; same GC caveat. |
 | Subscribe try/catch | `node bench/micro-subscribe-trycatch.mjs` | JS | alternating exception-wrapper overhead; successful call path only. |

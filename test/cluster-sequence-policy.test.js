@@ -75,7 +75,16 @@ describe('cluster sequence authority policy', () => {
 		const batch = source.slice(source.indexOf('\tpublishBatched('), source.indexOf('\n\t/**', source.indexOf('\tpublishBatched(') + 20));
 		expect(publish).toContain('assertClusterSequenceAuthority(options);');
 		expect(wire).toContain('if (!isRelay) assertClusterSequenceAuthority(options);');
-		expect(wireBatch).toContain('assertClusterSequenceBatchAuthority(options, entries.length);');
+		// The batch asserts on its OWN copy of the options and its own pinned
+		// count, not on the caller's live objects - a caller that mutated either
+		// after the check would otherwise stamp under an authority nobody
+		// validated. The guard still has to run before any mutation, which is
+		// what the slice below pins.
+		expect(wireBatch).toContain('assertClusterSequenceBatchAuthority(opts, count);');
+		const beforeAssert = wireBatch.slice(0, wireBatch.indexOf('assertClusterSequenceBatchAuthority('));
+		expect(beforeAssert).toContain('const opts = options == null ? options : { ...options };');
+		expect(beforeAssert, 'the batch stamps or fans out before its authority check')
+			.not.toMatch(/stampSeq|app\.publish|captureResumeFrame|maxSeenSeq\.set/);
 		expect(loopBatch).toContain('assertClusterSequenceAuthority(messages[i].options);');
 		expect(batch).toContain('assertClusterSequenceAuthority(messages[i].options);');
 	});
