@@ -160,6 +160,55 @@ describeUWS('admission metrics on createTestServer', () => {
 		for (const r of opened) r.ws?.close();
 	});
 
+	// The test above drives pacing overflow with NO application upgrade hook, so
+	// the refusal runs synchronously, inside the uWS route handler, where the
+	// request is still valid. Every shipped test was on that side of the line.
+	//
+	// With a hook that resolves in a LATER TICK - which is every hook doing real
+	// I/O, and so the ordinary auth-carrying shape - the refusal runs from the
+	// hook's `.then()`. uWS invalidates the stack-allocated request at the END OF
+	// THE NATIVE TICK (not at route-handler return: a hook awaiting only settled
+	// promises stays inside the tick and was always fine), so the refusal's header
+	// reads threw, the catch around the hook swallowed it, and the client got a
+	// 500 it cannot tell from a broken server - for a NORMAL, expected shed.
+	//
+	// It also double-counted: the same attempt landed on `deferred_overflow` and
+	// then again on `hook_error`, breaking the accounting invariant the
+	// over-capacity test above pins.
+	it('answers a paced shed with 503, not 500, when the upgrade hook resolves in a later tick', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const metrics = recordingRegistry();
+		server = await createTestServer({
+			upgradeAdmission: { perTickBudget: 1, maxDeferred: 0 },
+			metrics,
+			handler: {
+				// setTimeout, not `await Promise.resolve()`: the microtask shape
+				// never leaves the tick and never reaches the defect.
+				upgrade: async () => { await new Promise((r) => setTimeout(r, 5)); return {}; }
+			}
+		});
+
+		const results = await Promise.all(
+			Array.from({ length: 30 }, () => attemptUpgrade(server.wsUrl))
+		);
+		const opened = results.filter((r) => r.opened);
+		const shed = results.filter((r) => r.status === 503);
+		const errored = results.filter((r) => r.status === 500);
+
+		expect(errored.length, 'a shed upgrade answered 500 - the refusal read a dead request').toBe(0);
+		expect(shed.length).toBeGreaterThan(0);
+		expect(metrics.reason('upgrade_rejected_total', 'deferred_overflow')).toBe(shed.length);
+		expect(metrics.counterTotal('upgrade_deferred_rejected_total')).toBe(shed.length);
+		// A normal shed is not a hook failure, and must not be reported as one.
+		expect(metrics.reason('upgrade_rejected_total', 'hook_error'), 'a normal shed was charged to hook_error').toBe(0);
+		// The same accounting invariant the over-capacity run pins: every attempt
+		// is exactly one of admitted or rejected, and nothing is counted twice.
+		expect(metrics.counterTotal('upgrade_admitted_total') + metrics.counterTotal('upgrade_rejected_total'))
+			.toBe(results.length);
+
+		for (const r of opened) r.ws?.close();
+	});
+
 	it('exports exact live headroom and counts whole-lifetime cap sheds separately', async () => {
 		const { createTestServer } = await import('../src/testing.js');
 		const metrics = recordingRegistry();

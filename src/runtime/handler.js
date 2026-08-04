@@ -71,13 +71,43 @@ import { activeTraceContext, extractTraceContext, traceOperation, tracingEnabled
 
 const WS_TRACE_CONTEXT_KEY = '__uwsTraceContext';
 
+/**
+ * A stand-in for a uWS request, built from values read while it was still
+ * valid. `createWaitingRoomRequest` is duck-typed over exactly these four
+ * methods, so a refusal that runs after the tick has ended can still describe
+ * the request without the waiting-room module needing to know that happened -
+ * and without this fix reaching into that module, which sits inside the sealed
+ * ingress/platform/wire-fanout graph.
+ *
+ * The method is handed over exactly as uWS reported it (lowercase); the builder
+ * uppercases it, so the detached answer is identical to the live one rather
+ * than a second normalisation that could drift from it.
+ *
+ * @param {{ method: string, url: string, query: string, headers: Record<string, string> }} snapshot
+ */
+function detachedRequestFacade(snapshot) {
+	return {
+		getMethod: () => snapshot.method,
+		getUrl: () => snapshot.url,
+		getQuery: () => snapshot.query,
+		forEach: (visit) => {
+			for (const name of Object.keys(snapshot.headers)) visit(name, snapshot.headers[name]);
+		}
+	};
+}
+
 function traceUpgradeRejection(req, headers, reason) {
 	if (!tracingEnabled) return;
+	// `req` is optional: a caller that has already left the uWS tick passes null
+	// rather than a handle whose every read throws. A null `headers` short-
+	// circuits before this, and the fallback below is only reached when headers
+	// is undefined - so the optional calls are what stop that combination
+	// becoming a TypeError instead of a missing trace parent.
 	const parent = headers === null
 		? null
 		: extractTraceContext(headers ?? {
-			traceparent: req.getHeader('traceparent'),
-			tracestate: req.getHeader('tracestate')
+			traceparent: req?.getHeader('traceparent'),
+			tracestate: req?.getHeader('tracestate')
 		});
 	traceOperation('adapter.websocket.admission', {
 		kind: 'server',
@@ -1472,14 +1502,18 @@ if (WS_ENABLED) {
 			// (`0.5` at normal reproduces today's exact band). A cursor-lane
 			// upgrade is never a browser navigation, so it always gets the bare
 			// `503` - never the holding page - and skips the Accept negotiation.
-			const serveUpgradeRefusal = () => {
+			// `detached` is the pre-read snapshot taken while `req` was still valid,
+			// passed only by the caller that runs after the uWS tick has ended. The
+			// four synchronous refusals pass nothing and read the live request
+			// exactly as before, so their bytes are unchanged.
+			const serveUpgradeRefusal = (detached) => {
 				if (WAITING_ROOM === null || isCursor) {
 					// An HTML navigation keeps a minimal document baseline even
 					// when the interactive room is disabled. Cursor upgrades are
 					// never navigations and retain the byte-identical bare refusal.
 					if (!isCursor && negotiateRejection(
-						req.getHeader('accept'),
-						req.getHeader('upgrade')
+						detached ? detached.accept : req.getHeader('accept'),
+						detached ? detached.upgrade : req.getHeader('upgrade')
 					) === 'html') {
 						sendWaitingRoomPage(res, {
 							body: buildAccessibleCapacityRefusalPage(),
@@ -1499,12 +1533,17 @@ if (WS_ENABLED) {
 				}
 
 				// One header read, no full walk on the reject path.
-				const accept = req.getHeader('accept');
-				if (negotiateRejection(accept, req.getHeader('upgrade')) === 'html') {
+				const accept = detached ? detached.accept : req.getHeader('accept');
+				if (negotiateRejection(accept, detached ? detached.upgrade : req.getHeader('upgrade')) === 'html') {
 					// Browser navigation: serve the self-polling holding page.
+					// The builder is duck-typed, so the detached path hands it a plain
+					// facade over the snapshot instead of a request handle that is no
+					// longer alive - which keeps this fix out of upgrade-admission.js,
+					// and therefore out of the sealed ingress/platform/wire-fanout
+					// module graph it sits inside.
 					const page = WAITING_ROOM.renderResponse(
 						undefined,
-						createWaitingRoomRequest(req)
+						createWaitingRoomRequest(detached ? detachedRequestFacade(detached) : req)
 					);
 					sendWaitingRoomPage(res, page);
 					return;
@@ -1570,13 +1609,19 @@ if (WS_ENABLED) {
 				}
 				releaseConnectionPermit();
 			}
-			function rejectDeferredOverflow(headers) {
+			// `detached` is passed only by the caller that runs after an application
+			// upgrade hook resolved - by then uWS has ended the tick and every read
+			// of `req` throws, which turned a normal shed into a swallowed throw, a
+			// 500 the client cannot tell from a broken server, and a spurious
+			// error-severity hook_error that double-counted the rejection. The
+			// hookless caller passes nothing and is unchanged.
+			function rejectDeferredOverflow(headers, detached) {
 				if (counters.activePosture !== null) counters.activePosture.recordCapacityReject();
 				mUpgradeRejected?.inc({ reason: 'deferred_overflow' });
 				mUpgradeDeferredRejected?.inc();
-				traceUpgradeRejection(req, headers, 'deferred_overflow');
+				traceUpgradeRejection(detached ? null : req, headers, 'deferred_overflow');
 				releaseInFlight();
-				serveUpgradeRefusal();
+				serveUpgradeRefusal(detached);
 			}
 
 			if (!admission.tryAcquireConnection()) {
@@ -1604,6 +1649,35 @@ if (WS_ENABLED) {
 				releaseInFlight();
 				return;
 			}
+			// Snapshot what a deferred-overflow refusal needs, here, where every
+			// other synchronous read happens. That refusal can only run after an
+			// application upgrade hook resolves, and uWS invalidates `req` at the
+			// end of the native tick - so every read it used to do threw, the catch
+			// turned a normal shed into a 500, and the client could not tell being
+			// shed from a broken server.
+			//
+			// Gated on pacing being configured: without a per-tick budget no upgrade
+			// is ever deferred, so an accepted upgrade on the default configuration
+			// pays nothing for this.
+			//
+			// `accept` and `upgrade` are read from `req`, NOT from the collected
+			// `headers`: collectRequestHeaders joins repeated lines with ', ' and
+			// neither header is single-valued, so a duplicated Accept would content-
+			// negotiate differently here than on the four synchronous refusals. The
+			// header bag is COPIED rather than aliased, because the same object is
+			// handed to the application hook, which may mutate it before the
+			// refusal reads it.
+			const deferredRefusal = ADMISSION_PER_TICK_BUDGET > 0
+				? {
+					accept: req.getHeader('accept'),
+					upgrade: req.getHeader('upgrade'),
+					method: req.getMethod(),
+					url: req.getUrl(),
+					query: req.getQuery(),
+					headers: { ...headers }
+				}
+				: null;
+
 			// Decode the client IP once. resolveTransportAddress applies the
 			// opt-in PROXY-protocol substitution, then resolveClientIp applies
 			// the configured proxy header (ADDRESS_HEADER / XFF_DEPTH) - both
@@ -1919,7 +1993,10 @@ if (WS_ENABLED) {
 							releaseInFlight();
 						}
 					});
-					if (pacingOutcome === null) rejectDeferredOverflow(headers);
+					// This one runs inside the upgrade hook's `.then()`, so the uWS
+					// tick has ended and `req` is dead - the refusal takes the
+					// snapshot read before the hook was ever called.
+					if (pacingOutcome === null) rejectDeferredOverflow(headers, deferredRefusal);
 				})
 				.catch((err) => {
 					clearTimer(timer);

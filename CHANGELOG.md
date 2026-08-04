@@ -472,6 +472,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A paced upgrade shed while an application `upgrade` hook is in flight now
+  answers `503`, not `500`.** With `upgradeAdmission.perTickBudget` set, an
+  upgrade over the deferred ceiling is refused - and that refusal ran from
+  inside the application hook's `.then()`. uWS invalidates the stack-allocated
+  request at the end of the native tick, so the refusal's `Accept` / `Upgrade`
+  reads threw, the hook's own catch swallowed the throw, and the client received
+  `500 Internal Server Error` for what is a normal, expected shed. The same
+  attempt was then counted twice - once as `deferred_overflow` and again as
+  `hook_error` - and raised an error-severity `runtime.websocket-upgrade.failed`
+  event naming a hook that had not failed. Only hooks resolving in a LATER tick
+  were affected, which is every hook doing real I/O (a database, Redis, `fetch`,
+  a timer) and therefore the ordinary auth-carrying shape; a synchronous hook, a
+  hook awaiting only settled promises, and the no-hook path always answered
+  `503` correctly. The refusal now reads a snapshot taken while the request was
+  still valid, so it never touches it after the tick. Taken only when pacing is
+  configured, so an accepted upgrade on the default configuration is unchanged,
+  and the four synchronous refusal paths still read the live request and are
+  byte-identical. Mirrored in `createTestServer`; the Vite dev plugin has no
+  upgrade-admission surface and needs no change.
 - **A resume gap-fill that a socket refuses no longer leaves the client
   silently behind.** uWS answers a send past `maxBackpressure` with the dropped
   sentinel rather than throwing, and the flush that replays a resumed topic's
