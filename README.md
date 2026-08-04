@@ -5668,6 +5668,8 @@ uWebSockets.js manages connection lifecycle at the C++ level. These are its buil
 
 **HTTP keepalive:** uWS closes idle HTTP connections after 10 seconds of inactivity. This is compiled into the C++ layer and is not configurable from JavaScript. Behind a reverse proxy (nginx, Caddy, Cloudflare), the proxy manages keepalive for external clients; uWS handles only the proxy-to-app leg.
 
+**Server identification:** responses carry a `uWebSockets: 20` header naming the stack and its major version, the same way most servers identify themselves through `Server:`. It comes from the C++ layer, so the adapter neither sets nor overrides it: writing the same header name adds a second line beside the built-in one. Nothing in the adapter or the client reads it. If you would rather not name the stack and already have a proxy or CDN in front, drop the header there (`proxy_hide_header uWebSockets;` in nginx, `header -uWebSockets` in Caddy); served directly, the header stays.
+
 **Slow-loris protection:** uWS requires at least 16 KB/second of throughput from each HTTP client. Connections that send data slower than this (a common DoS technique) are dropped by the C++ layer before they reach your application code.
 
 **WebSocket ping/pong:** Set `idleTimeout` in the adapter's `websocket` option (in seconds) to have uWS send automatic WebSocket ping frames and close connections that don't respond. The default is 120 seconds. The client store handles pong automatically. Setting it to `0` disables the idle timeout, which also disables that liveness check: a connection whose peer has silently gone away is never reaped and keeps its slot.

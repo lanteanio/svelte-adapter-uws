@@ -472,6 +472,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `uWebSockets` response header is documented.** Responses carry a
+  `uWebSockets: 20` header naming the stack and its major version, the same way
+  most servers identify themselves through `Server:`. It comes from the C++
+  layer, so the adapter neither sets nor overrides it - writing the same header
+  name adds a second line beside the built-in one. It is now listed with the
+  other uWS connection defaults, including how a deployment that already has a
+  proxy or CDN in front can drop the header there.
 - **`TRACE`, `TRACK` and `CONNECT` are refused with `405`, not `500`.** The
   fetch specification forbids these three methods, so `new Request()` throws a
   `TypeError` for them and that throw reached the generic SSR failure path. The
