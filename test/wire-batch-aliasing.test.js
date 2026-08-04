@@ -169,4 +169,47 @@ describeUWS('publishWireBatch reads each caller entry once', () => {
 			expect(plain.sent.text.length + plain.sent.binary.length).toBeGreaterThan(0);
 		});
 	});
+
+	// Whether payloads are collected at all is decided from the fan-out capability
+	// COUNTER, while the test that picks a socket's lane reads that socket's own
+	// advertised caps. They disagree for one window: a closing connection releases
+	// its count before it leaves the live set, and application code running in
+	// between - a codec's onDetach publishing a batch - lands inside it. The
+	// socket is then still capable and still listed, with no payloads collected.
+	it('serves JSON rather than an empty batch when the capability counter is already released', () => {
+		const topic = 'wire-batch-aliasing-uncounted';
+		/** @type {any[]} */
+		const encoded = [];
+		const wire = {
+			capability: CAP,
+			schemaVersion: 1,
+			state: { onAttach: () => ({ schemaVersion: 1 }) },
+			encode(event, data) {
+				encoded.push(JSON.parse(JSON.stringify(data)));
+				return new Uint8Array([1]);
+			}
+		};
+
+		// Drop the count while leaving the sockets' WS_CAPS advertising it.
+		state.capCounts.adjust([CAP], null);
+		try {
+			withSockets(topic, (capable, plain) => {
+				// An exclusion, so the per-socket walk runs rather than the fast path.
+				const entries = [{ data: { v: 'a' }, excludeWs: plain }, { data: { v: 'b' } }];
+
+				platform.publishWireBatch(topic, 'update', entries, wire, { seq: false });
+
+				expect(state.capCounts.has(CAP), 'the counter must be released for this case to exist').toBe(false);
+				// No payloads were collected, so there is nothing to encode FROM. The
+				// old shape still entered the binary lane and encoded an empty batch,
+				// on a live socket, with the sequence already advanced.
+				expect(encoded, 'encoded a batch with no payloads to encode from').toEqual([]);
+				expect(capable.sent.binary.length, 'sent a binary frame built from no payloads').toBe(0);
+				const envelopes = capable.sent.text.filter((t) => !t.includes('"wire-id"'));
+				expect(envelopes.length, 'the still-listed socket was served nothing at all').toBe(2);
+			});
+		} finally {
+			state.capCounts.adjust(null, [CAP]);
+		}
+	});
 });
