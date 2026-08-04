@@ -100,6 +100,13 @@ export function message(ws, ctx) {
 				result = platform.publishWireBatch(topic, event, [{ data: { n: 1 } }, { data: { n: 2 } }], {
 					capability: 'fixture.sequence-batch:1', schemaVersion: 1, state: {}, encode: () => null
 				}, options);
+			} else if (msg.entry === 'wire-batch-one' || msg.entry === 'wire-batch-empty') {
+				// The batch contract must not depend on what the array happens to
+				// hold: one entry and none at all answer exactly as two do.
+				const entries = msg.entry === 'wire-batch-one' ? [{ data: { n: 1 } }] : [];
+				result = platform.publishWireBatch(topic, event, entries, {
+					capability: 'fixture.sequence-batch:1', schemaVersion: 1, state: {}, encode: () => null
+				}, options);
 			} else if (msg.entry === 'batch') {
 				platform.publishBatched([{ topic, event, data: { n: 1 }, options }]);
 				result = true;

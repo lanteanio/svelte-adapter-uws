@@ -13,7 +13,7 @@ import {
 	unknownOptionKeys,
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
-import { assertClusterSequenceBatchAuthority } from './runtime/handler/cluster-sequence-policy.js';
+import { assertBatchSequenceAuthority } from './runtime/handler/cluster-sequence-policy.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { snapshotUpgradeHeaders } from './runtime/utils/upgrade-headers.js';
 import { emitOperationalDiagnostic, viteHandlerFailureDiagnostic, viteHandlerRecoveredDiagnostic } from './runtime/utils/operational-diagnostic.js';
@@ -573,15 +573,17 @@ export default function uws(options = {}) {
 		// connection, so dev observes byte-identical envelopes. Per-entry
 		// sender exclusion flows through publishWire's options.
 		publishWireBatch(topic, event, entries, _wire, options) {
-			// Same refusal as production and the harness. Dev routes every entry
-			// through publish() with one shared options object, so a numeric seq
-			// would stamp them all identically here as well.
-			const count = Array.isArray(entries) ? entries.length : 0;
-			assertClusterSequenceBatchAuthority(options, count);
+			// Same refusal as production and the harness, checked before the
+			// entries: dev routes every entry through publish() with one shared
+			// options object, so a numeric seq would stamp them all identically
+			// here as well - and an empty dev batch must refuse what a full one
+			// refuses, or dev accepts a call production rejects.
+			const opts = options == null ? options : { ...options };
+			assertBatchSequenceAuthority(opts);
 			// Same one-read rule as production: the first publish runs application
 			// toJSON, and every read for a later entry happens after it. Dev that
 			// re-read them would disagree with production about what was sent.
-			const opts = options == null ? options : { ...options };
+			const count = Array.isArray(entries) ? entries.length : 0;
 			const datas = new Array(count);
 			const excludes = new Array(count);
 			for (let i = 0; i < count; i++) {

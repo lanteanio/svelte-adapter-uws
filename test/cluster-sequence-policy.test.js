@@ -4,7 +4,7 @@ import {
 	BATCH_SEQUENCE_ERROR,
 	CLUSTER_SEQUENCE_ERROR,
 	assertClusterSequenceAuthority,
-	assertClusterSequenceBatchAuthority,
+	assertBatchSequenceAuthority,
 	clusterSequenceAccepted,
 	hasMultipleWorkers
 } from '../src/runtime/handler/cluster-sequence-policy.js';
@@ -38,11 +38,10 @@ describe('cluster sequence authority policy', () => {
 		}
 	});
 
-	it('rejects one repeated numeric authority for a multi-entry wire batch', () => {
-		expect(() => assertClusterSequenceBatchAuthority({ seq: 7, relay: false }, 2, cluster))
+	it('rejects a numeric authority on the batch surface whatever it is publishing', () => {
+		expect(() => assertBatchSequenceAuthority({ seq: 7, relay: false }, cluster))
 			.toThrow(BATCH_SEQUENCE_ERROR);
-		expect(() => assertClusterSequenceBatchAuthority({ seq: 7, relay: false }, 1, cluster)).not.toThrow();
-		expect(() => assertClusterSequenceBatchAuthority({ seq: false }, 20, cluster)).not.toThrow();
+		expect(() => assertBatchSequenceAuthority({ seq: false }, cluster)).not.toThrow();
 	});
 
 	// The refusal used to be gated on hasMultipleWorkers, so the corruption it
@@ -50,18 +49,28 @@ describe('cluster sequence authority policy', () => {
 	// returns a caller-supplied number verbatim and publishWireBatch calls it once
 	// per entry, so every entry carried the same seq whatever the topology. Only
 	// the clustered case was covered here, which is why it survived.
-	it('rejects the repeated numeric authority off-cluster too, where the default deployment lives', () => {
+	it('rejects the numeric authority off-cluster too, where the default deployment lives', () => {
 		for (const solo of [null, { totalWorkers: 1 }, { totalWorkers: 1, ioWorkers: 1 }]) {
 			expect(hasMultipleWorkers(solo), JSON.stringify(solo)).toBe(false);
 			expect(
-				() => assertClusterSequenceBatchAuthority({ seq: 7, relay: false }, 2, solo),
+				() => assertBatchSequenceAuthority({ seq: 7, relay: false }, solo),
 				JSON.stringify(solo)
 			).toThrow(BATCH_SEQUENCE_ERROR);
-			// A single entry is unambiguous and stays allowed off-cluster as well,
-			// so this is a batch-arity rule and not a new ban on authoritative seqs.
-			expect(() => assertClusterSequenceBatchAuthority({ seq: 7, relay: false }, 1, solo)).not.toThrow();
-			expect(() => assertClusterSequenceBatchAuthority({ seq: false }, 20, solo)).not.toThrow();
+			expect(() => assertBatchSequenceAuthority({ seq: false }, solo)).not.toThrow();
 		}
+	});
+
+	// The rule is a property of the SURFACE, not of the payload: the batch takes
+	// one options object and has no per-entry sequence, so a numeric seq is
+	// refused before the entries are even looked at. Otherwise the contract would
+	// depend on the runtime length of an array - a call that works while a tick
+	// produces one update starts throwing the day it produces two, and an empty
+	// batch would silently accept options a full one rejects.
+	it('does not let the entry count decide whether the contract holds', () => {
+		expect(() => assertBatchSequenceAuthority({ seq: 7, relay: false })).toThrow(BATCH_SEQUENCE_ERROR);
+		expect(() => assertBatchSequenceAuthority({ seq: 1, relay: false })).toThrow(BATCH_SEQUENCE_ERROR);
+		// The signature carries no count at all, so no caller can reintroduce one.
+		expect(assertBatchSequenceAuthority.length).toBeLessThanOrEqual(2);
 	});
 
 	it('guards every production sequence-stamping entry point before mutation', () => {
@@ -75,16 +84,16 @@ describe('cluster sequence authority policy', () => {
 		const batch = source.slice(source.indexOf('\tpublishBatched('), source.indexOf('\n\t/**', source.indexOf('\tpublishBatched(') + 20));
 		expect(publish).toContain('assertClusterSequenceAuthority(options);');
 		expect(wire).toContain('if (!isRelay) assertClusterSequenceAuthority(options);');
-		// The batch asserts on its OWN copy of the options and its own pinned
-		// count, not on the caller's live objects - a caller that mutated either
-		// after the check would otherwise stamp under an authority nobody
-		// validated. The guard still has to run before any mutation, which is
-		// what the slice below pins.
-		expect(wireBatch).toContain('assertClusterSequenceBatchAuthority(opts, count);');
-		const beforeAssert = wireBatch.slice(0, wireBatch.indexOf('assertClusterSequenceBatchAuthority('));
+		// The batch asserts on its OWN copy of the options, not on the caller's
+		// live object - a caller that mutated it after the check would otherwise
+		// stamp under an authority nobody validated. The guard runs before ANY
+		// mutation and before the entries are even inspected, so an empty batch
+		// cannot accept options a full one refuses.
+		expect(wireBatch).toContain('assertBatchSequenceAuthority(opts);');
+		const beforeAssert = wireBatch.slice(0, wireBatch.indexOf('assertBatchSequenceAuthority('));
 		expect(beforeAssert).toContain('const opts = options == null ? options : { ...options };');
-		expect(beforeAssert, 'the batch stamps or fans out before its authority check')
-			.not.toMatch(/stampSeq|app\.publish|captureResumeFrame|maxSeenSeq\.set/);
+		expect(beforeAssert, 'the batch inspects entries or fans out before its authority check')
+			.not.toMatch(/stampSeq|app\.publish|captureResumeFrame|maxSeenSeq\.set|entries\.length|Array\.isArray/);
 		expect(loopBatch).toContain('assertClusterSequenceAuthority(messages[i].options);');
 		expect(batch).toContain('assertClusterSequenceAuthority(messages[i].options);');
 	});

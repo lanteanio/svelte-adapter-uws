@@ -2435,9 +2435,11 @@ export interface Platform {
 	 * Each entry may carry its own `excludeWs` (per-entry author suppression).
 	 * Sequencing, accounting, and the cross-instance relay match N
 	 * `publishWire` calls (one seq and one relay envelope per entry).
-	 * In a multi-worker runtime, a multi-entry call must use `seq: false`;
-	 * externally authoritative numeric values must be published one entry at
-	 * a time with `relay: false` so each entry can carry a distinct value.
+	 * This surface carries one options object and no per-entry sequence, so a
+	 * numeric `seq` is refused outright - on every topology, and whatever the
+	 * entries array holds, including one entry or none, so the contract never
+	 * changes shape with the data. Use `seq: false`, or publish through
+	 * `publishWire()` when each frame needs its own authoritative number.
 	 * Degradation is per connection: a codec that declines the batch falls back
 	 * to per-entry encodes, a per-entry decline to that entry's JSON envelope,
 	 * and a dropped frame or announce poisons the capability to JSON until

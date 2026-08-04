@@ -514,7 +514,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metric already alerts on. It is `null` for the process lifetime in the Vite
   dev plugin and in `createTestServer`, which fabricate the snapshot and never
   sample.
-- **A numeric `seq` on a multi-entry `publishWireBatch` is refused on every
+- **A numeric `seq` on `publishWireBatch` is refused outright, on every
   topology and every surface.** The batch stamps each entry by calling the
   sequence resolver once per entry with one shared options object, so a numeric
   `seq` gave every entry the same number. A client that received only part of
@@ -522,11 +522,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dedup floor discarded the whole batch on gap-fill - including entries it never
   received, which is the silent gap the sequence lane exists to prevent. The
   refusal existed but was gated on the runtime having multiple workers, so the
-  corruption was live on the default single-worker deployment; it is now a
-  batch-arity rule independent of topology. The Vite dev plugin and
-  `createTestServer` accepted it silently and now apply the same refusal, so a
-  test can no longer certify a wire shape production rejects. A single-entry
-  batch carrying an authoritative sequence stays allowed.
+  corruption was live on the default single-worker deployment. It now holds
+  independently of topology AND of what the entries array happens to hold: the
+  surface carries one options object and no per-entry sequence, so the check
+  runs before the entries are inspected and answers the same for twenty entries,
+  one, or none. Otherwise the contract would depend on the runtime length of an
+  array - a call that works while a tick produces one update would start
+  throwing the day it produced two. The Vite dev plugin and `createTestServer`
+  accepted the call silently and now apply the same refusal, so a test can no
+  longer certify a wire shape production rejects. Publish through `publishWire`
+  when each frame needs its own authoritative number.
 - **`publishWireBatch` no longer advances authoritative state for a batch that
   reached no wire.** The topic watermark, the per-topic publish stats and the
   publish-rate counter moved per entry inside the stamping loop, and that loop

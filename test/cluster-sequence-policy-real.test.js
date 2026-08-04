@@ -136,6 +136,16 @@ describeReal('real clustered sequence-authority policy', () => {
 		expect((await server.probe('wire-batch', { seq: false })).ok).toBe(true);
 		expect((await server.probe('wire-batch', { seq: 14, relay: false })).error)
 			.toBe(BATCH_SEQUENCE_ERROR);
+		// The refusal is a property of the surface, not of the array it was
+		// handed: a single-entry batch and an empty one answer the same, so a
+		// caller cannot discover the rule only once a tick produces two updates.
+		expect((await server.probe('wire-batch-one', { seq: 14, relay: false })).error)
+			.toBe(BATCH_SEQUENCE_ERROR);
+		expect((await server.probe('wire-batch-empty', { seq: 14, relay: false })).error)
+			.toBe(BATCH_SEQUENCE_ERROR);
+		// A valid unsequenced empty batch is still the no-op it always was.
+		expect(await server.probe('wire-batch-empty', { seq: false }))
+			.toMatchObject({ ok: true, result: false });
 		server.close();
 	}, 60_000);
 

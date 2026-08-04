@@ -17,7 +17,7 @@ import { BATCH_FRAME_WARN_BYTES, bumpOut, maybeWarnTopicRegistry, warnLargeBatch
 import { flushCoalescedFor, runUserSubscribeGate, hasUserSubscribeHook } from './subscribe-hooks.js';
 import { ensureWireId, ensureWireState, poisonWireState, wireStatePoisoned } from './wire-state.js';
 import { GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload, assertGameLaneClusterSafe } from './game-ingress.js';
-import { assertClusterSequenceAuthority, assertClusterSequenceBatchAuthority } from './cluster-sequence-policy.js';
+import { assertClusterSequenceAuthority, assertBatchSequenceAuthority } from './cluster-sequence-policy.js';
 import { registerWireCodec as _registerWireCodec, getWireCodec } from './codec-registry.js';
 import { cohortTopics, joinSharedCohort, leaveSharedCohort } from './cohort.js';
 import { getSharedWireId } from './shared-wire-id.js';
@@ -481,6 +481,11 @@ export const platform = {
 	 * @returns {boolean}
 	 */
 	publishWireBatch(topic, event, entries, wire, options) {
+		// The contract is checked before the data is: an invalid seq is invalid
+		// whether or not this particular call happens to carry entries, so an
+		// empty batch cannot silently accept options a full one refuses.
+		const opts = options == null ? options : { ...options };
+		assertBatchSequenceAuthority(opts);
 		if (!Array.isArray(entries) || entries.length === 0) return false;
 		// Everything application-owned is read ONCE, here, before any of it can
 		// run. completeEnvelope calls JSON.stringify, so a payload's toJSON
@@ -495,8 +500,6 @@ export const platform = {
 		// on a per-message path: mutating a payload object's own fields rather
 		// than replacing the reference. Every path holds the same object.
 		const count = entries.length;
-		const opts = options == null ? options : { ...options };
-		assertClusterSequenceBatchAuthority(opts, count);
 		// A stateless codec gains nothing from a batched walk (encode-once
 		// already amortizes it) - route through the per-entry path unchanged.
 		if (!wire || !wire.state) {

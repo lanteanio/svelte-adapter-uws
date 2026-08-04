@@ -501,7 +501,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// subscriber or the relay will read it). The added `.push(` calls are the
 	// existing per-socket exclusion filter now pushing payload references rather
 	// than entry objects, and `.set(` is unchanged.
-	platform: '1599d1acb53b738c930d61ab394bbe2e2a5e9660ff5bcce1ba77a4a7d6f92c46',
+	//
+	// Re-pinned again when the batch sequence check moved AHEAD of the entries
+	// inspection (the refusal is a property of the surface, not of the array):
+	// the drift is the options copy and the assert call relocating above the
+	// `Array.isArray` guard, and the assert losing its count argument. Pure
+	// control flow before any byte exists - nothing is read, allocated or copied
+	// by it.
+	platform: 'cdfd0370e07f2657bf71b6d844f63db2f65392af7d3df99c54d827914792229a',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
