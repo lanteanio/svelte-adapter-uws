@@ -472,6 +472,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A resume gap-fill that a socket refuses no longer leaves the client
+  silently behind.** uWS answers a send past `maxBackpressure` with the dropped
+  sentinel rather than throwing, and the flush that replays a resumed topic's
+  held window discarded the send result. A slow consumer resuming a large
+  window crossed its limit partway through, every remaining frame was handed to
+  a socket discarding it, each was charged to `bytesOut` as though delivered,
+  and the client then received its ack and went live believing it was caught up
+  - with a hole in the middle it has no way to detect. The flush now stops at
+  the first refusal and emits the same `__replay:<topic>` truncation marker the
+  overflow path already emits, so the client drops its stale offset and
+  cold-resyncs. If the socket refuses even that marker, the connection is closed
+  with a retry-class code: a reconnect resumes from the last sequence the client
+  actually received, so the missed tail is re-delivered instead of lost.
 - **A batch reads each entry once, so a payload's `toJSON` cannot change what
   the rest of the batch delivers.** `publishWireBatch` built its JSON envelopes
   first and then went back to the caller's `entries[]` for the exclusion
