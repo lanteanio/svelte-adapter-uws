@@ -17,6 +17,7 @@ import {
 	assertProtectiveNumber,
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
+import { assertClusterSequenceBatchAuthority } from './runtime/handler/cluster-sequence-policy.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
 import { runtimeVersionInfo } from './runtime/version-info.js';
 import { ADAPTER_ERROR_IDS, adapterErrorMessage } from './runtime/error-registry.js';
@@ -920,6 +921,11 @@ export async function createTestServer(options = {}) {
 			});
 		},
 		publishWireBatch(topic, event, entries, wire, options) {
+			// A permissive test double for a restrictive production rule creates a
+			// false-green test, so the batch-seq refusal is applied here too: without
+			// it, a harness batch stamps every entry with one caller-supplied seq and
+			// the suite certifies a wire shape production refuses.
+			assertClusterSequenceBatchAuthority(options, Array.isArray(entries) ? entries.length : 0);
 			// Mirror of handler/platform.js publishWireBatch: one binary frame per
 			// capable connection (the codec's `<event>-batch` form), per-entry JSON
 			// envelopes for everyone else, per-entry sender exclusion, per-entry

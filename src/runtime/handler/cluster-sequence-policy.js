@@ -3,8 +3,15 @@ import { workerData } from 'node:worker_threads';
 export const CLUSTER_SEQUENCE_ERROR =
 	'clustered publish requires { seq: false } or { seq: <positive integer>, relay: false }; per-worker counters and the multi-origin built-in relay cannot preserve one monotonic topic sequence';
 
-export const CLUSTER_SEQUENCE_BATCH_ERROR =
-	'clustered publishWireBatch with multiple entries requires { seq: false }; publish entries individually with externally authoritative seq values when replay ordering is required';
+// Not a clustered rule. `stampSeq` returns a caller-supplied numeric seq
+// verbatim, and publishWireBatch calls it once PER ENTRY with one shared
+// options object, so a numeric seq stamps every entry with the same number on a
+// single worker exactly as it does in a cluster. A client that received only
+// part of that batch then reports the shared number as its watermark, and the
+// resume dedup floor discards the whole batch on gap-fill - including entries it
+// never received. That silent gap is the outcome the seq lane exists to prevent.
+export const BATCH_SEQUENCE_ERROR =
+	'publishWireBatch with more than one entry cannot take a numeric seq: it would stamp every entry with the same value, so a client that received only part of the batch reports it as a watermark and the resume floor then discards the rest. Use { seq: false }, or publish entries individually when each needs an externally authoritative seq';
 
 /** @param {any} [data] */
 export function hasMultipleWorkers(data = workerData) {
@@ -46,7 +53,10 @@ export function assertClusterSequenceAuthority(options, data = workerData) {
  */
 export function assertClusterSequenceBatchAuthority(options, count, data = workerData) {
 	assertClusterSequenceAuthority(options, data);
-	if (hasMultipleWorkers(data) && count > 1 && typeof options?.seq === 'number') {
-		throw new Error(CLUSTER_SEQUENCE_BATCH_ERROR);
+	// A single-entry batch carrying an authoritative seq is unambiguous and stays
+	// allowed - that is a deliberate allowance, not an oversight. Everything above
+	// one entry is refused whatever the topology.
+	if (count > 1 && typeof options?.seq === 'number') {
+		throw new Error(BATCH_SEQUENCE_ERROR);
 	}
 }

@@ -477,7 +477,15 @@ const COPY_AUTHORITY_SYNTAX = Object.freeze({
 // change; executable module edits require a deliberate copy-budget review.
 const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	ingress: '710472f02ddefa6220afa4e9a17da05c8a47cb7a20468826c75a4e30c1f1f75e',
-	platform: '9712858e848445b9ac9bf07495174fdfae6ac79577587ea16ddd8edbc6324b04',
+	// Re-pinned after review of the publishWireBatch stamping-loop change: the
+	// drift is three scalar locals (a running highest seq and message/byte
+	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
+	// `counters.publishCountWindow` to AFTER the loop, so a batch that aborts
+	// mid-serialisation advances none of them. No copy primitive entered the
+	// body: the single added `.set(` is `maxSeenSeq.set(topic, highestSeq)`, a
+	// Map of numbers, not `Uint8Array.prototype.set`, and no byte is read,
+	// allocated or copied by any of it.
+	platform: '841804cfe0bfe1d10b0262620417099ec4557134f3b5729676e61ddf5eaa8ff2',
 	'wire-fanout': 'cfca189a1066c59a0f04a99ee2eab60d3a51e8024200a39626cd321a8b4d3d7b',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });

@@ -495,7 +495,6 @@ export const platform = {
 			}
 			return ok;
 		}
-		counters.publishCountWindow += entries.length;
 		const compressIntent = !!(options && options.compress === true);
 		const compress = WS_COMPRESSION_ON && compressIntent;
 		const relayed = !!(parentPort && (!options || options.relay !== false));
@@ -512,17 +511,30 @@ export const platform = {
 		const envs = new Array(entries.length);
 		const seqs = new Array(entries.length);
 		let anyExclude = false;
+		// Nothing AUTHORITATIVE moves until every entry has both stamped and
+		// serialised. completeEnvelope runs JSON.stringify, so a payload whose
+		// toJSON throws aborts this loop part-way; advancing the topic watermark
+		// or the counters per entry would leave them raised for a batch that put
+		// nothing on any wire. Republishing those same seqs after fixing the
+		// payload would then be discarded as already-seen - a silent gap.
+		let highestSeq = null;
+		let batchMessages = 0;
+		let batchBytes = 0;
 		for (let i = 0; i < entries.length; i++) {
 			const seq = stampSeq(options, topicSeqs, topic);
-			if (seq !== null) maxSeenSeq.set(topic, seq);
 			seqs[i] = seq == null ? 0 : seq;
 			const envelope = completeEnvelope(envelopePrefix(topic, event), entries[i].data, seq);
 			fatal(envelope.length > 0, 'envelope.empty', null);
-			stats.m++;
-			stats.b += envelope.length;
+			if (seq !== null && (highestSeq === null || seq > highestSeq)) highestSeq = seq;
+			batchMessages++;
+			batchBytes += envelope.length;
 			envs[i] = envelope;
 			if (entries[i].excludeWs !== undefined && entries[i].excludeWs !== null) anyExclude = true;
 		}
+		if (highestSeq !== null) maxSeenSeq.set(topic, highestSeq);
+		stats.m += batchMessages;
+		stats.b += batchBytes;
+		counters.publishCountWindow += entries.length;
 
 		// Resume cutover in flight: hold the per-entry JSON envelopes a caps-less
 		// resuming subscriber would receive from this stateful batch.

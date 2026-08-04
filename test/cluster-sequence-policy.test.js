@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
-	CLUSTER_SEQUENCE_BATCH_ERROR,
+	BATCH_SEQUENCE_ERROR,
 	CLUSTER_SEQUENCE_ERROR,
 	assertClusterSequenceAuthority,
 	assertClusterSequenceBatchAuthority,
@@ -40,9 +40,28 @@ describe('cluster sequence authority policy', () => {
 
 	it('rejects one repeated numeric authority for a multi-entry wire batch', () => {
 		expect(() => assertClusterSequenceBatchAuthority({ seq: 7, relay: false }, 2, cluster))
-			.toThrow(CLUSTER_SEQUENCE_BATCH_ERROR);
+			.toThrow(BATCH_SEQUENCE_ERROR);
 		expect(() => assertClusterSequenceBatchAuthority({ seq: 7, relay: false }, 1, cluster)).not.toThrow();
 		expect(() => assertClusterSequenceBatchAuthority({ seq: false }, 20, cluster)).not.toThrow();
+	});
+
+	// The refusal used to be gated on hasMultipleWorkers, so the corruption it
+	// exists to prevent was live on the DEFAULT single-worker deployment: stampSeq
+	// returns a caller-supplied number verbatim and publishWireBatch calls it once
+	// per entry, so every entry carried the same seq whatever the topology. Only
+	// the clustered case was covered here, which is why it survived.
+	it('rejects the repeated numeric authority off-cluster too, where the default deployment lives', () => {
+		for (const solo of [null, { totalWorkers: 1 }, { totalWorkers: 1, ioWorkers: 1 }]) {
+			expect(hasMultipleWorkers(solo), JSON.stringify(solo)).toBe(false);
+			expect(
+				() => assertClusterSequenceBatchAuthority({ seq: 7, relay: false }, 2, solo),
+				JSON.stringify(solo)
+			).toThrow(BATCH_SEQUENCE_ERROR);
+			// A single entry is unambiguous and stays allowed off-cluster as well,
+			// so this is a batch-arity rule and not a new ban on authoritative seqs.
+			expect(() => assertClusterSequenceBatchAuthority({ seq: 7, relay: false }, 1, solo)).not.toThrow();
+			expect(() => assertClusterSequenceBatchAuthority({ seq: false }, 20, solo)).not.toThrow();
+		}
 	});
 
 	it('guards every production sequence-stamping entry point before mutation', () => {

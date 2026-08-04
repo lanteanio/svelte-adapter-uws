@@ -13,6 +13,7 @@ import {
 	unknownOptionKeys,
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
+import { assertClusterSequenceBatchAuthority } from './runtime/handler/cluster-sequence-policy.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { snapshotUpgradeHeaders } from './runtime/utils/upgrade-headers.js';
 import { emitOperationalDiagnostic, viteHandlerFailureDiagnostic, viteHandlerRecoveredDiagnostic } from './runtime/utils/operational-diagnostic.js';
@@ -572,6 +573,10 @@ export default function uws(options = {}) {
 		// connection, so dev observes byte-identical envelopes. Per-entry
 		// sender exclusion flows through publishWire's options.
 		publishWireBatch(topic, event, entries, _wire, options) {
+			// Same refusal as production and the harness. Dev routes every entry
+			// through publish() with one shared options object, so a numeric seq
+			// would stamp them all identically here as well.
+			assertClusterSequenceBatchAuthority(options, Array.isArray(entries) ? entries.length : 0);
 			let ok = false;
 			for (let i = 0; i < entries.length; i++) {
 				const per = entries[i].excludeWs !== undefined

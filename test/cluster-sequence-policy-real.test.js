@@ -6,7 +6,7 @@ import path from 'node:path';
 import { buildFixtureOnce } from './helpers/fixture-build.js';
 import { freePort } from './helpers/real-runtime.js';
 import {
-	CLUSTER_SEQUENCE_BATCH_ERROR,
+	BATCH_SEQUENCE_ERROR,
 	CLUSTER_SEQUENCE_ERROR
 } from '../src/runtime/handler/cluster-sequence-policy.js';
 
@@ -135,7 +135,7 @@ describeReal('real clustered sequence-authority policy', () => {
 		expect((await server.probe('loop-batch', { seq: 13, relay: false })).ok).toBe(true);
 		expect((await server.probe('wire-batch', { seq: false })).ok).toBe(true);
 		expect((await server.probe('wire-batch', { seq: 14, relay: false })).error)
-			.toBe(CLUSTER_SEQUENCE_BATCH_ERROR);
+			.toBe(BATCH_SEQUENCE_ERROR);
 		server.close();
 	}, 60_000);
 

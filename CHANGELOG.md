@@ -472,6 +472,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A numeric `seq` on a multi-entry `publishWireBatch` is refused on every
+  topology and every surface.** The batch stamps each entry by calling the
+  sequence resolver once per entry with one shared options object, so a numeric
+  `seq` gave every entry the same number. A client that received only part of
+  that batch then reported the shared number as its watermark, and the resume
+  dedup floor discarded the whole batch on gap-fill - including entries it never
+  received, which is the silent gap the sequence lane exists to prevent. The
+  refusal existed but was gated on the runtime having multiple workers, so the
+  corruption was live on the default single-worker deployment; it is now a
+  batch-arity rule independent of topology. The Vite dev plugin and
+  `createTestServer` accepted it silently and now apply the same refusal, so a
+  test can no longer certify a wire shape production rejects. A single-entry
+  batch carrying an authoritative sequence stays allowed.
+- **`publishWireBatch` no longer advances authoritative state for a batch that
+  reached no wire.** The topic watermark, the per-topic publish stats and the
+  publish-rate counter moved per entry inside the stamping loop, and that loop
+  runs `JSON.stringify` - so a payload whose `toJSON` throws aborted the batch
+  part-way with those values already raised for the entries that got through.
+  Republishing the same sequences after fixing the payload would then be
+  discarded as already-seen. All three now move only once every entry has both
+  stamped and serialised.
 - **The `uWebSockets` response header is documented.** Responses carry a
   `uWebSockets: 20` header naming the stack and its major version, the same way
   most servers identify themselves through `Server:`. It comes from the C++
