@@ -1,4 +1,4 @@
-import { workerData as threadWorkerData } from 'node:worker_threads';
+import { threadId, workerData as threadWorkerData } from 'node:worker_threads';
 import { createCursor } from 'svelte-adapter-uws/plugins/cursor';
 
 const cursors = createCursor({
@@ -84,7 +84,13 @@ export function message(ws, ctx) {
 		platform.send(ws, 'test-topic', 'echo', msg.payload);
 	}
 	if (msg.type === 'broadcast') {
-		platform.publish(msg.topic || 'test-topic', msg.event || 'broadcast', msg.payload, msg.options ?? { seq: false });
+		// `inflate` synthesizes a large payload server-side: the inbound frame
+		// cap (1 MB) is far below the relay frame ceiling's default, so a test
+		// of that default cannot carry the oversized payload through the client.
+		const payload = typeof msg.inflate === 'number'
+			? { ...msg.payload, big: 'x'.repeat(msg.inflate) }
+			: msg.payload;
+		platform.publish(msg.topic || 'test-topic', msg.event || 'broadcast', payload, msg.options ?? { seq: false });
 	}
 	if (msg.type === 'sequence-policy-probe') {
 		try {
@@ -185,6 +191,34 @@ export function message(ws, ctx) {
 				error: error instanceof Error ? error.message : String(error)
 			});
 		}
+	}
+	if (msg.type === 'broadcast-batched') {
+		// The wire-level batched lane (platform.publishBatched) relays as ONE
+		// frame, so it is a separate relay decision point from `broadcast`
+		// above. Acked so a test can tell "refused by the relay" from "the
+		// publish itself threw" - the difference between a working ceiling and
+		// a broken publish path.
+		try {
+			const payload = typeof msg.inflate === 'number'
+				? { ...msg.payload, big: 'x'.repeat(msg.inflate) }
+				: msg.payload;
+			platform.publishBatched([
+				{ topic: msg.topic || 'test-topic', event: msg.event || 'batched', data: payload, options: { seq: false } }
+			]);
+			platform.send(ws, 'probe', 'batched-ack', { nonce: msg.nonce, ok: true });
+		} catch (error) {
+			platform.send(ws, 'probe', 'batched-ack', {
+				nonce: msg.nonce,
+				ok: false,
+				error: error instanceof Error ? error.message : String(error)
+			});
+		}
+	}
+	if (msg.type === 'whoami') {
+		// Which worker thread owns this connection. A clustered test needs it to
+		// place two clients on DIFFERENT workers before asserting anything about
+		// cross-worker relay - the topology cannot be observed from outside.
+		platform.send(ws, 'probe', 'whoami', { nonce: msg.nonce, threadId });
 	}
 	if (msg.type === 'sendto') {
 		platform.sendTo(
