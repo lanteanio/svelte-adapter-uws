@@ -1,8 +1,8 @@
 # Error reference
 
 Search this page with the exact stable ID, code, event, or beginning of the message you saw.
-The indexed reference below covers 6 of the 33 distinct diagnostic events the runtime
-emits; the [coverage list](#emitted-diagnostic-event-coverage) names all 33, so a search for any
+The indexed reference below covers 6 of the 36 distinct diagnostic events the runtime
+emits; the [coverage list](#emitted-diagnostic-event-coverage) names all 36, so a search for any
 emitted event name lands on this page. Runtime messages for indexed entries preserve the
 documented prefix and append the stable ID plus this package-local help route.
 
@@ -24,8 +24,8 @@ generate and ship their own runtime-owned references on the same release channel
 ## Emitted diagnostic event coverage
 
 This inventory is derived at generation time by scanning `src/runtime/`, `src/observability.js`,
-and `src/vite.js` for emitted diagnostic events; the runtime emits 33 distinct events.
-The 6 indexed above carry stable IDs and full operator guidance. The remaining 27
+and `src/vite.js` for emitted diagnostic events; the runtime emits 36 distinct events.
+The 6 indexed above carry stable IDs and full operator guidance. The remaining 30
 are listed below with their emitting sources, so an operator searching any emitted event
 name finds an authoritative row on this page.
 
@@ -48,6 +48,9 @@ format, so its searchable log prefix is:
 | Event | Component | Severity | Emitting sources |
 |---|---|---|---|
 | `admin.handler-failed` | `runtime.admin` | error | [src/runtime/handler/admin.js](../src/runtime/handler/admin.js) |
+| `cluster-relay.frame-oversized` | `runtime.cluster-relay` | error | [src/runtime/index.js](../src/runtime/index.js) |
+| `cluster-relay.frame-refused` | `runtime.cluster-relay` | warning | [src/runtime/index.js](../src/runtime/index.js) |
+| `cluster-relay.up-spill-overflow` | `runtime.cluster-relay` | error | [src/runtime/index.js](../src/runtime/index.js) |
 | `cluster.worker-error` | `runtime.cluster` | error | [src/runtime/index.js](../src/runtime/index.js) |
 | `divergence.detected` | `runtime.divergence` | error | [src/runtime/index.js](../src/runtime/index.js) |
 | `invariant.violated` | `runtime.assertion` | varies by call site | [src/runtime/utils/assertions.js](../src/runtime/utils/assertions.js) |

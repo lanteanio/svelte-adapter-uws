@@ -18,6 +18,7 @@ import { readFdLimits, fdPreflightWarning } from './utils/fd-limit.js';
 import { createSdNotify } from './utils/sd-notify.js';
 import { emitOperationalDiagnostic, listenFailureDiagnostic } from './utils/operational-diagnostic.js';
 import { emitOperationalEvent, diagnosticError } from './diagnostic.js';
+import { privateValueMetadata } from './utils/observability-privacy.js';
 import { formatVersionBanner, runtimeVersionInfo } from './version-info.js';
 
 // systemd readiness + watchdog (auto-detected from NOTIFY_SOCKET; a no-op
@@ -78,6 +79,23 @@ const relay_pending_max_bytes = parseIntEnv(
 const relay_pending_max_ms = parseIntEnv(
 	'CLUSTER_RELAY_MAX_PENDING_MS', env('CLUSTER_RELAY_MAX_PENDING_MS', '5000'), 1
 );
+// Largest serialized envelope a worker will hand to the cluster relay. This is
+// the SENDER's ceiling and it is a different question from the two above: those
+// describe a receiving peer's failure to drain, this describes the size of one
+// frame, which is nobody's fault and identical for every peer. Keeping them
+// apart is the point - conflating them is what let one large publish quarantine
+// every healthy sibling at once.
+//
+// It defaults to the per-peer byte ceiling, so one admitted frame can never be
+// larger than the backlog budget it will occupy, and the pathological publish is
+// refused at its source instead of being reassembled whole in the primary's heap
+// on its way to bouncing the cluster. `0` disables it, for a deployment that
+// genuinely relays frames larger than its spill budget and accepts the memory.
+const relay_frame_max_bytes = parseIntEnv(
+	'CLUSTER_RELAY_MAX_FRAME_KB',
+	env('CLUSTER_RELAY_MAX_FRAME_KB', String(Math.floor(relay_pending_max_bytes / 1024))),
+	0
+) * 1024;
 
 // Cross-worker state-hash divergence ACTION gate. The primary owns
 // worker.terminate() and never sees the per-build websocket options, so the
@@ -454,8 +472,17 @@ if (is_primary) {
 		const role = slot.role;
 		// Shared-memory relay rings for this worker (fresh per spawn AND per
 		// respawn - a replacement never inherits a dead worker's stream state).
+		// The ceilings travel with the buffers so BOTH directions are bounded by
+		// the same numbers. Only the down direction had them; a worker's up writer
+		// was built with no options at all, so a stalled primary let every
+		// publisher spill without limit in its own heap.
 		const relay_ring = relay_ring_kb > 0
-			? { up: createRelayRingBuffer(relay_ring_kb * 1024), down: createRelayRingBuffer(relay_ring_kb * 1024) }
+			? {
+				up: createRelayRingBuffer(relay_ring_kb * 1024),
+				down: createRelayRingBuffer(relay_ring_kb * 1024),
+				maxPendingBytes: relay_pending_max_bytes,
+				maxPendingAgeMs: relay_pending_max_ms
+			}
 			: null;
 		const worker = new Worker(fileURLToPath(import.meta.url), {
 			// `app` is the retained primaryInit output, replayed identically on every
@@ -473,6 +500,11 @@ if (is_primary) {
 				ioWorkers: io_count,
 				app: app_worker_data,
 				relayRing: relay_ring,
+				// Threaded rather than re-read from env in the worker: the
+				// sender-side ceiling is derived from the primary's spill budget,
+				// and every worker must apply the SAME one or a large publish is
+				// refused by some siblings and relayed by others.
+				relayMaxFrameBytes: relay_frame_max_bytes,
 				divergenceDiagnosticKey
 			}
 		});
@@ -522,6 +554,25 @@ if (is_primary) {
 							m.ringWriter.notify();
 						}
 					}
+				}
+			}, {
+				// Generous headroom over the sender's ENVELOPE ceiling: a frame also
+				// carries the topic, the event, the raw payload and the stream
+				// stamps, so it is legitimately a multiple of the envelope it was
+				// measured from. This bounds unbounded growth rather than fitting
+				// tightly - a frame this far past it means a peer not applying the
+				// ceiling, or a corrupt stream.
+				maxFrameBytes: relay_frame_max_bytes > 0 ? relay_frame_max_bytes * 4 : Infinity,
+				onOversized: (event) => {
+					emitOperationalEvent({
+						source: 'svelte-adapter-uws',
+						component: 'runtime.cluster-relay',
+						event: 'cluster-relay.frame-oversized',
+						severity: 'error',
+						dataClass: 'pseudonymous',
+						message: 'A worker sent a relay frame larger than this process will reassemble; its relay stream was stopped.',
+						attributes: { declaredBytes: event.declaredBytes, maxFrameBytes: event.maxFrameBytes }
+					});
 				}
 			});
 			meta.ringReader.start();
@@ -1024,7 +1075,7 @@ if (is_primary) {
 } else {
 	// ── Worker thread or single-process mode ─────────────────────────────
 
-	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls, setRelayRingWriter, markRelayAttached, collectLocalMetrics, resolveMetricsSnapshot } = await import('HANDLER');
+	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls, setRelayRingWriter, setRelayFrameCeiling, markRelayAttached, collectLocalMetrics, resolveMetricsSnapshot } = await import('HANDLER');
 	// The readiness/drain state machine lives in the lifecycle module, imported
 	// here directly (the same instance the handler graph above loaded) because
 	// entering the draining state and closing the sockets are two separate acts
@@ -1387,8 +1438,52 @@ if (is_primary) {
 		// forwarded verbatim by the primary from a sibling worker - decode here
 		// into the exact dispatch the postMessage path performs. Started after the
 		// graph is live; the postMessage path above is the fallback / control lane.
+		// The sender-side frame ceiling is applied whether or not the rings are
+		// enabled: `CLUSTER_RELAY_RING_KB=0` is a documented configuration and its
+		// postMessage fan-out is no more able to absorb an arbitrarily large frame
+		// than the ring is. Set BEFORE the ring block for that reason.
+		if (typeof workerData?.relayMaxFrameBytes === 'number' && workerData.relayMaxFrameBytes > 0) {
+			setRelayFrameCeiling(workerData.relayMaxFrameBytes, (lane, topic, bytes, limit) => {
+				emitOperationalEvent({
+					source: 'svelte-adapter-uws',
+					component: 'runtime.cluster-relay',
+					event: 'cluster-relay.frame-refused',
+					severity: 'warning',
+					dataClass: 'pseudonymous',
+					message: 'A publish was too large for the cluster relay and was not sent to other workers. Local subscribers received it.',
+					attributes: {
+						lane,
+						topic: privateValueMetadata(topic, 'topic'),
+						bytes,
+						limitBytes: limit
+					}
+				});
+			});
+		}
 		if (workerData?.relayRing) {
-			setRelayRingWriter(new RingWriter(workerData.relayRing.up));
+			// The up writer carries the SAME ceilings as the primary's down
+			// writers. Without them a stalled PRIMARY let every publishing worker
+			// spill without bound in its own heap - the mirror image of the defect
+			// the down-direction ceilings were added for, and the direction nobody
+			// had bounded. The action differs: a worker cannot quarantine the
+			// primary, so it reports and exits through the supervised path that
+			// already replaces it.
+			setRelayRingWriter(new RingWriter(workerData.relayRing.up, {
+				maxPendingBytes: workerData.relayRing.maxPendingBytes,
+				maxPendingAgeMs: workerData.relayRing.maxPendingAgeMs,
+				onOverflow: (event) => {
+					emitOperationalEvent({
+						source: 'svelte-adapter-uws',
+						component: 'runtime.cluster-relay',
+						event: 'cluster-relay.up-spill-overflow',
+						severity: 'error',
+						dataClass: 'pseudonymous',
+						message: 'This worker could not hand its relay backlog to the primary within its spill ceiling and is exiting to be replaced.',
+						attributes: { reason: event.reason, droppedBytes: event.droppedBytes, pendingAgeMs: event.pendingAgeMs }
+					});
+					process.exit(1);
+				}
+			}));
 			const relayReader = new RingReader(workerData.relayRing.down, (frame) => {
 				const msg = decodeRelayFrame(frame);
 				if (msg === null) return;

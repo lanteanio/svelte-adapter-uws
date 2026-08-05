@@ -77,6 +77,44 @@ export function setRelayRingWriter(writer) {
 }
 
 /**
+ * Largest serialized envelope this worker will hand to the cluster relay, and
+ * the sink that reports a refusal. Infinity -> no ceiling, which is the shape
+ * every deployment had before this existed.
+ *
+ * WHY THE SENDER OWNS THIS. The ring's own ceilings describe a PEER's failure to
+ * drain, so they cannot also police the size of what is being sent - that was
+ * the conflation which let one large publish quarantine every healthy sibling at
+ * once. Size is a property of the frame, known here, identical for every peer;
+ * deciding it once at the sender is also the only way every peer gets the SAME
+ * answer, so no sibling is left silently one frame behind the others.
+ *
+ * It is deliberately checked ABOVE the ring/postMessage split: `CLUSTER_RELAY_RING_KB=0`
+ * is a documented configuration, and it must not forfeit the ceiling.
+ * @type {number}
+ */
+let maxRelayEnvelopeBytes = Infinity;
+
+/** @type {((lane: 'publish' | 'batched', topic: string, bytes: number, limit: number) => void) | null} */
+let onRelayFrameRefused = null;
+
+/**
+ * Wired once at worker startup by runtime/index.js, alongside the ring writer.
+ * The refusal sink is injected rather than imported because this module has no
+ * access to the metrics registry the handler builds.
+ * @param {number} bytes
+ * @param {((lane: 'publish' | 'batched', topic: string, bytes: number, limit: number) => void) | null} [onRefused]
+ */
+export function setRelayFrameCeiling(bytes, onRefused) {
+	maxRelayEnvelopeBytes = Number.isFinite(bytes) && bytes > 0 ? bytes : Infinity;
+	onRelayFrameRefused = onRefused ?? null;
+}
+
+/** A refusal is never silent: the publish reached local subscribers, the cluster did not. */
+function refuseRelayFrame(lane, topic, bytes) {
+	try { onRelayFrameRefused?.(lane, topic, bytes, maxRelayEnvelopeBytes); } catch { /* never break a publish */ }
+}
+
+/**
  * @param {string} topic
  * @param {string} envelope
  * @param {boolean} [compress] - Per-frame compress intent carried across the
@@ -119,13 +157,36 @@ export function batchRelay(topic, envelope, compress, seq, capability, event, da
 					m.birth = stream.birth;
 				}
 			}
+			// Frame admission, decided once for the whole relay and ABOVE the lane
+			// split so both lanes inherit it. A refused message still reached this
+			// worker's own subscribers; only the cross-worker copy is dropped, and
+			// the ordinal it already took leaves a hole its receivers can see. One
+			// comparison per message, allocating nothing unless something is over.
+			let admitted = batch;
+			if (maxRelayEnvelopeBytes !== Infinity) {
+				let anyOver = false;
+				for (const m of batch) {
+					if (m.envelope.length > maxRelayEnvelopeBytes) { anyOver = true; break; }
+				}
+				if (anyOver) {
+					admitted = [];
+					for (const m of batch) {
+						if (m.envelope.length > maxRelayEnvelopeBytes) {
+							refuseRelayFrame('publish', m.topic, m.envelope.length);
+							continue;
+						}
+						admitted.push(m);
+					}
+					if (admitted.length === 0) return;
+				}
+			}
 			if (ringWriter !== null) {
 				// Ring path: each message is encoded to bytes ONCE here; the
 				// primary forwards the framed bytes verbatim (no clone, no
 				// parse) and only receiving workers decode. One notify wakes
 				// the primary for the whole batch.
 				let wroteAny = false;
-				for (const m of batch) {
+				for (const m of admitted) {
 					let frame;
 					try {
 						frame = encodePublishFrame(m.topic, m.envelope, m.compress, m.seq, m.capability, m.event, m.data, m.origin, m.ord, m.birth);
@@ -142,7 +203,7 @@ export function batchRelay(topic, envelope, compress, seq, capability, event, da
 				}
 				if (wroteAny) ringWriter.notify();
 			} else {
-				parentPort.postMessage({ type: 'publish-batch', messages: batch });
+				parentPort.postMessage({ type: 'publish-batch', messages: admitted });
 			}
 		}, 0);
 		if (relayTimer.unref) relayTimer.unref();
@@ -176,6 +237,18 @@ export function relayBatched(events, compress) {
 		events[i].origin = threadId;
 		events[i].ord = stream.ord;
 		events[i].birth = stream.birth;
+	}
+	// The whole array travels as ONE frame, so the ceiling is measured over the
+	// whole array and the refusal is wholesale - a batch cannot be half-relayed
+	// without changing what a receiver dispatches. Above the lane split, for the
+	// same reason as the single-publish path.
+	if (maxRelayEnvelopeBytes !== Infinity) {
+		let total = 0;
+		for (let i = 0; i < events.length; i++) total += events[i].envelope.length;
+		if (total > maxRelayEnvelopeBytes) {
+			refuseRelayFrame('batched', events.length > 0 ? events[0].topic : '', total);
+			return;
+		}
 	}
 	if (ringWriter !== null) {
 		let frame;

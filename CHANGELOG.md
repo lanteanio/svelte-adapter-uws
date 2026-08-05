@@ -472,6 +472,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A publish too large for the cluster relay is refused at its source, not
+  carried until something breaks.** New `CLUSTER_RELAY_MAX_FRAME_KB`, defaulting
+  to the per-peer spill budget (`CLUSTER_RELAY_MAX_PENDING_KB`), bounds the
+  serialized envelope a worker will hand to the relay. It is decided once per
+  publish, above the ring/`postMessage` split, so every worker gets the same
+  answer - no sibling is left silently one frame behind the others - and
+  `CLUSTER_RELAY_RING_KB=0` no longer opts out of the protection along with the
+  ring. A refused publish still reaches the publishing worker's own subscribers;
+  only the cross-worker copy is dropped, and it is reported as
+  `cluster-relay.frame-refused` rather than dropped silently. The receiving side
+  enforces it too: the reader decides from a frame's length prefix, before it
+  commits to holding the frame, so a peer that is not applying the ceiling
+  cannot make another process allocate for an arbitrarily large frame
+  (`cluster-relay.frame-oversized`). Set `0` to disable. Each worker's ring
+  toward the primary now carries the same spill ceilings the primary's rings
+  toward workers already had - a stalled primary previously let every publishing
+  worker spill without bound in its own heap, the one direction nobody had
+  bounded.
 - **One large cross-worker publish no longer quarantines every healthy worker
   in the cluster.** The relay ring's per-peer spill ceiling is meant to catch a
   worker that has stopped draining. It was measured against the peer's backlog

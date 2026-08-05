@@ -156,7 +156,7 @@ import { requestDone, isDraining, lifecycleState } from './handler/lifecycle.js'
 // only that way - the boot driver dynamic-imports the submodule for the first
 // (src/runtime/index.js), which is the shape this list exists to end.
 export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls, beginDrain, lifecycleState, tlsReloadState } from './handler/lifecycle.js';
-export { setRelayRingWriter } from './handler/relay.js';
+export { setRelayRingWriter, setRelayFrameCeiling } from './handler/relay.js';
 export { collectLocalMetrics, resolveMetricsSnapshot } from './handler/metrics-snapshot.js';
 export { markRelayAttached } from './handler/state.js';
 import { handleRequest } from './handler/request.js';

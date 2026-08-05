@@ -534,6 +534,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// entered. It also REMOVES a refusal that ran after `_push` had committed, so
 	// no path can leave a partial frame in the shared stream.
 	//
+	// Re-pinned again for the sender-side relay frame ceiling, which reaches this
+	// graph through handler/relay.js. The drift there is a module-level number
+	// and callback, one setter, and a length comparison per relayed message that
+	// allocates nothing unless something is actually over the ceiling; in
+	// relay-ring.js it is one comparison against the frame's own length PREFIX
+	// before the reader decides to hold it. Lengths and references only - no byte
+	// is read, copied or allocated by any of it, and no copy primitive entered.
+	// The single added `.push(` is `admitted.push(m)`, an array of the same
+	// message references the batch already held.
+	//
 	// The added `.push(` calls are the existing per-socket exclusion filter now
 	// pushing payload references rather than entry objects, and `.set(` is
 	// unchanged.
@@ -544,7 +554,7 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// `Array.isArray` guard, and the assert losing its count argument. Pure
 	// control flow before any byte exists - nothing is read, allocated or copied
 	// by it.
-	platform: '28763e65e5563ff10a8aa7354345b54892d394d036292aab549e7f7effb524e8',
+	platform: 'c07b6aaf0dc9e3fb5277c7202146fc2267b2db8b5baffacb4c08507aa4c2ea11',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

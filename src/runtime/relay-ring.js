@@ -307,13 +307,27 @@ export class RingReader {
 	/**
 	 * @param {SharedArrayBuffer} sab
 	 * @param {(frame: Uint8Array) => void} onFrame
+	 * @param {{
+	 *   maxFrameBytes?: number,
+	 *   onOversized?: (event: { declaredBytes: number, maxFrameBytes: number }) => void
+	 * }} [options]
 	 */
-	constructor(sab, onFrame) {
+	constructor(sab, onFrame, options = {}) {
 		this.i32 = new Int32Array(sab, 0, 16);
 		this.data = new Uint8Array(sab, HEADER_BYTES);
 		this.cap = this.data.length;
 		this.mask = this.cap - 1;
 		this.onFrame = onFrame;
+		/**
+		 * Largest frame this reader will reassemble. The accumulator grows to hold
+		 * a WHOLE frame before the consumer ever sees it - that is how a frame
+		 * larger than the ring streams through - so a cap at the sender is only a
+		 * policy until the reader also refuses to allocate for one. Same number on
+		 * both ends; a longer frame means a peer that is not applying the ceiling,
+		 * or a corrupt stream, and neither is worth an unbounded allocation.
+		 */
+		this.maxFrameBytes = options.maxFrameBytes ?? Infinity;
+		this.onOversized = options.onOversized ?? null;
 		/** Carry-over of a frame straddling drains. @type {Uint8Array | null} */
 		this.acc = null;
 		this.closed = false;
@@ -368,6 +382,16 @@ export class RingReader {
 		while (buf.length - offset >= 4) {
 			const len =
 				buf[offset] | (buf[offset + 1] << 8) | (buf[offset + 2] << 16) | ((buf[offset + 3] << 24) >>> 0);
+			if (len > this.maxFrameBytes) {
+				// Decided from the length PREFIX, before waiting for the rest: the
+				// point is not to allocate for it. Stopping the reader is the honest
+				// answer - the stream cannot be resynchronised past a frame this
+				// side refuses to hold, and continuing would mean reassembling it
+				// anyway just to skip it.
+				try { this.onOversized?.({ declaredBytes: len, maxFrameBytes: this.maxFrameBytes }); } catch { /* never wedge the drain */ }
+				this.close();
+				return;
+			}
 			if (buf.length - offset - 4 < len) break;
 			const frame = buf.subarray(offset, offset + 4 + len);
 			offset += 4 + len;
