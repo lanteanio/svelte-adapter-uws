@@ -192,6 +192,32 @@ export interface AdapterOptions {
 	staticCacheControl?: StaticCacheControlRule[];
 
 	/**
+	 * Serve dotfiles from the static/prerendered output. Off by default: a
+	 * path with a dot segment (`.env`, `a/.hidden/b`) is left out of the
+	 * static index and responds 404, as `adapter-node`'s dotfile default
+	 * also refuses them - the files that land in `static/` by accident are
+	 * exactly the sensitive ones (a stray `.env`, `.htpasswd`, editor
+	 * backups, an unpacked `.git`).
+	 *
+	 * `.well-known/*` is always served (RFC 8615 discovery: `security.txt`,
+	 * ACME HTTP-01 challenges). The carve-out applies at the first path
+	 * segment only, so `x/.well-known/y` is not an escape hatch and a dotfile
+	 * inside `.well-known/` is still refused. Both of those shapes are
+	 * stricter than `adapter-node`, whose static server keeps any path under
+	 * `.well-known/`.
+	 *
+	 * The exclusion is decided once when assets are indexed, so it has no
+	 * per-request cost and no request can reach an excluded file through
+	 * encoding tricks - the index simply has no entry. The build warns when
+	 * it writes a dot path that serving will refuse, naming each offender
+	 * once.
+	 * Set `true` to index and serve every dotfile.
+	 *
+	 * @default false
+	 */
+	staticDotfiles?: boolean;
+
+	/**
 	 * Module path to an optional vendor-neutral tracing provider. The module's
 	 * default or named tracing export implements startSpan(name, options)
 	 * using the types from svelte-adapter-uws/observability. The adapter

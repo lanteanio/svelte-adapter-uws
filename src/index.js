@@ -7,6 +7,7 @@ import { nodeResolve } from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 import json from '@rollup/plugin-json';
 import { normalizeStaticCacheControl, normalizeStaticHeaders } from './build-config.js';
+import { listExcludedDotPaths } from './static-scan.js';
 import {
 	assertWireSubscribeAuthorization,
 	assertProtectiveNumber,
@@ -508,6 +509,21 @@ export default function (opts = {}) {
 	// inside adapt(); the throw-on-bad-shape path runs here at factory time.
 	const staticHeadersResult = normalizeStaticHeaders(opts.staticHeaders);
 	const staticCacheControl = normalizeStaticCacheControl(opts.staticCacheControl);
+
+	if (opts.staticDotfiles !== undefined && typeof opts.staticDotfiles !== 'boolean') {
+		// JSON.stringify throws on a BigInt and erases functions and Symbols;
+		// String() throws on a null-prototype object. The tag form renders any
+		// object, String() everything else.
+		const shown = typeof opts.staticDotfiles === 'object' && opts.staticDotfiles !== null
+			? Object.prototype.toString.call(opts.staticDotfiles)
+			: String(opts.staticDotfiles);
+		throw new Error(
+			`staticDotfiles must be a boolean - got ${shown} (${typeof opts.staticDotfiles}). ` +
+			'The default (false) refuses every dot-segment static path except .well-known/*; ' +
+			'true indexes and serves them all.'
+		);
+	}
+	const staticDotfiles = opts.staticDotfiles === true;
 
 	// Normalize websocket config: true -> {}, false/undefined -> null
 	const websocket =
@@ -1029,6 +1045,27 @@ export default function (opts = {}) {
 				);
 			}
 
+			// Dotfiles are excluded from the static index by default, so a
+			// dot-path in the output would 404 in production with nothing saying
+			// why. Say so here, where the file is still in front of the developer.
+			if (!staticDotfiles) {
+				const outBase = builder.config.kit.paths.base;
+				const refused = [...new Set([
+					...listExcludedDotPaths(`${out}/client${outBase}`),
+					...listExcludedDotPaths(`${out}/prerendered${outBase}`)
+				])];
+				if (refused.length) {
+					// Every offender is named - a refused directory collapses to one
+					// entry, so the list stays proportionate to what the developer
+					// actually dropped into static/.
+					builder.log.warn(
+						`[adapter-uws] not served - dotfiles are refused by default, .well-known/ is ` +
+						`always served: ${refused.join(', ')}. Rename the file to serve it, or set ` +
+						'staticDotfiles: true to serve every dotfile.'
+					);
+				}
+			}
+
 			// A function waiting-room template cannot be serialized into the build,
 			// so it would be silently dropped. It is now an HTML string with
 			// `{{token}}` placeholders - warn loudly on the old function form.
@@ -1061,6 +1098,7 @@ export default function (opts = {}) {
 					READINESS_CHECK_PATH: JSON.stringify(readinessCheckPath),
 					STATIC_HEADERS: JSON.stringify(staticHeadersResult.headers),
 					STATIC_CACHE_CONTROL: JSON.stringify(staticCacheControl),
+					STATIC_DOTFILES: JSON.stringify(staticDotfiles),
 					METRICS_REGISTRY: './server/metrics-registry.js',
 					TRACING_PROVIDER: './server/tracing-provider.js',
 					WAITING_ROOM_RENDERER: './server/waiting-room-renderer.js',

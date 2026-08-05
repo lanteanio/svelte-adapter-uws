@@ -247,6 +247,20 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// Dotfile serving OPTED IN, so the exclusion default's opposite branch is a
+	// real build rather than a re-wired unit: the option has to survive the
+	// whole path - fixture config, adapter factory validation, placeholder
+	// substitution, the index-time walk - before a dotfile response proves it.
+	dotfiles: {
+		out: 'build-dotfiles',
+		handler: null,
+		staticDotfiles: true,
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
 	// Cross-worker state-hash reporting armed on a tight interval, so a real
 	// clustered runtime can prove the aggregate detector, the primary's
 	// bounded detail collection, and the replicated diagnostic store - the

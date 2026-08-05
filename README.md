@@ -1503,6 +1503,40 @@ adapter({
 
 Keys are case-insensitive and merged once while the static index is built, rather than being merged on each request. The handler's own transfer / caching / range headers cannot be overridden - `content-type`, `content-encoding`, `content-range`, `content-length`, `date`, `etag`, `cache-control`, `vary`, `accept-ranges` - supplying one logs a build warning and is ignored. Use `staticCacheControl` for path-specific cache policies. Every other header (including overriding the default `x-content-type-options`) is applied. To keep headers identical across SSR and static responses, set the same values in both `handle` and `staticHeaders`.
 
+#### Dotfiles are not served (`staticDotfiles`)
+
+A path with a dot-prefixed segment (`/.env`, `/deep/.hidden`, anything under
+`/.git/`) is left out of the static index and responds `404`. The files that
+land in `static/` by accident are exactly the sensitive ones - a stray `.env`,
+an `.htpasswd`, editor backups, an unpacked `.git` - and `adapter-node`
+refuses plain dotfiles too, so a migrating app keeps that posture. The
+exclusion is segment-wise and decided once while the index is built: there is
+no per-request check to bypass, and an encoded request (`/%2Eenv`) decodes to
+a key the index never contained.
+
+`.well-known/*` is always served - RFC 8615 discovery (`security.txt`, ACME
+HTTP-01 challenges) is part of the documented static surface above. The
+carve-out applies at the first path segment only: `x/.well-known/y` is not an
+escape hatch, and a dotfile inside `.well-known/` is still refused. Both of
+those shapes are stricter than `adapter-node`, whose static server keeps any
+path under `.well-known/`; the build warning names a path this rule refuses,
+so the difference cannot bite silently.
+
+The build warning names each refused path once - a refused directory is a
+single entry, and a compressed `.br`/`.gz` sibling is covered by naming its
+source file - so the mistake surfaces at build time instead of as a
+production `404`. To serve dotfiles deliberately:
+
+```js
+adapter({
+  staticDotfiles: true, // index and serve every dotfile
+});
+```
+
+Dev and preview serve `static/` through SvelteKit's own pipeline, which
+applies its own dotfile rule and does not read `staticDotfiles`; the behavior
+described here is the production server's.
+
 ---
 
 ## Environment variables

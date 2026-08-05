@@ -1,9 +1,11 @@
-// Substituted by the adapter's build step; a free identifier until then.
+// Substituted by the adapter's build step; free identifiers until then.
 /* global PRECOMPRESS */
+/* global STATIC_DOTFILES */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { manifest, prerendered } from '../manifest-bridge.js';
+import { excludedDotPath } from '../utils/dot-path.js';
 import { mimeLookup, mergeStaticHeaders, resolveStaticCacheControl } from '../utils.js';
 import { monotonicNow } from '../runtime.js';
 import { counters, staticCache, prerenderedDirStyle, decodeCache } from './state.js';
@@ -50,8 +52,15 @@ const __dirname = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 function walk(dir, fn, prefix = '') {
 	if (!fs.existsSync(dir)) return;
 	for (const entry of fs.readdirSync(dir)) {
-		const abs = path.join(dir, entry);
 		const rel = prefix ? `${prefix}/${entry}` : entry;
+		// Dot-segment paths never enter the index, so the request path has
+		// nothing to bypass - the cache simply has no entry, and an encoded
+		// traversal decodes to a key that is not there. A refused directory is
+		// not descended into either, so an unpacked .git is never even read.
+		// `.well-known` stays served; excludedDotPath carries the exact rule,
+		// and the build warns about every path this skips.
+		if (!STATIC_DOTFILES && excludedDotPath(rel)) continue;
+		const abs = path.join(dir, entry);
 		if (fs.statSync(abs).isDirectory()) {
 			walk(abs, fn, rel);
 		} else {

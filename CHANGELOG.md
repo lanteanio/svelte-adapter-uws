@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Breaking for a non-conforming custom template; built-in pages, WebSocket handshakes, and non-HTML clients keep their previous responses.
   - **Detail:** [Changed engineering detail](#changed).
 
+- **Changed: dotfile exposure in static serving.** Static and prerendered dot-segment paths such as a stray `.env` or an unpacked `.git` now respond 404 by default instead of being served publicly, while `.well-known/*` discovery keeps working and an explicit option restores the previous behavior.
+  - **Affects:** Deployments serving files whose path contains a dot-prefixed segment out of `static/`, and apps migrating from `adapter-node`, whose static server refuses plain dotfiles by default.
+  - **Action:** Rename any deliberately served dotfile or set `staticDotfiles: true`; the build warning names each refused path once.
+  - **Requires:** No new option for the default posture; `.well-known/*` needs nothing and keeps serving.
+  - **Compatibility:** Intentional breaking default for dot-segment static paths; `staticDotfiles: true` restores the previous indexing exactly.
+  - **Detail:** [Changed engineering detail](#changed).
+
 - **Fixed: realtime delivery and lifecycle boundaries.** The adapter now rejects unsafe multi-worker sequence and game-relay modes, enforces the advertised development payload ceiling, counts exact backpressure drops, closes Rollup handles, and balances logical subscriptions, turning silent divergence, oversized development frames, stale build resources, and misleading loss telemetry into explicit bounded behavior.
   - **Affects:** Clustered realtime deployments, Vite WebSocket development, programmatic builds, and pressure monitoring.
   - **Action:** Configure an external ordered sequence or single-worker game lane where required, and align any custom development payload ceiling with production.
@@ -462,6 +469,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Dot-segment static paths are excluded from serving by default.** Every
+  file SvelteKit copies out of `static/` used to be indexed and served
+  verbatim, including the ones that land there by accident - a stray `.env`,
+  an `.htpasswd`, editor backups, an unpacked `.git` - while `adapter-node`
+  refuses plain dotfiles, so a migrating app silently gained exposure. The
+  exclusion is segment-wise (`a/.hidden/b` is refused, not only `.env`) and
+  decided once at index time: the cache never holds the entry, so there is no
+  per-request check to bypass, an encoded request decodes to a key that is
+  not there, and a refused directory is never descended into. `.well-known/*`
+  keeps serving (RFC 8615 discovery - `security.txt`, ACME HTTP-01
+  challenges), with the carve-out at the first path segment only:
+  `x/.well-known/y` is not an escape hatch and a dotfile inside
+  `.well-known/` is still refused - both shapes stricter than
+  `adapter-node`, which keeps any path under `.well-known/`. The build warns
+  at write time, naming each refused offender once (a refused directory is
+  one entry, a compressed sibling is covered by its source file) and the
+  remedy. The new `staticDotfiles: true` adapter option restores the
+  previous indexing; it is validated as a boolean when the adapter is
+  constructed.
 - Moved `OBSERVABILITY.md`, `PRIVACY-INTEGRATION.md`, `RELEASE-MANIFEST.md`, `RELEASING.md` and `TRANSLATING.md` into `docs/` under the lowercase naming the rest of `docs/` already uses. The root keeps only what npm, GitHub, or a named package contract reads from there. The canonicality decision now states the placement rule and a test enforces it.
 - **Client failure text is explicitly diagnostic.** Every non-null `failure`
   value now includes `diagnosticReason`; the former `reason` property remains
