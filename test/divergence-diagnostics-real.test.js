@@ -3,8 +3,8 @@
 // collection over parentPort, the replicated diagnostic store, and the
 // platform.diagnostic lookup. The pure unit suite drives the diagnostic
 // builders with literal report objects, which proves the shapes but not the
-// wiring - and the wiring is the card: a deployment's evidence comes from
-// this IPC handshake or it does not exist.
+// wiring - and the wiring is the claim under test: a deployment's evidence
+// comes from this IPC handshake or it does not exist.
 //
 // The divergence is forced honestly: one worker publishes an externally
 // sequenced frame with the relay disabled, so its delivered-seq map moves

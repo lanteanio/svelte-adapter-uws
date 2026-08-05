@@ -296,9 +296,9 @@ describe('resolveWaitingRoom with a string template', () => {
 	it('renders every safe link scheme and drops the unsafe ones, on both link fields', () => {
 		// mailto: and tel: are the natural values for a help link and are
 		// classified safe by the accessibility validator's own recovery-href
-		// policy. Dropping them silently - no link, no warning - is the exact
-		// failure class this card was bounced for, so both fields carry the
-		// same safe-scheme set and it is pinned here.
+		// policy. Dropping them silently - no link, no warning - removes a
+		// visitor's recovery route without telling anyone, so both fields carry
+		// the same safe-scheme set and it is pinned here.
 		const safe = resolveWaitingRoom({
 			maxConcurrent: 10,
 			waitingRoom: {
