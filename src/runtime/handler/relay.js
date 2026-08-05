@@ -90,6 +90,13 @@ export function setRelayRingWriter(writer) {
  *
  * It is deliberately checked ABOVE the ring/postMessage split: `CLUSTER_RELAY_RING_KB=0`
  * is a documented configuration, and it must not forfeit the ceiling.
+ *
+ * Measured in UTF-16 code units (`String.prototype.length`), not encoded
+ * bytes: the length read is free, while `Buffer.byteLength` walks the string
+ * on every relayed message. A multibyte-heavy envelope can therefore encode
+ * to more UTF-8 bytes on the wire than the ceiling nominally admits; the
+ * reader's reassembly headroom is a generous multiple for exactly this class
+ * of undercount.
  * @type {number}
  */
 let maxRelayEnvelopeBytes = Infinity;

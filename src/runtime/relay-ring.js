@@ -322,9 +322,13 @@ export class RingReader {
 		 * Largest frame this reader will reassemble. The accumulator grows to hold
 		 * a WHOLE frame before the consumer ever sees it - that is how a frame
 		 * larger than the ring streams through - so a cap at the sender is only a
-		 * policy until the reader also refuses to allocate for one. Same number on
-		 * both ends; a longer frame means a peer that is not applying the ceiling,
-		 * or a corrupt stream, and neither is worth an unbounded allocation.
+		 * policy until the reader also refuses to allocate for one. The boot
+		 * driver sets this to a generous multiple of the sender's ENVELOPE
+		 * ceiling, because a frame also carries the topic, event, payload and
+		 * stream stamps (and the sender measured UTF-16 length, not encoded
+		 * bytes); a frame past even that margin means a peer not applying the
+		 * ceiling, or a corrupt stream, and neither is worth an unbounded
+		 * allocation.
 		 */
 		this.maxFrameBytes = options.maxFrameBytes ?? Infinity;
 		this.onOversized = options.onOversized ?? null;

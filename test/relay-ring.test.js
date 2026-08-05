@@ -225,6 +225,42 @@ describe('ring stream', () => {
 		})]);
 	});
 
+	it('never quarantines a peer that keeps draining, however long it stays behind', () => {
+		// The age ceiling is a STALL detector: it is re-stamped on every push
+		// that makes progress, so it measures "stopped draining", not "backlog
+		// non-empty since". This drives a peer that stays continuously behind
+		// for three times the ceiling while draining steadily, and it must
+		// survive - the stall case one test up is the only one allowed to trip.
+		const sab = createRelayRingBuffer(1024);
+		let now = 0;
+		const overflows = [];
+		const writer = new RingWriter(sab, {
+			maxPendingBytes: 64 * 1024,
+			maxPendingAgeMs: 50,
+			now: () => now,
+			setTimer: () => ({ unref() {} }),
+			clearTimer: () => {},
+			onOverflow: (event) => overflows.push(event)
+		});
+		const reader = new RingReader(sab, () => {});
+		writer.write(new Uint8Array(writer.cap));
+		writer.write(new Uint8Array(4096));
+		expect(writer.pendingBytes).toBe(4096);
+
+		let elapsed = 0;
+		for (let cycle = 0; cycle < 8 && writer.pendingBytes > 0; cycle++) {
+			now += 40; // under the 50ms ceiling since the LAST progress
+			elapsed += 40;
+			reader._drain(); // the consumer frees ring space...
+			writer._flushPending(); // ...and the producer pushes, re-stamping
+		}
+		expect(writer.pendingBytes).toBe(0);
+		expect(elapsed).toBeGreaterThan(3 * 50);
+		expect(writer.closed).toBe(false);
+		expect(overflows).toEqual([]);
+		reader.close();
+	});
+
 	it('streams a frame LARGER than the whole ring through in pieces', async () => {
 		const sab = createRelayRingBuffer(1024); // capacity 1024
 		const writer = new RingWriter(sab);
