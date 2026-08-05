@@ -104,6 +104,7 @@ command; if you change them, the changed command is the profile identity.
 | Wire fan-out | `node bench/micro-wire-fanout.mjs` | JS | encode CPU and bytes/publish by subscriber count; no sockets or compression. |
 | Pressure sampler bound | `node bench/pressure-sampler-micro.mjs` | JS | capped/uncapped microseconds/tick and growth ratio; synthetic connection objects. |
 | Relay ring | `node bench/relay-ring-ab.mjs` | JS | primary-to-consumer transfer timing by variant; worker-thread model, not network IPC. |
+| Relay frame admission | `node bench/relay-frame-admission-ab.mjs` | JS | best-of-round flush throughput with the sender frame ceiling on and off; the flush is driven synchronously through the injectable timer seam, so it isolates the admission branch and is not end-to-end relay timing. Repeat invocations - the per-invocation delta sits inside run-to-run spread. |
 | Runtime clock/timer helpers | `node bench/runtime-overhead.mjs` | JS | ns/op and overhead gate; timer arm/clear cost is informational. |
 | Compressed bytes on live uWS | `node bench/ws-compression-ab.mjs` | native | TCP-observed bytes/frame; loopback compression history and payload corpus constrain it. |
 | Compression CPU scaling | `node bench/ws-compression-cpu.mjs` | native | microseconds/publish by mode and subscriber count; synchronous loop isolates server work and is not end-to-end latency. |
