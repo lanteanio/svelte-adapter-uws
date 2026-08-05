@@ -522,6 +522,18 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// control flow - one boolean read - and it moves work AWAY from the binary
 	// path, never toward it. No byte read, copied or allocated, no copy primitive.
 	//
+	// Re-pinned again for the relay ring's spill ceiling, which reaches this
+	// graph through handler/relay.js. The drift is entirely control flow: the
+	// byte ceiling now compares against the BACKLOG alone rather than the backlog
+	// plus the frame being handed over, the empty-ring branch loses its ceiling
+	// test outright (a large frame is not a peer fault and the byte stream is
+	// built to carry it in pieces), and `pendingSince` is re-stamped when a push
+	// makes progress so the age ceiling means "stopped draining" rather than
+	// "backlog non-empty since". Comparisons and one timestamp assignment - no
+	// byte is read, copied or allocated by any of it, and no copy primitive
+	// entered. It also REMOVES a refusal that ran after `_push` had committed, so
+	// no path can leave a partial frame in the shared stream.
+	//
 	// The added `.push(` calls are the existing per-socket exclusion filter now
 	// pushing payload references rather than entry objects, and `.set(` is
 	// unchanged.
@@ -532,7 +544,7 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// `Array.isArray` guard, and the assert losing its count argument. Pure
 	// control flow before any byte exists - nothing is read, allocated or copied
 	// by it.
-	platform: '314c0c6afa9c7f4f33bf1bd94ce64d47ee8cb0d01389828c20d133a005528f4d',
+	platform: '28763e65e5563ff10a8aa7354345b54892d394d036292aab549e7f7effb524e8',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

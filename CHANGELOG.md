@@ -472,6 +472,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **One large cross-worker publish no longer quarantines every healthy worker
+  in the cluster.** The relay ring's per-peer spill ceiling is meant to catch a
+  worker that has stopped draining. It was measured against the peer's backlog
+  PLUS the frame being handed over - and, on a peer with nothing queued at all,
+  against that frame alone. So a large publish was charged to whichever workers
+  happened to receive it: the primary hands the same frame to every sibling in
+  one pass, so a single publish above the ceiling quarantined all of them at
+  once, each one asked to exit, with a process kill behind the exit grace.
+  Reproduced at production topology with two actively-draining consumers: both
+  quarantined, both permanently cut off, by one publish neither had failed to
+  read. A frame larger than the ring is not a peer fault - the ring is a byte
+  stream and carries it in pieces - so it no longer trips the ceiling, and the
+  ceiling now bounds only what a peer has genuinely failed to drain.
+  Additionally, the byte test used to run AFTER part of the frame had already
+  been written into the shared ring, so a refusal left a truncated prefix that
+  would misframe every later frame on that peer; every refusal is now decided
+  before any byte is committed. Finally, the age ceiling was stamped once when
+  the backlog opened and never re-stamped, so it measured "backlog non-empty
+  since" and could quarantine a peer that was draining steadily while staying
+  behind; it is re-stamped on real progress and now means what its name says.
 - **A paced upgrade shed while an application `upgrade` hook is in flight now
   answers `503`, not `500`.** With `upgradeAdmission.perTickBudget` set, an
   upgrade over the deferred ceiling is refused - and that refusal ran from

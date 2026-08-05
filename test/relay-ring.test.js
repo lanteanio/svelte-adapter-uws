@@ -120,7 +120,12 @@ describe('ring stream', () => {
 		reader.close();
 	});
 
-	it('quarantines a stalled consumer before its pending-byte spill can grow without bound', () => {
+	// The ceiling bounds the BACKLOG this peer has failed to drain. It used to be
+	// measured against the backlog PLUS the frame being handed over, which is why
+	// the case below needed only one write to trip: a peer with nothing queued
+	// was quarantined for being handed 65 bytes. That is not a peer fault, and
+	// the two tests after this one are what the old shape was hiding.
+	it('quarantines a stalled consumer once its backlog passes the ceiling', () => {
 		const sab = createRelayRingBuffer(1024);
 		const overflows = [];
 		const writer = new RingWriter(sab, {
@@ -128,17 +133,64 @@ describe('ring stream', () => {
 			maxPendingAgeMs: 5_000,
 			onOverflow: (event) => overflows.push(event)
 		});
+		// Fill the ring exactly, so everything after this can only spill.
 		writer.write(new Uint8Array(writer.cap));
-		const accepted = writer.write(new Uint8Array(65));
+		// Nothing has been read, so each of these joins the backlog.
+		expect(writer.write(new Uint8Array(40))).toBe(true);
+		expect(writer.write(new Uint8Array(40))).toBe(true);
+		expect(writer.pendingBytes).toBe(80);
+
+		// The backlog is now past the ceiling, so the next write is refused: this
+		// consumer is genuinely not draining.
+		const accepted = writer.write(new Uint8Array(1));
 
 		expect(accepted).toBe(false);
 		expect(writer.closed).toBe(true);
 		expect(writer.pendingBytes).toBe(0);
 		expect(overflows).toEqual([expect.objectContaining({
 			reason: 'bytes',
-			droppedBytes: 65,
+			droppedBytes: 81,
 			maxPendingBytes: 64
 		})]);
+	});
+
+	it('does not quarantine a healthy peer handed a frame bigger than the ceiling', () => {
+		const sab = createRelayRingBuffer(1024);
+		const overflows = [];
+		const writer = new RingWriter(sab, {
+			maxPendingBytes: 64,
+			maxPendingAgeMs: 5_000,
+			onOverflow: (event) => overflows.push(event)
+		});
+
+		// An EMPTY ring and one frame far larger than the ceiling. This peer is
+		// not lagging - it is being handed something big, which the byte stream
+		// carries in pieces. Quarantine is a peer-fault action and must not fire.
+		const accepted = writer.write(new Uint8Array(4096));
+
+		expect(accepted, 'refused a frame from a peer with nothing queued').toBe(true);
+		expect(writer.closed, 'closed a healthy peer for the size of one frame').toBe(false);
+		expect(overflows).toEqual([]);
+	});
+
+	it('commits nothing to the shared ring when a write is refused', () => {
+		const sab = createRelayRingBuffer(1024);
+		const writer = new RingWriter(sab, { maxPendingBytes: 64, maxPendingAgeMs: 5_000 });
+		writer.write(new Uint8Array(writer.cap));
+		writer.write(new Uint8Array(80));
+
+		// A FORWARD guard, stated plainly rather than dressed up as a
+		// reproduction: with every refusal now decided before `_push` runs, the
+		// old shape's partial commit is structurally unreachable - there is no
+		// post-push refusal left to leave a prefix behind. What this pins is that
+		// it stays that way. Moving a ceiling test back below `_push` reintroduces
+		// a truncated frame in the shared stream, which misframes every later
+		// frame on that peer, and today nothing else would notice because the
+		// refusal closes the writer and hides it.
+		const before = Atomics.load(writer.i32, 0);
+		expect(writer.write(new Uint8Array(200))).toBe(false);
+
+		expect(Atomics.load(writer.i32, 0), 'a refused write advanced the write position').toBe(before);
 	});
 
 	it('quarantines an old spill even when no later publish arrives', () => {

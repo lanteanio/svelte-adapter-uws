@@ -19,11 +19,18 @@
 //     there is never a second path a frame can race ahead on.
 //   - BACKPRESSURE: a full ring spills into the producer's pending queue and
 //     flushes as the consumer frees space (the consumer's readPos advance IS
-//     the wake-up signal) - the same unbounded-queue-while-consumer-lags
-//     semantics postMessage had, minus its per-message allocation.
+//     the wake-up signal), minus postMessage's per-message allocation. That
+//     spill is BOUNDED when a writer is given ceilings: a peer whose BACKLOG
+//     passes the byte ceiling, or which stops draining for longer than the age
+//     ceiling, is quarantined. Both ceilings describe the peer's own failure to
+//     keep up - never the size of what it is being handed - and both are
+//     decided before any byte is committed, so a refusal never leaves a partial
+//     frame in the stream.
 //   - OVERSIZED FRAMES: a frame larger than the ring streams through in
 //     pieces; the reader's accumulator reassembles it. No fallback path, no
-//     reordering window.
+//     reordering window. A large frame is therefore not a peer fault and does
+//     not quarantine anyone; bounding what a single frame may cost is the
+//     SENDER's job, above this module.
 //
 // The relay envelope is JSON-serializable by construction (the envelope field
 // IS a pre-serialized JSON string), so a message is encoded to bytes ONCE by
@@ -112,11 +119,30 @@ export class RingWriter {
 	 */
 	write(bytes) {
 		if (this.closed) return false;
+		// The ceiling bounds the BACKLOG - what this peer has failed to drain -
+		// and it is decided BEFORE anything is handed to the ring. Both halves of
+		// that sentence were wrong, and each one alone was enough to quarantine a
+		// healthy peer:
+		//
+		//   - It measured backlog PLUS the frame being handed over, so a peer one
+		//     byte behind was blamed for a large publish it had not seen; and on
+		//     an EMPTY ring the same test ran against the frame alone, so a peer
+		//     with nothing queued at all was quarantined for being handed
+		//     something big. Quarantine is a peer-fault action, and neither of
+		//     those is a peer fault. A frame larger than the ring is what the
+		//     byte-stream design exists to carry - it streams through in pieces.
+		//   - The decision came AFTER `_push` had already committed part of the
+		//     frame, so a refusal left a truncated prefix in the shared ring and
+		//     every later frame on that peer misframed. Nothing surfaced it
+		//     because the refusal also closed the writer for good.
+		//
+		// The backlog can therefore exceed the ceiling by at most ONE admitted
+		// frame; bounding that frame is the sender's job, not this one's.
 		if (this.pendingBytes > 0) {
 			if (this._pendingAge() >= this.maxPendingAgeMs) {
 				return this._overflow('age', bytes.length);
 			}
-			if (this.pendingBytes + bytes.length > this.maxPendingBytes) {
+			if (this.pendingBytes > this.maxPendingBytes) {
 				return this._overflow('bytes', bytes.length);
 			}
 			// Something is already queued: append behind it (order).
@@ -127,13 +153,9 @@ export class RingWriter {
 		}
 		const n = this._push(bytes, 0);
 		if (n < bytes.length) {
-			const remaining = bytes.length - n;
-			if (remaining > this.maxPendingBytes) {
-				return this._overflow('bytes', remaining);
-			}
 			this.pending.push(bytes);
 			this.pendingOffset = n;
-			this.pendingBytes = remaining;
+			this.pendingBytes = bytes.length - n;
 			this.pendingSince = this._now();
 			this._armAgeLimit();
 			this._armFlush();
@@ -226,6 +248,13 @@ export class RingWriter {
 			if (head === undefined) break;
 			const n = this._push(head, this.pendingOffset);
 			if (n === 0) break;
+			// The consumer freed space, so this peer is draining. The age ceiling
+			// is a STALL detector, and without this it was stamped once when the
+			// backlog opened and never touched again - so it measured "the backlog
+			// has been non-empty since", and quarantined a peer that was draining
+			// steadily while staying continuously behind. Re-stamping on real
+			// progress makes it mean what its name says.
+			this.pendingSince = this._now();
 			this.pendingOffset += n;
 			this.pendingBytes -= n;
 			if (this.pendingOffset >= head.length) {
