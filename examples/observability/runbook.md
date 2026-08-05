@@ -358,15 +358,63 @@ producer spill, quarantined it once, and asked the normal supervisor to replace
 it rather than letting the primary queue grow without bound.
 
 **Check:** the bounded `reason` label (`bytes` or `age`),
-`relay_spill_dropped_bytes_total`, and `relay_spill_pending_age_seconds`. Then
-inspect the primary log for the target worker and configured
-`CLUSTER_RELAY_MAX_PENDING_KB` / `CLUSTER_RELAY_MAX_PENDING_MS` ceilings. These
-metrics deliberately contain no topic or client identity.
+`relay_spill_dropped_bytes_total`, and `relay_spill_pending_age_seconds`. The
+age is measured from the peer's last drain progress, so `age` means the worker
+stopped draining entirely - a peer that reads steadily while staying behind
+trips the byte ceiling instead. Then inspect the primary log for the target
+worker and configured `CLUSTER_RELAY_MAX_PENDING_KB` /
+`CLUSTER_RELAY_MAX_PENDING_MS` ceilings. These metrics deliberately contain no
+topic or client identity.
 
 **Do:** confirm the worker was replaced and recovered. Treat repeated events as
 a worker stall or sustained capacity problem; correlate with process health,
 CPU, memory, and event-loop pressure before changing a ceiling. A quarantined
 worker can have missed state, so do not suppress the replacement.
+
+---
+
+## AdapterRelayFrameRefused
+
+**Means:** a publish was larger than the sender-side relay frame ceiling
+(`CLUSTER_RELAY_MAX_FRAME_KB`). The publishing worker's own subscribers
+received it; the cross-worker copy was refused, so clients on other workers
+did not. No worker was quarantined or replaced - the refusal exists precisely
+so one large publish cannot do that.
+
+**Check:** the bounded `lane` label: `publish` is a single message,
+`batched` is a whole `platform.publishBatched` array refused wholesale (it
+travels as one frame). The worker's `cluster-relay.frame-refused` operational
+event carries the byte size and the configured limit; the metric deliberately
+carries no topic.
+
+**Do:** this is an application payload question, not a worker health question.
+Find the publish that produces multi-megabyte envelopes and shrink it (send a
+reference, split the batch, or move bulk data out of the relay). If the
+deployment genuinely relays frames this large, raise
+`CLUSTER_RELAY_MAX_FRAME_KB` together with `CLUSTER_RELAY_MAX_PENDING_KB` so
+one admitted frame still fits the spill budget it will occupy.
+
+---
+
+## AdapterRelayFrameOversized
+
+**Means:** the primary was handed a relay frame far past the sender ceiling
+(the reassembly ceiling is a generous multiple of it) and refused to allocate
+for it, decided from the frame's length prefix. The sending worker's relay
+stream was stopped; its own spill ceiling then retires it through the normal
+supervised replacement.
+
+**Check:** with every worker built from the same configuration this should
+never fire - the sender refuses first. It firing means a worker that is not
+applying the ceiling, or a corrupt ring stream. The
+`cluster-relay.frame-oversized` operational event carries the declared size
+and the reader's ceiling. Like the quarantines, the count is attributed to a
+surviving worker's registry, so the reporting instance is not the offender.
+
+**Do:** treat it as an integrity signal, not a tuning knob. Confirm the
+sending worker was replaced, then look for a mid-rotation deployment mixing
+configurations, or memory corruption. Do not raise the reader ceiling to make
+it stop; the sender ceiling is the intended control.
 
 ---
 
@@ -569,8 +617,9 @@ threshold nobody could justify.
   `AdapterRelaySpillQuarantine`; the quarantine event owns paging, while the
   byte count explains its size.
 - `relay_spill_pending_age_seconds` - diagnostic context captured at relay
-  quarantine. The event owns paging; a universal age threshold would merely
-  restate the deployment's configured finite ceiling.
+  quarantine, measured from the peer's last drain progress (a stall detector,
+  not time-behind). The event owns paging; a universal age threshold would
+  merely restate the deployment's configured finite ceiling.
 - `pressure_reason` - a categorical explanation of saturation, read while
   triaging rather than alerted on.
 - `pressure_reason_transitions_total` - the incident timeline behind that

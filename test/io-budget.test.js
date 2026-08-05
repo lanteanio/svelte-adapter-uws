@@ -476,7 +476,15 @@ const COPY_AUTHORITY_SYNTAX = Object.freeze({
 // Comments, locations, and inert unreferenced function bodies remain free to
 // change; executable module edits require a deliberate copy-budget review.
 const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
-	ingress: '710472f02ddefa6220afa4e9a17da05c8a47cb7a20468826c75a4e30c1f1f75e',
+	// Re-pinned for the relay frame-ceiling counters. The drift is in
+	// observability-manifest.js, which both this graph and the platform graph
+	// reach through utils.js -> utils/metrics.js: two added signal
+	// declarations (relay_frame_refused_total, relay_frame_oversized_total)
+	// and one label-domain entry (the refusal's lane enum) - frozen object and
+	// array literals, data only. No statement executes on any frame path, no
+	// byte is read, allocated or copied, and no copy primitive entered either
+	// graph.
+	ingress: '1c89eeb70ec5c54c50a498576fd159289db687b53341bd90be34e79f7cc4bf03',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -554,13 +562,22 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// `Array.isArray` guard, and the assert losing its count argument. Pure
 	// control flow before any byte exists - nothing is read, allocated or copied
 	// by it.
-	platform: 'c07b6aaf0dc9e3fb5277c7202146fc2267b2db8b5baffacb4c08507aa4c2ea11',
+	// Re-pinned with the ingress seal above (the manifest data literals reached
+	// through utils.js), plus one one-word fix in handler/relay.js: the batched
+	// lane's ceiling read `events[i].envelope.length`, a field this lane does
+	// not carry - platform.publishBatched relays `{ topic, env, seq }` - so
+	// every clustered publishBatched threw under a finite ceiling. It now reads
+	// `events[i].env.length`. A member-name change in an existing length read;
+	// no byte is read, allocated or copied, and no copy primitive entered.
+	platform: '6964bdf3f479e34198983b53bc51de7d58380e1135396a6f5413795535abdb53',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
 	// same buffers; the drift is which array the payload comes out of, and no
 	// copy primitive entered the body.
-	'wire-fanout': '4912f33348b9d7e27275da422ae55704c05c702df35a9fdb17843081003a3c62',
+	// Re-pinned with the ingress and platform seals above, same drift, same
+	// review: the manifest data literals reached through utils.js.
+	'wire-fanout': 'd789b279d2a13fceb25639cf7824c78d5b19818e9796db426b80af7a7f0ad81e',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

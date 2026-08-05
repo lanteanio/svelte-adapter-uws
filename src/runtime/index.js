@@ -8,7 +8,7 @@ import { env } from 'ENV';
 import { certExpiryAlert, createCertWatcher, readCertIdentity, reloadClusterTls } from './utils/tls-reload.js';
 import { monotonicNow, wallEpoch, randomUuid, randomBytes as runtimeRandomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 import { createRelayRingBuffer, RingWriter, RingReader, decodeRelayFrame } from './relay-ring.js';
-import { createRelaySpillQuarantine } from './relay-spill-policy.js';
+import { createRelaySpillQuarantine, attributeRelayIncident, relayEligible } from './relay-spill-policy.js';
 import { createStateHashDetector } from './state-hash-detector.js';
 import { buildDivergenceDiagnostic, DIVERGENCE_DIAGNOSTIC_LIMIT, DIVERGENCE_TOPIC_LIMIT } from './divergence-diagnostics.js';
 import { createRestartSupervisor } from './restart-supervisor.js';
@@ -548,7 +548,7 @@ if (is_primary) {
 			meta.ringReader = new RingReader(relay_ring.up, (frame) => {
 				meta.lastHeartbeat = monotonicNow();
 				for (const [w, m] of workers) {
-					if (w !== worker && m.ringWriter !== null && !m.relayQuarantined) {
+					if (w !== worker && m.ringWriter !== null && relayEligible(m)) {
 						const accepted = m.ringWriter.write(frame);
 						if (accepted) {
 							m.ringWriter.notify();
@@ -572,6 +572,14 @@ if (is_primary) {
 						dataClass: 'pseudonymous',
 						message: 'A worker sent a relay frame larger than this process will reassemble; its relay stream was stopped.',
 						attributes: { declaredBytes: event.declaredBytes, maxFrameBytes: event.maxFrameBytes }
+					});
+					// The primary has no metrics registry; count the incident once
+					// on a surviving sibling, never on the sender whose stream this
+					// stop just cut off (its up spill is about to retire it).
+					attributeRelayIncident(workers, worker, {
+						type: 'relay-frame-oversized',
+						declaredBytes: event.declaredBytes,
+						maxFrameBytes: event.maxFrameBytes
 					});
 				}
 			});
@@ -639,9 +647,13 @@ if (is_primary) {
 			} else if (msg.type === 'heartbeat-ack') {
 				if (meta) meta.lastHeartbeat = monotonicNow();
 			} else if (msg.type === 'publish') {
-				// Single relay (legacy / non-batched path)
-				for (const [w] of workers) {
-					if (w !== worker) w.postMessage(msg);
+				// Single relay (legacy / non-batched path). Like every relay
+				// forward below, a quarantined peer is skipped: these postMessage
+				// lanes stay live as the encode-failure fallback while the rings
+				// run, and without the check they kept feeding relay traffic to a
+				// worker already being torn down.
+				for (const [w, m] of workers) {
+					if (w !== worker && relayEligible(m)) w.postMessage(msg);
 				}
 			} else if (msg.type === 'publish-batch') {
 				// Batched relay: one postMessage per microtask from the publishing worker.
@@ -653,8 +665,8 @@ if (is_primary) {
 				// stream it is being handed has a hole in it.
 				for (const { topic, envelope, compress, seq, capability, event, data, origin, ord, birth } of msg.messages) {
 					const relay = { type: 'publish', topic, envelope, compress, seq, capability, event, data, origin, ord, birth };
-					for (const [w] of workers) {
-						if (w !== worker) w.postMessage(relay);
+					for (const [w, m] of workers) {
+						if (w !== worker && relayEligible(m)) w.postMessage(relay);
 					}
 				}
 			} else if (msg.type === 'publish-batched') {
@@ -662,8 +674,8 @@ if (is_primary) {
 				// the whole event list as one IPC frame so receiving workers
 				// can re-detect the fast path locally and dispatch a single
 				// batch envelope, instead of degrading to N individual relays.
-				for (const [w] of workers) {
-					if (w !== worker) w.postMessage(msg);
+				for (const [w, m] of workers) {
+					if (w !== worker && relayEligible(m)) w.postMessage(msg);
 				}
 			} else if (msg.type === 'state-hash') {
 				// A worker's periodic structure-only state hash. Stamp it with the
@@ -1075,7 +1087,7 @@ if (is_primary) {
 } else {
 	// ── Worker thread or single-process mode ─────────────────────────────
 
-	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls, setRelayRingWriter, setRelayFrameCeiling, markRelayAttached, collectLocalMetrics, resolveMetricsSnapshot } = await import('HANDLER');
+	const { start, shutdown, drain, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls, setRelayRingWriter, setRelayFrameCeiling, markRelayAttached, collectLocalMetrics, resolveMetricsSnapshot, noteRelayFrameRefused } = await import('HANDLER');
 	// The readiness/drain state machine lives in the lifecycle module, imported
 	// here directly (the same instance the handler graph above loaded) because
 	// entering the draining state and closing the sockets are two separate acts
@@ -1458,6 +1470,9 @@ if (is_primary) {
 						limitBytes: limit
 					}
 				});
+				// The refusal happened on THIS worker, so its own registry takes
+				// the count directly - no cross-thread attribution needed.
+				noteRelayFrameRefused(lane);
 			});
 		}
 		if (workerData?.relayRing) {

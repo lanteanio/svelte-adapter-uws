@@ -74,6 +74,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metrics report quarantine reason, discarded pending bytes, and worst pending
   age without topic or client labels.
 
+- **Relay frame refusals are queryable, alertable signals, not only events.**
+  Two new bounded counters join the cluster-integrity family:
+  `relay_frame_refused_total{lane}` counts publishes the sender-side frame
+  ceiling refused (`lane` is `publish` or `batched`; a batched refusal is
+  wholesale because the whole array travels as one frame), and
+  `relay_frame_oversized_total` counts frames the primary refused to
+  reassemble at the reader ceiling, attributed once to a surviving worker's
+  registry exactly like the spill quarantines. Both chart on the integrity
+  dashboard panel and page through the new `AdapterRelayFrameRefused`
+  (warning) and `AdapterRelayFrameOversized` (critical) rules, each with a
+  runbook section and corpus-tested firing and foreign-silence cases.
+
 - **Finite whole-lifetime WebSocket connection admission.** The new opt-in
   `upgradeAdmission.maxConnections` ceiling is enforced per I/O worker across
   reserved upgrades and established sockets: a permit is acquired before
@@ -489,7 +501,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   toward the primary now carries the same spill ceilings the primary's rings
   toward workers already had - a stalled primary previously let every publishing
   worker spill without bound in its own heap, the one direction nobody had
-  bounded.
+  bounded. Measured: the admission is one envelope-length comparison per
+  relayed message. `bench/relay-frame-admission-ab.mjs` (each invocation
+  prints a best-of-seven flush throughput per side) was invoked seven times:
+  ~1.35M msg/s with the ceiling on and off alike, per-invocation deltas
+  -4.5% to +0.9% with a median of -0.6% - narrower than the same-side spread
+  across invocations, so within run noise. `bench/relay-ring-ab.mjs` (one
+  measurement per invocation) was invoked five times each against this tree
+  and a worktree at the pre-change commit, alternating: end-to-end medians
+  434k msg/s on both, primary-busy medians 642 vs 662 ns/msg with fully
+  overlapping ranges.
 - **One large cross-worker publish no longer quarantines every healthy worker
   in the cluster.** The relay ring's per-peer spill ceiling is meant to catch a
   worker that has stopped draining. It was measured against the peer's backlog
@@ -510,6 +531,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the backlog opened and never re-stamped, so it measured "backlog non-empty
   since" and could quarantine a peer that was draining steadily while staying
   behind; it is re-stamped on real progress and now means what its name says.
+- **A quarantined worker stops receiving relay traffic on every lane.** The
+  primary's three `postMessage` relay forwards (single, per-microtask batch,
+  and wire-level batch) now consult the same eligibility predicate as the ring
+  forward loop. Those lanes stay live as the encode-failure fallback while the
+  rings run, so a worker already being torn down after quarantine kept
+  receiving relay traffic through them.
 - **A paced upgrade shed while an application `upgrade` hook is in flight now
   answers `503`, not `500`.** With `upgradeAdmission.perTickBudget` set, an
   upgrade over the deferred ceiling is refused - and that refusal ran from

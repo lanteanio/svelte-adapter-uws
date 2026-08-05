@@ -372,7 +372,36 @@ tests:
         values: '0+1x20'
       - series: 'framework_resource_growth_suspected_total{adapter="svelte-adapter-uws",job="websocket",instance="growth",resource="decodeCache"}'
         values: '0+1x20'
+      - series: 'relay_frame_refused_total{adapter="svelte-adapter-uws",job="websocket",instance="refuser",lane="publish"}'
+        values: '0+1x20'
+      - series: 'relay_frame_oversized_total{adapter="svelte-adapter-uws",job="websocket",instance="survivor"}'
+        values: '0+1x20'
     alert_rule_test:
+      - eval_time: 15m
+        alertname: AdapterRelayFrameRefused
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: refuser
+              job: websocket
+              lane: publish
+              severity: warning
+            exp_annotations:
+              summary: Publishes are being refused by the relay frame ceiling
+              description: A publish exceeded CLUSTER_RELAY_MAX_FRAME_KB. Local subscribers received it; clients on other workers did not.
+              runbook_url: https://ops.example.com/adapter#adapterrelayframerefused
+      - eval_time: 15m
+        alertname: AdapterRelayFrameOversized
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: survivor
+              job: websocket
+              severity: critical
+            exp_annotations:
+              summary: A relay frame exceeded the reassembly ceiling
+              description: The primary refused to reassemble a frame far past the sender ceiling and stopped that worker's relay stream. Either a peer is not applying the ceiling, or the stream is corrupt.
+              runbook_url: https://ops.example.com/adapter#adapterrelayframeoversized
       - eval_time: 15m
         alertname: AdapterStateDivergence
         exp_alerts:
@@ -579,6 +608,10 @@ tests:
         values: '0+1x20'
       - series: 'relay_spill_quarantines_total{adapter="another-service",job="foreign",instance="one",reason="bytes"}'
         values: '0+1x20'
+      - series: 'relay_frame_refused_total{adapter="another-service",job="foreign",instance="one",lane="publish"}'
+        values: '0+1x20'
+      - series: 'relay_frame_oversized_total{adapter="another-service",job="foreign",instance="one"}'
+        values: '0+1x20'
       - series: 'framework_assertion_violations_total{adapter="another-service",job="foreign",instance="one",severity="fatal"}'
         values: '0+1x20'
       - series: 'framework_assertion_violations_total{adapter="another-service",job="foreign",instance="one",severity="soft"}'
@@ -662,6 +695,12 @@ tests:
         exp_alerts: []
       - eval_time: 20m
         alertname: AdapterRelaySpillQuarantine
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterRelayFrameRefused
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterRelayFrameOversized
         exp_alerts: []
       - eval_time: 20m
         alertname: AdapterFatalAssertion

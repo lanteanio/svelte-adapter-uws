@@ -267,6 +267,14 @@ const SIGNAL_DEFINITIONS = [
 	{ name: 'relay_spill_quarantines_total', type: 'counter', labels: ['reason'], unit: null, scope: 'worker', aggregate: 'sum', help: 'Workers quarantined after a relay spill ceiling' },
 	{ name: 'relay_spill_dropped_bytes_total', type: 'counter', labels: [], unit: 'bytes', scope: 'worker', aggregate: 'sum', help: 'Pending relay bytes discarded when a lagging worker was quarantined' },
 	{ name: 'relay_spill_pending_age_seconds', type: 'gauge', labels: [], unit: 'seconds', scope: 'worker', aggregate: 'max', help: 'Worst oldest-pending age observed at relay spill quarantine' },
+	// The frame ceilings are a different question from the spill ceilings
+	// above: those describe a receiving peer's failure to drain, these describe
+	// the size of one frame, refused before it costs anyone memory. Refused is
+	// counted on the worker that refused to send; oversized is a primary-side
+	// incident attributed once to a surviving worker registry, like the
+	// quarantines.
+	{ name: 'relay_frame_refused_total', type: 'counter', labels: ['lane'], unit: null, scope: 'worker', aggregate: 'sum', help: 'Publishes refused by the sender-side relay frame ceiling; local subscribers still received them' },
+	{ name: 'relay_frame_oversized_total', type: 'counter', labels: [], unit: null, scope: 'worker', aggregate: 'sum', help: 'Relay frames refused at the reassembly ceiling; the sending worker relay stream was stopped' },
 
 	// - Framework invariants ----------------------------------------------
 	{ name: 'framework_assertion_violations_total', type: 'counter', labels: ['category', 'severity'], unit: null, scope: 'worker', aggregate: 'sum', help: 'Framework production-assertion violations by category and severity' },
@@ -338,6 +346,9 @@ const LABEL_DOMAINS = Object.freeze({
 	}),
 	relay_spill_quarantines_total: Object.freeze({
 		reason: Object.freeze({ kind: 'enum', dataClass: 'operational', values: Object.freeze(['bytes', 'age']) })
+	}),
+	relay_frame_refused_total: Object.freeze({
+		lane: Object.freeze({ kind: 'enum', dataClass: 'operational', values: Object.freeze(['publish', 'batched']) })
 	}),
 	framework_assertion_violations_total: Object.freeze({
 		category: Object.freeze({

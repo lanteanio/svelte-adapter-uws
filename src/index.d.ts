@@ -842,7 +842,14 @@ export interface WebSocketOptions {
 	 * - `relay_spill_dropped_bytes_total` - pending relay bytes discarded at
 	 *   quarantine (counter).
 	 * - `relay_spill_pending_age_seconds` - worst oldest-pending age observed by
-	 *   the reporting worker at quarantine (gauge).
+	 *   the reporting worker at quarantine (gauge). Measured from the peer's
+	 *   last drain progress, so it reads "stopped draining", not "behind".
+	 * - `relay_frame_refused_total{lane}` - publishes refused by the sender-side
+	 *   relay frame ceiling; local subscribers still received them (counter).
+	 *   `lane` is `publish` or `batched`.
+	 * - `relay_frame_oversized_total` - relay frames the primary refused to
+	 *   reassemble at the reader ceiling, attributed once to a surviving
+	 *   worker's registry (counter).
 	 * - `framework_resource_growth_suspected_total{resource}` - sustained-growth
 	 *   suspicions from the optional resource-growth auditor (counter).
 	 *   Registered only when `resourceGrowthAuditIntervalMs` is set.

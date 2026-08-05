@@ -142,7 +142,7 @@ describe('shipped observability pack', () => {
 
 	it('parses every rule with the official grammar and scopes every vector selector', () => {
 		const rules = RULE_DOCUMENT.groups.flatMap((group) => group.rules);
-		expect(rules).toHaveLength(31);
+		expect(rules).toHaveLength(33);
 		for (const rule of rules) {
 			const selectors = vectorSelectors(rule.expr);
 			for (const selector of selectors) {
@@ -384,6 +384,7 @@ describe('shipped observability pack', () => {
 		for (const metric of [
 			'upgrade_rejected_total', 'upgrade_rate_map_evicted_total', 'state_divergence_total',
 			'relay_gap_frames_total', 'relay_spill_quarantines_total',
+			'relay_frame_refused_total', 'relay_frame_oversized_total',
 			'framework_assertion_violations_total', 'framework_resource_growth_suspected_total'
 		]) {
 			expect(

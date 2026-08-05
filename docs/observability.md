@@ -129,6 +129,8 @@ attests the family; a required unsampled gauge makes the snapshot incomplete.
 | `relay_spill_quarantines_total` | counter | count | worker | sum | operational | `registry_zero` | `zero_when_complete` | reason=bytes/age | - | - |
 | `relay_spill_dropped_bytes_total` | counter | bytes | worker | sum | operational | `registry_zero` | `zero_when_complete` | - | - | - |
 | `relay_spill_pending_age_seconds` | gauge | seconds | worker | max | operational | `last_sample` | `incomplete_until_sampled` | - | - | - |
+| `relay_frame_refused_total` | counter | count | worker | sum | operational | `registry_zero` | `zero_when_complete` | lane=publish/batched | - | - |
+| `relay_frame_oversized_total` | counter | count | worker | sum | operational | `registry_zero` | `zero_when_complete` | - | - | - |
 | `framework_assertion_violations_total` | counter | count | worker | sum | operational | `registry_zero` | `zero_when_complete` | category=/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/ (max 64); severity=soft/fatal | - | - |
 | `framework_resource_growth_suspected_total` | counter | count | worker | sum | operational | `absent_when_unavailable` | `absent_when_unavailable` | resource=wsConnections/topicPublishStats/lastPublishWarnAt/decodeCache/envelopePrefixCache/staticCache | - | - |
 | `metrics_snapshot_workers_expected` | gauge | count | process | max | operational | `not_exposed` | `always_present` | - | - | - |

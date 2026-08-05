@@ -477,6 +477,20 @@
           "legendFormat": "relay spill {{reason}} / {{job}} / {{instance}}",
           "range": true,
           "refId": "E"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(relay_frame_refused_total{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}[5m])",
+          "legendFormat": "frame refused {{lane}} / {{job}} / {{instance}}",
+          "range": true,
+          "refId": "F"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(relay_frame_oversized_total{adapter=\"svelte-adapter-uws\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}[5m])",
+          "legendFormat": "frame oversized {{job}} / {{instance}}",
+          "range": true,
+          "refId": "G"
         }
       ],
       "title": "Integrity and growth events",

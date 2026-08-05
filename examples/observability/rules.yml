@@ -334,6 +334,31 @@ groups:
             discarded, and the supervisor was asked to replace it.
           runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterrelayspillquarantine'
 
+      - alert: AdapterRelayFrameRefused
+        expr: increase(relay_frame_refused_total{adapter="svelte-adapter-uws"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: Publishes are being refused by the relay frame ceiling
+          description: >-
+            A publish exceeded CLUSTER_RELAY_MAX_FRAME_KB. Local subscribers
+            received it; clients on other workers did not.
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterrelayframerefused'
+
+      - alert: AdapterRelayFrameOversized
+        expr: increase(relay_frame_oversized_total{adapter="svelte-adapter-uws"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: A relay frame exceeded the reassembly ceiling
+          description: >-
+            The primary refused to reassemble a frame far past the sender
+            ceiling and stopped that worker's relay stream. Either a peer is
+            not applying the ceiling, or the stream is corrupt.
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterrelayframeoversized'
+
       - alert: AdapterFatalAssertion
         expr: increase(framework_assertion_violations_total{adapter="svelte-adapter-uws",severity="fatal"}[15m]) > 0
         for: 0m

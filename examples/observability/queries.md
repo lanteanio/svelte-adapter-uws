@@ -57,6 +57,8 @@ Import `dashboard.v1.json` for a compact Grafana view of these target-preserving
 | `relay_spill_quarantines_total` | counter | count | `rate(relay_spill_quarantines_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `relay_spill_dropped_bytes_total` | counter | bytes | `rate(relay_spill_dropped_bytes_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `relay_spill_pending_age_seconds` | gauge | seconds | `relay_spill_pending_age_seconds{adapter="svelte-adapter-uws"}` | The snapshot reports the worst worker. |
+| `relay_frame_refused_total` | counter | count | `rate(relay_frame_refused_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
+| `relay_frame_oversized_total` | counter | count | `rate(relay_frame_oversized_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `framework_assertion_violations_total` | counter | count | `rate(framework_assertion_violations_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `framework_resource_growth_suspected_total` | counter | count | `rate(framework_resource_growth_suspected_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. (not always registered) |
 | `metrics_snapshot_workers_expected` | gauge | count | `metrics_snapshot_workers_expected{adapter="svelte-adapter-uws"}` | Written by the merge itself; no worker registers it. |

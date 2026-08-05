@@ -1,5 +1,52 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createRelaySpillQuarantine } from '../src/runtime/relay-spill-policy.js';
+import { attributeRelayIncident, createRelaySpillQuarantine, relayEligible } from '../src/runtime/relay-spill-policy.js';
+
+describe('relay fan-out eligibility', () => {
+	it('excludes exactly the quarantined peers', () => {
+		expect(relayEligible({ relayQuarantined: false })).toBe(true);
+		expect(relayEligible({ relayQuarantined: true })).toBe(false);
+	});
+});
+
+describe('relay incident attribution', () => {
+	it('never reports through the involved worker and stops at the first survivor', () => {
+		const involved = { postMessage: vi.fn() };
+		const deadReporter = { postMessage: vi.fn(() => { throw new Error('gone'); }) };
+		const reporter = { postMessage: vi.fn() };
+		const late = { postMessage: vi.fn() };
+		const notice = { type: 'relay-frame-oversized', declaredBytes: 9, maxFrameBytes: 4 };
+		const delivered = attributeRelayIncident(
+			new Map([[involved, {}], [deadReporter, {}], [reporter, {}], [late, {}]]),
+			involved,
+			notice
+		);
+		expect(delivered).toBe(true);
+		expect(involved.postMessage).not.toHaveBeenCalled();
+		expect(deadReporter.postMessage).toHaveBeenCalledTimes(1);
+		expect(reporter.postMessage).toHaveBeenCalledWith(notice);
+		expect(late.postMessage).not.toHaveBeenCalled();
+	});
+
+	it('never reports through a quarantined peer, whose registry dies with its requested exit', () => {
+		const involved = { postMessage: vi.fn() };
+		const quarantined = { postMessage: vi.fn() };
+		const survivor = { postMessage: vi.fn() };
+		const delivered = attributeRelayIncident(
+			new Map([[involved, {}], [quarantined, { relayQuarantined: true }], [survivor, {}]]),
+			involved,
+			{ type: 'relay-frame-oversized' }
+		);
+		expect(delivered).toBe(true);
+		expect(quarantined.postMessage).not.toHaveBeenCalled();
+		expect(survivor.postMessage).toHaveBeenCalledTimes(1);
+	});
+
+	it('reports failure when no other worker survives, rather than reporting through the involved one', () => {
+		const involved = { postMessage: vi.fn() };
+		expect(attributeRelayIncident(new Map([[involved, {}]]), involved, { type: 'x' })).toBe(false);
+		expect(involved.postMessage).not.toHaveBeenCalled();
+	});
+});
 
 describe('relay spill quarantine policy', () => {
 	it('quarantines once, reports once through another worker, and requests supervised exit', () => {

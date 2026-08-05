@@ -159,6 +159,18 @@ export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatche
 export { setRelayRingWriter, setRelayFrameCeiling } from './handler/relay.js';
 export { collectLocalMetrics, resolveMetricsSnapshot } from './handler/metrics-snapshot.js';
 export { markRelayAttached } from './handler/state.js';
+
+// The relay frame-ceiling refusal fires in the boot driver's injected sink
+// (runtime/index.js wires setRelayFrameCeiling), which has no reach into the
+// registry built below - so the counter is bound here when instruments
+// register and the driver increments through this one function. Before the
+// registry exists (or without a `metrics` option) it is a no-op, matching
+// every other instrument in this file.
+let relayFrameRefusedInc = null;
+/** @param {'publish' | 'batched'} lane */
+export function noteRelayFrameRefused(lane) {
+	relayFrameRefusedInc?.(lane);
+}
 import { handleRequest } from './handler/request.js';
 import { handleAdminRequest } from './handler/admin.js';
 import { registerRoute } from './handler/route-registry.js';
@@ -824,10 +836,27 @@ if (WS_ENABLED) {
 	const gRelaySpillPendingAge = containMetricInstrument(METRICS?.gauge(
 		'relay_spill_pending_age_seconds', 'Worst oldest-pending age observed at relay spill quarantine', []
 	));
+	// A refusal is decided on THIS worker (the sender), so the count lands here
+	// directly; the boot driver reaches it through noteRelayFrameRefused above.
+	const mRelayFrameRefused = containMetricInstrument(METRICS?.counter(
+		'relay_frame_refused_total', 'Publishes refused by the sender-side relay frame ceiling; local subscribers still received them', ['lane']
+	));
+	relayFrameRefusedInc = (lane) => mRelayFrameRefused?.inc({ lane: lane === 'batched' ? 'batched' : 'publish' });
+	// An oversized-frame stop is a primary-side incident with no registry of its
+	// own; like the spill quarantines it is attributed exactly once to a
+	// surviving worker registry via a posted notice.
+	const mRelayFrameOversized = containMetricInstrument(METRICS?.counter(
+		'relay_frame_oversized_total', 'Relay frames refused at the reassembly ceiling; the sending worker relay stream was stopped', []
+	));
 	let relaySpillPendingAgePeak = 0;
 	if (parentPort) {
 		parentPort.on('message', (msg) => {
-			if (!msg || msg.type !== 'relay-spill-overflow') return;
+			if (!msg) return;
+			if (msg.type === 'relay-frame-oversized') {
+				mRelayFrameOversized?.inc();
+				return;
+			}
+			if (msg.type !== 'relay-spill-overflow') return;
 			const reason = msg.reason === 'age' ? 'age' : 'bytes';
 			const droppedBytes = Number.isFinite(msg.droppedBytes) ? Math.max(0, msg.droppedBytes) : 0;
 			const pendingAgeMs = Number.isFinite(msg.pendingAgeMs) ? Math.max(0, msg.pendingAgeMs) : 0;
