@@ -391,8 +391,13 @@ carries no topic.
 Find the publish that produces multi-megabyte envelopes and shrink it (send a
 reference, split the batch, or move bulk data out of the relay). If the
 deployment genuinely relays frames this large, raise
-`CLUSTER_RELAY_MAX_FRAME_KB` together with `CLUSTER_RELAY_MAX_PENDING_KB` so
-one admitted frame still fits the spill budget it will occupy.
+`CLUSTER_RELAY_MAX_FRAME_KB` together with `CLUSTER_RELAY_MAX_PENDING_KB` -
+and keep the pending budget a few times the largest frame actually relayed,
+not equal to it. An admitted near-ceiling frame occupies most of a peer's
+spill budget while it drains, so at a 1:1 ratio, sustained traffic behind it
+can cross the byte ceiling and quarantine a peer that is merely behind, not
+stalled. Headroom in the pending budget is what keeps the frame ceiling a
+refusal mechanism rather than a quarantine trigger.
 
 ---
 

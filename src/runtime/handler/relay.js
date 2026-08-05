@@ -212,6 +212,18 @@ export function batchRelay(topic, envelope, compress, seq, capability, event, da
 }
 
 /**
+ * One entry of a wire-level batched relay, exactly as platform.publishBatched
+ * builds it. The envelope travels under `env` - NOT `envelope`, which is the
+ * single-publish lane's field name on `batchRelay`'s entries. The two lanes
+ * carry different shapes and nothing mechanical checks JS shapes here, so this
+ * typedef is the one place the contract is written down; the receiver
+ * (handler/lifecycle.js `relayPublishBatched`) asserts `env` on entry, and the
+ * ceiling below reading the wrong lane's field once broke every clustered
+ * publishBatched.
+ * @typedef {{ topic: string, env: string, seq: number | null, origin?: number, ord?: number, birth?: number }} RelayBatchedEntry
+ */
+
+/**
  * Relay one wire-level batched publish (`platform.publishBatched`) to the
  * cluster: over the ring when enabled, else as the `publish-batched`
  * postMessage - the receiving worker dispatches it as one batch envelope
@@ -227,7 +239,7 @@ export function batchRelay(topic, envelope, compress, seq, capability, event, da
  * why both number their frames as they reach the wire: a batch published after a
  * single publish on the same topic overtakes it, and must carry the higher
  * ordinal to match.
- * @param {Array<any>} events
+ * @param {Array<RelayBatchedEntry>} events
  * @param {boolean} compress
  */
 export function relayBatched(events, compress) {
@@ -241,9 +253,7 @@ export function relayBatched(events, compress) {
 	// The whole array travels as ONE frame, so the ceiling is measured over the
 	// whole array and the refusal is wholesale - a batch cannot be half-relayed
 	// without changing what a receiver dispatches. Above the lane split, for the
-	// same reason as the single-publish path. These entries carry `env`, not
-	// `envelope`: this lane relays the pre-built per-event envelopes exactly as
-	// platform.publishBatched hands them over.
+	// same reason as the single-publish path.
 	if (maxRelayEnvelopeBytes !== Infinity) {
 		let total = 0;
 		for (let i = 0; i < events.length; i++) total += events[i].env.length;

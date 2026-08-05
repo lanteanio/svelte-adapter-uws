@@ -1870,6 +1870,7 @@ export const platform = {
 		// the wire-batching benefit cluster-wide instead of degrading to
 		// per-event relays on worker boundaries.
 		if (parentPort) {
+			/** @type {Array<import('./relay.js').RelayBatchedEntry>} */
 			const relayed = [];
 			for (let i = 0; i < messages.length; i++) {
 				const m = messages[i];

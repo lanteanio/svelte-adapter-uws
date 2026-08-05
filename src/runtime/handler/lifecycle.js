@@ -714,10 +714,12 @@ export function relayPublish(topic, envelope, compress, seq, capability, event, 
  * originator and ride along in each per-event envelope; we never
  * re-stamp and never re-relay.
  *
- * @param {Array<{ topic: string, env: string, seq?: number | null, origin?: number, ord?: number, birth?: number }>} events
- *   Each event also carries the sending worker's identity and that worker's
- *   per-topic relay ordinal + stream birth: the batch is one frame but N logical
- *   publishes, so losing it is a hole in each topic's stream (see relayPublish).
+ * @param {Array<import('./relay.js').RelayBatchedEntry>} events
+ *   The batched-lane entry contract, declared once at the sender boundary
+ *   (relay.js) and asserted below. Each event also carries the sending worker's
+ *   identity and that worker's per-topic relay ordinal + stream birth: the
+ *   batch is one frame but N logical publishes, so losing it is a hole in each
+ *   topic's stream (see relayPublish).
  * @param {boolean} [compress] - Batch-level compress intent from the originating
  *   worker; re-gated by this worker's WS_COMPRESSION_ON. Absent -> uncompressed.
  */
