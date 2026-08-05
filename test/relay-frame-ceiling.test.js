@@ -41,7 +41,13 @@ describe('the cluster relay refuses a frame too large to carry', () => {
 		// `parentPort.postMessage` - and `parentPort` is null outside a worker.
 		// That is the vacuity guard for this whole file: a refusal is the only
 		// reason this call can return without throwing.
-		relayBatched([{ topic: 'room', envelope: 'x'.repeat(4096) }], false);
+		//
+		// The entry shape is the PRODUCTION shape: platform.publishBatched relays
+		// `{ topic, env, seq }`, with the envelope under `env`. The first version
+		// of this file invented `envelope` here, and the ceiling read the same
+		// invented field - so the suite was green while every clustered
+		// publishBatched crashed on the real shape.
+		relayBatched([{ topic: 'room', env: 'x'.repeat(4096), seq: null }], false);
 
 		expect(refusals).toEqual([['batched', 'room', 4096, 1024]]);
 	});
@@ -52,7 +58,7 @@ describe('the cluster relay refuses a frame too large to carry', () => {
 
 		// Under the ceiling, so it is handed on - and reaching the null
 		// `parentPort` is what proves it got that far rather than being dropped.
-		expect(() => relayBatched([{ topic: 'room', envelope: 'x'.repeat(16) }], false)).toThrow();
+		expect(() => relayBatched([{ topic: 'room', env: 'x'.repeat(16), seq: null }], false)).toThrow();
 		expect(refusals, 'refused a publish that was under the ceiling').toEqual([]);
 	});
 
@@ -77,7 +83,7 @@ describe('the cluster relay refuses a frame too large to carry', () => {
 		const refusals = [];
 		setRelayFrameCeiling(512, (...args) => refusals.push(args));
 
-		relayBatched([{ topic: 'room', envelope: 'z'.repeat(2048) }], false);
+		relayBatched([{ topic: 'room', env: 'z'.repeat(2048), seq: null }], false);
 
 		expect(refusals).toEqual([['batched', 'room', 2048, 512]]);
 	});

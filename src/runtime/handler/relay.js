@@ -241,10 +241,12 @@ export function relayBatched(events, compress) {
 	// The whole array travels as ONE frame, so the ceiling is measured over the
 	// whole array and the refusal is wholesale - a batch cannot be half-relayed
 	// without changing what a receiver dispatches. Above the lane split, for the
-	// same reason as the single-publish path.
+	// same reason as the single-publish path. These entries carry `env`, not
+	// `envelope`: this lane relays the pre-built per-event envelopes exactly as
+	// platform.publishBatched hands them over.
 	if (maxRelayEnvelopeBytes !== Infinity) {
 		let total = 0;
-		for (let i = 0; i < events.length; i++) total += events[i].envelope.length;
+		for (let i = 0; i < events.length; i++) total += events[i].env.length;
 		if (total > maxRelayEnvelopeBytes) {
 			refuseRelayFrame('batched', events.length > 0 ? events[0].topic : '', total);
 			return;
