@@ -27,7 +27,7 @@ import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './diagn
 import { privateValueMetadata } from './utils/observability-privacy.js';
 import { probeOsPressureSources, emitPressureMetricTelemetry } from './utils/os-pressure.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, pendingSubscribeTotal, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { registerGameIngress, gameLaneClusterSafe } from './handler/game-ingress.js';
@@ -52,7 +52,7 @@ import { joinSharedCohort, leaveSharedCohort } from './handler/cohort.js';
 import { beginResumeCapture, discardResumeCapture, flushResumeTopic, coveredSeqFor } from './handler/resume-buffer.js';
 import { releaseSharedWireId } from './handler/shared-wire-id.js';
 import { setCohortHooks } from './utils.js';
-import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, deniesUngrantedObserve } from './utils/subscribe-policy.js';
+import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './utils/subscribe-policy.js';
 import { startPostureExport } from './utils/posture-export.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './utils/upgrade-headers.js';
 import { collectRequestHeaders, declareSingleValuedProxyHeaders } from './utils/request-headers.js';
@@ -2207,13 +2207,25 @@ if (WS_ENABLED) {
 						sendSubscribeDenied(ws, msg.topic, ref, 'FORBIDDEN');
 						return;
 					}
+					const pendingUd = ws.getUserData();
+					// In-flight authorization is bounded BEFORE it begins: every
+					// pending attempt is a live hook invocation (typically a DB or
+					// session-store query), and the landed cap above cannot see
+					// attempts that never land - repeated frames stack that work
+					// whether their topics are distinct or not. Checked after the
+					// cheap denials so a capped connection still gets its
+					// INVALID_TOPIC / FORBIDDEN answers for frames that cost no
+					// hook work.
+					if (exceedsPendingSubscribeCap({ pending: pendingSubscribeTotal(pendingUd), max: MAX_PENDING_SUBSCRIBES_PER_CONNECTION })) {
+						sendSubscribeDenied(ws, msg.topic, ref, 'RATE_LIMITED');
+						return;
+					}
 					// Track the in-flight subscribe: a revocation
 					// (platform.unsubscribe) landing during the hook await
 					// cannot remove a subscription that does not exist yet,
 					// so it tombstones this topic in the connection's
 					// pending-subscribe set; the landing below checks the
 					// tombstone and discards the grant (revocation TOCTOU).
-					const pendingUd = ws.getUserData();
 					const pendingToken = beginPendingSubscribe(pendingUd, msg.topic, subs.has(msg.topic));
 					const denial = await runUserSubscribeGate(ws, msg.topic);
 					if (denial !== null) {
@@ -2466,6 +2478,30 @@ if (WS_ENABLED) {
 					const authzDenied = _wireAuthz
 						? valid.map((t) => deniesWireSubscribePreHook({ armed: subscribeAuth.enabled, hasUserHook: _hasUserHook && !subscribeAuth.strict, held: userData[WS_SUBSCRIPTIONS].has(t), topic: t }))
 						: null;
+
+					// In-flight authorization capacity: topics beyond the connection's
+					// pending-attempt budget take no further part in the frame - they
+					// never enrol, never reach a hook, and never appear in the landing
+					// loop. The budget counts what is in flight NOW plus what this frame
+					// admits ahead of them, so one oversized frame cannot vault it, and
+					// truncating `valid` in place keeps every downstream pass over this
+					// frame index-aligned.
+					//
+					// A topic the grant gate already refused is answered FORBIDDEN even
+					// here, because that verdict is about the topic and costs no hook
+					// work, while RATE_LIMITED says "ask again". The client retries
+					// RATE_LIMITED and only RATE_LIMITED, so handing it that reason for
+					// a topic it will never be allowed would arm an endless retry - the
+					// same reason the single lane answers its cheap denials first.
+					{
+						const _headroom = MAX_PENDING_SUBSCRIBES_PER_CONNECTION - pendingSubscribeTotal(userData);
+						if (_headroom < valid.length) {
+							for (let i = Math.max(_headroom, 0); i < valid.length; i++) {
+								sendSubscribeDenied(ws, valid[i], ref, authzDenied?.[i] ? 'FORBIDDEN' : 'RATE_LIMITED');
+							}
+							valid.length = Math.max(_headroom, 0);
+						}
+					}
 
 					// Pass 2: gather denial decisions. If a batch hook is exported,
 					// call it once (typically backed by a single DB auth query) and

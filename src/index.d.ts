@@ -1679,8 +1679,14 @@ export interface SubscribeContext {
  * - `'FORBIDDEN'` - user is identified but not authorised for the topic.
  * - `'INVALID_TOPIC'` - topic failed wire-protocol validation
  *   (length / control chars). Emitted by the framework, not the hook.
- * - `'RATE_LIMITED'` - per-subscribe rate limit hit. Reserved; not
- *   emitted by the framework today.
+ * - `'RATE_LIMITED'` - a per-connection subscribe bound tripped. Emitted by
+ *   the framework for the landed-subscription cap, and for the in-flight
+ *   authorization cap - the count of attempts currently parked in their
+ *   (possibly async) hook await; an attempt refused there never reaches the
+ *   hook. Hooks may also return it for their own rate policies. Settled
+ *   attempts free the in-flight budget, and the stock client re-sends a
+ *   topic refused for this reason on a short jittered delay, so the
+ *   condition resolves without application code.
  */
 export type SubscribeDenialReason =
 	| 'UNAUTHENTICATED'

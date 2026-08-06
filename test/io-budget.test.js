@@ -484,7 +484,24 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// array literals, data only. No statement executes on any frame path, no
 	// byte is read, allocated or copied, and no copy primitive entered either
 	// graph.
-	ingress: '1c89eeb70ec5c54c50a498576fd159289db687b53341bd90be34e79f7cc4bf03',
+	//
+	// Re-pinned for the pending-subscribe budget, which reaches this graph
+	// through utils.js -> utils/ws-symbols.js and utils/subscribe-policy.js:
+	// one symbol declaration and a number accessor, one counter increment
+	// beside the existing inflight increment, four counter decrements beside
+	// the existing inflight decrements, one pure comparison predicate, and a
+	// frozen number constant in utils/caps.js. Nothing on any frame path
+	// executes differently; no byte is read, allocated or copied, and no copy
+	// primitive entered the graph.
+	//
+	// Re-pinned again with the budget's review repairs, in the same two
+	// modules: the derived observer lane now consults the same predicate
+	// before it enrols (one comparison, an early `return false`), and the
+	// predicate itself gained a type guard on its count so a non-numeric
+	// slot value fails closed instead of removing the bound. Comparisons and
+	// one early return - no byte is read, allocated or copied, and no copy
+	// primitive entered.
+	ingress: '81c3417d39b14c54f9851cf069822d980edf00ddfa37e76d3724f7f278b07afe',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -569,7 +586,19 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// every clustered publishBatched threw under a finite ceiling. It now reads
 	// `events[i].env.length`. A member-name change in an existing length read;
 	// no byte is read, allocated or copied, and no copy primitive entered.
-	platform: '6964bdf3f479e34198983b53bc51de7d58380e1135396a6f5413795535abdb53',
+	//
+	// Re-pinned for the pending-subscribe budget: platform.js itself gains one
+	// predicate call and two imports ahead of beginPendingSubscribe, and the
+	// graph reaches the same utils/ws-symbols.js counter statements and
+	// utils/subscribe-policy.js predicate the ingress seal names. Number reads,
+	// number arithmetic on userData, and comparisons only - no byte is read,
+	// allocated or copied, and no copy primitive entered.
+	//
+	// Re-pinned again with the budget's review repairs named on the ingress
+	// seal above - the derived lane's pre-enrolment check and the predicate's
+	// count guard, both reached through the same utils graph. Same review, same
+	// verdict: no byte read, allocated or copied, no copy primitive entered.
+	platform: '5113bb1b68fdfb3f3449591652f33aa900d24d3c3274d7dfa4eb6801c4e1fc12',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -577,7 +606,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// copy primitive entered the body.
 	// Re-pinned with the ingress and platform seals above, same drift, same
 	// review: the manifest data literals reached through utils.js.
-	'wire-fanout': 'd789b279d2a13fceb25639cf7824c78d5b19818e9796db426b80af7a7f0ad81e',
+	// Re-pinned again with those seals for the pending-subscribe budget - the
+	// same utils/ws-symbols.js counter statements, utils/subscribe-policy.js
+	// predicate, and utils/caps.js constant reached through utils.js; nothing
+	// in this graph's own modules changed, and no copy primitive entered.
+	// Re-pinned again with the other two seals for that budget's review
+	// repairs - the derived lane's pre-enrolment check and the predicate's
+	// count guard, both in the same shared utils modules. Nothing in this
+	// graph's own modules changed, and no copy primitive entered.
+	'wire-fanout': '78087312a9e6d11331ce3fae800a19aa56068c0e3d05c445e151e40b06a06759',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

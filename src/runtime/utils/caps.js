@@ -14,6 +14,22 @@ export const MAX_SUBSCRIPTIONS_PER_CONNECTION = 1_000_000;
 /** Max in-flight server-initiated `platform.request` calls per connection before further requests reject immediately. */
 export const MAX_PENDING_REQUESTS_PER_CONNECTION = 1_000_000;
 
+/**
+ * Max subscribe attempts one connection may hold IN AUTHORIZATION at once -
+ * wire `subscribe` / `subscribe-batch` frames and `platform.subscribe` calls
+ * parked in their (possibly async) hook await - before further attempts are
+ * denied with `RATE_LIMITED`. Deliberately much smaller than the landed
+ * subscription cap above: a landed subscription is one Set entry, while every
+ * pending attempt is a live hook invocation (typically a DB or session-store
+ * query) plus a pending-map entry, so an unbounded count turns one hostile
+ * connection into unbounded concurrent application work. The landed cap
+ * cannot see any of it - a denied or slow attempt never lands. 4096 keeps
+ * sixteen full 256-topic batch frames in flight at once, far above a healthy
+ * reconnect resubscribe, and a capped client is answered loudly and can
+ * simply retry once its in-flight attempts settle.
+ */
+export const MAX_PENDING_SUBSCRIBES_PER_CONNECTION = 4096;
+
 /** Max distinct keys in the per-connection sendCoalesced buffer before the oldest insertion-order entry is dropped on insert. */
 export const MAX_COALESCED_KEYS_PER_CONNECTION = 1_000_000;
 

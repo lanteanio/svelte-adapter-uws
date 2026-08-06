@@ -510,6 +510,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **In-flight subscribe authorization is bounded per connection.** The
+  landed-subscription cap counts memberships, and a denied, parked, or slow
+  attempt never lands - so one connection against an async authorization hook
+  could hold arbitrarily many hook invocations (typically DB or session-store
+  queries) in flight at once just by sending `subscribe` / `subscribe-batch`
+  frames faster than the hook resolves, accumulating pending-attempt state
+  and concurrent application work no cap ever saw. Attempts past 4,096 per
+  connection are now answered `subscribe-denied` with reason `'RATE_LIMITED'`
+  BEFORE the hook runs; every settled attempt frees its slot. The bound counts
+  attempts, not topics, so repeated frames for one topic are bounded exactly
+  like distinct topics. Applied on the wire single and batch lanes, on
+  `platform.subscribe`, on the derived observer lane presence and cursor
+  subscribe through, and identically in the Vite dev and `createTestServer`
+  mirrors. The budget holds sixteen full 256-topic batch frames in
+  authorization at once.
+- **The client asks again when a subscribe is refused `RATE_LIMITED`.** That
+  reason means a per-connection bound was momentarily full - it clears as the
+  server's in-flight work settles - but the client only warned and kept the
+  topic in its subscribed set, so the application believed it was subscribed
+  while the server had never enrolled it, with nothing correcting it until
+  the next reconnect. Refused topics are now re-asked for on a jittered
+  exponential backoff, batched, only while the application still wants them,
+  and carrying the same recovery offsets the original frame did - so a
+  reconnect resubscribe whose tail exceeds the budget keeps both its
+  subscriptions and its missed tail. The retry gives up after a few attempts
+  and leaves the denial standing on the `denials` store, because the reason
+  is not exclusively that transient bound: the landed-subscription cap
+  answers `RATE_LIMITED` too, and an application hook may return it as its
+  own throttle - which every retry would otherwise re-run. Every other denial
+  reason is a decision about the topic and is still surfaced without a retry.
 - **A publish too large for the cluster relay is refused at its source, not
   carried until something breaks.** New `CLUSTER_RELAY_MAX_FRAME_KB`, defaulting
   to the per-peer spill budget (`CLUSTER_RELAY_MAX_PENDING_KB`), bounds the

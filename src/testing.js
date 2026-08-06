@@ -1,13 +1,13 @@
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders } from './runtime/utils/request-headers.js';
-import { stampSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
+import { stampSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
-import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
-import { beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, isAuthorizationHook, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
+import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
+import { beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, isAuthorizationHook, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
@@ -1288,6 +1288,10 @@ export async function createTestServer(options = {}) {
 			// the production runtime - without it an app's ban logic verified
 			// against this server passes while the equivalent production path is
 			// the one that was fixed.
+			// In-flight authorization is bounded before the hook await, the same
+			// bound production applies: pending attempts are live hook work the
+			// landed cap cannot see.
+			if (exceedsPendingSubscribeCap({ pending: pendingSubscribeTotal(ud), max: MAX_PENDING_SUBSCRIBES_PER_CONNECTION })) return 'RATE_LIMITED';
 			const token = beginPendingSubscribe(ud, topic, subs.has(topic));
 			const denial = await runUserSubscribeGateT(ws, topic);
 			if (denial !== null) {
@@ -2292,6 +2296,13 @@ export async function createTestServer(options = {}) {
 							// without this the tombstone was a guaranteed no-op for every
 							// client-driven subscribe - the attacker-controlled path.
 							const pendingUd = ws.getUserData();
+							// In-flight authorization is bounded before it begins, the
+							// same bound production's wire lane applies: pending attempts
+							// are live hook work the landed cap cannot see.
+							if (exceedsPendingSubscribeCap({ pending: pendingSubscribeTotal(pendingUd), max: MAX_PENDING_SUBSCRIBES_PER_CONNECTION })) {
+								sendDeniedT(ws, msg.topic, ref, 'RATE_LIMITED');
+								return;
+							}
 							const pendingToken = beginPendingSubscribe(pendingUd, msg.topic, subs.has(msg.topic));
 							const denial = await runUserSubscribeGateT(ws, msg.topic);
 							if (denial !== null) {
@@ -2500,6 +2511,23 @@ export async function createTestServer(options = {}) {
 							// answer `true` - "I cancelled the in-flight grant" - while this
 							// path went on to ack the topic and install the membership.
 							const batchUd = ws.getUserData();
+							// In-flight authorization capacity, mirroring production's
+							// batch lane: topics beyond the pending-attempt budget are
+							// answered RATE_LIMITED and take no further part in the frame.
+							// A topic the grant gate already refused keeps its FORBIDDEN
+							// verdict here: that answer is about the topic and costs no
+							// hook work, while the client retries RATE_LIMITED and only
+							// RATE_LIMITED, so the retryable reason must never stand in
+							// for a permanent one.
+							{
+								const _headroom = MAX_PENDING_SUBSCRIBES_PER_CONNECTION - pendingSubscribeTotal(batchUd);
+								if (_headroom < valid.length) {
+									for (let i = Math.max(_headroom, 0); i < valid.length; i++) {
+										sendDeniedT(ws, valid[i], ref, authzDeniedT?.[i] ? 'FORBIDDEN' : 'RATE_LIMITED');
+									}
+									valid.length = Math.max(_headroom, 0);
+								}
+							}
 							const batchTokens = valid.map((t) => beginPendingSubscribe(batchUd, t, batchUd[WS_SUBSCRIPTIONS].has(t)));
 							// A topic the grant gate already denied must not reach the hook,
 							// exactly as on the single path. Running the hook first and

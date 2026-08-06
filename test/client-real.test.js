@@ -2894,6 +2894,163 @@ describe('client.js (real module)', () => {
 			conn.close();
 		});
 
+		// RATE_LIMITED means a per-connection server bound was momentarily
+		// full, and it clears on its own as the server's in-flight work
+		// settles. Warning and moving on left the application believing it
+		// was subscribed to a topic the server never enrolled, with nothing
+		// correcting it until the next reconnect.
+		it('re-sends a topic the server refused RATE_LIMITED', async () => {
+			vi.useFakeTimers();
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const conn = clientModule.connect();
+			const store = clientModule.on('capped');
+			const unsub = store.subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+			const ws = MockWebSocket._last;
+			ws._sent.length = 0;
+
+			ws._receive({ type: 'subscribe-denied', topic: 'capped', ref: 3, reason: 'RATE_LIMITED' });
+			// Not immediate: the retry is deliberately delayed and jittered, so
+			// every connection refused by one full server does not refill it in
+			// the same instant.
+			expect(ws._sent).toHaveLength(0);
+
+			await vi.advanceTimersByTimeAsync(600);
+			const retried = ws._sent
+				.map((s) => JSON.parse(s))
+				.filter((m) => m.type === 'subscribe-batch' || m.type === 'subscribe');
+			expect(retried).toHaveLength(1);
+			expect(retried[0].topics ?? [retried[0].topic]).toContain('capped');
+
+			unsub();
+			warnSpy.mockRestore();
+			conn.close();
+			vi.useRealTimers();
+		});
+
+		// The reason is not exclusively the transient in-flight bound: the
+		// landed-subscription cap answers RATE_LIMITED too, and an application
+		// hook may return it as its own throttle. Retrying forever would turn
+		// either into a hot loop that re-runs the hook every round.
+		it('backs off and gives up rather than retrying RATE_LIMITED forever', async () => {
+			vi.useFakeTimers();
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const conn = clientModule.connect();
+			const store = clientModule.on('always-capped');
+			const unsub = store.subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+			const ws = MockWebSocket._last;
+
+			let rounds = 0;
+			for (let i = 0; i < 12; i++) {
+				ws._sent.length = 0;
+				ws._receive({ type: 'subscribe-denied', topic: 'always-capped', ref: 100 + i, reason: 'RATE_LIMITED' });
+				// Generous enough to cover the whole backoff ladder including jitter.
+				await vi.advanceTimersByTimeAsync(120_000);
+				const retried = ws._sent
+					.map((s) => JSON.parse(s))
+					.filter((m) => m.type === 'subscribe-batch' || m.type === 'subscribe');
+				if (retried.length === 0) break;
+				rounds++;
+			}
+
+			expect(rounds).toBeGreaterThan(0);
+			expect(rounds).toBeLessThanOrEqual(6);
+
+			unsub();
+			warnSpy.mockRestore();
+			conn.close();
+			vi.useRealTimers();
+		});
+
+		// A topic refused during a reconnect resubscribe was asking for its
+		// missed tail too, and the truncated frame served no replay for it.
+		// Re-asking without the offset would restore the subscription and
+		// silently drop the gap.
+		it('carries recovery offsets on a retry after a reconnect resubscribe', async () => {
+			vi.useFakeTimers();
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const conn = clientModule.connect();
+			const store = clientModule.on('recovered');
+			const unsub = store.subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+			const ws1 = MockWebSocket._last;
+			// Land the subscription and take a seq, so the client tracks an offset.
+			ws1._receive({ type: 'subscribed', topic: 'recovered', ref: 1, epoch: 4 });
+			ws1._receive({ topic: 'recovered', event: 'msg', data: 'one', seq: 11 });
+
+			// Reconnect: the resubscribe carries recover, and the server refuses it.
+			ws1.readyState = MockWebSocket.CLOSED;
+			ws1.onclose?.({ code: 1006 });
+			await vi.advanceTimersByTimeAsync(5000);
+			const ws2 = MockWebSocket._last;
+			expect(ws2).not.toBe(ws1);
+			ws2._sent.length = 0;
+			ws2._receive({ type: 'subscribe-denied', topic: 'recovered', ref: 2, reason: 'RATE_LIMITED' });
+			await vi.advanceTimersByTimeAsync(600);
+
+			const retry = ws2._sent
+				.map((s) => JSON.parse(s))
+				.find((m) => m.type === 'subscribe-batch' && m.topics?.includes('recovered'));
+			expect(retry).toBeTruthy();
+			expect(retry.recover?.recovered).toMatchObject({ offset: 11, epoch: 4 });
+
+			unsub();
+			warnSpy.mockRestore();
+			conn.close();
+			vi.useRealTimers();
+		});
+
+		it('does not re-send a topic refused for any other reason', async () => {
+			vi.useFakeTimers();
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const conn = clientModule.connect();
+			const store = clientModule.on('private');
+			const unsub = store.subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+			const ws = MockWebSocket._last;
+			ws._sent.length = 0;
+
+			ws._receive({ type: 'subscribe-denied', topic: 'private', ref: 4, reason: 'FORBIDDEN' });
+			await vi.advanceTimersByTimeAsync(600);
+
+			expect(ws._sent).toHaveLength(0);
+
+			unsub();
+			warnSpy.mockRestore();
+			conn.close();
+			vi.useRealTimers();
+		});
+
+		it('drops a pending retry for a topic the application released', async () => {
+			vi.useFakeTimers();
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const conn = clientModule.connect();
+			const store = clientModule.on('transient');
+			const unsub = store.subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+			const ws = MockWebSocket._last;
+			ws._sent.length = 0;
+
+			ws._receive({ type: 'subscribe-denied', topic: 'transient', ref: 5, reason: 'RATE_LIMITED' });
+			// The application stops wanting the topic while the retry is armed:
+			// the retry must not resurrect a released subscription.
+			unsub();
+			conn.unsubscribe('transient');
+			ws._sent.length = 0;
+			await vi.advanceTimersByTimeAsync(600);
+
+			const resurrect = ws._sent
+				.map((s) => JSON.parse(s))
+				.filter((m) => (m.type === 'subscribe-batch' && m.topics?.includes('transient')) ||
+					(m.type === 'subscribe' && m.topic === 'transient'));
+			expect(resurrect).toHaveLength(0);
+
+			warnSpy.mockRestore();
+			conn.close();
+			vi.useRealTimers();
+		});
+
 		it('routes hostile denial values through structured ASCII-safe diagnostics', async () => {
 			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 			const topic = 'admin' + String.fromCodePoint(0x0007, 0x0085, 0x202e, 0x05d0);

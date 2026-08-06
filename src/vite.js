@@ -3,10 +3,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './runtime/cookies.js';
-import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
+import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
-import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
-import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
+import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
+import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
 import {
 	assertWireSubscribeAuthorization,
 	assertProtectiveNumber,
@@ -743,6 +743,10 @@ export default function uws(options = {}) {
 			if (!(subs instanceof Set)) return 'INVALID_TOPIC';
 			if (subs.has(topic)) return null;
 			if (exceedsSubscriptionCap({ held: subs.has(topic), size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) return 'RATE_LIMITED';
+			// In-flight authorization is bounded before the hook await, the same
+			// bound production applies: pending attempts are live hook work the
+			// landed cap cannot see.
+			if (exceedsPendingSubscribeCap({ pending: pendingSubscribeTotal(ud), max: MAX_PENDING_SUBSCRIBES_PER_CONNECTION })) return 'RATE_LIMITED';
 			// Enrolled, like the wire lanes and like production: a server-side
 			// kick racing a server-side join must cancel it, not install the
 			// grant a moment after `unsubscribe` answered "nothing to revoke".
@@ -1969,6 +1973,13 @@ export default function uws(options = {}) {
 								// membership afterwards - the "dev looser than production"
 								// direction an app then develops against.
 								const pendingUdV = wrapped.getUserData();
+								// In-flight authorization is bounded before it begins, the
+								// same bound production's wire lane applies: pending
+								// attempts are live hook work the landed cap cannot see.
+								if (exceedsPendingSubscribeCap({ pending: pendingSubscribeTotal(pendingUdV), max: MAX_PENDING_SUBSCRIBES_PER_CONNECTION })) {
+									sendDenied(ws, msg.topic, ref, 'RATE_LIMITED');
+									return;
+								}
 								const pendingTokenV = beginPendingSubscribe(pendingUdV, msg.topic, subs.has(msg.topic));
 								const denial = await runUserSubscribeGateV(wrapped, msg.topic);
 								if (denial !== null) {
@@ -2169,6 +2180,25 @@ export default function uws(options = {}) {
 								const authzDeniedV = _wireAuthzV
 									? valid.map((t) => deniesWireSubscribePreHook({ armed: SUBSCRIBE_AUTHZ_V, hasUserHook: _hasUserHookV && !SUBSCRIBE_AUTHZ_STRICT_V, held: _authzSubsV instanceof Set && _authzSubsV.has(t), topic: t }))
 									: null;
+								// In-flight authorization capacity, mirroring production's
+								// batch lane: topics beyond the pending-attempt budget take
+								// no further part in the frame. Decided BEFORE the hook
+								// input is derived below, or the refused topics would still
+								// reach the hook and spend exactly the work this budget
+								// bounds. A topic the grant gate already refused keeps its
+								// FORBIDDEN verdict, because the client retries
+								// RATE_LIMITED and only RATE_LIMITED. Skipped when no
+								// userData exists - such a socket does not enrol below.
+								const batchUdV = /** @type {any} */ (ws).__userData;
+								if (batchUdV) {
+									const _headroomV = MAX_PENDING_SUBSCRIBES_PER_CONNECTION - pendingSubscribeTotal(batchUdV);
+									if (_headroomV < valid.length) {
+										for (let i = Math.max(_headroomV, 0); i < valid.length; i++) {
+											sendDenied(ws, valid[i], ref, authzDeniedV?.[i] ? 'FORBIDDEN' : 'RATE_LIMITED');
+										}
+										valid.length = Math.max(_headroomV, 0);
+									}
+								}
 								// A topic the grant gate already denied must not reach the
 								// hook, as on the single path. Calling the hook first and
 								// reading the decision only at the landing lets a plugin
@@ -2189,7 +2219,6 @@ export default function uws(options = {}) {
 								// is inert here whenever the app ships a subscribe hook,
 								// since `_wireAuthzV` is false in exactly that configuration -
 								// which is the configuration where a hook can park at all.
-								const batchUdV = /** @type {any} */ (ws).__userData;
 								const batchTokensV = batchUdV
 									? valid.map((t) => beginPendingSubscribe(batchUdV, t, batchUdV?.[WS_SUBSCRIPTIONS] instanceof Set && batchUdV[WS_SUBSCRIPTIONS].has(t)))
 									: null;

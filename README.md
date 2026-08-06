@@ -1385,11 +1385,14 @@ A denial is deliberately distinguishable from a delivery failure: nothing was se
 
 ### Capacity model
 
-Every internal `Map` / `Set` that grows with client behaviour or topic cardinality has an explicit upper bound and a defined behaviour at saturation. The defaults are deliberately generous (1,000,000 across the board) - far above any healthy single-connection use, even at uWS's million-connection scale - so the cap catches obvious bugs and runaway clients without ever biting real apps. Aggregate live-connection memory is bounded separately by the opt-in `upgradeAdmission.maxConnections`; per-connection caps are not the right place to defend against a 1M-connection DoS.
+Every internal `Map` / `Set` that grows with client behaviour or topic cardinality has an explicit upper bound and a defined behaviour at saturation. The defaults are deliberately generous (1,000,000 for the retained-state caps) - far above any healthy single-connection use, even at uWS's million-connection scale - so the cap catches obvious bugs and runaway clients without ever biting real apps. Aggregate live-connection memory is bounded separately by the opt-in `upgradeAdmission.maxConnections`; per-connection caps are not the right place to defend against a 1M-connection DoS.
+
+One row is deliberately far tighter than the rest: subscribe attempts **in authorization** are capped at 4,096 rather than 1,000,000, because each one is a live invocation of your `subscribe` / `subscribeBatch` hook - typically a database or session-store query - and not a Set entry. It bounds concurrency, not ownership, so it is transient by construction: every attempt that settles frees its slot, the refusal is the retryable `RATE_LIMITED`, and the stock client re-asks for a topic refused that way on a jittered exponential backoff, giving up after a few attempts and leaving the denial on the `denials` store. The landed-subscription cap in the row above is what bounds how many topics one connection may end up holding.
 
 | Site                                            | Default cap                        | Behaviour at saturation                                               | Override                                             |
 | ----------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------- |
 | Subscriptions per connection                    | 1,000,000                          | `subscribe-denied` with reason `'RATE_LIMITED'`                       | not exposed                                          |
+| Subscribe attempts in authorization per connection | 4,096                           | `subscribe-denied` with reason `'RATE_LIMITED'`; the attempt never reaches the hook | not exposed                            |
 | Pending `platform.request` calls per connection | 1,000,000                          | promise rejects with "pending requests exceeded"                      | not exposed                                          |
 | `sendCoalesced` keys per connection             | 1,000,000                          | drop oldest insertion-order entry on insert                           | not exposed                                          |
 | Topic seq registry (`topicSeqs`)                | 1,000,000                          | one structured `console.warn` with topN publishers; publish continues | not exposed (resume protocol depends on persistence) |
@@ -1909,6 +1912,8 @@ export function subscribe(ws, topic, { platform }) {
   // omit / return undefined / return true -> subscribed
 }
 ```
+
+> **`'RATE_LIMITED'` is the one retryable reason.** The stock client re-asks for a topic denied that way on a jittered exponential backoff (a few attempts, then it stops and leaves the denial on `denials`), because the framework emits it for bounds that clear on their own - see [Capacity model](#capacity-model). Every retry re-runs your hook, so if you return it as your own throttle, expect the client to come back a handful of times before giving up; return `'FORBIDDEN'` (or a custom string) for a refusal you want the client to accept immediately.
 
 Old clients that send `subscribe` without a `ref` get no ack frame (silent allow / silent deny, as before). Old servers that ignore `ref` don't break new clients - they just don't emit acks; the client sees no entry in `denials` and treats the subscription as active.
 

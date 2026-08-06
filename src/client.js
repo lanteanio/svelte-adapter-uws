@@ -1267,6 +1267,82 @@ function createConnection(options) {
 		}
 	}
 
+	// Topics the server refused with RATE_LIMITED, waiting to be asked for
+	// again. That reason means a per-connection bound was momentarily full,
+	// not that the topic is forbidden - the server frees the budget as its
+	// in-flight work settles, so the condition clears on its own and the
+	// only wrong answer is to stop asking. Every other denial reason is a
+	// decision about the topic and is surfaced, never retried.
+	//
+	// This matters most where the refusal is most likely: a reconnect
+	// resubscribe sends every topic at once, so a large subscription set
+	// against a slow authorization hook can exceed the server's in-flight
+	// budget and have its tail refused. Without the retry those topics stay
+	// in `subscribedTopics` - the application believes it is subscribed -
+	// while the server never enrolled them, and nothing corrects it until
+	// the next reconnect.
+	// Topic -> attempts made so far, which is also the backoff step. The
+	// reason is not exclusively the transient bound: the landed-subscription
+	// cap answers RATE_LIMITED too, and an application hook may return it as
+	// its own throttle - and a hook-issued one is re-run by every retry, so
+	// an unbounded loop would amplify the very load the app was shedding.
+	// Retrying therefore backs off and gives up, leaving the denial surfaced
+	// on the `denials` store for the application to act on.
+	/** @type {Map<string, number>} */
+	const rateLimitedTopics = new Map();
+	/** @type {ReturnType<typeof setTimer> | null} */
+	let rateLimitedTimer = null;
+	const RATE_LIMITED_RETRY_MS = 250;
+	const RATE_LIMITED_MAX_ATTEMPTS = 6;
+
+	function flushRateLimitedRetries() {
+		rateLimitedTimer = null;
+		// Still-wanted topics only: one released between the refusal and here
+		// must not be resurrected by its own retry.
+		const topics = [...rateLimitedTopics.keys()].filter((t) => subscribedTopics.has(t));
+		for (const topic of [...rateLimitedTopics.keys()]) {
+			if (!subscribedTopics.has(topic)) rateLimitedTopics.delete(topic);
+		}
+		if (topics.length === 0) return;
+		if (!ws || ws.readyState !== WebSocket.OPEN) return; // the reopen resubscribes everything
+		// chunkResubscribe, not the plain chunker: a topic refused during a
+		// reconnect resubscribe was asking for its missed tail as well, and the
+		// truncated frame served no replay for it. Re-asking without the offset
+		// would restore the subscription and silently drop the gap. Outside a
+		// reconnect no topic carries a tracked seq, so `recover` is null and the
+		// frame is byte-identical to a plain resubscribe.
+		for (const { topics: chunk, recover } of chunkResubscribe(topics)) {
+			const frame = { type: 'subscribe-batch', topics: chunk, ref: nextSubscribeRef++ };
+			if (recover !== null) frame.recover = recover;
+			if (debug) console.log('[ws] subscribe-batch retry ->', chunk, recover ? '(+recover)' : '');
+			_flowSend(() => ws.send(JSON.stringify(frame)));
+		}
+	}
+
+	/** @param {string} topic */
+	function retryRateLimitedSubscribe(topic) {
+		if (!subscribedTopics.has(topic)) return;
+		const attempts = (rateLimitedTopics.get(topic) ?? 0) + 1;
+		if (attempts > RATE_LIMITED_MAX_ATTEMPTS) {
+			// Out of attempts: this is not the transient bound clearing, so stop
+			// asking and leave the denial standing on the store.
+			rateLimitedTopics.delete(topic);
+			return;
+		}
+		rateLimitedTopics.set(topic, attempts);
+		// One timer for the whole refused set, so a refused batch costs one
+		// retry frame per chunk rather than one per topic, and it runs at the
+		// pace of the LEAST-retried topic in the set - a fresh refusal is never
+		// made to wait out another topic's backoff. Jittered, because every
+		// connection refused by the same full server would otherwise retry in
+		// the same instant and refill it together.
+		if (rateLimitedTimer) return;
+		let step = attempts;
+		for (const n of rateLimitedTopics.values()) if (n < step) step = n;
+		const base = RATE_LIMITED_RETRY_MS * Math.pow(2, step - 1);
+		rateLimitedTimer = setTimer(flushRateLimitedRetries, base + dispersedReconnectDelay(0, base));
+	}
+
 	// Cause of the most recent non-open status transition. Set on
 	// TERMINAL/THROTTLE/RETRY close codes, on the reconnect cap being
 	// hit (EXHAUSTED), and on auth-preflight failures (AUTH). Cleared
@@ -1655,6 +1731,9 @@ function createConnection(options) {
 					// can present it back on resume. Old servers omit it; the
 					// map entry is simply absent and resume treats it as a match.
 					if (typeof msg.epoch === 'number') lastSeenEpochs.set(msg.topic, msg.epoch);
+					// The topic landed, so its backoff has served its purpose: a
+					// later refusal is a new episode and starts from the first step.
+					rateLimitedTopics.delete(msg.topic);
 					if (debug) console.log(formatDiagnostic({
 						source: 'svelte-adapter-uws',
 						component: 'client.subscription',
@@ -1725,6 +1804,10 @@ function createConnection(options) {
 						}
 					}));
 					denialsStore.set({ topic: msg.topic, reason: msg.reason, ref: msg.ref });
+					// RATE_LIMITED is a momentarily-full server bound, not a
+					// verdict on the topic: ask again shortly rather than
+					// leaving the application believing it is subscribed.
+					if (msg.reason === 'RATE_LIMITED') retryRateLimitedSubscribe(msg.topic);
 					return;
 				}
 				if (msg.type === 'message-overloaded' && typeof msg.reason === 'string' &&
@@ -1813,6 +1896,18 @@ function createConnection(options) {
 		};
 
 		ws.onclose = (event) => {
+			// Dropped BEFORE the identity guard below: a forced close can race a
+			// reconnect, and a superseded socket's late onclose returns early. If
+			// the retry outlived that return it would fire against the NEW socket
+			// and re-send topics the reopen had already resubscribed - with their
+			// recovery - burning the very budget this retry exists to wait out.
+			// Every close leads to a resubscribe of everything wanted, so a
+			// pending retry is never the thing that restores a subscription.
+			if (rateLimitedTimer) {
+				clearTimer(rateLimitedTimer);
+				rateLimitedTimer = null;
+			}
+			rateLimitedTopics.clear();
 			// A replaced socket's close must not null out (or reconnect over)
 			// the socket that superseded it.
 			if (ws !== sock) return;

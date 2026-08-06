@@ -4,8 +4,8 @@ import { wsModule } from '../ws-handler-bridge.js';
 import { metricsRegistry } from '../metrics-bridge.js';
 import { metricsSnapshot } from './metrics-snapshot.js';
 import { parentPort } from 'node:worker_threads';
-import { exceedsSubscriptionCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
+import { exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
 import { capCounts, captureResumeFrame, counters, maxSeenSeq, divergenceDiagnostics, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, resumeBuffers, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
@@ -1269,6 +1269,11 @@ export const platform = {
 		const held = subs.has(topic);
 		if (held) return null;
 		if (exceedsSubscriptionCap({ held, size: subs.size, max: MAX_SUBSCRIPTIONS_PER_CONNECTION })) return 'RATE_LIMITED';
+		// In-flight authorization is bounded before the hook await, exactly as
+		// the wire lanes bound it: a server-side subscribe loop against a slow
+		// hook stacks the same concurrent work a hostile client would, and the
+		// landed cap above cannot see attempts that never land.
+		if (exceedsPendingSubscribeCap({ pending: pendingSubscribeTotal(ud), max: MAX_PENDING_SUBSCRIBES_PER_CONNECTION })) return 'RATE_LIMITED';
 		// Track the in-flight subscribe so a revocation landing during the
 		// hook await can cancel it: platform.unsubscribe tombstones the topic
 		// in the pending set and the landing below discards the grant instead

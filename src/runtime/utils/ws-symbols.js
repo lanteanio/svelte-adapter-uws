@@ -29,13 +29,13 @@
 // can now reach these slots; that is a deliberate accept since the
 // alternative was a silent cluster-routing break in production.
 
-import { MAX_SUBSCRIPTIONS_PER_CONNECTION } from './caps.js';
+import { MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION } from './caps.js';
 // Cyclic with subscribe-policy.js, which imports isPluginOwnedTopic from here.
 // Safe and deliberate: neither module touches the other's bindings at module
 // eval, only inside function bodies, so the live bindings are resolved by the
 // time either can run. The alternative is the plugin subscribe lane keeping its
 // own copy of the cap decision, which is the divergence this seam exists to end.
-import { exceedsSubscriptionCap } from './subscribe-policy.js';
+import { exceedsSubscriptionCap, exceedsPendingSubscribeCap } from './subscribe-policy.js';
 
 export const WS_SUBSCRIPTIONS = Symbol.for('adapter-uws.ws.subscriptions');
 
@@ -60,6 +60,29 @@ export const WS_SUBSCRIPTIONS = Symbol.for('adapter-uws.ws.subscriptions');
  * in-flight attempt settles, so it holds nothing for an idle connection.
  */
 export const WS_PENDING_SUBSCRIBES = Symbol.for('adapter-uws.ws.pending-subscribes');
+
+/**
+ * Per-connection count of subscribe attempts currently in flight - the sum of
+ * every entry's `inflight` in {@link WS_PENDING_SUBSCRIBES}. Maintained at the
+ * begin/settle choke points in this module ONLY, so it cannot drift from the
+ * map: every path that changes an entry's `inflight` lives here. Read by the
+ * pending-attempt admission check (`exceedsPendingSubscribeCap`) in the wire
+ * and platform subscribe lanes: each pending attempt is a live authorization
+ * hook invocation, and without a bound one connection turns a slow hook into
+ * unbounded concurrent application work the landed-subscription cap never
+ * sees.
+ */
+export const WS_PENDING_SUBSCRIBES_TOTAL = Symbol.for('adapter-uws.ws.pending-subscribes-total');
+
+/**
+ * The connection's current in-flight subscribe attempt count.
+ *
+ * @param {any} ud - the connection's userData
+ * @returns {number}
+ */
+export function pendingSubscribeTotal(ud) {
+	return ud[WS_PENDING_SUBSCRIBES_TOTAL] ?? 0;
+}
 
 /**
  * Open an in-flight subscribe for `topic`, returning the token the landing
@@ -88,6 +111,7 @@ export function beginPendingSubscribe(ud, topic, held = false) {
 		pending.set(topic, entry);
 	}
 	entry.inflight++;
+	ud[WS_PENDING_SUBSCRIBES_TOTAL] = (ud[WS_PENDING_SUBSCRIBES_TOTAL] ?? 0) + 1;
 	return entry.epoch;
 }
 
@@ -112,6 +136,7 @@ export function settlePendingSubscribe(ud, topic, token, granted = false) {
 	if (!entry) return false;
 	if (granted && entry.epoch === token) entry.granted = true;
 	if (--entry.inflight <= 0) pending.delete(topic);
+	ud[WS_PENDING_SUBSCRIBES_TOTAL] = (ud[WS_PENDING_SUBSCRIBES_TOTAL] ?? 1) - 1;
 	return entry.epoch === token;
 }
 
@@ -161,11 +186,13 @@ export function settleHeldSubscribe(ud, topic, token) {
 		// sibling landing afterwards still reads it as current authority.
 		entry.granted = true;
 		if (--entry.inflight <= 0) pending.delete(topic);
+		ud[WS_PENDING_SUBSCRIBES_TOTAL] = (ud[WS_PENDING_SUBSCRIBES_TOTAL] ?? 1) - 1;
 		return 'ack';
 	}
 	const granted = entry.granted === true;
 	const last = entry.inflight <= 1;
 	if (--entry.inflight <= 0) pending.delete(topic);
+	ud[WS_PENDING_SUBSCRIBES_TOTAL] = (ud[WS_PENDING_SUBSCRIBES_TOTAL] ?? 1) - 1;
 	if (granted) return 'ack';
 	return last ? 'deny-unwind' : 'deny';
 }
@@ -215,6 +242,7 @@ export function settleDeniedSubscribe(ud, topic, token, held) {
 	const granted = entry.granted === true;
 	const last = entry.inflight <= 1;
 	if (--entry.inflight <= 0) pending.delete(topic);
+	ud[WS_PENDING_SUBSCRIBES_TOTAL] = (ud[WS_PENDING_SUBSCRIBES_TOTAL] ?? 1) - 1;
 	if (!held || granted || !last) return 'deny';
 	return 'deny-unwind';
 }
@@ -341,6 +369,14 @@ export async function authorizeDerivedSubscribe(ws, topic, authorize) {
 	let ud;
 	try { ud = ws.getUserData(); } catch { return false; }
 	const subs = ud[WS_SUBSCRIPTIONS];
+	// Bounded like every other lane that parks in authorization. This one is
+	// client-triggered too (a presence sync or cursor snapshot frame runs the
+	// app's authorization chain through it), so leaving it unbounded would
+	// keep the whole budget bypassable - and because it shares the counter,
+	// an unbounded derived lane would also starve the connection's own wire
+	// subscribes. Refusing the tap is the established failure here: every
+	// other refusal on this path returns false too.
+	if (exceedsPendingSubscribeCap({ pending: pendingSubscribeTotal(ud), max: MAX_PENDING_SUBSCRIBES_PER_CONNECTION })) return false;
 	const token = beginPendingSubscribe(ud, topic, subs instanceof Set && subs.has(topic));
 	let denied = true;
 	try {

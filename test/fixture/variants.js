@@ -126,6 +126,20 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// Every `subscribeBatch` invocation parks until released, so a suite can
+	// hold MANY whole batch frames in authorization at once - the shape that
+	// fills the per-connection pending-attempt budget. hooks.ws.park.js
+	// deliberately refuses a second park; this handler deliberately collects
+	// them.
+	parkmany: {
+		out: 'build-parkmany',
+		handler: './src/hooks.ws.parkmany.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
 	// A parking `subscribe` hook that releases INTO a group join - so the
 	// revoked attempt's own hook installs tracked membership inside the
 	// begin/settle window, and the landing finds the topic held. The

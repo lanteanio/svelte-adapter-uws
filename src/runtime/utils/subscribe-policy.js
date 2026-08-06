@@ -167,6 +167,30 @@ export function exceedsSubscriptionCap({ held, size, max }) {
 }
 
 /**
+ * Whether the per-connection in-flight authorization cap refuses this
+ * subscribe attempt. Counts attempts parked in their hook await - repeated
+ * frames for ONE topic stack in-flight work exactly like distinct topics do,
+ * so the total is what bounds, not the map's key count. No `held` exemption
+ * on purpose: a re-subscribe to a held topic still runs the hook chain, and
+ * that concurrent work is the resource this cap bounds.
+ *
+ * @param {object} input
+ * @param {number} input.pending - current in-flight attempt count
+ * @param {number} input.max
+ * @returns {boolean}
+ */
+export function exceedsPendingSubscribeCap({ pending, max }) {
+	// Fail closed on a missing cap, same reasoning as exceedsSubscriptionCap.
+	if (typeof max !== 'number' || Number.isNaN(max)) return true;
+	// The count too, unlike the landed cap's `size`: that one reads a Set the
+	// callers already guard, while this one reads a userData slot reachable
+	// through its published `Symbol.for` key. A non-numeric value would make
+	// every comparison false and silently remove the bound.
+	if (typeof pending !== 'number' || Number.isNaN(pending)) return true;
+	return pending >= max;
+}
+
+/**
  * Whether an observer-lane gate (`platform.checkSubscribe` with
  * `requireGrant`) must refuse `topic` before the app's hook chain is even
  * consulted, under the pure-grant model.
