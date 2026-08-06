@@ -38,11 +38,15 @@ let resumeBuffers;
  * way uWS does once a connection is past maxBackpressure - and that INVALIDATES
  * ITSELF on end(), which is the half that matters here.
  *
- * uWS fires the close handler inside end() and every later access throws
- * ('Invalid access of closed uWS.WebSocket'). A scripted socket that stays
- * usable afterwards validates the close path in a world where closing is free,
- * so a caller reading the socket after the flush closed it looks fine here and
- * takes the worker down in production.
+ * uWS fires the close handler synchronously inside end(), and after that a
+ * send() throws ('Invalid access of closed uWS.WebSocket') while
+ * getUserData() keeps working - on that tick and on later ones. MEASURED
+ * against the pinned v20.69.0 with the socket first buried past
+ * maxBackpressure, which is the exact state the flush gives up in; an earlier
+ * version of this file scripted every post-end access as throwing, which is
+ * not what the native socket does. A scripted socket has to model the real
+ * one in both directions: too permissive hides a real hazard, too strict
+ * invents one and invites a fix for a problem that does not exist.
  */
 function refusingWs(acceptCount) {
 	const sent = [];
@@ -55,7 +59,8 @@ function refusingWs(acceptCount) {
 		sent,
 		closed,
 		get dead() { return dead; },
-		getUserData() { alive(); return {}; },
+		// Survives the close, as the native socket does.
+		getUserData() { return {}; },
 		send(payload) {
 			alive();
 			sent.push(String(payload));
@@ -160,12 +165,13 @@ describeUWS('resume gap-fill flush against a refusing socket', () => {
 		expect(markers(ws).length).toBe(1);
 	});
 
-	// The close is only half the answer. uWS invalidates the socket inside end(),
-	// so the flush has to TELL its caller - the subscribe lane goes on to read
-	// getUserData() for the shared-cohort join and to send the ack, and on a dead
-	// socket both throw into an un-awaited async callback, which kills the worker
-	// and every other connection on it.
-	it('reports the close to its caller, so no caller touches a dead socket', () => {
+	// The close is only half the answer: the flush has to TELL its caller, or
+	// the subscribe lane goes on to cohort the connection and ack it as though
+	// it were live, and the client is acked on a socket that is already gone.
+	// Not a crash - the downstream sites guard their own socket calls, and
+	// getUserData() survives the close on the real socket - but an ack for a
+	// resume that did not complete, to nobody.
+	it('reports the close to its caller, so no caller treats a closed socket as live', () => {
 		const ws = refusingWs(0);
 		const handle = beginResumeCapture([TOPIC], ws);
 		fill(4);
@@ -174,8 +180,11 @@ describeUWS('resume gap-fill flush against a refusing socket', () => {
 
 		expect(unusable, 'closed the connection but told the caller nothing').toBe(true);
 		expect(ws.dead).toBe(true);
-		// Exactly what the caller does next, and what it would get for it.
-		expect(() => ws.getUserData()).toThrow(/closed uWS/);
+		// What the caller would do next on the real socket: reading userData
+		// still works, so nothing throws to stop it - the return value is the
+		// only signal there is.
+		expect(() => ws.getUserData()).not.toThrow();
+		expect(() => ws.send('anything')).toThrow(/closed uWS/);
 	});
 
 	it('reports nothing to the caller when the connection survives', () => {
