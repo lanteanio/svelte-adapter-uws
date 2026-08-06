@@ -123,3 +123,43 @@ describe('the batch numeric-seq refusal holds on every surface, not just product
 		assertRefusesNumericSeq(platform, 'vite dev');
 	}, 30000);
 });
+
+// The batch reads the WHOLE caller array before it builds the first envelope,
+// and that too shipped on production and the harness together while only
+// production was pinned - the aliasing suite drives the built fixture, so
+// reverting the harness hunk left the whole suite green. Same drift, same
+// answer: a mirror an application suite certifies against must publish what
+// production publishes.
+describe('the batch reads every entry before application code runs, on the harness too', () => {
+	itUWS('publishes the payload an entry held at call time, not one an earlier entry substituted', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const sent = [];
+		const server = await createTestServer({
+			__onPublish: ({ envelope }) => sent.push(envelope)
+		});
+		teardown.push(() => server.close());
+
+		// A stateful codec, so the call takes the batched walk rather than the
+		// per-entry stateless reroute, which pre-reads on every surface already.
+		const wire = {
+			capability: 'fixture.mirror-alias:1',
+			schemaVersion: 1,
+			state: { onAttach: () => ({ schemaVersion: 1 }) },
+			encode: () => null
+		};
+		const entries = [{ data: null }, { data: { v: 'committed' } }];
+		entries[0].data = {
+			toJSON() {
+				// Entry 1 has not been read yet by a single-pass loop.
+				entries[1].data = { v: 'substituted' };
+				return { v: 'first' };
+			}
+		};
+		server.platform.publishWireBatch('mirror-alias-room', 'update', entries, wire, { seq: false });
+
+		const payloads = sent.map((raw) => JSON.parse(raw).data);
+		expect(payloads.length, 'the harness published no envelopes for this batch').toBe(2);
+		expect(payloads[1], 'the harness published a payload entry 1 never committed, so it disagrees with production')
+			.toEqual({ v: 'committed' });
+	}, 30000);
+});

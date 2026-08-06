@@ -598,7 +598,19 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// seal above - the derived lane's pre-enrolment check and the predicate's
 	// count guard, both reached through the same utils graph. Same review, same
 	// verdict: no byte read, allocated or copied, no copy primitive entered.
-	platform: '5113bb1b68fdfb3f3449591652f33aa900d24d3c3274d7dfa4eb6801c4e1fc12',
+	//
+	// Re-pinned for publishWireBatch's snapshot pass: the stamping loop was
+	// split so every entry's `data` and `excludeWs` are read BEFORE the first
+	// completeEnvelope runs the payload's toJSON. The drift is one added loop
+	// of property reads and stores, the same reads moved out of the loop
+	// below, and `datas` losing its `needsData` guard - it now always exists,
+	// because N payload REFERENCES have to be held before the first
+	// serialise. References, not bytes: nothing is read out of a payload,
+	// nothing is copied, and no copy primitive entered. Allocation is one
+	// array of length N on the JSON path that previously allocated none,
+	// measured against the interleaved shape at 1, 8 and 64 entries and
+	// within run noise (bench/micro-wire-batch-alias-ab.mjs, variant F).
+	platform: '0fc6a37ac9535d9c2c5a1717dd1885c8ca44cd01ed15dd81886da9419603d099',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

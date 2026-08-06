@@ -487,14 +487,21 @@ export const platform = {
 		const opts = options == null ? options : { ...options };
 		assertBatchSequenceAuthority(opts);
 		if (!Array.isArray(entries) || entries.length === 0) return false;
-		// Everything application-owned is read ONCE, here, before any of it can
-		// run. completeEnvelope calls JSON.stringify, so a payload's toJSON
+		// What this call pins, before any application code inside it can run:
+		// the entry COUNT, the OPTIONS object, and every entry's `data` and
+		// `excludeWs`. Not `wire` - the codec object is caller-supplied and its
+		// `capability` and `encode` are read again during the walk, so a payload
+		// that reassigns those changes which codec encodes. That is out of scope
+		// here for the same reason a payload's own fields are: it is the
+		// caller's object, and copying it per message is not a trade this path
+		// makes. completeEnvelope calls JSON.stringify, so a payload's toJSON
 		// executes while this call is still half-built; anything re-read after
 		// that point could be a value the earlier reads never saw - a payload
 		// swapped between the JSON envelope and the binary encode under one seq,
 		// an exclusion cleared between counting it and honouring it, or an entry
 		// count that changed mid-walk. The count and the options are pinned here;
-		// the per-entry fields are pinned in the stamping loop below.
+		// the per-entry fields are pinned in a pass of their own, before any
+		// envelope is built.
 		//
 		// Not defended, because it cannot be without deep-copying every payload
 		// on a per-message path: mutating a payload object's own fields rather
@@ -525,9 +532,13 @@ export const platform = {
 		const compress = WS_COMPRESSION_ON && compressIntent;
 		const relayed = !!(parentPort && (!opts || opts.relay !== false));
 		const relayCap = relayed && getWireCodec(wire.capability) ? wire.capability : undefined;
-		// The payload array is read by the binary walk and by the relay, and by
-		// nothing else - so the JSON fast path (no binary-capable subscriber, no
-		// relay) allocates exactly what it allocated before this guard existed.
+		// Whether anything DOWNSTREAM will read the payload array: the binary
+		// walk and the relay, and nothing else. It no longer decides whether the
+		// array exists - the snapshot pass below has to hold every payload
+		// reference before the first envelope is built either way, so the JSON
+		// fast path now allocates one array of length N where it previously
+		// allocated none. This only decides whether the per-socket walk carries
+		// payloads and whether the relay is handed them.
 		const needsData = relayed || capCounts.has(wire.capability);
 
 		// Per-entry seq, envelope, and stats - the exact bookkeeping N
@@ -540,12 +551,32 @@ export const platform = {
 		}
 		const envs = new Array(count);
 		const seqs = new Array(count);
-		const datas = needsData ? new Array(count) : null;
+		// SNAPSHOT PASS. Every entry's fields are read before any envelope is
+		// built, because completeEnvelope runs the payload's toJSON: with the
+		// reads interleaved, entry 0's application code ran before entries
+		// 1..N-1 had been read and could replace a later payload or a later
+		// exclusion, so the batch delivered values the caller never committed.
+		// Reading them all first is what the stateless branch above already
+		// does, and it is why `datas` exists even when nothing downstream will
+		// read it - N references have to be held before the first serialise.
+		// Measured at 1, 8 and 64 entries against the interleaved shape:
+		// within run noise (bench/micro-wire-batch-alias-ab.mjs, variant F).
+		const datas = new Array(count);
 		// Allocated on the first entry that actually carries an exclusion, so the
 		// common unexcluded batch pays nothing for it. An entry with no exclusion
 		// leaves a hole, which reads as undefined and matches no socket.
 		let excludes = null;
 		let anyExclude = false;
+		for (let i = 0; i < count; i++) {
+			const entry = entries[i];
+			datas[i] = entry.data;
+			const exclude = entry.excludeWs;
+			if (exclude !== undefined && exclude !== null) {
+				if (excludes === null) excludes = new Array(count);
+				excludes[i] = exclude;
+				anyExclude = true;
+			}
+		}
 		// Nothing AUTHORITATIVE moves until every entry has both stamped and
 		// serialised. completeEnvelope runs JSON.stringify, so a payload whose
 		// toJSON throws aborts this loop part-way; advancing the topic watermark
@@ -556,17 +587,9 @@ export const platform = {
 		let batchMessages = 0;
 		let batchBytes = 0;
 		for (let i = 0; i < count; i++) {
-			// One read of each application-owned field, before the toJSON below
-			// can run. Everything downstream reads these, never the caller again.
-			const entry = entries[i];
-			const data = entry.data;
-			const exclude = entry.excludeWs;
-			if (needsData) datas[i] = data;
-			if (exclude !== undefined && exclude !== null) {
-				if (excludes === null) excludes = new Array(count);
-				excludes[i] = exclude;
-				anyExclude = true;
-			}
+			// Reads the snapshot, never the caller: application code has already
+			// run by the second iteration.
+			const data = datas[i];
 			const seq = stampSeq(opts, topicSeqs, topic);
 			seqs[i] = seq == null ? 0 : seq;
 			const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);

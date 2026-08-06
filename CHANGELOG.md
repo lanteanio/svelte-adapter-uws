@@ -682,10 +682,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reproduced against the real runtime and pinned. The array length and the
   options object are pinned on entry, and each entry's `data` and `excludeWs`
   are read exactly once and never read again afterwards, with `sendWireBatch`,
-  `createTestServer` and the Vite dev plugin following the same rule. What this
-  does not promise: a `toJSON` can still change a LATER entry the batch has not
-  reached, and that entry is delivered as it reads when its turn comes - a
-  stateless codec pre-reads the whole array and is stricter on that one point.
+  `createTestServer` and the Vite dev plugin following the same rule.
+  `publishWireBatch` goes further and reads the WHOLE array before it builds
+  the first envelope, so application code inside the call cannot change what
+  that call publishes in either direction - not an entry already built, and
+  not one whose turn has yet to come, which it previously could. The cost is
+  one array of length N that the JSON fast path did not previously allocate:
+  `bench/micro-wire-batch-alias-ab.mjs` (variant F against the shape it
+  replaced) was invoked four times at 1, 8 and 64 entries, and the delta
+  ranged -3.3% to +3.6% with the sign changing between invocations at every
+  size - narrower than the same-side spread across invocations, so within run
+  noise. `sendWireBatch` keeps the narrower rule, so a `toJSON` there can
+  still change a later entry.
   Replacing a payload object's own fields also still reaches the codec - every
   path holds one reference and a per-message deep copy is not a trade this
   adapter makes - so a payload handed to a publish must not be mutated; this is

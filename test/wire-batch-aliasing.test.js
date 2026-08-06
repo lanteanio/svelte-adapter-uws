@@ -122,6 +122,58 @@ describeUWS('publishWireBatch reads each caller entry once', () => {
 		});
 	});
 
+	// FORWARD mutation: the earlier tests pin what entry 1's toJSON can do to
+	// entry 0's already-read fields. This is the other direction, and it is the
+	// one a single read-then-serialise loop leaves open - entry 0's toJSON runs
+	// before entries 1..N-1 have been read at all, so it can choose what the
+	// batch publishes for them.
+	it('publishes the payload entry 1 held at call time, not one entry 0 substituted', () => {
+		const topic = 'wire-batch-aliasing-forward-payload';
+		const wire = { capability: CAP, schemaVersion: 1, state: { onAttach: () => ({ schemaVersion: 1 }) }, encode: () => new Uint8Array([1]) };
+
+		withSockets(topic, (capable, plain) => {
+			const entries = [{ data: null }, { data: { v: 'committed' } }];
+			entries[0].data = {
+				toJSON() {
+					// Entry 1 has not been read yet in a single-pass loop.
+					entries[1].data = { v: 'substituted' };
+					return { v: 'first' };
+				}
+			};
+
+			platform.publishWireBatch(topic, 'update', entries, wire, { seq: false });
+
+			const envelopes = plain.envelopes();
+			expect(envelopes.length).toBe(2);
+			expect(envelopes[1].data, 'entry 1 was published with a payload its own caller never committed')
+				.toEqual({ v: 'committed' });
+		});
+	});
+
+	it('honours the exclusion entry 1 carried at call time, not one entry 0 installed', () => {
+		const topic = 'wire-batch-aliasing-forward-exclude';
+		const wire = { capability: CAP, schemaVersion: 1, state: { onAttach: () => ({ schemaVersion: 1 }) }, encode: () => new Uint8Array([1]) };
+
+		withSockets(topic, (capable, plain) => {
+			const entries = [{ data: null }, { data: { v: 'second' } }];
+			entries[0].data = {
+				toJSON() {
+					// An exclusion the caller never asked for, installed from
+					// inside the call.
+					entries[1].excludeWs = plain;
+					return { v: 'first' };
+				}
+			};
+
+			platform.publishWireBatch(topic, 'update', entries, wire, { seq: false });
+
+			const envelopes = plain.envelopes();
+			expect(envelopes.length, 'an exclusion installed by application code mid-batch withheld an entry the caller published to everyone')
+				.toBe(2);
+			expect(envelopes[1].data).toEqual({ v: 'second' });
+		});
+	});
+
 	it('honours an exclusion that application code clears mid-batch', () => {
 		const topic = 'wire-batch-aliasing-exclude';
 		/** @type {any[]} */

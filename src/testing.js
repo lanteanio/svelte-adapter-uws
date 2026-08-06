@@ -979,19 +979,25 @@ export async function createTestServer(options = {}) {
 			}
 			const envs = new Array(count);
 			const seqs = new Array(count);
+			// Snapshot pass, as production has it: envelope building runs the
+			// payload's toJSON, so the reads for entries 1..N-1 must happen
+			// before the first one is built or entry 0's application code can
+			// replace a later payload or exclusion.
 			const datas = new Array(count);
 			let excludes = null;
 			let anyExclude = false;
 			for (let i = 0; i < count; i++) {
 				const entry = entries[i];
-				const data = entry.data;
+				datas[i] = entry.data;
 				const exclude = entry.excludeWs;
-				datas[i] = data;
 				if (exclude !== undefined && exclude !== null) {
 					if (excludes === null) excludes = new Array(count);
 					excludes[i] = exclude;
 					anyExclude = true;
 				}
+			}
+			for (let i = 0; i < count; i++) {
+				const data = datas[i];
 				const seq = stampSeq(opts, topicSeqs, topic);
 				seqs[i] = seq == null ? 0 : seq;
 				envs[i] = envelope(topic, event, data, seq);

@@ -2484,21 +2484,20 @@ export interface Platform {
 	 * and a dropped frame or announce poisons the capability to JSON until
 	 * reconnect. A stateless codec routes through the per-entry path unchanged.
 	 *
-	 * Every entry is read once. The array length and the options object are
-	 * pinned on entry, and each entry's `data` and `excludeWs` are read once,
-	 * when the batch reaches that entry, and never read again. So nothing
-	 * already built can be rewritten: no two subscribers can be handed different
-	 * bytes for the same entry, and an exclusion cannot be cleared out from
-	 * under the delivery walk.
+	 * The whole array is read before any of it is published. The length and the
+	 * options object are pinned on entry, and every entry's `data` and
+	 * `excludeWs` are read in a pass of their own before the first envelope is
+	 * built - which is where a payload's `toJSON` first runs. So application
+	 * code running inside this call cannot change what the call publishes: not
+	 * an entry already built, and not one whose turn has yet to come. No two
+	 * subscribers are handed different bytes for the same entry, an exclusion
+	 * cannot be cleared out from under the delivery walk, and an exclusion
+	 * cannot be installed on an entry that did not carry one.
 	 *
-	 * It does not freeze the whole array. A payload's `toJSON` runs during
-	 * serialization, so it can still change a LATER entry the batch has not
-	 * reached, and that entry is delivered as it reads when its turn comes.
-	 * (A stateless codec pre-reads the whole array and is stricter on that one
-	 * point.) Replacing a payload's own FIELDS also still reaches every
-	 * subscriber, because each path holds the same object. Do not mutate a
-	 * payload, or another entry, from inside one that has been handed to a
-	 * publish.
+	 * What it does NOT freeze is a payload's own fields: replacing those
+	 * reaches every subscriber, because each path holds the same object rather
+	 * than a copy of it. Do not mutate a payload from inside one that has been
+	 * handed to a publish.
 	 */
 	publishWireBatch(
 		topic: string,
