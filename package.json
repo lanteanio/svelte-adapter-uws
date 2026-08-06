@@ -17,7 +17,8 @@
 	},
 	"type": "module",
 	"bin": {
-		"svelte-adapter-uws-preflight": "./scripts/preflight.js"
+		"svelte-adapter-uws-preflight": "./scripts/preflight.js",
+		"svelte-adapter-uws-capacity": "./scripts/capacity/open-arrival.mjs"
 	},
 	"exports": {
 		".": {

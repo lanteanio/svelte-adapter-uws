@@ -75,8 +75,12 @@ function profile(overrides = {}) {
       }
     }],
     slo: {
-      p95MsMax: 100,
-      p99MsMax: 100,
+      // Headroom over the 25 ms service delay, because latency now includes
+      // the wait for a launch slot: with 8 attempts per phase the p95 IS the
+      // max, so one scheduling hiccup on a loaded machine would otherwise
+      // fail an assertion about something else entirely.
+      p95MsMax: 400,
+      p99MsMax: 400,
       errorRateMax: 0,
       recoveryP95MsMax: 100,
       recoveryErrorRateMax: 0,
@@ -88,6 +92,10 @@ function profile(overrides = {}) {
       operationTimeoutMs: 200,
       sampleIntervalMs: 5,
       drainTimeoutMs: 200,
+      // Explicit rather than derived, and legal because the latency bound
+      // above is 400: the derived budget would be 100 ms, which is a real
+      // tolerance change for a suite whose runs are a few hundred
+      // milliseconds long on a machine with coarse timers.
       maxSchedulerLagMs: 200
     },
     saturation: [{ resource: 'event loop', metric: 'runtime.lag', operator: 'gte', threshold: 0.7, unit: 'ratio' }],
@@ -99,6 +107,123 @@ function profile(overrides = {}) {
 }
 
 describe('capacity kit', () => {
+  // The primary open-model saturation signal is completion throughput falling
+  // below offered load. It can only ever appear if the two are measured
+  // differently - computing both from the same set makes the artifact
+  // structurally incapable of reporting saturation.
+  it('credits a phase only with the work that finished inside it', async () => {
+    const candidate = profile();
+    // Every operation outlives the 80 ms phase that launched it, so each phase
+    // starts its full offered load and completes none of it.
+    candidate.scenarios[0].run = async ({ signal }) => {
+      await delay(120, signal);
+      return { ok: true, status: 200 };
+    };
+    const result = await runCapacity(candidate);
+    const peak = result.phases.find((phase) => phase.name === 'expected_peak');
+
+    expect(peak.started).toBeGreaterThan(0);
+    expect(peak.completed).toBe(0);
+    expect(peak.completionRate).toBe(0);
+    expect(peak.completionRate).toBeLessThan(peak.achievedStartRate);
+  });
+
+  // Latency measured from the actual start hides the time an arrival waited
+  // for a launch slot - the delay a real client feels when the generator
+  // itself is the bottleneck, and the coordinated omission this kit refuses.
+  it('anchors latency to the scheduled arrival and publishes the decomposition', async () => {
+    const candidate = profile();
+    // Block the loop on the first arrival of the peak phase, so the arrivals
+    // scheduled behind it provably start late. Their service time is
+    // unaffected - only the wait for a launch slot grows - so a
+    // start-anchored measurement would report this run as fast while real
+    // clients waited. Busy work rather than a timer, because a timer would
+    // yield and let the injector keep up.
+    let stalled = false;
+    candidate.scenarios[0].run = async ({ phase, signal }) => {
+      if (phase === 'expected_peak' && !stalled) {
+        stalled = true;
+        const until = Date.now() + 60;
+        while (Date.now() < until) { /* hold the loop */ }
+      }
+      await delay(5, signal);
+      return { ok: true, status: 200 };
+    };
+    const result = await runCapacity(candidate);
+    const peak = result.phases.find((phase) => phase.name === 'expected_peak');
+
+    // The artifact says what its latency was measured from, so a result
+    // produced by the earlier start-anchored generator cannot be mistaken for
+    // one of these - it lacks the field and fails schema conformance.
+    expect(result.latencyAnchor).toBe('scheduled-arrival');
+    for (const family of ['latencyMs', 'serviceLatencyMs', 'queueDelayMs']) {
+      expect(peak[family], family).toEqual(expect.objectContaining({ p50: expect.any(Number) }));
+    }
+    // The arrivals behind the stall started tens of milliseconds late. A
+    // start-anchored measurement reports none of it; this one must, and must
+    // attribute it to the generator rather than to the target - whose own
+    // service time for those arrivals was the 5 ms delay.
+    expect(peak.queueDelayMs.max).toBeGreaterThan(20);
+    // Per attempt total = queue + service, so the total distribution can never
+    // sit below the service one. Equality here would mean the queueing was
+    // measured and then discarded.
+    expect(peak.latencyMs.max).toBeGreaterThanOrEqual(peak.serviceLatencyMs.max);
+    expect(peak.latencyMs.p95).toBeGreaterThan(peak.serviceLatencyMs.p95);
+    expect(peak.queueDelayMs.p50).toBeGreaterThanOrEqual(0);
+  });
+
+  it('refuses a lag budget looser than the tightest latency SLO, and derives one when unset', () => {
+    const loose = profile();
+    loose.generator = { ...loose.generator, maxSchedulerLagMs: loose.slo.p95MsMax + 1 };
+    expect(() => validateProfile(loose)).toThrow(/maxSchedulerLagMs.*must be <=/);
+
+    // Omitted, the budget follows the SLO rather than a constant a tight
+    // profile would trip over. The SLO here is tighter than the constant, so
+    // this can only pass if the derivation actually ran.
+    const derived = profile();
+    derived.slo = { ...derived.slo, p95MsMax: 40, p99MsMax: 60 };
+    delete derived.generator.maxSchedulerLagMs;
+    expect(validateProfile(derived).generator.maxSchedulerLagMs).toBe(40);
+
+    // And it never LOOSENS: a profile whose SLO is slacker than the constant
+    // keeps the constant rather than inheriting a budget from the SLO.
+    const slack = profile();
+    slack.slo = { ...slack.slo, p95MsMax: 5_000, p99MsMax: 5_000 };
+    delete slack.generator.maxSchedulerLagMs;
+    expect(validateProfile(slack).generator.maxSchedulerLagMs).toBe(100);
+  });
+
+  // A window that carried almost none of the offered load is not evidence of
+  // recovery; a sparse window is itself a symptom of a target still degraded.
+  it('will not certify recovery from a window that carried almost no load', async () => {
+    const candidate = profile();
+    // Windows of 40 ms at 100/s expect four arrivals each; demanding all of
+    // them makes a window that lost its arrivals unable to certify.
+    candidate.slo = { ...candidate.slo, recoveryWindowMs: 40, recoveryWithinMs: 80, recoveryMinAttemptRatio: 1 };
+    // Hold the loop through the first recovery window so the arrivals due
+    // inside it cannot start until the second one. Window one is then left
+    // with a single attempt that answers well within the recovery SLO - the
+    // exact shape that used to certify recovery on its own.
+    let stalled = false;
+    candidate.scenarios[0].run = async ({ phase, signal }) => {
+      if (phase === 'recovery' && !stalled) {
+        stalled = true;
+        const until = Date.now() + 45;
+        while (Date.now() < until) { /* hold the loop */ }
+      }
+      await delay(2, signal);
+      return { ok: true, status: 200 };
+    };
+    const result = await runCapacity(candidate);
+
+    expect(result.recovery.minAttempts).toBe(4);
+    // Recovery is certified by the SECOND window. Certifying at 40 ms would
+    // mean the first window's lone attempt was accepted as evidence.
+    expect(result.recovery.recovered).toBe(true);
+    expect(result.recovery.recoveredAtMs).toBe(80);
+    expect(result.recovery.attempts).toBeGreaterThanOrEqual(4);
+  });
+
   it('rejects an unpinned or incomplete launch worksheet', () => {
     const candidate = profile();
     candidate.release.imageDigest = 'candidate:latest';
@@ -161,8 +286,7 @@ describe('capacity kit', () => {
         maxInFlight: 100,
         operationTimeoutMs: 200,
         sampleIntervalMs: 20,
-        drainTimeoutMs: 200,
-        maxSchedulerLagMs: 200
+        drainTimeoutMs: 200
       }
     });
     candidate.sample = async ({ phase, signal }) => {
@@ -207,8 +331,7 @@ describe('capacity kit', () => {
         maxInFlight: 1,
         operationTimeoutMs: 200,
         sampleIntervalMs: 5,
-        drainTimeoutMs: 200,
-        maxSchedulerLagMs: 200
+        drainTimeoutMs: 200
       }
     });
     candidate.scenarios[0].run = async ({ signal }) => {

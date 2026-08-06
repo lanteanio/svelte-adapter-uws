@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { randomUUID } from 'node:crypto';
 import { open, unlink } from 'node:fs/promises';
 import os from 'node:os';
@@ -14,6 +15,9 @@ const DEFAULT_GENERATOR = Object.freeze({
   drainTimeoutMs: 60_000,
   maxSchedulerLagMs: 100
 });
+// Half the offered arrivals, so a window certifying recovery has to have
+// carried a representative share of the load rather than one lucky operation.
+const DEFAULT_RECOVERY_MIN_ATTEMPT_RATIO = 0.5;
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -151,6 +155,21 @@ export function validateProfile(input) {
   }
   add(errors, (slo?.recoveryWindowMs ?? Infinity) <= (slo?.recoveryWithinMs ?? 0), 'slo.recoveryWindowMs must be <= recoveryWithinMs');
   add(errors, (slo?.recoveryWithinMs ?? Infinity) <= (input.phases?.[3]?.durationMs ?? 0), 'slo.recoveryWithinMs must fit inside the recovery phase');
+  // How much of the recovery phase's offered load a window must actually have
+  // carried before it may certify recovery. Optional with a default, because
+  // every existing profile predates it and the default is the safe reading.
+  //
+  // Resolved into a LOCAL, never written back onto the caller's object: a
+  // profile is an operator's evidence config, and an author who froze it (the
+  // idiom this file itself uses for its defaults) would otherwise crash inside
+  // the validator, while a misshaped `slo` would throw a raw engine error
+  // before the aggregated report is assembled.
+  const recoveryMinAttemptRatio = isObject(slo) && slo.recoveryMinAttemptRatio !== undefined
+    ? slo.recoveryMinAttemptRatio
+    : DEFAULT_RECOVERY_MIN_ATTEMPT_RATIO;
+  if (isObject(slo)) {
+    add(errors, positive(recoveryMinAttemptRatio) && recoveryMinAttemptRatio <= 1, 'slo.recoveryMinAttemptRatio must be > 0 and <= 1');
+  }
 
   add(errors, typeof input.sample === 'function', 'sample must be a function');
   add(errors, Array.isArray(input.saturation) && input.saturation.length > 0, 'saturation thresholds must be non-empty');
@@ -166,6 +185,28 @@ export function validateProfile(input) {
   }
 
   const generator = { ...DEFAULT_GENERATOR, ...(input.generator ?? {}) };
+  // A lag budget looser than the tightest latency SLO is not a budget: it
+  // permits the generator to be later than the entire latency target while
+  // still reporting integrity. Reported latency is anchored to the scheduled
+  // arrival, so that lag lands inside the p95/p99 gates either way - this
+  // keeps the integrity signal from calling such a run clean.
+  //
+  // Unset, the budget is DERIVED from the SLO rather than left at a constant
+  // that a tight profile would trip over: a profile that never mentions the
+  // generator is always coherent. Set explicitly and looser, it is a
+  // deliberate misconfiguration and fails.
+  const tightestLatencySlo = positive(slo?.p95MsMax) && positive(slo?.p99MsMax)
+    ? Math.min(slo.p95MsMax, slo.p99MsMax)
+    : null;
+  if (input.generator?.maxSchedulerLagMs === undefined && tightestLatencySlo !== null) {
+    generator.maxSchedulerLagMs = Math.min(DEFAULT_GENERATOR.maxSchedulerLagMs, tightestLatencySlo);
+  } else if (tightestLatencySlo !== null) {
+    add(
+      errors,
+      !positive(generator.maxSchedulerLagMs) || generator.maxSchedulerLagMs <= tightestLatencySlo,
+      `generator.maxSchedulerLagMs (${generator.maxSchedulerLagMs}) must be <= the tightest slo latency bound (${tightestLatencySlo} ms); omit it to derive one`
+    );
+  }
   for (const key of ['maxInFlight', 'operationTimeoutMs', 'sampleIntervalMs', 'drainTimeoutMs', 'maxSchedulerLagMs']) {
     add(errors, positive(generator[key]), `generator.${key} must be > 0`);
   }
@@ -180,13 +221,25 @@ export function validateProfile(input) {
   for (const [label, value] of [['release', release], ['environment', environment], ['topology', topology], ['expectedPeak', peak], ['slo', slo], ['generator', generator], ['phases', input.phases], ['saturation', input.saturation]]) {
     dataClone(value, label);
   }
-  return { ...input, generator };
+  // Normalized copies, so the resolved defaults travel with the profile the
+  // run uses without the caller's own object ever being written to.
+  return { ...input, generator, slo: { ...slo, recoveryMinAttemptRatio } };
 }
 
 export function percentile(values, quantile) {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * quantile) - 1)];
+}
+
+/** The distribution shape every latency family in the artifact reports. */
+function percentiles(values) {
+  return {
+    p50: percentile(values, 0.5),
+    p95: percentile(values, 0.95),
+    p99: percentile(values, 0.99),
+    max: values.length === 0 ? null : Math.max(...values)
+  };
 }
 
 function chooseScenario(scenarios, index) {
@@ -212,6 +265,12 @@ function crossed(value, threshold) {
 
 function summarizePhase(record, attempts, scenarios) {
   const own = attempts.filter((attempt) => attempt.phase === record.name);
+  // Attempts are attributed to the phase that LAUNCHED them and recorded
+  // whenever they finish, so a phase whose work drains into the next one must
+  // not count that work as its own throughput. Completion falling below
+  // offered load is the primary open-model saturation signal, and it can only
+  // appear if these two are measured differently.
+  const finishedInPhase = own.filter((attempt) => attempt.completedAtMs < record.endedAtMs);
   const latencies = own.map((attempt) => attempt.latencyMs);
   const failed = own.filter((attempt) => !attempt.ok).length;
   const seconds = record.durationMs / 1_000;
@@ -221,13 +280,19 @@ function summarizePhase(record, attempts, scenarios) {
     durationMs: record.durationMs,
     scheduled: record.scheduled,
     started: own.length,
-    completed: own.length,
+    completed: finishedInPhase.length,
     succeeded: own.length - failed,
     failed,
     injectorDropped: record.injectorDropped,
     achievedStartRate: own.length / seconds,
-    completionRate: own.length / seconds,
+    completionRate: finishedInPhase.length / seconds,
     errorRate: own.length === 0 ? 1 : failed / own.length,
+    // `latencyMs` is what a client at this offered rate would have observed:
+    // scheduled arrival to completion. The SLO gates read it. The two
+    // components below decompose it - `serviceLatencyMs` is the target's own
+    // time, `queueDelayMs` is how late the injector was to start.
+    serviceLatencyMs: percentiles(own.map((attempt) => attempt.serviceLatencyMs)),
+    queueDelayMs: percentiles(own.map((attempt) => attempt.queueDelayMs)),
     latencyMs: {
       p50: percentile(latencies, 0.5),
       p95: percentile(latencies, 0.95),
@@ -285,6 +350,16 @@ async function waitUntil(due) {
 
 function recoveryEvidence(attempts, recoveryRecord, slo) {
   const limit = Math.min(slo.recoveryWithinMs, recoveryRecord.durationMs);
+  // A window may only certify recovery if it actually carried the load the
+  // phase offered. Without this, one successful operation in an otherwise
+  // silent window declares the system recovered - the thinnest possible
+  // evidence for the gate whose whole job is to refuse missing evidence, and
+  // a sparse window is itself a symptom of a target that has not recovered.
+  // Derived from offered load rather than a constant, so the bar scales with
+  // the profile instead of being generous at high rates and impossible at low
+  // ones.
+  const expectedPerWindow = recoveryRecord.arrivalRate * (slo.recoveryWindowMs / 1_000);
+  const minAttempts = Math.max(1, Math.ceil(expectedPerWindow * slo.recoveryMinAttemptRatio));
   let lastWindow = null;
   for (let end = slo.recoveryWindowMs; end <= limit; end += slo.recoveryWindowMs) {
     const start = end - slo.recoveryWindowMs;
@@ -292,12 +367,12 @@ function recoveryEvidence(attempts, recoveryRecord, slo) {
     if (windowAttempts.length === 0) continue;
     const p95 = percentile(windowAttempts.map((attempt) => attempt.latencyMs), 0.95);
     const errorRate = windowAttempts.filter((attempt) => !attempt.ok).length / windowAttempts.length;
-    lastWindow = { windowStartMs: start, windowEndMs: end, attempts: windowAttempts.length, p95Ms: p95, errorRate };
-    if (p95 <= slo.recoveryP95MsMax && errorRate <= slo.recoveryErrorRateMax) {
+    lastWindow = { windowStartMs: start, windowEndMs: end, attempts: windowAttempts.length, minAttempts, p95Ms: p95, errorRate };
+    if (windowAttempts.length >= minAttempts && p95 <= slo.recoveryP95MsMax && errorRate <= slo.recoveryErrorRateMax) {
       return { recovered: true, recoveredAtMs: end, ...lastWindow };
     }
   }
-  return { recovered: false, recoveredAtMs: null, ...(lastWindow ?? { windowStartMs: null, windowEndMs: null, attempts: 0, p95Ms: null, errorRate: null }) };
+  return { recovered: false, recoveredAtMs: null, ...(lastWindow ?? { windowStartMs: null, windowEndMs: null, attempts: 0, minAttempts, p95Ms: null, errorRate: null }) };
 }
 
 /** Run a validated workload. Starts are clocked by offered load, never by completions. */
@@ -399,7 +474,17 @@ export async function runCapacity(profileInput) {
           dueAtMs,
           startedAtMs,
           completedAtMs,
-          latencyMs: completedAtMs - startedAtMs,
+          // Anchored to the SCHEDULED arrival, not to the moment the injector
+          // got around to starting it. An open model offers load on a clock,
+          // so time spent waiting for a launch slot is delay a real client
+          // would have felt; measuring from the actual start hides exactly the
+          // delay that appears when the generator itself is the bottleneck,
+          // which is the coordinated omission this kit exists to refuse.
+          latencyMs: completedAtMs - dueAtMs,
+          // The two halves, published so a reviewer can tell a slow target
+          // apart from a late injector rather than inferring it.
+          serviceLatencyMs: completedAtMs - startedAtMs,
+          queueDelayMs: startedAtMs - dueAtMs,
           ok: normalized.ok !== false,
           status: normalized.status ?? null,
           errorCode: normalized.ok === false ? String(normalized.errorCode ?? normalized.status ?? 'FAILED') : null,
@@ -414,7 +499,17 @@ export async function runCapacity(profileInput) {
           dueAtMs,
           startedAtMs,
           completedAtMs,
-          latencyMs: completedAtMs - startedAtMs,
+          // Anchored to the SCHEDULED arrival, not to the moment the injector
+          // got around to starting it. An open model offers load on a clock,
+          // so time spent waiting for a launch slot is delay a real client
+          // would have felt; measuring from the actual start hides exactly the
+          // delay that appears when the generator itself is the bottleneck,
+          // which is the coordinated omission this kit exists to refuse.
+          latencyMs: completedAtMs - dueAtMs,
+          // The two halves, published so a reviewer can tell a slow target
+          // apart from a late injector rather than inferring it.
+          serviceLatencyMs: completedAtMs - startedAtMs,
+          queueDelayMs: startedAtMs - dueAtMs,
           ok: false,
           status: null,
           errorCode: error?.name ?? 'Error',
@@ -524,6 +619,13 @@ export async function runCapacity(profileInput) {
   const wallFinishedAt = new Date();
   return {
     schemaVersion: 1,
+    // What `latencyMs` is measured from. Earlier runs of this kit measured
+    // from the actual start, which excluded injector queueing and is not
+    // comparable with a scheduled-arrival measurement - and carried no field
+    // saying so. Stating it makes every artifact self-describing, and an
+    // artifact without it is correctly refused by the schema rather than
+    // quietly compared against one that means something else.
+    latencyAnchor: 'scheduled-arrival',
     runId: randomUUID(),
     profile: {
       name: profile.name,

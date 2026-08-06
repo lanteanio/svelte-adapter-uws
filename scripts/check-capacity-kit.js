@@ -91,7 +91,14 @@ if (errors.length === 0) {
   if (schema) {
     if (schema.$schema !== 'https://json-schema.org/draft/2020-12/schema') errors.push('result schema must use JSON Schema 2020-12');
     if (schema.properties?.schemaVersion?.const !== 1) errors.push('result schema must pin schemaVersion 1');
-    for (const field of ['profile', 'runtime', 'timing', 'phases', 'firstSaturatedResource', 'recovery', 'telemetry', 'integrity', 'gates', 'pass']) {
+    // The anchor is what makes a result comparable at all - it is the reason
+    // this contract did not need a version bump when latency changed meaning.
+    // Pinned like the version itself, so it cannot be dropped from the schema
+    // and the runner together without this saying so.
+    if (schema.properties?.latencyAnchor?.const !== 'scheduled-arrival') {
+      errors.push("result schema must pin latencyAnchor 'scheduled-arrival'");
+    }
+    for (const field of ['latencyAnchor', 'profile', 'runtime', 'timing', 'phases', 'firstSaturatedResource', 'recovery', 'telemetry', 'integrity', 'gates', 'pass']) {
       if (!schema.required?.includes(field)) errors.push(`result schema must require ${field}`);
     }
     if (schema.properties?.phases?.minItems !== 4 || schema.properties?.phases?.maxItems !== 4) errors.push('result schema must require exactly four phases');
@@ -132,7 +139,7 @@ if (errors.length === 0) {
     ],
     scenarios: [{ name: 'probe', weight: 1, description: 'contract probe', run() {} }],
     slo: { p95MsMax: 1, p99MsMax: 1, errorRateMax: 0, recoveryP95MsMax: 1, recoveryErrorRateMax: 0, recoveryWindowMs: 500, recoveryWithinMs: 1_000 },
-    generator: { maxInFlight: 10, operationTimeoutMs: 1_000, sampleIntervalMs: 100, drainTimeoutMs: 1_000, maxSchedulerLagMs: 100 },
+    generator: { maxInFlight: 10, operationTimeoutMs: 1_000, sampleIntervalMs: 100, drainTimeoutMs: 1_000 },
     saturation: [{ resource: 'test', metric: 'test.value', operator: 'gte', threshold: 1, unit: 'ratio' }],
     sample() { return { test: { value: 1 } }; }
   };
@@ -157,7 +164,7 @@ if (errors.length === 0) {
           { name: 'recovery', durationMs: 20, arrivalRate: 100 }
         ],
         slo: { p95MsMax: 100, p99MsMax: 100, errorRateMax: 0, recoveryP95MsMax: 100, recoveryErrorRateMax: 0, recoveryWindowMs: 10, recoveryWithinMs: 20 },
-        generator: { maxInFlight: 10, operationTimeoutMs: 100, sampleIntervalMs: 2, drainTimeoutMs: 100, maxSchedulerLagMs: 100 },
+        generator: { maxInFlight: 10, operationTimeoutMs: 100, sampleIntervalMs: 2, drainTimeoutMs: 100 },
         sample({ phase }) { return { test: { value: phase === 'overload' ? 1 : 0 } }; }
       };
       const result = await runCapacity(executionProfile);

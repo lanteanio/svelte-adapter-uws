@@ -65,8 +65,8 @@ describe('consumer native preflight', () => {
 		expect(lines.some((line) => line.includes('preflight OK'))).toBe(false);
 	});
 
-	it('ships the executable and every internal module it imports', () => {
-		expect(pkg.bin).toEqual({ 'svelte-adapter-uws-preflight': './scripts/preflight.js' });
+	it('ships every executable it declares, and every internal module they import', () => {
+		expect(pkg.bin['svelte-adapter-uws-preflight']).toBe('./scripts/preflight.js');
 		for (const file of [
 			'scripts/preflight.js',
 			'scripts/doctor.js',
@@ -75,21 +75,37 @@ describe('consumer native preflight', () => {
 			expect(pkg.files).toContain(file);
 		}
 
-		// The bin's own file list must be derived from what it actually
-		// imports, not from a hand-kept trio: a new internal import that is
-		// not published turns the published bin into a module-not-found.
-		const source = readFileSync(new URL('../scripts/preflight.js', import.meta.url), 'utf8');
-		const localImports = [...source.matchAll(/from\s+'(\.[^']+)'/g)].map((m) => m[1]);
-		expect(localImports.length).toBeGreaterThan(0);
-		for (const specifier of localImports) {
-			// Normalize against the bin's own directory: an import may climb
-			// out of scripts/ (../src/...), and `files` publishes whole
-			// directories as well as individual paths.
-			const relative = posix.normalize(posix.join('scripts', specifier));
-			const published = pkg.files.some((entry) =>
-				entry === relative || relative.startsWith(entry.replace(/\/$/, '') + '/'));
-			expect(published, `${relative} is imported by the bin but not published`).toBe(true);
+		/** Whether `files` publishes a path, directly or through a directory. */
+		const publishes = (relative) => pkg.files.some((entry) =>
+			entry === relative || relative.startsWith(entry.replace(/\/$/, '') + '/'));
+
+		// Every declared bin, not only the first one written: a bin that is
+		// not published, or whose internal imports are not, is a
+		// module-not-found the moment a consumer runs it - and that is
+		// invisible here until someone runs the published package.
+		for (const [name, target] of Object.entries(pkg.bin)) {
+			const relativeTarget = target.replace(/^\.\//, '');
+			expect(publishes(relativeTarget), `bin ${name} -> ${relativeTarget} is not published`).toBe(true);
+
+			// The file list must be derived from what each bin actually
+			// imports, not from a hand-kept list.
+			const source = readFileSync(new URL(`../${relativeTarget}`, import.meta.url), 'utf8');
+			const localImports = [...source.matchAll(/from\s+'(\.[^']+)'/g)].map((m) => m[1]);
+			const binDirectory = posix.dirname(relativeTarget);
+			for (const specifier of localImports) {
+				// Normalize against the bin's OWN directory: an import may
+				// climb out of it (../src/...), and a bin nested deeper than
+				// scripts/ resolves its siblings from where it actually sits.
+				const relative = posix.normalize(posix.join(binDirectory, specifier));
+				expect(publishes(relative), `${relative} is imported by bin ${name} but not published`).toBe(true);
+			}
 		}
+
+		// The preflight bin in particular is expected to have internal
+		// imports; a version of it with none would mean the diagnosis moved
+		// somewhere this check no longer follows.
+		const preflightSource = readFileSync(new URL('../scripts/preflight.js', import.meta.url), 'utf8');
+		expect([...preflightSource.matchAll(/from\s+'(\.[^']+)'/g)].length).toBeGreaterThan(0);
 	});
 
 	it('runs as a real spawned process, not a silently skipped module', async () => {

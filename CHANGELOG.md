@@ -510,6 +510,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The capacity kit's two headline numbers could not report saturation.**
+  `completed` and `completionRate` were computed from the same expression as
+  `started` and `achievedStartRate`, so completion throughput falling below
+  offered load - the primary saturation signal of an open model - was
+  structurally unreportable; attempts are attributed to the phase that
+  launched them, so work draining into the next phase was still credited to
+  the phase that offered it. `completed` now counts only what finished inside
+  the phase. And latency was anchored to the moment the injector managed to
+  start an operation rather than to its scheduled arrival, so a generator
+  that could not keep up produced fast-looking p95/p99 numbers while real
+  clients waited - the coordinated omission the kit exists to refuse.
+  `latencyMs` is now measured from the scheduled arrival and is what the SLO
+  gates read, with `serviceLatencyMs` and `queueDelayMs` publishing the two
+  halves so a slow target and a late generator are told apart. The scheduler
+  lag budget is derived from the tightest latency SLO when unset, and an
+  explicit value looser than that SLO is refused instead of quietly
+  permitting the generator to miss by more than the whole latency target.
+- **A capacity recovery window must now have carried real load to certify
+  recovery.** Any window that passed p95 and error rate could declare
+  recovery regardless of how little load it carried, which is thin evidence
+  for the gate whose job is to reject missing evidence - and a sparse window
+  is itself a symptom of a target that has not recovered. A window must now
+  carry a share of the recovery phase's offered arrivals, defaulting to half
+  and configurable through `slo.recoveryMinAttemptRatio`, never fewer than
+  one (a phase offering fewer arrivals per window than that cannot be held to
+  a higher count). The requirement is reported as `minAttempts` beside the
+  window that certified, so a reviewer can see how much evidence was behind
+  the verdict.
+- **A capacity result states what its latency was measured from.** The
+  artifact gained a required `latencyAnchor`, because the same
+  `schemaVersion` previously covered both the start-anchored numbers and the
+  scheduled-arrival ones that replace them, and nothing in the file said
+  which it held. Results produced before this change no longer validate,
+  which is the correct outcome: their percentiles are not comparable with the
+  ones the gates now read.
+- **The capacity runner is runnable by the consumers it ships to.** It was
+  packaged but documented only through this repository's own npm script,
+  which an installing application cannot run. It now has a
+  `svelte-adapter-uws-capacity` bin, and the guide shows the bin and the
+  direct `node_modules` path alongside the contributor form.
 - **In-flight subscribe authorization is bounded per connection.** The
   landed-subscription cap counts memberships, and a denied, parked, or slow
   attempt never lands - so one connection against an async authorization hook

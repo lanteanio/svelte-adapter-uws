@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schemaVersion",
+    "latencyAnchor",
     "runId",
     "profile",
     "runtime",
@@ -20,6 +21,7 @@
   ],
   "properties": {
     "schemaVersion": { "const": 1 },
+    "latencyAnchor": { "const": "scheduled-arrival", "description": "What latencyMs is measured from. Required, so an artifact produced before latency included injector queueing cannot be silently compared against one that does." },
     "runId": { "type": "string", "format": "uuid" },
     "profile": { "$ref": "#/$defs/profile" },
     "runtime": { "$ref": "#/$defs/runtime" },
@@ -128,7 +130,7 @@
     "slo": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["p95MsMax", "p99MsMax", "errorRateMax", "recoveryP95MsMax", "recoveryErrorRateMax", "recoveryWindowMs", "recoveryWithinMs"],
+      "required": ["p95MsMax", "p99MsMax", "errorRateMax", "recoveryP95MsMax", "recoveryErrorRateMax", "recoveryWindowMs", "recoveryWithinMs", "recoveryMinAttemptRatio"],
       "properties": {
         "p95MsMax": { "type": "number", "exclusiveMinimum": 0 },
         "p99MsMax": { "type": "number", "exclusiveMinimum": 0 },
@@ -136,7 +138,8 @@
         "recoveryP95MsMax": { "type": "number", "exclusiveMinimum": 0 },
         "recoveryErrorRateMax": { "type": "number", "minimum": 0, "maximum": 1 },
         "recoveryWindowMs": { "type": "number", "exclusiveMinimum": 0 },
-        "recoveryWithinMs": { "type": "number", "exclusiveMinimum": 0 }
+        "recoveryWithinMs": { "type": "number", "exclusiveMinimum": 0 },
+        "recoveryMinAttemptRatio": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "description": "Share of the recovery phase's offered arrivals a window must have carried before it may certify recovery. Defaults to 0.5." }
       }
     },
     "phaseConfig": {
@@ -241,7 +244,7 @@
     "phaseSummary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "targetArrivalRate", "durationMs", "scheduled", "started", "completed", "succeeded", "failed", "injectorDropped", "achievedStartRate", "completionRate", "errorRate", "latencyMs", "scenarios", "errors"],
+      "required": ["name", "targetArrivalRate", "durationMs", "scheduled", "started", "completed", "succeeded", "failed", "injectorDropped", "achievedStartRate", "completionRate", "errorRate", "latencyMs", "serviceLatencyMs", "queueDelayMs", "scenarios", "errors"],
       "properties": {
         "name": { "enum": ["warmup", "expected_peak", "overload", "recovery"] },
         "targetArrivalRate": { "type": "number", "exclusiveMinimum": 0 },
@@ -255,7 +258,9 @@
         "achievedStartRate": { "type": "number", "minimum": 0 },
         "completionRate": { "type": "number", "minimum": 0 },
         "errorRate": { "type": "number", "minimum": 0, "maximum": 1 },
-        "latencyMs": { "$ref": "#/$defs/latency" },
+        "latencyMs": { "$ref": "#/$defs/latency", "description": "Scheduled arrival to completion - what a client at this offered rate observes. The SLO gates read this." },
+        "serviceLatencyMs": { "$ref": "#/$defs/latency", "description": "Actual start to completion: the target's own time, excluding injector queueing." },
+        "queueDelayMs": { "$ref": "#/$defs/latency", "description": "Scheduled arrival to actual start: how late the generator was. Per attempt, latency is queue delay plus service time; these are percentiles over three different orderings, so the same relation does not hold between the reported quantiles." },
         "scenarios": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/scenarioSummary" } },
         "errors": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 1 } }
       }
@@ -298,13 +303,14 @@
     "recoveryEvidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["recovered", "recoveredAtMs", "windowStartMs", "windowEndMs", "attempts", "p95Ms", "errorRate"],
+      "required": ["recovered", "recoveredAtMs", "windowStartMs", "windowEndMs", "attempts", "minAttempts", "p95Ms", "errorRate"],
       "properties": {
         "recovered": { "type": "boolean" },
         "recoveredAtMs": { "$ref": "#/$defs/numberOrNull" },
         "windowStartMs": { "$ref": "#/$defs/numberOrNull" },
         "windowEndMs": { "$ref": "#/$defs/numberOrNull" },
         "attempts": { "type": "integer", "minimum": 0 },
+        "minAttempts": { "type": "integer", "minimum": 1, "description": "Attempts the window had to carry to be allowed to certify recovery." },
         "p95Ms": { "$ref": "#/$defs/numberOrNull" },
         "errorRate": { "$ref": "#/$defs/numberOrNull" }
       }
