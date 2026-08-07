@@ -1291,8 +1291,9 @@ an inner codec the endpoint never advertised.
 
 This section binds the reliable Lantean protocol to one long-lived
 client-initiated WebTransport bidirectional stream. The stream is an ordered
-byte stream, not a message transport, so it adds one record delimiter around
-the unchanged WebSocket message bytes. The same QUIC connection may
+byte stream, not a message transport, so it adds one record delimiter and one
+message-type byte around the unchanged WebSocket message bytes. The same QUIC
+connection may
 simultaneously carry section 14's unreliable `game` datagrams.
 
 Section 14 remains the datagram binding and section 15 remains the reliable
@@ -1312,11 +1313,12 @@ incompatible future carriage requires a new CONNECT token.
 Each stream record is:
 
 ```
-[messageLength:varint][messageBytes:messageLength]
+[messageLength:varint][kind:u8][messageBytes:messageLength]
 ```
 
 - `messageLength` is canonical unsigned LEB128, using the primitive encoding
-  of section 6.3. It counts `messageBytes` only. A canonical encoding is the
+  of section 6.3. It counts `messageBytes` only; the `kind` byte is carriage
+  framing, exactly like the prefix, and is never counted. A canonical encoding is the
   shortest possible encoding; a redundant continuation byte is a protocol
   error. The prefix MUST NOT exceed **5 bytes**, which locally narrows the
   uncapped primitive of section 6.3. A receiver MUST reject a longer one with
@@ -1350,22 +1352,44 @@ Each stream record is:
   carriage improves is diagnosis: an over-limit server-to-client message is a
   SILENT drop on WebSocket (section 1.3) but a signalled `RECORD_TOO_LARGE`
   here, so the same mistake is visible instead of invisible.
+- `kind` re-supplies the one bit of WebSocket framing a byte stream discards:
+  the message type. `0x00` is a text message, `0x01` is a binary message. A
+  receiver MUST reject any other value with `PROTOCOL_ERROR`; values
+  `0x02`-`0xFF` are reserved and only a future revision may define one. The
+  forward-compatibility pass-through of sections 1.4 and 10 deliberately does
+  NOT apply to this byte: an unknown frame can be forwarded or ignored, but a
+  record whose TYPE is unknown cannot be safely delivered anywhere, so it is a
+  structural error, not an extension point. The byte is read only after the
+  length verdict of the complete prefix, so a record refused for its length is
+  answered for its length and its `kind` byte is never inspected.
 - `messageBytes` are EXACTLY the bytes the corresponding WebSocket message
-  carries. No type byte, opcode, compression marker, checksum, or carriage
-  header is inserted inside them. Bytes beginning with a registered binary tag
-  from appendix C.3 are binary; every other core record MUST be valid UTF-8
-  JSON. In particular a control record still begins exactly `{"type`, and a
-  binary topic record still begins `0x03`.
+  carries, and `kind` is that message's WebSocket type. No opcode, compression
+  marker, checksum, or carriage header is inserted inside `messageBytes`. Demux
+  after deframing follows the WebSocket rules unchanged, gated by `kind`
+  exactly as they are gated by the opcode there: a text record is subject to
+  section 1.1's control-frame recognition and MUST be valid UTF-8 in whole -
+  RFC 6455 parity, rejected per 15.6, because two peers that repair invalid
+  bytes differently would silently disagree about the record's content - while
+  a binary record is subject to the leading-byte registry of appendix C.3 and
+  section 1.4's unknown-leading-byte rule, and never to control-frame
+  recognition. A control record is therefore a TEXT record beginning exactly
+  `{"type`, a binary topic record is a BINARY record beginning `0x03`, and a
+  binary record whose bytes happen to be printable JSON stays an application
+  binary payload: two records with identical `messageBytes` and different
+  `kind` are as distinct here as a text and a binary WebSocket message carrying
+  the same bytes, which is what makes the carriage lossless rather than merely
+  length-delimited.
 - Record boundaries are independent of QUIC read boundaries. A prefix or body
   may arrive across any number of reads, and one read may contain any number of
   complete records plus a partial next record. A receiver MUST parse
   incrementally and MUST NOT treat a read boundary as a message boundary.
 
-The prefix is carriage, not an inner frame. Consequently every JSON schema,
+The prefix and the `kind` byte are carriage, not an inner frame. Consequently every JSON schema,
 `0x03` codec, conformance vector, unknown-frame rule, control-frame recognition
 rule (section 1.1), and the 8192-byte control-frame ceiling with its
 `CONTROL_FRAME_TOO_LARGE` reply (section 1.2) remain shared with WebSocket after
-the prefix is removed. Section 1.2's ceiling keeps its DIRECTION as well as its
+the prefix and the `kind` byte are removed. Section 1.2's ceiling keeps its
+DIRECTION as well as its
 value: it bounds CLIENT-TO-SERVER control records only, and a server-to-client
 control record - a large `batch` (section 3.3), say - is bounded by the record
 limit alone, exactly as on WebSocket. The two limits are independent and answer
@@ -1462,8 +1486,9 @@ at least **1,048,576 bytes per session**, and at least the largest record this
 endpoint may itself emit (15.1) where out-of-band knowledge raised that above
 the unnegotiated maximum - otherwise emitting a record the sender is permitted
 to emit would force it to reset its own lane. The sum is over each queued
-record's `messageLength`; the length prefix (at most 5 bytes, 15.1) is fixed
-framing overhead and does not count. One maximum-size message therefore always
+record's `messageLength`; the length prefix (at most 5 bytes, 15.1) and the
+`kind` byte are fixed framing overhead and do not count. One maximum-size
+message therefore always
 fits. The endpoint MUST stop pulling or producing optional work while the
 stream is blocked. If adding the next complete record would cross the bound, it resets the
 reliable lane with `SLOW_CONSUMER`; it MUST NOT drop a reliable record,
@@ -1473,13 +1498,16 @@ as section 7 already requires. The datagram lane may continue after the reset.
 
 An inbound declared record above the receiver's 15.1 limit is stopped/reset with
 `RECORD_TOO_LARGE`. A non-canonical/zero prefix, a prefix over 5 bytes, an
-invalid registered binary shape, invalid UTF-8 where JSON is required, or FIN
-inside a record is reset with `PROTOCOL_ERROR`. The two never overlap because
-both are decided on the COMPLETE prefix (15.1) and structure is decided first:
-a prefix over 5 bytes or not canonically encoded is `PROTOCOL_ERROR` whatever
-length it would have denoted, and `RECORD_TOO_LARGE` applies only to a
-well-formed length. A receiver that judged a partial value instead could answer
-the same bytes with either code, which is why 15.1 forbids it. These errors
+unknown `kind` (anything but `0x00`/`0x01`, 15.1), a text record that is not
+valid UTF-8, an invalid registered binary shape, or FIN inside a record is
+reset with `PROTOCOL_ERROR`. The two codes never overlap because the checks are
+ordered: the prefix is decided first and COMPLETE (15.1), with structure before
+size - a prefix over 5 bytes or not canonically encoded is `PROTOCOL_ERROR`
+whatever length it would have denoted, and `RECORD_TOO_LARGE` applies only to a
+well-formed length. Only a record that passed both prefix verdicts has its
+`kind` byte and body judged at all, so a refused length is never also reported
+for its `kind`. A receiver that judged a partial prefix value instead could
+answer the same bytes with either code, which is why 15.1 forbids it. These errors
 close the reliable lane and its state, not the whole WebTransport session.
 
 One inner breach is deliberately NOT a lane reset: a CLIENT-TO-SERVER
@@ -1677,7 +1705,7 @@ the transport itself also closes.
 |---|---|---|
 | `0x01` | `STREAM_LIMIT` | A reserved, additional, wrong-direction, or undeclared stream was opened. |
 | `0x02` | `RECORD_TOO_LARGE` | A decoded inner message length exceeded the receiver's own limit (15.1; at least 1 MiB). |
-| `0x03` | `PROTOCOL_ERROR` | Record prefix/body or inner message was malformed, including a prefix over 5 bytes. |
+| `0x03` | `PROTOCOL_ERROR` | Record framing, body, or inner message was malformed: a bad prefix (including one over 5 bytes), an unknown `kind` byte, an invalid-UTF-8 text record, or a malformed inner message (15.1, 15.6). |
 | `0x04` | `SLOW_CONSUMER` | Pending framed bytes would exceed this endpoint's own per-session bound (15.6; at least 1 MiB). |
 
 ---
@@ -1741,11 +1769,33 @@ These non-choices are deliberate and are recorded so they are not relitigated:
   control records as fences. Splitting it across QUIC streams would add
   cross-stream races for welcome, hello, wire-id, resume, and subscribe acks.
   One long-lived bidi stream preserves the WebSocket ordering model.
-- **Length prefix outside byte-identical inner messages.** A QUIC stream needs
-  record boundaries; placing only canonical varint length outside the message
-  lets every schema, codec, vector, and fallback stay shared across transports.
-  CONNECT capability gating makes the new carriage additive without
-  reinterpreting reserved streams for old sessions.
+- **Length prefix and kind byte outside byte-identical inner messages.** A QUIC
+  stream needs record boundaries; placing canonical varint length and the
+  message type outside the message lets every schema, codec, vector, and
+  fallback stay shared across transports. CONNECT capability gating makes the
+  new carriage additive without reinterpreting reserved streams for old
+  sessions.
+- **The kind byte re-supplies the WebSocket opcode; nothing else could.** A
+  WebSocket message carries a type the protocol observably routes on: the
+  adapter surfaces `isBinary`, and section 1.4 delivers opaque client binary
+  untouched, so an application binary payload may be byte-identical to a text
+  message (arbitrary binary may begin `{` and be valid UTF-8). Without a
+  discriminator those two distinct inputs become indistinguishable records, and
+  first-byte demux cannot recover them. That is not only lost fidelity - it is type
+  confusion: a peer could be steered into `JSON.parse` on attacker-controlled
+  binary, or into handing text to a binary decode path, which is exactly the
+  class of failure a framing layer exists to prevent. The byte is separate
+  rather than folded into the varint's low bit because the fold makes the
+  prefix stop being the length: every implementer carries a shift, one
+  forgotten shift silently corrupts BOTH fields at once, error messages report
+  doubled numbers, and the expressible length halves - all to save less than
+  one byte amortised on a lane whose records are dominated by control frames
+  and batches well past 100 bytes, while the 60 Hz traffic rides section 14
+  datagrams. An unknown kind is rejected rather than passed through because the
+  pass-through rule exists for frames a peer can safely ignore or forward; a
+  record whose type is unknown can be delivered nowhere safely. A text record
+  must be whole-record valid UTF-8 for RFC 6455 parity, so the carriage never
+  accepts a text message the WebSocket carriage would have failed.
 - **QUIC flow control does not replace leases.** QUIC limits bytes accepted by
   the transport; `lease` limits application messages according to server
   pressure. The finite pending-record bound - at least 1 MiB, and at least what
@@ -1796,7 +1846,7 @@ These non-choices are deliberate and are recorded so they are not relitigated:
 | data-event envelope | both | 4 |
 | `0x03` binary | both | 6 |
 | plugin ingress (`cursor`, `presence-*`, `replay`, ...) | c->s | 8 |
-| varint-length stream record (carriage; inner frame unchanged) | both | 15.1 |
+| varint-length + kind stream record (carriage; inner frame unchanged) | both | 15.1 |
 
 ---
 

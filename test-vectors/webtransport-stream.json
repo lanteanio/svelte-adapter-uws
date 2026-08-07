@@ -1,9 +1,22 @@
 {
-  "description": "Byte-exact WebTransport reliable-stream transcript for PROTOCOL.md section 15. Each record is canonical unsigned-LEB128 message length plus the unchanged WebSocket message bytes. fragmentLengths deliberately split the first length/body, place a read boundary one byte before the first record ends, and coalesce later records.",
+  "description": "Byte-exact WebTransport reliable-stream transcript for PROTOCOL.md section 15. Each record is canonical unsigned-LEB128 message length, one kind byte restating the WebSocket text/binary opcode, plus the unchanged WebSocket message bytes. The final two records are the ambiguous pair: identical valid-UTF-8 JSON bytes carried once as a text data-event and once as an opaque binary application payload (section 1.4), so a decoder that ignores kind provably cannot tell them apart. fragmentLengths deliberately split the first record's prefix, kind, and body across separate reads, place a read boundary one byte before the first record ends, and coalesce later records. invalidRecords carry a well-formed prefix and are rejected on the kind byte or the text body.",
   "assumedReceiverMessageBytes": 1048576,
   "connectQuery": "lantean-cap=lantean.reliable%3A1&lantean-cap=game.fanout%3A1",
-  "decodedConnectCapabilities": ["lantean.reliable:1", "game.fanout:1"],
-  "fragmentLengths": [1, 2, 7, 3, 19, 5, 31, 1, 64, 8],
+  "decodedConnectCapabilities": [
+    "lantean.reliable:1",
+    "game.fanout:1"
+  ],
+  "fragmentLengths": [
+    1,
+    1,
+    68,
+    1,
+    3,
+    55,
+    16,
+    52,
+    51
+  ],
   "records": [
     {
       "direction": "s->c",
@@ -14,7 +27,7 @@
         "sessionId": "00000000-0000-4000-8000-000000000001"
       },
       "payloadHex": "7b2274797065223a2277656c636f6d65222c2273657373696f6e4964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031227d",
-      "recordHex": "457b2274797065223a2277656c636f6d65222c2273657373696f6e4964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031227d"
+      "recordHex": "45007b2274797065223a2277656c636f6d65222c2273657373696f6e4964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031227d"
     },
     {
       "direction": "c->s",
@@ -22,10 +35,14 @@
       "length": 57,
       "frame": {
         "type": "hello",
-        "caps": ["batch", "lease", "game.fanout:1"]
+        "caps": [
+          "batch",
+          "lease",
+          "game.fanout:1"
+        ]
       },
       "payloadHex": "7b2274797065223a2268656c6c6f222c2263617073223a5b226261746368222c226c65617365222c2267616d652e66616e6f75743a31225d7d",
-      "recordHex": "397b2274797065223a2268656c6c6f222c2263617073223a5b226261746368222c226c65617365222c2267616d652e66616e6f75743a31225d7d"
+      "recordHex": "39007b2274797065223a2268656c6c6f222c2263617073223a5b226261746368222c226c65617365222c2267616d652e66616e6f75743a31225d7d"
     },
     {
       "direction": "s->c",
@@ -39,10 +56,32 @@
         "payloadHex": "aabbcc"
       },
       "payloadHex": "03018180808010ac02aabbcc",
-      "recordHex": "0c03018180808010ac02aabbcc"
+      "recordHex": "0c0103018180808010ac02aabbcc"
+    },
+    {
+      "direction": "c->s",
+      "kind": "text",
+      "length": 50,
+      "frame": {
+        "topic": "arena:1",
+        "event": "input",
+        "data": {
+          "x": 1
+        }
+      },
+      "payloadHex": "7b22746f706963223a226172656e613a31222c226576656e74223a22696e707574222c2264617461223a7b2278223a317d7d",
+      "recordHex": "32007b22746f706963223a226172656e613a31222c226576656e74223a22696e707574222c2264617461223a7b2278223a317d7d"
+    },
+    {
+      "direction": "c->s",
+      "kind": "binary",
+      "length": 50,
+      "note": "Byte-identical to the preceding text record. As binary its leading byte 0x7b is not a registered appendix C.3 tag, so section 1.4 delivers it to the application untouched; only kind separates the two records.",
+      "payloadHex": "7b22746f706963223a226172656e613a31222c226576656e74223a22696e707574222c2264617461223a7b2278223a317d7d",
+      "recordHex": "32017b22746f706963223a226172656e613a31222c226576656e74223a22696e707574222c2264617461223a7b2278223a317d7d"
     }
   ],
-  "concatenatedHex": "457b2274797065223a2277656c636f6d65222c2273657373696f6e4964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031227d397b2274797065223a2268656c6c6f222c2263617073223a5b226261746368222c226c65617365222c2267616d652e66616e6f75743a31225d7d0c03018180808010ac02aabbcc",
+  "concatenatedHex": "45007b2274797065223a2277656c636f6d65222c2273657373696f6e4964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031227d39007b2274797065223a2268656c6c6f222c2263617073223a5b226261746368222c226c65617365222c2267616d652e66616e6f75743a31225d7d0c0103018180808010ac02aabbcc32007b22746f706963223a226172656e613a31222c226576656e74223a22696e707574222c2264617461223a7b2278223a317d7d32017b22746f706963223a226172656e613a31222c226576656e74223a22696e707574222c2264617461223a7b2278223a317d7d",
   "invalidPrefixes": [
     {
       "reason": "zero-length record",
@@ -63,6 +102,28 @@
     {
       "reason": "prefix runs past the 5-byte cap before any length is known",
       "hex": "808080808001",
+      "error": "PROTOCOL_ERROR"
+    }
+  ],
+  "invalidRecords": [
+    {
+      "reason": "unknown record kind 0x02",
+      "recordHex": "010200",
+      "error": "PROTOCOL_ERROR"
+    },
+    {
+      "reason": "reserved record kind 0xff",
+      "recordHex": "01ff00",
+      "error": "PROTOCOL_ERROR"
+    },
+    {
+      "reason": "text record that is not valid UTF-8",
+      "recordHex": "0200fffe",
+      "error": "PROTOCOL_ERROR"
+    },
+    {
+      "reason": "text record ending inside a UTF-8 sequence",
+      "recordHex": "0100c3",
       "error": "PROTOCOL_ERROR"
     }
   ]

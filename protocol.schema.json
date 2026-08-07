@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:lantean-protocol:revision-1",
   "title": "The Lantean protocol, revision 1",
-  "description": "JSON Schema for every CORE-OWNED control frame and the data-event envelope of the Lantean protocol (PROTOCOL.md). Additional properties are permitted everywhere: the protocol is forward-compatible and a peer ignores fields it does not recognize (PROTOCOL.md section 10). The same rule holds at the frame level: an unrecognized application control frame passes through to the application handler, and higher layers define their own frames that way (svelte-realtime ships its companion schema as svelte-realtime/protocol.schema.json). A validator for mixed ecosystem traffic accepts a frame when it matches the core schema OR a composed layer schema. A core frame is one of the definitions in $defs; correlate control frames by their `type` const. The x-webtransport annotation carries the non-JSON carriage constants from PROTOCOL.md sections 14.7 and 15; that binding is a freeze candidate (see the Meta section's Additive additions), so these constants are provisional until its wire-status line reads frozen. Record size splits into two obligations because nothing on that carriage negotiates a size: maximumSenderMessageBytes is what a sender may emit unnegotiated, and defaultReceiverMessageBytes is what a receiver accepts absent configuration, which a deployment SHOULD move in step with its WebSocket limit in either direction (receiverMessageBytesConfigurable), so one deployment does not accept a message on one carriage and refuse it on the other. innerControlFrameCeilingBytes restates the core section 1.2 constant, which is not stream-specific but does keep applying after deframing, and only client-to-server as in that section. minimumPendingBytes is a floor on the send-queue bound, which must also cover the largest record this endpoint may itself emit. maximumLengthPrefixBytes caps the prefix parse at 5 groups, so no length above 34359738367 is expressible and a receiver decides on the complete prefix rather than a partial value.",
+  "description": "JSON Schema for every CORE-OWNED control frame and the data-event envelope of the Lantean protocol (PROTOCOL.md). Additional properties are permitted everywhere: the protocol is forward-compatible and a peer ignores fields it does not recognize (PROTOCOL.md section 10). The same rule holds at the frame level: an unrecognized application control frame passes through to the application handler, and higher layers define their own frames that way (svelte-realtime ships its companion schema as svelte-realtime/protocol.schema.json). A validator for mixed ecosystem traffic accepts a frame when it matches the core schema OR a composed layer schema. A core frame is one of the definitions in $defs; correlate control frames by their `type` const. The x-webtransport annotation carries the non-JSON carriage constants from PROTOCOL.md sections 14.7 and 15; that binding is a freeze candidate (see the Meta section's Additive additions), so these constants are provisional until its wire-status line reads frozen. Record size splits into two obligations because nothing on that carriage negotiates a size: maximumSenderMessageBytes is what a sender may emit unnegotiated, and defaultReceiverMessageBytes is what a receiver accepts absent configuration, which a deployment SHOULD move in step with its WebSocket limit in either direction (receiverMessageBytesConfigurable), so one deployment does not accept a message on one carriage and refuse it on the other. innerControlFrameCeilingBytes restates the core section 1.2 constant, which is not stream-specific but does keep applying after deframing, and only client-to-server as in that section. minimumPendingBytes is a floor on the send-queue bound, which must also cover the largest record this endpoint may itself emit. maximumLengthPrefixBytes caps the prefix parse at 5 groups, so no length above 34359738367 is expressible and a receiver decides on the complete prefix rather than a partial value. Each record carries one kind byte between the length prefix and the message bytes (recordKindBytes), restating the WebSocket text/binary opcode the byte stream itself discards; recordKinds registers the values, and both an unregistered kind and an invalid-UTF-8 text record are structural rejections with the named stream errors rather than pass-through, because a record whose type is unknown cannot be delivered anywhere safely. Neither the prefix nor the kind byte counts toward pending-byte accounting.",
   "x-webtransport": {
     "connectCapabilityQueryKey": "lantean-cap",
     "connectCapabilities": {
@@ -14,13 +14,17 @@
       "bidirectionalStreamCount": 1,
       "unidirectionalStreamCount": 0,
       "lengthPrefix": "canonical-unsigned-leb128",
+      "recordKindBytes": 1,
+      "recordKinds": { "text": 0, "binary": 1 },
+      "unknownRecordKindError": "PROTOCOL_ERROR",
+      "invalidTextUtf8Error": "PROTOCOL_ERROR",
       "minimumMessageBytes": 1,
       "maximumLengthPrefixBytes": 5,
       "maximumSenderMessageBytes": 1048576,
       "defaultReceiverMessageBytes": 1048576,
       "receiverMessageBytesConfigurable": true,
       "minimumPendingBytes": 1048576,
-      "pendingByteAccounting": "message-bytes-excluding-length-prefix",
+      "pendingByteAccounting": "message-bytes-excluding-length-prefix-and-kind",
       "innerControlFrameCeilingBytes": 8192,
       "firstServerFrame": "welcome",
       "innerMessage": "websocket-message-bytes"

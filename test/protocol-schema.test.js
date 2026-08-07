@@ -205,8 +205,37 @@ describe('WebTransport reliable-stream carriage', () => {
 		return Buffer.from(out);
 	}
 
-	// A receiver is parameterized by the one thing section 15.1 lets it choose:
-	// how large a record it accepts. Everything else is fixed for every receiver.
+	const kindNames = Object.fromEntries(
+		Object.entries(root['x-webtransport'].reliableStream.recordKinds)
+			.map(([name, value]) => [value, name])
+	);
+
+	// A conformant record read, parameterized by the one thing section 15.1 lets
+	// a receiver choose: how large a record it accepts. Returns null while bytes
+	// are missing, {error} on a rejection, and {kind, payload, consumed} on a
+	// complete record. The kind byte is judged only after both prefix verdicts,
+	// and a text record must decode as UTF-8 (RFC 6455 parity, section 15.6).
+	function readRecord(pending, receiverLimit) {
+		const { recordKindBytes, unknownRecordKindError, invalidTextUtf8Error } =
+			root['x-webtransport'].reliableStream;
+		const head = prefix(pending, receiverLimit);
+		if (head === null || head.error) return head;
+		if (pending.length < head.bytes + recordKindBytes) return null;
+		const kind = kindNames[pending[head.bytes]];
+		if (kind === undefined) return { error: unknownRecordKindError };
+		const framing = head.bytes + recordKindBytes;
+		if (pending.length < framing + head.value) return null;
+		const payload = pending.subarray(framing, framing + head.value);
+		if (kind === 'text') {
+			try {
+				new TextDecoder('utf-8', { fatal: true }).decode(payload);
+			} catch {
+				return { error: invalidTextUtf8Error };
+			}
+		}
+		return { kind, payload, consumed: framing + head.value };
+	}
+
 	function prefix(bytes, receiverLimit = root['x-webtransport'].reliableStream.defaultReceiverMessageBytes) {
 		const { minimumMessageBytes, maximumLengthPrefixBytes } = root['x-webtransport'].reliableStream;
 		let value = 0;
@@ -247,17 +276,24 @@ describe('WebTransport reliable-stream carriage', () => {
 			bidirectionalStreamCount: 1,
 			unidirectionalStreamCount: 0,
 			lengthPrefix: 'canonical-unsigned-leb128',
+			recordKindBytes: 1,
+			recordKinds: { text: 0, binary: 1 },
+			unknownRecordKindError: 'PROTOCOL_ERROR',
+			invalidTextUtf8Error: 'PROTOCOL_ERROR',
 			minimumMessageBytes: 1,
 			maximumLengthPrefixBytes: 5,
 			maximumSenderMessageBytes: 1_048_576,
 			defaultReceiverMessageBytes: 1_048_576,
 			receiverMessageBytesConfigurable: true,
 			minimumPendingBytes: 1_048_576,
-			pendingByteAccounting: 'message-bytes-excluding-length-prefix',
+			pendingByteAccounting: 'message-bytes-excluding-length-prefix-and-kind',
 			innerControlFrameCeilingBytes: 8192,
 			firstServerFrame: 'welcome',
 			innerMessage: 'websocket-message-bytes'
 		});
+		// The rejection mappings must name registered stream errors, not prose.
+		expect(Object.keys(wt.streamErrors)).toContain(wt.reliableStream.unknownRecordKindError);
+		expect(Object.keys(wt.streamErrors)).toContain(wt.reliableStream.invalidTextUtf8Error);
 		expect(wt.streamErrors).toEqual({
 			STREAM_LIMIT: 1,
 			RECORD_TOO_LARGE: 2,
@@ -269,7 +305,11 @@ describe('WebTransport reliable-stream carriage', () => {
 	it('keeps the normative prose and registries on the same constants', () => {
 		expect(protocol).toContain('### 14.7 CONNECT capability declarations');
 		expect(protocol).toContain('## 15. The WebTransport reliable-stream binding');
-		expect(protocol).toContain('[messageLength:varint][messageBytes:messageLength]');
+		expect(protocol).toContain('[messageLength:varint][kind:u8][messageBytes:messageLength]');
+		// The kindless layout discarded the WebSocket opcode, leaving a
+		// reliable stream that could not say text-vs-binary. It must never
+		// reappear, not even as a stale second copy.
+		expect(protocol).not.toContain('[messageLength:varint][messageBytes:messageLength]');
 		expect(protocol).toContain('**`lantean-cap`**, repeated once per token');
 		for (const token of Object.keys(root['x-webtransport'].connectCapabilities)) {
 			expect(protocol).toContain(`\`${token}\``);
@@ -278,8 +318,27 @@ describe('WebTransport reliable-stream carriage', () => {
 			expect(protocol).toContain(`\`0x0${code}\` | \`${name}\``);
 		}
 		expect(flatProtocol).toContain('**1,048,576 bytes per session**');
-		expect(flatProtocol).toContain('the length prefix (at most 5 bytes, 15.1) is fixed framing overhead');
+		expect(flatProtocol).toContain('the length prefix (at most 5 bytes, 15.1) and the `kind` byte are fixed framing overhead');
 		expect(protocol).not.toContain('a future revision may bind reliable lanes');
+	});
+
+	// The kind byte restates the WebSocket opcode. Its registered values, its
+	// reject-unknown posture, and the text UTF-8 rule must agree between the
+	// schema constants and the normative prose, in both directions.
+	it('binds the record-kind constants to the prose', () => {
+		const { recordKinds } = root['x-webtransport'].reliableStream;
+		expect(flatProtocol).toContain(
+			`\`0x0${recordKinds.text}\` is a text message, \`0x0${recordKinds.binary}\` is a binary message`
+		);
+		expect(flatProtocol).toContain('A receiver MUST reject any other value with `PROTOCOL_ERROR`');
+		// The pass-through rule must be carved out for the discriminator: a record
+		// whose type is unknown cannot be delivered anywhere.
+		expect(flatProtocol).toContain('deliberately does NOT apply to this byte');
+		expect(flatProtocol).toContain('MUST be valid UTF-8 in whole');
+		// 15.6 must carry both structural additions on its error path.
+		expect(flatProtocol).toContain('an unknown `kind` (anything but `0x00`/`0x01`, 15.1), a text record that is not valid UTF-8');
+		// The check order is what keeps the two codes non-overlapping.
+		expect(flatProtocol).toContain('a record refused for its length is answered for its length and its `kind` byte is never inspected');
 	});
 
 	// A sender permitted to emit a large record must be able to QUEUE it: a flat
@@ -419,18 +478,27 @@ describe('WebTransport reliable-stream carriage', () => {
 		expect(params.getAll('cap')).toEqual([]);
 	});
 
-	it('each record is a canonical length plus byte-identical inner message', () => {
+	it('each record is a canonical length plus kind plus byte-identical inner message', () => {
+		const { recordKinds } = root['x-webtransport'].reliableStream;
 		for (const record of streamVector.records) {
 			const payload = Buffer.from(record.payloadHex, 'hex');
 			expect(payload.byteLength).toBe(record.length);
-			expect(Buffer.concat([encodeVarint(record.length), payload]).toString('hex'))
-				.toBe(record.recordHex);
+			expect(recordKinds[record.kind], `unregistered kind ${record.kind}`).toBeTypeOf('number');
+			expect(
+				Buffer.concat([encodeVarint(record.length), Buffer.from([recordKinds[record.kind]]), payload]).toString('hex')
+			).toBe(record.recordHex);
 			if (record.kind === 'text') {
+				// RFC 6455 parity carried across the carriage: every text record in
+				// the canonical transcript must be valid UTF-8.
+				expect(() => new TextDecoder('utf-8', { fatal: true }).decode(payload)).not.toThrow();
 				expect(JSON.parse(payload.toString('utf8'))).toEqual(record.frame);
 				expect(validate(root, record.frame)).toEqual([]);
-			} else {
+			} else if (record.decoded) {
 				expect(record.payloadHex).toBe(binaryVector.hexFrame);
 				expect(record.decoded).toEqual(binaryVector.decoded);
+			} else {
+				// An opaque binary payload must say why it is in the vector.
+				expect(record.note).toBeTypeOf('string');
 			}
 		}
 		expect(streamVector.records[0].frame.type).toBe(
@@ -438,7 +506,37 @@ describe('WebTransport reliable-stream carriage', () => {
 		);
 	});
 
-	it('reassembles records across arbitrary read boundaries', () => {
+	// The SAME bytes as a text message and as a binary message are two distinct
+	// WebSocket inputs (section 1.4, MessageContext.isBinary), so they must be
+	// two distinct stream records. The pair is chosen to be valid UTF-8 JSON
+	// beginning `{` so no demux other than the kind byte - first byte, UTF-8
+	// sniffing, JSON parsing - can separate it.
+	it('carries the ambiguous pair only the kind byte can separate', () => {
+		const byPayload = new Map();
+		for (const record of streamVector.records) {
+			byPayload.set(record.payloadHex, [...(byPayload.get(record.payloadHex) ?? []), record]);
+		}
+		const pairs = [...byPayload.values()].filter((records) => records.length > 1);
+		expect(pairs).toHaveLength(1);
+		const [pair] = pairs;
+		expect(pair.map((record) => record.kind).sort()).toEqual(['binary', 'text']);
+		const payload = Buffer.from(pair[0].payloadHex, 'hex');
+		expect(payload[0]).toBe(0x7b);
+		expect(() => new TextDecoder('utf-8', { fatal: true }).decode(payload)).not.toThrow();
+		expect(() => JSON.parse(payload.toString('utf8'))).not.toThrow();
+		const [a, b] = pair.map((record) => Buffer.from(record.recordHex, 'hex'));
+		expect(a.byteLength).toBe(b.byteLength);
+		const differing = [...a].map((v, i) => (v === b[i] ? -1 : i)).filter((i) => i >= 0);
+		// The records differ at EXACTLY the kind byte - the position right after
+		// the length prefix - which is the proof the discriminator is load-bearing.
+		expect(differing).toEqual([encodeVarint(payload.byteLength).byteLength]);
+		const decodedA = readRecord(a);
+		const decodedB = readRecord(b);
+		expect(decodedA.payload.equals(decodedB.payload)).toBe(true);
+		expect(decodedA.kind).not.toBe(decodedB.kind);
+	});
+
+	it('reassembles typed records across arbitrary read boundaries', () => {
 		const stream = Buffer.from(streamVector.concatenatedHex, 'hex');
 		expect(streamVector.fragmentLengths.reduce((sum, n) => sum + n, 0))
 			.toBe(stream.byteLength);
@@ -449,14 +547,20 @@ describe('WebTransport reliable-stream carriage', () => {
 			pending = Buffer.concat([pending, stream.subarray(at, at + size)]);
 			at += size;
 			for (;;) {
-				const head = prefix(pending);
-				if (head === null || head.error || pending.length < head.bytes + head.value) break;
-				decoded.push(pending.subarray(head.bytes, head.bytes + head.value).toString('hex'));
-				pending = pending.subarray(head.bytes + head.value);
+				const record = readRecord(pending);
+				if (record === null) break;
+				expect(record.error).toBeUndefined();
+				decoded.push({ kind: record.kind, payloadHex: record.payload.toString('hex') });
+				pending = pending.subarray(record.consumed);
 			}
 		}
 		expect(pending.byteLength).toBe(0);
-		expect(decoded).toEqual(streamVector.records.map((record) => record.payloadHex));
+		// kind AND payload: a decoder that discards the kind byte reproduces the
+		// payloads but not the tuples, so it fails on the ambiguous pair.
+		expect(decoded).toEqual(streamVector.records.map((record) => ({
+			kind: record.kind,
+			payloadHex: record.payloadHex
+		})));
 	});
 
 	it('rejects zero, non-canonical, and over-limit prefixes with the frozen errors', () => {
@@ -466,6 +570,22 @@ describe('WebTransport reliable-stream carriage', () => {
 			expect(root['x-webtransport'].streamErrors[vector.error], vector.reason)
 				.toBeTypeOf('number');
 		}
+	});
+
+	// Structural rejections past the prefix: an unregistered kind byte and a
+	// text record whose bytes are not UTF-8. Both are lane resets (15.6), and
+	// both must be decided without delivering anything to the application.
+	it('rejects unknown kinds and invalid-UTF-8 text records with the registered error', () => {
+		for (const vector of streamVector.invalidRecords) {
+			expect(readRecord(Buffer.from(vector.recordHex, 'hex')), vector.reason)
+				.toEqual({ error: vector.error });
+			expect(root['x-webtransport'].streamErrors[vector.error], vector.reason)
+				.toBeTypeOf('number');
+		}
+		// The rejections must cover both structural checks, not three copies of one.
+		const reasons = streamVector.invalidRecords.map((vector) => vector.reason).join(' ');
+		expect(reasons).toContain('kind');
+		expect(reasons).toContain('UTF-8');
 	});
 });
 

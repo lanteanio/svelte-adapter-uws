@@ -360,10 +360,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publish sites perform only a null-hook check.
 - **The reliable Lantean protocol now has a WebTransport bidirectional-stream
   freeze candidate.** A repeated `lantean-cap` CONNECT query declaration gates
-  exactly one client-opened bidi stream; canonical unsigned-LEB128 lengths wrap
-  byte-identical WebSocket messages, so welcome/hello, subscription, batch,
-  lease, resume, and `0x03` codecs share their existing schemas and vectors.
-  The binding settles FIN/session-close and QUIC-migration lifecycle, independent
+  exactly one client-opened bidi stream; canonical unsigned-LEB128 lengths plus
+  a one-byte text/binary `kind` wrap byte-identical WebSocket messages, so
+  welcome/hello, subscription, batch, lease, resume, and `0x03` codecs share
+  their existing schemas and vectors. The `kind` byte restates the WebSocket
+  opcode a byte stream discards: without it, an opaque binary application
+  payload whose bytes are valid UTF-8 JSON and a text message with those same
+  bytes - two distinct inputs on WebSocket - would become indistinguishable
+  stream records,
+  letting a peer be steered into parsing attacker-controlled binary as JSON.
+  An unregistered `kind` is rejected rather than passed through (a record
+  whose type is unknown cannot be delivered anywhere safely), and a text
+  record must be valid UTF-8 in whole, RFC 6455 parity. The binding settles
+  FIN/session-close and QUIC-migration lifecycle, independent
   datagram membership, slow-consumer reset posture, and four registered stream
   errors. Record size is two obligations rather than one ceiling, because
   nothing on the carriage negotiates a size: a sender may emit up to 1 MiB
@@ -377,7 +386,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control-frame ceiling keeps applying after deframing, answered with the
   ordinary `error` frame rather than a lane reset.
   Machine-readable schema constants plus a fragmented byte-exact transcript pin
-  prefix, topology, capability, and rejection behavior. The Meta section now
+  prefix, kind, topology, capability, and rejection behavior, including an
+  ambiguous text/binary record pair a kind-blind decoder provably cannot
+  separate. The Meta section now
   names which surfaces are provisional, so the binding's freeze-candidate status
   cannot be read as covered by revision 1's frozen commitment.
 - **Deterministic I/O budgets now gate hot paths on operation counts, never
