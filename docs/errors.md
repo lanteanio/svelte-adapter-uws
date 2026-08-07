@@ -201,7 +201,7 @@ searchable log prefix is:
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.cluster-relay event=cluster-relay.frame-oversized severity=error] A worker sent a relay frame larger than this process will reassemble; its relay stream was stopped.`
 - **Cause:** A worker declared a relay frame above the reassembly ceiling, which is four times the configured relay frame ceiling. Either the ceiling is set far below real payloads, or the stream is corrupt.
 - **Consequence:** That worker relay stream is stopped, so its cross-worker publishes no longer reach this process. Local delivery on the sending worker continues, which is what makes the split silent.
-- **Automatic recovery:** None for the stopped stream. It does not resume on its own.
+- **Automatic recovery:** None for the stopped stream itself. The sending worker is expected to retire through its own spill overflow and be replaced, which is the path that actually restores its relay.
 - **Next action:** Compare the declaredBytes and maxFrameBytes attributes. If the payload is legitimate, raise the relay frame ceiling; otherwise treat the stream as corrupt and replace the worker.
 - **Runtime help:** `docs/errors.md#adapter-err-relay-frame-oversized`
 - **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
@@ -380,8 +380,8 @@ searchable log prefix is:
 - **Code/event:** `resume.hook-read-failed`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.resume event=resume.hook-read-failed severity=error] Reading the resume hook result threw for a topic; that topic is treated as covering nothing.`
 - **Cause:** The resume hook returned a value whose properties threw while being read, typically a getter or a proxy.
-- **Consequence:** That topic is treated as covering no range, so the client resubscribes cold for it. Other topics in the same resume are unaffected.
-- **Automatic recovery:** Yes. The topic falls back to a fresh subscribe.
+- **Consequence:** That topic is treated as covering nothing, which is the same answer a hook returning a non-number gives, so it is served without gap-fill. Other topics in the same batch are unaffected: the read is guarded here precisely so one unreadable topic cannot abort the loop and leak the rest as permanently in-flight.
+- **Automatic recovery:** None for the gap itself. The subscribe still completes, on the ordinary no-coverage path rather than an error path.
 - **Next action:** Return a plain object from the resume hook. Values whose property reads have side effects cannot be read safely on this path.
 - **Runtime help:** `docs/errors.md#adapter-err-resume-hook-read`
 - **Runtime sources:** [src/runtime/handler/resume-buffer.js](../src/runtime/handler/resume-buffer.js)
@@ -464,9 +464,9 @@ searchable log prefix is:
 - **Code/event:** `subscribe.hook-failed`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.subscribe event=subscribe.hook-failed severity=error] The subscribe hook threw; the subscribe was denied INTERNAL_ERROR.`
 - **Cause:** The application subscribe authorization hook threw for a single topic.
-- **Consequence:** That subscribe is denied with INTERNAL_ERROR. Authorization is fail-closed.
+- **Consequence:** That subscribe is denied with INTERNAL_ERROR. Authorization is fail-closed, and the reason is deliberately distinct: returning false denies with FORBIDDEN, so a throw is reported as a fault rather than as a refusal.
 - **Automatic recovery:** None. The client may retry the subscribe, which runs the hook again.
-- **Next action:** Read the attached error and fix the hook. A denial here is indistinguishable to the client from a deliberate authorization refusal, so persistent throws look like a permissions problem.
+- **Next action:** Read the attached error and fix the hook. A client seeing INTERNAL_ERROR rather than FORBIDDEN or UNAUTHENTICATED is being told this is a defect, not a permissions decision, so treat it as one and do not go looking at authorization rules first.
 - **Runtime help:** `docs/errors.md#adapter-err-subscribe-hook`
 - **Runtime sources:** [src/runtime/handler/subscribe-hooks.js](../src/runtime/handler/subscribe-hooks.js)
 
@@ -476,9 +476,9 @@ searchable log prefix is:
 - **Code/event:** `tls.reload-skipped`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.reload-skipped severity=warn] A certificate reload was skipped and the previous certificate was kept; the renewal on disk is not being served.`
 - **Cause:** A certificate change was seen on disk but not applied, usually because the new material was unreadable or incomplete at the moment it was read.
-- **Consequence:** The server keeps serving the previous certificate. Nothing breaks now, and the renewal on disk is not in use, so the certificate can still expire while a valid one sits unserved.
-- **Automatic recovery:** The next reload attempt applies the certificate if the material is then readable.
-- **Next action:** Confirm the served certificate matches the one on disk rather than assuming renewal succeeded. Treat this warning as expiry risk, not as noise.
+- **Consequence:** The server keeps serving the previous certificate and enters a degraded TLS state. The renewal on disk is not in use, so the served certificate can expire while a valid one sits unread. READINESS PROBES STAY GREEN throughout, which is what makes this quiet.
+- **Automatic recovery:** The next reload that succeeds applies the certificate and clears the degraded state.
+- **Next action:** Confirm the served certificate matches the one on disk rather than assuming renewal succeeded, and read the TLS degraded state rather than the probe, which cannot see this. Treat the warning as expiry risk, not noise.
 - **Runtime help:** `docs/errors.md#adapter-err-tls-reload-skipped`
 - **Runtime sources:** [src/runtime/handler/lifecycle.js](../src/runtime/handler/lifecycle.js)
 
@@ -488,8 +488,8 @@ searchable log prefix is:
 - **Code/event:** `tls.swap-failed`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.swap-failed severity=error] A certificate swap failed mid-apply; some SNI hosts may be unroutable until the retry succeeds.`
 - **Cause:** Applying a new certificate set failed partway through the swap.
-- **Consequence:** The swap is partial, so some SNI hosts may have no usable certificate and fail the TLS handshake until a retry completes.
-- **Automatic recovery:** A retry is attempted; it is not guaranteed to succeed.
+- **Consequence:** The swap is partial, so some SNI hosts may have no usable certificate and fail the TLS handshake until a retry completes. The TLS degraded state is set for the duration.
+- **Automatic recovery:** A one-shot retry is armed from the failure itself, rather than from the next filesystem event, because the throw may have consumed the last event of a renewal burst and the next one could be months away. A persistent fault therefore retries at that cadence instead of spinning.
 - **Next action:** Verify every SNI host still completes a handshake rather than only checking the default host, then correct the certificate material and reload.
 - **Runtime help:** `docs/errors.md#adapter-err-tls-swap`
 - **Runtime sources:** [src/runtime/handler/lifecycle.js](../src/runtime/handler/lifecycle.js)
@@ -500,7 +500,7 @@ searchable log prefix is:
 - **Code/event:** `tls.watch-failed`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.watch-failed severity=error] The certificate directory watch failed to start; hot reload is disabled and no renewal will be seen.`
 - **Cause:** The filesystem watch on the certificate directory could not be established.
-- **Consequence:** Certificate hot reload is off for the process lifetime. The current certificate keeps serving and no renewal is ever picked up, so the failure surfaces later as an expired certificate.
+- **Consequence:** Certificate hot reload is off for the process lifetime and the TLS degraded state is set. The current certificate keeps serving and no renewal is ever picked up, so the failure surfaces much later as an expired certificate.
 - **Automatic recovery:** None. The watch is not retried, so this does not resolve without a restart.
 - **Next action:** Fix the path or permissions and restart the process. Until then, treat certificate renewal as requiring a restart, and alert on certificate expiry independently. In a clustered deployment the primary reports its own watch failure as a plain `[tls]` console line rather than this event, so search the console text as well as this event name.
 - **Runtime help:** `docs/errors.md#adapter-err-tls-watch`

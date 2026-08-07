@@ -661,7 +661,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// path, no byte is read, allocated or copied, and no copy primitive entered
 	// the graph. The existing id lookup is unchanged and no second index was
 	// kept - an event-keyed Map was added and then removed as unused.
-	platform: '82ca33dce4547bdc2b66b808518cf4201a8108c07d02584bc469c33475612596',
+	//
+	// Re-pinned again after correcting operator guidance inside those same
+	// frozen literals: cause, consequence, recovery and next-action strings were
+	// rewritten where a review found them describing the wrong code path. The
+	// digest covers literal CONTENT, so documentation wording moves it even
+	// though no statement, call or allocation changed. Nothing here executes on
+	// a frame path.
+	platform: 'efc04e6d4c3044632a42f6272d52055191930cf293426c3463c1ffc0cca1a302',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
