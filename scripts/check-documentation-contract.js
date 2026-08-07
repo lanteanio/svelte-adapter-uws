@@ -133,10 +133,12 @@ export function validateReadme(readme, manifest, nativeRefs = []) {
 	if (endLine > manifest.entryBudgetLines) errors.push('README documentation paths block ends on line ' + endLine + '; the entry budget requires it to end by line ' + manifest.entryBudgetLines);
 	// readmeMaxLines is a ratchet, not a target: it exists to force content
 	// out of the README and into docs/ or the site over time. Lower it when
-	// content moves; never raise it casually. The shipped pin was taken as
-	// the README length at pinning time plus 500 lines of headroom, because
-	// another section was being written concurrently and the ratchet must not
-	// fail honest in-flight work.
+	// content moves; never raise it casually. The first pin took the README
+	// length plus 500 lines of headroom so a section being written
+	// concurrently could not fail the gate. That section landed, and the
+	// headroom is now collected: the pin sits AT the current length, so the
+	// next line added to the README is a deliberate act that has to be paid
+	// for by moving content out or by raising the pin on the record.
 	const readmeLines = readme.split(/\r?\n/).length;
 	if (readmeLines > manifest.readmeMaxLines) {
 		errors.push('README.md is ' + readmeLines + ' lines; the readmeMaxLines ratchet is ' + manifest.readmeMaxLines + '. The ratchet exists to force content out of the README over time: move content to docs/ or the site and lower the pin when it moves; never raise it casually.');

@@ -3,7 +3,7 @@
 	"owner": "svelte-adapter-uws",
 	"compatibilitySource": "docs/compatibility.v1.csv",
 	"entryBudgetLines": 120,
-	"readmeMaxLines": 7116,
+	"readmeMaxLines": 6760,
 	"paths": [
 		{"key":"identity","type":"Identity","need":"Decide whether the adapter fits","label":"What you get","destination":"#what-you-get","owner":"README.md"},
 		{"key":"first-success","type":"First success","need":"Serve the first HTTP route","label":"Quick start: HTTP","destination":"#quick-start-http","owner":"README.md"},

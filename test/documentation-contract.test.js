@@ -80,21 +80,39 @@ describe('documentation entry-surface contract', () => {
 	});
 
 	it('derives governed pins and rejects their bare major.minor drift form', () => {
+		// These mutants append lines, and the size ratchet sits AT the README's
+		// current length, so they would trip it incidentally. This test is about
+		// which version facts are owned, not about size: relax the one pin that
+		// is not under test so a control case can still assert no errors at all.
+		const unsized = { ...manifest, readmeMaxLines: Number.MAX_SAFE_INTEGER };
 		expect(nativeRefs).toContain('v20.69.0');
 		expect(nativeRefs).toContain('v20.67.0');
 		expect(governedNativeRefs(pkg)).toContain('v20.69.0');
 		for (const bare of ['20.69', '20.69.0', '20.69.1', '20.67']) {
 			expect(
-				validateReadme(readme + '\nBuilt against ' + bare + ' binaries.\n', manifest, nativeRefs)
+				validateReadme(readme + '\nBuilt against ' + bare + ' binaries.\n', unsized, nativeRefs)
 			).toContain('native compatibility fact outside generated compatibility block: ' + bare);
 		}
 		// Unrelated bare numbers stay unowned: only governed pins get the
 		// no-v form, and word bounds keep 20.699 or 120.69 out.
 		for (const control of ['22.0', '20.699', '120.69', '1.20']) {
 			expect(
-				validateReadme(readme + '\nSee note ' + control + ' for details.\n', manifest, nativeRefs)
+				validateReadme(readme + '\nSee note ' + control + ' for details.\n', unsized, nativeRefs)
 			).toEqual([]);
 		}
+	});
+
+	// A ratchet with headroom is a cap: the first pin carried 434 spare lines
+	// and had absorbed 77 lines of growth before anyone noticed. Pinned AT the
+	// current length, the next added line has to be paid for deliberately.
+	it('keeps the size ratchet binding rather than slack', () => {
+		const lines = readme.split(/\r?\n/).length;
+		expect(manifest.readmeMaxLines, 'the pin must sit at the README length, not above it')
+			.toBe(lines);
+		expect(validateReadme(readme, manifest, nativeRefs)).toEqual([]);
+		const grown = readme.replace(/\n$/, '\nOne more line.\n');
+		expect(validateReadme(grown, manifest, nativeRefs).join('\n'))
+			.toContain('the readmeMaxLines ratchet is ' + manifest.readmeMaxLines);
 	});
 
 	it('rewrites only the bounded generated block', () => {
