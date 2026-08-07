@@ -119,6 +119,9 @@ describe('ecosystem translation contract', () => {
 			'event',
 			'component',
 			'severity',
+			// The emission shape is routing data, not prose: it names which line
+			// the runtime produces, so it is never shown to a user or translated.
+			'emission',
 			'sources',
 			'anchor',
 			'help',

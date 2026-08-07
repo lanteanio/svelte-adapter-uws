@@ -1460,7 +1460,7 @@ if (is_primary) {
 					source: 'svelte-adapter-uws',
 					component: 'runtime.cluster-relay',
 					event: 'cluster-relay.frame-refused',
-					severity: 'warning',
+					severity: 'warn',
 					dataClass: 'pseudonymous',
 					message: 'A publish was too large for the cluster relay and was not sent to other workers. Local subscribers received it.',
 					attributes: {

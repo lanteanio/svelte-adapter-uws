@@ -653,7 +653,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// throws TypeError, the class every seq-VALUE refusal shares. Field
 	// reads, comparisons and a relocated Map lookup - no byte is read,
 	// allocated or copied, and no copy primitive entered.
-	platform: '2e0e2a0dd3977c3917f9f2828304507fb8243f855d4ca87b08f2d2eb15079019',
+	// Re-pinned for the operator error reference, which this graph reaches
+	// through utils/operational-diagnostic.js -> error-registry.js: twenty-seven
+	// added frozen entry literals, a module-scope string helper that builds each
+	// entry's documented log prefix, a second Map index over the same frozen
+	// array, and one accessor returning from it. The helper and the Map run once
+	// at module evaluation to assemble documentation strings; nothing is added
+	// to a frame path, no byte is read, allocated or copied, and no copy
+	// primitive entered the graph.
+	platform: '191f67e9a76f29ad2c5f039601ec7c5759c04e10c506617e261f745ef2cc9555',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

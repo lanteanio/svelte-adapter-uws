@@ -43,6 +43,7 @@
         "event",
         "component",
         "severity",
+        "emission",
         "sources",
         "anchor",
         "help",

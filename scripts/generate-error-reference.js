@@ -20,6 +20,11 @@ const EVENT_SCAN_EXCLUDED = Object.freeze(['src/runtime/error-registry.js']);
 const EVENT_LITERAL = /event: '([a-z][a-z0-9.-]*)'/;
 const EVENT_CONTEXT_LINES = 6;
 
+// The runtime spells the same band both ways at different call sites, so both
+// count as a failure here rather than one silently escaping the coverage gate.
+const FAILURE_SEVERITIES = new Set(['fatal', 'error', 'warn', 'warning']);
+const INFORMATIONAL_SEVERITIES = new Set(['debug', 'info', 'trace']);
+
 // Where each sibling package keeps its own error reference. A documentPath of
 // null links the repository root and states that the reference lives with that
 // package. checkSiblingDocuments() soft-verifies these paths against local
@@ -201,17 +206,66 @@ export function validateErrorRegistry(entries) {
 		if (entry.code !== null && (typeof entry.code !== 'string' || !entry.code)) {
 			errors.push(label + ': code must be a string or null');
 		}
-		if ((entry.component === null) !== (entry.problemPrefix === null)) {
-			errors.push(label + ': component and problemPrefix must both be strings or both be null');
-		}
-		if (entry.component !== null) {
-			if (entry.severity !== 'fatal' && entry.severity !== 'error') errors.push(label + ': invalid operational severity');
-			const expected = '[' + DIAGNOSTIC_PREFIX + ' source=svelte-adapter-uws component=' + entry.component +
-				' event=' + entry.event + ' severity=' + entry.severity + '] ' + entry.event + ': ' + entry.problemPrefix;
-			if (entry.messagePrefix !== expected) errors.push(label + ': operational prefix does not match component, event, and problemPrefix');
+		// The three emission shapes produce three different lines. Validating the
+		// declared prefix against the shape is what stops the reference promising
+		// text no log will ever contain.
+		const head = '[' + DIAGNOSTIC_PREFIX + ' source=svelte-adapter-uws component=' + entry.component +
+			' event=' + entry.event + ' severity=';
+		if (entry.emission === 'thrown') {
+			if (entry.component !== null || entry.severity !== null || entry.problemPrefix !== null) {
+				errors.push(label + ': a thrown entry carries no component, severity, or problemPrefix');
+			}
+		} else if (entry.emission === 'composed' || entry.emission === 'direct') {
+			if (typeof entry.component !== 'string' || typeof entry.problemPrefix !== 'string') {
+				errors.push(label + ': an emitted entry needs a component and a problemPrefix');
+			}
+			if (!FAILURE_SEVERITIES.has(entry.severity)) errors.push(label + ': invalid operational severity');
+			if (entry.emission === 'composed' && entry.severity !== 'fatal' && entry.severity !== 'error') {
+				errors.push(label + ': a composed entry is fatal or error');
+			}
+			const body = entry.emission === 'composed' ? entry.event + ': ' + entry.problemPrefix : entry.problemPrefix;
+			if (entry.messagePrefix !== head + entry.severity + '] ' + body) {
+				errors.push(label + ': ' + entry.emission + ' prefix does not match component, event, severity, and problemPrefix');
+			}
+		} else if (entry.emission === 'head') {
+			if (typeof entry.component !== 'string' || entry.severity !== null || entry.problemPrefix !== null) {
+				errors.push(label + ': a head entry carries a component but no fixed severity or problemPrefix');
+			}
+			if (entry.messagePrefix !== head) errors.push(label + ': head prefix does not stop where the variation begins');
+		} else {
+			errors.push(label + ': unknown emission ' + JSON.stringify(entry.emission));
 		}
 	}
 	return errors;
+}
+
+/**
+ * A failure the runtime can emit but the reference does not index is the defect
+ * this document exists to prevent: an operator pastes the text and finds a row
+ * with no cause and no recovery. Informational events are exempt BY SEVERITY,
+ * not by name, so a new one is only exempt while it stays informational.
+ *
+ * An event whose severity is not a literal cannot be proven informational, so
+ * it must be indexed - unknown is treated as a failure rather than waved past.
+ *
+ * @param {ReturnType<typeof scanEmittedEvents>} scan
+ * @param {typeof ADAPTER_ERROR_REGISTRY} entries
+ * @returns {string[]}
+ */
+export function findUnindexedFailures(scan = scanEmittedEvents(), entries = ADAPTER_ERROR_REGISTRY) {
+	const indexed = new Set(entries.map((entry) => entry.event));
+	const unindexed = [];
+	for (const record of scan.events) {
+		if (indexed.has(record.event)) continue;
+		const informational = record.severities.length > 0 &&
+			record.severities.every((severity) => INFORMATIONAL_SEVERITIES.has(severity));
+		if (!informational) unindexed.push(record);
+	}
+	if (!unindexed.length) return [];
+	return unindexed.map((record) => record.event + ' (severity ' +
+		(record.severities.join('/') || 'not a literal') + ', emitted by ' + record.sources.join(', ') +
+		') is a failure with no entry in ADAPTER_ERROR_REGISTRY; add one with cause, consequence,' +
+		' automatic recovery, and next action, then rerun --write');
 }
 
 function cell(value) {
@@ -220,7 +274,11 @@ function cell(value) {
 
 export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options = {}) {
 	const scan = options.scan || scanEmittedEvents();
-	const errors = [...validateErrorRegistry(entries), ...findGhostRegistryEntries(entries, scan)];
+	const errors = [
+		...validateErrorRegistry(entries),
+		...findGhostRegistryEntries(entries, scan),
+		...findUnindexedFailures(scan, entries)
+	];
 	if (errors.length) throw new Error(errors.join('\n'));
 	const siblingRef = options.siblingRef || releaseDocumentationRef();
 	const indexedEvents = new Set(entries.map((entry) => entry.event));
@@ -231,10 +289,12 @@ export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options =
 		'# Error reference',
 		'',
 		'Search this page with the exact stable ID, code, event, or beginning of the message you saw.',
-		'The indexed reference below covers ' + entries.length + ' of the ' + emittedCount + ' distinct diagnostic events the runtime',
-		'emits; the [coverage list](#emitted-diagnostic-event-coverage) names all ' + emittedCount + ', so a search for any',
-		'emitted event name lands on this page. Runtime messages for indexed entries preserve the',
-		'documented prefix and append the stable ID plus this package-local help route.',
+		'Every failure the runtime can emit is indexed below with its cause, what it means for',
+		'traffic, whether anything recovers on its own, and what to do next: ' + entries.length + ' entries against',
+		'the ' + emittedCount + ' distinct diagnostic events the runtime emits. The rest are informational events,',
+		'listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance because there is',
+		'nothing to recover from. A new failure event cannot be added to the runtime without an entry',
+		'here - the generator fails the build until one exists.',
 		'',
 		'This is the adapter-owned part of the ecosystem index. The sibling packages',
 		'generate and ship their own runtime-owned references on the same release channel:',
@@ -262,9 +322,10 @@ export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options =
 		'',
 		'This inventory is derived at generation time by scanning `src/runtime/`, `src/observability.js`,',
 		'and `src/vite.js` for emitted diagnostic events; the runtime emits ' + emittedCount + ' distinct events.',
-		'The ' + entries.length + ' indexed above carry stable IDs and full operator guidance. The remaining ' + unindexed.length,
-		'are listed below with their emitting sources, so an operator searching any emitted event',
-		'name finds an authoritative row on this page.',
+		'The ' + entries.length + ' indexed above carry stable IDs and full operator guidance; the remaining ' + unindexed.length,
+		'are informational. That split is enforced by severity rather than by a list: an emitted event',
+		'is exempt from the indexed reference only while every severity it is emitted at is',
+		'informational, so promoting one to a warning or an error fails generation until it is indexed.',
 		'',
 		'Indexed events:',
 		''
@@ -274,10 +335,11 @@ export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options =
 	}
 	lines.push(
 		'',
-		'### Emitted diagnostics not yet in the indexed reference',
+		'### Informational events',
 		'',
-		'These events have no stable ID yet. Each one is emitted on the shared diagnostic line',
-		'format, so its searchable log prefix is:',
+		'These carry no stable ID and no recovery guidance because they report normal operation',
+		'rather than a failure. Each is emitted on the shared diagnostic line format, so its',
+		'searchable log prefix is:',
 		'',
 		'`[' + DIAGNOSTIC_PREFIX + ' source=svelte-adapter-uws component=<component> event=<event> severity=<severity>] <message>`',
 		'',

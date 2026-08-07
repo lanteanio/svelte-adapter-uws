@@ -544,6 +544,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A cluster relay diagnostic was silently discarded instead of logged.** The
+  `cluster-relay.frame-refused` event was emitted at severity `warning`, which is
+  not one of the telemetry levels, so the record failed validation and
+  `emitOperationalEvent` dropped it. Nothing reached a sink or the console. The
+  event reports that a publish exceeded the relay frame ceiling and therefore
+  reached local subscribers only, so the one signal that a cross-worker state
+  split had occurred was the signal that could never be seen. It now emits at
+  `warn`, and a check fails the suite on any emission whose severity is not a
+  real telemetry level, because that mistake drops an event rather than
+  downgrading it.
+
+- **Every operator-facing failure now carries cause and recovery, not just a
+  name.** The error reference indexed 6 of the 36 emitted diagnostic events;
+  the other 30 were rows naming a source file, so an operator who searched the
+  text they saw found an entry that told them nothing. All 27 failure events are
+  now indexed with their searchable message prefix, cause, consequence, whether
+  anything recovers automatically, and the next action. The three remaining
+  events are informational and say so. A new failure event cannot be added to
+  the runtime without an entry: the generator classifies by severity, so an
+  event is exempt only while every severity it is emitted at is informational,
+  and promoting one to a warning or error fails the build until it is indexed.
+  Documented prefixes are checked against the text the runtime actually
+  produces, so a reworded message cannot leave the reference describing an
+  older line.
+
 - **The migration rehearsal proves its claim on the wire.** The documented
   0.5-to-0.6 route ships with an executable rehearsal, but its publish half
   asserted a mock's echo - a canary that could not fail. The locked fixture
