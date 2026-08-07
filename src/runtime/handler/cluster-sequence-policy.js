@@ -12,14 +12,15 @@ export const CLUSTER_SEQUENCE_ERROR =
 // including entries it never received. That silent gap is the outcome the seq
 // lane exists to prevent.
 //
-// The batch surface carries ONE options object and has no per-entry numeric
-// form, so a numeric seq is a category error on it whatever the array happens
-// to hold - including one entry, and including none. Accepting it at count 1
-// would make the contract depend on the runtime length of an array: a call that
-// works while a tick produces one update starts throwing the day it produces
-// two. A caller with an authoritative number per frame wants publishWire.
+// One number for N entries is a category error on the batch whatever the array
+// happens to hold - including one entry, and including none. Accepting it at
+// count 1 would make the contract depend on the runtime length of an array: a
+// call that works while a tick produces one update starts throwing the day it
+// produces two. An authoritative number belongs on EACH ENTRY - `{ data, seq }`
+// - which is the one spelling that honours one-seq-per-entry when the numbers
+// come from a cluster authority rather than the local counter.
 export const BATCH_SEQUENCE_ERROR =
-	'publishWireBatch cannot take a numeric seq: the batch carries one options object and no per-entry sequence, so every entry would be stamped with the same value - a client that received only part of the batch reports it as a watermark and the resume floor then discards the rest. Use { seq: false }, or publish each entry through publishWire when each needs an externally authoritative seq';
+	'publishWireBatch cannot take a numeric seq: one options object cannot carry one-seq-per-entry, so every entry would be stamped with the same value - a client that received only part of the batch reports it as a watermark and the resume floor then discards the rest. Put the seq on each entry instead ({ data, seq }, each an integer >= 1; in a multi-worker runtime with { seq: false, relay: false }), or use { seq: false }. { seq: true } keeps the single-worker counter, which already increments per entry';
 
 /** @param {any} [data] */
 export function hasMultipleWorkers(data = workerData) {
@@ -63,6 +64,32 @@ export function assertClusterSequenceAuthority(options, data = workerData) {
 export function assertBatchSequenceAuthority(options, data = workerData) {
 	assertClusterSequenceAuthority(options, data);
 	if (typeof options?.seq === 'number') {
-		throw new Error(BATCH_SEQUENCE_ERROR);
+		// TypeError, like every seq-VALUE refusal (stampSeq's numeric arm, the
+		// per-entry pre-pass): the caller handed a value the surface cannot
+		// take. The topology asserts above and below stay plain Errors - they
+		// refuse a deployment shape, not a value.
+		throw new TypeError(BATCH_SEQUENCE_ERROR);
 	}
+}
+
+// A batch ENTRY carrying an explicit seq is the per-entry twin of
+// `publishWire({ seq: N })`, and takes the same clustered rule for the same
+// reason: the number came from an external ordered allocator, so the external
+// source must also be the fan-out - the built-in relay is multi-origin and
+// cannot preserve one monotonic topic order. `relay: false` is the observable
+// proof it is off. On a multi-worker runtime the batch's own options already
+// had to say `{ seq: false }` to get past the call-level gate above, so the
+// clustered spelling of an authoritative batch is `{ seq: false, relay: false }`
+// plus a seq on each entry - options renounce the counter, entries carry the
+// authority. Checked once per batch, in the pre-pass, BEFORE anything is
+// stamped or fanned out, so it composes with whole-batch-or-nothing rather
+// than throwing mid-delivery.
+export const BATCH_ENTRY_SEQUENCE_ERROR =
+	'clustered publishWireBatch entries carrying an explicit seq require { seq: false, relay: false }: the seq came from an external allocator, and the built-in multi-origin relay cannot preserve one monotonic topic sequence for it';
+
+/** @param {{ seq?: boolean | number, relay?: boolean } | null | undefined} options @param {any} [data] */
+export function assertBatchEntrySequenceAuthority(options, data = workerData) {
+	if (data === workerData ? !MULTI_WORKER_RUNTIME : !hasMultipleWorkers(data)) return;
+	if (options?.relay === false) return;
+	throw new Error(BATCH_ENTRY_SEQUENCE_ERROR);
 }

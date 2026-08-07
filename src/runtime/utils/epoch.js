@@ -53,6 +53,20 @@ export function nextTopicSeq(seqMap, topic) {
 }
 
 /**
+ * Refuse a seq the wire cannot carry. One throw site shared by `stampSeq`'s
+ * numeric arm and the batch's per-entry pre-pass, so the two spellings of the
+ * same contract cannot drift apart in message or in meaning. Cold path: it is
+ * only ever reached to throw, so the call costs nothing on a valid publish.
+ *
+ * @param {unknown} value
+ * @returns {never}
+ * @throws {TypeError} always
+ */
+export function throwInvalidSeq(value) {
+	throw new TypeError(`publish seq must be a positive integer (>= 1), received ${String(value)}`);
+}
+
+/**
  * Resolve the sequence number to stamp on a publish, honoring an explicit
  * caller-supplied authority. Shared by every publish entry point so the
  * three-way resolution never drifts between them.
@@ -97,7 +111,7 @@ export function stampSeq(options, seqMap, topic) {
 			// counter and every shipped authority (Redis INCR) are 1-based; a 0-based
 			// external source must offset by 1. Fail fast rather than corrupt the wire.
 			if (Number.isInteger(opt) && opt >= 1) return opt;
-			throw new TypeError(`publish seq must be a positive integer (>= 1), received ${String(opt)}`);
+			throwInvalidSeq(opt);
 		}
 	}
 	// The in-memory per-worker counter, inlined from `nextTopicSeq` rather than

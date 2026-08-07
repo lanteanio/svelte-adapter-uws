@@ -49,6 +49,26 @@ const WIRE = { capability: 'fixture.mirror-parity:1', schemaVersion: 1, encode: 
 const ENTRIES = [{ data: { n: 1 } }, { data: { n: 2 } }];
 
 /**
+ * The per-entry seq contract, against whichever surface's platform is handed
+ * in: the valid per-entry spelling is ACCEPTED (dev stamps no seq, but it must
+ * take the call), and an entry seq the wire cannot carry is refused - by every
+ * surface, in the same shape, before anything is delivered.
+ */
+function assertEntrySeqContract(platform, label) {
+	expect(
+		() => platform.publishWireBatch('mirror-entry-room', 'update', [{ data: { n: 1 }, seq: 5 }, { data: { n: 2 } }], WIRE, { seq: false }),
+		`${label}: the per-entry seq spelling must be accepted`
+	).not.toThrow();
+
+	for (const bad of [0, -1, 1.5, Number.NaN]) {
+		expect(
+			() => platform.publishWireBatch('mirror-entry-room', 'update', [{ data: { n: 1 }, seq: bad }], WIRE, { seq: false }),
+			`${label}: an entry seq of ${String(bad)} must be refused`
+		).toThrow(TypeError);
+	}
+}
+
+/**
  * The same four assertions against whichever surface's platform is handed in,
  * so a mirror cannot pass by refusing in a different shape than production.
  */
@@ -103,9 +123,11 @@ async function bootDevPlatform() {
 	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
 	await new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); });
 	teardown.push(() => { try { ws.terminate(); } catch { /* gone */ } });
+	const frames = [];
+	ws.on('message', (d) => frames.push(String(d)));
 	for (let i = 0; i < 200 && platform === null; i++) await new Promise((r) => setTimeout(r, 10));
 	expect(platform, 'the dev plugin never handed its platform to the handler').not.toBeNull();
-	return platform;
+	return { platform, ws, frames };
 }
 
 describe('the batch numeric-seq refusal holds on every surface, not just production', () => {
@@ -115,12 +137,38 @@ describe('the batch numeric-seq refusal holds on every surface, not just product
 		teardown.push(() => server.close());
 
 		assertRefusesNumericSeq(server.platform, 'createTestServer');
+		assertEntrySeqContract(server.platform, 'createTestServer');
 	}, 30000);
 
 	it('refuses it on the Vite dev plugin', async () => {
-		const platform = await bootDevPlatform();
+		const { platform, ws, frames } = await bootDevPlatform();
+
+		const parsed = () => frames.map((t) => { try { return JSON.parse(t); } catch { return null; } });
+		ws.send(JSON.stringify({ type: 'subscribe', topic: 'mirror-entry-room' }));
+		// Anchor on the ack rather than a fixed sleep, as the boot poll does.
+		for (let i = 0; i < 200; i++) {
+			if (parsed().some((e) => e && e.type === 'subscribed' && e.topic === 'mirror-entry-room')) break;
+			await new Promise((r) => setTimeout(r, 10));
+		}
 
 		assertRefusesNumericSeq(platform, 'vite dev');
+		assertEntrySeqContract(platform, 'vite dev');
+
+		// The accepted per-entry batch was DELIVERED, and delivered seq-less:
+		// dev stamps no seq on ordinary publishes (its documented posture), so
+		// an accepted `{ data, seq }` entry must not sprout one here either.
+		const delivered = () => parsed()
+			.filter((e) => e && e.topic === 'mirror-entry-room' && e.event === 'update');
+		for (let i = 0; i < 200 && delivered().length < 2; i++) {
+			await new Promise((r) => setTimeout(r, 10));
+		}
+		await new Promise((r) => setTimeout(r, 20));
+		const envelopes = delivered();
+		expect(envelopes.length, 'dev delivered a different entry set than the caller committed').toBe(2);
+		for (const env of envelopes) {
+			expect('seq' in env, 'dev stamped a seq it documents not stamping').toBe(false);
+		}
+		expect(envelopes.map((e) => e.data)).toEqual([{ n: 1 }, { n: 2 }]);
 	}, 30000);
 });
 

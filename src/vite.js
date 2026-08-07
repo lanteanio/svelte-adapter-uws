@@ -3,7 +3,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './runtime/cookies.js';
-import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
+import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, throwInvalidSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
@@ -13,7 +13,7 @@ import {
 	unknownOptionKeys,
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
-import { assertBatchSequenceAuthority } from './runtime/handler/cluster-sequence-policy.js';
+import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './runtime/handler/cluster-sequence-policy.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { snapshotUpgradeHeaders } from './runtime/utils/upgrade-headers.js';
 import { emitOperationalDiagnostic, viteHandlerFailureDiagnostic, viteHandlerRecoveredDiagnostic } from './runtime/utils/operational-diagnostic.js';
@@ -578,24 +578,49 @@ export default function uws(options = {}) {
 			// options object, so a numeric seq would stamp them all identically
 			// here as well - and an empty dev batch must refuse what a full one
 			// refuses, or dev accepts a call production rejects.
-			const opts = options == null ? options : { ...options };
+			// Field reads rather than a spread, as production reads them: an
+			// inherited or accessor-carried numeric seq must not slip a
+			// refusal here that production applies.
+			const opts = options == null
+				? options
+				: { seq: options.seq, relay: options.relay, compress: options.compress, excludeWs: options.excludeWs, jitterMs: options.jitterMs };
 			assertBatchSequenceAuthority(opts);
 			// Same one-read rule as production: the first publish runs application
 			// toJSON, and every read for a later entry happens after it. Dev that
 			// re-read them would disagree with production about what was sent.
+			// Per-entry seqs are validated with production's predicate - dev must
+			// refuse the call production refuses - and then carried through to
+			// publish(), which stamps no seq in dev (the documented dev posture;
+			// the seq protocol runs against createTestServer).
 			const count = Array.isArray(entries) ? entries.length : 0;
 			const datas = new Array(count);
 			const excludes = new Array(count);
+			let entrySeqs = null;
 			for (let i = 0; i < count; i++) {
 				const entry = entries[i];
 				datas[i] = entry.data;
 				excludes[i] = entry.excludeWs;
+				// typeof, as the options lane keys: numbers validate or refuse
+				// the batch, anything else falls through.
+				const entrySeq = entry.seq;
+				if (typeof entrySeq === 'number') {
+					if (!Number.isInteger(entrySeq) || entrySeq < 1) throwInvalidSeq(entrySeq);
+					if (entrySeqs === null) {
+						assertBatchEntrySequenceAuthority(opts);
+						entrySeqs = new Array(count);
+					}
+					entrySeqs[i] = entrySeq;
+				}
 			}
 			let ok = false;
 			for (let i = 0; i < count; i++) {
-				const per = excludes[i] !== undefined
-					? { ...(opts || {}), excludeWs: excludes[i] }
-					: opts;
+				const entrySeq = entrySeqs === null ? undefined : entrySeqs[i];
+				let per = opts;
+				if (excludes[i] !== undefined || entrySeq !== undefined) {
+					per = { ...(opts || {}) };
+					if (excludes[i] !== undefined) per.excludeWs = excludes[i];
+					if (entrySeq !== undefined) per.seq = entrySeq;
+				}
 				ok = publish(topic, event, datas[i], per) || ok;
 			}
 			return ok;

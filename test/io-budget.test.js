@@ -501,7 +501,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// slot value fails closed instead of removing the bound. Comparisons and
 	// one early return - no byte is read, allocated or copied, and no copy
 	// primitive entered.
-	ingress: '81c3417d39b14c54f9851cf069822d980edf00ddfa37e76d3724f7f278b07afe',
+	//
+	// Re-pinned for the per-entry batch seq, whose only drift in THIS graph is
+	// utils/epoch.js reached through utils.js: `throwInvalidSeq`, a cold
+	// throw-only helper, and stampSeq's numeric refusal arm now calling it
+	// instead of throwing inline - the same TypeError from one shared site so
+	// the batch pre-pass and the resolver cannot drift in message or meaning.
+	// The valid-seq path is untouched; nothing executes differently on any
+	// frame path, no byte is read, allocated or copied, and no copy primitive
+	// entered the graph.
+	ingress: 'af1f4c2860256b4350ca484c7b7db5b7436009f6940f9606c342cad4e94d8b12',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -610,7 +619,41 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// array of length N on the JSON path that previously allocated none,
 	// measured against the interleaved shape at 1, 8 and 64 entries and
 	// within run noise (bench/micro-wire-batch-alias-ab.mjs, variant F).
-	platform: '0fc6a37ac9535d9c2c5a1717dd1885c8ca44cd01ed15dd81886da9419603d099',
+	//
+	// Re-pinned for the per-entry batch seq. The drift in publishWireBatch's
+	// two branches: the snapshot passes also read each entry's `seq`
+	// (validating any they find through the shared refusal, and asserting the
+	// clustered relay rule once on the first one), an `entrySeqs` array of
+	// length N allocated only when an entry actually carries a seq, the
+	// stamping loop drawing from that snapshot behind one hoisted boolean,
+	// the stateless reroute's per-entry options carrying the seq through to
+	// publishWire, and the max-seen record folding per entry (monotone-max
+	// for explicit seqs, bare set for counter seqs) when - and only when -
+	// explicit seqs are present; the no-seq batch keeps its single bare set.
+	// The graph also gains cluster-sequence-policy.js's
+	// assertBatchEntrySequenceAuthority (comparisons and a throw) and
+	// utils/epoch.js's throwInvalidSeq (cold throw-only helper, named on the
+	// ingress seal). Numbers, references and comparisons only - no byte is
+	// read, allocated or copied, and no copy primitive entered. The no-seq
+	// batch's cost is one property read and one typeof-test per entry in
+	// the pre-pass, one boolean test per entry when stamping, and one boolean
+	// test per batch at the max-seen fold, measured at 1, 8 and 64 entries
+	// over four invocations and within run noise
+	// (bench/micro-wire-batch-alias-ab.mjs, variant G vs F).
+	//
+	// Re-pinned with the review repairs to the same change: the entry
+	// predicate keys on typeof number (non-numbers fall through to the shared
+	// options, the family spelling) instead of refusing anything defined; the
+	// options copy reads its four fields instead of spreading own properties,
+	// so an inherited or accessor-carried numeric seq meets the refusal
+	// instead of vanishing from the copy; the topic-stats lookup moved to
+	// AFTER the serialise loop, so a refused or toJSON-aborted batch no
+	// longer creates a stats entry for a topic no frame reached (publish()'s
+	// own ordering); and cluster-sequence-policy.js's batch-level refusal
+	// throws TypeError, the class every seq-VALUE refusal shares. Field
+	// reads, comparisons and a relocated Map lookup - no byte is read,
+	// allocated or copied, and no copy primitive entered.
+	platform: '2e0e2a0dd3977c3917f9f2828304507fb8243f855d4ca87b08f2d2eb15079019',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -626,7 +669,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// repairs - the derived lane's pre-enrolment check and the predicate's
 	// count guard, both in the same shared utils modules. Nothing in this
 	// graph's own modules changed, and no copy primitive entered.
-	'wire-fanout': '78087312a9e6d11331ce3fae800a19aa56068c0e3d05c445e151e40b06a06759',
+	// Re-pinned with the ingress seal for the per-entry batch seq: the only
+	// drift in this graph is utils/epoch.js reached through utils.js -
+	// throwInvalidSeq, a cold throw-only helper, and stampSeq's numeric
+	// refusal arm calling it instead of throwing inline. Nothing in this
+	// graph's own modules changed, and no copy primitive entered.
+	'wire-fanout': 'e09fda65aa0454213176dd219d7bb67749d324d2865492e9659918fe0b0b2e3d',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

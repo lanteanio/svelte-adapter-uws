@@ -5,7 +5,7 @@ import { metricsRegistry } from '../metrics-bridge.js';
 import { metricsSnapshot } from './metrics-snapshot.js';
 import { parentPort } from 'node:worker_threads';
 import { exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
 import { capCounts, captureResumeFrame, counters, maxSeenSeq, divergenceDiagnostics, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, resumeBuffers, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
@@ -17,7 +17,7 @@ import { BATCH_FRAME_WARN_BYTES, bumpOut, maybeWarnTopicRegistry, warnLargeBatch
 import { flushCoalescedFor, runUserSubscribeGate, hasUserSubscribeHook } from './subscribe-hooks.js';
 import { ensureWireId, ensureWireState, poisonWireState, wireStatePoisoned } from './wire-state.js';
 import { GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload, assertGameLaneClusterSafe } from './game-ingress.js';
-import { assertClusterSequenceAuthority, assertBatchSequenceAuthority } from './cluster-sequence-policy.js';
+import { assertClusterSequenceAuthority, assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './cluster-sequence-policy.js';
 import { registerWireCodec as _registerWireCodec, getWireCodec } from './codec-registry.js';
 import { cohortTopics, joinSharedCohort, leaveSharedCohort } from './cohort.js';
 import { getSharedWireId } from './shared-wire-id.js';
@@ -465,6 +465,22 @@ export const platform = {
 	 * carries the subset's LAST entry seq (batch consumers order by the
 	 * codec's own stamp, not the header seq).
 	 *
+	 * An entry may carry its own explicit `seq` - the cluster-authoritative
+	 * number a replay backend already allocated for that frame - exactly as
+	 * the same value would ride `publishWire({ seq: N })`, and it takes the
+	 * same rules: a NUMBER must be a positive integer or the batch refuses,
+	 * and on a multi-worker runtime it additionally requires `relay: false`
+	 * (with the batch options saying `{ seq: false }` - options renounce the
+	 * counter, entries carry the authority). A non-number entry `seq` falls
+	 * through to the shared options, exactly as it would on publishWire's own
+	 * options object; entries without one draw from the shared options as
+	 * before: the counter, or nothing under `{ seq: false }`. All numeric
+	 * per-entry seqs are validated in the snapshot pass BEFORE anything is
+	 * stamped, serialised, or fanned out - whole batch or nothing, so a
+	 * mid-batch refusal cannot leave earlier entries already delivered. A
+	 * batch-level numeric `options.seq` stays refused outright: one number
+	 * cannot be one-seq-per-entry.
+	 *
 	 * Degradation mirrors publishWire per connection: a codec that cannot
 	 * represent the batch (null) falls back to per-entry encodes; a per-entry
 	 * null falls back to that entry's JSON envelope; a dropped frame or
@@ -475,7 +491,7 @@ export const platform = {
 	 * @param {string} topic
 	 * @param {string} event - the PER-ENTRY event name; the codec's batch
 	 *   form is looked up as `<event>-batch` with `{ updates }` data.
-	 * @param {Array<{ data: any, excludeWs?: import('uWebSockets.js').WebSocket<any> }>} entries
+	 * @param {Array<{ data: any, excludeWs?: import('uWebSockets.js').WebSocket<any>, seq?: number }>} entries
 	 * @param {{ capability: string, schemaVersion: number, encode: Function, state?: any }} wire
 	 * @param {{ seq?: boolean, relay?: boolean, compress?: boolean }} [options]
 	 * @returns {boolean}
@@ -484,7 +500,15 @@ export const platform = {
 		// The contract is checked before the data is: an invalid seq is invalid
 		// whether or not this particular call happens to carry entries, so an
 		// empty batch cannot silently accept options a full one refuses.
-		const opts = options == null ? options : { ...options };
+		// Field reads rather than a spread: a spread copies own enumerable
+		// properties only, so a numeric seq carried on a prototype or by an
+		// inherited accessor would vanish from the copy and slip past a
+		// refusal every other read of the same object would have thrown on.
+		// Each field is read once, here; the value refused and the value used
+		// are the same read.
+		const opts = options == null
+			? options
+			: { seq: options.seq, relay: options.relay, compress: options.compress, excludeWs: options.excludeWs };
 		assertBatchSequenceAuthority(opts);
 		if (!Array.isArray(entries) || entries.length === 0) return false;
 		// What this call pins, before any application code inside it can run:
@@ -512,18 +536,38 @@ export const platform = {
 		if (!wire || !wire.state) {
 			// Read every entry before publishing any of them: the first publish
 			// runs application toJSON, and the reads for entry i+1 come after it.
+			// Per-entry seqs are validated here too - a refusal must land before
+			// the first publish fans out, or a mid-loop throw leaves earlier
+			// entries already delivered for a batch that never went out whole.
 			const datas = new Array(count);
 			const excludes = new Array(count);
+			let entrySeqs = null;
 			for (let i = 0; i < count; i++) {
 				const entry = entries[i];
 				datas[i] = entry.data;
 				excludes[i] = entry.excludeWs;
+				// The entry lane keys on typeof, exactly as the options lane
+				// does: a number must be a valid wire seq or the batch refuses,
+				// and anything else falls through to the shared options.
+				const seq = entry.seq;
+				if (typeof seq === 'number') {
+					if (!Number.isInteger(seq) || seq < 1) throwInvalidSeq(seq);
+					if (entrySeqs === null) {
+						assertBatchEntrySequenceAuthority(opts);
+						entrySeqs = new Array(count);
+					}
+					entrySeqs[i] = seq;
+				}
 			}
 			let ok = false;
 			for (let i = 0; i < count; i++) {
-				const per = excludes[i] !== undefined
-					? { ...(opts || {}), excludeWs: excludes[i] }
-					: opts;
+				const entrySeq = entrySeqs === null ? undefined : entrySeqs[i];
+				let per = opts;
+				if (excludes[i] !== undefined || entrySeq !== undefined) {
+					per = { ...(opts || {}) };
+					if (excludes[i] !== undefined) per.excludeWs = excludes[i];
+					if (entrySeq !== undefined) per.seq = entrySeq;
+				}
 				ok = this.publishWire(topic, event, datas[i], wire, per) || ok;
 			}
 			return ok;
@@ -543,12 +587,6 @@ export const platform = {
 
 		// Per-entry seq, envelope, and stats - the exact bookkeeping N
 		// publishWire calls would have produced.
-		let stats = topicPublishStats.get(topic);
-		if (!stats) {
-			stats = { m: 0, b: 0 };
-			topicPublishStats.set(topic, stats);
-			maybeWarnTopicRegistry();
-		}
 		const envs = new Array(count);
 		const seqs = new Array(count);
 		// SNAPSHOT PASS. Every entry's fields are read before any envelope is
@@ -567,6 +605,12 @@ export const platform = {
 		// leaves a hole, which reads as undefined and matches no socket.
 		let excludes = null;
 		let anyExclude = false;
+		// Per-entry explicit seqs, same lazy shape: allocated on the first entry
+		// that carries one, validated HERE - before anything is stamped or
+		// serialised - so an invalid seq refuses the whole batch with nothing
+		// half-delivered, and a toJSON that rewrites a later entry's seq is
+		// rewriting a field this call has already read.
+		let entrySeqs = null;
 		for (let i = 0; i < count; i++) {
 			const entry = entries[i];
 			datas[i] = entry.data;
@@ -575,6 +619,18 @@ export const platform = {
 				if (excludes === null) excludes = new Array(count);
 				excludes[i] = exclude;
 				anyExclude = true;
+			}
+			// The entry lane keys on typeof, exactly as the options lane does
+			// (stampSeq): a number must be a valid wire seq or the batch
+			// refuses, and anything else falls through to the shared options.
+			const entrySeq = entry.seq;
+			if (typeof entrySeq === 'number') {
+				if (!Number.isInteger(entrySeq) || entrySeq < 1) throwInvalidSeq(entrySeq);
+				if (entrySeqs === null) {
+					assertBatchEntrySequenceAuthority(opts);
+					entrySeqs = new Array(count);
+				}
+				entrySeqs[i] = entrySeq;
 			}
 		}
 		// Nothing AUTHORITATIVE moves until every entry has both stamped and
@@ -586,11 +642,19 @@ export const platform = {
 		let highestSeq = null;
 		let batchMessages = 0;
 		let batchBytes = 0;
+		// Hoisted so the common no-entry-seq batch tests one boolean per entry.
+		const hasEntrySeqs = entrySeqs !== null;
 		for (let i = 0; i < count; i++) {
 			// Reads the snapshot, never the caller: application code has already
 			// run by the second iteration.
 			const data = datas[i];
-			const seq = stampSeq(opts, topicSeqs, topic);
+			// An explicit entry seq is stamped verbatim (already validated in the
+			// snapshot pass) and does NOT advance the counter - the numeric
+			// authority and the local counter are two tracks, exactly as they are
+			// through publishWire.
+			const seq = hasEntrySeqs && entrySeqs[i] !== undefined
+				? entrySeqs[i]
+				: stampSeq(opts, topicSeqs, topic);
 			seqs[i] = seq == null ? 0 : seq;
 			const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
 			fatal(envelope.length > 0, 'envelope.empty', null);
@@ -599,7 +663,32 @@ export const platform = {
 			batchBytes += envelope.length;
 			envs[i] = envelope;
 		}
-		if (highestSeq !== null) maxSeenSeq.set(topic, highestSeq);
+		// The max-seen record matches what N publishWire calls would have left
+		// behind. Counter seqs are freshly stamped and monotonic, so the batch
+		// max IS the last write a per-call loop would have made - one bare set.
+		// Explicit entry seqs are cluster-authoritative and interleave across
+		// workers, so each goes through the monotone-max guard; a mixed batch
+		// applies them in entry order, as N calls would have.
+		if (hasEntrySeqs) {
+			for (let i = 0; i < count; i++) {
+				if (seqs[i] === 0) continue;
+				if (entrySeqs[i] !== undefined) recordSeen(maxSeenSeq, topic, seqs[i]);
+				else maxSeenSeq.set(topic, seqs[i]);
+			}
+		} else if (highestSeq !== null) {
+			maxSeenSeq.set(topic, highestSeq);
+		}
+		// Looked up only now, after every entry has stamped and serialised: a
+		// batch refused in the pre-pass, or aborted by a throwing toJSON, must
+		// not create the topic's stats entry - publish() likewise creates it
+		// only after its envelope is built, and the runaway-publisher window
+		// should not learn a topic no frame ever reached.
+		let stats = topicPublishStats.get(topic);
+		if (!stats) {
+			stats = { m: 0, b: 0 };
+			topicPublishStats.set(topic, stats);
+			maybeWarnTopicRegistry();
+		}
 		stats.m += batchMessages;
 		stats.b += batchBytes;
 		counters.publishCountWindow += count;

@@ -34,7 +34,7 @@
 // Defaults: 200_000 iterations, 9 rounds.
 
 import { performance } from 'node:perf_hooks';
-import { stampSeq, completeEnvelope } from '../src/runtime/utils/epoch.js';
+import { stampSeq, completeEnvelope, throwInvalidSeq } from '../src/runtime/utils/epoch.js';
 
 const ITERATIONS = parseInt(process.argv[2] || '200000', 10);
 const ROUNDS = parseInt(process.argv[3] || '9', 10);
@@ -206,6 +206,53 @@ function normalisedTwoPass(entries, seqMap, needsData) {
 	return sink + (anyExclude ? 1 : 0);
 }
 
+// Variant G: F plus the per-entry explicit-seq contract - the snapshot pass
+// also reads each entry's `seq` (validating any it finds), and the stamping
+// loop draws from the snapshot when an entry carried one. Entries here carry
+// none, so this measures what the CAPABILITY costs a batch that does not use
+// it: one property read and one typeof-test per entry in the pre-pass, and
+// one hoisted boolean test per entry in the stamping loop.
+function normalisedTwoPassSeq(entries, seqMap, needsData) {
+	const count = entries.length;
+	const datas = new Array(count);
+	let excludes = null;
+	let anyExclude = false;
+	let entrySeqs = null;
+	for (let i = 0; i < count; i++) {
+		const entry = entries[i];
+		datas[i] = entry.data;
+		const exclude = entry.excludeWs === undefined ? null : entry.excludeWs;
+		if (exclude !== null) {
+			if (excludes === null) excludes = new Array(count);
+			excludes[i] = exclude;
+			anyExclude = true;
+		}
+		const entrySeq = entry.seq;
+		if (typeof entrySeq === 'number') {
+			if (!Number.isInteger(entrySeq) || entrySeq < 1) throwInvalidSeq(entrySeq);
+			if (entrySeqs === null) entrySeqs = new Array(count);
+			entrySeqs[i] = entrySeq;
+		}
+	}
+	const envs = new Array(count);
+	const seqs = new Array(count);
+	const hasEntrySeqs = entrySeqs !== null;
+	for (let i = 0; i < count; i++) {
+		const seq = hasEntrySeqs && entrySeqs[i] !== undefined
+			? entrySeqs[i]
+			: stampSeq(OPTIONS, seqMap, 'room');
+		seqs[i] = seq == null ? 0 : seq;
+		envs[i] = completeEnvelope(ENV_PREFIX, datas[i], seq, null);
+	}
+	let sink = 0;
+	for (let i = 0; i < count; i++) sink += envs[i].length;
+	if (anyExclude) for (let i = 0; i < count; i++) if (excludes[i] === undefined) sink++;
+	else sink += count;
+	for (let i = 0; i < count; i++) sink += datas[i].n;
+	if (needsData) sink += 0;
+	return sink + (anyExclude ? 1 : 0);
+}
+
 // Every variant is called with the SAME arity, so none of them differs from the
 // others by an argument-shape the shipped code does not have. A, B and C ignore
 // the third argument; only D and F read it.
@@ -231,6 +278,7 @@ for (const SIZE of [1, 8, 64]) {
 	const d = [];
 	const e = [];
 	const f = [];
+	const g = [];
 	// Warm every shape before measuring so none pays first-call compilation.
 	run(readThrough, entries, 2000);
 	run(normalised, entries, 2000);
@@ -238,6 +286,7 @@ for (const SIZE of [1, 8, 64]) {
 	run(normalisedLazy, entries, 2000, false);
 	run(normalisedLazy, entries, 2000, true);
 	run(normalisedTwoPass, entries, 2000, false);
+	run(normalisedTwoPassSeq, entries, 2000, false);
 	for (let round = 0; round < ROUNDS; round++) {
 		a.push(run(readThrough, entries, iterations));
 		b.push(run(normalised, entries, iterations));
@@ -245,6 +294,7 @@ for (const SIZE of [1, 8, 64]) {
 		d.push(run(normalisedLazy, entries, iterations, false));
 		e.push(run(normalisedLazy, entries, iterations, true));
 		f.push(run(normalisedTwoPass, entries, iterations, false));
+		g.push(run(normalisedTwoPassSeq, entries, iterations, false));
 	}
 	const ma = median(a);
 	const mb = median(b);
@@ -252,6 +302,7 @@ for (const SIZE of [1, 8, 64]) {
 	const md = median(d);
 	const me = median(e);
 	const mf = median(f);
+	const mg = median(g);
 	const pct = (x) => ((x - ma) / ma) * 100;
 	const fmt = (x) => (pct(x) >= 0 ? '+' : '') + pct(x).toFixed(1) + '% vs A';
 	console.log(`${String(SIZE).padStart(3)} entries x ${iterations} batches:`);
@@ -261,6 +312,9 @@ for (const SIZE of [1, 8, 64]) {
 	console.log(`   D normalised (lazy)      ${md.toFixed(1)} ms   ${fmt(md)}   <- previous shape, JSON fast path`);
 	console.log(`   E normalised (lazy, bin) ${me.toFixed(1)} ms   ${fmt(me)}   <- previous shape, binary/relay path`);
 	const vsD = ((mf - md) / md) * 100;
-	console.log(`   F two-pass (alias-safe)  ${mf.toFixed(1)} ms   ${fmt(mf)}   <- SHIPPED shape: reads every entry before any toJSON runs`);
-	console.log(`     F vs D (the shape it replaced): ${vsD >= 0 ? '+' : ''}${vsD.toFixed(1)}%\n`);
+	console.log(`   F two-pass (alias-safe)  ${mf.toFixed(1)} ms   ${fmt(mf)}   <- previous shape: reads every entry before any toJSON runs`);
+	console.log(`     F vs D (the shape it replaced): ${vsD >= 0 ? '+' : ''}${vsD.toFixed(1)}%`);
+	const vsF = ((mg - mf) / mf) * 100;
+	console.log(`   G two-pass + entry seq   ${mg.toFixed(1)} ms   ${fmt(mg)}   <- SHIPPED shape: F plus the per-entry seq read (none carried here)`);
+	console.log(`     G vs F (the shape it replaced): ${vsF >= 0 ? '+' : ''}${vsF.toFixed(1)}%\n`);
 }

@@ -2,9 +2,11 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
 	BATCH_SEQUENCE_ERROR,
+	BATCH_ENTRY_SEQUENCE_ERROR,
 	CLUSTER_SEQUENCE_ERROR,
 	assertClusterSequenceAuthority,
 	assertBatchSequenceAuthority,
+	assertBatchEntrySequenceAuthority,
 	clusterSequenceAccepted,
 	hasMultipleWorkers
 } from '../src/runtime/handler/cluster-sequence-policy.js';
@@ -60,12 +62,13 @@ describe('cluster sequence authority policy', () => {
 		}
 	});
 
-	// The rule is a property of the SURFACE, not of the payload: the batch takes
-	// one options object and has no per-entry sequence, so a numeric seq is
-	// refused before the entries are even looked at. Otherwise the contract would
-	// depend on the runtime length of an array - a call that works while a tick
-	// produces one update starts throwing the day it produces two, and an empty
-	// batch would silently accept options a full one rejects.
+	// The rule is a property of the SURFACE, not of the payload: one options
+	// object cannot carry one-seq-per-entry (that form lives on the entries),
+	// so a numeric OPTIONS seq is refused before the entries are even looked
+	// at. Otherwise the contract would depend on the runtime length of an
+	// array - a call that works while a tick produces one update starts
+	// throwing the day it produces two, and an empty batch would silently
+	// accept options a full one rejects.
 	it('does not let the entry count decide whether the contract holds', () => {
 		expect(() => assertBatchSequenceAuthority({ seq: 7, relay: false })).toThrow(BATCH_SEQUENCE_ERROR);
 		expect(() => assertBatchSequenceAuthority({ seq: 1, relay: false })).toThrow(BATCH_SEQUENCE_ERROR);
@@ -76,6 +79,27 @@ describe('cluster sequence authority policy', () => {
 		// claimed to exclude - so the bounced `(options, count, data = workerData)`
 		// passed it at length 2 and the pin proved nothing.
 		expect(assertBatchSequenceAuthority.length).toBe(1);
+	});
+
+	// An entry carrying an explicit seq is the per-entry twin of
+	// publishWire({ seq: N }) and takes the same clustered rule: the external
+	// allocator must also be the fan-out, and relay: false is the observable
+	// proof the built-in multi-origin relay is off. Off-cluster the entry form
+	// is unconditionally welcome - the counter and an external authority
+	// cannot interleave across workers when there is only one.
+	it('admits clustered per-entry authority only with the relay renounced', () => {
+		for (const solo of [null, { totalWorkers: 1 }]) {
+			for (const options of [undefined, {}, { seq: false }, { relay: true }]) {
+				expect(() => assertBatchEntrySequenceAuthority(options, solo)).not.toThrow();
+			}
+		}
+		for (const accepted of [{ relay: false }, { seq: false, relay: false }]) {
+			expect(() => assertBatchEntrySequenceAuthority(accepted, cluster), JSON.stringify(accepted)).not.toThrow();
+		}
+		for (const rejected of [undefined, {}, { seq: false }, { relay: true }]) {
+			expect(() => assertBatchEntrySequenceAuthority(rejected, cluster), JSON.stringify(rejected))
+				.toThrow(BATCH_ENTRY_SEQUENCE_ERROR);
+		}
 	});
 
 	it('guards every production sequence-stamping entry point before mutation', () => {
@@ -96,9 +120,30 @@ describe('cluster sequence authority policy', () => {
 		// cannot accept options a full one refuses.
 		expect(wireBatch).toContain('assertBatchSequenceAuthority(opts);');
 		const beforeAssert = wireBatch.slice(0, wireBatch.indexOf('assertBatchSequenceAuthority('));
-		expect(beforeAssert).toContain('const opts = options == null ? options : { ...options };');
+		// Field reads, not a spread: the copy the assert vets and the copy the
+		// stamping reads must be the same one read of the caller's object, and
+		// a spread would let an inherited or accessor-carried numeric seq
+		// vanish from the copy and slip the refusal.
+		expect(beforeAssert).toContain(': { seq: options.seq, relay: options.relay, compress: options.compress, excludeWs: options.excludeWs };');
 		expect(beforeAssert, 'the batch inspects entries or fans out before its authority check')
 			.not.toMatch(/stampSeq|app\.publish|captureResumeFrame|maxSeenSeq\.set|entries\.length|Array\.isArray/);
+		// The per-entry authority check runs inside the batch too - in BOTH
+		// branches (the stateless reroute pre-reads and the stateful snapshot
+		// pass), before anything is stamped or fanned out: the last call site
+		// precedes the first counter stamp and the first per-entry publish.
+		expect(wireBatch.split('assertBatchEntrySequenceAuthority(opts)').length, 'both batch branches vet per-entry authority')
+			.toBe(3);
+		// Source order: the stateless branch's check (first occurrence) sits in
+		// its pre-read loop, before the first per-entry publish; the stateful
+		// branch's (last occurrence) sits in the snapshot pass, before the
+		// first counter stamp.
+		expect(wireBatch.indexOf('assertBatchEntrySequenceAuthority(opts)'),
+			'the stateless reroute must vet per-entry authority before it publishes')
+			.toBeLessThan(wireBatch.indexOf('this.publishWire('));
+		expect(wireBatch.lastIndexOf('assertBatchEntrySequenceAuthority(opts)'),
+			'the stateful branch must vet per-entry authority before it stamps')
+			.toBeLessThan(wireBatch.indexOf('stampSeq(opts'));
+		expect(wireBatch).toContain('throwInvalidSeq(');
 		expect(loopBatch).toContain('assertClusterSequenceAuthority(messages[i].options);');
 		expect(batch).toContain('assertClusterSequenceAuthority(messages[i].options);');
 	});

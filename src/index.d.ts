@@ -2474,25 +2474,38 @@ export interface Platform {
 	 * Each entry may carry its own `excludeWs` (per-entry author suppression).
 	 * Sequencing, accounting, and the cross-instance relay match N
 	 * `publishWire` calls (one seq and one relay envelope per entry).
-	 * This surface carries one options object and no per-entry sequence, so a
-	 * numeric `seq` is refused outright - on every topology, and whatever the
-	 * entries array holds, including one entry or none, so the contract never
-	 * changes shape with the data. Use `seq: false`, or publish through
-	 * `publishWire()` when each frame needs its own authoritative number.
+	 * An entry may carry its own explicit `seq` - the cluster-authoritative
+	 * number a replay backend already allocated for that frame - with exactly
+	 * `publishWire({ seq: N })`'s rules: a NUMBER must be a positive integer
+	 * or the whole batch is refused, it is stamped verbatim without advancing
+	 * the counter, and on a multi-worker runtime it additionally requires
+	 * `{ seq: false, relay: false }` on the options (options renounce the
+	 * counter, entries carry the authority, and `relay: false` proves the
+	 * multi-origin built-in relay is not also fanning out). A non-number
+	 * entry `seq` falls through to the shared options, exactly as it would on
+	 * `publishWire`'s own options object; entries without one draw from the
+	 * shared options as before. Every numeric per-entry seq is validated
+	 * before anything is stamped or delivered: an invalid one refuses the
+	 * WHOLE batch, so a mid-batch refusal cannot leave earlier entries
+	 * already fanned out. A batch-level numeric `options.seq` stays refused outright
+	 * - on every topology, and whatever the entries array holds, including
+	 * one entry or none, so that contract never changes shape with the data:
+	 * one number cannot be the one-seq-per-entry this method publishes.
 	 * Degradation is per connection: a codec that declines the batch falls back
 	 * to per-entry encodes, a per-entry decline to that entry's JSON envelope,
 	 * and a dropped frame or announce poisons the capability to JSON until
 	 * reconnect. A stateless codec routes through the per-entry path unchanged.
 	 *
 	 * The whole array is read before any of it is published. The length and the
-	 * options object are pinned on entry, and every entry's `data` and
-	 * `excludeWs` are read in a pass of their own before the first envelope is
-	 * built - which is where a payload's `toJSON` first runs. So application
-	 * code running inside this call cannot change what the call publishes: not
-	 * an entry already built, and not one whose turn has yet to come. No two
-	 * subscribers are handed different bytes for the same entry, an exclusion
-	 * cannot be cleared out from under the delivery walk, and an exclusion
-	 * cannot be installed on an entry that did not carry one.
+	 * options object are pinned on entry, and every entry's `data`,
+	 * `excludeWs` and `seq` are read in a pass of their own before the first
+	 * envelope is built - which is where a payload's `toJSON` first runs. So
+	 * application code running inside this call cannot change what the call
+	 * publishes: not an entry already built, and not one whose turn has yet to
+	 * come. No two subscribers are handed different bytes for the same entry,
+	 * an exclusion cannot be cleared out from under the delivery walk, an
+	 * exclusion cannot be installed on an entry that did not carry one, and a
+	 * seq cannot be rewritten after its entry was read.
 	 *
 	 * What it does NOT freeze is a payload's own fields: replacing those
 	 * reaches every subscriber, because each path holds the same object rather
@@ -2502,7 +2515,7 @@ export interface Platform {
 	publishWireBatch(
 		topic: string,
 		event: string,
-		entries: Array<{ data: unknown; excludeWs?: WebSocket<any> }>,
+		entries: Array<{ data: unknown; excludeWs?: WebSocket<any>; seq?: number }>,
 		wire: {
 			capability: string;
 			schemaVersion: number;

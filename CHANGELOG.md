@@ -63,6 +63,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-entry explicit seq on `publishWireBatch`: `{ data, seq }`.** Each
+  entry may carry the cluster-authoritative number a replay backend already
+  allocated for that frame - a Redis Lua INCR, a database outbox sequencer -
+  with exactly `publishWire({ seq: N })`'s semantics: a positive integer,
+  stamped verbatim, never advancing the in-memory counter, recorded through
+  the monotone-max guard. Only a number is an explicit entry seq - any other
+  spelling falls through to the shared options, exactly as it would on
+  `publishWire`'s own options object - and entries without one draw from the
+  shared options as before, so mixed batches work. The batch-level numeric
+  refusal now throws `TypeError`, the class every seq-value refusal shares. Every per-entry seq is validated before
+  anything is stamped, serialised, or delivered: an invalid one refuses the
+  WHOLE batch, and the seq is read in the same snapshot pass as `data` and
+  `excludeWs`, so application code running mid-batch cannot rewrite a later
+  entry's number. On a multi-worker runtime the clustered spelling is
+  `{ seq: false, relay: false }` on the options plus a seq on each entry -
+  options renounce the counter, entries carry the authority, and
+  `relay: false` is the same relay-off proof `publishWire` demands. An
+  authoritative cluster publisher can now batch instead of falling back to N
+  `publishWire` calls. The Vite dev plugin and `createTestServer` accept and
+  validate the same spelling (dev stamps no seq, its documented posture), so
+  a suite cannot certify a call production refuses - or the reverse.
+
 - **Server-enforced established-message admission.** The opt-in
   `websocket.messageAdmission` gate bounds per-connection/global rate and
   concurrent application work across the app hook, binary ingress, and JSON
@@ -741,15 +763,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   received, which is the silent gap the sequence lane exists to prevent. The
   refusal existed but was gated on the runtime having multiple workers, so the
   corruption was live on the default single-worker deployment. It now holds
-  independently of topology AND of what the entries array happens to hold: the
-  surface carries one options object and no per-entry sequence, so the check
-  runs before the entries are inspected and answers the same for twenty entries,
+  independently of topology AND of what the entries array happens to hold: a
+  batch-level option cannot be one-seq-per-entry, so the check runs before the
+  entries are inspected and answers the same for twenty entries,
   one, or none. Otherwise the contract would depend on the runtime length of an
   array - a call that works while a tick produces one update would start
   throwing the day it produced two. The Vite dev plugin and `createTestServer`
   accepted the call silently and now apply the same refusal, so a test can no
-  longer certify a wire shape production rejects. Publish through `publishWire`
-  when each frame needs its own authoritative number. The declaration now says
+  longer certify a wire shape production rejects. The authoritative number
+  belongs on each entry - `{ data, seq }`, the per-entry form this release
+  also adds (see Added) - or through `publishWire`
+  when each frame wants its own call. The declaration now says
   so as well: `publishWireBatch`'s `seq` narrowed from `boolean | number` to
   `boolean`, so a TypeScript caller passing a number gets a compile error rather
   than a clean build and a throw on the first tick that reaches the call. The

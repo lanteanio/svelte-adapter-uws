@@ -1,7 +1,7 @@
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders } from './runtime/utils/request-headers.js';
-import { stampSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
+import { stampSeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
@@ -17,7 +17,7 @@ import {
 	assertProtectiveNumber,
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
-import { assertBatchSequenceAuthority } from './runtime/handler/cluster-sequence-policy.js';
+import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './runtime/handler/cluster-sequence-policy.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
 import { runtimeVersionInfo } from './runtime/version-info.js';
 import { ADAPTER_ERROR_IDS, adapterErrorMessage } from './runtime/error-registry.js';
@@ -946,8 +946,12 @@ export async function createTestServer(options = {}) {
 			// the suite certifies a wire shape production refuses.
 			// Checked before the entries are, exactly as production does: an empty
 			// harness batch must refuse the options a full one refuses, or a suite
-			// certifies a call shape production rejects.
-			const opts = options == null ? options : { ...options };
+			// certifies a call shape production rejects. Field reads rather than a
+			// spread, as production reads them: an inherited or accessor-carried
+			// numeric seq must not slip a refusal here that production applies.
+			const opts = options == null
+				? options
+				: { seq: options.seq, relay: options.relay, compress: options.compress, excludeWs: options.excludeWs };
 			assertBatchSequenceAuthority(opts);
 			// Mirror of handler/platform.js publishWireBatch: one binary frame per
 			// capable connection (the codec's `<event>-batch` form), per-entry JSON
@@ -963,16 +967,34 @@ export async function createTestServer(options = {}) {
 			if (!wire || !wire.state) {
 				const statelessDatas = new Array(count);
 				const statelessExcludes = new Array(count);
+				// Per-entry seqs validated before the first publish fans out,
+				// as production does: whole batch or nothing.
+				let statelessSeqs = null;
 				for (let i = 0; i < count; i++) {
 					const entry = entries[i];
 					statelessDatas[i] = entry.data;
 					statelessExcludes[i] = entry.excludeWs;
+					// typeof, as the options lane keys: numbers validate or
+					// refuse the batch, anything else falls through.
+					const entrySeq = entry.seq;
+					if (typeof entrySeq === 'number') {
+						if (!Number.isInteger(entrySeq) || entrySeq < 1) throwInvalidSeq(entrySeq);
+						if (statelessSeqs === null) {
+							assertBatchEntrySequenceAuthority(opts);
+							statelessSeqs = new Array(count);
+						}
+						statelessSeqs[i] = entrySeq;
+					}
 				}
 				let ok = false;
 				for (let i = 0; i < count; i++) {
-					const per = statelessExcludes[i] !== undefined
-						? { ...(opts || {}), excludeWs: statelessExcludes[i] }
-						: opts;
+					const entrySeq = statelessSeqs === null ? undefined : statelessSeqs[i];
+					let per = opts;
+					if (statelessExcludes[i] !== undefined || entrySeq !== undefined) {
+						per = { ...(opts || {}) };
+						if (statelessExcludes[i] !== undefined) per.excludeWs = statelessExcludes[i];
+						if (entrySeq !== undefined) per.seq = entrySeq;
+					}
 					ok = platform.publishWire(topic, event, statelessDatas[i], wire, per) || ok;
 				}
 				return ok;
@@ -986,6 +1008,9 @@ export async function createTestServer(options = {}) {
 			const datas = new Array(count);
 			let excludes = null;
 			let anyExclude = false;
+			// Per-entry explicit seqs, validated in the snapshot pass before
+			// anything is stamped or serialised - as production has it.
+			let entrySeqs = null;
 			for (let i = 0; i < count; i++) {
 				const entry = entries[i];
 				datas[i] = entry.data;
@@ -995,10 +1020,26 @@ export async function createTestServer(options = {}) {
 					excludes[i] = exclude;
 					anyExclude = true;
 				}
+				// typeof, as the options lane keys: numbers validate or refuse
+				// the batch, anything else falls through.
+				const entrySeq = entry.seq;
+				if (typeof entrySeq === 'number') {
+					if (!Number.isInteger(entrySeq) || entrySeq < 1) throwInvalidSeq(entrySeq);
+					if (entrySeqs === null) {
+						assertBatchEntrySequenceAuthority(opts);
+						entrySeqs = new Array(count);
+					}
+					entrySeqs[i] = entrySeq;
+				}
 			}
+			const hasEntrySeqs = entrySeqs !== null;
 			for (let i = 0; i < count; i++) {
 				const data = datas[i];
-				const seq = stampSeq(opts, topicSeqs, topic);
+				// An explicit entry seq is stamped verbatim and does not advance
+				// the counter, exactly as through publishWire.
+				const seq = hasEntrySeqs && entrySeqs[i] !== undefined
+					? entrySeqs[i]
+					: stampSeq(opts, topicSeqs, topic);
 				seqs[i] = seq == null ? 0 : seq;
 				envs[i] = envelope(topic, event, data, seq);
 				if (onPublishT && !(opts && opts.relay === false)) {
