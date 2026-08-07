@@ -40,6 +40,7 @@ import {
 } from "../scripts/check-compatibility.js";
 import {
 	authenticatedReadmeSpan,
+	migrationBaselineException,
 	scanTextWithOffsets,
 } from "../scripts/check-uws-pin.js";
 
@@ -2474,6 +2475,39 @@ describe("ecosystem compatibility manifest", () => {
 			expect(() => uwsDeclaredInstallSpec(untagged + "#main")).toThrow(
 				/exact tagged GitHub source/,
 			);
+		});
+	});
+
+	describe("the migration baseline exception", () => {
+		// Refs assembled from pieces so this file never carries a stale spec
+		// the pin scanner would flag (the same discipline as the fixtures
+		// above). "v20." + "67.0" is the era ref, "v20." + "99.0" is a tag
+		// history never published.
+		const eraRef = "v20." + "67.0";
+		const bogusRef = "v20." + "99.0";
+		const baselinePath = "test/fixtures/migration-0.5/baseline.lock";
+		const refs = new Map([["0.5.8", eraRef]]);
+		const text = "format=adapter-migration-baseline-v1\nadapter.version=0.5.8\n";
+
+		it("allows only the baseline file, its own recorded era, and that era's exact ref", () => {
+			expect(migrationBaselineException(baselinePath, text, eraRef, refs)).toBe(true);
+			expect(migrationBaselineException("README.md", text, eraRef, refs)).toBe(false);
+			expect(migrationBaselineException(baselinePath, text, bogusRef, refs)).toBe(false);
+			expect(
+				migrationBaselineException(baselinePath, "format=adapter-migration-baseline-v1\n", eraRef, refs),
+			).toBe(false);
+			expect(
+				migrationBaselineException(baselinePath, text.replace("0.5.8", "0.4.0"), eraRef, refs),
+			).toBe(false);
+		});
+
+		it("reads the recorded era through a CRLF working copy unchanged", () => {
+			// A checkout can flip the baseline to CRLF while the index stays LF;
+			// the version key must not smuggle the carriage return into the
+			// lookup and fail with a misleading stale-spec verdict.
+			expect(
+				migrationBaselineException(baselinePath, text.replaceAll("\n", "\r\n"), eraRef, refs),
+			).toBe(true);
 		});
 	});
 });

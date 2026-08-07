@@ -532,6 +532,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The migration rehearsal proves its claim on the wire.** The documented
+  0.5-to-0.6 route ships with an executable rehearsal, but its publish half
+  asserted a mock's echo - a canary that could not fail. The locked fixture
+  is now a bootable consumer with its own server entry, and the rehearsal
+  boots it against the INSTALLED packed candidate and reads a real
+  WebSocket client's delivered frames: the documented `{ seq: false }` edit
+  is observed as a seq-less envelope (an unmigrated publish stamps the
+  counter, so the check discriminates), and the projection edit as fields
+  that never reach the wire. The baseline also quotes its era's native
+  install spec whole - it had been split into pieces that hid it from the
+  pin scanner and from anyone grepping for the tag; the scanner now detects
+  it and allows exactly that ref because it is an authenticated historical
+  compatibility fact.
+
 - **Twenty published GitHub source links (thirteen distinct files) no longer
   404.** Documentation on this release line linked repository files as
   `blob/main`, but the public main branch holds the previous stable release

@@ -33,7 +33,11 @@
  *     failing on one would demand the wrong edit.
  *   - NO TEXT OPT-OUTS: synthetic tests construct non-current refs from pieces
  *     so a marker cannot launder a copy-pasteable stale command in any shipped
- *     path. The authenticated historical manifest is the sole exception.
+ *     path. The only exceptions ride the authenticated historical manifest's
+ *     own authority: the manifest itself, the README span generated from it,
+ *     and the migration baseline whose recorded era-tag must be the
+ *     manifest's validated ref FOR THE ADAPTER VERSION THE BASELINE ITSELF
+ *     RECORDS - any other era's tag fails like a stale spec.
  *
  * The expected tag comes from the same derivation the runtime install hints use
  * (src/uws-load-hint.js), so the guard and the messages it protects can never
@@ -345,6 +349,34 @@ function trackedFiles() {
 		.filter(Boolean);
 }
 
+/**
+ * Whether a ref found in the migration baseline is that baseline's own era
+ * fact: the file must be the baseline, and the ref must be the manifest's
+ * validated historical native tag for the adapter version the baseline
+ * itself records. Pure so the contract suite can probe it; the caller
+ * additionally gates on the manifest having validated at all.
+ *
+ * @param {string} rel repository-relative path of the scanned file
+ * @param {string} text the scanned file's content
+ * @param {string | null} refValue the ref the scanner extracted
+ * @param {Map<string, string>} historicalRefByAdapterVersion npm-provenance rows: adapter version -> native ref
+ * @returns {boolean}
+ */
+export function migrationBaselineException(rel, text, refValue, historicalRefByAdapterVersion) {
+	if (rel !== 'test/fixtures/migration-0.5/baseline.lock') return false;
+	// [^\r\n] rather than a $-anchored dot, so CR handling is visible at a
+	// glance instead of derived from multiline-$ semantics: in ECMAScript the
+	// dot form happens to exclude CR too (CR is a LineTerminator), but a
+	// plausible refactor to [^\n]+$ would capture the carriage return of a
+	// CRLF working copy and fail the lookup with a misleading stale-spec
+	// verdict - the unit case pins that trap shut.
+	const era = /^adapter\.version=([^\r\n]+)/m.exec(text);
+	if (!era) return false;
+	if (typeof refValue !== 'string') return false;
+	const allowed = historicalRefByAdapterVersion.get(era[1]);
+	return allowed !== undefined && allowed === refValue;
+}
+
 export function authenticatedReadmeSpan(text, rows) {
 	const rendered = renderCompatibility(rows);
 	if (text.split(COMPATIBILITY_START).length !== 2 || text.split(COMPATIBILITY_END).length !== 2) return null;
@@ -373,6 +405,11 @@ function main() {
 			.filter((row) => row.provenance.startsWith('npm:'))
 			.map((row) => uwsRefFromSpec(row.uwebsockets))
 			.filter(Boolean)
+	);
+	const historicalRefByAdapterVersion = new Map(
+		compatibilityRows
+			.filter((row) => row.provenance.startsWith('npm:'))
+			.map((row) => [row.adapter_version, uwsRefFromSpec(row.uwebsockets)])
 	);
 	const readme = readFileSync(join(root, 'README.md'), 'utf8');
 	const readmeCompatibilitySpan = authenticatedCompatibility ? authenticatedReadmeSpan(readme, compatibilityRows) : null;
@@ -414,7 +451,17 @@ function main() {
 			const authenticatedBinaryRecord = rel === 'scripts/uws-accepted.json' &&
 				authenticatedBinaryPackage !== null && ref.ref === null &&
 				text.includes('"package": "' + authenticatedBinaryPackage + '"');
-			if (markdownNavigationTarget || immutableCompatibilityFact || generatedReadmeFact || authenticatedBinaryRecord) {
+			// The migration baseline records the 0.5 era's native tag whole -
+			// splitting it into pieces to dodge this scanner would be exactly
+			// the laundering the no-text-opt-outs rule forbids. It is allowed
+			// on the same authority as the compatibility manifest, bound to
+			// the baseline's OWN era: the ref must be the manifest's validated
+			// historical fact for the adapter version the baseline records, so
+			// a baseline naming any other tag - published in a different era
+			// or never - fails like any other stale spec.
+			const authenticatedMigrationBaseline = authenticatedCompatibility &&
+				migrationBaselineException(rel, text, ref.ref, historicalRefByAdapterVersion);
+			if (markdownNavigationTarget || immutableCompatibilityFact || generatedReadmeFact || authenticatedBinaryRecord || authenticatedMigrationBaseline) {
 				allowed++;
 				continue;
 			}

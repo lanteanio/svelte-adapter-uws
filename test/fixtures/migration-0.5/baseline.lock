@@ -3,8 +3,4 @@ adapter.name=svelte-adapter-uws
 adapter.version=0.5.8
 adapter.integrity=sha512-XG1DLduJDO+p6cK49NFd0ItJTuRXRVXhtukBNGS3ikW7NwUV2OIF+qhG0piNBP+vAVyvMfLvWM7sPVttFfBMjg==
 node=>=22.0.0
-uwebsockets.repository.scheme=github:
-uwebsockets.repository.owner=uNetworking
-uwebsockets.repository.name=uWebSockets.js
-uwebsockets.ref.prefix=v20.
-uwebsockets.ref.suffix=67.0
+uwebsockets=github:uNetworking/uWebSockets.js#v20.67.0
