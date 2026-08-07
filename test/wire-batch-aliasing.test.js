@@ -7,12 +7,14 @@
 // binary encode receives, the entry count - came back out of the caller's array,
 // so one entry's toJSON could change what a LATER read of an EARLIER entry saw.
 //
-// Two consequences are observable from outside, and this file pins both against
-// the real built runtime:
+// Three consequences are observable from outside, and this file pins them
+// against the real built runtime:
 //   1. the JSON envelope and the binary frame carry different payloads under the
 //      same seq, so two subscribers disagree about one sequenced frame;
-//   2. an exclusion the caller set is dropped, so the excluded socket is served
-//      the entry anyway.
+//   2. an exclusion the caller set is dropped (or one the caller never set is
+//      honoured), so the wrong sockets receive an entry;
+//   3. the batch publishes an entry set the caller never committed - one grown
+//      or shrunk from inside the call.
 //
 // LIMIT, deliberately not tested as a fix: mutating the payload object's own
 // fields (rather than replacing the reference) still reaches the binary encode,
@@ -129,7 +131,19 @@ describeUWS('publishWireBatch reads each caller entry once', () => {
 	// batch publishes for them.
 	it('publishes the payload entry 1 held at call time, not one entry 0 substituted', () => {
 		const topic = 'wire-batch-aliasing-forward-payload';
-		const wire = { capability: CAP, schemaVersion: 1, state: { onAttach: () => ({ schemaVersion: 1 }) }, encode: () => new Uint8Array([1]) };
+		/** @type {any[]} */
+		const encoded = [];
+		const wire = {
+			capability: CAP,
+			schemaVersion: 1,
+			state: { onAttach: () => ({ schemaVersion: 1 }) },
+			encode(event, data) {
+				// Snapshot what the codec was handed, so the binary lane is held
+				// to the same pin as the JSON lane below.
+				encoded.push(JSON.parse(JSON.stringify(data)));
+				return new Uint8Array([1]);
+			}
+		};
 
 		withSockets(topic, (capable, plain) => {
 			const entries = [{ data: null }, { data: { v: 'committed' } }];
@@ -147,6 +161,7 @@ describeUWS('publishWireBatch reads each caller entry once', () => {
 			expect(envelopes.length).toBe(2);
 			expect(envelopes[1].data, 'entry 1 was published with a payload its own caller never committed')
 				.toEqual({ v: 'committed' });
+			expect(encoded[0]?.updates).toEqual([{ v: 'first' }, { v: 'committed' }]);
 		});
 	});
 
@@ -171,6 +186,79 @@ describeUWS('publishWireBatch reads each caller entry once', () => {
 			expect(envelopes.length, 'an exclusion installed by application code mid-batch withheld an entry the caller published to everyone')
 				.toBe(2);
 			expect(envelopes[1].data).toEqual({ v: 'second' });
+		});
+	});
+
+	// Membership is the third thing a mid-batch toJSON could reach for: the
+	// count is pinned on entry and the snapshot holds every reference, so the
+	// batch publishes exactly the entries the caller committed - growing the
+	// caller's array adds nothing, shrinking it removes nothing.
+	it('publishes exactly the committed entries when application code appends one', () => {
+		const topic = 'wire-batch-aliasing-forward-append';
+		/** @type {any[]} */
+		const encoded = [];
+		const wire = {
+			capability: CAP,
+			schemaVersion: 1,
+			state: { onAttach: () => ({ schemaVersion: 1 }) },
+			encode(event, data) {
+				// The binary lane must hold the same two entries as the JSON lane.
+				encoded.push(JSON.parse(JSON.stringify(data)));
+				return new Uint8Array([1]);
+			}
+		};
+
+		withSockets(topic, (capable, plain) => {
+			const entries = [{ data: null }, { data: { v: 'committed' } }];
+			entries[0].data = {
+				toJSON() {
+					// A live length read would give this entry a turn of its own.
+					entries.push({ data: { v: 'appended' } });
+					return { v: 'first' };
+				}
+			};
+
+			platform.publishWireBatch(topic, 'update', entries, wire, { seq: false });
+
+			const envelopes = plain.envelopes();
+			expect(envelopes.length, 'the batch published an entry set the caller never committed').toBe(2);
+			expect(envelopes[1].data).toEqual({ v: 'committed' });
+			expect(encoded[0]?.updates).toEqual([{ v: 'first' }, { v: 'committed' }]);
+		});
+	});
+
+	it('publishes an entry the caller committed even after application code removes it', () => {
+		const topic = 'wire-batch-aliasing-forward-remove';
+		/** @type {any[]} */
+		const encoded = [];
+		const wire = {
+			capability: CAP,
+			schemaVersion: 1,
+			state: { onAttach: () => ({ schemaVersion: 1 }) },
+			encode(event, data) {
+				// The binary lane must hold the same two entries as the JSON lane.
+				encoded.push(JSON.parse(JSON.stringify(data)));
+				return new Uint8Array([1]);
+			}
+		};
+
+		withSockets(topic, (capable, plain) => {
+			const entries = [{ data: null }, { data: { v: 'committed' } }];
+			entries[0].data = {
+				toJSON() {
+					// Entry 1 was committed at call time; removing it from the
+					// caller's array must not un-publish it.
+					entries.pop();
+					return { v: 'first' };
+				}
+			};
+
+			platform.publishWireBatch(topic, 'update', entries, wire, { seq: false });
+
+			const envelopes = plain.envelopes();
+			expect(envelopes.length, 'the batch did not publish the entry set the caller committed').toBe(2);
+			expect(envelopes[1].data).toEqual({ v: 'committed' });
+			expect(encoded[0]?.updates).toEqual([{ v: 'first' }, { v: 'committed' }]);
 		});
 	});
 
