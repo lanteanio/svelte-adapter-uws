@@ -21,8 +21,12 @@ from the shipped wire.
 - **`webtransport-stream.json`** - the section-15 reliable-stream CONNECT
   declarations and a byte-exact three-record transcript (welcome, hello,
   binary `0x03`). Its fragment sizes split prefixes and bodies independently
-  of message boundaries, and its invalid prefixes pin zero, non-canonical, and
-  over-limit rejection.
+  of message boundaries, and its invalid prefixes pin zero, non-canonical,
+  over-limit, and past-the-5-byte-cap rejection. Record size is the receiver's
+  own (section 15.1), so the file states the receiver it assumes as
+  `assumedReceiverMessageBytes` and marks the one entry whose verdict depends
+  on it with `dependsOnReceiverLimit`: a receiver configured higher accepts
+  that record instead of refusing it, and both behaviours are conformant.
 
 A third-party implementer can validate captured frames against the
 [protocol schema](../protocol.schema.json) with any JSON Schema validator, and replay these

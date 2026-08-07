@@ -364,10 +364,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   byte-identical WebSocket messages, so welcome/hello, subscription, batch,
   lease, resume, and `0x03` codecs share their existing schemas and vectors.
   The binding settles FIN/session-close and QUIC-migration lifecycle, independent
-  datagram membership, 1 MiB record and pending-byte bounds, slow-consumer
-  reset posture, and four registered stream errors. Machine-readable schema
-  constants plus a fragmented byte-exact transcript pin prefix, topology,
-  capability, and rejection behavior pending independent freeze review.
+  datagram membership, slow-consumer reset posture, and four registered stream
+  errors. Record size is two obligations rather than one ceiling, because
+  nothing on the carriage negotiates a size: a sender may emit up to 1 MiB
+  unnegotiated, while a receiver applies its own inbound message limit - the
+  same deployment setting its WebSocket uses, 1 MiB absent configuration, and
+  moved in either direction for both carriages together - so one deployment no
+  longer accepts a message on one carriage and refuses it on the other. A
+  length prefix is capped at five bytes so the parse is bounded before any
+  length is known, and an over-wide prefix is a structural `PROTOCOL_ERROR`
+  distinct from a decoded over-limit `RECORD_TOO_LARGE`. The 8192-byte
+  control-frame ceiling keeps applying after deframing, answered with the
+  ordinary `error` frame rather than a lane reset.
+  Machine-readable schema constants plus a fragmented byte-exact transcript pin
+  prefix, topology, capability, and rejection behavior. The Meta section now
+  names which surfaces are provisional, so the binding's freeze-candidate status
+  cannot be read as covered by revision 1's frozen commitment.
 - **Deterministic I/O budgets now gate hot paths on operation counts, never
   timings.** The normal suite pins HTTP cork/write counts, outbound frame
   allocation and copy counts, zero-copy inbound frame parsing, stateless

@@ -13,6 +13,17 @@ const root = JSON.parse(readFileSync(new URL('../protocol.schema.json', import.m
 // prose pin joined with \n would then never match. Normalize on read so the
 // assertion tests the wording it claims to test.
 const protocol = readFileSync(new URL('../PROTOCOL.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+// Where a pin spans a line, match against collapsed whitespace: a reflow is not
+// a wire change, and a pin that breaks on rewrapping trains people to loosen it.
+// Paragraph breaks survive as breaks, so a pin can never span two paragraphs and
+// report a sentence the document does not actually carry in one place.
+const flatProtocol = protocol
+	.split(/\n\s*\n/)
+	.map((paragraph) => paragraph.replace(/\s+/g, ' ').trim())
+	.join('\n\n');
+// The Meta block alone: an assertion about what Meta says must not be satisfied
+// by the same words appearing in a section 800 lines away.
+const metaBlock = protocol.slice(protocol.indexOf('## Meta'), protocol.indexOf('## 1. Framing'));
 const expectedJsTransportDecision = [
 	'**Reference-runtime transport decision (`js-transport-v1`):**',
 	'WebSocket/WSS remains the permanent default and complete transport for the',
@@ -20,8 +31,9 @@ const expectedJsTransportDecision = [
 	'package: a negotiate-WebTransport/fall-back-to-WebSocket ladder remains parked',
 	'with no release target. Reopening it requires independent OSS demand, an',
 	'available QUIC-terminating server surface, and conformance against sections 14',
-	'and 15. A native runtime may implement those frozen bindings independently;',
-	'that does not create a JavaScript server or client deliverable.'
+	'and 15. A native runtime may implement those bindings independently - section 14',
+	'as frozen, section 15 at its own wire status (see Meta) - and that does not',
+	'create a JavaScript server or client deliverable.'
 ].join('\n');
 const vectors = JSON.parse(readFileSync(new URL('../test-vectors/frames.json', import.meta.url), 'utf8'));
 const binaryVector = JSON.parse(readFileSync(new URL('../test-vectors/binary.json', import.meta.url), 'utf8'));
@@ -193,21 +205,27 @@ describe('WebTransport reliable-stream carriage', () => {
 		return Buffer.from(out);
 	}
 
-	function prefix(bytes) {
+	// A receiver is parameterized by the one thing section 15.1 lets it choose:
+	// how large a record it accepts. Everything else is fixed for every receiver.
+	function prefix(bytes, receiverLimit = root['x-webtransport'].reliableStream.defaultReceiverMessageBytes) {
+		const { minimumMessageBytes, maximumLengthPrefixBytes } = root['x-webtransport'].reliableStream;
 		let value = 0;
 		let mul = 1;
 		for (let i = 0; i < bytes.length; i++) {
 			const byte = bytes[i];
+			// Structural, and decided before any length is known: a prefix that runs
+			// past the cap is refused at the byte after it, never read further.
+			if (i >= maximumLengthPrefixBytes) return { error: 'PROTOCOL_ERROR' };
 			value += (byte & 0x7f) * mul;
 			if ((byte & 0x80) === 0) {
 				const consumed = bytes.subarray(0, i + 1);
 				if (!consumed.equals(encodeVarint(value))) {
 					return { error: 'PROTOCOL_ERROR' };
 				}
-				if (value < root['x-webtransport'].reliableStream.minimumMessageBytes) {
+				if (value < minimumMessageBytes) {
 					return { error: 'PROTOCOL_ERROR' };
 				}
-				if (value > root['x-webtransport'].reliableStream.maximumMessageBytes) {
+				if (value > receiverLimit) {
 					return { error: 'RECORD_TOO_LARGE' };
 				}
 				return { value, bytes: i + 1 };
@@ -217,7 +235,7 @@ describe('WebTransport reliable-stream carriage', () => {
 		return null;
 	}
 
-	it('freezes the CONNECT, topology, size, and error constants in the schema', () => {
+	it('pins the CONNECT, topology, size, and error constants in the schema', () => {
 		const wt = root['x-webtransport'];
 		expect(wt.connectCapabilityQueryKey).toBe('lantean-cap');
 		expect(wt.connectCapabilities).toEqual({
@@ -230,9 +248,13 @@ describe('WebTransport reliable-stream carriage', () => {
 			unidirectionalStreamCount: 0,
 			lengthPrefix: 'canonical-unsigned-leb128',
 			minimumMessageBytes: 1,
-			maximumMessageBytes: 1_048_576,
-			maximumPendingBytes: 1_048_576,
+			maximumLengthPrefixBytes: 5,
+			maximumSenderMessageBytes: 1_048_576,
+			defaultReceiverMessageBytes: 1_048_576,
+			receiverMessageBytesConfigurable: true,
+			minimumPendingBytes: 1_048_576,
 			pendingByteAccounting: 'message-bytes-excluding-length-prefix',
+			innerControlFrameCeilingBytes: 8192,
 			firstServerFrame: 'welcome',
 			innerMessage: 'websocket-message-bytes'
 		});
@@ -255,9 +277,139 @@ describe('WebTransport reliable-stream carriage', () => {
 		for (const [name, code] of Object.entries(root['x-webtransport'].streamErrors)) {
 			expect(protocol).toContain(`\`0x0${code}\` | \`${name}\``);
 		}
-		expect(protocol).toMatch(/\*\*1,048,576 bytes\s+per session\*\*/);
-		expect(protocol).toMatch(/the\s+1-3-byte length prefixes are fixed framing overhead and do not count/);
+		expect(flatProtocol).toContain('**1,048,576 bytes per session**');
+		expect(flatProtocol).toContain('the length prefix (at most 5 bytes, 15.1) is fixed framing overhead');
 		expect(protocol).not.toContain('a future revision may bind reliable lanes');
+	});
+
+	// A sender permitted to emit a large record must be able to QUEUE it: a flat
+	// pending bound would make the permitted emission reset the sender's own lane.
+	it('scales the pending bound with what this endpoint may emit', () => {
+		expect(protocol).toMatch(/That bound MUST be\s+at least \*\*1,048,576 bytes per session\*\*, and at least the largest record this\s+endpoint may itself emit/);
+		expect(protocol).not.toMatch(/send stream to \*\*1,048,576 bytes\s+per session\*\*\./);
+	});
+
+	// Nothing on this carriage negotiates a size, so each side gets a rule it can
+	// evaluate alone: the sender a constant, the receiver its own configuration.
+	it('splits the record size into a sender constant and a receiver floor', () => {
+		const { maximumSenderMessageBytes, defaultReceiverMessageBytes } =
+			root['x-webtransport'].reliableStream;
+		const grouped = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+		expect(protocol).toContain(`MUST NOT emit a record whose \`messageBytes\` exceed ${grouped(maximumSenderMessageBytes)}`);
+		expect(flatProtocol).toContain(`and **${grouped(defaultReceiverMessageBytes)} bytes** absent configuration`);
+		// The parity rule must bind BOTH directions: a lowered limit that applied
+		// only to WebSocket would split the carriages exactly as a raised one did.
+		expect(flatProtocol).toContain('whether it raises that limit or lowers it');
+		// The old justification was false: section 1.3 states a configurable
+		// default, never a ceiling, so a raised limit split the two carriages.
+		expect(protocol).not.toContain('the section 1.3 frame ceiling made transport-independent');
+		expect(protocol).toMatch(/`maxPayloadLength` \(default 1 MiB,\s+deployment-configurable\)/);
+		// Section 12 reads 1.3 for its DoS bound and must not restate it as a cap.
+		expect(protocol).not.toContain('1 MiB payload cap');
+	});
+
+	// Both halves: the document must GRANT the raised receiver, and the vector
+	// must stay replayable by one - a helper agreeing with itself proves neither.
+	it('lets a raised receiver accept what a floor receiver refuses', () => {
+		const { defaultReceiverMessageBytes } = root['x-webtransport'].reliableStream;
+		expect(flatProtocol).toContain('deployment-configurable');
+		expect(root['x-webtransport'].reliableStream.receiverMessageBytesConfigurable).toBe(true);
+		// The vector states the receiver it assumes, so a differently-configured
+		// implementer knows which entry is conditional and why.
+		expect(streamVector.assumedReceiverMessageBytes).toBe(defaultReceiverMessageBytes);
+		const conditional = streamVector.invalidPrefixes.filter((entry) => entry.dependsOnReceiverLimit);
+		expect(conditional).toHaveLength(1);
+		const overFloor = Buffer.from(conditional[0].hex, 'hex');
+		expect(prefix(overFloor)).toEqual({ error: conditional[0].error });
+		expect(prefix(overFloor, defaultReceiverMessageBytes * 4))
+			.toEqual({ value: defaultReceiverMessageBytes + 1, bytes: overFloor.byteLength });
+		// Every unconditional entry must hold at ANY conformant receiver limit.
+		for (const entry of streamVector.invalidPrefixes.filter((e) => !e.dependsOnReceiverLimit)) {
+			expect(prefix(Buffer.from(entry.hex, 'hex'), defaultReceiverMessageBytes * 4), entry.reason)
+				.toEqual({ error: entry.error });
+		}
+	});
+
+	// Structure is decided on the COMPLETE prefix. A receiver judging a partial
+	// value could answer the same bytes with either code - hand-checked below.
+	it('forbids deciding on a partial prefix value', () => {
+		expect(flatProtocol).toContain('The LENGTH VALUE is judged only once the prefix is complete, never on a partial accumulation');
+		// 1 + 64*16384 = 1048577 after three bytes, but the 4-byte encoding is
+		// non-canonical (canonical is 81 80 40), so structure wins: PROTOCOL_ERROR.
+		expect(prefix(Buffer.from('8180c000', 'hex'))).toEqual({ error: 'PROTOCOL_ERROR' });
+		// Partial exceeds the floor at byte 3, yet the prefix runs past the cap.
+		expect(prefix(Buffer.from('ffffffffff01', 'hex'))).toEqual({ error: 'PROTOCOL_ERROR' });
+	});
+
+	// Section 1.2's ceiling is client-to-server; a server-to-client `batch` may
+	// legitimately exceed it on WebSocket, so it must not be rejected here.
+	it('keeps the control-frame ceiling client-to-server only', () => {
+		expect(protocol).toMatch(/it bounds CLIENT-TO-SERVER control records only, and a server-to-client/);
+		expect(protocol).toMatch(/That\s+ceiling does not apply server-to-client, so a large `batch` record is bounded\s+only by the record limit/);
+	});
+
+	// An over-wide prefix is refused structurally, before any length is known -
+	// the bound the fixed ceiling used to imply and no longer does.
+	it('refuses a prefix past the cap at every receiver limit', () => {
+		const { maximumLengthPrefixBytes } = root['x-webtransport'].reliableStream;
+		// Pinned in prose too: a derived-only check cannot notice the cap moving.
+		expect(protocol).toContain(`The prefix MUST NOT exceed **${maximumLengthPrefixBytes} bytes**`);
+		const overWide = Buffer.alloc(maximumLengthPrefixBytes + 1, 0x80);
+		overWide[maximumLengthPrefixBytes] = 0x01;
+		expect(prefix(overWide)).toEqual({ error: 'PROTOCOL_ERROR' });
+		// The largest limit the carriage can express - not MAX_SAFE_INTEGER, which
+		// would quantify over receivers the document forbids.
+		expect(prefix(overWide, 2 ** (7 * maximumLengthPrefixBytes) - 1)).toEqual({ error: 'PROTOCOL_ERROR' });
+		// The cap is what makes the length space finite, so the document must say
+		// how large a length is expressible and cap any configured limit by it.
+		const expressible = 2 ** (7 * maximumLengthPrefixBytes) - 1;
+		expect(protocol).toContain(`**${String(expressible).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}**`);
+	});
+
+	// A control record is bounded twice: by the carriage, and by section 1.2
+	// after deframing. The two breaches answer differently.
+	it('carries the control-frame ceiling across the deframe boundary', () => {
+		const { innerControlFrameCeilingBytes } = root['x-webtransport'].reliableStream;
+		expect(protocol).toContain(`**under ${innerControlFrameCeilingBytes} bytes**`);
+		expect(protocol).toContain(`the ${innerControlFrameCeilingBytes}-byte control-frame ceiling`);
+		expect(flatProtocol).toContain('answered with the ordinary `error` control frame (section 3.7) on the same stream and leaves the lane open');
+		// 15.6 is where an implementer builds the error path, so the one breach
+		// that must NOT reset the lane has to be visible there too.
+		expect(flatProtocol).toContain('One inner breach is deliberately NOT a lane reset');
+	});
+
+	// The reliable lane carries WebSocket bytes, so it carries the WebSocket
+	// form of the capability - not the datagram lane's one-room shorthand.
+	it('resolves compact fan-out on the reliable lane to the announced wire-id form', () => {
+		expect(flatProtocol).toContain("section 6.7's WebSocket form: the ordinary `wire-id` binding of section 6.2");
+		expect(flatProtocol).toContain("NOT section 14.6's reserved id `0`");
+		// A freeze candidate may not restate a frozen section more broadly than the
+		// frozen section states itself, so 15.7 quotes 6.7 instead of widening it.
+		expect(protocol).not.toContain('per-connection or shared-cohort');
+	});
+
+	// Every place that states section 15's status must agree, in both directions,
+	// and deleting the status line entirely may not read as a silent promotion.
+	it('states section 15 status consistently everywhere it is claimed', () => {
+		const sectionIsCandidate = protocol.includes('**Wire status: freeze candidate.**');
+		const metaCarvesItOut = /Provisional today[\s\S]{0,600}?\*\*section 15\*\* in whole/.test(protocol);
+		// Non-vacuous: the section must carry SOME status line either way.
+		expect(protocol).toMatch(/\*\*Wire status:[^*]*\*\*[\s\S]{0,200}?additive within revision 1/);
+		expect(metaCarvesItOut).toBe(sectionIsCandidate);
+		// The header block calls section 14 frozen; it must not sweep 15 in with it.
+		expect(protocol).not.toContain('A native runtime may implement those frozen bindings');
+		// Promotion has to move the schema's description too, or a machine consumer
+		// keeps reading "provisional" after the wire froze.
+		expect(root.description.includes('freeze candidate')).toBe(sectionIsCandidate);
+		// Scoped to Meta itself: these strings all occur elsewhere in the document,
+		// so an unscoped search passes with the whole enumeration deleted.
+		for (const reference of ['section 13', '14.1', '14.2', '14.5', 'appendices D, E']) {
+			expect(metaBlock, `Meta must name ${reference} as carrying provisional references`)
+				.toContain(reference);
+		}
+		// It is a RULE, not a closed list - the list can never enumerate every site.
+		expect(metaBlock).toContain('This is a rule, not a list');
+		expect(metaBlock).not.toContain('it is exhaustive');
 	});
 
 	it('decodes the repeated CONNECT capability carrier exactly once', () => {

@@ -1,5 +1,6 @@
 {
   "description": "Byte-exact WebTransport reliable-stream transcript for PROTOCOL.md section 15. Each record is canonical unsigned-LEB128 message length plus the unchanged WebSocket message bytes. fragmentLengths deliberately split the first length/body, place a read boundary one byte before the first record ends, and coalesce later records.",
+  "assumedReceiverMessageBytes": 1048576,
   "connectQuery": "lantean-cap=lantean.reliable%3A1&lantean-cap=game.fanout%3A1",
   "decodedConnectCapabilities": ["lantean.reliable:1", "game.fanout:1"],
   "fragmentLengths": [1, 2, 7, 3, 19, 5, 31, 1, 64, 8],
@@ -54,9 +55,15 @@
       "error": "PROTOCOL_ERROR"
     },
     {
-      "reason": "length 1048577 exceeds 1 MiB",
+      "reason": "length 1048577 exceeds assumedReceiverMessageBytes",
       "hex": "818040",
-      "error": "RECORD_TOO_LARGE"
+      "error": "RECORD_TOO_LARGE",
+      "dependsOnReceiverLimit": true
+    },
+    {
+      "reason": "prefix runs past the 5-byte cap before any length is known",
+      "hex": "808080808001",
+      "error": "PROTOCOL_ERROR"
     }
   ]
 }

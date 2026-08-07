@@ -15,7 +15,7 @@ implementation, and CI proofs below make that prose executable.
 | Task | Start here | What it establishes |
 | --- | --- | --- |
 | Decide what a peer MUST send or accept | [Wire protocol](../PROTOCOL.md) | The normative framing, lifecycle, capability, failure, and conformance-class contract. |
-| Validate a JSON frame | [Protocol schema](../protocol.schema.json) | The machine-readable control-frame and data-event union plus frozen constants. |
+| Validate a JSON frame | [Protocol schema](../protocol.schema.json) | The machine-readable control-frame and data-event union, plus the carriage constants at their own wire status. |
 | Replay known-good and known-bad bytes | [Test-vector index](../test-vectors/README.md) | Canonical JSON, binary, relay, and WebTransport reliable-stream transcripts. |
 | Bootstrap a third-party implementation | [Minimal Core client](../examples/minimal-client.mjs) | A dependency-free JSON-only implementation of the Core class. It is an example, not a replacement for the normative protocol. |
 | Compare client behavior | [Reference client](../src/client.js) | The shipped browser implementation, including negotiation, reconnect, resume, and binary dispatch. |

@@ -28,8 +28,9 @@ JavaScript adapter. No post-0.6 WebTransport client lane is scheduled for this
 package: a negotiate-WebTransport/fall-back-to-WebSocket ladder remains parked
 with no release target. Reopening it requires independent OSS demand, an
 available QUIC-terminating server surface, and conformance against sections 14
-and 15. A native runtime may implement those frozen bindings independently;
-that does not create a JavaScript server or client deliverable.
+and 15. A native runtime may implement those bindings independently - section 14
+as frozen, section 15 at its own wire status (see Meta) - and that does not
+create a JavaScript server or client deliverable.
 
 The reference implementation is [src/client.js](./src/client.js) (client) and
 [src/runtime/wire.js](./src/runtime/wire.js) plus
@@ -50,7 +51,31 @@ speak the identical wire.
   change incompatibly. The wire evolves only additively - new optional fields,
   new capability tokens, new schema versions within a token - per section 5 and
   section 10. A change that is not additive ships as revision 2 behind a new
-  token and is never a silent reinterpretation of anything frozen here.
+  token and is never a silent reinterpretation of anything frozen here. The
+  provisional surface described under Additive additions is the one exception:
+  anything outside it is frozen.
+- **Additive additions.** A new optional carriage or token that no existing peer
+  can observe until it opts in lands inside this revision rather than as a new
+  one, and stays provisional until it freezes. **Section 15's wire-status line
+  is the single normative status** for the surface below; this list and the
+  companion schema's description restate it and move with it. While that line
+  reads anything other than frozen an implementer MUST NOT read the commitment
+  above as covering any of it. Provisional today (added in 0.6.0-next.91):
+  - **section 15** in whole;
+  - the exact `lantean-cap` CONNECT query carrier and its registered tokens
+    (section 14.7, appendix C.5);
+  - the reliable-stream error registry (appendix C.6);
+  - and, in otherwise frozen prose, EVERY reference to anything named above.
+    This is a rule, not a list: the references include the transport-decision
+    preamble, 14.1's reliable-session sentences, 14.2's `hello` note, 14.4's
+    stream reservation and its `lantean.reliable:1` MUST NOT, 14.6's
+    negotiation bullet, 14.5's closing sentence, section 13's reliable-stream
+    claimant paragraph, and the section 15 rows and bullets of appendices D, E
+    and F. Those references describe provisional constructs, so they move when
+    the constructs do, and a third party MUST NOT read one as frozen merely
+    because the section around it is. Section 14's datagram carriage, its frame
+    shapes, and its posture of declaring capabilities in the CONNECT query are
+    frozen; only the spelling of that carrier can still move.
 - **Errata:** corrections that document shipped behavior more accurately (never a
   wire change) land as editorial updates to this revision; report them on the
   repository issue tracker. A wire change lands as a new revision.
@@ -996,8 +1021,8 @@ What the protocol does NOT promise (a client MUST NOT assume these):
   line-separator code points cannot appear in a topic name unless a deployment
   opts in and accepts the responsibility.
 - **DoS posture.** The 8192-byte control-frame ceiling (section 1.2) and the
-  1 MiB payload cap (section 1.3) bound per-frame work; an oversized control
-  frame is rejected WITHOUT being parsed. Deployments SHOULD additionally apply
+  configured inbound payload limit (section 1.3, default 1 MiB) bound per-frame
+  work; an oversized control frame is rejected WITHOUT being parsed. Deployments SHOULD additionally apply
   per-IP upgrade rate limiting and a per-connection subscription cap
   (`RATE_LIMITED`, section 3.2.2).
 - **Authorization is fail-closed.** An authorization gate that throws denies with
@@ -1293,11 +1318,38 @@ Each stream record is:
 - `messageLength` is canonical unsigned LEB128, using the primitive encoding
   of section 6.3. It counts `messageBytes` only. A canonical encoding is the
   shortest possible encoding; a redundant continuation byte is a protocol
-  error.
-- The length MUST be between **1 and 1,048,576 bytes**, inclusive. A receiver
-  MUST reject a zero length, a prefix that exceeds the limit, or a record whose
-  bytes are incomplete when the peer finishes its sending direction. The
-  1 MiB ceiling is the section 1.3 frame ceiling made transport-independent.
+  error. The prefix MUST NOT exceed **5 bytes**, which locally narrows the
+  uncapped primitive of section 6.3. A receiver MUST reject a longer one with
+  `PROTOCOL_ERROR`, and MAY do so the moment the breach is knowable - a fifth
+  byte still carrying the continuation bit already proves it - rather than
+  reading a sixth. This bounds the parse before any length is known, which a
+  prefix whose width is inferred from a size limit does not. Five groups carry
+  35 bits, so **34,359,738,367** is the largest length this carriage can
+  express and therefore the ceiling on any limit below.
+- **A sender MUST NOT emit a record whose `messageBytes` exceed 1,048,576
+  bytes**, unless it knows out of band that its peer accepts more. Nothing on
+  this carriage negotiates a size, so this bound is fixed and every sender can
+  evaluate it against the record in hand.
+- **A receiver's limit is its section 1.3 inbound message limit applied to this
+  carriage** - `maxPayloadLength` under another name: deployment-configurable,
+  and **1,048,576 bytes** absent configuration. A deployment SHOULD apply one
+  value to both carriages whether it raises that limit or lowers it, so that a
+  message its WebSocket accepts is not refused on its stream and a message its
+  WebSocket refuses is not accepted on its stream. A receiver MUST reject a
+  zero length, a declared length above its own limit (immediately on the
+  complete prefix, before allocating for that length and without waiting for
+  body bytes), or a record whose bytes are incomplete when the peer finishes
+  its sending direction. The LENGTH VALUE is judged only once the prefix is
+  complete, never on a partial accumulation, which would let the same bytes be
+  answered with two different codes.
+- The two directions are not symmetric, and this section does not pretend
+  otherwise: a client's inbound capacity is a property of its runtime rather
+  than a deployment knob, and section 1.3 describes what the reference client
+  applies. A sender within the unnegotiated bound may therefore still be
+  refused by a peer that accepts less, exactly as on WebSocket. What the
+  carriage improves is diagnosis: an over-limit server-to-client message is a
+  SILENT drop on WebSocket (section 1.3) but a signalled `RECORD_TOO_LARGE`
+  here, so the same mistake is visible instead of invisible.
 - `messageBytes` are EXACTLY the bytes the corresponding WebSocket message
   carries. No type byte, opcode, compression marker, checksum, or carriage
   header is inserted inside them. Bytes beginning with a registered binary tag
@@ -1310,8 +1362,16 @@ Each stream record is:
   incrementally and MUST NOT treat a read boundary as a message boundary.
 
 The prefix is carriage, not an inner frame. Consequently every JSON schema,
-`0x03` codec, conformance vector, and unknown-frame rule remains shared with
-WebSocket after the prefix is removed.
+`0x03` codec, conformance vector, unknown-frame rule, control-frame recognition
+rule (section 1.1), and the 8192-byte control-frame ceiling with its
+`CONTROL_FRAME_TOO_LARGE` reply (section 1.2) remain shared with WebSocket after
+the prefix is removed. Section 1.2's ceiling keeps its DIRECTION as well as its
+value: it bounds CLIENT-TO-SERVER control records only, and a server-to-client
+control record - a large `batch` (section 3.3), say - is bounded by the record
+limit alone, exactly as on WebSocket. The two limits are independent and answer
+differently: a record-limit breach resets the lane, while a client-to-server
+control record that reaches section 1.2's ceiling is answered with the ordinary
+`error` control frame (section 3.7) on the same stream and leaves the lane open.
 
 ### 15.2 Negotiation and topology
 
@@ -1397,23 +1457,37 @@ apply:
   `request-n` is still advisory and does not enlarge any byte limit.
 
 An endpoint MUST bound complete message bytes that have been framed for this
-lane but not yet accepted by the WebTransport send stream to **1,048,576 bytes
-per session**. The sum is over each queued record's `messageLength`; the
-1-3-byte length prefixes are fixed framing overhead and do not count. This lets
-one maximum-size message fit without making the pending bound ambiguous. The
-endpoint MUST stop pulling or producing optional work while the stream is
-blocked. If adding the next complete record would cross the bound, it resets the
+lane but not yet accepted by the WebTransport send stream. That bound MUST be
+at least **1,048,576 bytes per session**, and at least the largest record this
+endpoint may itself emit (15.1) where out-of-band knowledge raised that above
+the unnegotiated maximum - otherwise emitting a record the sender is permitted
+to emit would force it to reset its own lane. The sum is over each queued
+record's `messageLength`; the length prefix (at most 5 bytes, 15.1) is fixed
+framing overhead and does not count. One maximum-size message therefore always
+fits. The endpoint MUST stop pulling or producing optional work while the
+stream is blocked. If adding the next complete record would cross the bound, it resets the
 reliable lane with `SLOW_CONSUMER`; it MUST NOT drop a reliable record,
 silently skip a `seq`, or spill into a second stream. Recoverable topics then
 resume on a new connection by section 15.5; non-recoverable topics re-snapshot
 as section 7 already requires. The datagram lane may continue after the reset.
 
-An inbound declared record over the 1 MiB limit is stopped/reset with
-`RECORD_TOO_LARGE`. A non-canonical/zero prefix, invalid registered binary
-shape, invalid UTF-8 where JSON is required, or FIN inside a record is reset
-with `PROTOCOL_ERROR`. These errors close the reliable lane and its state, not
-the whole WebTransport session. Section 12's authorization and rate limits
-still apply after deframing.
+An inbound declared record above the receiver's 15.1 limit is stopped/reset with
+`RECORD_TOO_LARGE`. A non-canonical/zero prefix, a prefix over 5 bytes, an
+invalid registered binary shape, invalid UTF-8 where JSON is required, or FIN
+inside a record is reset with `PROTOCOL_ERROR`. The two never overlap because
+both are decided on the COMPLETE prefix (15.1) and structure is decided first:
+a prefix over 5 bytes or not canonically encoded is `PROTOCOL_ERROR` whatever
+length it would have denoted, and `RECORD_TOO_LARGE` applies only to a
+well-formed length. A receiver that judged a partial value instead could answer
+the same bytes with either code, which is why 15.1 forbids it. These errors
+close the reliable lane and its state, not the whole WebTransport session.
+
+One inner breach is deliberately NOT a lane reset: a CLIENT-TO-SERVER
+control-shaped record that reaches section 1.2's 8192-byte ceiling is answered
+with the ordinary `error` control frame and the lane stays open (15.1). That
+ceiling does not apply server-to-client, so a large `batch` record is bounded
+only by the record limit. Section 12's authorization and rate limits still
+apply after deframing.
 
 ### 15.7 Conformance and coexistence
 
@@ -1429,9 +1503,16 @@ A session may therefore be:
 - reliable-only (`lantean.reliable:1`, no implicit datagram room); or
 - combined (one reliable stream plus the unchanged datagram lane).
 
-Neither declaration implies the other. In particular `game.fanout:1` gates
-compact datagram fan-out only, while a `game.fanout:1` token inside
-`hello.caps` gates the identical compact payload on the reliable lane.
+Neither declaration implies the other. In particular the CONNECT
+`game.fanout:1` token gates compact datagram fan-out only, while a
+`game.fanout:1` token inside `hello.caps` gates compact fan-out on the reliable
+lane in section 6.7's WebSocket form: the ordinary `wire-id` binding of section
+6.2, announced before the first `0x03` frame for the topic, and NOT section
+14.6's reserved id `0`. That reserved
+id exists only because a datagram session holds exactly one CONNECT-bound room
+(14.1), which is not true of the reliable lane. Nothing here is a special case:
+15.1 carries the WebSocket message bytes unchanged, so the reliable lane carries
+the WebSocket form of every capability.
 
 ---
 
@@ -1595,9 +1676,9 @@ the transport itself also closes.
 | Code | Name | Meaning |
 |---|---|---|
 | `0x01` | `STREAM_LIMIT` | A reserved, additional, wrong-direction, or undeclared stream was opened. |
-| `0x02` | `RECORD_TOO_LARGE` | A declared inner message length exceeded 1 MiB. |
-| `0x03` | `PROTOCOL_ERROR` | Record prefix/body or inner message was malformed. |
-| `0x04` | `SLOW_CONSUMER` | Pending framed bytes would exceed the 1 MiB per-session bound. |
+| `0x02` | `RECORD_TOO_LARGE` | A decoded inner message length exceeded the receiver's own limit (15.1; at least 1 MiB). |
+| `0x03` | `PROTOCOL_ERROR` | Record prefix/body or inner message was malformed, including a prefix over 5 bytes. |
+| `0x04` | `SLOW_CONSUMER` | Pending framed bytes would exceed this endpoint's own per-session bound (15.6; at least 1 MiB). |
 
 ---
 
@@ -1667,8 +1748,20 @@ These non-choices are deliberate and are recorded so they are not relitigated:
   reinterpreting reserved streams for old sessions.
 - **QUIC flow control does not replace leases.** QUIC limits bytes accepted by
   the transport; `lease` limits application messages according to server
-  pressure. The finite 1 MiB pending-record bound prevents either mechanism
-  from becoming an unbounded userspace queue.
+  pressure. The finite pending-record bound - at least 1 MiB, and at least what
+  this endpoint may itself emit - prevents either mechanism from becoming an
+  unbounded userspace queue.
+- **What a sender may emit is fixed; what a receiver accepts is its own.** A
+  single fixed ceiling would have been simpler, but the inbound message limit is
+  a documented deployment knob, so one fixed stream ceiling would make the same
+  message legal on a deployment's WebSocket and refused on its stream. Making
+  the whole bound configurable is worse still: nothing here negotiates a size,
+  so a sender bound only by its peer's setting could never tell whether it is
+  conformant. Splitting the two obligations gives each side a rule it can apply
+  alone - the sender a constant it always satisfies, the receiver its own
+  configuration - and leaves exceeding the constant to deployments that know
+  both ends, which is the same standing the WebSocket carriage gives it. The
+  5-byte prefix cap bounds the parse before any length is known.
 
 ---
 
