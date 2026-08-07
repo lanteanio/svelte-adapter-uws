@@ -1,12 +1,13 @@
 # Error reference
 
 Search this page with the exact stable ID, code, event, or beginning of the message you saw.
-Every failure the runtime can emit is indexed below with its cause, what it means for
-traffic, whether anything recovers on its own, and what to do next: 33 entries against
-the 36 distinct diagnostic events the runtime emits. The rest are informational events,
-listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance because there is
-nothing to recover from. A new failure event cannot be added to the runtime without an entry
-here - the generator fails the build until one exists.
+Every failure emitted as a diagnostic event is indexed below with its cause, what it means
+for traffic, whether anything recovers on its own, and what to do next: 33 entries against
+the 36 distinct diagnostic events emitted from the scanned sources. The rest are
+informational, listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance
+because there is nothing to recover from. A new failure event cannot be added to those sources
+without an entry here: the generator fails the build until one exists. Plain console output that
+is not a diagnostic event is outside this index.
 
 This is the adapter-owned part of the ecosystem index. The sibling packages
 generate and ship their own runtime-owned references on the same release channel:
@@ -249,7 +250,7 @@ searchable log prefix is:
 - **Cause:** Workers that should hold identical state reported different state hashes.
 - **Consequence:** Clients on different workers can observe different state for the same topic. The log line carries only an opaque diagnostic id, because per-thread hashes and keyed sequence summaries are identifier-bearing.
 - **Automatic recovery:** None. Divergence is reported, never silently reconciled.
-- **Next action:** Look the diagnosticId attribute up through the authenticated admin diagnostic route to get the retained per-worker evidence, then treat it as a correctness incident.
+- **Next action:** Resolve the diagnosticId attribute to its retained per-worker evidence, then treat it as a correctness incident. In an adapter-only deployment that lookup is `platform.diagnostic(id)`; the authenticated admin HTTP route exists only where the realtime layer is configured to serve one.
 - **Runtime help:** `docs/errors.md#adapter-err-divergence`
 - **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
 
@@ -259,9 +260,9 @@ searchable log prefix is:
 - **Code/event:** `invariant.violated`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.assertion event=invariant.violated severity=`
 - **Cause:** A framework-internal assertion failed. The message is the assertion category and the severity is chosen by the call site, so both vary.
-- **Consequence:** Depends on the call site. The assertion is recorded in the platform.assertions map whether or not it also terminates the operation.
-- **Automatic recovery:** None. An assertion reports a condition the runtime believed impossible.
-- **Next action:** Read the category and context attributes and report them; these are library-internal invariants, so a violation is an adapter defect rather than an application misconfiguration.
+- **Consequence:** Depends on the tier. A recorded violation appears in the platform.assertions map; a development-only assertion is logged and thrown WITHOUT being recorded there, so an empty map does not mean none fired. At the fatal tier the worker is scheduled to exit with a dedicated status code and the supervisor replaces it.
+- **Automatic recovery:** None for the condition itself. A fatal-tier violation exits the worker, which is replacement rather than recovery.
+- **Next action:** Read the severity first, because it selects the tier and therefore the blast radius, then the category and context attributes. These are library-internal invariants, so a violation is an adapter defect rather than an application misconfiguration; report it with both attributes.
 - **Runtime help:** `docs/errors.md#adapter-err-invariant`
 - **Runtime sources:** [src/runtime/utils/assertions.js](../src/runtime/utils/assertions.js)
 
@@ -294,10 +295,10 @@ searchable log prefix is:
 
 - **Code/event:** `metrics.primary-unreachable`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.metrics event=metrics.primary-unreachable severity=error] The metrics snapshot request could not reach the primary; this scrape answers degraded with the local worker only.`
-- **Cause:** A worker asked the primary for the cluster snapshot and got no answer within the scrape budget.
+- **Cause:** Posting the snapshot request to the primary threw, which means this worker's message port to the primary is closed or unusable - the primary has gone or the worker is shutting down.
 - **Consequence:** The scrape is answered from the local worker and marked degraded rather than failing outright, so the endpoint stays up while the numbers describe one worker.
-- **Automatic recovery:** Yes. The next scrape retries the primary.
-- **Next action:** Check whether the primary is blocked or saturated. A primary that cannot answer within the scrape budget is usually also failing to service relay traffic, so check for accompanying relay events.
+- **Automatic recovery:** Yes. The next scrape posts to the primary again.
+- **Next action:** Treat this as a dead port rather than a slow primary. A primary that is merely slow does NOT emit this event: that path answers degraded silently when its deadline passes, so the absence of this line is not evidence the primary is healthy. Compare the expected and reporting worker counts for that.
 - **Runtime help:** `docs/errors.md#adapter-err-metrics-primary-unreachable`
 - **Runtime sources:** [src/runtime/handler/metrics-snapshot.js](../src/runtime/handler/metrics-snapshot.js)
 
@@ -342,10 +343,10 @@ searchable log prefix is:
 
 - **Code/event:** `pressure.runaway-publisher`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.pressure event=pressure.runaway-publisher severity=warn] A publisher crossed a configured per-topic pressure threshold.`
-- **Cause:** One topic exceeded its configured publish pressure threshold.
+- **Cause:** One topic exceeded its configured publish pressure threshold. The event is emitted only when no publish-rate listener is registered, and at most once per minute per topic, so it reports the condition rather than every crossing.
 - **Consequence:** Nothing is dropped by this event alone. It is the early signal that one topic is consuming a disproportionate share of outbound capacity.
-- **Automatic recovery:** None is needed; this is an observation, not a failure.
-- **Next action:** Identify the topic from the attributes and decide whether the rate is intended. Left alone, a runaway publisher is what later produces slow-consumer disconnects on unrelated topics.
+- **Automatic recovery:** None. Nothing throttles the publisher on the strength of this threshold.
+- **Next action:** Identify the topic from the attributes and decide whether the rate is intended. Because the line is suppressed entirely while an onPublishRate listener is registered and otherwise throttled per topic, its absence is not evidence the condition ended - read the pressure metrics for that. Left alone, a runaway publisher is what later produces slow-consumer disconnects on unrelated topics.
 - **Runtime help:** `docs/errors.md#adapter-err-pressure-runaway-publisher`
 - **Runtime sources:** [src/runtime/handler/pressure-metrics.js](../src/runtime/handler/pressure-metrics.js)
 
@@ -356,8 +357,8 @@ searchable log prefix is:
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.pressure event=pressure.topic-registry-high severity=warn] The topic registry crossed its cardinality warning threshold.`
 - **Cause:** The number of distinct live topics passed the configured warning threshold.
 - **Consequence:** Nothing is refused at this threshold. Topic bookkeeping grows with cardinality, so this is the memory-growth signal.
-- **Automatic recovery:** None is needed; this is an observation, not a failure.
-- **Next action:** Check whether topic names embed unbounded identifiers. Unbounded topic cardinality is a slow leak rather than a spike, so it is worth acting on at the warning rather than at exhaustion.
+- **Automatic recovery:** None. Cardinality is not reduced in response to the threshold.
+- **Next action:** Check whether topic names embed unbounded identifiers. The line fires ONCE per process: it is latched after the first crossing and never repeats, so it cannot tell you whether cardinality later fell or kept climbing - read the topic-registry gauge for that. Unbounded cardinality is a slow leak rather than a spike, so act at the warning rather than at exhaustion.
 - **Runtime help:** `docs/errors.md#adapter-err-pressure-topic-registry`
 - **Runtime sources:** [src/runtime/handler/pressure-metrics.js](../src/runtime/handler/pressure-metrics.js)
 
@@ -366,10 +367,10 @@ searchable log prefix is:
 
 - **Code/event:** `resume.hook-failed`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.resume event=resume.hook-failed severity=error] The resume hook threw; the client falls back to a fresh subscribe.`
-- **Cause:** The application resume hook threw while answering a client gap-fill request.
-- **Consequence:** That client does not receive the missed events and instead resubscribes cold, so it sees current state without the gap.
-- **Automatic recovery:** Yes, in the sense that the client is served: the fallback is a correct fresh subscribe rather than a failed connection.
-- **Next action:** Fix the hook if resume coverage matters for this topic. Until then, reconnecting clients silently lose history rather than failing loudly.
+- **Cause:** The application resume hook threw while answering a client gap-fill request, so some or all of the replay frames it owed were never sent.
+- **Consequence:** The client is still sent `resumed`, because that ack is not conditional on the hook. It therefore believes its gap was handled and reports nothing. Whether the history is actually recovered depends on whether the subscribe frames it sends next carry recover offsets; if they do not, the gap is permanent and silent on both sides.
+- **Automatic recovery:** None for the gap. Despite the message text, no fallback subscribe is triggered by this failure - the client simply continues its normal sequence.
+- **Next action:** Fix the hook if resume coverage matters for these topics, and do not read a `resumed` ack as evidence a gap was filled. Clients that subscribe with recover offsets recover anyway; clients that do not are missing history without any signal.
 - **Runtime help:** `docs/errors.md#adapter-err-resume-hook`
 - **Runtime sources:** [src/runtime/handler.js](../src/runtime/handler.js)
 
@@ -390,10 +391,10 @@ searchable log prefix is:
 
 - **Code/event:** `runtime.authenticate.failed`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.authenticate event=runtime.authenticate.failed severity=error] The WebSocket authentication endpoint failed.`
-- **Cause:** The application authenticate hook threw while deciding a WebSocket upgrade.
-- **Consequence:** The upgrade is refused. Authentication is fail-closed, so a throwing hook denies connections rather than admitting them.
-- **Automatic recovery:** None. Each upgrade runs the hook again, so the failure repeats while the fault persists.
-- **Next action:** Fix the hook. A dependency it calls being unavailable presents as a total inability to connect, because every upgrade is denied.
+- **Cause:** The application `authenticate` export threw or rejected while answering its HTTP POST endpoint, which the client posts to before opening its WebSocket.
+- **Consequence:** That POST is answered 500. This is an ordinary HTTP route rather than the upgrade path, so no upgrade is refused and established connections are untouched; a client that treats the failed POST as fatal never goes on to open its WebSocket.
+- **Automatic recovery:** None for the failed request. The client may post again, which runs the hook again.
+- **Next action:** Read the attached error and requestId and fix the hook. Look at the authentication endpoint and its dependencies, not at the upgrade path: the two are separate routes and this event never comes from an upgrade.
 - **Runtime help:** `docs/errors.md#adapter-err-authenticate`
 - **Runtime sources:** [src/runtime/handler.js](../src/runtime/handler.js), [src/vite.js](../src/vite.js)
 
@@ -431,7 +432,7 @@ searchable log prefix is:
 - **Automatic recovery:** None. The client retries by reconnecting, which runs the hook again.
 - **Next action:** Read the attached error and fix the hook. Persistent failure presents to users as a connection that never establishes, while HTTP continues to work.
 - **Runtime help:** `docs/errors.md#adapter-err-upgrade-hook`
-- **Runtime sources:** [src/runtime/handler.js](../src/runtime/handler.js), [src/vite.js](../src/vite.js)
+- **Runtime sources:** [src/runtime/handler.js](../src/runtime/handler.js), [src/vite.js](../src/vite.js), [src/testing.js](../src/testing.js)
 
 <a id="adapter-err-subscribe-batch-hook"></a>
 ## `ADAPTER-ERR-SUBSCRIBE-BATCH-HOOK`
@@ -501,6 +502,6 @@ searchable log prefix is:
 - **Cause:** The filesystem watch on the certificate directory could not be established.
 - **Consequence:** Certificate hot reload is off for the process lifetime. The current certificate keeps serving and no renewal is ever picked up, so the failure surfaces later as an expired certificate.
 - **Automatic recovery:** None. The watch is not retried, so this does not resolve without a restart.
-- **Next action:** Fix the path or permissions and restart the process. Until then, treat certificate renewal as requiring a restart, and alert on certificate expiry independently.
+- **Next action:** Fix the path or permissions and restart the process. Until then, treat certificate renewal as requiring a restart, and alert on certificate expiry independently. In a clustered deployment the primary reports its own watch failure as a plain `[tls]` console line rather than this event, so search the console text as well as this event name.
 - **Runtime help:** `docs/errors.md#adapter-err-tls-watch`
 - **Runtime sources:** [src/runtime/handler/lifecycle.js](../src/runtime/handler/lifecycle.js)

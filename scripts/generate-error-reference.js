@@ -15,7 +15,9 @@ const packageVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8
 // index itself, and counting them as emissions would make the ghost-entry
 // validation below vacuous.
 const EVENT_SCAN_DIRECTORIES = Object.freeze(['src/runtime']);
-const EVENT_SCAN_FILES = Object.freeze(['src/observability.js', 'src/vite.js']);
+// src/testing.js is a published entry point that emits diagnostics of its own,
+// so leaving it unscanned let a shipped failure event escape the coverage gate.
+const EVENT_SCAN_FILES = Object.freeze(['src/observability.js', 'src/vite.js', 'src/testing.js']);
 const EVENT_SCAN_EXCLUDED = Object.freeze(['src/runtime/error-registry.js']);
 const EVENT_LITERAL = /event: '([a-z][a-z0-9.-]*)'/;
 const EVENT_CONTEXT_LINES = 6;
@@ -206,7 +208,7 @@ export function validateErrorRegistry(entries) {
 		if (entry.code !== null && (typeof entry.code !== 'string' || !entry.code)) {
 			errors.push(label + ': code must be a string or null');
 		}
-		// The three emission shapes produce three different lines. Validating the
+		// The emission shapes produce different lines. Validating the
 		// declared prefix against the shape is what stops the reference promising
 		// text no log will ever contain.
 		const head = '[' + DIAGNOSTIC_PREFIX + ' source=svelte-adapter-uws component=' + entry.component +
@@ -289,12 +291,13 @@ export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options =
 		'# Error reference',
 		'',
 		'Search this page with the exact stable ID, code, event, or beginning of the message you saw.',
-		'Every failure the runtime can emit is indexed below with its cause, what it means for',
-		'traffic, whether anything recovers on its own, and what to do next: ' + entries.length + ' entries against',
-		'the ' + emittedCount + ' distinct diagnostic events the runtime emits. The rest are informational events,',
-		'listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance because there is',
-		'nothing to recover from. A new failure event cannot be added to the runtime without an entry',
-		'here - the generator fails the build until one exists.',
+		'Every failure emitted as a diagnostic event is indexed below with its cause, what it means',
+		'for traffic, whether anything recovers on its own, and what to do next: ' + entries.length + ' entries against',
+		'the ' + emittedCount + ' distinct diagnostic events emitted from the scanned sources. The rest are',
+		'informational, listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance',
+		'because there is nothing to recover from. A new failure event cannot be added to those sources',
+		'without an entry here: the generator fails the build until one exists. Plain console output that',
+		'is not a diagnostic event is outside this index.',
 		'',
 		'This is the adapter-owned part of the ecosystem index. The sibling packages',
 		'generate and ship their own runtime-owned references on the same release channel:',

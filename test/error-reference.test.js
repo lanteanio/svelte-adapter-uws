@@ -241,22 +241,43 @@ describe('generated operational error reference', () => {
 		}
 	});
 
-	// Round-tripping the real emission sites: every literal message the runtime
-	// passes to emitOperationalEvent for an indexed event must be the documented
-	// problemPrefix, or the reference documents text that was since reworded.
-	it('keeps every indexed problemPrefix equal to the emitted literal', () => {
+	// Round-tripping the real emission sites. A bare substring search is not
+	// enough: the same message literal can sit next to a DIFFERENT event, so a
+	// borrowed message passes it. Parse the emission block that declares this
+	// event and compare the message, component and severity it actually carries.
+	it('keeps every indexed entry equal to its own emission block', () => {
+		const blockFor = (source, event) => {
+			const lines = read(source).split(/\r?\n/);
+			const at = lines.findIndex((line) => new RegExp("event: '" + event.replace(/\./g, '\\.') + "'").test(line));
+			if (at === -1) return null;
+			const field = (name) => {
+				for (let i = Math.max(0, at - 8); i <= Math.min(lines.length - 1, at + 8); i++) {
+					const match = new RegExp('^\\s*' + name + ": '(.*)',?$").exec(lines[i]);
+					if (match) return match[1];
+				}
+				return null;
+			};
+			return { message: field('message'), component: field('component'), severity: field('severity') };
+		};
+		let checked = 0;
 		for (const entry of ADAPTER_ERROR_REGISTRY) {
 			if (entry.emission !== 'direct') continue;
-			const found = entry.sources.some((source) => read(source).includes("message: '" + entry.problemPrefix + "'"));
-			expect(found, entry.id + ': no source emits the documented message literal').toBe(true);
+			const block = entry.sources.map((source) => blockFor(source, entry.event)).find(Boolean);
+			expect(block, entry.id + ': no declared source emits this event').toBeTruthy();
+			expect(block.message, entry.id + ' message').toBe(entry.problemPrefix);
+			expect(block.component, entry.id + ' component').toBe(entry.component);
+			expect(block.severity, entry.id + ' severity').toBe(entry.severity);
+			checked++;
 		}
+		expect(checked).toBeGreaterThan(20);
 	});
 
 	// A severity outside TELEMETRY_LEVELS does not degrade: createDiagnostic
-	// rejects the record and emitOperationalEvent DROPS it, so the diagnostic is
-	// never seen. `cluster-relay.frame-refused` shipped as 'warning' and was
-	// therefore invisible - and it reports a silent cross-worker publish split,
-	// which is the class of fault that most needs to be visible.
+	// rejects the record and emitOperationalEvent discards it, leaving only a
+	// fixed "invalid record shape" console line that names the event and carries
+	// none of its message or attributes - and no sink delivery at all.
+	// `cluster-relay.frame-refused` shipped as 'warning', so the one signal for
+	// a silent cross-worker publish split arrived with its content stripped.
 	it('emits every indexed severity as a real telemetry level', () => {
 		const levels = new Set(TELEMETRY_LEVELS);
 		for (const entry of ADAPTER_ERROR_REGISTRY) {

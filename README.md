@@ -5527,7 +5527,7 @@ That HTTP lookup exists only when `realtime({ admin: { requires } })` is configu
 The same interval also checks for a **lost interior frame**, which the hash comparison structurally cannot see: a worker that received frames 2 and 3 of a stream and one that received 1, 2 and 3 both top out at 3, so their hashes agree exactly. Each worker numbers the frames it hands to the relay, per topic, and a receiver that finds a hole in that numbering has lost data - it does not need to be compared against anyone to know that, so it reports it directly rather than being voted on:
 
 ```
-[adapter-uws/relay-gap] lost 1 relayed frame(s) for topic=room:42 from worker=3 (ordinals 7-7). This worker is missing state its siblings received.
+[lantean/diagnostic source=svelte-adapter-uws component=runtime.relay-gap event=runtime.relay-gap.detected severity=error] This worker is missing relayed state that sibling workers received. {"count":1,"originWorker":3,"fromOrdinal":7,"toOrdinal":7,...}
 [primary] relay-gap worker=5 frames=1
 ```
 

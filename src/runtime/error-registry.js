@@ -3,8 +3,8 @@
  * equal to the invariant beginning of the emitted text; dynamic host, path,
  * timeout, or native-loader details follow it at runtime.
  *
- * `emission` says which shape the runtime actually produces, because the three
- * differ and a prefix that never appears in a log is worse than no prefix:
+ * `emission` says which shape the runtime actually produces, because they differ
+ * and a prefix that never appears in a log is worse than no prefix:
  *
  * - `thrown`   - an Error message with no diagnostic line around it.
  * - `composed` - emitOperationalDiagnostic(), whose message reads
@@ -263,7 +263,7 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		cause: 'Workers that should hold identical state reported different state hashes.',
 		consequence: 'Clients on different workers can observe different state for the same topic. The log line carries only an opaque diagnostic id, because per-thread hashes and keyed sequence summaries are identifier-bearing.',
 		automaticRecovery: 'None. Divergence is reported, never silently reconciled.',
-		nextAction: 'Look the diagnosticId attribute up through the authenticated admin diagnostic route to get the retained per-worker evidence, then treat it as a correctness incident.',
+		nextAction: 'Resolve the diagnosticId attribute to its retained per-worker evidence, then treat it as a correctness incident. In an adapter-only deployment that lookup is `platform.diagnostic(id)`; the authenticated admin HTTP route exists only where the realtime layer is configured to serve one.',
 		sources: Object.freeze(['src/runtime/index.js']),
 		anchor: 'adapter-err-divergence',
 		help: 'docs/errors.md#adapter-err-divergence'
@@ -278,9 +278,9 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		problemPrefix: null,
 		messagePrefix: HEAD + 'runtime.assertion event=invariant.violated severity=',
 		cause: 'A framework-internal assertion failed. The message is the assertion category and the severity is chosen by the call site, so both vary.',
-		consequence: 'Depends on the call site. The assertion is recorded in the platform.assertions map whether or not it also terminates the operation.',
-		automaticRecovery: 'None. An assertion reports a condition the runtime believed impossible.',
-		nextAction: 'Read the category and context attributes and report them; these are library-internal invariants, so a violation is an adapter defect rather than an application misconfiguration.',
+		consequence: 'Depends on the tier. A recorded violation appears in the platform.assertions map; a development-only assertion is logged and thrown WITHOUT being recorded there, so an empty map does not mean none fired. At the fatal tier the worker is scheduled to exit with a dedicated status code and the supervisor replaces it.',
+		automaticRecovery: 'None for the condition itself. A fatal-tier violation exits the worker, which is replacement rather than recovery.',
+		nextAction: 'Read the severity first, because it selects the tier and therefore the blast radius, then the category and context attributes. These are library-internal invariants, so a violation is an adapter defect rather than an application misconfiguration; report it with both attributes.',
 		sources: Object.freeze(['src/runtime/utils/assertions.js']),
 		anchor: 'adapter-err-invariant',
 		help: 'docs/errors.md#adapter-err-invariant'
@@ -328,10 +328,10 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		emission: 'direct',
 		problemPrefix: 'The metrics snapshot request could not reach the primary; this scrape answers degraded with the local worker only.',
 		messagePrefix: direct('runtime.metrics', 'metrics.primary-unreachable', 'error', 'The metrics snapshot request could not reach the primary; this scrape answers degraded with the local worker only.'),
-		cause: 'A worker asked the primary for the cluster snapshot and got no answer within the scrape budget.',
+		cause: 'Posting the snapshot request to the primary threw, which means this worker\'s message port to the primary is closed or unusable - the primary has gone or the worker is shutting down.',
 		consequence: 'The scrape is answered from the local worker and marked degraded rather than failing outright, so the endpoint stays up while the numbers describe one worker.',
-		automaticRecovery: 'Yes. The next scrape retries the primary.',
-		nextAction: 'Check whether the primary is blocked or saturated. A primary that cannot answer within the scrape budget is usually also failing to service relay traffic, so check for accompanying relay events.',
+		automaticRecovery: 'Yes. The next scrape posts to the primary again.',
+		nextAction: 'Treat this as a dead port rather than a slow primary. A primary that is merely slow does NOT emit this event: that path answers degraded silently when its deadline passes, so the absence of this line is not evidence the primary is healthy. Compare the expected and reporting worker counts for that.',
 		sources: Object.freeze(['src/runtime/handler/metrics-snapshot.js']),
 		anchor: 'adapter-err-metrics-primary-unreachable',
 		help: 'docs/errors.md#adapter-err-metrics-primary-unreachable'
@@ -396,10 +396,10 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		emission: 'direct',
 		problemPrefix: 'A publisher crossed a configured per-topic pressure threshold.',
 		messagePrefix: direct('runtime.pressure', 'pressure.runaway-publisher', 'warn', 'A publisher crossed a configured per-topic pressure threshold.'),
-		cause: 'One topic exceeded its configured publish pressure threshold.',
+		cause: 'One topic exceeded its configured publish pressure threshold. The event is emitted only when no publish-rate listener is registered, and at most once per minute per topic, so it reports the condition rather than every crossing.',
 		consequence: 'Nothing is dropped by this event alone. It is the early signal that one topic is consuming a disproportionate share of outbound capacity.',
-		automaticRecovery: 'None is needed; this is an observation, not a failure.',
-		nextAction: 'Identify the topic from the attributes and decide whether the rate is intended. Left alone, a runaway publisher is what later produces slow-consumer disconnects on unrelated topics.',
+		automaticRecovery: 'None. Nothing throttles the publisher on the strength of this threshold.',
+		nextAction: 'Identify the topic from the attributes and decide whether the rate is intended. Because the line is suppressed entirely while an onPublishRate listener is registered and otherwise throttled per topic, its absence is not evidence the condition ended - read the pressure metrics for that. Left alone, a runaway publisher is what later produces slow-consumer disconnects on unrelated topics.',
 		sources: Object.freeze(['src/runtime/handler/pressure-metrics.js']),
 		anchor: 'adapter-err-pressure-runaway-publisher',
 		help: 'docs/errors.md#adapter-err-pressure-runaway-publisher'
@@ -415,8 +415,8 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		messagePrefix: direct('runtime.pressure', 'pressure.topic-registry-high', 'warn', 'The topic registry crossed its cardinality warning threshold.'),
 		cause: 'The number of distinct live topics passed the configured warning threshold.',
 		consequence: 'Nothing is refused at this threshold. Topic bookkeeping grows with cardinality, so this is the memory-growth signal.',
-		automaticRecovery: 'None is needed; this is an observation, not a failure.',
-		nextAction: 'Check whether topic names embed unbounded identifiers. Unbounded topic cardinality is a slow leak rather than a spike, so it is worth acting on at the warning rather than at exhaustion.',
+		automaticRecovery: 'None. Cardinality is not reduced in response to the threshold.',
+		nextAction: 'Check whether topic names embed unbounded identifiers. The line fires ONCE per process: it is latched after the first crossing and never repeats, so it cannot tell you whether cardinality later fell or kept climbing - read the topic-registry gauge for that. Unbounded cardinality is a slow leak rather than a spike, so act at the warning rather than at exhaustion.',
 		sources: Object.freeze(['src/runtime/handler/pressure-metrics.js']),
 		anchor: 'adapter-err-pressure-topic-registry',
 		help: 'docs/errors.md#adapter-err-pressure-topic-registry'
@@ -430,10 +430,10 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		emission: 'direct',
 		problemPrefix: 'The resume hook threw; the client falls back to a fresh subscribe.',
 		messagePrefix: direct('runtime.resume', 'resume.hook-failed', 'error', 'The resume hook threw; the client falls back to a fresh subscribe.'),
-		cause: 'The application resume hook threw while answering a client gap-fill request.',
-		consequence: 'That client does not receive the missed events and instead resubscribes cold, so it sees current state without the gap.',
-		automaticRecovery: 'Yes, in the sense that the client is served: the fallback is a correct fresh subscribe rather than a failed connection.',
-		nextAction: 'Fix the hook if resume coverage matters for this topic. Until then, reconnecting clients silently lose history rather than failing loudly.',
+		cause: 'The application resume hook threw while answering a client gap-fill request, so some or all of the replay frames it owed were never sent.',
+		consequence: 'The client is still sent `resumed`, because that ack is not conditional on the hook. It therefore believes its gap was handled and reports nothing. Whether the history is actually recovered depends on whether the subscribe frames it sends next carry recover offsets; if they do not, the gap is permanent and silent on both sides.',
+		automaticRecovery: 'None for the gap. Despite the message text, no fallback subscribe is triggered by this failure - the client simply continues its normal sequence.',
+		nextAction: 'Fix the hook if resume coverage matters for these topics, and do not read a `resumed` ack as evidence a gap was filled. Clients that subscribe with recover offsets recover anyway; clients that do not are missing history without any signal.',
 		sources: Object.freeze(['src/runtime/handler.js']),
 		anchor: 'adapter-err-resume-hook',
 		help: 'docs/errors.md#adapter-err-resume-hook'
@@ -464,10 +464,10 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		emission: 'direct',
 		problemPrefix: 'The WebSocket authentication endpoint failed.',
 		messagePrefix: direct('runtime.authenticate', 'runtime.authenticate.failed', 'error', 'The WebSocket authentication endpoint failed.'),
-		cause: 'The application authenticate hook threw while deciding a WebSocket upgrade.',
-		consequence: 'The upgrade is refused. Authentication is fail-closed, so a throwing hook denies connections rather than admitting them.',
-		automaticRecovery: 'None. Each upgrade runs the hook again, so the failure repeats while the fault persists.',
-		nextAction: 'Fix the hook. A dependency it calls being unavailable presents as a total inability to connect, because every upgrade is denied.',
+		cause: 'The application `authenticate` export threw or rejected while answering its HTTP POST endpoint, which the client posts to before opening its WebSocket.',
+		consequence: 'That POST is answered 500. This is an ordinary HTTP route rather than the upgrade path, so no upgrade is refused and established connections are untouched; a client that treats the failed POST as fatal never goes on to open its WebSocket.',
+		automaticRecovery: 'None for the failed request. The client may post again, which runs the hook again.',
+		nextAction: 'Read the attached error and requestId and fix the hook. Look at the authentication endpoint and its dependencies, not at the upgrade path: the two are separate routes and this event never comes from an upgrade.',
 		sources: Object.freeze(['src/runtime/handler.js', 'src/vite.js']),
 		anchor: 'adapter-err-authenticate',
 		help: 'docs/errors.md#adapter-err-authenticate'
@@ -519,7 +519,7 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		consequence: 'That upgrade does not complete and the client cannot open its WebSocket.',
 		automaticRecovery: 'None. The client retries by reconnecting, which runs the hook again.',
 		nextAction: 'Read the attached error and fix the hook. Persistent failure presents to users as a connection that never establishes, while HTTP continues to work.',
-		sources: Object.freeze(['src/runtime/handler.js', 'src/vite.js']),
+		sources: Object.freeze(['src/runtime/handler.js', 'src/vite.js', 'src/testing.js']),
 		anchor: 'adapter-err-upgrade-hook',
 		help: 'docs/errors.md#adapter-err-upgrade-hook'
 	}),
@@ -620,7 +620,7 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		cause: 'The filesystem watch on the certificate directory could not be established.',
 		consequence: 'Certificate hot reload is off for the process lifetime. The current certificate keeps serving and no renewal is ever picked up, so the failure surfaces later as an expired certificate.',
 		automaticRecovery: 'None. The watch is not retried, so this does not resolve without a restart.',
-		nextAction: 'Fix the path or permissions and restart the process. Until then, treat certificate renewal as requiring a restart, and alert on certificate expiry independently.',
+		nextAction: 'Fix the path or permissions and restart the process. Until then, treat certificate renewal as requiring a restart, and alert on certificate expiry independently. In a clustered deployment the primary reports its own watch failure as a plain `[tls]` console line rather than this event, so search the console text as well as this event name.',
 		sources: Object.freeze(['src/runtime/handler/lifecycle.js']),
 		anchor: 'adapter-err-tls-watch',
 		help: 'docs/errors.md#adapter-err-tls-watch'
@@ -628,17 +628,11 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 ]);
 
 const ERROR_BY_ID = new Map(ADAPTER_ERROR_REGISTRY.map((entry) => [entry.id, entry]));
-const ERROR_BY_EVENT = new Map(ADAPTER_ERROR_REGISTRY.map((entry) => [entry.event, entry]));
 
 export function adapterErrorDefinition(id) {
 	const entry = ERROR_BY_ID.get(id);
 	if (!entry) throw new TypeError('Unknown svelte-adapter-uws error id: ' + id);
 	return entry;
-}
-
-/** The indexed entry for an emitted event, or undefined when it has none. */
-export function adapterErrorForEvent(event) {
-	return ERROR_BY_EVENT.get(event);
 }
 
 export function adapterErrorHelpSuffix(id) {

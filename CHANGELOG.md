@@ -547,8 +547,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A cluster relay diagnostic was silently discarded instead of logged.** The
   `cluster-relay.frame-refused` event was emitted at severity `warning`, which is
   not one of the telemetry levels, so the record failed validation and
-  `emitOperationalEvent` dropped it. Nothing reached a sink or the console. The
-  event reports that a publish exceeded the relay frame ceiling and therefore
+  `emitOperationalEvent` discarded it. All that reached the console was a
+  fixed `operational event dropped, invalid record shape` line naming the
+  event: no message text, no structured record, no delivery to a configured
+  sink, and none of the attributes that say which lane, topic, and byte count
+  were involved. The event reports that a publish exceeded the relay frame
+  ceiling and therefore
   reached local subscribers only, so the one signal that a cross-worker state
   split had occurred was the signal that could never be seen. It now emits at
   `warn`, and a check fails the suite on any emission whose severity is not a
