@@ -1,7 +1,7 @@
 # Ecosystem claim register: adapter ledger
 
 [Package README](../README.md) |
-[benchmark reproduction index](https://github.com/lanteanio/svelte-adapter-uws/blob/main/bench/README.md) |
+[benchmark reproduction index](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/bench/README.md) |
 [protocol conformance](./protocol-conformance.md)
 
 `claim-register-v1` is the `svelte-adapter-uws` component of the ecosystem
@@ -126,7 +126,7 @@ reason and control in the same change.
 
 **Verified:** Run `npm exec vitest -- run test/io-budget.test.js`; authority and
 non-vacuity live in
-[`test/io-budget.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/io-budget.test.js).
+[`test/io-budget.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/io-budget.test.js).
 
 ### ADAPTER-CORRECT-BATCH
 
@@ -140,7 +140,7 @@ event slices.
 
 **Verified:** Run the focused `publish-batched`, `relay-ring`,
 `sim-multiworker`, and `api-docs-contract` suites. The real two-server proof is
-in [`test/api-docs-contract.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/api-docs-contract.test.js).
+in [`test/api-docs-contract.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/api-docs-contract.test.js).
 
 ### ADAPTER-CORRECT-SEQUENCE
 
@@ -192,7 +192,7 @@ semantics across releases.
 test/wire-dict.test.js test/wire-codec.test.js`. The mixed-capability fan-out
 proof (binary to a capable subscriber and JSON to a non-capable one from one
 publish) lives in
-[`test/wire-mode.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/wire-mode.test.js).
+[`test/wire-mode.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/wire-mode.test.js).
 
 ### ADAPTER-SEC-SSRF
 
@@ -205,7 +205,7 @@ rebinding. Declare the translator's exact prefix when NAT64 cannot be inferred;
 an incorrect trusted prefix can weaken classification.
 
 **Verified:** Run `npm exec vitest -- run test/safe-url.test.js`; the corpus is
-owned by [`test/safe-url.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/safe-url.test.js).
+owned by [`test/safe-url.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/safe-url.test.js).
 
 ### ADAPTER-SEC-WEBHOOK
 
@@ -219,7 +219,7 @@ matters.
 
 **Verified:** Run `npm exec vitest -- run test/webhooks-delivery.test.js`; exact
 byte-container, rotation, freshness, malformed-input, and sender round trips
-live in [`test/webhooks-delivery.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/webhooks-delivery.test.js).
+live in [`test/webhooks-delivery.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/webhooks-delivery.test.js).
 
 ### ADAPTER-OPS-FD
 
@@ -233,7 +233,7 @@ service-manager, and login-shell limits differ; `1024` is not assumed.
 **Verified:** A soft limit below `8192` produces a boot warning. When metrics
 are configured, `open_fds` and `fd_soft_limit` expose the observed values; their
 aggregation law is covered by
-[`test/metrics-snapshot.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/metrics-snapshot.test.js).
+[`test/metrics-snapshot.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/metrics-snapshot.test.js).
 
 ## Withdrawn or narrowed copy
 

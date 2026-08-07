@@ -38,6 +38,9 @@ on:
       # The link checker crawls every tracked and packaged Markdown document.
       # A Markdown-only pull request must therefore run the gate it can break.
       - '**/*.md'
+      # The published-main file list check-links validates blob/main routes
+      # against: the pull request that regenerates it must run its judge.
+      - 'docs/main-source-tree.v1.json'
       - '.github/workflows/test.yml'
       - '.github/workflows/docs-links.yml'
       - '.github/workflows/release.yml'

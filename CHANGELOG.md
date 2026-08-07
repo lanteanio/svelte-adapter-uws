@@ -532,6 +532,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Twenty published GitHub source links (thirteen distinct files) no longer
+  404.** Documentation on this release line linked repository files as
+  `blob/main`, but the public main branch holds the previous stable release
+  with the previous layout, so every such link to content that ships with
+  this line was dead for every reader - and the link gate reported it
+  resolved, because it checked the path against the local working directory
+  rather than the tree the URL names. Links to this line's content now use
+  `blob/dev` (the branch that actually carries them; a stable promotion
+  flips them to `main`, and the release runbook records that step), and the
+  gate now validates each same-repo URL against the tree its ref names: the
+  published main file list via a checked-in snapshot that stays
+  deterministic and network-free (with a staleness check against origin/main
+  wherever that ref exists, bypassed only on the published main tip itself,
+  where the snapshot would name its own commit), and dev links against the
+  staged git index, so a file that exists only on one machine cannot green a
+  link it will not accompany. The long-dead `#origin-validation` deep-link
+  target is alive again as a compatibility anchor at the cross-origin
+  section.
+
 - **The capacity kit's two headline numbers could not report saturation.**
   `completed` and `completionRate` were computed from the same expression as
   `started` and `achievedStartRate`, so completion throughput falling below

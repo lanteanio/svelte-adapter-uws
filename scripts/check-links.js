@@ -24,15 +24,47 @@
  * `check-external-links.js` companion owns redirects, hard errors, and
  * soft-404 pages without weakening this pull-request gate.
  *
+ * Same-repo GitHub source routes are validated against the tree the URL
+ * actually names, not against this working directory - a file can exist here
+ * and still 404 on GitHub today, which is exactly the invisible-dead-route
+ * class this gate exists for. Two refs are accepted:
+ *   - `main` is the published stable tree. It only moves at a release
+ *     promotion, so its file list is a checked-in snapshot
+ *     (docs/main-source-tree.v1.json) that keeps this gate deterministic and
+ *     network-free everywhere, including shallow CI checkouts that have no
+ *     origin/main ref. When origin/main IS resolvable (every local clone),
+ *     the snapshot's commit is compared against it and staleness fails with
+ *     the regeneration command (`node scripts/check-links.js
+ *     --write-main-tree`). On the published main tip itself - a promoted
+ *     release checkout - main links validate against this very tree and the
+ *     snapshot comparison is skipped: a snapshot recording main's own commit
+ *     from inside main's tree would be a SHA self-reference no commit can
+ *     satisfy. Promoting a release onto main includes flipping dev links
+ *     (below) to main and regenerating the snapshot afterwards from the dev
+ *     line (docs/releasing.md records both steps).
+ *   - `dev` is the line these documents ride. Its links are validated
+ *     against the STAGED tree (the git index), never the working directory:
+ *     the docs and the files they link travel in the same commit or not at
+ *     all, so a link valid here is valid on the public dev branch the moment
+ *     the doc referencing it is visible there - an unstaged file cannot
+ *     green a link it will not accompany, and verify-before-commit still
+ *     works on a staged change.
+ *
+ * Without a usable git context (a tarball or ZIP extraction, possibly nested
+ * inside some unrelated repository whose git would answer for the wrong
+ * tree), same-repo route validation is skipped and the summary says so.
+ *
  * Dependency-free (no eslint), modeled on the sibling check-slugs /
  * check-determinism scripts.
  *
  * Flags:
- *   --verbose  list every resolved link, not only the broken ones.
+ *   --verbose          list every resolved link, not only the broken ones.
+ *   --write-main-tree  regenerate docs/main-source-tree.v1.json from
+ *                      origin/main (run after a stable promotion).
  *
  * @module scripts/check-links
  */
-import { readFileSync, existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, resolve, join, posix, relative as pathRelative, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +74,124 @@ import { parseFragment } from 'parse5';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const verbose = process.argv.includes('--verbose');
 const markdown = new MarkdownIt({ html: true });
+
+const MAIN_TREE_SNAPSHOT = 'docs/main-source-tree.v1.json';
+
+function gitLines(args) {
+	return execFileSync('git', ['-C', root, ...args], {
+		encoding: 'utf8',
+		windowsHide: true,
+		stdio: ['ignore', 'pipe', 'ignore']
+	}).split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
+/**
+ * Whether this checkout has a usable git context: the binary exists AND the
+ * repository it answers for is THIS one - the same guard trackedMarkdown
+ * applies, because a ZIP-extracted copy nested inside some other repository
+ * gets confident answers about the wrong tree. Without a usable context the
+ * same-repo route validation is skipped (and said so in the summary) rather
+ * than crashing or answering from a foreign repo.
+ */
+let gitUsableCache = null;
+export function gitUsable() {
+	if (gitUsableCache === null) {
+		try {
+			const top = gitLines(['rev-parse', '--show-toplevel'])[0] ?? '';
+			gitUsableCache = resolve(top).toLowerCase() === root.toLowerCase();
+		} catch {
+			gitUsableCache = false;
+		}
+	}
+	return gitUsableCache;
+}
+
+/**
+ * The file list of the STAGED tree (the git index) - what the public dev
+ * branch holds once the staged state is committed and pushed. Deliberately
+ * not the working directory: an unstaged file cannot green a link it will
+ * not accompany, while a staged doc and its staged target travel in the same
+ * commit or not at all (so verify-before-commit still works).
+ * @returns {Set<string> | null} null without a usable git context
+ */
+let stagedTreeCache;
+export function stagedTree() {
+	if (stagedTreeCache === undefined) {
+		stagedTreeCache = gitUsable() ? new Set(gitLines(['ls-files', '--cached'])) : null;
+	}
+	return stagedTreeCache;
+}
+
+/**
+ * The checked-in snapshot of origin/main's file list. Deterministic and
+ * network-free (a shallow CI checkout has no origin/main ref); staleness
+ * against a resolvable origin/main is enforced separately in main().
+ * @returns {{ commit: string, paths: Set<string> }}
+ */
+let mainTreeCache = null;
+export function mainTreeSnapshot() {
+	if (mainTreeCache === null) {
+		const raw = JSON.parse(readFileSync(join(root, MAIN_TREE_SNAPSHOT), 'utf8'));
+		mainTreeCache = { commit: raw.commit, paths: new Set(raw.paths) };
+	}
+	return mainTreeCache;
+}
+
+/** Whether a tree's file list contains `path` as a file or as a directory. */
+export function treeContains(paths, path) {
+	if (path === '') return true;
+	if (paths.has(path)) return true;
+	const prefix = path + '/';
+	for (const candidate of paths) {
+		if (candidate.startsWith(prefix)) return true;
+	}
+	return false;
+}
+
+/** origin/main's commit, or null when the ref is unavailable (shallow CI). */
+export function resolvableMainCommit() {
+	if (!gitUsable()) return null;
+	try {
+		return gitLines(['rev-parse', 'origin/main'])[0] ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether this checkout IS the main line: the `main` branch itself (checked
+ * out locally while building a promotion, or by CI's push checkout), or a
+ * detached HEAD sitting exactly on the published main tip (a release-tag
+ * verify). In that state the tree `blob/main` names is the very tree being
+ * checked, so main links validate against the staged tree directly and the
+ * snapshot comparison is moot - a snapshot recording main's own commit from
+ * inside main's tree would be a SHA self-reference no commit can satisfy.
+ * Branch identity comes FIRST so a promotion commit is green on a local
+ * main checkout BEFORE it is pushed; commit equality alone would only turn
+ * true after the push, leaving the promotion with no green state anywhere.
+ * A dev checkout never satisfies either arm, so a link only main will carry
+ * stays red on dev - deliberately.
+ */
+let onMainCache = null;
+export function onMainLine() {
+	if (onMainCache === null) {
+		onMainCache = false;
+		if (gitUsable()) {
+			try {
+				const branch = gitLines(['rev-parse', '--abbrev-ref', 'HEAD'])[0] ?? '';
+				if (branch === 'main') {
+					onMainCache = true;
+				} else if (branch === 'HEAD') {
+					const live = resolvableMainCommit();
+					onMainCache = live !== null && (gitLines(['rev-parse', 'HEAD'])[0] ?? '') === live;
+				}
+			} catch {
+				onMainCache = false;
+			}
+		}
+	}
+	return onMainCache;
+}
 
 const REPOSITORY_DOCS = [
 	'CHANGELOG.md',
@@ -287,19 +437,34 @@ export function checkLink(rel, target, docs, options = {}) {
 	if (/^https?:\/(?!\/)/i.test(target)) {
 		return `malformed scheme (single slash) in link: ${target}`;
 	}
-	// Same-repo GitHub source routes are checkable locally: the ref must be
-	// the canonical main branch (the tree every release fast-forwards onto),
-	// and the path must exist in this working tree - a typo'd or moved path
-	// is dead the day main receives this tree, so it fails now.
-	const sameRepo = /^https:\/\/github\.com\/lanteanio\/svelte-adapter-uws\/(blob|tree|raw)\/([^/]+)\/([^#?]*)/i.exec(target);
+	// Same-repo GitHub source routes are validated against the tree the URL
+	// NAMES, never this working directory: a file can exist here and still
+	// 404 on GitHub today. `main` is the published stable tree (the checked-in
+	// snapshot, so the answer is about what is public NOW, not what a future
+	// promotion will make public); `dev` is this line's branch, validated
+	// against the staged git index the doc itself rides.
+	const sameRepo = /^https:\/\/github\.com\/lanteanio\/svelte-adapter-uws\/(blob|tree|raw)\/([^/#?]+)(?:\/([^#?]*))?/i.exec(target);
 	if (sameRepo) {
-		const [, , ref, blobPath] = sameRepo;
-		if (ref !== 'main') {
-			return `same-repo source link must use the canonical main ref, not ${ref}: ${target}`;
+		const [, , ref, blobPath = ''] = sameRepo;
+		if (ref !== 'main' && ref !== 'dev') {
+			return `same-repo source link must name the published main tree or this line's dev branch, not ${ref}: ${target}`;
 		}
-		const decoded = decodeURIComponent(blobPath.replace(/\/+$/, ''));
-		if (decoded !== '' && !existsSync(resolve(root, decoded))) {
-			return `same-repo source link names a path absent from this tree: ${target}`;
+		let decoded;
+		try { decoded = decodeURIComponent(blobPath.replace(/\/+$/, '')); }
+		catch { return `malformed percent escape in path: ${target}`; }
+		const staged = stagedTree();
+		if (staged === null) return null; // no usable git context; noted in the summary
+		if (ref === 'main' && !onMainLine()) {
+			if (!treeContains(mainTreeSnapshot().paths, decoded)) {
+				return `same-repo source link names a path absent from the published main tree: ${target}` +
+					' (content that ships with this line links blob/dev until a stable promotion; after one, regenerate the snapshot with: node scripts/check-links.js --write-main-tree)';
+			}
+			return null;
+		}
+		// The dev line's own tree - and main's too when this checkout IS the
+		// published main tip, where the snapshot would be a SHA self-reference.
+		if (!treeContains(staged, decoded)) {
+			return `same-repo source link names a path absent from the staged tree (the git index): ${target}`;
 		}
 		return null;
 	}
@@ -340,12 +505,50 @@ export function checkLink(rel, target, docs, options = {}) {
 	return doc.anchors.has(decodedAnchor) ? null : `no heading in ${resolved} produces #${anchor}`;
 }
 
+function writeMainTree() {
+	const commit = resolvableMainCommit();
+	if (commit === null) {
+		console.error('check-links --write-main-tree FAILED: origin/main is not resolvable here; fetch it first (git fetch origin main).');
+		process.exit(1);
+	}
+	const paths = gitLines(['ls-tree', '-r', '--name-only', commit]);
+	const body = {
+		comment: 'File list of the published stable tree (origin/main), consumed by scripts/check-links.js to validate same-repo blob/main source links without network or a full clone. Regenerate after a stable promotion: node scripts/check-links.js --write-main-tree',
+		commit,
+		paths
+	};
+	writeFileSync(join(root, MAIN_TREE_SNAPSHOT), JSON.stringify(body, null, '\t') + '\n');
+	console.log(`check-links: wrote ${MAIN_TREE_SNAPSHOT} at origin/main ${commit.slice(0, 7)} (${paths.length} paths).`);
+}
+
 function main() {
 	const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 	const docs = loadDocs();
 	const packagedFiles = new Set(packageFiles());
 	const packagedDocs = new Set([...packagedFiles].filter((relative) => relative.toLowerCase().endsWith('.md')));
 	console.log(`check-links: ${pkg.name}@${pkg.version}`);
+
+	// The main-tree snapshot must describe the origin/main that exists, or
+	// blob/main validation is answering for a tree nobody is looking at. A
+	// shallow checkout without the ref cannot make that comparison; every
+	// local clone can and does, so staleness cannot survive a release cycle.
+	// On the published main tip itself the comparison is skipped: main links
+	// validate against this very tree there, and a snapshot recording main's
+	// own commit from inside main's tree cannot exist.
+	if (!gitUsable()) {
+		console.log('  no usable git context: same-repo source routes unchecked here (repo clones and CI validate them).');
+	} else if (onMainLine()) {
+		console.log('  this checkout is the published main tip: blob/main validates against the staged tree.');
+	} else {
+		const snapshot = mainTreeSnapshot();
+		const liveMain = resolvableMainCommit();
+		if (liveMain !== null && liveMain !== snapshot.commit) {
+			console.error(`check-links FAILED: ${MAIN_TREE_SNAPSHOT} records origin/main ${snapshot.commit.slice(0, 7)} but origin/main is ${liveMain.slice(0, 7)}.`);
+			console.error('  Regenerate it with: node scripts/check-links.js --write-main-tree');
+			process.exit(1);
+		}
+		console.log(`  main tree snapshot @${snapshot.commit.slice(0, 7)} (${snapshot.paths.size} paths, ${liveMain === null ? 'origin/main unavailable here - drift-checked on full clones' : 'matches origin/main'}).`);
+	}
 
 	let total = 0;
 	const broken = [];
@@ -372,4 +575,7 @@ function main() {
 }
 
 // Importable for its own test suite; only the CLI invocation reads the docs.
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	if (process.argv.includes('--write-main-tree')) writeMainTree();
+	else main();
+}

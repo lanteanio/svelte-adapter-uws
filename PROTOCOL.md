@@ -1729,5 +1729,5 @@ A [minimal dependency-free Core client](./examples/minimal-client.mjs) (~40
 lines) implements connect, subscribe, data-event dispatch, and
 resume-on-subscribe - the complete Core class (section 13) by construction. It
 is exercised by the repository's
-[minimal-client conformance test](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/minimal-client.test.js)
+[minimal-client conformance test](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/minimal-client.test.js)
 against the reference server.

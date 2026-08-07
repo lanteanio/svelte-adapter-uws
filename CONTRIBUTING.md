@@ -217,9 +217,14 @@ and has no config:
   the skip is a failure. Re-accept a deliberate pin bump with
   `node scripts/check-uws-binaries.js --update` and review the diff - it is the
   record of which binaries changed.
-- **check-links** - every owned Markdown link and anchor resolves, and a link in
+- **check-links** - every owned Markdown link and anchor resolves, a link in
   a packaged document cannot point at a repository-only file missing from the
-  npm tarball.
+  npm tarball, and a same-repo GitHub source URL is validated against the
+  tree its ref names: `blob/main` against the checked-in published-main file
+  list (`docs/main-source-tree.v1.json`, regenerated after a stable
+  promotion with `node scripts/check-links.js --write-main-tree`),
+  `blob/dev` against the staged git index - so a link that 404s on GitHub
+  today cannot report green from a file that only exists locally.
 - **check-scope** - every identifier a tracked source file reads resolves to
   something: a declaration, an import, or a declared global. Catches the name
   that parses fine and throws only when the line runs.

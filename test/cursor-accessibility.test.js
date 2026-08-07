@@ -144,7 +144,7 @@ describe("accessible cursor example", () => {
 		// through the stable source route rather than a packaged-relative
 		// link that would be dead in an installed copy.
 		expect(readme).toContain(
-			"[complete Svelte composition](https://github.com/lanteanio/svelte-adapter-uws/blob/main/examples/cursor-accessible.svelte)",
+			"[complete Svelte composition](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/examples/cursor-accessible.svelte)",
 		);
 		expect(readme).toMatch(
 			/Do not put continuous\s+position updates in an `aria-live` region/,

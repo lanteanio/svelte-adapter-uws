@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/capacity/v1/result.schema.json",
+  "$id": "https://github.com/lanteanio/svelte-adapter-uws/blob/dev/docs/capacity/v1/result.schema.json",
   "title": "svelte-adapter-uws ecosystem capacity result v1",
   "type": "object",
   "additionalProperties": false,

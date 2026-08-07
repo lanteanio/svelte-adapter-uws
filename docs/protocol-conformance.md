@@ -3,7 +3,7 @@
 [README](../README.md) | [wire protocol](../PROTOCOL.md) |
 [protocol schema](../protocol.schema.json) | [test vectors](../test-vectors/README.md) |
 [minimal Core client](../examples/minimal-client.mjs) |
-[release history](https://github.com/lanteanio/svelte-adapter-uws/blob/main/CHANGELOG.md)
+[release history](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/CHANGELOG.md)
 
 This is the traversal map for implementing or auditing the Lantean wire. It
 does not define another protocol surface: normative prose remains in the
@@ -21,8 +21,8 @@ implementation, and CI proofs below make that prose executable.
 | Compare client behavior | [Reference client](../src/client.js) | The shipped browser implementation, including negotiation, reconnect, resume, and binary dispatch. |
 | Compare server behavior | [Wire primitives](../src/runtime/wire.js) and [runtime handler](../src/runtime/handler.js) | The shipped production encoder, decoder, and connection lifecycle. |
 | Compare non-production behavior | [Vite surface](../src/vite.js) and [testing surface](../src/testing.js) | Development and in-process implementations that are required to speak the same wire. |
-| Inspect the executable proof | [Protocol/schema test](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/protocol-schema.test.js), [minimal-client test](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/minimal-client.test.js), and [relay oracle](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/relay-oracle.test.js) | Schema/vector validation, real-server Core behavior, and byte-exact relay output. These repository-only tests are intentionally not part of the npm package. |
-| Inspect when the proof runs | [CI workflow](https://github.com/lanteanio/svelte-adapter-uws/blob/main/.github/workflows/test.yml) | The hosted environment and blocking suite invocation. |
+| Inspect the executable proof | [Protocol/schema test](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/protocol-schema.test.js), [minimal-client test](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/minimal-client.test.js), and [relay oracle](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/relay-oracle.test.js) | Schema/vector validation, real-server Core behavior, and byte-exact relay output. These repository-only tests are intentionally not part of the npm package. |
+| Inspect when the proof runs | [CI workflow](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/.github/workflows/test.yml) | The hosted environment and blocking suite invocation. |
 
 Relative links above name files that ship in the npm package. Repository-only
 proofs use stable source links so the packaged copy of this index never points

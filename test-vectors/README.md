@@ -6,7 +6,7 @@
 [release history](../CHANGELOG.md)
 
 Machine-checkable companions to the [wire protocol](../PROTOCOL.md). They are
-validated in CI by the [repository protocol contract test](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/protocol-schema.test.js)
+validated in CI by the [repository protocol contract test](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/protocol-schema.test.js)
 against both the [protocol schema](../protocol.schema.json) and
 frames captured from the reference server, so the specification cannot drift
 from the shipped wire.

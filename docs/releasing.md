@@ -198,10 +198,24 @@ Stable versions come from `main` and use `latest`.
 1. Start from the reviewed prerelease lineage. Reconcile the final changelog and
    migration guidance; remove prerelease-only version suffixes in a dedicated
    promotion commit.
-2. Fast-forward or merge the reviewed promotion to `main` without squashing
-   away the commit recorded by the manifest.
-3. Repeat the complete preflight against `main`; prior prerelease evidence is
-   useful context, not a substitute.
+2. On a local `main` checkout, merge the reviewed promotion without squashing
+   away the commit recorded by the manifest, and flip the documentation's
+   same-repo `blob/dev` source links to `blob/main` in that commit: the
+   content they name is now on `main`'s lineage, and `scripts/check-links.js`
+   validates each link against the tree its ref names - on the `main` branch
+   that is the very tree being built, so the full verify runs green BEFORE
+   the push. (A `dev` checkout cannot green those links, deliberately: a
+   `blob/main` link is a claim about `main`.) Flipping the links also turns
+   the two tests that pin them verbatim red -
+   `test/content-destinations.test.js` and
+   `test/cursor-accessibility.test.js` - so update those pins in the same
+   commit; they exist to make the flip a conscious edit.
+3. Push, then repeat the complete preflight against `main`; prior prerelease
+   evidence is useful context, not a substitute. Re-verifying an OLD stable
+   tag after a later promotion fails the link gate's snapshot staleness check
+   by design - the tag's snapshot records the published `main` of its own era
+   - so rollback uses the retained artifact, never a re-verify of a
+   superseded tag.
 4. Follow the same proposed -> tagged -> quarantine publication -> immutable
    published-row transaction as a prerelease, using `latest` as the target
    channel. Verify exact-version installation before moving any `latest`
@@ -210,6 +224,10 @@ Stable versions come from `main` and use `latest`.
    its `routed` event immediately. Then remove or restore each quarantine
    `candidate` pointer, verify the resulting three-package install, and record
    the previous and new channel map in the release handoff.
+6. Back on `dev`, regenerate the published-main file list so the next
+   prerelease cycle validates `blob/main` links against the tree that now
+   exists: `node scripts/check-links.js --write-main-tree` (the gate fails
+   with this exact instruction until it is done).
 
 There is no partial-success fiction. If one package cannot publish or the final
 consumer fails, stop and use the abort or rollback procedure.

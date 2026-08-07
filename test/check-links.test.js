@@ -18,6 +18,11 @@ import {
 	anchorsOf,
 	linksOf,
 	checkLink,
+	stagedTree,
+	mainTreeSnapshot,
+	treeContains,
+	resolvableMainCommit,
+	onMainLine,
 	documentationFiles,
 	packageFiles
 } from '../scripts/check-links.js';
@@ -110,8 +115,10 @@ describe('resolving one link', () => {
 	});
 
 	// The defect this was written for: a section renamed, the link left behind.
+	// (The historical dead anchor that motivated it, #origin-validation, is now
+	// deliberately alive again as a compatibility target in the real README.)
 	it('rejects an anchor no heading produces', () => {
-		expect(checkLink('README.md', '#origin-validation', docs)).toContain('no heading in README.md');
+		expect(checkLink('README.md', '#renamed-away-heading', docs)).toContain('no heading in README.md');
 	});
 
 	it('follows an anchor into another document', () => {
@@ -162,6 +169,76 @@ describe('resolving one link', () => {
 	it('decodes a percent-escaped anchor before looking it up', () => {
 		const encoded = new Map([['README.md', { anchors: new Set(['größe']) }]]);
 		expect(checkLink('README.md', '#gr%C3%B6%C3%9Fe', encoded)).toBe(null);
+	});
+});
+
+// A same-repo GitHub URL names a REF, and the link is alive or dead on that
+// ref's tree - not in whatever happens to sit in this working directory. This
+// is the false-green the rule exists to kill: a file committed only on the
+// dev line, linked as blob/main, 404s for every reader today while an
+// existsSync check waves it through.
+describe('same-repo source routes resolve against the tree the URL names', () => {
+	const docs = new Map();
+	const base = 'https://github.com/lanteanio/svelte-adapter-uws';
+
+	it('accepts a main link only when the published main tree carries the path', () => {
+		// The script skips-and-discloses without a usable git context; its
+		// suite matches that posture rather than crashing on null.
+		if (stagedTree() === null) return;
+		expect(checkLink('README.md', `${base}/blob/main/README.md`, docs)).toBe(null);
+		expect(checkLink('README.md', `${base}/blob/main/no-such-file-ever.md`, docs))
+			.toContain(onMainLine() ? 'absent from the staged tree' : 'absent from the published main tree');
+	});
+
+	it('rejects a main link whose path is staged here but absent from the published main', () => {
+		// The guards are healthy states, not defects: without git context the
+		// script skips-and-discloses, on the main line the snapshot lane is
+		// bypassed by design, and right after a promotion the divergence
+		// class this case exists for is empty.
+		if (stagedTree() === null || onMainLine()) return;
+		const devOnly = [...stagedTree()].find((p) => !treeContains(mainTreeSnapshot().paths, p));
+		if (!devOnly) return;
+		expect(checkLink('README.md', `${base}/blob/main/${devOnly}`, docs))
+			.toContain('absent from the published main tree');
+	});
+
+	it('accepts a dev link for staged content, including a directory', () => {
+		expect(checkLink('README.md', `${base}/blob/dev/src/index.js`, docs)).toBe(null);
+		expect(checkLink('README.md', `${base}/tree/dev/src/runtime`, docs)).toBe(null);
+	});
+
+	it('rejects a dev link to an absent or unstaged path', () => {
+		if (stagedTree() === null) return;
+		expect(checkLink('README.md', `${base}/blob/dev/no-such-file-ever.md`, docs))
+			.toContain('absent from the staged tree');
+		// Present on disk, deliberately untracked: a link only its author's
+		// machine can resolve must not pass.
+		expect(checkLink('README.md', `${base}/blob/dev/source/shipped-log.md`, docs))
+			.toContain('absent from the staged tree');
+	});
+
+	it('refuses any ref that is not a published line, with or without a path', () => {
+		expect(checkLink('README.md', `${base}/blob/master/README.md`, docs)).toContain('not master');
+		expect(checkLink('README.md', `${base}/blob/v0.5.8/README.md`, docs)).toContain('not v0.5.8');
+		// A ref-only URL names the tree root of that ref; the ref rule still applies.
+		expect(checkLink('README.md', `${base}/tree/no-such-ref`, docs)).toContain('not no-such-ref');
+		expect(checkLink('README.md', `${base}/tree/dev`, docs)).toBe(null);
+	});
+
+	it('keeps the snapshot honest against the origin/main that exists, byte for byte', () => {
+		// A shallow checkout has no origin/main ref and skips the comparison
+		// (every full clone makes it, so staleness cannot outlive a release);
+		// the published main tip bypasses the snapshot lane entirely.
+		const live = resolvableMainCommit();
+		if (live === null || onMainLine()) return;
+		expect(mainTreeSnapshot().commit).toBe(live);
+		// The commit pin alone would let a hand-edited path list ride an
+		// untouched commit field; the list itself must match the tree.
+		const actual = execFileSync('git', ['-C', fileURLToPath(new URL('..', import.meta.url)), 'ls-tree', '-r', '--name-only', live], {
+			encoding: 'utf8',
+			windowsHide: true
+		}).split('\n').map((line) => line.trim()).filter(Boolean);
+		expect([...mainTreeSnapshot().paths].sort()).toEqual(actual.sort());
 	});
 });
 

@@ -101,7 +101,7 @@ describe('the benchmark reproduction destination', () => {
 	it('keeps development tooling repository-only and links it through a stable source route', () => {
 		expect(PACKAGE.files).not.toContain('bench');
 		expect(packageFiles().some((relative) => relative.startsWith('bench/'))).toBe(false);
-		expect(README).toContain('https://github.com/lanteanio/svelte-adapter-uws/blob/main/bench/README.md');
+		expect(README).toContain('https://github.com/lanteanio/svelte-adapter-uws/blob/dev/bench/README.md');
 		expect(README).not.toContain('](./bench/README.md)');
 		expect(documentationFiles()).toContain('bench/README.md');
 	});

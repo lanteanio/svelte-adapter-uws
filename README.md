@@ -1265,7 +1265,7 @@ rebinding, and declare the exact translator prefix on a NAT64 network whose
 prefix is not safely inferable.
 
 **Verified:** The executable address, DNS, allowlist, NAT64, 6to4, ISATAP, and
-metadata corpus is in [`test/safe-url.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/safe-url.test.js); the
+metadata corpus is in [`test/safe-url.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/safe-url.test.js); the
 bounded public statement is registered as
 [`ADAPTER-SEC-SSRF`](./docs/claim-register.md#adapter-sec-ssrf).
 
@@ -1319,7 +1319,7 @@ the accepted window matters.
 
 **Verified:** Byte-container, rotation, freshness, malformed-input, and sender
 round-trip cases are executable in
-[`test/webhooks-delivery.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/main/test/webhooks-delivery.test.js); see
+[`test/webhooks-delivery.test.js`](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/test/webhooks-delivery.test.js); see
 [`ADAPTER-SEC-WEBHOOK`](./docs/claim-register.md#adapter-sec-webhook).
 
 ### Sending a webhook (`deliverWebhook` and the delivery controls)
@@ -2815,7 +2815,7 @@ promise the shared-frame gain.
 
 **Reproduce:** Run `node bench/27-publish-batched-ab.mjs`; command ownership,
 output fields, and interpretation limits are in the repository-only
-[benchmark index](https://github.com/lanteanio/svelte-adapter-uws/blob/main/bench/README.md#complete-profile-catalog)
+[benchmark index](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/bench/README.md#complete-profile-catalog)
 and [`ADAPTER-PERF-BATCH`](./docs/claim-register.md#adapter-perf-batch).
 
 ### `platform.requestTopic(topic, event, data, options?)`
@@ -3431,6 +3431,8 @@ The client handles several edge cases automatically, with no configuration requi
 **Microtask-batched initial subscribes**: multiple `subscribe(topic)` calls landing in the same microtask coalesce into one `subscribe-batch` wire frame. A page that mounts many topic stores in a tight loop (a multi-stream dashboard, a `svelte-realtime` page initializing 5 stream RPCs) triggers the server's `subscribeBatch` hook ONCE instead of the per-topic `subscribe` hook N times. Single-topic case stays as a plain `subscribe` frame for the minimal-change wire shape. Same chunking limits as the reconnect path. Topics are still added to the local subscription set synchronously, so a disconnect between the call and the microtask flush loses nothing - the reopen path picks them up. **Test-code note**: code asserting on the exact wire shape of two same-microtask subscribes seeing two `subscribe` frames now sees one `subscribe-batch` frame; use `.find(m => m.type === 'subscribe-batch' && m.topics.includes(...))` instead.
 
 **Zombie detection**: the client checks every 30 seconds whether the server has been completely silent for more than 150 seconds (2.5x the server's idle timeout). If so, it forces a close and reconnects. This catches connections that appear open but were silently dropped by the server, which is common on mobile after wake from sleep.
+
+<a id="origin-validation"></a>
 
 ### Cross-origin and native app usage
 
@@ -4564,7 +4566,7 @@ A cursor layer never replaces the board's own semantics. Treat visual markers
 as supplementary presence: keep the underlying board operable with ordinary
 links, buttons, form controls, and focus order, and publish the local cursor
 from those same keyboard interactions. The
-[complete Svelte composition](https://github.com/lanteanio/svelte-adapter-uws/blob/main/examples/cursor-accessible.svelte) demonstrates
+[complete Svelte composition](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/examples/cursor-accessible.svelte) demonstrates
 the contract using the existing `cursor()` store and `move()` function:
 
 - Every collaborator has an application-selected public name plus a
@@ -5758,7 +5760,7 @@ the changed budget in the same change. Keep wall-clock evidence in
 uWebSockets.js is a C++ HTTP and WebSocket server compiled to a native V8
 addon. This repository compares specific adapter, Node HTTP, `ws`, and
 `socket.io` fixtures; it does not claim a universal server ranking. The
-repository-only [benchmark reproduction index](https://github.com/lanteanio/svelte-adapter-uws/blob/main/bench/README.md)
+repository-only [benchmark reproduction index](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/bench/README.md)
 maps every retained measurement to its exact command and interpretation limit,
 and the [claim register](./docs/claim-register.md) records what each number does
 and does not establish.
@@ -5877,7 +5879,7 @@ ordering and the magnitude; rerun the matched profile that resembles your
 deployment.
 
 These are the three broad runners. Use the
-[benchmark reproduction index](https://github.com/lanteanio/svelte-adapter-uws/blob/main/bench/README.md)
+[benchmark reproduction index](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/bench/README.md)
 for the complete profile catalog and the environment record required when
 citing a result:
 
