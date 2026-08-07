@@ -35,11 +35,32 @@ describeReal('real clustered game-lane topology guard', () => {
 	});
 
 	let lastOutput = () => '';
+	// The child's stdout scan stays attached for the life of the probe, so
+	// `output` keeps growing after the WebSocket answer resolves. A line logged
+	// by a DIFFERENT worker has to be waited for; it is not synchronized with
+	// the I/O worker's reply and under load it arrives later.
+	let awaitLine = async () => { throw new Error('probe() has not run yet'); };
 
 	async function probe(entry, extraEnv = {}) {
 		const port = await freePort();
 		let output = '';
 		lastOutput = () => output;
+		awaitLine = (matches, timeoutMs = 20_000) => new Promise((resolve, reject) => {
+			const scan = () => output.split('\n').find(matches);
+			const first = scan();
+			if (first) return resolve(first);
+			const poll = setInterval(() => {
+				const hit = scan();
+				if (!hit) return;
+				clearInterval(poll);
+				clearTimeout(bail);
+				resolve(hit);
+			}, 25);
+			const bail = setTimeout(() => {
+				clearInterval(poll);
+				reject(new Error(`line never appeared within ${timeoutMs}ms\n${output}`));
+			}, timeoutMs);
+		});
 		const env = {
 			...process.env,
 			HOST: '127.0.0.1',
@@ -106,9 +127,10 @@ describeReal('real clustered game-lane topology guard', () => {
 		// real built runtime.
 		const result = await probe(builtSingleHomeEntry, { GAME_POLICY_INIT_PROBE: '1' });
 		expect(result).toEqual({ ok: true });
-		const line = lastOutput().split('\n').find((candidate) =>
+		// The compute worker logs on its own schedule, so wait for ITS line
+		// rather than assuming the I/O worker's reply implies it has arrived.
+		const line = await awaitLine((candidate) =>
 			candidate.includes('__GAME_POLICY_INIT__') && candidate.includes('role=compute'));
-		expect(line, `no compute-worker probe line in output\n${lastOutput()}`).toBeTruthy();
 		expect(line).toContain(GAME_LANE_CLUSTER_ERROR);
 	}, 60_000);
 });
