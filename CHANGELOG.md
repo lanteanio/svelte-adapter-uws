@@ -597,6 +597,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mappings without inspecting the range. Editorial under the Meta errata
   clause; no wire change.
 
+- **The relay-gap report now counts every proven hole, each confirmed on its
+  own grace.** `relay_gap_frames_total` and the relay-gap event promised
+  frames proven lost, but the drain reported only the lowest hole and
+  discarded the rest of its evidence: a stream that arrived as [3,4,7,8] over
+  watermark 1 had provably lost 2 AND 5-6, yet reported one lost frame. The
+  drain is now STAGED: it reports the aged blocking hole, consumes exactly
+  the first covered run, and re-ages, so the next drain confirms the next
+  hole only once that hole has itself outlived the reorder grace - reporting
+  them all at once would have confirmed a frame still in flight on an older
+  hole's clock, the over-report direction a report must never take because
+  it can restart a healthy worker under the divergence-repair switch. The
+  counts still sum to the full proven loss; they arrive one grace apart.
+  Two further protections land with it: the retention now records the lowest
+  DELIVERED ordinal its bounded range array ever forgot, and the saturated
+  fallback clamps its report below that floor - closing a pre-existing hole
+  where a partial drain could advance the watermark past forgotten arrivals
+  and then report over a hundred delivered frames as lost - and while a
+  stream is saturated its one report uses the clamped first-hole form.
+  A genuine drop that only ever existed above saturated retention can still
+  close without a report; that silence is deliberate, documented where the
+  trade is made, because the alternative is unbounded per-stream memory
+  behind a live publisher. The count remains a proven lower bound, exactly
+  as the retention comments have always stated.
+
 - **The client's inbound text cap now measures bytes, matching its own
   documentation.** The reference client capped inbound text frames by JS
   string length - UTF-16 code units - while the binary branch one line up

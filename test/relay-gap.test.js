@@ -213,6 +213,139 @@ describe('recordOriginStream (per-origin relay contiguity)', () => {
 		expect(takeConfirmedGaps(s, 20_000, GAP_CONFIRM_MS)).toEqual([]);
 	});
 
+	it('reports every certain hole, each on its OWN grace, never on the first hole\'s age', () => {
+		// The under-report this drain once shipped: buffer [3,4,7,8] over
+		// watermark 1 holds two certain holes (2, and 5-6; 4 and 7 both
+		// arrived), and reporting only the first named 1 lost frame while 3
+		// were proven lost with the information already in hand. The repair is
+		// STAGED: reporting both holes on one tick would confirm the second
+		// with the first hole's age - a frame still inside its reorder window
+		// called lost - so the first drain reports the aged hole only, and the
+		// second hole is confirmed one grace after it became the blocking one.
+		const s = new Map();
+		recordOriginStream(s, 'room', 7, 1, NEW_BIRTH, ATTACHED_AT, clock(1000));
+		for (const ord of [3, 4, 7, 8]) {
+			recordOriginStream(s, 'room', 7, ord, NEW_BIRTH, ATTACHED_AT, clock(1000));
+		}
+		expect(takeConfirmedGaps(s, 10_000, GAP_CONFIRM_MS)).toEqual([
+			{ topic: 'room', origin: 7, from: 2, to: 2, count: 1 }
+		]);
+		// Not yet: the second hole's own grace started at the first drain.
+		expect(takeConfirmedGaps(s, 10_000 + GAP_CONFIRM_MS - 1, GAP_CONFIRM_MS)).toEqual([]);
+		expect(takeConfirmedGaps(s, 10_000 + GAP_CONFIRM_MS, GAP_CONFIRM_MS)).toEqual([
+			{ topic: 'room', origin: 7, from: 5, to: 6, count: 2 }
+		]);
+		// Drained completely, and the stream resumed from what arrived.
+		expect(takeConfirmedGaps(s, 30_000, GAP_CONFIRM_MS)).toEqual([]);
+	});
+
+	it('never confirms a hole that opened just before the drain with an older hole\'s age', () => {
+		// The over-report the staging exists to prevent: hole 2 is a real aged
+		// loss, but ord 4 fell to the slower relay channel milliseconds ago and
+		// is still in flight when the drain fires. An unstaged enumeration
+		// would report 4 as lost on hole 2's age; the staged drain must not.
+		const s = new Map();
+		recordOriginStream(s, 'room', 7, 1, NEW_BIRTH, ATTACHED_AT, clock(1000));
+		recordOriginStream(s, 'room', 7, 3, NEW_BIRTH, ATTACHED_AT, clock(1000));
+		for (const ord of [5, 6, 7]) {
+			recordOriginStream(s, 'room', 7, ord, NEW_BIRTH, ATTACHED_AT, clock(9999));
+		}
+		expect(takeConfirmedGaps(s, 10_000, GAP_CONFIRM_MS)).toEqual([
+			{ topic: 'room', origin: 7, from: 2, to: 2, count: 1 }
+		]);
+		// The straggler lands inside its own grace and plugs the hole: nothing
+		// was lost, and nothing further may ever be reported.
+		recordOriginStream(s, 'room', 7, 4, NEW_BIRTH, ATTACHED_AT, clock(10_050));
+		expect(takeConfirmedGaps(s, 30_000, GAP_CONFIRM_MS)).toEqual([]);
+	});
+
+	it('walks a hole boundary across the exact buffer and the compact ranges together', () => {
+		// Push the stream past the exact cap so coverage spans both retention
+		// forms, with a second hole that lives entirely in range territory:
+		// everything from 3 up arrives except one interior ordinal. The first
+		// covered run crosses from the Set into the ranges, so consuming it
+		// exercises the merged walk; the interior hole is confirmed on its own
+		// later grace.
+		const s = new Map();
+		const missing = 3 + MAX_PENDING_ABOVE + 10;
+		const last = missing + 20;
+		recordOriginStream(s, 'room', 7, 1, NEW_BIRTH, ATTACHED_AT, clock(1000));
+		for (let ord = 3; ord <= last; ord++) {
+			if (ord === missing) continue;
+			recordOriginStream(s, 'room', 7, ord, NEW_BIRTH, ATTACHED_AT, clock(1000));
+		}
+		expect(takeConfirmedGaps(s, 10_000, GAP_CONFIRM_MS)).toEqual([
+			{ topic: 'room', origin: 7, from: 2, to: 2, count: 1 }
+		]);
+		expect(takeConfirmedGaps(s, 10_000 + GAP_CONFIRM_MS, GAP_CONFIRM_MS)).toEqual([
+			{ topic: 'room', origin: 7, from: missing, to: missing, count: 1 }
+		]);
+	});
+
+	it('stays silent when the forgotten floor sits below every retained arrival', () => {
+		// Retention can forget DELIVERED ordinals (the range cap), and a later
+		// partial drain can advance the watermark past them. After that, the
+		// lowest retained arrival sits ABOVE delivered frames the tracker no
+		// longer knows about - a report bounded by it would name delivered
+		// frames as lost. The clamp keeps the drain silent instead: every
+		// ordinal here ARRIVED, so any nonzero count is fabricated.
+		const s = new Map();
+		const rec = (ord, at) => recordOriginStream(s, 'room', 7, ord, NEW_BIRTH, ATTACHED_AT, clock(at));
+		rec(1, 1000);
+		for (let ord = 3; ord <= 3 + MAX_PENDING_ABOVE - 1; ord++) rec(ord, 1000);
+		const setTop = 3 + MAX_PENDING_ABOVE - 1;
+		// Singleton even ranges fill the range array...
+		for (let i = 0; i < MAX_PENDING_ABOVE; i++) rec(setTop + 2 + 2 * i, 1000);
+		const rangeTop = setTop + 2 * MAX_PENDING_ABOVE;
+		// ...then a contiguous block beyond every retained range is forgotten
+		// wholesale, and the floor records where forgetting began.
+		for (let ord = rangeTop + 2; ord <= rangeTop + 40; ord++) rec(ord, 1000);
+		// The odd stragglers land, merging the singletons into one range.
+		for (let i = 0; i <= MAX_PENDING_ABOVE; i++) rec(setTop + 1 + 2 * i, 1000);
+		// One more arrival above everything is retained again.
+		rec(rangeTop + 50, 1000);
+		// The original hole closes: the drain advances across the merged run,
+		// past the forgotten block's floor.
+		rec(2, 1000);
+		// Whatever the retained coverage now suggests, every ordinal arrived:
+		// the clamp must keep every later drain silent.
+		expect(takeConfirmedGaps(s, 10_000, GAP_CONFIRM_MS)).toEqual([]);
+		expect(takeConfirmedGaps(s, 20_000, GAP_CONFIRM_MS)).toEqual([]);
+	});
+
+	it('falls back to the first hole once retention has forgotten a delivered ordinal', () => {
+		// Odd-only arrivals open a new discontiguous run each, exhausting first
+		// the exact buffer and then the range array; past both, delivered
+		// ordinals are forgotten, so absence stops meaning loss anywhere but
+		// below the lowest arrival. Enumerating the even ordinals as lost here
+		// would be wrong twice over: some absences above the retained frontier
+		// are forgotten ARRIVALS, and a report can restart a worker.
+		const s = new Map();
+		recordOriginStream(s, 'room', 7, 1, NEW_BIRTH, ATTACHED_AT, clock(1000));
+		const runs = 2 * MAX_PENDING_ABOVE + 4;
+		for (let i = 0; i < runs; i++) {
+			recordOriginStream(s, 'room', 7, 3 + 2 * i, NEW_BIRTH, ATTACHED_AT, clock(1000));
+		}
+		expect(s.get('room').get(7).saturated).toBe(true);
+		expect(takeConfirmedGaps(s, 10_000, GAP_CONFIRM_MS))
+			.toEqual([{ topic: 'room', origin: 7, from: 2, to: 2, count: 1 }]);
+		// The saturation is consumed with the drain: the resumed stream
+		// reports certainly again, each hole on its own staged grace.
+		const st = s.get('room').get(7);
+		expect(st.saturated).toBe(false);
+		const base = st.w;
+		for (const off of [2, 3, 6]) {
+			recordOriginStream(s, 'room', 7, base + off, NEW_BIRTH, ATTACHED_AT, clock(11_000));
+		}
+		const second = 11_000 + GAP_CONFIRM_MS;
+		expect(takeConfirmedGaps(s, second, GAP_CONFIRM_MS)).toEqual([
+			{ topic: 'room', origin: 7, from: base + 1, to: base + 1, count: 1 }
+		]);
+		expect(takeConfirmedGaps(s, second + GAP_CONFIRM_MS, GAP_CONFIRM_MS)).toEqual([
+			{ topic: 'room', origin: 7, from: base + 4, to: base + 5, count: 2 }
+		]);
+	});
+
 	it('reports a real loss that happens after a cap-limited stream resumes', () => {
 		const s = new Map();
 		recordOriginStream(s, 'room', 7, 1, NEW_BIRTH, ATTACHED_AT, clock(1000));

@@ -705,7 +705,22 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the pre-change shape: the absent-option hot shape sits within run
 	// noise and the authoritative-seq shape pays about one nanosecond more
 	// on the isolated resolution (bench/micro-publish-capture-ab.mjs).
-	platform: '51cf6079e0d56628c75f221c17e0b13b7bf1ea6d7c96c1e582ce72510c615d9b',
+	//
+	// Re-pinned for the relay-gap staged drain, reached through
+	// handler/state.js: the per-stream tracker gains a `saturated` boolean and
+	// a `forgottenFloor` number (one added field pair at stream creation, a
+	// hidden-class change there and nowhere hot), retainAboveRange returns
+	// the lowest delivered ordinal it forgot instead of swallowing the fact,
+	// and the confirmed-hole drain either reports the aged blocking hole from
+	// the complete arrival record - allocating, on that cold drain path only,
+	// one array of at most 64 exact ordinals for the sort plus the per-gap
+	// report objects the consumer already expects - or falls back to the
+	// first-hole report clamped below the forgotten floor. The per-frame
+	// record path's delta is a numeric truthiness test of the return value at
+	// two sites with a compare-and-store only when something was forgotten.
+	// No frame byte is read, allocated or copied, and no copy primitive
+	// entered the graph.
+	platform: 'e6971f60eddc524aa74fb51304b9f1d1857071de741cec98ef1f605ab4dffc04',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
