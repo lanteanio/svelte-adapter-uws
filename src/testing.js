@@ -166,6 +166,14 @@ export async function createTestServer(options = {}) {
 			'the receiver reads a zero maximum payload as a refusal of all traffic, not as a ' +
 			'disabled limit. Raise the limit instead.'
 	});
+	// Resolved from the caller exactly like maxPayloadLength above; the harness
+	// once passed a bare literal to the socket, so `createTestServer({
+	// idleTimeout })` was silently ignored and idle behaviour could only be
+	// observed by waiting out the 120-second default. Zero stays legal - it
+	// genuinely disables the idle reaper rather than inverting the option - so
+	// the guard matches the production adapter's: refuse misshaped values only.
+	const idleTimeout = options.idleTimeout ?? 120;
+	assertProtectiveNumber(options, 'idleTimeout', 'the createTestServer option idleTimeout');
 
 	// Lifecycle state, mirroring the production state machine
 	// (runtime/handler/lifecycle.js) rather than a boolean: `starting` while the
@@ -1892,7 +1900,7 @@ export async function createTestServer(options = {}) {
 
 	app.ws(wsPath, {
 		maxPayloadLength,
-		idleTimeout: 120,
+		idleTimeout,
 		sendPingsAutomatically: true,
 
 		upgrade(res, req, context) {

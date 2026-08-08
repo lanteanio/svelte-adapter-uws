@@ -143,6 +143,17 @@ export interface TestServerOptions {
 	 * @default 1048576
 	 */
 	maxPayloadLength?: number;
+	/**
+	 * Idle timeout in seconds applied by the harness's real uWS socket,
+	 * mirroring the production `websocket.idleTimeout` option with the same
+	 * guard and the same pass-through: values reach uWS unclamped, and uWS
+	 * applies its own coarse (roughly 4-second) timeout grid and refuses very
+	 * low nonzero values at socket setup. `0` disables the idle reaper
+	 * entirely. A test that wants to observe an idle close should use `8`.
+	 *
+	 * @default 120
+	 */
+	idleTimeout?: number;
 }
 
 /**

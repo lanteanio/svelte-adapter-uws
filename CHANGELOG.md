@@ -555,6 +555,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`createTestServer` now honours `idleTimeout` instead of silently ignoring
+  it.** The harness passed a bare literal 120 to its uWS socket one line below
+  the properly-resolved `maxPayloadLength`, so `createTestServer({ idleTimeout })`
+  was swallowed - neither applied nor rejected - and observing an idle close
+  through the harness meant waiting out two minutes. The option is now resolved
+  from the caller with the production adapter's protective-number guard (zero
+  stays legal: it genuinely disables the idle reaper), declared in the testing
+  types, and a regression test binds it to the real reaper: a client that
+  refuses protocol pings must be closed at the configured timeout, far below
+  the old hardwired default.
+
 - **A cluster relay diagnostic was silently discarded instead of logged.** The
   `cluster-relay.frame-refused` event was emitted at severity `warning`, which is
   not one of the telemetry levels, so the record failed validation and
