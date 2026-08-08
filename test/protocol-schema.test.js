@@ -367,6 +367,35 @@ describe('WebTransport reliable-stream carriage', () => {
 		expect(protocol).not.toContain('1 MiB payload cap');
 	});
 
+	// The C.6 meaning column must judge each limit exactly as its section does.
+	// The receiver record limit (15.1) is configurable in BOTH directions, so the
+	// registry must not restate its default as a minimum: an implementer reading
+	// only C.6 would otherwise accept a stream record its hardened WebSocket
+	// refuses, or call a 256 KiB receiver nonconforming. The pending bound (15.6)
+	// IS a floor ("MUST be at least"), and its row keeps saying so.
+	it('keeps the C.6 registry meanings on the same limit semantics as 15.1 and 15.6', () => {
+		const meaningOf = (name) => {
+			const match = flatProtocol.match(new RegExp('\\| `' + name + '` \\|([^|\\n]*)\\|'));
+			expect(match, name + ' row present in C.6').not.toBeNull();
+			return match[1];
+		};
+		const { receiverMessageBytesConfigurable, defaultReceiverMessageBytes, minimumPendingBytes } =
+			root['x-webtransport'].reliableStream;
+		expect(receiverMessageBytesConfigurable).toBe(true);
+		expect(defaultReceiverMessageBytes).toBe(1_048_576);
+		const recordRow = meaningOf('RECORD_TOO_LARGE');
+		expect(recordRow).toContain('deployment-configurable');
+		expect(recordRow).toContain('1 MiB absent configuration');
+		expect(recordRow).toContain('may still exceed a lowered limit, and refusing it is conforming');
+		expect(recordRow).not.toContain('at least');
+		// 15.6's floor has TWO conjuncts; a row carrying only the constant invites
+		// an endpoint with a raised emission permission to violate the MUST.
+		expect(minimumPendingBytes).toBe(1_048_576);
+		const slowRow = meaningOf('SLOW_CONSUMER');
+		expect(slowRow).toContain('at least 1 MiB');
+		expect(slowRow).toContain('at least the largest record this endpoint may itself emit');
+	});
+
 	// Both halves: the document must GRANT the raised receiver, and the vector
 	// must stay replayable by one - a helper agreeing with itself proves neither.
 	it('lets a raised receiver accept what a floor receiver refuses', () => {

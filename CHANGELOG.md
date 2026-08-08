@@ -571,6 +571,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Erratum: appendix C.6's `RECORD_TOO_LARGE` row no longer turns the
+  receiver default into a minimum.** The reliable-stream error registry
+  glossed the receiver's limit as "at least 1 MiB" while section 15.1 defines
+  it as deployment-configurable in both directions, with 1 MiB only the
+  unconfigured default and a lowered limit explicitly conforming - a sender
+  within the unnegotiated bound may still be refused by a peer that accepts
+  less. An implementer reading only the registry could accept a stream record
+  its hardened WebSocket rejects, or judge a 256 KiB receiver nonconforming.
+  The row now mirrors 15.1's own formulation: deployment-configurable, 1 MiB
+  absent configuration, and a sender within the unnegotiated bound may still
+  exceed a lowered limit and be conformingly refused. The sweep also caught
+  the same elision pattern next door: `SLOW_CONSUMER`'s gloss carried only
+  the constant half of 15.6's floor, and now states both conjuncts - at
+  least 1 MiB, and at least the largest record the endpoint may itself emit -
+  because an endpoint holding an out-of-band-raised emission permission that
+  sized its bound to the constant alone would violate the MUST and reset its
+  own lane. The schema suite pins both registry rows' wording. Editorial
+  under the Meta errata clause; no wire change.
+
 - **Erratum: appendix C.3's Reserved rows now state what Reserved means.** The
   binary leading-byte registry marked `0x04`-`0xFF` Reserved while frozen
   section 1.4 requires an unrecognized client-to-server leading byte to reach

@@ -1719,9 +1719,9 @@ the transport itself also closes.
 | Code | Name | Meaning |
 |---|---|---|
 | `0x01` | `STREAM_LIMIT` | A reserved, additional, wrong-direction, or undeclared stream was opened. |
-| `0x02` | `RECORD_TOO_LARGE` | A decoded inner message length exceeded the receiver's own limit (15.1; at least 1 MiB). |
+| `0x02` | `RECORD_TOO_LARGE` | A decoded inner message length exceeded the receiver's own limit (15.1; deployment-configurable, 1 MiB absent configuration - a sender within the unnegotiated 1 MiB bound may still exceed a lowered limit, and refusing it is conforming). |
 | `0x03` | `PROTOCOL_ERROR` | Record framing, body, or inner message was malformed: a bad prefix (including one over 5 bytes), an unknown `kind` byte, an invalid-UTF-8 text record, or a malformed inner message (15.1, 15.6). |
-| `0x04` | `SLOW_CONSUMER` | Pending framed bytes would exceed this endpoint's own per-session bound (15.6; at least 1 MiB). |
+| `0x04` | `SLOW_CONSUMER` | Pending framed bytes would exceed this endpoint's own per-session bound (15.6; at least 1 MiB, and at least the largest record this endpoint may itself emit). |
 
 ---
 
