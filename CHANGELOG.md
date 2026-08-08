@@ -568,6 +568,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   untagged application binary stays legal. Editorial under the Meta errata
   clause; no wire change.
 
+- **Erratum: section 6.7's per-connection id claim is now explicit rather than
+  ambiguous.** The compact `game` fan-out frame said its `topicId` is "the
+  ordinary per-connection wire-id binding (section 6.2)" while 6.2 also
+  defines a shared-cohort range at 2^32 and above, leaving a third-party
+  implementer unable to tell whether per-connection was exact or loose
+  shorthand - two readings that differ in what a conforming server may emit.
+  The reference runtime allocates this fan-out's ids exclusively through the
+  per-connection counter, and the text now says so: the fan-out never
+  announces a shared-cohort id for its frames, and the narrowing is invisible
+  to a correct decoder, which resolves any id through its recorded `wire-id`
+  mappings without inspecting the range. Editorial under the Meta errata
+  clause; no wire change.
+
 - **Every publish lane now reads each option field exactly once.** The batch
   surface already captured its options before judging them, but the single
   lanes re-read the caller's live object: the cluster-authority check read

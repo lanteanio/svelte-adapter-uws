@@ -806,9 +806,14 @@ introduces no new leading byte and no new framing:
 
 - `schemaVersion` is `1`. `topicId` is the ordinary per-connection wire-id
   binding (section 6.2), announced by a `wire-id` control frame before the first
-  `0x03` frame for the topic. `seq` is the authoritative ROOM seq the server
-  stamped on fan-out - the same value the JSON envelope's `seq` carries - so gap
-  detection is preserved.
+  `0x03` frame for the topic. Per-connection is exact, not shorthand: this
+  fan-out allocates from section 6.2's per-connection range and never announces
+  a shared-cohort id for its frames, so the cohort range's availability
+  elsewhere in 6.2 does not extend here. The narrowing is invisible to a
+  correct decoder, which resolves any `topicId` through the `wire-id` mappings
+  it has recorded (6.2) without inspecting the range. `seq` is the
+  authoritative ROOM seq the server stamped on fan-out - the same value the
+  JSON envelope's `seq` carries - so gap detection is preserved.
 - `payload` is a SINGLE value-codec value (section 6.3, the same generic codec
   the `game:1` ingress twin and the `smooth.command:1` kind use): the array
   `[event, data]`, or `[event, data, id]` when the relayed event carries the

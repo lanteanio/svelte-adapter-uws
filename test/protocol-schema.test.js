@@ -595,6 +595,14 @@ describe('WebTransport reliable-stream carriage', () => {
 // wire-id counter (never the shared-cohort acquire), and the runtime delivers
 // unknown-leading-byte client binary to the application untouched.
 describe('frozen demux errata', () => {
+	it('pins the fan-out id range narrowing and its decoder invisibility', () => {
+		expect(flatProtocol).toContain('Per-connection is exact, not shorthand');
+		expect(flatProtocol).toContain('never announces a shared-cohort id for its frames');
+		// The narrowing must not leak into what a decoder is told to accept: the
+		// resolution stays the recorded `wire-id` mappings, range-uninspected.
+		expect(flatProtocol).toContain('resolves any `topicId` through the `wire-id` mappings it has recorded (6.2) without inspecting the range');
+	});
+
 	it('pins the reserved-byte rule to the unknown-frame rule it defers to', () => {
 		expect(flatProtocol).toContain('A Reserved value is not an open slot');
 		expect(flatProtocol).toContain('assignable only behind a future negotiated capability token (sections 5, 10)');
