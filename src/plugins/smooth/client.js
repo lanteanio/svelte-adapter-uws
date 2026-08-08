@@ -763,9 +763,26 @@ export function createSmoothChannel(options) {
 		 * the topic advertised lag compensation (its `hitTest`), so a topic without it
 		 * sends a byte-identical, stampless frame. Inert if the transport predates the
 		 * shoot path.
+		 *
+		 * An app may supply the render instant it ACTUALLY drew the world at as
+		 * `options.rt`, on the synced server axis (e.g. `channel.now() - heldMs`
+		 * for a send the app deliberately delayed), replacing the stamp this
+		 * method would compute at call time. Without it, a send that the app
+		 * held back is stamped at the moment it finally runs, so the hold never
+		 * appears in the server's rewind age and a rewind ceiling can never be
+		 * exercised from the app side. Supplying an older instant only asks for
+		 * MORE rewind - the direction a server-side rewind ceiling exists to
+		 * bound, and bounding it is the shot resolver's obligation, exactly as
+		 * for the stamp computed here - and a newer one asks for less, so the
+		 * anti-cheat posture is unchanged: a shooter still cannot fake a lower
+		 * latency. Ignored when the topic did
+		 * not advertise lag compensation and during cold start, exactly like
+		 * the computed stamp; a non-finite value falls back to the computed
+		 * stamp.
 		 * @param {any} cmd
+		 * @param {{ rt?: number }} [options]
 		 */
-		shoot(cmd) {
+		shoot(cmd, options) {
 			if (typeof transport.sendShoot !== 'function') return;
 			// A shot is a command on the wire: the same wire view packs it.
 			const wcmd = wireCommand === null ? cmd : wireCommand.pack(cmd);
@@ -777,6 +794,8 @@ export function createSmoothChannel(options) {
 			// the raw local wall clock would be arbitrarily skewed (an un-synced laptop
 			// can be seconds off). Suppress the stamp and let the server resolve at
 			// present - an honest miss on a moving target, never a wrong-position hit.
+			// An app-supplied instant is suppressed with it: without a synced
+			// clock the app has no server axis to have derived it from.
 			const est = smoother.clock.estServerNow(monotonicNow());
 			if (est === null) {
 				transport.sendShoot({ cmd: wcmd });
@@ -786,7 +805,10 @@ export function createSmoothChannel(options) {
 			// trip against its OWN send time (both ends server-authored) - the client
 			// cannot fake a lower latency, only inflate it (bounded + detectable).
 			const ackT = smoother.lastServerT;
-			const rt = est - smoother.delay;
+			const supplied = options != null ? options.rt : undefined;
+			const rt = typeof supplied === 'number' && Number.isFinite(supplied)
+				? supplied
+				: est - smoother.delay;
 			if (ackT >= 0) transport.sendShoot({ cmd: wcmd, rt, ackT });
 			else transport.sendShoot({ cmd: wcmd, rt });
 		},

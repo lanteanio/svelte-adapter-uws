@@ -63,6 +63,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`channel.shoot` accepts an app-supplied render instant, so a rewind
+  ceiling is finally exercisable from the app side.** The smooth client
+  stamped a shot's render-time at the moment `shoot()` ran, so a send an app
+  deliberately held back - a latency slider, a replay - was stamped after the
+  hold and the delay never appeared in the server's rewind age, leaving any
+  rewind ceiling a boundary that existed only in prose. `shoot(cmd, { rt })`
+  now carries the instant the app actually drew the world at, on the synced
+  server axis, in place of the computed stamp. The anti-cheat posture is
+  unchanged: an older instant only asks for more rewind - the direction a
+  server-side rewind ceiling exists to bound, and bounding it is the shot
+  resolver's obligation, exactly as for the computed stamp - and a newer one
+  asks for less, so a shooter still cannot fake a lower latency. The seam
+  obeys every gate the computed stamp obeys - ignored without lag
+  compensation (the stampless frame stays byte-identical), suppressed during
+  cold start, and a non-finite value falls back to the computed stamp.
+
 - **Per-entry explicit seq on `publishWireBatch`: `{ data, seq }`.** Each
   entry may carry the cluster-authoritative number a replay backend already
   allocated for that frame - a Redis Lua INCR, a database outbox sequencer -

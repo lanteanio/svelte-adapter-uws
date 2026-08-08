@@ -812,6 +812,67 @@ describe('shoot (lag-compensated fire-and-forget)', () => {
 		expect(Number.isFinite(t.shots[0].ackT)).toBe(true);
 	});
 
+	it('carries an app-supplied render instant in place of the computed stamp', async () => {
+		// The seam a rewind ceiling needs: an app that deliberately held a send
+		// (a latency slider, a replay) supplies the instant it actually drew
+		// the world at, so the hold appears in the server's rewind age instead
+		// of vanishing into a stamp computed at the delayed call time.
+		const t = makeTransport({ lc: 1 });
+		const ch = makeChannel(t);
+		await flush();
+		const held = ch.now() - ch.delay - 750;
+		ch.shoot({ fire: true }, { rt: held });
+		ch.shoot({ fire: true });
+		expect(t.shots).toHaveLength(2);
+		expect(t.shots[0].rt).toBe(held);
+		// The round-trip echo is independent of the supplied instant: the
+		// supplied and unsupplied shots on the same channel echo the same
+		// server-authored stamp.
+		expect(typeof t.shots[0].ackT).toBe('number');
+		expect(t.shots[0].ackT).toBe(t.shots[1].ackT);
+	});
+
+	it('falls back to the computed stamp for a non-finite supplied instant', async () => {
+		const t = makeTransport({ lc: 1 });
+		const ch = makeChannel(t);
+		await flush();
+		for (const bad of [Number.NaN, Infinity, 'now', null]) {
+			ch.shoot({ fire: true }, { rt: /** @type {any} */ (bad) });
+		}
+		expect(t.shots).toHaveLength(4);
+		for (const shot of t.shots) {
+			expect(Number.isFinite(shot.rt)).toBe(true);
+			expect(shot.rt).toBeCloseTo(ch.now() - ch.delay, -2);
+		}
+	});
+
+	it('ignores a supplied instant when lag compensation was not advertised', async () => {
+		// The stampless frame stays byte-identical: the seam must not let an
+		// app smuggle a stamp onto a topic whose server never asked for one.
+		const t = makeTransport();
+		const ch = makeChannel(t);
+		await flush();
+		ch.shoot({ fire: true }, { rt: 12345 });
+		expect(t.shots).toHaveLength(1);
+		expect(t.shots[0]).toEqual({ cmd: { fire: true } });
+		// toEqual ignores undefined-valued properties, so pin byte-identity
+		// with the key test: not even { rt: undefined } may appear.
+		expect('rt' in t.shots[0]).toBe(false);
+	});
+
+	it('suppresses a supplied instant during cold start, like the computed one', async () => {
+		// No synced clock means no server axis the app could have derived its
+		// instant from - the honest resolve-at-present shot goes out unchanged.
+		const t = makeTransport({ lc: 1, t: undefined });
+		const ch = makeChannel(t);
+		await flush();
+		ch.shoot({ fire: true }, { rt: 12345 });
+		expect(t.shots).toHaveLength(1);
+		expect(t.shots[0]).toEqual({ cmd: { fire: true } });
+		// The key test, not just toEqual: `{ rt: undefined }` must not appear.
+		expect('rt' in t.shots[0]).toBe(false);
+	});
+
 	it('suppresses the stamp before the clock has synced (cold start)', async () => {
 		// lc is advertised but the sync reply carries no server time, so the clock
 		// never seeds: a render-time built from the raw local wall clock would be

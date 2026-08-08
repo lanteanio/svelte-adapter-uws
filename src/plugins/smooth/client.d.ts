@@ -172,8 +172,19 @@ export interface SmoothChannel<State = any, Command = any> {
 	 * against the rewound world (lag compensation). Stamps the shooter's
 	 * render-time (synced clock minus interpolation delay) when the topic
 	 * advertised its `hitTest`; the outcome arrives as an authoritative event, not
-	 * a reconciliation. Inert if the transport predates the shoot path. */
-	shoot(cmd: Command): void;
+	 * a reconciliation. Inert if the transport predates the shoot path.
+	 *
+	 * `options.rt` (opt-in) supplies the render instant the app actually drew
+	 * the world at, on the synced server axis - e.g. `channel.now() - heldMs`
+	 * for a deliberately delayed send - replacing the stamp computed at call
+	 * time, so a rewind ceiling can be exercised and regression-tested from the
+	 * app side. An older instant only asks for more rewind - the direction a
+	 * server-side rewind ceiling exists to bound, and bounding it is the shot
+	 * resolver's obligation, exactly as for the computed stamp; a newer one
+	 * asks for less, so a shooter still cannot fake a lower latency. Ignored
+	 * without lag compensation and during cold start; a non-finite value falls
+	 * back to the computed stamp. */
+	shoot(cmd: Command, options?: { rt?: number }): void;
 	/** Attach the per-frame consumer and start the render loop. `local` is
 	 * the rendered local state (prediction plus any decaying correction);
 	 * `remote` maps entity keys to interpolated states, each positional state
