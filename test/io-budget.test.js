@@ -729,7 +729,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// property, or key there still does. This digest movement IS the masking
 	// taking effect; no source module changed. Three probes hold the rule
 	// falsifiable in both directions below.
-	platform: '8925401c2652b5c8aef20c8729ef03a506942a735b4663aa9e615a25824fb649',
+	//
+	// Re-pinned for the quiet-state divergence entry: error-registry.js gained
+	// one frozen entry object (id, event, prose fields) and its id constant -
+	// STRUCTURE, which the prose-shape rule deliberately keeps sealed; the
+	// entry's sentences are masked like the rest. Data literals only, nothing
+	// on any frame path, no byte read, allocated or copied, no copy primitive.
+	platform: 'dc208e03445f26f500bec9417413b0d762dfaa0c6f1bec2b6449d8070eec9ad1',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

@@ -14,7 +14,7 @@ function fakeClock(start = 0) {
 describe('createStateHashDetector', () => {
 	it('does not judge until every live worker has reported into the epoch', () => {
 		const clock = fakeClock();
-		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const d = createStateHashDetector({ persistEpochs: 1, epochMs: 1000, monotonicNow: clock.now });
 		const live = [1, 2, 3];
 		expect(d.record(1, 100, live)).toBeNull();
 		expect(d.record(2, 100, live)).toBeNull();
@@ -24,7 +24,7 @@ describe('createStateHashDetector', () => {
 
 	it('returns null when all live workers agree', () => {
 		const clock = fakeClock();
-		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const d = createStateHashDetector({ persistEpochs: 1, epochMs: 1000, monotonicNow: clock.now });
 		const live = [1, 2];
 		expect(d.record(1, 777, live)).toBeNull();
 		expect(d.record(2, 777, live)).toBeNull();
@@ -32,7 +32,7 @@ describe('createStateHashDetector', () => {
 
 	it('flags the minority worker when one hash disagrees', () => {
 		const clock = fakeClock();
-		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const d = createStateHashDetector({ persistEpochs: 1, epochMs: 1000, monotonicNow: clock.now });
 		const live = [1, 2, 3];
 		expect(d.record(1, 500, live)).toBeNull();
 		expect(d.record(2, 500, live)).toBeNull();
@@ -45,7 +45,7 @@ describe('createStateHashDetector', () => {
 
 	it('judges a bucket at most once (no re-count as later reports arrive)', () => {
 		const clock = fakeClock();
-		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const d = createStateHashDetector({ persistEpochs: 1, epochMs: 1000, monotonicNow: clock.now });
 		const live = [1, 2];
 		expect(d.record(1, 1, live)).toBeNull();
 		const first = d.record(2, 2, live); // completes the bucket, diverges
@@ -57,7 +57,7 @@ describe('createStateHashDetector', () => {
 
 	it('buckets by the PRIMARY clock, so skewed-arrival reports in different epochs do not cross-compare', () => {
 		const clock = fakeClock();
-		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const d = createStateHashDetector({ persistEpochs: 1, epochMs: 1000, monotonicNow: clock.now });
 		const live = [1, 2];
 		// worker 1 reports in epoch 0
 		expect(d.record(1, 100, live)).toBeNull();
@@ -69,7 +69,7 @@ describe('createStateHashDetector', () => {
 
 	it('groups reports landing in the same epoch window even with a small jitter', () => {
 		const clock = fakeClock(0);
-		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const d = createStateHashDetector({ persistEpochs: 1, epochMs: 1000, monotonicNow: clock.now });
 		const live = [1, 2, 3];
 		expect(d.record(1, 5, live)).toBeNull();
 		clock.advance(200); // still epoch 0
@@ -82,7 +82,7 @@ describe('createStateHashDetector', () => {
 
 	it('does not stall when a worker died mid-window (it is no longer live)', () => {
 		const clock = fakeClock();
-		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const d = createStateHashDetector({ persistEpochs: 1, epochMs: 1000, monotonicNow: clock.now });
 		// Worker 3 reported, then died: it is dropped from the live set, and its
 		// stale report must not be compared as a divergent group either.
 		expect(d.record(1, 42, [1, 2, 3])).toBeNull();
@@ -95,7 +95,7 @@ describe('createStateHashDetector', () => {
 
 	it('picks the smaller group as the minority and names every off-majority thread', () => {
 		const clock = fakeClock();
-		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const d = createStateHashDetector({ persistEpochs: 1, epochMs: 1000, monotonicNow: clock.now });
 		const live = [1, 2, 3, 4];
 		expect(d.record(1, 10, live)).toBeNull();
 		expect(d.record(2, 10, live)).toBeNull();
@@ -107,7 +107,7 @@ describe('createStateHashDetector', () => {
 
 	it('on a two-way even split names a deterministic minority (numerically-larger id group)', () => {
 		const clock = fakeClock();
-		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const d = createStateHashDetector({ persistEpochs: 1, epochMs: 1000, monotonicNow: clock.now });
 		const live = [1, 2, 3, 4];
 		d.record(1, 100, live);
 		d.record(2, 100, live);
@@ -121,7 +121,7 @@ describe('createStateHashDetector', () => {
 
 	it('bounds memory: old epoch buckets are pruned', () => {
 		const clock = fakeClock();
-		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now, maxBuckets: 3 });
+		const d = createStateHashDetector({ persistEpochs: 1, epochMs: 1000, monotonicNow: clock.now, maxBuckets: 3 });
 		// Report into many distinct epochs without ever completing them.
 		for (let e = 0; e < 50; e++) {
 			clock.set(e * 1000);
@@ -139,7 +139,7 @@ describe('createStateHashDetector', () => {
 describe('detector produces no action on a healthy (converged) cluster', () => {
 	it('never returns a divergence across many converged epochs', () => {
 		const clock = fakeClock();
-		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const d = createStateHashDetector({ persistEpochs: 1, epochMs: 1000, monotonicNow: clock.now });
 		const live = [1, 2, 3];
 		let fired = 0;
 		for (let round = 0; round < 20; round++) {
@@ -154,7 +154,7 @@ describe('detector produces no action on a healthy (converged) cluster', () => {
 describe('epoch width sized to the reporting interval (the bug fix)', () => {
 	it('honors a per-record epoch width passed by the primary', () => {
 		const clock = fakeClock(0);
-		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const d = createStateHashDetector({ persistEpochs: 1, epochMs: 1000, monotonicNow: clock.now });
 		const live = [1, 2];
 		// A 4000ms width passed per record groups t=0 and t=3000 into one epoch,
 		// where the constructor's 1000ms width would have split them apart.
@@ -172,7 +172,7 @@ describe('epoch width sized to the reporting interval (the bug fix)', () => {
 		// bucket and a real divergence is caught - the drift the old jittered-period
 		// reporter caused (workers never sharing a bucket) cannot happen.
 		const clock = fakeClock(0);
-		const d = createStateHashDetector({ epochMs: 60000, monotonicNow: clock.now });
+		const d = createStateHashDetector({ persistEpochs: 1, epochMs: 60000, monotonicNow: clock.now });
 		const period = 1000, width = 2 * period, live = [1, 2];
 		let div = null;
 		const fire = (id, hash, t) => { clock.set(t); const r = d.record(id, hash, live, width); if (r) div = r; };
@@ -181,5 +181,115 @@ describe('epoch width sized to the reporting interval (the bug fix)', () => {
 		expect(div).not.toBeNull();
 		expect(div.majorityHash).toBe(100);
 		expect(div.minorityThreadIds).toEqual([2]);
+	});
+
+	// The persistence gate, at the DEFAULT construction the primary uses: one
+	// divergent epoch can be a boundary artifact (a report tick inside the skew
+	// window of a frame still fanning out), and a returned divergence can
+	// restart a worker, so a single epoch must never fire.
+	it('by default fires only when the divergence persists across two judged epochs', () => {
+		const clock = fakeClock();
+		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const live = [1, 2];
+		expect(d.record(1, 100, live)).toBeNull();
+		expect(d.record(2, 200, live)).toBeNull(); // divergent epoch 1 of 2: held
+		clock.advance(1000);
+		expect(d.record(1, 100, live)).toBeNull();
+		const fired = d.record(2, 200, live); // divergent epoch 2 of 2: fires
+		expect(fired).not.toBeNull();
+		expect(fired.minorityThreadIds).toEqual([2]);
+	});
+
+	it('a judged agreeing epoch resets the persistence streak', () => {
+		const clock = fakeClock();
+		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const live = [1, 2];
+		d.record(1, 100, live);
+		expect(d.record(2, 200, live)).toBeNull(); // divergent, held
+		clock.advance(1000);
+		d.record(1, 100, live);
+		expect(d.record(2, 100, live)).toBeNull(); // agreement: streak resets
+		clock.advance(1000);
+		d.record(1, 100, live);
+		expect(d.record(2, 200, live)).toBeNull(); // divergent again: held again
+		clock.advance(1000);
+		d.record(1, 100, live);
+		expect(d.record(2, 200, live)).not.toBeNull(); // second consecutive: fires
+	});
+
+	it('an epoch that never completes neither counts toward nor resets the streak', () => {
+		const clock = fakeClock();
+		const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+		const live = [1, 2];
+		d.record(1, 100, live);
+		expect(d.record(2, 200, live)).toBeNull(); // divergent, held
+		clock.advance(1000);
+		d.record(1, 100, live); // worker 2 never reports this epoch: unjudged
+		clock.advance(1000);
+		d.record(1, 100, live);
+		expect(d.record(2, 200, live)).not.toBeNull(); // streak survived the gap
+	});
+
+	// The quiet lane: same bucketing and majority rules, no restart authority,
+	// deduplicated per constellation. A respawned worker legitimately holds no
+	// quiet-topic history, so the standing disagreement must be reported once,
+	// not restated every epoch forever - the log-noise twin of the kill loop.
+	describe('recordQuiet', () => {
+		it('holds one epoch, then reports a standing quiet disagreement exactly once', () => {
+			const clock = fakeClock();
+			const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+			const live = [1, 2];
+			// Epoch 1: held by persistence - a one-epoch classification-skew
+			// artifact (one worker ages a topic to quiet a round before its
+			// sibling) must never log at all.
+			d.recordQuiet(1, 500, live);
+			expect(d.recordQuiet(2, 600, live)).toBeNull();
+			// Epoch 2: the same standing disagreement persists - reported.
+			clock.advance(1000);
+			d.recordQuiet(1, 500, live);
+			const first = d.recordQuiet(2, 600, live);
+			expect(first).not.toBeNull();
+			expect(first.minorityThreadIds).toEqual([2]);
+			for (let epoch = 0; epoch < 5; epoch++) {
+				clock.advance(1000);
+				d.recordQuiet(1, 500, live);
+				expect(d.recordQuiet(2, 600, live)).toBeNull(); // same constellation: silent
+			}
+		});
+
+		it('reports a changed constellation after its own persistence, and re-arms after agreement', () => {
+			const clock = fakeClock();
+			const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+			const live = [1, 2];
+			const settle = (hash2) => {
+				d.recordQuiet(1, 500, live);
+				const r = d.recordQuiet(2, hash2, live);
+				clock.advance(1000);
+				return r;
+			};
+			expect(settle(600)).toBeNull(); // held
+			expect(settle(600)).not.toBeNull(); // persisted: reported
+			// The hash moves but the minority partition is unchanged, so the
+			// streak survives - the CHANGED constellation reports immediately.
+			expect(settle(700)).not.toBeNull();
+			expect(settle(500)).toBeNull(); // agreement re-arms everything
+			expect(settle(600)).toBeNull(); // held again
+			expect(settle(600)).not.toBeNull(); // re-divergence reports again
+		});
+
+		it('never fires the active persistence gate from quiet reports, or vice versa', () => {
+			const clock = fakeClock();
+			const d = createStateHashDetector({ epochMs: 1000, monotonicNow: clock.now });
+			const live = [1, 2];
+			// Quiet disagreement alongside ACTIVE agreement: record() must stay
+			// silent however long the quiet lane disagrees.
+			for (let epoch = 0; epoch < 3; epoch++) {
+				d.record(1, 100, live);
+				expect(d.record(2, 100, live)).toBeNull();
+				d.recordQuiet(1, 500, live);
+				d.recordQuiet(2, 600, live);
+				clock.advance(1000);
+			}
+		});
 	});
 });

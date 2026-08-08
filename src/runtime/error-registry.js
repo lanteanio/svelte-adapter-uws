@@ -27,6 +27,7 @@ export const ADAPTER_ERROR_IDS = Object.freeze({
 	RELAY_SPILL_OVERFLOW: 'ADAPTER-ERR-RELAY-SPILL-OVERFLOW',
 	CLUSTER_WORKER_ERROR: 'ADAPTER-ERR-CLUSTER-WORKER-ERROR',
 	DIVERGENCE: 'ADAPTER-ERR-DIVERGENCE',
+	DIVERGENCE_QUIET: 'ADAPTER-ERR-DIVERGENCE-QUIET',
 	INVARIANT: 'ADAPTER-ERR-INVARIANT',
 	METRICS_MERGE: 'ADAPTER-ERR-METRICS-MERGE',
 	METRICS_MIRROR_READ: 'ADAPTER-ERR-METRICS-MIRROR-READ',
@@ -267,6 +268,23 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		sources: Object.freeze(['src/runtime/index.js']),
 		anchor: 'adapter-err-divergence',
 		help: 'docs/errors.md#adapter-err-divergence'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.DIVERGENCE_QUIET,
+		code: null,
+		event: 'divergence.quiet-state',
+		component: 'runtime.divergence',
+		severity: 'warn',
+		emission: 'direct',
+		problemPrefix: 'Workers disagree about quiet-topic history; this is expected after a worker restart and never triggers a restart.',
+		messagePrefix: direct('runtime.divergence', 'divergence.quiet-state', 'warn', 'Workers disagree about quiet-topic history; this is expected after a worker restart and never triggers a restart.'),
+		cause: 'The cross-worker comparison is split by activity: topics whose sequence moved recently carry the restart-authorized vote, while quiet topics ride this log-only lane. A worker that restarted holds none of its siblings\' quiet-topic history, and with nobody publishing those topics it can never re-learn it, so the quiet hashes legitimately disagree. The report requires the same disagreement to persist across consecutive comparison epochs, so a one-round classification skew between report phases never logs.',
+		consequence: 'No effect on current traffic: nothing is being delivered on a quiet topic by definition. The disagreement can also be the trace of a PAST loss - a final frame one worker missed on a topic that then went quiet surfaces here rather than in the restart lane - so it is visibility without kill authority, not proof of health. The record carries only counts and an epoch.',
+		automaticRecovery: 'The disagreement is reported once per distinct constellation (deduplicated), re-arms after agreement, and clears on its own when the quiet topics see traffic again or the cluster recycles together.',
+		nextAction: 'Usually nothing: correlate with a recent worker restart. If no worker restarted and the constellation keeps changing, treat it as a lead for the active-lane divergence diagnostics instead.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-divergence-quiet',
+		help: 'docs/errors.md#adapter-err-divergence-quiet'
 	}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.INVARIANT,

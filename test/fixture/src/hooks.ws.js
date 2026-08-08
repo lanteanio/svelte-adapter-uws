@@ -189,7 +189,22 @@ export function message(ws, ctx) {
 		// trip end to end.
 		try {
 			if (msg.entry === 'diverge') {
-				platform.publish('divergence:room', 'probe', { n: 1 }, { seq: msg.seq || 7, relay: false });
+				// A ONE-SHOT fork ages out of the activity-split comparison after
+				// the reporting window and falls to the log-only quiet lane, so a
+				// deterministic end-to-end oracle needs what a real diverging
+				// deployment has: a stream that keeps moving while forked. Keep
+				// republishing with advancing external seqs (relay off, so the
+				// fork never heals) for long enough to span several report
+				// epochs and the detector's persistence gate.
+				let seq = msg.seq || 7;
+				platform.publish('divergence:room', 'probe', { n: 1 }, { seq, relay: false });
+				const pump = setInterval(() => {
+					seq += 1;
+					try { platform.publish('divergence:room', 'probe', { n: 1 }, { seq, relay: false }); }
+					catch { clearInterval(pump); }
+				}, 40);
+				if (pump.unref) pump.unref();
+				setTimeout(() => clearInterval(pump), 10_000).unref?.();
 				platform.send(ws, 'probe', 'divergence', { nonce: msg.nonce, ok: true });
 			} else {
 				const info = platform.introspect().diagnostics;

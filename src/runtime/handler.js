@@ -33,7 +33,7 @@ import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, W
 import { registerGameIngress, gameLaneClusterSafe } from './handler/game-ingress.js';
 import { now, monotonicNow, processMonotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, divergenceDiagnostics, sharedTopics, subscribeAuth, originStreams, streamTracking, takeConfirmedGaps, GAP_CONFIRM_MS } from './handler/state.js';
-import { computeStateHash } from './invariants.js';
+import { computeStateHash, partitionActiveTopics } from './invariants.js';
 import { DIVERGENCE_TOPIC_LIMIT, summarizeTopicSequences } from './divergence-diagnostics.js';
 import { createConsistencyAuditor } from './auditor.js';
 import { buildConnectionAuditSnapshot } from './audit-snapshot.js';
@@ -888,12 +888,31 @@ if (WS_ENABLED) {
 		// The same interval also drives the relay-contiguity check below, so the
 		// tracker only runs when something will read it.
 		streamTracking.enabled = true;
+		// Reporter-side activity tracking: diffed per tick against the previous
+		// snapshot, so the publish and relay hot paths pay nothing for the split.
+		// These two maps mirror maxSeenSeq entry-for-entry (topic strings shared
+		// by reference) and are bounded by exactly its cardinality - which is
+		// itself unbounded today; any future bound on the seq registries bounds
+		// these with it.
+		let reporterTick = 0;
+		/** @type {Map<string, number>} */
+		const reporterPrevSeqs = new Map();
+		/** @type {Map<string, number>} */
+		const reporterLastChanged = new Map();
 		const reportStateHash = () => {
-			/** @type {Record<string, number>} */
-			const topicSeqsProjection = {};
-			for (const [t, s] of maxSeenSeq) topicSeqsProjection[t] = s;
-			const hash = computeStateHash({ topicSeqs: topicSeqsProjection });
-			parentPort.postMessage({ type: 'state-hash', hash, threadId, intervalMs: STATE_HASH_INTERVAL_MS });
+			reporterTick++;
+			// The comparison is split: ACTIVE topics (seq moved within the last
+			// tick window) carry the restart-authorized vote, because an active
+			// divergence either self-heals on the next publish or is real; QUIET
+			// topics ride a separate log-only hash, because a respawned worker
+			// legitimately holds none of its siblings' quiet history and a
+			// maximum over a topic nobody publishes can never re-converge - the
+			// exact shape that once made the repair switch a kill loop on an
+			// idle cluster.
+			const { active, quiet } = partitionActiveTopics(maxSeenSeq, reporterPrevSeqs, reporterLastChanged, reporterTick);
+			const hash = computeStateHash({ topicSeqs: active });
+			const quietHash = computeStateHash({ topicSeqs: quiet });
+			parentPort.postMessage({ type: 'state-hash', hash, quietHash, threadId, intervalMs: STATE_HASH_INTERVAL_MS });
 
 			// A maximum only ever reveals a lost TAIL. A lost INTERIOR frame moves no
 			// maximum - a worker that got [2,3] of a stream and one that got [1,2,3]

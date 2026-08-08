@@ -597,6 +597,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mappings without inspecting the range. Editorial under the Meta errata
   clause; no wire change.
 
+- **A restarted worker on a quiet cluster no longer diverges forever, so the
+  divergence-repair switch is safe on real deployments.** The cross-worker
+  comparison folded each topic's highest delivered sequence from a worker's
+  in-memory map, and a respawned worker comes back empty: for a topic still
+  seeing traffic that self-heals on the next publish, but a PERMANENTLY quiet
+  topic - a closed room, a finished game, a one-shot announcement - could
+  never re-enter the respawn's map while its siblings folded it forever, a
+  permanent 1-of-N divergence. With the restart switch enabled the primary
+  killed the minority worker, whose replacement respawned empty and diverged
+  again: a kill loop on an idle cluster, driven by a topic nobody was
+  publishing. The comparison is now split by activity, derived on the
+  reporter tick by diffing successive snapshots so the publish and relay hot
+  paths pay nothing: topics whose sequence moved within the last reporting
+  window carry the restart-authorized vote (unchanged semantics, plus a
+  two-epoch persistence gate so a report landing inside a fan-out skew
+  window can never restart anyone), while quiet topics ride a separate
+  log-only hash whose disagreement is reported once per distinct
+  constellation as the new `divergence.quiet-state` warning and never
+  triggers a restart - a respawned worker legitimately holds none of its
+  siblings' quiet history. A real tail loss on a topic that then goes quiet
+  stays visible through the quiet lane instead of vanishing; only its kill
+  authority is withdrawn. The lost-interior detection keeps its
+  found-not-held shape and is untouched.
+
 - **The copy-authority seal no longer fires on operator-guidance wording.**
   The module seal that guards the byte-owning graph digested string CONTENT,
   so rewording a `cause` or `nextAction` sentence in the error registry moved

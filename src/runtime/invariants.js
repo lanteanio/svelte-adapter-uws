@@ -219,3 +219,51 @@ export function computeStateHash(projection) {
 	}
 	return acc >>> 0;
 }
+
+/**
+ * Partition the delivered-seq map into ACTIVE topics (whose seq changed within
+ * the last `windowTicks` reporter ticks, including first sightings) and QUIET
+ * topics (everything else), updating the caller's tracking maps in place.
+ *
+ * The split exists because a maximum-based comparison over quiet topics can
+ * never converge for a respawned worker: it comes back with an empty map and
+ * re-learns a topic only when someone publishes it again, so a permanently
+ * quiet topic keeps its siblings' hashes disagreeing with the respawn forever
+ * - and under the restart-on-divergence switch that is a kill loop driven by a
+ * topic nobody is publishing. Splitting lets the active comparison keep its
+ * restart authority (an active topic self-heals or genuinely diverged) while
+ * quiet disagreement becomes a log-only fact of worker lifecycle.
+ *
+ * Activity is derived on the REPORTER tick, by diffing against the previous
+ * tick's snapshot - the publish and relay hot paths are untouched, pay no
+ * clock read and no extra write. Ticks are per-worker counters over the same
+ * configured interval, so "changed within the last tick" is comparable across
+ * workers to within one interval of skew; the detector's persistence gate
+ * absorbs a report landing inside that skew window.
+ *
+ * Pure with respect to inputs other than the two tracking maps it maintains
+ * (mirrors `recordSeen`), so a unit test drives it with plain maps.
+ *
+ * @param {Map<string, number>} current - the live delivered-seq map
+ * @param {Map<string, number>} prevSeqs - last tick's snapshot (updated in place)
+ * @param {Map<string, number>} lastChangedTick - per-topic last change tick (updated in place)
+ * @param {number} tick - the reporter's current tick counter
+ * @param {number} [windowTicks] - how many ticks back still counts as active
+ * @returns {{ active: Record<string, number>, quiet: Record<string, number> }}
+ */
+export function partitionActiveTopics(current, prevSeqs, lastChangedTick, tick, windowTicks = 1) {
+	/** @type {Record<string, number>} */
+	const active = {};
+	/** @type {Record<string, number>} */
+	const quiet = {};
+	for (const [topic, seq] of current) {
+		if (prevSeqs.get(topic) !== seq) {
+			prevSeqs.set(topic, seq);
+			lastChangedTick.set(topic, tick);
+		}
+		const changedAt = lastChangedTick.get(topic);
+		if (changedAt !== undefined && tick - changedAt <= windowTicks) active[topic] = seq;
+		else quiet[topic] = seq;
+	}
+	return { active, quiet };
+}

@@ -695,6 +695,30 @@ if (is_primary) {
 				const epochMs = state_hash_epoch_ms > 0
 					? state_hash_epoch_ms
 					: 2 * (msg.intervalMs > 0 ? msg.intervalMs : 30000);
+				// The QUIET lane first: a disagreement over topics nobody is
+				// publishing is expected worker lifecycle (a respawn holds none of
+				// its siblings' quiet history and can never re-learn it), so it is
+				// a deduplicated log-only diagnostic and NEVER a restart trigger -
+				// the shape that once made the repair switch a kill loop on an
+				// idle cluster. Only counts and an epoch cross into the record.
+				if (typeof msg.quietHash === 'number') {
+					const quietDivergence = stateHashDetector.recordQuiet(msg.threadId, msg.quietHash, liveThreadIds, epochMs);
+					if (quietDivergence) {
+						emitOperationalEvent({
+							source: 'svelte-adapter-uws',
+							component: 'runtime.divergence',
+							event: 'divergence.quiet-state',
+							severity: 'warn',
+							dataClass: 'operational',
+							message: 'Workers disagree about quiet-topic history; this is expected after a worker restart and never triggers a restart.',
+							attributes: {
+								epoch: quietDivergence.epoch,
+								workers: liveThreadIds.length,
+								minorityWorkers: quietDivergence.minorityThreadIds.length
+							}
+						});
+					}
+				}
 				const divergence = stateHashDetector.record(msg.threadId, msg.hash, liveThreadIds, epochMs);
 				if (divergence) {
 					const minoritySet = new Set(divergence.minorityThreadIds);

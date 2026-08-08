@@ -2,8 +2,8 @@
 
 Search this page with the exact stable ID, code, event, or beginning of the message you saw.
 Every failure emitted as a diagnostic event is indexed below with its cause, what it means
-for traffic, whether anything recovers on its own, and what to do next: 33 entries against
-the 36 distinct diagnostic events emitted from the scanned sources. The rest are
+for traffic, whether anything recovers on its own, and what to do next: 34 entries against
+the 37 distinct diagnostic events emitted from the scanned sources. The rest are
 informational, listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance
 because there is nothing to recover from. A new failure event cannot be added to those sources
 without an entry here: the generator fails the build until one exists. Plain console output that
@@ -29,6 +29,7 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-RELAY-SPILL-OVERFLOW](#adapter-err-relay-spill-overflow) | `cluster-relay.up-spill-overflow` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.cluster-relay event=cluster-relay.up-spill-overflow severity=error] This worker could not hand its relay backlog to the primary within its spill ceiling and is exiting to be replaced.` |
 | [ADAPTER-ERR-CLUSTER-WORKER-ERROR](#adapter-err-cluster-worker-error) | `cluster.worker-error` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.cluster event=cluster.worker-error severity=error] A worker thread reported an error.` |
 | [ADAPTER-ERR-DIVERGENCE](#adapter-err-divergence) | `divergence.detected` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.divergence event=divergence.detected severity=error] Cross-worker state divergence was detected; evidence is retained behind the authenticated diagnostic lookup.` |
+| [ADAPTER-ERR-DIVERGENCE-QUIET](#adapter-err-divergence-quiet) | `divergence.quiet-state` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.divergence event=divergence.quiet-state severity=warn] Workers disagree about quiet-topic history; this is expected after a worker restart and never triggers a restart.` |
 | [ADAPTER-ERR-INVARIANT](#adapter-err-invariant) | `invariant.violated` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.assertion event=invariant.violated severity=` |
 | [ADAPTER-ERR-METRICS-MERGE](#adapter-err-metrics-merge) | `metrics.merge-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.metrics event=metrics.merge-failed severity=error] The cluster metrics merge failed; this scrape answers with the local worker only.` |
 | [ADAPTER-ERR-METRICS-MIRROR-READ](#adapter-err-metrics-mirror-read) | `metrics.mirror-read-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.metrics event=metrics.mirror-read-failed severity=error] The metrics mirror read failed during cluster collection; this worker reports as a gap between expected and reporting.` |
@@ -54,8 +55,8 @@ generate and ship their own runtime-owned references on the same release channel
 ## Emitted diagnostic event coverage
 
 This inventory is derived at generation time by scanning `src/runtime/`, `src/observability.js`,
-and `src/vite.js` for emitted diagnostic events; the runtime emits 36 distinct events.
-The 33 indexed above carry stable IDs and full operator guidance; the remaining 3
+and `src/vite.js` for emitted diagnostic events; the runtime emits 37 distinct events.
+The 34 indexed above carry stable IDs and full operator guidance; the remaining 3
 are informational. That split is enforced by severity rather than by a list: an emitted event
 is exempt from the indexed reference only while every severity it is emitted at is
 informational, so promoting one to a warning or an error fails generation until it is indexed.
@@ -74,6 +75,7 @@ Indexed events:
 - `cluster-relay.up-spill-overflow` - [ADAPTER-ERR-RELAY-SPILL-OVERFLOW](#adapter-err-relay-spill-overflow)
 - `cluster.worker-error` - [ADAPTER-ERR-CLUSTER-WORKER-ERROR](#adapter-err-cluster-worker-error)
 - `divergence.detected` - [ADAPTER-ERR-DIVERGENCE](#adapter-err-divergence)
+- `divergence.quiet-state` - [ADAPTER-ERR-DIVERGENCE-QUIET](#adapter-err-divergence-quiet)
 - `invariant.violated` - [ADAPTER-ERR-INVARIANT](#adapter-err-invariant)
 - `metrics.merge-failed` - [ADAPTER-ERR-METRICS-MERGE](#adapter-err-metrics-merge)
 - `metrics.mirror-read-failed` - [ADAPTER-ERR-METRICS-MIRROR-READ](#adapter-err-metrics-mirror-read)
@@ -258,6 +260,18 @@ searchable log prefix is:
 - **Automatic recovery:** None. Divergence is reported, never silently reconciled.
 - **Next action:** Resolve the diagnosticId attribute to its retained per-worker evidence, then treat it as a correctness incident. In an adapter-only deployment that lookup is `platform.diagnostic(id)`; the authenticated admin HTTP route exists only where the realtime layer is configured to serve one.
 - **Runtime help:** `docs/errors.md#adapter-err-divergence`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-divergence-quiet"></a>
+## `ADAPTER-ERR-DIVERGENCE-QUIET`
+
+- **Code/event:** `divergence.quiet-state`
+- **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.divergence event=divergence.quiet-state severity=warn] Workers disagree about quiet-topic history; this is expected after a worker restart and never triggers a restart.`
+- **Cause:** The cross-worker comparison is split by activity: topics whose sequence moved recently carry the restart-authorized vote, while quiet topics ride this log-only lane. A worker that restarted holds none of its siblings' quiet-topic history, and with nobody publishing those topics it can never re-learn it, so the quiet hashes legitimately disagree. The report requires the same disagreement to persist across consecutive comparison epochs, so a one-round classification skew between report phases never logs.
+- **Consequence:** No effect on current traffic: nothing is being delivered on a quiet topic by definition. The disagreement can also be the trace of a PAST loss - a final frame one worker missed on a topic that then went quiet surfaces here rather than in the restart lane - so it is visibility without kill authority, not proof of health. The record carries only counts and an epoch.
+- **Automatic recovery:** The disagreement is reported once per distinct constellation (deduplicated), re-arms after agreement, and clears on its own when the quiet topics see traffic again or the cluster recycles together.
+- **Next action:** Usually nothing: correlate with a recent worker restart. If no worker restarted and the constellation keeps changing, treat it as a lead for the active-lane divergence diagnostics instead.
+- **Runtime help:** `docs/errors.md#adapter-err-divergence-quiet`
 - **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
 
 <a id="adapter-err-invariant"></a>

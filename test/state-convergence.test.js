@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { recordSeen } from '../src/runtime/handler/state.js';
 import { nextTopicSeq } from '../src/runtime/utils/epoch.js';
-import { computeStateHash } from '../src/runtime/invariants.js';
+import { computeStateHash, partitionActiveTopics } from '../src/runtime/invariants.js';
 import { createStateHashDetector } from '../src/runtime/state-hash-detector.js';
 
 // The convergent observable is a per-worker map of the highest seq each topic
@@ -262,8 +262,17 @@ describe('full pipeline: publish -> relay(seq) -> receive -> reporter -> detecto
 				receive(w, frame);
 			}
 		}
+		// The persistence gate holds the first divergent epoch (a single epoch
+		// can be a boundary artifact and a returned divergence can restart a
+		// worker); the SAME standing loss fires on the second consecutive one.
 		detectorClock = 5000;
 		let divergence = null;
+		for (const w of workers) {
+			const div = detector.record(w.id, reportHash(w), live);
+			if (div) divergence = div;
+		}
+		expect(divergence).toBeNull();
+		detectorClock = 6000;
 		for (const w of workers) {
 			const div = detector.record(w.id, reportHash(w), live);
 			if (div) divergence = div;
@@ -272,6 +281,77 @@ describe('full pipeline: publish -> relay(seq) -> receive -> reporter -> detecto
 		expect(divergence.minorityThreadIds).toEqual([3]);
 		// Majority hash is the converged (workers 1 & 2) value.
 		expect(divergence.majorityHash).toBe(reportHash(workers[0]));
+	});
+
+	// The scenario the split exists for: a worker restarts on a cluster whose
+	// only traffic stopped. Its siblings hold the quiet topic's maximum forever;
+	// the respawn can never learn it. Before the split that was a PERMANENT
+	// hash disagreement - and under the restart switch, a kill loop driven by a
+	// topic nobody was publishing, because the replacement respawns empty and
+	// diverges again. Active/quiet partitioning must keep the restart lane
+	// silent and report the quiet fact exactly once.
+	it('a respawned worker on a quiet cluster never trips the restart lane, and logs once', () => {
+		const tracking = () => ({ prev: new Map(), changed: new Map(), tick: 0 });
+		const workers = [
+			{ id: 1, maxSeen: new Map(), t: tracking() },
+			{ id: 2, maxSeen: new Map(), t: tracking() },
+			{ id: 3, maxSeen: new Map(), t: tracking() }
+		];
+		// A room lives and dies while all three run.
+		for (const w of workers) recordSeen(w.maxSeen, 'room:final', 40);
+		// Everyone ticks a few times: the topic goes quiet on all of them.
+		for (let i = 0; i < 3; i++) {
+			for (const w of workers) {
+				w.t.tick++;
+				partitionActiveTopics(w.maxSeen, w.t.prev, w.t.changed, w.t.tick);
+			}
+		}
+		// Worker 3 restarts: empty map, fresh tracking - the respawn shape.
+		workers[2].maxSeen = new Map();
+		workers[2].t = tracking();
+
+		let detectorClock = 0;
+		const detector = createStateHashDetector({ epochMs: 1000, monotonicNow: () => detectorClock });
+		const live = workers.map((w) => w.id);
+		let restartLane = null;
+		let quietReports = 0;
+		for (let epoch = 0; epoch < 6; epoch++) {
+			detectorClock = epoch * 1000;
+			for (const w of workers) {
+				w.t.tick++;
+				const { active, quiet } = partitionActiveTopics(w.maxSeen, w.t.prev, w.t.changed, w.t.tick);
+				const div = detector.record(w.id, computeStateHash({ topicSeqs: active }), live);
+				if (div) restartLane = div;
+				if (detector.recordQuiet(w.id, computeStateHash({ topicSeqs: quiet }), live)) quietReports++;
+			}
+		}
+		// The restart-authorized lane NEVER fires: the quiet topic is out of the
+		// active comparison on every worker, respawned or not.
+		expect(restartLane).toBeNull();
+		// The quiet fact is reported exactly once, not restated every epoch.
+		expect(quietReports).toBe(1);
+	});
+
+	it('partitions a topic to active on change and to quiet after the window', () => {
+		const current = new Map([['a', 5], ['b', 9]]);
+		const prev = new Map();
+		const changed = new Map();
+		// Tick 1: both first-seen, both active.
+		let split = partitionActiveTopics(current, prev, changed, 1);
+		expect(split).toEqual({ active: { a: 5, b: 9 }, quiet: {} });
+		// Tick 2: nothing moved, still inside the one-tick window.
+		split = partitionActiveTopics(current, prev, changed, 2);
+		expect(split).toEqual({ active: { a: 5, b: 9 }, quiet: {} });
+		// Tick 3: 'a' moves, 'b' ages out of the window.
+		current.set('a', 6);
+		split = partitionActiveTopics(current, prev, changed, 3);
+		expect(split).toEqual({ active: { a: 6 }, quiet: { b: 9 } });
+		// Tick 4: both quiet... except 'a' is still inside its window.
+		split = partitionActiveTopics(current, prev, changed, 4);
+		expect(split).toEqual({ active: { a: 6 }, quiet: { b: 9 } });
+		// Tick 5: everything quiet.
+		split = partitionActiveTopics(current, prev, changed, 5);
+		expect(split).toEqual({ active: {}, quiet: { a: 6, b: 9 } });
 	});
 
 	it('a {seq:false} topic never enters any worker map, so it cannot diverge', () => {
