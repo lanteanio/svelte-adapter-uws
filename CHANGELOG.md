@@ -597,6 +597,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mappings without inspecting the range. Editorial under the Meta errata
   clause; no wire change.
 
+- **The copy-authority seal no longer fires on operator-guidance wording.**
+  The module seal that guards the byte-owning graph digested string CONTENT,
+  so rewording a `cause` or `nextAction` sentence in the error registry moved
+  the digest and failed the suite, three times in one working day, twice for
+  prose alone. Before handing that text over to its own gate, the gate was
+  made complete: review found the operator shortlink URL the runtime prints
+  on error messages was validated nowhere but this seal, so the
+  error-reference generator now renders every shortlink into the checked
+  document and refuses any value that is not a registered-domain shortlink -
+  an edited URL must surface in a reviewed regeneration, and a hostile one is
+  refused outright. A gate that fires on wording teaches people that a seal
+  failure is routine paperwork, which is
+  how the one real firing gets waved through. The registry is now digested
+  as syntactic shape with string content masked: rewording a sentence no
+  longer moves the seal, while any new statement, call, property, or key
+  there still does, and string content everywhere else in the graph stays
+  fully sealed - all three directions pinned by probes that drive the real
+  graph digest. The allowlist is deliberately one module: the observability
+  manifest is also literal-heavy, but its literals are wire-visible signal
+  names that deserve the full watch. The seal's failure message now names
+  the common benign cause and the recorded-reason re-pin protocol, so a
+  legitimate re-pin costs minutes instead of a diagnostic session.
+
 - **The relay-gap report now counts every proven hole, each confirmed on its
   own grace.** `relay_gap_frames_total` and the relay-gap event promised
   frames proven lost, but the drain reported only the lowest hole and

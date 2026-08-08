@@ -720,7 +720,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// two sites with a compare-and-store only when something was forgotten.
 	// No frame byte is read, allocated or copied, and no copy primitive
 	// entered the graph.
-	platform: 'e6971f60eddc524aa74fb51304b9f1d1857071de741cec98ef1f605ab4dffc04',
+	//
+	// Re-pinned for the prose-shape rule: error-registry.js - the one graph
+	// module whose string content is operator documentation, independently
+	// gated by the error-reference generator - is now digested as syntactic
+	// SHAPE with string content masked, so rewording a cause or next-action
+	// sentence no longer moves this seal while any new statement, call,
+	// property, or key there still does. This digest movement IS the masking
+	// taking effect; no source module changed. Three probes hold the rule
+	// falsifiable in both directions below.
+	platform: '8925401c2652b5c8aef20c8729ef03a506942a735b4663aa9e615a25824fb649',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -973,6 +982,55 @@ function localModuleSpecifiers(body) {
 	return [...specifiers].sort();
 }
 
+// Modules whose STRING CONTENT is documentation rather than wire bytes. The
+// module seal exists so no copy primitive or executable change enters the
+// byte-owning graph unsealed - its object is STRUCTURE. error-registry.js is a
+// data module of operator guidance whose literal content is independently
+// gated: generate-error-reference renders and validates every entry field the
+// runtime displays - including the operator shortlink URL, added to that gate
+// when a review found it was previously watched by this seal alone - and
+// fails the build when the registry and docs/errors.md disagree. Yet its
+// sentences moved this seal three times in one session, twice for wording
+// alone - and a gate that fires on wording teaches people that a seal
+// failure is routine paperwork. For the modules
+// listed here the digest covers the syntactic SHAPE with string content
+// masked: rewording a sentence no longer moves it, while any new statement,
+// call, property, or key still does. The allowlist is deliberately one entry:
+// observability-manifest.js is also literal-heavy but its literals are
+// wire-visible signal names and label domains, which deserve the full watch.
+const PROSE_SHAPE_MODULES = new Set(['src/runtime/error-registry.js']);
+const PROSE_PLACEHOLDER = '<prose>';
+
+function maskProseStrings(node, keyPosition = false) {
+	if (Array.isArray(node)) return node.map((child) => maskProseStrings(child));
+	if (!node || typeof node !== 'object') return node;
+	if (node.type === 'Literal' && typeof node.value === 'string' && !keyPosition) {
+		return { ...node, value: PROSE_PLACEHOLDER };
+	}
+	if (node.type === 'TemplateElement') {
+		return { ...node, value: { raw: PROSE_PLACEHOLDER, cooked: PROSE_PLACEHOLDER } };
+	}
+	const masked = {};
+	for (const [key, value] of Object.entries(node)) {
+		if (node.type === 'Property' && key === 'key' && !node.computed) {
+			// A literal property KEY is structure (which entry exists), not prose.
+			// A COMPUTED key's literal falls through and is masked; none exists
+			// in the allowlisted module today, and introducing one is a new node
+			// that moves the digest into review on its way in.
+			masked[key] = maskProseStrings(value, true);
+		} else if ((node.type === 'ImportDeclaration' || node.type === 'ExportNamedDeclaration' ||
+			node.type === 'ExportAllDeclaration' || node.type === 'ImportExpression') && key === 'source') {
+			// Module specifiers are reachability structure, never prose.
+			masked[key] = value;
+		} else if (value && typeof value === 'object') {
+			masked[key] = maskProseStrings(value);
+		} else {
+			masked[key] = value;
+		}
+	}
+	return masked;
+}
+
 function moduleGraphSyntaxDigest(source, moduleName, options = {}) {
 	const roots = COPY_AUTHORITY_MODULE_ROOTS[moduleName];
 	const entryPath = COPY_AUTHORITY_MODULE_PATHS[moduleName];
@@ -989,7 +1047,11 @@ function moduleGraphSyntaxDigest(source, moduleName, options = {}) {
 		const relativePath = path.relative(ROOT, resolvedPath).replaceAll('\\', '/');
 		const moduleLabel = resolvedPath === path.resolve(entryPath) ? moduleName : relativePath;
 		const body = includedModuleBody(ast, moduleRoots, moduleLabel);
-		modules.push({ path: relativePath, program: { type: 'Program', sourceType: ast.sourceType, body } });
+		const program = { type: 'Program', sourceType: ast.sourceType, body };
+		modules.push({
+			path: relativePath,
+			program: PROSE_SHAPE_MODULES.has(relativePath) ? maskProseStrings(program) : program
+		});
 
 		for (const specifier of localModuleSpecifiers(body)) {
 			const dependencyPath = path.resolve(path.dirname(resolvedPath), specifier);
@@ -1025,7 +1087,14 @@ function assertClosedCopyModuleSyntax(source, moduleName, options = {}) {
 	if (!expected) throw new Error(`I/O budget authority has no module seal for ${moduleName}`);
 	const actual = moduleGraphSyntaxDigest(source, moduleName, options);
 	if (actual !== expected) {
-		throw new Error(`${moduleName} module syntax changed outside its counted copy authority: ${actual}`);
+		throw new Error(
+			`${moduleName} module syntax changed outside its counted copy authority: ${actual}. ` +
+			'The common benign cause is edited literal content somewhere in the sealed graph ' +
+			'(the digest covers string characters outside the prose-shape allowlist). If review ' +
+			'confirms no byte-owning change entered, re-pin COPY_AUTHORITY_MODULE_SYNTAX to the ' +
+			'digest above WITH a recorded reason in the comment over it - that is the protocol, ' +
+			'not a workaround.'
+		);
 	}
 }
 
@@ -2263,6 +2332,43 @@ describe('deterministic HTTP and frame I/O budgets', () => {
 		expect(() => assertDefaultFrameIOAuthority(WIRE_SOURCE)).not.toThrow();
 		expect(() => assertFrameBuilderAuthority(WIRE_SOURCE)).not.toThrow();
 		expect(() => assertParseBinaryFrameAuthority(WIRE_SOURCE)).not.toThrow();
+	});
+
+	// The prose-shape rule, held falsifiable in both directions: wording in the
+	// allowlisted documentation module must NOT move the seal (that noise
+	// taught people a seal failure is routine paperwork), while structure there
+	// and wording anywhere else still must. All three probes run through the
+	// real graph digest with source overrides, against the pinned value.
+	it('lets documentation wording move in the prose-shape module without moving the seal', () => {
+		const registryPath = path.resolve(ROOT, 'src/runtime/error-registry.js');
+		const registrySource = readFileSync(registryPath, 'utf8');
+		const sentence = 'The configured address or port could not be bound, or the process lacks permission.';
+		expect(registrySource).toContain(sentence);
+		const reworded = registrySource.replace(sentence,
+			'Binding the configured listener address or port failed, or the process lacks permission to.');
+		expect(reworded).not.toBe(registrySource);
+		expect(moduleGraphSyntaxDigest(PLATFORM_SOURCE, 'platform', {
+			sourceOverrides: new Map([[registryPath, reworded]])
+		})).toBe(COPY_AUTHORITY_MODULE_SYNTAX.platform);
+	});
+
+	it('still trips the seal for structure in the prose-shape module', () => {
+		const registryPath = path.resolve(ROOT, 'src/runtime/error-registry.js');
+		const registrySource = readFileSync(registryPath, 'utf8');
+		expect(moduleGraphSyntaxDigest(PLATFORM_SOURCE, 'platform', {
+			sourceOverrides: new Map([[registryPath, registrySource + '\nexport const proseShapeProbe = 1;\n']])
+		})).not.toBe(COPY_AUTHORITY_MODULE_SYNTAX.platform);
+	});
+
+	it('still trips the seal for string content outside the prose-shape allowlist', () => {
+		// A known CODE literal in the sealed entry module itself (an assert
+		// label on the publish path): outside the allowlist, its characters
+		// stay sealed - only the shape of the one documentation module is free.
+		expect(PLATFORM_SOURCE).toContain("'envelope.empty'");
+		const mutated = PLATFORM_SOURCE.replace("'envelope.empty'", "'prose-probe-text'");
+		expect(mutated).not.toBe(PLATFORM_SOURCE);
+		expect(moduleGraphSyntaxDigest(mutated, 'platform'))
+			.not.toBe(COPY_AUTHORITY_MODULE_SYNTAX.platform);
 	});
 
 	it('rejects module-level delegation and the complete ByteReader boundary', () => {

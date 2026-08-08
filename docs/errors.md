@@ -119,6 +119,7 @@ searchable log prefix is:
 - **Consequence:** The process never becomes ready and exits with status 1.
 - **Automatic recovery:** None. The adapter does not retry a failed bind.
 - **Next action:** Check address availability, port conflicts, and bind permissions, then restart the process.
+- **Operator shortlink:** `https://svti.me/listen-failed`
 - **Runtime help:** `docs/errors.md#adapter-err-listen`
 - **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js), [src/runtime/handler/lifecycle.js](../src/runtime/handler/lifecycle.js)
 
@@ -131,6 +132,7 @@ searchable log prefix is:
 - **Consequence:** The Vite HTTP server stays active, but WebSocket upgrades return HTTP 500 until a handler loads.
 - **Automatic recovery:** Vite retries the handler when its module graph changes again.
 - **Next action:** Fix the reported module error and save the handler or one of its dependencies; a dev-server restart is not required.
+- **Operator shortlink:** `https://svti.me/ws-handler-load`
 - **Runtime help:** `docs/errors.md#adapter-err-vite-load`
 - **Runtime sources:** [src/vite.js](../src/vite.js)
 
@@ -143,6 +145,7 @@ searchable log prefix is:
 - **Consequence:** Existing WebSocket connections keep the previous handler, but new upgrades return HTTP 500 until recovery.
 - **Automatic recovery:** Vite retries the handler when its module graph changes again.
 - **Next action:** Fix the reported module error and save the handler or one of its dependencies; a dev-server restart is not required.
+- **Operator shortlink:** `https://svti.me/ws-handler-load`
 - **Runtime help:** `docs/errors.md#adapter-err-vite-reload`
 - **Runtime sources:** [src/vite.js](../src/vite.js)
 
@@ -155,6 +158,7 @@ searchable log prefix is:
 - **Consequence:** The adapter cannot install or start, and there is no JavaScript transport fallback.
 - **Automatic recovery:** None. Package installation and process startup stop at this failure.
 - **Next action:** Install the exact supported archive and a binary for the active OS, CPU, Node ABI, and documented Linux libc floor.
+- **Operator shortlink:** `https://svti.me/native-load`
 - **Runtime help:** `docs/errors.md#adapter-err-native-load`
 - **Runtime sources:** [src/uws-load-hint.js](../src/uws-load-hint.js)
 
@@ -167,6 +171,7 @@ searchable log prefix is:
 - **Consequence:** The caller promise rejects while the remote operation outcome remains unknown.
 - **Automatic recovery:** None. The adapter does not retry requests because replay may duplicate an operation.
 - **Next action:** Reconcile application state first, or retry only through an idempotent operation; then investigate the handler, connection, and measured timeout budget.
+- **Operator shortlink:** `https://svti.me/request-timeout`
 - **Runtime help:** `docs/errors.md#adapter-err-request-timeout`
 - **Runtime sources:** [src/runtime/handler/platform.js](../src/runtime/handler/platform.js), [src/vite.js](../src/vite.js)
 
@@ -179,6 +184,7 @@ searchable log prefix is:
 - **Consequence:** The caller promise rejects while the remote operation outcome remains unknown.
 - **Automatic recovery:** None. The adapter does not retry requests because replay may duplicate an operation.
 - **Next action:** Reconcile application state first, or retry only through an idempotent operation after the connection recovers.
+- **Operator shortlink:** `https://svti.me/request-closed`
 - **Runtime help:** `docs/errors.md#adapter-err-request-closed`
 - **Runtime sources:** [src/runtime/handler/platform.js](../src/runtime/handler/platform.js), [src/runtime/handler.js](../src/runtime/handler.js), [src/vite.js](../src/vite.js)
 

@@ -195,6 +195,14 @@ export function validateErrorRegistry(entries) {
 			if (typeof entry[field] !== 'string' || !entry[field].trim()) errors.push(label + ': missing ' + field);
 		}
 		if (entry.help !== 'docs/errors.md#' + entry.anchor) errors.push(label + ': help route does not match anchor');
+		// `link` is displayed by the runtime itself (the See: suffix on adapter
+		// error messages), so its characters are load-bearing operator output:
+		// only the registered shortlink domain is acceptable, and the value is
+		// rendered into this generated document so any change is reviewed there.
+		if (entry.link !== undefined && entry.link !== null &&
+			(typeof entry.link !== 'string' || !/^https:\/\/svti\.me\/[a-z0-9-]+$/.test(entry.link))) {
+			errors.push(label + ': link must be an https://svti.me/<slug> shortlink');
+		}
 		if (!Array.isArray(entry.sources) || entry.sources.length === 0) {
 			errors.push(label + ': missing sources');
 		} else {
@@ -369,6 +377,11 @@ export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options =
 			'- **Consequence:** ' + entry.consequence,
 			'- **Automatic recovery:** ' + entry.automaticRecovery,
 			'- **Next action:** ' + entry.nextAction,
+			// The shortlink is what the RUNTIME prints to operators (See: ...),
+			// so it renders here and is validated: an edited URL must surface in
+			// this generated, checked document rather than slip through as an
+			// unwatched string.
+			...(entry.link ? ['- **Operator shortlink:** `' + entry.link + '`'] : []),
 			'- **Runtime help:** `' + entry.help + '`',
 			'- **Runtime sources:** ' + entry.sources.map((source) =>
 				'[' + source + '](../' + source.replace(/\\/g, '/') + ')'
