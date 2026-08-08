@@ -86,8 +86,12 @@ export function throwInvalidSeq(value) {
  *   the envelope and the topic stays out of the cross-worker SEQUENCE comparison
  *   (it has no number to compare). Such a topic is still contiguity-checked over
  *   the relay, which numbers frames independently of the publish seq.
- * - absent, or any other truthy value: the in-memory per-worker counter via
- *   `nextTopicSeq`. Byte-identical to every prior release.
+ * - absent, or any other truthy value: the in-memory per-worker counter. A
+ *   topic already in the map advances by one, exactly as every prior release
+ *   did. A topic NEW to the map starts at 1 for a caller that passes no
+ *   `bound`, and at the bound's carried floor plus one for a caller that does
+ *   - the registry may forget a topic, but the counter it hands out must
+ *   never repeat a number a client has already seen.
  *
  * Pure with respect to inputs other than the supplied map (mirrors
  * `nextTopicSeq`), so a unit test can pass a fresh map per case.
@@ -95,10 +99,11 @@ export function throwInvalidSeq(value) {
  * @param {{ seq?: boolean | number } | null | undefined} options
  * @param {Map<string, number>} seqMap
  * @param {string} topic
+ * @param {{ floorOf(topic: string): number, onInsert(topic: string): void } | undefined} [bound]
  * @returns {number | null}
  */
-export function stampSeq(options, seqMap, topic) {
-	return stampSeqValue(options != null ? options.seq : undefined, seqMap, topic);
+export function stampSeq(options, seqMap, topic, bound) {
+	return stampSeqValue(options != null ? options.seq : undefined, seqMap, topic, bound);
 }
 
 /**
@@ -113,9 +118,10 @@ export function stampSeq(options, seqMap, topic) {
  * @param {boolean | number | undefined} opt
  * @param {Map<string, number>} seqMap
  * @param {string} topic
+ * @param {{ floorOf(topic: string): number, onInsert(topic: string): void } | undefined} [bound]
  * @returns {number | null}
  */
-export function stampSeqValue(opt, seqMap, topic) {
+export function stampSeqValue(opt, seqMap, topic, bound) {
 	if (opt === false) return null;
 	if (typeof opt === 'number') {
 		// An explicit seq is a cluster-authoritative value that must survive BOTH
@@ -132,9 +138,20 @@ export function stampSeqValue(opt, seqMap, topic) {
 	// The in-memory per-worker counter, inlined from `nextTopicSeq` rather than
 	// called, so the common publish stays a single call frame (a wrapper call
 	// measured a few percent on the isolated publish-resolution micro-bench).
-	// Same increment semantics: first call for a topic returns 1.
-	const next = (seqMap.get(topic) ?? 0) + 1;
+	// Same increment semantics for a known topic: previous value plus one.
+	const current = seqMap.get(topic);
+	if (current !== undefined) {
+		const next = current + 1;
+		seqMap.set(topic, next);
+		return next;
+	}
+	// A topic new to the map - the cold path. A caller holding a bound resumes
+	// above any floor a prior eviction carried (the counter never goes
+	// backward, so held client watermarks stay valid) and then lets the bound
+	// enforce its cap; a bare-map caller keeps the historical first-call-is-1.
+	const next = (bound !== undefined ? bound.floorOf(topic) : 0) + 1;
 	seqMap.set(topic, next);
+	if (bound !== undefined) bound.onInsert(topic);
 	return next;
 }
 

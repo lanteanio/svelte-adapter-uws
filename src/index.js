@@ -75,7 +75,7 @@ function detectSetCookieOnUpgrade(source) {
  */
 export const KNOWN_WEBSOCKET_OPTION_KEYS = new Set([
 	'handler', 'path', 'authPath', 'adminPath', 'adminAuthAcknowledged', 'metrics', 'primaryInit', 'workers',
-	'maxPayloadLength', 'idleTimeout', 'maxBackpressure', 'closeOnBackpressureLimit',
+	'maxPayloadLength', 'idleTimeout', 'maxBackpressure', 'closeOnBackpressureLimit', 'maxTopicSeqEntries',
 	'sendPingsAutomatically', 'compression', 'allowedOrigins',
 	'upgradeTimeout', 'upgradeRateLimit', 'upgradeRateLimitWindow', 'upgradeAdmission',
 	'messageAdmission',
@@ -324,6 +324,9 @@ export function serializeWsOptions(websocket, adminPath) {
 	// Documenting it is the fix; a guard would refuse a legitimate setting.
 	assertProtectiveNumber(websocket, 'idleTimeout');
 	assertProtectiveNumber(websocket, 'upgradeTimeout');
+	// 0 genuinely disables here (an unbounded registry is the pre-existing
+	// behavior an operator may deliberately keep), so 0 stays legal.
+	assertProtectiveNumber(websocket, 'maxTopicSeqEntries');
 	const maxConnections = websocket?.upgradeAdmission?.maxConnections;
 	if (
 		maxConnections !== undefined &&
@@ -358,6 +361,11 @@ export function serializeWsOptions(websocket, adminPath) {
 		// predictable. Apps that want a stricter cap can pin via
 		// `websocket.maxPayloadLength` in svelte.config.js.
 		maxPayloadLength: websocket?.maxPayloadLength ?? DEFAULT_MAX_PAYLOAD_LENGTH,
+		// Ceiling on the per-topic seq registries (topicSeqs / maxSeenSeq).
+		// Undefined defers to the runtime default (the cardinality warn
+		// threshold); 0 deliberately disables the bound - the pre-existing
+		// unbounded behavior.
+		maxTopicSeqEntries: websocket?.maxTopicSeqEntries,
 		idleTimeout: websocket?.idleTimeout ?? 120,
 		maxBackpressure: websocket?.maxBackpressure ?? 1024 * 1024,
 		// When true, uWS closes a connection that stays pinned over

@@ -265,5 +265,19 @@ export function partitionActiveTopics(current, prevSeqs, lastChangedTick, tick, 
 		if (changedAt !== undefined && tick - changedAt <= windowTicks) active[topic] = seq;
 		else quiet[topic] = seq;
 	}
+	// The tracking maps follow the live map's membership, so a topic the
+	// registry bound evicted stops costing mirror memory on the next tick and
+	// the mirrors stay bounded by the same cap as the registries themselves. A
+	// topic that later re-enters is a first sighting again, which the active
+	// window already treats correctly. Size-gated so the common no-eviction
+	// tick pays one comparison and no scan.
+	if (prevSeqs.size > current.size) {
+		for (const topic of prevSeqs.keys()) {
+			if (!current.has(topic)) {
+				prevSeqs.delete(topic);
+				lastChangedTick.delete(topic);
+			}
+		}
+	}
 	return { active, quiet };
 }

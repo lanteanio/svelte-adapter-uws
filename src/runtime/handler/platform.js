@@ -24,6 +24,7 @@ import { getSharedWireId } from './shared-wire-id.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './wire-fanout.js';
 import { runtimeVersionInfo } from '../version-info.js';
 import { ADAPTER_ERROR_IDS, adapterConsoleLine, adapterErrorMessage } from '../error-registry.js';
+import { seqBound } from './seq-bound.js';
 import { privateValueMetadata } from '../utils/observability-privacy.js';
 import { activeTraceContext, trace } from '../tracing.js';
 
@@ -75,7 +76,7 @@ export const platform = {
 		const jitterOption = options != null ? options.jitterMs : undefined;
 		assertClusterSequenceAuthorityValues(seqOption, relayOption);
 		counters.publishCountWindow++;
-		const seq = stampSeqValue(seqOption, topicSeqs, topic);
+		const seq = stampSeqValue(seqOption, topicSeqs, topic, seqBound);
 		// Record the highest seq this worker has observed for the topic. An
 		// in-memory counter seq is freshly stamped and monotonic, so it is a bare
 		// set with no compare; an explicit numeric seq is cluster-authoritative,
@@ -84,7 +85,7 @@ export const platform = {
 		// a divergence). Skipped when stamping is off so a {seq:false}-only topic
 		// never enters the convergence comparison.
 		if (seq !== null) {
-			if (typeof seqOption === 'number') recordSeen(maxSeenSeq, topic, seq);
+			if (typeof seqOption === 'number') recordSeen(maxSeenSeq, topic, seq, seqBound);
 			else maxSeenSeq.set(topic, seq);
 		}
 		// `{ jitterMs }` de-herd window: stamp it on the frame so each client rolls its
@@ -224,13 +225,13 @@ export const platform = {
 		if (!isRelay) counters.publishCountWindow++;
 		const seq = isRelay
 			? (typeof relaySeqOption === 'number' ? relaySeqOption : null)
-			: stampSeqValue(seqOption, topicSeqs, topic);
+			: stampSeqValue(seqOption, topicSeqs, topic, seqBound);
 		// Track the highest observed seq for this topic (see platform.publish). An
 		// explicit numeric seq takes the monotone-max guard; the in-memory counter
 		// takes a bare set. Skipped on the relay path: relayPublish already called
 		// recordSeen with the guard the reorder-prone cross-worker receive path needs.
 		if (!isRelay && seq !== null) {
-			if (typeof seqOption === 'number') recordSeen(maxSeenSeq, topic, seq);
+			if (typeof seqOption === 'number') recordSeen(maxSeenSeq, topic, seq, seqBound);
 			else maxSeenSeq.set(topic, seq);
 		}
 		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
@@ -673,7 +674,7 @@ export const platform = {
 			// through publishWire.
 			const seq = hasEntrySeqs && entrySeqs[i] !== undefined
 				? entrySeqs[i]
-				: stampSeqValue(opts != null ? opts.seq : undefined, topicSeqs, topic);
+				: stampSeqValue(opts != null ? opts.seq : undefined, topicSeqs, topic, seqBound);
 			seqs[i] = seq == null ? 0 : seq;
 			const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
 			fatal(envelope.length > 0, 'envelope.empty', null);
@@ -691,7 +692,7 @@ export const platform = {
 		if (hasEntrySeqs) {
 			for (let i = 0; i < count; i++) {
 				if (seqs[i] === 0) continue;
-				if (entrySeqs[i] !== undefined) recordSeen(maxSeenSeq, topic, seqs[i]);
+				if (entrySeqs[i] !== undefined) recordSeen(maxSeenSeq, topic, seqs[i], seqBound);
 				else maxSeenSeq.set(topic, seqs[i]);
 			}
 		} else if (highestSeq !== null) {
@@ -1696,7 +1697,7 @@ export const platform = {
 		// is safe; more than one socket-owning worker needs an external authority.
 		assertGameLaneClusterSafe();
 		counters.publishCountWindow++;
-		const seq = stampSeqValue(undefined, topicSeqs, topic);
+		const seq = stampSeqValue(undefined, topicSeqs, topic, seqBound);
 		if (seq !== null) maxSeenSeq.set(topic, seq);
 		const envelope = completeGameEnvelope(envelopePrefix(topic, event), data, seq, id);
 		fatal(envelope.length > 0, 'envelope.empty', null);
@@ -2002,12 +2003,12 @@ export const platform = {
 		for (let i = 0; i < messages.length; i++) {
 			const m = messages[i];
 			counters.publishCountWindow++;
-			const seq = stampSeqValue(msgSeqs[i], topicSeqs, m.topic);
+			const seq = stampSeqValue(msgSeqs[i], topicSeqs, m.topic, seqBound);
 			// Track the highest observed seq per topic (see platform.publish): a
 			// bare set for the monotonic in-memory counter, the monotone-max guard
 			// for an explicit numeric seq.
 			if (seq !== null) {
-				if (typeof msgSeqs[i] === 'number') recordSeen(maxSeenSeq, m.topic, seq);
+				if (typeof msgSeqs[i] === 'number') recordSeen(maxSeenSeq, m.topic, seq, seqBound);
 				else maxSeenSeq.set(m.topic, seq);
 			}
 			const env = completeEnvelope(envelopePrefix(m.topic, m.event), m.data, seq);

@@ -467,8 +467,15 @@ const EXTERNAL_THUNK_CLONE_TAG = 'function hiddenThunkCloneTag(_strings, thunk) 
 // shape pays about one nanosecond more on the isolated resolution
 // (bench/micro-publish-capture-ab.mjs) - the price of a refusal that cannot
 // be answered and then bypassed.
+//
+// Re-pinned for the bounded seq registries: publishWire's counter stamp now
+// passes the shared bound (one added call argument), so an insert of a NEW
+// topic consults the eviction floor and enforces the cap on that cold arm
+// only. The known-topic stamp shape is unchanged and measured within run
+// noise against an inline replay of the pre-change body; no byte is read,
+// allocated or copied, and no copy primitive entered the body.
 const COPY_AUTHORITY_SYNTAX = Object.freeze({
-	publishWire: '1edfe2bd6d0dcd1c01ec09ce00c808b86ff1d9c526064e7fd9551f58a3165509',
+	publishWire: '45689fe902d3c6e9e47ba4c624baee4a85f7aa575e496ce44d7960fec174b239',
 	deliverStatelessWireFanout: '98c4246e4bea446d1647f6bf0b13fb0e0cde521ac27dfe899eff42b884113afa',
 	dispatchIngressFrame: '5ff5ed75d331620ed0bbdd4ffd9fe57ecb993b3b3d97923bdb7edf48e7483e5b',
 	send: 'c900028ed26614f6a0d83b1d57a6649a52db522503def86eee3000541d285b11',
@@ -532,7 +539,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the cold object-form callers, and no change to any frame path in this
 	// graph's own modules - no byte is read, allocated or copied, and no copy
 	// primitive entered.
-	ingress: '5ff8b1a0016839b5285732902b28af5fda4727f316c04e81293e646674a56a07',
+	//
+	// Re-pinned for the bounded seq registries, reached through utils.js ->
+	// utils/epoch.js: stampSeqValue's counter arm splits into a known-topic
+	// shape (byte-identical semantics, previous value plus one) and a cold
+	// new-topic arm that consults an optional bound's floor and cap. This
+	// graph's callers pass no bound, so their behavior is unchanged; the
+	// drift is the split itself and the optional parameter. No byte is read,
+	// allocated or copied, and no copy primitive entered.
+	ingress: 'd3c97555a20d6bd9206f00d50e876d52794d4640cd538e0635d4e4f5da520aee',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -745,7 +760,29 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// registry - all cold, once-per-condition warning paths, their guards
 	// untouched. No frame path changed, no byte read, allocated or copied, no
 	// copy primitive entered.
-	platform: '45a7fb6312109f5cf4457dbd12a6d215f8498168162289f4d5a700b6723524d0',
+	//
+	// Re-pinned for the bounded seq registries. Everything that moved in this
+	// graph, named rather than summarised, because the seal is the only thing
+	// watching some of it:
+	// - platform.js passes the shared bound at the counter-stamp and
+	//   seen-record sites (one added argument each; the known-topic shapes are
+	//   unchanged and measured within run noise against inline replays);
+	// - state.js's recordSeen splits its first-sighting case out of the
+	//   monotone-max compare so a new topic can be counted, same compare, one
+	//   added branch;
+	// - pressure-metrics.js's cardinality warning takes the threshold and the
+	//   observed size as defaulted parameters, so the lane that overflowed
+	//   reports its own number;
+	// - the graph gains utils/seq-bound.js and handler/seq-bound.js: map
+	//   bookkeeping over topic strings and numbers, entered only on the cold
+	//   new-topic arm. Its eviction sweep re-inserts the entries it passes
+	//   over, which rewrites Map ORDER in the two registries and nothing
+	//   else - no value is recomputed, and the state hash folds entries
+	//   commutatively, so no observable moves.
+	// topicEpoch is deliberately UNCHANGED - the floor carry is what keeps a
+	// resuming client correct, so no epoch moves. No frame byte is read,
+	// allocated or copied, and no copy primitive entered the graph.
+	platform: 'eb9d49a7ef1117b64acddb5dc24aca57ceaab49e1944b58c8abb24d14a287729',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -770,7 +807,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the only drift in this graph is utils/epoch.js's stampSeqValue and the
 	// stampSeq delegation, reached through utils.js. Nothing in this graph's
 	// own modules changed, and no copy primitive entered.
-	'wire-fanout': '133200c063dac8c71e68178f211ca842136566eb3c918f6f99d0e163d65a35ef',
+	// Re-pinned with the ingress seal for the bounded seq registries: the
+	// only drift in this graph is utils/epoch.js's cold new-topic arm and
+	// optional bound parameter, reached through utils.js; callers here pass
+	// no bound. Nothing in this graph's own modules changed, and no copy
+	// primitive entered.
+	'wire-fanout': 'e4da81eedaf9fbbea2e08cda5b90087b7fc9c49164958c3b5e6ff634abbfd342',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

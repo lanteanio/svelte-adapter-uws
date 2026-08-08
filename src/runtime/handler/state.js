@@ -70,12 +70,20 @@ export const divergenceDiagnostics = createDivergenceDiagnosticStore();
  * @param {Map<string, number>} seenMap
  * @param {string} topic
  * @param {number} seq
+ * @param {{ onSeenInsert(topic: string): void } | undefined} [bound]
  * @returns {void}
  */
-export function recordSeen(seenMap, topic, seq) {
+export function recordSeen(seenMap, topic, seq, bound) {
 	if (typeof seq !== 'number') return;
 	const prev = seenMap.get(topic);
-	if (prev === undefined || seq > prev) seenMap.set(topic, seq);
+	if (prev === undefined) {
+		seenMap.set(topic, seq);
+		// A topic new to the map - the cold path; the bound caps the
+		// observational registry the same way the counter map is capped.
+		if (bound !== undefined) bound.onSeenInsert(topic);
+		return;
+	}
+	if (seq > prev) seenMap.set(topic, seq);
 }
 
 /**

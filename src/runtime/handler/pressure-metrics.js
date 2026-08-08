@@ -49,17 +49,24 @@ export function bumpOut(ws, payload) {
 	stats.bytesOut += payload.length;
 }
 
-// Fires once when the topic registry first crosses the warn threshold.
-// Apps with unbounded topic cardinality (e.g. publishing to a topic
-// keyed on a per-user id) leak memory because each entry persists for
-// the process lifetime - the resume protocol cannot evict without
-// corrupting recovering clients. Surfacing the threshold loudly with
-// the topN publishers lets ops identify the source before OOM.
+// Fires once when a topic registry first crosses the warn threshold. Apps
+// with unbounded topic cardinality (e.g. publishing to a topic keyed on a
+// per-user id) work the registries hard: the bound (handler/seq-bound.js)
+// keeps them from growing without limit, but it can only evict a topic no
+// client is actively subscribed to, so a scheme whose whole working set is
+// live still accumulates and is admitted over the cap. Surfacing the
+// threshold loudly with the topN publishers lets ops identify the source
+// before OOM.
 let topicSeqsWarnFired = false;
 
-export function maybeWarnTopicRegistry() {
+export function maybeWarnTopicRegistry(threshold = TOPIC_SEQS_WARN_THRESHOLD, observed = topicSeqs.size) {
 	if (topicSeqsWarnFired) return;
-	if (topicSeqs.size < TOPIC_SEQS_WARN_THRESHOLD) return;
+	// The seq-bound over-cap path passes its own (possibly lower) capacity AND
+	// the registry size that tripped it, because the lane that overflowed may
+	// be the observed-seq map rather than the publish counters - reading
+	// topicSeqs.size there would silently drop the warning on a worker that
+	// mostly receives relayed frames.
+	if (observed < threshold) return;
 	topicSeqsWarnFired = true;
 	let topPublishers;
 	try {
@@ -78,7 +85,7 @@ export function maybeWarnTopicRegistry() {
 		dataClass: 'pseudonymous',
 		message: 'The topic registry crossed its cardinality warning threshold.',
 		attributes: {
-			topicCount: topicSeqs.size,
+			topicCount: observed,
 			topPublishers,
 			action: 'Reduce topic cardinality or publish high-cardinality topics with sequence stamping disabled.',
 			help: 'https://svti.me/topic-cardinality'

@@ -63,6 +63,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`websocket.maxTopicSeqEntries`: the per-topic sequence registries are
+  bounded, and eviction cannot corrupt a resuming client.** The publish
+  counters and the highest-observed map grew for the worker lifetime under a
+  high-cardinality topic scheme, with only a one-shot warning at a million
+  entries - and plain LRU eviction was never safe, because a client holds a
+  per-topic dedup watermark and a counter evicted then re-inserted would
+  restart at 1, silently discarding fresh events as duplicates. What makes
+  the new ceiling safe is that a forgotten counter is never REUSED. Evicting
+  a topic carries its last counter in a bounded floor map keyed by topic
+  hash, so a re-published topic resumes above its own old value; a hash
+  collision can only inflate another topic's resume point, which is safe by
+  the same argument. When that map fills, every floor in it collapses into a
+  single high-water number, so the no-reuse property survives with one
+  number of state however many topics a worker forgets. A counter may
+  therefore skip numbers and never repeats one, which means nothing about
+  the seq space resets: no epoch changes, and no client is asked to
+  rehydrate. Eviction passes over any topic with live subscribers or an open
+  resume buffer, and when every candidate is protected the insert is
+  admitted over the cap and the indexed cardinality warning fires instead -
+  that protection is best-effort (an exact-topic subscriber count does not
+  see a wildcard subscription) and correctness does not rest on it. The
+  search for a victim is a bounded sweep that rotates whatever it passes over
+  to the back, so a block of busy or subscribed topics at the front cannot
+  wedge it shut; when the sweep still finds nothing the insert is admitted
+  over the cap, the indexed cardinality warning fires with the real size, and
+  the next few over-cap inserts skip the sweep, because its answer cannot
+  change until something becomes evictable.
+  In a cluster the reporter additionally lends the bound its quiet-lane
+  judgment, because a sibling still holding a topic this worker forgot would
+  read the difference as ACTIVE divergence - the signal the restart switch
+  acts on - so eviction takes only topics positively judged quiet. A topic is
+  unevictable until judged, which makes the clustered ceiling
+  `maxTopicSeqEntries` plus two reporter intervals of new-topic arrivals;
+  README and the type declaration carry the formula. Both registries forget a
+  topic together, and the divergence reporter's mirror maps now follow the
+  live registry's membership, so one cap bounds all four. The default equals the warning threshold, `0` disables the bound,
+  and `createTestServer` mirrors the option. Steady-state publish stamping
+  is unchanged within measurement noise; the eviction cost is paid only on
+  inserting a new topic at the cap.
+
 - **`channel.shoot` accepts an app-supplied render instant, so a rewind
   ceiling is finally exercisable from the app side.** The smooth client
   stamped a shot's render-time at the moment `shoot()` ran, so a send an app

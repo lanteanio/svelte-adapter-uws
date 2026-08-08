@@ -31,6 +31,7 @@ import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, d
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { registerGameIngress, gameLaneClusterSafe } from './handler/game-ingress.js';
+import { seqBound } from './handler/seq-bound.js';
 import { now, monotonicNow, processMonotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, divergenceDiagnostics, sharedTopics, subscribeAuth, originStreams, streamTracking, takeConfirmedGaps, GAP_CONFIRM_MS } from './handler/state.js';
 import { computeStateHash, partitionActiveTopics } from './invariants.js';
@@ -892,13 +893,25 @@ if (WS_ENABLED) {
 		// snapshot, so the publish and relay hot paths pay nothing for the split.
 		// These two maps mirror maxSeenSeq entry-for-entry (topic strings shared
 		// by reference) and are bounded by exactly its cardinality - which is
-		// itself unbounded today; any future bound on the seq registries bounds
-		// these with it.
+		// bounded with the seq registries: the partition prunes entries whose
+		// topic left the live map, so the registry cap is these mirrors' cap too.
 		let reporterTick = 0;
 		/** @type {Map<string, number>} */
 		const reporterPrevSeqs = new Map();
 		/** @type {Map<string, number>} */
 		const reporterLastChanged = new Map();
+		// The registry bound may forget a subscriber-free topic to stay inside
+		// its ceiling, and a sibling that still holds it then reports a
+		// different hash. That is only safe while the forgotten topic is
+		// QUIET: the quiet lane logs a disagreement, the active lane can
+		// restart a worker over one. So the reporter lends the bound its
+		// activity window, and eviction never takes a topic whose seq moved
+		// inside it. Single-process workers never install this - they have no
+		// sibling to disagree with.
+		seqBound.useQuietProbe((topic) => {
+			const changedAt = reporterLastChanged.get(topic);
+			return changedAt !== undefined && reporterTick - changedAt > 1;
+		});
 		const reportStateHash = () => {
 			reporterTick++;
 			// The comparison is split: ACTIVE topics (seq moved within the last
@@ -1062,10 +1075,10 @@ if (WS_ENABLED) {
 			// cleared every pressure tick, and lastPublishWarnAt / decodeCache /
 			// envelopePrefixCache are LRU-evicted while staticCache plateaus at the
 			// finite asset set. The per-topic registries topicSeqs and sharedTopics
-			// are deliberately NEVER evicted - the resume protocol needs each topic's
-			// counter for the process lifetime - so their size grows with topic
-			// cardinality BY DESIGN; probing them here would self-fire a false leak.
-			// That accumulation is watched separately by the topicSeqs warn threshold.
+			// grow with topic cardinality BY DESIGN, so probing them here would
+			// self-fire a false leak: topicSeqs is held to its configured ceiling by
+			// the seq bound (handler/seq-bound.js), which can only evict a topic no
+			// client is on, and sharedTopics has no such bound at all.
 			probes: structuralResourceProbes({
 				wsConnections,
 				topicPublishStats,

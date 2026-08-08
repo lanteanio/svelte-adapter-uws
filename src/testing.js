@@ -1,7 +1,8 @@
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders } from './runtime/utils/request-headers.js';
-import { stampSeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
+import { stampSeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD } from './runtime/utils.js';
+import { createSeqBound } from './runtime/utils/seq-bound.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
@@ -174,6 +175,12 @@ export async function createTestServer(options = {}) {
 	// the guard matches the production adapter's: refuse misshaped values only.
 	const idleTimeout = options.idleTimeout ?? 120;
 	assertProtectiveNumber(options, 'idleTimeout', 'the createTestServer option idleTimeout');
+	// Mirrors websocket.maxTopicSeqEntries: the ceiling on this harness's
+	// per-topic seq registry, defaulting to the same cardinality warn
+	// threshold as production. Zero stays legal - it genuinely disables the
+	// bound (the pre-existing unbounded behavior) rather than inverting it.
+	const maxTopicSeqEntries = options.maxTopicSeqEntries ?? TOPIC_SEQS_WARN_THRESHOLD;
+	assertProtectiveNumber(options, 'maxTopicSeqEntries', 'the createTestServer option maxTopicSeqEntries');
 
 	// Lifecycle state, mirroring the production state machine
 	// (runtime/handler/lifecycle.js) rather than a boolean: `starting` while the
@@ -432,6 +439,25 @@ export async function createTestServer(options = {}) {
 
 	/** @type {Map<string, number>} */
 	const topicSeqs = new Map();
+	// The production seq-bound twin over this harness's one registry
+	// (topicSeqs doubles as the maxSeenSeq twin in a single process). Same
+	// protection rule: never evict under a live subscriber or an open resume
+	// buffer; a probe that throws protects rather than authorizes.
+	const seqBoundT = createSeqBound({
+		seqMap: topicSeqs,
+		seenMap: topicSeqs,
+		capacity: maxTopicSeqEntries,
+		floorCap: maxTopicSeqEntries === 0 ? 0 : Math.max(1024, Math.floor(maxTopicSeqEntries / 4)),
+		isProtected(topic) {
+			try {
+				if (resumeBuffersT.size > 0 && resumeBuffersT.has(topic)) return true;
+				return app.numSubscribers(topic) > 0;
+			} catch {
+				return true;
+			}
+		},
+		onOverCap() {}
+	});
 
 	/** @type {Array<(value: any) => void>} */
 	let connectionWaiters = [];
@@ -758,7 +784,7 @@ export async function createTestServer(options = {}) {
 			handler.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
 		},
 		publish(topic, event, data, options) {
-			const seq = stampSeq(options, topicSeqs, topic);
+			const seq = stampSeq(options, topicSeqs, topic, seqBoundT);
 			const msg = envelope(topic, event, data, seq);
 			// Relay the already-built envelope to other workers (sim), mirroring
 			// handler.js's `relayed = parentPort && options.relay !== false` gate.
@@ -797,7 +823,7 @@ export async function createTestServer(options = {}) {
 			const isRelay = !!(options && options._isRelay);
 			const seq = isRelay
 				? (typeof options._relaySeq === 'number' ? options._relaySeq : null)
-				: stampSeq(options, topicSeqs, topic);
+				: stampSeq(options, topicSeqs, topic, seqBoundT);
 			const env = envelope(topic, event, data, seq);
 			// The relay carries the JSON envelope plus, for a registered codec, its
 			// capability + raw payload so the receiving server re-encodes binary

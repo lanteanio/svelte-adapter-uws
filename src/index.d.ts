@@ -374,6 +374,48 @@ export interface WebSocketOptions {
 	maxPayloadLength?: number;
 
 	/**
+	 * Ceiling on the per-topic sequence registries a worker retains (the
+	 * publish counters and the highest-observed map). At the cap, inserting a
+	 * new topic evicts the oldest entry that has no live subscribers and no
+	 * open resume buffer, and both registries forget it together.
+	 *
+	 * Eviction cannot corrupt a resuming client, because a forgotten counter
+	 * is never REUSED: the evicted value is carried in a bounded floor map,
+	 * and when that map fills, every floor in it collapses into one
+	 * high-water number, so a re-published topic always resumes above what
+	 * any forgotten topic reached. A counter may skip numbers; it never
+	 * repeats one. No epoch changes and no client is asked to rehydrate.
+	 *
+	 * When every eviction candidate is protected, the insert is admitted over
+	 * the cap and the cardinality warning fires instead. That protection is
+	 * best-effort - an exact-topic subscriber count does not see a wildcard
+	 * subscription - and correctness does not depend on it.
+	 *
+	 * In a cluster, eviction additionally takes only topics the cross-worker
+	 * state reporter has judged quiet, so a sibling that still holds a busy
+	 * topic cannot read the difference as active divergence. A topic is
+	 * unevictable until judged, so the effective clustered ceiling is
+	 * `maxTopicSeqEntries + newTopicsPerSecond * 2 * stateHashIntervalMs/1000`
+	 * - two reporter intervals of arrivals. Size the option with that second
+	 * term in mind rather than from the cap alone. A registry that rises
+	 * above the cap holds that level rather than draining back to it:
+	 * eviction stops further growth, it does not compact.
+	 *
+	 * Set `0` to disable the bound entirely (the pre-existing unbounded
+	 * behavior). Topics published with `seq: false` never enter these
+	 * registries. The carried floor covers the counter this worker issues; a
+	 * topic whose sequence comes from an external authority (a numeric `seq`)
+	 * is that authority's to keep continuous, and its numbers are
+	 * deliberately not folded into this worker's counters.
+	 *
+	 * Applies to the production runtime and `createTestServer`. `vite dev`
+	 * stamps per-topic sequences only on the `game` lane, so its registry is
+	 * bounded by the rooms in one dev session and needs no ceiling.
+	 * @default 1000000 (the cardinality warning threshold)
+	 */
+	maxTopicSeqEntries?: number;
+
+	/**
 	 * Seconds of inactivity before the connection is closed.
 	 * Set to `0` to disable the idle timeout and uWS's automatic ping. A peer
 	 * that disappears silently is then never reaped and keeps its connection

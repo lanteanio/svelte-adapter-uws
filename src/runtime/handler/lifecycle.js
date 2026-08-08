@@ -11,6 +11,7 @@ import { platform, relayPublishWire } from './platform.js';
 import { stopPressureSampling } from './pressure-metrics.js';
 import { applyServerNames, certExpiryAlert, createCertWatcher, readCertIdentity } from '../utils/tls-reload.js';
 import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../error-registry.js';
+import { seqBound } from './seq-bound.js';
 import { mirrorRoutes } from './route-registry.js';
 import { parentPort } from 'node:worker_threads';
 import { dirname } from 'node:path';
@@ -676,7 +677,7 @@ export function relayPublish(topic, envelope, compress, seq, capability, event, 
 		envelopeType: typeof envelope,
 		envelopeLen: typeof envelope === 'string' ? envelope.length : null
 	});
-	recordSeen(maxSeenSeq, topic, seq);
+	recordSeen(maxSeenSeq, topic, seq, seqBound);
 	if (streamTracking.enabled) {
 		recordOriginStream(originStreams, topic, origin, ord, birth, relayAttach.at, processMonotonicNow);
 	}
@@ -740,7 +741,7 @@ export function relayPublishBatched(events, compress) {
 	// The batch arrived as ONE frame but carries a publish per event, so each
 	// event also advances its own topic's per-origin stream.
 	for (let i = 0; i < events.length; i++) {
-		recordSeen(maxSeenSeq, events[i].topic, events[i].seq);
+		recordSeen(maxSeenSeq, events[i].topic, events[i].seq, seqBound);
 		if (streamTracking.enabled) {
 			recordOriginStream(originStreams, events[i].topic, events[i].origin, events[i].ord, events[i].birth,
 				relayAttach.at, processMonotonicNow);

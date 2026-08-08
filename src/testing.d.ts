@@ -154,6 +154,22 @@ export interface TestServerOptions {
 	 * @default 120
 	 */
 	idleTimeout?: number;
+	/**
+	 * Ceiling on the harness's per-topic sequence registry, mirroring the
+	 * production `websocket.maxTopicSeqEntries` option with the same guard,
+	 * the same default, the same protected-eviction policy (passing over a
+	 * live subscriber or an open resume buffer), and the same floor carry: a
+	 * topic evicted and re-published resumes above its old counter. `0`
+	 * disables the bound. Set a small value (e.g. `4`) to exercise eviction
+	 * in a test without publishing a million topics.
+	 *
+	 * The harness is single-process, so it keeps ONE registry where
+	 * production keeps a publish-counter map and a relay-observed map; the
+	 * counter lane is what this mirrors.
+	 *
+	 * @default 1000000
+	 */
+	maxTopicSeqEntries?: number;
 }
 
 /**

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { recordSeen } from '../src/runtime/handler/state.js';
 import { nextTopicSeq } from '../src/runtime/utils/epoch.js';
 import { computeStateHash, partitionActiveTopics } from '../src/runtime/invariants.js';
+import { createSeqBound } from '../src/runtime/utils/seq-bound.js';
 import { createStateHashDetector } from '../src/runtime/state-hash-detector.js';
 
 // The convergent observable is a per-worker map of the highest seq each topic
@@ -330,6 +331,158 @@ describe('full pipeline: publish -> relay(seq) -> receive -> reporter -> detecto
 		expect(restartLane).toBeNull();
 		// The quiet fact is reported exactly once, not restated every epoch.
 		expect(quietReports).toBe(1);
+	});
+
+	// The registry bound evicts a quiet, subscriber-free topic from ONE
+	// worker's maps while a sibling retains it - the same one-sided-absence
+	// shape as a respawn, arriving one topic at a time. The active lane must
+	// stay silent (an evicted topic is by definition outside the activity
+	// window on the evicting worker, and the pruned mirrors treat any
+	// re-insert as a first sighting that self-heals), and the quiet
+	// constellation change must log once, never restart.
+	it('a bound eviction on one worker never trips the restart lane, and re-insertion self-heals', () => {
+		const tracking = () => ({ prev: new Map(), changed: new Map(), tick: 0 });
+		const workers = [
+			{ id: 1, maxSeen: new Map(), t: tracking() },
+			{ id: 2, maxSeen: new Map(), t: tracking() }
+		];
+		for (const w of workers) {
+			recordSeen(w.maxSeen, 'busy', 10);
+			recordSeen(w.maxSeen, 'one-shot', 7);
+		}
+		// Both tick until both topics are quiet everywhere.
+		for (let i = 0; i < 3; i++) {
+			for (const w of workers) {
+				w.t.tick++;
+				partitionActiveTopics(w.maxSeen, w.t.prev, w.t.changed, w.t.tick);
+			}
+		}
+		// Worker 1's bound evicts the one-shot topic; worker 2 retains it.
+		workers[0].maxSeen.delete('one-shot');
+
+		let detectorClock = 0;
+		const detector = createStateHashDetector({ epochMs: 1000, monotonicNow: () => detectorClock });
+		const live = workers.map((w) => w.id);
+		let restartLane = null;
+		let quietReports = 0;
+		const drive = (epoch) => {
+			detectorClock = epoch * 1000;
+			for (const w of workers) {
+				w.t.tick++;
+				const { active, quiet } = partitionActiveTopics(w.maxSeen, w.t.prev, w.t.changed, w.t.tick);
+				const div = detector.record(w.id, computeStateHash({ topicSeqs: active }), live);
+				if (div) restartLane = div;
+				if (detector.recordQuiet(w.id, computeStateHash({ topicSeqs: quiet }), live)) quietReports++;
+			}
+		};
+		for (let epoch = 0; epoch < 4; epoch++) drive(epoch);
+		expect(restartLane).toBeNull();
+		expect(quietReports).toBe(1);
+		// The evicting worker's mirrors dropped the topic with the eviction,
+		// so a later re-publish is a FIRST SIGHTING: it re-enters through the
+		// active lane on both workers and converges without any vote.
+		expect(workers[0].t.prev.has('one-shot')).toBe(false);
+		recordSeen(workers[0].maxSeen, 'one-shot', 8);
+		recordSeen(workers[1].maxSeen, 'one-shot', 8);
+		for (let epoch = 4; epoch < 8; epoch++) drive(epoch);
+		expect(restartLane).toBeNull();
+		// Convergence restored the ONE quiet constellation both agree on; the
+		// dedup keeps the report count where it was.
+		expect(quietReports).toBe(1);
+	});
+
+	// The load case, and the one that decides whether the bound is safe to
+	// enable together with the restart switch: sustained cap pressure where
+	// ONE worker evicts on every reporter tick (it protects fewer topics
+	// because it holds fewer subscribers) while its sibling retains
+	// everything. A relayed publish re-inserts the topic on the evicting
+	// worker, so each asymmetry is one-sided and short-lived - but it recurs
+	// every tick with a STABLE minority, which is exactly the shape the
+	// detector's persistence gate keys on.
+	it('sustained one-sided eviction pressure does not reach the restart lane', () => {
+		const tracking = () => ({ prev: new Map(), changed: new Map(), tick: 0 });
+		const workers = [
+			{ id: 1, maxSeen: new Map(), t: tracking() },
+			{ id: 2, maxSeen: new Map(), t: tracking() }
+		];
+		// Worker 2 runs the REAL bound over its relay-observed registry, with
+		// the reporter's quiet judgment installed exactly as handler.js
+		// installs it. Its seq map is empty on purpose: this models a worker
+		// that only RECEIVES the fan-out, which is where the observed
+		// registry actually grows. No subscribers, so the only thing standing
+		// between the sweep and a busy topic is the quiet probe.
+		const pressured = workers[1];
+		const bound = createSeqBound({
+			seqMap: new Map(),
+			seenMap: pressured.maxSeen,
+			capacity: 20,
+			floorCap: 8,
+			isProtected: () => false,
+			onOverCap: () => {}
+		});
+		bound.useQuietProbe((topic) => {
+			const changedAt = pressured.t.changed.get(topic);
+			return changedAt !== undefined && pressured.t.tick - changedAt > 1;
+		});
+
+		let detectorClock = 0;
+		const detector = createStateHashDetector({ epochMs: 1000, monotonicNow: () => detectorClock });
+		const live = workers.map((w) => w.id);
+		let restartLane = null;
+		let seq = 0;
+		let evicted = 0;
+		/** @type {string[]} epoch:topic for every busy topic missing at an epoch end */
+		const busyMissing = [];
+
+		// MORE busy topics than the sweep's window, published on EVERY tick
+		// and inserted first, so they fill the head of insertion order - the
+		// eviction sweep meets them before anything else, while they are the
+		// topics the active lane is comparing. Plus a stream of one-shots
+		// that keeps the worker permanently over its ceiling. Without the
+		// quiet guard the sweep takes a busy topic and the active hashes part
+		// company; with it, only the one-shots go - and it takes the sweep's
+		// second pass to get past a window this full.
+		const busyTopics = Array.from({ length: 18 }, (_, i) => 'busy:' + i);
+		for (let epoch = 0; epoch < 60; epoch++) {
+			for (const busy of busyTopics) {
+				seq++;
+				recordSeen(workers[0].maxSeen, busy, seq);
+				recordSeen(pressured.maxSeen, busy, seq, bound);
+			}
+			seq++;
+			const oneShot = 'one-shot:' + epoch;
+			recordSeen(workers[0].maxSeen, oneShot, seq);
+			const before = pressured.maxSeen.size;
+			recordSeen(pressured.maxSeen, oneShot, seq, bound);
+			if (pressured.maxSeen.size <= before) evicted++;
+
+			for (const busy of busyTopics) {
+				if (!pressured.maxSeen.has(busy)) busyMissing.push(epoch + ':' + busy);
+			}
+
+			detectorClock = epoch * 1000;
+			for (const w of workers) {
+				w.t.tick++;
+				const { active, quiet } = partitionActiveTopics(w.maxSeen, w.t.prev, w.t.changed, w.t.tick);
+				const div = detector.record(w.id, computeStateHash({ topicSeqs: active }), live);
+				if (div) restartLane = div;
+				detector.recordQuiet(w.id, computeStateHash({ topicSeqs: quiet }), live);
+			}
+		}
+		// The bound really did work - otherwise this proves nothing.
+		expect(evicted).toBeGreaterThan(25);
+		expect(pressured.maxSeen.size).toBeLessThan(workers[0].maxSeen.size);
+		// Every busy topic was present at the end of EVERY epoch, not merely
+		// present at the end of the run: a comparison of final values could
+		// not tell "never evicted" from "evicted and re-learned on the next
+		// relayed publish", and it is the never-evicted property the quiet
+		// guard is supposed to deliver.
+		expect(busyMissing).toEqual([]);
+		// ...and across dozens of consecutive evictions with a stable
+		// minority, the restart authority never fires: every eviction landed
+		// in the quiet lane, where a one-sided disagreement is logged rather
+		// than voted on.
+		expect(restartLane).toBeNull();
 	});
 
 	it('partitions a topic to active on change and to quiet after the window', () => {
