@@ -117,7 +117,11 @@ function measure(run, iterations, commands) {
 
 export function smoothIngestDecision(currentNs, accessorNs, flatIntNs) {
 	const gap = currentNs - accessorNs;
-	const closure = gap > 0 ? (currentNs - flatIntNs) / gap : 0;
+	// No gap means the zero-copy accessor buys nothing over the current path,
+	// so there is nothing for a standalone accessor to win: the degenerate
+	// case is a TRIVIALLY closed gap, not a mandate to build the very thing
+	// the measurement just refuted. Treat it as full closure.
+	const closure = gap > 0 ? (currentNs - flatIntNs) / gap : 1;
 	return {
 		gapClosure: closure,
 		decision: closure >= MOST_OF_GAP ? 'record-diet' : 'standalone-accessor'

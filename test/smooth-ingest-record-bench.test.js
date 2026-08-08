@@ -25,6 +25,9 @@ describe('smooth ingest record decision bench', () => {
 	});
 
 	it('uses the declared seventy-percent gap-closure gate', () => {
+		// The 0.70 gate is the ADOPTED decision policy, recorded with the
+		// verdict in source/shipped-log.md - the constant here restates that
+		// record, it does not invent it.
 		expect(smoothIngestDecision(100, 20, 44)).toMatchObject({
 			gapClosure: 0.7,
 			decision: 'record-diet'
@@ -32,6 +35,22 @@ describe('smooth ingest record decision bench', () => {
 		expect(smoothIngestDecision(100, 20, 45)).toMatchObject({
 			gapClosure: 0.6875,
 			decision: 'standalone-accessor'
+		});
+	});
+
+	it('never recommends the accessor when the measurement shows it buys nothing', () => {
+		// The degenerate case the oracle once inverted: with no gap between
+		// the current path and the accessor there is nothing for a standalone
+		// accessor to win, so the verdict must be record-diet - recommending
+		// the accessor precisely when the data refutes it was the one wrong
+		// answer this function could give.
+		expect(smoothIngestDecision(20, 20, 20)).toMatchObject({
+			gapClosure: 1,
+			decision: 'record-diet'
+		});
+		expect(smoothIngestDecision(20, 25, 30)).toMatchObject({
+			gapClosure: 1,
+			decision: 'record-diet'
 		});
 	});
 
