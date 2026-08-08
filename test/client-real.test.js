@@ -562,6 +562,100 @@ describe('client.js (real module)', () => {
 		});
 	});
 
+	describe('inbound text cap measures bytes, not UTF-16 code units', () => {
+		// PROTOCOL.md 1.3 documents the client cap as 1 MiB "in either
+		// encoding". A JS string's length is UTF-16 code units, which
+		// understates UTF-8 by up to 3x on non-ASCII text, so a code-unit cap
+		// admitted ~3 MB CJK payloads straight into JSON.parse - the blocking
+		// the guard exists to prevent, defeated exactly where it is worst.
+		// Expected sizes here are computed with TextEncoder, an encoder
+		// independent of the client's counting loop, so the two cannot agree
+		// by construction.
+		const CAP = 1048576;
+
+		function envelope(topic, filler) {
+			return `{"topic":"${topic}","event":"blob","data":"${filler}"}`;
+		}
+
+		async function deliver(topic, raw) {
+			const store = clientModule.on(topic);
+			const seen = [];
+			const unsub = store.subscribe((v) => { if (v !== null && v !== undefined) seen.push(v); });
+			await flush();
+			MockWebSocket._last.onmessage({ data: raw });
+			unsub();
+			clientModule.connect().close();
+			return seen;
+		}
+
+		it('drops a payload over the cap in bytes even when under it in code units', async () => {
+			// CJK: 3 UTF-8 bytes per code unit. Sized to sit just over the cap
+			// in bytes while far under it in units - the exact input the old
+			// code-unit check admitted.
+			const raw = envelope('cap-cjk-over', '一'.repeat(349600));
+			expect(raw.length).toBeLessThan(CAP);
+			expect(new TextEncoder().encode(raw).byteLength).toBeGreaterThan(CAP);
+			expect(await deliver('cap-cjk-over', raw)).toEqual([]);
+		});
+
+		it('accepts a payload in the measuring band whose bytes fit the cap', async () => {
+			// In the band (units * 3 > cap) so the exact count runs, yet the
+			// real byte size fits: mostly ASCII with enough two-byte characters
+			// to force the measurement. Rejecting on units * 3 alone would drop
+			// it; only a correct byte count accepts it.
+			const filler = 'a'.repeat(500000) + 'ä'.repeat(20000);
+			const raw = envelope('cap-band-ok', filler);
+			expect(raw.length * 3).toBeGreaterThan(CAP);
+			expect(new TextEncoder().encode(raw).byteLength).toBeLessThanOrEqual(CAP);
+			const seen = await deliver('cap-band-ok', raw);
+			expect(seen.length).toBeGreaterThan(0);
+		});
+
+		it('rejects a pair-heavy payload only when its real four-byte count crosses the cap', async () => {
+			// Emoji are one surrogate pair: two units, FOUR encoded bytes. Sized
+			// so only the correct per-pair arithmetic rejects: the real count
+			// sits just over the cap, while a loop that missed the pair rule in
+			// the other direction is caught by the accept test below.
+			const pairs = 262200; // 4 bytes each: 1048800 > CAP
+			const raw = envelope('cap-emoji', '\u{1f600}'.repeat(pairs));
+			expect(raw.length).toBeLessThan(CAP);
+			expect(new TextEncoder().encode(raw).byteLength).toBeGreaterThan(CAP);
+			expect(await deliver('cap-emoji', raw)).toEqual([]);
+		});
+
+		it('accepts a pair-heavy payload a six-byte-per-pair overcount would drop', async () => {
+			// The other half of the pair rule: 240,000 pairs are 480,000 units
+			// and ~960,050 real bytes - inside the cap. A loop that counted a
+			// surrogate pair as two three-byte units (six bytes) would measure
+			// ~1.44 MB and wrongly drop a legal payload; only the four-byte
+			// arithmetic accepts it. Together with the reject test above, both
+			// directions of the pair rule are pinned.
+			const pairs = 240000;
+			const raw = envelope('cap-emoji-ok', '\u{1f600}'.repeat(pairs));
+			expect(raw.length * 3).toBeGreaterThan(CAP);
+			expect(new TextEncoder().encode(raw).byteLength).toBeLessThanOrEqual(CAP);
+			const seen = await deliver('cap-emoji-ok', raw);
+			expect(seen.length).toBeGreaterThan(0);
+		});
+
+		it('accepts a payload of exactly the cap in bytes', async () => {
+			// The cap is "larger than 1 MiB" drops, so exactly 1 MiB passes -
+			// the same boundary the binary branch applies to byteLength. ASCII
+			// sized so the whole frame lands on the cap to the byte, inside the
+			// measuring band (units * 3 over the cap).
+			const overhead = envelope('cap-exact', '').length;
+			const raw = envelope('cap-exact', 'a'.repeat(CAP - overhead));
+			expect(new TextEncoder().encode(raw).byteLength).toBe(CAP);
+			const seen = await deliver('cap-exact', raw);
+			expect(seen.length).toBeGreaterThan(0);
+		});
+
+		it('still drops an over-cap ASCII payload exactly as before', async () => {
+			const raw = envelope('cap-ascii-over', 'x'.repeat(CAP + 100));
+			expect(await deliver('cap-ascii-over', raw)).toEqual([]);
+		});
+	});
+
 	describe('oversized message rejection', () => {
 		it('drops messages larger than 1MB', async () => {
 			const conn = clientModule.connect();

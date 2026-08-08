@@ -109,6 +109,30 @@ export function bindIngress(kind, target) {
 }
 
 /**
+ * UTF-8 byte length of a string, allocation-free (no TextEncoder buffer).
+ * Runs only inside the inbound size guard's ambiguous band, where the UTF-16
+ * code-unit count alone cannot decide the byte cap. A well-formed surrogate
+ * pair counts as its four encoded bytes; a lone surrogate counts as the three
+ * bytes its replacement character would encode to, matching what any encoder
+ * would have produced for it.
+ * @param {string} s
+ * @returns {number}
+ */
+function utf8ByteLength(s) {
+	let bytes = 0;
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charCodeAt(i);
+		if (c < 0x80) bytes += 1;
+		else if (c < 0x800) bytes += 2;
+		else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+			bytes += 4;
+			i++;
+		} else bytes += 3;
+	}
+	return bytes;
+}
+
+/**
  * Build the `hello` caps array: `'batch'` plus every capability every
  * registered codec can decode. A client always advertises what it can decode;
  * the wire format is the server's decision (a plugin's codec, or `binary: false`
@@ -1680,10 +1704,31 @@ function createConnection(options) {
 					}
 					return;
 				}
-				// Reject oversized messages to prevent main-thread blocking
-				if (typeof rawEvent.data === 'string' && rawEvent.data.length > 1048576) {
-					if (debug) console.warn('[ws] message too large, dropped:', rawEvent.data.length, 'bytes');
-					return;
+				// Reject oversized messages to prevent main-thread blocking. The cap
+				// is BYTES in either encoding (PROTOCOL.md section 1.3), and a JS
+				// string's length is UTF-16 code units, which understates UTF-8 by
+				// up to 3x on non-ASCII text - a ~1M-code-unit CJK payload is ~3 MB.
+				// Every code unit encodes to at least one and at most three UTF-8
+				// bytes (a surrogate pair: four bytes for its two units), so the
+				// unit count bounds the byte count on both sides: over the cap in
+				// units is over in bytes (reject without measuring), at or under a
+				// third of the cap in units cannot exceed it in bytes (accept
+				// without measuring). Only the band between measures exactly, with
+				// an allocation-free counting loop. The common small message pays
+				// one extra integer compare; the reported figure is real bytes.
+				if (typeof rawEvent.data === 'string') {
+					const units = rawEvent.data.length;
+					if (units > 1048576) {
+						if (debug) console.warn('[ws] message too large, dropped:', utf8ByteLength(rawEvent.data), 'bytes');
+						return;
+					}
+					if (units * 3 > 1048576) {
+						const bytes = utf8ByteLength(rawEvent.data);
+						if (bytes > 1048576) {
+							if (debug) console.warn('[ws] message too large, dropped:', bytes, 'bytes');
+							return;
+						}
+					}
 				}
 				const msg = JSON.parse(rawEvent.data);
 				if (msg.topic && msg.event !== undefined) {

@@ -581,6 +581,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mappings without inspecting the range. Editorial under the Meta errata
   clause; no wire change.
 
+- **The client's inbound text cap now measures bytes, matching its own
+  documentation.** The reference client capped inbound text frames by JS
+  string length - UTF-16 code units - while the binary branch one line up
+  measured bytes and the protocol documents the cap as 1 MiB in either
+  encoding. A ~1M-code-unit CJK payload is roughly 3 MB of UTF-8 and was
+  accepted straight into `JSON.parse`, defeating the guard's stated purpose
+  exactly where main-thread blocking is worst; the debug line also printed
+  the code-unit count labelled "bytes". The guard now bounds by bytes with no
+  cost to the common case: over the cap in units is over in bytes (instant
+  reject), at or under a third of the cap in units cannot exceed it in bytes
+  (instant accept), and only the band between runs an allocation-free exact
+  count, with surrogate pairs counted at their four encoded bytes. Regression
+  tests size their payloads with `TextEncoder`, an encoder independent of the
+  client's counting loop, and the ordinary ASCII drop behaves exactly as
+  before.
+
 - **Every publish lane now reads each option field exactly once.** The batch
   surface already captured its options before judging them, but the single
   lanes re-read the caller's live object: the cluster-authority check read
