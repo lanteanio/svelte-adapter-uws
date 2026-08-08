@@ -117,11 +117,21 @@ function measure(run, iterations, commands) {
 
 export function smoothIngestDecision(currentNs, accessorNs, flatIntNs) {
 	const gap = currentNs - accessorNs;
-	// No gap means the zero-copy accessor buys nothing over the current path,
-	// so there is nothing for a standalone accessor to win: the degenerate
-	// case is a TRIVIALLY closed gap, not a mandate to build the very thing
-	// the measurement just refuted. Treat it as full closure.
-	const closure = gap > 0 ? (currentNs - flatIntNs) / gap : 1;
+	if (gap <= 0) {
+		// The zero-copy accessor buys nothing over the current path, so there
+		// is no gap to close - closure is not a number here, and reporting one
+		// would let the summary line contradict its own verdict. The record
+		// diet must then stand on its own numbers: it keeps the verdict only
+		// while it does not regress the current path on CPU (its byte saving
+		// is then free). When every candidate is slower than what already
+		// ships, the honest verdict is that nothing changes - not a
+		// recommendation the same measurement refutes.
+		return {
+			gapClosure: null,
+			decision: flatIntNs <= currentNs ? 'record-diet' : 'no-change'
+		};
+	}
+	const closure = (currentNs - flatIntNs) / gap;
 	return {
 		gapClosure: closure,
 		decision: closure >= MOST_OF_GAP ? 'record-diet' : 'standalone-accessor'
@@ -176,12 +186,14 @@ function print(result) {
 			row.nsPerCommand.current.toFixed(1).padStart(8),
 			row.nsPerCommand.accessor.toFixed(1).padStart(9),
 			row.nsPerCommand.flatInt.toFixed(1).padStart(9),
-			`${(row.gapClosure * 100).toFixed(1)}%`.padStart(11),
+			(row.gapClosure === null ? 'no gap' : `${(row.gapClosure * 100).toFixed(1)}%`).padStart(11),
 			`${row.bytes.current}/${row.bytes.accessor}/${row.bytes.flatInt}`
 		);
 	}
 	const decision = result.rows[result.rows.length - 1];
-	console.log(`decision: ${decision.decision} (flat-int closes ${(decision.gapClosure * 100).toFixed(1)}% of the current-to-accessor gap; threshold ${(result.threshold * 100).toFixed(0)}%)`);
+	console.log(decision.gapClosure === null
+		? `decision: ${decision.decision} (the accessor does not beat the current path, so there is no gap to close)`
+		: `decision: ${decision.decision} (flat-int closes ${(decision.gapClosure * 100).toFixed(1)}% of the current-to-accessor gap; threshold ${(result.threshold * 100).toFixed(0)}%)`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

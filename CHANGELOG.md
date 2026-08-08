@@ -571,6 +571,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The smooth-ingest decision oracle now has an honest answer when nothing
+  wins.** Asked to adjudicate between the app record diet and a standalone
+  zero-copy accessor, the bench's decision function treated "the accessor
+  buys nothing over the current path" as full gap closure and returned the
+  record diet unconditionally - including when the flat record arm measured
+  slower than both alternatives, so the oracle recommended the very shape its
+  own data refuted, and a test pinned the false winner. The degenerate branch
+  now keeps the record-diet verdict only while the flat arm does not regress
+  the current path (its byte saving is then free) and otherwise reports
+  no-change - and it stops reporting a closure percentage at all, because
+  with no gap there is no closure, and the printed summary line could
+  otherwise contradict its own verdict. The measured verdict on real corpora
+  is unchanged: the flat arm closes most of the current-to-accessor gap and
+  the record diet stands.
+
 - **Erratum: appendix C.6's `RECORD_TOO_LARGE` row no longer turns the
   receiver default into a minimum.** The reliable-stream error registry
   glossed the receiver's limit as "at least 1 MiB" while section 15.1 defines
