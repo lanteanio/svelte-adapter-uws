@@ -2,12 +2,15 @@
 
 Search this page with the exact stable ID, code, event, or beginning of the message you saw.
 Every failure emitted as a diagnostic event is indexed below with its cause, what it means
-for traffic, whether anything recovers on its own, and what to do next: 34 entries against
-the 37 distinct diagnostic events emitted from the scanned sources. The rest are
+for traffic, whether anything recovers on its own, and what to do next: 34 entries
+against the 37 distinct diagnostic events emitted from the scanned sources, plus
+15 entries indexing consequential plain console lines that never enter the diagnostic
+pipeline - each such line is printed through the registry and carries its stable ID tag, so
+the emitted text cannot drift from the prefix indexed here. The remaining emitted events are
 informational, listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance
 because there is nothing to recover from. A new failure event cannot be added to those sources
-without an entry here: the generator fails the build until one exists. Plain console output that
-is not a diagnostic event is outside this index.
+without an entry here: the generator fails the build until one exists. Plain console output
+without a stable ID tag is operational narration, outside this index.
 
 This is the adapter-owned part of the ecosystem index. The sibling packages
 generate and ship their own runtime-owned references on the same release channel:
@@ -51,6 +54,21 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-TLS-RELOAD-SKIPPED](#adapter-err-tls-reload-skipped) | `tls.reload-skipped` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.reload-skipped severity=warn] A certificate reload was skipped and the previous certificate was kept; the renewal on disk is not being served.` |
 | [ADAPTER-ERR-TLS-SWAP](#adapter-err-tls-swap) | `tls.swap-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.swap-failed severity=error] A certificate swap failed mid-apply; some SNI hosts may be unroutable until the retry succeeds.` |
 | [ADAPTER-ERR-TLS-WATCH](#adapter-err-tls-watch) | `tls.watch-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.watch-failed severity=error] The certificate directory watch failed to start; hot reload is disabled and no renewal will be seen.` |
+| [ADAPTER-ERR-CLUSTER-CONFIG-WORKERS](#adapter-err-cluster-config-workers) | `cluster.config.invalid-workers` | `[svelte-adapter-uws] Invalid CLUSTER_WORKERS value: '` |
+| [ADAPTER-ERR-CLUSTER-CONFIG-COMPUTE](#adapter-err-cluster-config-compute) | `cluster.config.invalid-compute-count` | `[svelte-adapter-uws] websocket.workers.compute (` |
+| [ADAPTER-ERR-CLUSTER-CONFIG-MODE](#adapter-err-cluster-config-mode) | `cluster.config.invalid-mode` | `[svelte-adapter-uws] Invalid CLUSTER_MODE: '` |
+| [ADAPTER-ERR-CLUSTER-CONFIG-REUSEPORT](#adapter-err-cluster-config-reuseport) | `cluster.config.reuseport-unsupported` | `[svelte-adapter-uws] CLUSTER_MODE=reuseport requires Linux (SO_REUSEPORT is not reliable on ` |
+| [ADAPTER-ERR-TLS-PRIMARY-BOOT-READ](#adapter-err-tls-primary-boot-read) | `tls.primary.boot-read-failed` | `[tls] boot certificate unreadable on the primary (hot-reload broadcast stays armed)` |
+| [ADAPTER-ERR-TLS-PRIMARY-RELOAD-READ](#adapter-err-tls-primary-reload-read) | `tls.primary.reload-read-failed` | `[tls] renewed certificate unreadable on the primary (workers gate on their own reads)` |
+| [ADAPTER-ERR-TLS-PRIMARY-WATCH](#adapter-err-tls-primary-watch) | `tls.primary.watch-failed` | `[tls] primary cert watch failed to start, cluster hot-reload disabled (server keeps running)` |
+| [ADAPTER-ERR-SHUTDOWN-LISTENER-REJECTED](#adapter-err-shutdown-listener-rejected) | `shutdown.listener-rejected` | `[svelte-adapter-uws] a sveltekit:shutdown listener rejected` |
+| [ADAPTER-ERR-SHUTDOWN-LISTENER-THREW](#adapter-err-shutdown-listener-threw) | `shutdown.listener-threw` | `[svelte-adapter-uws] a sveltekit:shutdown listener threw` |
+| [ADAPTER-ERR-SHUTDOWN-REQUESTS-DROPPED](#adapter-err-shutdown-requests-dropped) | `shutdown.requests-dropped` | `[svelte-adapter-uws] in-flight requests did not finish within the shutdown budget (` |
+| [ADAPTER-ERR-SHUTDOWN-LISTENERS-UNSETTLED](#adapter-err-shutdown-listeners-unsettled) | `shutdown.listeners-unsettled` | `[svelte-adapter-uws] sveltekit:shutdown listeners did not settle within the shutdown budget (` |
+| [ADAPTER-ERR-SHUTDOWN-FAILED](#adapter-err-shutdown-failed) | `shutdown.failed` | `[svelte-adapter-uws] graceful shutdown failed` |
+| [ADAPTER-ERR-WORKER-RESTART-LIMIT](#adapter-err-worker-restart-limit) | `cluster.worker.restart-limit` | `[svelte-adapter-uws] Worker restart limit reached for ` |
+| [ADAPTER-ERR-TLS-DEGRADED-EXPIRY](#adapter-err-tls-degraded-expiry) | `tls.degraded-expiry-alert` | `[svelte-adapter-uws] [tls] certificate hot-reload is DEGRADED (` |
+| [ADAPTER-ERR-SENDTO-ASYNC-FILTER](#adapter-err-sendto-async-filter) | `ws.sendto.async-filter-refused` | `[ws] platform.sendTo filter returned a Promise; treating as fail-closed.` |
 
 ## Emitted diagnostic event coverage
 
@@ -97,6 +115,25 @@ Indexed events:
 - `tls.reload-skipped` - [ADAPTER-ERR-TLS-RELOAD-SKIPPED](#adapter-err-tls-reload-skipped)
 - `tls.swap-failed` - [ADAPTER-ERR-TLS-SWAP](#adapter-err-tls-swap)
 - `tls.watch-failed` - [ADAPTER-ERR-TLS-WATCH](#adapter-err-tls-watch)
+
+Indexed console lines (no diagnostic event; the searchable key is the printed prefix and
+the stable ID tag on the line):
+
+- `[svelte-adapter-uws] Invalid CLUSTER_WORKERS value: '` - [ADAPTER-ERR-CLUSTER-CONFIG-WORKERS](#adapter-err-cluster-config-workers)
+- `[svelte-adapter-uws] websocket.workers.compute (` - [ADAPTER-ERR-CLUSTER-CONFIG-COMPUTE](#adapter-err-cluster-config-compute)
+- `[svelte-adapter-uws] Invalid CLUSTER_MODE: '` - [ADAPTER-ERR-CLUSTER-CONFIG-MODE](#adapter-err-cluster-config-mode)
+- `[svelte-adapter-uws] CLUSTER_MODE=reuseport requires Linux (SO_REUSEPORT is not reliable on ` - [ADAPTER-ERR-CLUSTER-CONFIG-REUSEPORT](#adapter-err-cluster-config-reuseport)
+- `[tls] boot certificate unreadable on the primary (hot-reload broadcast stays armed)` - [ADAPTER-ERR-TLS-PRIMARY-BOOT-READ](#adapter-err-tls-primary-boot-read)
+- `[tls] renewed certificate unreadable on the primary (workers gate on their own reads)` - [ADAPTER-ERR-TLS-PRIMARY-RELOAD-READ](#adapter-err-tls-primary-reload-read)
+- `[tls] primary cert watch failed to start, cluster hot-reload disabled (server keeps running)` - [ADAPTER-ERR-TLS-PRIMARY-WATCH](#adapter-err-tls-primary-watch)
+- `[svelte-adapter-uws] a sveltekit:shutdown listener rejected` - [ADAPTER-ERR-SHUTDOWN-LISTENER-REJECTED](#adapter-err-shutdown-listener-rejected)
+- `[svelte-adapter-uws] a sveltekit:shutdown listener threw` - [ADAPTER-ERR-SHUTDOWN-LISTENER-THREW](#adapter-err-shutdown-listener-threw)
+- `[svelte-adapter-uws] in-flight requests did not finish within the shutdown budget (` - [ADAPTER-ERR-SHUTDOWN-REQUESTS-DROPPED](#adapter-err-shutdown-requests-dropped)
+- `[svelte-adapter-uws] sveltekit:shutdown listeners did not settle within the shutdown budget (` - [ADAPTER-ERR-SHUTDOWN-LISTENERS-UNSETTLED](#adapter-err-shutdown-listeners-unsettled)
+- `[svelte-adapter-uws] graceful shutdown failed` - [ADAPTER-ERR-SHUTDOWN-FAILED](#adapter-err-shutdown-failed)
+- `[svelte-adapter-uws] Worker restart limit reached for ` - [ADAPTER-ERR-WORKER-RESTART-LIMIT](#adapter-err-worker-restart-limit)
+- `[svelte-adapter-uws] [tls] certificate hot-reload is DEGRADED (` - [ADAPTER-ERR-TLS-DEGRADED-EXPIRY](#adapter-err-tls-degraded-expiry)
+- `[ws] platform.sendTo filter returned a Promise; treating as fail-closed.` - [ADAPTER-ERR-SENDTO-ASYNC-FILTER](#adapter-err-sendto-async-filter)
 
 ### Informational events
 
@@ -522,6 +559,189 @@ searchable log prefix is:
 - **Cause:** The filesystem watch on the certificate directory could not be established.
 - **Consequence:** Certificate hot reload is off for the process lifetime and the TLS degraded state is set. The current certificate keeps serving and no renewal is ever picked up, so the failure surfaces much later as an expired certificate.
 - **Automatic recovery:** None. The watch is not retried, so this does not resolve without a restart.
-- **Next action:** Fix the path or permissions and restart the process. Until then, treat certificate renewal as requiring a restart, and alert on certificate expiry independently. In a clustered deployment the primary reports its own watch failure as a plain `[tls]` console line rather than this event, so search the console text as well as this event name.
+- **Next action:** Fix the path or permissions and restart the process. Until then, treat certificate renewal as requiring a restart, and alert on certificate expiry independently. In a clustered deployment the primary reports its own watch failure separately as ADAPTER-ERR-TLS-PRIMARY-WATCH.
 - **Runtime help:** `docs/errors.md#adapter-err-tls-watch`
 - **Runtime sources:** [src/runtime/handler/lifecycle.js](../src/runtime/handler/lifecycle.js)
+
+<a id="adapter-err-cluster-config-workers"></a>
+## `ADAPTER-ERR-CLUSTER-CONFIG-WORKERS`
+
+- **Code/event:** `cluster.config.invalid-workers`
+- **Message prefix:** `[svelte-adapter-uws] Invalid CLUSTER_WORKERS value: '`
+- **Cause:** CLUSTER_WORKERS is set to something other than a positive integer or 'auto'.
+- **Consequence:** The cluster primary exits with status 1 before spawning any worker; the service never comes up.
+- **Automatic recovery:** None. Startup configuration is validated once, at boot.
+- **Next action:** Set CLUSTER_WORKERS to a positive integer or 'auto' (or unset it) and restart.
+- **Runtime help:** `docs/errors.md#adapter-err-cluster-config-workers`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-cluster-config-compute"></a>
+## `ADAPTER-ERR-CLUSTER-CONFIG-COMPUTE`
+
+- **Code/event:** `cluster.config.invalid-compute-count`
+- **Message prefix:** `[svelte-adapter-uws] websocket.workers.compute (`
+- **Cause:** websocket.workers.compute is greater than or equal to the total worker count, which would leave no I/O worker to listen.
+- **Consequence:** The cluster primary exits with status 1 before spawning any worker; the service never comes up.
+- **Automatic recovery:** None. Startup configuration is validated once, at boot.
+- **Next action:** Lower websocket.workers.compute or raise CLUSTER_WORKERS so at least one I/O worker remains.
+- **Runtime help:** `docs/errors.md#adapter-err-cluster-config-compute`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-cluster-config-mode"></a>
+## `ADAPTER-ERR-CLUSTER-CONFIG-MODE`
+
+- **Code/event:** `cluster.config.invalid-mode`
+- **Message prefix:** `[svelte-adapter-uws] Invalid CLUSTER_MODE: '`
+- **Cause:** CLUSTER_MODE is set to an unknown value.
+- **Consequence:** The cluster primary exits with status 1 before spawning any worker; the service never comes up.
+- **Automatic recovery:** None. Startup configuration is validated once, at boot.
+- **Next action:** Use 'reuseport' (Linux only) or 'acceptor', or unset CLUSTER_MODE for the platform default.
+- **Runtime help:** `docs/errors.md#adapter-err-cluster-config-mode`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-cluster-config-reuseport"></a>
+## `ADAPTER-ERR-CLUSTER-CONFIG-REUSEPORT`
+
+- **Code/event:** `cluster.config.reuseport-unsupported`
+- **Message prefix:** `[svelte-adapter-uws] CLUSTER_MODE=reuseport requires Linux (SO_REUSEPORT is not reliable on `
+- **Cause:** CLUSTER_MODE=reuseport was requested on a platform other than Linux, where the kernel does not distribute accepts reliably across listeners.
+- **Consequence:** The cluster primary exits with status 1 before spawning any worker; the service never comes up.
+- **Automatic recovery:** None. Startup configuration is validated once, at boot.
+- **Next action:** Remove CLUSTER_MODE to use the default acceptor mode on this platform, or deploy on Linux to keep reuseport.
+- **Operator shortlink:** `https://svti.me/cluster-mode`
+- **Runtime help:** `docs/errors.md#adapter-err-cluster-config-reuseport`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-tls-primary-boot-read"></a>
+## `ADAPTER-ERR-TLS-PRIMARY-BOOT-READ`
+
+- **Code/event:** `tls.primary.boot-read-failed`
+- **Message prefix:** `[tls] boot certificate unreadable on the primary (hot-reload broadcast stays armed)`
+- **Cause:** The cluster primary could not read or parse the boot certificate while arming the hot-reload watch.
+- **Consequence:** Primary-side expiry observability starts blind: no baseline identity or expiry is recorded, so a later reload failure is reported without the number that says how urgent it is. Workers gate on their own certificate reads and keep serving; the reload broadcast stays armed.
+- **Automatic recovery:** The next reload that reads cleanly records identity and expiry.
+- **Next action:** Verify the certificate path and PEM contents on the primary host.
+- **Runtime help:** `docs/errors.md#adapter-err-tls-primary-boot-read`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-tls-primary-reload-read"></a>
+## `ADAPTER-ERR-TLS-PRIMARY-RELOAD-READ`
+
+- **Code/event:** `tls.primary.reload-read-failed`
+- **Message prefix:** `[tls] renewed certificate unreadable on the primary (workers gate on their own reads)`
+- **Cause:** A certificate change was seen on disk but the renewed material was unreadable or incomplete when the primary read it.
+- **Consequence:** The reload broadcast still goes out and every worker gates on its OWN read, so a primary-local failure (a read racing the renewal writer at the primary debounce instant) can leave the workers correctly swapped while only the primary is blind. What certainly failed is the primary side: no renewed identity or expiry is recorded, the primary enters the degraded TLS state with its expiry sentinel armed, and READINESS PROBES STAY GREEN. When the renewal itself is broken, every worker read fails the same way and the fleet keeps the previous certificate.
+- **Automatic recovery:** Every certificate change broadcasts again; the next change the primary reads cleanly records identity and expiry and clears the degraded state.
+- **Next action:** Check whether the workers actually swapped (compare the served certificate against the renewal on disk) before assuming the fleet is stale, then fix the certificate material or the primary-host read.
+- **Runtime help:** `docs/errors.md#adapter-err-tls-primary-reload-read`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-tls-primary-watch"></a>
+## `ADAPTER-ERR-TLS-PRIMARY-WATCH`
+
+- **Code/event:** `tls.primary.watch-failed`
+- **Message prefix:** `[tls] primary cert watch failed to start, cluster hot-reload disabled (server keeps running)`
+- **Cause:** The filesystem watch on the certificate directory could not start on the cluster primary, commonly a not-yet-mounted secret volume or a mistyped path.
+- **Consequence:** Cluster-wide certificate hot reload is off for the process lifetime: with no watcher on the primary, no worker is ever told to reload, so the whole fleet serves its current certificate until it expires. The primary enters the degraded TLS state; readiness probes stay green throughout.
+- **Automatic recovery:** None. The watch is not retried, so this does not resolve without a restart.
+- **Next action:** Fix the path or permissions and restart the primary. Until then, treat certificate renewal as requiring a restart and alert on certificate expiry independently.
+- **Runtime help:** `docs/errors.md#adapter-err-tls-primary-watch`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-shutdown-listener-rejected"></a>
+## `ADAPTER-ERR-SHUTDOWN-LISTENER-REJECTED`
+
+- **Code/event:** `shutdown.listener-rejected`
+- **Message prefix:** `[svelte-adapter-uws] a sveltekit:shutdown listener rejected`
+- **Cause:** An async sveltekit:shutdown listener's promise rejected during shutdown.
+- **Consequence:** That listener's cleanup did not complete. The rejection is contained: remaining listeners still run, shutdown proceeds, and the exit is not held.
+- **Automatic recovery:** Not applicable; shutdown proceeds without the failed cleanup.
+- **Next action:** Fix the listener, and check whatever it was tearing down (pools, final writes) for leaked state, because that teardown did not happen.
+- **Runtime help:** `docs/errors.md#adapter-err-shutdown-listener-rejected`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-shutdown-listener-threw"></a>
+## `ADAPTER-ERR-SHUTDOWN-LISTENER-THREW`
+
+- **Code/event:** `shutdown.listener-threw`
+- **Message prefix:** `[svelte-adapter-uws] a sveltekit:shutdown listener threw`
+- **Cause:** A sveltekit:shutdown listener threw synchronously during shutdown.
+- **Consequence:** That listener's cleanup did not complete. The throw is contained: remaining listeners still run, shutdown proceeds, and the exit is not held.
+- **Automatic recovery:** Not applicable; shutdown proceeds without the failed cleanup.
+- **Next action:** Fix the listener, and check whatever it was tearing down (pools, final writes) for leaked state, because that teardown did not happen.
+- **Runtime help:** `docs/errors.md#adapter-err-shutdown-listener-threw`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-shutdown-requests-dropped"></a>
+## `ADAPTER-ERR-SHUTDOWN-REQUESTS-DROPPED`
+
+- **Code/event:** `shutdown.requests-dropped`
+- **Message prefix:** `[svelte-adapter-uws] in-flight requests did not finish within the shutdown budget (`
+- **Cause:** In-flight HTTP requests were still open when the configured shutdown budget expired.
+- **Consequence:** The remaining open requests are dropped as the sockets close; their clients see resets. The drop is bounded and deliberate: the budget exists so a wedged request cannot hold the process open.
+- **Automatic recovery:** Not applicable; shutdown proceeds by design.
+- **Next action:** Raise SHUTDOWN_TIMEOUT if legitimate requests need longer to drain, or find the handler that never finished. SHUTDOWN_TIMEOUT=0 removes the budget entirely and waits forever.
+- **Runtime help:** `docs/errors.md#adapter-err-shutdown-requests-dropped`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-shutdown-listeners-unsettled"></a>
+## `ADAPTER-ERR-SHUTDOWN-LISTENERS-UNSETTLED`
+
+- **Code/event:** `shutdown.listeners-unsettled`
+- **Message prefix:** `[svelte-adapter-uws] sveltekit:shutdown listeners did not settle within the shutdown budget (`
+- **Cause:** One or more sveltekit:shutdown listeners were still pending when the shutdown budget expired.
+- **Consequence:** The process exits with that cleanup unfinished: final writes and teardowns those listeners were performing did not complete.
+- **Automatic recovery:** Not applicable; the budget exists so a wedged listener cannot hold the exit.
+- **Next action:** Make the listener finish within the budget or raise SHUTDOWN_TIMEOUT; SHUTDOWN_TIMEOUT=0 removes the budget entirely and waits forever.
+- **Runtime help:** `docs/errors.md#adapter-err-shutdown-listeners-unsettled`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-shutdown-failed"></a>
+## `ADAPTER-ERR-SHUTDOWN-FAILED`
+
+- **Code/event:** `shutdown.failed`
+- **Message prefix:** `[svelte-adapter-uws] graceful shutdown failed`
+- **Cause:** The graceful shutdown sequence itself threw.
+- **Consequence:** The orderly steps after the throw were skipped, so the shutdown was not clean; the process still exits rather than hanging.
+- **Automatic recovery:** Not applicable.
+- **Next action:** Read the attached error. The shutdown path is adapter-owned, so a failure here that does not originate in an application hook is worth reporting.
+- **Runtime help:** `docs/errors.md#adapter-err-shutdown-failed`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-worker-restart-limit"></a>
+## `ADAPTER-ERR-WORKER-RESTART-LIMIT`
+
+- **Code/event:** `cluster.worker.restart-limit`
+- **Message prefix:** `[svelte-adapter-uws] Worker restart limit reached for `
+- **Cause:** A worker slot crashed and was respawned repeatedly without ever reaching stable uptime, exhausting its restart budget.
+- **Consequence:** The primary exits - hard-killing if other workers are still alive, so the teardown is clean - and the whole service goes down until an orchestrator respawns the process.
+- **Automatic recovery:** None inside the process. An orchestrator respawn, where one is configured, is the recovery path.
+- **Next action:** Read the failing worker crash output above this line: the restart limit is the symptom and the repeated worker crash is the fault. A loop this fast is usually a boot-time error, not load.
+- **Operator shortlink:** `https://svti.me/worker-restart-limit`
+- **Runtime help:** `docs/errors.md#adapter-err-worker-restart-limit`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
+
+<a id="adapter-err-tls-degraded-expiry"></a>
+## `ADAPTER-ERR-TLS-DEGRADED-EXPIRY`
+
+- **Code/event:** `tls.degraded-expiry-alert`
+- **Message prefix:** `[svelte-adapter-uws] [tls] certificate hot-reload is DEGRADED (`
+- **Cause:** TLS hot-reload is in the degraded state and the recorded certificate expiry is inside the alert window.
+- **Consequence:** On a worker the figure is the certificate that worker actually serves, so the countdown is real: the renewal on disk is not being applied and handshakes fail at the printed expiry while readiness probes stay green. On the CLUSTER PRIMARY the figure is the last certificate the primary read cleanly, not necessarily what the workers serve - after a primary-local reload-read failure this alarm can count down against a certificate the fleet already replaced.
+- **Automatic recovery:** The alert re-checks hourly while degraded. A reload that succeeds clears the degraded state and silences it.
+- **Next action:** From a worker, treat this as an outage countdown: fix the certificate files now, and restart the instance if the reload cannot be repaired before the printed expiry. From the primary, verify the served certificate first (see ADAPTER-ERR-TLS-PRIMARY-RELOAD-READ) before treating the countdown as real.
+- **Runtime help:** `docs/errors.md#adapter-err-tls-degraded-expiry`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js), [src/runtime/handler/lifecycle.js](../src/runtime/handler/lifecycle.js)
+
+<a id="adapter-err-sendto-async-filter"></a>
+## `ADAPTER-ERR-SENDTO-ASYNC-FILTER`
+
+- **Code/event:** `ws.sendto.async-filter-refused`
+- **Message prefix:** `[ws] platform.sendTo filter returned a Promise; treating as fail-closed.`
+- **Cause:** A platform.sendTo filter returned a Promise. The filter must be synchronous, because sendTo iterates every active connection in one pass.
+- **Consequence:** Every connection whose filter returns a Promise is skipped - fail-closed - on this and every later sendTo call, so the targeted delivery silently reaches nobody the filter cannot answer synchronously. The warning prints once per worker.
+- **Automatic recovery:** None. The filter stays fail-closed until the code is fixed.
+- **Next action:** Resolve the fields the filter needs into userData in your upgrade hook so the filter can read them synchronously.
+- **Operator shortlink:** `https://svti.me/sendto-async`
+- **Runtime help:** `docs/errors.md#adapter-err-sendto-async-filter`
+- **Runtime sources:** [src/runtime/handler/platform.js](../src/runtime/handler/platform.js)

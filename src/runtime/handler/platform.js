@@ -23,7 +23,7 @@ import { cohortTopics, joinSharedCohort, leaveSharedCohort } from './cohort.js';
 import { getSharedWireId } from './shared-wire-id.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './wire-fanout.js';
 import { runtimeVersionInfo } from '../version-info.js';
-import { ADAPTER_ERROR_IDS, adapterErrorMessage } from '../error-registry.js';
+import { ADAPTER_ERROR_IDS, adapterConsoleLine, adapterErrorMessage } from '../error-registry.js';
 import { privateValueMetadata } from '../utils/observability-privacy.js';
 import { activeTraceContext, trace } from '../tracing.js';
 
@@ -1056,13 +1056,10 @@ export const platform = {
 			if (decision && typeof decision.then === 'function') {
 				if (!counters.sendToAsyncWarned) {
 					counters.sendToAsyncWarned = true;
-					console.error(
-						'[ws] platform.sendTo filter returned a Promise; treating as fail-closed.\n' +
-						'  Async filters cannot be used here because sendTo iterates every active\n' +
+					console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.SENDTO_ASYNC_FILTER,
+						'\n  Async filters cannot be used here because sendTo iterates every active\n' +
 						'  connection synchronously. Resolve the relevant fields into userData from\n' +
-						'  your `upgrade` hook so the filter can read them synchronously.\n' +
-						'  See: https://svti.me/sendto-async'
-					);
+						'  your `upgrade` hook so the filter can read them synchronously.'));
 				}
 				continue;
 			}

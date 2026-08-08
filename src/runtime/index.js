@@ -18,6 +18,7 @@ import { readFdLimits, fdPreflightWarning } from './utils/fd-limit.js';
 import { createSdNotify } from './utils/sd-notify.js';
 import { emitOperationalDiagnostic, listenFailureDiagnostic } from './utils/operational-diagnostic.js';
 import { emitOperationalEvent, diagnosticError } from './diagnostic.js';
+import { ADAPTER_ERROR_IDS, adapterConsoleLine } from './error-registry.js';
 import { privateValueMetadata } from './utils/observability-privacy.js';
 import { formatVersionBanner, runtimeVersionInfo } from './version-info.js';
 
@@ -135,7 +136,8 @@ if (is_primary) {
 		: parseInt(cluster_workers, 10);
 
 	if (isNaN(num) || num < 1) {
-		console.error(`[svelte-adapter-uws] Invalid CLUSTER_WORKERS value: '${cluster_workers}'. Use a positive integer or 'auto'.`);
+		console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.CLUSTER_CONFIG_WORKERS,
+			`${cluster_workers}'. Use a positive integer or 'auto'.`));
 		process.exit(1);
 	}
 
@@ -147,7 +149,8 @@ if (is_primary) {
 	const workers_config = WORKERS_CONFIG;
 	const compute_count = Math.max(0, Math.floor(workers_config?.compute ?? 0));
 	if (compute_count >= num) {
-		console.error(`[svelte-adapter-uws] websocket.workers.compute (${compute_count}) must be less than the total worker count (${num}).`);
+		console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.CLUSTER_CONFIG_COMPUTE,
+			`${compute_count}) must be less than the total worker count (${num}).`));
 		process.exit(1);
 	}
 	const io_count = num - compute_count;
@@ -172,16 +175,14 @@ if (is_primary) {
 	const cluster_mode = env('CLUSTER_MODE', process.platform === 'linux' ? 'reuseport' : 'acceptor');
 
 	if (cluster_mode === 'reuseport' && process.platform !== 'linux') {
-		console.error(
-			`[svelte-adapter-uws] CLUSTER_MODE=reuseport requires Linux (SO_REUSEPORT is not reliable on ${process.platform}). ` +
-			'Remove CLUSTER_MODE to use the default acceptor mode.\n' +
-			'  See: https://svti.me/cluster-mode'
-		);
+		console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.CLUSTER_CONFIG_REUSEPORT,
+			`${process.platform}). Remove CLUSTER_MODE to use the default acceptor mode.`));
 		process.exit(1);
 	}
 
 	if (cluster_mode !== 'reuseport' && cluster_mode !== 'acceptor') {
-		console.error(`[svelte-adapter-uws] Invalid CLUSTER_MODE: '${cluster_mode}'. Use 'reuseport' or 'acceptor'.`);
+		console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.CLUSTER_CONFIG_MODE,
+			`${cluster_mode}'. Use 'reuseport' or 'acceptor'.`));
 		process.exit(1);
 	}
 
@@ -344,10 +345,8 @@ if (is_primary) {
 		now: monotonicNow,
 		spawn: (slot) => spawn_worker(slot),
 		onExhausted: (slot) => {
-			console.error(
-				`[svelte-adapter-uws] Worker restart limit reached for ${slot.role}#${slot.index} (${RESTART_MAX_ATTEMPTS}). Exiting.\n` +
-				'  See: https://svti.me/worker-restart-limit'
-			);
+			console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.WORKER_RESTART_LIMIT,
+				`${slot.role}#${slot.index} (${RESTART_MAX_ATTEMPTS}). Exiting.`));
 			primaryHardExit(1);
 		},
 		shuttingDown: () => shutting_down,
@@ -968,11 +967,11 @@ if (is_primary) {
 	function primaryTlsDegraded(reason) {
 		primaryTlsHealth.degraded = reason;
 		const alert = certExpiryAlert(primaryTlsHealth, wallEpoch());
-		if (alert !== null) console.error('[svelte-adapter-uws] ' + alert);
+		if (alert !== null) console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.TLS_DEGRADED_EXPIRY, alert));
 		if (primaryTlsSentinel !== null) return;
 		primaryTlsSentinel = setIntervalTimer(() => {
 			const line = certExpiryAlert(primaryTlsHealth, wallEpoch());
-			if (line !== null) console.error('[svelte-adapter-uws] ' + line);
+			if (line !== null) console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.TLS_DEGRADED_EXPIRY, line));
 		}, TLS_DEGRADED_CHECK_MS);
 		if (primaryTlsSentinel && primaryTlsSentinel.unref) primaryTlsSentinel.unref();
 	}
@@ -997,7 +996,7 @@ if (is_primary) {
 		primaryTlsHealth.notAfter = primaryTlsState.notAfter ?? null;
 		primaryTlsHealth.notAfterText = primaryTlsState.notAfterText ?? null;
 		if (failure !== null) {
-			console.error('[tls] renewed certificate unreadable on the primary (workers keep the previous cert):', failure);
+			console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.TLS_PRIMARY_RELOAD_READ), failure);
 			primaryTlsDegraded('the renewed certificate is unreadable on the primary');
 		} else {
 			primaryTlsRecovered();
@@ -1013,7 +1012,7 @@ if (is_primary) {
 			primaryTlsHealth.notAfter = primaryTlsState.notAfter;
 			primaryTlsHealth.notAfterText = primaryTlsState.notAfterText;
 		} catch (err) {
-			console.error('[tls] boot certificate unreadable on the primary (hot-reload broadcast stays armed):', err && err.message ? err.message : err);
+			console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.TLS_PRIMARY_BOOT_READ), err && err.message ? err.message : err);
 		}
 		// Guard the watcher start: fs.watch throws ENOENT synchronously when the
 		// cert's parent directory does not exist (a not-yet-mounted secret volume,
@@ -1030,7 +1029,7 @@ if (is_primary) {
 			console.log(`[tls] primary watching ${dirname(ssl_cert)} for certificate renewals (cluster broadcast reload)`);
 		} catch (err) {
 			primaryCertWatcher = null;
-			console.error('[tls] primary cert watch failed to start, cluster hot-reload disabled (server keeps running):', err && err.message ? err.message : err);
+			console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.TLS_PRIMARY_WATCH), err && err.message ? err.message : err);
 			// Nothing retries this: with no watcher on the primary, no worker is ever
 			// told to reload, so the whole cluster serves its current certificate
 			// until it expires.
@@ -1196,11 +1195,15 @@ if (is_primary) {
 				const result = listener.call(process, reason, { reason, signal, deadline });
 				if (result && typeof result.then === 'function') {
 					pending.push(Promise.resolve(result).catch((err) => {
-						console.error(`[svelte-adapter-uws] ${prefix}a sveltekit:shutdown listener rejected:`, err);
+						// The worker tag trails the invariant text so the line stays
+						// findable by its documented prefix on every thread.
+						console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.SHUTDOWN_LISTENER_REJECTED,
+							prefix ? ' ' + prefix.trim() : ''), err);
 					}));
 				}
 			} catch (err) {
-				console.error(`[svelte-adapter-uws] ${prefix}a sveltekit:shutdown listener threw:`, err);
+				console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.SHUTDOWN_LISTENER_THREW,
+					prefix ? ' ' + prefix.trim() : ''), err);
 			}
 		}
 		if (pending.length === 0) return true;
@@ -1300,26 +1303,23 @@ if (is_primary) {
 			// Step 4: in-flight requests finish.
 			drained = await Promise.race([drain().then(() => true), whenAborted(signal).then(() => false)]);
 			if (!drained) {
-				console.error(
-					`[svelte-adapter-uws] ${prefix}in-flight requests did not finish within the ${budget_ms}ms shutdown budget; ` +
-					'closing anyway - the requests still open at this point are dropped.'
-				);
+				console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.SHUTDOWN_REQUESTS_DROPPED,
+					`${budget_ms}ms)${prefix ? ' ' + prefix.trim() : ''}; closing anyway - the requests still open at this point are dropped.`));
 			}
 
 			// Step 5: process-level cleanup, after the drain so a listener closing a
 			// pool or writing a final record sees no request still using it.
 			cleaned = await runShutdownCleanup(reason, signal, deadline, prefix);
 			if (!cleaned) {
-				console.error(
-					`[svelte-adapter-uws] ${prefix}sveltekit:shutdown listeners did not settle within the ${budget_ms}ms shutdown budget; ` +
-					'exiting anyway - their cleanup did NOT finish.'
-				);
+				console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.SHUTDOWN_LISTENERS_UNSETTLED,
+					`${budget_ms}ms)${prefix ? ' ' + prefix.trim() : ''}; exiting anyway - their cleanup did NOT finish.`));
 			}
 		} catch (err) {
 			// Nothing above is allowed to refuse the shutdown, and this path is
 			// invoked unawaited from the signal handler - an escaping rejection would
 			// surface as an unhandled rejection instead of an exit.
-			console.error(`[svelte-adapter-uws] ${prefix}graceful shutdown failed:`, err);
+			console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.SHUTDOWN_FAILED,
+				prefix ? ' ' + prefix.trim() : ''), err);
 		} finally {
 			clearTimer(budget_timer);
 			const spent = (monotonicNow() - t_close).toFixed(0);

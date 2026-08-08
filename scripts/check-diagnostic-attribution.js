@@ -18,8 +18,11 @@ const families = [
 	['groups', /^\[group /]
 ];
 // The boot banner is attributed by content: its first token IS the
-// package name plus resolved sibling versions.
-const formatters = new Set(['formatDiagnostic', 'formatOperationalDiagnostic', 'assertionDiagnostic', 'formatVersionBanner']);
+// package name plus resolved sibling versions. adapterConsoleLine is
+// attributed by the registry: validateErrorRegistry requires every console
+// entry's messagePrefix to open with an owned family tag, so the helper's
+// output cannot start unattributed.
+const formatters = new Set(['formatDiagnostic', 'formatOperationalDiagnostic', 'assertionDiagnostic', 'formatVersionBanner', 'adapterConsoleLine']);
 
 function files(dir) {
 	return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {

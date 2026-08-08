@@ -13,6 +13,13 @@
  *                carries the message with no event repetition.
  * - `head`     - only the line head is invariant; severity and message vary by
  *                call site, so the prefix stops where the variation begins.
+ * - `console`  - a plain console line with no diagnostic head, printed through
+ *                adapterConsoleLine() so the emitted text IS the registry's
+ *                prefix plus the call-site detail and the stable ID tag. These
+ *                are the consequential failures that never enter the
+ *                diagnostic-event pipeline (primary-thread and once-per-worker
+ *                guidance lines), indexed so the text an operator saw resolves
+ *                here like every other failure.
  */
 export const ADAPTER_ERROR_IDS = Object.freeze({
 	LISTEN: 'ADAPTER-ERR-LISTEN',
@@ -48,7 +55,22 @@ export const ADAPTER_ERROR_IDS = Object.freeze({
 	SUBSCRIBE_HOOK: 'ADAPTER-ERR-SUBSCRIBE-HOOK',
 	TLS_RELOAD_SKIPPED: 'ADAPTER-ERR-TLS-RELOAD-SKIPPED',
 	TLS_SWAP: 'ADAPTER-ERR-TLS-SWAP',
-	TLS_WATCH: 'ADAPTER-ERR-TLS-WATCH'
+	TLS_WATCH: 'ADAPTER-ERR-TLS-WATCH',
+	CLUSTER_CONFIG_WORKERS: 'ADAPTER-ERR-CLUSTER-CONFIG-WORKERS',
+	CLUSTER_CONFIG_COMPUTE: 'ADAPTER-ERR-CLUSTER-CONFIG-COMPUTE',
+	CLUSTER_CONFIG_MODE: 'ADAPTER-ERR-CLUSTER-CONFIG-MODE',
+	CLUSTER_CONFIG_REUSEPORT: 'ADAPTER-ERR-CLUSTER-CONFIG-REUSEPORT',
+	TLS_PRIMARY_BOOT_READ: 'ADAPTER-ERR-TLS-PRIMARY-BOOT-READ',
+	TLS_PRIMARY_RELOAD_READ: 'ADAPTER-ERR-TLS-PRIMARY-RELOAD-READ',
+	TLS_PRIMARY_WATCH: 'ADAPTER-ERR-TLS-PRIMARY-WATCH',
+	SHUTDOWN_LISTENER_REJECTED: 'ADAPTER-ERR-SHUTDOWN-LISTENER-REJECTED',
+	SHUTDOWN_LISTENER_THREW: 'ADAPTER-ERR-SHUTDOWN-LISTENER-THREW',
+	SHUTDOWN_REQUESTS_DROPPED: 'ADAPTER-ERR-SHUTDOWN-REQUESTS-DROPPED',
+	SHUTDOWN_LISTENERS_UNSETTLED: 'ADAPTER-ERR-SHUTDOWN-LISTENERS-UNSETTLED',
+	SHUTDOWN_FAILED: 'ADAPTER-ERR-SHUTDOWN-FAILED',
+	WORKER_RESTART_LIMIT: 'ADAPTER-ERR-WORKER-RESTART-LIMIT',
+	TLS_DEGRADED_EXPIRY: 'ADAPTER-ERR-TLS-DEGRADED-EXPIRY',
+	SENDTO_ASYNC_FILTER: 'ADAPTER-ERR-SENDTO-ASYNC-FILTER'
 });
 
 const HEAD = '[lantean/diagnostic source=svelte-adapter-uws component=';
@@ -638,10 +660,268 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		cause: 'The filesystem watch on the certificate directory could not be established.',
 		consequence: 'Certificate hot reload is off for the process lifetime and the TLS degraded state is set. The current certificate keeps serving and no renewal is ever picked up, so the failure surfaces much later as an expired certificate.',
 		automaticRecovery: 'None. The watch is not retried, so this does not resolve without a restart.',
-		nextAction: 'Fix the path or permissions and restart the process. Until then, treat certificate renewal as requiring a restart, and alert on certificate expiry independently. In a clustered deployment the primary reports its own watch failure as a plain `[tls]` console line rather than this event, so search the console text as well as this event name.',
+		nextAction: 'Fix the path or permissions and restart the process. Until then, treat certificate renewal as requiring a restart, and alert on certificate expiry independently. In a clustered deployment the primary reports its own watch failure separately as ADAPTER-ERR-TLS-PRIMARY-WATCH.',
 		sources: Object.freeze(['src/runtime/handler/lifecycle.js']),
 		anchor: 'adapter-err-tls-watch',
 		help: 'docs/errors.md#adapter-err-tls-watch'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.CLUSTER_CONFIG_WORKERS,
+		code: null,
+		event: 'cluster.config.invalid-workers',
+		component: null,
+		severity: 'fatal',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: "[svelte-adapter-uws] Invalid CLUSTER_WORKERS value: '",
+		cause: "CLUSTER_WORKERS is set to something other than a positive integer or 'auto'.",
+		consequence: 'The cluster primary exits with status 1 before spawning any worker; the service never comes up.',
+		automaticRecovery: 'None. Startup configuration is validated once, at boot.',
+		nextAction: "Set CLUSTER_WORKERS to a positive integer or 'auto' (or unset it) and restart.",
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-cluster-config-workers',
+		help: 'docs/errors.md#adapter-err-cluster-config-workers'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.CLUSTER_CONFIG_COMPUTE,
+		code: null,
+		event: 'cluster.config.invalid-compute-count',
+		component: null,
+		severity: 'fatal',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[svelte-adapter-uws] websocket.workers.compute (',
+		cause: 'websocket.workers.compute is greater than or equal to the total worker count, which would leave no I/O worker to listen.',
+		consequence: 'The cluster primary exits with status 1 before spawning any worker; the service never comes up.',
+		automaticRecovery: 'None. Startup configuration is validated once, at boot.',
+		nextAction: 'Lower websocket.workers.compute or raise CLUSTER_WORKERS so at least one I/O worker remains.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-cluster-config-compute',
+		help: 'docs/errors.md#adapter-err-cluster-config-compute'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.CLUSTER_CONFIG_MODE,
+		code: null,
+		event: 'cluster.config.invalid-mode',
+		component: null,
+		severity: 'fatal',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: "[svelte-adapter-uws] Invalid CLUSTER_MODE: '",
+		cause: 'CLUSTER_MODE is set to an unknown value.',
+		consequence: 'The cluster primary exits with status 1 before spawning any worker; the service never comes up.',
+		automaticRecovery: 'None. Startup configuration is validated once, at boot.',
+		nextAction: "Use 'reuseport' (Linux only) or 'acceptor', or unset CLUSTER_MODE for the platform default.",
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-cluster-config-mode',
+		help: 'docs/errors.md#adapter-err-cluster-config-mode'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.CLUSTER_CONFIG_REUSEPORT,
+		code: null,
+		event: 'cluster.config.reuseport-unsupported',
+		component: null,
+		severity: 'fatal',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[svelte-adapter-uws] CLUSTER_MODE=reuseport requires Linux (SO_REUSEPORT is not reliable on ',
+		cause: 'CLUSTER_MODE=reuseport was requested on a platform other than Linux, where the kernel does not distribute accepts reliably across listeners.',
+		consequence: 'The cluster primary exits with status 1 before spawning any worker; the service never comes up.',
+		automaticRecovery: 'None. Startup configuration is validated once, at boot.',
+		nextAction: 'Remove CLUSTER_MODE to use the default acceptor mode on this platform, or deploy on Linux to keep reuseport.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-cluster-config-reuseport',
+		help: 'docs/errors.md#adapter-err-cluster-config-reuseport',
+		link: 'https://svti.me/cluster-mode'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.TLS_PRIMARY_BOOT_READ,
+		code: null,
+		event: 'tls.primary.boot-read-failed',
+		component: null,
+		severity: 'error',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[tls] boot certificate unreadable on the primary (hot-reload broadcast stays armed)',
+		cause: 'The cluster primary could not read or parse the boot certificate while arming the hot-reload watch.',
+		consequence: 'Primary-side expiry observability starts blind: no baseline identity or expiry is recorded, so a later reload failure is reported without the number that says how urgent it is. Workers gate on their own certificate reads and keep serving; the reload broadcast stays armed.',
+		automaticRecovery: 'The next reload that reads cleanly records identity and expiry.',
+		nextAction: 'Verify the certificate path and PEM contents on the primary host.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-tls-primary-boot-read',
+		help: 'docs/errors.md#adapter-err-tls-primary-boot-read'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.TLS_PRIMARY_RELOAD_READ,
+		code: null,
+		event: 'tls.primary.reload-read-failed',
+		component: null,
+		severity: 'error',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[tls] renewed certificate unreadable on the primary (workers gate on their own reads)',
+		cause: 'A certificate change was seen on disk but the renewed material was unreadable or incomplete when the primary read it.',
+		consequence: 'The reload broadcast still goes out and every worker gates on its OWN read, so a primary-local failure (a read racing the renewal writer at the primary debounce instant) can leave the workers correctly swapped while only the primary is blind. What certainly failed is the primary side: no renewed identity or expiry is recorded, the primary enters the degraded TLS state with its expiry sentinel armed, and READINESS PROBES STAY GREEN. When the renewal itself is broken, every worker read fails the same way and the fleet keeps the previous certificate.',
+		automaticRecovery: 'Every certificate change broadcasts again; the next change the primary reads cleanly records identity and expiry and clears the degraded state.',
+		nextAction: 'Check whether the workers actually swapped (compare the served certificate against the renewal on disk) before assuming the fleet is stale, then fix the certificate material or the primary-host read.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-tls-primary-reload-read',
+		help: 'docs/errors.md#adapter-err-tls-primary-reload-read'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.TLS_PRIMARY_WATCH,
+		code: null,
+		event: 'tls.primary.watch-failed',
+		component: null,
+		severity: 'error',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[tls] primary cert watch failed to start, cluster hot-reload disabled (server keeps running)',
+		cause: 'The filesystem watch on the certificate directory could not start on the cluster primary, commonly a not-yet-mounted secret volume or a mistyped path.',
+		consequence: 'Cluster-wide certificate hot reload is off for the process lifetime: with no watcher on the primary, no worker is ever told to reload, so the whole fleet serves its current certificate until it expires. The primary enters the degraded TLS state; readiness probes stay green throughout.',
+		automaticRecovery: 'None. The watch is not retried, so this does not resolve without a restart.',
+		nextAction: 'Fix the path or permissions and restart the primary. Until then, treat certificate renewal as requiring a restart and alert on certificate expiry independently.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-tls-primary-watch',
+		help: 'docs/errors.md#adapter-err-tls-primary-watch'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.SHUTDOWN_LISTENER_REJECTED,
+		code: null,
+		event: 'shutdown.listener-rejected',
+		component: null,
+		severity: 'error',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[svelte-adapter-uws] a sveltekit:shutdown listener rejected',
+		cause: "An async sveltekit:shutdown listener's promise rejected during shutdown.",
+		consequence: "That listener's cleanup did not complete. The rejection is contained: remaining listeners still run, shutdown proceeds, and the exit is not held.",
+		automaticRecovery: 'Not applicable; shutdown proceeds without the failed cleanup.',
+		nextAction: 'Fix the listener, and check whatever it was tearing down (pools, final writes) for leaked state, because that teardown did not happen.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-shutdown-listener-rejected',
+		help: 'docs/errors.md#adapter-err-shutdown-listener-rejected'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.SHUTDOWN_LISTENER_THREW,
+		code: null,
+		event: 'shutdown.listener-threw',
+		component: null,
+		severity: 'error',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[svelte-adapter-uws] a sveltekit:shutdown listener threw',
+		cause: 'A sveltekit:shutdown listener threw synchronously during shutdown.',
+		consequence: "That listener's cleanup did not complete. The throw is contained: remaining listeners still run, shutdown proceeds, and the exit is not held.",
+		automaticRecovery: 'Not applicable; shutdown proceeds without the failed cleanup.',
+		nextAction: 'Fix the listener, and check whatever it was tearing down (pools, final writes) for leaked state, because that teardown did not happen.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-shutdown-listener-threw',
+		help: 'docs/errors.md#adapter-err-shutdown-listener-threw'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.SHUTDOWN_REQUESTS_DROPPED,
+		code: null,
+		event: 'shutdown.requests-dropped',
+		component: null,
+		severity: 'error',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[svelte-adapter-uws] in-flight requests did not finish within the shutdown budget (',
+		cause: 'In-flight HTTP requests were still open when the configured shutdown budget expired.',
+		consequence: 'The remaining open requests are dropped as the sockets close; their clients see resets. The drop is bounded and deliberate: the budget exists so a wedged request cannot hold the process open.',
+		automaticRecovery: 'Not applicable; shutdown proceeds by design.',
+		nextAction: 'Raise SHUTDOWN_TIMEOUT if legitimate requests need longer to drain, or find the handler that never finished. SHUTDOWN_TIMEOUT=0 removes the budget entirely and waits forever.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-shutdown-requests-dropped',
+		help: 'docs/errors.md#adapter-err-shutdown-requests-dropped'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.SHUTDOWN_LISTENERS_UNSETTLED,
+		code: null,
+		event: 'shutdown.listeners-unsettled',
+		component: null,
+		severity: 'error',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[svelte-adapter-uws] sveltekit:shutdown listeners did not settle within the shutdown budget (',
+		cause: 'One or more sveltekit:shutdown listeners were still pending when the shutdown budget expired.',
+		consequence: 'The process exits with that cleanup unfinished: final writes and teardowns those listeners were performing did not complete.',
+		automaticRecovery: 'Not applicable; the budget exists so a wedged listener cannot hold the exit.',
+		nextAction: 'Make the listener finish within the budget or raise SHUTDOWN_TIMEOUT; SHUTDOWN_TIMEOUT=0 removes the budget entirely and waits forever.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-shutdown-listeners-unsettled',
+		help: 'docs/errors.md#adapter-err-shutdown-listeners-unsettled'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.SHUTDOWN_FAILED,
+		code: null,
+		event: 'shutdown.failed',
+		component: null,
+		severity: 'error',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[svelte-adapter-uws] graceful shutdown failed',
+		cause: 'The graceful shutdown sequence itself threw.',
+		consequence: 'The orderly steps after the throw were skipped, so the shutdown was not clean; the process still exits rather than hanging.',
+		automaticRecovery: 'Not applicable.',
+		nextAction: 'Read the attached error. The shutdown path is adapter-owned, so a failure here that does not originate in an application hook is worth reporting.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-shutdown-failed',
+		help: 'docs/errors.md#adapter-err-shutdown-failed'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.WORKER_RESTART_LIMIT,
+		code: null,
+		event: 'cluster.worker.restart-limit',
+		component: null,
+		severity: 'fatal',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[svelte-adapter-uws] Worker restart limit reached for ',
+		cause: 'A worker slot crashed and was respawned repeatedly without ever reaching stable uptime, exhausting its restart budget.',
+		consequence: 'The primary exits - hard-killing if other workers are still alive, so the teardown is clean - and the whole service goes down until an orchestrator respawns the process.',
+		automaticRecovery: 'None inside the process. An orchestrator respawn, where one is configured, is the recovery path.',
+		nextAction: 'Read the failing worker crash output above this line: the restart limit is the symptom and the repeated worker crash is the fault. A loop this fast is usually a boot-time error, not load.',
+		sources: Object.freeze(['src/runtime/index.js']),
+		anchor: 'adapter-err-worker-restart-limit',
+		help: 'docs/errors.md#adapter-err-worker-restart-limit',
+		link: 'https://svti.me/worker-restart-limit'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.TLS_DEGRADED_EXPIRY,
+		code: null,
+		event: 'tls.degraded-expiry-alert',
+		component: null,
+		severity: 'error',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[svelte-adapter-uws] [tls] certificate hot-reload is DEGRADED (',
+		cause: 'TLS hot-reload is in the degraded state and the recorded certificate expiry is inside the alert window.',
+		consequence: 'On a worker the figure is the certificate that worker actually serves, so the countdown is real: the renewal on disk is not being applied and handshakes fail at the printed expiry while readiness probes stay green. On the CLUSTER PRIMARY the figure is the last certificate the primary read cleanly, not necessarily what the workers serve - after a primary-local reload-read failure this alarm can count down against a certificate the fleet already replaced.',
+		automaticRecovery: 'The alert re-checks hourly while degraded. A reload that succeeds clears the degraded state and silences it.',
+		nextAction: 'From a worker, treat this as an outage countdown: fix the certificate files now, and restart the instance if the reload cannot be repaired before the printed expiry. From the primary, verify the served certificate first (see ADAPTER-ERR-TLS-PRIMARY-RELOAD-READ) before treating the countdown as real.',
+		sources: Object.freeze(['src/runtime/index.js', 'src/runtime/handler/lifecycle.js']),
+		anchor: 'adapter-err-tls-degraded-expiry',
+		help: 'docs/errors.md#adapter-err-tls-degraded-expiry'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.SENDTO_ASYNC_FILTER,
+		code: null,
+		event: 'ws.sendto.async-filter-refused',
+		component: null,
+		severity: 'error',
+		emission: 'console',
+		problemPrefix: null,
+		messagePrefix: '[ws] platform.sendTo filter returned a Promise; treating as fail-closed.',
+		cause: 'A platform.sendTo filter returned a Promise. The filter must be synchronous, because sendTo iterates every active connection in one pass.',
+		consequence: 'Every connection whose filter returns a Promise is skipped - fail-closed - on this and every later sendTo call, so the targeted delivery silently reaches nobody the filter cannot answer synchronously. The warning prints once per worker.',
+		automaticRecovery: 'None. The filter stays fail-closed until the code is fixed.',
+		nextAction: 'Resolve the fields the filter needs into userData in your upgrade hook so the filter can read them synchronously.',
+		sources: Object.freeze(['src/runtime/handler/platform.js']),
+		anchor: 'adapter-err-sendto-async-filter',
+		help: 'docs/errors.md#adapter-err-sendto-async-filter',
+		link: 'https://svti.me/sendto-async'
 	})
 ]);
 
@@ -669,4 +949,18 @@ export function adapterErrorProblem(id, detail = '') {
 	const entry = adapterErrorDefinition(id);
 	if (entry.problemPrefix === null) throw new TypeError('Adapter error id has no operational problem prefix: ' + id);
 	return entry.problemPrefix + detail + adapterErrorHelpSuffix(id);
+}
+
+/**
+ * The full text of a console-emitted failure line: the registry's prefix, the
+ * call-site detail, the stable ID tag, and the shortlink when the entry has
+ * one. Printing THROUGH the registry is what keeps the emitted line and the
+ * indexed prefix the same bytes - a call site cannot reword one without the
+ * other. No repo-relative help route is appended: a console cannot resolve
+ * one, and the stable ID already finds the entry.
+ */
+export function adapterConsoleLine(id, detail = '') {
+	const entry = adapterErrorDefinition(id);
+	if (entry.emission !== 'console') throw new TypeError('Adapter error id is not console-emitted: ' + id);
+	return entry.messagePrefix + detail + ' [' + entry.id + ']' + (entry.link ? ' See: ' + entry.link : '');
 }

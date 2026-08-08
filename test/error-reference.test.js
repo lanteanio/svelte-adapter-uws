@@ -10,6 +10,7 @@ import {
 import {
 	ADAPTER_ERROR_IDS,
 	ADAPTER_ERROR_REGISTRY,
+	adapterConsoleLine,
 	adapterErrorHelpSuffix,
 	adapterErrorMessage
 } from '../src/runtime/error-registry.js';
@@ -111,8 +112,13 @@ describe('generated operational error reference', () => {
 		for (const record of scanEmittedEvents().events) {
 			expect(doc).toContain('`' + record.event + '`');
 		}
+		// Console entries index printed lines, not diagnostic events, so their
+		// coverage row carries the searchable prefix instead of an event name
+		// the runtime never emits.
 		for (const entry of ADAPTER_ERROR_REGISTRY) {
-			expect(doc).toContain('- `' + entry.event + '` - [' + entry.id + '](#' + entry.anchor + ')');
+			expect(doc).toContain(entry.emission === 'console'
+				? '- `' + entry.messagePrefix + '` - [' + entry.id + '](#' + entry.anchor + ')'
+				: '- `' + entry.event + '` - [' + entry.id + '](#' + entry.anchor + ')');
 		}
 	});
 
@@ -197,17 +203,50 @@ describe('generated operational error reference', () => {
 	// it to text a console prints, and a console cannot resolve a repo-relative
 	// route. Entries emitted through emitOperationalEvent append no suffix, so a
 	// short link there would be an unredeemed promise to a route nobody serves.
+	// Console entries sit between: their line IS printed to a console, so a link
+	// is welcome where one is served, but never required and never a repo path.
 	it('gives runtime-rendered entries an absolute short link and the rest none', () => {
 		const rendered = new Set(['thrown', 'composed']);
 		for (const entry of byId.values()) {
 			if (rendered.has(entry.emission)) {
 				expect(entry.link, entry.id).toMatch(/^https:\/\/svti\.me\/[a-z0-9-]+$/);
 				expect(adapterErrorHelpSuffix(entry.id)).toContain(entry.link);
+			} else if (entry.emission === 'console') {
+				if (entry.link !== undefined) {
+					expect(entry.link, entry.id).toMatch(/^https:\/\/svti\.me\/[a-z0-9-]+$/);
+					expect(adapterConsoleLine(entry.id)).toContain(' See: ' + entry.link);
+				} else {
+					// No repo-relative route on a console line: the stable ID is
+					// the search key the reference is built around.
+					expect(adapterConsoleLine(entry.id)).not.toContain(entry.help);
+				}
 			} else {
 				expect(entry.link, entry.id + ' is not rendered into runtime text').toBeUndefined();
 				expect(adapterErrorHelpSuffix(entry.id)).toContain(entry.help);
 			}
 		}
+	});
+
+	// Console lines are printed THROUGH the registry, so the emitted bytes and
+	// the indexed prefix cannot diverge: the line starts with the documented
+	// prefix, carries the stable ID tag, and every declared source actually
+	// references the entry's key (the same binding request errors use).
+	it('binds console-emitted failure lines to the registry at their call sites', () => {
+		const consoleEntries = ADAPTER_ERROR_REGISTRY.filter((entry) => entry.emission === 'console');
+		expect(consoleEntries.length).toBeGreaterThanOrEqual(10);
+		const keyById = new Map(Object.entries(ADAPTER_ERROR_IDS).map(([key, value]) => [value, key]));
+		for (const entry of consoleEntries) {
+			const line = adapterConsoleLine(entry.id, 'DETAIL');
+			expect(line.startsWith(entry.messagePrefix), entry.id).toBe(true);
+			expect(line).toContain('DETAIL [' + entry.id + ']');
+			for (const source of entry.sources) {
+				expect(read(source), entry.id + ' key referenced in ' + source)
+					.toContain('ADAPTER_ERROR_IDS.' + keyById.get(entry.id));
+			}
+		}
+		// The helper refuses ids whose line it does not own, so a diagnostic
+		// entry cannot borrow the console shape by accident.
+		expect(() => adapterConsoleLine(ADAPTER_ERROR_IDS.LISTEN)).toThrow(/not console-emitted/);
 	});
 
 	// The strongest binding available: build the line the runtime would actually
@@ -375,6 +414,22 @@ describe('generated operational error reference', () => {
 		it('rejects an unknown emission', () => {
 			const entry = { ...entryFor('direct'), emission: 'telepathy' };
 			expect(validateErrorRegistry([entry]).join('\n')).toContain('unknown emission');
+		});
+
+		it('rejects a console entry that claims the diagnostic head or a component', () => {
+			const base = entryFor('console');
+			expect(validateErrorRegistry([{
+				...base,
+				messagePrefix: '[lantean/diagnostic source=svelte-adapter-uws component=zz event=zz severity=error] zz'
+			}]).join('\n')).toContain('must not claim the diagnostic line head');
+			expect(validateErrorRegistry([{ ...base, component: 'runtime.zz' }]).join('\n'))
+				.toContain('carries no component or problemPrefix');
+			expect(validateErrorRegistry([{ ...base, severity: 'debug' }]).join('\n'))
+				.toContain('invalid operational severity');
+			// The attribution gate admits adapterConsoleLine output because the
+			// registry proves the family tag; an untagged prefix must not pass.
+			expect(validateErrorRegistry([{ ...base, messagePrefix: 'certificate watch failed' }]).join('\n'))
+				.toContain('must open with an owned family tag');
 		});
 	});
 });

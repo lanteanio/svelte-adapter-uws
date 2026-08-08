@@ -242,6 +242,22 @@ export function validateErrorRegistry(entries) {
 				errors.push(label + ': a head entry carries a component but no fixed severity or problemPrefix');
 			}
 			if (entry.messagePrefix !== head) errors.push(label + ': head prefix does not stop where the variation begins');
+		} else if (entry.emission === 'console') {
+			// A console entry's prefix is the literal line beginning, so it must
+			// not claim the diagnostic head it never carries, it must state a
+			// real failure severity even though no event pipeline enforces one,
+			// and it must open with an owned family tag - the attribution gate
+			// admits adapterConsoleLine output on the strength of this check.
+			if (entry.component !== null || entry.problemPrefix !== null) {
+				errors.push(label + ': a console entry carries no component or problemPrefix');
+			}
+			if (!FAILURE_SEVERITIES.has(entry.severity)) errors.push(label + ': invalid operational severity');
+			if (entry.messagePrefix.startsWith('[' + DIAGNOSTIC_PREFIX)) {
+				errors.push(label + ': a console prefix must not claim the diagnostic line head');
+			}
+			if (!/^\[(?:svelte-adapter-uws|tls|ws|primary)\] /.test(entry.messagePrefix)) {
+				errors.push(label + ': a console prefix must open with an owned family tag');
+			}
 		} else {
 			errors.push(label + ': unknown emission ' + JSON.stringify(entry.emission));
 		}
@@ -294,18 +310,26 @@ export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options =
 	const indexedEvents = new Set(entries.map((entry) => entry.event));
 	const unindexed = scan.events.filter((record) => !indexedEvents.has(record.event));
 	const scannedNames = new Set(scan.events.map((record) => record.event));
-	const emittedCount = scan.events.length + entries.filter((entry) => !scannedNames.has(entry.event)).length;
+	// Console entries index plain console lines, not diagnostic events: their
+	// event fields are registry keys that never appear in a log, so counting
+	// them as emitted events would make the document overstate the pipeline.
+	const consoleEntries = entries.filter((entry) => entry.emission === 'console');
+	const diagnosticEntries = entries.filter((entry) => entry.emission !== 'console');
+	const emittedCount = scan.events.length + diagnosticEntries.filter((entry) => !scannedNames.has(entry.event)).length;
 	const lines = [
 		'# Error reference',
 		'',
 		'Search this page with the exact stable ID, code, event, or beginning of the message you saw.',
 		'Every failure emitted as a diagnostic event is indexed below with its cause, what it means',
-		'for traffic, whether anything recovers on its own, and what to do next: ' + entries.length + ' entries against',
-		'the ' + emittedCount + ' distinct diagnostic events emitted from the scanned sources. The rest are',
+		'for traffic, whether anything recovers on its own, and what to do next: ' + diagnosticEntries.length + ' entries',
+		'against the ' + emittedCount + ' distinct diagnostic events emitted from the scanned sources, plus',
+		'' + consoleEntries.length + ' entries indexing consequential plain console lines that never enter the diagnostic',
+		'pipeline - each such line is printed through the registry and carries its stable ID tag, so',
+		'the emitted text cannot drift from the prefix indexed here. The remaining emitted events are',
 		'informational, listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance',
 		'because there is nothing to recover from. A new failure event cannot be added to those sources',
-		'without an entry here: the generator fails the build until one exists. Plain console output that',
-		'is not a diagnostic event is outside this index.',
+		'without an entry here: the generator fails the build until one exists. Plain console output',
+		'without a stable ID tag is operational narration, outside this index.',
 		'',
 		'This is the adapter-owned part of the ecosystem index. The sibling packages',
 		'generate and ship their own runtime-owned references on the same release channel:',
@@ -333,7 +357,7 @@ export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options =
 		'',
 		'This inventory is derived at generation time by scanning `src/runtime/`, `src/observability.js`,',
 		'and `src/vite.js` for emitted diagnostic events; the runtime emits ' + emittedCount + ' distinct events.',
-		'The ' + entries.length + ' indexed above carry stable IDs and full operator guidance; the remaining ' + unindexed.length,
+		'The ' + diagnosticEntries.length + ' indexed above carry stable IDs and full operator guidance; the remaining ' + unindexed.length,
 		'are informational. That split is enforced by severity rather than by a list: an emitted event',
 		'is exempt from the indexed reference only while every severity it is emitted at is',
 		'informational, so promoting one to a warning or an error fails generation until it is indexed.',
@@ -341,8 +365,17 @@ export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options =
 		'Indexed events:',
 		''
 	);
-	for (const entry of entries) {
+	for (const entry of diagnosticEntries) {
 		lines.push('- `' + entry.event + '` - [' + entry.id + '](#' + entry.anchor + ')');
+	}
+	lines.push(
+		'',
+		'Indexed console lines (no diagnostic event; the searchable key is the printed prefix and',
+		'the stable ID tag on the line):',
+		''
+	);
+	for (const entry of consoleEntries) {
+		lines.push('- `' + cell(entry.messagePrefix) + '` - [' + entry.id + '](#' + entry.anchor + ')');
 	}
 	lines.push(
 		'',
@@ -402,9 +435,11 @@ export function checkErrorReference({ write = false } = {}) {
 		throw new Error('docs/errors.md is stale; run node scripts/generate-error-reference.js --write');
 	}
 	const scannedNames = new Set(scan.events.map((record) => record.event));
-	const emittedCount = scan.events.length + ADAPTER_ERROR_REGISTRY.filter((entry) => !scannedNames.has(entry.event)).length;
-	console.log('generate-error-reference: ' + ADAPTER_ERROR_REGISTRY.length + ' stable adapter errors and ' +
-		emittedCount + ' emitted diagnostic events match docs/errors.md');
+	const consoleCount = ADAPTER_ERROR_REGISTRY.filter((entry) => entry.emission === 'console').length;
+	const emittedCount = scan.events.length + ADAPTER_ERROR_REGISTRY
+		.filter((entry) => entry.emission !== 'console' && !scannedNames.has(entry.event)).length;
+	console.log('generate-error-reference: ' + ADAPTER_ERROR_REGISTRY.length + ' stable adapter errors (' +
+		consoleCount + ' console lines) and ' + emittedCount + ' emitted diagnostic events match docs/errors.md');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

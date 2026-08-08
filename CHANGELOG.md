@@ -571,6 +571,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Console-only failures are now searchable in the error reference.** A
+  family of consequential failures printed plain console lines that appeared
+  nowhere in the generated reference, so the text an operator actually saw
+  resolved to nothing. Fifteen such lines are now indexed: the cluster
+  primary's TLS failures (boot certificate unreadable, renewed certificate
+  unreadable, certificate watch failed to start), the degraded-expiry alert
+  on both threads, invalid cluster startup configuration (CLUSTER_WORKERS,
+  websocket.workers.compute, CLUSTER_MODE, and reuseport off Linux), the
+  worker restart limit, a sveltekit:shutdown listener that threw or
+  rejected, the shutdown-budget overruns (dropped requests, unsettled
+  listeners) and a failed shutdown sequence, and the sendTo async-filter
+  fail-closed warning. Each has a registry entry with cause, consequence,
+  automatic recovery, and next action, rendered into docs/errors.md - and
+  the lines are printed THROUGH the registry under a new console emission
+  kind, so every such line carries its stable ID tag and the emitted text
+  cannot drift from the indexed prefix. Lines that interpolated a worker tag
+  mid-sentence move it behind the invariant text so the documented prefix
+  matches on every thread, and the primary's renewed-cert failure line now
+  says "(workers gate on their own reads)" instead of asserting the workers
+  kept the previous certificate, which a primary-local read failure does not
+  prove; the reference counts these console lines separately from emitted
+  diagnostic events instead of conflating the two.
+
 - **The smooth-ingest decision oracle now has an honest answer when nothing
   wins.** Asked to adjudicate between the app record diet and a standalone
   zero-copy accessor, the bench's decision function treated "the accessor

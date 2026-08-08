@@ -36,6 +36,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildFixtureOnce } from './helpers/fixture-build.js';
 import { EVAL_TIME_ENV } from './helpers/real-runtime.js';
 import { certExpiryAlert, readCertIdentity } from '../src/runtime/utils/tls-reload.js';
+import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../src/runtime/error-registry.js';
 
 const fixtureDir = fileURLToPath(new URL('./fixture', import.meta.url));
 const builtEntry = join(fixtureDir, 'build', 'index.js');
@@ -114,14 +115,19 @@ describe('certificate reload alert', () => {
 	});
 
 	it('names the reason, the expiry and the remaining validity once degraded and inside the window', () => {
-		const line = certExpiryAlert(
+		const tail = certExpiryAlert(
 			{ degraded: 'the certificate directory watch failed to start', notAfter, notAfterText: 'Jan  1 00:00:00 2027 GMT' },
 			notAfter - (6 * day + 4 * 3600000)
 		);
-		expect(line).toContain('DEGRADED');
-		expect(line).toContain('the certificate directory watch failed to start');
-		expect(line).toContain('Jan  1 00:00:00 2027 GMT');
-		expect(line).toContain('6d 4h left');
+		expect(tail).toContain('the certificate directory watch failed to start');
+		expect(tail).toContain('Jan  1 00:00:00 2027 GMT');
+		expect(tail).toContain('6d 4h left');
+		// The composer returns the varying tail; the invariant DEGRADED head
+		// comes from the registry, so the printed line is searchable by the
+		// documented prefix and carries the stable ID tag.
+		const line = adapterConsoleLine(ADAPTER_ERROR_IDS.TLS_DEGRADED_EXPIRY, tail);
+		expect(line).toContain('certificate hot-reload is DEGRADED (the certificate directory watch failed to start)');
+		expect(line).toContain('[ADAPTER-ERR-TLS-DEGRADED-EXPIRY]');
 	});
 
 	it('reports an already-expired certificate rather than a negative duration', () => {
@@ -565,7 +571,10 @@ describeUWS('graceful shutdown of the built server', () => {
 		expect(elapsed).toBeLessThan(20000);
 		// And the operator is told which phase ran out of budget, rather than being
 		// left with a clean-looking "Shutdown complete."
-		expect(output.text).toContain('did not settle within the 2000ms shutdown budget');
+		expect(output.text).toContain('did not settle within the shutdown budget (2000ms)');
+		// The overrun line is indexed: it must carry its stable ID tag so the
+		// operator can search the reference by the text they saw.
+		expect(output.text).toContain('[ADAPTER-ERR-SHUTDOWN-LISTENERS-UNSETTLED]');
 		expect(output.text).toContain('was NOT clean');
 		expect(output.text).not.toContain('Shutdown complete');
 	}, 60000);

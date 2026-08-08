@@ -735,7 +735,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// STRUCTURE, which the prose-shape rule deliberately keeps sealed; the
 	// entry's sentences are masked like the rest. Data literals only, nothing
 	// on any frame path, no byte read, allocated or copied, no copy primitive.
-	platform: 'dc208e03445f26f500bec9417413b0d762dfaa0c6f1bec2b6449d8070eec9ad1',
+	//
+	// Re-pinned for the console-emitted failure index: error-registry.js gained
+	// fifteen console-emission entries with their id constants plus the
+	// adapterConsoleLine helper (string concatenation of registry fields, no
+	// buffer); platform.js's sendTo async-filter warning, lifecycle.js's
+	// degraded-expiry alert, and tls-reload.js's certExpiryAlert composer now
+	// print through that helper, moving each literal line head into the
+	// registry - all cold, once-per-condition warning paths, their guards
+	// untouched. No frame path changed, no byte read, allocated or copied, no
+	// copy primitive entered.
+	platform: '45a7fb6312109f5cf4457dbd12a6d215f8498168162289f4d5a700b6723524d0',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

@@ -147,8 +147,11 @@ export function certExpiryAlert(state, now, withinMs = CERT_EXPIRY_ALERT_MS) {
 	if (typeof state.notAfter !== 'number' || !Number.isFinite(state.notAfter)) return null;
 	const remaining = state.notAfter - now;
 	if (remaining > withinMs) return null;
+	// The varying tail only: the invariant head lives in the error registry
+	// (TLS_DEGRADED_EXPIRY) and callers print through adapterConsoleLine, so
+	// the emitted line is searchable by its indexed prefix.
 	return (
-		`[tls] certificate hot-reload is DEGRADED (${state.degraded}) and the certificate being served expires ` +
+		`${state.degraded}) and the certificate being served expires ` +
 		`${state.notAfterText || state.notAfter} (${formatRemaining(remaining)}). A failed reload keeps the PREVIOUS ` +
 		'certificate, so a renewal landing on disk will not fix this by itself: check the certificate files and restart this instance.'
 	);

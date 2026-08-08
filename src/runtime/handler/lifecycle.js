@@ -10,6 +10,7 @@ import { app, is_tls, _t_app, WS_COMPRESSION_ON, reconnect_dispersal_ms, ssl_cer
 import { platform, relayPublishWire } from './platform.js';
 import { stopPressureSampling } from './pressure-metrics.js';
 import { applyServerNames, certExpiryAlert, createCertWatcher, readCertIdentity } from '../utils/tls-reload.js';
+import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../error-registry.js';
 import { mirrorRoutes } from './route-registry.js';
 import { parentPort } from 'node:worker_threads';
 import { dirname } from 'node:path';
@@ -115,11 +116,11 @@ function recordServedCertExpiry() {
 function tlsDegraded(reason) {
 	tlsHealth.degraded = reason;
 	const alert = certExpiryAlert(tlsHealth, wallEpoch());
-	if (alert !== null) console.error('[svelte-adapter-uws] ' + alert);
+	if (alert !== null) console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.TLS_DEGRADED_EXPIRY, alert));
 	if (tlsExpirySentinel !== null) return;
 	tlsExpirySentinel = setIntervalTimer(() => {
 		const line = certExpiryAlert(tlsHealth, wallEpoch());
-		if (line !== null) console.error('[svelte-adapter-uws] ' + line);
+		if (line !== null) console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.TLS_DEGRADED_EXPIRY, line));
 	}, TLS_DEGRADED_CHECK_MS);
 	if (tlsExpirySentinel && tlsExpirySentinel.unref) tlsExpirySentinel.unref();
 }
