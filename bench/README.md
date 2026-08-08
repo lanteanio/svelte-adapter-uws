@@ -87,6 +87,7 @@ command; if you change them, the changed command is the profile identity.
 | Cursor microtask defer | `node bench/micro-cursor-microtask-defer.mjs` | JS | update fragmentation and bulk sizes; Promise turns model uWS dispatch but are not uWS. |
 | Origin helper extraction | `node bench/micro-origin.mjs` | JS | alternating helper medians/stddev; valid hot-path inputs only. |
 | Presence wire | `node bench/micro-presence-wire.mjs` | JS | raw JSON/binary size and codec timing; compressed results belong to the live compression profile. |
+| Publish option capture | `node bench/micro-publish-capture-ab.mjs` | JS | alternating live-read versus one-read-capture option handling around the publish-lane sequence resolution; local synthetic topics, no sockets. |
 | Publish codec gate | `node bench/micro-publish-codec-overhead.mjs` | JS | publish-path codec/no-codec timing and bytes; no sockets. |
 | Resume-cutover publish guard | `node bench/micro-publish-resume-guard-ab.mjs` | JS | alternating publish-path cost; synthetic state distribution. |
 | Relay receive path | `node bench/micro-relay-receive-ab.mjs` | native | live fan-out receive variants and rates; loopback, fixed synthetic envelope. |

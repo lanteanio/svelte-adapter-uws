@@ -5,11 +5,14 @@ import {
 	BATCH_ENTRY_SEQUENCE_ERROR,
 	CLUSTER_SEQUENCE_ERROR,
 	assertClusterSequenceAuthority,
+	assertClusterSequenceAuthorityValues,
 	assertBatchSequenceAuthority,
 	assertBatchEntrySequenceAuthority,
 	clusterSequenceAccepted,
+	clusterSequenceValuesAccepted,
 	hasMultipleWorkers
 } from '../src/runtime/handler/cluster-sequence-policy.js';
+import { stampSeq, stampSeqValue } from '../src/runtime/utils/epoch.js';
 
 describe('cluster sequence authority policy', () => {
 	const cluster = { totalWorkers: 3, ioWorkers: 2 };
@@ -102,17 +105,68 @@ describe('cluster sequence authority policy', () => {
 		}
 	});
 
+	// The hot lanes judge captured VALUES while colder callers judge the options
+	// OBJECT. The object form delegates to the values form, and this matrix is
+	// the proof the two spellings cannot drift: every (seq, relay) shape answers
+	// identically through both, in both topologies.
+	it('the values form and the options form agree on every shape', () => {
+		const shapes = [
+			[undefined, undefined], [false, undefined], [true, undefined],
+			[7, undefined], [7, false], [7, true], [0, false], [-1, false],
+			[1.5, false], [false, false], [Number.NaN, false]
+		];
+		for (const data of [null, { totalWorkers: 1 }, cluster]) {
+			for (const [seq, relay] of shapes) {
+				expect(clusterSequenceValuesAccepted(seq, relay, data), `${String(seq)}/${String(relay)}`)
+					.toBe(clusterSequenceAccepted({ seq, relay }, data));
+			}
+			expect(clusterSequenceValuesAccepted(undefined, undefined, data))
+				.toBe(clusterSequenceAccepted(undefined, data));
+			expect(() => assertClusterSequenceAuthorityValues(7, undefined, cluster))
+				.toThrow(CLUSTER_SEQUENCE_ERROR);
+		}
+	});
+
+	it('the stampSeq value form and options form agree on every shape', () => {
+		for (const seq of [undefined, false, true, 3, 'x']) {
+			const a = new Map();
+			const b = new Map();
+			const call = (fn) => { try { return { value: fn() }; } catch (error) { return { threw: error.constructor.name }; } };
+			const viaOptions = call(() => stampSeq(seq === undefined ? undefined : { seq }, a, 't'));
+			const viaValue = call(() => stampSeqValue(seq, b, 't'));
+			expect(viaValue, String(seq)).toEqual(viaOptions);
+			expect([...b.entries()]).toEqual([...a.entries()]);
+		}
+	});
+
 	it('guards every production sequence-stamping entry point before mutation', () => {
 		const indexSource = readFileSync(new URL('../src/runtime/index.js', import.meta.url), 'utf8');
 		const source = readFileSync(new URL('../src/runtime/handler/platform.js', import.meta.url), 'utf8');
 		expect(indexSource).toContain('totalWorkers: num');
 		const publish = source.slice(source.indexOf('\tpublish('), source.indexOf('\n\t/**\n\t * Send a message'));
-		const wire = source.slice(source.indexOf('\tpublishWire('), source.indexOf('\n\t/**\n\t * Send one wire', source.indexOf('\tpublishWire(')));
+		const wire = source.slice(source.indexOf('\tpublishWire('), source.indexOf('\n\t/**\n\t * Register a plugin', source.indexOf('\tpublishWire(')));
 		const wireBatch = source.slice(source.indexOf('\tpublishWireBatch('), source.indexOf('\n\t/**\n\t * Multi-entry single-target', source.indexOf('\tpublishWireBatch(')));
-		const loopBatch = source.slice(source.indexOf('\tbatch(messages)'), source.indexOf('\n\t/**\n\t * Publish a list', source.indexOf('\tbatch(messages)')));
+		const loopBatch = source.slice(source.indexOf('\tbatch(messages)'), source.indexOf('\n\t/**\n\t * Wire-batching implementation', source.indexOf('\tbatch(messages)')));
 		const batch = source.slice(source.indexOf('\tpublishBatched('), source.indexOf('\n\t/**', source.indexOf('\tpublishBatched(') + 20));
-		expect(publish).toContain('assertClusterSequenceAuthority(options);');
-		expect(wire).toContain('if (!isRelay) assertClusterSequenceAuthority(options);');
+		// The single lanes follow the one-read rule the batch pioneered: every
+		// option field is read into a local BEFORE the authority check, and the
+		// check judges the locals - so a stateful accessor cannot answer the
+		// refusal with one value and hand the stamp another. The pins below
+		// require the values-form assert AND exactly one read site per field
+		// (the capture line itself) in each lane body.
+		expect(publish).toContain('assertClusterSequenceAuthorityValues(seqOption, relayOption);');
+		expect(publish.indexOf('options.seq'), 'publish must capture before judging')
+			.toBeLessThan(publish.indexOf('assertClusterSequenceAuthorityValues('));
+		for (const field of ['options.seq', 'options.relay', 'options.compress', 'options.jitterMs']) {
+			expect(publish.split(field).length, `publish reads ${field} exactly once`).toBe(2);
+		}
+		expect(wire).toContain('if (!isRelay) assertClusterSequenceAuthorityValues(seqOption, relayOption);');
+		// The wire slice runs on into the batch surfaces; the one-read counts
+		// must cover exactly the publishWire body, which ends at the next JSDoc.
+		const wireBody = wire.slice(0, wire.indexOf('\n\t/**'));
+		for (const field of ['options.seq', 'options.relay', 'options.compress', 'options.excludeWs', 'options._relaySeq']) {
+			expect(wireBody.split(field).length, `publishWire reads ${field} exactly once`).toBe(2);
+		}
 		// The batch asserts on its OWN copy of the options, not on the caller's
 		// live object - a caller that mutated it after the check would otherwise
 		// stamp under an authority nobody validated. The guard runs before ANY
@@ -142,9 +196,25 @@ describe('cluster sequence authority policy', () => {
 			.toBeLessThan(wireBatch.indexOf('this.publishWire('));
 		expect(wireBatch.lastIndexOf('assertBatchEntrySequenceAuthority(opts)'),
 			'the stateful branch must vet per-entry authority before it stamps')
-			.toBeLessThan(wireBatch.indexOf('stampSeq(opts'));
+			.toBeLessThan(wireBatch.indexOf('stampSeqValue(opts'));
 		expect(wireBatch).toContain('throwInvalidSeq(');
-		expect(loopBatch).toContain('assertClusterSequenceAuthority(messages[i].options);');
-		expect(batch).toContain('assertClusterSequenceAuthority(messages[i].options);');
+		// batch() snapshots each message's option fields once and judges the
+		// snapshot, then hands publish() the SAME snapshot - so the atomic
+		// pre-pass and the per-message stamp cannot disagree.
+		expect(loopBatch).toContain(': { seq: o.seq, relay: o.relay, compress: o.compress, jitterMs: o.jitterMs };');
+		expect(loopBatch).toContain('assertClusterSequenceAuthority(snap);');
+		expect(loopBatch.indexOf('assertClusterSequenceAuthority(snap);'),
+			'batch must vet every snapshot before the first publish')
+			.toBeLessThan(loopBatch.indexOf('platform.publish('));
+		expect(loopBatch).toContain('platform.publish(topic, event, data, snapshots[i])');
+		// publishBatched captures per-message seq/relay/jitter into arrays in
+		// its atomic pre-pass; the stamp, the monotone-max branch, and the
+		// relay filter all consume the captured values.
+		expect(batch).toContain('assertClusterSequenceAuthorityValues(seqOption, relayOption);');
+		expect(batch).toContain('stampSeqValue(msgSeqs[i]');
+		expect(batch).toContain('typeof msgSeqs[i] === \'number\'');
+		expect(batch).toContain('msgRelays[i] !== false');
+		expect(batch.split('messages[i].options').length, 'publishBatched reads each message options object in the pre-pass only')
+			.toBe(2);
 	});
 });

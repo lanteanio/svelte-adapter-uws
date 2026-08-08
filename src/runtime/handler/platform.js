@@ -5,7 +5,7 @@ import { metricsRegistry } from '../metrics-bridge.js';
 import { metricsSnapshot } from './metrics-snapshot.js';
 import { parentPort } from 'node:worker_threads';
 import { exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeq, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeqValue, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
 import { capCounts, captureResumeFrame, counters, maxSeenSeq, divergenceDiagnostics, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, resumeBuffers, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
@@ -17,7 +17,7 @@ import { BATCH_FRAME_WARN_BYTES, bumpOut, maybeWarnTopicRegistry, warnLargeBatch
 import { flushCoalescedFor, runUserSubscribeGate, hasUserSubscribeHook } from './subscribe-hooks.js';
 import { ensureWireId, ensureWireState, poisonWireState, wireStatePoisoned } from './wire-state.js';
 import { GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload, assertGameLaneClusterSafe } from './game-ingress.js';
-import { assertClusterSequenceAuthority, assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './cluster-sequence-policy.js';
+import { assertClusterSequenceAuthority, assertClusterSequenceAuthorityValues, assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './cluster-sequence-policy.js';
 import { registerWireCodec as _registerWireCodec, getWireCodec } from './codec-registry.js';
 import { cohortTopics, joinSharedCohort, leaveSharedCohort } from './cohort.js';
 import { getSharedWireId } from './shared-wire-id.js';
@@ -62,9 +62,20 @@ export const platform = {
 	 * No-op if no clients are subscribed - safe to call unconditionally.
 	 */
 	publish(topic, event, data, options) {
-		assertClusterSequenceAuthority(options);
+		// One read per option field, before anything judges them. The value the
+		// authority check refuses and the value the stamp uses must be the SAME
+		// read: an options object with a stateful `seq` accessor could otherwise
+		// answer the check with `false` and hand the stamp a number - accepted,
+		// stamped, and relayed, the exact combination the check exists to refuse.
+		// The batch lane already follows this one-read rule; locals keep this
+		// hottest lane allocation-free.
+		const seqOption = options != null ? options.seq : undefined;
+		const relayOption = options != null ? options.relay : undefined;
+		const compressOption = options != null ? options.compress : undefined;
+		const jitterOption = options != null ? options.jitterMs : undefined;
+		assertClusterSequenceAuthorityValues(seqOption, relayOption);
 		counters.publishCountWindow++;
-		const seq = stampSeq(options, topicSeqs, topic);
+		const seq = stampSeqValue(seqOption, topicSeqs, topic);
 		// Record the highest seq this worker has observed for the topic. An
 		// in-memory counter seq is freshly stamped and monotonic, so it is a bare
 		// set with no compare; an explicit numeric seq is cluster-authoritative,
@@ -73,14 +84,14 @@ export const platform = {
 		// a divergence). Skipped when stamping is off so a {seq:false}-only topic
 		// never enters the convergence comparison.
 		if (seq !== null) {
-			if (options && typeof options.seq === 'number') recordSeen(maxSeenSeq, topic, seq);
+			if (typeof seqOption === 'number') recordSeen(maxSeenSeq, topic, seq);
 			else maxSeenSeq.set(topic, seq);
 		}
 		// `{ jitterMs }` de-herd window: stamp it on the frame so each client rolls its
 		// own delay before dispatching (spreads N receivers' follow-up actions across
 		// the window). The window is carried verbatim - NOT a server-rolled offset,
 		// which would defer every subscriber of this one frame identically.
-		const jitterMs = (options && typeof options.jitterMs === 'number' && options.jitterMs > 0) ? options.jitterMs : null;
+		const jitterMs = (typeof jitterOption === 'number' && jitterOption > 0) ? jitterOption : null;
 		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq, jitterMs);
 		// A zero-length frame at a send site would broadcast garbage to every
 		// subscriber - unrecoverable framing corruption. One length guard, identical
@@ -108,7 +119,7 @@ export const platform = {
 		// Compress this text frame when a compressor is configured; opt out per
 		// call with `{ compress: false }` (e.g. a very high-rate text topic where
 		// the per-subscriber deflate CPU would outweigh the bandwidth saving).
-		const compress = WS_COMPRESSION_ON && (!options || options.compress !== false);
+		const compress = WS_COMPRESSION_ON && compressOption !== false;
 		// A connection still gap-filling this topic (a resume cutover in flight) is
 		// not yet subscribed to live, so hold this frame in its buffer to flush once
 		// it subscribes - otherwise a publish landing inside the async resume window
@@ -120,7 +131,7 @@ export const platform = {
 		// Pass { relay: false } when the message originates from an external
 		// pub/sub source (Redis, Postgres, etc.) that already fans out to
 		// every process - relaying would cause duplicate delivery.
-		const relayed = !!(parentPort && (!options || options.relay !== false));
+		const relayed = !!(parentPort && relayOption !== false);
 		if (relayed) {
 			// Carry the stamped seq as explicit relay-frame metadata so the
 			// receiving worker advances its delivered-seq tracker without
@@ -200,18 +211,26 @@ export const platform = {
 		// (relayPublish -> app.publish), which likewise never re-counts a relayed
 		// frame; counting it on every receiving worker would inflate one logical
 		// publisher into N and trip the runaway-publisher signal.
+		// One read per option field (see platform.publish): the field set here
+		// additionally carries the internal relay-receive markers, which must
+		// keep working for the cross-worker path. Locals, no capture object.
+		const seqOption = options != null ? options.seq : undefined;
+		const relayOption = options != null ? options.relay : undefined;
+		const compressOption = options != null ? options.compress : undefined;
+		const excludeOption = options != null ? options.excludeWs : undefined;
 		const isRelay = !!(options && options._isRelay);
-		if (!isRelay) assertClusterSequenceAuthority(options);
+		const relaySeqOption = isRelay ? options._relaySeq : undefined;
+		if (!isRelay) assertClusterSequenceAuthorityValues(seqOption, relayOption);
 		if (!isRelay) counters.publishCountWindow++;
 		const seq = isRelay
-			? (typeof options._relaySeq === 'number' ? options._relaySeq : null)
-			: stampSeq(options, topicSeqs, topic);
+			? (typeof relaySeqOption === 'number' ? relaySeqOption : null)
+			: stampSeqValue(seqOption, topicSeqs, topic);
 		// Track the highest observed seq for this topic (see platform.publish). An
 		// explicit numeric seq takes the monotone-max guard; the in-memory counter
 		// takes a bare set. Skipped on the relay path: relayPublish already called
 		// recordSeen with the guard the reorder-prone cross-worker receive path needs.
 		if (!isRelay && seq !== null) {
-			if (options && typeof options.seq === 'number') recordSeen(maxSeenSeq, topic, seq);
+			if (typeof seqOption === 'number') recordSeen(maxSeenSeq, topic, seq);
 			else maxSeenSeq.set(topic, seq);
 		}
 		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
@@ -235,7 +254,7 @@ export const platform = {
 			s.b += envelope.length;
 		}
 
-		const relayed = !!(parentPort && (!options || options.relay !== false));
+		const relayed = !!(parentPort && relayOption !== false);
 
 		// Binary codec frames (and this call's JSON-fallback frames) compress only
 		// when the codec/plugin opts in with `{ compress: true }` AND a compressor
@@ -243,7 +262,7 @@ export const platform = {
 		// (cursor: off, the 60 Hz hot path; presence: on, a low-frequency roster)
 		// applies to its binary and JSON-fallback frames alike. Off by default
 		// keeps the hot path uncompressed.
-		const compressIntent = !!(options && options.compress === true);
+		const compressIntent = compressOption === true;
 		const compress = WS_COMPRESSION_ON && compressIntent;
 
 		// A connection still gap-filling this topic (resume cutover in flight) is not
@@ -270,7 +289,7 @@ export const platform = {
 		// the frame. The single C++ app.publish fan-out cannot skip a socket,
 		// so an excluding publish always takes the per-subscriber walk (the
 		// walk already hands caps-less connections the identical JSON envelope).
-		const excludeWs = (options && options.excludeWs) || null;
+		const excludeWs = excludeOption || null;
 
 		// JSON fast path: no live connection wants binary for this codec. Byte-
 		// and instruction-identical to platform.publish - a JSON-only deployment
@@ -654,7 +673,7 @@ export const platform = {
 			// through publishWire.
 			const seq = hasEntrySeqs && entrySeqs[i] !== undefined
 				? entrySeqs[i]
-				: stampSeq(opts, topicSeqs, topic);
+				: stampSeqValue(opts != null ? opts.seq : undefined, topicSeqs, topic);
 			seqs[i] = seq == null ? 0 : seq;
 			const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
 			fatal(envelope.length > 0, 'envelope.empty', null);
@@ -1680,7 +1699,7 @@ export const platform = {
 		// is safe; more than one socket-owning worker needs an external authority.
 		assertGameLaneClusterSafe();
 		counters.publishCountWindow++;
-		const seq = stampSeq(undefined, topicSeqs, topic);
+		const seq = stampSeqValue(undefined, topicSeqs, topic);
 		if (seq !== null) maxSeenSeq.set(topic, seq);
 		const envelope = completeGameEnvelope(envelopePrefix(topic, event), data, seq, id);
 		fatal(envelope.length > 0, 'envelope.empty', null);
@@ -1834,13 +1853,24 @@ export const platform = {
 	batch(messages) {
 		// All-or-nothing authority validation: do not publish a safe prefix and
 		// then discover an implicit sequence later in the same cluster batch.
+		// Field reads into plain snapshots, once per message: the value this
+		// pre-pass judged must be the value publish() stamps, or a stateful
+		// accessor could pass the atomic check and then hand the per-message
+		// publish a different one - which would throw mid-batch and leave a
+		// published prefix, the exact outcome the pre-pass exists to prevent.
+		const snapshots = new Array(messages.length);
 		for (let i = 0; i < messages.length; i++) {
-			assertClusterSequenceAuthority(messages[i].options);
+			const o = messages[i].options;
+			const snap = o == null
+				? o
+				: { seq: o.seq, relay: o.relay, compress: o.compress, jitterMs: o.jitterMs };
+			assertClusterSequenceAuthority(snap);
+			snapshots[i] = snap;
 		}
 		const results = [];
 		for (let i = 0; i < messages.length; i++) {
-			const { topic, event, data, options } = messages[i];
-			results.push(platform.publish(topic, event, data, options));
+			const { topic, event, data } = messages[i];
+			results.push(platform.publish(topic, event, data, snapshots[i]));
 		}
 		return results;
 	},
@@ -1873,9 +1903,21 @@ export const platform = {
 		if (messages.length === 0) return;
 		// Validate the WHOLE batch before one event can mutate counters or reach a
 		// subscriber. A mixed safe/unsafe batch must fail atomically rather than
-		// partially publishing its prefix.
+		// partially publishing its prefix. One read per field, snapshotted: the
+		// value judged here is the value the stamp and the relay decision use
+		// below, so a stateful accessor cannot pass this atomic pre-pass and
+		// then hand the fast path an authoritative number it would relay.
+		const msgSeqs = new Array(messages.length);
+		const msgRelays = new Array(messages.length);
+		const msgJitters = new Array(messages.length);
 		for (let i = 0; i < messages.length; i++) {
-			assertClusterSequenceAuthority(messages[i].options);
+			const o = messages[i].options;
+			const seqOption = o != null ? o.seq : undefined;
+			const relayOption = o != null ? o.relay : undefined;
+			msgJitters[i] = o != null ? o.jitterMs : undefined;
+			assertClusterSequenceAuthorityValues(seqOption, relayOption);
+			msgSeqs[i] = seqOption;
+			msgRelays[i] = relayOption;
 		}
 
 		// Pick the fanout strategy before allocating per-event envelopes.
@@ -1940,7 +1982,15 @@ export const platform = {
 		if ((!allSameTopic && !allSeeAll) || !everyoneCapable) {
 			for (let i = 0; i < messages.length; i++) {
 				const m = messages[i];
-				platform.publish(m.topic, m.event, m.data, { ...m.options, compress: compressOptIn });
+				// The snapshot, not a spread of the live object: publish() consumes
+				// exactly these fields, and the values it stamps must be the ones
+				// the atomic pre-pass above already judged.
+				platform.publish(m.topic, m.event, m.data, {
+					seq: msgSeqs[i],
+					relay: msgRelays[i],
+					jitterMs: msgJitters[i],
+					compress: compressOptIn
+				});
 			}
 			return;
 		}
@@ -1955,12 +2005,12 @@ export const platform = {
 		for (let i = 0; i < messages.length; i++) {
 			const m = messages[i];
 			counters.publishCountWindow++;
-			const seq = stampSeq(m.options, topicSeqs, m.topic);
+			const seq = stampSeqValue(msgSeqs[i], topicSeqs, m.topic);
 			// Track the highest observed seq per topic (see platform.publish): a
 			// bare set for the monotonic in-memory counter, the monotone-max guard
 			// for an explicit numeric seq.
 			if (seq !== null) {
-				if (m.options && typeof m.options.seq === 'number') recordSeen(maxSeenSeq, m.topic, seq);
+				if (typeof msgSeqs[i] === 'number') recordSeen(maxSeenSeq, m.topic, seq);
 				else maxSeenSeq.set(m.topic, seq);
 			}
 			const env = completeEnvelope(envelopePrefix(m.topic, m.event), m.data, seq);
@@ -1990,8 +2040,7 @@ export const platform = {
 			/** @type {Array<import('./relay.js').RelayBatchedEntry>} */
 			const relayed = [];
 			for (let i = 0; i < messages.length; i++) {
-				const m = messages[i];
-				if (!m.options || m.options.relay !== false) {
+				if (msgRelays[i] !== false) {
 					// Carry each event's stamped seq so the receiving worker
 					// advances its delivered-seq tracker without re-parsing.
 					relayed.push({ topic: events[i].topic, env: events[i].env, seq: events[i].seq });

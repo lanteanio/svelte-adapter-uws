@@ -93,10 +93,19 @@ export function message(ws, ctx) {
 		platform.publish(msg.topic || 'test-topic', msg.event || 'broadcast', payload, msg.options ?? { seq: false });
 	}
 	if (msg.type === 'sequence-policy-probe') {
+		// A hostile options object cannot cross the JSON probe boundary, so it is
+		// built server-side on request: `seq` answers `false` to its first read
+		// and an authoritative number to every later one. A lane that judges one
+		// read and stamps another accepts the false and stamps the number - the
+		// reply carries the read count so the test can pin one-read-per-call.
+		let seqReads = 0;
 		try {
 			const topic = msg.topic || 'sequence-policy:room';
 			const event = 'probe';
-			const options = msg.options;
+			const options = msg.statefulSeq === undefined ? msg.options : {
+				relay: undefined,
+				get seq() { seqReads += 1; return seqReads === 1 ? false : msg.statefulSeq; }
+			};
 			let result;
 			if (msg.entry === 'wire') {
 				result = platform.publishWire(topic, event, { n: 1 }, {
@@ -121,12 +130,18 @@ export function message(ws, ctx) {
 			} else {
 				result = platform.publish(topic, event, { n: 1 }, options);
 			}
-			platform.send(ws, 'probe', 'sequence-policy', { nonce: msg.nonce, ok: true, result });
+			platform.send(ws, 'probe', 'sequence-policy', {
+				nonce: msg.nonce,
+				ok: true,
+				result,
+				seqReads: msg.statefulSeq === undefined ? undefined : seqReads
+			});
 		} catch (error) {
 			platform.send(ws, 'probe', 'sequence-policy', {
 				nonce: msg.nonce,
 				ok: false,
-				error: error instanceof Error ? error.message : String(error)
+				error: error instanceof Error ? error.message : String(error),
+				seqReads: msg.statefulSeq === undefined ? undefined : seqReads
 			});
 		}
 	}

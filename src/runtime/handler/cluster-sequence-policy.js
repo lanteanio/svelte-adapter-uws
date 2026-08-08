@@ -37,13 +37,31 @@ const MULTI_WORKER_RUNTIME = hasMultipleWorkers();
  * observable proof that the adapter's unordered multi-origin relay is not also
  * being used. An unsequenced frame makes no monotonic promise and is safe too.
  *
- * @param {{ seq?: boolean | number, relay?: boolean } | null | undefined} options
+ * The values form is the primitive and the options form delegates to it, so
+ * the rule cannot drift between the two spellings. The hot publish lanes call
+ * the values form with fields they read ONCE: an options object with a
+ * stateful `seq` accessor must not be able to answer this check with one
+ * value and hand the stamp another - accepted, stamped, and relayed is the
+ * exact combination the check exists to refuse.
+ *
+ * @param {boolean | number | undefined} seq
+ * @param {boolean | undefined} relay
  * @param {any} [data]
  */
-export function clusterSequenceAccepted(options, data = workerData) {
+export function clusterSequenceValuesAccepted(seq, relay, data = workerData) {
 	if (data === workerData ? !MULTI_WORKER_RUNTIME : !hasMultipleWorkers(data)) return true;
-	if (options?.seq === false) return true;
-	return Number.isInteger(options?.seq) && options.seq >= 1 && options?.relay === false;
+	if (seq === false) return true;
+	return Number.isInteger(seq) && /** @type {number} */ (seq) >= 1 && relay === false;
+}
+
+/** @param {boolean | number | undefined} seq @param {boolean | undefined} relay @param {any} [data] */
+export function assertClusterSequenceAuthorityValues(seq, relay, data = workerData) {
+	if (!clusterSequenceValuesAccepted(seq, relay, data)) throw new Error(CLUSTER_SEQUENCE_ERROR);
+}
+
+/** @param {{ seq?: boolean | number, relay?: boolean } | null | undefined} options @param {any} [data] */
+export function clusterSequenceAccepted(options, data = workerData) {
+	return clusterSequenceValuesAccepted(options?.seq, options?.relay, data);
 }
 
 /** @param {{ seq?: boolean | number, relay?: boolean } | null | undefined} options @param {any} [data] */

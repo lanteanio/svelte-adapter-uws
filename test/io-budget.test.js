@@ -455,8 +455,20 @@ const EXTERNAL_THUNK_CLONE_TAG = 'function hiddenThunkCloneTag(_strings, thunk) 
 // route call. No copy primitive entered either body - the only byte
 // construction on the ingress path is the pre-existing zero-copy
 // `new Uint8Array(message)` VIEW over an ArrayBuffer argument.
+// Re-pinned for the publish-lane one-read capture: publishWire now reads each
+// option field (seq, relay, compress, excludeWs, _isRelay, _relaySeq) exactly
+// once into locals ahead of the authority check, judges the locals through the
+// values-form assert, and stamps through stampSeqValue - so a stateful
+// accessor cannot answer the cluster refusal with one value and hand the
+// stamp another. Property reads into locals and renamed callees only; no byte
+// is read, allocated or copied, and no copy primitive entered the body.
+// Measured against a faithful inline replay of the pre-change shape: the
+// absent-option hot shape sits within run noise and the authoritative-seq
+// shape pays about one nanosecond more on the isolated resolution
+// (bench/micro-publish-capture-ab.mjs) - the price of a refusal that cannot
+// be answered and then bypassed.
 const COPY_AUTHORITY_SYNTAX = Object.freeze({
-	publishWire: '7c1abe91f3ecfb8b8b28f31451f06b7fd0529efc027dd508137ae4a8ea79cc49',
+	publishWire: '1edfe2bd6d0dcd1c01ec09ce00c808b86ff1d9c526064e7fd9551f58a3165509',
 	deliverStatelessWireFanout: '98c4246e4bea446d1647f6bf0b13fb0e0cde521ac27dfe899eff42b884113afa',
 	dispatchIngressFrame: '5ff5ed75d331620ed0bbdd4ffd9fe57ecb993b3b3d97923bdb7edf48e7483e5b',
 	send: 'c900028ed26614f6a0d83b1d57a6649a52db522503def86eee3000541d285b11',
@@ -510,7 +522,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// The valid-seq path is untouched; nothing executes differently on any
 	// frame path, no byte is read, allocated or copied, and no copy primitive
 	// entered the graph.
-	ingress: 'af1f4c2860256b4350ca484c7b7db5b7436009f6940f9606c342cad4e94d8b12',
+	//
+	// Re-pinned for the publish-lane one-read capture, which reaches this graph
+	// through utils.js -> utils/epoch.js and handler/cluster-sequence-policy.js:
+	// stampSeqValue (the value form of the same three-way resolution, which
+	// stampSeq now delegates to) and clusterSequenceValuesAccepted /
+	// assertClusterSequenceAuthorityValues (the value form of the same refusal,
+	// which the object forms delegate to). Comparisons, one delegation frame on
+	// the cold object-form callers, and no change to any frame path in this
+	// graph's own modules - no byte is read, allocated or copied, and no copy
+	// primitive entered.
+	ingress: '5ff8b1a0016839b5285732902b28af5fda4727f316c04e81293e646674a56a07',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -668,7 +690,22 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// digest covers literal CONTENT, so documentation wording moves it even
 	// though no statement, call or allocation changed. Nothing here executes on
 	// a frame path.
-	platform: 'efc04e6d4c3044632a42f6272d52055191930cf293426c3463c1ffc0cca1a302',
+	//
+	// Re-pinned for the publish-lane one-read capture. The drift in this
+	// graph's own module: publish() and publishWire() read each option field
+	// once into locals ahead of the values-form authority check and stamp
+	// through stampSeqValue; batch() snapshots each message's four option
+	// fields into one plain object per message, judges the snapshot, and hands
+	// publish() the SAME snapshot; publishBatched() captures per-message
+	// seq/relay/jitterMs into three arrays in its atomic pre-pass and its
+	// stamp, monotone-max branch, relay filter, and slow-path publish all
+	// consume the captured values. Locals, plain snapshot objects and arrays
+	// of scalars/references - no byte is read, allocated or copied, and no
+	// copy primitive entered. Measured against a faithful inline replay of
+	// the pre-change shape: the absent-option hot shape sits within run
+	// noise and the authoritative-seq shape pays about one nanosecond more
+	// on the isolated resolution (bench/micro-publish-capture-ab.mjs).
+	platform: '51cf6079e0d56628c75f221c17e0b13b7bf1ea6d7c96c1e582ce72510c615d9b',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -689,7 +726,11 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// throwInvalidSeq, a cold throw-only helper, and stampSeq's numeric
 	// refusal arm calling it instead of throwing inline. Nothing in this
 	// graph's own modules changed, and no copy primitive entered.
-	'wire-fanout': 'e09fda65aa0454213176dd219d7bb67749d324d2865492e9659918fe0b0b2e3d',
+	// Re-pinned with the ingress seal for the publish-lane one-read capture:
+	// the only drift in this graph is utils/epoch.js's stampSeqValue and the
+	// stampSeq delegation, reached through utils.js. Nothing in this graph's
+	// own modules changed, and no copy primitive entered.
+	'wire-fanout': '133200c063dac8c71e68178f211ca842136566eb3c918f6f99d0e163d65a35ef',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

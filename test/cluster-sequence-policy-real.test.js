@@ -70,7 +70,7 @@ describeReal('real clustered sequence-authority policy', () => {
 		let nonce = 0;
 		return {
 			output: () => output,
-			async probe(entry, options) {
+			async probe(entry, options, extra) {
 				const wanted = ++nonce;
 				return new Promise((resolve, reject) => {
 					const timer = setTimeout(() => reject(new Error(`sequence policy response timed out\n${output}`)), 10_000);
@@ -83,7 +83,7 @@ describeReal('real clustered sequence-authority policy', () => {
 						resolve(frame.data);
 					};
 					ws.on('message', onMessage);
-					ws.send(JSON.stringify({ type: 'sequence-policy-probe', entry, options, nonce: wanted }));
+					ws.send(JSON.stringify({ type: 'sequence-policy-probe', entry, options, nonce: wanted, ...extra }));
 				});
 			},
 			async pluginProbe(entry) {
@@ -146,6 +146,23 @@ describeReal('real clustered sequence-authority policy', () => {
 		// A valid unsequenced empty batch is still the no-op it always was.
 		expect(await server.probe('wire-batch-empty', { seq: false }))
 			.toMatchObject({ ok: true, result: false });
+		server.close();
+	}, 60_000);
+
+	it('every lane reads the seq option exactly once, so a stateful accessor cannot split judge and stamp', async () => {
+		// The fixture builds an options object whose `seq` answers `false` to
+		// its first read and an authoritative number to every later one. A lane
+		// that reads once judges and stamps the same value (here: `false`, so
+		// nothing is stamped and the publish is accepted). A lane that reads
+		// again after judging would stamp - and relay - a number the cluster
+		// refusal never saw, which is the exact combination it exists to refuse.
+		// The read count is the contract: every extra read is a second answer.
+		const server = await boot(2);
+		for (const entry of ['publish', 'wire', 'batch', 'loop-batch', 'wire-batch']) {
+			const result = await server.probe(entry, undefined, { statefulSeq: 4242 });
+			expect(result.ok, `${entry}: ${result.error}`).toBe(true);
+			expect(result.seqReads, entry).toBe(1);
+		}
 		server.close();
 	}, 60_000);
 

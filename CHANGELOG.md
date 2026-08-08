@@ -555,6 +555,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every publish lane now reads each option field exactly once.** The batch
+  surface already captured its options before judging them, but the single
+  lanes re-read the caller's live object: the cluster-authority check read
+  `seq`, the stamp read it again, and the max-seen branch a third time - so an
+  options object with a stateful `seq` accessor could answer the check with
+  `false` and hand the stamp an authoritative number, which was then relayed
+  through the multi-origin relay, the exact combination the check exists to
+  refuse. `publish`, `publishWire`, `batch`, and `publishBatched` now read
+  every option field once into locals or a pre-pass snapshot and judge, stamp,
+  and relay from that single read; the shared refusal and stamp primitives
+  gained value forms the object forms delegate to, so the rule cannot drift
+  between spellings. A real two-worker cluster test drives a server-built
+  stateful accessor through all five lanes and pins the read count at one, and
+  a source guard pins one read site per field. Measured cost: the ordinary
+  no-options publish sits within run noise of the previous shape, and the
+  authoritative-seq shape pays about one nanosecond more on the isolated
+  resolution (`bench/micro-publish-capture-ab.mjs`). One deliberate consequence on
+  the `publishBatched` slow path: its per-message forward previously spread
+  the caller's options, which copies own enumerable properties only, so a
+  prototype-carried or accessor-carried numeric `seq` was judged by the
+  atomic pre-pass and then silently dropped before stamping; the snapshot
+  reads through the prototype chain, so such a seq is now stamped - the
+  behavior the wire-batch surface already documents as correct.
+
 - **`createTestServer` now honours `idleTimeout` instead of silently ignoring
   it.** The harness passed a bare literal 120 to its uWS socket one line below
   the properly-resolved `maxPayloadLength`, so `createTestServer({ idleTimeout })`

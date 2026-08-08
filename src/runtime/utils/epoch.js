@@ -98,21 +98,36 @@ export function throwInvalidSeq(value) {
  * @returns {number | null}
  */
 export function stampSeq(options, seqMap, topic) {
-	if (options != null) {
-		const opt = options.seq;
-		if (opt === false) return null;
-		if (typeof opt === 'number') {
-			// An explicit seq is a cluster-authoritative value that must survive BOTH
-			// the JSON envelope and the 0x03 binary frame and drive the client's resume
-			// gap-fill, so it must be a positive integer. The binary frame reserves 0 as
-			// its "no seq" sentinel (a stamped 0 would vanish for binary subscribers),
-			// and a non-finite / negative / fractional value would emit invalid JSON,
-			// diverge from the varint, and poison the monotone-max guard. The in-memory
-			// counter and every shipped authority (Redis INCR) are 1-based; a 0-based
-			// external source must offset by 1. Fail fast rather than corrupt the wire.
-			if (Number.isInteger(opt) && opt >= 1) return opt;
-			throwInvalidSeq(opt);
-		}
+	return stampSeqValue(options != null ? options.seq : undefined, seqMap, topic);
+}
+
+/**
+ * The value form of `stampSeq`, for callers that already hold the `seq`
+ * option as a local. The hot publish lanes read each option field exactly
+ * once, up front, so the value the cluster-authority check judged and the
+ * value stamped here are the same read - a stateful accessor cannot answer
+ * the check with `false` and hand the stamp a number. Same three-way
+ * resolution, same validation, same counter semantics as the options form,
+ * which delegates here so the rule cannot drift.
+ *
+ * @param {boolean | number | undefined} opt
+ * @param {Map<string, number>} seqMap
+ * @param {string} topic
+ * @returns {number | null}
+ */
+export function stampSeqValue(opt, seqMap, topic) {
+	if (opt === false) return null;
+	if (typeof opt === 'number') {
+		// An explicit seq is a cluster-authoritative value that must survive BOTH
+		// the JSON envelope and the 0x03 binary frame and drive the client's resume
+		// gap-fill, so it must be a positive integer. The binary frame reserves 0 as
+		// its "no seq" sentinel (a stamped 0 would vanish for binary subscribers),
+		// and a non-finite / negative / fractional value would emit invalid JSON,
+		// diverge from the varint, and poison the monotone-max guard. The in-memory
+		// counter and every shipped authority (Redis INCR) are 1-based; a 0-based
+		// external source must offset by 1. Fail fast rather than corrupt the wire.
+		if (Number.isInteger(opt) && opt >= 1) return opt;
+		throwInvalidSeq(opt);
 	}
 	// The in-memory per-worker counter, inlined from `nextTopicSeq` rather than
 	// called, so the common publish stays a single call frame (a wrapper call
