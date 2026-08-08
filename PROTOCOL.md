@@ -1687,8 +1687,8 @@ application MUST NOT define its own `__`-prefixed topics.
 A Reserved value is not an open slot: it is assignable only behind a future
 negotiated capability token (sections 5, 10), whether that token arrives in
 this revision or a later one, so its meaning can never change for a peer that
-did not opt in. Until such an
-assignment is negotiated on a connection, a leading byte with no registered
+did not opt in. Until such an assignment is negotiated on a connection, a
+leading byte with no registered
 meaning follows section 1.4 - client to server it reaches the application
 message handler untouched, server to client the reference client drops it - so
 untagged application binary is, and remains, legal on every connection that

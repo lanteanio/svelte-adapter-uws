@@ -563,8 +563,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   meaning for peers that never opted in, bytes promised to applications would
   be silently reinterpreted. The registry now states the shipped rule: a
   Reserved value is assignable only behind a future negotiated capability
-  token, and until negotiated on a connection an
-  unregistered leading byte follows section 1.4 in both directions, so
+  token, and until negotiated on a connection an unregistered leading byte
+  follows section 1.4 in both directions, so
   untagged application binary stays legal. Editorial under the Meta errata
   clause; no wire change.
 
