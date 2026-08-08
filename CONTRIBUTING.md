@@ -550,6 +550,10 @@ The `good first issue` label is curated, not a synonym for low priority. Use
 it only when the reproduction is complete, the expected files and test command
 are named, no security/wire/concurrency design decision remains, and the change
 fits one small review. Remove the label if investigation expands the scope.
+An empty label is a valid state, not a backlog gap: the maintainer applies it
+only when such an issue genuinely exists, and the project does not maintain a
+standing starter queue. A newcomer who finds none labeled should start from
+the issue forms above instead of waiting for one.
 
 ## House conventions
 
