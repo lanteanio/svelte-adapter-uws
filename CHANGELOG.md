@@ -555,6 +555,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Erratum: appendix C.3's Reserved rows now state what Reserved means.** The
+  binary leading-byte registry marked `0x04`-`0xFF` Reserved while frozen
+  section 1.4 requires an unrecognized client-to-server leading byte to reach
+  the application untouched - two sentences a third-party implementer could
+  not reconcile: if Reserved meant a future release may assign those bytes
+  meaning for peers that never opted in, bytes promised to applications would
+  be silently reinterpreted. The registry now states the shipped rule: a
+  Reserved value is assignable only behind a future negotiated capability
+  token, and until negotiated on a connection an
+  unregistered leading byte follows section 1.4 in both directions, so
+  untagged application binary stays legal. Editorial under the Meta errata
+  clause; no wire change.
+
 - **Every publish lane now reads each option field exactly once.** The batch
   surface already captured its options before judging them, but the single
   lanes re-read the caller's live object: the cluster-authority check read

@@ -589,6 +589,21 @@ describe('WebTransport reliable-stream carriage', () => {
 	});
 });
 
+// Two errata against frozen demux text, pinned so the clarifications cannot
+// silently regress to the ambiguous wording they replaced. Both document
+// shipped behaviour: the game fan-out allocates through the per-connection
+// wire-id counter (never the shared-cohort acquire), and the runtime delivers
+// unknown-leading-byte client binary to the application untouched.
+describe('frozen demux errata', () => {
+	it('pins the reserved-byte rule to the unknown-frame rule it defers to', () => {
+		expect(flatProtocol).toContain('A Reserved value is not an open slot');
+		expect(flatProtocol).toContain('assignable only behind a future negotiated capability token (sections 5, 10)');
+		// The deferral must quote 1.4's actual behavior, both directions.
+		expect(flatProtocol).toContain('client to server it reaches the application message handler untouched, server to client the reference client drops it');
+		expect(flatProtocol).toContain('untagged application binary is, and remains, legal');
+	});
+});
+
 // Anti-drift: frames the real server emits must conform to the published schema.
 const uWS = hasUWS ? (await import('uWebSockets.js')).default : null;
 const describeUWS = hasUWS ? describe : describe.skip;
