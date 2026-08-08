@@ -571,6 +571,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The wire contract no longer schedules the package.** PROTOCOL.md's
+  preamble carried a transport paragraph that mixed facts with product
+  scheduling: a claim that no client lane is scheduled, a "parked with no
+  release target" status, and reopening preconditions a wire document cannot
+  impose. Scheduling belongs to the package roadmap and release records, so
+  the paragraph now states only what is true of the contract and its
+  reference implementation: WebSocket/WSS is the permanent default and
+  complete transport, no capability of the protocol requires the
+  WebTransport bindings, and whether any package ships such a lane is a
+  roadmap decision recorded with that package. The guarding test stops
+  duplicating the paragraph verbatim as its only check: it still pins the
+  wording exact-once, but now also bans the removed scheduling register
+  case-insensitively and scans every shipped source for a WebTransport
+  implementation, so an actual lane fails the suite and forces the preamble
+  rewrite instead of shipping beside stale prose. Editorial under the Meta
+  errata clause; no wire change.
+
 - **Console-only failures are now searchable in the error reference.** A
   family of consequential failures printed plain console lines that appeared
   nowhere in the generated reference, so the text an operator actually saw

@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 // The shared gate, not a local try/import: the published spec says these
 // artifacts are validated in CI against the reference implementation, and a
@@ -24,17 +25,30 @@ const flatProtocol = protocol
 // The Meta block alone: an assertion about what Meta says must not be satisfied
 // by the same words appearing in a section 800 lines away.
 const metaBlock = protocol.slice(protocol.indexOf('## Meta'), protocol.indexOf('## 1. Framing'));
-const expectedJsTransportDecision = [
-	'**Reference-runtime transport decision (`js-transport-v1`):**',
-	'WebSocket/WSS remains the permanent default and complete transport for the',
-	'JavaScript adapter. No post-0.6 WebTransport client lane is scheduled for this',
-	'package: a negotiate-WebTransport/fall-back-to-WebSocket ladder remains parked',
-	'with no release target. Reopening it requires independent OSS demand, an',
-	'available QUIC-terminating server surface, and conformance against sections 14',
-	'and 15. A native runtime may implement those bindings independently - section 14',
-	'as frozen, section 15 at its own wire status (see Meta) - and that does not',
-	'create a JavaScript server or client deliverable.'
+const expectedTransportStatus = [
+	'**Transport status (reference runtime):**',
+	'WebSocket/WSS is the permanent default and complete transport for the',
+	'JavaScript adapter; no capability of this protocol requires sections 14 or 15',
+	'to be available. Those sections define how this same wire binds to',
+	'WebTransport for a runtime that implements them. Whether and when any package',
+	'ships such a lane is a roadmap decision recorded with that package, not a',
+	'statement of this contract. A native runtime may implement those bindings',
+	'independently - section 14 as frozen, section 15 at its own wire status (see',
+	'Meta) - and that does not create a JavaScript server or client deliverable.'
 ].join('\n');
+// Every shipped source, not just the entry file: a WebTransport lane could
+// land in client-runtime.js, a plugin client, or a new module the entry
+// imports, and a one-file scan would miss exactly the likely shape.
+function walkSources(dir) {
+	const files = [];
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		const path = join(dir, entry.name);
+		if (entry.isDirectory()) files.push(...walkSources(path));
+		else if (entry.name.endsWith('.js')) files.push(path);
+	}
+	return files;
+}
+const sourceRoot = fileURLToPath(new URL('../src', import.meta.url));
 const vectors = JSON.parse(readFileSync(new URL('../test-vectors/frames.json', import.meta.url), 'utf8'));
 const binaryVector = JSON.parse(readFileSync(new URL('../test-vectors/binary.json', import.meta.url), 'utf8'));
 const streamVector = JSON.parse(readFileSync(new URL('../test-vectors/webtransport-stream.json', import.meta.url), 'utf8'));
@@ -188,10 +202,33 @@ describe('binary 0x03 vector decodes to the documented layout', () => {
 });
 
 describe('WebTransport reliable-stream carriage', () => {
-	it('pins the JavaScript reference-runtime adoption decision once', () => {
-		expect(protocol.indexOf(expectedJsTransportDecision)).toBeGreaterThan(-1);
-		expect(protocol.indexOf(expectedJsTransportDecision))
-			.toBe(protocol.lastIndexOf(expectedJsTransportDecision));
+	// The preamble states transport FACTS; package scheduling belongs to the
+	// roadmap, and normative wire text must not freeze a product decision.
+	it('pins the transport status once and keeps scheduling policy off the wire text', () => {
+		expect(protocol.indexOf(expectedTransportStatus)).toBeGreaterThan(-1);
+		expect(protocol.indexOf(expectedTransportStatus))
+			.toBe(protocol.lastIndexOf(expectedTransportStatus));
+		// The removed decision register must not resurface anywhere in the
+		// contract: no schedule claims, no release targets, no invented
+		// reopening preconditions. Case-insensitive, so a mid-sentence
+		// respelling cannot slip past the phrase-initial capital.
+		for (const scheduling of [/js-transport-v1/i, /no post-0\.6/i, /remains parked/i, /release target/i, /independent OSS demand/i]) {
+			expect(protocol, String(scheduling)).not.toMatch(scheduling);
+		}
+	});
+
+	// The status paragraph is falsifiable against the implementation it
+	// describes: the moment ANY shipped source grows a WebTransport lane -
+	// entry file, client runtime, plugin client, or a new module - this fails
+	// and forces the preamble to be rewritten, which the old prose-duplicating
+	// pin could never do. The WebTransport global constructor must appear
+	// somewhere in the sources for a lane to exist.
+	it('matches the transport status against the actual shipped sources', () => {
+		const files = walkSources(sourceRoot);
+		expect(files.length).toBeGreaterThan(100);
+		for (const file of files) {
+			expect(readFileSync(file, 'utf8'), file).not.toMatch(/WebTransport|createBidirectionalStream/i);
+		}
 	});
 
 	function encodeVarint(value) {

@@ -22,15 +22,15 @@ stream. A single WebTransport session may use either binding or both; both
 reuse the inner frames frozen here rather than defining transport-specific
 copies.
 
-**Reference-runtime transport decision (`js-transport-v1`):**
-WebSocket/WSS remains the permanent default and complete transport for the
-JavaScript adapter. No post-0.6 WebTransport client lane is scheduled for this
-package: a negotiate-WebTransport/fall-back-to-WebSocket ladder remains parked
-with no release target. Reopening it requires independent OSS demand, an
-available QUIC-terminating server surface, and conformance against sections 14
-and 15. A native runtime may implement those bindings independently - section 14
-as frozen, section 15 at its own wire status (see Meta) - and that does not
-create a JavaScript server or client deliverable.
+**Transport status (reference runtime):**
+WebSocket/WSS is the permanent default and complete transport for the
+JavaScript adapter; no capability of this protocol requires sections 14 or 15
+to be available. Those sections define how this same wire binds to
+WebTransport for a runtime that implements them. Whether and when any package
+ships such a lane is a roadmap decision recorded with that package, not a
+statement of this contract. A native runtime may implement those bindings
+independently - section 14 as frozen, section 15 at its own wire status (see
+Meta) - and that does not create a JavaScript server or client deliverable.
 
 The reference implementation is [src/client.js](./src/client.js) (client) and
 [src/runtime/wire.js](./src/runtime/wire.js) plus
@@ -66,7 +66,7 @@ speak the identical wire.
     (section 14.7, appendix C.5);
   - the reliable-stream error registry (appendix C.6);
   - and, in otherwise frozen prose, EVERY reference to anything named above.
-    This is a rule, not a list: the references include the transport-decision
+    This is a rule, not a list: the references include the transport-status
     preamble, 14.1's reliable-session sentences, 14.2's `hello` note, 14.4's
     stream reservation and its `lantean.reliable:1` MUST NOT, 14.6's
     negotiation bullet, 14.5's closing sentence, section 13's reliable-stream
