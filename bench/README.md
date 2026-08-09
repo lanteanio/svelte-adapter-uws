@@ -93,6 +93,7 @@ command; if you change them, the changed command is the profile identity.
 | Relay receive path | `node bench/micro-relay-receive-ab.mjs` | native | live fan-out receive variants and rates; loopback, fixed synthetic envelope. |
 | Request construction | `node bench/micro-request.mjs` | JS | `Request` construction cost; isolated primitive, not SSR latency. |
 | Sequence stamping | `node bench/micro-seq-stamp-ab.mjs` | JS | alternating sequence-path cost; local synthetic topics. |
+| Observed-sequence record | `node bench/micro-seq-seen-record-ab.mjs` | JS | alternating bare-set versus membership-reporting max-seen record inside a publish proxy; the fresh-topic shape is held at a small count on purpose, because a larger one measures `Map` growth rather than the record. |
 | Delivered-sequence tracker | `node bench/micro-seq-tracker.mjs` | JS | marginal tracker/fan-out cost; no production multiworker IPC. |
 | Batch entry reads | `node bench/micro-wire-batch-alias-ab.mjs` | JS | alternating per-entry read shapes at 1/8/64 entries; run-to-run spread exceeds the A/B delta, so treat a single run as inconclusive. |
 | Per-viewer batch pinning | `node bench/micro-send-wire-batch-ab.mjs` | JS | alternating `sendWireBatch` payload-pinning shapes at 1/8/30/64 entries, on the JSON-only and binary paths separately; the JSON-only figures sit inside run-to-run spread because `JSON.stringify` dominates them, so read the binary column for the copy the change removes. |

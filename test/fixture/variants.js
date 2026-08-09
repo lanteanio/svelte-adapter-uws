@@ -290,6 +290,25 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// A four-entry ceiling on the per-topic sequence registries, so eviction is
+	// reachable against the REAL runtime.
+	//
+	// `maxTopicSeqEntries` is baked into the generated handler at build time and
+	// defaults to a million topics, which no suite can fill. Without its own
+	// build the ceiling could only ever be tested against a hand-written model
+	// of the registries - and the defect this variant exists to catch was
+	// exactly that: the model and the runtime agreed, while a publish lane wrote
+	// one of the two real registries behind the bound's back.
+	seqcap: {
+		out: 'build-seq-cap',
+		handler: null,
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100,
+			maxTopicSeqEntries: 4
+		}
+	},
+
 	// Current `sv create` projects pass SvelteKit configuration directly to
 	// `sveltekit(...)` in Vite config. This is deliberately the same runtime
 	// posture as default but has its own output/module identity and exercises

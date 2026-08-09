@@ -1,7 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createSeqBound, fnv32 } from '../src/runtime/utils/seq-bound.js';
 import { stampSeqValue } from '../src/runtime/utils/epoch.js';
-import { recordSeen } from '../src/runtime/handler/state.js';
+import { recordSeen, recordStampedSeen } from '../src/runtime/handler/state.js';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parse } from 'acorn';
 
 let uWS;
 try {
@@ -29,10 +33,12 @@ function makeBound(overrides = {}) {
 }
 
 // The production shape: a counter topic is stamped AND recorded as observed,
-// so the seen map is the wider of the two registries.
+// so the seen map is the wider of the two registries. Both writes report to
+// the bound, exactly as the publish lanes do - a model that set the seen map
+// directly would be testing a runtime that no longer exists.
 function publish(bound, seqMap, seenMap, topic) {
 	const seq = stampSeqValue(undefined, seqMap, topic, bound);
-	seenMap.set(topic, seq);
+	recordStampedSeen(seenMap, topic, seq, bound);
 	return seq;
 }
 
@@ -174,6 +180,38 @@ describe('bounded seq registries (unit)', () => {
 		expect(stampSeqValue(undefined, seqMap, 'c1', bound)).toBeGreaterThan(1);
 	});
 
+	// The order that defeats a bound the counter lane never reports to: the
+	// observed registry is filled FIRST by an external seq authority, so it is
+	// already at the ceiling by the time ordinary counter publishing starts,
+	// and every counter topic then adds an entry the bound never hears about.
+	// The counter registry stays honest the whole time, which is what makes
+	// this invisible from the seq side - the operator sizes for one ceiling
+	// and pays for two.
+	it('bounds the seen registry when an external authority fills it before the counters arrive', () => {
+		const { bound, seqMap, seenMap } = makeBound({ config: { capacity: 4 } });
+		for (let i = 0; i < 4; i++) recordSeen(seenMap, 'external:' + i, 10_000 + i, bound);
+		expect(seenMap.size).toBe(4);
+
+		for (let i = 0; i < 4; i++) publish(bound, seqMap, seenMap, 'counter:' + i);
+
+		expect(seqMap.size).toBeLessThanOrEqual(4);
+		expect(seenMap.size).toBeLessThanOrEqual(4);
+	});
+
+	// The same bypass sustained: alternating authorities over many topics must
+	// hold ONE ceiling between them, not one each.
+	it('holds a single ceiling across sustained mixed-authority arrival', () => {
+		const { bound, seqMap, seenMap } = makeBound({ config: { capacity: 8, scanLimit: 16 } });
+		for (let i = 0; i < 200; i++) {
+			if (i % 2 === 0) recordSeen(seenMap, 'ext:' + i, 5_000_000 + i, bound);
+			else publish(bound, seqMap, seenMap, 'ctr:' + i);
+		}
+		// No quiet probe and nothing protected, so the sweep always finds a
+		// victim and neither registry has an overshoot allowance to spend.
+		expect(seenMap.size).toBeLessThanOrEqual(8);
+		expect(seqMap.size).toBeLessThanOrEqual(8);
+	});
+
 	it('keeps the monotone-max guard for a known topic and bounds only new ones', () => {
 		const { bound, seenMap } = makeBound();
 		recordSeen(seenMap, 'o1', 10, bound);
@@ -313,6 +351,148 @@ describe('bounded seq registries (unit)', () => {
 			expect(seqMap.size, blocker).toBeLessThanOrEqual(21);
 			// ...and every unevictable topic is still there, untouched.
 			for (const topic of busy) expect(seqMap.has(topic), blocker + ' ' + topic).toBe(true);
+		}
+	});
+
+	// The bypass above was not a missing case in the bound; it was a publish
+	// lane writing the registry behind the bound's back, and five lanes shared
+	// that shape. A unit test over the bound's own surface cannot see a caller
+	// that never calls it, so this walks the runtime sources instead.
+	//
+	// Two forms reproduce the defect and both are refused here: writing the
+	// observed registry directly, and calling a recorder WITHOUT the bound -
+	// `bound` is an optional parameter, so `recordStampedSeen(maxSeenSeq,
+	// topic, seq)` compiles, records the topic, and reports nothing. The
+	// second form is why this reads the syntax tree rather than the text: an
+	// argument count is not something a line regex can count.
+	//
+	// Aliasing the map defeats the first check, so every way of binding it to
+	// another name is refused too - a declaration, an assignment, and an
+	// object property, which is the spelling the runtime itself uses when it
+	// hands the map to the bound's factory. That one construction site is the
+	// single exemption, and naming it here is what keeps the rule absolute
+	// everywhere else.
+	it('leaves every runtime write to the observed registry with the recorders, bound included', () => {
+		const runtimeDir = fileURLToPath(new URL('../src/runtime/', import.meta.url));
+		// The recorders bound the observed registry; stampSeq/stampSeqValue bound
+		// the counter one. Both take the bound as a trailing argument, and
+		// omitting it reintroduces the same defect on whichever map it owns.
+		const recorders = new Set(['recordSeen', 'recordStampedSeen', 'stampSeq', 'stampSeqValue']);
+		// Where the map is legitimately handed to the bound that owns it.
+		const factoryWiring = 'handler/seq-bound.js';
+		/** @type {string[]} */
+		const offenders = [];
+		let scanned = 0;
+
+		/** @param {any} node @param {(n: any) => void} visit */
+		function walkAst(node, visit) {
+			if (!node || typeof node !== 'object') return;
+			visit(node);
+			for (const value of Object.values(node)) {
+				if (Array.isArray(value)) for (const child of value) walkAst(child, visit);
+				else if (value && typeof value === 'object' && typeof value.type === 'string') walkAst(value, visit);
+			}
+		}
+
+		/** The name a member expression reads, computed or not. */
+		const memberName = (node) => node.computed
+			? (node.property?.type === 'Literal' ? node.property.value : null)
+			: node.property?.name;
+
+		/** The node handler, factored out so a synthetic source can run it too. */
+		const visitor = (rel, found) => (node) => {
+				const at = () => rel + ':' + node.loc.start.line;
+				// `maxSeenSeq.set(...)`, and the same write reached through a
+				// namespace import - `state.maxSeenSeq.set(...)` - which is the
+				// shipped defect with a different callee node.
+				const writesSeenMap = node.type === 'MemberExpression' && memberName(node) === 'set' &&
+					(node.object?.name === 'maxSeenSeq' ||
+						(node.object?.type === 'MemberExpression' && memberName(node.object) === 'maxSeenSeq'));
+				if (writesSeenMap) {
+					found.push(at() + ': writes maxSeenSeq directly instead of through a recorder');
+				}
+				const aliases = node.type === 'VariableDeclarator' ? node.init
+					: node.type === 'AssignmentExpression' ? node.right
+						: node.type === 'Property' ? node.value
+							: null;
+				if (aliases?.type === 'Identifier' && aliases.name === 'maxSeenSeq' && rel !== factoryWiring) {
+					found.push(at() + ': binds maxSeenSeq to another name, which puts its writes out of reach of this check');
+				}
+				// A recorder reached through a namespace import is the same
+				// call with a different callee node, so both spellings are
+				// held to the argument count.
+				const callee = node.type === 'CallExpression'
+					? (node.callee?.type === 'Identifier' ? node.callee.name
+						: node.callee?.type === 'MemberExpression' ? memberName(node.callee) : null)
+					: null;
+				if (callee !== null && recorders.has(callee)) {
+					// A COUNT is not enough: `recordStampedSeen(map, topic, seq, undefined)`
+					// has four arguments and reports nothing.
+					const bound = node.arguments[3];
+					const named = bound?.type === 'Identifier' && bound.name !== 'undefined';
+					if (!named) {
+						found.push(at() + ': ' + callee + ' is called with ' +
+							(node.arguments.length < 4 ? 'no bound argument' : 'a bound that is not a named binding') +
+							', so the registry bound never hears about the topic it admits');
+					}
+				}
+		};
+
+		/** Count the modules the walk should reach, so the floor is derived. */
+		function countJsFiles(dir) {
+			return readdirSync(dir, { withFileTypes: true }).reduce((total, entry) => total +
+				(entry.isDirectory() ? countJsFiles(join(dir, entry.name)) : entry.name.endsWith('.js') ? 1 : 0), 0);
+		}
+
+		/** Run the same visitor over a synthetic module. */
+		function offendersIn(source, rel = 'probe.js') {
+			const found = [];
+			const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+			walkAst(ast, visitor(rel, found));
+			return found;
+		}
+
+		/** @param {string} dir */
+		function walk(dir) {
+			for (const entry of readdirSync(dir, { withFileTypes: true })) {
+				const full = join(dir, entry.name);
+				if (entry.isDirectory()) { walk(full); continue; }
+				if (!entry.name.endsWith('.js')) continue;
+				// state.js is where the two recorders live, and the writes
+				// inside them are the ones every lane is routed through.
+				if (full.endsWith(join('handler', 'state.js'))) continue;
+				scanned++;
+				const rel = relative(runtimeDir, full).split(String.fromCharCode(92)).join('/');
+				const ast = parse(readFileSync(full, 'utf8'), { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+				walkAst(ast, visitor(rel, offenders));
+			}
+		}
+		walk(runtimeDir);
+		// A tree that stopped being walked would report no offenders, so the
+		// walk's reach is asserted against the tree's own size rather than a
+		// pinned number that an ordinary refactor would break.
+		const runtimeModules = countJsFiles(runtimeDir);
+		expect(scanned).toBe(runtimeModules - 1); // every module but state.js
+		expect(offenders).toEqual([]);
+
+		// POSITIVE CONTROL. `offenders` staying empty proves nothing unless the
+		// visitor can still produce one: a broken walk and a clean tree look
+		// identical from here. Each refused form is fed through the same
+		// visitor and must be caught.
+		const mutants = {
+			'direct write': 'maxSeenSeq.set(topic, seq);',
+			'computed write': "maxSeenSeq['set'](topic, seq);",
+			'namespace write': 'state.maxSeenSeq.set(topic, seq);',
+			'declaration alias': 'const m = maxSeenSeq; m.set(topic, seq);',
+			'assignment alias': 'let m; m = maxSeenSeq; m.set(topic, seq);',
+			'property alias': 'const cfg = { seen: maxSeenSeq };',
+			'missing bound': 'recordStampedSeen(maxSeenSeq, topic, seq);',
+			'undefined bound': 'recordStampedSeen(maxSeenSeq, topic, seq, undefined);',
+			'namespace recorder': 'state.recordStampedSeen(maxSeenSeq, topic, seq);',
+			'unbounded stamp': 'stampSeqValue(undefined, topicSeqs, topic);'
+		};
+		for (const [name, source] of Object.entries(mutants)) {
+			expect(offendersIn(source), name).not.toEqual([]);
 		}
 	});
 

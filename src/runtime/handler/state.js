@@ -59,10 +59,11 @@ export const divergenceDiagnostics = createDivergenceDiagnosticStore();
  * Used on the relay RECEIVE path, where frames can arrive out of order across
  * the worker `postMessage` boundary, so the monotone-max guard is required (a
  * blind overwrite could move the value backward and fabricate a divergence). The
- * local publish path already holds the freshly stamped (monotonic) seq, so it
- * sets `maxSeenSeq` directly without this guard. A non-number `seq` (a frame
- * relayed for a `{ seq: false }` topic) is ignored, so such topics never enter
- * the map on any worker.
+ * local publish path already holds the freshly stamped (monotonic) seq and takes
+ * `recordStampedSeen` below instead, which skips the compare but keeps the
+ * membership report. A non-number `seq` (a frame relayed for a
+ * `{ seq: false }` topic) is ignored, so such topics never enter the map on any
+ * worker.
  *
  * Pure with respect to inputs other than the supplied map (mirrors
  * `nextTopicSeq`), so a unit test can pass a fresh map per case.
@@ -84,6 +85,53 @@ export function recordSeen(seenMap, topic, seq, bound) {
 		return;
 	}
 	if (seq > prev) seenMap.set(topic, seq);
+}
+
+/**
+ * Record a freshly stamped counter `seq` for `topic` into a max-seen map.
+ *
+ * The local publish lanes hold a value they issued one line earlier, so the
+ * write itself skips the compare: the monotone-max lookup `recordSeen` performs
+ * exists for the reorder-prone relay RECEIVE path, and paying it on the hottest
+ * lane in the runtime would buy nothing for a topic whose numbers this worker's
+ * own counter issues in order.
+ *
+ * The exception is a topic that ALSO carries an external numeric authority.
+ * The counter is monotone in itself, not against a foreign seq recorded for
+ * the same topic, so a topic published once with `{ seq: 900000 }` and then
+ * with the counter records 1 here and the observed maximum moves backward.
+ * That is a pre-existing property of mixing two sequence authorities on one
+ * topic, which is already incoherent for resume - a client cannot hold one
+ * watermark against two numbering schemes - and it is deliberately not
+ * bought back with a lookup on every publish. Give a topic one authority.
+ *
+ * What it does share with `recordSeen` is the MEMBERSHIP report. A registry
+ * bound caps a map by hearing about the entries that enter it, and a lane that
+ * wrote the map directly was invisible to it: an application mixing an external
+ * seq authority with ordinary adapter counters could hold a full ceiling of
+ * observed topics from the relay and then add counter topics on top of it, one
+ * per publish, with nothing left to notice. Coldness is read from the map's own
+ * size across the write rather than from a preceding `has`, so a publish on a
+ * topic the map already holds - every publish but the first - pays two field
+ * reads and no second hash lookup.
+ *
+ * A non-number `seq` is ignored, exactly as in `recordSeen`: every call site
+ * guards on the stamp being non-null, and the day one stops, a null recorded
+ * here would become the `prev` that every later relay frame for that topic
+ * compares against. Pure with respect to inputs other than the supplied map,
+ * so a unit test can pass a fresh map per case.
+ *
+ * @param {Map<string, number>} seenMap
+ * @param {string} topic
+ * @param {number} seq
+ * @param {{ onSeenInsert(topic: string): void } | undefined} [bound]
+ * @returns {void}
+ */
+export function recordStampedSeen(seenMap, topic, seq, bound) {
+	if (typeof seq !== 'number') return;
+	const before = seenMap.size;
+	seenMap.set(topic, seq);
+	if (bound !== undefined && seenMap.size !== before) bound.onSeenInsert(topic);
 }
 
 /**

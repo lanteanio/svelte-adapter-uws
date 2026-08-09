@@ -8,7 +8,7 @@ import { exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObse
 import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeqValue, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
-import { capCounts, captureResumeFrame, counters, maxSeenSeq, divergenceDiagnostics, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, resumeBuffers, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
+import { capCounts, captureResumeFrame, counters, maxSeenSeq, divergenceDiagnostics, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, recordStampedSeen, resumeBuffers, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
 import { app, wsDebug, WS_COMPRESSION_ON, ALLOW_NON_ASCII_TOPICS } from './config.js';
 import { envelopePrefix } from './envelope-cache.js';
 import { batchRelay, relayBatched } from './relay.js';
@@ -78,15 +78,17 @@ export const platform = {
 		counters.publishCountWindow++;
 		const seq = stampSeqValue(seqOption, topicSeqs, topic, seqBound);
 		// Record the highest seq this worker has observed for the topic. An
-		// in-memory counter seq is freshly stamped and monotonic, so it is a bare
-		// set with no compare; an explicit numeric seq is cluster-authoritative,
-		// interleaves across workers on arrival, and so goes through the
-		// monotone-max guard (a bare set could regress the local max and fabricate
-		// a divergence). Skipped when stamping is off so a {seq:false}-only topic
-		// never enters the convergence comparison.
+		// in-memory counter seq is freshly stamped and monotonic, so it skips the
+		// compare; an explicit numeric seq is cluster-authoritative, interleaves
+		// across workers on arrival, and so goes through the monotone-max guard (a
+		// bare set could regress the local max and fabricate a divergence). Both
+		// arms report a new topic to the registry bound, which is what keeps the
+		// observed registry under the same ceiling as the counter registry.
+		// Skipped when stamping is off so a {seq:false}-only topic never enters
+		// the convergence comparison.
 		if (seq !== null) {
 			if (typeof seqOption === 'number') recordSeen(maxSeenSeq, topic, seq, seqBound);
-			else maxSeenSeq.set(topic, seq);
+			else recordStampedSeen(maxSeenSeq, topic, seq, seqBound);
 		}
 		// `{ jitterMs }` de-herd window: stamp it on the frame so each client rolls its
 		// own delay before dispatching (spreads N receivers' follow-up actions across
@@ -228,11 +230,12 @@ export const platform = {
 			: stampSeqValue(seqOption, topicSeqs, topic, seqBound);
 		// Track the highest observed seq for this topic (see platform.publish). An
 		// explicit numeric seq takes the monotone-max guard; the in-memory counter
-		// takes a bare set. Skipped on the relay path: relayPublish already called
-		// recordSeen with the guard the reorder-prone cross-worker receive path needs.
+		// skips the compare and keeps the membership report. Skipped on the relay
+		// path: relayPublish already called recordSeen with the guard the
+		// reorder-prone cross-worker receive path needs.
 		if (!isRelay && seq !== null) {
 			if (typeof seqOption === 'number') recordSeen(maxSeenSeq, topic, seq, seqBound);
-			else maxSeenSeq.set(topic, seq);
+			else recordStampedSeen(maxSeenSeq, topic, seq, seqBound);
 		}
 		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
 		// A zero-length frame at a send site would broadcast garbage to every
@@ -685,7 +688,7 @@ export const platform = {
 		}
 		// The max-seen record matches what N publishWire calls would have left
 		// behind. Counter seqs are freshly stamped and monotonic, so the batch
-		// max IS the last write a per-call loop would have made - one bare set.
+		// max IS the last write a per-call loop would have made - one write.
 		// Explicit entry seqs are cluster-authoritative and interleave across
 		// workers, so each goes through the monotone-max guard; a mixed batch
 		// applies them in entry order, as N calls would have.
@@ -693,10 +696,10 @@ export const platform = {
 			for (let i = 0; i < count; i++) {
 				if (seqs[i] === 0) continue;
 				if (entrySeqs[i] !== undefined) recordSeen(maxSeenSeq, topic, seqs[i], seqBound);
-				else maxSeenSeq.set(topic, seqs[i]);
+				else recordStampedSeen(maxSeenSeq, topic, seqs[i], seqBound);
 			}
 		} else if (highestSeq !== null) {
-			maxSeenSeq.set(topic, highestSeq);
+			recordStampedSeen(maxSeenSeq, topic, highestSeq, seqBound);
 		}
 		// Looked up only now, after every entry has stamped and serialised: a
 		// batch refused in the pre-pass, or aborted by a throwing toJSON, must
@@ -1698,7 +1701,7 @@ export const platform = {
 		assertGameLaneClusterSafe();
 		counters.publishCountWindow++;
 		const seq = stampSeqValue(undefined, topicSeqs, topic, seqBound);
-		if (seq !== null) maxSeenSeq.set(topic, seq);
+		if (seq !== null) recordStampedSeen(maxSeenSeq, topic, seq, seqBound);
 		const envelope = completeGameEnvelope(envelopePrefix(topic, event), data, seq, id);
 		fatal(envelope.length > 0, 'envelope.empty', null);
 		let s = topicPublishStats.get(topic);
@@ -2004,12 +2007,12 @@ export const platform = {
 			const m = messages[i];
 			counters.publishCountWindow++;
 			const seq = stampSeqValue(msgSeqs[i], topicSeqs, m.topic, seqBound);
-			// Track the highest observed seq per topic (see platform.publish): a
-			// bare set for the monotonic in-memory counter, the monotone-max guard
-			// for an explicit numeric seq.
+			// Track the highest observed seq per topic (see platform.publish): the
+			// compare-free record for the monotonic in-memory counter, the
+			// monotone-max guard for an explicit numeric seq.
 			if (seq !== null) {
 				if (typeof msgSeqs[i] === 'number') recordSeen(maxSeenSeq, m.topic, seq, seqBound);
-				else maxSeenSeq.set(m.topic, seq);
+				else recordStampedSeen(maxSeenSeq, m.topic, seq, seqBound);
 			}
 			const env = completeEnvelope(envelopePrefix(m.topic, m.event), m.data, seq);
 			events[i] = { topic: m.topic, env, seq };

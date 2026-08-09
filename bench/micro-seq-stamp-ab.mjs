@@ -5,22 +5,38 @@
 // three inline publish-site resolutions (publish / publishWire / publishBatched)
 // behind a shared `stampSeq(options, seqMap, topic)` helper, and split the
 // max-seen record into a numeric-guarded branch (an explicit authoritative seq
-// takes the monotone-max guard; the in-memory counter keeps its bare set). The
+// takes the monotone-max guard; the in-memory counter skips the compare). The
 // common publish carries NO seq option, so the hot path must stay byte-identical:
 // an absent-option publish must resolve + record exactly as fast as the old
 // inline ternary + bare set. This needs the bench, not an estimate - a
 // single-digit-% regression on the publish resolution is a blocker.
 //
 // Variant A replays the pre-change inline shape; Variant B calls the real shipped
-// stampSeq + recordSeen. Three operand shapes are timed: the absent case (the hot
-// path), { seq: false }, and { seq: <number> } (the new authoritative track).
+// stampSeq + the two max-seen recorders. Three operand shapes are timed: the
+// absent case (the hot path), { seq: false }, and { seq: <number> } (the new
+// authoritative track).
+//
+// The counter arm's recorder is `recordStampedSeen`, not a bare set: it keeps the
+// bare write and adds the membership report the registry bound needs. Its own
+// A/B against the bare set is bench/micro-seq-seen-record-ab.mjs; it is spelled
+// the shipped way here so this bench keeps replaying the real publish lane.
+//
+// READ THIS BENCH'S PUBLISH-PROXY NUMBERS AS A PAIR, NOT SINGLY. Its two cases
+// move in opposite directions by roughly the same amount on a single tree -
+// measured at +9%/-12%, +11%/-13%, +12%/-11% across three consecutive runs
+// with nothing changed between them - which no per-operation cost can produce.
+// The medians it compares carry that alternation, so its verdict line is a
+// smoke alarm rather than a measurement: when it fires, take the difference on
+// the FASTEST round of each arm (as micro-seq-seen-record-ab.mjs does) before
+// believing a regression. On this shape the fastest round is stable to a
+// fraction of a percent across invocations while the median swings by ten.
 //
 // Usage:
 //   node bench/micro-seq-stamp-ab.mjs [iterations] [rounds]
 // Defaults: 20_000_000 iterations, 12 rounds.
 
 import { stampSeq, nextTopicSeq, completeEnvelope } from '../src/runtime/utils/epoch.js';
-import { recordSeen } from '../src/runtime/handler/state.js';
+import { recordSeen, recordStampedSeen } from '../src/runtime/handler/state.js';
 
 const ITERATIONS = parseInt(process.argv[2] || '20000000', 10);
 const ROUNDS = parseInt(process.argv[3] || '12', 10);
@@ -38,12 +54,18 @@ function baseline(options, seqMap, seenMap) {
 	return seq;
 }
 
+// A bound that answers every insert as under-cap. Passing one matters: the
+// recorder short-circuits on an absent bound, so a bench that omitted it would
+// measure a cheaper shape than any shipped call site, all of which pass the
+// runtime's own bound.
+const idleBound = { onSeenInsert() {} };
+
 // Variant B: the shipped shared helper + numeric-guarded record branch.
 function current(options, seqMap, seenMap) {
 	const seq = stampSeq(options, seqMap, topic);
 	if (seq !== null) {
-		if (options && typeof options.seq === 'number') recordSeen(seenMap, topic, seq);
-		else seenMap.set(topic, seq);
+		if (options && typeof options.seq === 'number') recordSeen(seenMap, topic, seq, idleBound);
+		else recordStampedSeen(seenMap, topic, seq, idleBound);
 	}
 	return seq;
 }
@@ -63,8 +85,8 @@ function baselinePublish(options, seqMap, seenMap, stats) {
 function currentPublish(options, seqMap, seenMap, stats) {
 	const seq = stampSeq(options, seqMap, topic);
 	if (seq !== null) {
-		if (options && typeof options.seq === 'number') recordSeen(seenMap, topic, seq);
-		else seenMap.set(topic, seq);
+		if (options && typeof options.seq === 'number') recordSeen(seenMap, topic, seq, idleBound);
+		else recordStampedSeen(seenMap, topic, seq, idleBound);
 	}
 	const env = completeEnvelope(ENV_PREFIX, ENV_DATA, seq, null);
 	stats.b += env.length;
@@ -163,7 +185,7 @@ for (const c of [{ name: 'absent (hot path)', options: undefined }, { name: '{ s
 	if (Math.abs(deltaPct) <= noiseFloor) verdict = `noise (within stddev ${noiseFloor.toFixed(2)}%) -> free`;
 	else if (deltaPct < 0) verdict = `current FASTER by ${Math.abs(deltaPct).toFixed(2)}%`;
 	else if (deltaPct < 1) verdict = `current slower by <1% (${deltaPct.toFixed(2)}%) -> negligible`;
-	else { verdict = `current slower by ${deltaPct.toFixed(2)}% -> investigate`; if (c.name.startsWith('absent')) blocker = true; }
+	else { verdict = `median says slower by ${deltaPct.toFixed(2)}% -> read the fastest-round line above before believing it`; if (c.name.startsWith('absent')) blocker = true; }
 	console.log(`  delta ${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%   ${verdict}`);
 }
 

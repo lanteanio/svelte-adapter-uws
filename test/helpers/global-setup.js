@@ -15,8 +15,8 @@
 // and the call is a digest check. Suites keep their own call, so running a single
 // file directly still works.
 //
-// SCOPED TO THE RUN. Building all nine unconditionally made
-// `npx vitest run test/env.test.js` pay nine serial `vite build`s on a cold tree
+// SCOPED TO THE RUN. Building every variant unconditionally made
+// `npx vitest run test/env.test.js` pay one serial `vite build` per variant on a cold tree
 // before a single test executed, for a suite that boots no runtime at all. Since
 // every suite still builds what it needs on demand, pre-building the wrong set
 // costs only the contention this file exists to avoid - never correctness - so

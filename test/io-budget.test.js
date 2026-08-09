@@ -474,8 +474,21 @@ const EXTERNAL_THUNK_CLONE_TAG = 'function hiddenThunkCloneTag(_strings, thunk) 
 // only. The known-topic stamp shape is unchanged and measured within run
 // noise against an inline replay of the pre-change body; no byte is read,
 // allocated or copied, and no copy primitive entered the body.
+//
+// Re-pinned again after the counter arm's max-seen write moved from a bare
+// `maxSeenSeq.set` to `recordStampedSeen`: the write itself is unchanged, and
+// what the recorder adds is a report to the registry bound when the write
+// admitted a topic the map did not hold - the membership the bound was blind
+// to, which left the observed registry growing past its configured ceiling.
+// The map write itself is unchanged and now sits inside the recorder's frame;
+// what the publish additionally pays is two reads of the map's own size and a
+// compare, with no second hash lookup. Measured on the fastest round of each
+// arm rather than the median, because the median's run-to-run spread on this
+// shape is an order of magnitude larger than the effect: 0.13 ns/op on the
+// shipped two-armed shape (bench/micro-seq-seen-record-ab.mjs). No byte is
+// read, allocated or copied, and no copy primitive entered the body.
 const COPY_AUTHORITY_SYNTAX = Object.freeze({
-	publishWire: '45689fe902d3c6e9e47ba4c624baee4a85f7aa575e496ce44d7960fec174b239',
+	publishWire: '9b597e4bcbad7c70ec9a0f068d42b2fbf9733b8f469d4c73c9c7e58a97083648',
 	deliverStatelessWireFanout: '98c4246e4bea446d1647f6bf0b13fb0e0cde521ac27dfe899eff42b884113afa',
 	dispatchIngressFrame: '5ff5ed75d331620ed0bbdd4ffd9fe57ecb993b3b3d97923bdb7edf48e7483e5b',
 	send: 'c900028ed26614f6a0d83b1d57a6649a52db522503def86eee3000541d285b11',
@@ -782,7 +795,25 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// topicEpoch is deliberately UNCHANGED - the floor carry is what keeps a
 	// resuming client correct, so no epoch moves. No frame byte is read,
 	// allocated or copied, and no copy primitive entered the graph.
-	platform: 'eb9d49a7ef1117b64acddb5dc24aca57ceaab49e1944b58c8abb24d14a287729',
+	//
+	// Re-pinned for the observed registry's missing membership report, the half
+	// of the bound above that the seal did NOT catch: five publish lanes wrote
+	// maxSeenSeq with a bare set, so the ceiling bounded the counter registry
+	// alone and an application mixing an external seq authority with ordinary
+	// counters retained close to two ceilings. state.js gains recordStampedSeen
+	// (the same bare write, plus a size-delta check that reports a newly
+	// admitted topic to the bound) and platform.js's five counter-arm writes
+	// call it. The map write is unchanged and now sits inside the recorder's
+	// frame; what the publish additionally pays is that frame, a non-number
+	// guard, a bound-present guard, and two reads of the map's own size with a
+	// compare - and no second hash lookup. The frame is the part worth naming:
+	// utils/epoch.js records that `nextTopicSeq` was inlined into stampSeqValue
+	// because a wrapper call measured a few percent on this same lane, so the
+	// shape is one this file has been bitten by. Measured against it directly,
+	// on the fastest round of each arm in the shipped two-armed shape:
+	// 0.13 ns/op (bench/micro-seq-seen-record-ab.mjs). No frame byte is read,
+	// allocated or copied, and no copy primitive entered the graph.
+	platform: '56c50eea07e6dd16c8fef771199bf947e88675cf6a31898dab835af45668a0e3',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

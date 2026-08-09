@@ -98,10 +98,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `maxTopicSeqEntries` plus two reporter intervals of new-topic arrivals;
   README and the type declaration carry the formula. Both registries forget a
   topic together, and the divergence reporter's mirror maps now follow the
-  live registry's membership, so one cap bounds all four. The default equals the warning threshold, `0` disables the bound,
-  and `createTestServer` mirrors the option. Steady-state publish stamping
-  is unchanged within measurement noise; the eviction cost is paid only on
-  inserting a new topic at the cap.
+  live registry's membership, so one cap bounds all four. They are bounded on
+  ADMISSION together as well: every lane that records a topic reports it,
+  the publish counters and the observed-seq record alike, so an application
+  that mixes an externally authored sequence with ordinary adapter counters
+  holds one ceiling between them instead of one each. The default equals the
+  warning threshold, `0` disables the bound, and `createTestServer` mirrors
+  the option. Steady-state publish stamping is unchanged: against the previous
+  write it measures 0.13 ns per publish, taken from the fastest round of each
+  arm because this shape's median swings by several percent run to run. The
+  eviction cost is paid only on inserting a new topic at the cap.
 
 - **`channel.shoot` accepts an app-supplied render instant, so a rewind
   ceiling is finally exercisable from the app side.** The smooth client
