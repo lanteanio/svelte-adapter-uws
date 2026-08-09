@@ -185,6 +185,13 @@ and has no config:
 - **check-entry-points** - every public export has an owned README route.
 - **check-diagnostic-attribution** - every diagnostic is attributed to a
   canonical area rather than an ad-hoc string.
+- **check-console-index** - every console-printed failure anywhere in `src` is
+  either printed through the error registry (so it lands in `docs/errors.md`
+  and carries its stable id) or recorded in the gate's allowlist with a reason
+  an operator who saw the line needs nothing more. A new raw `console.error`
+  fails until one of the two is true. The gate reads every module and keeps a
+  named exclusion list with a reason each, so a new file is covered the day it
+  is added rather than the day someone remembers to list it.
 - **check-related-projects** - the related-projects snapshot and its import
   path are valid.
 - **generate-api-docs --check** - every bounded public API block in README is

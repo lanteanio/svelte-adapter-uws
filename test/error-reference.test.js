@@ -26,6 +26,7 @@ import {
 	scanEmittedEvents,
 	validateErrorRegistry
 } from '../scripts/generate-error-reference.js';
+import { auditConsoleFailures, auditRuntimeConsoleFailures, staleExclusions } from '../scripts/check-console-index.js';
 
 const read = (relative) => readFileSync(new URL('../' + relative, import.meta.url), 'utf8');
 const byId = new Map(ADAPTER_ERROR_REGISTRY.map((entry) => [entry.id, entry]));
@@ -393,6 +394,193 @@ describe('generated operational error reference', () => {
 				expect(findUnindexedFailures({ idKeyReferences: new Set(), events: [failing('zz.x', severities)] }),
 					JSON.stringify(severities)).toHaveLength(1);
 			}
+		});
+	});
+
+	// The coverage gate above starts from the EVENTS the runtime emits, so it
+	// can only ever see failures that enter the diagnostic pipeline. A plain
+	// console.error emits no event, references no id, and was invisible to it -
+	// which is how consequential failures (a shutdown hook that threw, metrics
+	// disabling themselves, a message hook closing a client with 1011) printed
+	// text no search of this document could resolve. That gap is closed from
+	// the call sites instead.
+	describe('console call-site gate', () => {
+		it('accounts for every console failure in the shipped runtime', () => {
+			const { failures, indexed, modules } = auditRuntimeConsoleFailures();
+			expect(failures).toEqual([]);
+			// A tree that stopped being scanned would also report no failures.
+			expect(modules).toBeGreaterThan(50);
+			expect(indexed).toBeGreaterThan(0);
+		});
+
+		it('refuses a new console failure that is neither indexed nor recorded', () => {
+			const source = "console.error('[ws] the widget lane collapsed:', err);\n";
+			const { failures } = auditConsoleFailures(source, 'utils/widget.js', new Map());
+			expect(failures).toHaveLength(1);
+			expect(failures[0]).toContain('utils/widget.js:1');
+			expect(failures[0]).toContain('the widget lane collapsed');
+		});
+
+		it('accepts a line printed through the registry, and one recorded with a reason', () => {
+			const indexedSource = "console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.MESSAGE_HOOK), err);\n";
+			// At the file the entry declares as a source - the gate refuses the
+			// same call anywhere the entry does not name.
+			const result = auditConsoleFailures(indexedSource, 'runtime/utils/hook-boundary.js', new Map());
+			expect(result.failures).toEqual([]);
+			expect(result.indexed).toBe(1);
+
+			const recorded = new Map([['utils/widget.js::[ws] the widget lane collapsed:', 'narrates an indexed failure']]);
+			const raw = "console.error('[ws] the widget lane collapsed:', err);\n";
+			expect(auditConsoleFailures(raw, 'utils/widget.js', recorded).failures).toEqual([]);
+		});
+
+		// The call SHAPE is not the contract - the id is. `adapterConsoleLine`
+		// throws on an id it cannot resolve, and it is called from inside catch
+		// blocks, so a dangling id replaces the failure being reported with a
+		// TypeError that also skips whatever recovery the catch was performing.
+		it('refuses an adapterConsoleLine call whose id is not a console entry', () => {
+			const dangling = "console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.WIDGET), err);\n";
+			const { failures } = auditConsoleFailures(dangling, 'utils/widget.js', new Map());
+			expect(failures).toHaveLength(1);
+			expect(failures[0]).toContain('not a registry entry');
+
+			// A real id whose emission is not `console` is refused the same way,
+			// because adapterConsoleLine refuses it at runtime too.
+			const thrownEntry = ADAPTER_ERROR_REGISTRY.find((entry) => entry.emission !== 'console');
+			const key = Object.keys(ADAPTER_ERROR_IDS).find((name) => ADAPTER_ERROR_IDS[name] === thrownEntry.id);
+			const wrongEmission = `console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.${key}), err);\n`;
+			expect(auditConsoleFailures(wrongEmission, 'utils/widget.js', new Map()).failures[0])
+				.toContain('rather than "console"');
+		});
+
+		// A warn-level line indexed as an error misfiles wherever severity
+		// routes, and the reference then describes it at the wrong urgency.
+		it('refuses a console method that disagrees with the entry severity', () => {
+			const errorEntry = ADAPTER_ERROR_REGISTRY.find((entry) => entry.emission === 'console' && entry.severity === 'error');
+			const key = Object.keys(ADAPTER_ERROR_IDS).find((name) => ADAPTER_ERROR_IDS[name] === errorEntry.id);
+			const source = `console.warn(adapterConsoleLine(ADAPTER_ERROR_IDS.${key}));\n`;
+			const { failures } = auditConsoleFailures(source, 'utils/widget.js', new Map());
+			expect(failures).toHaveLength(1);
+			expect(failures[0]).toContain('severity');
+		});
+
+		// Every printer spelling the header claims to follow, and the two
+		// object-access forms, which no file in the tree currently uses - so
+		// without this they were assertions about code nobody had run.
+		it('follows every console spelling and binding the header claims', () => {
+			const emit = "('[ws] the widget lane collapsed:', err);";
+			for (const source of [
+				`console.error${emit}`,
+				`console['error']${emit}`,
+				`globalThis.console.error${emit}`,
+				`globalThis['console'].error${emit}`,
+				`const fail = console.error.bind(console);\nfail${emit}`,
+				`const { error: fail } = console;\nfail${emit}`,
+				`const c = console;\nc.error${emit}`,
+				`let fail;\nfail = console.warn;\nfail${emit}`
+			]) {
+				const { failures } = auditConsoleFailures(source, 'utils/widget.js', new Map());
+				expect(failures, source).toHaveLength(1);
+			}
+			// console.log is not a failure and must not be conscripted.
+			expect(auditConsoleFailures(`console.log${emit}`, 'utils/widget.js', new Map()).failures).toEqual([]);
+		});
+
+		// An entry is checked against the call sites it names, and the prose is
+		// written per site - so a site the entry does not name is one nobody
+		// checked the prose against.
+		it('refuses a call site the entry does not declare as a source', () => {
+			const consoleEntry = ADAPTER_ERROR_REGISTRY.find((entry) => entry.emission === 'console');
+			const key = Object.keys(ADAPTER_ERROR_IDS).find((name) => ADAPTER_ERROR_IDS[name] === consoleEntry.id);
+			const source = `console.${consoleEntry.severity === 'warn' ? 'warn' : 'error'}(adapterConsoleLine(ADAPTER_ERROR_IDS.${key}));\n`;
+			const { failures } = auditConsoleFailures(source, 'runtime/somewhere-else.js', new Map());
+			expect(failures).toHaveLength(1);
+			expect(failures[0]).toContain('sources do not name this file');
+			// And it passes at a site the entry does declare.
+			const declared = consoleEntry.sources[0].replace(/^src\//, '');
+			expect(auditConsoleFailures(source, declared, new Map()).failures).toEqual([]);
+		});
+
+		it('reports an exclusion that no longer names a file', () => {
+			expect(staleExclusions()).toEqual([]);
+		});
+
+		// Writing to the stream directly skips every classification above.
+		it('refuses a failure written straight to stderr', () => {
+			const { failures } = auditConsoleFailures("process.stderr.write('[ws] the lane collapsed\\n');\n", 'utils/widget.js', new Map());
+			expect(failures).toHaveLength(1);
+			expect(failures[0]).toContain('bypasses the console index');
+		});
+
+		// The decision is keyed on the text an operator would search for, so
+		// rewording the line asks for the decision again instead of inheriting
+		// one made about different words.
+		it('does not let a reworded line inherit an earlier decision', () => {
+			const recorded = new Map([['utils/widget.js::[ws] the widget lane collapsed:', 'narrates an indexed failure']]);
+			const reworded = "console.error('[ws] the widget lane failed:', err);\n";
+			expect(auditConsoleFailures(reworded, 'utils/widget.js', recorded).failures).toHaveLength(1);
+		});
+
+		it('refuses a line with no invariant text of its own', () => {
+			for (const source of [
+				"console.warn('[ws] ' + detail);\n",
+				'console.error(`[svelte-adapter-uws] ${prefix}`);\n'
+			]) {
+				const { failures } = auditConsoleFailures(source, 'utils/widget.js', new Map());
+				expect(failures, source).toHaveLength(1);
+				expect(failures[0]).toContain('no invariant text');
+			}
+			// An interpolation in the MIDDLE is fine: the words around it are
+			// what an operator searches for, and they are what the key carries.
+			const interpolated = 'console.error(`[ws] the widget lane collapsed after ${ms}ms`);\n';
+			const key = 'utils/widget.js::[ws] the widget lane collapsed after {}ms';
+			expect(auditConsoleFailures(interpolated, 'utils/widget.js', new Map([[key, 'recorded']])).failures).toEqual([]);
+
+			// EVERY leading tag is stripped, not just the first - otherwise a
+			// second family tag reads as the line's own invariant words.
+			const twoTags = "console.warn('[svelte-adapter-uws] [tls] ' + detail);\n";
+			expect(auditConsoleFailures(twoTags, 'utils/widget.js', new Map()).failures[0]).toContain('no invariant text');
+		});
+
+		// The key normalises whitespace runs, so it is not collision-proof and
+		// the check that catches one is load-bearing rather than belt-and-braces.
+		it('refuses two lines whose keys collide through whitespace', () => {
+			const source = "console.error('[ws] the widget lane\\n collapsed:', a);\nconsole.error('[ws] the widget lane collapsed:', b);\n";
+			const recorded = new Map([['utils/widget.js::[ws] the widget lane collapsed:', 'judged once']]);
+			const { failures } = auditConsoleFailures(source, 'utils/widget.js', recorded);
+			expect(failures).toHaveLength(1);
+			expect(failures[0]).toContain('the same key');
+		});
+
+		// A printer taken as an injectable default is still console.error. The
+		// relay spill policy takes exactly that shape so a test can capture its
+		// output, and its quarantine line was invisible to a walk that only
+		// recognised `console.error(...)` spelled literally.
+		it('sees a console printer bound under another name', () => {
+			const emit = "log('[primary] the relay lane collapsed:', err);";
+			for (const source of [
+				`const { log = console.error } = options;\n${emit}\n`,
+				`const log = console.error;\n${emit}\n`,
+				`function report(log = console.warn) {\n\t${emit}\n}\n`
+			]) {
+				const { failures } = auditConsoleFailures(source, 'relay.js', new Map());
+				expect(failures, source).toHaveLength(1);
+				expect(failures[0]).toContain('alias');
+			}
+		});
+
+		it('reports an allowlist entry that no longer matches anything', () => {
+			const stale = new Map([['utils/gone.js::[ws] a line that was deleted:', 'no longer emitted']]);
+			const { failures } = auditRuntimeConsoleFailures(stale);
+			expect(failures.some((f) => f.includes('stale UNINDEXED entry'))).toBe(true);
+		});
+
+		// console.log and friends are not failures, and the gate must not
+		// conscript them - an informational line has nothing to index.
+		it('leaves informational console output alone', () => {
+			const source = "console.log('[ws] listening on ' + port);\nconsole.info('[ws] ready');\n";
+			const { failures } = auditConsoleFailures(source, 'utils/widget.js', new Map());
+			expect(failures).toEqual([]);
 		});
 	});
 

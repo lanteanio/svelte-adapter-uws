@@ -4,13 +4,18 @@ Search this page with the exact stable ID, code, event, or beginning of the mess
 Every failure emitted as a diagnostic event is indexed below with its cause, what it means
 for traffic, whether anything recovers on its own, and what to do next: 34 entries
 against the 37 distinct diagnostic events emitted from the scanned sources, plus
-15 entries indexing consequential plain console lines that never enter the diagnostic
+30 entries indexing consequential plain console lines that never enter the diagnostic
 pipeline - each such line is printed through the registry and carries its stable ID tag, so
 the emitted text cannot drift from the prefix indexed here. The remaining emitted events are
 informational, listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance
 because there is nothing to recover from. A new failure event cannot be added to those sources
-without an entry here: the generator fails the build until one exists. Plain console output
-without a stable ID tag is operational narration, outside this index.
+without an entry here: the generator fails the build until one exists. Plain console output is
+held to the same rule from the other side - check-console-index walks every console.warn and
+console.error across the production runtime, the dev server, the test harness and the shipped
+plugins, and fails the build unless the line prints through this registry or carries a recorded
+reason an operator who read it needs nothing more. A failure absent from this page is therefore
+a decision someone made rather than one nobody noticed. The build-time adapter and the browser
+client print for other audiences and are deliberately outside that walk.
 
 This is the adapter-owned part of the ecosystem index. The sibling packages
 generate and ship their own runtime-owned references on the same release channel:
@@ -69,6 +74,21 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-WORKER-RESTART-LIMIT](#adapter-err-worker-restart-limit) | `cluster.worker.restart-limit` | `[svelte-adapter-uws] Worker restart limit reached for ` |
 | [ADAPTER-ERR-TLS-DEGRADED-EXPIRY](#adapter-err-tls-degraded-expiry) | `tls.degraded-expiry-alert` | `[svelte-adapter-uws] [tls] certificate hot-reload is DEGRADED (` |
 | [ADAPTER-ERR-SENDTO-ASYNC-FILTER](#adapter-err-sendto-async-filter) | `ws.sendto.async-filter-refused` | `[ws] platform.sendTo filter returned a Promise; treating as fail-closed.` |
+| [ADAPTER-ERR-WS-SHUTDOWN-HOOK-THREW](#adapter-err-ws-shutdown-hook-threw) | `ws.shutdown-hook.threw` | `[ws] the WebSocket shutdown hook threw` |
+| [ADAPTER-ERR-WS-SHUTDOWN-HOOK-UNSETTLED](#adapter-err-ws-shutdown-hook-unsettled) | `ws.shutdown-hook.unsettled` | `[ws] the WebSocket shutdown hook has not settled after ` |
+| [ADAPTER-ERR-MESSAGE-HOOK](#adapter-err-message-hook) | `ws.message-hook.threw` | `[ws] the message hook threw` |
+| [ADAPTER-ERR-RECOVER-HOOK](#adapter-err-recover-hook) | `ws.recover-hook.threw` | `[ws] the recover-on-subscribe hook threw` |
+| [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape) | `ws.metrics.module-shape` | `[ws] the metrics module must default-export a registry object; got ` |
+| [ADAPTER-ERR-METRICS-INSTRUMENT](#adapter-err-metrics-instrument) | `ws.metrics.instrument-threw` | `[ws] a metrics instrument threw; further errors from it are suppressed` |
+| [ADAPTER-ERR-POSTURE-EXPORT-DISABLED](#adapter-err-posture-export-disabled) | `ws.posture-export.disabled` | `[ws] posture export disabled: ` |
+| [ADAPTER-ERR-POSTURE-OBSERVER](#adapter-err-posture-observer) | `ws.posture-observer.threw` | `[ws] a posture transition handler threw` |
+| [ADAPTER-ERR-UPGRADE-DEFERRED](#adapter-err-upgrade-deferred) | `ws.upgrade.deferred-failed` | `[ws] a deferred upgrade failed` |
+| [ADAPTER-ERR-WAITING-ROOM-FALLBACK](#adapter-err-waiting-room-fallback) | `ws.waiting-room.renderer-failed` | `[svelte-adapter-uws] the waiting-room renderer failed; serving the built-in English page instead` |
+| [ADAPTER-ERR-DIAGNOSTIC-RECORD-SHAPE](#adapter-err-diagnostic-record-shape) | `ws.diagnostic.record-shape` | `[ws] operational event dropped, invalid record shape` |
+| [ADAPTER-ERR-RESOURCE-GROWTH](#adapter-err-resource-growth) | `ws.resource-growth.trending` | `[ws] resource-growth auditor: ` |
+| [ADAPTER-ERR-RELAY-SPILL-QUARANTINE](#adapter-err-relay-spill-quarantine) | `cluster-relay.spill-quarantine` | `[primary] relay spill quarantining ` |
+| [ADAPTER-ERR-POSTURE-TRANSITION](#adapter-err-posture-transition) | `ws.protection-posture.transition` | `[ws] protection posture ` |
+| [ADAPTER-ERR-WORKER-EXIT-SIGKILL](#adapter-err-worker-exit-sigkill) | `cluster.worker-exit-sigkill` | `[primary] worker ` |
 
 ## Emitted diagnostic event coverage
 
@@ -134,6 +154,21 @@ the stable ID tag on the line):
 - `[svelte-adapter-uws] Worker restart limit reached for ` - [ADAPTER-ERR-WORKER-RESTART-LIMIT](#adapter-err-worker-restart-limit)
 - `[svelte-adapter-uws] [tls] certificate hot-reload is DEGRADED (` - [ADAPTER-ERR-TLS-DEGRADED-EXPIRY](#adapter-err-tls-degraded-expiry)
 - `[ws] platform.sendTo filter returned a Promise; treating as fail-closed.` - [ADAPTER-ERR-SENDTO-ASYNC-FILTER](#adapter-err-sendto-async-filter)
+- `[ws] the WebSocket shutdown hook threw` - [ADAPTER-ERR-WS-SHUTDOWN-HOOK-THREW](#adapter-err-ws-shutdown-hook-threw)
+- `[ws] the WebSocket shutdown hook has not settled after ` - [ADAPTER-ERR-WS-SHUTDOWN-HOOK-UNSETTLED](#adapter-err-ws-shutdown-hook-unsettled)
+- `[ws] the message hook threw` - [ADAPTER-ERR-MESSAGE-HOOK](#adapter-err-message-hook)
+- `[ws] the recover-on-subscribe hook threw` - [ADAPTER-ERR-RECOVER-HOOK](#adapter-err-recover-hook)
+- `[ws] the metrics module must default-export a registry object; got ` - [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape)
+- `[ws] a metrics instrument threw; further errors from it are suppressed` - [ADAPTER-ERR-METRICS-INSTRUMENT](#adapter-err-metrics-instrument)
+- `[ws] posture export disabled: ` - [ADAPTER-ERR-POSTURE-EXPORT-DISABLED](#adapter-err-posture-export-disabled)
+- `[ws] a posture transition handler threw` - [ADAPTER-ERR-POSTURE-OBSERVER](#adapter-err-posture-observer)
+- `[ws] a deferred upgrade failed` - [ADAPTER-ERR-UPGRADE-DEFERRED](#adapter-err-upgrade-deferred)
+- `[svelte-adapter-uws] the waiting-room renderer failed; serving the built-in English page instead` - [ADAPTER-ERR-WAITING-ROOM-FALLBACK](#adapter-err-waiting-room-fallback)
+- `[ws] operational event dropped, invalid record shape` - [ADAPTER-ERR-DIAGNOSTIC-RECORD-SHAPE](#adapter-err-diagnostic-record-shape)
+- `[ws] resource-growth auditor: ` - [ADAPTER-ERR-RESOURCE-GROWTH](#adapter-err-resource-growth)
+- `[primary] relay spill quarantining ` - [ADAPTER-ERR-RELAY-SPILL-QUARANTINE](#adapter-err-relay-spill-quarantine)
+- `[ws] protection posture ` - [ADAPTER-ERR-POSTURE-TRANSITION](#adapter-err-posture-transition)
+- `[primary] worker ` - [ADAPTER-ERR-WORKER-EXIT-SIGKILL](#adapter-err-worker-exit-sigkill)
 
 ### Informational events
 
@@ -424,7 +459,7 @@ searchable log prefix is:
 
 - **Code/event:** `resume.hook-failed`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.resume event=resume.hook-failed severity=error] The resume hook threw; the client falls back to a fresh subscribe.`
-- **Cause:** The application resume hook threw while answering a client gap-fill request, so some or all of the replay frames it owed were never sent.
+- **Cause:** The application resume hook threw while answering a client GAP-FILL request, so some or all of the replay frames it owed were never sent. The same hook failing on the subscribe-time backfill is ADAPTER-ERR-RECOVER-HOOK instead.
 - **Consequence:** The client is still sent `resumed`, because that ack is not conditional on the hook. It therefore believes its gap was handled and reports nothing. Whether the history is actually recovered depends on whether the subscribe frames it sends next carry recover offsets; if they do not, the gap is permanent and silent on both sides.
 - **Automatic recovery:** None for the gap. Despite the message text, no fallback subscribe is triggered by this failure - the client simply continues its normal sequence.
 - **Next action:** Fix the hook if resume coverage matters for these topics, and do not read a `resumed` ack as evidence a gap was filled. Clients that subscribe with recover offsets recover anyway; clients that do not are missing history without any signal.
@@ -745,3 +780,183 @@ searchable log prefix is:
 - **Operator shortlink:** `https://svti.me/sendto-async`
 - **Runtime help:** `docs/errors.md#adapter-err-sendto-async-filter`
 - **Runtime sources:** [src/runtime/handler/platform.js](../src/runtime/handler/platform.js)
+
+<a id="adapter-err-ws-shutdown-hook-threw"></a>
+## `ADAPTER-ERR-WS-SHUTDOWN-HOOK-THREW`
+
+- **Code/event:** `ws.shutdown-hook.threw`
+- **Message prefix:** `[ws] the WebSocket shutdown hook threw`
+- **Cause:** The `shutdown` export of the WebSocket handler threw synchronously or rejected while the server was closing.
+- **Consequence:** Whatever that hook was flushing did not finish - final writes, external deregistration, or draining a queue. The throw is contained and the teardown carries on regardless, so the loss is silent unless this line is read. The same line prints for the same hook on all three surfaces: under the production runtime and createTestServer the listen socket closes after the hook, and on the dev server the hook runs from the server's own close event, so the socket is already gone by then.
+- **Automatic recovery:** None. Shutdown is best-effort and proceeds without the hook.
+- **Next action:** Fix the hook, then check whatever it was flushing for state left behind. Under the production runtime and createTestServer the hook is handed a `signal` it can watch to give up cleanly instead of throwing - but only when a shutdown budget is configured, and it is null without one. The dev server passes no such field at all, so a hook that reads it must tolerate undefined.
+- **Runtime help:** `docs/errors.md#adapter-err-ws-shutdown-hook-threw`
+- **Runtime sources:** [src/runtime/handler/lifecycle.js](../src/runtime/handler/lifecycle.js), [src/vite.js](../src/vite.js), [src/testing.js](../src/testing.js)
+
+<a id="adapter-err-ws-shutdown-hook-unsettled"></a>
+## `ADAPTER-ERR-WS-SHUTDOWN-HOOK-UNSETTLED`
+
+- **Code/event:** `ws.shutdown-hook.unsettled`
+- **Message prefix:** `[ws] the WebSocket shutdown hook has not settled after `
+- **Cause:** The `shutdown` export of the WebSocket handler was still running when the shutdown budget expired.
+- **Consequence:** The close path stops waiting and the listen socket closes anyway. The hook keeps running - user code cannot be interrupted - but nothing awaits it, so whatever it was flushing is cut off by whatever ends the process next. createTestServer prints the same line for the same hook.
+- **Automatic recovery:** None by design: the budget exists so a wedged hook cannot hold the process open.
+- **Next action:** Make the hook finish inside the budget, or raise SHUTDOWN_TIMEOUT. The hook receives a `signal` that aborts when the budget expires - honoring it turns this into a clean early return.
+- **Runtime help:** `docs/errors.md#adapter-err-ws-shutdown-hook-unsettled`
+- **Runtime sources:** [src/runtime/handler/lifecycle.js](../src/runtime/handler/lifecycle.js), [src/testing.js](../src/testing.js)
+
+<a id="adapter-err-message-hook"></a>
+## `ADAPTER-ERR-MESSAGE-HOOK`
+
+- **Code/event:** `ws.message-hook.threw`
+- **Message prefix:** `[ws] the message hook threw`
+- **Cause:** The application or plugin `message` hook threw or rejected while handling a client frame.
+- **Consequence:** That client's connection is closed with code 1011 and the reason `Message handler error`; the cause stays server-side and is not sent to the client. Other connections are unaffected. A client that reconnects and replays the same frame is closed again.
+- **Automatic recovery:** None for the frame. The client sees a close, and reconnection is the client library's own resume path.
+- **Next action:** Fix the hook, or catch inside it and answer the client deliberately. The error printed with this line is the original throw.
+- **Runtime help:** `docs/errors.md#adapter-err-message-hook`
+- **Runtime sources:** [src/runtime/utils/hook-boundary.js](../src/runtime/utils/hook-boundary.js)
+
+<a id="adapter-err-recover-hook"></a>
+## `ADAPTER-ERR-RECOVER-HOOK`
+
+- **Code/event:** `ws.recover-hook.threw`
+- **Message prefix:** `[ws] the recover-on-subscribe hook threw`
+- **Cause:** The `resume` hook threw on the RECOVER-ON-SUBSCRIBE path - a client subscribing to a topic the server was asked to backfill - so the backlog that subscription should have replayed could not be produced. The same hook failing on a client resume frame is ADAPTER-ERR-RESUME-HOOK instead.
+- **Consequence:** The subscription itself still completes: the client is subscribed and receives live frames from that moment on, but the events it missed before subscribing are not delivered and no gap is reported to it. It looks like a working subscription with a hole at the start.
+- **Automatic recovery:** None. Live delivery continues; the missed range is not retried.
+- **Next action:** Fix the hook or make it fail closed for the topics it cannot serve. A hook that throws for a topic it does not own should return an empty result for it instead.
+- **Runtime help:** `docs/errors.md#adapter-err-recover-hook`
+- **Runtime sources:** [src/runtime/handler.js](../src/runtime/handler.js), [src/vite.js](../src/vite.js), [src/testing.js](../src/testing.js)
+
+<a id="adapter-err-metrics-module-shape"></a>
+## `ADAPTER-ERR-METRICS-MODULE-SHAPE`
+
+- **Code/event:** `ws.metrics.module-shape`
+- **Message prefix:** `[ws] the metrics module must default-export a registry object; got `
+- **Cause:** The module named by `websocket.metrics` default-exports something that cannot carry instrument factories. The build forwards whatever the module exports without validating its shape.
+- **Consequence:** Metrics are disabled for the whole worker: no instrument is ever created, so the adapter series are ABSENT from the scrape rather than present at zero. Dashboards read as no data and alerts that fire on a threshold never fire at all.
+- **Automatic recovery:** None. The runtime keeps serving traffic with metrics off - the alternative is a boot failure naming neither metrics nor the option that caused it.
+- **Next action:** The guard accepts any object or function, so what printed this is a PRIMITIVE default export - the `got` value on the line says which. Default-export the registry itself (`export default registry`). Note the two shapes that pass this guard and still do not work: a module with no default export at all is treated as no registry configured and prints nothing, and a factory is accepted as-is and never called.
+- **Runtime help:** `docs/errors.md#adapter-err-metrics-module-shape`
+- **Runtime sources:** [src/runtime/utils/metrics.js](../src/runtime/utils/metrics.js)
+
+<a id="adapter-err-metrics-instrument"></a>
+## `ADAPTER-ERR-METRICS-INSTRUMENT`
+
+- **Code/event:** `ws.metrics.instrument-threw`
+- **Message prefix:** `[ws] a metrics instrument threw; further errors from it are suppressed`
+- **Cause:** Recording a value threw. The containment wraps the adapter's own mirror of the instrument, so the throw is usually from the registry module the `websocket.metrics` option names, but adapter code runs first on that path and a failure there surfaces the same way.
+- **Consequence:** Where the value ends up depends on which side threw. The adapter records into its own mirror BEFORE delegating, so a throw from the configured registry loses the value only from that registry's scrape - `metricsSnapshot()` still has it. Every later call is attempted again, the containment being per call, so an instrument that throws for one label set or one transient keeps recording the rest; but the failures are printed once and then suppressed, so nothing tells you whether it kept failing. A series that stops moving reads as an idle server rather than a broken instrument.
+- **Automatic recovery:** The throw is contained per call, so the request or frame that triggered it completes normally, and a transient failure self-heals on the next call.
+- **Next action:** Read the error printed with this line - it is the original throw, and its stack says which side failed. Label cardinality and type mismatches in the registry module are the usual causes.
+- **Runtime help:** `docs/errors.md#adapter-err-metrics-instrument`
+- **Runtime sources:** [src/runtime/utils/metrics.js](../src/runtime/utils/metrics.js)
+
+<a id="adapter-err-posture-export-disabled"></a>
+## `ADAPTER-ERR-POSTURE-EXPORT-DISABLED`
+
+- **Code/event:** `ws.posture-export.disabled`
+- **Message prefix:** `[ws] posture export disabled: `
+- **Cause:** The posture export socket could not listen on its configured path - typically a stale socket file, a permission denial, or an address already in use.
+- **Consequence:** The worker keeps serving traffic, but nothing can read its live pressure posture over that socket: an external supervisor watching it sees a connection failure rather than a posture, and any shedding decision built on it stops updating. Already-connected readers are dropped.
+- **Automatic recovery:** None. The export is not retried for the life of the worker.
+- **Next action:** Remove a stale socket file, fix the directory permissions, or point the export at a free path, then restart the worker.
+- **Runtime help:** `docs/errors.md#adapter-err-posture-export-disabled`
+- **Runtime sources:** [src/runtime/utils/posture-export.js](../src/runtime/utils/posture-export.js)
+
+<a id="adapter-err-posture-observer"></a>
+## `ADAPTER-ERR-POSTURE-OBSERVER`
+
+- **Code/event:** `ws.posture-observer.threw`
+- **Message prefix:** `[ws] a posture transition handler threw`
+- **Cause:** The adapter's own protection-posture transition handler threw. It records the transition metric, prints the posture line and pushes the new posture to the export socket, so the throw comes from one of those three.
+- **Consequence:** The posture CHANGED and the runtime is shedding or recovering as configured, but the record of it did not finish. The transition metric is not what went missing - it is recorded first and is itself contained - so what is incomplete is the posture log line, the posture export push, or both, and anything reading the export socket is a step behind the real posture until the next transition.
+- **Automatic recovery:** The next transition runs the handler again; a throw does not unregister it.
+- **Next action:** This is an adapter-internal failure - report it with the error printed beside it. Two things run after the contained metric: writing the console line, and pushing the new posture to the export socket. A configured metrics registry is NOT a candidate - an instrument that throws is contained and prints ADAPTER-ERR-METRICS-INSTRUMENT instead of reaching this handler.
+- **Runtime help:** `docs/errors.md#adapter-err-posture-observer`
+- **Runtime sources:** [src/runtime/utils/pressure.js](../src/runtime/utils/pressure.js)
+
+<a id="adapter-err-upgrade-deferred"></a>
+## `ADAPTER-ERR-UPGRADE-DEFERRED`
+
+- **Code/event:** `ws.upgrade.deferred-failed`
+- **Message prefix:** `[ws] a deferred upgrade failed`
+- **Cause:** A WebSocket upgrade held back by the admission queue threw when it was finally completed, after the client had already passed admission.
+- **Consequence:** That one client never connects. Its response is left unfinished rather than refused, so it typically waits out its own timeout instead of seeing an error, and it retries as if the server were briefly unavailable. The admission slot it held is released, and the other upgrades in the same drain still run.
+- **Automatic recovery:** None for that connection; the client reconnects on its own schedule.
+- **Next action:** Read the error printed with this line - it comes from the upgrade hook or the socket, and a repeated throw here means admission is letting through connections the upgrade cannot complete.
+- **Runtime help:** `docs/errors.md#adapter-err-upgrade-deferred`
+- **Runtime sources:** [src/runtime/utils/upgrade-admission.js](../src/runtime/utils/upgrade-admission.js)
+
+<a id="adapter-err-waiting-room-fallback"></a>
+## `ADAPTER-ERR-WAITING-ROOM-FALLBACK`
+
+- **Code/event:** `ws.waiting-room.renderer-failed`
+- **Message prefix:** `[svelte-adapter-uws] the waiting-room renderer failed; serving the built-in English page instead`
+- **Cause:** The module named by `waitingRoom.renderer` threw, or returned a result the runtime could not accept, while rendering the over-capacity page.
+- **Consequence:** The visitor turned away by that request receives the built-in English page instead of the rendered one, so localization, branding and any per-request content are lost for it. The capacity decision itself is unaffected. The line prints once per worker, so a renderer that keeps failing reports only the first one.
+- **Automatic recovery:** The renderer is called again on the next request, so a failure that depends on the request self-heals; a renderer that always throws serves the built-in page every time.
+- **Next action:** Fix the renderer and redeploy. A renderer must return a complete document meeting the accessible baseline, which is validated on the first successful render rather than at build time; when the baseline is what failed the error printed with this line names the requirement, and for any other throw it is the renderer's own error.
+- **Runtime help:** `docs/errors.md#adapter-err-waiting-room-fallback`
+- **Runtime sources:** [src/runtime/utils/upgrade-admission.js](../src/runtime/utils/upgrade-admission.js)
+
+<a id="adapter-err-diagnostic-record-shape"></a>
+## `ADAPTER-ERR-DIAGNOSTIC-RECORD-SHAPE`
+
+- **Code/event:** `ws.diagnostic.record-shape`
+- **Message prefix:** `[ws] operational event dropped, invalid record shape`
+- **Cause:** Something emitted an operational diagnostic the runtime could not build a record from - a malformed event name, an unknown severity or data class, or a bad timestamp. A field that cannot be SERIALIZED fails later, in the renderer, and prints the diagnostic-render line instead.
+- **Consequence:** That diagnostic is DROPPED: it reaches neither the configured sink nor the log, so the failure it was reporting leaves no structured trace. Everything else keeps emitting normally.
+- **Automatic recovery:** None for the dropped record. Telemetry deliberately never throws, so the emitting path continued as if it had been reported.
+- **Next action:** Read the event name printed with this line and fix the emitter. If it is application or plugin code calling the diagnostic surface, check the record against the documented shape.
+- **Runtime help:** `docs/errors.md#adapter-err-diagnostic-record-shape`
+- **Runtime sources:** [src/runtime/diagnostic.js](../src/runtime/diagnostic.js)
+
+<a id="adapter-err-resource-growth"></a>
+## `ADAPTER-ERR-RESOURCE-GROWTH`
+
+- **Code/event:** `ws.resource-growth.trending`
+- **Message prefix:** `[ws] resource-growth auditor: `
+- **Cause:** A runtime structure the growth auditor samples has been trending upward across consecutive samples without shedding. The auditor is opt-in and off unless an audit interval is configured, so silence here means it is disabled just as often as it means nothing is growing.
+- **Consequence:** Nothing is refused yet - this is the early warning, printed once per worker lifetime while the metric keeps carrying the ongoing signal. Left alone the trend ends in memory pressure, which raises the protection posture and eventually exhausts the heap; no worker is restarted on account of memory, so what follows an exhausted heap is the process aborting rather than one thread being replaced.
+- **Automatic recovery:** None. The auditor observes; it does not evict.
+- **Next action:** The line names the structure. Find the path that stopped shedding for it - a close, unsubscribe or eviction that no longer runs - rather than raising a limit; framework_resource_growth_suspected_total carries the structure as its `resource` label and shows whether the trend continued.
+- **Runtime help:** `docs/errors.md#adapter-err-resource-growth`
+- **Runtime sources:** [src/runtime/handler.js](../src/runtime/handler.js)
+
+<a id="adapter-err-relay-spill-quarantine"></a>
+## `ADAPTER-ERR-RELAY-SPILL-QUARANTINE`
+
+- **Code/event:** `cluster-relay.spill-quarantine`
+- **Message prefix:** `[primary] relay spill quarantining `
+- **Cause:** The primary could not hand relay traffic DOWN to this worker inside the worker's spill ceiling - its ring backlog crossed the byte limit, or the worker stopped making drain progress for longer than the age limit - so the primary quarantined it. This is the opposite direction from ADAPTER-ERR-RELAY-SPILL-OVERFLOW, which is a worker that could not reach the primary.
+- **Consequence:** The primary stops forwarding relay traffic to that worker and asks it to exit, so its clients are dropped and reconnect onto a sibling. Until they do, that worker's subscribers were already missing whatever the ring could not deliver. Quarantine happens once per worker - the primary does not re-evaluate it - and the line names the reason, the bytes dropped and how long the backlog had been pending.
+- **Automatic recovery:** The worker exits and the primary replaces it. The dropped frames are not resent, so a client that was subscribed on that worker has a hole its own resume path must fill when it reconnects.
+- **Next action:** Read the reason on the line. An AGE spill means that worker stopped draining its ring - a blocked event loop is the usual cause, and it is the worker's own thread to profile, not the primary's. A BYTES spill can mean either: a peer merely behind on a ceiling sized too close to the largest relayed frame, where raising CLUSTER_RELAY_MAX_PENDING_KB to a few times that frame is the fix, or sustained fan-out the relay is undersized for, where a wider ceiling only delays the next spill. The droppedBytes on the line tells you which.
+- **Runtime help:** `docs/errors.md#adapter-err-relay-spill-quarantine`
+- **Runtime sources:** [src/runtime/relay-spill-policy.js](../src/runtime/relay-spill-policy.js)
+
+<a id="adapter-err-posture-transition"></a>
+## `ADAPTER-ERR-POSTURE-TRANSITION`
+
+- **Code/event:** `ws.protection-posture.transition`
+- **Message prefix:** `[ws] protection posture `
+- **Cause:** The worker moved between protection postures - normal, elevated and siege. Normal to elevated is decided by sampled pressure holding over a configured threshold (memory, CPU quota, kernel stall time, publish rate or subscriber ratio). Elevated to siege is decided instead by the rate of capacity rejections crossing the siege rate, independently of those signals. Both directions relax after a run of quiet samples, and siege steps down to elevated rather than straight to normal. The line names the posture it left, the posture it entered, the rejection rate at that moment and the highest pressure signal.
+- **Consequence:** What the posture changes depends on which one it entered. At ELEVATED nothing is refused - the admission effect is only a wider Retry-After jitter on capacity responses that were already going out - so this line is a warning rather than an outage. It does change what the worker REPORTS, though: from here every sample reads its pressure reason as CAPACITY and its pressure state as active, so `platform.pressure`, the pressure gauge, the posture export and any onPressure listener follow the posture rather than the underlying signal. At SIEGE the worker additionally refuses EVERY new upgrade at static-serve cost, and clients see a capacity refusal rather than an error. A worker that settles at either is running at its ceiling.
+- **Automatic recovery:** Yes, and a de-escalation prints this same line: the posture steps back down after a run of quiet samples, and both directions are dwell-gated so it cannot flap.
+- **Next action:** Read the two numbers together, because which one decided depends on the edge. Entering elevated is decided by the pressure signal named on the line. Entering siege is decided by rejected/s crossing the siege rate and can print pressure=NONE - that is a capacity-reject storm rather than a resource problem, so read rejected/s there. A relaxation always prints pressure=NONE, because a run of quiet samples is what causes it. A posture that returns to normal on its own needs nothing; one that stays raised means the worker is undersized for the load or something is not shedding - the resource-growth line and the per-topic pressure entries cover that side.
+- **Runtime help:** `docs/errors.md#adapter-err-posture-transition`
+- **Runtime sources:** [src/runtime/handler.js](../src/runtime/handler.js)
+
+<a id="adapter-err-worker-exit-sigkill"></a>
+## `ADAPTER-ERR-WORKER-EXIT-SIGKILL`
+
+- **Code/event:** `cluster.worker-exit-sigkill`
+- **Message prefix:** `[primary] worker `
+- **Cause:** A worker was asked to exit and had not done so within the exit grace period, so the primary killed the WHOLE PROCESS with SIGKILL. A wedged worker cannot close itself, and worker.terminate() would abort the process anyway.
+- **Consequence:** Every worker dies, not just the wedged one: all connections drop, in-flight requests are lost, and no shutdown hook runs. The process is expected to be respawned by whatever supervises it - systemd, a container runtime, an orchestrator. Without one, the service stays down.
+- **Automatic recovery:** None inside the process. Recovery is the supervisor restarting it.
+- **Next action:** Find why the worker would not exit. A blocked event loop is the usual cause - a synchronous hook, an unbounded loop, or a native call that does not return - and it will happen again at the next exit request. Most exit requests print their reason above this line; the one that does not is the shutdown budget expiring, where the request went to every worker at once and this one did not go.
+- **Runtime help:** `docs/errors.md#adapter-err-worker-exit-sigkill`
+- **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)

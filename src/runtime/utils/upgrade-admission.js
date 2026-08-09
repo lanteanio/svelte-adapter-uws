@@ -5,6 +5,7 @@ import {
 	compileWaitingRoomTemplate
 } from './waiting-room-template.js';
 import { collectRequestHeaders } from './request-headers.js';
+import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../error-registry.js';
 
 const DEFAULT_MAX_DEFERRED = 1024;
 
@@ -127,7 +128,7 @@ export function createUpgradeAdmission(opts) {
 		while (perTickCount < perTickBudget && deferredDepth > 0) {
 			const entry = dequeue();
 			perTickCount++;
-			try { entry.fn(); } catch (err) { console.error('[ws] deferred upgrade failed:', err); }
+			try { entry.fn(); } catch (err) { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.UPGRADE_DEFERRED), err); }
 		}
 		notifyDeferredObserver();
 		// A drain that ran callbacks consumed this tick's budget. Schedule one
@@ -1078,10 +1079,7 @@ export function resolveWaitingRoom(upgradeAdmission, rendererModule = null) {
 				} catch (error) {
 					if (!rendererFailureReported) {
 						rendererFailureReported = true;
-						console.error(
-							'[adapter-uws] waiting-room renderer failed; using the built-in English page:',
-							error
-						);
+						console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.WAITING_ROOM_FALLBACK), error);
 					}
 				}
 			}

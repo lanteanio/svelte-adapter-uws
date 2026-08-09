@@ -542,22 +542,23 @@ export async function shutdown(ctx) {
 			// would surface as an unhandled rejection in the middle of the exit.
 			const hook = Promise.resolve(wsModule.shutdown(hookContext)).then(
 				() => true,
-				(err) => { console.error('[ws] shutdown hook threw:', err); return true; }
+				(err) => { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.WS_SHUTDOWN_HOOK_THREW), err); return true; }
 			);
 			// The hook keeps running after the budget expires - user code cannot be
 			// interrupted - but it no longer holds the close path. Its `signal` is
 			// how a hook that wants to give up cleanly can.
 			const settled = await Promise.race([hook, whenAborted(signal).then(() => false)]);
 			if (!settled) {
-				console.error(
-					`[ws] shutdown hook has not settled after ${(monotonicNow() - started).toFixed(0)}ms and the shutdown budget is spent; ` +
+				console.error(adapterConsoleLine(
+					ADAPTER_ERROR_IDS.WS_SHUTDOWN_HOOK_UNSETTLED,
+					`${(monotonicNow() - started).toFixed(0)}ms and the shutdown budget is spent; ` +
 					'closing the listen socket anyway - whatever the hook was flushing did NOT finish.'
-				);
+				));
 			}
 		} catch (err) {
 			// A hook that throws synchronously, before it ever returned a promise.
 			// Log-and-continue: shutdown is best-effort, we cannot refuse.
-			console.error('[ws] shutdown hook threw:', err);
+			console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.WS_SHUTDOWN_HOOK_THREW), err);
 		}
 	}
 	if (listenSocket) {

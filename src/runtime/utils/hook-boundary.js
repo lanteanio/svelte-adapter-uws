@@ -1,4 +1,5 @@
 import { traceOperation, tracingEnabled } from '../tracing.js';
+import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../error-registry.js';
 
 async function invokeMessageHook(hook, ws, context, span) {
 	try {
@@ -6,7 +7,7 @@ async function invokeMessageHook(hook, ws, context, span) {
 	} catch (err) {
 		try { span?.recordException?.(err); } catch {}
 		// Preserve the cause server-side without exposing it to the client.
-		console.error('[ws] message hook threw:', err);
+		console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.MESSAGE_HOOK), err);
 		try {
 			if (typeof ws.end === 'function') ws.end(1011, 'Message handler error');
 			else if (typeof ws.close === 'function') ws.close(1011, 'Message handler error');

@@ -19,7 +19,7 @@ import { snapshotUpgradeHeaders } from './runtime/utils/upgrade-headers.js';
 import { emitOperationalDiagnostic, viteHandlerFailureDiagnostic, viteHandlerRecoveredDiagnostic } from './runtime/utils/operational-diagnostic.js';
 import { trace } from './runtime/tracing.js';
 import { emitOperationalEvent, diagnosticError } from './runtime/diagnostic.js';
-import { ADAPTER_ERROR_IDS, adapterErrorMessage } from './runtime/error-registry.js';
+import { ADAPTER_ERROR_IDS, adapterConsoleLine, adapterErrorMessage } from './runtime/error-registry.js';
 
 /**
  * Options the dev plugin honors, mirroring `UWSPluginOptions` in vite.d.ts.
@@ -1247,7 +1247,7 @@ export default function uws(options = {}) {
 			try {
 				await userHandlers.shutdown({ platform });
 			} catch (err) {
-				console.error('[ws] shutdown hook threw:', err);
+				console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.WS_SHUTDOWN_HOOK_THREW), err);
 			}
 		}
 	}
@@ -2080,7 +2080,7 @@ export default function uws(options = {}) {
 									_cap = beginResumeCaptureV([msg.topic], ws);
 									try {
 										await userHandlers.resume(wrapped, { sessionId: wrapped.getUserData()[WS_SESSION_ID], lastSeenSeqs: { [msg.topic]: msg.recover.offset }, lastSeenEpochs: _rEpochs, platform: wrapped.getUserData()[WS_PLATFORM] });
-									} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
+									} catch (err) { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.RECOVER_HOOK), err); }
 									if (subs.has(msg.topic)) {
 										const heldVerdictVR = settleHeldSubscribe(pendingUdV, msg.topic, pendingTokenV);
 										if (heldVerdictVR === 'ack') { discardResumeCaptureV(_cap); sendSubscribedV(ws, msg.topic, ref); return; }
@@ -2292,7 +2292,7 @@ export default function uws(options = {}) {
 									_batchCap = beginResumeCaptureV(Object.keys(_recoverSeqs), ws);
 										try {
 											await userHandlers.resume(wrapped, { sessionId: wrapped.getUserData()[WS_SESSION_ID], lastSeenSeqs: _recoverSeqs, lastSeenEpochs: _recoverEpochs || undefined, platform: wrapped.getUserData()[WS_PLATFORM] });
-										} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
+										} catch (err) { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.RECOVER_HOOK), err); }
 									}
 								}
 								for (let i = 0; i < valid.length; i++) {

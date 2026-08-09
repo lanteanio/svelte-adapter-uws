@@ -41,6 +41,7 @@
  */
 
 import { SIGNALS_BY_NAME } from '../observability-manifest.js';
+import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../error-registry.js';
 
 // One bounded metadata record rides each worker report. It is never rendered
 // as a metric: the merge consumes it before looking at samples. A value alone
@@ -213,8 +214,8 @@ export function mirrorRegistry(registry) {
 	// configuration, and null is the shape the whole runtime already treats as
 	// "no registry configured".
 	if (typeof registry !== 'object' && typeof registry !== 'function') {
-		console.error('[ws] the `metrics` module must default-export a registry object; got ' +
-			typeof registry + '. Metrics are disabled.');
+		console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.METRICS_MODULE_SHAPE,
+			typeof registry + '. Metrics are disabled.'));
 		return null;
 	}
 	registryWrapped = true;
@@ -286,7 +287,7 @@ export function containMetricInstrument(instrument) {
 		} catch (err) {
 			if (!warned) {
 				warned = true;
-				console.error('[ws] metrics instrument threw; suppressing further errors from it:', err);
+				console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.METRICS_INSTRUMENT), err);
 			}
 		}
 	};

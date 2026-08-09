@@ -1,4 +1,5 @@
 // @ts-check
+import { ADAPTER_ERROR_IDS, adapterConsoleLine } from './error-registry.js';
 
 /**
  * May the primary hand relay traffic to this peer? One predicate for every
@@ -54,10 +55,11 @@ export function createRelaySpillQuarantine(options) {
 		if (meta.relayQuarantined) return false;
 		meta.relayQuarantined = true;
 		try {
-			log(
-				'[primary] relay spill quarantining worker=%d reason=%s droppedBytes=%d pendingAgeMs=%d',
-				meta.threadId, event.reason, event.droppedBytes, Math.round(event.pendingAgeMs)
-			);
+			log(adapterConsoleLine(
+				ADAPTER_ERROR_IDS.RELAY_SPILL_QUARANTINE,
+				`worker=${meta.threadId} reason=${event.reason} droppedBytes=${event.droppedBytes} ` +
+				`pendingAgeMs=${Math.round(event.pendingAgeMs)}`
+			));
 		} catch {}
 
 		attributeRelayIncident(workers, worker, {

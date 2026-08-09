@@ -560,7 +560,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// graph's callers pass no bound, so their behavior is unchanged; the
 	// drift is the split itself and the optional parameter. No byte is read,
 	// allocated or copied, and no copy primitive entered.
-	ingress: 'd3c97555a20d6bd9206f00d50e876d52794d4640cd538e0635d4e4f5da520aee',
+	//
+	// Re-pinned for the console failure index, reached through
+	// utils/hook-boundary.js: the message hook's failure line is now printed
+	// through the error registry (`adapterConsoleLine`) instead of a literal,
+	// which adds that import to the graph and moves the literal's characters
+	// into a registry entry. A once-per-failure log line on the hook's catch
+	// path; the frame the hook was handling is untouched, no byte is read,
+	// allocated or copied, and no copy primitive entered.
+	ingress: '0295a3bfee3520078aa73e4229f6cd2c7ea791e5bacf02089b885d912a90f06d',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -813,7 +821,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// on the fastest round of each arm in the shipped two-armed shape:
 	// 0.13 ns/op (bench/micro-seq-seen-record-ab.mjs). No frame byte is read,
 	// allocated or copied, and no copy primitive entered the graph.
-	platform: '56c50eea07e6dd16c8fef771199bf947e88675cf6a31898dab835af45668a0e3',
+	//
+	// Re-pinned for the console failure index. Two changes reach this graph:
+	// state.js's new recorder gained the non-number guard its sibling already
+	// had, and error-registry.js gained fifteen console entries plus their id
+	// constants - data literals on no frame path. Later re-pins in this same
+	// change carry only corrected entry prose and one renamed id constant. The registry's prose is
+	// masked by the prose-shape allowlist; its STRUCTURE is not, which is what
+	// moves the digest. No frame byte is read, allocated or copied, and no copy
+	// primitive entered the graph.
+	platform: '605bc72670e5c4c475b0471a77a1e477ceac72583f281bd0c37c1ffa09be417b',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -843,7 +860,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// optional bound parameter, reached through utils.js; callers here pass
 	// no bound. Nothing in this graph's own modules changed, and no copy
 	// primitive entered.
-	'wire-fanout': 'e4da81eedaf9fbbea2e08cda5b90087b7fc9c49164958c3b5e6ff634abbfd342',
+	// Re-pinned for the console failure index. The drift reaches this graph
+	// only through utils.js's re-exports: utils/pressure.js,
+	// utils/upgrade-admission.js, utils/metrics.js and utils/fd-limit.js each
+	// print an existing failure through the error registry instead of a
+	// literal (which also pulls error-registry.js and its new entries into the
+	// graph), and the fd advisory's subject moved ahead of its numbers. All
+	// cold, once-per-condition log paths. Nothing in this graph's own modules
+	// changed, and no copy primitive entered.
+	'wire-fanout': 'edbda43019745d63417c503a843bd0bea5db5ad51d9de3dd69921502ab4d3ecd',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

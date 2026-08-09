@@ -123,7 +123,10 @@ if (isMainThread) console.log(formatVersionBanner(runtimeVersionInfo));
 // silent no-op there.
 if (isMainThread) {
 	const fdWarning = fdPreflightWarning(readFdLimits());
-	if (fdWarning !== null) console.warn('[svelte-adapter-uws] ' + fdWarning);
+	// The subject is spelled at the call site, ahead of the advisory's own
+	// numbers: a line whose first words are the package tag and then an
+	// interpolated value gives an operator nothing to search for.
+	if (fdWarning !== null) console.warn('[svelte-adapter-uws] file-descriptor preflight: ' + fdWarning);
 }
 
 if (is_primary) {
@@ -409,11 +412,12 @@ if (is_primary) {
 		try { worker.postMessage({ type: 'terminate', code }); } catch {}
 		const t = setTimer(() => {
 			if (workers.has(worker)) {
-				console.error(
-					`[primary] Worker ${worker.threadId} did not exit within ${WORKER_EXIT_GRACE_MS}ms; ` +
+				console.error(adapterConsoleLine(
+					ADAPTER_ERROR_IDS.WORKER_EXIT_SIGKILL,
+					`${worker.threadId} did not exit within ${WORKER_EXIT_GRACE_MS}ms; ` +
 					'SIGKILL-ing the process for a clean respawn (a wedged worker cannot self-close, ' +
 					'and worker.terminate() would abort the process).'
-				);
+				));
 				process.kill(process.pid, 'SIGKILL');
 			}
 		}, WORKER_EXIT_GRACE_MS);

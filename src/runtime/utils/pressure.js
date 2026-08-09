@@ -1,3 +1,5 @@
+import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../error-registry.js';
+
 /**
  * Resolve which pressure signal (if any) is firing for a given sample.
  *
@@ -263,7 +265,7 @@ export function createPosture(cfg) {
 				try {
 					onTransition(prev, level);
 				} catch (err) {
-					console.error('[ws] posture transition observer threw:', err);
+					console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.POSTURE_OBSERVER), err);
 				}
 			}
 		}

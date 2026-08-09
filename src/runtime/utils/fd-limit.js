@@ -114,7 +114,7 @@ export function fdPreflightWarning(limits) {
 	if (limits.soft >= LOW_FD_SOFT_LIMIT) return null;
 	const hard = limits.hard === Infinity ? 'unlimited' : String(limits.hard);
 	return (
-		`Warning: The soft file-descriptor limit for this process is ${limits.soft} ` +
+		`the soft file-descriptor limit for this process is ${limits.soft} ` +
 		`(hard limit: ${hard}). Every WebSocket connection holds one descriptor, so new ` +
 		'sockets fail with EMFILE at that count even while CPU is idle. Raise it in the launcher:\n' +
 		'  ulimit -n <n>              (shell)\n' +

@@ -32,6 +32,7 @@
 
 import { createServer } from 'node:net';
 import { unlinkSync } from 'node:fs';
+import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../error-registry.js';
 
 // A consumer that cannot drain this much pending posture JSON is not
 // consuming; disconnect it rather than queue without bound.
@@ -68,7 +69,8 @@ export function startPostureExport(path, getLine) {
 		} catch { /* raced a disconnect */ }
 	});
 	server.on('error', (err) => {
-		console.warn('[ws] posture export disabled: listen on %s failed: %s', path, err && err.message);
+		console.warn(adapterConsoleLine(ADAPTER_ERROR_IDS.POSTURE_EXPORT_DISABLED,
+			'listen on ' + path + ' failed: ' + (err && err.message ? err.message : err)));
 		closed = true;
 		for (const socket of clients) socket.destroy();
 		clients.clear();

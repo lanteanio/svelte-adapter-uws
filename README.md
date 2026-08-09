@@ -1114,13 +1114,14 @@ families, `[ws]`, `[tls]`, `[primary]`, `[worker <id>]`, `[pressure]`, and
 `[redis]`, the named Redis/Postgres families, and `[publish-rate]`), and
 realtime (`[svelte-realtime]`, `[realtime/assert]`, and `[realtime/fatal]`).
 Assertions and the migrated operational events use the canonical prefix; other
-owned warning/error sites deliberately retain only those parser-covered
-families for this compatibility window. Each package runs
-`scripts/check-diagnostic-attribution.js` in `npm run check`; the executable
-family manifest rejects a new unattributed or unparseable warning/error prefix
-and prints the bounded residual call-site counts. Collectors should route on
-the parsed fields, not split the human text or make environment-specific prefix
-assumptions.
+owned warning/error sites keep those parser-covered families for this window.
+Each package runs `scripts/check-diagnostic-attribution.js` in `npm run check`,
+whose executable family manifest rejects a new unattributed or unparseable
+warning/error prefix and prints the bounded residual call-site counts.
+Attribution is not findability, so `scripts/check-console-index.js` also holds
+every console failure under `src` - bar the build-time adapter and browser
+halves, excluded by name - to printing through the registry, through a
+diagnostic formatter, or with a reason recorded in that gate.
 
 #### Cluster-wide metrics
 

@@ -21,7 +21,7 @@ import {
 import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './runtime/handler/cluster-sequence-policy.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
 import { runtimeVersionInfo } from './runtime/version-info.js';
-import { ADAPTER_ERROR_IDS, adapterErrorMessage } from './runtime/error-registry.js';
+import { ADAPTER_ERROR_IDS, adapterConsoleLine, adapterErrorMessage } from './runtime/error-registry.js';
 import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './runtime/diagnostic.js';
 import { createDivergenceDiagnosticStore } from './runtime/divergence-diagnostics.js';
 
@@ -2452,7 +2452,7 @@ export async function createTestServer(options = {}) {
 								_cap = beginResumeCaptureT([msg.topic], ws);
 								try {
 									_covered = await handler.resume(ws, { sessionId: ws.getUserData()[WS_SESSION_ID], lastSeenSeqs: { [msg.topic]: msg.recover.offset }, lastSeenEpochs: _rEpochs, platform: ws.getUserData()[WS_PLATFORM] });
-								} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
+								} catch (err) { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.RECOVER_HOOK), err); }
 								if (subs.has(msg.topic)) {
 									const heldVerdictR = settleHeldSubscribe(pendingUd, msg.topic, pendingToken);
 									if (heldVerdictR === 'ack') { discardResumeCaptureT(_cap); sendSubscribedT(ws, msg.topic, ref); return; }
@@ -2669,7 +2669,7 @@ export async function createTestServer(options = {}) {
 								_batchCap = beginResumeCaptureT(Object.keys(_recoverSeqs), ws);
 									try {
 										_batchCovered = await handler.resume(ws, { sessionId: ws.getUserData()[WS_SESSION_ID], lastSeenSeqs: _recoverSeqs, lastSeenEpochs: _recoverEpochs || undefined, platform: ws.getUserData()[WS_PLATFORM] });
-									} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
+									} catch (err) { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.RECOVER_HOOK), err); }
 								}
 							}
 							for (let i = 0; i < valid.length; i++) {
@@ -3181,21 +3181,22 @@ export async function createTestServer(options = {}) {
 							// the middle of teardown.
 							const hook = Promise.resolve(
 								handler.shutdown({ platform, reason: 'shutdown', signal, deadline })
-							).then(() => true, (err) => { console.error('[ws] shutdown hook threw:', err); return true; });
+							).then(() => true, (err) => { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.WS_SHUTDOWN_HOOK_THREW), err); return true; });
 							// The hook keeps running after the budget expires - user
 							// code cannot be interrupted - but it no longer holds the
 							// close path.
 							const settled = await Promise.race([hook, whenAbortedT(signal).then(() => false)]);
 							if (!settled) {
-								console.error(
-									`[ws] shutdown hook has not settled after ${(monotonicNow() - started).toFixed(0)}ms and the shutdown budget is spent; ` +
+								console.error(adapterConsoleLine(
+									ADAPTER_ERROR_IDS.WS_SHUTDOWN_HOOK_UNSETTLED,
+									`${(monotonicNow() - started).toFixed(0)}ms and the shutdown budget is spent; ` +
 									'closing anyway - whatever the hook was flushing did NOT finish.'
-								);
+								));
 							}
 						} catch (err) {
 							// A hook that threw synchronously, before it ever returned a
 							// promise. Log-and-continue: shutdown is best-effort.
-							console.error('[ws] shutdown hook threw:', err);
+							console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.WS_SHUTDOWN_HOOK_THREW), err);
 						} finally {
 							if (budgetTimer !== null) clearTimer(budgetTimer);
 						}

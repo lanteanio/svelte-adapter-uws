@@ -657,6 +657,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prove; the reference counts these console lines separately from emitted
   diagnostic events instead of conflating the two.
 
+- **A gate now enumerates the console failures themselves, so the reference
+  cannot be incomplete again.** Indexing fifteen lines closed the reported gap
+  and left the mechanism that produced it: the reference generator walks the
+  entries and diagnostic events that already exist, and the attribution gate
+  accepts any owned family tag such as `[ws]`, so a raw
+  `console.error('[ws] ...')` added anywhere printed an operator-facing
+  failure that no search of the document could resolve and passed both checks.
+  `check-console-index` starts from the call sites instead, and reads EVERY
+  module under `src` minus a named exclusion list with a reason each - the
+  build-time adapter and the browser client - so a new file is covered the day
+  it is added rather than the day someone remembers to list it. Every
+  `console.warn` and `console.error` must print through the registry, print
+  through a diagnostic formatter, or be named in an allowlist with a stated
+  reason. It follows a printer bound under another name (the
+  relay spill policy's injectable `log`), refuses one written straight to
+  stderr, and refuses a line with no invariant text of its own - and it
+  resolves the id, so a call that names a missing entry, an entry that is not
+  console-emitted, or one whose severity disagrees with the console method
+  fails the build rather than throwing a `TypeError` in place of the failure
+  it was meant to report.
+  Fifteen further failures were indexed on the way in: the WebSocket shutdown
+  hook throwing or outliving its budget, the message hook that closes a client
+  with 1011, the recover-on-subscribe hook, metrics disabling themselves on a
+  wrong module shape or a throwing instrument, posture export failing to
+  listen, a posture-transition handler throwing, a deferred upgrade failing,
+  the waiting-room renderer falling back to the built-in page, a dropped
+  operational event, the resource-growth auditor's leak warning, the primary
+  quarantining a worker over relay spill, a protection-posture transition, and
+  the SIGKILL that ends the whole process when a worker will not exit. The dev
+  server and `createTestServer` now print the shutdown-hook and
+  recover-on-subscribe failures through the same entries as production, so the
+  same text and the same id reach an app developer. The allowlist is keyed by
+  the whole static shape of the line an operator would search for, with
+  whitespace runs collapsed, so a reworded line asks for its decision again
+  rather than inheriting one; a stale entry fails the gate, and so does a pair
+  of lines whose keys collide.
+  Each indexed call site must also appear in its entry's declared sources,
+  because those are what a reviewer reads to check an entry's prose against
+  the code. One visible change to the lines themselves: an indexed failure
+  that passes no detail now reads `[ws] the message hook threw
+  [ADAPTER-ERR-MESSAGE-HOOK]` followed by the error, where it previously ended
+  in a colon - the stable id sits where the colon was. The file-descriptor
+  boot advisory also leads with its subject now (`file-descriptor preflight:`)
+  rather than opening on the package tag, so it can be searched for at all.
+
 - **The smooth-ingest decision oracle now has an honest answer when nothing
   wins.** Asked to adjudicate between the app record diet and a standalone
   zero-copy accessor, the bench's decision function treated "the accessor

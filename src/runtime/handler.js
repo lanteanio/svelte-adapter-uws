@@ -22,7 +22,7 @@ import * as wsModule from 'WS_HANDLER';
 import { metricsRegistry } from './metrics-bridge.js';
 import { waitingRoomRenderer } from './waiting-room-renderer-bridge.js';
 import { PRESSURE_REASON_CODES } from './observability-manifest.js';
-import { ADAPTER_ERROR_IDS, adapterErrorMessage } from './error-registry.js';
+import { ADAPTER_ERROR_IDS, adapterConsoleLine, adapterErrorMessage } from './error-registry.js';
 import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './diagnostic.js';
 import { privateValueMetadata } from './utils/observability-privacy.js';
 import { probeOsPressureSources, emitPressureMetricTelemetry } from './utils/os-pressure.js';
@@ -1094,7 +1094,8 @@ if (WS_ENABLED) {
 				// carries the ongoing signal; the log is a one-time nudge.
 				if (growthWarned) return;
 				growthWarned = true;
-				console.warn(`[ws] resource-growth auditor: '${report.name}' size trending upward (delta ${report.delta} over ${report.n} samples); investigate a close/unsubscribe/eviction path that stopped shedding.`);
+				console.warn(adapterConsoleLine(ADAPTER_ERROR_IDS.RESOURCE_GROWTH,
+					`'${report.name}' size trending upward (delta ${report.delta} over ${report.n} samples); investigate a close/unsubscribe/eviction path that stopped shedding.`));
 			}
 		});
 		counters.resourceGrowthAuditor = growthAuditor;
@@ -1126,12 +1127,11 @@ if (WS_ENABLED) {
 			// No client identity in the line: rate and reason only.
 			onTransition: (from, to) => {
 				mPostureTransitions?.inc({ from, to });
-				console.warn(
-					'[ws] protection posture %s -> %s rejected/s=%d pressure=%s',
-					from, to,
-					counters.activePosture !== null ? counters.activePosture.rejectedPerSecond : 0,
-					counters.lastBasePressureReason
-				);
+				console.warn(adapterConsoleLine(
+					ADAPTER_ERROR_IDS.POSTURE_TRANSITION,
+					`${from} -> ${to} rejected/s=${counters.activePosture !== null ? counters.activePosture.rejectedPerSecond : 0} ` +
+					`pressure=${counters.lastBasePressureReason}`
+				));
 				// Push the transition to export subscribers immediately - a
 				// defense daemon reacting to a posture change must not wait
 				// out the rest of the sample window.
@@ -2352,7 +2352,7 @@ if (WS_ENABLED) {
 						_cap = beginResumeCapture([msg.topic], ws);
 						try {
 							_covered = await wsModule.resume(ws, { sessionId: ws.getUserData()[WS_SESSION_ID], lastSeenSeqs: { [msg.topic]: msg.recover.offset }, lastSeenEpochs: _rEpochs, platform: ws.getUserData()[WS_PLATFORM] });
-						} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
+						} catch (err) { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.RECOVER_HOOK), err); }
 						// Re-check after the await: a concurrent subscribe may have added
 						// it, so the client is already live and the buffered frames would
 						// be duplicates - discard them.
@@ -2666,7 +2666,7 @@ if (WS_ENABLED) {
 							_batchCap = beginResumeCapture(Object.keys(_recoverSeqs), ws);
 							try {
 								_batchCovered = await wsModule.resume(ws, { sessionId: ws.getUserData()[WS_SESSION_ID], lastSeenSeqs: _recoverSeqs, lastSeenEpochs: _recoverEpochs || undefined, platform: ws.getUserData()[WS_PLATFORM] });
-							} catch (err) { console.error('[ws] recover-on-subscribe hook threw:', err); }
+							} catch (err) { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.RECOVER_HOOK), err); }
 						}
 					}
 					let subscribed = 0;

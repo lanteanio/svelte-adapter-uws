@@ -13,6 +13,7 @@ import {
 	normalizeDiagnosticMessage
 } from './diagnostic-format.js';
 import { wallIso } from './runtime.js';
+import { ADAPTER_ERROR_IDS, adapterConsoleLine } from './error-registry.js';
 
 export { DIAGNOSTIC_PREFIX, DIAGNOSTIC_SCHEMA_VERSION, createDiagnostic, formatDiagnostic };
 
@@ -149,7 +150,7 @@ export function emitOperationalEvent(input) {
 		// runtime the last honest act is a plain console line.
 		try {
 			console.error(
-				'[ws] operational event dropped, invalid record shape:',
+				adapterConsoleLine(ADAPTER_ERROR_IDS.DIAGNOSTIC_RECORD_SHAPE),
 				/** @type {any} */ (err)?.message ?? err,
 				input?.event
 			);
