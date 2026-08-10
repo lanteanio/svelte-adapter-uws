@@ -116,12 +116,6 @@ const ENTRY_BY_ID = new Map(ADAPTER_ERROR_REGISTRY.map((entry) => [entry.id, ent
  * and a stable route.
  */
 export const UNINDEXED = new Map(Object.entries({
-	// The diagnostic pipeline's own last resort. If these print, the sink and
-	// its fallback are both broken, so an entry generated FROM the registry is
-	// exactly what could not be delivered.
-	'runtime/diagnostic.js::[ws] diagnostic render failed:': 'the diagnostic renderer itself failed; nothing downstream of it can be trusted to route',
-	'runtime/diagnostic.js::[ws] operational sink failed and the fallback could not render:': 'the sink and its fallback both failed; this is the pipeline reporting its own collapse',
-
 	// Debug-gated: printed only under the WS debug flag, for someone reading
 	// their own wire codec.
 	'runtime/handler/wire-state.js::[ws] wire.state.onAttach threw for': 'debug-flag-gated aid for the author of the codec, not an operator-facing failure',

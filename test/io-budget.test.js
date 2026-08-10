@@ -568,7 +568,20 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// into a registry entry. A once-per-failure log line on the hook's catch
 	// path; the frame the hook was handling is untouched, no byte is read,
 	// allocated or copied, and no copy primitive entered.
-	ingress: '0295a3bfee3520078aa73e4229f6cd2c7ea791e5bacf02089b885d912a90f06d',
+	//
+	// Re-pinned for the diagnostic pipeline's own collapse lines. Two entries
+	// (id constants plus frozen entry objects) entered error-registry.js, and
+	// diagnostic.js's two last-resort `console.error` calls now build their text
+	// with `adapterConsoleLine` and a `String(record?.event)` coercion instead of
+	// passing a literal and the raw value as separate console arguments. Registry
+	// STRUCTURE is sealed by design, which is why data-only entries move this
+	// digest; their sentences are masked like the rest. Both call sites sit in
+	// the catch of a catch - reached only when rendering a diagnostic has already
+	// failed twice, or when a configured sink AND its console fallback both
+	// failed - so nothing on a frame path changed, no byte is read, allocated or
+	// copied, and no copy primitive entered the graph. The coercion allocates a
+	// string only on that collapse path and only from a value already held.
+	ingress: '7f69435074c3344771555ace6090959a21642205d168dfb5d48a331140069ba9',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -830,7 +843,18 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// masked by the prose-shape allowlist; its STRUCTURE is not, which is what
 	// moves the digest. No frame byte is read, allocated or copied, and no copy
 	// primitive entered the graph.
-	platform: '605bc72670e5c4c475b0471a77a1e477ceac72583f281bd0c37c1ffa09be417b',
+	//
+	// Re-pinned for the diagnostic pipeline's own collapse lines, which reach
+	// this graph the same way the console failure index did. error-registry.js
+	// gained two id constants and two frozen entry objects so the pipeline's
+	// last-resort lines carry a searchable ID and a documented route instead of
+	// printing as bare strings; diagnostic.js builds those two lines through
+	// `adapterConsoleLine` now. Data literals plus two rewritten calls on the
+	// catch-of-a-catch path, which is reached only once rendering has already
+	// failed twice or a sink and its fallback have both failed. Registry prose is
+	// masked; its structure is not, and that is what moves this digest. No frame
+	// byte is read, allocated or copied, and no copy primitive entered.
+	platform: 'cbeda249fce40815b158b06fb18ba8f0b8e89445e09c58a1147bc92e610c05f2',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -868,7 +892,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// graph), and the fd advisory's subject moved ahead of its numbers. All
 	// cold, once-per-condition log paths. Nothing in this graph's own modules
 	// changed, and no copy primitive entered.
-	'wire-fanout': 'edbda43019745d63417c503a843bd0bea5db5ad51d9de3dd69921502ab4d3ecd',
+	// Re-pinned for the diagnostic pipeline's own collapse lines. This graph
+	// reaches error-registry.js the same way it did for the console failure
+	// index, so its two new id constants and two new frozen entry objects move
+	// this digest as data literals; the registry's prose is masked, its
+	// structure is not. diagnostic.js is not in this graph. Nothing in this
+	// graph's own modules changed, and no copy primitive entered.
+	'wire-fanout': 'bfbd8f2a0d07adfe783760aba671d06e67df4f9c84a305905a74522296568b5f',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

@@ -34,7 +34,11 @@ function defaultOperationalEventSink(record) {
 		try {
 			console[method](formatDiagnostic(createDiagnostic({ ...record, attributes: undefined })));
 		} catch {
-			try { console.error('[ws] diagnostic render failed:', record?.event); } catch { /* console gone */ }
+			// Rendered from the registry like any other indexed line. That is a
+			// pure string build over frozen data, not a trip through the sink -
+			// the thing that just failed - so the operator gets a searchable ID
+			// and a documented route even at the pipeline's last resort.
+			try { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.DIAGNOSTIC_RENDER_COLLAPSE, String(record?.event))); } catch { /* console gone */ }
 		}
 	}
 }
@@ -75,7 +79,7 @@ function sinkFailureFallback(record) {
 			attributes: { originalSource: record.source, originalEvent: record.event }
 		}));
 	} catch {
-		try { console.error('[ws] operational sink failed and the fallback could not render:', record?.event); } catch { /* console gone */ }
+		try { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.DIAGNOSTIC_SINK_COLLAPSE, String(record?.event))); } catch { /* console gone */ }
 	}
 }
 

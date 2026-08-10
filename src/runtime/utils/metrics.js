@@ -210,7 +210,8 @@ export function mirrorRegistry(registry) {
 	// or a number would let `METRICS?.counter(...)` reach `.counter` on it and
 	// throw at module evaluation in every worker - a boot kill naming neither
 	// metrics nor the option that caused it. The build does no shape validation
-	// (it forwards whatever the module default-exports), so this is reachable
+	// (it forwards the first of `default`, `metrics` and `registry` that is not
+	// nullish, whatever that turns out to be), so this is reachable
 	// configuration, and null is the shape the whole runtime already treats as
 	// "no registry configured".
 	if (typeof registry !== 'object' && typeof registry !== 'function') {

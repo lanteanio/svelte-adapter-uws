@@ -4,7 +4,7 @@ Search this page with the exact stable ID, code, event, or beginning of the mess
 Every failure emitted as a diagnostic event is indexed below with its cause, what it means
 for traffic, whether anything recovers on its own, and what to do next: 34 entries
 against the 37 distinct diagnostic events emitted from the scanned sources, plus
-30 entries indexing consequential plain console lines that never enter the diagnostic
+32 entries indexing consequential plain console lines that never enter the diagnostic
 pipeline - each such line is printed through the registry and carries its stable ID tag, so
 the emitted text cannot drift from the prefix indexed here. The remaining emitted events are
 informational, listed under [coverage](#emitted-diagnostic-event-coverage) with no recovery guidance
@@ -78,13 +78,15 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-WS-SHUTDOWN-HOOK-UNSETTLED](#adapter-err-ws-shutdown-hook-unsettled) | `ws.shutdown-hook.unsettled` | `[ws] the WebSocket shutdown hook has not settled after ` |
 | [ADAPTER-ERR-MESSAGE-HOOK](#adapter-err-message-hook) | `ws.message-hook.threw` | `[ws] the message hook threw` |
 | [ADAPTER-ERR-RECOVER-HOOK](#adapter-err-recover-hook) | `ws.recover-hook.threw` | `[ws] the recover-on-subscribe hook threw` |
-| [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape) | `ws.metrics.module-shape` | `[ws] the metrics module must default-export a registry object; got ` |
+| [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape) | `ws.metrics.module-shape` | `[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got ` |
 | [ADAPTER-ERR-METRICS-INSTRUMENT](#adapter-err-metrics-instrument) | `ws.metrics.instrument-threw` | `[ws] a metrics instrument threw; further errors from it are suppressed` |
 | [ADAPTER-ERR-POSTURE-EXPORT-DISABLED](#adapter-err-posture-export-disabled) | `ws.posture-export.disabled` | `[ws] posture export disabled: ` |
 | [ADAPTER-ERR-POSTURE-OBSERVER](#adapter-err-posture-observer) | `ws.posture-observer.threw` | `[ws] a posture transition handler threw` |
 | [ADAPTER-ERR-UPGRADE-DEFERRED](#adapter-err-upgrade-deferred) | `ws.upgrade.deferred-failed` | `[ws] a deferred upgrade failed` |
 | [ADAPTER-ERR-WAITING-ROOM-FALLBACK](#adapter-err-waiting-room-fallback) | `ws.waiting-room.renderer-failed` | `[svelte-adapter-uws] the waiting-room renderer failed; serving the built-in English page instead` |
 | [ADAPTER-ERR-DIAGNOSTIC-RECORD-SHAPE](#adapter-err-diagnostic-record-shape) | `ws.diagnostic.record-shape` | `[ws] operational event dropped, invalid record shape` |
+| [ADAPTER-ERR-DIAGNOSTIC-RENDER-COLLAPSE](#adapter-err-diagnostic-render-collapse) | `ws.diagnostic.render-collapse` | `[ws] diagnostic render failed: ` |
+| [ADAPTER-ERR-DIAGNOSTIC-SINK-COLLAPSE](#adapter-err-diagnostic-sink-collapse) | `ws.diagnostic.sink-collapse` | `[ws] operational sink failed and the fallback could not render: ` |
 | [ADAPTER-ERR-RESOURCE-GROWTH](#adapter-err-resource-growth) | `ws.resource-growth.trending` | `[ws] resource-growth auditor: ` |
 | [ADAPTER-ERR-RELAY-SPILL-QUARANTINE](#adapter-err-relay-spill-quarantine) | `cluster-relay.spill-quarantine` | `[primary] relay spill quarantining ` |
 | [ADAPTER-ERR-POSTURE-TRANSITION](#adapter-err-posture-transition) | `ws.protection-posture.transition` | `[ws] protection posture ` |
@@ -158,13 +160,15 @@ the stable ID tag on the line):
 - `[ws] the WebSocket shutdown hook has not settled after ` - [ADAPTER-ERR-WS-SHUTDOWN-HOOK-UNSETTLED](#adapter-err-ws-shutdown-hook-unsettled)
 - `[ws] the message hook threw` - [ADAPTER-ERR-MESSAGE-HOOK](#adapter-err-message-hook)
 - `[ws] the recover-on-subscribe hook threw` - [ADAPTER-ERR-RECOVER-HOOK](#adapter-err-recover-hook)
-- `[ws] the metrics module must default-export a registry object; got ` - [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape)
+- `[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got ` - [ADAPTER-ERR-METRICS-MODULE-SHAPE](#adapter-err-metrics-module-shape)
 - `[ws] a metrics instrument threw; further errors from it are suppressed` - [ADAPTER-ERR-METRICS-INSTRUMENT](#adapter-err-metrics-instrument)
 - `[ws] posture export disabled: ` - [ADAPTER-ERR-POSTURE-EXPORT-DISABLED](#adapter-err-posture-export-disabled)
 - `[ws] a posture transition handler threw` - [ADAPTER-ERR-POSTURE-OBSERVER](#adapter-err-posture-observer)
 - `[ws] a deferred upgrade failed` - [ADAPTER-ERR-UPGRADE-DEFERRED](#adapter-err-upgrade-deferred)
 - `[svelte-adapter-uws] the waiting-room renderer failed; serving the built-in English page instead` - [ADAPTER-ERR-WAITING-ROOM-FALLBACK](#adapter-err-waiting-room-fallback)
 - `[ws] operational event dropped, invalid record shape` - [ADAPTER-ERR-DIAGNOSTIC-RECORD-SHAPE](#adapter-err-diagnostic-record-shape)
+- `[ws] diagnostic render failed: ` - [ADAPTER-ERR-DIAGNOSTIC-RENDER-COLLAPSE](#adapter-err-diagnostic-render-collapse)
+- `[ws] operational sink failed and the fallback could not render: ` - [ADAPTER-ERR-DIAGNOSTIC-SINK-COLLAPSE](#adapter-err-diagnostic-sink-collapse)
 - `[ws] resource-growth auditor: ` - [ADAPTER-ERR-RESOURCE-GROWTH](#adapter-err-resource-growth)
 - `[primary] relay spill quarantining ` - [ADAPTER-ERR-RELAY-SPILL-QUARANTINE](#adapter-err-relay-spill-quarantine)
 - `[ws] protection posture ` - [ADAPTER-ERR-POSTURE-TRANSITION](#adapter-err-posture-transition)
@@ -799,7 +803,7 @@ searchable log prefix is:
 - **Code/event:** `ws.shutdown-hook.unsettled`
 - **Message prefix:** `[ws] the WebSocket shutdown hook has not settled after `
 - **Cause:** The `shutdown` export of the WebSocket handler was still running when the shutdown budget expired.
-- **Consequence:** The close path stops waiting and the listen socket closes anyway. The hook keeps running - user code cannot be interrupted - but nothing awaits it, so whatever it was flushing is cut off by whatever ends the process next. createTestServer prints the same line for the same hook.
+- **Consequence:** The close path stops waiting and the listen socket closes anyway. The hook keeps running - user code cannot be interrupted - but nothing awaits it any more, so whether it finishes is now a race against whatever ends the process next. It may well complete: under `createTestServer` the process often continues afterwards and the flush lands. What is gone is the guarantee, so a hook that prints this is one deploy timing away from losing whatever it was flushing. createTestServer prints the same line for the same hook.
 - **Automatic recovery:** None by design: the budget exists so a wedged hook cannot hold the process open.
 - **Next action:** Make the hook finish inside the budget, or raise SHUTDOWN_TIMEOUT. The hook receives a `signal` that aborts when the budget expires - honoring it turns this into a clean early return.
 - **Runtime help:** `docs/errors.md#adapter-err-ws-shutdown-hook-unsettled`
@@ -833,11 +837,11 @@ searchable log prefix is:
 ## `ADAPTER-ERR-METRICS-MODULE-SHAPE`
 
 - **Code/event:** `ws.metrics.module-shape`
-- **Message prefix:** `[ws] the metrics module must default-export a registry object; got `
-- **Cause:** The module named by `websocket.metrics` default-exports something that cannot carry instrument factories. The build forwards whatever the module exports without validating its shape.
+- **Message prefix:** `[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got `
+- **Cause:** The module named by `websocket.metrics` exports something that cannot carry instrument factories under any of the names the build reads. The build takes the first of `default`, `metrics` and `registry` that is not nullish and forwards it without validating its shape.
 - **Consequence:** Metrics are disabled for the whole worker: no instrument is ever created, so the adapter series are ABSENT from the scrape rather than present at zero. Dashboards read as no data and alerts that fire on a threshold never fire at all.
 - **Automatic recovery:** None. The runtime keeps serving traffic with metrics off - the alternative is a boot failure naming neither metrics nor the option that caused it.
-- **Next action:** The guard accepts any object or function, so what printed this is a PRIMITIVE default export - the `got` value on the line says which. Default-export the registry itself (`export default registry`). Note the two shapes that pass this guard and still do not work: a module with no default export at all is treated as no registry configured and prints nothing, and a factory is accepted as-is and never called.
+- **Next action:** The guard accepts any object or function, so what printed this is a PRIMITIVE - the `got` value on the line says which type. Export the registry itself under any one of the three names the build reads, which it tries in order: `default`, then `metrics`, then `registry`. The first one that is not nullish wins, so a primitive `default` masks a perfectly good named `metrics` beside it and is worth ruling out first. Note the two shapes that pass this guard and still do not work: a module exporting none of those three names is treated as no registry configured and prints nothing at all, and a factory is accepted as-is and never called.
 - **Runtime help:** `docs/errors.md#adapter-err-metrics-module-shape`
 - **Runtime sources:** [src/runtime/utils/metrics.js](../src/runtime/utils/metrics.js)
 
@@ -870,10 +874,10 @@ searchable log prefix is:
 
 - **Code/event:** `ws.posture-observer.threw`
 - **Message prefix:** `[ws] a posture transition handler threw`
-- **Cause:** The adapter's own protection-posture transition handler threw. It records the transition metric, prints the posture line and pushes the new posture to the export socket, so the throw comes from one of those three.
-- **Consequence:** The posture CHANGED and the runtime is shedding or recovering as configured, but the record of it did not finish. The transition metric is not what went missing - it is recorded first and is itself contained - so what is incomplete is the posture log line, the posture export push, or both, and anything reading the export socket is a step behind the real posture until the next transition.
-- **Automatic recovery:** The next transition runs the handler again; a throw does not unregister it.
-- **Next action:** This is an adapter-internal failure - report it with the error printed beside it. Two things run after the contained metric: writing the console line, and pushing the new posture to the export socket. A configured metrics registry is NOT a candidate - an instrument that throws is contained and prints ADAPTER-ERR-METRICS-INSTRUMENT instead of reaching this handler.
+- **Cause:** The adapter's own protection-posture transition handler threw. It records the transition metric, prints the posture line, then pushes the new posture to the export socket. The metric is contained and the export push contains its own failures, so what remains is the console write.
+- **Consequence:** The posture CHANGED and the runtime is shedding or recovering as configured, but the record of it did not finish. What went missing is the posture log line, and with it the IMMEDIATE export push that follows it - a defense daemon reacting to the change does not get it at the moment of transition. It is not left stale until the next transition, though: the 1 Hz pressure sampler pushes the posture on every sample, so an export reader is behind by at most one sample and then carries the true posture continuously.
+- **Automatic recovery:** The export catches up on the next 1 Hz sample without waiting for another transition, and the next transition runs the handler again; a throw does not unregister it. Only the incident-timeline console line for this transition is gone for good.
+- **Next action:** This is an adapter-internal failure - report it with the error printed beside it. The console write is the candidate to look at first: the transition metric is recorded before it and is contained, and the export push after it contains its own failures (a non-serializable snapshot and a slow client are both handled inside it). A configured metrics registry is NOT a candidate - an instrument that throws is contained and prints ADAPTER-ERR-METRICS-INSTRUMENT instead of reaching this handler.
 - **Runtime help:** `docs/errors.md#adapter-err-posture-observer`
 - **Runtime sources:** [src/runtime/utils/pressure.js](../src/runtime/utils/pressure.js)
 
@@ -913,13 +917,37 @@ searchable log prefix is:
 - **Runtime help:** `docs/errors.md#adapter-err-diagnostic-record-shape`
 - **Runtime sources:** [src/runtime/diagnostic.js](../src/runtime/diagnostic.js)
 
+<a id="adapter-err-diagnostic-render-collapse"></a>
+## `ADAPTER-ERR-DIAGNOSTIC-RENDER-COLLAPSE`
+
+- **Code/event:** `ws.diagnostic.render-collapse`
+- **Message prefix:** `[ws] diagnostic render failed: `
+- **Cause:** Formatting an operational diagnostic threw, and formatting it again with the attributes stripped threw as well. The first failure is usually a value that cannot be serialized (a BigInt, a circular reference, a getter that throws); the second means the failure is not in the attributes, because they were already gone.
+- **Consequence:** That one diagnostic is lost - the line names its event, which is all that survived. Nothing else is affected: this path is contained so telemetry cannot take a request down with it, and every later diagnostic is formatted independently.
+- **Automatic recovery:** None for the lost record. The next diagnostic is attempted normally, so a value-specific failure affects only events carrying that value.
+- **Next action:** Read the event name on the line and find its emitter. Since stripping the attributes did not help, look at the envelope rather than the payload - a severity, event name or timestamp that is not the documented shape. If the emitter is application or plugin code, check its record against the documented diagnostic shape.
+- **Runtime help:** `docs/errors.md#adapter-err-diagnostic-render-collapse`
+- **Runtime sources:** [src/runtime/diagnostic.js](../src/runtime/diagnostic.js)
+
+<a id="adapter-err-diagnostic-sink-collapse"></a>
+## `ADAPTER-ERR-DIAGNOSTIC-SINK-COLLAPSE`
+
+- **Code/event:** `ws.diagnostic.sink-collapse`
+- **Message prefix:** `[ws] operational sink failed and the fallback could not render: `
+- **Cause:** A configured operational event sink threw, and the console fallback that exists to catch exactly that also failed - both the original event and the record announcing the sink failure could not be rendered.
+- **Consequence:** Two records are lost: the event being reported and the notice that the sink is broken. This is the observability pipeline reporting its own collapse, so treat any structured telemetry from this process as incomplete for as long as it persists - a quiet sink is indistinguishable from a healthy one from the outside.
+- **Automatic recovery:** None. The sink is not unregistered and is called again for the next event, so a transient failure self-heals and a persistent one keeps printing this line.
+- **Next action:** The sink is the thing to look at first - it is the component that failed originally, and it is supplied by the deployment rather than the adapter. The event name on the line says what was being reported when it went. If the sink is healthy in isolation, suspect what both paths share: a console replaced or removed by the host, which is the one dependency the fallback cannot route around.
+- **Runtime help:** `docs/errors.md#adapter-err-diagnostic-sink-collapse`
+- **Runtime sources:** [src/runtime/diagnostic.js](../src/runtime/diagnostic.js)
+
 <a id="adapter-err-resource-growth"></a>
 ## `ADAPTER-ERR-RESOURCE-GROWTH`
 
 - **Code/event:** `ws.resource-growth.trending`
 - **Message prefix:** `[ws] resource-growth auditor: `
 - **Cause:** A runtime structure the growth auditor samples has been trending upward across consecutive samples without shedding. The auditor is opt-in and off unless an audit interval is configured, so silence here means it is disabled just as often as it means nothing is growing.
-- **Consequence:** Nothing is refused yet - this is the early warning, printed once per worker lifetime while the metric keeps carrying the ongoing signal. Left alone the trend ends in memory pressure, which raises the protection posture and eventually exhausts the heap; no worker is restarted on account of memory, so what follows an exhausted heap is the process aborting rather than one thread being replaced.
+- **Consequence:** Nothing is refused yet - this is the early warning, printed once per worker lifetime while the metric keeps carrying the ongoing signal. Left alone the trend ends in memory pressure and eventually exhausts the heap. Whether anything sheds before that depends on configuration: the protection posture is opt-in, so on a default deployment there is no posture to raise and the trend runs to exhaustion unattended. No worker is restarted on account of memory either, so what follows an exhausted heap is the process aborting rather than one thread being replaced.
 - **Automatic recovery:** None. The auditor observes; it does not evict.
 - **Next action:** The line names the structure. Find the path that stopped shedding for it - a close, unsubscribe or eviction that no longer runs - rather than raising a limit; framework_resource_growth_suspected_total carries the structure as its `resource` label and shows whether the trend continued.
 - **Runtime help:** `docs/errors.md#adapter-err-resource-growth`
@@ -943,7 +971,7 @@ searchable log prefix is:
 - **Code/event:** `ws.protection-posture.transition`
 - **Message prefix:** `[ws] protection posture `
 - **Cause:** The worker moved between protection postures - normal, elevated and siege. Normal to elevated is decided by sampled pressure holding over a configured threshold (memory, CPU quota, kernel stall time, publish rate or subscriber ratio). Elevated to siege is decided instead by the rate of capacity rejections crossing the siege rate, independently of those signals. Both directions relax after a run of quiet samples, and siege steps down to elevated rather than straight to normal. The line names the posture it left, the posture it entered, the rejection rate at that moment and the highest pressure signal.
-- **Consequence:** What the posture changes depends on which one it entered. At ELEVATED nothing is refused - the admission effect is only a wider Retry-After jitter on capacity responses that were already going out - so this line is a warning rather than an outage. It does change what the worker REPORTS, though: from here every sample reads its pressure reason as CAPACITY and its pressure state as active, so `platform.pressure`, the pressure gauge, the posture export and any onPressure listener follow the posture rather than the underlying signal. At SIEGE the worker additionally refuses EVERY new upgrade at static-serve cost, and clients see a capacity refusal rather than an error. A worker that settles at either is running at its ceiling.
+- **Consequence:** What the posture changes depends on which one it entered. At ELEVATED nothing is refused - the admission effect is only a wider Retry-After jitter on capacity responses that were already going out - so this line is a warning rather than an outage. It does change what the worker REPORTS, though: from here a sample reads its pressure state as active, and its reason as CAPACITY unless the underlying signal is MEMORY, which is preserved and reported as itself - so `platform.pressure`, the pressure gauge, the posture export and any onPressure listener follow the posture rather than the underlying signal, except for the one signal you would least want masked. At SIEGE the worker additionally refuses EVERY new upgrade at static-serve cost, and clients see a capacity refusal rather than an error. A worker that settles at either is running at its ceiling.
 - **Automatic recovery:** Yes, and a de-escalation prints this same line: the posture steps back down after a run of quiet samples, and both directions are dwell-gated so it cannot flap.
 - **Next action:** Read the two numbers together, because which one decided depends on the edge. Entering elevated is decided by the pressure signal named on the line. Entering siege is decided by rejected/s crossing the siege rate and can print pressure=NONE - that is a capacity-reject storm rather than a resource problem, so read rejected/s there. A relaxation always prints pressure=NONE, because a run of quiet samples is what causes it. A posture that returns to normal on its own needs nothing; one that stays raised means the worker is undersized for the load or something is not shedding - the resource-growth line and the per-topic pressure entries cover that side.
 - **Runtime help:** `docs/errors.md#adapter-err-posture-transition`
