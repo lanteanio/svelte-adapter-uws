@@ -274,9 +274,14 @@ describeUWS('publishWireBatch per-entry explicit seq', () => {
 		});
 		expect(state.maxSeenSeq.get(monotone)).toBe(1000);
 
-		// Mixed, in entry order: the guard records 1000, then the counter's
-		// bare set overwrites it - the same record N publishWire calls leave,
-		// because the counter lane owns the topic's record when it is in use.
+		// Mixed, in entry order: the guard records 1000, and the counter entry
+		// that follows does NOT overwrite it with 1. Same record N publishWire
+		// calls leave, which is what this case is really pinning - the counter
+		// lane no longer claims a topic's record just by publishing to it,
+		// because the explicit seq that came first armed the monotone guard.
+		// Recording 1 here moved the observed maximum backward by 999, and that
+		// value is read as a fabricated divergence by the convergence hash and
+		// as a dropped floor by the resume cutover.
 		const mixed = 'entry-seq-maxseen-mixed';
 		withSockets(mixed, () => {
 			platform.publishWireBatch(mixed, 'update', [
@@ -284,7 +289,7 @@ describeUWS('publishWireBatch per-entry explicit seq', () => {
 				{ data: { v: 'b' } }
 			], statefulWire());
 		});
-		expect(state.maxSeenSeq.get(mixed)).toBe(1);
+		expect(state.maxSeenSeq.get(mixed)).toBe(1000);
 	});
 });
 

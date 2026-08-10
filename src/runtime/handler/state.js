@@ -60,10 +60,10 @@ export const divergenceDiagnostics = createDivergenceDiagnosticStore();
  * the worker `postMessage` boundary, so the monotone-max guard is required (a
  * blind overwrite could move the value backward and fabricate a divergence). The
  * local publish path already holds the freshly stamped (monotonic) seq and takes
- * `recordStampedSeen` below instead, which skips the compare but keeps the
- * membership report. A non-number `seq` (a frame relayed for a
- * `{ seq: false }` topic) is ignored, so such topics never enter the map on any
- * worker.
+ * `recordStampedSeen` below instead, which skips the compare while the counter
+ * is the only authority in the map and keeps the membership report either way.
+ * A non-number `seq` (a frame relayed for a `{ seq: false }` topic) is ignored,
+ * so such topics never enter the map on any worker.
  *
  * Pure with respect to inputs other than the supplied map (mirrors
  * `nextTopicSeq`), so a unit test can pass a fresh map per case.
@@ -74,8 +74,36 @@ export const divergenceDiagnostics = createDivergenceDiagnosticStore();
  * @param {{ onSeenInsert(topic: string): void } | undefined} [bound]
  * @returns {void}
  */
+/**
+ * Has this worker ever recorded a seq it did not itself stamp?
+ *
+ * Latches on the first such record and never clears (outside the reset below,
+ * which exists for suites that drive these recorders with fresh maps). It is
+ * the gate on the monotone compare in `recordStampedSeen`: until a foreign
+ * number has entered the observed registry, the counter really is the only
+ * authority numbering these topics, it really is monotone in itself, and the
+ * compare really is redundant. Afterwards it is none of those things.
+ *
+ * A latch rather than a per-topic mark because per-topic granularity costs a
+ * second lookup on the publish lane, which is the entire expense being avoided.
+ * Erring toward comparing is the safe direction: the cost of a needless compare
+ * is nanoseconds, the cost of a missed one is a max that moved backward.
+ */
+let foreignSeqRecorded = false;
+
+/** Test seam: forget the latch so a suite can drive both sides in one process. */
+export function resetForeignSeqLatch() { foreignSeqRecorded = false; }
+
+/** Whether the monotone compare is currently armed. Exposed for assertions. */
+export function foreignSeqLatched() { return foreignSeqRecorded; }
+
 export function recordSeen(seenMap, topic, seq, bound) {
 	if (typeof seq !== 'number') return;
+	// Every caller of this recorder is handling a number some OTHER authority
+	// issued - a sibling worker's relay frame, or an explicit `seq` option from a
+	// replay backend - which is exactly the condition that makes a bare stamped
+	// write able to regress the maximum.
+	foreignSeqRecorded = true;
 	const prev = seenMap.get(topic);
 	if (prev === undefined) {
 		seenMap.set(topic, seq);
@@ -96,14 +124,28 @@ export function recordSeen(seenMap, topic, seq, bound) {
  * lane in the runtime would buy nothing for a topic whose numbers this worker's
  * own counter issues in order.
  *
- * The exception is a topic that ALSO carries an external numeric authority.
- * The counter is monotone in itself, not against a foreign seq recorded for
- * the same topic, so a topic published once with `{ seq: 900000 }` and then
- * with the counter records 1 here and the observed maximum moves backward.
- * That is a pre-existing property of mixing two sequence authorities on one
- * topic, which is already incoherent for resume - a client cannot hold one
- * watermark against two numbering schemes - and it is deliberately not
- * bought back with a lookup on every publish. Give a topic one authority.
+ * That reasoning holds only while the counter is the ONLY authority in the map.
+ * It is not, on two ordinary shapes: a topic that also carries an explicit
+ * numeric seq (the per-entry batch seq puts both on one topic by design, one
+ * entry stamped and the next counted), and a clustered topic whose sibling's
+ * relayed numbers land here through `recordSeen`. Against a foreign number the
+ * counter is not monotone, so a topic recorded at 900000 and then published by
+ * a counter sitting at 1 used to record 1 OVER 900000 - the observed maximum,
+ * whose whole purpose is the highest seq seen for a topic, moving backward by
+ * 899999. That value feeds the cross-worker convergence hash, where a backward
+ * move is a fabricated divergence between workers that saw the publishes in a
+ * different order, and the resume cutover floor, where it reads as `before` and
+ * turns a clean handover into duplicate delivery.
+ *
+ * So the compare is paid, but only from the moment it can matter: `recordSeen`
+ * latches on the first foreign number this worker records, and this recorder
+ * takes the guarded path from then on. A worker that never meets one - a
+ * single process publishing through its own counter - keeps the bare write and
+ * measures at parity with it (bench/micro-seq-monotone-stamp-ab.mjs: +1.1% on
+ * the hot-topic shape, with the arms crossing over between process runs, where
+ * comparing unconditionally costs a consistent ~5.5%). Latch granularity rather
+ * than per-topic because a per-topic mark costs the second lookup this shape
+ * exists to avoid, and erring toward comparing is the safe direction.
  *
  * What it does share with `recordSeen` is the MEMBERSHIP report. A registry
  * bound caps a map by hearing about the entries that enter it, and a lane that
@@ -129,6 +171,22 @@ export function recordSeen(seenMap, topic, seq, bound) {
  */
 export function recordStampedSeen(seenMap, topic, seq, bound) {
 	if (typeof seq !== 'number') return;
+	// Once any foreign number has been recorded on this worker, the counter is no
+	// longer the only authority in this map and its value is no longer the
+	// maximum by construction, so the write has to compare. A publish on a topic
+	// no foreign seq ever touched takes the bare write it always did; the branch
+	// is one already-hot boolean, and the alternative - a per-topic mark - costs
+	// the lookup this whole shape exists to avoid.
+	if (foreignSeqRecorded) {
+		const prev = seenMap.get(topic);
+		if (prev === undefined) {
+			seenMap.set(topic, seq);
+			if (bound !== undefined) bound.onSeenInsert(topic);
+			return;
+		}
+		if (seq > prev) seenMap.set(topic, seq);
+		return;
+	}
 	const before = seenMap.size;
 	seenMap.set(topic, seq);
 	if (bound !== undefined && seenMap.size !== before) bound.onSeenInsert(topic);

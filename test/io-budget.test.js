@@ -854,7 +854,18 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// failed twice or a sink and its fallback have both failed. Registry prose is
 	// masked; its structure is not, and that is what moves this digest. No frame
 	// byte is read, allocated or copied, and no copy primitive entered.
-	platform: 'cbeda249fce40815b158b06fb18ba8f0b8e89445e09c58a1147bc92e610c05f2',
+	//
+	// Re-pinned for the latched monotone guard on the observed maximum.
+	// state.js gains a module-level boolean, two accessors over it, and a branch
+	// in recordStampedSeen that takes a monotone-max compare once a foreign seq
+	// has been recorded on this worker - a `get`, a comparison, and a `set` that
+	// is SKIPPED when the value does not increase. recordSeen sets the boolean.
+	// All of it is per-topic number bookkeeping in a Map of numbers: no frame
+	// byte is read, allocated or copied, and no copy primitive entered the graph.
+	// The counter-only path still takes the same bare write it did, which
+	// bench/micro-seq-monotone-stamp-ab.mjs prices at parity (about a percent,
+	// with the arms crossing over between process runs).
+	platform: '3f55e9e8ee7c00da7a3743e62ea863f33508cb4ed49805af487b7c1b8a434621',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

@@ -1,7 +1,7 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { createSeqBound, fnv32 } from '../src/runtime/utils/seq-bound.js';
 import { stampSeqValue } from '../src/runtime/utils/epoch.js';
-import { recordSeen, recordStampedSeen } from '../src/runtime/handler/state.js';
+import { recordSeen, recordStampedSeen, resetForeignSeqLatch, foreignSeqLatched } from '../src/runtime/handler/state.js';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,6 +41,85 @@ function publish(bound, seqMap, seenMap, topic) {
 	recordStampedSeen(seenMap, topic, seq, bound);
 	return seq;
 }
+
+// The foreign-seq latch is module state, so a case that records one would
+// otherwise arm the guard for every case after it in this file and the order of
+// the file would decide which write path was under test.
+beforeEach(resetForeignSeqLatch);
+
+// One topic, two sequence authorities. This is not a misconfiguration to be
+// refused - the per-entry batch seq is a shipped shape that puts an explicit
+// seq and the counter on the SAME topic, and a clustered topic mixes a
+// sibling's relayed numbers with this worker's counter as a matter of course.
+// What it must not do is move the observed maximum backward, because that value
+// feeds the cross-worker convergence hash (a backward move is a fabricated
+// divergence) and the resume cutover floor (a dropped floor is duplicate
+// delivery).
+describe('the observed maximum under mixed sequence authority', () => {
+	it('holds the foreign maximum when the local counter publishes underneath it', () => {
+		const seenMap = new Map();
+		// The exact reproduction from the report.
+		recordSeen(seenMap, 't', 900000);
+		recordStampedSeen(seenMap, 't', 1);
+		expect(seenMap.get('t'), 'the counter wrote 1 over 900000').toBe(900000);
+	});
+
+	it('holds it across the per-entry batch shape, where one topic carries both', () => {
+		const seenMap = new Map();
+		// A batch whose first entry is stamped 40 by a replay backend and whose
+		// second takes the worker counter, which is exactly what the shipped
+		// stateless reroute produces for [{ seq: 40 }, {}].
+		recordSeen(seenMap, 'mirror', 40);
+		recordStampedSeen(seenMap, 'mirror', 1);
+		expect(seenMap.get('mirror')).toBe(40);
+		// And the counter climbing past it still moves the maximum.
+		for (const seq of [39, 40, 41]) recordStampedSeen(seenMap, 'mirror', seq);
+		expect(seenMap.get('mirror')).toBe(41);
+	});
+
+	it('still reports membership on the guarded path, so the bound stays fed', () => {
+		const seenMap = new Map();
+		const admitted = [];
+		const bound = { onSeenInsert: (topic) => admitted.push(topic) };
+		recordSeen(seenMap, 'armed', 5, bound);
+		// A topic new to the map, recorded while the guard is armed: the insert
+		// has to reach the bound, or the ceiling stops counting what it admits.
+		recordStampedSeen(seenMap, 'fresh', 2, bound);
+		expect(admitted).toEqual(['armed', 'fresh']);
+		// An existing topic reports nothing, guarded or not.
+		recordStampedSeen(seenMap, 'fresh', 3, bound);
+		expect(admitted).toEqual(['armed', 'fresh']);
+	});
+
+	it('leaves the counter-only lane on the bare write, which is what the latch buys', () => {
+		const seenMap = new Map();
+		expect(foreignSeqLatched()).toBe(false);
+		recordStampedSeen(seenMap, 't', 5);
+		// Unguarded, a lower stamped value still overwrites. This is the historic
+		// behaviour, and asserting it is what keeps the gate honest: if the guard
+		// ever ran unconditionally this case would fail rather than silently
+		// costing every publish a lookup.
+		recordStampedSeen(seenMap, 't', 3);
+		expect(seenMap.get('t')).toBe(3);
+	});
+
+	it('latches on the first foreign record and stays armed', () => {
+		expect(foreignSeqLatched()).toBe(false);
+		recordSeen(new Map(), 't', 7);
+		expect(foreignSeqLatched()).toBe(true);
+		// A later stamped write does not disarm it - one foreign number is enough
+		// to make the counter's monotonicity claim false for the rest of the run.
+		recordStampedSeen(new Map(), 'other', 1);
+		expect(foreignSeqLatched()).toBe(true);
+	});
+
+	it('ignores a non-number seq without arming, so a seq:false topic changes nothing', () => {
+		const seenMap = new Map();
+		recordSeen(seenMap, 'quiet', null);
+		expect(foreignSeqLatched()).toBe(false);
+		expect(seenMap.has('quiet')).toBe(false);
+	});
+});
 
 describe('bounded seq registries (unit)', () => {
 	it('keeps the bare-map stamp byte-identical: first call is 1, then previous plus one', () => {
