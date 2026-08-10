@@ -201,12 +201,16 @@ describe('consumer release summary', () => {
 	});
 
 	it('binds the newest release to a safe exact package SemVer and real date', () => {
-		const heading = '## [0.6.0-next.91] - 2026-08-01';
-		const mismatch = CHANGELOG.replace(heading, '## [9.9.9] - 2026-08-01');
+		// Read the newest heading out of the file rather than pinning its literal text: the
+		// release date moves every release, and a pinned date makes the replace below a silent
+		// no-op, which turns every mutation here into a test that cannot fail.
+		const [heading, headingVersion, releaseDate] = CHANGELOG.match(/^## \[(.+?)\] - (\d{4}-\d{2}-\d{2})$/m);
+		expect(headingVersion).toBe(NEWEST_VERSION);
+		const mismatch = CHANGELOG.replace(heading, `## [9.9.9] - ${releaseDate}`);
 		expect(() => validateReleaseSummary(mismatch)).toThrow(/does not match package\.json version/);
 
 		for (const date of ['2026-99-99', '2026-02-29']) {
-			const invalidDate = CHANGELOG.replace(heading, '## [0.6.0-next.91] - ' + date);
+			const invalidDate = CHANGELOG.replace(heading, `## [${NEWEST_VERSION}] - ` + date);
 			expect(() => validateReleaseSummary(invalidDate), date).toThrow(/real calendar date/);
 		}
 

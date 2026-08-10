@@ -5,9 +5,12 @@ import { createResourceTracker, processResourceProbes, detectGrowth } from '../s
 // and asserts the process heap and active-handle count trend flat across many
 // connect/close cycles. Unlike the DST structural harness (test/sim-leak.test.js)
 // this covers the NON-DETERMINISTIC memory dimension, so it needs a settled heap:
-// run with `node --expose-gc` (vitest: `--expose-gc`) so global.gc is available.
-// When it is not, the whole suite is skipped so the default `npm test` stays
-// green - the deterministic simulator is the always-on gate.
+// `global.gc` has to exist. vitest.config.js passes `--expose-gc` to every worker,
+// so the default `npm test` runs this suite. The guard below stays as a guard: it
+// reports an honest skip if the flag is ever dropped, rather than failing on a
+// missing global. Skipping it is not the resting state - a permanent skip here
+// leaves real heap behaviour under real client churn untested, which the
+// deterministic simulator in test/sim-leak.test.js does not cover.
 
 let uWS;
 try {

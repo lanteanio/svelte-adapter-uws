@@ -1334,13 +1334,56 @@ if (is_primary) {
 	}
 
 	if (isMainThread) {
+		// Signal handlers are armed BEFORE `start()`, for the same reason the worker
+		// branch below registers its message dispatch early. `start()` logs
+		// "Listening on" the moment the socket binds and then keeps awaiting the
+		// `init` hook, so a server is reachable - and an orchestrator can already be
+		// sending SIGTERM - while this module has not reached its own end yet.
+		// Arming afterwards left that whole window on Node's DEFAULT disposition,
+		// where SIGTERM terminates the process outright: no drain, no readiness
+		// flip, no `sveltekit:shutdown` listeners, every in-flight request dropped,
+		// and nothing in the log to say it happened. The window is as long as a
+		// user's warmup takes.
+		//
+		// A signal that arrives mid-boot is LATCHED rather than dispatched: running
+		// the drain against a half-built handler graph is the other way to lose the
+		// same requests. The latch is spent once `start()` has resolved, so the
+		// shutdown always runs against a complete server.
+		// Readiness leaves the rotation on the signal itself, and only the teardown
+		// waits for boot - the same split the worker branch makes when it actions a
+		// primary `drain` ahead of its boot gate but buffers `shutdown` behind it.
+		// Deferring the drain too would keep readiness answering 200 for the whole
+		// warmup while the process is already condemned, so a balancer would keep
+		// routing to it until the orchestrator's patience ran out and SIGKILL took
+		// the requests with it. The lifecycle module holds this line from its side:
+		// a boot that finishes after the drain must not pull the instance back into
+		// rotation.
+		/** @type {'SIGINT' | 'SIGTERM' | null} */
+		let boot_signal = null;
+		let booted = false;
+		/** @param {'SIGINT' | 'SIGTERM'} reason */
+		const onSignal = (reason) => {
+			if (booted) { graceful_shutdown(reason); return; }
+			if (boot_signal) return;
+			boot_signal = reason;
+			if (beginDrain()) console.log('[svelte-adapter-uws] Readiness now reports NOT ready (draining); still accepting.');
+		};
+		process.on('SIGTERM', () => onSignal('SIGTERM'));
+		process.on('SIGINT', () => onSignal('SIGINT'));
+
 		// Single-process mode (no clustering). Awaiting `start()` lets the
 		// hooks.ws `init` hook run to completion (cron registration, warmup
 		// tasks, etc.) before this entry script returns. A throwing init
 		// surfaces as an unhandled promise rejection and crashes the
 		// process - which is the right behavior for boot failure.
 		await start(host, port);
-		sdReadyOnce();
+		booted = true;
+		// An instance that took a signal mid-boot is already draining and about to
+		// exit, so it never announces itself READY - telling the supervisor it came
+		// up, one tick before it goes down, is how a rolling deploy convinces itself
+		// the new instance is healthy.
+		if (boot_signal) graceful_shutdown(boot_signal);
+		else sdReadyOnce();
 	} else {
 		// Worker thread startup depends on role, then clustering mode.
 		const role = workerData?.role ?? 'io';
@@ -1549,10 +1592,9 @@ if (is_primary) {
 		markRelayAttached();
 	}
 
-	if (isMainThread) {
-		process.on('SIGTERM', () => graceful_shutdown('SIGTERM'));
-		process.on('SIGINT', () => graceful_shutdown('SIGINT'));
-	}
+	// Single-process signal handlers are armed before `start()`, up where the boot
+	// latch lives - a registration down here can only ever be later than the socket
+	// that is already taking traffic.
 }
 
 export { host, port };

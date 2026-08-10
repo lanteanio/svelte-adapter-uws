@@ -5,7 +5,7 @@ All notable changes to `svelte-adapter-uws` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0-next.91] - 2026-08-01
+## [0.6.0-next.91] - 2026-08-10
 
 <!-- consumer-release-summary:start -->
 ### Consumer summary
@@ -57,6 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Action:** Use the matched HTTPS native-addon archive from the generated compatibility row, then rerun the normal static and unit gates after changing public declarations, metrics, links, compatibility, or subscription policy.
   - **Requires:** Node 22 or newer and a published binary for the current Node ABI, CPU, OS, and, on Linux, glibc 2.38 or newer; no runtime API migration.
   - **Compatibility:** Clean server installs fail earlier when the native addon is unavailable; other corrections tighten validation and stale-data behavior without renaming documented public signals.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: a signal arriving during boot no longer kills the server outright.** A single-process server armed its `SIGTERM` and `SIGINT` handlers only after the `init` hook finished, so a signal during warmup met Node's default disposition and killed the process with no drain, no cleanup listeners and nothing in the log, where it now drains and exits gracefully.
+  - **Affects:** Every non-clustered deployment whose `hooks.ws` `init` hook does real work, and any orchestrator that signals during a rolling restart or scale-down.
+  - **Action:** None; the corrected ordering is the default.
+  - **Requires:** No new option and no API change.
+  - **Compatibility:** An instance signalled mid-boot now drains and exits gracefully instead of dying, and no longer announces itself ready to the supervisor on its way down.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 <!-- consumer-release-summary:end -->
@@ -616,6 +623,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `presence.update()` calls retain their existing contract.
 
 ### Fixed
+
+- **A signal during boot runs the adapter's own shutdown, not Node's default
+  disposition.** `start()` binds the listen socket and prints `Listening on`
+  before it awaits the `hooks.ws` `init` hook, but single-process mode armed
+  its `SIGTERM` and `SIGINT` handlers only after `await start()` returned. For
+  the whole length of a warmup the process was reachable, serving, and running
+  with no handler installed, so a signal delivered in that window terminated it
+  instantly: no drain, no readiness flip, no `sveltekit:shutdown` listeners,
+  every in-flight request dropped, and no line in the log to say it happened.
+  The handlers are armed before `start()` now. Readiness leaves the rotation on
+  the signal itself, the same split a worker makes when it actions a primary
+  `drain` ahead of its own boot gate, while the teardown is held until boot
+  resolves so it never runs against a half-built handler graph; an instance
+  condemned mid-boot also stops announcing itself READY to the supervisor one
+  tick before it goes down. The exit helper covering these cases folded a
+  signal death (`code === null`) into a clean `0`, so the assertion guarding
+  the exit could not fail on the one outcome it existed to reject; it reports
+  the signal now, and a case holds the boot window open with a slow `init` so
+  the window is driven deliberately rather than won or lost on machine load.
 
 - **The wire contract no longer schedules the package.** PROTOCOL.md's
   preamble carried a transport paragraph that mixed facts with product

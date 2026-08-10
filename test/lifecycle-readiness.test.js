@@ -488,7 +488,14 @@ describeUWS('graceful shutdown of the built server', () => {
 	function whenExited(proc, ms) {
 		return new Promise((resolve) => {
 			const timer = setTimeout(() => resolve(null), ms);
-			proc.on('exit', (code) => { clearTimeout(timer); resolve(code ?? 0); });
+			// A process killed by a signal reports `code === null` with the signal name,
+			// so folding it to `code ?? 0` read a SIGTERM death as a clean exit - the one
+			// outcome these assertions exist to reject, and the one that loses every
+			// cleanup listener. Surface the signal so it cannot pass as a zero.
+			proc.on('exit', (code, signal) => {
+				clearTimeout(timer);
+				resolve(code === null && signal ? `killed:${signal}` : (code ?? 0));
+			});
 		});
 	}
 
@@ -531,6 +538,37 @@ describeUWS('graceful shutdown of the built server', () => {
 		// writes gone and nothing in the log.
 		expect(existsSync(marker), 'the async cleanup listener never finished before exit').toBe(true);
 		expect(readFileSync(marker, 'utf8')).toBe('closed:SIGTERM');
+	}, 60000);
+
+	it('arms its signal handlers before the socket, so a SIGTERM during a slow init still drains', async () => {
+		const marker = join(dir, 'bootsignal-marker.txt');
+		const entry = writeWrapper('entry-bootsignal.mjs');
+		// `start()` logs "Listening on" at the bind and only THEN awaits the init
+		// hook, so this resolves inside the window under test: the server is already
+		// reachable and an orchestrator can already be signalling it.
+		const { proc, output } = await startServer(entry, {
+			PROBE_CLEANUP: 'async', PROBE_MARKER: marker, SLOW_INIT_MS: '1500'
+		});
+
+		requestShutdown(proc);
+
+		// The exit must be the adapter's own. Handlers armed after `await start()`
+		// left this window on Node's default SIGTERM disposition, which terminates
+		// the process outright - no drain, no listeners, nothing in the log - and
+		// reported `code === null`, which the exit helper above used to fold into a
+		// passing 0.
+		expect(await whenExited(proc, 25000)).toBe(0);
+
+		expect(existsSync(marker), `a SIGTERM during init killed the process outright.\n--- server output ---\n${output.text}`).toBe(true);
+		expect(readFileSync(marker, 'utf8')).toBe('closed:SIGTERM');
+		// Readiness left the rotation on the SIGNAL, not once the warmup finished:
+		// a condemned instance answering 200 for the length of someone's init hook
+		// keeps a balancer routing live traffic at it.
+		expect(output.text).toContain('Readiness now reports NOT ready (draining)');
+		// And the init that completes underneath the shutdown never announces the
+		// instance ready on its way down.
+		expect(output.text).not.toContain('Ready for traffic');
+		expect(output.text).toContain('Shutdown complete');
 	}, 60000);
 
 	it('treats SHUTDOWN_TIMEOUT=0 as NO budget and still awaits the cleanup listener', async () => {

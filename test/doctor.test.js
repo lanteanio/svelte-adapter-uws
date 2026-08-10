@@ -160,7 +160,10 @@ describe('doctor exit code', () => {
 		expect(output).toMatch(/^doctor: svelte-adapter-uws@/);
 		expect(output).toMatch(/uWebSockets\.js/);
 		expect(run.status).toBe(/^ {2}FAIL /m.test(output) ? 1 : 0);
-	});
+		// Spawns the real doctor, which probes the toolchain and the native addon in a
+		// child process. That work crosses vitest's 5000ms default when the full suite
+		// is competing for the machine, so the ceiling is the one that catches a hang.
+	}, 30000);
 });
 
 // The severity split above is decided in main(), from argv and the environment,

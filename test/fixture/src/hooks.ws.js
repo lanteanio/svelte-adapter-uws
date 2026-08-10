@@ -10,7 +10,15 @@ const cursors = createCursor({
 // Test-only init probe: when ACCEPTOR_INIT_PROBE=1 the per-worker init hook logs a
 // marker so the acceptor-init integration test can prove that a clustered acceptor
 // worker runs its init BEFORE the primary starts serving (a no-op otherwise).
-export function init({ platform }) {
+export async function init({ platform }) {
+	// Test-only: hold the boot window open. `start()` binds the listen socket and
+	// logs "Listening on" BEFORE it awaits this hook, so a held init is the one
+	// place a test can deliver a real signal to a server that is already reachable
+	// but whose entry script has not finished - the window a SIGTERM used to meet
+	// Node's default disposition in, dying instantly with every cleanup listener
+	// still pending (a no-op when the variable is unset).
+	const holdMs = Number(process.env.SLOW_INIT_MS || 0);
+	if (holdMs > 0) await new Promise((resolve) => setTimeout(resolve, holdMs));
 	if (process.env.ACCEPTOR_INIT_PROBE === '1') {
 		console.log(`__ACCEPTOR_INIT_RAN__ connections=${platform.connections}`);
 	}

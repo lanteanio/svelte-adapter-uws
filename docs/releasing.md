@@ -59,7 +59,7 @@ bullet is split into focused bullets rather than raising the bound.
 
 The generated `docs/releases/<version>.md` page links engineering detail to the
 release's own version-heading anchor in `CHANGELOG.md` (for example
-`## [0.6.0-next.91] - 2026-08-01` produces `#060-next91---2026-08-01`), never
+`## [0.6.0-next.91] - 2026-08-10` produces `#060-next91---2026-08-10`), never
 to the file-first `#added` style anchors, which always resolve to the newest
 release and would silently misroute archived pages. Every page in
 `docs/releases/`, not only the newest, must pin its own version anchor, and

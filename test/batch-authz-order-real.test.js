@@ -88,7 +88,11 @@ describeUWS('subscribe-batch authorization ordering (real runtime)', () => {
 		const after = await readRoster(alice, 'private-room', 'after');
 		expect(after.members).toEqual(['alice']);
 		expect(after.taps).toBe(1);
-	});
+		// Boots a server and then pays for a grant plus two roster round-trips, so it
+		// carries more of the wall clock than its siblings and is the one that crosses
+		// vitest's 5000ms default once the full suite is competing for the machine.
+		// Long enough that a genuine stall still fails, rather than the scheduler.
+	}, 30000);
 
 	it('delivers no roster state to the denied caller', async () => {
 		server = await startRealRuntime({ variant: 'batchleak' });

@@ -16,6 +16,17 @@ export default defineConfig({
 	},
 	test: {
 		pool: 'vmForks',
+		// Expose `global.gc` to every worker so the real-server leak harness runs
+		// instead of gating itself off. Nothing else supplied the flag, so its
+		// `uWS && gc` condition was never satisfiable and the non-deterministic
+		// memory dimension went uncovered on every platform while the summary line
+		// still read green. Set here rather than in NODE_OPTIONS because an inline
+		// environment assignment in an npm script does not carry across Windows.
+		// The flag only publishes the collection hook; it does not change how V8
+		// collects, so no other suite's behaviour moves. Top-level, not under
+		// `poolOptions`: vitest 4 removed that nesting and silently ignores it,
+		// which looks identical to the flag working and the suite skipping anyway.
+		execArgv: ['--expose-gc'],
 		include: ['test/**/*.test.js'],
 		// `**/node_modules/**`, not `node_modules/**`: the Svelte 4 profile under
 		// test/fixtures/ installs its own dependency tree, and a bare top-level
