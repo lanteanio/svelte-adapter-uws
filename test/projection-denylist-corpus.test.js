@@ -383,7 +383,7 @@ describe('every spelling of one datum gets one verdict', () => {
 	// mic-state field on a huddle roster and must pass; `phone` is PII and must
 	// drop. Nothing spells a microphone `microPhone`, so the divergence has no
 	// real subject - but it is a divergence, and an unpinned one reads as an
-	// oversight to the next reviewer.
+	// oversight to whoever meets it next.
 	it('splits microphone from phone on purpose', () => {
 		expect(dropped('microphone')).toBe(false);
 		expect(dropped('microphoneOn')).toBe(false);

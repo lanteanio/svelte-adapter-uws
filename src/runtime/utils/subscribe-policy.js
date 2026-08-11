@@ -9,8 +9,9 @@
  * decision appeared as `isNew` in one file and `!subs.has(topic)` in another,
  * the plugin-owned carve-out reached the batch path on all three surfaces and
  * the single path on one, the recover guard reached two of three, and the
- * gap-fill fall-through reached one. Every one of those was found by a reviewer
- * rather than by a test, because a hand-copied mirror has no oracle.
+ * gap-fill fall-through reached one. No test caught any of them, because a
+ * hand-copied mirror has no oracle: three surfaces agreeing with each other is
+ * not something a suite can check when nothing states what they should agree on.
  *
  * The seam is DECISIONS, not plumbing. A decision here is a pure function of
  * named inputs: no socket, no userData, no I/O, nothing to mock. Each surface

@@ -735,7 +735,7 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	//
 	// Re-pinned again after correcting operator guidance inside those same
 	// frozen literals: cause, consequence, recovery and next-action strings were
-	// rewritten where a review found them describing the wrong code path. The
+	// rewritten wherever they described the wrong code path. The
 	// digest covers literal CONTENT, so documentation wording moves it even
 	// though no statement, call or allocation changed. Nothing here executes on
 	// a frame path.
@@ -1143,7 +1143,7 @@ function localModuleSpecifiers(body) {
 // data module of operator guidance whose literal content is independently
 // gated: generate-error-reference renders and validates every entry field the
 // runtime displays - including the operator shortlink URL, added to that gate
-// when a review found it was previously watched by this seal alone - and
+// after it turned out to be watched by this seal alone - and
 // fails the build when the registry and docs/errors.md disagree. Yet its
 // sentences moved this seal three times in one session, twice for wording
 // alone - and a gate that fires on wording teaches people that a seal

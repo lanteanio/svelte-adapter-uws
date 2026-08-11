@@ -817,7 +817,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so rewording a `cause` or `nextAction` sentence in the error registry moved
   the digest and failed the suite, three times in one working day, twice for
   prose alone. Before handing that text over to its own gate, the gate was
-  made complete: review found the operator shortlink URL the runtime prints
+  made complete: the operator shortlink URL the runtime prints
   on error messages was validated nowhere but this seal, so the
   error-reference generator now renders every shortlink into the checked
   document and refuses any value that is not a registered-domain shortlink -
