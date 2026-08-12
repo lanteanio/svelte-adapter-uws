@@ -16,6 +16,20 @@ const CHANGELOG = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf
 const NEWEST_VERSION = newestReleaseVersion(CHANGELOG);
 const RELEASE_PAGE = readFileSync(new URL('../' + releasePagePath(CHANGELOG), import.meta.url), 'utf8');
 
+/** The newest release block: its own heading down to the next dated heading. */
+const NEWEST_BODY = (() => {
+	const newest = CHANGELOG.slice(CHANGELOG.indexOf('## [' + NEWEST_VERSION + ']'));
+	const following = newest.indexOf('\n## [', 1);
+	return following === -1 ? newest : newest.slice(0, following);
+})();
+
+// Every mutation below is derived from the newest release rather than pinned
+// to one release's copy. A pinned literal ages into a replace() that matches
+// nothing the moment that copy moves into history, and a mutation that does
+// not mutate passes vacuously - the whole block goes green while asserting
+// nothing at all.
+const FIRST_ENTRY = NEWEST_BODY.match(/^- \*\*(Added|Changed|Fixed): [^.]+\.\*\* (.+)$/m);
+
 function summaryEntry(kind) {
 	return [
 		`- **${kind}: the mutation fixture.** The synthetic release fixture keeps one bounded consumer outcome in front of its engineering detail so the mutation suite can prove that coverage is required per existing section and never demanded for a section the release does not contain.`,
@@ -50,9 +64,7 @@ function syntheticChangelog(version, entryKinds, sections) {
 describe('consumer release summary', () => {
 	it('keeps the newest release action-first, grouped, and completely enumerated', () => {
 		const entries = validateReleaseSummary(CHANGELOG);
-		const newest = CHANGELOG.slice(CHANGELOG.indexOf('## [' + NEWEST_VERSION + ']'));
-		const nextRelease = newest.indexOf('\n## [', 1);
-		const body = nextRelease === -1 ? newest : newest.slice(0, nextRelease);
+		const body = NEWEST_BODY;
 
 		// Derived, not frozen: a hardcoded kind list only records what was
 		// written the day it was pinned and turns every legitimate new entry
@@ -85,25 +97,29 @@ describe('consumer release summary', () => {
 	});
 
 	it('rejects short or multi-sentence outcome blocks', () => {
-		const short = CHANGELOG.replace(
-			'Structured compatibility, migration, protocol, observability, contribution, security, and release surfaces now ship with executable drift checks, giving consumers one route to supported version tuples, production signals, incident guidance, and upgrade evidence instead of requiring source-code or CI archaeology.',
-			'The contracts are easier to find.'
-		);
-		const twoSentences = CHANGELOG.replace('CI archaeology.', 'CI archaeology. Consumers benefit.');
+		const outcome = FIRST_ENTRY[2];
+		const short = CHANGELOG.replace(outcome, () => 'The contracts are easier to find.');
+		const twoSentences = CHANGELOG.replace(outcome, () => outcome + ' Consumers benefit.');
 		expect(() => validateReleaseSummary(short)).toThrow(/expected 40-60/);
 		expect(() => validateReleaseSummary(twoSentences)).toThrow(/one outcome sentence/);
 	});
 
 	it('rejects missing, reordered, or misrouted decision fields', () => {
-		const reordered = CHANGELOG.replace(
-			'  - **Affects:** Package consumers, operators, contributors, and release maintainers.\n  - **Action:**',
-			'  - **Action:** Package consumers, operators, contributors, and release maintainers.\n  - **Affects:**'
+		const pair = NEWEST_BODY.match(/^ {2}- \*\*Affects:\*\* .+\n {2}- \*\*Action:\*\* .+$/m)[0];
+		const [affects, action] = pair.split('\n');
+		const reordered = CHANGELOG.replace(pair, () => action + '\n' + affects);
+		// The newest release is the first block in the file, so the first
+		// occurrence of a field label is always the one under test.
+		const missing = CHANGELOG.replace('  - **Requires:**', '  - **Prerequisite:**');
+		const detail = NEWEST_BODY.match(/^ {2}- \*\*Detail:\*\* \[(\w+) engineering detail\]\(#(\w+)\)\.$/m);
+		const wrongAnchor = detail[2] === 'fixed' ? 'added' : 'fixed';
+		const misrouted = CHANGELOG.replace(
+			detail[0],
+			() => '  - **Detail:** [' + detail[1] + ' engineering detail](#' + wrongAnchor + ').'
 		);
-		const missing = CHANGELOG.replace('  - **Requires:** No runtime option;', '  - **Prerequisite:** No runtime option;');
-		const misrouted = CHANGELOG.replace('[Changed engineering detail](#changed)', '[Changed engineering detail](#fixed)');
 		expect(() => validateReleaseSummary(reordered)).toThrow(/in order/);
 		expect(() => validateReleaseSummary(missing)).toThrow(/in order/);
-		expect(() => validateReleaseSummary(misrouted)).toThrow(/link to #changed/);
+		expect(() => validateReleaseSummary(misrouted)).toThrow(new RegExp('link to #' + detail[2]));
 	});
 
 	it('rejects bypass prose, duplicate markers, and missing category coverage', () => {
@@ -112,18 +128,27 @@ describe('consumer release summary', () => {
 			'<!-- consumer-release-summary:start -->',
 			'<!-- consumer-release-summary:start -->\n<!-- consumer-release-summary:start -->'
 		);
-		// The real newest release HAS a `### Changed` engineering section, so
-		// removing its Changed coverage must fail; a release without that
-		// section is exercised by the section-coverage test below.
-		// EVERY Changed entry must be relabeled, or a surviving one still
-		// supplies the coverage and the mutant silently stops mutating.
-		const noChanged = CHANGELOG
-			.replaceAll('- **Changed: ', '- **Added: ')
-			.replaceAll('[Changed engineering detail](#changed).', '[Added engineering detail](#added).');
+		// Strip one existing section's coverage while its engineering section
+		// stays. The relabeled entries have to land on a section the release
+		// also has, or the validator reports the missing detail link before it
+		// ever reaches the coverage rule - so this needs two sections, and a
+		// single-section release is exercised by the synthetic case below.
+		const sections = [...NEWEST_BODY.matchAll(/^### (Added|Changed|Fixed)$/gm)].map((match) => match[1]);
+		expect(sections.length, 'the newest release needs two engineering sections for this mutant')
+			.toBeGreaterThanOrEqual(2);
+		const [dropped, host] = sections;
+		// EVERY entry of the dropped kind must be relabeled, or a surviving one
+		// still supplies the coverage and the mutant silently stops mutating.
+		const uncovered = CHANGELOG.replace(NEWEST_BODY, () => NEWEST_BODY
+			.replaceAll('- **' + dropped + ': ', '- **' + host + ': ')
+			.replaceAll(
+				'[' + dropped + ' engineering detail](#' + dropped.toLowerCase() + ').',
+				'[' + host + ' engineering detail](#' + host.toLowerCase() + ').'
+			));
 		const hidden = CHANGELOG.replace('### Consumer summary', '### Consumer summary\n\n<div hidden>');
 		expect(() => validateReleaseSummary(prose)).toThrow(/prose outside an entry/);
 		expect(() => validateReleaseSummary(duplicate)).toThrow(/one consumer summary marker pair/);
-		expect(() => validateReleaseSummary(noChanged)).toThrow(/missing Changed coverage/);
+		expect(() => validateReleaseSummary(uncovered)).toThrow(new RegExp('missing ' + dropped + ' coverage'));
 		expect(() => validateReleaseSummary(hidden)).toThrow(/cannot hide content in raw HTML/);
 	});
 
