@@ -2,7 +2,7 @@
 
 [README](./README.md) | [wire protocol](./PROTOCOL.md) |
 [protocol schema](./protocol.schema.json) | [test vectors](./test-vectors/README.md) |
-[current release](./docs/releases/0.6.0-next.91.md) |
+[current release](./docs/releases/0.6.0-next.92.md) |
 [release history](./CHANGELOG.md)
 
 This stable URL is the permanent entry point for adapter migrations. Versioned

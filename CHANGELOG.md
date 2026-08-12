@@ -5,6 +5,121 @@ All notable changes to `svelte-adapter-uws` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.92] - 2026-08-12
+
+<!-- consumer-release-summary:start -->
+### Consumer summary
+
+- **Changed: the development dependency tree carries no open advisories.** Five npm audit advisories, two moderate and three high, are resolved at patch level entirely inside the development and comparison-benchmark tree, so contributors and continuous integration audit clean while every shipped dependency range, peer floor and published tarball stays exactly where it was.
+  - **Affects:** Contributors and continuous integration; no consumer of the published package.
+  - **Action:** None; run `npm install` in a clone to pick up the resolved lockfile.
+  - **Requires:** No new dependency, range or Node floor.
+  - **Compatibility:** Lockfile-only movement; the declared dependency, peer and optional ranges are unchanged.
+  - **Detail:** [Changed engineering detail](#changed).
+
+- **Fixed: the observed sequence maximum under mixed numbering authority.** A topic numbered by both a relayed sibling and this worker's own counter could record a maximum far below one it had already seen, which fabricated divergence in the cross-worker convergence hash and turned a clean resume handover into duplicate delivery for clustered rooms and per-entry batch sequences.
+  - **Affects:** Clustered deployments, and any publisher mixing an explicit `seq` with counter-numbered entries on one topic.
+  - **Action:** None; the corrected bookkeeping is the default and costs nothing on a worker that never meets a foreign sequence.
+  - **Requires:** No new option and no API change.
+  - **Compatibility:** The highest-seen value is now monotone per topic; a single-authority worker keeps its previous values byte for byte.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: the operator-facing error reference and its console index.** Six registry entries sent an operator somewhere the runtime does not behave as described, and the two lines reporting a collapse of the diagnostic pipeline itself printed with no stable identifier, so an incident now starts from guidance and identifiers that agree with the code that produced the line.
+  - **Affects:** Operators reading `docs/errors.md` or searching a printed adapter console line.
+  - **Action:** Re-read any runbook step derived from the six corrected entries, because the remedy each one named was wrong.
+  - **Requires:** No runtime option; the reference is generated from the shipped registry.
+  - **Compatibility:** Two previously unindexed console lines gain the stable identifiers `DIAGNOSTIC_RENDER_COLLAPSE` and `DIAGNOSTIC_SINK_COLLAPSE`; no existing identifier is renamed.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+<!-- consumer-release-summary:end -->
+
+### Changed
+
+- **Every open advisory against the development tree is resolved at patch
+  level.** npm audit reported five advisories, two moderate and three high,
+  and none of them reach a consumer: the shipped dependencies are the Rollup
+  plugins, parse5, rollup and yjs plus the optional native addon, while all
+  five sat in the development tree - `@sveltejs/kit` (development and peer),
+  ajv via ajv-formats, brace-expansion under c8, nanoid under kit's vite, and
+  socket.io-parser from the comparison benchmarks. The resolutions move only
+  the lockfile: `@sveltejs/kit` 2.70.1 to 2.70.2, ajv 8.17.1 to 8.20.0,
+  brace-expansion 5.0.8 to 5.0.9, nanoid 3.3.16 to 3.3.18, and
+  socket.io-parser 4.2.6 to 4.2.7. Kit lands on the 2.70.2 the locked support
+  profile already names, no declared range and no peer floor moves, and
+  `0.6.0-next.91` is unaffected and needs no republication.
+
+### Fixed
+
+- **The highest observed sequence number for a topic cannot move backward.**
+  The counter arm of every publish lane wrote the highest-seen registry with a
+  bare set, on the argument that a counter is monotone in itself. That holds
+  only while the counter is the sole authority numbering a topic, and two
+  ordinary shapes break it: a per-entry batch sequence puts an explicit `seq`
+  and the counter on one topic by design, and a clustered topic mixes a
+  sibling's relayed numbers with this worker's counter as a matter of course.
+  Against a foreign number the counter is not monotone, so a topic recorded at
+  900000 and then published by a counter sitting at 1 recorded 1 over 900000,
+  moving the maximum backward by 899999. That value feeds the cross-worker
+  convergence hash, where a backward move is a fabricated divergence between
+  workers that saw the publishes in a different order, and the resume cutover
+  floor, where it reads as `before` and turns a clean handover into duplicate
+  delivery. The comparison is now paid, but only from the moment it can
+  matter: the one recorder that handles a number this worker did not stamp -
+  whether relayed or supplied as an explicit `seq` - latches a flag, and the
+  stamped recorder takes the monotone path from then on, so a worker that
+  never meets a foreign sequence keeps the bare write it always had. The
+  latched form measures at parity, 107.28ns against 108.45ns on the hot-topic
+  shape over the best of three process runs, and
+  `bench/micro-seq-monotone-stamp-ab.mjs` carries all three arms with the
+  numbers - including the unconditional comparison, which prices at a
+  consistent 5.5% on the publish lane, and the warning that running the arms
+  in one process reported that same figure as 18% because inline caches and
+  deoptimisation state are shared across call sites.
+
+- **Six operator-facing registry entries stop contradicting their call
+  sites.** `METRICS_MODULE_SHAPE` claimed the metrics module must
+  default-export a registry and that a module without a default is treated as
+  unconfigured; the build picks the first of `default`, `metrics` and
+  `registry` that is not nullish, so a named export works, a primitive in any
+  of those slots prints the line, and a leading primitive `default` masks a
+  valid named `metrics` beside it. `POSTURE_OBSERVER` sent the reader after an
+  export failure that carries its own errors and said an export reader stays
+  behind until the next transition; the 1 Hz sampler pushes every sample, so
+  the reader is behind by at most one sample and what is lost for good is the
+  transition's console line, now named as the first thing to look at.
+  `POSTURE_TRANSITION` said every sample reads its pressure reason as
+  `CAPACITY` once the posture is raised, when `MEMORY` is applied first and
+  preserved. `RESOURCE_GROWTH` asserted that the trend raises the protection
+  posture before the heap is exhausted, when the posture is opt-in and a
+  default deployment sheds nothing and runs to exhaustion unattended.
+  `WS_SHUTDOWN_HOOK_UNSETTLED` stated the flush is cut off, where the hook
+  keeps running and may well finish, so what is lost is the guarantee rather
+  than necessarily the work. The wrong metrics-module claim is corrected in
+  the comment over the guard in `src/runtime/utils/metrics.js` as well.
+
+- **The diagnostic pipeline's own collapse is reported with a stable
+  identifier.** Its two lines were exempt from the console index on the
+  grounds that a registry-generated entry is what could not be delivered,
+  which conflates delivery with rendering: `adapterConsoleLine` builds a
+  string from frozen registry data and never touches the sink, as the same
+  file already demonstrated for `DIAGNOSTIC_RECORD_SHAPE`. Both are indexed
+  now, as `DIAGNOSTIC_RENDER_COLLAPSE` and `DIAGNOSTIC_SINK_COLLAPSE`, so the
+  moment the observability pipeline reports its own collapse an operator gets
+  an identifier, a cause, a consequence and a next action instead of a bare
+  string. The registry holds 66 stable errors and 32 console lines, and the
+  index reads 45 registry entries against 41 deliberately unindexed.
+
+- **Shipped source states what is true of the code rather than how a defect
+  surfaced.** A comment in `src/runtime/utils/subscribe-policy.js` and one
+  changelog paragraph attributed a defect to the process that caught it, and
+  both files are in the packaged file list, so both reached the published
+  tarball. Each names the property instead: for the subscribe policy, that a
+  hand-copied mirror has no oracle, so three surfaces agreeing is not
+  something a suite can check while nothing states what they should agree on.
+  Three test comments are corrected the same way, and the files a local
+  history rewrite had re-materialised as CRLF are normalised back to LF in the
+  same pass.
+
 ## [0.6.0-next.91] - 2026-08-10
 
 <!-- consumer-release-summary:start -->
