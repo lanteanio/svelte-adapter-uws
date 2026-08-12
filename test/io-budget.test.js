@@ -581,7 +581,25 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// failed - so nothing on a frame path changed, no byte is read, allocated or
 	// copied, and no copy primitive entered the graph. The coercion allocates a
 	// string only on that collapse path and only from a value already held.
-	ingress: '7f69435074c3344771555ace6090959a21642205d168dfb5d48a331140069ba9',
+	//
+	// Re-pinned for the diagnostic-collapse repair. Two things drifted here and
+	// both are named, because this seal is the only thing that would catch the
+	// second one. error-registry.js: one id constant removed and two added, one
+	// frozen entry object added and one replaced - structure, which is sealed by
+	// design, while the entries' sentences stay masked. And diagnostic.js's own
+	// bodies, which ARE inside this graph - confirmed by reverting
+	// error-registry.js alone and watching this digest still move, rather than
+	// inferred. defaultOperationalEventSink now binds `formatDiagnostic(record)`
+	// to a local and hands THAT to `console[method]` instead of nesting the two
+	// in one expression, and sinkFailureFallback prints the original event
+	// before building its notice instead of wrapping both in one try. Same
+	// format call, same console call, same order, same operands: the local holds
+	// the exact string the nested call already consumed, so no value is copied
+	// and no allocation is added on any path. Neither function is on a frame
+	// path - this is the diagnostics pipeline and it never touches a frame
+	// buffer - so no byte is read, allocated or copied, and no copy primitive
+	// entered the graph.
+	ingress: 'bc2fc022c792e109e9a4e90a6af602e6ce2c028bd732c90a347d77a936edada7',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -865,7 +883,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// The counter-only path still takes the same bare write it did, which
 	// bench/micro-seq-monotone-stamp-ab.mjs prices at parity (about a percent,
 	// with the arms crossing over between process runs).
-	platform: '3f55e9e8ee7c00da7a3743e62ea863f33508cb4ed49805af487b7c1b8a434621',
+	// Re-pinned with the ingress seal above for the diagnostic-collapse repair,
+	// same drift and same reason: error-registry.js structure (one id constant
+	// removed, two added, one frozen entry object added and one replaced), plus
+	// diagnostic.js's render/write split and its notice split, both of which are
+	// in this graph too. Nothing on a frame path changed, no byte is read,
+	// allocated or copied, and no copy primitive entered.
+	platform: '4ffbb8a4e1bf80364ba616059f5f5fafb5f38e774ec937c4563bb938a6debb60',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -909,7 +933,19 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// this digest as data literals; the registry's prose is masked, its
 	// structure is not. diagnostic.js is not in this graph. Nothing in this
 	// graph's own modules changed, and no copy primitive entered.
-	'wire-fanout': 'bfbd8f2a0d07adfe783760aba671d06e67df4f9c84a305905a74522296568b5f',
+	// Re-pinned with the other two seals for the diagnostic-collapse repair. The
+	// certain drift is error-registry.js structure, exactly as for the collapse
+	// lines above: one id constant removed, two added, one frozen entry object
+	// added and one replaced, with the prose masked. Whether diagnostic.js's own
+	// restructure also reaches THIS graph was not isolated - the ingress and
+	// platform assertions run first and abort before this one, so the
+	// revert-one-file check that settled it for them cannot be run here - and the
+	// note above claiming diagnostic.js is absent from this graph is exactly the
+	// kind of inherited assertion that check disproved for the other two. It does
+	// not change the verdict either way: the drift in both files is a local
+	// binding, a statement order and cold last-resort console paths, so on either
+	// reading no byte is read, allocated or copied and no copy primitive entered.
+	'wire-fanout': '1947442c6e51937afa4330fcef41bbd5a60eca2d6c2d404826917d9639bd4a85',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

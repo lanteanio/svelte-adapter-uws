@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Affects:** Operators reading `docs/errors.md` or searching a printed adapter console line.
   - **Action:** Re-read any runbook step derived from the six corrected entries, because the remedy each one named was wrong.
   - **Requires:** No runtime option; the reference is generated from the shipped registry.
-  - **Compatibility:** Two previously unindexed console lines gain the stable identifiers `DIAGNOSTIC_RENDER_COLLAPSE` and `DIAGNOSTIC_SINK_COLLAPSE`; no existing identifier is renamed.
+  - **Compatibility:** Three stable identifiers now cover the diagnostic pipeline's own collapse, where two console lines previously carried none; no identifier that has ever shipped is renamed.
   - **Detail:** [Fixed engineering detail](#fixed).
 
 - **Fixed: the cluster primary's own boot window.** A SIGTERM or SIGINT delivered while the primary was starting, through the whole of an application's `primaryInit` hook, met Node's default disposition and killed the process with no log line and no shutdown of its own, and a worker reporting in afterwards could still announce the dying instance ready.
@@ -105,16 +105,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the comment over the guard in `src/runtime/utils/metrics.js` as well.
 
 - **The diagnostic pipeline's own collapse is reported with a stable
-  identifier.** Its two lines were exempt from the console index on the
-  grounds that a registry-generated entry is what could not be delivered,
-  which conflates delivery with rendering: `adapterConsoleLine` builds a
-  string from frozen registry data and never touches the sink, as the same
-  file already demonstrated for `DIAGNOSTIC_RECORD_SHAPE`. Both are indexed
-  now, as `DIAGNOSTIC_RENDER_COLLAPSE` and `DIAGNOSTIC_SINK_COLLAPSE`, so the
-  moment the observability pipeline reports its own collapse an operator gets
-  an identifier, a cause, a consequence and a next action instead of a bare
-  string. The registry holds 66 stable errors and 32 console lines, and the
-  index reads 45 registry entries against 41 deliberately unindexed.
+  identifier, and each identifier names a condition its code can actually
+  produce.** The two lines were exempt from the console index on the grounds
+  that a registry-generated entry is what could not be delivered, which
+  conflates delivery with rendering: `adapterConsoleLine` builds a string from
+  frozen registry data and never touches the sink, as the same file already
+  demonstrated for `DIAGNOSTIC_RECORD_SHAPE`. Indexing them was not enough on
+  its own, because both entries then described conditions their own code cannot
+  reach. `console[method](formatDiagnostic(record))` is ONE protected
+  expression, so a console method that throws - a host that wrapped the console,
+  a transport whose write end is gone - landed on the render entry and sent an
+  operator to inspect the envelope of a record that formats perfectly well.
+  Rendering and writing are separate statements now, and a refused write reports
+  `DIAGNOSTIC_CONSOLE_WRITE`, which says what a broken severity channel costs:
+  every later diagnostic of that severity, not just the one that revealed it.
+
+- **A broken sink no longer reports the event it just printed as lost.** The
+  sink fallback wrapped the original event and its failure notice in one `try`,
+  and told an operator through `DIAGNOSTIC_SINK_COLLAPSE` that both records were
+  gone and a shared console was the thing to suspect. Neither was true: the
+  console path contains every failure it can have and does not throw, so the
+  original had always already printed, and a console that could not print would
+  not have produced the line being read either. The only thing that can fail
+  there is BUILDING the notice, from the clock it stamps or the record shape, so
+  that is what `DIAGNOSTIC_SINK_NOTICE` now reports - one record lost, the event
+  itself in the log above it, and two independent things to look at. The
+  registry holds 67 stable errors and 33 console lines, and the index reads 46
+  registry entries against 41 deliberately unindexed.
+
+- **The three collapse lines are driven by cases instead of described by
+  prose.** Nothing executed them, which is how entries describing unreachable
+  conditions survived a green suite and a gate that counts indexed lines: a gate
+  cannot read prose. Each is now driven from the condition it claims to be
+  about - a valid record against a throwing `console.warn`, a record nothing can
+  serialize, and a throwing sink whose notice meets a clock that refuses. Two of
+  the three fail against the code as it stood; the render case passes on both
+  sides, which is what makes it the control proving the split left the real
+  render path where it was.
+
+- **Three operator-facing entries stop overstating what they know.**
+  `METRICS_MODULE_SHAPE` said the module exports nothing usable under any of the
+  three names the build reads, when the line is about the ONE export the build
+  selected - a module carrying a good `metrics` registry prints it whenever a
+  primitive `default` sits in front. `POSTURE_OBSERVER` said an export reader is
+  behind by at most one sample and catches up on the next one; the posture
+  advances from inside the 1 Hz sampler and that same run pushes the heartbeat a
+  few statements later, so the staleness is shorter than a sample, not longer.
+  `RESOURCE_GROWTH` stated that the trend ends in exhaustion, where the auditor
+  has a direction across consecutive samples rather than a prediction.
 
 - **The cluster primary arms its signal handlers before its own boot window
   rather than after it.** It registered `SIGTERM` and `SIGINT` at the END of

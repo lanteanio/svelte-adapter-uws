@@ -26,20 +26,38 @@ function defaultOperationalEventSink(record) {
 	const method = record.severity === 'debug' ? 'debug'
 		: record.severity === 'info' ? 'info'
 			: record.severity === 'warn' ? 'warn' : 'error';
+	// Rendering and writing are separated deliberately, and this is the whole
+	// reason: `console[method](formatDiagnostic(record))` is ONE protected
+	// expression, so a console method that throws - a host that replaced the
+	// console, a transport whose write end is gone - landed on the same entry as
+	// a record that could not be formatted. An operator was then told the
+	// formatter had failed twice and sent to inspect the record's envelope, for a
+	// record that formats perfectly well. Split, each failure names the condition
+	// that actually produced it.
+	let line;
 	try {
-		console[method](formatDiagnostic(record));
+		line = formatDiagnostic(record);
 	} catch {
 		// An unserializable attribute (BigInt, circular reference) must not
 		// erase the event: drop the attributes, keep the envelope.
 		try {
-			console[method](formatDiagnostic(createDiagnostic({ ...record, attributes: undefined })));
+			line = formatDiagnostic(createDiagnostic({ ...record, attributes: undefined }));
 		} catch {
 			// Rendered from the registry like any other indexed line. That is a
 			// pure string build over frozen data, not a trip through the sink -
 			// the thing that just failed - so the operator gets a searchable ID
 			// and a documented route even at the pipeline's last resort.
 			try { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.DIAGNOSTIC_RENDER_COLLAPSE, String(record?.event))); } catch { /* console gone */ }
+			return;
 		}
+	}
+	try {
+		console[method](line);
+	} catch {
+		// The record rendered; the console method it was destined for refused it.
+		// Reported through console.error because it is a DIFFERENT method in every
+		// case but this one, so a single broken severity channel still surfaces.
+		try { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.DIAGNOSTIC_CONSOLE_WRITE, String(record?.event))); } catch { /* console gone */ }
 	}
 }
 
@@ -67,9 +85,20 @@ function sinkFailureFallback(record) {
 	// This runs inside emitOperationalEvent's own catch (and in a rejection
 	// handler), so nothing here may throw either - not even with a broken
 	// injected clock underneath wallIso().
+	//
+	// The original event goes out FIRST and on its own. Both calls used to sit
+	// inside one try, which made this report - through the entry it printed -
+	// that BOTH records were lost. They never were: defaultOperationalEventSink
+	// contains every failure it can have and does not throw, so the original had
+	// always already printed by the time anything here could fail. The only thing
+	// that can throw is BUILDING the notice below, from the clock or the record
+	// shape - one record's worth of loss, and a different thing to send an
+	// operator looking at.
+	defaultOperationalEventSink(record);
+	/** @type {any} */
+	let notice;
 	try {
-		defaultOperationalEventSink(record);
-		defaultOperationalEventSink(createDiagnostic({
+		notice = createDiagnostic({
 			source: 'svelte-adapter-uws',
 			component: 'runtime.observability',
 			event: 'operational.sink.failed',
@@ -77,10 +106,12 @@ function sinkFailureFallback(record) {
 			message: 'The configured operational event sink failed; console fallback was restored for this event.',
 			occurredAt: wallIso(),
 			attributes: { originalSource: record.source, originalEvent: record.event }
-		}));
+		});
 	} catch {
-		try { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.DIAGNOSTIC_SINK_COLLAPSE, String(record?.event))); } catch { /* console gone */ }
+		try { console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.DIAGNOSTIC_SINK_NOTICE, String(record?.event))); } catch { /* console gone */ }
+		return;
 	}
+	defaultOperationalEventSink(notice);
 }
 
 function operationalEventSinkRegistry() {
