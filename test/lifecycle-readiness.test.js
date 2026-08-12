@@ -34,6 +34,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildFixtureOnce } from './helpers/fixture-build.js';
+import { variantOut } from './fixture/variants.js';
 import { EVAL_TIME_ENV } from './helpers/real-runtime.js';
 import { certExpiryAlert, readCertIdentity } from '../src/runtime/utils/tls-reload.js';
 import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../src/runtime/error-registry.js';
@@ -616,6 +617,133 @@ describeUWS('graceful shutdown of the built server', () => {
 		expect(output.text).toContain('was NOT clean');
 		expect(output.text).not.toContain('Shutdown complete');
 	}, 60000);
+});
+
+// A real signal, or nothing. Windows does not deliver SIGTERM to a Node child -
+// the cases above re-emit the event from stdin, which calls whatever handler is
+// registered and therefore cannot observe the absence of one. The whole subject
+// here is what Node's DEFAULT disposition does to a process that has armed
+// nothing yet, so a Windows run of these two would pass with the fix reverted.
+const describeSignal = bindingLoads() && process.platform === 'linux' ? describe : describe.skip;
+
+describeSignal('a cluster primary signalled inside its own boot window', () => {
+	// The primary registered its SIGTERM/SIGINT handlers at the END of its
+	// branch, after the app's `primaryInit` hook had been awaited. Everything
+	// before that sat on the default disposition, where a signal terminates the
+	// process outright - and in cluster mode the workers are THREADS in this
+	// process, so once any of them is serving that disposition takes their live
+	// connections too.
+	/** @type {import('node:child_process').ChildProcess | null} */
+	let child = null;
+	let dir;
+
+	beforeAll(() => {
+		expect(buildFixtureOnce('slowprimary'), 'fixture build must succeed').toBe(true);
+		dir = mkdtempSync(join(tmpdir(), 'lifecycle-primarysignal-'));
+	}, 400000);
+
+	afterEach(() => {
+		if (child && !child.killed) {
+			try { child.kill('SIGKILL'); } catch { /* already gone */ }
+		}
+		child = null;
+	});
+
+	/**
+	 * Boot the clustered fixture and resolve once `marker` appears in its output.
+	 * The marker is what makes this deterministic: the window under test opens
+	 * and closes on the app hook's own schedule, so waiting a fixed delay into it
+	 * would be a race that silently passes when it lost.
+	 */
+	async function bootUntil(marker, env, notifyDir) {
+		const port = await freePort();
+		const output = { text: '' };
+		const merged = {
+			...process.env,
+			HOST: '127.0.0.1',
+			PORT: String(port),
+			CLUSTER_WORKERS: '1',
+			...env
+		};
+		if (notifyDir) {
+			merged.NOTIFY_SOCKET = '/run/systemd/notify';
+			merged.PATH = notifyDir + ':' + merged.PATH;
+		}
+		for (const key of ['CLUSTER_MODE', 'SSL_CERT', 'SSL_KEY', 'SHUTDOWN_DELAY_MS', 'SHUTDOWN_TIMEOUT']) {
+			if (!(key in (env || {}))) delete merged[key];
+		}
+		const proc = spawn(process.execPath, [join(fixtureDir, variantOut('slowprimary'), 'index.js')], {
+			cwd: fixtureDir,
+			stdio: ['pipe', 'pipe', 'pipe'],
+			env: merged
+		});
+		child = proc;
+		const reached = await new Promise((resolve) => {
+			const scan = (buf) => {
+				output.text += buf.toString();
+				if (output.text.includes(marker)) resolve(true);
+			};
+			proc.stdout.on('data', scan);
+			proc.stderr.on('data', scan);
+			proc.on('exit', () => resolve(false));
+			setTimeout(() => resolve(false), 30000);
+		});
+		expect(reached, `never reached ${marker}.\n--- server output ---\n${output.text}`).toBe(true);
+		return { proc, output };
+	}
+
+	function exited(proc, ms) {
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => resolve(null), ms);
+			proc.on('exit', (code, signal) => {
+				clearTimeout(timer);
+				resolve(code === null && signal ? `killed:${signal}` : (code ?? 0));
+			});
+		});
+	}
+
+	it('runs its own exit instead of dying on the default disposition', async () => {
+		// Inside `await primaryInit(...)`: no listen socket, no worker, nothing in
+		// flight - and, before this was fixed, no signal handler either.
+		const { proc, output } = await bootUntil('__PRIMARY_INIT_HOLDING__', { SLOW_PRIMARY_INIT_MS: '4000' });
+		proc.kill('SIGTERM');
+
+		// With the handlers armed at the end of the branch this reported
+		// `killed:SIGTERM`: the kernel ended it, with nothing in the log to say so.
+		expect(await exited(proc, 25000), `--- server output ---\n${output.text}`).toBe(0);
+		expect(output.text).toContain('before any worker was spawned');
+		// It exits on the signal rather than waiting out the app's hook. Deferring
+		// would be worse than the death it replaces: the primary's own shutdown
+		// leaves the process exit to the last worker's exit handler, and with no
+		// worker ever spawned nothing would end the process at all.
+		expect(output.text, `the hold ran to completion before the exit.\n--- server output ---\n${output.text}`)
+			.not.toContain('__PRIMARY_INIT_DONE__');
+	}, 120000);
+
+	it('withholds READY from systemd when a worker reports in after the shutdown began', async () => {
+		// sd_notify goes through the `systemd-notify` helper binary, so a stand-in
+		// earlier on PATH records exactly what the runtime would have told systemd.
+		const notifyDir = mkdtempSync(join(dir, 'notify-'));
+		const log = join(notifyDir, 'sent.txt');
+		const helper = join(notifyDir, 'systemd-notify');
+		writeFileSync(helper, `#!/bin/sh\necho "$@" >> ${JSON.stringify(log)}\n`, { mode: 0o755 });
+
+		// The primary boots immediately; the WORKER holds in its own init hook, so
+		// the signal lands after the primary is up and well before the worker
+		// reports ready.
+		const { proc, output } = await bootUntil('Primary thread starting', { SLOW_INIT_MS: '3000' }, notifyDir);
+		proc.kill('SIGTERM');
+		expect(await exited(proc, 30000), `--- server output ---\n${output.text}`).toBe(0);
+
+		const sent = existsSync(log) ? readFileSync(log, 'utf8') : '';
+		expect(sent, `no systemd notification was sent at all.\n--- server output ---\n${output.text}`).toContain('STOPPING=1');
+		// The worker finishes its init underneath the shutdown and reports ready.
+		// Passing that on told systemd the instance had arrived, one tick before it
+		// left - which is how a rolling deploy convinces itself a dying instance is
+		// healthy.
+		expect(sent, `READY was announced during shutdown.\n--- notifications ---\n${sent}\n--- server output ---\n${output.text}`)
+			.not.toContain('--ready');
+	}, 120000);
 });
 
 describeUWS('a cluster worker drained while it is still booting', () => {

@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Two previously unindexed console lines gain the stable identifiers `DIAGNOSTIC_RENDER_COLLAPSE` and `DIAGNOSTIC_SINK_COLLAPSE`; no existing identifier is renamed.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: the cluster primary's own boot window.** A SIGTERM or SIGINT delivered while the primary was starting, through the whole of an application's `primaryInit` hook, met Node's default disposition and killed the process with no log line and no shutdown of its own, and a worker reporting in afterwards could still announce the dying instance ready.
+  - **Affects:** Clustered deployments, and any of them that configure a `websocket.primaryInit` hook.
+  - **Action:** None; the corrected arming order and the withheld readiness announcement are the defaults.
+  - **Requires:** No new option and no API change.
+  - **Compatibility:** A primary signalled before its workers exist now exits 0 through its own path instead of dying on the signal; the shutdown sequence of a running fleet is unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Changed
@@ -108,6 +115,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an identifier, a cause, a consequence and a next action instead of a bare
   string. The registry holds 66 stable errors and 32 console lines, and the
   index reads 45 registry entries against 41 deliberately unindexed.
+
+- **The cluster primary arms its signal handlers before its own boot window
+  rather than after it.** It registered `SIGTERM` and `SIGINT` at the END of
+  its branch, after the app's `primaryInit` hook had been awaited and after the
+  worker fleet had been spawned. Until the first `process.on` call Node
+  installs no handler at all, so that whole stretch ran on the OS default
+  disposition, where a signal terminates the process outright. The window is
+  externally reachable, and by more than the app hook's duration: on Linux a
+  write to a piped stdout is a synchronous handoff, so the primary's own
+  "starting N workers" line is enough for an orchestrator to act inside it. The
+  blast radius is also larger here than in single-process mode, because the
+  workers are threads in THIS process - the default disposition takes every
+  worker's live connections with it. A mid-boot signal is now latched rather
+  than dispatched, in two states, because the primary's situation genuinely
+  differs from a single-process server's. Before the spawn loop there is no
+  listen socket, no worker and nothing in flight, and `graceful_shutdown`
+  cannot end the process from there at all: it leaves the exit to the last
+  worker's `exit` handler, and an empty fleet fires none, so deferring would
+  hang until the orchestrator's SIGKILL. That state exits directly. Once the
+  fleet exists the latch is spent at the end of the branch and the ordinary
+  shutdown runs against a complete fleet.
+
+- **A worker reporting in after the shutdown began no longer announces the
+  instance READY.** Readiness reaches systemd from whichever worker comes up
+  first, on its own schedule, so a report could land after the primary had
+  already sent `STOPPING=1` - telling the supervisor the instance had arrived
+  one tick before it left, which is how a rolling deploy convinces itself a
+  dying instance is healthy. The announcement is withheld from the moment the
+  process is condemned, by a latched boot signal or by a shutdown already under
+  way. Its case drives a real signal into a cluster whose worker is still
+  inside its `init` hook and reads what the runtime told systemd through a
+  stand-in `systemd-notify` on `PATH`; with only this half reverted it records
+  `--ready` after `STOPPING=1`. Both new cases are gated to Linux on purpose:
+  Windows delivers no real signal to a Node child, and the re-emit path the
+  other signal cases use calls whatever handler is registered, so it cannot
+  observe the absence of one - a Windows run of either case would pass against
+  the defect it exists to catch.
 
 - **Shipped source states what is true of the code rather than how a defect
   surfaced.** A comment in `src/runtime/utils/subscribe-policy.js` and one

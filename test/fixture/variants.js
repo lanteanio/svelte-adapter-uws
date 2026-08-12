@@ -337,6 +337,21 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// A primary-thread init hook that can hold the primary inside its own boot
+	// window, which is the only way a test can deliver a signal into it: with no
+	// such hook configured the primary's remaining boot awaits are module imports
+	// measured in microseconds. Its own output directory because the hook runs on
+	// every boot of the build that carries it.
+	slowprimary: {
+		out: 'build-slow-primary',
+		handler: null,
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100,
+			primaryInit: './src/primary-init.js'
+		}
+	},
+
 	// A configured waitingRoom.renderer module path drives the whole
 	// production pipeline: build-side validation, the isolated esbuild
 	// renderer entry, the pick(default/renderWaitingRoom) selection, and the

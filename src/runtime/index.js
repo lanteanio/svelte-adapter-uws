@@ -27,8 +27,14 @@ import { formatVersionBanner, runtimeVersionInfo } from './version-info.js';
 // service's MainPID - so every call site below is main-thread-gated.
 const sdNotify = createSdNotify();
 let sd_ready_sent = false;
+// Set the moment this process is condemned. Readiness is reported by whichever
+// worker comes up first, on its own schedule, so a report can land after the
+// decision to go down has already been taken - telling the supervisor the
+// instance arrived one tick before it leaves, which is how a rolling deploy
+// convinces itself a dying instance is healthy.
+let sd_ready_withheld = false;
 function sdReadyOnce() {
-	if (sd_ready_sent || !isMainThread) return;
+	if (sd_ready_sent || sd_ready_withheld || !isMainThread) return;
 	sd_ready_sent = true;
 	sdNotify.ready();
 	sdNotify.armWatchdog();
@@ -131,6 +137,54 @@ if (isMainThread) {
 
 if (is_primary) {
 	// ── Primary thread: spawn workers, coordinate shutdown ──
+
+	// Signal handlers are armed FIRST, ahead of this branch's own awaits, for the
+	// reason the single-process branch arms ahead of `start()`: until the first
+	// `process.on('SIGTERM')` call Node installs no handler at all, so everything
+	// before it sits on the OS default disposition, where a signal terminates the
+	// process outright. Registering at the end of this branch left the app's
+	// `primaryInit` hook - unbounded app code, awaited below - inside that window.
+	// The blast radius is larger here than in single-process mode, because the
+	// workers are THREADS in this process: the default disposition takes every
+	// worker's live connections with it, and no `await` may ever be added between
+	// the spawn loop and the end of this branch without the fleet inheriting that.
+	//
+	// A signal that arrives mid-boot is LATCHED rather than dispatched, and the
+	// latch has two states because the primary's mid-boot situation is genuinely
+	// different from a single-process server's. Before the spawn loop there is no
+	// listen socket, no worker and nothing in flight - no drain to run, and
+	// `graceful_shutdown` cannot even end the process from there, because it
+	// leaves the exit to the last worker's `exit` handler (`workers.size === 0`)
+	// and an empty fleet fires no such handler. Deferring would hang until the
+	// orchestrator's SIGKILL, so that state exits directly. Once the fleet exists,
+	// the latch is spent at the end of this branch and the ordinary shutdown runs
+	// against a complete fleet.
+	/** @type {'SIGINT' | 'SIGTERM' | null} */
+	let boot_signal = null;
+	let primary_booted = false;
+	let fleet_spawned = false;
+	/** @param {'SIGINT' | 'SIGTERM'} reason */
+	const onPrimarySignal = (reason) => {
+		if (primary_booted) { graceful_shutdown(reason); return; }
+		if (boot_signal) return;
+		boot_signal = reason;
+		// Whatever happens next, this instance is going down: the workers spawned
+		// after this point must not announce it ready on the way out.
+		sd_ready_withheld = true;
+		if (!fleet_spawned) {
+			// No STOPPING notification from here: the helper that carries it is a
+			// short-lived child process, and this exits in the same tick, so the
+			// spawn would never complete. It is also the wrong message - STOPPING
+			// announces the orderly shutdown of a RUNNING service, and this one
+			// never reached READY.
+			console.log(`[svelte-adapter-uws] Primary received ${reason} before any worker was spawned; exiting.`);
+			process.exit(0);
+		} else {
+			console.log(`[svelte-adapter-uws] Primary received ${reason} during boot; shutting down once the fleet is up.`);
+		}
+	};
+	process.on('SIGTERM', () => onPrimarySignal('SIGTERM'));
+	process.on('SIGINT', () => onPrimarySignal('SIGINT'));
 
 	const { availableParallelism } = await import('node:os');
 
@@ -941,6 +995,9 @@ if (is_primary) {
 	for (let i = 0; i < compute_count; i++) restartSupervisor.register({ role: 'compute', index: i });
 	for (let i = 0; i < io_count; i++) spawn_worker({ role: 'io', index: i });
 	for (let i = 0; i < compute_count; i++) spawn_worker({ role: 'compute', index: i });
+	// From here a latched signal has a fleet to shut down, so it waits for the end
+	// of this branch instead of exiting directly.
+	fleet_spawned = true;
 
 	// --- TLS certificate hot-reload (cluster primary half) ---
 	// The primary watches the cert directory and, on a renewed cert (certbot /
@@ -1045,6 +1102,10 @@ if (is_primary) {
 	async function graceful_shutdown(reason) {
 		if (shutting_down) return;
 		shutting_down = true;
+		// A worker still finishing its own boot can report `ready` after this
+		// point; the announcement is withheld from here on for the same reason a
+		// mid-boot signal withholds it.
+		sd_ready_withheld = true;
 		sdNotify.stopping();
 		sdNotify.disarmWatchdog();
 		console.log(`[svelte-adapter-uws] Primary received ${reason}, shutting down ${workers.size} workers...`);
@@ -1109,8 +1170,11 @@ if (is_primary) {
 		}
 	}
 
-	process.on('SIGTERM', () => graceful_shutdown('SIGTERM'));
-	process.on('SIGINT', () => graceful_shutdown('SIGINT'));
+	// The fleet is up and every handler above is installed, so the latch is spent:
+	// a signal from here on dispatches straight into the shutdown, and one taken
+	// during boot runs now, against the complete fleet.
+	primary_booted = true;
+	if (boot_signal) graceful_shutdown(boot_signal);
 } else {
 	// ── Worker thread or single-process mode ─────────────────────────────
 
