@@ -617,7 +617,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// WeakSet stores a reference, not a copy, and holds no bytes. None of it is on
 	// a frame path: these run on subscribe, unsubscribe and close. No byte is
 	// read, allocated or copied, and no copy primitive entered the graph.
-	ingress: '5c28c98611db03817909bad9b1c616e4b67d62b4d7a96b3f8457c6a87cceaab5',
+	//
+	// Re-pinned again for the same registry, moved to a shared slot: the settle
+	// mark was a module-local WeakSet, which a duplicated bundle gives one copy
+	// per instance while every copy mutates the same connection Set. It is now a
+	// `Symbol.for` constant plus a lazy accessor that reads or creates the set on
+	// globalThis - one property read, one comparison, one assignment of a WeakSet
+	// reference. The operands are unchanged and none of it is on a frame path.
+	ingress: 'e3527772d5098ae9081f0f78d58963ecbdd2addcb6be11d734e03ef7bc7360e8',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -917,7 +924,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// that stores a REFERENCE to the subscription registry rather than copying it.
 	// These run on subscribe, unsubscribe and close, never on a frame path. No
 	// byte is read, allocated or copied, and no copy primitive entered.
-	platform: '9da6b30ba13b7f6245c841cbef5ff9b13056dcced096ae7d6ccda7ea76295ebb',
+	// Re-pinned again with the ingress seal above for the same registry moved to
+	// a shared slot: a `Symbol.for` constant and a lazy accessor over globalThis
+	// replace the module-local WeakSet, so a duplicated bundle shares one set
+	// instead of one per copy. A property read, a comparison and a reference
+	// assignment; no byte is read, allocated or copied.
+	platform: 'ea81b7727b52ded4566492805db3814fb63dce163f4928fa0936d12e42a9a378',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -989,7 +1001,10 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// The fan-out path itself is untouched; these run on subscribe, unsubscribe
 	// and close. No byte is read, allocated or copied, and no copy primitive
 	// entered.
-	'wire-fanout': 'e7a68fe265c78762d8bd611bc7954f07705ecf5fc610c7bb5426eba4b375da7e',
+	// Re-pinned again with the two seals above for the same registry moved to a
+	// shared slot - same one-file drift, same operands, still nothing on the
+	// fan-out path and no copy primitive.
+	'wire-fanout': '28c5dbcec449d465e1b4fa7c317129e099e9d4502b6020e4d740e04627c20cd8',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

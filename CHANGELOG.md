@@ -64,6 +64,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The close-settled subscription registry is shared across duplicated module
+  copies, so the double charge cannot return through a plugin.** The settle mark
+  was held in a module-local `WeakSet`. A bundler gives a plugin package and the
+  runtime separate copies of that module while every copy mutates the same
+  connection `Set` - which is why the cohort hooks and the accounting hook
+  already live on `globalThis` under `Symbol.for` keys. The mark did not, so the
+  runtime's close settled the registry in its own copy and a plugin's late leave,
+  reading another copy, found no mark and charged the membership a second time.
+  The per-worker counter reached `-1` again in exactly the deployment the fix was
+  for. It is now one slot however many copies exist, and the case that holds it
+  drives two genuinely separate module instances rather than simulating them.
+
 - **`ADAPTER-ERR-RELAY-SPILL-OVERFLOW` no longer promises a recovery its
   supervisor cannot always deliver.** It said the worker exits and the
   supervisor replaces it, full stop. That is true of one incident and wrong

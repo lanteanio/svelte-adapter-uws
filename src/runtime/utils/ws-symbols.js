@@ -527,7 +527,27 @@ function accountSubscriptionDelta(delta) {
 // A WeakSet keyed on the registry itself: one is created fresh per connection at
 // open (`userData[WS_SUBSCRIPTIONS] = new Set()`) and is never reused for another
 // connection, so a settled registry is settled for good and nothing accumulates.
-const settledRegistries = new WeakSet();
+//
+// Held on globalThis under a `Symbol.for` key, for the same duplicated-bundle
+// reason as the accounting hook above - and it is load-bearing here rather than
+// defensive. The bundler gives a plugin package and the runtime SEPARATE copies
+// of this module while every copy mutates the SAME connection Set, so a mark
+// kept in one copy's module binding is invisible to the others. The runtime's
+// close would settle the registry in its own copy and a plugin's late
+// trackedUnsubscribe, reading a different copy, would find no mark and charge
+// the membership a second time - exactly the double charge this exists to
+// prevent, surviving in the one configuration that matters.
+const SETTLED_REGISTRIES = Symbol.for('adapter-uws.settled-subscription-registries');
+
+/** @returns {WeakSet<Set<string>>} */
+function settledRegistries() {
+	let settled = /** @type {any} */ (globalThis)[SETTLED_REGISTRIES];
+	if (!settled) {
+		settled = new WeakSet();
+		/** @type {any} */ (globalThis)[SETTLED_REGISTRIES] = settled;
+	}
+	return settled;
+}
 
 /**
  * Add one logical topic exactly once and charge accounting only on growth.
@@ -541,7 +561,7 @@ const settledRegistries = new WeakSet();
 export function addLogicalSubscription(subscriptions, topic) {
 	if (subscriptions.has(topic)) return false;
 	subscriptions.add(topic);
-	if (!settledRegistries.has(subscriptions)) accountSubscriptionDelta(1);
+	if (!settledRegistries().has(subscriptions)) accountSubscriptionDelta(1);
 	return true;
 }
 
@@ -555,7 +575,7 @@ export function addLogicalSubscription(subscriptions, topic) {
  */
 export function removeLogicalSubscription(subscriptions, topic) {
 	if (!subscriptions.delete(topic)) return false;
-	if (!settledRegistries.has(subscriptions)) accountSubscriptionDelta(-1);
+	if (!settledRegistries().has(subscriptions)) accountSubscriptionDelta(-1);
 	return true;
 }
 
@@ -579,9 +599,9 @@ export function accountClosedLogicalSubscriptions(subscriptions) {
 	// releasing neither its capability counts nor its wire state. There is also
 	// nothing here to release, so releasing nothing is the honest answer.
 	if (!(subscriptions instanceof Set)) return 0;
-	if (settledRegistries.has(subscriptions)) return 0;
+	if (settledRegistries().has(subscriptions)) return 0;
 	const count = subscriptions.size;
-	settledRegistries.add(subscriptions);
+	settledRegistries().add(subscriptions);
 	if (count > 0) accountSubscriptionDelta(-count);
 	return count;
 }

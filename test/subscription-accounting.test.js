@@ -252,6 +252,47 @@ describe('production-built subscription accounting wiring', () => {
 		expect(state.counters.totalSubscriptions).toBe(baseline);
 	});
 
+	it('settles across SEPARATE module copies, which is how production loads it', () => {
+		// The real cross-bundle probe, not a simulation of one: the imports at the
+		// top of this file are `src/runtime/utils/ws-symbols.js` and the ones under
+		// `productionSymbols` are the BUILT copy the fixture bundled. Two distinct
+		// module instances of the same file, which is exactly what the bundler
+		// hands a plugin package and the runtime.
+		//
+		// Every copy mutates the SAME connection Set (WS_SUBSCRIPTIONS is a
+		// Symbol.for), so a settle mark kept in one copy's module binding is
+		// invisible to the others: the runtime's close settles in its copy, and a
+		// plugin's late leave, reading a different copy, finds no mark and charges
+		// the membership a second time. That is the original defect surviving in
+		// the one configuration that matters.
+		expect(productionSymbols.addLogicalSubscription).not.toBe(addLogicalSubscription);
+
+		const baseline = state.counters.totalSubscriptions;
+		const subscriptions = new Set();
+		const ud = {
+			[productionSymbols.WS_SUBSCRIPTIONS]: subscriptions,
+			[productionSymbols.WS_PLATFORM]: productionPlatform
+		};
+		const ws = fakeWs(ud);
+
+		// Runtime copy: subscribe, then close.
+		expect(productionSymbols.trackedSubscribe(ws, 'room')).toBe(true);
+		expect(state.counters.totalSubscriptions).toBe(baseline + 1);
+		expect(productionSymbols.accountClosedLogicalSubscriptions(subscriptions)).toBe(1);
+		expect(state.counters.totalSubscriptions).toBe(baseline);
+
+		// Plugin copy: the late leave. Both copies charge the same worker counter
+		// through the global accounting hook, so this is a real charge if the
+		// settle did not cross the boundary.
+		expect(removeLogicalSubscription(subscriptions, 'room')).toBe(true);
+		expect(state.counters.totalSubscriptions).toBe(baseline);
+
+		// And the close itself is settled for both copies, so neither can release
+		// the same registry twice.
+		expect(accountClosedLogicalSubscriptions(subscriptions)).toBe(0);
+		expect(state.counters.totalSubscriptions).toBe(baseline);
+	});
+
 	it('leaves the counter agreeing with the auditor predicate after closes with late releases', () => {
 		// The two halves come from independent places on purpose: the expected
 		// value is summed from the connections' own subscription Sets by the same
