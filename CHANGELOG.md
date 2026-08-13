@@ -87,6 +87,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actually threw; the entry states why the attributes are not the test, so the
   branch cannot return as an obvious-looking improvement.
 
+- **The `.well-known` carve-out reads the same on every surface that documents
+  it.** The build warning and the README were corrected while the public
+  declaration an IDE shows on hover still promised `.well-known/*` is always
+  served and refused a dotfile inside it a few lines later. Correcting per
+  surface is what allowed that, so the wording is now held across all of them at
+  once - which also caught the migration guide's default-change table and the
+  `staticDotfiles` configuration error, both of which used the `/*` form that
+  promises the whole tree when only the first segment is exempt. The declaration
+  now also records that dev and preview are not evidence about this rule.
+
 - **`ADAPTER-ERR-RELAY-SPILL-OVERFLOW` no longer promises a recovery its
   supervisor cannot always deliver.** It said the worker exits and the
   supervisor replaces it, full stop. That is true of one incident and wrong

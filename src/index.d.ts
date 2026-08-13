@@ -199,12 +199,17 @@ export interface AdapterOptions {
 	 * exactly the sensitive ones (a stray `.env`, `.htpasswd`, editor
 	 * backups, an unpacked `.git`).
 	 *
-	 * `.well-known/*` is always served (RFC 8615 discovery: `security.txt`,
-	 * ACME HTTP-01 challenges). The carve-out applies at the first path
-	 * segment only, so `x/.well-known/y` is not an escape hatch and a dotfile
-	 * inside `.well-known/` is still refused. Both of those shapes are
-	 * stricter than `adapter-node`, whose static server keeps any path under
-	 * `.well-known/`.
+	 * A top-level `.well-known/` keeps serving its own non-dot files (RFC 8615
+	 * discovery: `security.txt`, ACME HTTP-01 challenges). The carve-out
+	 * exempts that first path segment, not the tree beneath it, so
+	 * `x/.well-known/y` is not an escape hatch and a dotfile inside
+	 * `.well-known/` is still refused. Both shapes are stricter than
+	 * `adapter-node`, whose static server keeps any path under `.well-known/`.
+	 *
+	 * Dev and preview do not match this rule and are not evidence about it:
+	 * `vite dev` serves `static/` through `sirv` with no dotfile filter at all,
+	 * and preview's filter keeps everything under `.well-known/`. Verify
+	 * against the production build.
 	 *
 	 * The exclusion is decided once when assets are indexed, so it has no
 	 * per-request cost and no request can reach an excluded file through

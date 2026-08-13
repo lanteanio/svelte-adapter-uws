@@ -551,8 +551,9 @@ export default function (opts = {}) {
 			: String(opts.staticDotfiles);
 		throw new Error(
 			`staticDotfiles must be a boolean - got ${shown} (${typeof opts.staticDotfiles}). ` +
-			'The default (false) refuses every dot-segment static path except .well-known/*; ' +
-			'true indexes and serves them all.'
+			'The default (false) refuses every dot-segment static path, except that a ' +
+			'top-level .well-known/ keeps serving its own non-dot files; true indexes ' +
+			'and serves them all.'
 		);
 	}
 	const staticDotfiles = opts.staticDotfiles === true;

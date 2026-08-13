@@ -165,6 +165,32 @@ describeMaybe('index-time exclusion (built runtime)', () => {
 		expect(refused.filter((p) => p.endsWith('.br') || p.endsWith('.gz'))).toEqual([]);
 	});
 
+	it('states the carve-out the same way on every surface that documents it', () => {
+		// Three surfaces describe this rule: the build warning, the README, and the
+		// PUBLIC DECLARATION an IDE shows on hover. Correcting the first two left
+		// the third still promising `.well-known/*` is always served and then
+		// refusing a dotfile inside it a few lines later - the same contradiction,
+		// on the copy a consumer is most likely to read. A per-surface fix is what
+		// let that happen, so the rule is checked across all of them at once.
+		const root = fileURLToPath(new URL('..', import.meta.url));
+		const surfaces = [
+			'src/index.d.ts',
+			'README.md',
+			'src/index.js',
+			'docs/migrations/0.5-to-0.6.md'
+		];
+		// Both forms of the same overpromise: the flat claim, and the `/*` glob
+		// that says the whole tree keeps serving when only the segment is exempt.
+		const retracts = /\.well-known\/\*?`? (is\s+always served|keeps serving)(?! its own non-dot)|except\s+`?\.well-known\/\*/;
+		for (const relative of surfaces) {
+			const text = fs.readFileSync(path.join(root, relative), 'utf8');
+			expect(text, `${relative} promises more than the carve-out delivers`).not.toMatch(retracts);
+			// And each one still has to describe the carve-out, so the check cannot
+			// be satisfied by deleting the explanation.
+			expect(text, `${relative} should still document the carve-out`).toMatch(/\.well-known/);
+		}
+	});
+
 	it('reports those paths in a warning that does not contradict its own list', () => {
 		// The scan above is pinned against the real build output; this pins the
 		// sentence that reports it. The two are separable failures - a correct scan
