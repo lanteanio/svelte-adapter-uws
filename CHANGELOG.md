@@ -76,6 +76,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for. It is now one slot however many copies exist, and the case that holds it
   drives two genuinely separate module instances rather than simulating them.
 
+- **`ADAPTER-ERR-DIAGNOSTIC-RENDER-COLLAPSE` stops sending the operator to an
+  input its own cause excludes.** The entry establishes that an attribute which
+  cannot be serialized is absorbed by the retry and never reaches the line. Its
+  next action then offered serializing the event's own attributes as an
+  alternative test, reading any difference from the trivial case as proof of a
+  wrapper - so a record carrying a `BigInt` would convict an instrumentation
+  agent that need not exist. Both sentences were true in isolation. The test is
+  now the shape the retry formats, the envelope with no attributes, which is what
+  actually threw; the entry states why the attributes are not the test, so the
+  branch cannot return as an obvious-looking improvement.
+
 - **`ADAPTER-ERR-RELAY-SPILL-OVERFLOW` no longer promises a recovery its
   supervisor cannot always deliver.** It said the worker exits and the
   supervisor replaces it, full stop. That is true of one incident and wrong

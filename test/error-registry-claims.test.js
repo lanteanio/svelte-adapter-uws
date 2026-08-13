@@ -150,6 +150,29 @@ describe('ADAPTER-ERR-RELAY-SPILL-OVERFLOW', () => {
 	});
 });
 
+describe('ADAPTER-ERR-DIAGNOSTIC-RENDER-COLLAPSE', () => {
+	it('does not send the operator to a test its own cause rules out', () => {
+		// The entry establishes that an attribute which cannot be serialized is
+		// absorbed by the retry and never reaches this line. Guidance that then
+		// asks the operator to serialize the event's own attributes contradicts
+		// that: attributes are the one input already excluded, so a throw there
+		// says nothing about this failure - and under guidance that reads "a
+		// difference between them IS the wrapper" it convicts a wrapper that does
+		// not exist. Each sentence was true alone; together they pointed at a
+		// false positive.
+		const entry = entryFor(ADAPTER_ERROR_IDS.DIAGNOSTIC_RENDER_COLLAPSE);
+
+		expect(entry.cause).toMatch(/attributes.*absorbed by the retry|absorbed by the retry/i);
+		expect(entry.nextAction).not.toMatch(/on the event's own attributes/);
+		// The sound test is the shape the RETRY formats: the envelope WITHOUT
+		// attributes, which is what actually failed.
+		expect(entry.nextAction).toMatch(/no attributes|without attributes/i);
+		// And it must still say why the attributes are not the test, so the
+		// branch cannot be reinstated as an obvious-looking improvement.
+		expect(entry.nextAction).toMatch(/never produces this line|proves nothing/i);
+	});
+});
+
 describe('ADAPTER-ERR-METRICS-MIRROR-READ', () => {
 	it('leaves the failed worker as an expected-versus-reporting gap, not a silent omission', () => {
 		// The entry promises the failure is VISIBLE: the worker "contributes

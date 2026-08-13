@@ -230,8 +230,14 @@ describe('operational event hardening', () => {
 			(candidate) => candidate.id === ADAPTER_ERROR_IDS.DIAGNOSTIC_RENDER_COLLAPSE
 		);
 		// So the guidance must not settle it on the trivial case alone, and must
-		// not promise that everything else is gone.
-		expect(entry.nextAction).toMatch(/same shape|its own attributes/);
+		// not promise that everything else is gone. It has to name a second test,
+		// and that test is the shape the RETRY formats - the envelope with no
+		// attributes, which is what threw. Note this record carried `attributes:
+		// {}` and still collapsed: the attributes were never the input under
+		// suspicion, so guidance sending the operator to serialize them would
+		// convict a wrapper on evidence this failure cannot supply.
+		expect(entry.nextAction).toMatch(/no attributes|without attributes/i);
+		expect(entry.nextAction).not.toMatch(/on the event's own attributes/);
 		expect(entry.consequence).toMatch(/selective|only certain shapes/);
 	});
 
