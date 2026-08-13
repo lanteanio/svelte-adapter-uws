@@ -607,7 +607,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// nothing, and emitOperationalEvent is not on a frame path in the first place;
 	// diagnostics are emitted per notable occurrence, not per message or per
 	// frame. No copy primitive entered.
-	ingress: '22ae501467b67e7c2e905f5f2e29b4ce5444259d47b6ae880c8c80432f624eb0',
+	//
+	// Re-pinned for the close-settled subscription registry, whose drift in this
+	// graph is entirely in utils/ws-symbols.js, reached through utils.js: one
+	// module-level `new WeakSet()` declaration, three membership comparisons
+	// guarding the existing accounting deltas, one `instanceof Set` shape guard,
+	// and one `add` of a Set object into that WeakSet. The operands are the
+	// subscription registry OBJECT and a topic string that is already in it - the
+	// WeakSet stores a reference, not a copy, and holds no bytes. None of it is on
+	// a frame path: these run on subscribe, unsubscribe and close. No byte is
+	// read, allocated or copied, and no copy primitive entered the graph.
+	ingress: '5c28c98611db03817909bad9b1c616e4b67d62b4d7a96b3f8457c6a87cceaab5',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -900,7 +910,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// Re-pinned with the ingress seal above for the sink trust boundary, same
 	// single statement and same reason: `Object.freeze(record)` on an object the
 	// runtime just built, off any frame path. No copy primitive entered.
-	platform: 'efc6c96bbab44fa6e55d745da35a40856c51b207ac03fd9253bdaec2d8d3ea3d',
+	// Re-pinned with the ingress seal above for the close-settled subscription
+	// registry, same drift and same reason: utils/ws-symbols.js gains a
+	// module-level `new WeakSet()`, three membership comparisons guarding the
+	// existing accounting deltas, one `instanceof Set` shape guard, and one `add`
+	// that stores a REFERENCE to the subscription registry rather than copying it.
+	// These run on subscribe, unsubscribe and close, never on a frame path. No
+	// byte is read, allocated or copied, and no copy primitive entered.
+	platform: '9da6b30ba13b7f6245c841cbef5ff9b13056dcced096ae7d6ccda7ea76295ebb',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -964,7 +981,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// ingress and platform. The drift is the same one statement,
 	// `Object.freeze(record)` in emitOperationalEvent, on an object the runtime
 	// just built and off any frame path. No copy primitive entered.
-	'wire-fanout': '24c9e85d005a02fd4cc76e832bb6dee7f0bfe766a77e2d731c5a120c0b84dbc7',
+	// Re-pinned with the ingress and platform seals above for the close-settled
+	// subscription registry, same drift and same reason: utils/ws-symbols.js is in
+	// this graph too, and gains a module-level `new WeakSet()`, three membership
+	// comparisons guarding the existing accounting deltas, one `instanceof Set`
+	// shape guard, and one `add` storing a reference to the subscription registry.
+	// The fan-out path itself is untouched; these run on subscribe, unsubscribe
+	// and close. No byte is read, allocated or copied, and no copy primitive
+	// entered.
+	'wire-fanout': 'e7a68fe265c78762d8bd611bc7954f07705ecf5fc610c7bb5426eba4b375da7e',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

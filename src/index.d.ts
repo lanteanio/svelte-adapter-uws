@@ -3303,6 +3303,12 @@ export interface Platform {
 	 * fires `hooks.ws.unsubscribe` (informational, not a gate - mirrors
 	 * the wire-level unsubscribe path), and returns `true`.
 	 *
+	 * The decrement describes LIVE connections. Once a socket's close has
+	 * been accounted, every membership it held was released as a whole, so
+	 * a call landing after that - an async plugin leave, a revocation
+	 * resuming late - still removes and still returns `true`, but charges
+	 * nothing. Charging it again would put the counter below the truth.
+	 *
 	 * A topic whose subscribe is still in flight (parked in an async
 	 * authorization-hook await) is tombstoned instead: the pending grant
 	 * is discarded when the awaited subscribe lands, and the cancel

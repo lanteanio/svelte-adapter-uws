@@ -1782,6 +1782,12 @@ export const platform = {
 	 * a gate - mirrors the wire-level unsubscribe path), and returns
 	 * `true`.
 	 *
+	 * The decrement describes LIVE connections. Once this socket's close has
+	 * been accounted, the memberships it held were released as a whole and the
+	 * registry is settled, so a call landing after that still removes and still
+	 * returns `true` but charges nothing - charging it again would put the
+	 * counter below the truth. See `accountClosedLogicalSubscriptions`.
+	 *
 	 * A topic with a subscribe still IN FLIGHT (a wire subscribe parked in
 	 * its authorization-hook await, or a `platform.subscribe` in the same
 	 * window) is tombstoned in the connection's pending-subscribe set: the

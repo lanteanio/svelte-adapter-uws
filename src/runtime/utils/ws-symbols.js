@@ -513,8 +513,27 @@ function accountSubscriptionDelta(delta) {
 	if (typeof hook === 'function') hook(delta);
 }
 
+// Registries the close path has already settled. The close path charges every
+// still-live membership at once and deliberately leaves the Set POPULATED,
+// because that Set is the snapshot handed to the app's close hook - so after it
+// runs, "the topic is present" no longer answers "the connection still holds a
+// charged membership". A release landing after that point (a plugin leave parked
+// in an await, a revocation resuming on a socket that is already gone) would
+// otherwise find the topic present, remove it, and charge a membership the close
+// already released, pushing the per-worker counter below the truth. Once it is
+// below the truth it stays there, and every later audit reports a negative total
+// or a summed/total gap that no live membership explains.
+//
+// A WeakSet keyed on the registry itself: one is created fresh per connection at
+// open (`userData[WS_SUBSCRIPTIONS] = new Set()`) and is never reused for another
+// connection, so a settled registry is settled for good and nothing accumulates.
+const settledRegistries = new WeakSet();
+
 /**
  * Add one logical topic exactly once and charge accounting only on growth.
+ * A registry the close path already settled still grows, but is not charged -
+ * its memberships were released as a whole and there is no live connection for
+ * the counter to describe.
  * @param {Set<string>} subscriptions
  * @param {string} topic
  * @returns {boolean} true only when the Set grew
@@ -522,19 +541,21 @@ function accountSubscriptionDelta(delta) {
 export function addLogicalSubscription(subscriptions, topic) {
 	if (subscriptions.has(topic)) return false;
 	subscriptions.add(topic);
-	accountSubscriptionDelta(1);
+	if (!settledRegistries.has(subscriptions)) accountSubscriptionDelta(1);
 	return true;
 }
 
 /**
  * Remove one logical topic exactly once and charge accounting only on removal.
+ * A removal against a registry the close path already settled is not charged;
+ * see {@link accountClosedLogicalSubscriptions}.
  * @param {Set<string>} subscriptions
  * @param {string} topic
  * @returns {boolean} true only when the Set shrank
  */
 export function removeLogicalSubscription(subscriptions, topic) {
 	if (!subscriptions.delete(topic)) return false;
-	accountSubscriptionDelta(-1);
+	if (!settledRegistries.has(subscriptions)) accountSubscriptionDelta(-1);
 	return true;
 }
 
@@ -543,11 +564,24 @@ export function removeLogicalSubscription(subscriptions, topic) {
  * The Set is intentionally left intact because it is the documented snapshot
  * passed to the app's close hook; the runtime calls this exactly once after
  * that hook returns.
+ *
+ * Settles the registry, so a release that lands afterwards charges nothing and
+ * a second call releases nothing. Both are ordinary under async plugin cleanup,
+ * and both used to charge memberships this call had already released.
  * @param {Set<string>} subscriptions
- * @returns {number} number of memberships released
+ * @returns {number} number of memberships released by THIS call
  */
 export function accountClosedLogicalSubscriptions(subscriptions) {
+	// A non-Set slot is unrecoverable corruption that the shape guards report on
+	// their own paths. This one must not turn it into a THROW: the close path
+	// calls this from a `finally`, so a raised TypeError would escape the close
+	// callback entirely and abandon the rest of the connection's teardown -
+	// releasing neither its capability counts nor its wire state. There is also
+	// nothing here to release, so releasing nothing is the honest answer.
+	if (!(subscriptions instanceof Set)) return 0;
+	if (settledRegistries.has(subscriptions)) return 0;
 	const count = subscriptions.size;
+	settledRegistries.add(subscriptions);
 	if (count > 0) accountSubscriptionDelta(-count);
 	return count;
 }

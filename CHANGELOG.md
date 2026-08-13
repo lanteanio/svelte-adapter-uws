@@ -64,6 +64,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A subscription released by a socket close is never charged a second time.**
+  The close path charges every membership the connection still held in one
+  delta, and deliberately leaves the connection's subscription Set populated,
+  because that Set is the snapshot handed to the app's close hook. After that
+  point "the topic is present" no longer means "the connection still holds a
+  charged membership" - but every release path still read it that way, so a
+  leave that landed afterwards removed the topic and charged it again. Landing
+  afterwards is ordinary, not exotic: a plugin leave parked in an await, a
+  revocation resuming on a socket that has already gone. Each one drove the
+  per-worker `totalSubscriptions` counter one below the truth, and it stays
+  there, so the consistency auditor reported either a negative total or a
+  summed-versus-total gap that no live membership could explain - the gap being
+  as large as the number of double charges, which is why the reported ratio
+  varied instead of being a fixed doubling. The close now settles the registry:
+  a release landing after it charges nothing, a second close releases nothing,
+  and a subscribe landing after it is not charged either, since there is no
+  live connection left for the counter to describe. The settle is keyed on the
+  close having run rather than on the Set being empty, so a connection that
+  unsubscribes from everything and subscribes again is still charged normally.
+  This is one change at the accounting primitive, so every release path - wire,
+  `platform.unsubscribe`, the tracked plugin lane, and revocation unwinding -
+  is covered at once rather than each guarding itself.
+
 - **The highest observed sequence number for a topic cannot move backward.**
   The counter arm of every publish lane wrote the highest-seen registry with a
   bare set, on the argument that a counter is monotone in itself. That holds
