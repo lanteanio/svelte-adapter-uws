@@ -64,6 +64,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`ADAPTER-ERR-RELAY-SPILL-OVERFLOW` no longer promises a recovery its
+  supervisor cannot always deliver.** It said the worker exits and the
+  supervisor replaces it, full stop. That is true of one incident and wrong
+  about the condition the entry is written for: the same entry names a blocked
+  or slow primary as the usual cause, and a blocked primary starves every worker
+  at once, so each replacement queues against it, spills, and exits again
+  without ever reaching stable uptime. Each of those exits charges the slot's
+  restart budget, and when the budget is gone the primary exits the whole
+  process - the outcome `ADAPTER-ERR-WORKER-RESTART-LIMIT` documents from the
+  other end. An operator reading an unqualified yes would not expect the service
+  to go down. The entry now states the bound, points at the restart-limit entry,
+  and says to check whether siblings are reporting the same thing, because a
+  process-wide cause does not resolve by replacing one worker. Its consequence
+  no longer promises clients reconnect "normally to another worker" either. The
+  claim is now driven by cases against the real supervisor: one shows the
+  respawn stopping and the exhaustion firing, another shows the budget genuinely
+  resetting when a replacement stays up, so the first cannot pass for the wrong
+  reason.
+
 - **The dotfile build warning no longer contradicts its own list, and the
   README no longer claims `vite dev` protects you.** The warning announced that
   `.well-known/ is always served` and then listed `.well-known/.nested-secret`

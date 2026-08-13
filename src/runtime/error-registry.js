@@ -268,9 +268,9 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		problemPrefix: 'This worker could not hand its relay backlog to the primary within its spill ceiling and is exiting to be replaced.',
 		messagePrefix: direct('runtime.cluster-relay', 'cluster-relay.up-spill-overflow', 'error', 'This worker could not hand its relay backlog to the primary within its spill ceiling and is exiting to be replaced.'),
 		cause: 'The worker queued more relay bytes, or held them longer, than its spill ceiling allows while waiting on the primary.',
-		consequence: 'The worker exits deliberately rather than growing an unbounded queue. Connections on it drop and those clients reconnect, normally to another worker.',
-		automaticRecovery: 'Yes. The worker exits so the supervisor replaces it.',
-		nextAction: 'Read the reason, droppedBytes, and pendingAgeMs attributes. A blocked or slow primary is the usual cause; if the backlog is legitimate peak traffic, raise the relay ring pending ceilings.',
+		consequence: 'The worker exits deliberately rather than growing an unbounded queue. Connections on it drop and those clients reconnect to whichever workers are still up.',
+		automaticRecovery: 'Within the slot restart budget. The worker exits and the supervisor respawns it, but a slot that keeps exiting without reaching stable uptime exhausts that budget and the primary then exits the whole process (see ADAPTER-ERR-WORKER-RESTART-LIMIT). A blocked primary - the usual cause here - starves every worker at once, so repeated occurrences are the shape that reaches exhaustion rather than a series each worker recovers from.',
+		nextAction: 'Read the reason, droppedBytes, and pendingAgeMs attributes. A blocked or slow primary is the usual cause; if the backlog is legitimate peak traffic, raise the relay ring pending ceilings. Check whether siblings are reporting this too - a process-wide cause will not resolve by replacing one worker.',
 		sources: Object.freeze(['src/runtime/index.js']),
 		anchor: 'adapter-err-relay-spill-overflow',
 		help: 'docs/errors.md#adapter-err-relay-spill-overflow'
