@@ -599,7 +599,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// path - this is the diagnostics pipeline and it never touches a frame
 	// buffer - so no byte is read, allocated or copied, and no copy primitive
 	// entered the graph.
-	ingress: 'bc2fc022c792e109e9a4e90a6af602e6ce2c028bd732c90a347d77a936edada7',
+	//
+	// Re-pinned for the sink trust boundary. The whole drift in this graph is one
+	// statement: `Object.freeze(record)` in emitOperationalEvent, between the
+	// record's construction and the first thing outside this module that can hold
+	// it. It freezes an object the runtime just built - it reads no frame, copies
+	// nothing, and emitOperationalEvent is not on a frame path in the first place;
+	// diagnostics are emitted per notable occurrence, not per message or per
+	// frame. No copy primitive entered.
+	ingress: '22ae501467b67e7c2e905f5f2e29b4ce5444259d47b6ae880c8c80432f624eb0',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -889,7 +897,10 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// diagnostic.js's render/write split and its notice split, both of which are
 	// in this graph too. Nothing on a frame path changed, no byte is read,
 	// allocated or copied, and no copy primitive entered.
-	platform: '4ffbb8a4e1bf80364ba616059f5f5fafb5f38e774ec937c4563bb938a6debb60',
+	// Re-pinned with the ingress seal above for the sink trust boundary, same
+	// single statement and same reason: `Object.freeze(record)` on an object the
+	// runtime just built, off any frame path. No copy primitive entered.
+	platform: 'efc6c96bbab44fa6e55d745da35a40856c51b207ac03fd9253bdaec2d8d3ea3d',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -945,7 +956,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// not change the verdict either way: the drift in both files is a local
 	// binding, a statement order and cold last-resort console paths, so on either
 	// reading no byte is read, allocated or copied and no copy primitive entered.
-	'wire-fanout': '1947442c6e51937afa4330fcef41bbd5a60eca2d6c2d404826917d9639bd4a85',
+	// Re-pinned for the sink trust boundary, and this one settles what the note
+	// above could only leave open. The single production file that changed this
+	// time is diagnostic.js, so this digest moving is the isolation that could
+	// not be run before: diagnostic.js IS in this graph too, and the older claim
+	// that it is absent from it was wrong for every graph here, not just for
+	// ingress and platform. The drift is the same one statement,
+	// `Object.freeze(record)` in emitOperationalEvent, on an object the runtime
+	// just built and off any frame path. No copy primitive entered.
+	'wire-fanout': '24c9e85d005a02fd4cc76e832bb6dee7f0bfe766a77e2d731c5a120c0b84dbc7',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

@@ -155,6 +155,43 @@ describe('operational event hardening', () => {
 		}
 	});
 
+	it('cannot be driven into a render collapse by a sink that mutates the record', () => {
+		// A configured sink is handed the record by reference. One that mutated a
+		// validated field and then threw gave the fallback a record it could no
+		// longer rebuild, and that reached the render collapse with the process
+		// serializer perfectly healthy - the one cause that entry rules out. The
+		// record is frozen at the trust boundary now, so the mutation is refused
+		// rather than absorbed and then documented.
+		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+		/** @type {any} */
+		let seen = null;
+		setOperationalEventSink((record) => {
+			seen = record;
+			// Both of these would produce the collapse if they landed: severity
+			// makes the rebuild fail validation, message makes it unserializable.
+			try { record.severity = 'not-a-severity'; } catch { /* refused, which is the point */ }
+			try { record.message = BigInt(7); } catch { /* refused */ }
+			throw new Error('sink down');
+		});
+
+		emitOperationalEvent({
+			source: 'svelte-adapter-uws',
+			component: 'runtime.test',
+			event: 'test.mutating-sink',
+			severity: 'error',
+			message: 'A valid record handed to a hostile sink.',
+			attributes: {}
+		});
+
+		const printed = printedErrors(consoleError);
+		expect(JSON.stringify({}), 'the serializer is healthy throughout').toBe('{}');
+		expect(printed).not.toContain('ADAPTER-ERR-DIAGNOSTIC-RENDER-COLLAPSE');
+		// The ordinary fallback ran instead: the event and its sink-failure notice.
+		expect(printed).toContain('A valid record handed to a hostile sink.');
+		expect(printed).toContain('operational.sink.failed');
+		expect(Object.isFrozen(seen), 'the sink must not receive a mutable record').toBe(true);
+	});
+
 	it('points the render-collapse guidance at the process, never at the emitter', () => {
 		// Three of these entries have now shipped guidance for a state their own
 		// code cannot be in, and a counting gate cannot see it. The case above

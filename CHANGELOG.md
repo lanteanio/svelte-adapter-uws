@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Three stable identifiers now cover the diagnostic pipeline's own collapse, where two console lines previously carried none; no identifier that has ever shipped is renamed.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: records handed to a configured operational sink are frozen.** A sink that mutated a validated diagnostic and then threw handed the console fallback a record it could no longer rebuild, which reported a serialization collapse while the serializer was perfectly healthy, so the record is now frozen before anything outside the runtime can hold it.
+  - **Affects:** Applications that install a custom operational event sink through `setOperationalEventSink`.
+  - **Action:** Copy the record before altering it; a sink that assigns to one now throws in strict mode instead of corrupting the runtime's own telemetry.
+  - **Requires:** No new option and no API change.
+  - **Compatibility:** The freeze is shallow, so the `attributes` object is untouched, and reading or forwarding a record is exactly as it was.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: the cluster primary's own boot window.** A SIGTERM or SIGINT delivered while the primary was starting, through the whole of an application's `primaryInit` hook, met Node's default disposition and killed the process with no log line and no shutdown of its own, and a worker reporting in afterwards could still announce the dying instance ready.
   - **Affects:** Clustered deployments, and any of them that configure a `websocket.primaryInit` hook.
   - **Action:** None; the corrected arming order and the withheld readiness announcement are the defaults.
@@ -119,6 +126,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Rendering and writing are separate statements now, and a refused write reports
   `DIAGNOSTIC_CONSOLE_WRITE`, which says what a broken severity channel costs:
   every later diagnostic of that severity, not just the one that revealed it.
+
+- **A configured sink can no longer corrupt the record it was given.** The sink
+  receives the diagnostic by reference, and one that mutated a validated field
+  and then threw handed the console fallback a record it could no longer
+  rebuild: the retry re-validates, so a severity or message replaced in flight
+  fails it, and the render-collapse line printed with the process serializer
+  perfectly healthy - the one cause that entry rules out. Widening the entry to
+  admit a mutating sink would document that state instead of preventing it, and
+  would leave its next action conditional on something an operator cannot see,
+  so the record is frozen at the trust boundary instead, before anything outside
+  the runtime holds it. Shallow is the right
+  depth: `attributes` is the only object below it and the retry drops attributes
+  entirely, so nothing mutated in there can reach the collapse. A sink that
+  assigns to a record now throws in strict mode, is caught like any other sink
+  failure, and the event still reaches the log.
 
 - **`DIAGNOSTIC_RENDER_COLLAPSE` names the process rather than the record.** Its
   guidance sent an operator to inspect the envelope of the diagnostic that

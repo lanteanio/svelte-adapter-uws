@@ -192,6 +192,17 @@ export function emitOperationalEvent(input) {
 		} catch { /* console gone */ }
 		return null;
 	}
+	// Frozen at the trust boundary, before anything outside this module can hold
+	// it. A configured sink is handed this object by reference, and one that
+	// mutated a validated field and then threw gave the fallback a record it
+	// could no longer rebuild - which reached the render-collapse line with the
+	// process serializer perfectly healthy, the one cause that line says it
+	// cannot have. Prose describing the exception would have been the third
+	// version of that entry to document a state instead of preventing it.
+	// Shallow is the right depth: `attributes` is the only object below this one,
+	// and the fallback's retry drops attributes entirely, so nothing mutated in
+	// there can reach the collapse.
+	Object.freeze(record);
 	const sink = globalThis[OPERATIONAL_EVENT_SINK];
 	if (typeof sink !== 'function') {
 		defaultOperationalEventSink(record);
