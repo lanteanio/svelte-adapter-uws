@@ -14,6 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { diagnosticError, emitOperationalEvent, setOperationalEventSink } from '../src/runtime/diagnostic.js';
 import { getRuntimeEnv, resetRuntimeEnv, setRuntimeEnv } from '../src/runtime/runtime.js';
+import { ADAPTER_ERROR_IDS, ADAPTER_ERROR_REGISTRY } from '../src/runtime/error-registry.js';
 import { DATA_CLASSES } from '../src/runtime/observability-manifest.js';
 
 const srcDir = fileURLToPath(new URL('../src', import.meta.url));
@@ -102,18 +103,19 @@ describe('operational event hardening', () => {
 		expect(printed).not.toContain('ADAPTER-ERR-DIAGNOSTIC-RENDER-COLLAPSE');
 	});
 
-	it('reports a render collapse only when the record itself cannot be rendered', () => {
+	it('reports a render collapse when the process serialization itself is broken', () => {
 		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
-		// Both attempts fail, including the one with the attributes stripped, which
-		// is what the entry says distinguishes this from a payload problem.
-		vi.spyOn(JSON, 'stringify').mockImplementation(() => { throw new Error('render gone'); });
+		// The record here is entirely valid. What is broken is the serialization
+		// the format is built on, which is the ONLY thing that can fail both
+		// attempts - see the case below for why the record never can.
+		vi.spyOn(JSON, 'stringify').mockImplementation(() => { throw new Error('serializer patched'); });
 
 		emitOperationalEvent({
 			source: 'svelte-adapter-uws',
 			component: 'runtime.test',
 			event: 'test.render-collapse',
 			severity: 'error',
-			message: 'A record nothing can serialize.',
+			message: 'A perfectly valid record.',
 			attributes: {}
 		});
 
@@ -121,6 +123,50 @@ describe('operational event hardening', () => {
 		expect(printed).toContain('ADAPTER-ERR-DIAGNOSTIC-RENDER-COLLAPSE');
 		expect(printed).toContain('test.render-collapse');
 		expect(printed).not.toContain('ADAPTER-ERR-DIAGNOSTIC-CONSOLE-WRITE');
+	});
+
+	it('cannot be driven into a render collapse by any record the runtime accepts', () => {
+		// This is the property the entry above rests on, and the reason its
+		// guidance sends an operator at the process rather than at the emitter.
+		// The retry strips the attributes, and everything createDiagnostic leaves
+		// behind is a bounded string or number it produced itself - the message is
+		// cut to 512 characters at creation - so the second attempt has nothing
+		// left that JSON can refuse. Every hostile payload below is absorbed.
+		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const circular = /** @type {any} */ ({});
+		circular.self = circular;
+		const hostile = [
+			['bigint', { big: BigInt(7) }],
+			['circular', circular],
+			['throwing-getter', { get boom() { throw new Error('hostile getter'); } }],
+			['huge-message', { note: 'x'.repeat(4096) }]
+		];
+
+		for (const [name, attributes] of hostile) {
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.test',
+				event: 'test.hostile-payload',
+				severity: 'error',
+				message: 'y'.repeat(4096),
+				attributes
+			});
+			expect(printedErrors(consoleError), name).not.toContain('ADAPTER-ERR-DIAGNOSTIC-RENDER-COLLAPSE');
+		}
+	});
+
+	it('points the render-collapse guidance at the process, never at the emitter', () => {
+		// Three of these entries have now shipped guidance for a state their own
+		// code cannot be in, and a counting gate cannot see it. The case above
+		// produces this line from a VALID record emitted by the adapter itself, so
+		// any guidance naming the record or its emitter as the thing to inspect is
+		// wrong by construction, whatever else it says.
+		const entry = ADAPTER_ERROR_REGISTRY.find(
+			(candidate) => candidate.id === ADAPTER_ERROR_IDS.DIAGNOSTIC_RENDER_COLLAPSE
+		);
+		expect(entry, 'the render-collapse entry must exist').toBeTruthy();
+		expect(entry.nextAction).toMatch(/JSON\.stringify/);
+		expect(entry.nextAction).toMatch(/not (a suspect|start at the emitter)/);
 	});
 
 	it('keeps the original event when a broken sink is reported and the notice cannot be built', () => {

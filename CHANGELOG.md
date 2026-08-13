@@ -120,6 +120,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DIAGNOSTIC_CONSOLE_WRITE`, which says what a broken severity channel costs:
   every later diagnostic of that severity, not just the one that revealed it.
 
+- **`DIAGNOSTIC_RENDER_COLLAPSE` names the process rather than the record.** Its
+  guidance sent an operator to inspect the envelope of the diagnostic that
+  printed it, which is a state the code cannot be in: the retry strips the
+  attributes, and everything `createDiagnostic` leaves behind is a bounded
+  string or number it produced itself - the message is cut to 512 characters at
+  creation - so no record the runtime accepts can fail the second attempt. What
+  can fail it is the JSON serialization the format is built on, replaced or
+  wrapped by an instrumentation agent, a polyfill or a test stub, and that fails
+  for every record equally. The entry says so now, states that the loss is the
+  whole operational stream rather than one event, and sends the reader to
+  evaluate `JSON.stringify({})` in the same process. One case drives the line
+  from a valid record against a patched serializer; another feeds a BigInt, a
+  circular reference, a throwing getter and an oversized message through the
+  emitter to prove the retry absorbs every record-carried fault.
+
 - **A broken sink no longer reports the event it just printed as lost.** The
   sink fallback wrapped the original event and its failure notice in one `try`,
   and told an operator through `DIAGNOSTIC_SINK_COLLAPSE` that both records were
