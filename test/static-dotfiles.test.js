@@ -24,6 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { excludedDotPath } from '../src/runtime/utils/dot-path.js';
 import { listExcludedDotPaths } from '../src/static-scan.js';
+import { renderRefusedDotfileWarning } from '../src/index.js';
 import { buildFixtureOnce } from './helpers/fixture-build.js';
 import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
 
@@ -162,6 +163,29 @@ describeMaybe('index-time exclusion (built runtime)', () => {
 		expect(refused).not.toContain('.well-known/probe.txt');
 		// A compressed sibling of a refused dotfile is not named again.
 		expect(refused.filter((p) => p.endsWith('.br') || p.endsWith('.gz'))).toEqual([]);
+	});
+
+	it('reports those paths in a warning that does not contradict its own list', () => {
+		// The scan above is pinned against the real build output; this pins the
+		// sentence that reports it. The two are separable failures - a correct scan
+		// can still be announced by a message that tells the developer the opposite
+		// of what the list shows.
+		const clientDir = path.join(fileURLToPath(new URL('./fixture', import.meta.url)), 'build', 'client');
+		const refused = listExcludedDotPaths(clientDir);
+		const warning = renderRefusedDotfileWarning(refused);
+
+		// Every offender the scan found is named, and both remedies are offered.
+		for (const offender of refused) expect(warning).toContain(offender);
+		expect(warning).toContain('Rename the file to serve it');
+		expect(warning).toContain('staticDotfiles: true');
+
+		// The carve-out exempts the SEGMENT, not the tree. This list contains
+		// `.well-known/.nested-secret`, so a message promising that .well-known is
+		// always served would be refuted by its own next clause - which reads as an
+		// adapter bug rather than as a file to rename.
+		expect(refused).toContain('.well-known/.nested-secret');
+		expect(warning).not.toMatch(/\.well-known\/? is\s+always served/);
+		expect(warning).toContain('a top-level .well-known/ still serves its own non-dot files');
 	});
 });
 

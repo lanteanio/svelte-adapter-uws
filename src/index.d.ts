@@ -3734,6 +3734,14 @@ export declare function unknownWebsocketOptionKeys(
 ): string[];
 
 /**
+ * The build-time warning naming every static path the dotfile rule refuses.
+ * The `.well-known` carve-out exempts the first path segment, not the tree
+ * under it, so the message must not promise more than its own list delivers.
+ * @internal
+ */
+export declare function renderRefusedDotfileWarning(refused: string[]): string;
+
+/**
  * Serialize normalized websocket options into the object baked into the build.
  * Throws when a flag that restricts access carries a non-boolean value, since
  * reading such a value as "off" would silently disarm it.

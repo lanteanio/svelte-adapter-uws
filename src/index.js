@@ -256,6 +256,30 @@ export function assertBundledHandlerMatches(handler, origin, log) {
 }
 
 /**
+ * The build-time warning naming every static path the dotfile rule refuses.
+ *
+ * The wording has to survive its own list. The `.well-known` carve-out exempts
+ * the first path SEGMENT, not the tree beneath it, so `.well-known/.nested`
+ * appears among the refused paths - and a message claiming `.well-known/ is
+ * always served` was contradicted by the very list it introduced, which reads
+ * as a bug in the adapter rather than as a file the developer should rename.
+ *
+ * Split out from the build so the text itself can be pinned: the scan is
+ * already held against the real build output, but nothing held the sentence
+ * that reports it.
+ *
+ * @param {string[]} refused - refused static paths, relative and already deduped
+ * @returns {string}
+ */
+export function renderRefusedDotfileWarning(refused) {
+	return (
+		'[adapter-uws] not served - dotfiles are refused by default (a top-level ' +
+		`.well-known/ still serves its own non-dot files): ${refused.join(', ')}. ` +
+		'Rename the file to serve it, or set staticDotfiles: true to serve every dotfile.'
+	);
+}
+
+/**
  * The `wsOpts` payload serialized into the build as `WS_OPTIONS` (the
  * production handler's `wsOptions`). Every runtime-tunable `websocket.*`
  * key must be threaded through here - a documented key missing from this
@@ -1066,11 +1090,7 @@ export default function (opts = {}) {
 					// Every offender is named - a refused directory collapses to one
 					// entry, so the list stays proportionate to what the developer
 					// actually dropped into static/.
-					builder.log.warn(
-						`[adapter-uws] not served - dotfiles are refused by default, .well-known/ is ` +
-						`always served: ${refused.join(', ')}. Rename the file to serve it, or set ` +
-						'staticDotfiles: true to serve every dotfile.'
-					);
+					builder.log.warn(renderRefusedDotfileWarning(refused));
 				}
 			}
 

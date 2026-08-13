@@ -1512,26 +1512,22 @@ Keys are case-insensitive and merged once while the static index is built, rathe
 #### Dotfiles are not served (`staticDotfiles`)
 
 A path with a dot-prefixed segment (`/.env`, `/deep/.hidden`, anything under
-`/.git/`) is left out of the static index and responds `404`. The files that
-land in `static/` by accident are exactly the sensitive ones - a stray `.env`,
-an `.htpasswd`, editor backups, an unpacked `.git` - and `adapter-node`
-refuses plain dotfiles too, so a migrating app keeps that posture. The
-exclusion is segment-wise and decided once while the index is built: there is
-no per-request check to bypass, and an encoded request (`/%2Eenv`) decodes to
-a key the index never contained.
+`/.git/`) is left out of the static index and responds `404`. What lands in
+`static/` by accident is exactly what is sensitive - a stray `.env`, an
+`.htpasswd`, editor backups, an unpacked `.git` - and `adapter-node` refuses
+plain dotfiles too, so a migrating app keeps that posture. The exclusion is
+segment-wise and decided once while the index is built: no per-request check to
+bypass, and an encoded `/%2Eenv` decodes to a key the index never contained.
 
-`.well-known/*` is always served - RFC 8615 discovery (`security.txt`, ACME
-HTTP-01 challenges) is part of the documented static surface above. The
-carve-out applies at the first path segment only: `x/.well-known/y` is not an
-escape hatch, and a dotfile inside `.well-known/` is still refused. Both of
-those shapes are stricter than `adapter-node`, whose static server keeps any
-path under `.well-known/`; the build warning names a path this rule refuses,
-so the difference cannot bite silently.
+A top-level `.well-known/` keeps serving its own non-dot files - RFC 8615
+discovery (`security.txt`, ACME HTTP-01 challenges) is documented static surface
+above. The carve-out exempts that first path **segment**, not the tree beneath
+it: `x/.well-known/y` is no escape hatch and a dotfile inside `.well-known/` is
+still refused - both stricter than `adapter-node`, which keeps that whole tree.
 
-The build warning names each refused path once - a refused directory is a
-single entry, and a compressed `.br`/`.gz` sibling is covered by naming its
-source file - so the mistake surfaces at build time instead of as a
-production `404`. To serve dotfiles deliberately:
+The build warning names each refused path once - a refused directory is one
+entry, and a `.br`/`.gz` sibling is covered by its source file - so the mistake
+surfaces at build time instead of as a production `404`. To serve them anyway:
 
 ```js
 adapter({
@@ -1539,9 +1535,13 @@ adapter({
 });
 ```
 
-Dev and preview serve `static/` through SvelteKit's own pipeline, which
-applies its own dotfile rule and does not read `staticDotfiles`; the behavior
-described here is the production server's.
+Dev and preview serve `static/` through SvelteKit's own pipeline, which ignores
+`staticDotfiles` and matches neither the rule above nor each other: `vite dev`
+calls `sirv` with `dev: true`, a branch with no dotfile filter, so `/.env`
+answers `200` there but `404` in preview and production; preview's pre-built
+list keeps everything under `.well-known/`, so `/.well-known/.nested-secret`
+answers `200` in both where this adapter answers `404`. Fetching a dotfile
+before building proves nothing - verify against the production build.
 
 ---
 

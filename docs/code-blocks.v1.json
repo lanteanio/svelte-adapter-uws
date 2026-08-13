@@ -476,7 +476,7 @@
 			"fingerprint": "38dc91bd428a300281c05b23ab7ef4e2a4cfe9235bd7b70ac37474de2814bc94",
 			"occurrence": 1,
 			"language": "js",
-			"line": 1536,
+			"line": 1532,
 			"section": "svelte-adapter-uws > Adapter options > Static file behavior > Dotfiles are not served (`staticDotfiles`)",
 			"classification": "syntax",
 			"channel": "acorn",

@@ -64,6 +64,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The dotfile build warning no longer contradicts its own list, and the
+  README no longer claims `vite dev` protects you.** The warning announced that
+  `.well-known/ is always served` and then listed `.well-known/.nested-secret`
+  among the paths it refuses, because the carve-out exempts that first path
+  SEGMENT rather than the tree beneath it - so the message read as an adapter
+  bug instead of as a file to rename. It now says a top-level `.well-known/`
+  keeps serving its own non-dot files, and the README's matching sentence is
+  corrected the same way. Separately, the README said dev and preview serve
+  `static/` through SvelteKit's pipeline, "which applies its own dotfile rule".
+  Preview does; `vite dev` does not. SvelteKit's dev middleware calls `sirv`
+  with `dev: true`, and that branch resolves from disk with no dotfile filter -
+  the filter exists only in the file list `sirv` pre-builds when `dev` is
+  falsy. Measured against the installed `sirv`: `/.env` answers `200` in dev and
+  `404` in preview. That pre-built list also keeps everything under
+  `.well-known/`, so `/.well-known/.nested-secret` answers `200` in dev AND
+  preview while this adapter refuses it. The README now carries the three-way
+  table and says plainly that a dotfile fetchable in dev is not evidence the
+  built server will serve it. No behavior changed - the refusal rule, the
+  index-time walk and the served surface are untouched. The warning text is now
+  pinned by a case: the scan was already held against the real build output,
+  but nothing held the sentence that reports it, and those are separable
+  failures.
+
 - **A subscription released by a socket close is never charged a second time.**
   The close path charges every membership the connection still held in one
   delta, and deliberately leaves the connection's subscription Set populated,
