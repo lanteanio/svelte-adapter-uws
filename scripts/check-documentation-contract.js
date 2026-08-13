@@ -122,6 +122,13 @@ export function governedNativeRefs(pkg, compatibilityCsv = '') {
 }
 
 export function validateReadme(readme, manifest, nativeRefs = []) {
+	// Normalised once, up front. This function locates its block and its section
+	// ordering by literal `\n` anchors, and a Windows checkout under
+	// `core.autocrlf=true` hands it CRLF - which made a freshly cloned tree
+	// report the block BOTH stale and out of position, two errors from one
+	// cause. The line-count rules below already allowed for `\r?\n`; the
+	// anchors and the block comparison did not.
+	readme = readme.replace(/\r\n/g, '\n');
 	const errors = [];
 	let bounds;
 	try { bounds = blockBounds(readme); } catch (error) { return [error.message]; }

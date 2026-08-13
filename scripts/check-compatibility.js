@@ -207,6 +207,18 @@ export const NPM_FIXED_VALUE_SHORTHANDS = new Set([
 	"verbose",
 ]);
 
+/**
+ * Line endings normalised for comparing a generated artifact with what is on
+ * disk. Generators here emit LF; a checkout under `core.autocrlf=true` hands
+ * back CRLF, and the difference is not what any of these gates are about.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function normalizeGeneratedText(text) {
+	return text.replace(/\r\n/g, "\n");
+}
+
 export function uwsRefFromSpec(spec) {
 	if (typeof spec !== "string") return null;
 	return (
@@ -1891,14 +1903,25 @@ function main() {
 		renderedMigration,
 	);
 	if (process.argv.includes("--write")) {
-		writeFileSync(readmePath, updated);
-		writeFileSync(migrationPath, updatedMigration);
+		// Written with LF, like every other generated artifact here, so a rewrite
+		// on a CRLF working copy cannot leave the file with mixed endings.
+		writeFileSync(readmePath, normalizeGeneratedText(updated));
+		writeFileSync(migrationPath, normalizeGeneratedText(updatedMigration));
 		console.log(
 			"check-compatibility: README and MIGRATION.md blocks regenerated.",
 		);
 		return;
 	}
-	if (updated !== readme || updatedMigration !== migration) {
+	// Compared on CONTENT, not byte for byte. The rendered block is built with
+	// LF, while a Windows checkout under `core.autocrlf=true` materialises the
+	// committed file as CRLF - so splicing one into the other differs in nothing
+	// but line endings and reported a freshly cloned tree as stale, which no
+	// `--write` could fix because the next checkout restores the CRLF.
+	if (
+		normalizeGeneratedText(updated) !== normalizeGeneratedText(readme) ||
+		normalizeGeneratedText(updatedMigration) !==
+			normalizeGeneratedText(migration)
+	) {
 		console.error(
 			"check-compatibility FAILED: generated documentation is stale; run node scripts/check-compatibility.js --write",
 		);

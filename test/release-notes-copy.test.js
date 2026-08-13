@@ -12,7 +12,13 @@ import {
 	validateReleaseSummary
 } from '../scripts/check-release-notes.js';
 
-const CHANGELOG = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8');
+// Normalised on read. A Windows checkout under `core.autocrlf=true` materialises
+// this file as CRLF, and every mutation below is built by matching literal text
+// out of it - so deriving from the raw bytes made these cases depend on how the
+// tree happened to be checked out rather than on what the validator does. The
+// validator normalises internally, so this only aligns the mutants with it.
+const CHANGELOG = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8')
+	.replace(/\r\n/g, '\n');
 const NEWEST_VERSION = newestReleaseVersion(CHANGELOG);
 const RELEASE_PAGE = readFileSync(new URL('../' + releasePagePath(CHANGELOG), import.meta.url), 'utf8');
 

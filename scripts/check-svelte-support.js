@@ -176,7 +176,12 @@ export function validateSvelte4Profile(profile, readme, workflow) {
 		}
 	}
 	const rendered = renderSvelte4Support(profile);
-	if (!readme.includes(rendered)) errors.push('README Svelte support block is stale; run node scripts/check-svelte-support.js --write');
+	// Matched against the README with line endings normalised. The block is
+	// rendered with LF, while a Windows checkout under `core.autocrlf=true`
+	// materialises the committed README as CRLF - so a raw `includes` reported a
+	// freshly cloned tree as stale, and `--write` could not settle it because the
+	// next checkout restores the CRLF.
+	if (!readme.replace(/\r\n/g, '\n').includes(rendered)) errors.push('README Svelte support block is stale; run node scripts/check-svelte-support.js --write');
 	errors.push(...sequenceErrors(rendered, '', 'the published reproduce sequence'));
 	if (!workflow.includes('working-directory: test/fixtures/svelte4')) {
 		errors.push('test workflow never enters test/fixtures/svelte4');
@@ -191,7 +196,9 @@ export function checkSvelte4Support({ write = false } = {}) {
 	const workflowPath = join(root, '.github', 'workflows', 'test.yml');
 	let readme = readFileSync(readmePath, 'utf8');
 	if (write) {
-		readme = replaceBlock(readme, renderSvelte4Support(profile));
+		// Written with LF, like every generated artifact here, so a rewrite on a
+		// CRLF working copy cannot leave the file with mixed endings.
+		readme = replaceBlock(readme, renderSvelte4Support(profile)).replace(/\r\n/g, '\n');
 		writeFileSync(readmePath, readme);
 	}
 	const errors = validateSvelte4Profile(profile, readme, readFileSync(workflowPath, 'utf8'));

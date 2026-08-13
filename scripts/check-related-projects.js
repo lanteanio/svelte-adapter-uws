@@ -128,7 +128,9 @@ export function validateRelatedProjects({
 		extensions: extensionsDescription,
 		realtime: realtimeDescription
 	});
-	if (block !== null && block !== expected) {
+	// Compared on content: the block is rendered with LF and a Windows checkout
+	// hands back a CRLF README, which is not what "stale" is meant to mean here.
+	if (block !== null && block.replace(/\r\n/g, '\n') !== expected.replace(/\r\n/g, '\n')) {
 		errors.push('README related-projects block is stale; regenerate it from sibling manifest descriptions');
 	}
 	if (readme.includes('Opinionated full-stack starter')) {

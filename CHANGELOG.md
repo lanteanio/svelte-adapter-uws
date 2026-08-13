@@ -149,13 +149,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string or number it produced itself - the message is cut to 512 characters at
   creation - so no record the runtime accepts can fail the second attempt. What
   can fail it is the JSON serialization the format is built on, replaced or
-  wrapped by an instrumentation agent, a polyfill or a test stub, and that fails
-  for every record equally. The entry says so now, states that the loss is the
-  whole operational stream rather than one event, and sends the reader to
-  evaluate `JSON.stringify({})` in the same process. One case drives the line
-  from a valid record against a patched serializer; another feeds a BigInt, a
-  circular reference, a throwing getter and an oversized message through the
-  emitter to prove the retry absorbs every record-carried fault.
+  wrapped by an instrumentation agent, a polyfill or a test stub. The entry says
+  so now, and says how far the loss reaches without overstating it: a
+  serialization that fails outright takes the whole operational stream, while
+  one that refuses only certain shapes - a wrapper scrubbing a field, a size
+  ceiling - takes every diagnostic of that shape and lets the rest through, so a
+  log still carrying other events does not mean the gap was one record wide. Its
+  next action no longer settles the question on `JSON.stringify({})`, which a
+  selective wrapper answers `{}` while still refusing the shape that produced the
+  line; it asks for a record of the same shape and a comparison against the
+  trivial case. Three cases drive it: a valid record against a patched
+  serializer, a selective wrapper that leaves ordinary records printing, and a
+  BigInt, circular reference, throwing getter and oversized message fed through
+  the emitter to prove the retry absorbs every record-carried fault.
+
+- **Generated artifacts are compared on content, not byte for byte.** Seven
+  gates compared generated text against the file on disk exactly, while every
+  generator here emits LF and a Windows checkout under `core.autocrlf=true` -
+  which this repository carries no `.gitattributes` to override - materialises
+  the committed file as CRLF. A clean clone therefore failed `npm run check`
+  before anything had been edited: `docs/errors.md is stale`, `generated
+  documentation is stale`, a README reported both stale and out of position, a
+  stale Svelte-support block, a stale related-projects block, and the uws pin
+  guard reporting the stable row's own historical tag as a stale pin. No
+  `--write` could settle any of it, because the next checkout restores the CRLF.
+  `generate-error-reference`, `check-compatibility`, `check-svelte-support` and
+  `check-related-projects` now normalise on both sides of the comparison;
+  `check-documentation-contract`, `check-entry-points` and `check-uws-pin`
+  normalise at the read instead, because they locate blocks and offset spans by
+  literal newline anchors and correcting one comparison only moves the failure
+  to the next rule. `--write` emits LF, so a rewrite on a CRLF working copy
+  cannot leave a file with mixed endings. Cases drive five of the seven from
+  both forms and assert they reach the same verdict - including that a changed
+  WORD still fails from either, so normalising did not replace one silent gate
+  with another. `check-doc-code`, `check-release-notes`, `generate-api-docs`,
+  `generate-observability` and `generate-privacy-integration` already did this
+  and are unchanged.
 
 - **A broken sink no longer reports the event it just printed as lost.** The
   sink fallback wrapped the original event and its failure notice in one `try`,

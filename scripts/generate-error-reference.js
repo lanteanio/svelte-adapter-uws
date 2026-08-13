@@ -429,6 +429,25 @@ export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options =
 	return lines.join('\n') + '\n';
 }
 
+/**
+ * Whether a generated document on disk still matches what the generator would
+ * produce, compared on CONTENT rather than byte for byte.
+ *
+ * The generator writes LF. A Windows checkout with `core.autocrlf=true` - the
+ * default this repository is developed under - materialises the committed file
+ * as CRLF, so a byte comparison reports a freshly cloned tree as stale before a
+ * line of it has been touched, and `--write` cannot fix it: the next checkout
+ * puts the CRLF back. What this gate exists to catch is generated content that
+ * no longer matches its source, and that question is line-ending independent.
+ *
+ * @param {string} onDisk
+ * @param {string} generated
+ * @returns {boolean}
+ */
+export function generatedContentMatches(onDisk, generated) {
+	return onDisk.replace(/\r\n/g, '\n') === generated.replace(/\r\n/g, '\n');
+}
+
 export function checkErrorReference({ write = false } = {}) {
 	const siblingErrors = checkSiblingDocuments();
 	if (siblingErrors.length) throw new Error(siblingErrors.join('\n'));
@@ -436,7 +455,7 @@ export function checkErrorReference({ write = false } = {}) {
 	const expected = renderErrorReference(ADAPTER_ERROR_REGISTRY, { scan });
 	if (write) writeFileSync(outputPath, expected);
 	const actual = readFileSync(outputPath, 'utf8');
-	if (actual !== expected) {
+	if (!generatedContentMatches(actual, expected)) {
 		throw new Error('docs/errors.md is stale; run node scripts/generate-error-reference.js --write');
 	}
 	const scannedNames = new Set(scan.events.map((record) => record.event));

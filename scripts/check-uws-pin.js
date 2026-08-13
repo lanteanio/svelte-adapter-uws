@@ -411,7 +411,14 @@ function main() {
 			.filter((row) => row.provenance.startsWith('npm:'))
 			.map((row) => [row.adapter_version, uwsRefFromSpec(row.uwebsockets)])
 	);
-	const readme = readFileSync(join(root, 'README.md'), 'utf8');
+	// Normalised, and so is every file scanned below, because the generated-README
+	// exception is an OFFSET range: the span is located in one read of this file
+	// and the stale ref is located in another, so the two must agree on how many
+	// bytes a line ending takes. Under a Windows checkout they did not, and the
+	// exception stopped covering the very span it was written for - reporting the
+	// stable row's own historical tag as a stale pin. Line NUMBERS are unaffected
+	// by the normalisation, so the reported location stays correct.
+	const readme = readFileSync(join(root, 'README.md'), 'utf8').replace(/\r\n/g, '\n');
 	const readmeCompatibilitySpan = authenticatedCompatibility ? authenticatedReadmeSpan(readme, compatibilityRows) : null;
 	let authenticatedBinaryPackage = null;
 	try {
@@ -433,7 +440,7 @@ function main() {
 	for (const rel of files) {
 		let text;
 		try {
-			text = readFileSync(join(root, rel), 'utf8');
+			text = readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n');
 		} catch {
 			continue; // a tracked path missing from the working tree is not this guard's case
 		}

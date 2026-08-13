@@ -255,7 +255,11 @@ export function replaceCatalog(readme, rendered) {
 function main() {
 	const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
 	const readmePath = resolve(root, 'README.md');
-	const readme = readFileSync(readmePath, 'utf8');
+	// Normalised at the read, not at each comparison: every rule below locates
+	// headings and blocks by literal `\n` anchors, and a Windows checkout under
+	// `core.autocrlf=true` hands back CRLF. Patching one comparison only moves
+	// the failure to the next rule that anchors on a newline.
+	const readme = readFileSync(readmePath, 'utf8').replace(/\r\n/g, '\n');
 	const simDts = readFileSync(resolve(root, 'src/sim.d.ts'), 'utf8');
 	const expected = replaceCatalog(readme, renderCatalog(pkg));
 	const gateErrors = [

@@ -192,6 +192,49 @@ describe('operational event hardening', () => {
 		expect(Object.isFrozen(seen), 'the sink must not receive a mutable record').toBe(true);
 	});
 
+	it('survives a serialization that refuses only some shapes, and says so', () => {
+		// A wrapper that refuses one shape - a scrubber keyed on a field, a size
+		// ceiling - is not the total failure the entry first described. Under it
+		// the collapse line prints for the matching record while every other
+		// diagnostic keeps working, so "the whole operational stream is gone" was
+		// wrong, and so was pointing the operator at `JSON.stringify({})`: that
+		// returns `{}` under exactly this wrapper and reads as all-clear.
+		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const real = JSON.stringify;
+		vi.spyOn(JSON, 'stringify').mockImplementation(function (value, ...rest) {
+			const text = real.call(JSON, value, ...rest);
+			if (typeof text === 'string' && text.includes('refuse-me')) throw new Error('wrapper refused');
+			return text;
+		});
+
+		const emit = (event, message) => emitOperationalEvent({
+			source: 'svelte-adapter-uws',
+			component: 'runtime.test',
+			event,
+			severity: 'error',
+			message,
+			attributes: {}
+		});
+		emit('test.selective-refused', 'carries the refuse-me marker');
+		emit('test.selective-ordinary', 'an ordinary record');
+
+		const printed = printedErrors(consoleError);
+		expect(printed).toContain('ADAPTER-ERR-DIAGNOSTIC-RENDER-COLLAPSE');
+		expect(printed).toContain('test.selective-refused');
+		// The stream did NOT go quiet, which is the half the entry had wrong.
+		expect(printed).toContain('an ordinary record');
+		// And the check the entry used to prescribe still reads as healthy here.
+		expect(JSON.stringify({})).toBe('{}');
+
+		const entry = ADAPTER_ERROR_REGISTRY.find(
+			(candidate) => candidate.id === ADAPTER_ERROR_IDS.DIAGNOSTIC_RENDER_COLLAPSE
+		);
+		// So the guidance must not settle it on the trivial case alone, and must
+		// not promise that everything else is gone.
+		expect(entry.nextAction).toMatch(/same shape|its own attributes/);
+		expect(entry.consequence).toMatch(/selective|only certain shapes/);
+	});
+
 	it('points the render-collapse guidance at the process, never at the emitter', () => {
 		// Three of these entries have now shipped guidance for a state their own
 		// code cannot be in, and a counting gate cannot see it. The case above
