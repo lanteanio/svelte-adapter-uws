@@ -165,6 +165,12 @@ describe('ADAPTER-ERR-METRICS-MIRROR-READ', () => {
 		const healthy = completeWorkerReport(1);
 		const mirrorFailed = { worker: 2, samples: [] }; // what collectLocalMetrics returns on a throw
 
+		// Tied to the entry, not just to the behaviour: without this the cases
+		// below would keep passing after the entry was reworded or removed, and
+		// the promise they exist to hold would be gone with nothing failing.
+		expect(entryFor(ADAPTER_ERROR_IDS.METRICS_MIRROR_READ).consequence)
+			.toMatch(/difference between the expected and reporting worker counts/);
+
 		const text = mergeSamples([healthy, mirrorFailed], { expected: 2, reporting: 2 });
 		const reporting = readGauge(text, 'metrics_snapshot_workers_reporting');
 		const expected = readGauge(text, 'metrics_snapshot_workers_expected');
