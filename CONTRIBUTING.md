@@ -578,6 +578,15 @@ and the gate agree by construction, which is the part that was missing: the
 declaration previously said two-space JSON while `package.json` and both
 `--write` generators used tabs, and nothing could see the contradiction.
 
+**Line endings on checkout.** `.gitattributes` carries `* text=auto eol=lf`,
+so every platform materialises tracked text files as LF - which is what every
+generator and gate here emits and compares, and what the test loader requires
+for the shebang-carrying files under `scripts/`. A clone that predates the
+attribute shows tracked files as modified until the working tree is
+rewritten: commit or stash real work first, then run `git checkout -- .` once
+to re-materialise the tree as LF. No `core.autocrlf` setting needs changing -
+the attribute outranks it.
+
 **Typography in source and docs.** ASCII hyphens, straight quotes, three dots
 for an ellipsis. No em dashes, no en dashes, no curly quotes, no ellipsis
 character. This is about typographic characters only - real umlauts and accented

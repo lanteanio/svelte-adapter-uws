@@ -315,13 +315,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Generated artifacts are compared on content, not byte for byte.** Seven
   gates compared generated text against the file on disk exactly, while every
   generator here emits LF and a Windows checkout under `core.autocrlf=true` -
-  which this repository carries no `.gitattributes` to override - materialises
+  which at the time no `.gitattributes` overrode - materialised
   the committed file as CRLF. A clean clone therefore failed `npm run check`
   before anything had been edited: `docs/errors.md is stale`, `generated
   documentation is stale`, a README reported both stale and out of position, a
   stale Svelte-support block, a stale related-projects block, and the uws pin
   guard reporting the stable row's own historical tag as a stale pin. No
-  `--write` could settle any of it, because the next checkout restores the CRLF.
+  `--write` could settle any of it, because the next checkout restored the CRLF.
   `generate-error-reference`, `check-compatibility`, `check-svelte-support` and
   `check-related-projects` now normalise on both sides of the comparison;
   `check-documentation-contract`, `check-entry-points` and `check-uws-pin`
@@ -435,7 +435,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A clean Windows clone collects every test file that imports from
   `scripts/`.** With `core.autocrlf` true and no `.gitattributes`, a fresh
   clone materialized every text file with CRLF, and all but one of the
-  thirty-five test files importing a module from `scripts/` failed to
+  thirty-six test files importing a module from `scripts/` failed to
   COLLECT with a bare `SyntaxError: Invalid or unexpected token` - zero
   tests contributed, while the rest of the run printed a green-looking tail.
   The failure follows the whole import graph, so a shebang-less script that

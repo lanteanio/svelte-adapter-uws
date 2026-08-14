@@ -142,4 +142,20 @@ describe('generated artifacts survive a CRLF checkout', () => {
 		) === normalizeGeneratedText(source);
 		expect(verdict(asCrlf(readme))).toBe(verdict(asLf(readme)));
 	});
+
+	it('the checkout attribute that removes the CRLF class stays in force', () => {
+		// The LF checkout rests on one tracked line. On an all-LF machine and in
+		// CI nothing goes red when it is deleted or weakened - the collection
+		// drop only returns on the next fresh Windows clone, silently. This is
+		// the loud tripwire: the attribute file must exist and carry the exact
+		// rule every generator and gate assumes.
+		const attributes = readFileSync(fileURLToPath(new URL('../.gitattributes', import.meta.url)), 'utf8');
+		const rules = attributes.split(/\r?\n/).filter((line) => line !== '' && !line.startsWith('#'));
+		const index = rules.indexOf('* text=auto eol=lf');
+		expect(index).toBeGreaterThanOrEqual(0);
+		// Last match wins per pattern, so a later bare-`*` line could silently
+		// retract text/eol for the whole tree while the line above stays
+		// present. Narrower patterns may follow; the catch-all may not recur.
+		expect(rules.slice(index + 1).filter((line) => line.split(/\s+/)[0] === '*')).toEqual([]);
+	});
 });
