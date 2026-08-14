@@ -66,6 +66,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** A handler that loaded once and later breaks reports `vite.handler.reload-failed` exactly as before; only the never-loaded retry moves to `vite.handler.load-failed`.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: a present but unreadable sibling package no longer reports as not installed.** The boot banner and `platform.introspect().versions` printed `not installed` for every resolution failure, so a sibling whose exports map was broken read as absent; only the resolver's own not-found now prints absence, and anything present but unreadable prints `unresolvable`.
+  - **Affects:** Operators comparing the boot version banner or `platform.introspect().versions` during incident triage.
+  - **Action:** None; `not installed` now always means absent.
+  - **Requires:** No new option and no API change; the field type is unchanged.
+  - **Compatibility:** A cleanly absent sibling prints exactly as before; only failures that were never absences change their word.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Changed
@@ -84,6 +91,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.6.0-next.91` is unaffected and needs no republication.
 
 ### Fixed
+
+- **Sibling resolution reports absence only when the resolver itself says
+  ERR_MODULE_NOT_FOUND.** Every other failure - an exports map that does not
+  expose the probed entry, an invalid package config, an entry that resolves
+  into no readable package - now reports `unresolvable`, because those mean
+  something IS there that cannot be read, and printing them as absence sent
+  an operator comparing version tuples in exactly the wrong direction. The
+  positive resolution path is also pinned for the first time: a stub sibling
+  installed into the built fixture must surface its version in the spawned
+  boot banner, so a bundling change that breaks `import.meta.resolve` can no
+  longer hide behind the absence wording, and a unit case drives the
+  unexported-subpath shape both ways.
 
 - **A retry of a never-loaded development handler is reported as what it is:
   the initial load still failing.** The hot-update failure path chose

@@ -2321,9 +2321,18 @@ export interface RuntimeVersionInfo {
 	adapter: string | null;
 	/** Frozen wire revision parsed from protocol.schema.json. */
 	protocolRevision: number | null;
-	/** Actually resolved svelte-realtime version, or null when it is not installed. */
+	/**
+	 * Actually resolved svelte-realtime version. `null` when the resolver
+	 * reports the package absent; the literal `'unresolvable'` when something
+	 * is present that cannot be read (a broken exports map, an invalid
+	 * package config) - a configuration to fix, not an absence.
+	 */
 	realtime: string | null;
-	/** Actually resolved extensions version, or null when it is not installed. */
+	/**
+	 * Actually resolved extensions version. `null` when the resolver reports
+	 * the package absent; the literal `'unresolvable'` when something is
+	 * present that cannot be read - a configuration to fix, not an absence.
+	 */
 	extensions: string | null;
 }
 

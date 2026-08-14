@@ -221,8 +221,8 @@ Mixed-version installs are rejected at install time with a peer-dep warning.
 Every production boot also prints the versions the process can actually see:
 the adapter package metadata that produced the build, the wire revision parsed
 from `protocol.schema.json`, and the resolved `svelte-realtime` /
-`svelte-adapter-uws-extensions` versions (or `not installed`). The same
-tuple is available at `platform.introspect().versions`. When two deployments,
+`svelte-adapter-uws-extensions` versions - `not installed` means absent, `unresolvable` present but unreadable (fix the package; nothing is missing).
+The same tuple is at `platform.introspect().versions`. When two deployments,
 logs, or diagnostic reports disagree, compare this tuple first: a partial
 upgrade or registry cooldown can leave allowed peer ranges resolving to
 different concrete package versions.
