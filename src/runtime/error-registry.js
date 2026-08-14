@@ -474,7 +474,7 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		cause: 'The number of distinct live topics passed the configured warning threshold.',
 		consequence: 'Nothing is refused at this threshold. Topic bookkeeping grows with cardinality, so this is the memory-growth signal.',
 		automaticRecovery: 'None. Cardinality is not reduced in response to the threshold.',
-		nextAction: 'Check whether topic names embed unbounded identifiers. The line fires ONCE per process: it is latched after the first crossing and never repeats, so it cannot tell you whether cardinality later fell or kept climbing - read the topic-registry gauge for that. Unbounded cardinality is a slow leak rather than a spike, so act at the warning rather than at exhaustion.',
+		nextAction: 'Check whether topic names embed unbounded identifiers - the `topPublishers` attribute names the busiest topics at the crossing and `topicCount` carries the count that tripped it. The line fires ONCE per process: it is latched after the first crossing and never repeats, and the runtime publishes no continuous topic-cardinality metric, so neither this line nor the metrics will tell you whether cardinality later fell or kept climbing. The naming scheme is what settles that. Unbounded cardinality is a slow leak rather than a spike, so act at the warning rather than at exhaustion.',
 		sources: Object.freeze(['src/runtime/handler/pressure-metrics.js']),
 		anchor: 'adapter-err-pressure-topic-registry',
 		help: 'docs/errors.md#adapter-err-pressure-topic-registry'

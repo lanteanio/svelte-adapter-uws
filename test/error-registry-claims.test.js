@@ -173,6 +173,47 @@ describe('ADAPTER-ERR-DIAGNOSTIC-RENDER-COLLAPSE', () => {
 	});
 });
 
+describe('ADAPTER-ERR-PRESSURE-TOPIC-REGISTRY', () => {
+	it('does not send the operator to a metric the runtime does not publish', () => {
+		// The entry admits its own blind spot - the line is latched and fires once,
+		// so it cannot show a trend - and then named a topic-registry gauge as the
+		// way to get one. No such signal exists: `topicCount` is carried ONLY as an
+		// attribute on this event, and the nearest manifest signal, ws_subscriptions,
+		// counts subscriptions rather than distinct topics. Acknowledging a blind
+		// spot and then pointing at an instrument that is not there leaves the
+		// reader worse off than saying nothing.
+		const entry = entryFor(ADAPTER_ERROR_IDS.PRESSURE_TOPIC_REGISTRY);
+
+		// A filter over an empty manifest returns [] and would pass for the wrong
+		// reason, so prove the manifest is loaded and that this filter can select
+		// before trusting what it does not select.
+		expect(SIGNALS.length).toBeGreaterThan(20);
+		expect(SIGNALS.filter((signal) => /topic/i.test(`${signal.name} ${signal.help ?? ''}`)).length)
+			.toBeGreaterThan(0);
+
+		const cardinalitySignals = SIGNALS.filter((signal) =>
+			/topic/i.test(signal.name) && /cardinal|registry|distinct/i.test(`${signal.name} ${signal.help ?? ''}`)
+		);
+		expect(cardinalitySignals).toEqual([]);
+		expect(entry.nextAction).not.toMatch(/topic-registry gauge/i);
+		expect(entry.nextAction).toMatch(/no continuous topic-cardinality metric/i);
+
+		// What it points at instead has to be what the event actually carries.
+		for (const attribute of ['topPublishers', 'topicCount']) {
+			expect(entry.nextAction, `nextAction should name ${attribute}`).toContain(attribute);
+		}
+	});
+
+	it('still describes a latch the code actually holds', () => {
+		// The "fires ONCE per process" claim is the reason the guidance above has to
+		// exist at all, so it is pinned here rather than assumed: a repeat-firing
+		// warning would need entirely different advice.
+		const entry = entryFor(ADAPTER_ERROR_IDS.PRESSURE_TOPIC_REGISTRY);
+		expect(entry.nextAction).toMatch(/fires ONCE per process|latched/i);
+		expect(entry.automaticRecovery).toMatch(/^None/);
+	});
+});
+
 describe('ADAPTER-ERR-METRICS-MIRROR-READ', () => {
 	it('leaves the failed worker as an expected-versus-reporting gap, not a silent omission', () => {
 		// The entry promises the failure is VISIBLE: the worker "contributes

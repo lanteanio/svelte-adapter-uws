@@ -64,6 +64,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`ADAPTER-ERR-PRESSURE-TOPIC-REGISTRY` stops pointing at a metric the runtime
+  does not publish.** The entry correctly says the warning is latched and fires
+  once per process, so it cannot show whether cardinality later fell or kept
+  climbing - and then told the reader to get that from the topic-registry gauge.
+  There is no such signal: the topic count exists only as an attribute on this
+  event, and the nearest thing the manifest carries, `ws_subscriptions`, counts
+  subscriptions rather than distinct topics. Acknowledging a blind spot and then
+  naming an instrument that is not there leaves a reader worse off than saying
+  nothing. It now points at the `topPublishers` and `topicCount` attributes the
+  event actually carries, states that no continuous topic-cardinality metric is
+  published, and says the naming scheme is what settles the trend. A case holds
+  the guidance against the signal manifest in both directions, so adding such a
+  metric later fails until the entry is updated to mention it.
+
 - **The close-settled subscription registry is shared across duplicated module
   copies, so the double charge cannot return through a plugin.** The settle mark
   was held in a module-local `WeakSet`. A bundler gives a plugin package and the

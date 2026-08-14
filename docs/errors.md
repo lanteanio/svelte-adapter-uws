@@ -456,7 +456,7 @@ searchable log prefix is:
 - **Cause:** The number of distinct live topics passed the configured warning threshold.
 - **Consequence:** Nothing is refused at this threshold. Topic bookkeeping grows with cardinality, so this is the memory-growth signal.
 - **Automatic recovery:** None. Cardinality is not reduced in response to the threshold.
-- **Next action:** Check whether topic names embed unbounded identifiers. The line fires ONCE per process: it is latched after the first crossing and never repeats, so it cannot tell you whether cardinality later fell or kept climbing - read the topic-registry gauge for that. Unbounded cardinality is a slow leak rather than a spike, so act at the warning rather than at exhaustion.
+- **Next action:** Check whether topic names embed unbounded identifiers - the `topPublishers` attribute names the busiest topics at the crossing and `topicCount` carries the count that tripped it. The line fires ONCE per process: it is latched after the first crossing and never repeats, and the runtime publishes no continuous topic-cardinality metric, so neither this line nor the metrics will tell you whether cardinality later fell or kept climbing. The naming scheme is what settles that. Unbounded cardinality is a slow leak rather than a spike, so act at the warning rather than at exhaustion.
 - **Runtime help:** `docs/errors.md#adapter-err-pressure-topic-registry`
 - **Runtime sources:** [src/runtime/handler/pressure-metrics.js](../src/runtime/handler/pressure-metrics.js)
 
