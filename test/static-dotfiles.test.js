@@ -21,6 +21,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { excludedDotPath } from '../src/runtime/utils/dot-path.js';
 import { listExcludedDotPaths } from '../src/static-scan.js';
@@ -166,29 +167,46 @@ describeMaybe('index-time exclusion (built runtime)', () => {
 	});
 
 	it('states the carve-out the same way on every surface that documents it', () => {
-		// Three surfaces describe this rule: the build warning, the README, and the
-		// PUBLIC DECLARATION an IDE shows on hover. Correcting the first two left
-		// the third still promising `.well-known/*` is always served and then
-		// refusing a dotfile inside it a few lines later - the same contradiction,
-		// on the copy a consumer is most likely to read. A per-surface fix is what
-		// let that happen, so the rule is checked across all of them at once.
+		// Fixing this per surface is what let surfaces be missed, so this does not
+		// hold a hand-written list either - a list is the same defect one level up.
+		// The first version named four files and called itself every-surface while
+		// the released consumer entry and its generated page still promised the
+		// whole tree. The inventory now comes from the tree.
 		const root = fileURLToPath(new URL('..', import.meta.url));
-		const surfaces = [
-			'src/index.d.ts',
-			'README.md',
-			'src/index.js',
-			'docs/migrations/0.5-to-0.6.md'
-		];
-		// Both forms of the same overpromise: the flat claim, and the `/*` glob
-		// that says the whole tree keeps serving when only the segment is exempt.
-		const retracts = /\.well-known\/\*?`? (is\s+always served|keeps serving)(?! its own non-dot)|except\s+`?\.well-known\/\*/;
-		for (const relative of surfaces) {
+		const tracked = execFileSync('git', ['ls-files', '*.md', '*.ts', '*.js'], {
+			cwd: root, encoding: 'utf8', maxBuffer: 1 << 24
+		})
+			.split('\n')
+			.filter((p) => p && !p.startsWith('test/fixture/'));
+
+		// Any place that pairs `.well-known` with a promise about what keeps being
+		// served. Every phrasing that has actually shipped is here: the flat claim,
+		// the bare glob, and the discovery/needs-nothing wording the release records
+		// used, which the earlier narrow pattern read straight past.
+		const promises = /\.well-known[^\n]{0,60}?(is\s+always served|keeps serving|keeps working|needs nothing)/gi;
+		// The rule stated correctly always says which part is exempt.
+		const qualified = /top-level|non-dot|first (path )?segment/i;
+
+		const offenders = [];
+		for (const relative of tracked) {
 			const text = fs.readFileSync(path.join(root, relative), 'utf8');
-			expect(text, `${relative} promises more than the carve-out delivers`).not.toMatch(retracts);
-			// And each one still has to describe the carve-out, so the check cannot
-			// be satisfied by deleting the explanation.
-			expect(text, `${relative} should still document the carve-out`).toMatch(/\.well-known/);
+			for (const match of text.matchAll(promises)) {
+				// Read a window rather than the line: these sentences wrap, and the
+				// qualification often lands on the next line.
+				const window = text.slice(Math.max(0, match.index - 220), match.index + 260);
+				if (!qualified.test(window)) offenders.push(`${relative}: ${match[0].trim()}`);
+			}
 		}
+		expect(offenders, 'these promise the whole .well-known tree').toEqual([]);
+
+		// The check must still be looking at something, so a rename that empties the
+		// inventory cannot read as success.
+		const documenting = tracked.filter((relative) =>
+			fs.readFileSync(path.join(root, relative), 'utf8').includes('.well-known')
+		);
+		expect(documenting.length).toBeGreaterThan(4);
+		expect(documenting).toContain('src/index.d.ts');
+		expect(documenting).toContain('README.md');
 	});
 
 	it('reports those paths in a warning that does not contradict its own list', () => {

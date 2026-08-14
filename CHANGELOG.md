@@ -89,8 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The `.well-known` carve-out reads the same on every surface that documents
   it.** The build warning and the README were corrected while the public
-  declaration an IDE shows on hover still promised `.well-known/*` is always
-  served and refused a dotfile inside it a few lines later. Correcting per
+  declaration an IDE shows on hover still promised the whole `.well-known` tree
+  keeps being served and refused a dotfile inside it a few lines later.
+  Correcting per
   surface is what allowed that, so the wording is now held across all of them at
   once - which also caught the migration guide's default-change table and the
   `staticDotfiles` configuration error, both of which used the `/*` form that
@@ -117,8 +118,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reason.
 
 - **The dotfile build warning no longer contradicts its own list, and the
-  README no longer claims `vite dev` protects you.** The warning announced that
-  `.well-known/ is always served` and then listed `.well-known/.nested-secret`
+  README no longer claims `vite dev` protects you.** The warning announced the
+  whole `.well-known` tree as exempt and then listed `.well-known/.nested-secret`
   among the paths it refuses, because the carve-out exempts that first path
   SEGMENT rather than the tree beneath it - so the message read as an adapter
   bug instead of as a file to rename. It now says a top-level `.well-known/`
@@ -399,10 +400,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Breaking for a non-conforming custom template; built-in pages, WebSocket handshakes, and non-HTML clients keep their previous responses.
   - **Detail:** [Changed engineering detail](#changed).
 
-- **Changed: dotfile exposure in static serving.** Static and prerendered dot-segment paths such as a stray `.env` or an unpacked `.git` now respond 404 by default instead of being served publicly, while `.well-known/*` discovery keeps working and an explicit option restores the previous behavior.
+- **Changed: dotfile exposure in static serving.** Static and prerendered dot-segment paths such as a stray `.env` or an unpacked `.git` now respond 404 by default instead of being served publicly, while a top-level `.well-known/` keeps serving its own non-dot files for RFC 8615 discovery, and an explicit option restores the previous behavior.
   - **Affects:** Deployments serving files whose path contains a dot-prefixed segment out of `static/`, and apps migrating from `adapter-node`, whose static server refuses plain dotfiles by default.
   - **Action:** Rename any deliberately served dotfile or set `staticDotfiles: true`; the build warning names each refused path once.
-  - **Requires:** No new option for the default posture; `.well-known/*` needs nothing and keeps serving.
+  - **Requires:** No new option for the default posture; a top-level `.well-known/` needs nothing and keeps serving its own non-dot files, though a dotfile inside it is refused like any other.
   - **Compatibility:** Intentional breaking default for dot-segment static paths; `staticDotfiles: true` restores the previous indexing exactly.
   - **Detail:** [Changed engineering detail](#changed).
 
@@ -952,9 +953,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exclusion is segment-wise (`a/.hidden/b` is refused, not only `.env`) and
   decided once at index time: the cache never holds the entry, so there is no
   per-request check to bypass, an encoded request decodes to a key that is
-  not there, and a refused directory is never descended into. `.well-known/*`
-  keeps serving (RFC 8615 discovery - `security.txt`, ACME HTTP-01
-  challenges), with the carve-out at the first path segment only:
+  not there, and a refused directory is never descended into. A top-level
+  `.well-known/` keeps serving its own non-dot files (RFC 8615 discovery -
+  `security.txt`, ACME HTTP-01 challenges), with the carve-out at the first
+  path segment only:
   `x/.well-known/y` is not an escape hatch and a dotfile inside
   `.well-known/` is still refused - both shapes stricter than
   `adapter-node`, which keeps any path under `.well-known/`. The build warns
