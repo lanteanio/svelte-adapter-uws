@@ -552,7 +552,7 @@ searchable log prefix is:
 - **Cause:** The subscribeBatch hook returned a value whose properties threw while being read, typically a getter or a proxy.
 - **Consequence:** Every topic in that batch is denied with INTERNAL_ERROR, exactly as though the hook itself had thrown.
 - **Automatic recovery:** None. The client may retry the subscribe.
-- **Next action:** Return a plain object or array from the hook. Property reads on this path must be free of side effects.
+- **Next action:** Return a plain object keyed by topic from the hook, and keep property reads on it free of side effects. An array is not that shape: its entries are read back under index keys, so its denials name topics like 0 and 1 and every real topic in the batch is silently allowed.
 - **Runtime help:** `docs/errors.md#adapter-err-subscribe-batch-result`
 - **Runtime sources:** [src/runtime/handler/subscribe-hooks.js](../src/runtime/handler/subscribe-hooks.js)
 

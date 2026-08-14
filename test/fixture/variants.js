@@ -128,6 +128,20 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// A `subscribeBatch` hook whose failure modes are selected by a topic name
+	// inside the batch: the hook throwing, the hook RESULT throwing on read,
+	// and the hook returning an array where the contract says a topic-keyed
+	// record. The batch-hook registry entries' claims are only reachable
+	// against a build whose batch hook can actually fail these ways.
+	subbatch: {
+		out: 'build-subbatch',
+		handler: './src/hooks.ws.subbatch.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
 	// A `subscribeBatch` hook that PARKS on demand, so a revocation can be landed
 	// inside the batch path's begin/settle window - the window the tombstone
 	// exists for. See src/hooks.ws.park.js for why a real suspension is required.

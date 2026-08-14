@@ -381,6 +381,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   history rewrite had re-materialised as CRLF are normalised back to LF in the
   same pass.
 
+- **`ADAPTER-ERR-SUBSCRIBE-BATCH-RESULT` stops prescribing a return shape that
+  disarms authorization.** The entry's repair guidance said a `subscribeBatch`
+  hook could return a plain object or an array. The contract shape is a record
+  keyed by topic; an array is read back under index keys, so its denials name
+  topics like 0 and 1 and every real topic in the batch is silently allowed -
+  a fail-open outcome in the deliberately fail-closed batch path, reachable by
+  following the entry's own advice. The guidance now names the record shape
+  and states what an array does instead. Driven against the built runtime over
+  a real socket: the hook-throw and result-read collapses each deny every
+  topic the hook received with `INTERNAL_ERROR` while their documented events
+  fire carrying the attached error, a malformed topic in the same frame keeps
+  its own `INVALID_TOPIC` verdict, and an array return subscribes every topic
+  with no event - the case that keeps the corrected sentence honest in both
+  directions.
+
 ## [0.6.0-next.91] - 2026-08-10
 
 <!-- consumer-release-summary:start -->
