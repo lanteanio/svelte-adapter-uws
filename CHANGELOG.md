@@ -396,6 +396,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no event - the case that keeps the corrected sentence honest in both
   directions.
 
+- **The `subscribe` and `subscribeBatch` hook declarations admit the async
+  forms the runtime awaits.** Both wire authorization hooks have been awaited
+  on production, the Vite dev server and the published test server since the
+  0.5 hardening that made async hooks fail closed, and the `subscribeBatch`
+  documentation's own example is an `async` function - but the declared return
+  types admitted no promise and the prose beside them still said sync only, so
+  a typed application writing the documented pattern got a type error against
+  behaviour the runtime fully supports, and the workaround the stale sentence
+  pointed at (pre-caching grants during `upgrade`) is exactly the pattern the
+  hook exists to replace. Both signatures now declare the promise-returning
+  forms, and the prose states the awaited semantics, including that a
+  rejection denies with `INTERNAL_ERROR` exactly like a throw.
+
 ## [0.6.0-next.91] - 2026-08-10
 
 <!-- consumer-release-summary:start -->

@@ -2036,6 +2036,10 @@ export interface WebSocketHandler<UserData = unknown> {
 	 *   is forwarded verbatim to the client.
 	 * - Anything else (or omit this export) - allow.
 	 *
+	 * May be async: the returned promise is awaited before the value is
+	 * inspected, so `async () => false` denies just like `() => false`,
+	 * and a rejection denies with `'INTERNAL_ERROR'` exactly like a throw.
+	 *
 	 * When the client supplied a `ref` with its subscribe op, the
 	 * server emits a `{type:'subscribed', topic, ref}` ack on accept or
 	 * a `{type:'subscribe-denied', topic, ref, reason}` ack on deny.
@@ -2052,7 +2056,8 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * ```
 	 */
 	subscribe?: (ws: WebSocket<UserData>, topic: string, ctx: SubscribeContext) =>
-		| boolean | void | SubscribeDenialReason | string;
+		| boolean | void | SubscribeDenialReason | string
+		| Promise<boolean | void | SubscribeDenialReason | string>;
 
 	/**
 	 * Optional batch variant of `subscribe`. Called once when a client
@@ -2080,7 +2085,9 @@ export interface WebSocketHandler<UserData = unknown> {
 	 * - Omit a topic, return `true`, or return `undefined` for it -> allow.
 	 *
 	 * Returning `undefined` or `{}` from the hook means "allow
-	 * everything". Sync only in v1.
+	 * everything". May be async: the returned promise is awaited before
+	 * its entries are read, and a rejection denies the whole batch with
+	 * `'INTERNAL_ERROR'` exactly like a throw.
 	 *
 	 * If you do not export this hook, the per-topic `subscribe` hook
 	 * is called once per topic in the batch (unchanged behaviour).
@@ -2103,7 +2110,9 @@ export interface WebSocketHandler<UserData = unknown> {
 		ws: WebSocket<UserData>,
 		topics: string[],
 		ctx: SubscribeContext
-	) => Record<string, boolean | SubscribeDenialReason | string> | void;
+	) =>
+		| Record<string, boolean | SubscribeDenialReason | string> | void
+		| Promise<Record<string, boolean | SubscribeDenialReason | string> | void>;
 
 	/**
 	 * Called when a client unsubscribes from a topic (ref count reached zero).
