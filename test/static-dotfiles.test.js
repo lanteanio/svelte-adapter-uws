@@ -33,6 +33,37 @@ const describeMaybe = hasUWS ? describe : describe.skip;
 
 const MARKER = 'leaked-if-served';
 
+/**
+ * Every place a text makes a promise about what `.well-known` continues to
+ * serve, with whether the sentence around it says which part is actually exempt.
+ *
+ * Worth knowing that this very comment tripped the check when it was worded as
+ * the promise: the detector runs over the whole tracked tree, this file
+ * included, and does not care that the sentence is describing the rule rather
+ * than stating it.
+ *
+ * Whitespace is normalised BEFORE anything is matched. Prose here is hard
+ * wrapped, so the promise and the noun it attaches to routinely land on
+ * different lines, and a candidate pattern that cannot cross a newline drops
+ * those silently - reflowing a correct sentence would then remove that surface
+ * from the inventory with every gate still green. Normalising first is what
+ * makes wrapping irrelevant to discovery instead of decisive.
+ */
+function wellKnownPromises(text) {
+	const flat = String(text).replace(/\s+/g, ' ');
+	// Every phrasing that has actually shipped: the flat claim, the bare glob, and
+	// the discovery / needs-nothing wording the release records used.
+	const promise = /\.well-known[^]{0,60}?(is always served|keeps serving|keeps working|needs nothing)/gi;
+	// Stated correctly, the rule always names the part that is exempt.
+	const qualifier = /top-level|non-dot|first (path )?segment/i;
+	const found = [];
+	for (const match of flat.matchAll(promise)) {
+		const window = flat.slice(Math.max(0, match.index - 220), match.index + 260);
+		found.push({ snippet: match[0].trim(), qualified: qualifier.test(window) });
+	}
+	return found;
+}
+
 describe('excludedDotPath', () => {
 	it('refuses a dot segment anywhere in the path', () => {
 		expect(excludedDotPath('.env')).toBe(true);
@@ -61,6 +92,51 @@ describe('excludedDotPath', () => {
 		// Not an escape hatch: nested placement and dotfiles inside are refused.
 		expect(excludedDotPath('x/.well-known/y')).toBe(true);
 		expect(excludedDotPath('.well-known/.hidden')).toBe(true);
+	});
+});
+
+describe('wellKnownPromises (the inventory oracle)', () => {
+	// The corpus being clean says nothing about whether the detector can SEE a
+	// bad sentence - a detector that finds nothing passes a clean corpus exactly
+	// like a correct one. These drive it against known-bad inputs directly.
+	// Assembled rather than written out, so this file does not itself contain the
+	// phrase the corpus scan looks for. A negative-control fixture must not become
+	// a finding, and excluding this file from the inventory instead would put back
+	// the hand-maintained exception the derived scan exists to remove.
+	const PROMISE = 'keeps' + ' serving';
+	const sameLine = `The \`.well-known/\` ${PROMISE} whatever you put there.`;
+	const wrapped = `The \`.well-known/\`\n${PROMISE} whatever you put there.`;
+
+	it('finds the same promise whether or not the prose wraps', () => {
+		// The failure this replaces: candidate discovery was bounded by [^\n], so
+		// the wrapped form produced zero candidates while the same-line form
+		// produced one. Reflowing a correct sentence would then have removed that
+		// surface from the inventory silently.
+		expect(wellKnownPromises(sameLine)).toHaveLength(1);
+		expect(wellKnownPromises(wrapped)).toHaveLength(1);
+		expect(wellKnownPromises(wrapped)[0].qualified).toBe(false);
+		// Wrapping is not merely tolerated, it is irrelevant: both forms reduce to
+		// the same finding.
+		expect(wellKnownPromises(wrapped)[0].snippet).toBe(wellKnownPromises(sameLine)[0].snippet);
+	});
+
+	it('reads the qualifier across a wrap too, so a correct sentence is not reported', () => {
+		const qualifiedWrapped = 'A top-level `.well-known/`\nkeeps serving its own non-dot files.';
+		const found = wellKnownPromises(qualifiedWrapped);
+		expect(found).toHaveLength(1);
+		expect(found[0].qualified).toBe(true);
+	});
+
+	it('recognises every phrasing that has shipped, wrapped or not', () => {
+		for (const promise of ['is always served', 'keeps serving', 'keeps working', 'needs nothing']) {
+			expect(wellKnownPromises(`\`.well-known/*\` ${promise} here.`), promise).toHaveLength(1);
+			expect(wellKnownPromises(`\`.well-known/*\`\n${promise} here.`), `${promise} (wrapped)`).toHaveLength(1);
+		}
+	});
+
+	it('does not fire on text that never makes the promise', () => {
+		expect(wellKnownPromises('Headers are missing on `/llms.txt`, `robots.txt`, `.well-known/*`, and more.')).toEqual([]);
+		expect(wellKnownPromises('nothing to see here')).toEqual([]);
 	});
 });
 
@@ -179,22 +255,11 @@ describeMaybe('index-time exclusion (built runtime)', () => {
 			.split('\n')
 			.filter((p) => p && !p.startsWith('test/fixture/'));
 
-		// Any place that pairs `.well-known` with a promise about what keeps being
-		// served. Every phrasing that has actually shipped is here: the flat claim,
-		// the bare glob, and the discovery/needs-nothing wording the release records
-		// used, which the earlier narrow pattern read straight past.
-		const promises = /\.well-known[^\n]{0,60}?(is\s+always served|keeps serving|keeps working|needs nothing)/gi;
-		// The rule stated correctly always says which part is exempt.
-		const qualified = /top-level|non-dot|first (path )?segment/i;
-
 		const offenders = [];
 		for (const relative of tracked) {
 			const text = fs.readFileSync(path.join(root, relative), 'utf8');
-			for (const match of text.matchAll(promises)) {
-				// Read a window rather than the line: these sentences wrap, and the
-				// qualification often lands on the next line.
-				const window = text.slice(Math.max(0, match.index - 220), match.index + 260);
-				if (!qualified.test(window)) offenders.push(`${relative}: ${match[0].trim()}`);
+			for (const found of wellKnownPromises(text)) {
+				if (!found.qualified) offenders.push(`${relative}: ${found.snippet}`);
 			}
 		}
 		expect(offenders, 'these promise the whole .well-known tree').toEqual([]);
