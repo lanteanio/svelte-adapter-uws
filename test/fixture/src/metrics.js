@@ -7,9 +7,11 @@
 // counter moved does not need per-label series, and keeping one number per name
 // makes the scrape trivial to parse.
 //
-// Anything reading these values must go through `platform.metrics`, NOT import
-// this module: a second import creates a second, empty registry that the runtime
-// never writes to.
+// Readable through `platform.metrics` AND by importing this module directly:
+// the Vite plugin bundles the registry into the app's own server graph, so the
+// runtime's instance and an app-graph import are the same object. The
+// metrics-direct route drives that contract; a build that bundled this module
+// standalone would hand that route a second, empty registry.
 
 /** @type {Map<string, number>} */
 const values = new Map();

@@ -1,9 +1,11 @@
 // Scrape route for the fixture's metrics variant.
 //
-// Reads platform.metrics - the SAME registry instance the runtime writes to.
-// Importing ../metrics.js here instead would hand back a second, empty registry
-// and every counter would read zero, which is exactly the kind of assertion that
-// passes while proving nothing.
+// Reads platform.metrics - the runtime-populated read point, which works on
+// every build shape. The sibling metrics-direct route reads the module by
+// import instead; the two agreeing is the shared-instance contract the plugin
+// provides, and only holds because the plugin bundles the registry into the
+// app graph. This route stays on platform.metrics so the platform read point
+// keeps its own coverage.
 
 export function GET({ platform }) {
 	const registry = platform?.metrics;

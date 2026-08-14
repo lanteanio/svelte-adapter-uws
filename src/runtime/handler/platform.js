@@ -2216,9 +2216,10 @@ export const platform = {
 	 * whose default export is the registry), or `null` when unset. The adapter
 	 * populates it with admission/posture instruments; expose its
 	 * Prometheus-text output from a scrape route, e.g.
-	 * `new Response(platform.metrics.serialize())`. Reading this is how an app
-	 * route reaches the SAME registry instance the runtime writes to - importing
-	 * the metrics module again from app code would create a second, empty copy.
+	 * `new Response(platform.metrics.serialize())`. On a plugin-built bundle a
+	 * direct import of the metrics module reads this same instance; on the
+	 * standalone fallback bundle (built without the Vite plugin, which warns)
+	 * this property is the only read point that reaches the populated copy.
 	 */
 	get metrics() {
 		return metricsRegistry;

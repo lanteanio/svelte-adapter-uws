@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** The freeze is shallow, so the `attributes` object is untouched, and reading or forwarding a record is exactly as it was.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: the configured metrics registry is one instance, shared with the application graph.** The module named by `websocket.metrics` was instantiated twice, adapter counters landing on a copy only `platform.metrics` could reach while a direct import read an empty copy, so the Vite plugin bundles the registry into the app's server graph and both read points are one object.
+  - **Affects:** Applications setting `websocket.metrics`, and any scrape route or module importing the metrics module directly.
+  - **Action:** None with the standard setup (the `svelte-adapter-uws/vite` plugin in `vite.config.js`); without the plugin the build now warns that the standalone bundle remains a second instance readable only through `platform.metrics`.
+  - **Requires:** No new option and no API change.
+  - **Compatibility:** `platform.metrics` reads exactly as before; a build whose bundled metrics module disagrees with the configured path is now refused instead of shipping counters no scrape route reads.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: the cluster primary's own boot window.** A SIGTERM or SIGINT delivered while the primary was starting, through the whole of an application's `primaryInit` hook, met Node's default disposition and killed the process with no log line and no shutdown of its own, and a worker reporting in afterwards could still announce the dying instance ready.
   - **Affects:** Clustered deployments, and any of them that configure a `websocket.primaryInit` hook.
   - **Action:** None; the corrected arming order and the withheld readiness announcement are the defaults.
@@ -395,6 +402,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its own `INVALID_TOPIC` verdict, and an array return subscribes every topic
   with no event - the case that keeps the corrected sentence honest in both
   directions.
+
+- **The module named by `websocket.metrics` is instantiated once per process.**
+  The option is a module path bundled into the build, and the adapter bundled
+  it standalone - a second instance of the module by construction: every
+  adapter counter incremented on the standalone copy while a route importing
+  the module read the other, empty copy, so the adapter's own counters were
+  invisible to the app's scrape route, and any module-level side effect ran
+  twice per process. The Vite plugin now emits the registry as a chunk of the
+  app's own server build, where Rollup dedupes the module with every route
+  that imports it, so the runtime's instance and an app-graph import are one
+  object. A suite drives both directions against the real built runtime: an
+  adapter-written counter is visible through a direct app-graph import, and a
+  probe counter written through that import is visible on `platform.metrics`.
+  The plugin records which module it bundled and the adapter refuses a build
+  where that record disagrees with the configured path, mirroring the
+  WebSocket handler's origin check; without the plugin the esbuild fallback
+  still produces a standalone second instance, and the build now says so and
+  names the plugin as the cure.
 
 - **The `subscribe` and `subscribeBatch` hook declarations admit the async
   forms the runtime awaits.** Both wire authorization hooks have been awaited

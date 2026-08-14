@@ -19,7 +19,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import adapter, { assertBundledHandlerMatches, readHandlerOrigin } from '../src/index.js';
+import adapter, { assertBundledHandlerMatches, readHandlerOrigin, assertBundledMetricsMatches, readMetricsOrigin } from '../src/index.js';
 import { buildFixtureOnce } from './helpers/fixture-build.js';
 import { hasUWS } from './helpers/real-runtime.js';
 import { variantOut, FIXTURE_VARIANTS } from './fixture/variants.js';
@@ -97,6 +97,60 @@ describe('assertBundledHandlerMatches', () => {
 describe('readHandlerOrigin', () => {
 	it('returns null for a directory with no marker', () => {
 		expect(readHandlerOrigin(path.join(ROOT, 'test'))).toBeNull();
+	});
+});
+
+// The metrics registry rides the same plugin-emits-adapter-verifies mechanism
+// as the handler, with a different stake: the module that wins is the registry
+// INSTANCE every adapter counter lands on, so a silent substitution presents
+// as counters frozen at zero on the scrape route rather than as an error.
+describe('adapter exposes websocket.metrics to the Vite plugin', () => {
+	it('publishes the configured module path on the adapter object', () => {
+		expect(adapter({ websocket: { metrics: './src/m.js' } }).websocketMetrics).toBe('./src/m.js');
+	});
+
+	it('is null when no metrics module is configured', () => {
+		expect(adapter({ websocket: true }).websocketMetrics).toBeNull();
+		expect(adapter({}).websocketMetrics).toBeNull();
+	});
+});
+
+describe('assertBundledMetricsMatches', () => {
+	const log = () => {
+		const warnings = [];
+		return { warn: (m) => warnings.push(m), warnings };
+	};
+
+	it('accepts agreement, including a differing relative spelling', () => {
+		const l = log();
+		expect(() =>
+			assertBundledMetricsMatches('./src/metrics.js', { source: 'src/metrics.js', from: 'x' }, l)
+		).not.toThrow();
+		expect(l.warnings).toHaveLength(0);
+	});
+
+	it('throws when the bundled module is not the configured one, naming both', () => {
+		let message = '';
+		try {
+			assertBundledMetricsMatches('./a.js', { source: 'b.js', from: 'websocket.metrics in SvelteKit config' }, log());
+		} catch (err) {
+			message = err.message;
+		}
+		expect(message).toMatch(/names a different module than the one that was built/);
+		expect(message).toContain('./a.js');
+		expect(message).toContain('b.js');
+	});
+
+	it('warns rather than throws when the plugin left no record', () => {
+		const l = log();
+		expect(() => assertBundledMetricsMatches('./src/m.js', null, l)).not.toThrow();
+		expect(l.warnings.join('\n')).toMatch(/cannot confirm/);
+	});
+
+	it('stays silent when no metrics module is configured', () => {
+		const l = log();
+		expect(() => assertBundledMetricsMatches(null, null, l)).not.toThrow();
+		expect(l.warnings).toHaveLength(0);
 	});
 });
 

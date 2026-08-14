@@ -168,8 +168,28 @@ function collectUnknownKeys(bag, known, prefix, out) {
  * @returns {{ source: string, absolute: string | null, from: string } | null}
  */
 export function readHandlerOrigin(tmp) {
+	return readEmittedOrigin(`${tmp}/ws-handler.origin.json`);
+}
+
+/**
+ * What the Vite plugin recorded about the module it bundled as the metrics
+ * registry, written beside the emitted chunk. Null when there is no record -
+ * older plugin builds wrote none, and the esbuild fallback writes none either.
+ *
+ * @param {string} tmp - the adapter build directory, which is also the SSR output dir
+ * @returns {{ source: string, absolute: string | null, from: string } | null}
+ */
+export function readMetricsOrigin(tmp) {
+	return readEmittedOrigin(`${tmp}/metrics-registry.origin.json`);
+}
+
+/**
+ * @param {string} file
+ * @returns {{ source: string, absolute: string | null, from: string } | null}
+ */
+function readEmittedOrigin(file) {
 	try {
-		const parsed = JSON.parse(readFileSync(`${tmp}/ws-handler.origin.json`, 'utf8'));
+		const parsed = JSON.parse(readFileSync(file, 'utf8'));
 		if (typeof parsed?.source !== 'string' || !parsed.source) return null;
 		return {
 			source: parsed.source,
@@ -252,6 +272,46 @@ export function assertBundledHandlerMatches(handler, origin, log) {
 		'Refusing the build rather than shipping the wrong one.\n' +
 		'  Name the handler in ONE place - websocket.handler on the adapter is honored ' +
 		'by the dev plugin too.'
+	);
+}
+
+/**
+ * Refuse a build whose `websocket.metrics` names a different module than the
+ * one the Vite plugin actually bundled as the metrics registry.
+ *
+ * Same shape as the handler check above, with a different consequence: the
+ * winning module decides WHICH registry instance the adapter's counters land
+ * on. A substituted registry does not disarm authorization, it mis-scrapes -
+ * every adapter counter increments on an instance no scrape route reads, which
+ * presents as counters silently frozen at zero rather than as an error.
+ *
+ * @param {string | null | undefined} metrics - the adapter's `websocket.metrics`
+ * @param {{ source: string, absolute?: string | null, from: string } | null} origin - what the plugin recorded
+ * @param {{ warn: (msg: string) => void }} log - builder.log
+ */
+export function assertBundledMetricsMatches(metrics, origin, log) {
+	if (!metrics) return;
+
+	if (!origin) {
+		log.warn(
+			`websocket.metrics is set to '${metrics}', but the metrics registry was already built ` +
+			'by the Vite plugin and carries no record of which module it used, so the adapter ' +
+			'cannot confirm the two agree.\n' +
+			'  If the plugin and the adapter come from the same svelte-adapter-uws install this ' +
+			'should not happen - check for a stale or duplicated copy of the package.'
+		);
+		return;
+	}
+
+	if (samePath(metrics, origin.absolute ?? origin.source)) return;
+
+	throw new Error(
+		`websocket.metrics names a different module than the one that was built.\n` +
+		`  SvelteKit config  websocket.metrics: ${JSON.stringify(metrics)}\n` +
+		`  actually bundled: ${JSON.stringify(origin.source)} (${origin.from})\n` +
+		'The Vite plugin resolves the metrics registry before the adapter runs, so the ' +
+		'bundled module is the instance every adapter counter lands on. Refusing the build ' +
+		'rather than shipping counters that increment where no scrape route reads.'
 	);
 }
 
@@ -601,6 +661,14 @@ export default function (opts = {}) {
 		// choice and would bundle whatever auto-discovery found instead.
 		websocketHandler: websocket?.handler ?? null,
 
+		// Same contract for the metrics registry. The plugin emits the module as
+		// a chunk of the app's own SSR build, which is what makes the registry
+		// ONE instance: Rollup dedupes the module between this entry and every
+		// route that imports it, so `platform.metrics` and an app-graph import
+		// read the same object. The adapter's esbuild fallback below cannot do
+		// that - a separate bundle is a separate instance by construction.
+		websocketMetrics: websocket?.metrics ?? null,
+
 		async adapt(builder) {
 			// Verify the native addon is present before starting build work.
 			try {
@@ -770,7 +838,13 @@ export default function (opts = {}) {
 			// always written (even with WS off) so the placeholder import resolves.
 			const metricsPath = websocket?.metrics;
 			if (metricsPath && existsSync(`${tmp}/metrics-registry.js`)) {
-				builder.log.minor('Metrics registry: built by Vite plugin');
+				// The plugin emitted the registry as a chunk of the app's SSR build,
+				// so the user's module lands in a shared chunk imported by BOTH this
+				// entry and every route that imports it - one instance, and an app
+				// scrape route that reads the module directly sees the adapter's
+				// counters. Verify it bundled the module this config names.
+				assertBundledMetricsMatches(metricsPath, readMetricsOrigin(tmp), builder.log);
+				builder.log.minor('Metrics registry: built by Vite plugin (one instance, shared with the app graph)');
 			} else if (metricsPath) {
 				// Not '__'-prefixed: the extra-entry discovery loop below only
 				// bundles '__' files, and this is an esbuild source, not a Rollup
@@ -787,6 +861,19 @@ export default function (opts = {}) {
 				);
 				await esbuildServerModule(metricsEntry, `${tmp}/metrics-registry.js`);
 				builder.log.minor(`Metrics registry: ${metricsPath}`);
+				// A standalone bundle is a SECOND instance of the module. Adapter
+				// counters land on it, an app-graph import reads the other copy, and
+				// module-level side effects run twice per process. Only reachable
+				// without the Vite plugin, which bundles the registry into the app
+				// graph instead - so say exactly what restores the single instance.
+				builder.log.warn(
+					`websocket.metrics was bundled standalone, so '${metricsPath}' is instantiated ` +
+					'twice per process: the adapter writes its counters to one copy while any app ' +
+					'module importing it reads the other. Read the populated registry via ' +
+					"platform.metrics, or add the adapter's Vite plugin (import uws from " +
+					"'svelte-adapter-uws/vite') so the registry is bundled into the app graph " +
+					'as one shared instance.'
+				);
 			} else {
 				writeFileSync(`${tmp}/metrics-registry.js`, 'export default null;\n');
 			}

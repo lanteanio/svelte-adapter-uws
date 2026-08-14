@@ -1283,9 +1283,12 @@ export default function uws(options = {}) {
 			const adapter = plugin?.api?.options?.kit?.adapter;
 			if (adapter?.name !== 'adapter-uws') continue;
 			const handler = adapter.websocketHandler;
+			const metrics = adapter.websocketMetrics;
 			return {
 				handler: typeof handler === 'string' && handler ? handler : null,
-				from: 'websocket.handler in SvelteKit config'
+				metrics: typeof metrics === 'string' && metrics ? metrics : null,
+				from: 'websocket.handler in SvelteKit config',
+				configName: 'SvelteKit config'
 			};
 		}
 
@@ -1299,17 +1302,20 @@ export default function uws(options = {}) {
 				// API path above to avoid evaluating app config twice.
 				const mod = await import(pathToFileURL(full).href);
 				const adapter = mod?.default?.kit?.adapter;
-				if (adapter?.name !== 'adapter-uws') return { handler: null, from: null };
+				if (adapter?.name !== 'adapter-uws') return { handler: null, metrics: null, from: null, configName: null };
 				const handler = adapter.websocketHandler;
+				const metrics = adapter.websocketMetrics;
 				return {
 					handler: typeof handler === 'string' && handler ? handler : null,
-					from: `websocket.handler in ${name}`
+					metrics: typeof metrics === 'string' && metrics ? metrics : null,
+					from: `websocket.handler in ${name}`,
+					configName: name
 				};
 			} catch {
-				return { handler: null, from: null };
+				return { handler: null, metrics: null, from: null, configName: null };
 			}
 		}
-		return { handler: null, from: null };
+		return { handler: null, metrics: null, from: null, configName: null };
 	}
 
 	/**
@@ -1325,8 +1331,12 @@ export default function uws(options = {}) {
 	 * @param {{ plugins?: Array<any> } | null | undefined} resolved
 	 * @returns {Promise<{ path: string, from: string } | null>}
 	 */
-	async function discoverHandler(root, resolved) {
-		const adapterOption = await adapterHandlerOption(root, resolved);
+	async function discoverHandler(root, resolved, preReadAdapterOption) {
+		// `preReadAdapterOption` exists so the SSR-build path can read the adapter
+		// options ONCE and share the reading between the handler and the metrics
+		// registry: on old Kit the fallback imports the app's svelte.config, and
+		// two independent reads would evaluate it twice.
+		const adapterOption = preReadAdapterOption ?? await adapterHandlerOption(root, resolved);
 		const fromAdapter = adapterOption.handler;
 		// `websocket.handler` belongs to the adapter, whose non-plugin fallback
 		// resolves it with path.resolve() from the project process cwd. Vite's
@@ -1402,6 +1412,22 @@ export default function uws(options = {}) {
 	/** SSR-build state captured in `configResolved` and consumed in `buildStart`. */
 	let ssrHandler = /** @type {{ path: string, from: string } | null} */ (null);
 	let ssrRoot = '';
+	// The adapter's `websocket.metrics` module, resolved for the SSR build. Kept
+	// beside ssrHandler because the two ride the same mechanism: emitted as a
+	// chunk of the app's own Rollup pass, so modules shared with routes dedupe
+	// into `chunks/` and the registry is ONE instance per module graph (one per
+	// cluster worker; workers each evaluate their own graph). Bundling it
+	// separately (the adapter's esbuild fallback) instantiates the module a
+	// second time in any graph that also imports it: adapter counters land on
+	// one copy while an app-graph import reads the other, and module-level side
+	// effects run once per copy.
+	let ssrMetrics = /** @type {{ path: string, source: string, from: string } | null} */ (null);
+	// Rollup virtual-module id for the emitted registry entry. The entry cannot
+	// be the user's module itself: its default export must be the NORMALIZED
+	// registry (`default` / `metrics` / `registry`, whichever the app exported),
+	// so a wrapper module does the pick and the user's module stays a plain
+	// import that Rollup can dedupe with the routes.
+	const METRICS_REGISTRY_ENTRY_ID = '\0adapter-uws:metrics-registry-entry';
 
 	return {
 		name: 'svelte-adapter-uws',
@@ -1432,8 +1458,36 @@ export default function uws(options = {}) {
 			// detect SSR via `resolved.build.ssr` instead.
 			if (resolved.build?.ssr) {
 				ssrRoot = resolved.root || process.cwd();
-				ssrHandler = await discoverHandler(ssrRoot, resolved);
+				const adapterOption = await adapterHandlerOption(ssrRoot, resolved);
+				ssrHandler = await discoverHandler(ssrRoot, resolved, adapterOption);
+				// Resolved from the process cwd, NOT the Vite root, for the same
+				// reason as the handler above: the adapter's esbuild fallback
+				// resolves `websocket.metrics` with path.resolve() from cwd, and the
+				// two sides must name the same file or the adapter's origin check
+				// reports a mismatch for the module the plugin actually bundled.
+				ssrMetrics = adapterOption.metrics
+					? {
+						path: path.resolve(adapterOption.metrics),
+						source: adapterOption.metrics,
+						from: `websocket.metrics in ${adapterOption.configName ?? 'SvelteKit config'}`
+					}
+					: null;
 			}
+		},
+		resolveId(id) {
+			if (id === METRICS_REGISTRY_ENTRY_ID) return id;
+		},
+		load(id) {
+			if (id !== METRICS_REGISTRY_ENTRY_ID || !ssrMetrics) return;
+			// The same normalization the adapter's esbuild fallback generates:
+			// accept `default`, `metrics`, or `registry` exports. Read through a
+			// function so Rollup does not statically bind the export names the
+			// user's module happens not to have and warn about each one.
+			return (
+				`import * as m from ${JSON.stringify(ssrMetrics.path)};\n` +
+				'const pick = (ns) => ns.default ?? ns.metrics ?? ns.registry ?? null;\n' +
+				'export default pick(m);\n'
+			);
 		},
 		buildStart() {
 			// Inject the ws-handler entry directly into the active Rollup
@@ -1453,8 +1507,41 @@ export default function uws(options = {}) {
 			// (metrics registries, leader-election state, in-memory
 			// caches) land in `chunks/` rather than getting duplicated
 			// into the ws-handler bundle.
-			if (!ssrHandler) return;
 			if (this.environment?.name && this.environment.name !== 'ssr') return;
+			// The metrics registry rides the same mechanism, and sharing is the
+			// POINT here rather than a nicety: emitted into the app's own Rollup
+			// pass, the user's registry module dedupes into `chunks/` with every
+			// route that imports it, so `platform.metrics` and an app-graph
+			// import read ONE instance. The adapter's standalone esbuild fallback
+			// instantiates the module a second time by construction.
+			if (ssrMetrics) {
+				if (!existsSync(ssrMetrics.path)) {
+					throw new Error(
+						`[adapter-uws] websocket.metrics names '${ssrMetrics.source}', which does not exist ` +
+						`(resolved from the process working directory to ${ssrMetrics.path}).`
+					);
+				}
+				this.emitFile({
+					type: 'chunk',
+					id: METRICS_REGISTRY_ENTRY_ID,
+					fileName: 'metrics-registry.js'
+				});
+				// Record WHICH module was bundled, beside the chunk, for the same
+				// reason as the handler record below: the adapter takes the emitted
+				// file as it stands, so without a record a substitution would ship
+				// silently - here as counters incrementing on a registry no scrape
+				// route reads.
+				this.emitFile({
+					type: 'asset',
+					fileName: 'metrics-registry.origin.json',
+					source: JSON.stringify({
+						source: ssrMetrics.source,
+						absolute: ssrMetrics.path,
+						from: ssrMetrics.from
+					}) + '\n'
+				});
+			}
+			if (!ssrHandler) return;
 			this.emitFile({
 				type: 'chunk',
 				id: ssrHandler.path,

@@ -953,10 +953,21 @@ export interface WebSocketOptions {
 	 * options are serialized into the build, so a registry constructed in
 	 * `svelte.config.js` could never reach the production runtime. Point it at a
 	 * module whose default export (or a named `metrics` / `registry` export) is
-	 * the registry; the adapter bundles it, populates it, and exposes the SAME
-	 * instance on `platform.metrics`. Scrape it from a route via
-	 * `platform.metrics` - do NOT import the metrics module again from app code,
-	 * which would create a second, empty copy.
+	 * the registry; the adapter populates it and exposes it on
+	 * `platform.metrics`.
+	 *
+	 * **One instance, with the Vite plugin.** With the adapter's Vite plugin in
+	 * `vite.config.js` (`import uws from 'svelte-adapter-uws/vite'` - the
+	 * standard setup, it also provides dev WebSockets), the registry is bundled
+	 * into the app's own server graph and deduplicated with every route that
+	 * imports it, so `platform.metrics` and a direct
+	 * `import { metrics } from '$lib/server/metrics.js'` read the SAME
+	 * instance and either read point works. Without the plugin the adapter
+	 * falls back to a standalone bundle, which instantiates the module a
+	 * second time: adapter counters then land on a copy that only
+	 * `platform.metrics` can reach, a direct app-graph import reads the other,
+	 * empty copy, and any module-level side effect runs twice per process. The
+	 * build warns when it takes that fallback.
 	 *
 	 * @example
 	 * ```js
@@ -3437,9 +3448,11 @@ export interface Platform {
 	 * The metrics registry configured via `WebSocketOptions.metrics` (a module
 	 * path whose default export is the registry), or `null` when unset. This is
 	 * the SAME instance the adapter populates with admission/posture instruments,
-	 * so a scrape route can expose its Prometheus-text output directly. Importing
-	 * the metrics module again from app code would create a second, empty copy -
-	 * read it here instead.
+	 * so a scrape route can expose its Prometheus-text output directly. With the
+	 * Vite plugin the module is bundled into the app's own server graph, so a
+	 * direct import of the metrics module reads this same instance; on a build
+	 * made without the plugin (standalone fallback, the build warns), this
+	 * property is the only read point that reaches the populated copy.
 	 *
 	 * @example
 	 * ```js
@@ -3794,6 +3807,28 @@ export declare function readHandlerOrigin(
  */
 export declare function assertBundledHandlerMatches(
 	handler: string | null | undefined,
+	origin: { source: string; absolute?: string | null; from: string } | null,
+	log: { warn: (msg: string) => void }
+): void;
+
+/**
+ * Read the record the Vite plugin leaves of which module it built the metrics
+ * registry from. `null` when the build carries no such record.
+ * @internal
+ */
+export declare function readMetricsOrigin(
+	tmp: string
+): { source: string; absolute: string | null; from: string } | null;
+
+/**
+ * Refuse when the adapter's `websocket.metrics` disagrees with the module the
+ * Vite plugin actually bundled, which would otherwise ship adapter counters
+ * incrementing on a registry no scrape route reads. Warns only when an
+ * older/unrelated plugin emitted no origin record at all.
+ * @internal
+ */
+export declare function assertBundledMetricsMatches(
+	metrics: string | null | undefined,
 	origin: { source: string; absolute?: string | null; from: string } | null,
 	log: { warn: (msg: string) => void }
 ): void;

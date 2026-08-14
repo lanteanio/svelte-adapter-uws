@@ -884,7 +884,7 @@ TimeoutStopSec=45s
 
 **`metrics`** (default: off) - a **module path** whose default export (or a named `metrics` / `registry` export) is a Prometheus-style registry that makes the whole admission stack chartable. Any registry implementing the four-method contract below works - the `createMetrics()` registry from [`svelte-adapter-uws-extensions/prometheus`](https://github.com/lanteanio/svelte-adapter-uws-extensions) fits as-is and owns naming concerns like a global prefix.
 
-It is a module path (like `handler`), not a live object: adapter options are serialized into the build, so a registry constructed inline in `svelte.config.js` never reaches the production runtime. Put the registry in its own module; the adapter bundles it, populates it, and exposes the **same instance** on `platform.metrics`. Scrape it from a route via `platform.metrics` - do not re-import the metrics module from app code, which would create a second, empty copy.
+It is a module path (like `handler`), not a live object: adapter options are serialized into the build, so a registry constructed inline in `svelte.config.js` never reaches the production runtime. Put the registry in its own module; the adapter populates it and exposes it on `platform.metrics`. With the Vite plugin (the standard setup) the module is bundled into the app's own server graph, so `platform.metrics` and a direct import read the **same instance**; without the plugin the build falls back to a standalone bundle, warns, and only `platform.metrics` reaches the populated copy.
 
 ```js
 // src/lib/server/metrics.js
