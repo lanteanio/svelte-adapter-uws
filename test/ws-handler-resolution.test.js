@@ -100,6 +100,15 @@ describe('readHandlerOrigin', () => {
 	});
 });
 
+describe('readMetricsOrigin', () => {
+	it('returns null for a directory with no marker', () => {
+		// A missing marker downgrades the origin check to a warning instead of
+		// a refusal, so the reader pointing at the right filename is what keeps
+		// the refusal path reachable at all.
+		expect(readMetricsOrigin(path.join(ROOT, 'test'))).toBeNull();
+	});
+});
+
 // The metrics registry rides the same plugin-emits-adapter-verifies mechanism
 // as the handler, with a different stake: the module that wins is the registry
 // INSTANCE every adapter counter lands on, so a silent substitution presents

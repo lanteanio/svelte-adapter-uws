@@ -1524,7 +1524,8 @@ export default function uws(options = {}) {
 				if (!existsSync(ssrMetrics.path)) {
 					throw new Error(
 						`[adapter-uws] websocket.metrics names '${ssrMetrics.source}', which does not exist ` +
-						`(resolved from the process working directory to ${ssrMetrics.path}).`
+						`(resolved from the process working directory to ${ssrMetrics.path}; the option ` +
+						'must name the registry file exactly, including its extension).'
 					);
 				}
 				this.emitFile({

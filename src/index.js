@@ -861,15 +861,16 @@ export default function (opts = {}) {
 				);
 				await esbuildServerModule(metricsEntry, `${tmp}/metrics-registry.js`);
 				builder.log.minor(`Metrics registry: ${metricsPath}`);
-				// A standalone bundle is a SECOND instance of the module. Adapter
-				// counters land on it, an app-graph import reads the other copy, and
-				// module-level side effects run twice per process. Only reachable
-				// without the Vite plugin, which bundles the registry into the app
-				// graph instead - so say exactly what restores the single instance.
+				// A standalone bundle is its own instance of the module. Adapter
+				// counters land on it; an app-graph import instantiates a second
+				// copy, reads that one, and re-runs any module-level side effect.
+				// Only reachable without the Vite plugin, which bundles the
+				// registry into the app graph instead - so say exactly what
+				// restores the single instance.
 				builder.log.warn(
-					`websocket.metrics was bundled standalone, so '${metricsPath}' is instantiated ` +
-					'twice per process: the adapter writes its counters to one copy while any app ' +
-					'module importing it reads the other. Read the populated registry via ' +
+					'websocket.metrics was bundled standalone: the adapter writes its counters ' +
+					`to this copy of '${metricsPath}', and any app module importing it ` +
+					'instantiates and reads a second copy. Read the populated registry via ' +
 					"platform.metrics, or add the adapter's Vite plugin (import uws from " +
 					"'svelte-adapter-uws/vite') so the registry is bundled into the app graph " +
 					'as one shared instance.'
