@@ -135,17 +135,25 @@ function trackedFiles() {
 /**
  * Index end-of-line per tracked file, from ONE git call.
  *
- * `end_of_line` governs the COMMITTED bytes, not the working copy: this
- * repository normalizes on checkout, so a Windows working tree is legitimately
- * CRLF and reading from disk would report every file as violating its own
- * declaration. `git ls-files --eol` reports what is actually stored.
+ * `end_of_line` governs the COMMITTED bytes, not the working copy: a clone
+ * predating the LF checkout attribute (or one materialised by other tooling)
+ * can legitimately hold a CRLF working tree, and reading from disk would
+ * report every such file as violating its own declaration. `git ls-files
+ * --eol` reports what is actually stored.
  */
-function indexEol() {
+export function indexEol() {
 	const map = new Map();
 	const output = execFileSync('git', ['ls-files', '--eol'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
 	for (const line of output.split('\n')) {
 		if (!line.trim()) continue;
-		const match = /^i\/(\S+)\s+w\/(\S+)\s+attr\/(\S*)\s+\t(.*)$/.exec(line);
+		// The attr field is everything up to the tab that precedes the path,
+		// because it can hold SEVERAL space-separated attributes - the repo's
+		// `* text=auto eol=lf` prints as `attr/text=auto eol=lf`. A single-token
+		// pattern here silently emptied the whole map the day a second attribute
+		// appeared: every end-of-line check went vacuous and every binary or
+		// newline-less file lost its skip, which is how the gate itself broke
+		// under the policy it now guards.
+		const match = /^i\/(\S+)\s+w\/(\S+)\s+attr\/([^\t]*?)\s*\t(.*)$/.exec(line);
 		if (match) map.set(match[4], match[1]);
 	}
 	return map;

@@ -1913,10 +1913,11 @@ function main() {
 		return;
 	}
 	// Compared on CONTENT, not byte for byte. The rendered block is built with
-	// LF, while a Windows checkout under `core.autocrlf=true` materialises the
-	// committed file as CRLF - so splicing one into the other differs in nothing
-	// but line endings and reported a freshly cloned tree as stale, which no
-	// `--write` could fix because the next checkout restores the CRLF.
+	// LF, while a CRLF working copy (before the LF checkout attribute, every
+	// fresh Windows clone under `core.autocrlf=true`) holds the committed file
+	// as CRLF - so splicing one into the other differed in nothing but line
+	// endings and reported such a tree as stale, which no `--write` could fix
+	// because the next checkout restored the CRLF.
 	if (
 		normalizeGeneratedText(updated) !== normalizeGeneratedText(readme) ||
 		normalizeGeneratedText(updatedMigration) !==

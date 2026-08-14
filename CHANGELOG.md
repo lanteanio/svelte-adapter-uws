@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** The freeze is shallow, so the `attributes` object is untouched, and reading or forwarding a record is exactly as it was.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: a clean Windows clone collects the whole test suite.** Under `core.autocrlf` a fresh clone produced CRLF shebang lines the test loader cannot parse, and nearly every test file importing from `scripts/` silently failed to collect, so the repository now carries a `.gitattributes` with `* text=auto eol=lf` and every checkout materializes LF with no local repair.
+  - **Affects:** Contributors cloning the repository, most visibly on Windows; no consumer of the published package.
+  - **Action:** Existing clones see tracked text files rewritten to LF on their next checkout touch; commit or stash local work first.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Every tracked blob was already stored LF, so history and published artifacts are byte-identical; only working-tree materialization changes.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: the configured metrics registry is one instance, shared with the application graph.** The module named by `websocket.metrics` was instantiated twice, adapter counters landing on a copy only `platform.metrics` could reach while a direct import read an empty copy, so the Vite plugin bundles the registry into the app's server graph and both read points are one object.
   - **Affects:** Applications setting `websocket.metrics`, and any scrape route or module importing the metrics module directly.
   - **Action:** None with the standard setup (the `svelte-adapter-uws/vite` plugin in `vite.config.js`); without the plugin the build now warns that the standalone bundle remains a second instance readable only through `platform.metrics`.
@@ -402,6 +409,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its own `INVALID_TOPIC` verdict, and an array return subscribes every topic
   with no event - the case that keeps the corrected sentence honest in both
   directions.
+
+- **A clean Windows clone collects every test file that imports from
+  `scripts/`.** With `core.autocrlf` true and no `.gitattributes`, a fresh
+  clone materialized every text file with CRLF, and all but one of the
+  thirty-five test files importing a module from `scripts/` failed to
+  COLLECT with a bare `SyntaxError: Invalid or unexpected token` - zero
+  tests contributed, while the rest of the run printed a green-looking tail.
+  The failure follows the whole import graph, so a shebang-less script that
+  imports a shebang-carrying sibling takes its importers down too; only the
+  one suite whose import graph reaches no shebang-carrying script collected.
+  The
+  trigger is precise, established by converting one line at a time: 34 of
+  the 42 scripts open with a shebang, and the module-runner's server-side
+  transform locates its insertion point past a hashbang with a pattern that
+  accepts only an LF ending, so a CRLF shebang line is not recognised - the
+  transform's injected preamble lands at byte 0, in front of a shebang that
+  is only legal at byte 0. A file whose shebang line alone is CRLF fails; a
+  file with an LF shebang and a CRLF body collects fine, which is why `src/`
+  (no shebangs) never showed the failure.
+
+- **Checkouts materialize LF on every platform.** The repository now carries
+  `* text=auto eol=lf`, which overrides `core.autocrlf`, so a clean clone
+  matches what every generator and gate already emits and compares.
+  Renormalization changed nothing: every tracked blob was already stored LF,
+  so history and published artifacts are byte-identical and the only cost is
+  a one-time working-tree rewrite in existing clones. Verified in a fully
+  re-materialized checkout with `core.autocrlf` still true: all 42 scripts
+  arrive LF and the previously uncollectable suites collect and pass.
+
+- **The formatting gate keeps reading the stored end-of-line record when a
+  path matches several attributes.** `git ls-files --eol` prints every
+  attribute a path carries in one space-separated field, and the gate's
+  parser assumed a single token - so the repository-wide end-of-line
+  attribute emptied its whole map in one step: every committed-eol
+  comparison went vacuous while every binary and newline-less file lost its
+  skip, under- and over-reporting at once. The parser now reads the field up
+  to the tab that precedes the path, and a case pins both non-vacuity (the
+  map covers the tree) and a known classification, so an empty map can never
+  again read as a clean pass.
 
 - **The module named by `websocket.metrics` is instantiated once per process.**
   The option is a module path bundled into the build, and the adapter bundled

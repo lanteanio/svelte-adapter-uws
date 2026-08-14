@@ -14,6 +14,7 @@ import {
 	findOffenses,
 	globToRegExp,
 	indentRunIsValid,
+	indexEol,
 	parseEditorConfig,
 	propertiesFor
 } from '../scripts/check-formatting.js';
@@ -28,6 +29,19 @@ describe('the tree conforms to its own formatting declaration', () => {
 		// A pass over an empty or truncated list would report success having
 		// read nothing at all.
 		expect(count).toBeGreaterThan(500);
+	});
+
+	it('parses the stored end-of-line record for the whole tree, spaces in attributes included', () => {
+		// The attr field of `git ls-files --eol` holds every attribute the path
+		// matches - with `* text=auto eol=lf` it is two space-separated tokens.
+		// A parser that assumed one token returned an EMPTY map: every
+		// end-of-line comparison went vacuous and every binary or newline-less
+		// file lost its skip, so the gate both under- and over-reported at once.
+		// Non-emptiness plus a known classification is what makes that shape of
+		// failure loud.
+		const eol = indexEol();
+		expect(eol.size).toBeGreaterThan(500);
+		expect(eol.get('package.json')).toBe('lf');
 	});
 });
 

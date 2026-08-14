@@ -1,13 +1,16 @@
 // Generated artifacts are compared against the tree on CONTENT, not byte for
 // byte.
 //
-// This repository is developed on Windows with `core.autocrlf=true` and carries
-// no `.gitattributes`, so a fresh clone materialises every committed text file
+// The repository is developed on Windows, and before `.gitattributes` forced
+// LF checkouts, `core.autocrlf=true` materialised every committed text file
 // with CRLF while every generator here emits LF. Seven gates compared the two
 // directly and therefore failed on a clean checkout before anything had been
-// edited - and `--write` could not fix it, because the next checkout restores
-// the CRLF. The failure reads as "generated documentation is stale", which
-// sends the reader looking for a content drift that does not exist.
+// edited - and `--write` could not fix it, because the next checkout restored
+// the CRLF. The failure read as "generated documentation is stale", which
+// sends the reader looking for a content drift that does not exist. The
+// attributes file removes the CRLF checkout, but a clone predating it (or a
+// tree materialised by other tooling) can still hold CRLF working copies, so
+// these guards stay.
 //
 // The cases below reach five of the seven. The other two - check-entry-points
 // and check-uws-pin - normalise at the read inside `main()`, so there is no

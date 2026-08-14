@@ -433,12 +433,13 @@ export function renderErrorReference(entries = ADAPTER_ERROR_REGISTRY, options =
  * Whether a generated document on disk still matches what the generator would
  * produce, compared on CONTENT rather than byte for byte.
  *
- * The generator writes LF. A Windows checkout with `core.autocrlf=true` - the
- * default this repository is developed under - materialises the committed file
- * as CRLF, so a byte comparison reports a freshly cloned tree as stale before a
- * line of it has been touched, and `--write` cannot fix it: the next checkout
- * puts the CRLF back. What this gate exists to catch is generated content that
- * no longer matches its source, and that question is line-ending independent.
+ * The generator writes LF. A CRLF working copy - before the LF checkout
+ * attribute, every fresh Windows clone under `core.autocrlf=true` - holds the
+ * committed file as CRLF, so a byte comparison reported such a tree as stale
+ * before a line of it had been touched, and `--write` could not fix it: the
+ * next checkout put the CRLF back. What this gate exists to catch is generated
+ * content that no longer matches its source, and that question is
+ * line-ending independent.
  *
  * @param {string} onDisk
  * @param {string} generated

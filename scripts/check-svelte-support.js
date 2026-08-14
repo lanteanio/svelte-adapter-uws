@@ -177,10 +177,11 @@ export function validateSvelte4Profile(profile, readme, workflow) {
 	}
 	const rendered = renderSvelte4Support(profile);
 	// Matched against the README with line endings normalised. The block is
-	// rendered with LF, while a Windows checkout under `core.autocrlf=true`
-	// materialises the committed README as CRLF - so a raw `includes` reported a
-	// freshly cloned tree as stale, and `--write` could not settle it because the
-	// next checkout restores the CRLF.
+	// rendered with LF, while a CRLF working copy (before the LF checkout
+	// attribute, every fresh Windows clone under `core.autocrlf=true`) holds
+	// the README as CRLF - so a raw `includes` reported such a tree as stale,
+	// and `--write` could not settle it because the next checkout restored the
+	// CRLF.
 	if (!readme.replace(/\r\n/g, '\n').includes(rendered)) errors.push('README Svelte support block is stale; run node scripts/check-svelte-support.js --write');
 	errors.push(...sequenceErrors(rendered, '', 'the published reproduce sequence'));
 	if (!workflow.includes('working-directory: test/fixtures/svelte4')) {
