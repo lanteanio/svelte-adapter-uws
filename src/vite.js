@@ -1074,6 +1074,12 @@ export default function uws(options = {}) {
 	/** True when a handler file was found but failed to load - reject upgrades */
 	let handlerFailed = false;
 
+	/** True once a handler module has loaded and applied at least once. A later
+	 *  failure is then a reload of a working handler; until it flips, every
+	 *  failed load attempt - including retries on module-graph changes - is
+	 *  still the initial load, and no previous handler exists to keep serving. */
+	let handlerEverLoaded = false;
+
 	/**
 	 * Extract handler functions from a loaded module.
 	 * @param {Record<string, any>} mod
@@ -1642,6 +1648,7 @@ export default function uws(options = {}) {
 					const mod = await server.ssrLoadModule(resolvedHandler.path);
 					handlerFailed = false;
 					applyHandlers(mod);
+					handlerEverLoaded = true;
 				} catch (err) {
 					handlerFailed = true;
 					emitOperationalDiagnostic(viteHandlerFailureDiagnostic({
@@ -2644,6 +2651,7 @@ export default function uws(options = {}) {
 					}
 					console.log('[adapter-uws] WebSocket handler reloaded, existing connections closed');
 				}
+				handlerEverLoaded = true;
 				if (recovered) {
 					// Recovery from an INITIAL load failure must also run the
 					// user's init hook, or the recovered event's "no operator
@@ -2660,15 +2668,16 @@ export default function uws(options = {}) {
 				}
 			}).catch((err) => {
 				handlerFailed = true;
+				const phase = handlerEverLoaded ? 'reload' : 'load';
 				emitOperationalDiagnostic(viteHandlerFailureDiagnostic({
-					phase: 'reload',
+					phase,
 					source: path.relative(server.config.root, resolvedHandlerPath).replaceAll(path.sep, '/') || path.basename(resolvedHandlerPath),
 					...viteDiagnosticEndpoint(server),
 					error: err
 				}));
 				// The raw error carries the stack, Vite frame, and source
 				// location the structured record deliberately bounds away.
-				console.error('[adapter-uws] handler reload error detail:', err);
+				console.error(`[adapter-uws] handler ${phase} error detail:`, err);
 			});
 		}
 	};

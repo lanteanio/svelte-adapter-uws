@@ -247,4 +247,43 @@ describe('action-oriented operational diagnostics', () => {
 		expect(failed.attributes.action).toContain('save the handler');
 		expect(failed.attributes.problem).not.toContain(process.cwd());
 	});
+
+	it('attributes every failure to the initial load until a handler has ever loaded', async () => {
+		const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const infoLog = vi.spyOn(console, 'info').mockImplementation(() => {});
+		vi.spyOn(console, 'log').mockImplementation(() => {});
+		const ssrLoadModule = vi.fn()
+			.mockRejectedValueOnce(Object.assign(new Error('still broken'), { code: 'ERR_MODULE' }))
+			.mockRejectedValueOnce(Object.assign(new Error('still broken'), { code: 'ERR_MODULE' }))
+			.mockResolvedValueOnce({ message() {} });
+		const server = viteServer(ssrLoadModule);
+		const { default: uws } = await import('../src/vite.js');
+		const plugin = uws();
+
+		await plugin.configureServer(server);
+		await settle();
+
+		// A module-graph retry of a handler that has never loaded is still the
+		// initial load. reload-failed would tell the operator a previously
+		// loaded handler keeps serving existing connections - connections that
+		// cannot exist, since every upgrade has answered HTTP 500 since boot.
+		plugin.handleHotUpdate({ server });
+		await settle();
+		const loadFailures = errorLog.mock.calls.flat().filter((value) =>
+			typeof value === 'string' && value.includes(' vite.handler.load-failed:'));
+		expect(loadFailures).toHaveLength(2);
+		expect(() => recordFromCalls(errorLog, 'vite.handler.reload-failed')).toThrow();
+		expect(errorLog.mock.calls.flat().filter((value) =>
+			value === '[adapter-uws] handler load error detail:')).toHaveLength(2);
+
+		// Once a handler has loaded, the same failure becomes a reload failure.
+		plugin.handleHotUpdate({ server });
+		await settle();
+		await settle();
+		recordFromCalls(infoLog, 'vite.handler.recovered');
+		ssrLoadModule.mockRejectedValueOnce(Object.assign(new Error('reload broke'), { code: 'ERR_RELOAD' }));
+		plugin.handleHotUpdate({ server });
+		await settle();
+		recordFromCalls(errorLog, 'vite.handler.reload-failed');
+	});
 });

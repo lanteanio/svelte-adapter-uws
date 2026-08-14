@@ -59,6 +59,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** A primary signalled before its workers exist now exits 0 through its own path instead of dying on the signal; the shutdown sequence of a running fleet is unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: a never-loaded development handler reports failed retries as initial-load failures.** A handler whose first load failed and whose next save was still broken reported `vite.handler.reload-failed`, whose guidance describes a loaded predecessor still serving connections - connections that cannot exist when every upgrade has answered HTTP 500 since boot - so attribution now follows whether a handler ever loaded.
+  - **Affects:** Development-mode diagnostics only; no production code path.
+  - **Action:** None; a runbook keyed on `vite.handler.load-failed` now also matches the retry of a never-loaded handler.
+  - **Requires:** No new option and no API change.
+  - **Compatibility:** A handler that loaded once and later breaks reports `vite.handler.reload-failed` exactly as before; only the never-loaded retry moves to `vite.handler.load-failed`.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Changed
@@ -77,6 +84,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.6.0-next.91` is unaffected and needs no republication.
 
 ### Fixed
+
+- **A retry of a never-loaded development handler is reported as what it is:
+  the initial load still failing.** The hot-update failure path chose
+  `vite.handler.reload-failed` whenever the handler path had been resolved,
+  and resolution happens before the first load attempt - so the second
+  failure of a handler that had never loaded carried a cause asserting an
+  earlier handler had loaded and a consequence telling the operator existing
+  connections keep running it, while in truth every upgrade had answered
+  HTTP 500 since boot. A flag now flips on the first successful
+  load-and-apply, at both the startup site and the hot-update site, and the
+  failure emission routes its phase through it; the raw console detail line
+  follows the same attribution. A case drives two consecutive initial
+  failures and pins both to `vite.handler.load-failed` with no reload event
+  recorded, then loads a handler and pins the next break to
+  `vite.handler.reload-failed`.
 
 - **`ADAPTER-ERR-PRESSURE-TOPIC-REGISTRY` stops pointing at a metric the runtime
   does not publish.** The entry correctly says the warning is latched and fires
