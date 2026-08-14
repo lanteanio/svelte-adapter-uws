@@ -114,6 +114,20 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// A per-topic `subscribe` hook whose failure modes are selected by topic
+	// name (throw / return-false), and NO `subscribeBatch` export - with one
+	// present the runtime routes every subscribe through it and the per-topic
+	// hook is unreachable from the wire. This is the build that can reach the
+	// failure ADAPTER-ERR-SUBSCRIBE-HOOK documents through a real frame.
+	subhook: {
+		out: 'build-subhook',
+		handler: './src/hooks.ws.subhook.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
 	// A `subscribeBatch` hook that PARKS on demand, so a revocation can be landed
 	// inside the batch path's begin/settle window - the window the tombstone
 	// exists for. See src/hooks.ws.park.js for why a real suspension is required.
