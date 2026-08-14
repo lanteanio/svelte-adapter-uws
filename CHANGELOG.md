@@ -438,6 +438,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-materialized checkout with `core.autocrlf` still true: all 42 scripts
   arrive LF and the previously uncollectable suites collect and pass.
 
+- **`ADAPTER-ERR-LISTEN` describes all three failure loops it reports.** The
+  entry promised one outcome - exits with status 1, no retry - which is only
+  the single-process path. In acceptor mode the emission runs inside a live
+  worker's registration handler, so the primary's hard exit is delivered as
+  a self-SIGKILL rather than an exit status; in reuseport mode the failing
+  bind lives in a worker thread whose exit ends only that thread, and the
+  supervisor respawns it against the same address - under the entry's usual
+  cause every replacement fails the same way, so the adapter retries with
+  backoff until the slot's restart budget exhausts and the whole service
+  goes down, the outcome `ADAPTER-ERR-WORKER-RESTART-LIMIT` documents from
+  the other end and the entry now cross-references. Driven by real child
+  processes against a genuinely occupied port: the indexed line reaches the
+  console in every mode, single-process exits 1, the acceptor primary dies
+  by SIGKILL on POSIX, and the Linux-gated respawn-loop case watches the
+  supervisor retry the occupied bind twice before standing down.
+
 - **The formatting gate keeps reading the stored end-of-line record when a
   path matches several attributes.** `git ls-files --eol` prints every
   attribute a path carries in one space-separated field, and the gate's

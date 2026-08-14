@@ -196,9 +196,9 @@ searchable log prefix is:
 - **Code/event:** `LISTEN_FAILED`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.listener event=runtime.listen.failed severity=fatal] runtime.listen.failed: Could not bind the server listener on`
 - **Cause:** The configured address or port could not be bound, or the process lacks permission.
-- **Consequence:** The process never becomes ready and exits with status 1.
-- **Automatic recovery:** None. The adapter does not retry a failed bind.
-- **Next action:** Check address availability, port conflicts, and bind permissions, then restart the process.
+- **Consequence:** The process never becomes ready. Single-process, the bind failure exits with status 1. In acceptor mode the primary hard-exits with workers still alive, which is delivered as a self-SIGKILL rather than an exit status. In reuseport mode only the failing worker exits; the process stays up while the supervisor respawns it.
+- **Automatic recovery:** None single-process or in acceptor mode. In reuseport mode the supervisor respawns the failed worker and the replacement retries the same bind - under a persistent conflict each attempt fails the same way until the slot exhausts its restart budget and the whole service goes down, the outcome ADAPTER-ERR-WORKER-RESTART-LIMIT documents from the other end.
+- **Next action:** Check address availability, port conflicts, and bind permissions, then restart the process. In reuseport mode a repeating restart line for the same worker slot beside this one is the same conflict burning restart budget, not a second fault.
 - **Operator shortlink:** `https://svti.me/listen-failed`
 - **Runtime help:** `docs/errors.md#adapter-err-listen`
 - **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js), [src/runtime/handler/lifecycle.js](../src/runtime/handler/lifecycle.js)
