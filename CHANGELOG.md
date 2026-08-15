@@ -94,6 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Every existing script keeps its name and behavior; the inventory pins exactly the current set, refusing additions and removals alike.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: a malformed `CLUSTER_WORKERS` value refuses at boot instead of booting a wrong fleet.** A value like `2.5` or `3workers` was absorbed by leading-digit parsing into a fleet the operator never asked for, and `1e2` booted one worker instead of the hundred it denotes; the token now follows the same whole-number rule as `PORT`.
+  - **Affects:** Clustered deployments setting `CLUSTER_WORKERS`; a plain integer or `auto` is untouched.
+  - **Action:** None if the value already denotes a whole number or is `auto`; fix the variable where the new refusal fires.
+  - **Requires:** No new option and no API change.
+  - **Compatibility:** Whitespace-padded, signed, and decimal spellings of a whole number keep booting exactly the fleet they denote; values that never denoted one now refuse with the `ADAPTER-ERR-CLUSTER-CONFIG-WORKERS` line, and `1e2` boots the hundred workers it denotes instead of one.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Changed
@@ -112,6 +119,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.6.0-next.91` is unaffected and needs no republication.
 
 ### Fixed
+
+- **A `CLUSTER_WORKERS` token is read as the whole number it denotes, or
+  refused.** The cluster primary parsed the variable with parseInt, which
+  absorbs `2.5` as 2, `3workers` as 3, and `1e2` as 1 - so values squarely
+  inside the registry entry's documented cause, set to something other
+  than a positive integer or `auto`, booted a silently wrong fleet where
+  the entry promises a fatal exit before any worker spawns. The token now
+  goes through parseIntEnv, the rule `PORT`, the shutdown budgets, and the
+  relay ceilings answer to, with the helper's throw mapped onto the
+  documented refusal: exit code 1, the indexed
+  `[ADAPTER-ERR-CLUSTER-CONFIG-WORKERS]` line, and no worker spawned.
+  Whitespace-padded, signed, and decimal spellings that denote a whole
+  number - the shapes `PORT` has always accepted - keep booting the fleet
+  they denote; `1e2` now boots the hundred workers it denotes rather than
+  one; and Number's other whole-number notations, a hex spelling like
+  `0x10` among them, boot the fleet they denote where base-10 parseInt
+  refused them. The registry prose is unchanged; the code now does what it
+  says. Cases spawn the built fixture entry: five values that denote no
+  positive whole number assert the exit code, the indexed line, and that
+  no fleet was announced; a padded, signed, decimal spelling of 2 boots to
+  readiness; and an exponent spelling of 10 announces the ten-worker fleet
+  parseInt would have collapsed to one.
 
 - **The connection-closed request rejection names which side of transmission
   the close landed on.** One wording covered emission sites with opposite

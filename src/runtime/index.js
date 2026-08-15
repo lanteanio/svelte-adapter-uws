@@ -188,9 +188,18 @@ if (is_primary) {
 
 	const { availableParallelism } = await import('node:os');
 
-	const num = cluster_workers === 'auto'
-		? availableParallelism()
-		: parseInt(cluster_workers, 10);
+	// The token must denote a whole number, judged by the rule PORT, the
+	// shutdown budgets, and the relay ceilings answer to: parseInt would
+	// absorb '2.5' as 2, '3workers' as 3, and '1e2' as 1, silently booting
+	// a fleet the operator did not ask for where the documented behavior is
+	// a fatal exit before any worker spawns. The helper's throw becomes
+	// this path's refusal: the indexed console line and a pre-spawn exit.
+	let num;
+	if (cluster_workers === 'auto') {
+		num = availableParallelism();
+	} else {
+		try { num = parseIntEnv('CLUSTER_WORKERS', cluster_workers, 1); } catch { num = NaN; }
+	}
 
 	if (isNaN(num) || num < 1) {
 		console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.CLUSTER_CONFIG_WORKERS,
