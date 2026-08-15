@@ -68,12 +68,31 @@ export function startPostureExport(path, getLine) {
 			socket.write(JSON.stringify(getLine()) + '\n');
 		} catch { /* raced a disconnect */ }
 	});
+	// The one failure line covers two shapes with opposite operator stories: a
+	// listen that never bound (no reader ever connected) and a socket that
+	// failed later (its readers are dropped below). Naming the shape on the
+	// line is what lets the registry entry route the repair.
+	let listening = false;
+	server.on('listening', () => { listening = true; });
 	server.on('error', (err) => {
-		console.warn(adapterConsoleLine(ADAPTER_ERROR_IDS.POSTURE_EXPORT_DISABLED,
-			'listen on ' + path + ' failed: ' + (err && err.message ? err.message : err)));
+		const detail = (listening ? 'socket error on ' : 'listen on ') + path +
+			(listening ? ': ' : ' failed: ') + (err && err.message ? err.message : err);
+		console.warn(adapterConsoleLine(ADAPTER_ERROR_IDS.POSTURE_EXPORT_DISABLED, detail));
 		closed = true;
 		for (const socket of clients) socket.destroy();
 		clients.clear();
+		// Disabled must mean disabled: an error after a successful listen does
+		// not close the listener by itself, and a surviving one would keep
+		// accepting readers and hand each a single line with no cadence behind
+		// it - a supervisor reconnect would read a live posture off a dead
+		// export. Close the server, and release the path ONLY if this process
+		// bound it: a failed listen may mean another process just won the bind
+		// on the same path, and unlinking here would silently unreach the
+		// winner's live socket.
+		try { server.close(); } catch { /* defensive: nothing to close */ }
+		if (listening && !path.startsWith('\\\\')) {
+			try { unlinkSync(path); } catch { /* absent or not removable */ }
+		}
 	});
 	server.listen(path);
 

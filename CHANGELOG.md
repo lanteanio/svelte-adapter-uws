@@ -94,6 +94,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Every existing script keeps its name and behavior; the inventory pins exactly the current set, refusing additions and removals alike.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: the diagnostic pipeline's own failure entries match the pipeline.** An unserializable attribute prints the event without its attributes rather than a failure the renderer never produces, the broken-console entry states that error and fatal share one console method, and the sink-notice entry no longer promises a steady state its own clock arithmetic cannot reach.
+  - **Affects:** Operators reading `docs/errors.md` for the three diagnostic-pipeline failure entries.
+  - **Action:** Re-read runbook steps derived from them; a missing fatal line means `console.error` is broken, and an event printing without attributes is the unserializable-attribute symptom.
+  - **Requires:** No new option and no API change.
+  - **Compatibility:** Identifiers, events, and console lines are unchanged; the composed boot-lane emitter now contains a record-construction failure with the same guard the direct emitter has, instead of letting it escape the telemetry layer.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+- **Fixed: four more error-reference entries match the code they describe.** An unreadable resume-hook result costs duplicates in a bounded window, not a silent gap; the posture export names whether its socket failed at listen or later; the deferred-upgrade guidance no longer blames the upgrade hook; and the divergence entry documents its opt-in restart gate.
+  - **Affects:** Operators reading `docs/errors.md` for the four entries; applications with a custom resume hook or the posture export configured.
+  - **Action:** Re-read runbook steps built on any of the four; a repeated deferred-upgrade throw points at the admission backlog, not your hook.
+  - **Requires:** No new option and no API change.
+  - **Compatibility:** The posture-export console line now says `socket error on` when the failure came after a successful listen, and that failure now also closes the listener and releases the socket path, so a disabled export is observable as a connection failure instead of a single line with no cadence behind it; the listen wording is unchanged, and identifiers and events are untouched.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: the TLS reload failure guidance matches what each failure breaks.** A partial certificate swap was described as failing handshakes when its real harms are force-closed requests on swapped hosts and the boot certificate on a removed one, and a dead certificate watch could report recovered after a catch-up swap while the process stays blind to future renewals.
   - **Affects:** Operators of native-TLS deployments and any runbook built on `ADAPTER-ERR-TLS-SWAP` or `ADAPTER-ERR-TLS-WATCH`.
   - **Action:** After a swap failure, probe every SNI host with an HTTP request rather than a handshake; treat a watch failure as permanent until restart even when a catch-up swap lands a renewal.
@@ -133,6 +147,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.6.0-next.91` is unaffected and needs no republication.
 
 ### Fixed
+
+- **The diagnostic pipeline's three failure entries describe the pipeline
+  as built.** The record-shape entry said a field that cannot be
+  serialized fails later in the renderer and prints the render-collapse
+  line - but the renderer absorbs it, printing the envelope with the
+  attributes stripped and no error line at all; the entry now names that
+  quieter symptom and leaves the render line to the total collapse only a
+  patched serializer can cause. The console-write entry claimed other
+  severities are unaffected when a method breaks - but the mapping is not
+  one method per severity: debug, info, and warn ride their own, while
+  error and fatal share console.error, so a broken error channel loses
+  both. The sink-notice entry promised a persistent clock failure keeps
+  printing the line beside each fallback-printed event - a steady state
+  that cannot exist, because the next emission dies earlier, at record
+  construction; the line is inherently intermittent, needing the same
+  clock to succeed for the event and fail for the notice moments later,
+  and the advice naming a clock return value the record shape rejects
+  described an input no clock can produce. The composed boot-lane emitter
+  used to let a record-construction throw - a broken injected clock
+  included - escape the telemetry layer; it now takes the same guard the
+  direct emitter has and prints the record-shape line. Driven with
+  stubbed console methods and the injectable wall clock: the
+  malformed-name line, the absorbed attribute (envelope printed, no
+  indexed line), the broken warn channel reporting through console.error,
+  fatal handed to console.error with the report riding the same broken
+  channel, the two-call clock window producing the notice line, the
+  broken-outright clock producing the record-shape line instead, and the
+  composed emitter refusing to throw under the same broken clock.
+
+- **The posture export names its failure shape, and disabled means
+  disabled.** The entry named a stale socket file as the typical cause when
+  the code removes one before every listen; it now names what actually
+  reaches the line - a permission denial, a missing parent directory, a
+  taken Windows pipe - the console detail says whether the socket failed at
+  listen or later in its life, and the guidance stops prescribing the
+  repair the runtime already performs. A socket error after a successful
+  listen also now closes the listener and releases the path this process
+  bound: the surviving listener used to keep accepting readers and hand
+  each one posture line with no cadence behind it, so a supervisor's
+  reconnect read a live posture off a dead export. A failed listen still
+  touches nothing, because the path may have just been won by a sibling
+  process. Driven: the missing-parent and taken-pipe listen failures and
+  the silently repaired stale file against real sockets, and the
+  post-listen shape against a mocked net server - the shape wording, the
+  reader teardown, the close, the release, and the failed-listen
+  non-release.
+
+- **Three more entries stop describing failures their code does not
+  produce.** The resume-hook read guard's entry claimed an unreadable
+  result serves the topic without gap-fill - but the hook has already run
+  when the read happens, so its replay is on the wire, and the flush falls
+  back to the pre-window floor and delivers the whole captured window:
+  possible re-delivery inside that window, never a gap, and the entry now
+  says so. The deferred-upgrade entry sent the operator to the upgrade
+  hook for an error that cannot come from it - the hook resolved before
+  the completion was deferred - and now points at what runs in the
+  deferred completion and at sockets dying in the admission backlog. The
+  divergence entry denied automatic recovery while
+  RESTART_ON_STATE_DIVERGENCE=1 makes the primary ask each minority worker
+  to exit under the slot restart budget; the recovery is now documented as
+  gated, off by default, with the quiet lane's contrast intact. Driven:
+  the throwing hook result through the built runtime's own modules (the
+  event, the undefined watermark, and both flush floors), one throwing
+  deferred completion (one indexed line, the drain continuing), and the
+  detector naming the minority only after a persisted disagreement.
 
 - **A dead certificate watch is degradation no later reload can clear.** The
   watch-failure path and the swap-failure path shared one degraded slot and

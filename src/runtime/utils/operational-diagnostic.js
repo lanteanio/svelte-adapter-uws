@@ -2,6 +2,7 @@ import { OBSERVABILITY_SCHEMA_VERSION, TELEMETRY_LEVELS } from '../observability
 import { wallIso } from '../runtime.js';
 import {
 	ADAPTER_ERROR_IDS,
+	adapterConsoleLine,
 	adapterErrorDefinition,
 	adapterErrorProblem
 } from '../error-registry.js';
@@ -88,7 +89,23 @@ export function formatOperationalDiagnostic(input) {
 }
 
 export function emitOperationalDiagnostic(input) {
-	const record = createOperationalDiagnostic(input);
+	let record;
+	try {
+		record = createOperationalDiagnostic(input);
+	} catch (err) {
+		// The same last honest act as emitOperationalEvent's own guard: the
+		// composed emitters sit on failure paths, and a throw here - a broken
+		// injected clock included - would replace the failure being reported
+		// with a crash inside the telemetry itself.
+		try {
+			console.error(
+				adapterConsoleLine(ADAPTER_ERROR_IDS.DIAGNOSTIC_RECORD_SHAPE),
+				/** @type {any} */ (err)?.message ?? err,
+				input?.event
+			);
+		} catch { /* console gone */ }
+		return null;
+	}
 	return emitOperationalEvent({ ...record, message: composedMessage(record) });
 }
 

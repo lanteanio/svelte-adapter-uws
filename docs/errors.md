@@ -335,7 +335,7 @@ searchable log prefix is:
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.divergence event=divergence.detected severity=error] Cross-worker state divergence was detected; evidence is retained behind the authenticated diagnostic lookup.`
 - **Cause:** Workers that should hold identical state reported different state hashes.
 - **Consequence:** Clients on different workers can observe different state for the same topic. The log line carries only an opaque diagnostic id, because per-thread hashes and keyed sequence summaries are identifier-bearing.
-- **Automatic recovery:** None. Divergence is reported, never silently reconciled.
+- **Automatic recovery:** None by default: divergence is reported, never silently reconciled. With RESTART_ON_STATE_DIVERGENCE=1 the primary asks each minority worker to exit, and the exit handler respawns it under the same slot restart budget as any other worker exit, so the replacement reconnects and re-converges - automatic per incident, and only when that knob is explicitly on. The quiet lane never restarts anyone (see ADAPTER-ERR-DIVERGENCE-QUIET).
 - **Next action:** Resolve the diagnosticId attribute to its retained per-worker evidence, then treat it as a correctness incident. In an adapter-only deployment that lookup is `platform.diagnostic(id)`; the authenticated admin HTTP route exists only where the realtime layer is configured to serve one.
 - **Runtime help:** `docs/errors.md#adapter-err-divergence`
 - **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
@@ -478,8 +478,8 @@ searchable log prefix is:
 - **Code/event:** `resume.hook-read-failed`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.resume event=resume.hook-read-failed severity=error] Reading the resume hook result threw for a topic; that topic is treated as covering nothing.`
 - **Cause:** The resume hook returned a value whose properties threw while being read, typically a getter or a proxy.
-- **Consequence:** That topic is treated as covering nothing, which is the same answer a hook returning a non-number gives, so it is served without gap-fill. Other topics in the same batch are unaffected: the read is guarded here precisely so one unreadable topic cannot abort the loop and leak the rest as permanently in-flight.
-- **Automatic recovery:** None for the gap itself. The subscribe still completes, on the ordinary no-coverage path rather than an error path.
+- **Consequence:** That topic loses only the hook's watermark report, not its replay: the hook has already run to completion, so whatever it replayed is on the wire, and the held-frame flush falls back to the pre-window floor and delivers the whole captured window. The client can therefore see duplicates inside that window rather than a gap. Other topics in the same batch are unaffected: the read is guarded here precisely so one unreadable topic cannot abort the loop and leak the rest as permanently in-flight.
+- **Automatic recovery:** The subscribe completes on the ordinary no-watermark path, the same answer a hook returning a non-number gives. Possible re-delivery inside the captured window is the cost; nothing is silently lost, because an overflowed or refused flush still escalates to the truncation signal like any other.
 - **Next action:** Return a plain object from the resume hook. Values whose property reads have side effects cannot be read safely on this path.
 - **Runtime help:** `docs/errors.md#adapter-err-resume-hook-read`
 - **Runtime sources:** [src/runtime/handler/resume-buffer.js](../src/runtime/handler/resume-buffer.js)
@@ -864,10 +864,10 @@ searchable log prefix is:
 
 - **Code/event:** `ws.posture-export.disabled`
 - **Message prefix:** `[ws] posture export disabled: `
-- **Cause:** The posture export socket could not listen on its configured path - typically a stale socket file, a permission denial, or an address already in use.
-- **Consequence:** The worker keeps serving traffic, but nothing can read its live pressure posture over that socket: an external supervisor watching it sees a connection failure rather than a posture, and any shedding decision built on it stops updating. Already-connected readers are dropped.
+- **Cause:** The posture export socket could not listen on its configured path, or its socket failed later in its life; the line says which. A stale socket file is removed automatically before every listen attempt, so the listen shape means a permission denial (including a stale path the process could not remove), a missing parent directory, or a Windows named pipe already taken.
+- **Consequence:** The worker keeps serving traffic, but nothing can read its live pressure posture over that socket: an external supervisor watching it sees a connection failure rather than a posture, and any shedding decision built on it stops updating. A failed listen never had readers to lose; a later socket error drops whichever readers were connected.
 - **Automatic recovery:** None. The export is not retried for the life of the worker.
-- **Next action:** Remove a stale socket file, fix the directory permissions, or point the export at a free path, then restart the worker.
+- **Next action:** Read the shape on the line. For a failed listen, fix the directory permissions, create the missing parent directory, or point the export at a free path, then restart the worker - removing a stale socket file by hand is not the repair, because the runtime already removes one before every listen. For a later socket error the export is down until restart; its consumers key on the 1 Hz cadence stopping either way.
 - **Runtime help:** `docs/errors.md#adapter-err-posture-export-disabled`
 - **Runtime sources:** [src/runtime/utils/posture-export.js](../src/runtime/utils/posture-export.js)
 
@@ -891,7 +891,7 @@ searchable log prefix is:
 - **Cause:** A WebSocket upgrade held back by the admission queue threw when it was finally completed, after the client had already passed admission.
 - **Consequence:** That one client never connects. Its response is left unfinished rather than refused, so it typically waits out its own timeout instead of seeing an error, and it retries as if the server were briefly unavailable. The admission slot it held is released, and the other upgrades in the same drain still run.
 - **Automatic recovery:** None for that connection; the client reconnects on its own schedule.
-- **Next action:** Read the error printed with this line - it comes from the upgrade hook or the socket, and a repeated throw here means admission is letting through connections the upgrade cannot complete.
+- **Next action:** Read the error printed with this line. Its source cannot be your upgrade hook - the hook had already resolved before the completion was deferred; what runs here is the socket write, the native upgrade, the permit bookkeeping, and, on the fast path, the tracing hook. A repeated throw usually means sockets are dying in the queue before their turn comes - the admission backlog is holding upgrades longer than clients wait.
 - **Runtime help:** `docs/errors.md#adapter-err-upgrade-deferred`
 - **Runtime sources:** [src/runtime/utils/upgrade-admission.js](../src/runtime/utils/upgrade-admission.js)
 
@@ -912,12 +912,12 @@ searchable log prefix is:
 
 - **Code/event:** `ws.diagnostic.record-shape`
 - **Message prefix:** `[ws] operational event dropped, invalid record shape`
-- **Cause:** Something emitted an operational diagnostic the runtime could not build a record from - a malformed event name, an unknown severity or data class, or a bad timestamp. A field that cannot be SERIALIZED fails later, in the renderer, and prints the diagnostic-render line instead.
+- **Cause:** Something emitted an operational diagnostic the runtime could not build a record from - a malformed event name, an unknown severity or data class, or a bad timestamp. A field that cannot be SERIALIZED is a different, quieter failure: the renderer absorbs it by printing the envelope with the attributes stripped, so the event still appears minus its attributes and no error line prints - the render path reports only its own total collapse (see ADAPTER-ERR-DIAGNOSTIC-RENDER-COLLAPSE).
 - **Consequence:** That diagnostic is DROPPED: it reaches neither the configured sink nor the log, so the failure it was reporting leaves no structured trace. Everything else keeps emitting normally.
 - **Automatic recovery:** None for the dropped record. Telemetry deliberately never throws, so the emitting path continued as if it had been reported.
 - **Next action:** Read the event name printed with this line and fix the emitter. If it is application or plugin code calling the diagnostic surface, check the record against the documented shape.
 - **Runtime help:** `docs/errors.md#adapter-err-diagnostic-record-shape`
-- **Runtime sources:** [src/runtime/diagnostic.js](../src/runtime/diagnostic.js)
+- **Runtime sources:** [src/runtime/diagnostic.js](../src/runtime/diagnostic.js), [src/runtime/utils/operational-diagnostic.js](../src/runtime/utils/operational-diagnostic.js)
 
 <a id="adapter-err-diagnostic-render-collapse"></a>
 ## `ADAPTER-ERR-DIAGNOSTIC-RENDER-COLLAPSE`
@@ -937,7 +937,7 @@ searchable log prefix is:
 - **Code/event:** `ws.diagnostic.console-write`
 - **Message prefix:** `[ws] diagnostic rendered but the console refused it: `
 - **Cause:** The diagnostic formatted correctly and the console method carrying its severity threw when handed the finished line. The record is not the suspect here: a console replaced or wrapped by the host, or one whose write end has gone, refuses a well-formed string exactly the same way.
-- **Consequence:** That one diagnostic is lost, and so is every later one of the SAME severity for as long as that method keeps throwing - this is a broken channel rather than a bad value, so it does not stop at the record that revealed it. Other severities are unaffected, and this line itself is written through console.error, which is a different method in every case but a failing error channel.
+- **Consequence:** That one diagnostic is lost, and so is every later one carried by the SAME console method for as long as it keeps throwing - this is a broken channel rather than a bad value, so it does not stop at the record that revealed it. The mapping is not one method per severity: debug, info, and warn ride their own methods, while error and fatal share console.error, so a broken error channel loses both and a fatal line missing from the log means console.error is broken. Severities riding other methods are unaffected, and this line itself is written through console.error, which is a different method in every case but a failing error or fatal channel.
 - **Automatic recovery:** None, and none is attempted: nothing re-routes a severity to another method, because silently moving warnings into the error stream would corrupt the log an operator reads.
 - **Next action:** Look at the console rather than the emitter - specifically anything in the deployment that replaces, wraps, or proxies it (a log shipper, an APM agent, a test harness stub). The event name on the line says what was being reported when it went; the severity that is missing from the log tells you which method is broken. If nothing wraps the console, check whether its destination still exists - a closed pipe or a full stream refuses writes the same way.
 - **Runtime help:** `docs/errors.md#adapter-err-diagnostic-console-write`
@@ -948,10 +948,10 @@ searchable log prefix is:
 
 - **Code/event:** `ws.diagnostic.sink-notice`
 - **Message prefix:** `[ws] operational sink failed and its failure notice could not be built: `
-- **Cause:** A configured operational event sink threw, the console fallback printed the original event in its place, and then BUILDING the record that announces the sink failure threw - from the wall clock it stamps or from the record shape itself. The console is not implicated: this very line is written through it.
+- **Cause:** A configured operational event sink threw, the console fallback printed the original event in its place, and then BUILDING the record that announces the sink failure threw. Only the wall clock the notice stamps can do that: every other field is a constant or a value read off the already-validated original record, and a clock either throws or returns a timestamp the shape accepts - no clock RETURN value can be rejected. The console is not implicated: this very line is written through it.
 - **Consequence:** One record is lost, and it is the notice, not the event. The event named on this line was printed by the console fallback immediately above it, so the telemetry the sink was carrying is in the log; what is missing is the machine-readable statement that the sink is broken, which is what a collector watching for sink health would have keyed on.
-- **Automatic recovery:** None for the lost notice. The sink is not unregistered and is called again for the next event, so a transient failure self-heals and a persistent one keeps printing this line beside each fallback-printed event.
-- **Next action:** Two independent things failed and both are worth a look. The sink is the deployment-supplied component that failed first, and the event name on the line says what it was carrying. The notice failure is separate and is the adapter-side clock or record construction - an injected clock that throws, or one returning a value the record shape rejects. A deployment that has not injected a clock should treat this half as a defect worth reporting.
+- **Automatic recovery:** None for the lost notice. The sink is not unregistered and is called again for the next event. This line is inherently intermittent: it needs the same clock to succeed for the event's own record and then fail for the notice moments later, so a clock broken outright does not keep printing it - the next emission dies earlier, at record construction, and prints the record-shape line instead.
+- **Next action:** Two independent things failed and both are worth a look. The sink is the deployment-supplied component that failed first, and the event name on the line says what it was carrying. The notice failure is separate and is the adapter-side wall clock - an injected clock that throws intermittently, or an async sink rejection settling after the clock broke. A deployment that has not injected a clock should treat this half as a defect worth reporting.
 - **Runtime help:** `docs/errors.md#adapter-err-diagnostic-sink-notice`
 - **Runtime sources:** [src/runtime/diagnostic.js](../src/runtime/diagnostic.js)
 

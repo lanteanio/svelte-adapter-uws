@@ -632,7 +632,19 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// request sites are in this closure. Data literals off every frame path;
 	// no byte is read, allocated or copied, and no copy primitive entered
 	// the graph.
-	ingress: 'c06e66a42eebb7d0288edd40cee64ccd39bfcee24846928f89a5f59f1c61591d',
+	//
+	// Re-pinned for the composed emitter record-construction guard,
+	// reached through utils/operational-diagnostic.js:
+	// emitOperationalDiagnostic wraps createOperationalDiagnostic in the
+	// same try/catch its direct sibling has, printing the record-shape line
+	// through adapterConsoleLine (one added import) instead of letting a
+	// construction throw - a broken injected clock included - escape the
+	// telemetry layer; and error-registry.js record-shape entry names the
+	// new emission site in its sources array (an array node is structure
+	// even with its string masked). A catch on a cold failure path plus
+	// data literals; nothing on any frame path, no byte is read, allocated
+	// or copied, and no copy primitive entered the graph.
+	ingress: 'baf3c9e7578642d89fd65905f12f6d0dcb7abe8a76965ee8d7feb01d9b5410e5',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -957,7 +969,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// is structure even with its string masked). Cold failure paths and one
 	// boolean store beside the existing send; no byte is read, allocated or
 	// copied, and no copy primitive entered the graph.
-	platform: '95ca1f1c1539081e65b2a716f8a26689ca3b38c5db982e848b4fdf5f4b848e9c',
+	// Re-pinned with the ingress seal above for the composed emitter
+	// record-construction guard, same drift and same reason: the guard and
+	// its adapterConsoleLine import in utils/operational-diagnostic.js, and
+	// the record-shape entry sources array gaining that emission site.
+	// Cold failure path and data literals; no byte is read, allocated or
+	// copied, and no copy primitive entered the graph.
+	platform: '042e9023a50fb47f9639874535661c19350df318839ba61bc89cf2c5cdc789ec',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1038,7 +1056,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// arrays gain an element, an array node being structure even with its
 	// string masked. Data literals off every fan-out path; no byte is read,
 	// allocated or copied, and no copy primitive entered.
-	'wire-fanout': 'b359f9d96289c3e308282204639a0efbac632bf555d931f669ac7fb50fba5678',
+	// Re-pinned with the ingress and platform seals above for the composed
+	// emitter record-construction guard, same drift and same reason: the
+	// guard and its adapterConsoleLine import in
+	// utils/operational-diagnostic.js, and the record-shape entry sources
+	// array gaining that emission site. Cold failure path and data literals;
+	// no byte is read, allocated or copied, and no copy primitive entered
+	// the graph.
+	'wire-fanout': '17cc4b578f175443b55ed181ab44b707f164f9b863bf5241d522a24037e1effd',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({
