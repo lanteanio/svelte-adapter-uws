@@ -106,6 +106,23 @@ const PUBLISH_STEPS = [
 	{ name: 'Publish exact tarball to quarantine with trusted OIDC', run: 'npm publish "release-artifacts/${{ needs.verify.outputs.filename }}" --tag candidate' }
 ];
 
+// The closed inventory of package scripts. npm implicitly executes the
+// pre<name>/post<name> companion of every script it runs, so the name SPACE
+// is the attack surface, not any fixed list of lifecycle hooks - see the
+// scripts check in validateReleaseWorkflow. pretest and postinstall are
+// themselves implicit companions and belong here because they run BEFORE the
+// verification steps, where their effects are still tested.
+const EXPECTED_SCRIPTS = [
+	'check', 'pretest', 'postinstall', 'prepublishOnly', 'check:publish',
+	'check:links', 'check:entry-points', 'check:docs-code',
+	'check:documentation', 'check:operations', 'check:capacity', 'capacity:run',
+	'check:privacy', 'privacy:generate', 'drill:operations', 'drill:respawner',
+	'check:errors', 'check:migration', 'doctor', 'smoke', 'bootstrap', 'test',
+	'test:watch', 'test:e2e', 'test:coverage', 'test:floor', 'sim:swarm',
+	'sim:golden', 'verify:fast', 'verify:docs', 'verify:suite', 'verify:sim',
+	'verify:pr', 'verify:full'
+];
+
 function checkSteps(errors, jobName, job, expected) {
 	const steps = Array.isArray(job.steps) ? job.steps : [];
 	const actualNames = steps.map((step) => step?.name);
@@ -215,6 +232,30 @@ export function validateReleaseWorkflow(source, pkg, policy) {
 	}
 	if (pkg.scripts?.prepublishOnly !== 'npm run check') {
 		errors.push('package prepublishOnly gate is not exact');
+	}
+	// npm pack runs prepack, prepare, and postpack around tarball creation -
+	// AFTER every explicit verification step in the verify job - and npm run
+	// implicitly executes the pre<name> and post<name> companions of every
+	// script it runs, so ANY unexpected script name can put code inside the
+	// window between the last check and the bytes that are hashed: a
+	// postprepublishOnly lands exactly there, and postpack can swap the
+	// finished tarball on disk before the hash step reads it. That namespace
+	// cannot be enumerated by a blocklist, so the scripts object is a closed
+	// inventory like every other level of this file: a name outside the list
+	// does not exist yet, and adding one is a deliberate review of where npm
+	// will implicitly run it. Removals are refused too - the release path
+	// runs several of these by name, and a silent removal would move that
+	// failure from this gate to the middle of a tag build.
+	const scriptNames = Object.keys(pkg.scripts ?? {});
+	for (const name of scriptNames) {
+		if (!EXPECTED_SCRIPTS.includes(name)) {
+			errors.push('package script is outside the closed inventory: ' + name);
+		}
+	}
+	for (const name of EXPECTED_SCRIPTS) {
+		if (!scriptNames.includes(name)) {
+			errors.push('package script is missing from the closed inventory: ' + name);
+		}
 	}
 	for (const phrase of [
 		'npm trusted publisher',

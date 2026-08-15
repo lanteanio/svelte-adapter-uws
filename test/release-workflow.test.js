@@ -53,6 +53,32 @@ describe('trusted release workflow', () => {
 		}
 	});
 
+	it('rejects any script name outside the closed inventory, additions and removals alike', () => {
+		// npm pack runs prepack, prepare, and postpack AFTER the verify job's
+		// explicit checks, and npm run executes the pre/post companions of
+		// every script it runs - so a postprepublishOnly lands between the
+		// last check and the hash, and no blocklist can enumerate that name
+		// space. The scripts object is therefore a closed inventory.
+		const added = ['prepublish', 'prepack', 'prepare', 'postpack',
+			'postprepublishOnly', 'postcheck', 'precheck', 'postverify:pr'];
+		for (const hook of added) {
+			const mutant = { ...pkg, scripts: { ...pkg.scripts, [hook]: 'node rewrite.js' } };
+			const failures = validateReleaseWorkflow(workflow, mutant, policy);
+			expect(failures.some((e) => e.includes(hook)), hook + ' was accepted').toBe(true);
+		}
+		// Presence, not content: an innocent-looking script is the same hole,
+		// because the gate cannot judge what a script does.
+		const benign = { ...pkg, scripts: { ...pkg.scripts, prepare: 'echo ready' } };
+		expect(validateReleaseWorkflow(workflow, benign, policy).length).toBeGreaterThan(0);
+		// A removal is refused too: the release path runs several scripts by
+		// name, and losing one silently would fail in the middle of a tag
+		// build instead of here.
+		const { check, ...withoutCheck } = pkg.scripts;
+		const removed = { ...pkg, scripts: withoutCheck };
+		expect(validateReleaseWorkflow(workflow, removed, policy)
+			.some((e) => e.includes('missing') && e.includes('check'))).toBe(true);
+	});
+
 	it('rejects action-tag drift and artifact-output laundering', () => {
 		const floating = workflow.replace(
 			'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',

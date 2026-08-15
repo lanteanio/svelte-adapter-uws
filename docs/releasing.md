@@ -108,6 +108,18 @@ required dev prerelease / main stable lineage, runs the complete pull-request
 verification contract and prepublishOnly, packs exactly one npm-pack tarball,
 and retains it as a build artifact.
 
+The pack itself is kept inert. npm pack runs the prepack, prepare, and
+postpack lifecycle scripts around tarball creation - after every explicit
+verification step - and npm run executes the pre/post companions of every
+script it runs, so any unexpected script name can put code between the checks
+and the bytes that are hashed, leaving the digest authenticating an artifact
+nothing tested. check-release-workflow therefore holds the manifest's scripts
+object to a closed name inventory - additions and removals both refuse - and
+the refusal runs inside the same checked-in gate the workflow body is pinned
+by. The publish job is outside this window entirely: npm runs lifecycle
+scripts only when publishing a directory, and it is handed a prebuilt
+tarball, which packs nothing and executes nothing.
+
 The publish job receives contents: read and id-token: write. It never installs
 a dependency tree and never executes repository code: it installs the pinned
 OIDC-capable npm CLI, downloads the artifact the verify job retained, and

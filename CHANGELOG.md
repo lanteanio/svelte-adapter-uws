@@ -80,6 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** A failure before the first byte still answers 500 with the request id exactly as before, and the backpressure-deadline close is unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: the release gate holds package scripts to a closed inventory.** npm pack runs lifecycle scripts after every verification step, and npm run executes the pre and post companions of every script it runs, so an unexpected script name could rewrite bytes between the checks and the hash; the checked-in gate now refuses any script outside its exact inventory.
+  - **Affects:** Maintainers adding or removing npm scripts; no consumer of the published package.
+  - **Action:** A new script now requires naming it in the validator's inventory in the same change.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Every existing script keeps its name and behavior; the inventory pins exactly the current set, refusing additions and removals alike.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Changed
@@ -98,6 +105,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.6.0-next.91` is unaffected and needs no republication.
 
 ### Fixed
+
+- **The pack step of the release workflow can no longer run code the checks
+  never saw.** npm pack runs the prepack, prepare, and postpack lifecycle
+  scripts around tarball creation - after every explicit verification step in
+  the verify job - and npm run implicitly executes the pre and post
+  companions of every script it runs, so any unexpected script name can put
+  code inside the window between the last check and the bytes that are
+  hashed and retained: a postprepublishOnly lands exactly there, and a
+  postpack can swap the finished tarball on disk before the hash step reads
+  it. The digest would then authenticate an artifact nothing ever tested.
+  That name space cannot be enumerated by a blocklist, so
+  check-release-workflow holds the manifest's scripts object to a closed
+  inventory - a name outside the list refuses, presence not content, because
+  a gate cannot judge what a script does, and a removal refuses too so the
+  release path cannot lose a script it runs by name. The refusal lives
+  inside the same checked-in chain whose body pins the workflow. Mutation
+  cases drive eight added names including an innocent-looking one, and a
+  removal. The release policy states the contract and why the publish job
+  sits outside the window: npm runs lifecycle scripts only when publishing a
+  directory, and it is handed a prebuilt tarball, which packs nothing and
+  executes nothing.
 
 - **A mid-stream SSR failure aborts the exchange instead of fabricating a
   complete response.** Once headers and the first chunks are written, a
