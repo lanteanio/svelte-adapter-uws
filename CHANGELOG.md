@@ -94,6 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Every existing script keeps its name and behavior; the inventory pins exactly the current set, refusing additions and removals alike.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: two cluster recovery descriptions state where their loop ends.** The worker-error entry promised replacement without naming that a fault every replacement hits exhausts the slot's restart budget and downs the service, and the relay-quarantine entry promised an exit its wedged worker may never perform; both now describe the bounded loop and the process-kill fallback.
+  - **Affects:** Operators reading `docs/errors.md` for `ADAPTER-ERR-CLUSTER-WORKER-ERROR` or `ADAPTER-ERR-RELAY-SPILL-QUARANTINE`.
+  - **Action:** Re-read runbook steps derived from either entry; recovery can end at the supervisor or the orchestrator, not always at a replaced worker.
+  - **Requires:** No runtime option; the reference is generated from the shipped registry.
+  - **Compatibility:** Identifiers, events, and console lines are unchanged; only the two recovery descriptions moved.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a malformed `CLUSTER_WORKERS` value refuses at boot instead of booting a wrong fleet.** A value like `2.5` or `3workers` was absorbed by leading-digit parsing into a fleet the operator never asked for, and `1e2` booted one worker instead of the hundred it denotes; the token now follows the same whole-number rule as `PORT`.
   - **Affects:** Clustered deployments setting `CLUSTER_WORKERS`; a plain integer or `auto` is untouched.
   - **Action:** None if the value already denotes a whole number or is `auto`; fix the variable where the new refusal fires.
@@ -119,6 +126,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.6.0-next.91` is unaffected and needs no republication.
 
 ### Fixed
+
+- **The two cluster recovery descriptions no longer stop at their happy
+  half.** The worker-error entry's automaticRecovery said the supervisor
+  replaces an exiting worker, full stop - but under the startup or import
+  fault the entry itself names as usual, every replacement hits the same
+  error, the slot's restart budget exhausts, and the whole service goes
+  down, the outcome the restart-limit entry documents from the other end;
+  the entry now says so. The relay spill quarantine's automaticRecovery
+  said the worker exits and the primary replaces it - but quarantine only
+  posts a terminate message the quarantined worker's own event loop must
+  process, and an AGE quarantine means exactly that loop stopped
+  draining; a worker still wedged when the exit grace expires is resolved
+  by killing the whole process for the orchestrator to respawn, the
+  mechanism the worker-exit entry documents. The spill-overflow sibling
+  keeps its unconditional sentence, because there the worker's own exit
+  call makes it true. Driven cases land both ways: a real clustered
+  fixture crashes one worker through an authenticated frame on a real
+  socket and reads the reported event, the slot charge against the
+  restart budget, and the replacement registering; and the quarantine
+  policy's pure export is driven for the indexed line, the
+  once-per-worker latch, the forwarding stop, the sibling attribution,
+  and the fact that its action is a request handed to the exit path
+  rather than an exit.
 
 - **A `CLUSTER_WORKERS` token is read as the whole number it denotes, or
   refused.** The cluster primary parsed the variable with parseInt, which

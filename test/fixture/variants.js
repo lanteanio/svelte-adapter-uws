@@ -88,6 +88,21 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// A message hook that crashes its own worker thread on an authenticated
+	// test token: the throw is scheduled off the request context, so nothing
+	// contains it and the worker's uncaught exception surfaces as the
+	// primary's worker 'error' event - the condition the cluster
+	// worker-error entry names. Its own output directory keeps the fault
+	// injection out of every ordinary fixture build.
+	workercrash: {
+		out: 'build-worker-crash',
+		handler: './src/hooks.ws.workercrash.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
 	// Strict wire authorization with an ordinary application subscribe hook.
 	// The hook allows every topic, so only the server-grant half can refuse a
 	// cross-tenant raw subscribe - the hybrid permissive-hook bypass.
