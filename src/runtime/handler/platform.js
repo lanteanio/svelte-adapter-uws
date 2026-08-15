@@ -23,7 +23,7 @@ import { cohortTopics, joinSharedCohort, leaveSharedCohort } from './cohort.js';
 import { getSharedWireId } from './shared-wire-id.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './wire-fanout.js';
 import { runtimeVersionInfo } from '../version-info.js';
-import { ADAPTER_ERROR_IDS, adapterConsoleLine, adapterErrorMessage } from '../error-registry.js';
+import { ADAPTER_ERROR_IDS, REQUEST_CLOSED_DETAIL, adapterConsoleLine, adapterErrorMessage } from '../error-registry.js';
 import { seqBound } from './seq-bound.js';
 import { privateValueMetadata } from '../utils/observability-privacy.js';
 import { activeTraceContext, trace } from '../tracing.js';
@@ -2099,7 +2099,10 @@ export const platform = {
 	 * `onRequest` handler returns (or rejects with the error string the
 	 * client sent back if the handler threw). Rejects with `'request timed out'`
 	 * after `timeoutMs` (default 5000), and with `'connection closed'`
-	 * if the WebSocket closes before a reply arrives.
+	 * if the WebSocket closes before a reply arrives - the closed rejection
+	 * appends which side of transmission the close landed on (never sent,
+	 * send failed, or handed to the transport and unanswered), and only the
+	 * last of those needs an idempotent retry.
 	 *
 	 * Pending requests live in `WS_PENDING_REQUESTS` on `ws.getUserData()`,
 	 * so cleanup is automatic on close - no module-level leak risk.
@@ -2109,7 +2112,10 @@ export const platform = {
 		try { userData = ws.getUserData(); }
 		catch {
 			counters.closedWsAborts++;
-			return Promise.reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED)));
+			return Promise.reject(new Error(adapterErrorMessage(
+				ADAPTER_ERROR_IDS.REQUEST_CLOSED,
+				REQUEST_CLOSED_DETAIL.NEVER_SENT
+			)));
 		}
 		let pending = userData[WS_PENDING_REQUESTS];
 		if (!pending) {
@@ -2129,14 +2135,21 @@ export const platform = {
 			const timer = setTimer(() => {
 				if (pending.delete(ref)) reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_TIMEOUT)));
 			}, timeoutMs);
-			pending.set(ref, { resolve, reject, timer });
+			const entry = { resolve, reject, timer, sent: false };
+			pending.set(ref, entry);
 			const payload = JSON.stringify({ type: 'request', ref, event, data: data ?? null });
-			try { ws.send(payload, false, false); }
+			// The send outcome is recorded so the close sweep can say which
+			// side of transmission the close landed on: 2 (DROPPED) means the
+			// frame never reached the transport even though the call returned.
+			try { entry.sent = ws.send(payload, false, false) !== 2; }
 			catch {
 				counters.closedWsAborts++;
 				clearTimer(timer);
 				pending.delete(ref);
-				reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED)));
+				reject(new Error(adapterErrorMessage(
+					ADAPTER_ERROR_IDS.REQUEST_CLOSED,
+					REQUEST_CLOSED_DETAIL.SEND_FAILED
+				)));
 				return;
 			}
 			bumpOut(ws, payload);

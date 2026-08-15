@@ -2786,8 +2786,14 @@ export interface Platform {
 	 *
 	 * Rejects with `Error('request timed out')` after `timeoutMs`
 	 * (default `5000`) and with `Error('connection closed')` if the
-	 * WebSocket closes before a reply arrives. Pending requests are
-	 * tracked per-connection, so close cleanup is automatic.
+	 * WebSocket closes before a reply arrives. The closed rejection
+	 * appends which side of transmission the close landed on: a frame
+	 * that was `never sent` or `could not be sent` leaves the remote
+	 * outcome known and is safe to retry after reconnect, while one
+	 * `handed to the transport and no reply had arrived` must be
+	 * reconciled or retried only through an idempotent operation.
+	 * Pending requests are tracked per-connection, so close cleanup
+	 * is automatic.
 	 *
 	 * Pairs with the client store's `onRequest(handler)`. Use this for
 	 * server-driven confirmations, capability challenges, or

@@ -624,7 +624,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// `Symbol.for` constant plus a lazy accessor that reads or creates the set on
 	// globalThis - one property read, one comparison, one assignment of a WeakSet
 	// reference. The operands are unchanged and none of it is on a frame path.
-	ingress: 'e3527772d5098ae9081f0f78d58963ecbdd2addcb6be11d734e03ef7bc7360e8',
+	// Re-pinned for the request-rejection transmission detail. The drift in
+	// THIS graph is error-registry.js structure only, reached through
+	// utils.js: the shared REQUEST_CLOSED_DETAIL frozen constant and the two
+	// request entries' sources arrays gaining an element - an array node is
+	// structure even with its string masked. Neither the close sweep nor the
+	// request sites are in this closure. Data literals off every frame path;
+	// no byte is read, allocated or copied, and no copy primitive entered
+	// the graph.
+	ingress: 'c06e66a42eebb7d0288edd40cee64ccd39bfcee24846928f89a5f59f1c61591d',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -940,7 +948,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// byte is read, allocated or copied, and no copy primitive entered the
 	// graph. The registry consequence rewording is masked by the prose-shape
 	// rule and contributes nothing here.
-	platform: 'ace7e13976fdb10671c79679b1b9a9e0317b089fb18419502c170d5b11653e4e',
+	// Re-pinned with the ingress seal above for the request-rejection
+	// transmission detail: platform.request's rejections pass the registry's
+	// shared detail constants to adapterErrorMessage, the pending entry
+	// gains a recorded send-outcome field the close sweep reads through a
+	// two-way conditional, and the registry gains the shared frozen constant
+	// plus an element in each request entry's sources array (an array node
+	// is structure even with its string masked). Cold failure paths and one
+	// boolean store beside the existing send; no byte is read, allocated or
+	// copied, and no copy primitive entered the graph.
+	platform: '95ca1f1c1539081e65b2a716f8a26689ca3b38c5db982e848b4fdf5f4b848e9c',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1015,7 +1032,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// Re-pinned again with the two seals above for the same registry moved to a
 	// shared slot - same one-file drift, same operands, still nothing on the
 	// fan-out path and no copy primitive.
-	'wire-fanout': '28c5dbcec449d465e1b4fa7c317129e099e9d4502b6020e4d740e04627c20cd8',
+	// Re-pinned with the ingress and platform seals above for the
+	// request-rejection transmission detail: the drift in THIS graph is
+	// error-registry.js structure only - the shared detail constant and the two request entries' sources
+	// arrays gain an element, an array node being structure even with its
+	// string masked. Data literals off every fan-out path; no byte is read,
+	// allocated or copied, and no copy primitive entered.
+	'wire-fanout': 'b359f9d96289c3e308282204639a0efbac632bf555d931f669ac7fb50fba5678',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

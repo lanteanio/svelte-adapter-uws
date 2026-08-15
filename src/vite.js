@@ -19,7 +19,7 @@ import { snapshotUpgradeHeaders } from './runtime/utils/upgrade-headers.js';
 import { emitOperationalDiagnostic, viteHandlerFailureDiagnostic, viteHandlerRecoveredDiagnostic } from './runtime/utils/operational-diagnostic.js';
 import { trace } from './runtime/tracing.js';
 import { emitOperationalEvent, diagnosticError } from './runtime/diagnostic.js';
-import { ADAPTER_ERROR_IDS, adapterConsoleLine, adapterErrorMessage } from './runtime/error-registry.js';
+import { ADAPTER_ERROR_IDS, REQUEST_CLOSED_DETAIL, adapterConsoleLine, adapterErrorMessage } from './runtime/error-registry.js';
 
 /**
  * Options the dev plugin honors, mirroring `UWSPluginOptions` in vite.d.ts.
@@ -464,9 +464,14 @@ export default function uws(options = {}) {
 			const timer = setTimeout(() => {
 				if (pending.delete(ref)) reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_TIMEOUT)));
 			}, timeoutMs);
-			pending.set(ref, { resolve, reject, timer });
+			// The wrapper's send returns 0 without sending when the socket is
+			// not open, so only a 1 counts as handed to the transport - the
+			// close sweep reads this to say which side of transmission the
+			// close landed on.
+			const entry = { resolve, reject, timer, sent: false };
+			pending.set(ref, entry);
 			const payload = JSON.stringify({ type: 'request', ref, event, data: data ?? null });
-			wrapped.send(payload);
+			entry.sent = wrapped.send(payload) === 1;
 			bumpOutV(wrapped.getUserData(), payload);
 		});
 	}
@@ -2591,7 +2596,14 @@ export default function uws(options = {}) {
 					if (pending && pending.size > 0) {
 						for (const entry of pending.values()) {
 							clearTimeout(entry.timer);
-							try { entry.reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED))); } catch {}
+							try {
+								entry.reject(new Error(adapterErrorMessage(
+									ADAPTER_ERROR_IDS.REQUEST_CLOSED,
+									entry.sent
+										? REQUEST_CLOSED_DETAIL.UNANSWERED
+										: REQUEST_CLOSED_DETAIL.NEVER_SENT
+								)));
+							} catch {}
 						}
 						pending.clear();
 					}

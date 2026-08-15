@@ -22,7 +22,7 @@ import * as wsModule from 'WS_HANDLER';
 import { metricsRegistry } from './metrics-bridge.js';
 import { waitingRoomRenderer } from './waiting-room-renderer-bridge.js';
 import { PRESSURE_REASON_CODES } from './observability-manifest.js';
-import { ADAPTER_ERROR_IDS, adapterConsoleLine, adapterErrorMessage } from './error-registry.js';
+import { ADAPTER_ERROR_IDS, REQUEST_CLOSED_DETAIL, adapterConsoleLine, adapterErrorMessage } from './error-registry.js';
 import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './diagnostic.js';
 import { privateValueMetadata } from './utils/observability-privacy.js';
 import { probeOsPressureSources, emitPressureMetricTelemetry } from './utils/os-pressure.js';
@@ -2994,7 +2994,14 @@ if (WS_ENABLED) {
 			if (pending && pending.size > 0) {
 				for (const entry of pending.values()) {
 					clearTimer(entry.timer);
-					try { entry.reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED))); } catch {}
+					try {
+						entry.reject(new Error(adapterErrorMessage(
+							ADAPTER_ERROR_IDS.REQUEST_CLOSED,
+							entry.sent
+								? REQUEST_CLOSED_DETAIL.UNANSWERED
+								: REQUEST_CLOSED_DETAIL.NEVER_SENT
+						)));
+					} catch {}
 				}
 				pending.clear();
 			}

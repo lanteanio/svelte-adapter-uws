@@ -2715,7 +2715,7 @@ if (reply.confirmed) {
 }
 ```
 
-The framework picks a fresh `ref`, sends `{type:'request', ref, event, data}`, and the returned Promise resolves with whatever the client's `onRequest` handler returned. Rejects with `Error('request timed out')` after `timeoutMs` (default `5000`) and with `Error('connection closed')` if the WebSocket closes before a reply arrives.
+The framework picks a fresh `ref`, sends `{type:'request', ref, event, data}`, and the returned Promise resolves with whatever the client's `onRequest` handler returned. Rejects with `Error('request timed out')` after `timeoutMs` (default `5000`) and with `Error('connection closed')` if the WebSocket closes before a reply arrives - the closed rejection appends whether the frame was never sent (safe to retry after reconnect) or was handed to the transport unanswered (retry only idempotently).
 
 The client side opts in by registering a single handler:
 

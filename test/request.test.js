@@ -109,9 +109,36 @@ describeUWS('platform.request push-with-reply', () => {
 		const ws = [...server.wsConnections][0];
 
 		const reqPromise = server.platform.request(ws, 'ping', null, { timeoutMs: 5000 });
-		// Close from the client side while the request is in flight
+		// Close from the client side while the request is in flight. The frame
+		// left the process before the close, so the rejection must say the
+		// outcome is the unknowable kind - this is the one shape whose retry
+		// is only safe through an idempotent operation.
 		setTimeout(() => client.ws.close(), 30);
-		await expect(reqPromise).rejects.toThrow('connection closed');
+		await expect(reqPromise).rejects.toThrow('connection closed; the request frame was handed to the transport and no reply had arrived');
+	});
+
+	it('says the frame never left when the request is made on an already-closed socket', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer();
+
+		const client = await connectAndCapture(server.wsUrl);
+		await client.waitFor(f => f.parsed?.type === 'welcome');
+		await new Promise(r => setTimeout(r, 30));
+		const ws = [...server.wsConnections][0];
+
+		client.ws.close();
+		await new Promise(r => setTimeout(r, 50));
+
+		// The same registry id, but the detail names the other side of
+		// transmission: nothing was requested, so the remote outcome is
+		// KNOWN and a plain retry after reconnect is safe. Conflating this
+		// with the in-flight shape wrongly forbade that retry. This harness
+		// meets the closed socket at the send: uWS's getUserData() does not
+		// always throw on closed sockets, so the entry-time never-sent
+		// spelling stays for the freed-handle path; both spellings state
+		// the same known outcome.
+		await expect(server.platform.request(ws, 'ping', null, { timeoutMs: 1000 }))
+			.rejects.toThrow('connection closed; the request frame could not be sent');
 	});
 
 	it('rejects with the error message when the client sends an error reply', async () => {

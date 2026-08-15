@@ -21,7 +21,7 @@ import {
 import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './runtime/handler/cluster-sequence-policy.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
 import { runtimeVersionInfo } from './runtime/version-info.js';
-import { ADAPTER_ERROR_IDS, adapterConsoleLine, adapterErrorMessage } from './runtime/error-registry.js';
+import { ADAPTER_ERROR_IDS, REQUEST_CLOSED_DETAIL, adapterConsoleLine, adapterErrorMessage } from './runtime/error-registry.js';
 import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './runtime/diagnostic.js';
 import { createDivergenceDiagnosticStore } from './runtime/divergence-diagnostics.js';
 
@@ -1671,7 +1671,10 @@ export async function createTestServer(options = {}) {
 			try { userData = ws.getUserData(); }
 			catch {
 				closedWsAbortsT++;
-				return Promise.reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED)));
+				return Promise.reject(new Error(adapterErrorMessage(
+					ADAPTER_ERROR_IDS.REQUEST_CLOSED,
+					REQUEST_CLOSED_DETAIL.NEVER_SENT
+				)));
 			}
 			let pending = userData[WS_PENDING_REQUESTS];
 			if (!pending) {
@@ -1690,20 +1693,26 @@ export async function createTestServer(options = {}) {
 				const timer = setTimer(() => {
 					if (pending.delete(ref)) reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_TIMEOUT)));
 				}, timeoutMs);
-				pending.set(ref, { resolve, reject, timer });
+				const entry = { resolve, reject, timer, sent: false };
+				pending.set(ref, entry);
 				const payload = JSON.stringify({ type: 'request', ref, event, data: data ?? null });
 				// Direct ws.send so we can distinguish "closed WS"
 				// (throws -> reject now) from "backpressure DROPPED"
 				// (returns 2 -> let it time out, matches production
 				// semantics where uWS will not retry on its own).
 				// sendOutboundT exists for chaos-injection; the request
-				// flow takes the bare path and re-uses bumpOutT.
-				try { ws.send(payload, false, false); }
+				// flow takes the bare path and re-uses bumpOutT. The
+				// outcome is recorded so the close sweep can say which
+				// side of transmission the close landed on.
+				try { entry.sent = ws.send(payload, false, false) !== 2; }
 				catch {
 					closedWsAbortsT++;
 					clearTimer(timer);
 					pending.delete(ref);
-					reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED)));
+					reject(new Error(adapterErrorMessage(
+						ADAPTER_ERROR_IDS.REQUEST_CLOSED,
+						REQUEST_CLOSED_DETAIL.SEND_FAILED
+					)));
 					return;
 				}
 				bumpOutT(ws, payload);
@@ -2861,7 +2870,14 @@ export async function createTestServer(options = {}) {
 			if (pending && pending.size > 0) {
 				for (const entry of pending.values()) {
 					clearTimer(entry.timer);
-					try { entry.reject(new Error(adapterErrorMessage(ADAPTER_ERROR_IDS.REQUEST_CLOSED))); } catch {}
+					try {
+						entry.reject(new Error(adapterErrorMessage(
+							ADAPTER_ERROR_IDS.REQUEST_CLOSED,
+							entry.sent
+								? REQUEST_CLOSED_DETAIL.UNANSWERED
+								: REQUEST_CLOSED_DETAIL.NEVER_SENT
+						)));
+					} catch {}
 				}
 				pending.clear();
 			}

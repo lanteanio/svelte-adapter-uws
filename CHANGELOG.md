@@ -80,6 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** A failure before the first byte still answers 500 with the request id exactly as before, and the backpressure-deadline close is unchanged.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: a request rejection says whether its frame was ever sent.** Every connection-closed request rejection carried the same words, so a caller could not tell a request that never left the process - safe to retry - from one that reached the transport unanswered, whose outcome is unknown; the rejection detail now states which side of transmission the close landed on.
+  - **Affects:** Callers of `platform.request` handling rejection, and operators reading `ADAPTER-ERR-REQUEST-CLOSED`.
+  - **Action:** None; substring matches on `connection closed` keep matching.
+  - **Requires:** No new option and no API change.
+  - **Compatibility:** The stable id, event, and message prefix are unchanged; only the appended detail is new.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: the release gate holds package scripts to a closed inventory.** npm pack runs lifecycle scripts after every verification step, and npm run executes the pre and post companions of every script it runs, so an unexpected script name could rewrite bytes between the checks and the hash; the checked-in gate now refuses any script outside its exact inventory.
   - **Affects:** Maintainers adding or removing npm scripts; no consumer of the published package.
   - **Action:** A new script now requires naming it in the validator's inventory in the same change.
@@ -105,6 +112,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.6.0-next.91` is unaffected and needs no republication.
 
 ### Fixed
+
+- **The connection-closed request rejection names which side of transmission
+  the close landed on.** One wording covered emission sites with opposite
+  retry semantics: a request refused at entry (the socket already closed) or
+  whose send itself failed never left the process - the remote outcome is
+  known, nothing was requested, and a plain retry after reconnect is safe -
+  while a request swept at close after its frame reached the transport is
+  genuinely unknowable and must be reconciled or retried only through an
+  idempotent operation. The entry's blanket claim that the outcome remains
+  unknown wrongly forbade the safe retry. Each of the seven emission sites
+  now appends the side it stands on, and the close sweep reads a recorded
+  send outcome rather than assuming one: a frame the transport dropped
+  under backpressure - or that a non-open dev socket never carried - still
+  rejects as never sent, and the delivered side claims only a hand-off to
+  the transport, which is all a returned send can stand behind. The three
+  detail strings live in the registry as one shared frozen constant so the
+  runtime, dev, and test twins cannot drift apart; the entry's cause,
+  consequence, and next action describe both sides; and the sources
+  inventories of both request entries gain src/testing.js, whose
+  test-server twins emit the same registry errors. Cases drive the
+  in-flight sweep and the closed-socket send through a real server and
+  client, pinned to the exact detail text.
 
 - **The pack step of the release workflow can no longer run code the checks
   never saw.** npm pack runs the prepack, prepare, and postpack lifecycle

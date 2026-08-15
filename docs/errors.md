@@ -253,20 +253,20 @@ searchable log prefix is:
 - **Next action:** Reconcile application state first, or retry only through an idempotent operation; then investigate the handler, connection, and measured timeout budget.
 - **Operator shortlink:** `https://svti.me/request-timeout`
 - **Runtime help:** `docs/errors.md#adapter-err-request-timeout`
-- **Runtime sources:** [src/runtime/handler/platform.js](../src/runtime/handler/platform.js), [src/vite.js](../src/vite.js)
+- **Runtime sources:** [src/runtime/handler/platform.js](../src/runtime/handler/platform.js), [src/vite.js](../src/vite.js), [src/testing.js](../src/testing.js)
 
 <a id="adapter-err-request-closed"></a>
 ## `ADAPTER-ERR-REQUEST-CLOSED`
 
 - **Code/event:** `websocket.request.connection-closed`
 - **Message prefix:** `connection closed`
-- **Cause:** The target WebSocket closed before its pending request produced a reply.
-- **Consequence:** The caller promise rejects while the remote operation outcome remains unknown.
+- **Cause:** The target WebSocket closed around a platform.request - before the request frame could be sent at all, or with the frame already handed to the transport and unanswered.
+- **Consequence:** The caller promise rejects. The rejection detail names which side of transmission the close landed on: a frame that was never sent leaves the remote outcome known - nothing was requested - while a frame handed to the transport leaves it unknown.
 - **Automatic recovery:** None. The adapter does not retry requests because replay may duplicate an operation.
-- **Next action:** Reconcile application state first, or retry only through an idempotent operation after the connection recovers.
+- **Next action:** Read the rejection detail first. A request whose frame was never sent is safe to retry as-is once the connection recovers; a sent but unanswered request must be reconciled or retried only through an idempotent operation.
 - **Operator shortlink:** `https://svti.me/request-closed`
 - **Runtime help:** `docs/errors.md#adapter-err-request-closed`
-- **Runtime sources:** [src/runtime/handler/platform.js](../src/runtime/handler/platform.js), [src/runtime/handler.js](../src/runtime/handler.js), [src/vite.js](../src/vite.js)
+- **Runtime sources:** [src/runtime/handler/platform.js](../src/runtime/handler/platform.js), [src/runtime/handler.js](../src/runtime/handler.js), [src/vite.js](../src/vite.js), [src/testing.js](../src/testing.js)
 
 <a id="adapter-err-admin-handler"></a>
 ## `ADAPTER-ERR-ADMIN-HANDLER`

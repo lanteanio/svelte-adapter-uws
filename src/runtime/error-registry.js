@@ -184,7 +184,7 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		consequence: 'The caller promise rejects while the remote operation outcome remains unknown.',
 		automaticRecovery: 'None. The adapter does not retry requests because replay may duplicate an operation.',
 		nextAction: 'Reconcile application state first, or retry only through an idempotent operation; then investigate the handler, connection, and measured timeout budget.',
-		sources: Object.freeze(['src/runtime/handler/platform.js', 'src/vite.js']),
+		sources: Object.freeze(['src/runtime/handler/platform.js', 'src/vite.js', 'src/testing.js']),
 		anchor: 'adapter-err-request-timeout',
 		help: 'docs/errors.md#adapter-err-request-timeout',
 		link: 'https://svti.me/request-timeout'
@@ -198,11 +198,11 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		emission: 'thrown',
 		problemPrefix: null,
 		messagePrefix: 'connection closed',
-		cause: 'The target WebSocket closed before its pending request produced a reply.',
-		consequence: 'The caller promise rejects while the remote operation outcome remains unknown.',
+		cause: 'The target WebSocket closed around a platform.request - before the request frame could be sent at all, or with the frame already handed to the transport and unanswered.',
+		consequence: 'The caller promise rejects. The rejection detail names which side of transmission the close landed on: a frame that was never sent leaves the remote outcome known - nothing was requested - while a frame handed to the transport leaves it unknown.',
 		automaticRecovery: 'None. The adapter does not retry requests because replay may duplicate an operation.',
-		nextAction: 'Reconcile application state first, or retry only through an idempotent operation after the connection recovers.',
-		sources: Object.freeze(['src/runtime/handler/platform.js', 'src/runtime/handler.js', 'src/vite.js']),
+		nextAction: 'Read the rejection detail first. A request whose frame was never sent is safe to retry as-is once the connection recovers; a sent but unanswered request must be reconciled or retried only through an idempotent operation.',
+		sources: Object.freeze(['src/runtime/handler/platform.js', 'src/runtime/handler.js', 'src/vite.js', 'src/testing.js']),
 		anchor: 'adapter-err-request-closed',
 		help: 'docs/errors.md#adapter-err-request-closed',
 		link: 'https://svti.me/request-closed'
@@ -1263,6 +1263,21 @@ export function adapterErrorHelpSuffix(id) {
 	// carry an absolute link render it instead of the packaged doc route.
 	return ' [' + entry.id + '] See: ' + (entry.link ?? entry.help);
 }
+
+/**
+ * Rejection details for ADAPTER-ERR-REQUEST-CLOSED, shared by every runtime
+ * twin so the three transmission-side statements cannot drift apart. The
+ * close sweep picks by the recorded send outcome: a frame the transport
+ * dropped - or that a non-open dev socket never carried - is NEVER_SENT even
+ * though the caller's send call returned, and UNANSWERED deliberately claims
+ * a hand-off to the transport rather than delivery to the peer, which is all
+ * a returned send can stand behind.
+ */
+export const REQUEST_CLOSED_DETAIL = Object.freeze({
+	NEVER_SENT: '; the request frame was never sent',
+	SEND_FAILED: '; the request frame could not be sent',
+	UNANSWERED: '; the request frame was handed to the transport and no reply had arrived'
+});
 
 export function adapterErrorMessage(id, detail = '') {
 	const entry = adapterErrorDefinition(id);
