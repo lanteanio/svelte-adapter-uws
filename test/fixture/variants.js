@@ -291,6 +291,20 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// Byte-identical to `default`, for the same reason as `tls`: its own
+	// OUTPUT DIRECTORY, so its own module. The suite using this one boots
+	// with the TLS environment pointing at a directory it deletes between
+	// module eval and start() - a module state no other TLS suite's cached
+	// import can be allowed to share.
+	tlswatch: {
+		out: 'build-tls-watch',
+		handler: null,
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
 	// Metrics registry wired, so counters that are otherwise no-ops become
 	// observable over the /metrics route. Without this, a counter-based
 	// assertion reads zero whether or not the code under test ever fired.

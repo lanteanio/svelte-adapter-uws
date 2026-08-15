@@ -59,11 +59,19 @@ function fileFilters() {
  */
 function variantsNeededBy(source) {
 	if (!source.includes('real-runtime')) return [];
-	const named = [...source.matchAll(/variant:\s*'([a-z]+)'/g)].map((m) => m[1]);
-	// `startRealRuntime()` with no variant, or with only some calls naming one,
-	// still boots `default`.
+	// A suite names its variant through the helper option or by building it
+	// directly - the spawned-child suites call `buildFixtureOnce('x')` and
+	// never `startRealRuntime`, and missing them here re-creates the lock
+	// contention this file exists to remove.
+	const named = [
+		...[...source.matchAll(/variant:\s*'([a-z]+)'/g)].map((m) => m[1]),
+		...[...source.matchAll(/buildFixtureOnce\('([a-z]+)'\)/g)].map((m) => m[1])
+	];
+	// `startRealRuntime()` with no variant (or only some calls naming one) and
+	// a bare `buildFixtureOnce()` both mean the default build.
 	const usesDefault = /startRealRuntime\(\s*\)/.test(source) ||
-		/startRealRuntime\(\s*\{(?![^}]*variant:)/.test(source);
+		/startRealRuntime\(\s*\{(?![^}]*variant:)/.test(source) ||
+		/buildFixtureOnce\(\s*\)/.test(source);
 	return [...new Set(usesDefault ? ['default', ...named] : named)];
 }
 

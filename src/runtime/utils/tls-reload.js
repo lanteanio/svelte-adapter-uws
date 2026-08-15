@@ -158,6 +158,59 @@ export function certExpiryAlert(state, now, withinMs = CERT_EXPIRY_ALERT_MS) {
 }
 
 /**
+ * The degraded-state ledger for one process's certificate reload path. One
+ * shared slot reports the CURRENT reason serving is degraded, but reasons
+ * differ in what can clear them: a swap or validation failure is superseded
+ * by the next reload that succeeds, while a dead directory watch cannot be -
+ * no later swap resurrects the watcher, so after any recovery the ledger
+ * falls back to the watch reason instead of clearing. The sentinel follows
+ * the same rule: it stays armed as long as any reason, the sticky watch
+ * reason included, remains. Kept separate from the lifecycle wiring so the
+ * policy is executable without a server, a watcher, or a certificate.
+ *
+ * @param {{
+ *   health: { degraded: string | null },
+ *   onRecovered: (was: string, still: string | null) => void,
+ *   armSentinel: () => void,
+ *   disarmSentinel: () => void
+ * }} options
+ */
+export function createTlsDegradedLedger({ health, onRecovered, armSentinel, disarmSentinel }) {
+	let watchReason = null;
+	return {
+		/** The directory watch is dead for the process lifetime; sticky. */
+		watchFailed(reason) {
+			watchReason = reason;
+			health.degraded = reason;
+			armSentinel();
+		},
+		/** A reload-path failure; superseded by the next reload that succeeds. */
+		failed(reason) {
+			health.degraded = reason;
+			armSentinel();
+		},
+		/** A reload succeeded: clear what a success can clear. */
+		recovered() {
+			if (watchReason !== null) {
+				// The swap worked, the watcher is still dead: this process will
+				// not see the next renewal, so the degradation and its expiry
+				// sentinel stay.
+				if (health.degraded !== watchReason) {
+					onRecovered(health.degraded, watchReason);
+					health.degraded = watchReason;
+				}
+				return;
+			}
+			if (health.degraded !== null) {
+				onRecovered(health.degraded, null);
+				health.degraded = null;
+			}
+			disarmSentinel();
+		}
+	};
+}
+
+/**
  * Reconcile the uWS app's SNI server names with the certificate now on disk,
  * gated on the cert's fingerprint: when the disk cert is byte-identical to the
  * one already served (`prev.fingerprint`), the app is not touched and

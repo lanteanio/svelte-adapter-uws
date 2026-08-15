@@ -9,7 +9,7 @@ import { captureResumeFrame, counters, maxSeenSeq, originStreams, recordOriginSt
 import { app, is_tls, _t_app, WS_COMPRESSION_ON, reconnect_dispersal_ms, ssl_cert, ssl_key, ssl_watch, ssl_reload_debounce_ms, ssl_sni_hosts, boot_cert_fingerprint } from './config.js';
 import { platform, relayPublishWire } from './platform.js';
 import { stopPressureSampling } from './pressure-metrics.js';
-import { applyServerNames, certExpiryAlert, createCertWatcher, readCertIdentity } from '../utils/tls-reload.js';
+import { applyServerNames, certExpiryAlert, createCertWatcher, createTlsDegradedLedger, readCertIdentity } from '../utils/tls-reload.js';
 import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../error-registry.js';
 import { seqBound } from './seq-bound.js';
 import { mirrorRoutes } from './route-registry.js';
@@ -107,17 +107,13 @@ function recordServedCertExpiry() {
 	}
 }
 
-/**
- * Mark the reload path as unable to pick up a renewal, and arm the sentinel that
- * re-reports it as the served certificate's expiry approaches. The immediate
- * failure line is the caller's; this adds what the caller cannot know - how long
- * the certificate it kept serving is still valid for.
- * @param {string} reason
- */
-function tlsDegraded(reason) {
-	tlsHealth.degraded = reason;
+/** Print the expiry alert immediately if the served cert is inside the window. */
+function printTlsExpiryAlert() {
 	const alert = certExpiryAlert(tlsHealth, wallEpoch());
 	if (alert !== null) console.error(adapterConsoleLine(ADAPTER_ERROR_IDS.TLS_DEGRADED_EXPIRY, alert));
+}
+
+function armTlsExpirySentinel() {
 	if (tlsExpirySentinel !== null) return;
 	tlsExpirySentinel = setIntervalTimer(() => {
 		const line = certExpiryAlert(tlsHealth, wallEpoch());
@@ -126,16 +122,49 @@ function tlsDegraded(reason) {
 	if (tlsExpirySentinel && tlsExpirySentinel.unref) tlsExpirySentinel.unref();
 }
 
-/** Clear the degraded mark once a reload has succeeded again, and disarm the sentinel. */
-function tlsRecovered() {
-	if (tlsHealth.degraded !== null) {
-		console.log(`[tls] certificate reload recovered (was: ${tlsHealth.degraded})`);
-		tlsHealth.degraded = null;
-	}
+function disarmTlsExpirySentinel() {
 	if (tlsExpirySentinel !== null) {
 		clearIntervalTimer(tlsExpirySentinel);
 		tlsExpirySentinel = null;
 	}
+}
+
+// Which degradations a successful reload can clear is policy, not wiring: a
+// swap or validation failure is superseded by the next success, while a dead
+// directory watch cannot be - the ledger keeps that reason (and the armed
+// sentinel) through any later success, so the process never reports healthy
+// while it is blind to the next renewal.
+const tlsLedger = createTlsDegradedLedger({
+	health: tlsHealth,
+	onRecovered: (was, still) => {
+		if (still === null) console.log(`[tls] certificate reload recovered (was: ${was})`);
+		else console.log(`[tls] certificate reload recovered (was: ${was}); still degraded: ${still}`);
+	},
+	armSentinel: armTlsExpirySentinel,
+	disarmSentinel: disarmTlsExpirySentinel
+});
+
+/**
+ * Mark the reload path as unable to pick up a renewal, and arm the sentinel that
+ * re-reports it as the served certificate's expiry approaches. The immediate
+ * failure line is the caller's; this adds what the caller cannot know - how long
+ * the certificate it kept serving is still valid for.
+ * @param {string} reason
+ */
+function tlsDegraded(reason) {
+	tlsLedger.failed(reason);
+	printTlsExpiryAlert();
+}
+
+/** The watch-death variant: sticky, surviving every later reload success. */
+function tlsWatchDegraded(reason) {
+	tlsLedger.watchFailed(reason);
+	printTlsExpiryAlert();
+}
+
+/** Clear what a successful reload can clear; watch death stays. */
+function tlsRecovered() {
+	tlsLedger.recovered();
 }
 
 /**
@@ -274,7 +303,9 @@ function initTlsReload() {
 			});
 			// Nothing will ever retry this: without a watcher no renewal is seen, so
 			// this instance will serve its current certificate until it expires.
-			tlsDegraded('the certificate directory watch failed to start, so no renewal will be seen');
+			// Sticky - the arm-time catch-up below may still swap a renewal that
+			// was already on disk, and that success must not read as recovery.
+			tlsWatchDegraded('the certificate directory watch failed to start, so no renewal will be seen');
 		}
 	}
 	// Arm-time catch-up: swap now if the cert on disk already differs from the
@@ -293,10 +324,7 @@ export function stopTlsReload() {
 		clearTimer(tlsRetryTimer);
 		tlsRetryTimer = null;
 	}
-	if (tlsExpirySentinel !== null) {
-		clearIntervalTimer(tlsExpirySentinel);
-		tlsExpirySentinel = null;
-	}
+	disarmTlsExpirySentinel();
 }
 
 /**

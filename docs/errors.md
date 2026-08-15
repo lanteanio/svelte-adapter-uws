@@ -586,9 +586,9 @@ searchable log prefix is:
 - **Code/event:** `tls.swap-failed`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.swap-failed severity=error] A certificate swap failed mid-apply; some SNI hosts may be unroutable until the retry succeeds.`
 - **Cause:** Applying a new certificate set failed partway through the swap.
-- **Consequence:** The swap is partial, so some SNI hosts may have no usable certificate and fail the TLS handshake until a retry completes. The TLS degraded state is set for the duration.
+- **Consequence:** The swap is partial: a host already moved to the new certificate has a fresh, empty SNI router until the retry replays the routes, so its handshakes complete while its requests are force-closed; a host removed but not yet re-added falls back to the default context, so it serves the boot-time certificate and its handshakes complete wherever that certificate covers it. The TLS degraded state is set for the duration.
 - **Automatic recovery:** A one-shot retry is armed from the failure itself, rather than from the next filesystem event, because the throw may have consumed the last event of a renewal burst and the next one could be months away. A persistent fault therefore retries at that cadence instead of spinning.
-- **Next action:** Verify every SNI host still completes a handshake rather than only checking the default host, then correct the certificate material and reload.
+- **Next action:** Probe every SNI host with an HTTP request rather than only a handshake: both partial shapes complete handshakes while a host is either force-closing requests or still serving the boot certificate. Then read the attached error to pick the repair - certificate material explains only a throw inside the apply step, while a route-replay failure has nothing wrong with the material and resolves through the armed retry or a restart.
 - **Runtime help:** `docs/errors.md#adapter-err-tls-swap`
 - **Runtime sources:** [src/runtime/handler/lifecycle.js](../src/runtime/handler/lifecycle.js)
 
@@ -598,8 +598,8 @@ searchable log prefix is:
 - **Code/event:** `tls.watch-failed`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.tls event=tls.watch-failed severity=error] The certificate directory watch failed to start; hot reload is disabled and no renewal will be seen.`
 - **Cause:** The filesystem watch on the certificate directory could not be established.
-- **Consequence:** Certificate hot reload is off for the process lifetime and the TLS degraded state is set. The current certificate keeps serving and no renewal is ever picked up, so the failure surfaces much later as an expired certificate.
-- **Automatic recovery:** None. The watch is not retried, so this does not resolve without a restart.
+- **Consequence:** Certificate hot reload is off for the process lifetime and the TLS degraded state is set - and stays set, because no later reload can resurrect the watcher. One arm-time catch-up read runs right after this failure, so a renewal already on disk at that moment is still served; nothing that lands afterwards is ever picked up, and the failure surfaces much later as an expired certificate.
+- **Automatic recovery:** None for the watch itself: it is not retried, so this does not resolve without a restart. The arm-time catch-up may still swap in a renewal that was already on disk when the watch failed; the degraded state and its expiry sentinel survive even that success.
 - **Next action:** Fix the path or permissions and restart the process. Until then, treat certificate renewal as requiring a restart, and alert on certificate expiry independently. In a clustered deployment the primary reports its own watch failure separately as ADAPTER-ERR-TLS-PRIMARY-WATCH.
 - **Runtime help:** `docs/errors.md#adapter-err-tls-watch`
 - **Runtime sources:** [src/runtime/handler/lifecycle.js](../src/runtime/handler/lifecycle.js)

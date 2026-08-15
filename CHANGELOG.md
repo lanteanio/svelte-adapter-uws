@@ -94,6 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Every existing script keeps its name and behavior; the inventory pins exactly the current set, refusing additions and removals alike.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: the TLS reload failure guidance matches what each failure breaks.** A partial certificate swap was described as failing handshakes when its real harms are force-closed requests on swapped hosts and the boot certificate on a removed one, and a dead certificate watch could report recovered after a catch-up swap while the process stays blind to future renewals.
+  - **Affects:** Operators of native-TLS deployments and any runbook built on `ADAPTER-ERR-TLS-SWAP` or `ADAPTER-ERR-TLS-WATCH`.
+  - **Action:** After a swap failure, probe every SNI host with an HTTP request rather than a handshake; treat a watch failure as permanent until restart even when a catch-up swap lands a renewal.
+  - **Requires:** No new option and no public API change.
+  - **Compatibility:** A reload success with a live watcher clears the degraded state exactly as before; only a success under a dead watch now keeps the degradation and its expiry sentinel, and the recovered console line then names what is still degraded.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: two cluster recovery descriptions state where their loop ends.** The worker-error entry promised replacement without naming that a fault every replacement hits exhausts the slot's restart budget and downs the service, and the relay-quarantine entry promised an exit its wedged worker may never perform; both now describe the bounded loop and the process-kill fallback.
   - **Affects:** Operators reading `docs/errors.md` for `ADAPTER-ERR-CLUSTER-WORKER-ERROR` or `ADAPTER-ERR-RELAY-SPILL-QUARANTINE`.
   - **Action:** Re-read runbook steps derived from either entry; recovery can end at the supervisor or the orchestrator, not always at a replaced worker.
@@ -126,6 +133,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.6.0-next.91` is unaffected and needs no republication.
 
 ### Fixed
+
+- **A dead certificate watch is degradation no later reload can clear.** The
+  watch-failure path and the swap-failure path shared one degraded slot and
+  one recovery: any reload success cleared the slot and disarmed the expiry
+  sentinel. But the arm-time catch-up runs right after a failed watch
+  arming, and when it swapped in a renewal already on disk the process
+  printed recovered, cleared the flag, and disarmed the sentinel while the
+  watcher was still dead - the exact blind state the watch entry warns
+  about, with the warning light off. Which failures a success can clear is
+  now policy in a pure degraded-state ledger: a swap or validation failure
+  is superseded by the next success; watch death is sticky, the sentinel
+  stays armed through any success, and a recovery that only supersedes a
+  later swap failure prints what is still degraded. The watch entry's
+  consequence states the persistence and the catch-up window; the swap
+  entry's consequence now names its two real partial shapes - a swapped
+  host force-closing requests on an empty router until the retry, a
+  removed host serving the boot certificate from the default context - and
+  its next action sends the operator to an HTTP probe per SNI host, which
+  detects both, instead of a handshake check that passes under each.
+  Ledger transitions and both partial-swap shapes are driven at their pure
+  seams, the swap against real certificate files with a recording app; the
+  real handshake ladder stays pinned by the existing watch suite.
 
 - **The two cluster recovery descriptions no longer stop at their happy
   half.** The worker-error entry's automaticRecovery said the supervisor
