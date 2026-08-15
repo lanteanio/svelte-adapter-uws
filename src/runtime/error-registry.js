@@ -557,7 +557,7 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		problemPrefix: 'SvelteKit request handling failed.',
 		messagePrefix: direct('runtime.ssr', 'runtime.ssr.failed', 'error', 'SvelteKit request handling failed.'),
 		cause: 'The SvelteKit server handler threw while rendering or handling a request.',
-		consequence: 'That request is answered with an error response. Other requests and WebSocket connections are unaffected.',
+		consequence: 'A failure before the response starts is answered with an error response. A response already streaming its body is aborted instead, so the client sees the truncation rather than a clean end that reads as a complete response. Other requests and WebSocket connections are unaffected.',
 		automaticRecovery: 'None for the failed request.',
 		nextAction: 'Read the attached error. This is application rendering code rather than adapter transport, so the fault is normally in a route, hook, or load function.',
 		sources: Object.freeze(['src/runtime/handler/ssr.js']),

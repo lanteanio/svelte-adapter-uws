@@ -382,9 +382,13 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 		await writeResponse(res, response, state, respAcceptEncoding);
 	} catch (err) {
 		try { span?.recordException?.(err); } catch {}
-		if (state.aborted) return;
+		if (state.aborted && !state.closedByServer) return;
 		if (err instanceof PayloadTooLargeError) {
-			send413(res);
+			// The limit can also trip mid-stream, through a route that pipes the
+			// request body into its response: the reader rejection aborts the
+			// exchange in the stream teardown, and a 413 written there would be
+			// a second response into a closed exchange - same rule as the 500.
+			if (!state.aborted && !state.responseStarted) send413(res);
 			return;
 		}
 		emitOperationalEvent({
@@ -396,7 +400,11 @@ async function handleSSRTraced(res, method, url, headers, remoteAddress, state, 
 			message: 'SvelteKit request handling failed.',
 			attributes: { requestId, error: diagnosticError(err) }
 		});
-		if (!state.aborted) send500(res, requestId);
+		// Once any byte of the real response has reached the wire, no error
+		// response can be delivered: the streaming path has either ended or
+		// abruptly closed the exchange, and writing a 500 into it would be a
+		// second response. The event above is the failure's record.
+		if (!state.aborted && !state.responseStarted) send500(res, requestId);
 	}
 }
 
@@ -439,7 +447,11 @@ function writeHeaders(res, response) {
 /**
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {Response} response
- * @param {{ aborted: boolean }} state
+ * @param {{ aborted: boolean, responseStarted?: boolean, closedByServer?: boolean }} state -
+ *   Shared with the request handler; `responseStarted` flips once any byte
+ *   reaches the wire, which is what tells the failure path an error response
+ *   can no longer be sent, and `closedByServer` marks an abort this teardown
+ *   inflicted on itself so the failure path can tell it from a client abort.
  * @param {string} [acceptEncoding]
  */
 async function writeResponse(res, response, state, acceptEncoding) {
@@ -449,6 +461,7 @@ async function writeResponse(res, response, state, acceptEncoding) {
 	if (!response.body) {
 		if (state.aborted) return;
 		const cl = response.headers.get('content-length');
+		state.responseStarted = true;
 		res.cork(() => {
 			writeHeaders(res, response);
 			if (cl) res.endWithoutBody(parseInt(cl, 10));
@@ -459,6 +472,7 @@ async function writeResponse(res, response, state, acceptEncoding) {
 
 	if (response.body.locked) {
 		if (state.aborted) return;
+		state.responseStarted = true;
 		res.cork(() => {
 			res.writeStatus('500 Internal Server Error');
 			res.writeHeader('content-type', 'text/plain');
@@ -472,12 +486,15 @@ async function writeResponse(res, response, state, acceptEncoding) {
 
 	const reader = response.body.getReader();
 	let streaming = false;
-	let streamTimedOut = false;
+	let streamDone = false;
 	try {
 		// Read first chunk - if it's also the last, write headers + body in one cork
 		const first = await reader.read();
 		if (first.done || state.aborted) {
-			if (!state.aborted) res.cork(() => { writeHeaders(res, response); res.end(); });
+			if (!state.aborted) {
+				state.responseStarted = true;
+				res.cork(() => { writeHeaders(res, response); res.end(); });
+			}
 			return;
 		}
 
@@ -506,6 +523,7 @@ async function writeResponse(res, response, state, acceptEncoding) {
 						}
 					}
 				}
+				state.responseStarted = true;
 				res.cork(() => {
 					writeHeaders(res, response);
 					if (encoding) {
@@ -525,6 +543,7 @@ async function writeResponse(res, response, state, acceptEncoding) {
 		// uWS "writes must be made from within a corked callback" warning.
 		if (state.aborted) return;
 		streaming = true;
+		state.responseStarted = true;
 		res.cork(() => {
 			writeHeaders(res, response);
 			res.write(first.value);
@@ -533,24 +552,31 @@ async function writeResponse(res, response, state, acceptEncoding) {
 
 		for (;;) {
 			const { done, value } = await reader.read();
-			if (done || state.aborted) break;
+			if (done) { streamDone = true; break; }
+			if (state.aborted) break;
 
 			const result = writeChunkWithBackpressure(res, value);
 			if (result !== true) {
 				const drained = await result;
-				if (!drained) { streamTimedOut = true; break; }
+				if (!drained) break;
 				if (state.aborted) break;
 			}
 		}
 	} finally {
 		if (streaming && !state.aborted) {
-			if (streamTimedOut) {
-				// Backpressure drained past the 30s deadline. Abruptly close the
-				// connection rather than sending a clean EOF on a partial body,
-				// which would look like a successful but truncated response.
-				res.cork(() => res.close());
-			} else {
+			if (streamDone) {
 				res.cork(() => res.end());
+			} else {
+				// Backpressure drained past the 30s deadline, or the source
+				// failed mid-body (a rejecting reader.read() exits the loop
+				// without setting streamDone). Abruptly close the connection
+				// rather than sending a clean EOF on a partial body, which
+				// would look like a successful but truncated response.
+				// close() fires the abort callback, so mark the close as ours:
+				// the failure path must still report a source fault it is
+				// about to rethrow, where a client-initiated abort stays silent.
+				state.closedByServer = true;
+				res.cork(() => res.close());
 			}
 		}
 		reader.cancel().catch(() => {});

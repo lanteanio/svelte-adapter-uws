@@ -73,6 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** A cleanly absent sibling prints exactly as before; only failures that were never absences change their word.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: a response that fails while streaming is aborted instead of ending as if complete.** A body source failing after its first chunks were on the wire got a clean end - a truncated body indistinguishable from a complete one, plus a 500 written into the ended exchange; the connection is now aborted and the documented event still fires.
+  - **Affects:** Streaming SSR and endpoint responses whose body source fails mid-stream; buffered responses are untouched.
+  - **Action:** None; clients see the truncation as a transport error instead of a short success.
+  - **Requires:** No new option and no API change.
+  - **Compatibility:** A failure before the first byte still answers 500 with the request id exactly as before, and the backpressure-deadline close is unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Changed
@@ -91,6 +98,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.6.0-next.91` is unaffected and needs no republication.
 
 ### Fixed
+
+- **A mid-stream SSR failure aborts the exchange instead of fabricating a
+  complete response.** Once headers and the first chunks are written, a
+  rejecting body read used to fall into a teardown that cleanly ended the
+  response - the client got the app's own status with a truncated,
+  validly-framed body and a clean EOF, the exact shape the adjacent
+  backpressure-deadline branch refuses to produce - and the follow-up 500
+  was written into the already-ended exchange. The stream teardown now ends
+  the response only when the source reported done; every other exit closes
+  abruptly, the close is marked server-initiated so the failure event
+  survives the abort callback the close itself triggers, and the error
+  response is suppressed once any byte has reached the wire. The registry
+  consequence states both halves. Driven through the built runtime with a
+  real client both ways: a source failing before its first byte answers 500
+  carrying the request id, and a source failing after three chunks leaves
+  the client a truncated response whose read fails, with the documented
+  event emitted in both cases.
 
 - **Sibling resolution reports absence only when the resolver itself says
   ERR_MODULE_NOT_FOUND.** Every other failure - an exports map that does not

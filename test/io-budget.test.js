@@ -929,7 +929,18 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// replace the module-local WeakSet, so a duplicated bundle shares one set
 	// instead of one per copy. A property read, a comparison and a reference
 	// assignment; no byte is read, allocated or copied.
-	platform: 'ea81b7727b52ded4566492805db3814fb63dce163f4928fa0936d12e42a9a378',
+	// Re-pinned for the streaming teardown's failure honesty, reached through
+	// handler/ssr.js and handler/state-pool.js: the teardown now ends the
+	// response only when the source reported done and abruptly closes on every
+	// other exit; the close is marked server-initiated on the shared request
+	// state so the failure event survives the abort callback close() itself
+	// fires; and the error-response writes (500 and 413) are guarded off once
+	// any byte reached the wire. Flag assignments, comparisons, and a close()
+	// on an already-failing exchange - the chunk write path is untouched, no
+	// byte is read, allocated or copied, and no copy primitive entered the
+	// graph. The registry consequence rewording is masked by the prose-shape
+	// rule and contributes nothing here.
+	platform: 'ace7e13976fdb10671c79679b1b9a9e0317b089fb18419502c170d5b11653e4e',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

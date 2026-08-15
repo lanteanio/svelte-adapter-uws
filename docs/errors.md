@@ -514,7 +514,7 @@ searchable log prefix is:
 - **Code/event:** `runtime.ssr.failed`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.ssr event=runtime.ssr.failed severity=error] SvelteKit request handling failed.`
 - **Cause:** The SvelteKit server handler threw while rendering or handling a request.
-- **Consequence:** That request is answered with an error response. Other requests and WebSocket connections are unaffected.
+- **Consequence:** A failure before the response starts is answered with an error response. A response already streaming its body is aborted instead, so the client sees the truncation rather than a clean end that reads as a complete response. Other requests and WebSocket connections are unaffected.
 - **Automatic recovery:** None for the failed request.
 - **Next action:** Read the attached error. This is application rendering code rather than adapter transport, so the fault is normally in a route, hook, or load function.
 - **Runtime help:** `docs/errors.md#adapter-err-ssr`
