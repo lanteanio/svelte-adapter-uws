@@ -79,6 +79,33 @@ describe('trusted release workflow', () => {
 			.some((e) => e.includes('missing') && e.includes('check'))).toBe(true);
 	});
 
+	it('rejects an edited body on an allowed script, the other half of the surface', () => {
+		// The name inventory closes what npm can be made to RUN; the body pins
+		// close what the allowed names DO. Without them, one edit turns a
+		// check the workflow claims to run into any of the weakenings below
+		// while every name pin stays green.
+		const weakenings = [
+			['check', 'echo ok'],
+			['prepublishOnly', 'true'],
+			['verify:pr', 'npm run verify:sim'],
+			['test', 'vitest run test/env.test.js'],
+			['check:publish', 'publint']
+		];
+		for (const [name, body] of weakenings) {
+			expect(pkg.scripts[name], name + ' must exist and differ from the weakening').not.toBe(body);
+			const mutant = { ...pkg, scripts: { ...pkg.scripts, [name]: body } };
+			const failures = validateReleaseWorkflow(workflow, mutant, policy);
+			expect(failures.some((e) => e.includes('"' + name + '"') && e.includes('pinned body')),
+				name + ' body edit was accepted').toBe(true);
+		}
+		// The refusal states the protocol, so the repair is in the message:
+		// the pin moves in the same change, where the gate's diff shows what
+		// the release path will now run.
+		const mutant = { ...pkg, scripts: { ...pkg.scripts, check: 'echo ok' } };
+		expect(validateReleaseWorkflow(workflow, mutant, policy)
+			.some((e) => e.includes('must move the pin'))).toBe(true);
+	});
+
 	it('rejects action-tag drift and artifact-output laundering', () => {
 		const floating = workflow.replace(
 			'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',

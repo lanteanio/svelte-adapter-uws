@@ -106,22 +106,55 @@ const PUBLISH_STEPS = [
 	{ name: 'Publish exact tarball to quarantine with trusted OIDC', run: 'npm publish "release-artifacts/${{ needs.verify.outputs.filename }}" --tag candidate' }
 ];
 
-// The closed inventory of package scripts. npm implicitly executes the
-// pre<name>/post<name> companion of every script it runs, so the name SPACE
-// is the attack surface, not any fixed list of lifecycle hooks - see the
-// scripts check in validateReleaseWorkflow. pretest and postinstall are
-// themselves implicit companions and belong here because they run BEFORE the
-// verification steps, where their effects are still tested.
-const EXPECTED_SCRIPTS = [
-	'check', 'pretest', 'postinstall', 'prepublishOnly', 'check:publish',
-	'check:links', 'check:entry-points', 'check:docs-code',
-	'check:documentation', 'check:operations', 'check:capacity', 'capacity:run',
-	'check:privacy', 'privacy:generate', 'drill:operations', 'drill:respawner',
-	'check:errors', 'check:migration', 'doctor', 'smoke', 'bootstrap', 'test',
-	'test:watch', 'test:e2e', 'test:coverage', 'test:floor', 'sim:swarm',
-	'sim:golden', 'verify:fast', 'verify:docs', 'verify:suite', 'verify:sim',
-	'verify:pr', 'verify:full'
-];
+// The closed inventory of package scripts, pinned to their exact bodies.
+// npm implicitly executes the pre<name>/post<name> companion of every script
+// it runs, so the name SPACE is one attack surface - see the scripts check
+// in validateReleaseWorkflow - and a body is the other half: the release
+// path runs several of these by name, so an edited body (a check reduced to
+// a no-op) would weaken the verification the workflow claims to run while
+// every name pin stayed green. Presence AND content are therefore both
+// closed. Editing a script is a deliberate change to this inventory in the
+// same commit, where the diff of the gate shows exactly what the release
+// path will now run - the protocol, not a workaround. pretest and
+// postinstall are themselves implicit companions and belong here because
+// they run BEFORE the verification steps, where their effects are still
+// tested.
+const EXPECTED_SCRIPTS = {
+	'check': 'node scripts/check-compatibility.js && node scripts/check-formatting.js && node scripts/check-contributor-map.js && node scripts/check-svelte-support.js && node scripts/generate-error-reference.js --check && node scripts/check-migration-freshness.js && node scripts/check-release-notes.js && node scripts/check-release-workflow.js && node scripts/generate-api-docs.js --check && node scripts/check-doc-code.js && node scripts/check-documentation-contract.js && node scripts/check-operations-pack.js && node scripts/check-capacity-kit.js && node scripts/generate-observability.js --check && node scripts/generate-privacy-integration.js --check && node scripts/check-types.js && node scripts/check-entry-points.js && node scripts/check-diagnostic-attribution.js && node scripts/check-console-index.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node scripts/check-uws-pin.js && node scripts/check-uws-binaries.js && node scripts/check-related-projects.js && node scripts/check-links.js && node scripts/check-scope.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js',
+	'pretest': 'npm run check',
+	'postinstall': 'node scripts/check-native-install.js',
+	'prepublishOnly': 'npm run check',
+	'check:publish': 'publint && attw --pack . --profile esm-only',
+	'check:links': 'node scripts/check-links.js',
+	'check:entry-points': 'node scripts/check-entry-points.js',
+	'check:docs-code': 'node scripts/check-doc-code.js',
+	'check:documentation': 'node scripts/check-documentation-contract.js',
+	'check:operations': 'node scripts/check-operations-pack.js',
+	'check:capacity': 'node scripts/check-capacity-kit.js',
+	'capacity:run': 'node scripts/capacity/open-arrival.mjs',
+	'check:privacy': 'node scripts/generate-privacy-integration.js --check',
+	'privacy:generate': 'node scripts/generate-privacy-integration.js',
+	'drill:operations': 'node scripts/check-operations-pack.js',
+	'drill:respawner': 'node scripts/drill-respawner.js',
+	'check:errors': 'node scripts/generate-error-reference.js --check',
+	'check:migration': 'node scripts/check-migration-freshness.js',
+	'doctor': 'node scripts/doctor.js',
+	'smoke': 'node scripts/smoke.js',
+	'bootstrap': 'node scripts/bootstrap.js',
+	'test': 'vitest run',
+	'test:watch': 'vitest',
+	'test:e2e': 'npx playwright test --config test/e2e/playwright.config.js',
+	'test:coverage': 'node scripts/coverage.js',
+	'test:floor': 'vitest run test/client test/crdt- test/cursor-handle test/cursor-viewport-client test/lease-client test/presence-client test/smooth-channel test/smooth-interpolate test/smooth-wire-view test/utils test/wire-client test/wire-sink',
+	'sim:swarm': 'node scripts/sim-swarm.js',
+	'sim:golden': 'node scripts/sim-golden.js',
+	'verify:fast': 'node scripts/verify.js fast',
+	'verify:docs': 'node scripts/check-related-projects.js && node scripts/check-links.js && node scripts/check-entry-points.js && node scripts/generate-api-docs.js --check && node scripts/check-doc-code.js && node scripts/check-documentation-contract.js && node scripts/generate-error-reference.js --check && node scripts/check-migration-freshness.js && vitest run test/related-projects.test.js test/docs-map.test.js test/api-docs-contract.test.js test/entry-point-catalog.test.js test/doc-code-contract.test.js test/documentation-contract.test.js test/error-reference.test.js test/packed-readme-examples.test.js test/migration-lifecycle.test.js test/migration-rehearsal.test.js test/compatibility-contract.test.js',
+	'verify:suite': 'node scripts/verify.js suite',
+	'verify:sim': 'node scripts/verify.js sim',
+	'verify:pr': 'npm run verify:suite && npm run verify:sim',
+	'verify:full': 'npm run verify:pr && npm run test:e2e'
+};
 
 function checkSteps(errors, jobName, job, expected) {
 	const steps = Array.isArray(job.steps) ? job.steps : [];
@@ -230,9 +263,6 @@ export function validateReleaseWorkflow(source, pkg, policy) {
 		/\bnpm\s+publish\s+(?:\.|--)/.test(source)) {
 		errors.push('release workflow must not contain token fallback or source-directory publication');
 	}
-	if (pkg.scripts?.prepublishOnly !== 'npm run check') {
-		errors.push('package prepublishOnly gate is not exact');
-	}
 	// npm pack runs prepack, prepare, and postpack around tarball creation -
 	// AFTER every explicit verification step in the verify job - and npm run
 	// implicitly executes the pre<name> and post<name> companions of every
@@ -245,15 +275,29 @@ export function validateReleaseWorkflow(source, pkg, policy) {
 	// does not exist yet, and adding one is a deliberate review of where npm
 	// will implicitly run it. Removals are refused too - the release path
 	// runs several of these by name, and a silent removal would move that
-	// failure from this gate to the middle of a tag build.
-	const scriptNames = Object.keys(pkg.scripts ?? {});
-	for (const name of scriptNames) {
-		if (!EXPECTED_SCRIPTS.includes(name)) {
+	// failure from this gate to the middle of a tag build. BODIES are pinned
+	// beside the names, because presence alone leaves the other half open: an
+	// edited body turns a check the workflow claims to run into whatever the
+	// edit says, without moving a single pinned name - so a body change must
+	// move this inventory in the same commit, where the gate's own diff shows
+	// what the release path will now run.
+	// Object.hasOwn, not `in`: a manifest script named after a prototype key
+	// (constructor, toString, __proto__ arrives as an own property from
+	// JSON.parse) must be refused as OUTSIDE the inventory, not as a body
+	// mismatch against a pin that never existed.
+	const scripts = pkg.scripts ?? {};
+	for (const [name, body] of Object.entries(scripts)) {
+		if (!Object.hasOwn(EXPECTED_SCRIPTS, name)) {
 			errors.push('package script is outside the closed inventory: ' + name);
+		} else if (body !== EXPECTED_SCRIPTS[name]) {
+			errors.push(
+				'package script "' + name + '" does not match its pinned body - an edit here changes what ' +
+				'the release path runs, so it must move the pin in scripts/check-release-workflow.js in the same change'
+			);
 		}
 	}
-	for (const name of EXPECTED_SCRIPTS) {
-		if (!scriptNames.includes(name)) {
+	for (const name of Object.keys(EXPECTED_SCRIPTS)) {
+		if (!Object.hasOwn(scripts, name)) {
 			errors.push('package script is missing from the closed inventory: ' + name);
 		}
 	}

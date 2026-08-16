@@ -114,11 +114,16 @@ verification step - and npm run executes the pre/post companions of every
 script it runs, so any unexpected script name can put code between the checks
 and the bytes that are hashed, leaving the digest authenticating an artifact
 nothing tested. check-release-workflow therefore holds the manifest's scripts
-object to a closed name inventory - additions and removals both refuse - and
-the refusal runs inside the same checked-in gate the workflow body is pinned
-by. The publish job is outside this window entirely: npm runs lifecycle
-scripts only when publishing a directory, and it is handed a prebuilt
-tarball, which packs nothing and executes nothing.
+object to a closed inventory of names AND bodies - additions, removals, and
+edits all refuse - and the refusal runs inside the same checked-in gate the
+workflow body is pinned by. The body pins are what couple the workflow to the
+verification it claims to run: without them, one edit could reduce a check
+the release path runs by name to a no-op while every name stayed green, so
+changing what a script does means moving its pin in the same commit, where
+the gate's own diff shows what the release path will now run. The publish
+job is outside this window entirely: npm runs lifecycle scripts only when
+publishing a directory, and it is handed a prebuilt tarball, which packs
+nothing and executes nothing.
 
 The publish job receives contents: read and id-token: write. It never installs
 a dependency tree and never executes repository code: it installs the pinned

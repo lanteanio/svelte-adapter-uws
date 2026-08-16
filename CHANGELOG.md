@@ -94,6 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Every existing script keeps its name and behavior; the inventory pins exactly the current set, refusing additions and removals alike.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: the release gate pins what its scripts do, not only which exist.** The closed script inventory refused unexpected names while an edit to an allowed body could reduce a release-path check to a no-op; every body is pinned inside the same checked-in gate, so weakening a check must move the pin in the same change.
+  - **Affects:** Maintainers editing npm scripts; no consumer of the published package.
+  - **Action:** Changing any script body now requires updating its pin in the release gate in the same change.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Every script keeps its current name and body; the gate refuses edits, additions, and removals alike until the pin moves with them.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: the pressure entries name their real surface and bound.** The pressure-listener entry pointed at backpressure when its listeners ride `platform.onPressure` pressure-state transitions, and the runaway-publisher entry claimed a strict once-per-minute throttle its bounded dedup table cannot guarantee under many simultaneous offenders; both now say what the code does.
   - **Affects:** Operators reading `docs/errors.md` for the pressure entries.
   - **Action:** None; the corrected wording routes the listener failure to `platform.onPressure`.
@@ -154,6 +161,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.6.0-next.91` is unaffected and needs no republication.
 
 ### Fixed
+
+- **The release gate's script inventory pins bodies beside names.** The
+  closed inventory refuses names outside itself, which is what keeps npm's
+  implicit lifecycle companions out of the window between the last check
+  and the hashed bytes - but presence alone left the other half open: the
+  verify job runs several scripts by name, and an edit reducing one of
+  those bodies to a no-op weakened the verification the workflow claims
+  to run without moving a single pinned name. Every script body is now
+  pinned in check-release-workflow beside its name; additions, removals,
+  and edits all refuse; and the refusal message states the protocol - the
+  pin moves in the same change, where the gate's own diff shows what the
+  release path will now run. The dedicated prepublishOnly check folds
+  into the same map. Mutation cases drive five representative weakenings,
+  the check chain to an echo among them, and the message's protocol
+  sentence; the release policy states why the body pins are the coupling.
 
 - **Every error-reference entry is now driven from the condition it
   claims, or its unreachability is recorded.** The reference generator
