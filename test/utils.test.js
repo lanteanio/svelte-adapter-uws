@@ -1711,6 +1711,47 @@ describe('drainCoalesced', () => {
 	});
 });
 
+// - resolvePressureThresholds ----------------------------------------------
+
+// Gated like every built-fixture import: the built module chain loads the
+// native uWS binary at import time, and a machine without it skips rather
+// than fails.
+(hasUWS ? describe : describe.skip)('resolvePressureThresholds', () => {
+	// The source module sits behind the build-time env define, so the built
+	// fixture is the importable form of the same code (house pattern). Built
+	// here, not assumed: a stale build/ would bind these cases to code that
+	// is not under test.
+	let resolvePressureThresholds;
+	beforeAll(async () => {
+		const { buildFixtureOnce } = await import('./helpers/fixture-build.js');
+		expect(buildFixtureOnce(), 'fixture failed to build').toBe(true);
+		({ resolvePressureThresholds } = await import('./fixture/build/handler/pressure-metrics.js'));
+	}, 400000);
+
+	it('reads a null threshold as absent, keeping the numeric default', () => {
+		// A JSON round trip writes an unset option as null. A merge that let
+		// null replace the numeric default would hand the comparators a
+		// threshold that coerces to 0 - `sample >= null` is true on every
+		// sample - so a healthy worker would report that signal permanently.
+		const defaults = resolvePressureThresholds(undefined);
+		const resolved = resolvePressureThresholds({ memoryHeapUsedRatio: null, publishRatePerSec: 25000 });
+		expect(resolved.memoryHeapUsedRatio).toBe(defaults.memoryHeapUsedRatio);
+		expect(typeof resolved.memoryHeapUsedRatio).toBe('number');
+		expect(resolved.publishRatePerSec).toBe(25000);
+		// The fold is what keeps the reason machine honest: with the default
+		// held, a calm sample stays NONE instead of firing MEMORY forever.
+		expect(computePressureReason(
+			{ heapUsedRatio: 0.1, publishRate: 100, subscriberRatio: 5 },
+			resolved
+		)).toBe('NONE');
+	});
+
+	it('keeps the documented false disable and numeric tuning', () => {
+		const resolved = resolvePressureThresholds({ memoryHeapUsedRatio: false });
+		expect(resolved.memoryHeapUsedRatio).toBe(false);
+	});
+});
+
 // - computePressureReason --------------------------------------------------
 
 describe('computePressureReason', () => {

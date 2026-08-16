@@ -398,14 +398,25 @@ export function grantSizeFor() {
 
 /**
  * Merge user-supplied pressure options on top of the safe defaults. Each
- * threshold accepts `false` to disable that signal. `sampleIntervalMs` is
- * clamped to a sane minimum to avoid pathological tight-loop sampling if
- * a user passes 0 or a negative number.
+ * threshold accepts `false` to disable that signal. A `null` (or undefined)
+ * value is ABSENT and keeps the default: a JSON round trip writes an unset
+ * option as null, and a spread that let null replace a numeric default would
+ * hand the comparators a threshold that coerces to 0 - `sample >= null` is
+ * true on every sample, a signal permanently on while the worker is healthy.
+ * `sampleIntervalMs` that is not a number >= 100 is replaced by the default
+ * cadence to avoid pathological tight-loop sampling.
  *
  * @param {{ memoryHeapUsedRatio?: number | false, publishRatePerSec?: number | false, subscriberRatio?: number | false, sampleIntervalMs?: number, topicPublishRatePerSec?: number | false, topicPublishBytesPerSec?: number | false } | undefined} opts
  */
 export function resolvePressureThresholds(opts) {
-	const merged = { ...DEFAULT_PRESSURE_THRESHOLDS, ...(opts || {}) };
+	const merged = { ...DEFAULT_PRESSURE_THRESHOLDS };
+	if (opts && typeof opts === 'object') {
+		for (const key of Object.keys(opts)) {
+			const value = opts[key];
+			if (value === undefined || value === null) continue;
+			merged[key] = value;
+		}
+	}
 	if (typeof merged.sampleIntervalMs !== 'number' || merged.sampleIntervalMs < 100) {
 		merged.sampleIntervalMs = DEFAULT_PRESSURE_THRESHOLDS.sampleIntervalMs;
 	}

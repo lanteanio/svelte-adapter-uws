@@ -627,18 +627,18 @@ adapter({
   // Prefix for environment variables (e.g. 'MY_APP_' -> MY_APP_PORT)
   envPrefix: "", // default: ''
 
-  // Liveness probe - 200 whenever the process is up, including during a drain
-  // (set to false to disable)
+  // Liveness probe - 200 whenever the process is up, even during a drain (false to disable)
   healthCheckPath: "/healthz", // default: '/healthz'
 
-  // Readiness probe - 200 when ready, 503 during graceful shutdown so a load
-  // balancer drains this instance (set to false to disable)
+  // Readiness probe - 200 when ready, 503 during graceful shutdown so a load balancer drains this instance (false to disable)
   readinessCheckPath: "/readyz", // default: '/readyz'
 
   // WebSocket configuration
   websocket: true, // or false, or an options object (see below)
 });
 ```
+
+An unrecognized option key (top-level or under `websocket`) is warned about and ignored, with a closest-match suggestion - a config carrying a newer version's key still builds on an older adapter. A recognized key whose value the option cannot honor fails the build instead, with an error naming what the option accepts.
 
 The two probes answer different questions, and wiring them the other way round is the classic rolling-deploy outage:
 

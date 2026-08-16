@@ -44,7 +44,25 @@ const DEFAULT_MAX_DEFERRED = 1024;
  * @param {{ maxConcurrent?: number, maxConnections?: number, perTickBudget?: number, maxDeferred?: number, cursorLane?: { fraction?: number } }} [opts]
  */
 export function createUpgradeAdmission(opts) {
-	const maxConcurrent = (opts && opts.maxConcurrent) || 0;
+	// A JSON round trip or a config spread writes an unconfigured section as
+	// null, and every config guard reads null as absent. Folded to absent here
+	// too - otherwise `opts && opts.maxConcurrent` yields null, which is not
+	// undefined, so the safe-integer checks below would refuse a section that
+	// configures nothing and crash the worker at boot under a config the
+	// build passed.
+	if (opts === null) opts = undefined;
+	// Both `|| 0` ceilings below are read as `value > 0` throughout, so a
+	// misshaped value would not fall back to "disabled" loudly - it would
+	// leave the gate open in silence. Refused here on the same terms as
+	// `maxConnections` and `maxDeferred`.
+	const configuredMaxConcurrent = opts && opts.maxConcurrent;
+	if (
+		configuredMaxConcurrent !== undefined &&
+		(!Number.isSafeInteger(configuredMaxConcurrent) || configuredMaxConcurrent < 0)
+	) {
+		throw new TypeError('upgradeAdmission.maxConcurrent must be a non-negative safe integer.');
+	}
+	const maxConcurrent = configuredMaxConcurrent || 0;
 	const configuredMaxConnections = opts && opts.maxConnections;
 	if (
 		configuredMaxConnections !== undefined &&
@@ -53,7 +71,14 @@ export function createUpgradeAdmission(opts) {
 		throw new TypeError('upgradeAdmission.maxConnections must be a non-negative safe integer.');
 	}
 	const maxConnections = configuredMaxConnections || 0;
-	const perTickBudget = (opts && opts.perTickBudget) || 0;
+	const configuredPerTickBudget = opts && opts.perTickBudget;
+	if (
+		configuredPerTickBudget !== undefined &&
+		(!Number.isSafeInteger(configuredPerTickBudget) || configuredPerTickBudget < 0)
+	) {
+		throw new TypeError('upgradeAdmission.perTickBudget must be a non-negative safe integer.');
+	}
+	const perTickBudget = configuredPerTickBudget || 0;
 	const configuredMaxDeferred = opts && opts.maxDeferred;
 	if (
 		configuredMaxDeferred !== undefined &&

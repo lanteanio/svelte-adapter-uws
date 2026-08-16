@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { parse } from 'acorn';
 import ts from 'typescript';
 import {
+	KNOWN_ADAPTER_OPTION_KEYS,
 	KNOWN_WEBSOCKET_OPTION_KEYS,
 	serializeWsOptions,
 	unknownWebsocketOptionKeys
@@ -140,5 +141,23 @@ describe('production websocket option contract', () => {
 	it('treats the stale resourceGrowthIntervalMs name as unknown', () => {
 		expect(unknownWebsocketOptionKeys({ resourceGrowthIntervalMs: 1000 }))
 			.toEqual(['resourceGrowthIntervalMs']);
+	});
+
+	it('keeps every published AdapterOptions key in the top-level known-key registry', () => {
+		// Same contract one level up: a documented top-level option missing
+		// from the registry warns on a legitimate config, and a registry key
+		// the type does not document admits an option no app can type.
+		const declared = interfaceProperties(read('src/index.d.ts'), 'AdapterOptions');
+		expect(declared.size, 'the declaration scan must not pass vacuously').toBeGreaterThan(5);
+		expect([...KNOWN_ADAPTER_OPTION_KEYS].sort()).toEqual([...declared].sort());
+	});
+
+	it('wires the top-level unknown-key report into the build warning', () => {
+		// The pure helper is tested elsewhere; this pins the adapt() wiring,
+		// which no suite drives end to end - removing the warn call would
+		// leave every helper case green while the build went quiet.
+		const source = read('src/index.js');
+		const warned = /const unknownTopLevelKeys = unknownAdapterOptionKeys\(opts\);\s*\n\s*if \(unknownTopLevelKeys\.length\) \{\s*\n\s*builder\.log\.warn\(/;
+		expect(source).toMatch(warned);
 	});
 });

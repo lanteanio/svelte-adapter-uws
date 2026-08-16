@@ -11,6 +11,9 @@ import { listExcludedDotPaths } from './static-scan.js';
 import {
 	assertWireSubscribeAuthorization,
 	assertProtectiveNumber,
+	assertSharedOptionValues,
+	describeUnknownOptionKeys,
+	KNOWN_PRESSURE_OPTION_KEYS,
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
@@ -87,6 +90,33 @@ export const KNOWN_WEBSOCKET_OPTION_KEYS = new Set([
 ]);
 
 /**
+ * Every top-level option key the adapter factory consumes. The same policy as
+ * the `websocket.*` set above: a key outside this set warns and is ignored
+ * rather than refused, because an app pinning an older adapter must still
+ * build with a config that carries a newer version's key - only a KNOWN key
+ * with an unusable VALUE fails the build.
+ */
+export const KNOWN_ADAPTER_OPTION_KEYS = new Set([
+	'out', 'precompress', 'envPrefix', 'healthCheckPath', 'readinessCheckPath',
+	'tracing', 'staticHeaders', 'staticCacheControl', 'staticDotfiles', 'websocket'
+]);
+
+/**
+ * Top-level keys the adapter does not recognize, each annotated with the
+ * closest documented key when one is close enough to name. A `websocket.*`
+ * option typed at the top level - the most likely way to lose a real option
+ * here - is pointed to its nested home.
+ *
+ * @param {Record<string, unknown> | null | undefined} opts - raw adapter options
+ * @returns {string[]}
+ */
+export function unknownAdapterOptionKeys(opts) {
+	return describeUnknownOptionKeys(opts, KNOWN_ADAPTER_OPTION_KEYS, (key) =>
+		KNOWN_WEBSOCKET_OPTION_KEYS.has(key) ? `websocket.${key}` : null
+	);
+}
+
+/**
  * Object-valued options whose CONTENTS are also checked, keyed by dotted path.
  *
  * A top-level-only walk cannot see a typo one level down, and for
@@ -110,11 +140,9 @@ export const KNOWN_NESTED_WEBSOCKET_OPTION_KEYS = {
 		'perConnectionRate', 'globalRate', 'rateWindowMs',
 		'perConnectionConcurrent', 'globalConcurrent', 'maxQueue'
 	]),
-	pressure: new Set([
-		'memoryHeapUsedRatio', 'publishRatePerSec', 'subscriberRatio', 'sampleIntervalMs',
-		'topicPublishRatePerSec', 'topicPublishBytesPerSec',
-		'psiCpuSome', 'psiMemoryFull', 'psiIoFull', 'cpuThrottledRatio'
-	]),
+	// One set with the value judgment in config-guards.js, so the unknown-key
+	// warning and the threshold guard can never recognize different keys.
+	pressure: KNOWN_PRESSURE_OPTION_KEYS,
 	// `workers: { comptue: 2 }` silently runs zero compute workers - the same
 	// failure class, one level down, on a different option.
 	workers: new Set(['compute']),
@@ -411,26 +439,17 @@ export function serializeWsOptions(websocket, adminPath) {
 	// 0 genuinely disables here (an unbounded registry is the pre-existing
 	// behavior an operator may deliberately keep), so 0 stays legal.
 	assertProtectiveNumber(websocket, 'maxTopicSeqEntries');
-	const maxConnections = websocket?.upgradeAdmission?.maxConnections;
-	if (
-		maxConnections !== undefined &&
-		(!Number.isSafeInteger(maxConnections) || maxConnections < 0)
-	) {
-		throw new Error(
-			'websocket.upgradeAdmission.maxConnections must be a non-negative safe integer. ' +
-			'Use 0 to disable the live-connection ceiling deliberately.'
-		);
-	}
-	const maxDeferred = websocket?.upgradeAdmission?.maxDeferred;
-	if (
-		maxDeferred !== undefined &&
-		(!Number.isSafeInteger(maxDeferred) || maxDeferred < 0)
-	) {
-		throw new Error(
-			'websocket.upgradeAdmission.maxDeferred must be a non-negative safe integer. ' +
-			'Use 0 to reject once the current tick budget is spent, without retaining a queue.'
-		);
-	}
+	// The enum-, shape-, and timer-constrained options degrade the same way a
+	// misshaped number does, each in its own direction: an unrecognized
+	// `protection` level runs the posture machine in 'auto' instead of
+	// pinning, an unrecognized `allowedOrigins` policy refuses every
+	// origin-bearing connection, a truthy non-boolean `compression` enables
+	// SHARED_COMPRESSOR, a misshaped interval or threshold silently disables
+	// the timer or signal it configures, and a misshaped admission ceiling
+	// leaves that gate open - all without a word at build time. One shared
+	// judgment (config-guards.js) that the dev plugin and the test harness
+	// also run, so a value refused here is refused on every surface.
+	assertSharedOptionValues(websocket, (key) => `websocket.${key}`);
 	normalizeMessageAdmission(websocket?.messageAdmission, 'websocket.messageAdmission');
 	return {
 		// Default raised from 16 KB to 1 MB in 0.5. uWS's own
@@ -1103,6 +1122,22 @@ export default function (opts = {}) {
 				);
 			}
 			const wsOpts = serializeWsOptions(websocket, adminPath);
+
+			// Loud on unknown top-level keys, on the same terms as the
+			// websocket.* warning below: a key the factory does not read is
+			// dropped silently, and the most likely spelling of that mistake -
+			// a websocket option typed at the top level - is pointed to its
+			// nested home. Warned, never refused: an app pinning an older
+			// adapter must still build with a config carrying a newer
+			// version's key.
+			const unknownTopLevelKeys = unknownAdapterOptionKeys(opts);
+			if (unknownTopLevelKeys.length) {
+				builder.log.warn(
+					`[adapter-uws] unknown adapter option(s): ${unknownTopLevelKeys.join(', ')} - ` +
+					'not recognized by the adapter and ignored. Check the spelling against the ' +
+					'documented adapter options (AdapterOptions in index.d.ts).'
+				);
+			}
 
 			// Loud on unknown websocket.* keys: adapter options are serialized
 			// into the build, so a key the adapter does not recognize is dropped

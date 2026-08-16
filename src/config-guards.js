@@ -153,6 +153,318 @@ export function assertProtectiveNumber(
 }
 
 /**
+ * Validate the graduated protection posture level.
+ *
+ * The runtime reads this with `value || 'normal'` and builds the posture
+ * machine for any other value, pinning only a level it recognizes - so a
+ * misspelled level does not fail and does not pin: it silently runs the
+ * machine in `'auto'` resolution, which is neither the pin the operator asked
+ * for nor the inert default. Absent (`undefined` / `null`) is fine and stays
+ * on the `'normal'` default by the same route it always took.
+ *
+ * @param {Record<string, any> | null | undefined} bag - the options object
+ * @param {string} key - the option being read
+ * @param {string} [surface] - how the user names the option, for the message
+ * @returns {void}
+ * @throws {Error} when the value is present and not a recognized level
+ */
+export function assertProtectionPosture(bag, key, surface = `websocket.${key}`) {
+	const value = bag?.[key];
+	if (value === undefined || value === null) return;
+	if (value === 'normal' || value === 'auto' || value === 'elevated' || value === 'siege') return;
+	throw new Error(
+		`${surface} must be 'normal', 'auto', 'elevated', or 'siege' - got ${describeValue(value)} (${typeof value}). ` +
+		`The runtime pins only a level it recognizes, so an unrecognized level would silently ` +
+		`resolve the posture from live pressure ('auto') instead of holding the pin that was asked for.`
+	);
+}
+
+/**
+ * Validate the WebSocket origin policy.
+ *
+ * The origin check recognizes exactly three forms - `'*'`, `'same-origin'`,
+ * and an array of origin strings compared verbatim against the request's
+ * `Origin` header. Every other TRUTHY value falls through every branch and the
+ * check returns `false`, so a misspelled policy does not fail the build and
+ * does not fall back to the default: it silently refuses every origin-bearing
+ * connection while the build log reports the option as configured. A FALSY
+ * value never reaches the check at all - the runtime reads the policy with
+ * `|| 'same-origin'` - so it silently runs the default rather than expressing
+ * anything; it is refused too, named for what it actually did. Array entries
+ * are compared with `===` against a header string, so a non-string entry (a
+ * RegExp, a number) can never match anything and is refused too; the strings
+ * themselves are not second-guessed, because a non-browser client may
+ * legitimately send an `Origin` no URL parser would normalize.
+ *
+ * @param {Record<string, any> | null | undefined} bag - the options object
+ * @param {string} key - the option being read
+ * @param {string} [surface] - how the user names the option, for the message
+ * @returns {void}
+ * @throws {Error} when the value is present and not a recognized policy shape
+ */
+export function assertAllowedOrigins(bag, key, surface = `websocket.${key}`) {
+	const value = bag?.[key];
+	if (value === undefined || value === null || value === '*' || value === 'same-origin') return;
+	if (!value) {
+		throw new Error(
+			`${surface} must be '*', 'same-origin', or an array of origin strings ` +
+			`(e.g. ['https://example.com']) - got ${describeValue(value)} (${typeof value}). ` +
+			`A falsy value never reaches the origin check - the policy is read with a fallback, so ` +
+			`it silently runs the 'same-origin' default while expressing no policy of its own. ` +
+			`Omit the option (or write 'same-origin') to keep the default deliberately.`
+		);
+	}
+	if (!Array.isArray(value)) {
+		throw new Error(
+			`${surface} must be '*', 'same-origin', or an array of origin strings ` +
+			`(e.g. ['https://example.com']) - got ${describeValue(value)} (${typeof value}). ` +
+			`The origin check recognizes only these forms, so an unrecognized value would silently ` +
+			`refuse every origin-bearing connection instead of applying the policy that was meant.`
+		);
+	}
+	for (const entry of value) {
+		if (typeof entry === 'string' && entry !== '') continue;
+		throw new Error(
+			`${surface} entries must be non-empty origin strings (e.g. 'https://example.com') - ` +
+			`got ${describeValue(entry)} (${typeof entry}). An entry is compared verbatim against ` +
+			`the request's Origin header string, so any other type can never match and would be a ` +
+			`silently dead allowlist entry.`
+		);
+	}
+}
+
+/**
+ * Validate the per-message-deflate configuration.
+ *
+ * The runtime maps this as: a number passes through to uWS, any other truthy
+ * value becomes `SHARED_COMPRESSOR`, any falsy value disables. That coercion
+ * INVERTS the natural env spelling - `compression: process.env.WS_COMPRESS`
+ * set to `'0'` or `'false'` is a truthy string, so it turns compression ON.
+ * Only the two documented forms pass: a boolean, or a uWS compression
+ * constant, which is a non-negative integer bit set.
+ *
+ * @param {Record<string, any> | null | undefined} bag - the options object
+ * @param {string} key - the option being read
+ * @param {string} [surface] - how the user names the option, for the message
+ * @returns {void}
+ * @throws {Error} when the value is present and neither boolean nor constant
+ */
+export function assertCompression(bag, key, surface = `websocket.${key}`) {
+	const value = bag?.[key];
+	if (value === undefined || value === null || typeof value === 'boolean') return;
+	if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return;
+	throw new Error(
+		`${surface} must be a boolean or a uWS compression constant (a non-negative integer such as ` +
+		`uWS.SHARED_COMPRESSOR or uWS.DEDICATED_COMPRESSOR_4KB) - got ${describeValue(value)} (${typeof value}). ` +
+		`Any other truthy value would silently enable SHARED_COMPRESSOR - including '0' or 'false' ` +
+		`from an environment variable, which would turn compression ON.`
+	);
+}
+
+/**
+ * Milliseconds ceiling of a Node timer delay. `setInterval` stores the delay
+ * in a signed 32-bit integer, and a larger delay overflows to fire every
+ * millisecond - so an interval meant to slow a sampler or auditor down would
+ * instead run it in the tightest loop the event loop allows.
+ */
+export const MAX_TIMER_INTERVAL_MS = 0x7fffffff;
+
+/**
+ * @param {string} surface
+ * @param {unknown} value
+ * @returns {never}
+ */
+function throwTimerOverflow(surface, value) {
+	throw new Error(
+		`${surface} must be no greater than ${MAX_TIMER_INTERVAL_MS} milliseconds, because Node ` +
+		`stores a timer delay in a signed 32-bit integer and a larger delay overflows to fire ` +
+		`every millisecond - the tight loop an interval this large was meant to avoid - got ` +
+		`${describeValue(value)}.`
+	);
+}
+
+/**
+ * Validate a millisecond interval that feeds a Node timer.
+ *
+ * Same terms as {@link assertProtectiveNumber} - the runtime reads these as
+ * `value > 0`, so a misshaped value silently disables the timer instead of
+ * falling back to its default, and `0` stays the documented deliberate
+ * disable - plus the 32-bit timer ceiling: a finite value above it passes a
+ * `> 0` check and then overflows `setInterval` into a 1 ms loop. Fractional
+ * milliseconds below the ceiling stay legal; Node timers accept them.
+ *
+ * @param {Record<string, any> | null | undefined} bag - the options object
+ * @param {string} key - the option being read
+ * @param {string} [surface] - how the user names the option, for the message
+ * @returns {void}
+ * @throws {Error} when the value is present and not a usable timer delay
+ */
+export function assertIntervalMs(bag, key, surface = `websocket.${key}`) {
+	assertProtectiveNumber(bag, key, surface);
+	const value = bag?.[key];
+	if (typeof value === 'number' && value > MAX_TIMER_INTERVAL_MS) throwTimerOverflow(surface, value);
+}
+
+/**
+ * The documented keys of the `pressure` section. The adapter's nested
+ * unknown-key walk (`KNOWN_NESTED_WEBSOCKET_OPTION_KEYS` in src/index.js)
+ * reads this same set, so the value judgment below and the unknown-key
+ * warning can never recognize different keys.
+ */
+export const KNOWN_PRESSURE_OPTION_KEYS = new Set([
+	'memoryHeapUsedRatio', 'publishRatePerSec', 'subscriberRatio', 'sampleIntervalMs',
+	'topicPublishRatePerSec', 'topicPublishBytesPerSec',
+	'psiCpuSome', 'psiMemoryFull', 'psiIoFull', 'cpuThrottledRatio'
+]);
+
+/**
+ * Validate the pressure section: its shape, its thresholds, and the sample
+ * cadence.
+ *
+ * A threshold fires on `sample >= threshold`, and a comparison against a
+ * non-number is false - so a misshaped threshold silently stands its signal
+ * down while `false` is the documented way to do that on purpose.
+ * `sampleIntervalMs` degrades differently: the runtime replaces a non-number
+ * or a number below 100 with the 1000 ms default, so a configured cadence
+ * would be silently ignored - while NaN and Infinity are numbers the floor
+ * comparison cannot place, and a finite value above the Node timer ceiling
+ * passes it, so all three flow to `setInterval` and collapse into a 1 ms
+ * loop. A
+ * section that is not an object at all - `false` included - is silently
+ * spread away and replaced by the full default thresholds, so the sampler
+ * runs at complete default tuning under a config that plainly meant to change
+ * or disable it; standing signals down is spelled per threshold.
+ *
+ * @param {Record<string, any> | null | undefined} bag - the options object
+ * @param {string} [key] - the option being read
+ * @param {string} [surface] - how the user names the option, for the message
+ * @returns {void}
+ * @throws {Error} when the section or a value in it cannot be honored
+ */
+export function assertPressureSection(bag, key = 'pressure', surface = `websocket.${key}`) {
+	const pressure = bag?.[key];
+	if (pressure === undefined || pressure === null) return;
+	if (!pressure || typeof pressure !== 'object' || Array.isArray(pressure)) {
+		throw new Error(
+			`${surface} must be an object of thresholds (or omitted) - got ` +
+			`${describeValue(pressure)} (${typeof pressure}). Any other value - false included - is ` +
+			`silently replaced by the full default thresholds, so neither the tuning nor the ` +
+			`disable that was meant would ever apply. To stand individual signals down, set each ` +
+			`threshold to false (e.g. { memoryHeapUsedRatio: false }).`
+		);
+	}
+	for (const thresholdKey of Object.keys(pressure)) {
+		// A key outside the documented set is the unknown-key warning's job,
+		// not a value error.
+		if (!KNOWN_PRESSURE_OPTION_KEYS.has(thresholdKey)) continue;
+		const value = pressure[thresholdKey];
+		if (value === undefined || value === null) continue;
+		if (thresholdKey === 'sampleIntervalMs') {
+			if (typeof value !== 'number' || !Number.isFinite(value) || value < 100) {
+				throw new Error(
+					`${surface}.sampleIntervalMs must be a number >= 100 (milliseconds between ` +
+					`samples) - got ${describeValue(value)} (${typeof value}). The sampler silently ` +
+					`replaces a non-number or a lower number with its 1000 ms default, while NaN and ` +
+					`Infinity slip that floor check and collapse setInterval into a 1 ms loop.`
+				);
+			}
+			if (value > MAX_TIMER_INTERVAL_MS) throwTimerOverflow(`${surface}.sampleIntervalMs`, value);
+			continue;
+		}
+		if (value === false || (typeof value === 'number' && Number.isFinite(value) && value >= 0)) continue;
+		throw new Error(
+			`${surface}.${thresholdKey} must be false (disable the signal) or a number >= 0 - ` +
+			`got ${describeValue(value)} (${typeof value}). A threshold compares as ` +
+			`\`sample >= threshold\`, and every comparison against any other value is false, so ` +
+			`the signal would be silently disabled rather than tuned.`
+		);
+	}
+}
+
+/**
+ * Validate the upgrade-admission section and its four ceilings.
+ *
+ * Each ceiling is read as `value > 0`, so a misshaped value does not fall
+ * back to a default - it leaves that gate open in silence. `0` is each
+ * ceiling's documented deliberate disable, so it stays legal and the refusal
+ * names what `0` means for that ceiling. The section itself must be an
+ * object: the gate reads its ceilings off the section's properties, so no
+ * other value can configure admission control - a bare number or `true`
+ * silently leaves every ceiling unset. The runtime admission factory
+ * (`createUpgradeAdmission`) enforces the same per-ceiling predicate, so a
+ * value that slips past a surface without this guard still cannot construct
+ * the gate.
+ *
+ * @param {Record<string, any> | null | undefined} bag - the options object
+ * @param {string} [key] - the option being read
+ * @param {string} [surface] - how the user names the option, for the message
+ * @returns {void}
+ * @throws {Error} when the section or a ceiling in it cannot be honored
+ */
+export function assertUpgradeAdmissionCeilings(bag, key = 'upgradeAdmission', surface = `websocket.${key}`) {
+	const admission = bag?.[key];
+	if (admission === undefined || admission === null) return;
+	if (typeof admission !== 'object' || Array.isArray(admission)) {
+		throw new Error(
+			`${surface} must be an object of admission ceilings (or omitted) - got ` +
+			`${describeValue(admission)} (${typeof admission}). The gate reads its ceilings off the ` +
+			`section object, so no other value can configure admission control; omit the option to ` +
+			`leave the gate disabled deliberately.`
+		);
+	}
+	const ceilings = [
+		['maxConcurrent', 'Use 0 to leave the concurrent-handshake ceiling disabled deliberately.'],
+		['perTickBudget', 'Use 0 to leave upgrade pacing disabled deliberately.'],
+		['maxConnections', 'Use 0 to disable the live-connection ceiling deliberately.'],
+		['maxDeferred', 'Use 0 to reject once the current tick budget is spent, without retaining a queue.']
+	];
+	for (const [ceiling, zeroMeans] of ceilings) {
+		const value = admission[ceiling];
+		if (value === undefined) continue;
+		if (!Number.isSafeInteger(value) || value < 0) {
+			throw new Error(`${surface}.${ceiling} must be a non-negative safe integer. ${zeroMeans}`);
+		}
+	}
+}
+
+/**
+ * One value judgment for every intake surface.
+ *
+ * The adapter factory, the `uws()` dev plugin, and `createTestServer` each
+ * read user options out of a plain bag, and each shipped the same failure
+ * separately: a value one surface refuses rides through another, so a config
+ * that "works" under `vite dev` or a test harness fails its first production
+ * build. Every surface passes its bag through here, so the set of refused
+ * values cannot differ between them - a surface that does not HONOR an option
+ * still judges its value, on the terms the dev plugin already established for
+ * `protection`.
+ *
+ * `surfaceFor` names the option the way the caller's users spell it, so the
+ * refusal reads in the caller's vocabulary (`websocket.protection` at the
+ * factory, `the uws() dev plugin option protection` in dev).
+ *
+ * @param {Record<string, any> | null | undefined} bag - the options object
+ * @param {(key: string) => string} surfaceFor - names an option for this surface
+ * @returns {void}
+ * @throws {Error} when any judged value cannot be honored
+ */
+export function assertSharedOptionValues(bag, surfaceFor) {
+	assertProtectionPosture(bag, 'protection', surfaceFor('protection'));
+	assertAllowedOrigins(bag, 'allowedOrigins', surfaceFor('allowedOrigins'));
+	assertCompression(bag, 'compression', surfaceFor('compression'));
+	// The observability timers are read as `value > 0` at runtime, and every
+	// comparison against a non-number is false - so a misshaped interval does
+	// not fall back to its default, it silently disables the auditor or
+	// reporter it configures. 0 stays legal for all three: it is the
+	// documented way to disable them deliberately.
+	assertIntervalMs(bag, 'stateHashIntervalMs', surfaceFor('stateHashIntervalMs'));
+	assertIntervalMs(bag, 'consistencyAuditIntervalMs', surfaceFor('consistencyAuditIntervalMs'));
+	assertIntervalMs(bag, 'resourceGrowthAuditIntervalMs', surfaceFor('resourceGrowthAuditIntervalMs'));
+	assertPressureSection(bag, 'pressure', surfaceFor('pressure'));
+	assertUpgradeAdmissionCeilings(bag, 'upgradeAdmission', surfaceFor('upgradeAdmission'));
+}
+
+/**
  * Render a rejected option value for a message without throwing on the exotic
  * ones. `JSON.stringify` handles most, returns `undefined` for a function or a
  * symbol, and throws on a BigInt or a circular object.
@@ -183,4 +495,82 @@ function describeValue(value) {
 export function unknownOptionKeys(bag, known) {
 	if (!bag || typeof bag !== 'object') return [];
 	return Object.keys(bag).filter((k) => !known.has(k));
+}
+
+/**
+ * The closest documented key to an unrecognized one, or `null` when nothing is
+ * close enough to name.
+ *
+ * A casing slip is the most common way to type a known key wrong, so a
+ * case-insensitive exact match wins outright. After that, a small bounded edit
+ * distance (at most 2, and only between names of 4+ characters) catches the
+ * transposed or dropped letter; anything further apart stays suggestion-free,
+ * because a wrong guess in a warning is worse than none.
+ *
+ * @param {string} key - the unrecognized key
+ * @param {Set<string>} known
+ * @returns {string | null}
+ */
+export function suggestOptionKey(key, known) {
+	const lower = key.toLowerCase();
+	for (const candidate of known) {
+		if (candidate.toLowerCase() === lower) return candidate;
+	}
+	if (key.length < 4) return null;
+	let best = null;
+	let bestDistance = 3;
+	for (const candidate of known) {
+		if (candidate.length < 4) continue;
+		const distance = boundedEditDistance(lower, candidate.toLowerCase(), 2);
+		if (distance !== null && distance < bestDistance) {
+			best = candidate;
+			bestDistance = distance;
+		}
+	}
+	return best;
+}
+
+/**
+ * Levenshtein distance capped at `bound`; `null` once the strings are provably
+ * further apart, so the scan over a key set stays cheap.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @param {number} bound
+ * @returns {number | null}
+ */
+function boundedEditDistance(a, b, bound) {
+	if (Math.abs(a.length - b.length) > bound) return null;
+	let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+	for (let i = 1; i <= a.length; i++) {
+		const row = [i];
+		let rowMin = i;
+		for (let j = 1; j <= b.length; j++) {
+			const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+			const value = Math.min(previous[j] + 1, row[j - 1] + 1, previous[j - 1] + cost);
+			row.push(value);
+			if (value < rowMin) rowMin = value;
+		}
+		if (rowMin > bound) return null;
+		previous = row;
+	}
+	return previous[b.length] <= bound ? previous[b.length] : null;
+}
+
+/**
+ * Unknown keys of `bag`, each annotated with the closest documented key when
+ * {@link suggestOptionKey} finds one. `fallbackSuggestion` lets a caller offer
+ * a suggestion from outside `known` - the adapter uses it to point a
+ * `websocket.*` option typed at the top level to its real home.
+ *
+ * @param {Record<string, any> | null | undefined} bag
+ * @param {Set<string>} known
+ * @param {(key: string) => string | null} [fallbackSuggestion]
+ * @returns {string[]}
+ */
+export function describeUnknownOptionKeys(bag, known, fallbackSuggestion) {
+	return unknownOptionKeys(bag, known).map((key) => {
+		const suggestion = suggestOptionKey(key, known) ?? fallbackSuggestion?.(key) ?? null;
+		return suggestion === null ? key : `${key} (did you mean '${suggestion}'?)`;
+	});
 }

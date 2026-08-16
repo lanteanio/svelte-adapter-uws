@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Lockfile-only movement; the declared dependency, peer and optional ranges are unchanged.
   - **Detail:** [Changed engineering detail](#changed).
 
+- **Changed: a configuration value the adapter cannot honor refuses the build.** A misspelled `protection` level silently ran the posture machine in automatic resolution, an unrecognized `allowedOrigins` policy silently refused every origin-bearing connection, and a truthy string switched compression on; such values now fail the build naming what the option accepts, while unknown keys warn with a closest-match suggestion.
+  - **Affects:** Configurations carrying `websocket.protection`, `allowedOrigins`, `compression`, pressure thresholds, admission ceilings, or observability intervals outside their documented forms; every documented value is untouched.
+  - **Action:** None for a valid config; where the new refusal fires, set the named option to one of the values the error lists.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The factory build, the `uws()` dev plugin, and `createTestServer` judge these values through one shared guard; a value refused in one place is refused in all of them, and an unknown key still builds.
+  - **Detail:** [Changed engineering detail](#changed).
+
 - **Fixed: the observed sequence maximum under mixed numbering authority.** A topic numbered by both a relayed sibling and this worker's own counter could record a maximum far below one it had already seen, which fabricated divergence in the cross-worker convergence hash and turned a clean resume handover into duplicate delivery for clustered rooms and per-entry batch sequences.
   - **Affects:** Clustered deployments, and any publisher mixing an explicit `seq` with counter-numbered entries on one topic.
   - **Action:** None; the corrected bookkeeping is the default and costs nothing on a worker that never meets a foreign sequence.
@@ -242,6 +249,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   socket.io-parser 4.2.6 to 4.2.7. Kit lands on the 2.70.2 the locked support
   profile already names, no declared range and no peer floor moves, and
   `0.6.0-next.91` is unaffected and needs no republication.
+
+- **A recognized option whose value cannot be honored refuses the build;
+  an unrecognized key warns with the closest documented name.** The
+  policy already covered unknown `websocket.*` keys and the protective
+  numbers; the remaining silently-degrading values now refuse through
+  one aggregate judgment shared by the factory build, the `uws()` dev
+  plugin, and `createTestServer`, so a value refused on one surface is
+  refused on all three even where a surface does not honor the key - a
+  bad value cannot ride through `vite dev` or a green test suite and
+  fail the first production build. Unknown TOP-LEVEL adapter keys now
+  warn like the `websocket.*` set, each annotated with a
+  case-insensitive or edit-distance closest match, and a `websocket.*`
+  option typed at the top level is pointed to its nested home; a
+  contract test holds the known set equal to the published
+  `AdapterOptions` declaration.
+
+- **The enum- and shape-constrained values are refused for what their
+  degradation actually did.** `protection` must be `'normal'`,
+  `'auto'`, `'elevated'`, or `'siege'` - the runtime pins only a level
+  it recognizes, so a misspelled pin ran the machine in `'auto'`
+  resolution. `allowedOrigins` must be `'*'`, `'same-origin'`, or an
+  array of origin strings - any other truthy shape fell through every
+  branch of the origin check and ran as deny-all, while a falsy one
+  never reached the check and silently ran the `'same-origin'` default;
+  both refuse, each named for what it actually did. A non-string array
+  entry can never match a header and is refused, while the strings
+  themselves stay unparsed because a non-browser client may send an
+  `Origin` no URL parser would normalize. `compression` must be a
+  boolean or a uWS constant - any other truthy value, `'0'` from an
+  environment variable included, silently enabled `SHARED_COMPRESSOR`.
+
+- **The pressure section refuses misshaped tuning and the false
+  disable it never honored.** The section must be an object of
+  thresholds: `false` was silently spread away and ran the full default
+  tuning under a config that meant to disable it, so standing signals
+  down is spelled per threshold. Each threshold must be `false` or a
+  number `>= 0` (a misshaped threshold never fires), and
+  `sampleIntervalMs` a number from `100` to the 32-bit timer ceiling -
+  the runtime silently replaced a non-number or a lower number with its
+  1000 ms default, while NaN, Infinity, and a finite delay above the
+  ceiling all reach `setInterval` and collapse into a 1 ms loop. A
+  `null` threshold reads as absent and keeps its default, instead of
+  replacing it with a value every sample compares above.
+
+- **The admission section and the observability timers refuse what
+  would silently unset them.** `upgradeAdmission` must be an object of
+  ceilings - the gate reads its ceilings off the section object, so no
+  other value configures anything - and `null` now reads as absent all
+  the way into the runtime admission factory, instead of crashing the
+  worker at boot under a config the build passed. `maxConcurrent` and
+  `perTickBudget` must be non-negative safe integers, refused in the
+  admission factory beside `maxConnections` and `maxDeferred`. The
+  three observability intervals ride the interval guard: `0` stays the
+  documented disable, and a delay above the 32-bit timer ceiling -
+  which would overflow into a 1 ms loop - is refused.
 
 ### Fixed
 

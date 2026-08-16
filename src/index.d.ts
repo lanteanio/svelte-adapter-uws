@@ -88,6 +88,13 @@ export interface StaticCacheControlRule {
 	cacheControl: string;
 }
 
+/**
+ * Options for the adapter factory. An unrecognized KEY (top-level or under
+ * `websocket`) warns at build time with a closest-match suggestion and is
+ * ignored, so a config carrying a newer version's key still builds; a
+ * recognized key with a VALUE the option cannot honor fails the build with an
+ * error naming what the option accepts.
+ */
 export interface AdapterOptions {
 	/**
 	 * Output directory for the build.
@@ -638,6 +645,11 @@ export interface WebSocketOptions {
 	 * ```
 	 */
 	upgradeAdmission?: {
+		/**
+		 * Ceiling on upgrades in flight at once; crossed requests receive a
+		 * fast `503 Service Unavailable`. Must be a non-negative safe integer.
+		 * `0` or omitted keeps the ceiling disabled.
+		 */
 		maxConcurrent?: number;
 		/**
 		 * Finite per-worker ceiling for reserved upgrades plus live WebSocket
@@ -646,6 +658,11 @@ export interface WebSocketOptions {
 		 * `0` or omitted keeps the backward-compatible unlimited default.
 		 */
 		maxConnections?: number;
+		/**
+		 * Ceiling on `res.upgrade()` calls per event-loop tick; the overflow is
+		 * deferred via `setImmediate`. Must be a non-negative safe integer.
+		 * `0` or omitted keeps upgrade pacing disabled.
+		 */
 		perTickBudget?: number;
 		/**
 		 * Finite per-worker ceiling for callbacks waiting behind
@@ -1205,8 +1222,13 @@ export interface WebSocketOptions {
 		subscriberRatio?: number | false;
 
 		/**
-		 * Sample interval in milliseconds. Clamped to a minimum of 100 ms
-		 * to prevent pathological tight-loop sampling.
+		 * Sample interval in milliseconds. Must be a number of at least
+		 * 100 ms - the floor that prevents pathological tight-loop
+		 * sampling - and no greater than `2147483647` (Node stores a
+		 * timer delay in a signed 32-bit integer, and a larger delay
+		 * overflows to fire every millisecond). The build refuses
+		 * anything outside those bounds or misshaped rather than
+		 * silently running at the default cadence.
 		 *
 		 * @default 1000
 		 */
@@ -3759,6 +3781,24 @@ export interface TopicHelper {
 // export them, and a runtime export with no declaration is the drift this
 // package closed once already (an import that runs but does not typecheck).
 // Prefer configuring the adapter through `AdapterOptions`.
+
+/**
+ * Top-level option keys the adapter factory recognizes. Anything else passed
+ * to `adapter()` is ignored and warned about at build time; only a known key
+ * with an unusable value fails the build.
+ * @internal
+ */
+export declare const KNOWN_ADAPTER_OPTION_KEYS: ReadonlySet<string>;
+
+/**
+ * Top-level keys in an adapter options object that the factory does not
+ * recognize, each annotated with the closest documented key when one is close
+ * enough to name.
+ * @internal
+ */
+export declare function unknownAdapterOptionKeys(
+	opts: Record<string, unknown> | null | undefined
+): string[];
 
 /**
  * Websocket option keys the adapter recognizes. Anything else in the

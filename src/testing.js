@@ -16,6 +16,7 @@ import { createConnectionPermitCarrier } from './runtime/utils/connection-permit
 import {
 	assertWireSubscribeAuthorization,
 	assertProtectiveNumber,
+	assertSharedOptionValues,
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
 import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './runtime/handler/cluster-sequence-policy.js';
@@ -143,6 +144,13 @@ export async function createTestServer(options = {}) {
 		'authorizeWireSubscribe',
 		'the createTestServer option authorizeWireSubscribe'
 	);
+	// Same judgment of the shared option values as the adapter build and the
+	// dev plugin: a misspelled `protection` pin below would otherwise build
+	// the machine UNPINNED, so a test written against a pinned 'siege' would
+	// quietly run against 'auto' resolution - and a value the build refuses
+	// on an option this harness does not honor must still refuse here, so a
+	// test suite can never certify a config the production build rejects.
+	assertSharedOptionValues(options, (key) => `the createTestServer option ${key}`);
 	const { port = 0, wsPath = '/ws', handler = {}, upgradeAdmission, messageAdmission: messageAdmissionOptions, protection, metrics, adminPath = '/__realtime', readinessCheckPath = '/readyz', healthCheckPath = '/healthz', primaryInit } = options;
 	// Read with `??`, not as a destructuring default. Every other surface folds
 	// `null` into the default - assertProtectiveNumber returns early for it as an

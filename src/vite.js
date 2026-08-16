@@ -10,7 +10,8 @@ import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireS
 import {
 	assertWireSubscribeAuthorization,
 	assertProtectiveNumber,
-	unknownOptionKeys,
+	assertSharedOptionValues,
+	describeUnknownOptionKeys,
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
 import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './runtime/handler/cluster-sequence-policy.js';
@@ -94,7 +95,16 @@ export default function uws(options = {}) {
 	// size and timeout options are not dev-plugin options; passing one to
 	// `uws()` warns as unknown.
 	assertProtectiveNumber(options, 'timeoutMs', 'the uws() dev plugin option timeoutMs');
-	const unknownPluginKeys = unknownOptionKeys(options, KNOWN_PLUGIN_OPTION_KEYS);
+	// The shared adapter-option values - `allowedOrigins` among them, which
+	// the plugin honors, and `protection`, `compression`, the pressure
+	// section, the observability intervals, and the admission ceilings, which
+	// it does not. An adapter-only KEY falls through to the unknown-key
+	// warning below like every other, but its VALUE is judged first, by the
+	// same aggregate the production build runs: a value the build refuses
+	// must refuse here too, not ride through `vite dev` as an ignorable
+	// warning and fail the first production build.
+	assertSharedOptionValues(options, (key) => `the uws() dev plugin option ${key}`);
+	const unknownPluginKeys = describeUnknownOptionKeys(options, KNOWN_PLUGIN_OPTION_KEYS);
 	if (unknownPluginKeys.length) {
 		console.warn(
 			`[adapter-uws] unknown uws() plugin option(s): ${unknownPluginKeys.join(', ')} - ` +

@@ -8,9 +8,18 @@
 // on the dev plugin, which had no key checking at all.
 
 import { describe, it, expect, vi } from 'vitest';
-import { serializeWsOptions, unknownWebsocketOptionKeys, KNOWN_WEBSOCKET_OPTION_KEYS, KNOWN_NESTED_WEBSOCKET_OPTION_KEYS } from '../src/index.js';
+import {
+	serializeWsOptions,
+	unknownWebsocketOptionKeys,
+	unknownAdapterOptionKeys,
+	KNOWN_ADAPTER_OPTION_KEYS,
+	KNOWN_WEBSOCKET_OPTION_KEYS,
+	KNOWN_NESTED_WEBSOCKET_OPTION_KEYS
+} from '../src/index.js';
 import uws from '../src/vite.js';
 import { createTestServer } from '../src/testing.js';
+import { createUpgradeAdmission } from '../src/runtime/utils/upgrade-admission.js';
+import { FIXTURE_VARIANTS } from './fixture/variants.js';
 
 describe('a restrictive flag refuses a misshaped value rather than reading it as off', () => {
 	// The reads are `=== true`, which treats every other value as "off". For a
@@ -70,12 +79,36 @@ describe('the dev plugin does not drop its options in silence', () => {
 		expect(() => uws({ authorizeWireSubscribe: 'strict' })).not.toThrow();
 	});
 
-	it('warns on an unrecognized option key', () => {
+	it('warns on an unrecognized option key, naming the closest documented one', () => {
 		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		try {
 			uws({ authorizeWireSubcribe: true });
 			expect(warn, 'a typo must not be dropped silently').toHaveBeenCalled();
-			expect(String(warn.mock.calls[0][0])).toMatch(/authorizeWireSubcribe/);
+			expect(String(warn.mock.calls[0][0]))
+				.toContain("authorizeWireSubcribe (did you mean 'authorizeWireSubscribe'?)");
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('warns on a casing slip with the documented spelling', () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			uws({ AllowedOrigins: '*' });
+			expect(String(warn.mock.calls[0][0]))
+				.toContain("AllowedOrigins (did you mean 'allowedOrigins'?)");
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('offers no suggestion for a key nothing documented is close to', () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			uws({ turboMode: true });
+			const line = String(warn.mock.calls[0][0]);
+			expect(line).toContain('turboMode');
+			expect(line, 'a wrong guess in a warning is worse than none').not.toContain('did you mean');
 		} finally {
 			warn.mockRestore();
 		}
@@ -106,6 +139,241 @@ describe('the dev plugin does not drop its options in silence', () => {
 	});
 });
 
+// The same inversion in the graduated protection posture: the runtime builds
+// the machine for any non-'normal' value but pins only a level it recognizes,
+// so a misspelled pin does not fail and does not pin - it silently resolves
+// the level from live pressure, which is 'auto' behavior under a config that
+// asked for an incident-response freeze.
+describe('the protection posture refuses a level the runtime would not pin', () => {
+	const REFUSAL = /must be 'normal', 'auto', 'elevated', or 'siege'/;
+
+	for (const bad of ['seige', 'Siege', 'on', '', false, true, 1, {}]) {
+		it(`the build refuses protection = ${JSON.stringify(bad)}`, () => {
+			expect(() => serializeWsOptions({ protection: bad }, false)).toThrow(REFUSAL);
+		});
+	}
+
+	it('the build accepts every documented level and absence', () => {
+		for (const level of ['normal', 'auto', 'elevated', 'siege']) {
+			expect(serializeWsOptions({ protection: level }, false).protection).toBe(level);
+		}
+		expect(() => serializeWsOptions({}, false)).not.toThrow();
+	});
+
+	it('the dev plugin refuses the same misspelled level through the shared guard', () => {
+		// The plugin does not honor `protection` (dev never engages admission
+		// control), but the VALUE is judged before the unknown-key warning: a
+		// level the production build refuses must not ride through `vite dev`.
+		expect(() => uws({ protection: 'seige' })).toThrow(REFUSAL);
+	});
+
+	it('createTestServer refuses the same misspelled level through the shared guard', async () => {
+		// Close the server if the guard regresses and the call unexpectedly
+		// succeeds, so this red case never leaks a listener.
+		let server;
+		let thrown = null;
+		try {
+			server = await createTestServer({ protection: /** @type {any} */ ('seige') });
+		} catch (error) {
+			thrown = error;
+		} finally {
+			await server?.close();
+		}
+		expect(String(thrown)).toMatch(REFUSAL);
+	});
+});
+
+// The origin policy has exactly three recognized forms; anything else falls
+// through every branch of the runtime check and returns false - deny-all,
+// reported by the build as a configured policy.
+describe('the origin policy refuses a shape the runtime check cannot match', () => {
+	const REFUSAL = /must be '\*', 'same-origin', or an array of origin strings/;
+
+	for (const bad of ['same-orgin', 'any', '', true, 1, { origin: '*' }]) {
+		it(`the build refuses allowedOrigins = ${JSON.stringify(bad)}`, () => {
+			expect(() => serializeWsOptions({ allowedOrigins: bad }, false)).toThrow(REFUSAL);
+		});
+	}
+
+	it('the build refuses a non-string allowlist entry, which can never match a header', () => {
+		expect(() => serializeWsOptions({ allowedOrigins: ['https://example.com', /example/] }, false))
+			.toThrow(/entries must be non-empty origin strings/);
+		expect(() => serializeWsOptions({ allowedOrigins: [''] }, false))
+			.toThrow(/entries must be non-empty origin strings/);
+	});
+
+	it('the build accepts the three documented forms and absence', () => {
+		expect(() => serializeWsOptions({ allowedOrigins: '*' }, false)).not.toThrow();
+		expect(() => serializeWsOptions({ allowedOrigins: 'same-origin' }, false)).not.toThrow();
+		expect(() => serializeWsOptions({ allowedOrigins: ['https://example.com', 'null'] }, false)).not.toThrow();
+		expect(serializeWsOptions({}, false).allowedOrigins).toBe('same-origin');
+	});
+
+	it('the dev plugin refuses the same misspelled policy through the shared guard', () => {
+		expect(() => uws({ allowedOrigins: 'same-orgin' })).toThrow(REFUSAL);
+	});
+
+	it('names the falsy case for what it did: silently run the default, not deny', () => {
+		// '' / false / 0 never reached the origin check - the runtime reads
+		// the policy with a same-origin fallback - so the refusal must not
+		// claim deny-all for them. They are refused for expressing no policy.
+		for (const falsy of ['', false, 0]) {
+			expect(() => serializeWsOptions({ allowedOrigins: falsy }, false))
+				.toThrow(/silently runs the 'same-origin' default/);
+		}
+		expect(() => serializeWsOptions({ allowedOrigins: 'same-orgin' }, false))
+			.toThrow(/refuse every origin-bearing connection/);
+	});
+
+	it('createTestServer refuses the same misspelled policy through the shared guard', async () => {
+		// The harness does not honor allowedOrigins, but a value the build
+		// refuses must not be certified green by a test suite.
+		let server;
+		let thrown = null;
+		try {
+			server = await createTestServer(/** @type {any} */ ({ allowedOrigins: 'same-orgin' }));
+		} catch (error) {
+			thrown = error;
+		} finally {
+			await server?.close();
+		}
+		expect(String(thrown)).toMatch(REFUSAL);
+	});
+});
+
+// Compression coerces every truthy non-number to SHARED_COMPRESSOR, so the
+// natural env spelling INVERTS: '0' and 'false' are truthy strings that turn
+// compression ON.
+describe('compression refuses a value the runtime would coerce to ON', () => {
+	const REFUSAL = /must be a boolean or a uWS compression constant/;
+
+	for (const bad of ['0', 'false', 'shared', 1.5, -1, NaN]) {
+		it(`refuses compression = ${JSON.stringify(bad) ?? String(bad)}`, () => {
+			expect(() => serializeWsOptions({ compression: bad }, false)).toThrow(REFUSAL);
+		});
+	}
+
+	it('accepts booleans, uWS constants, and absence', () => {
+		expect(serializeWsOptions({ compression: true }, false).compression).toBe(true);
+		expect(serializeWsOptions({ compression: false }, false).compression).toBe(false);
+		// uWS constants are non-negative integer bit sets; 0 is DISABLED.
+		expect(serializeWsOptions({ compression: 0 }, false).compression).toBe(0);
+		expect(serializeWsOptions({ compression: 2 }, false).compression).toBe(2);
+		expect(serializeWsOptions({}, false).compression).toBe(false);
+	});
+
+	it('the dev plugin refuses the same inverted value through the shared guard', () => {
+		// Dev delegates compression to the ws library and never honors the
+		// key, but the value must not ride through `vite dev` and fail the
+		// first production build.
+		expect(() => uws({ compression: '0' })).toThrow(REFUSAL);
+	});
+
+	it('createTestServer refuses the same inverted value through the shared guard', async () => {
+		let server;
+		let thrown = null;
+		try {
+			server = await createTestServer(/** @type {any} */ ({ compression: '0' }));
+		} catch (error) {
+			thrown = error;
+		} finally {
+			await server?.close();
+		}
+		expect(String(thrown)).toMatch(REFUSAL);
+	});
+});
+
+// The pressure thresholds fire on `sample >= threshold`, so a misshaped
+// threshold never fires and the signal is silently gone; `false` is the
+// documented deliberate disable and stays legal. The sample interval degrades
+// differently - the runtime replaces anything under 100 or misshaped with the
+// 1000 ms default - so a configured cadence would be silently ignored.
+describe('a pressure threshold refuses a value that would silently stand the signal down', () => {
+	it('refuses a string threshold', () => {
+		expect(() => serializeWsOptions({ pressure: { memoryHeapUsedRatio: '0.9' } }, false))
+			.toThrow(/websocket\.pressure\.memoryHeapUsedRatio must be false \(disable the signal\) or a number >= 0/);
+	});
+
+	it('refuses a negative threshold, which would fire permanently', () => {
+		expect(() => serializeWsOptions({ pressure: { publishRatePerSec: -1 } }, false))
+			.toThrow(/must be false \(disable the signal\) or a number >= 0/);
+	});
+
+	it('keeps the documented false disable and numeric tuning legal', () => {
+		expect(() => serializeWsOptions({
+			pressure: { memoryHeapUsedRatio: 0.9, subscriberRatio: false, psiCpuSome: 60 }
+		}, false)).not.toThrow();
+	});
+
+	it('refuses a sample interval the runtime would silently replace with the default', () => {
+		expect(() => serializeWsOptions({ pressure: { sampleIntervalMs: 50 } }, false))
+			.toThrow(/sampleIntervalMs must be a number >= 100/);
+		expect(() => serializeWsOptions({ pressure: { sampleIntervalMs: '1000' } }, false))
+			.toThrow(/sampleIntervalMs must be a number >= 100/);
+		expect(() => serializeWsOptions({ pressure: { sampleIntervalMs: 1000 } }, false)).not.toThrow();
+	});
+
+	it('refuses a sample interval above the 32-bit timer ceiling, which would overflow to 1 ms', () => {
+		// A finite value above 2^31-1 passes a `>= 100` check and then
+		// overflows Node's setInterval into the exact tight loop the floor
+		// exists to prevent.
+		expect(() => serializeWsOptions({ pressure: { sampleIntervalMs: 2 ** 31 } }, false))
+			.toThrow(/no greater than 2147483647 milliseconds/);
+		// Fractional milliseconds below the ceiling are a working setInterval
+		// delay and must stay legal.
+		expect(() => serializeWsOptions({ pressure: { sampleIntervalMs: 1000.5 } }, false)).not.toThrow();
+	});
+
+	it('refuses a pressure section that is not an object of thresholds', () => {
+		expect(() => serializeWsOptions({ pressure: 'high' }, false))
+			.toThrow(/websocket\.pressure must be an object of thresholds/);
+		// `false` is spread away by the runtime (`false || {}`) and replaced by
+		// the FULL default thresholds - sampling at complete default tuning
+		// under a config that plainly meant "no pressure monitoring". Every
+		// sub-threshold spells disable as `false`, so the section-level `false`
+		// is exactly the silent degradation this guard exists for.
+		expect(() => serializeWsOptions({ pressure: false }, false))
+			.toThrow(/websocket\.pressure must be an object of thresholds/);
+	});
+
+	it('leaves an unknown pressure key to the unknown-key warning', () => {
+		// A typo'd KEY is the warning's job; the value guard must not turn it
+		// into a confusing value error.
+		expect(() => serializeWsOptions({ pressure: { memoryHeapUsedRatioo: '0.9' } }, false)).not.toThrow();
+		expect(unknownWebsocketOptionKeys({ pressure: { memoryHeapUsedRatioo: 0.9 } }))
+			.toEqual(['pressure.memoryHeapUsedRatioo']);
+	});
+
+	it('the dev plugin refuses the same misshaped section through the shared guard', () => {
+		// `pressure` is not a dev-plugin option; the key warns as unknown, but
+		// the VALUE is judged by the same aggregate the build runs.
+		expect(() => uws({ pressure: { sampleIntervalMs: 50 } }))
+			.toThrow(/sampleIntervalMs must be a number >= 100/);
+		expect(() => uws({ pressure: 'high' }))
+			.toThrow(/must be an object of thresholds/);
+	});
+});
+
+// The three observability timers ride the same interval guard: misshaped
+// values were already refused on protective-number terms; the timer ceiling is
+// the second half, because a finite value above 2^31-1 passes `> 0` and then
+// overflows Node's setInterval into a 1 ms cadence - the auditor it was meant
+// to slow down instead runs in the tightest loop the event loop allows.
+describe('an observability interval refuses a delay the timer cannot hold', () => {
+	for (const key of ['stateHashIntervalMs', 'consistencyAuditIntervalMs', 'resourceGrowthAuditIntervalMs']) {
+		it(`refuses ${key} above the 32-bit timer ceiling`, () => {
+			expect(() => serializeWsOptions({ [key]: 2 ** 31 }, false))
+				.toThrow(/no greater than 2147483647 milliseconds/);
+		});
+
+		it(`keeps a fractional ${key} below the ceiling legal`, () => {
+			// setInterval accepts fractional milliseconds; refusing them would
+			// break a config that ran fine before the guard.
+			expect(() => serializeWsOptions({ [key]: 30000.5 }, false)).not.toThrow();
+		});
+	}
+});
+
 // The same silent-disable in a NUMERIC option. The rate limits are read as
 // `x ?? default` and then compared with `>` / `>=`, and every comparison
 // against a non-number is false - so a misshaped value does not fall back to
@@ -123,7 +391,13 @@ describe('an option that sizes a rate limit refuses a misshaped value', () => {
 		'maxPayloadLength',
 		'maxBackpressure',
 		'idleTimeout',
-		'upgradeTimeout'
+		'upgradeTimeout',
+		// The observability timers are read as `value > 0` at runtime, so a
+		// misshaped interval silently disables the auditor or reporter it
+		// configures; 0 stays the documented deliberate disable.
+		'stateHashIntervalMs',
+		'consistencyAuditIntervalMs',
+		'resourceGrowthAuditIntervalMs'
 	];
 
 	for (const key of cases) {
@@ -237,6 +511,72 @@ describe('an unknown key nested inside an option object is reported', () => {
 	});
 
 	it.each([-1, 1.5, Number.POSITIVE_INFINITY, '500', null])(
+		'refuses upgradeAdmission.maxConcurrent = %p before serializing the build',
+		(value) => {
+			// The gate reads `maxConcurrent > 0`, so a misshaped value does not
+			// fall back - it leaves the handshake ceiling open in silence.
+			expect(() => serializeWsOptions({
+				upgradeAdmission: { maxConcurrent: value }
+			}, false)).toThrow(/maxConcurrent must be a non-negative safe integer/);
+		}
+	);
+
+	it('accepts a finite maxConcurrent ceiling and the explicit disabled value', () => {
+		expect(serializeWsOptions({
+			upgradeAdmission: { maxConcurrent: 500 }
+		}, false).upgradeAdmission.maxConcurrent).toBe(500);
+		expect(() => serializeWsOptions({
+			upgradeAdmission: { maxConcurrent: 0 }
+		}, false)).not.toThrow();
+	});
+
+	it.each([-1, 1.5, Number.POSITIVE_INFINITY, '64', null])(
+		'refuses upgradeAdmission.perTickBudget = %p before serializing the build',
+		(value) => {
+			expect(() => serializeWsOptions({
+				upgradeAdmission: { perTickBudget: value }
+			}, false)).toThrow(/perTickBudget must be a non-negative safe integer/);
+		}
+	);
+
+	it('accepts a finite perTickBudget and the explicit disabled value', () => {
+		expect(serializeWsOptions({
+			upgradeAdmission: { perTickBudget: 64 }
+		}, false).upgradeAdmission.perTickBudget).toBe(64);
+		expect(() => serializeWsOptions({
+			upgradeAdmission: { perTickBudget: 0 }
+		}, false)).not.toThrow();
+	});
+
+	it.each([true, false, 500, 'strict', ['maxConcurrent']])(
+		'refuses an upgradeAdmission section of %p, off which no ceiling can be read',
+		(value) => {
+			// The gate reads its ceilings off the section object, so a bare
+			// number or `true` configured nothing at all, in silence - and a
+			// section of `false` crashed the worker at start, because the
+			// runtime admission factory refuses `false` as a misshaped
+			// ceiling. The build now refuses the section shape up front.
+			expect(() => serializeWsOptions({
+				upgradeAdmission: value
+			}, false)).toThrow(/upgradeAdmission must be an object of admission ceilings/);
+		}
+	);
+
+	it('reads a null upgradeAdmission section as absent on every layer', () => {
+		// A JSON round trip or a config spread writes an unconfigured section
+		// as null, and every config guard reads null as absent - so the build
+		// must pass it AND the runtime admission factory must boot with it,
+		// not refuse null as a misshaped ceiling and crash the worker at
+		// start under a config the build passed.
+		expect(() => serializeWsOptions({ upgradeAdmission: null }, false)).not.toThrow();
+		// And the gate it builds is genuinely the disabled gate, not a
+		// zero-ceiling one: acquisition always succeeds.
+		const gate = createUpgradeAdmission(null);
+		expect(gate.tryAcquire()).toBe(true);
+		expect(gate.tryAcquireConnection()).toBe(true);
+	});
+
+	it.each([-1, 1.5, Number.POSITIVE_INFINITY, '500', null])(
 		'refuses upgradeAdmission.maxConnections = %p before serializing the build',
 		(value) => {
 			expect(() => serializeWsOptions({
@@ -339,5 +679,89 @@ describe('the payload ceiling is one guard, not three copies of it', () => {
 		} finally {
 			await server.close();
 		}
+	});
+});
+
+// The fourth shape of the silent drop: a key spelled wrong at the TOP level of
+// the adapter options. Warned like the websocket.* keys - refusing would break
+// an app pinning an older adapter under a config carrying a newer version's
+// key - and each warning names the closest documented key, because the usual
+// mistake is a casing slip or one transposed letter.
+describe('an unknown top-level adapter option is reported with the closest documented key', () => {
+	it('suggests the documented key for a one-letter slip', () => {
+		expect(unknownAdapterOptionKeys({ precompres: true }))
+			.toEqual(["precompres (did you mean 'precompress'?)"]);
+	});
+
+	it('suggests the documented key for a casing slip', () => {
+		expect(unknownAdapterOptionKeys({ HealthCheckPath: '/healthz' }))
+			.toEqual(["HealthCheckPath (did you mean 'healthCheckPath'?)"]);
+	});
+
+	it('points a websocket option typed at the top level to its nested home', () => {
+		expect(unknownAdapterOptionKeys({ allowedOrigins: '*' }))
+			.toEqual(["allowedOrigins (did you mean 'websocket.allowedOrigins'?)"]);
+	});
+
+	it('offers no suggestion for a key nothing documented is close to', () => {
+		expect(unknownAdapterOptionKeys({ turboMode: true })).toEqual(['turboMode']);
+	});
+
+	it('stays quiet for every documented top-level option', () => {
+		expect(unknownAdapterOptionKeys({
+			out: 'build',
+			precompress: true,
+			envPrefix: '',
+			healthCheckPath: '/healthz',
+			readinessCheckPath: '/readyz',
+			tracing: './src/lib/server/tracing.js',
+			staticHeaders: {},
+			staticCacheControl: [],
+			staticDotfiles: false,
+			websocket: true
+		})).toEqual([]);
+		expect(unknownAdapterOptionKeys(null)).toEqual([]);
+		expect(unknownAdapterOptionKeys(undefined)).toEqual([]);
+	});
+
+	it('pins the known-key set literal so an edit to it is a conscious act', () => {
+		// This pin only catches an accidental edit of the set itself - both
+		// sides of the comparison are hand-written copies. The binding to the
+		// factory's real intake is the AdapterOptions contract test
+		// (test/websocket-option-contract.test.js), which parses the published
+		// declaration and holds the set equal to it.
+		expect([...KNOWN_ADAPTER_OPTION_KEYS].sort()).toEqual([
+			'envPrefix', 'healthCheckPath', 'out', 'precompress', 'readinessCheckPath',
+			'staticCacheControl', 'staticDotfiles', 'staticHeaders', 'tracing', 'websocket'
+		]);
+	});
+});
+
+// The control: a configuration that is valid today stays exactly as quiet as
+// it was. Every new value guard has to coexist with the options the shipped
+// examples and the fixture app already use.
+describe('a config valid before the value guards stays silent', () => {
+	it('serializes the fixture default variant untouched', () => {
+		// Bound to the real variant object, not a hand copy, so a fixture
+		// edit cannot silently unbind this control from the options the
+		// booted suites actually build with.
+		const serialized = serializeWsOptions(FIXTURE_VARIANTS.default.websocket, false);
+		expect(serialized.allowedOrigins).toBe('*');
+		expect(serialized.upgradeRateLimit).toBe(100);
+	});
+
+	it('serializes a fully tuned config without a warning-shaped key report', () => {
+		const websocket = {
+			allowedOrigins: ['https://example.com'],
+			compression: true,
+			protection: 'auto',
+			stateHashIntervalMs: 30000,
+			consistencyAuditIntervalMs: 5000,
+			resourceGrowthAuditIntervalMs: 30000,
+			pressure: { memoryHeapUsedRatio: 0.9, subscriberRatio: false, sampleIntervalMs: 1000 },
+			upgradeAdmission: { maxConcurrent: 500, perTickBudget: 64, maxConnections: 5000 }
+		};
+		expect(() => serializeWsOptions(websocket, false)).not.toThrow();
+		expect(unknownWebsocketOptionKeys(websocket)).toEqual([]);
 	});
 });
