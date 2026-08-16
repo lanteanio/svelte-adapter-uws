@@ -1,4 +1,4 @@
-schema_version,owner,current,channel,dist_tag,adapter_version,provenance,adapter,realtime,extensions,node,uwebsockets
-1,svelte-adapter-uws,false,legacy,,,,0.4.x,0.4.x,0.4.x,,
-1,svelte-adapter-uws,false,stable,latest,0.5.8,npm:svelte-adapter-uws@0.5.8,0.5.x,0.5.x,0.5.x,>=22.0.0,github:uNetworking/uWebSockets.js#v20.67.0
-1,svelte-adapter-uws,true,prerelease,next,0.6.0-next.92,workspace,0.6.0-next,0.6.0-next,0.6.0-next,>=22.0.0,https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
+schema_version,owner,current,channel,dist_tag,adapter_version,provenance,adapter,realtime,extensions,node,uwebsockets,train,realtime_version,extensions_version,realtime_head,extensions_head,wire_protocol,procedure
+1,svelte-adapter-uws,false,legacy,,,,0.4.x,0.4.x,0.4.x,,,0.4,,,,,,
+1,svelte-adapter-uws,false,stable,latest,0.5.8,npm:svelte-adapter-uws@0.5.8,0.5.x,0.5.x,0.5.x,>=22.0.0,github:uNetworking/uWebSockets.js#v20.67.0,0.5,,,,,,
+1,svelte-adapter-uws,true,prerelease,next,0.6.0-next.92,workspace,0.6.0-next,0.6.0-next,0.6.0-next,>=22.0.0,https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz,0.6,0.6.0-next.90,0.6.0-next.63,c76a05892aa6f95222644583f49ab22843d29e5c,90c9f887b888cef96a44c2113950f00e0b8f7f33,1,docs/releasing.md#prerelease-publication docs/releasing.md#abort

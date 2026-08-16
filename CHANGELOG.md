@@ -143,7 +143,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Whitespace-padded, signed, and decimal spellings of a whole number keep booting exactly the fleet they denote; values that never denoted one now refuse with the `ADAPTER-ERR-CLUSTER-CONFIG-WORKERS` line, and `1e2` boots the hundred workers it denotes instead of one.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Added: the compatibility manifest records the coordinated release train.** The machine-readable manifest now carries the exact qualified sibling versions, the git heads the packed cross-repo gate exercised, the frozen wire-protocol revision, and the publication-order and abort procedure references, and the gate refuses drift between the manifest, the cross-repo workflow pins, and the protocol schema.
+  - **Affects:** Release tooling and anyone reading `docs/compatibility.v1.csv`; no runtime code path.
+  - **Action:** None; the seven columns are additive and filled for the current train.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The pre-existing columns are byte-identical; rows predating the train contract leave the six release-fact columns empty.
+  - **Detail:** [Added engineering detail](#added).
+
 <!-- consumer-release-summary:end -->
+
+### Added
+
+- **The compatibility manifest carries per-train coordinated release
+  facts.** Seven additive columns - `train`, `realtime_version`,
+  `extensions_version`, `realtime_head`, `extensions_head`, `wire_protocol`,
+  and `procedure` - record, per release train, the exact qualified sibling
+  versions, the sibling git heads the packed cross-repo gate exercised, the
+  frozen wire-protocol revision, and the publication-order and abort
+  procedure anchors in `docs/releasing.md`. The compatibility gate validates
+  the shapes hermetically, and with the repository facts in hand it refuses
+  a procedure anchor absent from the release policy, a head that disagrees
+  with the cross-repo workflow's `REALTIME_REF` or `EXTENSIONS_REF` pin,
+  and a `wire_protocol` that disagrees with the revision parsed from
+  `protocol.schema.json` - parsed the same way the runtime version banner
+  parses it, never duplicated by hand. The six release facts form one unit:
+  the current row must carry all of them, and a row predating the train
+  contract leaves all six empty. The pinned 0.5.8 baseline digest is
+  recomputed over the widened row with its pre-existing fields
+  byte-identical.
 
 ### Changed
 

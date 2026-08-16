@@ -51,6 +51,22 @@ const readme = read("README.md");
 const migration = read("MIGRATION.md");
 const pkg = JSON.parse(read("package.json"));
 const rows = parseCompatibility(manifest);
+const releasePolicy = read("docs/releasing.md");
+const crossRepoWorkflow = read(".github/workflows/cross-repo-heads.yml");
+const protocolSchema = JSON.parse(read("protocol.schema.json"));
+const trainFacts = {
+	policy: releasePolicy,
+	workflow: crossRepoWorkflow,
+	protocolSchema,
+};
+const TRAIN_FACT_FIELDS = [
+	"realtime_version",
+	"extensions_version",
+	"realtime_head",
+	"extensions_head",
+	"wire_protocol",
+	"procedure",
+];
 const nativeSpec = (ref) => "github:uNetworking/" + "uWebSockets.js#" + ref;
 const nativeArchive = (ref) =>
 	"https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/" +
@@ -126,6 +142,193 @@ describe("ecosystem compatibility manifest", () => {
 			provenance: "npm:svelte-adapter-uws@0.5.8",
 			uwebsockets: nativeSpec("v20.67.0"),
 		});
+	});
+
+	it("records the coordinated release train and passes against the repository facts", () => {
+		expect(validateCompatibility(rows, pkg, trainFacts)).toEqual([]);
+		expect(rows.find((row) => row.current === "true")).toMatchObject({
+			train: "0.6",
+			realtime_version: "0.6.0-next.90",
+			extensions_version: "0.6.0-next.63",
+			realtime_head: "c76a05892aa6f95222644583f49ab22843d29e5c",
+			extensions_head: "90c9f887b888cef96a44c2113950f00e0b8f7f33",
+			wire_protocol: "1",
+			procedure:
+				"docs/releasing.md#prerelease-publication docs/releasing.md#abort",
+		});
+		// The shipped anchors point at real policy headings, and the slug rule
+		// (lowercase, spaces to hyphens, everything else stripped) is what maps
+		// them; the clean validation above proves the mapping resolves.
+		expect(releasePolicy).toContain("## Prerelease publication");
+		expect(releasePolicy).toContain("## Abort");
+		// Rows written before the train contract keep the documented empty
+		// spelling for all six release facts and still pass.
+		for (const channel of ["legacy", "stable"]) {
+			const row = rows.find((candidate) => candidate.channel === channel);
+			expect(row.train).toBe(channel === "legacy" ? "0.4" : "0.5");
+			for (const field of TRAIN_FACT_FIELDS) expect(row[field]).toBe("");
+		}
+	});
+
+	it("requires a well-formed train that prefixes its adapter series", () => {
+		for (const broken of ["", "0.6.0", "0.x", "banana"]) {
+			const mutated = rows.map((row) =>
+				row.current === "true" ? { ...row, train: broken } : row,
+			);
+			expect(validateCompatibility(mutated, pkg), broken).toContain(
+				"prerelease: train must be a major.minor release train",
+			);
+		}
+		const foreign = rows.map((row) =>
+			row.current === "true" ? { ...row, train: "0.5" } : row,
+		);
+		expect(validateCompatibility(foreign, pkg)).toContain(
+			"prerelease: train 0.5 does not prefix the adapter series 0.6.0-next",
+		);
+		const missingStable = rows.map((row) =>
+			row.channel === "stable" ? { ...row, train: "" } : row,
+		);
+		expect(validateCompatibility(missingStable, pkg)).toContain(
+			"stable: train must be a major.minor release train",
+		);
+	});
+
+	it("treats the six train release facts as one all-or-nothing unit", () => {
+		const partialCurrent = rows.map((row) =>
+			row.current === "true" ? { ...row, realtime_head: "" } : row,
+		);
+		const partialErrors = validateCompatibility(partialCurrent, pkg);
+		expect(partialErrors).toContain(
+			"prerelease: train release facts form one unit and must be all present or all empty",
+		);
+		expect(partialErrors).toContain(
+			"prerelease: current row must record all six train release facts",
+		);
+		const bareCurrent = rows.map((row) =>
+			row.current === "true"
+				? {
+						...row,
+						...Object.fromEntries(
+							TRAIN_FACT_FIELDS.map((field) => [field, ""]),
+						),
+					}
+				: row,
+		);
+		expect(validateCompatibility(bareCurrent, pkg)).toContain(
+			"prerelease: current row must record all six train release facts",
+		);
+		const partialStable = rows.map((row) =>
+			row.channel === "stable" ? { ...row, wire_protocol: "1" } : row,
+		);
+		expect(validateCompatibility(partialStable, pkg)).toContain(
+			"stable: train release facts form one unit and must be all present or all empty",
+		);
+	});
+
+	it("rejects out-of-series sibling versions, malformed heads, and malformed procedures", () => {
+		const outsideRealtime = rows.map((row) =>
+			row.current === "true"
+				? { ...row, realtime_version: "0.5.0" }
+				: row,
+		);
+		expect(validateCompatibility(outsideRealtime, pkg)).toContain(
+			"prerelease: realtime_version release identity is outside its series",
+		);
+		const outsideExtensions = rows.map((row) =>
+			row.current === "true"
+				? { ...row, extensions_version: "0.7.0" }
+				: row,
+		);
+		expect(validateCompatibility(outsideExtensions, pkg)).toContain(
+			"prerelease: extensions_version release identity is outside its series",
+		);
+		const shortHead = rows.map((row) =>
+			row.current === "true"
+				? { ...row, extensions_head: "90c9f887" }
+				: row,
+		);
+		expect(validateCompatibility(shortHead, pkg)).toContain(
+			"prerelease: extensions_head must be a full lowercase git head",
+		);
+		const upperHead = rows.map((row) =>
+			row.current === "true"
+				? { ...row, realtime_head: row.realtime_head.toUpperCase() }
+				: row,
+		);
+		expect(validateCompatibility(upperHead, pkg)).toContain(
+			"prerelease: realtime_head must be a full lowercase git head",
+		);
+		const zeroRevision = rows.map((row) =>
+			row.current === "true" ? { ...row, wire_protocol: "0" } : row,
+		);
+		expect(validateCompatibility(zeroRevision, pkg)).toContain(
+			"prerelease: wire_protocol must be a positive integer revision",
+		);
+		for (const procedure of [
+			"docs/other.md#abort",
+			"docs/releasing.md#Abort",
+			"docs/releasing.md#abort  docs/releasing.md#abort",
+		]) {
+			const mutated = rows.map((row) =>
+				row.current === "true" ? { ...row, procedure } : row,
+			);
+			expect(validateCompatibility(mutated, pkg), procedure).toContain(
+				"prerelease: procedure must be space-separated docs/releasing.md anchors",
+			);
+		}
+	});
+
+	it("refuses fact drift against the release policy, the workflow pins, and the protocol schema", () => {
+		const missingAnchor = rows.map((row) =>
+			row.current === "true"
+				? { ...row, procedure: "docs/releasing.md#no-such-heading" }
+				: row,
+		);
+		expect(validateCompatibility(missingAnchor, pkg)).toEqual([]);
+		expect(
+			validateCompatibility(missingAnchor, pkg, trainFacts),
+		).toContain(
+			"prerelease: procedure anchor docs/releasing.md#no-such-heading has no matching release policy heading",
+		);
+
+		const driftedHead = rows.map((row) =>
+			row.current === "true"
+				? { ...row, realtime_head: "a".repeat(40) }
+				: row,
+		);
+		expect(validateCompatibility(driftedHead, pkg)).toEqual([]);
+		expect(validateCompatibility(driftedHead, pkg, trainFacts)).toContain(
+			"prerelease: realtime_head disagrees with the cross-repo workflow REALTIME_REF pin",
+		);
+		const driftedExtensionsHead = rows.map((row) =>
+			row.current === "true"
+				? { ...row, extensions_head: "b".repeat(40) }
+				: row,
+		);
+		expect(
+			validateCompatibility(driftedExtensionsHead, pkg, trainFacts),
+		).toContain(
+			"prerelease: extensions_head disagrees with the cross-repo workflow EXTENSIONS_REF pin",
+		);
+		expect(
+			validateCompatibility(rows, pkg, {
+				...trainFacts,
+				workflow: crossRepoWorkflow.replace(
+					"REALTIME_REF:",
+					"REALTIME_WAS:",
+				),
+			}),
+		).toContain("cross-repo workflow does not pin REALTIME_REF");
+
+		const driftedRevision = rows.map((row) =>
+			row.current === "true" ? { ...row, wire_protocol: "2" } : row,
+		);
+		expect(validateCompatibility(driftedRevision, pkg)).toEqual([]);
+		expect(
+			validateCompatibility(driftedRevision, pkg, trainFacts),
+		).toContain(
+			"prerelease: wire_protocol disagrees with the protocol schema revision",
+		);
 	});
 
 	it("renders the bounded README block exactly", () => {
@@ -2130,6 +2333,26 @@ describe("ecosystem compatibility manifest", () => {
 					},
 				),
 			).toContain("3 channels agree");
+
+			// A REPOSITORY checkout missing a fact source must refuse rather
+			// than silently skip the train binding - a deleted workflow would
+			// otherwise disarm the pin check forever. A worktree's .git is a
+			// FILE, and it must count as repository-shaped too.
+			writeFileSync(join(temp, ".git"), "gitdir: elsewhere\n");
+			const repoShaped = spawnSync(
+				process.execPath,
+				["scripts/check-compatibility.js"],
+				{
+					cwd: temp,
+					encoding: "utf8",
+					windowsHide: true,
+				},
+			);
+			expect(repoShaped.status).not.toBe(0);
+			expect(repoShaped.stderr + repoShaped.stdout).toContain(
+				"compatibility train fact source is missing from the repository checkout",
+			);
+			rmSync(join(temp, ".git"));
 
 			const nested = readme
 				.replace(

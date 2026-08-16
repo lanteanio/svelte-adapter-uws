@@ -49,7 +49,29 @@ const EXPECTED_HEADERS = [
 	"extensions",
 	"node",
 	"uwebsockets",
+	"train",
+	"realtime_version",
+	"extensions_version",
+	"realtime_head",
+	"extensions_head",
+	"wire_protocol",
+	"procedure",
 ];
+// The six per-train release facts form ONE unit: the current row must carry
+// all of them, and a row written before the train contract existed carries
+// none. `train` itself is required on every row.
+const TRAIN_FACT_FIELDS = [
+	"realtime_version",
+	"extensions_version",
+	"realtime_head",
+	"extensions_head",
+	"wire_protocol",
+	"procedure",
+];
+const TRAIN_SERIES_RE = /^\d+\.\d+$/;
+const GIT_HEAD_RE = /^[0-9a-f]{40}$/;
+const WIRE_PROTOCOL_RE = /^[1-9]\d*$/;
+const PROCEDURE_ANCHOR_RE = /^docs\/releasing\.md#([a-z0-9-]+)$/;
 const REQUIRED_CHANNELS = new Map([
 	["legacy", ""],
 	["stable", "latest"],
@@ -57,9 +79,14 @@ const REQUIRED_CHANNELS = new Map([
 ]);
 const PUBLISHED_BASELINE_DIGESTS = new Map([
 	// Verified against npm metadata for immutable svelte-adapter-uws@0.5.8.
+	// Recomputed for the additive train columns: the pre-existing fields are
+	// byte-identical (their old-header digest still equals
+	// b1a9adc641c46d3227611e8a28f50b9275b78f170f94cc47a1da1f1a2e1581c4), and
+	// the new fields are train 0.5 with the six pre-contract release facts
+	// empty.
 	[
 		"npm:svelte-adapter-uws@0.5.8",
-		"b1a9adc641c46d3227611e8a28f50b9275b78f170f94cc47a1da1f1a2e1581c4",
+		"9958c654a7ecd1fe2836bec7273efa1b6faeee3e0b92a4f3ae052ebdee8734d5",
 	],
 ]);
 const COMPATIBILITY_GATE_COMMAND = "node scripts/check-compatibility.js";
@@ -306,6 +333,45 @@ function validNodeRange(value) {
 	);
 }
 
+/**
+ * The slugs of every `## Heading` in the release policy, computed the way the
+ * manifest's procedure anchors spell them: lowercase, spaces to hyphens,
+ * everything else stripped.
+ */
+function policyHeadingSlugs(policy) {
+	return new Set(
+		[...policy.matchAll(/^##[ \t]+(.+?)[ \t]*$/gm)].map((match) =>
+			match[1]
+				.toLowerCase()
+				.replace(/ /g, "-")
+				.replace(/[^a-z0-9-]/g, ""),
+		),
+	);
+}
+
+/** The single-quoted env pin for one sibling ref in the cross-repo workflow. */
+function workflowRefPin(workflow, name) {
+	return (
+		workflow.match(
+			new RegExp("^\\s*" + name + ":\\s*'([0-9a-f]{40})'\\s*$", "m"),
+		)?.[1] ?? null
+	);
+}
+
+/**
+ * Mirrors protocolRevision() in src/runtime/version-info.js: both parse the
+ * revision out of the shared source of truth protocol.schema.json ($id first,
+ * then title), never out of a hand-duplicated constant.
+ */
+function schemaProtocolRevision(schema) {
+	const id = typeof schema?.$id === "string" ? schema.$id : "";
+	const title = typeof schema?.title === "string" ? schema.title : "";
+	const match =
+		/(?:revision[- ]|rev(?:ision)?[- ]?)(\d+)/i.exec(id) ||
+		/(?:revision|rev)\s+(\d+)/i.exec(title);
+	return match ? Number(match[1]) : null;
+}
+
 export function validateLifecycleScripts(pkg) {
 	const errors = [];
 	const check = pkg.scripts?.check;
@@ -339,7 +405,17 @@ export function validateLifecycleScripts(pkg) {
 	return errors;
 }
 
-export function validateCompatibility(rows, pkg) {
+/**
+ * @param {Array<Record<string, string>>} rows
+ * @param {object} pkg
+ * @param {{ policy?: string, workflow?: string, protocolSchema?: object }} [facts]
+ *   Repository facts the train columns bind to: the release policy text
+ *   (docs/releasing.md), the cross-repo workflow text
+ *   (.github/workflows/cross-repo-heads.yml), and the parsed
+ *   protocol.schema.json. Each may be absent; a validation that needs a
+ *   missing fact is skipped, so hermetic row/package checks run everywhere.
+ */
+export function validateCompatibility(rows, pkg, facts = {}) {
 	const errors = [];
 	const requiredChannels = [...REQUIRED_CHANNELS.keys()];
 	if (rows.length !== requiredChannels.length)
@@ -430,6 +506,96 @@ export function validateCompatibility(rows, pkg) {
 				);
 			}
 		}
+		if (!TRAIN_SERIES_RE.test(row.train)) {
+			errors.push(
+				row.channel + ": train must be a major.minor release train",
+			);
+		} else if (
+			!(
+				row.adapter.startsWith(row.train + ".") ||
+				row.adapter === row.train + ".x"
+			)
+		) {
+			errors.push(
+				row.channel +
+					": train " +
+					row.train +
+					" does not prefix the adapter series " +
+					row.adapter,
+			);
+		}
+		const presentTrainFacts = TRAIN_FACT_FIELDS.filter(
+			(field) => row[field],
+		);
+		if (
+			presentTrainFacts.length !== 0 &&
+			presentTrainFacts.length !== TRAIN_FACT_FIELDS.length
+		) {
+			errors.push(
+				row.channel +
+					": train release facts form one unit and must be all present or all empty",
+			);
+		}
+		if (
+			row.current === "true" &&
+			presentTrainFacts.length !== TRAIN_FACT_FIELDS.length
+		) {
+			errors.push(
+				row.channel +
+					": current row must record all six train release facts",
+			);
+		}
+		if (presentTrainFacts.length === TRAIN_FACT_FIELDS.length) {
+			for (const [field, series] of [
+				["realtime_version", row.realtime],
+				["extensions_version", row.extensions],
+			]) {
+				if (!matchesSeries(row[field], series)) {
+					errors.push(
+						row.channel +
+							": " +
+							field +
+							" release identity is outside its series",
+					);
+				}
+			}
+			for (const field of ["realtime_head", "extensions_head"]) {
+				if (!GIT_HEAD_RE.test(row[field])) {
+					errors.push(
+						row.channel +
+							": " +
+							field +
+							" must be a full lowercase git head",
+					);
+				}
+			}
+			if (!WIRE_PROTOCOL_RE.test(row.wire_protocol)) {
+				errors.push(
+					row.channel +
+						": wire_protocol must be a positive integer revision",
+				);
+			}
+			const anchors = row.procedure.split(" ");
+			if (anchors.some((token) => !PROCEDURE_ANCHOR_RE.test(token))) {
+				errors.push(
+					row.channel +
+						": procedure must be space-separated docs/releasing.md anchors",
+				);
+			} else if (facts.policy !== undefined) {
+				const slugs = policyHeadingSlugs(facts.policy);
+				for (const token of anchors) {
+					const slug = PROCEDURE_ANCHOR_RE.exec(token)[1];
+					if (!slugs.has(slug)) {
+						errors.push(
+							row.channel +
+								": procedure anchor " +
+								token +
+								" has no matching release policy heading",
+						);
+					}
+				}
+			}
+		}
 	}
 	if (current) {
 		if (!matchesSeries(pkg.version, current.adapter)) {
@@ -476,6 +642,45 @@ export function validateCompatibility(rows, pkg) {
 						current[field] +
 						" does not match the lockstep adapter series " +
 						current.adapter,
+				);
+			}
+		}
+		// The heads the current row claims the packed cross-repo gate exercised
+		// are the workflow's own single-quoted env pins, and the frozen wire
+		// revision is whatever protocol.schema.json declares - both facts live
+		// in this repository, so drift between the manifest and either source
+		// is refused rather than published.
+		if (TRAIN_FACT_FIELDS.every((field) => current[field])) {
+			if (facts.workflow !== undefined) {
+				for (const [field, pinName] of [
+					["realtime_head", "REALTIME_REF"],
+					["extensions_head", "EXTENSIONS_REF"],
+				]) {
+					const pin = workflowRefPin(facts.workflow, pinName);
+					if (pin === null) {
+						errors.push(
+							"cross-repo workflow does not pin " + pinName,
+						);
+					} else if (current[field] !== pin) {
+						errors.push(
+							current.channel +
+								": " +
+								field +
+								" disagrees with the cross-repo workflow " +
+								pinName +
+								" pin",
+						);
+					}
+				}
+			}
+			if (
+				facts.protocolSchema !== undefined &&
+				Number(current.wire_protocol) !==
+					schemaProtocolRevision(facts.protocolSchema)
+			) {
+				errors.push(
+					current.channel +
+						": wire_protocol disagrees with the protocol schema revision",
 				);
 			}
 		}
@@ -1877,8 +2082,37 @@ function main() {
 		if (start === -1 || end === -1) return text;
 		return text.slice(0, start) + text.slice(end);
 	};
+	// The repository checkout carries all three fact sources, so the full
+	// train binding runs there - and a REPOSITORY checkout that has lost one
+	// refuses rather than silently skipping, or a deleted workflow would
+	// disarm the pin binding forever. A package-shaped tree (the packed
+	// checker running without Git) has no .github workflow and may lack the
+	// schema; as with workspace siblings, absence is a different machine,
+	// not drift, and validateCompatibility skips only the validations that
+	// need the missing fact.
+	const repositoryShaped = existsSync(join(root, ".git"));
+	const optionalText = (path) => {
+		if (existsSync(path)) return readFileSync(path, "utf8");
+		if (repositoryShaped) {
+			throw new Error(
+				"compatibility train fact source is missing from the repository checkout: " + path,
+			);
+		}
+		return undefined;
+	};
+	const protocolSchemaPath = join(root, "protocol.schema.json");
+	const facts = {
+		policy: optionalText(join(root, "docs", "releasing.md")),
+		workflow: optionalText(
+			join(root, ".github", "workflows", "cross-repo-heads.yml"),
+		),
+		protocolSchema: (() => {
+			const text = optionalText(protocolSchemaPath);
+			return text === undefined ? undefined : JSON.parse(text);
+		})(),
+	};
 	const errors = [
-		...validateCompatibility(rows, pkg),
+		...validateCompatibility(rows, pkg, facts),
 		...validateWorkspaceSiblings(rows, readWorkspaceSibling),
 		...validatePublishedCompatibilityDocuments(publishedDocuments, rows),
 		...validateUnownedVersionLiterals(

@@ -363,3 +363,11 @@ chain. Do not rewrite the original row. The manifest test checks schemas,
 candidate transitions, identity continuity, duplicate identities, routing
 continuity and time, quarantine state, rollback history, complete correction
 chains, full Git heads and registry digests without contacting npm.
+
+The compatibility manifest's train columns record, per coordinated release
+train, the exact qualified sibling versions, the qualification heads (which
+must equal the cross-repo workflow's `REALTIME_REF` and `EXTENSIONS_REF`
+pins - the compatibility gate enforces that equality), the frozen
+wire-protocol revision (parsed from `protocol.schema.json`, never duplicated
+by hand), and the procedure anchors into this document. A new train row is
+filled in when the cross-repo gate's pins move.

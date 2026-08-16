@@ -64,12 +64,22 @@ export function publicPackageSurface(pkg) {
 export function versionIndependentCompatibilitySurface(csvText) {
 	const lines = normalizeSurfaceText(csvText).trim().split('\n');
 	const headers = (lines[0] ?? '').split(',');
-	const drop = headers.indexOf('adapter_version');
-	if (drop === -1) return normalizeSurfaceText(csvText);
+	// The train FACT columns move with every qualification-pin advance - an
+	// exact sibling counter or head is the same false freshness input as the
+	// adapter's own release identity. The series columns and `train` stay:
+	// they are what a migration guide is about.
+	const dropped = new Set([
+		'adapter_version', 'realtime_version', 'extensions_version',
+		'realtime_head', 'extensions_head', 'wire_protocol', 'procedure'
+	]);
+	const dropIndexes = headers
+		.map((header, index) => (dropped.has(header) ? index : -1))
+		.filter((index) => index !== -1);
+	if (dropIndexes.length === 0) return normalizeSurfaceText(csvText);
 	return lines
 		.map((line) => {
 			const cells = line.split(',');
-			cells.splice(drop, 1);
+			for (let i = dropIndexes.length - 1; i >= 0; i--) cells.splice(dropIndexes[i], 1);
 			return cells.join(',');
 		})
 		.join('\n') + '\n';
