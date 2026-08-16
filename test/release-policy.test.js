@@ -418,19 +418,28 @@ export function validateRoutingEvents(
 		rowsById.set(id, row);
 	}
 
+	// The newest legacy row on each channel is that channel's routing
+	// baseline; every earlier legacy row records an identity that previously
+	// occupied the channel and is a valid rollback destination.
 	const current = new Map([["candidate", "none"]]);
 	const previouslyRouted = new Map([["candidate", new Set(["none"])]]);
+	const baselineTime = new Map();
 	for (const row of releases.filter(
 		(release) => release["Git tag"] === "legacy-none",
 	)) {
-		if (current.has(row["Target channel"])) {
-			throw new Error(
-				"duplicate legacy routing baseline for " +
-					row["Target channel"],
-			);
+		const channel = row["Target channel"];
+		const publishedTime = eventTime(
+			row["Published UTC"],
+			"published release " + releaseKey(row),
+		);
+		if (!previouslyRouted.has(channel)) {
+			previouslyRouted.set(channel, new Set());
 		}
-		current.set(row["Target channel"], row.Version);
-		previouslyRouted.set(row["Target channel"], new Set([row.Version]));
+		previouslyRouted.get(channel).add(row.Version);
+		if ((baselineTime.get(channel) ?? -1) < publishedTime) {
+			baselineTime.set(channel, publishedTime);
+			current.set(channel, row.Version);
+		}
 	}
 	let lastEffectiveTime = 0;
 	let activeQuarantine = null;
@@ -2287,6 +2296,6 @@ describe("release lineage contract", () => {
 			lifecycles,
 		);
 		expect(current.get("latest")).toBe("0.5.8");
-		expect(current.get("next")).toBe("0.6.0-next.90");
+		expect(current.get("next")).toBe("0.6.0-next.91");
 	});
 });

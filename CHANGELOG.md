@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** The pre-existing columns are byte-identical; rows predating the train contract leave the six release-fact columns empty.
   - **Detail:** [Added engineering detail](#added).
 
+- **Added: the release history ledger is complete and checked offline.** The release manifest now records every version npm has ever accepted with its registry identity, the changelog carries a heading (or the earliest-history archive heading) for every published version with unpublished headings marked, and a new gate reconciles both against the working head without touching the network.
+  - **Affects:** Maintainers and release tooling reading `docs/release-manifest.md` or `CHANGELOG.md`; no runtime code path.
+  - **Action:** None; the reconstruction is one-time and the gate runs inside `npm run check`.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Existing manifest rows and changelog entry bodies are byte-identical; the restored headings and not-published markers are additive.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Changed: the development dependency tree carries no open advisories.** Five npm audit advisories, two moderate and three high, are resolved at patch level entirely inside the development and comparison-benchmark tree, so contributors and continuous integration audit clean while every shipped dependency range, peer floor and published tarball stays exactly where it was.
   - **Affects:** Contributors and continuous integration; no consumer of the published package.
   - **Action:** None; run `npm install` in a clone to pick up the resolved lockfile.
@@ -196,6 +203,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract leaves all six empty. The pinned 0.5.8 baseline digest is
   recomputed over the widened row with its pre-existing fields
   byte-identical.
+
+- **The release ledger covers the whole registry history and a gate holds
+  it closed.** The published-releases table in `docs/release-manifest.md`
+  now carries one row for every version the npm registry has ever accepted -
+  177 rows, each with the version's registry `gitHead`, integrity, shasum,
+  and publication instant, `legacy-none` recording that none of them
+  carried a Git tag - so no later check needs the network to resolve a
+  published identity, and the routing baseline is the newest legacy row on
+  each channel. `CHANGELOG.md` reconciles against that table: eight
+  published versions whose headings had been folded into a neighboring
+  entry (`0.4.8`, `0.5.0`, `0.6.0-next.21`, `.39`, `.40`, `.49`, `.58`,
+  `.84`) get their heading back with a one-line body naming the entry that
+  holds their text, and the two headings the registry never accepted
+  (`0.6.0-next.3`, `0.6.0-next.57`) carry an explicit not-published marker.
+  `scripts/check-release-ledger.js`, run inside `npm run check`, reads only
+  the two files and refuses a published version without a changelog
+  heading, a heading for a version the registry never accepted unless it
+  carries the marker, the marker on any published version, and a malformed
+  row (non-canonical timestamp, missing integrity or shasum). The current
+  `package.json` version is exempt from the marker by rule and must not
+  have a manifest row, so the working head stays a normal unpublished
+  entry by construction; versions at or below the `[0.3.9] and earlier`
+  archive heading are covered collectively by it, exactly as the changelog
+  has always recorded them.
 
 ### Changed
 
@@ -3668,6 +3699,10 @@ authority.persistNow()` resolved successfully after every host `store` call had 
 
 - **The `upgradeResponse` helper's type declarations now match what actually ships at runtime, closing two import forms that typechecked but were `undefined`.** The `svelte-adapter-uws/upgrade-response` subpath pointed its TypeScript types at the full adapter declaration file (which declares a default adapter export), while the subpath's runtime module exports only the named `upgradeResponse` helper - so `import adapter from 'svelte-adapter-uws/upgrade-response'` compiled but was `undefined` at runtime. Inversely, the package root declared a named `upgradeResponse` that the root runtime never exported, so `import { upgradeResponse } from 'svelte-adapter-uws'` also compiled but was `undefined`. The subpath now has its own declaration file describing exactly the named helper (no phantom default), and the phantom root declaration is removed: `upgradeResponse` is imported solely from `svelte-adapter-uws/upgrade-response`, a tiny standalone module with no build-time dependencies. This is deliberate - the package root is the build-time adapter (it pulls in Rollup and Node built-ins), so re-exporting the helper there would risk dragging build tooling into a runtime bundle, and the usual `sideEffects: false` mitigation is unsafe here because some modules register wire codecs on import. Importing `upgradeResponse` from the package root is now a compile error instead of a silent runtime `undefined`, failing fast at the point of the mistake. A new export-shape gate test asserts the runtime exports and the declarations agree at both entry points, so the two can no longer drift.
 
+## [0.6.0-next.84] - 2026-07-17
+
+Published release; its changes are recorded under [0.6.0-next.85] above.
+
 ## [0.6.0-next.83] - 2026-07-17
 
 ### Fixed
@@ -3866,7 +3901,15 @@ authority.persistNow()` resolved successfully after every host `store` call had 
 - **`websocket.postureExport` - push the live protection posture to a local socket.** An external process (an edge-defense daemon, a watchdog) connects to a unix domain socket (or a Windows named pipe) and receives newline-delimited JSON - posture, reason, saturation value, and the kernel pressure readings - once on connect, once on every posture/reason transition, and once per 1 Hz pressure sample. The steady cadence doubles as a liveness contract: silence means the adapter is gone (killed, frozen, deadlocked). Local-only, read-only, payload-free, and unable to hurt the server it reports on: a failed listen logs once and disables the export, nothing is serialized with zero consumers, and a consumer that stops draining is disconnected rather than buffered without bound.
 - **systemd readiness + watchdog (`Type=notify`), automatic.** Under systemd the runtime detects `NOTIFY_SOCKET` and sends `READY` when the service actually accepts traffic (after the app's `init` hook resolves in single-process mode; on first listen in clustered modes) - so dependents and rolling restarts wait for real readiness, not process launch - plus `STOPPING` on graceful shutdown. With `WatchdogSec=` set, a `WATCHDOG` ping fires at half the timeout from a main-loop timer: the ping itself is the event-loop liveness proof, so a frozen loop stops the pings and systemd applies the unit's recovery action - the failure mode an HTTP health route can never report. Notifications ride the `systemd-notify` helper (unit needs `NotifyAccess=all`; README carries the unit example); on any non-systemd host the whole integration is a no-op.
 
+## [0.6.0-next.58] - 2026-07-05
+
+Published release; its changes are recorded under [0.6.0-next.59] above,
+whose entry absorbed this release's text. Its tarball also first shipped
+the work recorded under [0.6.0-next.57] below.
+
 ## [0.6.0-next.57] - 2026-07-05
+
+*Not published to npm; superseded before release.*
 
 ### Added
 
@@ -3930,6 +3973,10 @@ authority.persistNow()` resolved successfully after every host `store` call had 
 
 - **Smooth channel wire views (`options.wire`) - app-owned codecs at the wire boundary.** A rich simulation state serializes to kilobytes of verbose JSON, and it changes every tick, so every acknowledgement and every remote update paid that price per entity per tick (the binary framing is compact, but a non-`{x,y}` state rides inside it as a JSON string). `wire.state = { pack, unpack }` declares the state's compact wire form: the channel unpacks every inbound state - updates, acknowledgements, the sync roster - back into the simulation shape before the predictor and the interpolation consume it. `wire.command = { pack, unpack }` is the outbound counterpart: each transmitted command (and shot) is packed, while the prediction always replays the ORIGINAL command objects - packing touches only the transmit copy. The pairs must be the same functions the server topic declares (share the module, like `apply`). A state frame whose unpack throws is dropped as malformed; a command whose pack throws surfaces at the `command()` call. Off by default - without `wire`, the channel is byte-identical to before.
 
+## [0.6.0-next.49] - 2026-07-02
+
+Published release; its changes are recorded under [0.6.0-next.50] above.
+
 ## [0.6.0-next.48] - 2026-07-02
 
 ### Fixed
@@ -3988,6 +4035,14 @@ authority.persistNow()` resolved successfully after every host `store` call had 
 ### Added
 
 - **`platform.requestTopic(topic, event, data, options?)`: broadcast-with-reply.** The request/reply analog of `publish` - sends a request to EVERY connection subscribed to `topic` on this instance and resolves with one result per subscriber (`{ ok: true, reply }` or `{ ok: false, error }`). Partial success is the contract: a subscriber that times out, errors, or whose socket closed lands in the array as an error entry and never fails the whole call. `timeoutMs` (default 5000) bounds each request, so run concurrently it is the whole-fan-out budget. Walks this worker's subscriber set (the cross-instance broadcast is the extensions layer). svelte-realtime's `live.push({ topic })` / `live.notify({ topic })` aggregate it. Mirrored on the dev (Vite) and `createTestServer` platforms.
+
+## [0.6.0-next.40] - 2026-06-26
+
+Published release; its changes are recorded under [0.6.0-next.41] above.
+
+## [0.6.0-next.39] - 2026-06-26
+
+Published release; its changes are recorded under [0.6.0-next.41] above.
 
 ## [0.6.0-next.38] - 2026-06-26
 
@@ -4150,6 +4205,10 @@ authority.persistNow()` resolved successfully after every host `store` call had 
 - **`TestServerOptions` now declares the `protection` option** that `createTestServer` has accepted since the posture shipped; previously TypeScript users had to cast to pass it.
 - **The waiting-room queue-depth estimate no longer freezes at its last count after polling stops.** The rolling two-window poll counter only decayed when a new poll rolled the window, so a reader with no poll in front of it - the holding page served by a direct navigation, and the new `waiting_room_queue_depth` gauge - kept reporting the final window's count indefinitely after the room emptied. The window math (now shared between the production handler and `createTestServer` as `createPollCounter`) fades an un-rolled window to zero over one interval and reads zero after two.
 
+## [0.6.0-next.21] - 2026-06-12
+
+Published release; its changes are recorded under [0.6.0-next.22] above.
+
 ## [0.6.0-next.20] - 2026-06-10
 
 ### Added
@@ -4292,6 +4351,8 @@ authority.persistNow()` resolved successfully after every host `store` call had 
 
 ## [0.6.0-next.3] - 2026-05-29
 
+*Not published to npm; superseded before release.*
+
 ### Added
 
 - **Binary presence frames (`presence.protocol:1`), on by default.** The presence plugin declares a binary wire codec, so `presence()` gets the binary path transparently - no API change, no flag. Presence `state` / `diff` / `heartbeat` frames ride a compact `0x03` codec (a `[key][JSON value]` roster, length-prefixed) instead of JSON envelopes: the server sends the binary frame to clients that advertised `presence.protocol:1` and the identical JSON envelope to everyone else, from one publish. The codec is **stateless** - a roster frame is encoded once and fanned out to every subscriber (encode-once-send-many), which fits presence's infrequent-but-full-roster broadcasts (the opposite trade from the per-connection cursor dictionary; a presence dictionary was measured and rejected because the roster value JSON, not the short keys, dominates the frame). A presence value is arbitrary user data, so it is carried as a length-prefixed JSON string (the only lossless form); the win over JSON is the `0x03` framing plus the per-connection topic id, not the value bytes. Measured against the **real** uWebSockets.js compressors (`bench/ws-compression-ab.mjs` - live server, permessage-deflate client, bytes counted off the socket): a modest but durable reduction that survives compression - roughly **4-13% smaller for a 50-user roster and ~2-3% for a 500-user roster** across `DISABLED` / `SHARED_COMPRESSOR` / `DEDICATED_COMPRESSOR_*` (the `DEDICATED_*` window sizes are byte-identical on the wire: permessage-deflate caps the negotiated window at 32 KB). Fully transparent: the `presence()` store decodes binary frames back to the same `{ event, data }` the JSON path produced, so the store and the wire shape are unchanged. `createPresence({ binary: false })` forces JSON for every client; a frame the codec cannot represent (a non-serializable value) falls back to JSON for that one frame. JSON-only deployments and the unit-test mock platform send the byte-identical JSON frames - the existing presence wire is unchanged. The same client bundle decodes both the in-process and the Redis-backed presence backends (the extensions backend's binary codec is a follow-up; until then a Redis-backed deployment sends JSON to all clients, which the binary-capable client decodes unchanged).
@@ -4411,6 +4472,10 @@ authority.persistNow()` resolved successfully after every host `store` call had 
 ### Fixed
 
 - **`WS_*` userData slot symbols in `files/utils.js` switched from `Symbol(...)` to `Symbol.for(...)` so handler.js, vite.js, testing.js, and downstream extensions (e.g. `svelte-adapter-uws-extensions/redis/registry`) resolve to the same global symbol regardless of how `utils.js` was loaded.** Pre-fix, each `Symbol('adapter-uws.ws.subscriptions')` call returned a fresh unique value. In a single-module-instance setup (everything imports the same `files/utils.js`) this was fine. But the adapter's build step bundles `handler.js` + `utils.js` into the SvelteKit build artifact (`build/handler.js`), so the bundled `utils.js` is a _different module instance_ from the one a runtime extension loads via `node_modules/svelte-adapter-uws/files/utils.js`. Two instances meant two distinct symbols for each slot - the handler stamped subscriptions / session-id / stats under one symbol and a runtime-loaded extension (the cluster registry walks every `ws.getUserData()[WS_SUBSCRIPTIONS]` to rebuild routing tables) read under the other, silently dropping every cross-module lookup. The failure was invisible in single-process dev (only one instance ever loaded) and surfaced only in clustered + extension production where subscription rebuilds returned empty sets. Fix is one-character per export (`Symbol(x)` -> `Symbol.for(x)`) which routes via the V8 global symbol registry and gives identity-by-key across every module instance in the process. Trade-off: user code that calls `Symbol.for('adapter-uws.ws.subscriptions')` can now reach these slots; documented at the top of the symbol block as a deliberate accept since the alternative was a silent cluster-routing break.
+
+## [0.5.0] - 2026-05-16
+
+Published stable release promoting the prerelease line; its changes are recorded under [0.5.0-next.24] and the earlier prerelease entries below.
 
 ## [0.5.0-next.24] - 2026-05-16
 
@@ -4884,6 +4949,14 @@ Fully backwards compatible. No existing user code changes behavior:
 - **WebSocket handler**: new "Message protocol" section explaining the byte-prefix discriminator that skips `JSON.parse` for user messages. New "Topic validation" section documenting enforcement rules (1-256 chars, no control characters, 256-topic batch cap) and the `__` prefix reservation for plugins.
 - **WebSocket options**: new "Backpressure and connection limits" section explaining `maxPayloadLength` (connection closed on exceed), `maxBackpressure` (silent drop on overflow), and upgrade rate limiting (sliding window, 10K IP map cap with LRU eviction).
 - **Performance**: new "Internal optimizations" section documenting request state object pooling (256 items) and the envelope prefix LRU cache (256 entries, 60s trim cycle).
+
+---
+
+## [0.4.8] - 2026-04-08
+
+Published release with no changelog entry of its own at publication: it
+carried the upgrade-handler URL gaining its query string, recorded here
+for the registry boundary rather than restored as invented history.
 
 ---
 

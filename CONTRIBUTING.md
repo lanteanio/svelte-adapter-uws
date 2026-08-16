@@ -169,6 +169,11 @@ and has no config:
   re-pin with `npm run check:migration -- --write`.
 - **check-release-notes** - the newest changelog entry is action-first and
   bounded, and its release page and routes exist.
+- **check-release-ledger** - the published-releases table in
+  `docs/release-manifest.md` and the changelog headings reconcile offline:
+  every published version has a heading, unpublished headings carry the
+  not-published marker, and the current version stays unpublished and
+  unmarked.
 - **check-release-workflow** - the tag-only trusted-publishing path is
   structurally closed: closed key inventories at workflow, job and step level,
   full-commit action pins, and exact command bodies.
