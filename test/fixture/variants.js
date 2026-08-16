@@ -103,6 +103,20 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// Fault-injection hooks for the hook-failure entries: an authenticate
+	// that throws on an env-gated header, a resume that throws when the
+	// gap-fill names a token-keyed topic, and a message lane handing sendTo
+	// an async filter. Its own output directory keeps the fault lanes out
+	// of every ordinary fixture build.
+	hookcrash: {
+		out: 'build-hook-crash',
+		handler: './src/hooks.ws.hookcrash.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
 	// Strict wire authorization with an ordinary application subscribe hook.
 	// The hook allows every topic, so only the server-grant half can refuse a
 	// cross-tenant raw subscribe - the hybrid permissive-hook bypass.
@@ -298,6 +312,19 @@ export const FIXTURE_VARIANTS = {
 	// import can be allowed to share.
 	tlswatch: {
 		out: 'build-tls-watch',
+		handler: null,
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
+	// Byte-identical to `default`, for the same module-identity reason as
+	// `tls` and `tlswatch`: the suite using this one boots in-process with
+	// real TLS certificates and then breaks the on-disk pair to drive the
+	// validation-refusal reload path.
+	tlsskip: {
+		out: 'build-tls-skip',
 		handler: null,
 		websocket: {
 			allowedOrigins: '*',

@@ -417,7 +417,7 @@ searchable log prefix is:
 
 - **Code/event:** `pressure.listener-failed`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.pressure event=pressure.listener-failed severity=error] A pressure listener failed.`
-- **Cause:** An application listener registered for backpressure notifications threw.
+- **Cause:** An application listener registered through platform.onPressure for pressure-state notifications threw.
 - **Consequence:** That listener missed the notification. Pressure accounting itself is unaffected, so shedding and limits still apply.
 - **Automatic recovery:** Yes. A throwing listener stays registered and is called again on the next notification.
 - **Next action:** Fix the listener. Application code that reacts to pressure by shedding load is not running while it throws, so the process can stay under pressure longer than intended.
@@ -441,7 +441,7 @@ searchable log prefix is:
 
 - **Code/event:** `pressure.runaway-publisher`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.pressure event=pressure.runaway-publisher severity=warn] A publisher crossed a configured per-topic pressure threshold.`
-- **Cause:** One topic exceeded its configured publish pressure threshold. The event is emitted only when no publish-rate listener is registered, and at most once per minute per topic, so it reports the condition rather than every crossing.
+- **Cause:** One topic exceeded its configured publish pressure threshold. The event is emitted only when no publish-rate listener is registered, and per topic it is throttled to once a minute through a bounded dedup table - with more simultaneously runaway topics than the table holds, a topic can re-report sooner - so it reports the condition rather than every crossing.
 - **Consequence:** Nothing is dropped by this event alone. It is the early signal that one topic is consuming a disproportionate share of outbound capacity.
 - **Automatic recovery:** None. Nothing throttles the publisher on the strength of this threshold.
 - **Next action:** Identify the topic from the attributes and decide whether the rate is intended. Because the line is suppressed entirely while an onPublishRate listener is registered and otherwise throttled per topic, its absence is not evidence the condition ended - read the pressure metrics for that. Left alone, a runaway publisher is what later produces slow-consumer disconnects on unrelated topics.

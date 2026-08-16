@@ -380,6 +380,38 @@ describeUWS('the app shutdown hook under the shutdown budget', () => {
 		expect(errors.join('\n')).toContain('did NOT finish');
 	}, 120000);
 
+	it('reports a shutdown hook that throws and completes the teardown regardless', async () => {
+		const probe = '__wsHookThrew';
+		const lifecycle = await runtimeWithWsHook('threw', probe, [
+			'export function shutdown(ctx) {',
+			'	globalThis[PROBE_KEY] = { ctx };',
+			"	throw new Error('flush failed on purpose');",
+			'}',
+			''
+		].join('\n'));
+
+		const errors = [];
+		const spy = vi.spyOn(console, 'error').mockImplementation((...args) => { errors.push(args.join(' ')); });
+		try {
+			// Resolving at all is part of the subject: a rethrow out of shutdown()
+			// would reject this await and leave the teardown unfinished.
+			await lifecycle.shutdown({ reason: 'SIGTERM' });
+		} finally {
+			spy.mockRestore();
+		}
+		// The hook genuinely ran before it threw, and the close path still walked
+		// to its end - the throw is contained, not allowed to refuse the shutdown.
+		expect(globalThis[probe].ctx.reason).toBe('SIGTERM');
+		expect(lifecycle.lifecycleState()).toBe('closed');
+		// The loss is silent unless this line is read, so the line is what these
+		// assertions bind: the documented prefix, the stable ID tag, and the
+		// hook's own error attached so the log says what the flush died of.
+		const text = errors.join('\n');
+		expect(text).toContain('the WebSocket shutdown hook threw');
+		expect(text).toContain('[ADAPTER-ERR-WS-SHUTDOWN-HOOK-THREW]');
+		expect(text).toContain('flush failed on purpose');
+	}, 120000);
+
 	it('awaits the hook with no deadline at all when no budget is configured', async () => {
 		const probe = '__wsHookUnbounded';
 		const lifecycle = await runtimeWithWsHook('unbounded', probe, [
@@ -424,7 +456,9 @@ describeUWS('graceful shutdown of the built server', () => {
 	 * The entry the child actually runs: it installs the cleanup listener under
 	 * test (the documented `sveltekit:shutdown` hook), then imports the built
 	 * server. `PROBE_CLEANUP` picks which listener, `PROBE_MARKER` is where an
-	 * async one records that it finished.
+	 * async one records that it finished. The failing variants register a
+	 * healthy listener AFTER the failing one, because the containment under
+	 * test is that one listener's failure does not cost the others their turn.
 	 */
 	function writeWrapper(name) {
 		const file = join(dir, name);
@@ -439,6 +473,20 @@ describeUWS('graceful shutdown of the built server', () => {
 			"}",
 			"if (process.env.PROBE_CLEANUP === 'hang') {",
 			"	process.on('sveltekit:shutdown', () => new Promise(() => {}));",
+			"}",
+			"if (process.env.PROBE_CLEANUP === 'reject') {",
+			"	process.on('sveltekit:shutdown', async () => { throw new Error('cleanup rejected on purpose'); });",
+			"	process.on('sveltekit:shutdown', async (reason) => {",
+			"		await new Promise((r) => setTimeout(r, 50));",
+			"		appendFileSync(marker, 'survived:' + reason);",
+			"	});",
+			"}",
+			"if (process.env.PROBE_CLEANUP === 'throw') {",
+			"	process.on('sveltekit:shutdown', () => { throw new Error('cleanup threw on purpose'); });",
+			"	process.on('sveltekit:shutdown', async (reason) => {",
+			"		await new Promise((r) => setTimeout(r, 50));",
+			"		appendFileSync(marker, 'survived:' + reason);",
+			"	});",
 			"}",
 			"process.stdin.on('data', (d) => { if (String(d).includes('shutdown')) process.emit('SIGTERM'); });",
 			"process.stdin.unref();",
@@ -541,6 +589,51 @@ describeUWS('graceful shutdown of the built server', () => {
 		expect(readFileSync(marker, 'utf8')).toBe('closed:SIGTERM');
 	}, 60000);
 
+	it('contains a sveltekit:shutdown listener whose promise rejects: the others still run and the exit stays clean', async () => {
+		const marker = join(dir, 'reject-marker.txt');
+		const entry = writeWrapper('entry-reject.mjs');
+		const { proc, output } = await startServer(entry, { PROBE_CLEANUP: 'reject', PROBE_MARKER: marker });
+
+		requestShutdown(proc);
+		// Exit 0 is half of what the registry promises here: the rejection is
+		// reported, not escalated into a failing exit or an unhandled rejection
+		// that takes the process down mid-teardown.
+		expect(await whenExited(proc, 20000)).toBe(0);
+
+		// The documented line, findable by its invariant prefix, plus the stable
+		// ID tag an operator searches the reference by, plus the listener's own
+		// error so the log says WHICH cleanup was lost.
+		expect(output.text).toContain('a sveltekit:shutdown listener rejected');
+		expect(output.text).toContain('[ADAPTER-ERR-SHUTDOWN-LISTENER-REJECTED]');
+		expect(output.text).toContain('cleanup rejected on purpose');
+		// Containment is the other half: the listener registered AFTER the failing
+		// one still ran through its await and landed its final write.
+		expect(existsSync(marker), `the second listener was lost to the first one's rejection.\n--- server output ---\n${output.text}`).toBe(true);
+		expect(readFileSync(marker, 'utf8')).toBe('survived:SIGTERM');
+		// And the sequence itself finished: one bad listener does not turn the
+		// whole shutdown into an unclean one.
+		expect(output.text).toContain('Shutdown complete');
+	}, 60000);
+
+	it('contains a sveltekit:shutdown listener that throws: the others still run and the exit stays clean', async () => {
+		const marker = join(dir, 'throw-marker.txt');
+		const entry = writeWrapper('entry-throw.mjs');
+		const { proc, output } = await startServer(entry, { PROBE_CLEANUP: 'throw', PROBE_MARKER: marker });
+
+		requestShutdown(proc);
+		// Same containment as the rejection above, on the synchronous path: the
+		// throw lands while the listeners are still being invoked, so an escape
+		// here would cost every listener registered after it, not just one.
+		expect(await whenExited(proc, 20000)).toBe(0);
+
+		expect(output.text).toContain('a sveltekit:shutdown listener threw');
+		expect(output.text).toContain('[ADAPTER-ERR-SHUTDOWN-LISTENER-THREW]');
+		expect(output.text).toContain('cleanup threw on purpose');
+		expect(existsSync(marker), `the second listener was lost to the first one's throw.\n--- server output ---\n${output.text}`).toBe(true);
+		expect(readFileSync(marker, 'utf8')).toBe('survived:SIGTERM');
+		expect(output.text).toContain('Shutdown complete');
+	}, 60000);
+
 	it('arms its signal handlers before the socket, so a SIGTERM during a slow init still drains', async () => {
 		const marker = join(dir, 'bootsignal-marker.txt');
 		const entry = writeWrapper('entry-bootsignal.mjs');
@@ -614,6 +707,35 @@ describeUWS('graceful shutdown of the built server', () => {
 		// The overrun line is indexed: it must carry its stable ID tag so the
 		// operator can search the reference by the text they saw.
 		expect(output.text).toContain('[ADAPTER-ERR-SHUTDOWN-LISTENERS-UNSETTLED]');
+		expect(output.text).toContain('was NOT clean');
+		expect(output.text).not.toContain('Shutdown complete');
+	}, 60000);
+
+	it('drops the requests still open at budget expiry, and says so instead of reporting a clean shutdown', async () => {
+		const entry = writeWrapper('entry-inflight.mjs');
+		const { proc, port, output } = await startServer(entry, { SHUTDOWN_TIMEOUT: '2' });
+
+		// A request that outlives the whole 2000ms budget. The route prints a line
+		// the moment its hold begins, so "the request is in flight" is read off
+		// the server's own output rather than assumed from a fixed delay.
+		const held = httpGet(port, '/slow-hold?ms=30000').then(() => 'answered', () => 'reset');
+		const t0 = Date.now();
+		while (!output.text.includes('[slow-hold] holding') && Date.now() - t0 < 10000) await sleep(50);
+		expect(output.text, 'the slow-hold request never reached the server').toContain('[slow-hold] holding');
+
+		requestShutdown(proc);
+		// The documented exit: the drop is bounded and deliberate, so a budget
+		// overrun in the drain does not escalate into a failing exit code.
+		expect(await whenExited(proc, 25000)).toBe(0);
+
+		// The composed line names the budget that expired, and it carries the
+		// stable ID tag the operator searches the reference by.
+		expect(output.text).toContain('in-flight requests did not finish within the shutdown budget (2000ms)');
+		expect(output.text).toContain('[ADAPTER-ERR-SHUTDOWN-REQUESTS-DROPPED]');
+		// The client-visible half of the consequence: the held request is dropped
+		// as the sockets close, so its client sees a reset, never a response.
+		expect(await held).toBe('reset');
+		// And the summary refuses to call this shutdown clean.
 		expect(output.text).toContain('was NOT clean');
 		expect(output.text).not.toContain('Shutdown complete');
 	}, 60000);

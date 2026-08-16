@@ -94,6 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Every existing script keeps its name and behavior; the inventory pins exactly the current set, refusing additions and removals alike.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: the pressure entries name their real surface and bound.** The pressure-listener entry pointed at backpressure when its listeners ride `platform.onPressure` pressure-state transitions, and the runaway-publisher entry claimed a strict once-per-minute throttle its bounded dedup table cannot guarantee under many simultaneous offenders; both now say what the code does.
+  - **Affects:** Operators reading `docs/errors.md` for the pressure entries.
+  - **Action:** None; the corrected wording routes the listener failure to `platform.onPressure`.
+  - **Requires:** No new option and no API change.
+  - **Compatibility:** Prose only; identifiers, events, and console lines are unchanged.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: the diagnostic pipeline's own failure entries match the pipeline.** An unserializable attribute prints the event without its attributes rather than a failure the renderer never produces, the broken-console entry states that error and fatal share one console method, and the sink-notice entry no longer promises a steady state its own clock arithmetic cannot reach.
   - **Affects:** Operators reading `docs/errors.md` for the three diagnostic-pipeline failure entries.
   - **Action:** Re-read runbook steps derived from them; a missing fatal line means `console.error` is broken, and an event printing without attributes is the unserializable-attribute symptom.
@@ -147,6 +154,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0.6.0-next.91` is unaffected and needs no republication.
 
 ### Fixed
+
+- **Every error-reference entry is now driven from the condition it
+  claims, or its unreachability is recorded.** The reference generator
+  verifies that entries exist, are indexed, and render; it cannot read
+  them, so an entry could promise behavior its code does not produce and
+  every gate stayed green. Four new suites and an extended shutdown suite
+  close that: pure-seam cases for
+  the TLS primary reload trio, resource growth, relay gaps, the message
+  hook boundary, the Vite and native load diagnostics, the metrics
+  mirror and instrument guards, both posture machines, the waiting-room
+  fallback, the quiet divergence lane, assertions, and the sink
+  fallback; server cases for the upgrade and recover hooks and the three
+  cluster configuration refusals; fixture-variant cases for the throwing
+  authenticate and resume hooks and the async sendTo filter; a
+  validation-refusal TLS reload case; and shutdown cases for the two
+  listener failures, the ws shutdown hook, and requests dropped at the
+  budget. Along the way the pressure-listener cause moved from
+  backpressure to `platform.onPressure` pressure-state transitions, and
+  the runaway-publisher throttle now states its bounded dedup table.
+  Entries whose emission cannot be conjured on cue - the worker-context
+  metrics pair, the self-killing worker-exit line, the shutdown safety
+  net - carry recorded reasons instead of contrived cases.
 
 - **The diagnostic pipeline's three failure entries describe the pipeline
   as built.** The record-shape entry said a field that cannot be
