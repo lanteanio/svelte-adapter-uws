@@ -906,6 +906,23 @@ export function markSideEffectHooks(hooks, names) {
 	return hooks;
 }
 
+/**
+ * The connection's server-resolved attribution: a frozen
+ * `{ tenantId?, principalId?, entitlement? }` object, or absent for an
+ * unattributed connection. Written exactly once at open, from the handler
+ * module's `attribution(user)` export, after each present field passed the
+ * shared id rule (`[a-zA-Z0-9_-]`, at most 64 chars - which also excludes
+ * the NUL byte every downstream key delimiter relies on). Never derived
+ * from the wire: the resolver sees only `ws.getUserData()`, the same
+ * server-trusted identity the upgrade hook established.
+ *
+ * Read by the bundled limiter surfaces (the ratelimit plugin's tenant
+ * fallback) and by the public `attribution(ws)` accessor. Absent rather
+ * than `null` when unattributed, so the common single-tenant connection
+ * never grows the slot.
+ */
+export const WS_ATTRIBUTION = Symbol.for('adapter-uws.ws.attribution');
+
 export const WS_COALESCED = Symbol.for('adapter-uws.ws.coalesced');
 export const WS_SESSION_ID = Symbol.for('adapter-uws.ws.session-id');
 export const WS_PENDING_REQUESTS = Symbol.for('adapter-uws.ws.pending-requests');

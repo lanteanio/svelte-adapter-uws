@@ -50,6 +50,7 @@ export const ADAPTER_ERROR_IDS = Object.freeze({
 	RELAY_GAP: 'ADAPTER-ERR-RELAY-GAP',
 	SSR: 'ADAPTER-ERR-SSR',
 	UPGRADE_HOOK: 'ADAPTER-ERR-UPGRADE-HOOK',
+	ATTRIBUTION_HOOK: 'ADAPTER-ERR-ATTRIBUTION',
 	SUBSCRIBE_BATCH_HOOK: 'ADAPTER-ERR-SUBSCRIBE-BATCH-HOOK',
 	SUBSCRIBE_BATCH_RESULT: 'ADAPTER-ERR-SUBSCRIBE-BATCH-RESULT',
 	SUBSCRIBE_HOOK: 'ADAPTER-ERR-SUBSCRIBE-HOOK',
@@ -580,6 +581,23 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		sources: Object.freeze(['src/runtime/handler.js', 'src/vite.js', 'src/testing.js']),
 		anchor: 'adapter-err-upgrade-hook',
 		help: 'docs/errors.md#adapter-err-upgrade-hook'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.ATTRIBUTION_HOOK,
+		code: null,
+		event: 'runtime.websocket-attribution.failed',
+		component: 'runtime.websocket-attribution',
+		severity: 'error',
+		emission: 'direct',
+		problemPrefix: 'The WebSocket attribution hook failed; the connection was refused at open.',
+		messagePrefix: direct('runtime.websocket-attribution', 'runtime.websocket-attribution.failed', 'error', 'The WebSocket attribution hook failed; the connection was refused at open.'),
+		cause: 'The handler module\'s `attribution` export threw, returned a promise, returned a misshaped result, or returned an id outside the allowed form (a string of [a-zA-Z0-9_-], at most 64 characters).',
+		consequence: 'That connection is closed with code 1008 before the application open hook runs. Attribution is fail-closed: a connection that cannot be attributed is refused rather than admitted unattributed, because an unattributed admission would silently stand down every tenant-scoped limit that reads the attribution.',
+		automaticRecovery: 'None for that connection. The client may reconnect, which runs the resolver again against a fresh userData.',
+		nextAction: 'Read the attached error and fix the `attribution` export: return { tenantId?, principalId?, entitlement? } synchronously - each present value a string of [a-zA-Z0-9_-] with 1-64 characters - or null/undefined for an unattributed connection. Resolve identity itself in the upgrade hook; attribution only derives from the userData that hook produced.',
+		sources: Object.freeze(['src/runtime/handler.js', 'src/vite.js', 'src/testing.js']),
+		anchor: 'adapter-err-attribution',
+		help: 'docs/errors.md#adapter-err-attribution'
 	}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.SUBSCRIBE_BATCH_HOOK,

@@ -18,6 +18,8 @@ describe('established-message admission', () => {
 		expect(normalizeMessageAdmission(undefined)).toEqual({
 			perConnectionRate: 0,
 			globalRate: 0,
+			perConnectionBytesRate: 0,
+			globalBytesRate: 0,
 			rateWindowMs: 1000,
 			perConnectionConcurrent: 0,
 			globalConcurrent: 0,
@@ -28,12 +30,20 @@ describe('established-message admission', () => {
 		expect(() => normalizeMessageAdmission([])).toThrow('messageAdmission must be an object');
 		expect(() => normalizeMessageAdmission({ maxQueu: 1 })).toThrow('unsupported field: maxQueu');
 		expect(() => normalizeMessageAdmission({ maxQueue: 1 })).toThrow('maxQueue requires');
+		// The byte rates take the same misshape judgment as the frame rates: a
+		// value that cannot bound anything throws instead of silently disabling.
+		expect(() => normalizeMessageAdmission({ perConnectionBytesRate: -1 })).toThrow('messageAdmission.perConnectionBytesRate');
+		expect(() => normalizeMessageAdmission({ perConnectionBytesRate: 1.5 })).toThrow('messageAdmission.perConnectionBytesRate');
+		expect(() => normalizeMessageAdmission({ globalBytesRate: '65536' })).toThrow('messageAdmission.globalBytesRate');
+		expect(() => normalizeMessageAdmission({ globalBytesRate: Number.NaN })).toThrow('messageAdmission.globalBytesRate');
 	});
 
 	it('serializes the public option and reports nested typos', () => {
 		const messageAdmission = {
 			perConnectionRate: 25,
 			globalRate: 1000,
+			perConnectionBytesRate: 65536,
+			globalBytesRate: 1048576,
 			rateWindowMs: 500,
 			perConnectionConcurrent: 2,
 			globalConcurrent: 64,
@@ -42,8 +52,67 @@ describe('established-message admission', () => {
 		expect(serializeWsOptions({ messageAdmission }, false).messageAdmission).toEqual(messageAdmission);
 		expect(unknownWebsocketOptionKeys({ messageAdmission: { maxQueu: 5 } }))
 			.toEqual(['messageAdmission.maxQueu']);
+		expect(unknownWebsocketOptionKeys({ messageAdmission: { perConnectionBytesRate: 65536 } }))
+			.toEqual([]);
 		expect(() => serializeWsOptions({ messageAdmission: { globalRate: -1 } }, false))
 			.toThrow('websocket.messageAdmission.globalRate');
+		expect(() => serializeWsOptions({ messageAdmission: { perConnectionBytesRate: -1 } }, false))
+			.toThrow('websocket.messageAdmission.perConnectionBytesRate');
+	});
+
+	it('charges the byte rates by frame length under an untouched frame rate', () => {
+		let at = 0;
+		const gate = createMessageAdmission({
+			perConnectionRate: 100,
+			perConnectionBytesRate: 1000,
+			globalBytesRate: 1500,
+			rateWindowMs: 1000
+		}, () => at);
+		const a = {};
+		const b = {};
+		// Well under the 100-frame rate, over the 1000-byte connection rate.
+		const first = gate.enter(a, 600);
+		expect(first.ok).toBe(true);
+		first.release();
+		expect(gate.enter(a, 600)).toMatchObject({ ok: false, reason: 'rate_limit', scope: 'connection', retryAfterMs: 200 });
+		// The refused frame charged NOTHING: 400 tokens still stand.
+		const fits = gate.enter(a, 400);
+		expect(fits.ok).toBe(true);
+		fits.release();
+		// The global byte bucket saw 600 + 400; another connection's 600 tips it.
+		expect(gate.enter(b, 600)).toMatchObject({ ok: false, reason: 'rate_limit', scope: 'global' });
+		// Refill restores byte admission on the same clock the frame rates use.
+		at = 1000;
+		const recovered = gate.enter(b, 600);
+		expect(recovered.ok).toBe(true);
+		recovered.release();
+	});
+
+	it('a frame heavier than the whole window allowance is refused every time', () => {
+		let at = 0;
+		const gate = createMessageAdmission({ perConnectionBytesRate: 1000, rateWindowMs: 1000 }, () => at);
+		const ws = {};
+		expect(gate.enter(ws, 4096)).toMatchObject({ ok: false, reason: 'rate_limit', scope: 'connection' });
+		at = 60_000;
+		expect(gate.enter(ws, 4096)).toMatchObject({ ok: false, reason: 'rate_limit', scope: 'connection' });
+		// A zero-byte entry (a caller without a frame) charges no weight.
+		const free = gate.enter(ws);
+		expect(free.ok).toBe(true);
+		free.release();
+	});
+
+	it('runs the hook lane under the byte gate, charging the context payload', async () => {
+		const gate = createMessageAdmission({ perConnectionBytesRate: 1000, rateWindowMs: 1000 }, () => 0);
+		const ws = {};
+		const overloads = [];
+		const ran = [];
+		const hook = (_ws, context) => { ran.push(context.data.byteLength); };
+		await runAdmittedMessageHook(gate, hook, ws, { data: new Uint8Array(700).buffer }, (_w, rejection) => overloads.push(rejection));
+		await runAdmittedMessageHook(gate, hook, ws, { data: new Uint8Array(700).buffer }, (_w, rejection) => overloads.push(rejection));
+		expect(ran).toEqual([700]);
+		expect(overloads).toEqual([
+			expect.objectContaining({ reason: 'rate_limit', scope: 'connection' })
+		]);
 	});
 
 	it('enforces connection and global token buckets with a concrete retry delay', () => {

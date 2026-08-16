@@ -1,7 +1,7 @@
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders } from './runtime/utils/request-headers.js';
-import { stampSeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD } from './runtime/utils.js';
+import { stampSeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD } from './runtime/utils.js';
 import { createSeqBound } from './runtime/utils/seq-bound.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
@@ -13,6 +13,7 @@ import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, W
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { createConnectionPermitCarrier } from './runtime/utils/connection-permit.js';
+import { installAttribution } from './runtime/utils/attribution.js';
 import {
 	assertWireSubscribeAuthorization,
 	assertProtectiveNumber,
@@ -29,7 +30,7 @@ import { createDivergenceDiagnosticStore } from './runtime/divergence-diagnostic
 // Curated re-exports for downstream test code (extensions, app-side
 // integration tests, custom transport bridges that need to assert on
 // the wire shape). Five wire-protocol helpers, three behavior helpers,
-// and all eight userData slot constants. Production-internal helpers
+// and all nine userData slot constants. Production-internal helpers
 // (mime lookup, byte parsing, sampler internals, etc.) deliberately
 // stay unexported so the surface stays semver-stable for tests without
 // blocking future refactors of the production hot paths.
@@ -49,6 +50,7 @@ export {
 	WS_STATS,
 	WS_PLATFORM,
 	WS_CAPS,
+	WS_ATTRIBUTION,
 	WS_REQUEST_ID_KEY
 };
 
@@ -2283,6 +2285,24 @@ export async function createTestServer(options = {}) {
 			wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
 			userData[WS_PLATFORM] = wsPlatform;
 			delete userData[WS_REQUEST_ID_KEY];
+			// Attribution parity with the production handler: resolved once, before
+			// the app open hook, fail-closed. A test server that admitted what
+			// production refuses would certify a resolver production closes on.
+			try {
+				installAttribution(handler.attribution, userData);
+			} catch (err) {
+				emitOperationalEvent({
+					source: 'svelte-adapter-uws',
+					component: 'runtime.websocket-attribution',
+					event: 'runtime.websocket-attribution.failed',
+					severity: 'error',
+					dataClass: 'pseudonymous',
+					message: 'The WebSocket attribution hook failed; the connection was refused at open.',
+					attributes: { requestId: wsPlatform.requestId, error: diagnosticError(err) }
+				});
+				try { ws.end(1008, 'Attribution failed'); } catch { /* native side already gone */ }
+				return;
+			}
 			const sessionId = randomUuid();
 			userData[WS_SESSION_ID] = sessionId;
 			if (closeHookRegisteredT) {
@@ -2846,7 +2866,10 @@ export async function createTestServer(options = {}) {
 							// the connection's publish grant, never client-supplied.
 							// Ungranted or a non-string event -> game-denied; granted ->
 							// stamp seq, fan out to the room excluding this sender, echo id.
-							await runAdmittedMessageWork(messageAdmission, ws, { msg, platform }, runGameApplicationWorkT, rejectApplicationMessageT);
+							// `data` carries the raw frame so the byte-rate buckets
+							// charge this lane like every other application-work
+							// lane; the game work itself reads only `msg`.
+							await runAdmittedMessageWork(messageAdmission, ws, { msg, platform, data: message }, runGameApplicationWorkT, rejectApplicationMessageT);
 							return;
 						}
 					} catch {
@@ -2911,7 +2934,12 @@ export async function createTestServer(options = {}) {
 			// otherwise a leaked cap count would wedge a codec's JSON fast path on
 			// and a stateful codec's per-connection state would never be freed.
 			try {
-				handler.close?.(ws, ctx);
+				// Mirror production: the app close hook stays silent for a
+				// connection refused at open (a failed attribution) - its open
+				// hook never ran, and a counter paired across open/close must
+				// not go negative. The session id's absence marks exactly
+				// those connections; the finally cleanup still runs.
+				if (ud[WS_SESSION_ID] !== undefined) handler.close?.(ws, ctx);
 			} finally {
 				if (ud[WS_CONNECTION_PERMIT]) {
 					ud[WS_CONNECTION_PERMIT] = undefined;

@@ -3,7 +3,8 @@ import { runMessageHook } from './hook-boundary.js';
 
 const DEFAULT_WINDOW_MS = 1000;
 const MESSAGE_ADMISSION_KEYS = new Set([
-	'perConnectionRate', 'globalRate', 'rateWindowMs',
+	'perConnectionRate', 'globalRate',
+	'perConnectionBytesRate', 'globalBytesRate', 'rateWindowMs',
 	'perConnectionConcurrent', 'globalConcurrent', 'maxQueue'
 ]);
 const STATIC_OVERLOAD_FRAMES = Object.freeze({
@@ -25,7 +26,9 @@ function limit(value, name, { positive = false } = {}) {
  * Validate and normalize the established-message admission options.
  *
  * Every limit is per worker. A zero limit is disabled. Rate permits use a
- * token bucket, while concurrency overflow may wait in one bounded FIFO.
+ * token bucket - the per-frame rates charge one token per frame, the byte
+ * rates charge the incoming frame's byte length - while concurrency overflow
+ * may wait in one bounded FIFO.
  *
  * @param {unknown} input
  * @param {string} [prefix]
@@ -35,6 +38,8 @@ export function normalizeMessageAdmission(input, prefix = 'messageAdmission') {
 		return Object.freeze({
 			perConnectionRate: 0,
 			globalRate: 0,
+			perConnectionBytesRate: 0,
+			globalBytesRate: 0,
 			rateWindowMs: DEFAULT_WINDOW_MS,
 			perConnectionConcurrent: 0,
 			globalConcurrent: 0,
@@ -57,6 +62,8 @@ export function normalizeMessageAdmission(input, prefix = 'messageAdmission') {
 	const normalized = {
 		perConnectionRate,
 		globalRate,
+		perConnectionBytesRate: limit(value.perConnectionBytesRate, `${prefix}.perConnectionBytesRate`),
+		globalBytesRate: limit(value.globalBytesRate, `${prefix}.globalBytesRate`),
 		rateWindowMs,
 		perConnectionConcurrent: limit(value.perConnectionConcurrent, `${prefix}.perConnectionConcurrent`),
 		globalConcurrent: limit(value.globalConcurrent, `${prefix}.globalConcurrent`),
@@ -77,12 +84,14 @@ function refill(bucket, capacity, windowMs, at) {
 	};
 }
 
-function rateRejection(scope, bucket, capacity, windowMs) {
+function rateRejection(scope, bucket, capacity, windowMs, cost = 1) {
+	// A cost above the whole capacity can never be afforded; the delay until
+	// the bucket is FULL is the honest floor of "not before then".
 	return {
 		ok: false,
 		reason: 'rate_limit',
 		scope,
-		retryAfterMs: Math.max(1, Math.ceil((1 - bucket.tokens) * windowMs / capacity))
+		retryAfterMs: Math.max(1, Math.ceil((Math.min(cost, capacity) - bucket.tokens) * windowMs / capacity))
 	};
 }
 
@@ -98,19 +107,22 @@ function rateRejection(scope, bucket, capacity, windowMs) {
 export function createMessageAdmission(input, clock = monotonicNow) {
 	const config = normalizeMessageAdmission(input);
 	const enabled = config.perConnectionRate > 0 || config.globalRate > 0 ||
+		config.perConnectionBytesRate > 0 || config.globalBytesRate > 0 ||
 		config.perConnectionConcurrent > 0 || config.globalConcurrent > 0;
-	/** @type {WeakMap<object, { active: number, queued: number, rate: { tokens: number, updatedAt: number } | null, closed: boolean }>} */
+	/** @type {WeakMap<object, { active: number, queued: number, rate: { tokens: number, updatedAt: number } | null, bytes: { tokens: number, updatedAt: number } | null, closed: boolean }>} */
 	const connections = new WeakMap();
 	/** @type {Array<{ ws: object, state: any, resolve: (value: any) => void }>} */
 	const queue = [];
 	let active = 0;
 	/** @type {{ tokens: number, updatedAt: number } | null} */
 	let globalBucket = null;
+	/** @type {{ tokens: number, updatedAt: number } | null} */
+	let globalBytesBucket = null;
 
 	const stateFor = (ws) => {
 		let state = connections.get(ws);
 		if (state === undefined) {
-			state = { active: 0, queued: 0, rate: null, closed: false };
+			state = { active: 0, queued: 0, rate: null, bytes: null, closed: false };
 			connections.set(ws, state);
 		}
 		return state;
@@ -158,15 +170,25 @@ export function createMessageAdmission(input, clock = monotonicNow) {
 		config,
 		get active() { return active; },
 		get queued() { return queue.length; },
-		/** @param {object} ws */
-		enter(ws) {
+		/**
+		 * @param {object} ws
+		 * @param {number} [bytes] - the incoming frame's byte length, charged
+		 * against the byte-rate buckets when they are configured. Defaults to 0
+		 * so a caller without a frame in hand charges nothing by weight.
+		 */
+		enter(ws, bytes = 0) {
 			if (!enabled) return permit(stateFor(ws));
 			const state = stateFor(ws);
 			if (state.closed) return { ok: false, reason: 'connection_closed', scope: 'connection' };
 
 			const at = clock();
+			const cost = bytes > 0 ? bytes : 0;
+			// Every rate lane is CHECKED before any is CHARGED, so a frame refused
+			// by a later lane leaves the earlier buckets untouched.
 			let nextConnectionBucket = null;
 			let nextGlobalBucket = null;
+			let nextConnectionBytes = null;
+			let nextGlobalBytes = null;
 			if (config.perConnectionRate > 0) {
 				nextConnectionBucket = refill(state.rate, config.perConnectionRate, config.rateWindowMs, at);
 				if (nextConnectionBucket.tokens < 1) {
@@ -181,6 +203,20 @@ export function createMessageAdmission(input, clock = monotonicNow) {
 					return rateRejection('global', nextGlobalBucket, config.globalRate, config.rateWindowMs);
 				}
 			}
+			if (cost > 0 && config.perConnectionBytesRate > 0) {
+				nextConnectionBytes = refill(state.bytes, config.perConnectionBytesRate, config.rateWindowMs, at);
+				if (nextConnectionBytes.tokens < cost) {
+					state.bytes = nextConnectionBytes;
+					return rateRejection('connection', nextConnectionBytes, config.perConnectionBytesRate, config.rateWindowMs, cost);
+				}
+			}
+			if (cost > 0 && config.globalBytesRate > 0) {
+				nextGlobalBytes = refill(globalBytesBucket, config.globalBytesRate, config.rateWindowMs, at);
+				if (nextGlobalBytes.tokens < cost) {
+					globalBytesBucket = nextGlobalBytes;
+					return rateRejection('global', nextGlobalBytes, config.globalBytesRate, config.rateWindowMs, cost);
+				}
+			}
 			if (nextConnectionBucket !== null) {
 				nextConnectionBucket.tokens--;
 				state.rate = nextConnectionBucket;
@@ -188,6 +224,14 @@ export function createMessageAdmission(input, clock = monotonicNow) {
 			if (nextGlobalBucket !== null) {
 				nextGlobalBucket.tokens--;
 				globalBucket = nextGlobalBucket;
+			}
+			if (nextConnectionBytes !== null) {
+				nextConnectionBytes.tokens -= cost;
+				state.bytes = nextConnectionBytes;
+			}
+			if (nextGlobalBytes !== null) {
+				nextGlobalBytes.tokens -= cost;
+				globalBytesBucket = nextGlobalBytes;
 			}
 
 			if (canStart(state)) return permit(state);
@@ -232,6 +276,16 @@ export function messageOverloadedFrame(rejection) {
 	return JSON.stringify(frame);
 }
 
+/**
+ * The byte weight a frame's context charges against the byte-rate buckets:
+ * the incoming payload's length, 0 when the context carries none.
+ * @param {any} context
+ */
+function contextBytes(context) {
+	const length = context?.data?.byteLength;
+	return typeof length === 'number' && length > 0 ? length : 0;
+}
+
 function retainedContext(context) {
 	const data = context?.data;
 	let retained = data;
@@ -257,7 +311,7 @@ function retainedContext(context) {
  */
 export async function runAdmittedMessageWork(admission, ws, context, work, onOverload) {
 	if (!admission.enabled) return work(ws, context);
-	const decision = admission.enter(ws);
+	const decision = admission.enter(ws, contextBytes(context));
 	const queuedContext = decision.ok === null ? retainedContext(context) : context;
 	const result = decision.ok === null ? await decision.wait : decision;
 	if (!result.ok) {
@@ -285,7 +339,7 @@ export async function runAdmittedMessageWork(admission, ws, context, work, onOve
 export async function runAdmittedMessageHook(admission, hook, ws, context, onOverload) {
 	if (typeof hook !== 'function') return;
 	if (!admission.enabled) return runMessageHook(hook, ws, context);
-	const decision = admission.enter(ws);
+	const decision = admission.enter(ws, contextBytes(context));
 	const queuedContext = decision.ok === null ? retainedContext(context) : context;
 	const result = decision.ok === null ? await decision.wait : decision;
 	if (!result.ok) {

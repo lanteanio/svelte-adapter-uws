@@ -275,6 +275,21 @@ export interface MessageAdmissionOptions {
 	perConnectionRate?: number;
 	/** Maximum application-work frames accepted across this worker in `rateWindowMs`. `0` disables. */
 	globalRate?: number;
+	/**
+	 * Maximum application-work payload bytes accepted per connection in
+	 * `rateWindowMs`, charged by each incoming frame's byte length. `0`
+	 * disables. Refusals use the same `rate_limit` reason and scopes as the
+	 * per-frame rates. A single frame larger than the whole window's byte
+	 * allowance can never afford its own cost and is refused every time, so
+	 * size the allowance against `maxPayloadLength` deliberately.
+	 */
+	perConnectionBytesRate?: number;
+	/**
+	 * Maximum application-work payload bytes accepted across this worker in
+	 * `rateWindowMs`, charged by each incoming frame's byte length. `0`
+	 * disables. Same refusal semantics as `perConnectionBytesRate`.
+	 */
+	globalBytesRate?: number;
 	/** Token-bucket refill window in milliseconds. @default 1000 */
 	rateWindowMs?: number;
 	/** Maximum concurrently-running application frames per connection. `0` disables. */
@@ -1848,6 +1863,25 @@ export interface ResumeContext {
 }
 
 /**
+ * A connection's server-resolved attribution: who traffic on this connection
+ * is accounted to. Resolved exactly once per connection at open from the
+ * handler module's `attribution(user)` export, validated, frozen, and read
+ * back via `attribution(ws)` from `svelte-adapter-uws/connection`.
+ *
+ * Every present field is a string of `[a-zA-Z0-9_-]` with 1-64 characters -
+ * the same rule svelte-realtime applies to tenant ids, which also excludes
+ * the NUL byte every downstream key delimiter relies on.
+ */
+export interface Attribution {
+	/** The tenant (organization, workspace) this connection belongs to. */
+	readonly tenantId?: string;
+	/** The principal (user, service identity) inside that tenant. */
+	readonly principalId?: string;
+	/** An application-defined entitlement label (a billing or quota class). */
+	readonly entitlement?: string;
+}
+
+/**
  * Shape of the user's WebSocket handler module.
  *
  * Create a file (e.g. `src/lib/server/websocket.js`) and export any
@@ -2035,6 +2069,28 @@ export interface WebSocketHandler<UserData = unknown> {
 		| UserData | false
 		| ReturnType<typeof upgradeResponse<UserData>>
 		| Promise<UserData | false | ReturnType<typeof upgradeResponse<UserData>>>;
+
+	/**
+	 * Resolve who traffic on a connection is accounted to.
+	 *
+	 * Called exactly once per connection at open, BEFORE the `open` hook, with
+	 * the connection's `ws.getUserData()` - the server-trusted identity the
+	 * `upgrade` hook established. The result is validated, frozen, stored for
+	 * the connection's life, and read back via `attribution(ws)` from
+	 * `svelte-adapter-uws/connection`; the bundled ratelimit plugin reads its
+	 * `tenantId` when no `tenant` resolver of its own is configured.
+	 *
+	 * MUST be synchronous - it runs inside the open callback, ahead of every
+	 * hook that needs the answer. Resolve identity itself in the async-capable
+	 * `upgrade` hook; derive the attribution from userData here.
+	 *
+	 * Fail-closed: a throwing resolver, a promise, a misshaped result, or an
+	 * id outside `[a-zA-Z0-9_-]` / 64 chars refuses the connection at open
+	 * (close code 1008) with one logged error line, rather than admitting it
+	 * unattributed. Returning `null` / `undefined` (or omitting the export)
+	 * means unattributed and is always accepted.
+	 */
+	attribution?: (user: UserData) => Attribution | null | undefined;
 
 	/** Called when a WebSocket connection is established. */
 	open?: (ws: WebSocket<UserData>, ctx: OpenContext) => void;

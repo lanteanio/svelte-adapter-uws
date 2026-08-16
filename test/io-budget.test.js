@@ -657,7 +657,18 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// configuration time - gate construction and sampler start - and touch
 	// only scalar option values; nothing on any frame path, no byte is
 	// read, allocated or copied, and no copy primitive entered the graph.
-	ingress: '2693348b682da469844a52992d8141dedfe75b77360f551f6bbb336355095793',
+	//
+	// Re-pinned for the attribution slot install, reached through utils.js:
+	// one `Symbol.for` slot declaration in utils/ws-symbols.js
+	// (WS_ATTRIBUTION - the slot the open callback stamps once per
+	// connection, off every frame path), and error-registry.js structure -
+	// one id constant plus one frozen entry for the attribution refusal -
+	// whose sentences stay masked while the object/array nodes count as
+	// structure by design. The admission byte counters live in
+	// utils/message-admission.js, which this graph does not reach. Data
+	// declarations only; no byte is read, allocated or copied, and no copy
+	// primitive entered the graph.
+	ingress: 'af8fdd140ea96d74e25fdbb4ca8dc7daf1005f4274cc6052913230e787a1e94f',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -994,7 +1005,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// merge in resolvePressureThresholds. Configuration-time scalar reads;
 	// no byte is read, allocated or copied, and no copy primitive entered
 	// the graph.
-	platform: 'b3f3cb1a504d6b7c0a66a3dd1c5d1cca7ee6fbaed96f1437d9d7d503838ca211',
+	// Re-pinned with the ingress seal above for the attribution slot install,
+	// same drift and same reason: the WS_ATTRIBUTION `Symbol.for` declaration
+	// in utils/ws-symbols.js and the attribution refusal's id constant plus
+	// frozen entry in error-registry.js (structure by design, sentences
+	// masked). The admission byte counters live in utils/message-admission.js,
+	// outside this graph. Data declarations off every frame path; no byte is
+	// read, allocated or copied, and no copy primitive entered the graph.
+	platform: 'd11ccd258b5fbfa6435ea6e51a208e109ed0c0ce27998256be196455e8d82695',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1088,7 +1106,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// explicit null-skipping threshold merge in resolvePressureThresholds.
 	// Configuration-time scalar reads; no byte is read, allocated or
 	// copied, and no copy primitive entered the graph.
-	'wire-fanout': '368d32789985eec192add59d17f7698bb21067cff7d1c1978ef0c38d55853061',
+	// Re-pinned with the ingress and platform seals above for the
+	// attribution slot install, same drift and same reason: the
+	// WS_ATTRIBUTION `Symbol.for` declaration in utils/ws-symbols.js and
+	// the attribution refusal's id constant plus frozen entry in
+	// error-registry.js (structure by design, sentences masked). The
+	// admission byte counters live in utils/message-admission.js, outside
+	// this graph. Data declarations off every frame path; no byte is read,
+	// allocated or copied, and no copy primitive entered the graph.
+	'wire-fanout': 'd30b683fce4b61db714f7738cb72df79d000a302debe7b5322786c4483a25209',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

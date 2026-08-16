@@ -42,9 +42,39 @@ export interface RateLimitOptions<UserData = unknown> {
 	 * IPv6 keys), so two tenants sharing an IP / connection / custom key get independent
 	 * buckets and a tenant's `reset` / `ban` / `unban` / `clear` touch only that tenant.
 	 * Mirrors the `redis/ratelimit` extension. Return null/undefined for an unscoped
-	 * connection; omit for a single-tenant deploy (byte-identical).
+	 * connection.
+	 *
+	 * When OMITTED, the limiter reads the tenant id from the connection's frozen
+	 * attribution slot - the answer the adapter settled at open from the handler
+	 * module's `attribution(user)` export - and no resolver runs. An explicit resolver
+	 * overrides that read; a deployment with neither stays byte-identical
+	 * single-tenant.
 	 */
 	tenant?: (ws: import('uWebSockets.js').WebSocket<UserData>) => string | null | undefined;
+
+	/**
+	 * What one bucket's allowance covers inside a tenant's namespace.
+	 *
+	 * Both values provide NAMESPACE scoping (two tenants never share a bucket, and
+	 * tenant-scoped admin ops touch only their tenant); the budget decides how one
+	 * tenant's own traffic shares the allowance:
+	 *
+	 * - `'principal'` (default): each resolved key (IP, connection, custom) gets its
+	 *   own bucket inside the tenant's namespace - a per-principal budget. Exactly
+	 *   the pre-existing behavior.
+	 * - `'tenant'`: the bucket key is the tenant id alone, so ALL of a tenant's
+	 *   principals draw from ONE shared allowance - a fair-share ceiling per tenant.
+	 *   Every consumed connection must then carry a tenant id (from the `tenant`
+	 *   resolver, or from the adapter attribution); `consume` throws for one that
+	 *   does not, because a shared bucket for every id-less connection would be one
+	 *   global bucket, which is not what `budget: 'tenant'` means. Admin ops
+	 *   (`reset`/`ban`/`unban`) address the tenant's one bucket by their tenant
+	 *   argument and do not read the key argument in this mode; calling one
+	 *   without a tenant id throws.
+	 *
+	 * @default 'principal'
+	 */
+	budget?: 'principal' | 'tenant';
 
 	/**
 	 * Hard cap on retained buckets. When the map crosses this size on a

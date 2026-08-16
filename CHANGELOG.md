@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Existing manifest rows and changelog entry bodies are byte-identical; the restored headings and not-published markers are additive.
   - **Detail:** [Added engineering detail](#added).
 
+- **Added: one trusted attribution contract, consumed by the bundled limiter surfaces.** The handler module may export `attribution(user)`, resolved once per connection at open over server-trusted userData, frozen, and readable via `attribution(ws)` from `svelte-adapter-uws/connection`; the ratelimit plugin consumes it and gains a `budget` option, message admission gains byte-weighted rates, and `docs/tenancy.md` contracts ownership per surface.
+  - **Affects:** Multi-tenant deployments wanting tenant-scoped or tenant-shared limits; single-tenant apps that export none of it are untouched.
+  - **Action:** None by default. To attribute, export `attribution(user)` returning `{ tenantId?, principalId?, entitlement? }` (each a string of `[a-zA-Z0-9_-]`, at most 64 chars) or null for unattributed.
+  - **Requires:** No new dependency; the resolver must be synchronous and is fail-closed - an invalid id or a throwing resolver closes the connection at open (code 1008) with one indexed `ADAPTER-ERR-ATTRIBUTION` line instead of admitting it unattributed.
+  - **Compatibility:** Production, `createTestServer`, and the dev plugin resolve identically. The no-attribution, no-option paths are byte-identical: ratelimit bucket keys, admission behavior, and userData shape are unchanged for apps that opt into nothing.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Changed: the development dependency tree carries no open advisories.** Five npm audit advisories, two moderate and three high, are resolved at patch level entirely inside the development and comparison-benchmark tree, so contributors and continuous integration audit clean while every shipped dependency range, peer floor and published tarball stays exactly where it was.
   - **Affects:** Contributors and continuous integration; no consumer of the published package.
   - **Action:** None; run `npm install` in a clone to pick up the resolved lockfile.
@@ -174,6 +181,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:end -->
 
 ### Added
+
+- **The attribution contract: one resolver, one frozen per-connection
+  answer, one accessor.** `src/runtime/utils/attribution.js` validates the
+  handler module's `attribution(user)` result against the realtime id rule
+  (`[a-zA-Z0-9_-]{1,64}` per present field - a charset that also excludes
+  the NUL byte every downstream key delimiter relies on, and the `/` a
+  tenant topic prefix splits on), refuses unknown fields and thenables
+  (the open callback is synchronous; identity resolution belongs in the
+  async-capable upgrade hook), freezes the result, and stamps it once on a
+  new `Symbol.for` userData slot (`WS_ATTRIBUTION` in
+  `utils/ws-symbols.js`, so a bundle-duplicated module instance still
+  reads the same slot). All three surfaces - `runtime/handler.js`,
+  `testing.js`, `vite.js` - resolve at the same point: after the platform
+  install, before the session welcome and the app open hook, so a refused
+  connection never receives a welcome and the close path finds every slot
+  it asserts on. The refusal is fail-closed and indexed: close 1008 plus
+  one `runtime.websocket-attribution.failed` line under the new
+  `ADAPTER-ERR-ATTRIBUTION` registry entry, because a silently-dropped
+  attribution would stand down every tenant-scoped limit downstream - the
+  same silent-degradation class the config guards refuse. The public read
+  is `attribution(ws)` on the `svelte-adapter-uws/connection` subpath,
+  beside `connectionSessionId`, so app code and plugins reach it without
+  the build factory or the testing surface; an unattributed connection
+  never grows the slot property.
+
+- **The ratelimit plugin consumes attribution and speaks the budget
+  vocabulary.** With no `tenant` resolver configured, `consume` reads the
+  adapter-resolved tenant id from the connection's frozen attribution
+  slot - no resolver runs, and the settled answer costs at most one
+  cached lookup on the hot key paths - while an explicit resolver keeps
+  overriding and the no-attribution, no-option key space stays
+  byte-identical. The new `budget` option names what one allowance covers:
+  `'principal'` (default) keeps today's per-key buckets inside the
+  tenant's namespace; `'tenant'` keys the bucket by the tenant id alone so
+  every principal of a tenant draws from one shared allowance, and
+  `consume` throws for a connection with no tenant id, naming both fixes
+  (a `tenant` option or an `attribution` export), because folding id-less
+  traffic into one shared bucket would be a global bucket and falling back
+  to per-key buckets would silently be `'principal'`. Under
+  `budget: 'tenant'` the tenant id alone addresses the bucket: admin ops
+  take it as their tenant argument, `clear(tenantId)` drops the shared
+  bucket, and the per-key derivation never runs.
+
+- **Message admission charges by weight as well as by count.**
+  `messageAdmission.perConnectionBytesRate` and `globalBytesRate` are
+  token buckets over payload bytes per `rateWindowMs`, charged by each
+  admitted frame's byte length at the same boundary as the per-frame
+  rates (application work only; protocol-control frames stay outside).
+  Every rate lane is checked before any is charged, so a frame refused by
+  a later lane leaves earlier buckets untouched; refusals reuse the
+  `rate_limit` reason with the existing `connection` / `global` scopes and
+  a cost-aware `retryAfterMs`. A frame heavier than a whole window's
+  allowance is refused every time - documented against
+  `maxPayloadLength` in the option's declaration - and misshaped values
+  throw through the shared intake guard on all three surfaces.
+  `docs/tenancy.md` is the cross-surface contract for which layer owns
+  each abuse surface's namespace and budget, linked from the README
+  rate-limiting section and the architecture contract-authorities table.
 
 - **The 0.6 line states its outcomes, its non-goals, and the evidence that
   promotes it.** ROADMAP.md is the outcome contract: each outcome names the

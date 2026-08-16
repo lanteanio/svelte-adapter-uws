@@ -25,6 +25,6 @@ describe('production connection context', () => {
 		const source = readFileSync(new URL('../src/connection.js', import.meta.url), 'utf8');
 		expect(source).not.toMatch(/^\s*import\s/m);
 		expect(source).not.toContain('./testing.js');
-		expect(Object.keys(await import('../src/connection.js'))).toEqual(['connectionSessionId']);
+		expect(Object.keys(await import('../src/connection.js'))).toEqual(['connectionSessionId', 'attribution']);
 	});
 });

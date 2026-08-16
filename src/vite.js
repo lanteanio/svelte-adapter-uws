@@ -16,6 +16,7 @@ import {
 } from './config-guards.js';
 import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './runtime/handler/cluster-sequence-policy.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
+import { installAttribution } from './runtime/utils/attribution.js';
 import { snapshotUpgradeHeaders } from './runtime/utils/upgrade-headers.js';
 import { emitOperationalDiagnostic, viteHandlerFailureDiagnostic, viteHandlerRecoveredDiagnostic } from './runtime/utils/operational-diagnostic.js';
 import { trace } from './runtime/tracing.js';
@@ -1232,7 +1233,8 @@ export default function uws(options = {}) {
 			subscribeBatch: mod.subscribeBatch,
 			unsubscribe: mod.unsubscribe,
 			resume: mod.resume,
-			authenticate: mod.authenticate
+			authenticate: mod.authenticate,
+			attribution: mod.attribution
 		};
 	}
 
@@ -1988,6 +1990,29 @@ export default function uws(options = {}) {
 				wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
 				userData[WS_PLATFORM] = wsPlatform;
 				delete userData[WS_REQUEST_ID_KEY];
+				// Attribution parity with the production handler: resolved once,
+				// before the app open hook, fail-closed. Dev must refuse exactly the
+				// resolver production refuses, or the failure ships unseen.
+				try {
+					installAttribution(userHandlers.attribution, userData);
+				} catch (err) {
+					emitOperationalEvent({
+						source: 'svelte-adapter-uws',
+						component: 'runtime.websocket-attribution',
+						event: 'runtime.websocket-attribution.failed',
+						severity: 'error',
+						dataClass: 'pseudonymous',
+						message: 'The WebSocket attribution hook failed; the connection was refused at open.',
+						attributes: { requestId: wsPlatform.requestId, error: diagnosticError(err) }
+					});
+					// The dev close listener is registered further down, so this early
+					// exit must undo the connection-tracking inserts itself; the app
+					// close hook stays silent, matching an open hook that never ran.
+					connections.delete(ws);
+					subscriptions.delete(ws);
+					try { ws.close(1008, 'Attribution failed'); } catch { /* socket already gone */ }
+					return;
+				}
 				const sessionId = randomUUID();
 				userData[WS_SESSION_ID] = sessionId;
 				userData[WS_STATS] = {
@@ -2577,7 +2602,11 @@ export default function uws(options = {}) {
 								// is the connection's publish grant, never client-supplied.
 								// Ungranted or a non-string event -> game-denied; granted
 								// -> stamp seq, fan out to the room excluding this sender.
-								await runAdmittedMessageWork(messageAdmission, wrapped, { msg, platform }, runGameApplicationWorkV, rejectApplicationMessageV);
+								// `data` carries the raw frame so the byte-rate
+								// buckets charge this lane like every other
+								// application-work lane; the game work itself
+								// reads only `msg`.
+								await runAdmittedMessageWork(messageAdmission, wrapped, { msg, platform, data: raw }, runGameApplicationWorkV, rejectApplicationMessageV);
 								return;
 							}
 						} catch {
@@ -2664,7 +2693,13 @@ export default function uws(options = {}) {
 					mod.subscribe !== userHandlers.subscribe ||
 					mod.subscribeBatch !== userHandlers.subscribeBatch ||
 					mod.unsubscribe !== userHandlers.unsubscribe ||
-					mod.resume !== userHandlers.resume) {
+					mod.resume !== userHandlers.resume ||
+					// The exports applyHandlers copies must all be compared, or a
+					// module exporting ONLY one of these keeps serving the stale
+					// version after an edit: a stale attribution resolver would
+					// admit or refuse what the edited source would not.
+					mod.authenticate !== userHandlers.authenticate ||
+					mod.attribution !== userHandlers.attribution) {
 					applyHandlers(mod);
 					connectionsRestarted = connections.size > 0;
 					// Close existing connections so they reconnect with the new handler.

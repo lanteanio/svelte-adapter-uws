@@ -137,7 +137,8 @@ export const KNOWN_NESTED_WEBSOCKET_OPTION_KEYS = {
 		'renderer', 'appName', 'statusUrl', 'supportUrl', 'incidentId'
 	]),
 	messageAdmission: new Set([
-		'perConnectionRate', 'globalRate', 'rateWindowMs',
+		'perConnectionRate', 'globalRate',
+		'perConnectionBytesRate', 'globalBytesRate', 'rateWindowMs',
 		'perConnectionConcurrent', 'globalConcurrent', 'maxQueue'
 	]),
 	// One set with the value judgment in config-guards.js, so the unknown-key

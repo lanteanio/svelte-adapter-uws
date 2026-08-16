@@ -2,8 +2,8 @@
 
 Search this page with the exact stable ID, code, event, or beginning of the message you saw.
 Every failure emitted as a diagnostic event is indexed below with its cause, what it means
-for traffic, whether anything recovers on its own, and what to do next: 34 entries
-against the 37 distinct diagnostic events emitted from the scanned sources, plus
+for traffic, whether anything recovers on its own, and what to do next: 35 entries
+against the 38 distinct diagnostic events emitted from the scanned sources, plus
 33 entries indexing consequential plain console lines that never enter the diagnostic
 pipeline - each such line is printed through the registry and carries its stable ID tag, so
 the emitted text cannot drift from the prefix indexed here. The remaining emitted events are
@@ -53,6 +53,7 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-RELAY-GAP](#adapter-err-relay-gap) | `runtime.relay-gap.detected` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.relay-gap event=runtime.relay-gap.detected severity=error] This worker is missing relayed state that sibling workers received.` |
 | [ADAPTER-ERR-SSR](#adapter-err-ssr) | `runtime.ssr.failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.ssr event=runtime.ssr.failed severity=error] SvelteKit request handling failed.` |
 | [ADAPTER-ERR-UPGRADE-HOOK](#adapter-err-upgrade-hook) | `runtime.websocket-upgrade.failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.websocket-upgrade event=runtime.websocket-upgrade.failed severity=error] The WebSocket upgrade hook failed.` |
+| [ADAPTER-ERR-ATTRIBUTION](#adapter-err-attribution) | `runtime.websocket-attribution.failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.websocket-attribution event=runtime.websocket-attribution.failed severity=error] The WebSocket attribution hook failed; the connection was refused at open.` |
 | [ADAPTER-ERR-SUBSCRIBE-BATCH-HOOK](#adapter-err-subscribe-batch-hook) | `subscribe.batch-hook-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.subscribe event=subscribe.batch-hook-failed severity=error] The subscribeBatch hook threw; every topic in the batch was denied INTERNAL_ERROR.` |
 | [ADAPTER-ERR-SUBSCRIBE-BATCH-RESULT](#adapter-err-subscribe-batch-result) | `subscribe.batch-result-read-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.subscribe event=subscribe.batch-result-read-failed severity=error] Reading the subscribeBatch result threw; every topic in the batch was denied INTERNAL_ERROR.` |
 | [ADAPTER-ERR-SUBSCRIBE-HOOK](#adapter-err-subscribe-hook) | `subscribe.hook-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.subscribe event=subscribe.hook-failed severity=error] The subscribe hook threw; the subscribe was denied INTERNAL_ERROR.` |
@@ -96,8 +97,8 @@ generate and ship their own runtime-owned references on the same release channel
 ## Emitted diagnostic event coverage
 
 This inventory is derived at generation time by scanning `src/runtime/`, `src/observability.js`,
-and `src/vite.js` for emitted diagnostic events; the runtime emits 37 distinct events.
-The 34 indexed above carry stable IDs and full operator guidance; the remaining 3
+and `src/vite.js` for emitted diagnostic events; the runtime emits 38 distinct events.
+The 35 indexed above carry stable IDs and full operator guidance; the remaining 3
 are informational. That split is enforced by severity rather than by a list: an emitted event
 is exempt from the indexed reference only while every severity it is emitted at is
 informational, so promoting one to a warning or an error fails generation until it is indexed.
@@ -132,6 +133,7 @@ Indexed events:
 - `runtime.relay-gap.detected` - [ADAPTER-ERR-RELAY-GAP](#adapter-err-relay-gap)
 - `runtime.ssr.failed` - [ADAPTER-ERR-SSR](#adapter-err-ssr)
 - `runtime.websocket-upgrade.failed` - [ADAPTER-ERR-UPGRADE-HOOK](#adapter-err-upgrade-hook)
+- `runtime.websocket-attribution.failed` - [ADAPTER-ERR-ATTRIBUTION](#adapter-err-attribution)
 - `subscribe.batch-hook-failed` - [ADAPTER-ERR-SUBSCRIBE-BATCH-HOOK](#adapter-err-subscribe-batch-hook)
 - `subscribe.batch-result-read-failed` - [ADAPTER-ERR-SUBSCRIBE-BATCH-RESULT](#adapter-err-subscribe-batch-result)
 - `subscribe.hook-failed` - [ADAPTER-ERR-SUBSCRIBE-HOOK](#adapter-err-subscribe-hook)
@@ -530,6 +532,18 @@ searchable log prefix is:
 - **Automatic recovery:** None. The client retries by reconnecting, which runs the hook again.
 - **Next action:** Read the attached error and fix the hook. Persistent failure presents to users as a connection that never establishes, while HTTP continues to work.
 - **Runtime help:** `docs/errors.md#adapter-err-upgrade-hook`
+- **Runtime sources:** [src/runtime/handler.js](../src/runtime/handler.js), [src/vite.js](../src/vite.js), [src/testing.js](../src/testing.js)
+
+<a id="adapter-err-attribution"></a>
+## `ADAPTER-ERR-ATTRIBUTION`
+
+- **Code/event:** `runtime.websocket-attribution.failed`
+- **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.websocket-attribution event=runtime.websocket-attribution.failed severity=error] The WebSocket attribution hook failed; the connection was refused at open.`
+- **Cause:** The handler module's `attribution` export threw, returned a promise, returned a misshaped result, or returned an id outside the allowed form (a string of [a-zA-Z0-9_-], at most 64 characters).
+- **Consequence:** That connection is closed with code 1008 before the application open hook runs. Attribution is fail-closed: a connection that cannot be attributed is refused rather than admitted unattributed, because an unattributed admission would silently stand down every tenant-scoped limit that reads the attribution.
+- **Automatic recovery:** None for that connection. The client may reconnect, which runs the resolver again against a fresh userData.
+- **Next action:** Read the attached error and fix the `attribution` export: return { tenantId?, principalId?, entitlement? } synchronously - each present value a string of [a-zA-Z0-9_-] with 1-64 characters - or null/undefined for an unattributed connection. Resolve identity itself in the upgrade hook; attribution only derives from the userData that hook produced.
+- **Runtime help:** `docs/errors.md#adapter-err-attribution`
 - **Runtime sources:** [src/runtime/handler.js](../src/runtime/handler.js), [src/vite.js](../src/vite.js), [src/testing.js](../src/testing.js)
 
 <a id="adapter-err-subscribe-batch-hook"></a>

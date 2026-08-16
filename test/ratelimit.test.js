@@ -1,6 +1,20 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRateLimit } from '../src/plugins/ratelimit/server.js';
+import { installAttribution } from '../src/runtime/utils/attribution.js';
 import { mockWs, installFakeRuntimeClock, releaseRuntimeClock } from './_helpers.js';
+
+/**
+ * A mock connection whose userData carries the attribution slot exactly as the
+ * runtime stamps it at open - through installAttribution, not by poking the
+ * symbol - so these cases read the same contract the handler writes.
+ * @param {Record<string, unknown>} userData
+ * @param {{ tenantId?: string, principalId?: string } | null} attr
+ */
+function attributedWs(userData, attr) {
+	const ws = mockWs(userData);
+	installAttribution(attr === null ? null : () => attr, ws.getUserData());
+	return ws;
+}
 
 describe('ratelimit plugin', () => {
 	let limiter;
@@ -99,6 +113,166 @@ describe('ratelimit plugin', () => {
 		it('rejects a tenant id containing the NUL delimiter (injection-safety)', () => {
 			const lim = createRateLimit({ points: 5, interval: 1000, tenant: () => 'a\0b' });
 			expect(() => lim.consume(mockWs({ ip: '1.2.3.4' }))).toThrow('NUL byte');
+		});
+	});
+
+	describe('adapter attribution as the tenant source', () => {
+		it('scopes buckets by the attribution tenantId when no tenant option is set', () => {
+			const lim = createRateLimit({ points: 1, interval: 60000 });
+			expect(lim.consume(attributedWs({ ip: '9.9.9.9' }, { tenantId: 'a' })).allowed).toBe(true);
+			// Same IP, different attributed tenant: an independent bucket.
+			expect(lim.consume(attributedWs({ ip: '9.9.9.9' }, { tenantId: 'b' })).allowed).toBe(true);
+			expect(lim.consume(attributedWs({ ip: '9.9.9.9' }, { tenantId: 'a' })).allowed).toBe(false);
+			expect(lim.consume(attributedWs({ ip: '9.9.9.9' }, { tenantId: 'b' })).allowed).toBe(false);
+			// The attribution namespace is the same one the tenant option uses,
+			// so tenant-scoped admin ops reach attribution-scoped buckets.
+			lim.clear('a');
+			expect(lim.consume(attributedWs({ ip: '9.9.9.9' }, { tenantId: 'a' })).allowed).toBe(true);
+			expect(lim.consume(attributedWs({ ip: '9.9.9.9' }, { tenantId: 'b' })).allowed).toBe(false);
+		});
+
+		it('an explicit tenant option overrides the attribution slot', () => {
+			const lim = createRateLimit({ points: 1, interval: 60000, tenant: (ws) => ws.getUserData().org });
+			const wsA = attributedWs({ ip: '8.8.8.8', org: 'resolver-org' }, { tenantId: 'slot-org' });
+			expect(lim.consume(wsA).allowed).toBe(true);
+			// Exhausted under the RESOLVER's org: a connection attributed to the
+			// slot org but resolving to the same resolver org shares the bucket...
+			const wsB = attributedWs({ ip: '8.8.8.8', org: 'resolver-org' }, { tenantId: 'other-slot' });
+			expect(lim.consume(wsB).allowed).toBe(false);
+			// ...and the slot org's namespace was never touched.
+			lim.clear('slot-org');
+			expect(lim.consume(wsA).allowed).toBe(false);
+		});
+
+		it('neither option nor attribution stays byte-identical single-tenant', () => {
+			const lim = createRateLimit({ points: 1, interval: 60000 });
+			expect(lim.consume(attributedWs({ ip: '7.7.7.7' }, null)).allowed).toBe(true);
+			// A second unattributed connection from the same IP hits the SAME
+			// bucket under the SAME raw key an unscoped limiter would use:
+			// reset() with no tenant frees it, proving no scoping was applied.
+			expect(lim.consume(attributedWs({ ip: '7.7.7.7' }, null)).allowed).toBe(false);
+			lim.reset('7.7.7.7');
+			expect(lim.consume(attributedWs({ ip: '7.7.7.7' }, null)).allowed).toBe(true);
+		});
+
+		it('an attribution without a tenantId reads as unscoped', () => {
+			const lim = createRateLimit({ points: 1, interval: 60000 });
+			expect(lim.consume(attributedWs({ ip: '6.6.6.6' }, { principalId: 'p1' })).allowed).toBe(true);
+			expect(lim.consume(attributedWs({ ip: '6.6.6.6' }, null)).allowed).toBe(false);
+		});
+	});
+
+	describe('budget scoping', () => {
+		it('throws on an unknown budget value', () => {
+			expect(() => createRateLimit({ points: 5, interval: 1000, budget: 'global' }))
+				.toThrow("budget must be 'principal' or 'tenant'");
+		});
+
+		it("budget:'tenant' shares one bucket across differently-keyed connections of one tenant and separates tenants", () => {
+			const lim = createRateLimit({
+				points: 2,
+				interval: 60000,
+				budget: 'tenant',
+				tenant: (ws) => ws.getUserData().org
+			});
+			// Two DIFFERENT IPs, one tenant: both draw from the same allowance.
+			expect(lim.consume(mockWs({ ip: '1.1.1.1', org: 'a' })).allowed).toBe(true);
+			expect(lim.consume(mockWs({ ip: '2.2.2.2', org: 'a' })).allowed).toBe(true);
+			expect(lim.consume(mockWs({ ip: '3.3.3.3', org: 'a' })).allowed).toBe(false);
+			// A different tenant is untouched by tenant a's exhaustion.
+			expect(lim.consume(mockWs({ ip: '1.1.1.1', org: 'b' })).allowed).toBe(true);
+		});
+
+		it("budget:'tenant' works from the adapter attribution when no tenant option is set", () => {
+			const lim = createRateLimit({ points: 1, interval: 60000, budget: 'tenant' });
+			expect(lim.consume(attributedWs({ ip: '1.1.1.1' }, { tenantId: 'a' })).allowed).toBe(true);
+			expect(lim.consume(attributedWs({ ip: '2.2.2.2' }, { tenantId: 'a' })).allowed).toBe(false);
+			expect(lim.consume(attributedWs({ ip: '1.1.1.1' }, { tenantId: 'b' })).allowed).toBe(true);
+		});
+
+		it("budget:'tenant' refuses a connection with no tenant id, naming what to add", () => {
+			const lim = createRateLimit({ points: 5, interval: 1000, budget: 'tenant' });
+			expect(() => lim.consume(attributedWs({ ip: '1.2.3.4' }, null)))
+				.toThrow(/tenant.*option|attribution/);
+			let message = '';
+			try {
+				lim.consume(attributedWs({ ip: '1.2.3.4' }, null));
+			} catch (err) {
+				message = /** @type {Error} */ (err).message;
+			}
+			expect(message).toContain('tenant');
+			expect(message).toContain('attribution');
+		});
+
+		it("clear(tenant) drops the shared budget bucket under budget:'tenant'", () => {
+			const lim = createRateLimit({
+				points: 1,
+				interval: 60000,
+				budget: 'tenant',
+				tenant: (ws) => ws.getUserData().org
+			});
+			lim.consume(mockWs({ ip: '1.1.1.1', org: 'a' }));
+			expect(lim.consume(mockWs({ ip: '2.2.2.2', org: 'a' })).allowed).toBe(false);
+			lim.clear('a');
+			expect(lim.consume(mockWs({ ip: '2.2.2.2', org: 'a' })).allowed).toBe(true);
+		});
+
+		it("clear(tenant) under budget:'principal' never touches an unscoped bucket whose raw key equals the id", () => {
+			// Raw keys are not derived from tenant ids, so a custom key can
+			// legitimately EQUAL one. A tenant-aimed clear that deleted it
+			// would lift that unrelated connection's ban - amnesty across the
+			// namespace boundary.
+			const lim = createRateLimit({
+				points: 1,
+				interval: 60000,
+				blockDuration: 60000,
+				keyBy: (ws) => ws.getUserData().key,
+				tenant: (ws) => ws.getUserData().org ?? null
+			});
+			// Unscoped connection whose raw key is the string 'acme'; exhaust
+			// it into its ban.
+			expect(lim.consume(mockWs({ key: 'acme' })).allowed).toBe(true);
+			expect(lim.consume(mockWs({ key: 'acme' })).allowed).toBe(false);
+			// Tenant-aimed clear for tenant 'acme' must not lift that ban.
+			lim.clear('acme');
+			expect(lim.consume(mockWs({ key: 'acme' })).allowed).toBe(false);
+		});
+
+		it("admin ops under budget:'tenant' address the tenant's one bucket by the tenant argument", () => {
+			const lim = createRateLimit({
+				points: 2,
+				interval: 60000,
+				budget: 'tenant',
+				tenant: (ws) => ws.getUserData().org
+			});
+			// Seed tenant a's shared bucket with one consume (1 point left),
+			// then ban it: the key argument is not read in this mode; the
+			// tenant IS the bucket.
+			expect(lim.consume(mockWs({ ip: '1.1.1.1', org: 'a' })).allowed).toBe(true);
+			lim.ban('ignored-key', 60000, 'a');
+			expect(lim.consume(mockWs({ ip: '2.2.2.2', org: 'a' })).allowed).toBe(false);
+			expect(lim.consume(mockWs({ ip: '1.1.1.1', org: 'b' })).allowed).toBe(true);
+			// unban restores the non-banned state; the remaining allowance
+			// (one point) is drawable again.
+			lim.unban('ignored-key', 'a');
+			expect(lim.consume(mockWs({ ip: '3.3.3.3', org: 'a' })).allowed).toBe(true);
+			expect(lim.consume(mockWs({ ip: '3.3.3.3', org: 'a' })).allowed).toBe(false);
+			// reset drops the tenant's shared bucket entirely: the full
+			// allowance returns.
+			lim.reset('ignored-key', 'a');
+			expect(lim.consume(mockWs({ ip: '4.4.4.4', org: 'a' })).allowed).toBe(true);
+		});
+
+		it("admin ops under budget:'tenant' refuse a call with no tenant id, in admin wording", () => {
+			const lim = createRateLimit({ points: 1, interval: 60000, budget: 'tenant' });
+			for (const call of [() => lim.reset('k'), () => lim.ban('k', 1000), () => lim.unban('k')]) {
+				let message = '';
+				try { call(); } catch (err) { message = /** @type {Error} */ (err).message; }
+				expect(message).toContain('tenantId argument');
+				// The consume path's connection wording would misdirect an
+				// admin caller toward the attribution hook.
+				expect(message).not.toContain('this one has none');
+			}
 		});
 	});
 

@@ -21,6 +21,7 @@
  */
 
 import { now } from '../../runtime/runtime.js';
+import { WS_ATTRIBUTION } from '../../runtime/utils/ws-symbols.js';
 
 /**
  * @typedef {Object} RateLimitOptions
@@ -38,9 +39,29 @@ import { now } from '../../runtime/runtime.js';
  *   tenant resolver. When set, the bucket key is scoped by the returned tenant id so two
  *   tenants sharing an IP / connection / custom key get independent buckets and a tenant's
  *   `reset` / `ban` / `unban` / `clear` touch only that tenant. Mirrors the `redis/ratelimit`
- *   extension. Return null/undefined for an unscoped connection; omit for a single-tenant
- *   deploy (byte-identical). The id is joined to the key with a NUL, so it stays unambiguous
- *   even when the key is an IPv6 address.
+ *   extension. Return null/undefined for an unscoped connection. The id is joined to the key
+ *   with a NUL, so it stays unambiguous even when the key is an IPv6 address.
+ *
+ *   When OMITTED, the limiter reads the tenant id from the connection's frozen
+ *   attribution slot - the answer the adapter settled at open from the handler module's
+ *   `attribution(user)` export - and no resolver runs. The slot never changes for a
+ *   connection's life, so how often the limiter reads it is a cost detail per keyBy, not
+ *   a semantic one. An explicit resolver overrides that read; a deployment with neither
+ *   stays byte-identical single-tenant.
+ * @property {'principal' | 'tenant'} [budget='principal'] - What one bucket's allowance
+ *   covers inside a tenant's namespace. Both values keep tenants NAMESPACE-scoped (two
+ *   tenants never share a bucket, and tenant-scoped admin ops touch only their tenant);
+ *   the budget decides how a tenant's own traffic shares the allowance:
+ *   - `'principal'` (default): each resolved key (IP, connection, custom) gets its own
+ *     bucket inside the tenant's namespace - per-principal budget, today's behavior.
+ *   - `'tenant'`: the bucket key is the tenant id alone, so ALL of a tenant's principals
+ *     draw from ONE shared allowance - a fair-share ceiling per tenant. Every consumed
+ *     connection must then carry a tenant id (from the `tenant` resolver or the adapter
+ *     attribution); `consume` throws for one that does not, because a shared null bucket
+ *     would be one global bucket, which is not what `budget: 'tenant'` means. Admin ops
+ *     (`reset`/`ban`/`unban`) address the tenant's one bucket by the tenantId argument
+ *     and do not read the key argument in this mode; calling one without a tenant id
+ *     throws.
  * @property {number} [maxBuckets=1_000_000] - Hard cap on retained buckets. When the
  *   map crosses this size on a new insert, one entry is evicted to make room. The
  *   lazy expired-entry sweep at 1000+ entries still runs first; the hard cap protects
@@ -141,6 +162,7 @@ export function createRateLimit(options) {
 		blockDuration = 0,
 		keyBy = 'ip',
 		tenant,
+		budget = 'principal',
 		maxBuckets = 1_000_000,
 		evictionSample = 16,
 		onEvict = null
@@ -160,6 +182,9 @@ export function createRateLimit(options) {
 	}
 	if (tenant !== undefined && typeof tenant !== 'function') {
 		throw new Error('ratelimit: tenant must be a function (ws) => id | null');
+	}
+	if (budget !== 'principal' && budget !== 'tenant') {
+		throw new Error("ratelimit: budget must be 'principal' or 'tenant'");
 	}
 	if (!Number.isInteger(maxBuckets) || maxBuckets < 1) {
 		throw new Error('ratelimit: maxBuckets must be a positive integer');
@@ -216,10 +241,58 @@ export function createRateLimit(options) {
 
 	/**
 	 * Derive the rate-limit key from a ws.
+	 *
+	 * With no explicit `tenant` resolver, `wsKeys` holds the FINAL
+	 * tenant-scoped bucket key for `keyBy: 'connection'`: both the synthetic
+	 * key and the attribution slot are settled for the connection's life
+	 * before any frame can reach a consume call (the runtime installs the
+	 * slot at open, before the app open hook), so deriving once is correct -
+	 * and it keeps this path at its pre-attribution cost of one WeakMap hit,
+	 * which is what the hot-path bench budget allows. With an explicit
+	 * resolver the map holds the raw key and the resolver runs per call, as
+	 * it always has; the shape is constant per limiter instance because the
+	 * options are.
+	 *
+	 * @param {any} ws
+	 * @returns {string} the FINAL bucket key (tenant scope applied)
+	 */
+	function principalBucketKey(ws) {
+		if (tenant) return bucketKey(resolveRawKey(ws), tenant(ws));
+		if (keyBy === 'connection') {
+			let k = wsKeys.get(ws);
+			if (k === undefined) {
+				k = bucketKey('__conn:' + (++connCounter), attributionTenantId(ws));
+				wsKeys.set(ws, k);
+			}
+			return k;
+		}
+		if (typeof keyBy === 'function') {
+			// A custom key function may derive a different key per call, so
+			// only the tenant half is cacheable; it is read through the
+			// per-connection cache below.
+			return bucketKey(keyBy(ws), attributionTenantId(ws));
+		}
+		// 'ip': the userData object is already in hand for the address read,
+		// so the attribution slot costs one property read on it - no second
+		// native call and no cache needed.
+		const ud = typeof ws.getUserData === 'function' ? ws.getUserData() : null;
+		if (ud) {
+			const attr = ud[WS_ATTRIBUTION];
+			return bucketKey(
+				String(ud.remoteAddress || ud.ip || ud.address || 'unknown'),
+				attr && typeof attr.tenantId === 'string' ? attr.tenantId : null
+			);
+		}
+		return bucketKey('unknown', null);
+	}
+
+	/**
+	 * The raw (unscoped) key, used when an explicit `tenant` resolver owns the
+	 * scoping. Exactly the pre-attribution derivation.
 	 * @param {any} ws
 	 * @returns {string}
 	 */
-	function resolveKey(ws) {
+	function resolveRawKey(ws) {
 		if (typeof keyBy === 'function') return keyBy(ws);
 		if (keyBy === 'connection') {
 			let k = wsKeys.get(ws);
@@ -237,16 +310,81 @@ export function createRateLimit(options) {
 		return 'unknown';
 	}
 
-	// Scope the bucket key by the connection's tenant (when a `tenant` resolver is set),
+	// Scope the bucket key by the connection's tenant (when one resolves),
 	// FIRST and NUL-delimited so it stays unambiguous even for IPv6 keys. Null -> raw key
 	// (byte-identical single-tenant key space). Mirrors redis/ratelimit's bucketKey. The id
 	// is rejected if it contains the NUL delimiter (the one char that would let two distinct
 	// tenants collide on one bucket); the check short-circuits on the null (default) path.
+	//
+	// Under budget:'tenant' the key is the tenant id ALONE - one shared allowance
+	// for all of a tenant's principals - and a missing tenant id is refused rather
+	// than folded: a shared bucket for every id-less connection would be one global
+	// bucket, which is neither the per-principal nor the per-tenant meaning, and a
+	// silent fallback to per-key buckets would quietly be budget:'principal'.
 	function bucketKey(rawKey, tenantId) {
 		if (tenantId && tenantId.indexOf('\0') !== -1) {
 			throw new Error('ratelimit: tenant id must not contain a NUL byte (it is the bucket-key delimiter)');
 		}
+		if (budget === 'tenant') {
+			if (!tenantId) {
+				throw new Error(
+					"ratelimit: budget 'tenant' needs a tenant id for every connection, and this one has none. " +
+					'Set the `tenant` option, or export `attribution(user)` (returning a tenantId) from the ' +
+					"WebSocket handler module so the adapter attributes the connection at open. Without either, " +
+					"the config can only describe one global bucket, which budget 'tenant' does not mean."
+				);
+			}
+			return tenantId;
+		}
 		return tenantId ? tenantId + '\0' + rawKey : rawKey;
+	}
+
+	// Admin ops (reset/ban/unban) address one bucket directly, with no
+	// connection to attribute. Under budget:'tenant' the bucket key IS the
+	// tenant id - a per-principal key has no meaning there - so the tenantId
+	// argument selects the bucket and the key argument is not read; calling
+	// one without a tenant id in that mode is refused with wording for the
+	// admin caller, not the consume path's connection wording.
+	function adminBucketKey(key, tenantId) {
+		if (budget === 'tenant') {
+			if (!tenantId) {
+				throw new Error(
+					"ratelimit: budget 'tenant' keeps one bucket per tenant, so reset/ban/unban " +
+					'address it by the tenantId argument (the key argument is not read in this mode). ' +
+					'Pass the tenant id to name the bucket to act on.'
+				);
+			}
+			return bucketKey('', tenantId);
+		}
+		return bucketKey(key, tenantId);
+	}
+
+	// The adapter-resolved attribution, consulted only when no explicit
+	// `tenant` resolver overrides it. The runtime settles the slot exactly
+	// once per connection at open, before any message can reach a consume
+	// call, and the stamped object is frozen - so the answer is immutable for
+	// the connection's life and is cached per ws after the first read. The
+	// cache is what keeps the no-attribution consume path within the bench
+	// budget: getUserData() is a native uWS call, and paying it per consume
+	// regressed the hot primitive double-digit percent; a WeakMap hit does
+	// not. A connection with no slot (unattributed, a non-adapter socket, a
+	// closed native handle) caches null and stays in the single-tenant key
+	// space.
+	/** @type {WeakMap<object, string | null>} */
+	const tenantIds = new WeakMap();
+	function attributionTenantId(ws) {
+		let id = tenantIds.get(ws);
+		if (id === undefined) {
+			id = null;
+			if (typeof ws?.getUserData === 'function') {
+				try {
+					const attr = ws.getUserData()?.[WS_ATTRIBUTION];
+					if (attr && typeof attr.tenantId === 'string') id = attr.tenantId;
+				} catch { /* native side already closed; stays unattributed */ }
+			}
+			tenantIds.set(ws, id);
+		}
+		return id;
 	}
 
 	/** Lazy cleanup when the map grows large. */
@@ -404,7 +542,12 @@ export function createRateLimit(options) {
 			if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) {
 				throw new Error('ratelimit: cost must be a non-negative finite number');
 			}
-			const key = bucketKey(resolveKey(ws), tenant ? tenant(ws) : null);
+			// Under budget:'tenant' the raw key never reaches the bucket key, so
+			// the derivation (and the per-connection WeakMap entry keyBy
+			// 'connection' would mint) is skipped entirely.
+			const key = budget === 'tenant'
+				? bucketKey('', tenant ? tenant(ws) : attributionTenantId(ws))
+				: principalBucketKey(ws);
 			const t = now();
 
 			cleanup(t);
@@ -472,13 +615,13 @@ export function createRateLimit(options) {
 		},
 
 		reset(key, tenantId) {
-			if (buckets.delete(bucketKey(key, tenantId))) evictCursor = null;
+			if (buckets.delete(adminBucketKey(key, tenantId))) evictCursor = null;
 		},
 
 		ban(key, duration, tenantId) {
 			const dur = duration ?? (blockDuration || 60000);
 			const t = now();
-			const bk = bucketKey(key, tenantId);
+			const bk = adminBucketKey(key, tenantId);
 			let bucket = buckets.get(bk);
 			/** @type {{ key: string, banned: boolean } | null} */
 			let evicted = null;
@@ -498,7 +641,7 @@ export function createRateLimit(options) {
 		},
 
 		unban(key, tenantId) {
-			const bucket = buckets.get(bucketKey(key, tenantId));
+			const bucket = buckets.get(adminBucketKey(key, tenantId));
 			if (bucket) bucket.bannedUntil = 0;
 		},
 
@@ -506,6 +649,13 @@ export function createRateLimit(options) {
 		clear(tenantId) {
 			evictCursor = null;
 			if (tenantId) {
+				// The bare-id delete is gated on the mode: budget:'tenant'
+				// stores the tenant's one shared bucket under the bare id, but
+				// under budget:'principal' a raw UNSCOPED key can legitimately
+				// equal a tenant id (raw keys are not derived from tenant ids),
+				// and deleting it here would lift that unrelated connection's
+				// ban - amnesty across the namespace boundary.
+				if (budget === 'tenant') buckets.delete(tenantId);
 				const prefix = tenantId + '\0';
 				for (const k of buckets.keys()) {
 					if (k.startsWith(prefix)) buckets.delete(k);

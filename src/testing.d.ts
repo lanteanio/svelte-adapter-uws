@@ -462,6 +462,14 @@ export const WS_PLATFORM: unique symbol;
 export const WS_CAPS: unique symbol;
 
 /**
+ * The connection's server-resolved attribution: a frozen
+ * `{ tenantId?, principalId?, entitlement? }`, stamped once at open from the
+ * handler module's `attribution(user)` export; absent when unattributed.
+ * Prefer the `attribution(ws)` accessor from `svelte-adapter-uws/connection`.
+ */
+export const WS_ATTRIBUTION: unique symbol;
+
+/**
  * String key (not a Symbol) used to ferry the per-connection requestId
  * across the upgrade->open transition. uWebSockets.js strips Symbol keys
  * from the userData object handed to `res.upgrade()`, so the carrier has

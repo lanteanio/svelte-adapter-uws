@@ -112,6 +112,7 @@ whole system.
 | Supported release lines and native tuple | [`docs/compatibility.v1.csv`](./compatibility.v1.csv) |
 | Published adapter identities and candidate evidence | [`release-manifest.md`](./release-manifest.md) and [`releasing.md`](./releasing.md) |
 | Adapter observability names and aggregation | [`observability.md`](./observability.md) |
+| Tenancy: namespace, budget, and attribution ownership | [`docs/tenancy.md`](./tenancy.md) |
 | Cross-package responsibility decisions | This document and [the decision index](./decisions/README.md) |
 | Tutorials, how-to guides, explanations, and searchable reference | [`svelte-realtime.dev`](https://svelte-realtime.dev/) |
 

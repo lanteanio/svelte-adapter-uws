@@ -117,6 +117,21 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// An `attribution` export whose behavior is selected per connection through
+	// upgrade-header-derived userData: healthy ids, an unattributed default, an
+	// invalid id, and a throwing resolver. The refusal (close 1008 before the
+	// open hook) and the frozen accessor read are only observable against the
+	// real runtime's open callback. Its own output directory keeps the export
+	// out of every ordinary fixture build.
+	attribution: {
+		out: 'build-attribution',
+		handler: './src/hooks.ws.attribution.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
 	// Strict wire authorization with an ordinary application subscribe hook.
 	// The hook allows every topic, so only the server-grant half can refuse a
 	// cross-tenant raw subscribe - the hybrid permissive-hook bypass.

@@ -60,6 +60,7 @@ import { collectRequestHeaders, declareSingleValuedProxyHeaders } from './utils/
 import { createSlidingWindowLimiter } from './utils/rate-limiter.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './utils/message-admission.js';
 import { createConnectionPermitCarrier } from './utils/connection-permit.js';
+import { installAttribution } from './utils/attribution.js';
 import { recordBackpressureDrop } from './utils/backpressure.js';
 import {
 	createTransportMetricHooks,
@@ -398,7 +399,7 @@ if (WS_ENABLED) {
 		'init', 'shutdown',
 		'open', 'message', 'upgrade', 'close', 'drain',
 		'subscribe', 'subscribeBatch', 'unsubscribe',
-		'authenticate', 'resume', 'admin'
+		'authenticate', 'resume', 'admin', 'attribution'
 	]);
 	for (const name of Object.keys(wsModule)) {
 		if (!knownWsExports.has(name)) {
@@ -2112,6 +2113,28 @@ if (WS_ENABLED) {
 			delete userData[WS_REQUEST_ID_KEY];
 			delete userData[WS_TRACE_CONTEXT_KEY];
 			assert(userData[WS_REQUEST_ID_KEY] === undefined, 'ws.request-id-leak', null);
+			// Server-trusted attribution, resolved exactly once per connection and
+			// BEFORE the app open hook, so open/message hooks and every bundled
+			// limiter read one settled answer. Placed after the platform install so
+			// the refusal's close path finds the slots it asserts on. Fail-closed
+			// and loud: an invalid id or a throwing resolver refuses the connection,
+			// because admitting it unattributed would silently stand down every
+			// tenant-scoped limit downstream.
+			try {
+				installAttribution(wsModule.attribution, userData);
+			} catch (err) {
+				emitOperationalEvent({
+					source: 'svelte-adapter-uws',
+					component: 'runtime.websocket-attribution',
+					event: 'runtime.websocket-attribution.failed',
+					severity: 'error',
+					dataClass: 'pseudonymous',
+					message: 'The WebSocket attribution hook failed; the connection was refused at open.',
+					attributes: { requestId: wsPlatform.requestId, error: diagnosticError(err) }
+				});
+				try { ws.end(1008, 'Attribution failed'); } catch { /* native side already gone */ }
+				return;
+			}
 			// Stamp a fresh session id and announce it. The client stores it
 			// in sessionStorage and presents it back via { type: 'resume' }
 			// after a reconnect so the user's resume hook can fill the gap.
@@ -2957,7 +2980,10 @@ if (WS_ENABLED) {
 					// never publish to a room it did not join. Ungranted (or a malformed
 					// event) -> game-denied. Granted -> stamp the per-room seq, fan out to
 					// the room excluding this sender, and echo the client id.
-					await runAdmittedMessageWork(messageAdmission, ws, { msg, platform }, runGameApplicationWork, rejectApplicationMessage);
+					// `data` carries the raw frame so the byte-rate buckets charge
+					// this lane like every other application-work lane; the game
+					// work itself reads only `msg`.
+					await runAdmittedMessageWork(messageAdmission, ws, { msg, platform, data: message }, runGameApplicationWork, rejectApplicationMessage);
 					return;
 				}
 			}
@@ -3025,7 +3051,14 @@ if (WS_ENABLED) {
 				}
 				: { code, message, platform: closePlatform, subscriptions };
 			try {
-				wsModule.close?.(ws, ctx);
+				// The app close hook mirrors the app open hook: a connection
+				// refused at open (a failed attribution) never ran open, so
+				// close stays silent for it too - a counter paired across
+				// open/close must not go negative on a refusal. The session id
+				// is stamped immediately after the refusal point, so its
+				// absence marks exactly the connections whose open hook never
+				// ran. Everything in the finally still runs for them.
+				if (userData[WS_SESSION_ID] !== undefined) wsModule.close?.(ws, ctx);
 			} finally {
 				if (userData[WS_CONNECTION_PERMIT]) {
 					userData[WS_CONNECTION_PERMIT] = undefined;
