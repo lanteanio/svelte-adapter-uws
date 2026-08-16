@@ -30,7 +30,7 @@ the versioned [0.4.x to 0.5.x](./docs/migrations/0.4-to-0.5.md) or
 deployments should follow the ordered [ecosystem sequence](./docs/migrations/ecosystem-0.5-to-0.6.md).
 
 **Documentation:** [documentation site](https://svelte-realtime.dev/) |
-[migration guide](./MIGRATION.md) | [wire protocol](./PROTOCOL.md) |
+[migration guide](./MIGRATION.md) | [wire protocol](./PROTOCOL.md) | [roadmap](./ROADMAP.md) |
 [observability contract](./docs/observability.md) |
 [privacy integration contract](./docs/privacy-integration.md) |
 [operations pack v1](./docs/operations/v1/README.md) |

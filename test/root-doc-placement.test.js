@@ -11,14 +11,15 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // README, CHANGELOG, CONTRIBUTING and SECURITY are read from the root by npm and
-// GitHub. MIGRATION and PROTOCOL are the two package contracts a consumer is
-// told to open by name.
+// GitHub. MIGRATION, PROTOCOL, and ROADMAP are the package contracts a
+// consumer is told to open by name.
 const ALLOWED_ROOT_MARKDOWN = [
 	'CHANGELOG.md',
 	'CONTRIBUTING.md',
 	'MIGRATION.md',
 	'PROTOCOL.md',
 	'README.md',
+	'ROADMAP.md',
 	'SECURITY.md'
 ];
 

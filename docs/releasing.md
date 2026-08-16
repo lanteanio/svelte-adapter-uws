@@ -210,7 +210,11 @@ the exact-version consumer passes.
 
 ## Stable promotion
 
-Stable versions come from `main` and use `latest`.
+Stable versions come from `main` and use `latest`. Promotion is an evidence
+decision before it is a procedure: the exit contract in
+[`ROADMAP.md`](../ROADMAP.md) must be satisfied, each item demonstrated at
+promotion time, before step 1 begins. The steps below are the mechanics of a
+promotion the evidence already justifies.
 
 1. Start from the reviewed prerelease lineage. Reconcile the final changelog and
    migration guidance; remove prerelease-only version suffixes in a dedicated

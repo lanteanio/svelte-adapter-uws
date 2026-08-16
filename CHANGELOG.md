@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Added: the prerelease line states its outcome map and promotion exit contract.** ROADMAP.md traces each outcome to the actor it serves, the checkable measure showing it landed, and the delivering work, names the non-goals, and defines the evidence justifying promotion to `latest`; the promotion procedure treats that contract as its precondition.
+  - **Affects:** Consumers deciding when to adopt the stable line, and maintainers deciding when to promote it.
+  - **Action:** None; read `ROADMAP.md` for what 0.6 promises and deliberately does not.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Documentation only; the mechanical promotion steps are unchanged and now begin from a stated evidence bar.
+  - **Detail:** [Added engineering detail](#added).
+
+- **Added: the compatibility manifest records the coordinated release train.** The machine-readable manifest now carries the exact qualified sibling versions, the git heads the packed cross-repo gate exercised, the frozen wire-protocol revision, and the publication-order and abort procedure references, and the gate refuses drift between the manifest, the cross-repo workflow pins, and the protocol schema.
+  - **Affects:** Release tooling and anyone reading `docs/compatibility.v1.csv`; no runtime code path.
+  - **Action:** None; the seven columns are additive and filled for the current train.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The pre-existing columns are byte-identical; rows predating the train contract leave the six release-fact columns empty.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Changed: the development dependency tree carries no open advisories.** Five npm audit advisories, two moderate and three high, are resolved at patch level entirely inside the development and comparison-benchmark tree, so contributors and continuous integration audit clean while every shipped dependency range, peer floor and published tarball stays exactly where it was.
   - **Affects:** Contributors and continuous integration; no consumer of the published package.
   - **Action:** None; run `npm install` in a clone to pick up the resolved lockfile.
@@ -143,16 +157,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Whitespace-padded, signed, and decimal spellings of a whole number keep booting exactly the fleet they denote; values that never denoted one now refuse with the `ADAPTER-ERR-CLUSTER-CONFIG-WORKERS` line, and `1e2` boots the hundred workers it denotes instead of one.
   - **Detail:** [Fixed engineering detail](#fixed).
 
-- **Added: the compatibility manifest records the coordinated release train.** The machine-readable manifest now carries the exact qualified sibling versions, the git heads the packed cross-repo gate exercised, the frozen wire-protocol revision, and the publication-order and abort procedure references, and the gate refuses drift between the manifest, the cross-repo workflow pins, and the protocol schema.
-  - **Affects:** Release tooling and anyone reading `docs/compatibility.v1.csv`; no runtime code path.
-  - **Action:** None; the seven columns are additive and filled for the current train.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** The pre-existing columns are byte-identical; rows predating the train contract leave the six release-fact columns empty.
-  - **Detail:** [Added engineering detail](#added).
-
 <!-- consumer-release-summary:end -->
 
 ### Added
+
+- **The 0.6 line states its outcomes, its non-goals, and the evidence that
+  promotes it.** ROADMAP.md is the outcome contract: each outcome names the
+  actor it serves, a measure that is a gate, a suite, or a generated
+  artifact in this repository - never an intention - and the work that
+  delivers it, so the map doubles as the tracked grouping of the
+  delivering work. The non-goal list states what 0.6 deliberately does not
+  do: no HTTP/3, QUIC, or WebTransport serving default, no Bun backend
+  before the tag, no reference UI in the package, no interest scheduler,
+  and no blocking on sibling lifecycle parity. The stable promotion exit
+  contract lists seven independently checkable evidence items - the
+  verification contract green where it gates, the train row current and
+  bound to the cross-repo pins, the wire protocol frozen against the
+  schema, the error reference complete, the documentation matching the
+  promoted bytes, no reachable open defect, and the ledger reconciled -
+  and the promotion procedure in the release policy now names that
+  contract as its precondition, so promotion is an evidence decision
+  before it is a procedure.
 
 - **The compatibility manifest carries per-train coordinated release
   facts.** Seven additive columns - `train`, `realtime_version`,
