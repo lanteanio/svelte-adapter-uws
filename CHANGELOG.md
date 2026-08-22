@@ -372,6 +372,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A rate-limit bucket is the client, not the connection: an IPv4 address
+  carrying a port no longer meters per port.** `foldToPrefix` recognised
+  `1.2.3.4:5678` as IPv4-with-a-port and then kept the value whole, port
+  included, while the bracketed IPv6 form dropped its port before folding.
+  Behind any proxy that writes `ip:port` as the client address - Azure App
+  Service does, and so does nginx configured with
+  `$remote_addr:$remote_port` - every request from one client arrived on a
+  fresh ephemeral port and therefore in a bucket of its own, so
+  `upgradeRateLimit` could never refuse and the entry cap absorbed the churn
+  silently. The port is dropped now, which also makes the two spellings of one
+  client agree: gaining or losing that proxy no longer changes who is metered
+  together. Both halves have to be real for the fold to happen: a value that
+  merely looks IPv4-shaped is kept whole rather than truncated at its colon,
+  whether what fails is the port (`203.0.113.7:65536`) or the address
+  (`999.999.999.999:80`, `256.0.0.1:443`, or a leading-zero octet that reads as
+  decimal here and octal further along the path). With a configured address
+  header the value is client-supplied and opaque, so normalising two distinct
+  ones onto a shared prefix would merge identities into one bucket - the
+  direction this function refuses everywhere else.
+
 - **`platform.batch()` carries each entry's options in dev, as it always did
   in production.** The dev plugin read only `{ topic, event, data }` from a
   batch entry and dropped `options`, so a de-herd window (`jitterMs`) went

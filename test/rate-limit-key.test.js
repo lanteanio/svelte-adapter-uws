@@ -114,8 +114,47 @@ describe('rateLimitKey', () => {
 			expect(key('[2001:db8:1:2::1]:not-a-port')).not.toBe(victim);
 			expect(key('[2001:db8:1:2::1]:65536')).not.toBe(victim);
 		});
-		it('leaves IPv4 with a port alone', () => {
+		it('drops the port from IPv4, so one client is one bucket however it is spelled', () => {
+			// A port identifies a CONNECTION, not a client. Behind a proxy that
+			// writes `ip:port` as the client address - Azure App Service, or nginx
+			// with `$remote_addr:$remote_port` - every request arrives on a fresh
+			// ephemeral port, so keeping the port gave every request its own
+			// bucket and no ceiling could ever refuse.
+			expect(key('203.0.113.7:5678')).toBe(key('203.0.113.7:5679'));
+			// ...and it agrees with the same client reaching the server directly,
+			// so gaining or losing that proxy does not change who is metered
+			// together. Asserting only that two ported addresses differ - which
+			// is what this case used to do - is satisfied by keeping the port,
+			// which is the defect.
+			expect(key('203.0.113.7:5678')).toBe(key('203.0.113.7'));
+			// Distinct clients still stay apart.
 			expect(key('203.0.113.7:5678')).not.toBe(key('203.0.113.8:5678'));
+		});
+
+		it('keeps an IPv4-shaped value whose port is not a port', () => {
+			// Bounded like the bracketed IPv6 path: an opaque value that merely
+			// starts with digits and dots must not be truncated at its colon.
+			expect(key('203.0.113.7:65536')).toBe('203.0.113.7:65536');
+			expect(key('203.0.113.7:not-a-port')).toBe('203.0.113.7:not-a-port');
+		});
+
+		it('keeps a value whose address half is not an address either', () => {
+			// The port bound alone is not enough. Four dot-separated runs of up
+			// to three digits is a SHAPE, and an opaque header value can hold
+			// one: `999.999.999.999:80` is not IPv4, and stripping its tail
+			// would fold two distinct attacker-supplied identities onto one
+			// bucket - the direction this module refuses everywhere else.
+			expect(key('999.999.999.999:80')).toBe('999.999.999.999:80');
+			expect(key('256.0.0.1:443')).toBe('256.0.0.1:443');
+			expect(key('999.999.999.999:80')).not.toBe(key('999.999.999.999:81'));
+			// A leading zero is refused for a related reason rather than an
+			// unparseable one: `010.1.1.1` is decimal here and octal to
+			// something else on the path, so two readers would disagree about
+			// who is metered together.
+			expect(key('010.1.1.1:80')).toBe('010.1.1.1:80');
+			// The boundary itself, from both sides.
+			expect(key('255.255.255.255:80')).toBe('255.255.255.255');
+			expect(key('255.255.255.256:80')).toBe('255.255.255.256:80');
 		});
 
 		it('leaves an opaque header value alone', () => {

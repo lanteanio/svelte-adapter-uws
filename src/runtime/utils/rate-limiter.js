@@ -139,8 +139,41 @@ function foldToPrefix(value) {
 	if (pct !== -1) return value; // scoped/zone-qualified, not a global literal
 	host = host.toLowerCase();
 
-	// `1.2.3.4:5678` has a colon but is IPv4 with a port, not IPv6.
-	if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(host)) return value;
+	// `1.2.3.4:5678` has a colon but is IPv4 with a port, not IPv6 - and the
+	// port is dropped, exactly as the bracketed IPv6 form above drops it.
+	//
+	// A port is not part of a client's identity, it is part of one CONNECTION's.
+	// Behind a proxy that writes `ip:port` as the client address - Azure App
+	// Service does, and so does nginx configured with `$remote_addr:$remote_port`
+	// - every request from one client arrives on a fresh ephemeral port, so
+	// keeping it put every request in a bucket of its own: no ceiling could ever
+	// refuse, and the entry cap silently absorbed the churn. Folding here also
+	// makes the two spellings of one client agree, so a deployment that gains or
+	// loses that proxy does not change who is metered together.
+	//
+	// Bounded like the bracketed path: something that is not a plausible port is
+	// not a port, and an opaque header value is kept whole rather than truncated
+	// at its first colon.
+	//
+	// BOTH HALVES are checked, not only the port. Four dot-separated runs of up
+	// to three digits is a shape, not an address: `999.999.999.999:80` and
+	// `256.0.0.1:443` match it and are not IPv4. Folding those would take this
+	// module past what it promises - with a configured address header the value
+	// is attacker-controlled and opaque, so normalising two distinct ones onto a
+	// shared prefix merges identities into one bucket, which is the failure
+	// direction the rest of this function refuses to risk. A leading zero is
+	// refused for a related reason rather than because it cannot be parsed:
+	// `010.1.1.1` is decimal here and octal to something else on the path, so
+	// two readers would disagree about who is being metered together.
+	const withPort = /^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$/.exec(host);
+	if (withPort !== null) {
+		if (Number(withPort[2]) > 65535) return value;
+		for (const octet of withPort[1].split('.')) {
+			if (octet.length > 1 && octet.charCodeAt(0) === 48) return value;
+			if (Number(octet) > 255) return value;
+		}
+		return withPort[1];
+	}
 
 	const groups = expandIpv6(host);
 	if (groups === null) return value;
