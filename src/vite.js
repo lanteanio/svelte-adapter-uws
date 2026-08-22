@@ -659,8 +659,14 @@ export default function uws(options = {}) {
 		batch(messages) {
 			const results = [];
 			for (let i = 0; i < messages.length; i++) {
-				const { topic, event, data } = messages[i];
-				results.push(publish(topic, event, data));
+				const { topic, event, data, options } = messages[i];
+				// Each entry carries its own options, exactly as it does through
+				// production's batch and the harness's: this method is a loop over
+				// independent publishes, so an entry's `excludeWs` or `jitterMs` is
+				// as load-bearing as it is when the caller publishes directly.
+				// Dropping them made a dev batch quietly deliver a different frame
+				// than the same call under `npm start`.
+				results.push(publish(topic, event, data, options));
 			}
 			return results;
 		},

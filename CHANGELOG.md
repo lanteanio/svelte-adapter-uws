@@ -372,6 +372,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`platform.batch()` carries each entry's options in dev, as it always did
+  in production.** The dev plugin read only `{ topic, event, data }` from a
+  batch entry and dropped `options`, so a de-herd window (`jitterMs`) went
+  unstamped and an `excludeWs` exclusion was ignored - the same call delivered a
+  different frame under `vite dev` than under `npm start` or the
+  `createTestServer` harness, both of which forward the field. The method is a
+  loop over independent publishes, so an entry's options are as load-bearing as
+  they are on a direct publish.
+
 - **The release gate's script inventory pins bodies beside names.** The
   closed inventory refuses names outside itself, which is what keeps npm's
   implicit lifecycle companions out of the window between the last check
