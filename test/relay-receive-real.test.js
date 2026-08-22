@@ -47,6 +47,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { WebSocket } from 'ws';
 import { hasUWS, startRealRuntime } from './helpers/real-runtime.js';
 import { variantOut } from './fixture/variants.js';
 
@@ -118,9 +119,13 @@ describeUWS('relay receive paths record every frame (built runtime)', () => {
 	function relayOne(topic, ord, origin, opts = {}) {
 		const seq = opts.seq === undefined ? seqFor(ord) : opts.seq;
 		const birth = opts.birth === undefined ? bornAfterAttach() : opts.birth;
+		// The envelope carries its own `seq` exactly as the origin worker's
+		// completeEnvelope wrote it, so what a subscriber here reads off the
+		// wire is what production would have delivered. A `{seq:false}` topic
+		// relays without the field, and passing `seq: null` reproduces that.
 		server.handler.relayPublish(
 			topic,
-			JSON.stringify({ topic, event: 'tick', data: { ord } }),
+			JSON.stringify(seq == null ? { topic, event: 'tick', data: { ord } } : { topic, event: 'tick', data: { ord }, seq }),
 			false,
 			seq,
 			undefined,
@@ -240,6 +245,80 @@ describeUWS('relay receive paths record every frame (built runtime)', () => {
 			{ topic, origin: 14, from: 2, to: 2, count: 1 }
 		]);
 	});
+
+	it('delivers the surviving frames to a subscriber and says nothing about the lost one', async () => {
+		// WHAT A CLIENT ON THE WORKER THAT LOST FRAMES ACTUALLY RECEIVES.
+		//
+		// The detector's own behaviour is covered above. This case asks the
+		// separate question the operator-facing report leaves open: the worker
+		// knows it lost frames, so does anything on the wire tell the clients
+		// whose state is now wrong?
+		//
+		// A single runtime driven through relayPublish is the right instrument
+		// rather than a real two-worker cluster: relayPublish IS the function
+		// index.js hands a sibling's frame to, the subscriber here is a real
+		// socket on the receiving worker, and a hole can be placed exactly where
+		// the assertion needs it. A live cluster cannot be made to drop one
+		// interior frame on demand, so the same case there would be a race.
+		state.streamTracking.enabled = true;
+		const topic = 'relay-recv-client-view';
+
+		const ws = new WebSocket(`${server.wsUrl}`);
+		/** @type {any[]} */
+		const frames = [];
+		ws.on('message', (data) => {
+			try { frames.push(JSON.parse(data.toString())); } catch { /* binary control frame */ }
+		});
+		await new Promise((resolve, reject) => {
+			ws.once('open', resolve);
+			ws.once('error', reject);
+		});
+		ws.send(JSON.stringify({ type: 'subscribe', topic, ref: 1 }));
+		await new Promise((resolve, reject) => {
+			const timer = setTimeout(() => reject(new Error('no subscribe ack')), 10_000);
+			const scan = () => {
+				if (!frames.some((f) => f.type === 'subscribed' && f.topic === topic)) return;
+				clearTimeout(timer);
+				ws.off('message', scan);
+				resolve(undefined);
+			};
+			ws.on('message', scan);
+			scan();
+		});
+
+		// Ordinal 2 is lost in transit between the sibling and this worker.
+		relayOne(topic, 1, 21);
+		relayOne(topic, 3, 21);
+		await new Promise((r) => setTimeout(r, 250));
+
+		const delivered = frames.filter((f) => f.topic === topic && f.event === 'tick');
+		expect(delivered.map((f) => f.data.ord), 'the surviving relayed frames must reach the subscriber').toEqual([1, 3]);
+
+		// The worker now confirms it lost the frame in between. Everything the
+		// runtime does about that happens here.
+		expect(gapsFor(topic), 'the loss must be confirmed, or the silence below proves nothing').toEqual([
+			{ topic, origin: 21, from: 2, to: 2, count: 1 }
+		]);
+
+		await new Promise((r) => setTimeout(r, 250));
+		const after = frames.filter((f) => f.topic === topic || f.type === 'resync' || f.type === 'rehydrate');
+		expect(
+			after.map((f) => f.event ?? f.type),
+			'the subscribe ack and the two frames that survived - nothing tells this subscriber its state is short'
+		).toEqual(['subscribed', 'tick', 'tick']);
+		expect(ws.readyState, 'the connection is not closed either').toBe(WebSocket.OPEN);
+
+		// And the publish sequences the client did receive step over the lost
+		// one, so its own resume watermark advances past a frame it never had:
+		// a later reconnect asks for everything after the higher sequence and
+		// the hole between them is never re-requested.
+		expect(
+			delivered.map((f) => f.seq),
+			'the delivered sequences skip the lost frame, which is what the resume watermark will carry'
+		).toEqual([seqFor(1), seqFor(3)]);
+
+		ws.close();
+	}, 30_000);
 
 	it('records nothing at all while stream tracking is off', () => {
 		// The gate is what keeps a default (single-process, no state-hash
