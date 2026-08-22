@@ -6618,10 +6618,10 @@ summary.failingSeeds; // every failing seed
 
 `faultMode` sets how fault injection is applied across the swarm: `'off'` runs each seed unfaulted, `'on'` layers `faultProfile` on every run, and `'random'` flips a per-seed seeded coin (`faultProbability`, default `0.25`) so one swarm covers both quiet and chaotic interleavings reproducibly. `checkRatio` re-runs a deterministically-chosen fraction through `replaySim` so a determinism regression fails the swarm distinctly from an invariant violation. Each run also carries an 8-hex-char structural `fingerprint`: if it ever changes for a fixed seed, determinism has regressed.
 
-The bundled runner reads the swarm config from the environment, stamps wall-clock metadata, writes a result JSON, and exits non-zero on any failure - the shape a scheduled CI job runs:
+The bundled runner reads the swarm config from the environment, stamps wall-clock metadata, writes a result JSON, and exits non-zero on any failure - the shape a scheduled CI job runs. The recorded `gitCommit` defaults to the checkout's `HEAD`, since a seed reproduces a run only alongside the revision it ran against; set `GIT_COMMIT` to override it, which is what a detached or synthesised CI checkout should do:
 
 ```sh
-DST_COUNT=1000 DST_FAULTS=random DST_CHECK_RATIO=0.05 GIT_COMMIT=$(git rev-parse HEAD) \
+DST_COUNT=1000 DST_FAULTS=random DST_CHECK_RATIO=0.05 \
   npm run sim:swarm        # writes sim-swarm-result.json; exit 1 on a failing seed
 ```
 

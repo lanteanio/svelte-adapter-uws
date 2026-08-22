@@ -23,6 +23,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import process from 'node:process';
 import { runSimSwarm, buildSimGoldens, checkSimGoldens } from '../src/sim.js';
+import { resolveGitCommit } from './sim-git-commit.js';
 
 // The fault profile faulted runs layer on. Matches sim-swarm.js so the golden
 // corpus exercises the same drop/duplicate/reorder/jitter interleavings the CI
@@ -54,7 +55,7 @@ const CONFIGS = [
 ];
 
 const update = process.argv.includes('--update');
-const gitCommit = process.env.GIT_COMMIT || null;
+const gitCommit = resolveGitCommit();
 
 // Build a corpus in memory WITHOUT writing. Returns the built corpus on a clean
 // swarm, or null (with a reason logged) when the swarm is not clean - so

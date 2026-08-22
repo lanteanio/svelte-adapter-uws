@@ -11,7 +11,8 @@
 //   DST_FAULT_PROB  fault probability under random mode (default 0.25)
 //   DST_CHECK_RATIO   fraction of runs re-checked for determinism (default 0.05)
 //   DST_WORKERS       model N workers per run (default 1, single-worker)
-//   GIT_COMMIT        pins the source revision in the report
+//   GIT_COMMIT        overrides the source revision in the report (defaults to
+//                     the checkout's HEAD)
 //   DST_OUT           output path (default sim-swarm-result.json)
 //   DST_MAX_RUNS      cap on retained PASSING runs in the JSON (default 200;
 //                     every failing run is always kept, never silently dropped)
@@ -22,6 +23,7 @@
 import { writeFileSync } from 'node:fs';
 import process from 'node:process';
 import { runSimSwarm } from '../src/sim.js';
+import { resolveGitCommit } from './sim-git-commit.js';
 
 const num = (name, def) => {
 	const v = process.env[name];
@@ -36,7 +38,7 @@ const faultMode = (process.env.DST_FAULTS || 'random').toLowerCase();
 const faultProbability = num('DST_FAULT_PROB', 0.25);
 const checkRatio = num('DST_CHECK_RATIO', 0.05);
 const workers = num('DST_WORKERS', 1);
-const gitCommit = process.env.GIT_COMMIT || null;
+const gitCommit = resolveGitCommit();
 const out = process.env.DST_OUT || 'sim-swarm-result.json';
 const maxRuns = num('DST_MAX_RUNS', 200);
 
