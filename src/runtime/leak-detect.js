@@ -15,13 +15,24 @@
 // input numbers always yield an identical report, byte-for-byte, which is what
 // lets the simulator fold the report into its reproducer gate.
 //
-// The verdict is a three-way AND vote, so a noisy or oscillating series is not
-// mistaken for a leak:
+// The verdict is an AND vote, so a noisy or oscillating series is not mistaken
+// for a leak:
 //   1. least-squares slope over the post-warmup window  >  minSlope
 //   2. monotonic (non-decreasing) fraction of the window  >=  minMonotonicFraction
 //   3. total delta (last - first)  >  tolerance
+//   4. coefficient of determination of that fit  >=  minRSquared
 // A flat series fails (1) and (3); a sawtooth fails (2); a genuine ramp passes
-// all three.
+// all of them.
+//
+// The fourth vote asks whether the line MEANS anything. Least squares fits a
+// line through any cloud, and the line it finds through a flat noisy one tilts
+// with wherever the window happens to start and stop - so a long enough series
+// of a healthy resident set eventually produces a positive slope, a delta over
+// any fixed tolerance, and a verdict of leaking. r-squared is the share of the
+// series' own variance the fit accounts for: near 1 the samples really do lie on
+// the line, near 0 the slope is an artifact of the sample the window took.
+// Defaults to 0 so every existing caller's verdict is unchanged; the sustained
+// resident-set lane sets it to 0.5.
 
 /**
  * @typedef {object} GrowthReport
@@ -34,7 +45,10 @@
  * @property {number} delta last - first
  * @property {number} slope least-squares slope over the analyzed window (per sample)
  * @property {number} monotonicFraction fraction of consecutive pairs that did not decrease, in [0,1]
- * @property {boolean} leaking true only when all three votes agree
+ * @property {number} rSquared coefficient of determination of the least-squares
+ *   fit over the analyzed window, in [0,1]. 1 for a window whose samples are all
+ *   equal (a flat line explains a flat series exactly).
+ * @property {boolean} leaking true only when every vote agrees
  * @property {string} reason stable machine-readable verdict tag
  */
 
@@ -50,6 +64,10 @@
  *   count. Default 0 (any strictly-positive trend).
  * @property {number} [minMonotonicFraction] the non-decreasing fraction must be
  *   at least this to count. Default 0.9.
+ * @property {number} [minRSquared] the fit's coefficient of determination must be
+ *   at least this to count, which is what keeps a least-squares line through a
+ *   noisy flat series from reading as a trend. Default 0 (fit quality ignored,
+ *   so an existing caller's verdict does not move).
  */
 
 const DEFAULT_WARMUP = 0;
@@ -57,6 +75,7 @@ const DEFAULT_MIN_SAMPLES = 8;
 const DEFAULT_TOLERANCE = 0;
 const DEFAULT_MIN_SLOPE = 0;
 const DEFAULT_MIN_MONOTONIC_FRACTION = 0.9;
+const DEFAULT_MIN_R_SQUARED = 0;
 
 /** Coerce a probe reading to a finite number; a non-finite reading counts as 0. */
 function numify(v) {
@@ -65,16 +84,24 @@ function numify(v) {
 }
 
 /**
- * Least-squares slope of `y` against its own index 0..m-1. Pure arithmetic over
- * the sample values, so identical inputs give an identical float. Returns 0 for
- * a window shorter than two points (no line to fit).
+ * Least-squares fit of `y` against its own index 0..m-1, with the share of the
+ * series' variance the fit explains.
+ *
+ * `rSquared` is 1 - (residual sum of squares / total sum of squares). A window
+ * with no variance at all (every sample equal) has no residual either, and a
+ * flat line describes it exactly, so that case is 1 rather than a division by
+ * zero - the slope is 0 there and the other votes decide.
+ *
+ * Pure arithmetic over the sample values, so identical inputs give identical
+ * floats. Returns a zero slope and a perfect fit for a window shorter than two
+ * points: there is no line to fit and nothing for it to fail to explain.
  *
  * @param {number[]} y
- * @returns {number}
+ * @returns {{ slope: number, rSquared: number }}
  */
-function leastSquaresSlope(y) {
+function leastSquaresFit(y) {
 	const m = y.length;
-	if (m < 2) return 0;
+	if (m < 2) return { slope: 0, rSquared: 1 };
 	// Closed forms for x = 0..m-1: sumX = m(m-1)/2, sumXX = (m-1)m(2m-1)/6.
 	const sumX = (m * (m - 1)) / 2;
 	const sumXX = ((m - 1) * m * (2 * m - 1)) / 6;
@@ -85,8 +112,21 @@ function leastSquaresSlope(y) {
 		sumXY += i * y[i];
 	}
 	const denom = m * sumXX - sumX * sumX;
-	if (denom === 0) return 0;
-	return (m * sumXY - sumX * sumY) / denom;
+	if (denom === 0) return { slope: 0, rSquared: 1 };
+	const slope = (m * sumXY - sumX * sumY) / denom;
+	const meanY = sumY / m;
+	const intercept = meanY - (slope * sumX) / m;
+	let residual = 0;
+	let total = 0;
+	for (let i = 0; i < m; i++) {
+		const predicted = intercept + slope * i;
+		residual += (y[i] - predicted) ** 2;
+		total += (y[i] - meanY) ** 2;
+	}
+	if (total === 0) return { slope, rSquared: 1 };
+	// Clamped at 0: a least-squares fit cannot do worse than the mean, so a
+	// negative value here would be floating-point noise rather than a fit.
+	return { slope, rSquared: Math.max(0, 1 - residual / total) };
 }
 
 /**
@@ -102,6 +142,7 @@ export function detectGrowth(samples, opts = {}) {
 	const tolerance = opts.tolerance ?? DEFAULT_TOLERANCE;
 	const minSlope = opts.minSlope ?? DEFAULT_MIN_SLOPE;
 	const minMonotonicFraction = opts.minMonotonicFraction ?? DEFAULT_MIN_MONOTONIC_FRACTION;
+	const minRSquared = opts.minRSquared ?? DEFAULT_MIN_R_SQUARED;
 
 	const all = Array.isArray(samples) ? samples : [];
 	const start = warmup > 0 ? Math.min(warmup, all.length) : 0;
@@ -109,7 +150,7 @@ export function detectGrowth(samples, opts = {}) {
 	const m = window.length;
 
 	if (m === 0) {
-		return { n: 0, first: 0, last: 0, min: 0, max: 0, delta: 0, slope: 0, monotonicFraction: 1, leaking: false, reason: 'insufficient-samples' };
+		return { n: 0, first: 0, last: 0, min: 0, max: 0, delta: 0, slope: 0, monotonicFraction: 1, rSquared: 1, leaking: false, reason: 'insufficient-samples' };
 	}
 
 	const first = window[0];
@@ -127,25 +168,30 @@ export function detectGrowth(samples, opts = {}) {
 	const monotonicFraction = m > 1 ? nonDecreasing / (m - 1) : 1;
 
 	if (m < minSamples) {
-		return { n: m, first, last, min, max, delta, slope: 0, monotonicFraction, leaking: false, reason: 'insufficient-samples' };
+		return { n: m, first, last, min, max, delta, slope: 0, monotonicFraction, rSquared: 1, leaking: false, reason: 'insufficient-samples' };
 	}
 
-	const slope = leastSquaresSlope(window);
+	const { slope, rSquared } = leastSquaresFit(window);
 
 	const deltaVote = delta > tolerance;
 	const monotonicVote = monotonicFraction >= minMonotonicFraction;
 	const slopeVote = slope > minSlope;
-	const leaking = deltaVote && monotonicVote && slopeVote;
+	const fitVote = rSquared >= minRSquared;
+	const leaking = deltaVote && monotonicVote && slopeVote && fitVote;
 
 	// First failing gate names the reason so a not-leaking verdict is
-	// explainable; a passing verdict is `growth-detected`.
+	// explainable; a passing verdict is `growth-detected`. The fit is judged
+	// last because it only matters once a slope has already been found worth
+	// believing - reporting `fit-too-poor` for a series with no trend at all
+	// would name the wrong thing.
 	let reason;
 	if (leaking) reason = 'growth-detected';
 	else if (!deltaVote) reason = 'delta-within-tolerance';
 	else if (!monotonicVote) reason = 'non-monotonic';
-	else reason = 'slope-below-threshold';
+	else if (!slopeVote) reason = 'slope-below-threshold';
+	else reason = 'fit-too-poor';
 
-	return { n: m, first, last, min, max, delta, slope, monotonicFraction, leaking, reason };
+	return { n: m, first, last, min, max, delta, slope, monotonicFraction, rSquared, leaking, reason };
 }
 
 /**

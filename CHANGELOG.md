@@ -182,6 +182,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A standing leak lane, and the fit-quality vote that makes it trustworthy.**
+  `npm run test:leak` spawns the real built server - the production entry, not
+  a harness shim - drives it at a fixed rate over keepalive connections, and
+  samples its resident set across a window long enough for a slope to mean
+  something. Three scenarios: an HTTP one, a WebSocket topic-churn one, and a
+  self-check that arms a real leak and fails if the lane does not catch it, so
+  a lane that has quietly stopped working says so instead of reporting health.
+  Its own command and its own nightly job, because it spends minutes by design
+  and a slow gate inside the fast suite is a gate people stop running.
+
+  Three rules carry it, and each exists because its absence produces a
+  confident wrong answer. A forced collection is followed by a worked but
+  UNSAMPLED resettle window, since sampling straight after one measures the
+  climb back to the working set - steep, near-linear, and the most leak-shaped
+  stretch a healthy process ever produces. The window opens only once the
+  reading has held still for half a minute, which is longer than the plateaus
+  this server's staircase growth holds on the way up; a shorter rule opened the
+  window mid-staircase and reported 79 MiB of growth at r-squared 0.89 on a
+  server whose next thirty samples were flat. And `detectGrowth` gained a
+  fourth vote, `minRSquared`: least squares tilts a line through any cloud, so
+  a long enough window over a healthy series eventually clears any fixed slope
+  and delta threshold, and the coefficient of determination is what separates a
+  line that explains the samples from one that merely passes through them. It
+  defaults to 0, so every existing caller's verdict is unchanged, and the
+  report now carries `rSquared` either way.
+
+  The verdict also runs two gates that have nothing to do with memory, because
+  a window that lost 4% of its requests has not shown that the memory is flat -
+  it has shown the server stopped answering: an error-rate ceiling and a p95
+  creep ceiling against a baseline taken under the same load. Exit 1 is a
+  verdict failure and exit 2 is the lane failing to reach a verdict it trusts,
+  which is not the same as a pass and is no longer reported as one.
+
 - **The attribution contract: one resolver, one frozen per-connection
   answer, one accessor.** `src/runtime/utils/attribution.js` validates the
   handler module's `attribution(user)` result against the realtime id rule

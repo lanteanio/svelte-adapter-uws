@@ -375,7 +375,14 @@ export interface GrowthReport {
 	slope: number;
 	/** Fraction of consecutive pairs that did not decrease, in [0,1]. */
 	monotonicFraction: number;
-	/** True only when the slope, monotonic-fraction, and delta votes all agree. */
+	/**
+	 * Share of the window's own variance the least-squares fit explains, in
+	 * [0,1]. Near 1 the samples lie on the line; near 0 the slope is an artifact
+	 * of where the window started and stopped. 1 for a window whose samples are
+	 * all equal.
+	 */
+	rSquared: number;
+	/** True only when the slope, monotonic-fraction, delta and fit votes all agree. */
 	leaking: boolean;
 	/** Stable machine-readable verdict tag. */
 	reason: string;
@@ -392,6 +399,12 @@ export interface GrowthOptions {
 	minSlope?: number;
 	/** The non-decreasing fraction must be at least this to count. Default 0.9. */
 	minMonotonicFraction?: number;
+	/**
+	 * The fit's coefficient of determination must be at least this to count,
+	 * which is what keeps a least-squares line through a noisy flat series from
+	 * reading as a trend. Default 0 (fit quality ignored).
+	 */
+	minRSquared?: number;
 }
 
 /** A single probe: a named numeric reading of some live resource. */

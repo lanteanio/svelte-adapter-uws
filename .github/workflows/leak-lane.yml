@@ -1,0 +1,70 @@
+name: leak-lane
+
+# Standing leak detection: the real built server, driven at a fixed rate with
+# real clients, its resident set sampled across a window long enough for a slope
+# to mean something.
+#
+# Its own job rather than a leg of the test matrix, because it spends minutes by
+# design and a slow gate inside the fast suite is a gate people learn to skip.
+# Nightly plus an on-demand run, not on every pull request: a leak is a property
+# of a build under sustained load, and a three-minute window on every push buys
+# noise rather than coverage.
+#
+# The self-check scenario runs alongside the real ones and arms a deliberate
+# leak. If it comes back clean the job fails: a lane that can no longer detect a
+# planted leak would otherwise report a healthy server every night forever.
+
+on:
+  schedule:
+    # 03:41 UTC, off the top-of-hour stampede and clear of the sim swarm's 04:17.
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: 'Measurement window per scenario, in minutes'
+        default: '3'
+      scenario:
+        description: 'http | ws | selfcheck | all'
+        default: 'all'
+  # The lane's own machinery is the one thing a pull request must not break
+  # silently: a rules change that stops the gate from firing looks identical to
+  # a clean nightly.
+  pull_request:
+    paths:
+      - 'scripts/leak-lane.js'
+      - 'src/runtime/leak-detect.js'
+      - 'src/runtime/leak-probes.js'
+      - 'test/leak-lane-rules.test.js'
+      - 'test/fixture/src/routes/__leak/**'
+      - '.github/workflows/leak-lane.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lane:
+    runs-on: ubuntu-latest
+    # A three-minute window per scenario plus warmups, settles and a build, with
+    # room for a loaded runner. Well short of what a wedged server would take.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - run: npm ci
+      # The rules first and separately. They run in milliseconds, and a lane
+      # whose verdict logic is broken cannot be trusted to report on anything -
+      # so it is better to learn that here than from a green window.
+      - run: npx vitest run test/leak-lane-rules.test.js
+      - name: Drive the lane
+        run: npm run test:leak -- --minutes ${{ inputs.minutes || '3' }} --scenario ${{ inputs.scenario || 'all' }} --out "$RUNNER_TEMP/leak-lane"
+      # Uploaded whether the lane passed or failed: the sample series is the
+      # evidence either way, and a failing run is exactly when someone wants it.
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: leak-lane-record
+          path: ${{ runner.temp }}/leak-lane
+          if-no-files-found: warn

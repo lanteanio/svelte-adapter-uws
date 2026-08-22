@@ -140,6 +140,7 @@ client-only case. You cannot verify a runtime behaviour claim.
 | `npm run test:watch` | The same vitest run, watching. |
 | `npm run test:e2e` | Playwright, two projects: `dev` (`vite dev` plus the Vite plugin) and `prod` (`vite build` plus the built server through real uWS). Needs extra setup, see below. |
 | `npm run test:coverage` | vitest with coverage, then Playwright under `NODE_V8_COVERAGE`, then a `c8` report over the server and browser sources. A superset of the two above, so it needs their setup too. |
+| `npm run test:leak` | The standing leak lane: the real built server driven at a fixed rate over keepalive connections, its resident set sampled across a window long enough for a slope to mean something. Minutes per scenario by design, so it is its own command and its own nightly job rather than part of the fast suite. `--scenario http\|ws\|selfcheck\|all`, `--minutes N`. Exits 1 on a verdict failure and 2 when it could not reach a verdict it trusts - an unsettled baseline is not a clean bill of health. |
 | `npm run sim:swarm` | Deterministic simulation: many seeded interleavings of the in-memory server under the fault engine. Exits non-zero on any invariant violation, fatal, or determinism regression. |
 | `npm run sim:golden` | Re-runs the committed golden corpus (`test/dst-goldens/`) and fails when a fingerprint drifted from its blessed baseline. |
 | `node bench/<file>.mjs` | The benchmark harness. Files ending `-ab.mjs` are before/after comparisons for a single hot path. |

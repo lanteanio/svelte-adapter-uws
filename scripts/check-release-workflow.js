@@ -145,6 +145,7 @@ const EXPECTED_SCRIPTS = {
 	'test:watch': 'vitest',
 	'test:e2e': 'npx playwright test --config test/e2e/playwright.config.js',
 	'test:coverage': 'node scripts/coverage.js',
+	'test:leak': 'node scripts/leak-lane.js',
 	'test:floor': 'vitest run test/client test/crdt- test/cursor-handle test/cursor-viewport-client test/lease-client test/presence-client test/presence-heartbeat test/smooth-channel test/smooth-interpolate test/smooth-wire-view test/utils test/wire-client test/wire-sink',
 	'sim:swarm': 'node scripts/sim-swarm.js',
 	'sim:golden': 'node scripts/sim-golden.js',

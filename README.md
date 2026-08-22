@@ -6715,7 +6715,7 @@ try {
 
 ### Resource-leak harness
 
-`svelte-adapter-uws/sim` also ships a reusable leak detector. Its core is a pure, deterministic trend kernel: give `detectGrowth` a numeric series (successive samples of some bookkeeping size) and it votes three ways - least-squares **slope**, **monotonic fraction**, and total **delta** - so a flat or sawtooth series is never mistaken for a leak, only a sustained climb is.
+`svelte-adapter-uws/sim` also ships a reusable leak detector. Its core is a pure, deterministic trend kernel: give `detectGrowth` a numeric series (successive samples of some bookkeeping size) and it votes four ways - least-squares **slope**, total **delta**, **monotonic fraction**, and the fit's **r-squared** (`minRSquared`, off by default) - so a flat or sawtooth series is never mistaken for a leak, only a sustained climb is. The fit vote is what a noisy real-world series needs: least squares tilts a line through any cloud, so on a long enough window a healthy resident set eventually produces a positive slope and a delta over any fixed tolerance, and r-squared is what says whether the line explains the samples or merely passes through them.
 
 ```js
 import {
@@ -6748,7 +6748,7 @@ const r = await runSim({
 r.resourceGrowth.every((s) => !s.leaking); // true when the close path is clean
 ```
 
-For the non-deterministic memory dimension, `processResourceProbes({ forceGc })` trends `heapUsed` / `rss` / `external` / `arrayBuffers` and active handle/request counts - drive it from a real server under `node --expose-gc`. And for production, the opt-in `resourceGrowthAuditIntervalMs` ws option installs an observe-only trend auditor (a metric plus one throttled warning, never fatal) - the same `createResourceGrowthAuditor({ probes, intervalMs, onGrowth })` factory this subpath exports, so a downstream package can run the identical auditor over its own probes.
+For the non-deterministic memory dimension, `processResourceProbes({ forceGc })` trends `heapUsed` / `rss` / `external` / `arrayBuffers` and active handle/request counts - drive it from a real server under `node --expose-gc`. `npm run test:leak` is the standing lane built on all of it: it spawns the real built server, drives it at a fixed rate over keepalive connections, forces a collection and then works through an unsampled resettle window before opening a measurement window at all (sampling straight after a collection measures the climb back to the working set, which is the most leak-shaped stretch a healthy process ever produces), and gates on the slope with its r-squared floor plus independent error-rate and p95-creep ceilings; a self-check scenario arms a real leak and fails if the lane does not catch it, so a lane that has quietly stopped working says so instead of reporting health. And for production, the opt-in `resourceGrowthAuditIntervalMs` ws option installs an observe-only trend auditor (a metric plus one throttled warning, never fatal) - the same `createResourceGrowthAuditor({ probes, intervalMs, onGrowth })` factory this subpath exports, so a downstream package can run the identical auditor over its own probes.
 
 ---
 
