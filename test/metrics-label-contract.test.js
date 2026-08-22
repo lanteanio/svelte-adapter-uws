@@ -392,6 +392,8 @@ function scan(file) {
 			const labelsArg = node.arguments[0];
 			if (!labelsArg || labelsArg.type !== 'ObjectExpression') continue;
 			const keys = [];
+			/** @type {Record<string, string>} label -> the literal VALUE emitted, where it is one */
+			const literals = {};
 			for (const prop of labelsArg.properties) {
 				// A spread or computed key cannot be checked statically; fail loudly
 				// rather than letting an unchecked label through.
@@ -400,9 +402,16 @@ function scan(file) {
 					((prop.key.type === 'Identifier') || (prop.key.type === 'Literal' && typeof prop.key.value === 'string')),
 					`${file}: ${object.name}.${method}() labels must be literal keys`
 				).toBe(true);
-				keys.push(prop.key.type === 'Identifier' ? prop.key.name : prop.key.value);
+				const key = prop.key.type === 'Identifier' ? prop.key.name : prop.key.value;
+				keys.push(key);
+				// A computed value cannot be checked statically and is simply not
+				// recorded; a literal one is, and is checked against the manifest's
+				// enum below.
+				if (prop.value.type === 'Literal' && typeof prop.value.value === 'string') {
+					literals[key] = prop.value.value;
+				}
 			}
-			emits.push({ varName: object.name, method, keys, file });
+			emits.push({ varName: object.name, method, keys, literals, file });
 		}
 	}
 	return { registrations, emits };
@@ -693,5 +702,44 @@ describe('metrics label contract', () => {
 				expect(() => instrument.inc(labels), `${reg.metric} emit threw`).not.toThrow();
 			}
 		}
+	});
+});
+
+describe('every enum label VALUE emitted is declared in the manifest', () => {
+	// The case above pins label KEYS. A key can be declared while the VALUE
+	// carried on it is not: `upgrade_rejected_total{reason}` shipped with
+	// `deferred_overflow` emitted from two surfaces and absent from the
+	// manifest's enum, and nothing noticed - the label-name comparison passes,
+	// and the README/manifest table comparison is over metric ROWS, not over the
+	// prose reason list inside a cell.
+	//
+	// It costs more than tidiness: everything generated from the manifest treats
+	// an undeclared value as one that cannot occur, so the alert and dashboard
+	// pack has no case for it and a refusal reason is invisible to the operator
+	// who is looking for exactly that shed.
+	it('emits no reason, outcome or door the manifest does not declare', () => {
+		const scanned = FILES.map(scan);
+		const registrations = new Map();
+		const emits = [];
+		for (const { registrations: r, emits: e } of scanned) {
+			for (const [k, v] of r) registrations.set(k, v);
+			emits.push(...e);
+		}
+		/** @type {string[]} */
+		const undeclared = [];
+		for (const emit of emits) {
+			const reg = registrations.get(emit.varName);
+			if (!reg) continue;
+			const signal = SIGNALS.find((sig) => sig.name === reg.metric);
+			if (!signal) continue;
+			for (const [label, value] of Object.entries(emit.literals ?? {})) {
+				const domain = (signal.labelDomains ?? {})[label];
+				if (!domain || domain.kind !== 'enum') continue;
+				if (!domain.values.includes(value)) {
+					undeclared.push(`${reg.metric}{${label}="${value}"} emitted in ${emit.file} but not declared`);
+				}
+			}
+		}
+		expect(undeclared, 'an emitted enum value the manifest does not declare is invisible to everything generated from it').toEqual([]);
 	});
 });

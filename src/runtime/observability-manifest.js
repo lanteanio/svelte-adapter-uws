@@ -306,7 +306,7 @@ const LABEL_DOMAINS = Object.freeze({
 	upgrade_rejected_total: Object.freeze({
 		reason: Object.freeze({ kind: 'enum', dataClass: 'operational', values: Object.freeze([
 			'auth_rate_limit', 'siege', 'cursor_lane', 'over_capacity', 'connection_capacity', 'duplicate_header',
-			'ip_rate_limit', 'bad_origin', 'auth_timeout', 'auth_rejected', 'hook_error'
+			'ip_rate_limit', 'bad_origin', 'deferred_overflow', 'auth_timeout', 'auth_rejected', 'hook_error'
 		]) })
 	}),
 	upgrade_rate_map_evicted_total: Object.freeze({
