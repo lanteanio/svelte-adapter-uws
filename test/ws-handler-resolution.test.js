@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import adapter, { assertBundledHandlerMatches, readHandlerOrigin, assertBundledMetricsMatches, readMetricsOrigin } from '../src/index.js';
 import { buildFixtureOnce } from './helpers/fixture-build.js';
-import { hasUWS } from './helpers/real-runtime.js';
+import { hasUWS, REAL_BOOT_BUDGET_MS } from './helpers/real-runtime.js';
 import { variantOut, FIXTURE_VARIANTS } from './fixture/variants.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -188,7 +188,10 @@ describeBuild('the built artifact honours websocket.handler through the Vite plu
 		expect(bundle).toContain('resume-topics');
 		// ...and one unique to the module auto-discovery would have picked.
 		expect(bundle).not.toContain('cork-test');
-	});
+		// Reads a build rather than performing one on a warm tree, but the call
+		// is the same one either way and a cold or contended tree pays for the
+		// build here - which is more than vitest's default allows for.
+	}, REAL_BOOT_BUDGET_MS);
 
 	it('carries the named handler plugin hook, not the auto-discovered authorization hook', () => {
 		// The named handler now wraps a real groups-plugin side-effect hook and
@@ -214,5 +217,5 @@ describeBuild('the built artifact honours websocket.handler through the Vite plu
 		expect(names).toContain('subscribe');
 		expect(bundle).toContain('policy-lobby');
 		expect(bundle).toContain('hook-entered');
-	});
+	}, REAL_BOOT_BUDGET_MS);
 });

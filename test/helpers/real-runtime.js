@@ -22,6 +22,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildFixtureOnce } from './fixture-build.js';
+import { registerRuntime, forgetRuntime } from './live-runtimes.js';
 import { variantOut } from '../fixture/variants.js';
 // The PRODUCTION parsers, so the eval-time-env expectations below cannot drift
 // from what the runtime actually computes from the same string.
@@ -233,6 +234,26 @@ export function evalTimeEnvMismatches(config, env) {
 	return mismatched;
 }
 
+/**
+ * The budget for a test that boots a real runtime in its own body.
+ *
+ * vitest's 5000 ms default was never chosen for this: a test whose first act is
+ * booting a real server is not a unit test, and the default is what it gets by
+ * saying nothing. Boots measured on this machine run 2398-2420 ms idle and have
+ * been seen at 5257 ms and 6162 ms while a full run is competing for the
+ * machine - either side of the default, which is exactly the shape that fails
+ * one run and passes the next.
+ *
+ * Wide on purpose. The budget is not a performance assertion; it is the line
+ * past which a stall is a stall. A boot that needs thirty seconds is broken in
+ * a way no timeout should paper over, and a boot that needs seven is a loaded
+ * machine.
+ *
+ * A suite that boots once in `beforeAll` does not need this - that hook carries
+ * its own budget, and by convention here a generous one.
+ */
+export const REAL_BOOT_BUDGET_MS = 30000;
+
 /** @returns {Promise<number>} an unused loopback port */
 export function freePort() {
 	return new Promise((resolve, reject) => {
@@ -329,12 +350,13 @@ export async function startRealRuntime({ variant = 'default', env = {} } = {}) {
 	const port = await freePort();
 	await handler.start('127.0.0.1', port);
 
-	return {
+	const runtime = {
 		port,
 		wsUrl: `ws://127.0.0.1:${port}/ws`,
 		httpUrl: `http://127.0.0.1:${port}`,
 		handler,
 		async stop() {
+			forgetRuntime(runtime);
 			try { await handler.shutdown(); } catch { /* already down */ }
 			try { handler.forceCloseApp(); } catch { /* already closed */ }
 			// RESTORE, rather than delete what this call set. Deleting only the
@@ -347,6 +369,13 @@ export async function startRealRuntime({ variant = 'default', env = {} } = {}) {
 			}
 		}
 	};
+
+	// Registered the moment it is listening, BEFORE the caller can hold it. A
+	// test whose budget expires during this boot never receives the value and so
+	// can never stop it; the harness sweep in helpers/stop-leaked-runtimes.js
+	// stops it instead of leaving a listener behind for the next test to find.
+	registerRuntime(runtime);
+	return runtime;
 }
 
 /**

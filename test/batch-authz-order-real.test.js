@@ -17,7 +17,7 @@
 // arrived would pass just as well against a server that never sends one.
 
 import { describe, it, expect, afterEach, beforeAll } from 'vitest';
-import { startRealRuntime, connectRealClient, hasUWS } from './helpers/real-runtime.js';
+import { startRealRuntime, connectRealClient, hasUWS, REAL_BOOT_BUDGET_MS } from './helpers/real-runtime.js';
 import { buildFixtureOnce } from './helpers/fixture-build.js';
 
 const describeUWS = hasUWS ? describe : describe.skip;
@@ -92,7 +92,9 @@ describeUWS('subscribe-batch authorization ordering (real runtime)', () => {
 		// carries more of the wall clock than its siblings and is the one that crosses
 		// vitest's 5000ms default once the full suite is competing for the machine.
 		// Long enough that a genuine stall still fails, rather than the scheduler.
-	}, 30000);
+		// The number is the harness's, not this file's, so the three cases below
+		// cannot drift back onto the default by being written without one.
+	}, REAL_BOOT_BUDGET_MS);
 
 	it('delivers no roster state to the denied caller', async () => {
 		server = await startRealRuntime({ variant: 'batchleak' });
@@ -109,7 +111,7 @@ describeUWS('subscribe-batch authorization ordering (real runtime)', () => {
 		// proves the hook did not run.
 		const leaked = await mallory.waitFor((p) => p?.topic === '__presence:private-room', 400);
 		expect(leaked, 'denied caller received presence traffic for the room').toBeNull();
-	});
+	}, REAL_BOOT_BUDGET_MS);
 
 	it('treats the batch and single spellings of one request identically', async () => {
 		server = await startRealRuntime({ variant: 'batchleak' });
@@ -127,7 +129,7 @@ describeUWS('subscribe-batch authorization ordering (real runtime)', () => {
 		const after = await readRoster(alice, 'private-room', 'single');
 		expect(after.members).toEqual(['alice']);
 		expect(after.taps).toBe(1);
-	});
+	}, REAL_BOOT_BUDGET_MS);
 
 	it('still admits a granted topic named in a batch frame', async () => {
 		// The gate must not be closed by simply refusing everything.
@@ -143,5 +145,5 @@ describeUWS('subscribe-batch authorization ordering (real runtime)', () => {
 			2000
 		);
 		expect(ack, 'a granted topic was refused in a batch frame').not.toBeNull();
-	});
+	}, REAL_BOOT_BUDGET_MS);
 });

@@ -111,19 +111,33 @@ describeReal('real clustered relay frame ceiling', () => {
 	}
 
 	// Two clients proven (via the fixture's whoami probe) to sit on different
-	// worker threads; the acceptor distributes connections, so a same-worker
-	// landing is retried with a fresh connection.
+	// worker threads.
+	//
+	// The retry HOLDS every same-worker connection open until a different worker
+	// answers, and only then lets them go. Closing each one before trying again
+	// is the intuitive spelling and it fights the acceptor: a worker that just
+	// lost a connection is the emptiest one, so the next connect goes straight
+	// back to it, and the loop can spend all twelve attempts on a single worker.
+	// That is not hypothetical - it is how this failed one full run, under a
+	// load that made the distribution lopsided enough for the effect to show.
+	// Parking the connections instead pushes the acceptor along.
 	async function connectOnDistinctWorkers(port) {
 		const a = await connect(port);
 		const aThread = await a.threadId();
-		let b = null;
-		for (let attempt = 0; attempt < 12; attempt++) {
-			b = await connect(port);
-			if (await b.threadId() !== aThread) return { a, b };
-			b.close();
-			b = null;
+		/** Same-worker landings, kept open so the acceptor stops choosing that worker. */
+		const parked = [];
+		try {
+			for (let attempt = 0; attempt < 12; attempt++) {
+				const b = await connect(port);
+				if (await b.threadId() !== aThread) return { a, b };
+				parked.push(b);
+			}
+		} finally {
+			for (const client of parked) client.close();
 		}
-		throw new Error('could not place two clients on distinct workers');
+		throw new Error(
+			`could not place two clients on distinct workers - 12 connections all landed on thread ${aThread}`
+		);
 	}
 
 	// One deterministic scenario for any lane configuration. The negative

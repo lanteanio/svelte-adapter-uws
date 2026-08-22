@@ -606,27 +606,38 @@ describe('documentation map', () => {
 		expect(ownershipFailures(tableDrift)).toContain('bounded ownership table drifted');
 	}, 15_000);
 
-	it('requires the top canonical route to use the exact accessible Markdown shape', () => {
-		for (const replacement of [
-			'<span inert>[documentation site](' + DOCS_SITE + ')</span>',
-			'<span style=pointer-events:none>[documentation site](' + DOCS_SITE + ')</span>',
-			'<span style=display:/**/none>[documentation site](' + DOCS_SITE + ')</span>',
-			'<span style=display:var(--docs);--docs:none>[documentation site](' + DOCS_SITE + ')</span>',
-			'<span style=visibility:/**/hidden>[documentation site](' + DOCS_SITE + ')</span>',
-			'<span aria-hidden=true>[documentation site](' + DOCS_SITE + ')</span>'
-		]) {
-			const mutant = README.replace('[documentation site](' + DOCS_SITE + ')', replacement);
-			expect.soft(ownershipFailures(mutant), replacement).toContain('top documentation-site route drifted');
-			const relatedReplacement = replacement.replace(/documentation site/g, 'svelte-realtime.dev');
-			const relatedMutant = README.replace(
-				EXPECTED_RELATED_MARKDOWN,
-				EXPECTED_RELATED_MARKDOWN.replace('[svelte-realtime.dev](' + DOCS_SITE + ')', relatedReplacement)
-			);
-			expect.soft(ownershipFailures(relatedMutant), relatedReplacement).toContain(
-				'related-projects documentation-site route drifted'
-			);
-		}
-	}, 15_000);
+	// One case per interference shape, rather than one case over all six.
+	// Each mutant is a different document, so `ownershipFailures` has to walk
+	// it in full - twelve of those walks under a single budget put the case
+	// close enough to its ceiling that full-suite load, not content, decided
+	// whether it passed. It failed one full run and passed the next on the
+	// same tree while passing 31/31 in isolation both times, which is the
+	// shape that teaches people to re-run instead of read.
+	//
+	// `it.each` also names the shape under test in the failure, which the
+	// loop could only do through `expect.soft`'s message argument.
+	const HIDDEN_ROUTE_SHAPES = [
+		['inert attribute', '<span inert>[documentation site](' + DOCS_SITE + ')</span>'],
+		['pointer-events none', '<span style=pointer-events:none>[documentation site](' + DOCS_SITE + ')</span>'],
+		['display none via comment', '<span style=display:/**/none>[documentation site](' + DOCS_SITE + ')</span>'],
+		['display none via custom property', '<span style=display:var(--docs);--docs:none>[documentation site](' + DOCS_SITE + ')</span>'],
+		['visibility hidden via comment', '<span style=visibility:/**/hidden>[documentation site](' + DOCS_SITE + ')</span>'],
+		['aria-hidden', '<span aria-hidden=true>[documentation site](' + DOCS_SITE + ')</span>']
+	];
+
+	it.each(HIDDEN_ROUTE_SHAPES)('rejects a top canonical route hidden by %s', (_label, replacement) => {
+		const mutant = README.replace('[documentation site](' + DOCS_SITE + ')', replacement);
+		expect(ownershipFailures(mutant)).toContain('top documentation-site route drifted');
+	}, 10_000);
+
+	it.each(HIDDEN_ROUTE_SHAPES)('rejects a related-projects route hidden by %s', (_label, replacement) => {
+		const relatedReplacement = replacement.replace(/documentation site/g, 'svelte-realtime.dev');
+		const relatedMutant = README.replace(
+			EXPECTED_RELATED_MARKDOWN,
+			EXPECTED_RELATED_MARKDOWN.replace('[svelte-realtime.dev](' + DOCS_SITE + ')', relatedReplacement)
+		);
+		expect(ownershipFailures(relatedMutant)).toContain('related-projects documentation-site route drifted');
+	}, 10_000);
 
 	it('rejects inaccessible ancestors around otherwise exact route source', () => {
 		const topAncestor = README

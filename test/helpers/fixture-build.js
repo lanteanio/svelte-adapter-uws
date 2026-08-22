@@ -60,7 +60,29 @@ function digestFile(hash, label, file) {
 	hash.update('\0');
 }
 
+/**
+ * Digests already computed in THIS process, keyed by variant.
+ *
+ * The digest walks the whole adapter `src` tree plus the fixture's sources and
+ * static files and hashes every byte, which is the right freshness key and the
+ * wrong thing to repeat. Sources cannot change during a run - a run that edited
+ * them mid-flight is already reporting on a tree that no longer exists - so one
+ * walk per variant per worker is as correct as one per call and does not scale
+ * with how many suites in that worker need the variant.
+ *
+ * @type {Map<string, string>}
+ */
+const digestByVariant = new Map();
+
 function sourceDigest(variant) {
+	const memo = digestByVariant.get(variant);
+	if (memo !== undefined) return memo;
+	const digest = computeSourceDigest(variant);
+	digestByVariant.set(variant, digest);
+	return digest;
+}
+
+function computeSourceDigest(variant) {
 	const hash = createHash('sha256');
 	// The variant name and the table that maps it to an adapter config both
 	// change what gets baked into the handler, so both key the digest.
@@ -79,6 +101,33 @@ function sourceDigest(variant) {
 		digestFile(hash, 'fixture/package-lock.json', join(fixtureDir, 'package-lock.json'));
 	} catch { /* no lockfile - the manifests still key the digest */ }
 	return hash.digest('hex');
+}
+
+/**
+ * Variants this process has already confirmed are on disk at the current source
+ * state. A second call in the same worker is then a Set lookup rather than a
+ * stat and a read.
+ *
+ * @type {Set<string>}
+ */
+const inPlace = new Set();
+
+/**
+ * Is a complete build for this variant already on disk at `digest`?
+ *
+ * Both halves matter: the stamp says WHICH sources produced the output, and
+ * `index.js` says the output is actually there - a tree cleared for a rebuild
+ * that never finished leaves neither, but a hand-deleted handler leaves the
+ * stamp behind.
+ *
+ * @param {string} outDir @param {string} stampFile @param {string} digest
+ */
+function stampMatches(outDir, stampFile, digest) {
+	try {
+		return existsSync(join(fixtureDir, outDir, 'index.js')) && readFileSync(stampFile, 'utf8') === digest;
+	} catch {
+		return false; // no stamp yet
+	}
 }
 
 const sleepSync = (ms) => {
@@ -100,7 +149,32 @@ const sleepSync = (ms) => {
 export function buildFixtureOnce(variant = 'default') {
 	const outDir = variantOut(variant);
 	const stampFile = join(fixtureDir, outDir, '.build-stamp');
+	if (inPlace.has(variant)) return true;
 	const digest = sourceDigest(variant);
+
+	// FAST PATH, deliberately OUTSIDE the lock.
+	//
+	// The lock exists to serialize `vite build`, and the common case does not
+	// build: global-setup produces every variant a run needs before any worker
+	// starts, so almost every call here is a suite confirming what is already on
+	// disk. Taking the lock to confirm it made a read-only check queue behind
+	// every other read-only check, and a loser sleeps in 250 ms steps - so with
+	// dozens of suites arriving together the confirmation cost was measured in
+	// seconds, paid inside whichever test happened to ask first. That is a
+	// timing artifact appearing in a suite that has nothing to do with building.
+	//
+	// The check is safe unlocked because it reads exactly what the locked one
+	// reads, and the stamp is the LAST thing a build writes - only after the
+	// build exited and a runnable handler was verified. A stamp that matches the
+	// current digest therefore means a complete tree. The rebuild that would
+	// invalidate it can only start when some process computes a DIFFERENT
+	// digest, and every process digests the same unchanging sources, so a
+	// matching reader and a rebuilding writer cannot coexist for one variant.
+	if (stampMatches(outDir, stampFile, digest)) {
+		inPlace.add(variant);
+		return true;
+	}
+
 	const deadline = Date.now() + 300000;
 	// Acquire: mkdir is atomic across processes. A holder that died without
 	// unlocking is reclaimed after the stale window - 240s against the build's
@@ -127,11 +201,12 @@ export function buildFixtureOnce(variant = 'default') {
 	}
 	const acquiredAt = Date.now();
 	try {
-		try {
-			if (existsSync(join(fixtureDir, outDir, 'index.js')) && readFileSync(stampFile, 'utf8') === digest) {
-				return true; // another suite already built this exact source state
-			}
-		} catch { /* no stamp yet - build below */ }
+		// Re-check under the lock: between the fast path above and this line a
+		// racer may have finished the very build this call was about to start.
+		if (stampMatches(outDir, stampFile, digest)) {
+			inPlace.add(variant);
+			return true; // another suite already built this exact source state
+		}
 		// Clear this variant's output BEFORE building. Reaching here means the
 		// digest changed, so whatever sits on disk was produced by different
 		// sources - and a build that exits 0 without emitting a handler would
@@ -169,6 +244,7 @@ export function buildFixtureOnce(variant = 'default') {
 				lockIntact = statSync(lockDir).mtimeMs <= acquiredAt + 5000;
 			} catch { /* lock gone - reclaimed */ }
 			if (lockIntact) writeFileSync(stampFile, digest);
+			inPlace.add(variant);
 			return true;
 		} catch (err) {
 			// Surface what Vite actually said. `stdio: 'pipe'` keeps a passing
