@@ -40,6 +40,46 @@ describeUWS('the hook-failure entries against the built runtime', () => {
 		vi.restoreAllMocks();
 	});
 
+	it('ADMIN-HANDLER: that one admin request answers 500, and the next one does not', async () => {
+		// The entry's consequence is entirely about blast radius - "That one
+		// admin request answered 500. Application traffic and WebSocket
+		// delivery are unaffected" - and its recovery is that the NEXT request
+		// runs the handler again. Both are asserted here in the same process,
+		// because an entry claiming containment is worth nothing if the case
+		// only ever sees the failure.
+		const events = [];
+		diagnostic.setOperationalEventSink((record) => { events.push(record); });
+
+		const bystander = await connectRealClient(server.wsUrl);
+		try {
+			const failed = await fetch(`${server.httpUrl}/__realtime/status`, {
+				headers: { 'x-hook-crash': token }
+			});
+			expect(failed.status, 'the entry promises this one request answers 500').toBe(500);
+
+			const hit = events.find((e) => e.event === 'admin.handler-failed');
+			expect(hit, 'the entry event must be emitted').toBeTruthy();
+			expect(hit.severity).toBe('error');
+			// "Read the attached error attribute and fix the admin handler" -
+			// guidance that is only actionable if the record carries the throw.
+			expect(JSON.stringify(hit.attributes)).toContain('__ADMIN_HOOK_CRASH__');
+
+			// "the next admin request runs the handler again": no latch, no
+			// breaker, and the route is not left poisoned by the throw.
+			const healthy = await fetch(`${server.httpUrl}/__realtime/status`);
+			expect(healthy.status).toBe(200);
+			expect((await healthy.json()).ok).toBe(true);
+
+			// "Application traffic and WebSocket delivery are unaffected", on a
+			// socket that was already open when the admin handler threw.
+			expect(bystander.ws.readyState).toBe(1);
+			const page = await fetch(`${server.httpUrl}/`);
+			expect(page.status).toBe(200);
+		} finally {
+			bystander.close();
+		}
+	});
+
 	it('AUTHENTICATE: the failing POST answers 500 while connections and HTTP stay up', async () => {
 		const events = [];
 		diagnostic.setOperationalEventSink((record) => { events.push(record); });

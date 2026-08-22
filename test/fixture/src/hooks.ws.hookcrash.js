@@ -45,3 +45,24 @@ export function message(ws, { data, platform }) {
 	const second = platform.sendTo(async () => true, 'test-topic', 'dm', { n: 2 });
 	platform.send(ws, 'probe', 'sendto-async-drill', { nonce: msg.nonce, first, second });
 }
+
+/**
+ * Admin route, for ADAPTER-ERR-ADMIN-HANDLER.
+ *
+ * Throws only for a request carrying the drill token, so the same build serves
+ * the healthy answer as its own control - an entry that promises "that ONE
+ * request answered 500" needs the next one to succeed in the same process to
+ * mean anything.
+ */
+export function admin(request) {
+	if (
+		process.env.HOOK_CRASH_DRILL_TOKEN &&
+		request.headers.get('x-hook-crash') === process.env.HOOK_CRASH_DRILL_TOKEN
+	) {
+		throw new Error('__ADMIN_HOOK_CRASH__');
+	}
+	return new Response(JSON.stringify({ ok: true, path: new URL(request.url).pathname }), {
+		status: 200,
+		headers: { 'content-type': 'application/json' }
+	});
+}

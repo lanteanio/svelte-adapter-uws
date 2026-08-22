@@ -174,6 +174,18 @@ describeReal('real clustered relay frame ceiling', () => {
 			// quarantined, asked to exit, or escalated to a process kill.
 			expect(output()).not.toContain('relay spill quarantining');
 			expect(output()).not.toContain('did not exit within');
+
+			// ADAPTER-ERR-RELAY-FRAME-REFUSED, driven from the condition it
+			// names. The entry's whole value is that the split above is
+			// INVISIBLE to clients - a described consequence nobody on the wire
+			// can observe - so the operator line is the only place it surfaces,
+			// and an entry whose emission never fires documents a silence.
+			// Asserted on the cluster child's own output, because the worker
+			// that refused is the one that reports.
+			expect(output(), 'the refusal must reach the operator; nothing on the wire says it happened')
+				.toContain('event=cluster-relay.frame-refused');
+			expect(output(), 'and it is a warning, not an error - local delivery succeeded')
+				.toContain('severity=warn');
 		} finally {
 			a.close();
 			b.close();
