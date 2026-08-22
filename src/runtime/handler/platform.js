@@ -5,22 +5,23 @@ import { metricsRegistry } from '../metrics-bridge.js';
 import { metricsSnapshot } from './metrics-snapshot.js';
 import { parentPort } from 'node:worker_threads';
 import { exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeqValue, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeqValue, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
+import { egressGate, resolvePublishTenant, admitPublishEgress, admitTopicEgress, admitTenantEgress, chargePublishEgress, chargeDirectEgress, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, EGRESS_ADMITTED } from './egress-budget.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
-import { capCounts, captureResumeFrame, counters, maxSeenSeq, divergenceDiagnostics, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, recordStampedSeen, resumeBuffers, sharedTopics, subscribeAuth, topicPublishStats, topicSeqs, wsConnections } from './state.js';
+import { capCounts, captureResumeFrame, counters, maxSeenSeq, divergenceDiagnostics, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, recordStampedSeen, resumeBuffers, sharedTopics, subscribeAuth, topicSeqs, topicSubscriberCounts, wsConnections } from './state.js';
 import { app, wsDebug, WS_COMPRESSION_ON, ALLOW_NON_ASCII_TOPICS } from './config.js';
 import { envelopePrefix } from './envelope-cache.js';
 import { batchRelay, relayBatched } from './relay.js';
 import { readHlc } from './hlc.js';
-import { BATCH_FRAME_WARN_BYTES, bumpOut, maybeWarnTopicRegistry, warnLargeBatchFrame } from './pressure-metrics.js';
+import { BATCH_FRAME_WARN_BYTES, bumpOut, warnLargeBatchFrame } from './pressure-metrics.js';
 import { flushCoalescedFor, runUserSubscribeGate, hasUserSubscribeHook } from './subscribe-hooks.js';
 import { ensureWireId, ensureWireState, poisonWireState, wireStatePoisoned } from './wire-state.js';
 import { GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload, assertGameLaneClusterSafe } from './game-ingress.js';
 import { assertClusterSequenceAuthority, assertClusterSequenceAuthorityValues, assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './cluster-sequence-policy.js';
 import { registerWireCodec as _registerWireCodec, getWireCodec } from './codec-registry.js';
 import { cohortTopics, joinSharedCohort, leaveSharedCohort } from './cohort.js';
-import { getSharedWireId } from './shared-wire-id.js';
+import { getSharedWireId, sharedWireIdRefs } from './shared-wire-id.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './wire-fanout.js';
 import { runtimeVersionInfo } from '../version-info.js';
 import { ADAPTER_ERROR_IDS, REQUEST_CLOSED_DETAIL, adapterConsoleLine, adapterErrorMessage } from '../error-registry.js';
@@ -33,6 +34,65 @@ import { activeTraceContext, trace } from '../tracing.js';
 // helper object per topic name instead of allocating a fresh one each call.
 /** @type {((name: string) => ReturnType<typeof createScopedTopic>) | null} */
 let _topicHelperCache = null;
+
+/**
+ * Wire bytes for `recipients` copies of one JSON envelope. Measured exactly
+ * only while a BYTES ceiling is armed: the exact measurement walks the
+ * envelope, so paying it with nothing deciding on the result would tax every
+ * publish on a server that configured no budget - or configured one that
+ * counts messages rather than bytes. See `envelopeWireBytes`.
+ *
+ * @param {string} envelope
+ * @param {number} recipients
+ * @returns {number}
+ */
+function chargeableBytes(envelope, recipients) {
+	return envelopeWireBytes(envelope, recipients, egressGate.bytesArmed);
+}
+
+/**
+ * The whole-batch egress decision, taken before any entry is stamped or sent.
+ *
+ * Every topic in the batch admits its own share, and every tenant admits ONCE
+ * against the pooled weight of the topics it owns here - asking per topic
+ * against a window nothing has charged yet would let a batch spanning N topics
+ * of one tenant pass N times against the same allowance. One refusal refuses
+ * the whole batch: a batch that delivered a prefix and refused the tail would
+ * be the mid-batch shedding this budget forbids.
+ *
+ * `sharedRecipients` is the recipient count every entry shares (the all-see-all
+ * fast path dispatches on one topic); pass null to read each topic's own count.
+ *
+ * @param {Array<{ topic: string }>} messages
+ * @param {number | null} sharedRecipients
+ * @returns {boolean}
+ */
+function admitBatchEgress(messages, sharedRecipients) {
+	/** @type {Map<string, number>} */
+	const perTopic = new Map();
+	for (let i = 0; i < messages.length; i++) {
+		perTopic.set(messages[i].topic, (perTopic.get(messages[i].topic) || 0) + 1);
+	}
+	/** @type {Map<string, { m: number, d: number, topic: string }> | null} */
+	const perTenant = egressGate.tenantArmed ? new Map() : null;
+	for (const [t, c] of perTopic) {
+		const recipients = sharedRecipients === null ? (topicSubscriberCounts.get(t) || 0) : sharedRecipients;
+		const deliveries = c * recipients;
+		if (!admitTopicEgress(t, c, deliveries)) return false;
+		if (perTenant === null) continue;
+		const ten = resolvePublishTenant(t);
+		if (ten === null) continue;
+		const agg = perTenant.get(ten);
+		if (agg === undefined) perTenant.set(ten, { m: c, d: deliveries, topic: t });
+		else { agg.m += c; agg.d += deliveries; }
+	}
+	if (perTenant !== null) {
+		for (const [ten, agg] of perTenant) {
+			if (!admitTenantEgress(ten, agg.topic, agg.m, agg.d)) return false;
+		}
+	}
+	return true;
+}
 
 /** @type {import('../../index.js').Platform} */
 export const platform = {
@@ -75,6 +135,21 @@ export const platform = {
 		const compressOption = options != null ? options.compress : undefined;
 		const jitterOption = options != null ? options.jitterMs : undefined;
 		assertClusterSequenceAuthorityValues(seqOption, relayOption);
+		// Egress recipients are the topic's local native subscribers, read once
+		// per logical publish; the ceiling decision runs BEFORE the sequence is
+		// stamped, so a refused publish leaves no client-visible seq gap and
+		// nothing reaches the native layer or the relay.
+		const recipients = topicSubscriberCounts.get(topic) || 0;
+		let egressTenant = null;
+		if (egressGate.armed) {
+			egressTenant = resolvePublishTenant(topic);
+			// EGRESS_ADMITTED marks an event whose batch already decided for
+			// the whole call (publishBatched's slow path). It still charges
+			// below - every event is its own logical publish in the ledger -
+			// but re-deciding here would deliver a prefix of an atomic batch.
+			if (!(options != null && options[EGRESS_ADMITTED]) &&
+				!admitPublishEgress(topic, egressTenant, 1, recipients)) return false;
+		}
 		counters.publishCountWindow++;
 		const seq = stampSeqValue(seqOption, topicSeqs, topic, seqBound);
 		// Record the highest seq this worker has observed for the topic. An
@@ -100,25 +175,10 @@ export const platform = {
 		// subscriber - unrecoverable framing corruption. One length guard, identical
 		// in cost to the assert it replaces.
 		fatal(envelope.length > 0, 'envelope.empty', null);
-		// Per-topic counter for runaway-publisher detection. Allocates
-		// one entry per topic on first publish, then mutates two int
-		// fields in place forever. Sampler drains and resets at 1 Hz.
-		let s = topicPublishStats.get(topic);
-		if (!s) {
-			s = { m: 0, b: 0 };
-			topicPublishStats.set(topic, s);
-			// Cold path: a brand-new topic just entered the registry. Cheap
-			// place to check the topic-cardinality warn threshold without
-			// touching the steady-state hot path.
-			maybeWarnTopicRegistry();
-		} else {
-			assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape', {
-				messagesType: typeof s.m,
-				bytesType: typeof s.b
-			});
-		}
-		s.m++;
-		s.b += envelope.length;
+		// The one egress charge for this logical publish: per-topic runaway
+		// stats, worker window counters, and the ceiling account. Wire bytes
+		// are the envelope's UTF-8 encoding times the local recipients.
+		chargePublishEgress(topic, egressTenant, 1, recipients, envelope.length, chargeableBytes(envelope, recipients));
 		// Compress this text frame when a compressor is configured; opt out per
 		// call with `{ compress: false }` (e.g. a very high-rate text topic where
 		// the per-subscriber deflate CPU would outweigh the bandwidth saving).
@@ -223,8 +283,32 @@ export const platform = {
 		const excludeOption = options != null ? options.excludeWs : undefined;
 		const isRelay = !!(options && options._isRelay);
 		const relaySeqOption = isRelay ? options._relaySeq : undefined;
+		// The authority check keeps its own statement, in the canonical one-line
+		// form the policy pin greps for: it is the security-relevant guard, and
+		// what follows it here is accounting.
 		if (!isRelay) assertClusterSequenceAuthorityValues(seqOption, relayOption);
-		if (!isRelay) counters.publishCountWindow++;
+		// Egress recipients and admission, origin-side only: a relayed frame was
+		// charged once on the worker that published it, and refusing it here
+		// would fork the cluster's delivery. The decision runs before the stamp,
+		// exactly as in publish(); an excluded socket that holds the topic is
+		// not a recipient.
+		let recipients = 0;
+		let egressTenant = null;
+		if (!isRelay) {
+			recipients = topicSubscriberCounts.get(topic) || 0;
+			if (excludeOption !== undefined && excludeOption !== null && excludedRecipient(excludeOption, topic)) recipients--;
+			if (egressGate.armed) {
+				egressTenant = resolvePublishTenant(topic);
+				// EGRESS_ADMITTED marks an entry whose batch already took the
+				// decision for the whole call (publishWireBatch's stateless
+				// lane). It still charges below - every entry is its own
+				// logical publish in the ledger - but re-deciding here would
+				// let a batch deliver a prefix and refuse the rest.
+				if (!(options && options[EGRESS_ADMITTED]) &&
+					!admitPublishEgress(topic, egressTenant, 1, recipients)) return false;
+			}
+			counters.publishCountWindow++;
+		}
 		const seq = isRelay
 			? (typeof relaySeqOption === 'number' ? relaySeqOption : null)
 			: stampSeqValue(seqOption, topicSeqs, topic, seqBound);
@@ -242,22 +326,6 @@ export const platform = {
 		// subscriber - unrecoverable framing corruption. One length guard, identical
 		// in cost to the assert it replaces.
 		fatal(envelope.length > 0, 'envelope.empty', null);
-		if (!isRelay) {
-			let s = topicPublishStats.get(topic);
-			if (!s) {
-				s = { m: 0, b: 0 };
-				topicPublishStats.set(topic, s);
-				maybeWarnTopicRegistry();
-			} else {
-				assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape', {
-					messagesType: typeof s.m,
-					bytesType: typeof s.b
-				});
-			}
-			s.m++;
-			s.b += envelope.length;
-		}
-
 		const relayed = !!(parentPort && relayOption !== false);
 
 		// Binary codec frames (and this call's JSON-fallback frames) compress only
@@ -299,6 +367,9 @@ export const platform = {
 		// and instruction-identical to platform.publish - a JSON-only deployment
 		// never enters the per-subscriber walk or touches the codec at all.
 		if (excludeWs === null && !capCounts.has(wire.capability)) {
+			// The one egress charge for this logical publish (origin side only):
+			// every recipient gets the JSON envelope here.
+			if (!isRelay) chargePublishEgress(topic, egressTenant, 1, recipients, envelope.length, chargeableBytes(envelope, recipients));
 			const result = app.publish(topic, envelope, false, compress);
 			counters.publishOutcomeHook?.(result);
 			if (relayed) batchRelay(topic, envelope, compressIntent, seq, relayCap, relayEvent, relayData);
@@ -315,6 +386,12 @@ export const platform = {
 		// encode at `wire.schemaVersion`, memoized by topic-id, so a mixed room
 		// keeps the single-encode fan-out for those clients.
 		if (wire.state) {
+			// The one egress charge for this logical publish. A stateful codec's
+			// frames are recipient-specific (each connection's dictionary shapes
+			// its own bytes), so the JSON envelope is the charged per-recipient
+			// size for this lane - the stable serialized form every degraded
+			// recipient actually receives.
+			if (!isRelay) chargePublishEgress(topic, egressTenant, 1, recipients, envelope.length, chargeableBytes(envelope, recipients));
 			let sharedPayload;
 			let sharedEncoded = false;
 			/** @type {Map<number, Uint8Array>} */
@@ -397,6 +474,9 @@ export const platform = {
 		// all-same-id case builds one frame and reuses it for every binary send.
 		const payload = encodeStatelessWirePayload(wire, event, data);
 		if (payload == null) {
+			// The codec declined this frame: every recipient gets the JSON
+			// envelope, on the single fan-out or the excluding walk alike.
+			if (!isRelay) chargePublishEgress(topic, egressTenant, 1, recipients, envelope.length, chargeableBytes(envelope, recipients));
 			if (excludeWs === null) {
 				const result = app.publish(topic, envelope, false, compress);
 				counters.publishOutcomeHook?.(result);
@@ -438,6 +518,16 @@ export const platform = {
 				sharedTopics.set(topic, wire.capability);
 			}
 			const { bin, json } = cohortTopics(topic);
+			// The one egress charge for this logical publish, split by cohort:
+			// the binary cohort is charged its 0x03 frame, everyone else the
+			// envelope. The binary-cohort size is the shared wire-id refcount
+			// (one reference per cohorted socket), so the split is exact
+			// without a walk or a native read.
+			if (!isRelay) {
+				const binCount = Math.min(sharedWireIdRefs(topic), recipients);
+				chargePublishEgress(topic, egressTenant, 1, recipients, envelope.length,
+					binaryFrameChargeBytes(payload.length, seqOnWire) * binCount + chargeableBytes(envelope, recipients - binCount));
+			}
 			// The binary cohort exists only if a capable client joined it (its
 			// announce succeeded); otherwise this shared topic currently has only JSON
 			// subscribers and skips the binary fan-out entirely.
@@ -456,6 +546,19 @@ export const platform = {
 			return true;
 		}
 
+		// The one egress charge for this logical publish. Once a live connection
+		// advertises this codec's capability, the walk's encoded form is the
+		// binary frame and the charge reflects it for every recipient (a mixed
+		// room's JSON-degraded members ride at the same charged size - the
+		// documented approximation that keeps the charge O(1)); with no capable
+		// connection the walk exists only for the exclusion and every recipient
+		// gets the envelope.
+		if (!isRelay) {
+			const wireBytes = capCounts.has(wire.capability)
+				? binaryFrameChargeBytes(payload.length, seqOnWire) * recipients
+				: chargeableBytes(envelope, recipients);
+			chargePublishEgress(topic, egressTenant, 1, recipients, envelope.length, wireBytes);
+		}
 		deliverStatelessWireFanout(wire, payload, {
 			topic, envelope, seq: seqOnWire, excludeWs, connections: wsConnections,
 			ensureId: ensureWireId, isPoisoned: wireStatePoisoned,
@@ -582,12 +685,34 @@ export const platform = {
 					entrySeqs[i] = seq;
 				}
 			}
+			// One admission for the whole batch, before the first entry goes
+			// out. Delegating per entry would let each admit on its own and
+			// deliver a prefix of the batch under a ceiling, which is both the
+			// mid-batch shedding this budget forbids and a partial delivery
+			// reported to the caller as success. Recipients are read once here
+			// for the decision; each delegated entry still CHARGES itself, so
+			// the ledger sees one logical publish per entry either way.
+			let admitOpts = opts;
+			if (egressGate.armed) {
+				let batchRecipients = topicSubscriberCounts.get(topic) || 0;
+				if (batchRecipients > 0) {
+					// A per-entry exclusion only discounts that entry, so the
+					// batch's admission uses the undiscounted count: over-
+					// estimating a refusal boundary is safe, under-estimating
+					// would admit past the ceiling.
+					const shared = opts && opts.excludeWs;
+					if (shared !== undefined && shared !== null && excludedRecipient(shared, topic)) batchRecipients--;
+				}
+				if (!admitPublishEgress(topic, resolvePublishTenant(topic), count, count * batchRecipients)) return false;
+				// The entries inherit the decision rather than re-taking it.
+				admitOpts = { ...(opts || {}), [EGRESS_ADMITTED]: true };
+			}
 			let ok = false;
 			for (let i = 0; i < count; i++) {
 				const entrySeq = entrySeqs === null ? undefined : entrySeqs[i];
-				let per = opts;
+				let per = admitOpts;
 				if (excludes[i] !== undefined || entrySeq !== undefined) {
-					per = { ...(opts || {}) };
+					per = { ...(admitOpts || {}) };
 					if (excludes[i] !== undefined) per.excludeWs = excludes[i];
 					if (entrySeq !== undefined) per.seq = entrySeq;
 				}
@@ -656,6 +781,30 @@ export const platform = {
 				entrySeqs[i] = entrySeq;
 			}
 		}
+		// Egress admission for the WHOLE batch, decided after the snapshot pass
+		// (a contract violation still refuses by throwing there) and before the
+		// stamping loop, so a refused batch moves no watermark and builds no
+		// envelope. Deliveries deduct each entry whose excluded socket actually
+		// holds the topic; the deduction array is reused by the byte charge in
+		// the stamping loop below.
+		const recipients = topicSubscriberCounts.get(topic) || 0;
+		/** @type {Uint8Array | number[] | null} */
+		let exDeduct = null;
+		let deliveries = recipients * count;
+		if (anyExclude) {
+			exDeduct = new Array(count).fill(0);
+			for (let i = 0; i < count; i++) {
+				if (excludes !== null && excludes[i] !== undefined && excludedRecipient(excludes[i], topic)) {
+					exDeduct[i] = 1;
+					deliveries--;
+				}
+			}
+		}
+		let egressTenant = null;
+		if (egressGate.armed) {
+			egressTenant = resolvePublishTenant(topic);
+			if (!admitPublishEgress(topic, egressTenant, count, deliveries)) return false;
+		}
 		// Nothing AUTHORITATIVE moves until every entry has both stamped and
 		// serialised. completeEnvelope runs JSON.stringify, so a payload whose
 		// toJSON throws aborts this loop part-way; advancing the topic watermark
@@ -665,6 +814,7 @@ export const platform = {
 		let highestSeq = null;
 		let batchMessages = 0;
 		let batchBytes = 0;
+		let batchWireBytes = 0;
 		// Hoisted so the common no-entry-seq batch tests one boolean per entry.
 		const hasEntrySeqs = entrySeqs !== null;
 		for (let i = 0; i < count; i++) {
@@ -684,6 +834,12 @@ export const platform = {
 			if (seq !== null && (highestSeq === null || seq > highestSeq)) highestSeq = seq;
 			batchMessages++;
 			batchBytes += envelope.length;
+			// Per-entry wire bytes: the envelope's UTF-8 encoding times the
+			// recipients this entry actually reaches (its exclusion deducted).
+			// The stateful batch lane is charged at the envelope size for the
+			// same reason publishWire's stateful walk is: the binary batch
+			// frame is recipient-specific.
+			batchWireBytes += chargeableBytes(envelope, recipients - (exDeduct === null ? 0 : exDeduct[i]));
 			envs[i] = envelope;
 		}
 		// The max-seen record matches what N publishWire calls would have left
@@ -701,19 +857,13 @@ export const platform = {
 		} else if (highestSeq !== null) {
 			recordStampedSeen(maxSeenSeq, topic, highestSeq, seqBound);
 		}
-		// Looked up only now, after every entry has stamped and serialised: a
+		// Charged only now, after every entry has stamped and serialised: a
 		// batch refused in the pre-pass, or aborted by a throwing toJSON, must
-		// not create the topic's stats entry - publish() likewise creates it
-		// only after its envelope is built, and the runaway-publisher window
-		// should not learn a topic no frame ever reached.
-		let stats = topicPublishStats.get(topic);
-		if (!stats) {
-			stats = { m: 0, b: 0 };
-			topicPublishStats.set(topic, stats);
-			maybeWarnTopicRegistry();
-		}
-		stats.m += batchMessages;
-		stats.b += batchBytes;
+		// not create the topic's stats entry - publish() likewise charges only
+		// after its envelope is built, and the runaway-publisher window should
+		// not learn a topic no frame ever reached. One charge for the whole
+		// batch: N logical publishes under one admission decision.
+		chargePublishEgress(topic, egressTenant, batchMessages, deliveries, batchBytes, batchWireBytes);
 		counters.publishCountWindow += count;
 
 		// Resume cutover in flight: hold the per-entry JSON envelopes a caps-less
@@ -1046,7 +1196,12 @@ export const platform = {
 		// uncompressed. Pass { compress: true } to deflate for a large fan-out.
 		// No-op while websocket.compression is off (the default).
 		const compress = WS_COMPRESSION_ON && !!(options && options.compress === true);
-		let count = 0;
+		// Filter pass first, sends after: the egress decision is pre-hoc over
+		// the WHOLE recipient set (there is no mid-walk shedding), and only the
+		// filter can name that set. Filters are documented synchronous and
+		// side-effect-free reads of userData, so running them ahead of the
+		// sends changes nothing a conforming filter can observe.
+		const targets = [];
 		for (const ws of wsConnections) {
 			// uWS's close event fires synchronously and removes from
 			// wsConnections before any user code runs, so under normal
@@ -1067,13 +1222,26 @@ export const platform = {
 				}
 				continue;
 			}
-			if (decision) {
-				try { ws.send(envelope, false, compress); }
-				catch { counters.closedWsAborts++; continue; }
-				bumpOut(ws, envelope);
-				count++;
-			}
+			if (decision) targets.push(ws);
 		}
+		if (targets.length === 0) return 0;
+		let egressTenant = null;
+		if (egressGate.armed) {
+			egressTenant = resolvePublishTenant(topic);
+			// Refused: nothing is sent and the count says so.
+			if (!admitPublishEgress(topic, egressTenant, 1, targets.length)) return 0;
+		}
+		let count = 0;
+		for (const ws of targets) {
+			try { ws.send(envelope, false, compress); }
+			catch { counters.closedWsAborts++; continue; }
+			bumpOut(ws, envelope);
+			count++;
+		}
+		// One egress charge for the delivered set. This lane never feeds the
+		// per-topic runaway stats - those keep meaning publish-family calls -
+		// but its frames are egress like any other.
+		if (count > 0) chargeDirectEgress(topic, egressTenant, count, chargeableBytes(envelope, count));
 		return count;
 	},
 
@@ -1102,10 +1270,11 @@ export const platform = {
 			? '{"type":"reconnect","afterMs":' + afterMs + ',"windowMs":' + windowMs + '}'
 			: '{"type":"reconnect","windowMs":' + windowMs + '}';
 		const compress = WS_COMPRESSION_ON && !!(options && options.compress === true);
-		let count = 0;
 		// Snapshot: with close:true, ws.end() fires the close handler synchronously
 		// and removes the entry from wsConnections mid-iteration (unlike sendTo, which
-		// never closes). Mirrors shutdown()'s snapshot.
+		// never closes). Mirrors shutdown()'s snapshot. The filter pass runs over
+		// the snapshot first so the advised set is settled before the first frame.
+		const targets = [];
 		for (const ws of [...wsConnections]) {
 			let userData;
 			try { userData = ws.getUserData(); }
@@ -1117,6 +1286,10 @@ export const platform = {
 				if (decision && typeof decision.then === 'function') continue;
 				if (!decision) continue;
 			}
+			targets.push(ws);
+		}
+		let count = 0;
+		for (const ws of targets) {
 			try {
 				// end() flushes buffered outbound before the 1001 close frame, so the
 				// advisory always lands before the close.
@@ -1126,6 +1299,10 @@ export const platform = {
 			} catch { counters.closedWsAborts++; continue; }
 			count++;
 		}
+		// The advisory is operator-lane egress: it carries no topic and no
+		// tenant, so it lands in the worker egress window but sits outside
+		// every ceiling - a drain command must not be refusable by a budget.
+		if (count > 0) chargeDirectEgress(null, null, count, chargeableBytes(frame, count));
 		return count;
 	},
 
@@ -1203,7 +1380,7 @@ export const platform = {
 	 *   protection: 'normal' | 'elevated' | 'siege',
 	 *   maxPayloadLength: number,
 	 *   versions: { adapter: string | null, protocolRevision: number | null, realtime: string | null, extensions: string | null },
-	 *   pressure: { sampledAt: number | null, active: boolean, reason: string, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, maxBufferedBytes: number, backpressuredConnections: number, droppedFrames: number, droppedBytes: number },
+	 *   pressure: { sampledAt: number | null, active: boolean, reason: string, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, maxBufferedBytes: number, backpressuredConnections: number, droppedFrames: number, droppedBytes: number, egress: { deliveries: number, bytes: number, refusedTopic: number, refusedTenant: number } },
 	 *   assertions: Record<string, number>,
 	 *   diagnostics: { retained: number, recent: Array<{ diagnosticId: string, kind: string, observedAt: number, complete: boolean, affectedStreamCount: number, evidenceTruncated: boolean }> }
 	 * }}
@@ -1229,7 +1406,17 @@ export const platform = {
 				maxBufferedBytes: p.maxBufferedBytes,
 				backpressuredConnections: p.backpressuredConnections,
 				droppedFrames: p.droppedFrames,
-				droppedBytes: p.droppedBytes
+				droppedBytes: p.droppedBytes,
+				// Counts only, like everything else here: local deliveries,
+				// serialized wire bytes, and ceiling refusals for the last
+				// sample window. A fresh copy, so a caller cannot mutate the
+				// sampler's live object through the snapshot.
+				egress: {
+					deliveries: p.egress.deliveries,
+					bytes: p.egress.bytes,
+					refusedTopic: p.egress.refusedTopic,
+					refusedTenant: p.egress.refusedTenant
+				}
 			},
 			assertions: Object.fromEntries(platform.assertions),
 			// Metadata only. Keyed stream ids and sequence evidence require an
@@ -1699,15 +1886,34 @@ export const platform = {
 		// independently as well. One I/O worker plus any number of compute workers
 		// is safe; more than one socket-owning worker needs an external authority.
 		assertGameLaneClusterSafe();
+		// Egress: the sender is subscribed to its own room in the ordinary case
+		// and is excluded from the walk, so it is not a recipient. The game lane
+		// is the one publish with a socket in hand - its tenant is the SENDER's
+		// frozen attribution, never the topic resolver: the client relaying
+		// through this lane is the party whose budget the fan-out spends.
+		let recipients = topicSubscriberCounts.get(topic) || 0;
+		if (excludedRecipient(senderWs, topic)) recipients--;
+		let egressTenant = null;
+		if (egressGate.armed) {
+			if (egressGate.account !== null && egressGate.account.tenantEnabled) {
+				let att = null;
+				try { att = senderWs.getUserData()[WS_ATTRIBUTION] ?? null; } catch { att = null; }
+				egressTenant = att !== null && typeof att.tenantId === 'string' ? att.tenantId : null;
+			}
+			// A refusal delivers nothing and stamps nothing; { seq: null,
+			// delivered: 0 } is this lane's refusal shape.
+			if (!admitPublishEgress(topic, egressTenant, 1, recipients)) return { seq: null, delivered: 0 };
+		}
 		counters.publishCountWindow++;
 		const seq = stampSeqValue(undefined, topicSeqs, topic, seqBound);
 		if (seq !== null) recordStampedSeen(maxSeenSeq, topic, seq, seqBound);
 		const envelope = completeGameEnvelope(envelopePrefix(topic, event), data, seq, id);
 		fatal(envelope.length > 0, 'envelope.empty', null);
-		let s = topicPublishStats.get(topic);
-		if (!s) { s = { m: 0, b: 0 }; topicPublishStats.set(topic, s); maybeWarnTopicRegistry(); }
-		s.m++;
-		s.b += envelope.length;
+		// The one egress charge for this logical publish. Compact-binary
+		// recipients are charged the envelope size too: the 0x03 form is
+		// per-capability and encoded lazily inside the walk, and forcing the
+		// encode on every publish just to price it would tax the 60 Hz lane.
+		chargePublishEgress(topic, egressTenant, 1, recipients, envelope.length, chargeableBytes(envelope, recipients));
 		// Fan out to the topic's LOCAL subscribers, skipping the sender. The single
 		// C++ app.publish fan-out cannot skip a socket, so the exclusion forces the
 		// per-subscriber walk (the same shape publishWire uses for excludeWs).
@@ -1987,6 +2193,12 @@ export const platform = {
 		// degradation when any interested subscriber is non-cap-able -
 		// they would otherwise receive an unparseable batch frame.
 		if ((!allSameTopic && !allSeeAll) || !everyoneCapable) {
+			// The batch is atomic on this path too: admitting per event would
+			// deliver a prefix and refuse the tail, which is the mid-batch
+			// shedding the budget forbids. Each topic carries its own
+			// recipient count here (the paths differ only in dispatch), and a
+			// tenant decides once on everything it owns in the batch.
+			if (egressGate.armed && !admitBatchEgress(messages, null)) return;
 			for (let i = 0; i < messages.length; i++) {
 				const m = messages[i];
 				// The snapshot, not a spread of the live object: publish() consumes
@@ -1996,14 +2208,32 @@ export const platform = {
 					seq: msgSeqs[i],
 					relay: msgRelays[i],
 					jitterMs: msgJitters[i],
-					compress: compressOptIn
+					compress: compressOptIn,
+					[EGRESS_ADMITTED]: true
 				});
 			}
 			return;
 		}
 
-		// Fast path: build per-event envelopes (also stamps seq + bumps
-		// per-topic stats), wrap into a shared batch frame, and hand
+		// Egress admission for the whole fast-path batch, before anything is
+		// stamped. In all-see-all every interested subscriber holds every batch
+		// topic, so the dispatch topic's tracked count IS the recipient set for
+		// every topic in the batch; a mixed-topic batch admits each distinct
+		// topic's own share and pools each tenant's, and one refusal refuses
+		// the whole batch (its atomicity contract). The slow path above takes
+		// the same decision through the same helper, reading each topic's own
+		// count, and marks its events so they charge without re-deciding.
+		const recipients = topicSubscriberCounts.get(messages[0].topic) || 0;
+		const gateArmed = egressGate.armed;
+		let egressTenant = null;
+		if (gateArmed) {
+			if (allSameTopic) {
+				egressTenant = resolvePublishTenant(firstTopic);
+				if (!admitPublishEgress(firstTopic, egressTenant, messages.length, messages.length * recipients)) return;
+			} else if (!admitBatchEgress(messages, recipients)) return;
+		}
+		// Fast path: build per-event envelopes (also stamps seq + charges the
+		// per-event egress), wrap into a shared batch frame, and hand
 		// fanout to uWS's C++ TopicTree via app.publish. In all-see-all
 		// every interested subscriber is subscribed to every batch
 		// topic, so dispatching on any one of them reaches them all.
@@ -2022,19 +2252,14 @@ export const platform = {
 			}
 			const env = completeEnvelope(envelopePrefix(m.topic, m.event), m.data, seq);
 			events[i] = { topic: m.topic, env, seq };
-			let s = topicPublishStats.get(m.topic);
-			if (!s) {
-				s = { m: 0, b: 0 };
-				topicPublishStats.set(m.topic, s);
-				maybeWarnTopicRegistry();
-			} else {
-				assert(typeof s.m === 'number' && typeof s.b === 'number', 'topic.stats-shape-batch', {
-					messagesType: typeof s.m,
-					bytesType: typeof s.b
-				});
-			}
-			s.m++;
-			s.b += env.length;
+			// One egress charge per logical publish: each batched event is one,
+			// priced at its own envelope's UTF-8 bytes times the shared
+			// recipient set. The batch frame's wrapper bytes are uncharged
+			// overhead, so a tenant pays the same for N events whether the
+			// runtime batches them or not.
+			chargePublishEgress(m.topic,
+				gateArmed ? (allSameTopic ? egressTenant : resolvePublishTenant(m.topic)) : null,
+				1, recipients, env.length, chargeableBytes(env, recipients));
 		}
 
 		// Cross-worker relay: a single 'publish-batched' IPC carrying the

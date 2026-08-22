@@ -142,7 +142,7 @@ describe('shipped observability pack', () => {
 
 	it('parses every rule with the official grammar and scopes every vector selector', () => {
 		const rules = RULE_DOCUMENT.groups.flatMap((group) => group.rules);
-		expect(rules).toHaveLength(33);
+		expect(rules).toHaveLength(34);
 		for (const rule of rules) {
 			const selectors = vectorSelectors(rule.expr);
 			for (const selector of selectors) {

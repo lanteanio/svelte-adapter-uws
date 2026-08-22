@@ -33,7 +33,7 @@ import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, W
 import { registerGameIngress, gameLaneClusterSafe } from './handler/game-ingress.js';
 import { seqBound } from './handler/seq-bound.js';
 import { now, monotonicNow, processMonotonicNow, randomUuid, randomFloat, randomU32, randomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
-import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, divergenceDiagnostics, sharedTopics, subscribeAuth, originStreams, streamTracking, takeConfirmedGaps, GAP_CONFIRM_MS } from './handler/state.js';
+import { statePool, envelopePrefixCache, staticCache, prerenderedDirStyle, wsConnections, topicPublishStats, topicSubscriberCounts, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt, capCounts, decodeCache, counters, maxSeenSeq, divergenceDiagnostics, sharedTopics, subscribeAuth, originStreams, streamTracking, takeConfirmedGaps, GAP_CONFIRM_MS } from './handler/state.js';
 import { computeStateHash, partitionActiveTopics } from './invariants.js';
 import { DIVERGENCE_TOPIC_LIMIT, summarizeTopicSequences } from './divergence-diagnostics.js';
 import { createConsistencyAuditor } from './auditor.js';
@@ -61,6 +61,7 @@ import { createSlidingWindowLimiter } from './utils/rate-limiter.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './utils/message-admission.js';
 import { createConnectionPermitCarrier } from './utils/connection-permit.js';
 import { installAttribution } from './utils/attribution.js';
+import { configureEgress } from './handler/egress-budget.js';
 import { recordBackpressureDrop } from './utils/backpressure.js';
 import {
 	createTransportMetricHooks,
@@ -137,15 +138,22 @@ setCohortHooks(
 // routes through add/removeLogicalSubscription. Keep the counter non-negative
 // even if a pre-existing mismatch is encountered; the assertion makes that
 // corruption visible while the clamp prevents it from poisoning pressure and
-// every subsequent close.
-function adjustTotalSubscriptions(delta) {
+// every subsequent close. The same exactly-once deltas maintain the per-topic
+// subscriber counts the egress charge reads (state.topicSubscriberCounts);
+// entries leave the map at zero so its cardinality tracks live memberships.
+function adjustTotalSubscriptions(delta, topic) {
 	const next = counters.totalSubscriptions + delta;
 	if (next < 0) {
 		assert(false, 'subs.total-negative', { totalSubscriptions: next });
 		counters.totalSubscriptions = 0;
-		return;
+	} else {
+		counters.totalSubscriptions = next;
 	}
-	counters.totalSubscriptions = next;
+	if (typeof topic !== 'string') return;
+	const held = topicSubscriberCounts.get(topic) || 0;
+	const nextHeld = held + delta;
+	if (nextHeld > 0) topicSubscriberCounts.set(topic, nextHeld);
+	else topicSubscriberCounts.delete(topic);
 }
 setSubscriptionAccountingHook(adjustTotalSubscriptions);
 import { platform } from './handler/platform.js';
@@ -399,7 +407,7 @@ if (WS_ENABLED) {
 		'init', 'shutdown',
 		'open', 'message', 'upgrade', 'close', 'drain',
 		'subscribe', 'subscribeBatch', 'unsubscribe',
-		'authenticate', 'resume', 'admin', 'attribution'
+		'authenticate', 'resume', 'admin', 'attribution', 'egressTenantOf'
 	]);
 	for (const name of Object.keys(wsModule)) {
 		if (!knownWsExports.has(name)) {
@@ -566,6 +574,12 @@ if (WS_ENABLED) {
 	const connectionPermitCarrier = createConnectionPermitCarrier();
 	const ADMISSION_PER_TICK_BUDGET = wsOptions.upgradeAdmission?.perTickBudget ?? 0;
 	const messageAdmission = createMessageAdmission(wsOptions.messageAdmission);
+	// Publish-egress ledger and ceilings: the account is configured from the
+	// serialized option section, and the tenant resolver comes from the handler
+	// module (the one carrier that reaches the runtime as a function). A
+	// defined non-function export refuses at startup rather than silently
+	// standing every tenant ceiling down.
+	configureEgress(wsOptions.egress, wsModule.egressTenantOf);
 	const rejectApplicationMessage = (ws, rejection) => {
 		mMessageAdmissionRejected?.inc({ reason: rejection.reason, scope: rejection.scope });
 		const frame = messageOverloadedFrame(rejection);
@@ -844,6 +858,22 @@ if (WS_ENABLED) {
 		'relay_frame_refused_total', 'Publishes refused by the sender-side relay frame ceiling; local subscribers still received them', ['lane']
 	));
 	relayFrameRefusedInc = (lane) => mRelayFrameRefused?.inc({ lane: lane === 'batched' ? 'batched' : 'publish' });
+	// A publish refused by an egress ceiling is decided on THIS worker, so the
+	// cumulative count lands here directly; the per-window figures ride the
+	// pressure snapshot. Always assigned (hook or null) so a factory re-run
+	// replaces any previous hook.
+	const mEgressRefused = containMetricInstrument(METRICS?.counter(
+		'egress_refused_total', 'Publishes refused by a configured egress ceiling; nothing was delivered or relayed for them', ['scope']
+	));
+	counters.egressRefusedHook = mEgressRefused === undefined
+		? null
+		: (scope) => mEgressRefused?.inc({ scope: scope === 'tenant' ? 'tenant' : 'topic' });
+	const mEgressEvicted = containMetricInstrument(METRICS?.counter(
+		'egress_window_evicted_total', 'Live usage windows evicted at the ledger cap; each one stops enforcing its ceiling for the rest of its window', ['scope']
+	));
+	counters.egressEvictedHook = mEgressEvicted === undefined
+		? null
+		: (scope) => mEgressEvicted?.inc({ scope: scope === 'tenant' ? 'tenant' : 'topic' });
 	// An oversized-frame stop is a primary-side incident with no registry of its
 	// own; like the spill quarantines it is attributed exactly once to a
 	// surviving worker registry via a posted notice.

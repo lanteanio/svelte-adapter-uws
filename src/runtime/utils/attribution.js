@@ -23,6 +23,20 @@
 import { WS_ATTRIBUTION } from './ws-symbols.js';
 
 const VALID_ID = /^[a-zA-Z0-9_-]{1,64}$/;
+
+/**
+ * The one shared attribution id rule: `[a-zA-Z0-9_-]`, 1..64 chars. Exported
+ * so every surface that accepts an attribution-shaped id from server code
+ * (the egress tenant resolver among them) judges it by the SAME rule the
+ * per-connection resolver enforces - two copies of the regex would drift.
+ *
+ * @param {unknown} value
+ * @returns {value is string}
+ */
+export function isValidAttributionId(value) {
+	return typeof value === 'string' && VALID_ID.test(value);
+}
+
 const ATTRIBUTION_FIELDS = Object.freeze(['tenantId', 'principalId', 'entitlement']);
 const FIELD_SET = new Set(ATTRIBUTION_FIELDS);
 

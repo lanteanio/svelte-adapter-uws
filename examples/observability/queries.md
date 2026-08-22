@@ -40,6 +40,8 @@ Import `dashboard.v1.json` for a compact Grafana view of these target-preserving
 | `ws_backpressure_connections` | gauge | count | `ws_backpressure_connections{adapter="svelte-adapter-uws"}` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `ws_dropped_frames_total` | counter | count | `rate(ws_dropped_frames_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `ws_dropped_bytes_total` | counter | bytes | `rate(ws_dropped_bytes_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
+| `egress_refused_total` | counter | count | `rate(egress_refused_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
+| `egress_window_evicted_total` | counter | count | `rate(egress_window_evicted_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |
 | `pressure_saturation` | gauge | ratio | `pressure_saturation{adapter="svelte-adapter-uws"}` | The snapshot reports the worst worker. |
 | `pressure_reason` | gauge | enumerated state (see the description) | `pressure_reason{adapter="svelte-adapter-uws"}` | The snapshot reports the worst worker. |
 | `pressure_reason_transitions_total` | counter | count | `rate(pressure_reason_transitions_total{adapter="svelte-adapter-uws"}[5m])` | Per-worker quantity; the snapshot has already summed it across workers. |

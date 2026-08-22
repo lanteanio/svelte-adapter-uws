@@ -263,6 +263,17 @@ function samplePressure(thresholds) {
 	pressureSnapshot.backpressuredConnections = backpressuredConnections;
 	pressureSnapshot.droppedFrames = droppedFrames;
 	pressureSnapshot.droppedBytes = droppedBytes;
+	// Publish-egress figures for the window just closed, drained exactly like
+	// the publish count above: read into the snapshot, then zeroed so the next
+	// window starts fresh. One stable nested object, mutated in place.
+	pressureSnapshot.egress.deliveries = counters.egressDeliveriesWindow;
+	pressureSnapshot.egress.bytes = counters.egressBytesWindow;
+	pressureSnapshot.egress.refusedTopic = counters.egressRefusedTopicWindow;
+	pressureSnapshot.egress.refusedTenant = counters.egressRefusedTenantWindow;
+	counters.egressDeliveriesWindow = 0;
+	counters.egressBytesWindow = 0;
+	counters.egressRefusedTopicWindow = 0;
+	counters.egressRefusedTenantWindow = 0;
 	// Kernel readings ride the snapshot (platform.pressure / introspect /
 	// the posture export) as small stable objects; null when unavailable.
 	pressureSnapshot.psi = os.psi;
@@ -370,6 +381,7 @@ function samplePressure(thresholds) {
 						topic: privateValueMetadata(e.topic, 'topic'),
 						messagesPerSec: Math.round(e.messagesPerSec),
 						bytesPerSec: Math.round(e.bytesPerSec),
+						deliveriesPerSec: Math.round(e.deliveriesPerSec),
 						help: 'https://svti.me/pressure'
 					}
 				});

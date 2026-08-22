@@ -2,8 +2,8 @@
 
 Search this page with the exact stable ID, code, event, or beginning of the message you saw.
 Every failure emitted as a diagnostic event is indexed below with its cause, what it means
-for traffic, whether anything recovers on its own, and what to do next: 35 entries
-against the 38 distinct diagnostic events emitted from the scanned sources, plus
+for traffic, whether anything recovers on its own, and what to do next: 38 entries
+against the 41 distinct diagnostic events emitted from the scanned sources, plus
 33 entries indexing consequential plain console lines that never enter the diagnostic
 pipeline - each such line is printed through the registry and carries its stable ID tag, so
 the emitted text cannot drift from the prefix indexed here. The remaining emitted events are
@@ -47,6 +47,9 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-PRESSURE-RATE-LISTENER](#adapter-err-pressure-rate-listener) | `pressure.publish-rate-listener-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.pressure event=pressure.publish-rate-listener-failed severity=error] A publish-rate listener failed.` |
 | [ADAPTER-ERR-PRESSURE-RUNAWAY-PUBLISHER](#adapter-err-pressure-runaway-publisher) | `pressure.runaway-publisher` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.pressure event=pressure.runaway-publisher severity=warn] A publisher crossed a configured per-topic pressure threshold.` |
 | [ADAPTER-ERR-PRESSURE-TOPIC-REGISTRY](#adapter-err-pressure-topic-registry) | `pressure.topic-registry-high` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.pressure event=pressure.topic-registry-high severity=warn] The topic registry crossed its cardinality warning threshold.` |
+| [ADAPTER-ERR-EGRESS-REFUSED](#adapter-err-egress-refused) | `egress.publish-refused` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.egress event=egress.publish-refused severity=warn] A publish crossed a configured egress ceiling and was refused.` |
+| [ADAPTER-ERR-EGRESS-EVICTED](#adapter-err-egress-evicted) | `egress.window-evicted` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.egress event=egress.window-evicted severity=warn] The egress ledger dropped a usage window that was still counting, so that key is unmetered for the rest of it.` |
+| [ADAPTER-ERR-EGRESS-TENANT-RESOLVER](#adapter-err-egress-tenant-resolver) | `egress.tenant-resolver-invalid` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.egress event=egress.tenant-resolver-invalid severity=error] The egress tenant resolver returned an unusable id; publishes are charged unattributed.` |
 | [ADAPTER-ERR-RESUME-HOOK](#adapter-err-resume-hook) | `resume.hook-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.resume event=resume.hook-failed severity=error] The resume hook threw; the client falls back to a fresh subscribe.` |
 | [ADAPTER-ERR-RESUME-HOOK-READ](#adapter-err-resume-hook-read) | `resume.hook-read-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.resume event=resume.hook-read-failed severity=error] Reading the resume hook result threw for a topic; that topic is treated as covering nothing.` |
 | [ADAPTER-ERR-AUTHENTICATE](#adapter-err-authenticate) | `runtime.authenticate.failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.authenticate event=runtime.authenticate.failed severity=error] The WebSocket authentication endpoint failed.` |
@@ -97,8 +100,8 @@ generate and ship their own runtime-owned references on the same release channel
 ## Emitted diagnostic event coverage
 
 This inventory is derived at generation time by scanning `src/runtime/`, `src/observability.js`,
-and `src/vite.js` for emitted diagnostic events; the runtime emits 38 distinct events.
-The 35 indexed above carry stable IDs and full operator guidance; the remaining 3
+and `src/vite.js` for emitted diagnostic events; the runtime emits 41 distinct events.
+The 38 indexed above carry stable IDs and full operator guidance; the remaining 3
 are informational. That split is enforced by severity rather than by a list: an emitted event
 is exempt from the indexed reference only while every severity it is emitted at is
 informational, so promoting one to a warning or an error fails generation until it is indexed.
@@ -127,6 +130,9 @@ Indexed events:
 - `pressure.publish-rate-listener-failed` - [ADAPTER-ERR-PRESSURE-RATE-LISTENER](#adapter-err-pressure-rate-listener)
 - `pressure.runaway-publisher` - [ADAPTER-ERR-PRESSURE-RUNAWAY-PUBLISHER](#adapter-err-pressure-runaway-publisher)
 - `pressure.topic-registry-high` - [ADAPTER-ERR-PRESSURE-TOPIC-REGISTRY](#adapter-err-pressure-topic-registry)
+- `egress.publish-refused` - [ADAPTER-ERR-EGRESS-REFUSED](#adapter-err-egress-refused)
+- `egress.window-evicted` - [ADAPTER-ERR-EGRESS-EVICTED](#adapter-err-egress-evicted)
+- `egress.tenant-resolver-invalid` - [ADAPTER-ERR-EGRESS-TENANT-RESOLVER](#adapter-err-egress-tenant-resolver)
 - `resume.hook-failed` - [ADAPTER-ERR-RESUME-HOOK](#adapter-err-resume-hook)
 - `resume.hook-read-failed` - [ADAPTER-ERR-RESUME-HOOK-READ](#adapter-err-resume-hook-read)
 - `runtime.authenticate.failed` - [ADAPTER-ERR-AUTHENTICATE](#adapter-err-authenticate)
@@ -461,6 +467,42 @@ searchable log prefix is:
 - **Next action:** Check whether topic names embed unbounded identifiers - the `topPublishers` attribute names the busiest topics at the crossing and `topicCount` carries the count that tripped it. The line fires ONCE per process: it is latched after the first crossing and never repeats, and the runtime publishes no continuous topic-cardinality metric, so neither this line nor the metrics will tell you whether cardinality later fell or kept climbing. The naming scheme is what settles that. Unbounded cardinality is a slow leak rather than a spike, so act at the warning rather than at exhaustion.
 - **Runtime help:** `docs/errors.md#adapter-err-pressure-topic-registry`
 - **Runtime sources:** [src/runtime/handler/pressure-metrics.js](../src/runtime/handler/pressure-metrics.js)
+
+<a id="adapter-err-egress-refused"></a>
+## `ADAPTER-ERR-EGRESS-REFUSED`
+
+- **Code/event:** `egress.publish-refused`
+- **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.egress event=egress.publish-refused severity=warn] A publish crossed a configured egress ceiling and was refused.`
+- **Cause:** A publish-family call would have taken one topic or one tenant past a `websocket.egress` ceiling for the current window, so it was refused before anything was stamped, serialized, or handed to the native layer. Per (scope, topic) the line is throttled to once a minute through a bounded dedup table, so it reports the condition rather than every refusal; the exact counts are `egress_refused_total{scope}` and the pressure snapshot egress figures.
+- **Consequence:** The refused publish delivered nothing anywhere: no local subscriber received it, no cross-worker relay fired, and no sequence number was consumed, so subscribers see no gap. The caller received the refusal shape (`false`, a zero count, or `{ seq: null, delivered: 0 }` on the game lane) and owns any retry.
+- **Automatic recovery:** Yes, by time: the window rotates (default 1000 ms) and publishing under the ceiling resumes on its own. Relayed frames from sibling workers are never refused.
+- **Next action:** Decide whether the traffic or the ceiling is wrong. The attributes name the scope, the dimension (messages, bytes, or deliveries), and the configured limit; read the topic reference beside your `pressure.topPublishers` deliveries figures to see whether one publisher is spending the budget. Raise the ceiling in `websocket.egress` if the load is intended. On the dev plugin this event is the whole report: dev enforces the ceilings live but registers no metrics and reports its pressure egress figures as zeros, so the counts named above exist only in production and createTestServer.
+- **Runtime help:** `docs/errors.md#adapter-err-egress-refused`
+- **Runtime sources:** [src/runtime/handler/egress-budget.js](../src/runtime/handler/egress-budget.js), [src/vite.js](../src/vite.js), [src/testing.js](../src/testing.js)
+
+<a id="adapter-err-egress-evicted"></a>
+## `ADAPTER-ERR-EGRESS-EVICTED`
+
+- **Code/event:** `egress.window-evicted`
+- **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.egress event=egress.window-evicted severity=warn] The egress ledger dropped a usage window that was still counting, so that key is unmetered for the rest of it.`
+- **Cause:** More distinct topics or tenants published inside one window than the ledger can hold, so seating a new key took a live window from another. The ledger reclaims lapsed windows first and only evicts a live one when none is left, which makes this a statement about topic or tenant CARDINALITY rather than about publish volume. Per scope the line is throttled to once a minute, so it reports the condition rather than every eviction - which would fire at the rate of the churn causing it.
+- **Consequence:** The evicted key starts its next publish from an empty window, so its ceiling cannot refuse anything it already spent: enforcement is not wrong for other keys, it is ABSENT for that one until the window it lost would have rotated. A deployment that evicts steadily is one where the busiest topics are metered and the tail is not.
+- **Automatic recovery:** Partly, and only by the traffic changing: the ledger holds its bound and keeps serving, and cardinality falling back under the bound restores full enforcement on its own. Nothing raises the bound.
+- **Next action:** Treat it as a cardinality problem, not a capacity one. Check whether topic names embed unbounded identifiers, and scope tenant ids to the tenants you actually meter. The exact count is `egress_evicted_total{scope}` in production and createTestServer; the dev plugin registers no metrics, so there this line is the whole report.
+- **Runtime help:** `docs/errors.md#adapter-err-egress-evicted`
+- **Runtime sources:** [src/runtime/handler/egress-budget.js](../src/runtime/handler/egress-budget.js), [src/vite.js](../src/vite.js), [src/testing.js](../src/testing.js)
+
+<a id="adapter-err-egress-tenant-resolver"></a>
+## `ADAPTER-ERR-EGRESS-TENANT-RESOLVER`
+
+- **Code/event:** `egress.tenant-resolver-invalid`
+- **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.egress event=egress.tenant-resolver-invalid severity=error] The egress tenant resolver returned an unusable id; publishes are charged unattributed.`
+- **Cause:** The handler module `egressTenantOf(topic)` export threw, or returned something other than null/undefined or a string of `[a-zA-Z0-9_-]` (1-64 chars) - the same id rule the attribution resolver enforces. The line fires once per worker: the defect repeats on every publish and refusing to attribute is already the fail-closed behavior.
+- **Consequence:** Publishes on the affected topics are charged as unattributed: the topic-scope ceilings and the worker egress figures still apply, but no tenant window is charged, so a tenant ceiling cannot bound this traffic until the resolver is fixed. Nothing is misattributed - an invalid id is never used as a key.
+- **Automatic recovery:** None. The resolver stays installed and its valid answers keep working; only invalid results (and thrown calls) stay unattributed.
+- **Next action:** Fix `egressTenantOf` to return a rule-conforming tenant id or null. The attributes carry the returned value TYPE only; reproduce locally by calling the resolver with the topics your server publishes.
+- **Runtime help:** `docs/errors.md#adapter-err-egress-tenant-resolver`
+- **Runtime sources:** [src/runtime/handler/egress-budget.js](../src/runtime/handler/egress-budget.js), [src/vite.js](../src/vite.js), [src/testing.js](../src/testing.js)
 
 <a id="adapter-err-resume-hook"></a>
 ## `ADAPTER-ERR-RESUME-HOOK`

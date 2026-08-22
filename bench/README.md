@@ -26,6 +26,7 @@ supposed to rewrite a source file or a committed golden.
 | Real compressed wire-size claims | `node bench/ws-compression-ab.mjs` | raw and TCP-observed bytes/frame for binary and JSON | Local negotiated permessage-deflate; proxy, TLS, dictionary history, and application payloads can change the result. |
 | Smooth replay cost quoted in the README | `node bench/35-smooth-replay-ab.mjs` | nanoseconds per acknowledgement and replayed command | Pure steady-state predictor work; excludes transport and rendering. |
 | CRDT merge/flush/compaction claims | `node bench/micro-crdt-apply.mjs` | nanoseconds/op, flush bytes, and explicit gates | Synthetic Yjs documents; data shape and edit locality matter in applications. |
+| Publish-egress ledger reclamation and eviction policy | `node bench/37-egress-ledger-ab.mjs` | ns per publish, median and p90, on four ledger shapes, plus an independent enforcement oracle | The clock advances every publish on purpose: a frozen intra-window clock gives every resident window the same start and flatters any reclamation design. Read each arm against the CONTROL column, not against zero - the control is the same module loaded twice, so its spread is that shape's noise floor, and it has run as wide as 22%. |
 
 The normal test gate does not consume these timings. It uses deterministic
 operation counts in [`test/io-budget.test.js`](../test/io-budget.test.js) so a

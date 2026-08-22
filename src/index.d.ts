@@ -306,6 +306,82 @@ export interface MessageAdmissionOptions {
 	maxQueue?: number;
 }
 
+/**
+ * One scope's publish-egress ceilings, each per rotation window
+ * (`EgressOptions.windowMs`). Every ceiling must be a non-negative safe
+ * integer; `0` (or omitted) disables that ceiling deliberately, and a value
+ * of any other shape refuses the build on every intake surface.
+ *
+ * Size a ceiling above the largest single publish it must admit. A batch frame
+ * is admitted whole or refused whole (`platform.batch()` is a loop over
+ * independent publishes, not one frame), and a publish heavier than the entire
+ * window allowance (a 10-entry batch under `messages: 5`, or a topic whose
+ * subscriber count exceeds `deliveries`) can never fit a window: it is
+ * refused on every attempt, reported through the refusal counter and the
+ * throttled operational event rather than silently.
+ *
+ * Ceilings are held per key in a ledger bounded to 4096 keys per scope, which
+ * is not configurable. Keys approaching the bound reclaim windows that have
+ * already lapsed, a little at a time, so that the lapsed ones are gone before
+ * the ledger is full; a ceiling is given up only when it is full anyway and
+ * nothing in it has lapsed. So the bound is on the keys LIVE at once rather
+ * than on every key the worker has published to, and a population that fits
+ * inside the bound keeps every ceiling however close to the bound it sits.
+ * Below it the ceilings apply to every key.
+ *
+ * Above it - more than 4096 distinct topics (or tenants) live inside one window
+ * - the ledger evicts, and an evicted key stops being held to its ceiling for
+ * the rest of its window. The victim is the key that has spent least of its
+ * allowance among a bounded sample rather than the least-spent key overall, so
+ * a group of keys that became busy together can lose some of its members even
+ * while quieter keys survive elsewhere. Every eviction that costs enforcement
+ * increments `egress_window_evicted_total{scope}`. This is why a `tenant`
+ * ceiling is the durable one for a high-cardinality topic space: tenant ids
+ * have to outnumber the ledger before the tenant scope can be affected at all.
+ */
+export interface EgressCeilings {
+	/** Maximum logical publishes per window. `0` disables. */
+	messages?: number;
+	/**
+	 * Maximum charged wire bytes per window (serialized frame bytes summed
+	 * over recipients, pre-compression). `0` disables. This ceiling refuses
+	 * once the window's charge has REACHED it - the publish that crosses it
+	 * is delivered and the next is refused - because a publish's byte weight
+	 * exists only after serialization, which must not precede admission.
+	 */
+	bytes?: number;
+	/**
+	 * Maximum deliveries per window (local recipients times messages, an
+	 * excluded socket deducted). `0` disables. Refuses the publish that
+	 * would cross it.
+	 */
+	deliveries?: number;
+}
+
+/**
+ * The `websocket.egress` section: publish-egress accounting ceilings per
+ * worker. See the `egress` option on {@link WebSocketOptions} for the charge
+ * law, the refusal shape, and the tenant attribution contract.
+ */
+export interface EgressOptions {
+	/**
+	 * Accounting window in milliseconds. Rotated lazily per scope key - no
+	 * timer. Must be a number `>= 100` (and below the 32-bit timer ceiling,
+	 * the shared bound every interval option takes).
+	 * @default 1000
+	 */
+	windowMs?: number;
+	/** Ceilings applied per topic, to attributed and unattributed publishes alike. */
+	topic?: EgressCeilings;
+	/**
+	 * Ceilings applied per tenant, keyed by the tenant a publish is charged
+	 * to (the game lane sender's `attribution` tenant id, or the handler
+	 * module's `egressTenantOf(topic)` result). Unattributed publishes are
+	 * not bounded here - they fall under `topic` only.
+	 */
+	tenant?: EgressCeilings;
+}
+
 export type MessageOverloadReason = 'rate_limit' | 'concurrency_limit' | 'queue_full';
 
 /** Server response for an application message shed by `messageAdmission`. */
@@ -615,6 +691,57 @@ export interface WebSocketOptions {
 	messageAdmission?: MessageAdmissionOptions;
 
 	/**
+	 * Publish-egress accounting ceilings - the outbound half of a tenant
+	 * budget, enforced per worker at every publish-family fan-out
+	 * (`publish`, `publishWire`, `publishWireBatch`, `publishBatched`,
+	 * `publishGame`, `sendTo`). Every logical publish is charged as
+	 * serialized wire bytes times local recipients; the optional ceilings
+	 * refuse a publish BEFORE anything happens - no sequence is stamped, no
+	 * frame is built, nothing reaches the native layer or the cross-worker
+	 * relay - so subscribers never see a sequence gap from a refusal. The
+	 * caller receives the refusal shape (`false`, a zero count, or
+	 * `{ seq: null, delivered: 0 }` on the game lane).
+	 *
+	 * Frames received over the cross-worker relay are never charged and never
+	 * refused: the origin worker charged its own local recipients, and each
+	 * instance owns only its own egress. Cross-instance multiplication is the
+	 * extensions bus's half of the contract (see `docs/tenancy.md`).
+	 *
+	 * The `tenant` ceilings key on the tenant a publish is charged to: the
+	 * SENDER's frozen attribution (`attribution` export) on the client-relay
+	 * game lane, and the handler module's `egressTenantOf(topic)` export for
+	 * server-side publishes. An unattributed publish is bounded by the
+	 * `topic` ceilings only. `tenantOf` cannot be configured here - a
+	 * function does not survive the build's option serialization, so a
+	 * `tenantOf` key in this section refuses the build and points to the
+	 * handler export.
+	 *
+	 * Enforcement semantics, identical on production, `createTestServer`,
+	 * and the dev plugin: the `messages` and `deliveries` ceilings refuse
+	 * the publish that would cross them; the `bytes` ceiling refuses once
+	 * the window's charged bytes have reached it (a publish's byte weight
+	 * exists only after serialization, which must not precede admission), so
+	 * the crossing publish is delivered and the next is refused. A batching
+	 * primitive that builds one wire frame - `publishBatched`,
+	 * `publishWireBatch` - is atomic: it is admitted against the pooled weight
+	 * of every topic it spans and every tenant that owns them, then delivered
+	 * whole or refused whole. `platform.batch()` is not one of them; it loops
+	 * independent publishes, so a ceiling can admit part of a `batch()` call.
+	 * Refusals are visible as `egress_refused_total{scope}`
+	 * on a configured metrics registry, in `platform.pressure.egress`, and
+	 * as a throttled `ADAPTER-ERR-EGRESS-REFUSED` operational event -
+	 * `publishBatched` returns nothing, so those signals are its only
+	 * refusal report.
+	 *
+	 * The charged `bytes` are the encoded UTF-8 length while a `bytes`
+	 * ceiling is armed, and the character length otherwise: measuring the
+	 * encoding walks the envelope, so a server that configured no budget - or
+	 * one that counts messages rather than bytes - does not pay for a number
+	 * nothing decides on. The two agree for ASCII.
+	 */
+	egress?: EgressOptions;
+
+	/**
 	 * Admission control for WebSocket upgrades. Three independent layers are
 	 * opt-in (omit or set them to `0` to disable):
 	 *
@@ -909,6 +1036,15 @@ export interface WebSocketOptions {
 	 *   configured backpressure limit (counter).
 	 * - `ws_dropped_bytes_total` - exact payload bytes in those shed frames
 	 *   (counter, bytes).
+	 * - `egress_refused_total{scope}` - publishes refused pre-hoc by a
+	 *   configured `websocket.egress` ceiling (counter); nothing was
+	 *   delivered, relayed, or sequence-stamped for them. `scope` is `topic`
+	 *   or `tenant`.
+	 * - `egress_window_evicted_total{scope}` - live usage windows dropped at
+	 *   the egress ledger's key cap (counter). Each one stops enforcing that
+	 *   key's ceiling for the rest of its window, and the symptom is FEWER
+	 *   refusals, so a non-zero rate here is what distinguishes a budget that
+	 *   has run out of ledger room from traffic that simply fits.
 	 * - `pressure_saturation` - worker saturation, `0` healthy to `1` at the
 	 *   configured thresholds (gauge, sampled).
 	 * - `pressure_reason` - the live pressure reason as a severity-ordered
@@ -2092,6 +2228,29 @@ export interface WebSocketHandler<UserData = unknown> {
 	 */
 	attribution?: (user: UserData) => Attribution | null | undefined;
 
+	/**
+	 * Resolve the tenant a server-side publish on `topic` is charged to, for
+	 * the `websocket.egress` tenant ceilings. This is how a framework's topic
+	 * namespace convention (svelte-realtime's `@t/<id>/` prefix, for one)
+	 * plugs into the egress budget without the adapter hardcoding any topic
+	 * grammar.
+	 *
+	 * MUST be a pure synchronous function of the topic string - its answers
+	 * are memoized. Return a tenant id under the shared attribution rule
+	 * (`[a-zA-Z0-9_-]`, 1-64 chars) or `null` / `undefined` for an
+	 * unattributed topic. Fail-closed on defects: an invalid id or a throwing
+	 * resolver charges the publish UNATTRIBUTED (never a mangled key) and
+	 * reports `ADAPTER-ERR-EGRESS-TENANT-RESOLVER` once per worker; a defined
+	 * non-function export refuses startup outright.
+	 *
+	 * Not consulted on the client-relay game lane, where the SENDER's frozen
+	 * `attribution` tenant id is the charged tenant. The ledger keys tenants
+	 * only - `principalId` rides the attribution object for the inbound
+	 * limiter surfaces, because per-principal budgets are the inbound rate
+	 * limiter's job while egress budgets are tenant fair-share.
+	 */
+	egressTenantOf?: (topic: string) => string | null | undefined;
+
 	/** Called when a WebSocket connection is established. */
 	open?: (ws: WebSocket<UserData>, ctx: OpenContext) => void;
 
@@ -2361,10 +2520,32 @@ export interface PressureSnapshot {
 	/** Exact payload bytes reported by uWS as dropped during the last sample window. */
 	readonly droppedBytes: number;
 	/**
+	 * Worker publish-egress figures for the last sample window: local
+	 * deliveries (recipients times messages, exclusions deducted), charged
+	 * wire bytes, and `websocket.egress` ceiling refusals per scope. All
+	 * zeros while nothing publishes; the ceilings' own enforcement window
+	 * (`egress.windowMs`) is independent of this reporting window.
+	 *
+	 * `bytes` is the encoded UTF-8 length while a `bytes` ceiling is armed -
+	 * the unit that ceiling decides on - and the character length while none
+	 * is, because measuring an encoding walks every envelope and nothing
+	 * reads the result until a ceiling does. The two agree for ASCII
+	 * payloads, which is what the adapter's own envelope framing is.
+	 * In `createTestServer` these are live cumulative totals instead (the
+	 * harness runs no sampler; `sampledAt` stays `null` there), and the dev
+	 * plugin reports inert zeros while still enforcing the ceilings.
+	 */
+	readonly egress: {
+		deliveries: number;
+		bytes: number;
+		refusedTopic: number;
+		refusedTenant: number;
+	};
+	/**
 	 * Top 5 topics by message rate during the last sample window, sorted
 	 * descending by `messagesPerSec`. Each entry is
-	 * `{ topic, messagesPerSec, bytesPerSec }`. Empty when no
-	 * `platform.publish()` calls landed in the window.
+	 * `{ topic, messagesPerSec, bytesPerSec, deliveriesPerSec }`. Empty when
+	 * no `platform.publish()` calls landed in the window.
 	 */
 	readonly topPublishers: TopicPublishRate[];
 }
@@ -2377,6 +2558,12 @@ export interface TopicPublishRate {
 	topic: string;
 	messagesPerSec: number;
 	bytesPerSec: number;
+	/**
+	 * Egress deliveries per second for the topic (local recipients times
+	 * messages). Additive: `messagesPerSec` and `bytesPerSec` keep their
+	 * meanings, and no over-threshold decision reads this dimension.
+	 */
+	deliveriesPerSec: number;
 }
 
 /**
@@ -2520,6 +2707,11 @@ export interface Platform {
 	 *   platform.publish('todos', 'created', todo);
 	 * }
 	 * ```
+	 *
+	 * @returns `true` when delivered locally or relayed; `false` with no
+	 *   subscribers - and `false` when a configured `websocket.egress`
+	 *   ceiling refused the publish, in which case nothing was delivered,
+	 *   relayed, or sequence-stamped.
 	 */
 	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): boolean;
 
@@ -3023,6 +3215,13 @@ export interface Platform {
 	 * // at upgrade time and using publish() is more efficient at scale:
 	 * // platform.publish(`user:${targetUserId}`, 'dm', 'new-message', { message });
 	 * ```
+	 *
+	 * Egress note: the filter pass runs over every connection FIRST and the
+	 * sends follow, so a configured `websocket.egress` ceiling can refuse the
+	 * whole fan-out pre-hoc - a refused call sends nothing and returns `0`.
+	 * The count is charged to the topic's egress (and its resolved tenant),
+	 * but never to the per-topic publish-rate stats, which keep meaning
+	 * publish-family calls.
 	 */
 	sendTo(filter: (userData: any) => boolean, topic: string, event: string, data?: unknown, options?: { compress?: boolean }): number;
 
@@ -3047,6 +3246,11 @@ export interface Platform {
 	 * // Drain this node before a rolling deploy, scattering reconnects over 10s:
 	 * platform.adviseReconnect({ windowMs: 10000 });
 	 * ```
+	 *
+	 * Egress note: the advisory is operator-lane egress - it carries no topic
+	 * and no tenant, so it lands in the worker egress figures but sits
+	 * outside every `websocket.egress` ceiling; a drain command is never
+	 * refusable by a budget.
 	 */
 	adviseReconnect(options?: { windowMs?: number; afterMs?: number; close?: boolean; filter?: (userData: any) => boolean; compress?: boolean }): number;
 
@@ -3134,6 +3338,12 @@ export interface Platform {
 			backpressuredConnections: number;
 			droppedFrames: number;
 			droppedBytes: number;
+			egress: {
+				deliveries: number;
+				bytes: number;
+				refusedTopic: number;
+				refusedTenant: number;
+			};
 		};
 		assertions: Record<string, number>;
 		diagnostics: {
@@ -3488,6 +3698,11 @@ export interface Platform {
 	 * subscribers delivered to.
 	 * Throws in a topology with more than one I/O worker for the same reason as
 	 * `grantPublish`: local fan-out cannot satisfy the cluster-wide contract.
+	 *
+	 * Egress note: this is the one publish with a socket in hand, so its
+	 * `websocket.egress` tenant is the SENDER's frozen `attribution` tenant
+	 * id (never the `egressTenantOf` topic resolver). A ceiling refusal
+	 * returns `{ seq: null, delivered: 0 }` with no sequence consumed.
 	 */
 	publishGame(
 		senderWs: WebSocket<unknown> | null,

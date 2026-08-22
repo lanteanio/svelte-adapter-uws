@@ -658,8 +658,31 @@ export function takeConfirmedGaps(streams, nowMs, graceMs) {
 	return gaps;
 }
 
-/** Per-topic publish counters for runaway-publisher detection (sampled + reset each pressure tick). @type {Map<string, { m: number, b: number }>} */
+/**
+ * Per-topic publish counters for runaway-publisher detection (sampled + reset
+ * each pressure tick). `m`/`b` keep their original meanings (publish calls and
+ * envelope UTF-16 length); `d` is the additive egress deliveries dimension
+ * (recipients times messages, exclusions deducted). All three are written by
+ * the one shared charge point (handler/egress-budget.js chargePublishEgress).
+ * @type {Map<string, { m: number, b: number, d: number }>}
+ */
 export const topicPublishStats = new Map();
+
+/**
+ * Live logical subscribers per topic on this worker, maintained by the
+ * subscription accounting sink (handler.js) from the same exactly-once deltas
+ * that drive `counters.totalSubscriptions` - every wire, platform, and
+ * tracked-plugin membership mutation routes through the one choke in
+ * utils/ws-symbols.js. This is the egress charge's recipient count. It is
+ * deliberately NOT read through `app.numSubscribers`: the native read aborts
+ * the process on an app whose WebSocket route was never registered (a state
+ * imported-runtime harnesses legitimately hold), and the walk fan-outs
+ * deliver by the logical registry anyway, so this map is the count that
+ * matches what a walk will actually send. An entry is removed when its count
+ * returns to zero, so the map's cardinality is bounded by live memberships.
+ * @type {Map<string, number>}
+ */
+export const topicSubscriberCounts = new Map();
 
 /**
  * Active resume-cutover live-frame buffers, keyed by topic. A connection that is
@@ -727,7 +750,7 @@ export const sharedTopics = new Map();
  * except rss - so a consumer that wants to be honest before the first tick has
  * no generic signal without it. Same rule as the freshness gauge, which stays
  * absent rather than publishing a zero timestamp (see counters.lastSampleWallMs).
- * @type {{ sampledAt: number | null, active: boolean, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI' | 'CAPACITY', maxBufferedBytes: number, backpressuredConnections: number, droppedFrames: number, droppedBytes: number, psi: { cpuSome10: number, memoryFull10: number, ioFull10: number } | null, cpuThrottle: { throttledRatio: number, nrThrottledDelta: number } | null, topPublishers: { topic: string, messagesPerSec: number, bytesPerSec: number }[] }}
+ * @type {{ sampledAt: number | null, active: boolean, value: number, subscriberRatio: number, publishRate: number, memoryMB: number, reason: 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY' | 'CPU_QUOTA' | 'PSI' | 'CAPACITY', maxBufferedBytes: number, backpressuredConnections: number, droppedFrames: number, droppedBytes: number, psi: { cpuSome10: number, memoryFull10: number, ioFull10: number } | null, cpuThrottle: { throttledRatio: number, nrThrottledDelta: number } | null, egress: { deliveries: number, bytes: number, refusedTopic: number, refusedTenant: number }, topPublishers: { topic: string, messagesPerSec: number, bytesPerSec: number, deliveriesPerSec: number }[] }}
  */
 export const pressureSnapshot = {
 	sampledAt: null,
@@ -743,6 +766,11 @@ export const pressureSnapshot = {
 	droppedBytes: 0,
 	psi: null,
 	cpuThrottle: null,
+	// Worker publish-egress figures for the last sample window: local
+	// deliveries (recipients times messages), serialized wire bytes, and
+	// ceiling refusals per scope. One stable object, mutated in place by the
+	// sampler like every other field here.
+	egress: { deliveries: 0, bytes: 0, refusedTopic: 0, refusedTenant: 0 },
 	topPublishers: []
 };
 
@@ -769,7 +797,7 @@ export const subscribeAuth = { enabled: false, strict: false };
 /** platform.onPressure transition callbacks. @type {Set<(snapshot: typeof pressureSnapshot) => void>} */
 export const pressureListeners = new Set();
 
-/** platform.onPublishRate callbacks. @type {Set<(events: { topic: string, messagesPerSec: number, bytesPerSec: number }[]) => void>} */
+/** platform.onPublishRate callbacks. @type {Set<(events: { topic: string, messagesPerSec: number, bytesPerSec: number, deliveriesPerSec: number }[]) => void>} */
 export const publishRateListeners = new Set();
 
 /** Throttle map for the default runaway-publisher console.warn (one per topic per minute). @type {Map<string, number>} */
@@ -796,6 +824,22 @@ export const counters = {
 	sendToAsyncWarned: false,
 	// Publishes in the current pressure window (reset each sample).
 	publishCountWindow: 0,
+	// Publish-egress accounting for the current pressure window (reset each
+	// sample): local deliveries (recipients times messages) and serialized
+	// wire bytes charged by the shared egress charge point, plus ceiling
+	// refusals per scope. Written by handler/egress-budget.js, drained into
+	// pressureSnapshot.egress by the sampler.
+	egressDeliveriesWindow: 0,
+	egressBytesWindow: 0,
+	egressRefusedTopicWindow: 0,
+	egressRefusedTenantWindow: 0,
+	// Cumulative egress-refusal metrics hook (null when metrics are disabled);
+	// called with the refused scope so the registry counter carries it.
+	egressRefusedHook: null,
+	// Cumulative hook for LIVE usage windows dropped at the ledger cap (null when
+	// metrics are disabled), called with the evicted scope. An expired window is
+	// reclaimed for free and is deliberately not reported here.
+	egressEvictedHook: null,
 	// Exact uWS backpressure drops in the current pressure window. Unlike the
 	// queue-depth sampler these are event counters and cannot miss short spikes.
 	droppedFramesWindow: 0,

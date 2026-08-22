@@ -26,6 +26,7 @@ type SharedAdapterOptions = Pick<
 	| 'authorizeWireSubscribe'
 	| 'maxPayloadLength'
 	| 'messageAdmission'
+	| 'egress'
 >;
 
 export interface UWSPluginOptions extends SharedAdapterOptions {

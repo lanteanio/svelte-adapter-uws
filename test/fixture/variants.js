@@ -132,6 +132,27 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// Publish-egress ceilings ARMED against the real runtime, with the tenant
+	// resolver and per-connection attribution the tenant scope keys on. The
+	// window is long so a suite's refusal assertions cannot rotate out from
+	// under it on a slow runner; the ceilings are small so a handful of real
+	// publishes reach them. Its own output directory keeps the ceilings out of
+	// every ordinary fixture build - an armed budget would refuse unrelated
+	// suites' publish traffic.
+	egress: {
+		out: 'build-egress',
+		handler: './src/hooks.ws.egress.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100,
+			egress: {
+				windowMs: 60000,
+				topic: { messages: 3, deliveries: 4 },
+				tenant: { messages: 2 }
+			}
+		}
+	},
+
 	// Strict wire authorization with an ordinary application subscribe hook.
 	// The hook allows every topic, so only the server-grant half can refuse a
 	// cross-tenant raw subscribe - the hybrid permissive-hook bypass.

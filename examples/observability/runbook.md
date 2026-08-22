@@ -296,6 +296,39 @@ promise that churn can never reach a ban.
 
 ---
 
+## AdapterEgressLedgerChurn
+
+**Means:** the egress ledger is full of windows that are still counting, so to
+seat a new key it had to drop one that was still enforcing. Every dropped
+window is a topic or tenant that stops being held to its `websocket.egress`
+ceiling for the rest of that window.
+
+**Threshold:** more than one eviction per second sustained for fifteen minutes.
+Occasional evictions are the ledger doing its job at the edge of its capacity;
+a sustained rate means live key cardinality has simply outgrown it.
+
+**Check:** the `scope` label. `topic` means several thousand distinct topics are
+live inside one window - live, not merely seen, since windows that have lapsed
+are reclaimed before any of this happens. That is ordinary for `room:<uuid>`
+designs and is why the `tenant` scope exists. `scope="tenant"` is the serious
+one: tenant ids have to outnumber the ledger for it to happen at all, so either
+the resolver is minting ids per room rather than per tenant, or something is
+feeding it unbounded input.
+
+Expect the count to be larger than the number of topics actually losing their
+ceiling. The victim is chosen from a bounded sample rather than the whole
+ledger, so keys that went busy together can take turns being dropped and
+re-seated; a burst of evictions concentrated in one window usually means one
+such group, not a proportional number of distinct victims.
+
+**Do:** read it beside `egress_refused_total`. Refusals falling while this
+rises is enforcement lapsing, not load easing - the opposite of what the
+refusal rate alone suggests. The fix is fewer distinct live keys per window
+(scope the resolver, coarsen the topic space), not a larger ceiling: raising a
+ceiling changes what each key may spend, not how many keys the ledger holds.
+
+---
+
 ## AdapterWaitingRoomBacklog
 
 **Means:** clients have been sitting in the waiting room for a sustained period,
@@ -584,6 +617,12 @@ threshold nobody could justify.
   queue. The same decisions increment
   `upgrade_rejected_total{reason="deferred_overflow"}`, which already feeds
   the reject-ratio alert; a second alert would page twice for one incident.
+- `egress_refused_total` - a refusal here is the configured `websocket.egress`
+  ceiling doing exactly what it was set to do (fair-share enforcement against
+  one topic or tenant), so a nonzero rate is policy, not an incident. Chart
+  `rate(egress_refused_total[5m])` by `scope` beside the tenant's own traffic
+  to decide whether the ceiling or the workload should move; capacity distress
+  appears through the pressure and backpressure alerts above.
 - `ws_connection_headroom` - exact remaining `maxConnections` permits.
   Exhaustion already appears in the bounded connection-capacity rejection
   series and reject-ratio alert; a warning threshold above zero depends on the

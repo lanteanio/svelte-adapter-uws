@@ -233,6 +233,15 @@ const SIGNAL_DEFINITIONS = [
 	{ name: 'ws_backpressure_connections', type: 'gauge', labels: [], unit: null, scope: 'worker', aggregate: 'sum', help: 'Sampled connections holding a backpressured outbound queue' },
 	{ name: 'ws_dropped_frames_total', type: 'counter', labels: [], unit: null, scope: 'worker', aggregate: 'sum', help: 'Outbound WebSocket frames dropped by the native backpressure limit' },
 	{ name: 'ws_dropped_bytes_total', type: 'counter', labels: [], unit: 'bytes', scope: 'worker', aggregate: 'sum', help: 'Outbound WebSocket payload bytes dropped by the native backpressure limit' },
+	// A refusal is decided pre-hoc on the publishing worker: nothing was
+	// delivered locally and nothing was relayed, unlike the backpressure drops
+	// above, which shed frames already accepted for delivery.
+	{ name: 'egress_refused_total', type: 'counter', labels: ['scope'], unit: null, scope: 'worker', aggregate: 'sum', help: 'Publishes refused by a configured egress ceiling; nothing was delivered or relayed for them' },
+	// Eviction under the ledger cap restarts a live window, so the evicted key
+	// stops being held to its ceiling for the rest of it. The symptom is FEWER
+	// refusals, which is indistinguishable from healthy traffic - this is what
+	// makes that state queryable.
+	{ name: 'egress_window_evicted_total', type: 'counter', labels: ['scope'], unit: null, scope: 'worker', aggregate: 'sum', help: 'Live usage windows evicted at the ledger cap; each one stops enforcing its ceiling for the rest of its window' },
 
 	// - Pressure ----------------------------------------------------------
 	{ name: 'pressure_saturation', type: 'gauge', labels: [], unit: 'ratio', scope: 'worker', aggregate: 'max', help: 'Worker saturation, 0 healthy to 1 at the configured thresholds' },
@@ -349,6 +358,12 @@ const LABEL_DOMAINS = Object.freeze({
 	}),
 	relay_frame_refused_total: Object.freeze({
 		lane: Object.freeze({ kind: 'enum', dataClass: 'operational', values: Object.freeze(['publish', 'batched']) })
+	}),
+	egress_refused_total: Object.freeze({
+		scope: Object.freeze({ kind: 'enum', dataClass: 'operational', values: Object.freeze(['topic', 'tenant']) })
+	}),
+	egress_window_evicted_total: Object.freeze({
+		scope: Object.freeze({ kind: 'enum', dataClass: 'operational', values: Object.freeze(['topic', 'tenant']) })
 	}),
 	framework_assertion_violations_total: Object.freeze({
 		category: Object.freeze({

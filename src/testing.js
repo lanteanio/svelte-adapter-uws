@@ -1,7 +1,7 @@
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders } from './runtime/utils/request-headers.js';
-import { stampSeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD } from './runtime/utils.js';
+import { stampSeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createSeqBound } from './runtime/utils/seq-bound.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
@@ -14,6 +14,8 @@ import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encod
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { createConnectionPermitCarrier } from './runtime/utils/connection-permit.js';
 import { installAttribution } from './runtime/utils/attribution.js';
+import { normalizeEgressOptions, createEgressAccount, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, EGRESS_ADMITTED } from './runtime/utils/egress-account.js';
+import { privateValueMetadata } from './runtime/utils/observability-privacy.js';
 import {
 	assertWireSubscribeAuthorization,
 	assertProtectiveNumber,
@@ -234,6 +236,154 @@ export async function createTestServer(options = {}) {
 	const connectionPermitCarrier = createConnectionPermitCarrier();
 	const ADMISSION_PER_TICK_BUDGET = upgradeAdmission?.perTickBudget || 0;
 	const messageAdmission = createMessageAdmission(messageAdmissionOptions);
+	// Publish-egress ledger and ceilings, mirroring the production wiring: the
+	// section rides `options.egress` (already judged by the shared guard
+	// above), the tenant resolver is the handler module's `egressTenantOf`
+	// export, and a defined non-function export refuses at create exactly as
+	// production refuses at startup. Per server, so test servers stay
+	// isolated. The live totals below are cumulative (this harness runs no
+	// pressure sampler), exposed through the fabricated pressure snapshot.
+	if (handler.egressTenantOf !== undefined && handler.egressTenantOf !== null && typeof handler.egressTenantOf !== 'function') {
+		throw new TypeError(
+			'the egressTenantOf export must be a function (topic) => tenantId | null; got ' + typeof handler.egressTenantOf
+		);
+	}
+	const egressLiveT = { deliveries: 0, bytes: 0, refusedTopic: 0, refusedTenant: 0 };
+	/** @type {Map<string, number>} */
+	const egressWarnAtT = new Map();
+	/** Per-scope throttle for the eviction line, mirroring production's table. @type {Map<string, number>} */
+	const egressEvictWarnAtT = new Map();
+	const egressAccountT = createEgressAccount({
+		options: normalizeEgressOptions(options.egress),
+		tenantOf: typeof handler.egressTenantOf === 'function' ? handler.egressTenantOf : null,
+		clock: monotonicNow,
+		onEvicted: (scope) => {
+			mEgressEvictedT?.inc({ scope });
+			// Same pairing as production: the counter is the measure, the
+			// throttled line is what a reader gets without a scrape.
+			const t = monotonicNow();
+			if (t - (egressEvictWarnAtT.get(scope) || 0) < 60_000) return;
+			egressEvictWarnAtT.set(scope, t);
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.egress',
+				event: 'egress.window-evicted',
+				severity: 'warn',
+				dataClass: 'pseudonymous',
+				message: 'The egress ledger dropped a usage window that was still counting, so that key is unmetered for the rest of it.',
+				attributes: { scope, help: 'https://svti.me/egress' }
+			});
+		},
+		onRefused: (scope, topic, dimension, limit) => {
+			if (scope === 'tenant') egressLiveT.refusedTenant++;
+			else egressLiveT.refusedTopic++;
+			mEgressRefusedT?.inc({ scope });
+			// One line per (scope, topic) per minute, the production throttle.
+			const key = scope + '\0' + (topic === null ? '' : topic);
+			const t = now();
+			if (t - (egressWarnAtT.get(key) || 0) < 60_000) return;
+			// FIFO-bounded like production's table: a refusal key per topic
+			// would otherwise grow without limit under high cardinality.
+			if (egressWarnAtT.size >= PUBLISH_WARN_DEDUP_MAX && !egressWarnAtT.has(key)) {
+				const oldest = egressWarnAtT.keys().next().value;
+				if (oldest !== undefined) egressWarnAtT.delete(oldest);
+			}
+			egressWarnAtT.set(key, t);
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.egress',
+				event: 'egress.publish-refused',
+				severity: 'warn',
+				dataClass: 'pseudonymous',
+				message: 'A publish crossed a configured egress ceiling and was refused.',
+				attributes: {
+					scope,
+					dimension,
+					limit,
+					topic: topic === null ? null : privateValueMetadata(topic, 'topic'),
+					help: 'https://svti.me/egress'
+				}
+			});
+		},
+		onResolverInvalid: (raw) => {
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.egress',
+				event: 'egress.tenant-resolver-invalid',
+				severity: 'error',
+				dataClass: 'pseudonymous',
+				message: 'The egress tenant resolver returned an unusable id; publishes are charged unattributed.',
+				attributes: { valueType: raw === null ? 'null' : typeof raw, help: 'https://svti.me/egress' }
+			});
+		}
+	});
+	/**
+	 * The one charge point for this harness's fan-out mirrors: live totals plus
+	 * the ceiling account, the same law production's chargePublishEgress
+	 * applies (this harness keeps no runaway-publisher stats).
+	 * @param {string | null} topic
+	 * @param {string | null} tenantId
+	 * @param {number} messages
+	 * @param {number} deliveries
+	 * @param {number} wireBytes
+	 */
+	const chargeEgressT = (topic, tenantId, messages, deliveries, wireBytes) => {
+		egressLiveT.deliveries += deliveries;
+		egressLiveT.bytes += wireBytes;
+		if (egressAccountT.enabled) egressAccountT.charge(topic, tenantId, messages, deliveries, wireBytes);
+	};
+	/** Resolve the tenant a server-side publish is charged to, or null. */
+	const egressTenantForT = (topic) =>
+		egressAccountT.tenantEnabled ? egressAccountT.resolveTenant(topic) : null;
+	/**
+	 * Wire bytes for `recipients` copies of one envelope, measured exactly
+	 * only while a BYTES ceiling is armed - the same cost rule the production
+	 * surface applies, so the harness cannot report a unit production would
+	 * not. See `envelopeWireBytes`.
+	 *
+	 * @param {string} envelope
+	 * @param {number} recipients
+	 * @returns {number}
+	 */
+	const chargeableBytes = (envelope, recipients) =>
+		envelopeWireBytes(envelope, recipients, egressAccountT.bytesEnabled);
+	/**
+	 * The whole-batch egress decision, mirroring the production helper of the
+	 * same shape: every topic admits its own share, every tenant admits ONCE
+	 * against the pooled weight of the topics it owns here, and one refusal
+	 * refuses the whole batch. `sharedRecipients` is the count every entry
+	 * shares on the all-see-all path; null reads each topic's own count.
+	 *
+	 * @param {Array<{ topic: string }>} messages
+	 * @param {number | null} sharedRecipients
+	 * @returns {boolean}
+	 */
+	const admitBatchEgressT = (messages, sharedRecipients) => {
+		/** @type {Map<string, number>} */
+		const perTopic = new Map();
+		for (let i = 0; i < messages.length; i++) {
+			perTopic.set(messages[i].topic, (perTopic.get(messages[i].topic) || 0) + 1);
+		}
+		/** @type {Map<string, { m: number, d: number, topic: string }> | null} */
+		const perTenant = egressAccountT.tenantEnabled ? new Map() : null;
+		for (const [t, c] of perTopic) {
+			const recipients = sharedRecipients === null ? app.numSubscribers(t) : sharedRecipients;
+			const deliveries = c * recipients;
+			if (!egressAccountT.admitTopic(t, c, deliveries)) return false;
+			if (perTenant === null) continue;
+			const ten = egressTenantForT(t);
+			if (ten === null) continue;
+			const agg = perTenant.get(ten);
+			if (agg === undefined) perTenant.set(ten, { m: c, d: deliveries, topic: t });
+			else { agg.m += c; agg.d += deliveries; }
+		}
+		if (perTenant !== null) {
+			for (const [ten, agg] of perTenant) {
+				if (!egressAccountT.admitTenant(ten, agg.topic, agg.m, agg.d)) return false;
+			}
+		}
+		return true;
+	};
 	const rejectApplicationMessageT = (ws, rejection) => {
 		mMessageAdmissionRejectedT?.inc({ reason: rejection.reason, scope: rejection.scope });
 		sendOutboundT(ws, messageOverloadedFrame(rejection));
@@ -274,6 +424,16 @@ export async function createTestServer(options = {}) {
 		'ws_message_admission_rejected_total',
 		'Application WebSocket messages shed by established-message admission',
 		['reason', 'scope']
+	));
+	const mEgressRefusedT = containMetricInstrument(metrics?.counter(
+		'egress_refused_total',
+		'Publishes refused by a configured egress ceiling; nothing was delivered or relayed for them',
+		['scope']
+	));
+	const mEgressEvictedT = containMetricInstrument(metrics?.counter(
+		'egress_window_evicted_total',
+		'Live usage windows evicted at the ledger cap; each one stops enforcing its ceiling for the rest of its window',
+		['scope']
 	));
 	const gConnectionHeadroomT = admission.maxConnections > 0
 		? containMetricInstrument(metrics?.gauge(
@@ -794,8 +954,20 @@ export async function createTestServer(options = {}) {
 			handler.unsubscribe?.(ws, topic, { platform: ud[WS_PLATFORM] });
 		},
 		publish(topic, event, data, options) {
+			// Egress admission before the stamp, exactly as production: a
+			// refused publish consumes no sequence and reaches no transport.
+			const recipients = app.numSubscribers(topic);
+			let egressTenant = null;
+			if (egressAccountT.enabled) {
+				egressTenant = egressTenantForT(topic);
+				// An event whose batch already decided for the whole call
+				// charges but does not re-decide; see production's publish().
+				if (!(options != null && options[EGRESS_ADMITTED]) &&
+					!egressAccountT.admit(topic, egressTenant, 1, recipients)) return false;
+			}
 			const seq = stampSeq(options, topicSeqs, topic, seqBoundT);
 			const msg = envelope(topic, event, data, seq);
+			chargeEgressT(topic, egressTenant, 1, recipients, chargeableBytes(msg, recipients));
 			// Relay the already-built envelope to other workers (sim), mirroring
 			// handler.js's `relayed = parentPort && options.relay !== false` gate.
 			if (onPublishT && !(options && options.relay === false)) {
@@ -831,6 +1003,22 @@ export async function createTestServer(options = {}) {
 			// carried origin seq verbatim (no re-stamp) and never re-relaying
 			// (relay:false suppresses the onPublishT relay below).
 			const isRelay = !!(options && options._isRelay);
+			// Egress admission, origin-side only (a relayed frame was charged on
+			// the worker that published it), before the stamp - as production.
+			let recipients = 0;
+			let egressTenant = null;
+			if (!isRelay) {
+				recipients = app.numSubscribers(topic);
+				const excludeOpt = (options && options.excludeWs) || null;
+				if (excludeOpt !== null && excludedRecipient(excludeOpt, topic)) recipients--;
+				if (egressAccountT.enabled) {
+					egressTenant = egressTenantForT(topic);
+					// An entry whose batch already decided for the whole call
+					// charges but does not re-decide; see production.
+					if (!(options && options[EGRESS_ADMITTED]) &&
+						!egressAccountT.admit(topic, egressTenant, 1, recipients)) return false;
+				}
+			}
 			const seq = isRelay
 				? (typeof options._relaySeq === 'number' ? options._relaySeq : null)
 				: stampSeq(options, topicSeqs, topic, seqBoundT);
@@ -856,6 +1044,7 @@ export async function createTestServer(options = {}) {
 			const excludeWs = (options && options.excludeWs) || null;
 			// JSON fast path: no capable client.
 			if (excludeWs === null && !capCountsT.has(wire.capability)) {
+				if (!isRelay) chargeEgressT(topic, egressTenant, 1, recipients, chargeableBytes(env, recipients));
 				if (chaos.scenario === null) return app.publish(topic, env, false, false);
 				let delivered = false;
 				for (const ws of wsConnections) {
@@ -869,6 +1058,9 @@ export async function createTestServer(options = {}) {
 			// Stateful codec: per-connection encode (null-state connections share
 			// one encode-once frame, memoized by topic-id). Mirrors handler.js.
 			if (wire.state) {
+				// A stateful codec's frames are recipient-specific, so the JSON
+				// envelope is the charged per-recipient size - as production.
+				if (!isRelay) chargeEgressT(topic, egressTenant, 1, recipients, chargeableBytes(env, recipients));
 				let sharedPayload;
 				let sharedEncoded = false;
 				/** @type {Map<number, Uint8Array>} */
@@ -928,6 +1120,8 @@ export async function createTestServer(options = {}) {
 			// Stateless codec: encode once, send many.
 			const payload = encodeStatelessWirePayload(wire, event, data);
 			if (payload == null) {
+				// Declined frame: every recipient gets the JSON envelope.
+				if (!isRelay) chargeEgressT(topic, egressTenant, 1, recipients, chargeableBytes(env, recipients));
 				if (excludeWs === null) {
 					if (chaos.scenario === null) return app.publish(topic, env, false, false);
 					let delivered = false;
@@ -962,6 +1156,13 @@ export async function createTestServer(options = {}) {
 					sharedTopicsT.set(topic, wire.capability);
 				}
 				const { bin, json } = cohortTopicsT(topic);
+				// Cohort split charge, as production: the binary cohort pays its
+				// 0x03 frame, the JSON cohort its envelope.
+				if (!isRelay) {
+					chargeEgressT(topic, egressTenant, 1, recipients,
+						binaryFrameChargeBytes(payload.length, seqOnWire) * app.numSubscribers(bin) +
+						chargeableBytes(env, app.numSubscribers(json)));
+				}
 				const id = sharedWireIds.get(topic);
 				const frame = id !== undefined ? buildBinaryFrame(wire.schemaVersion, id, seqOnWire, payload) : null;
 				if (chaos.scenario === null) {
@@ -976,6 +1177,16 @@ export async function createTestServer(options = {}) {
 					}
 				}
 				return true;
+			}
+			// Walk-path charge, as production: with a capable connection the
+			// lane's encoded form is the binary frame and every recipient is
+			// charged at it; otherwise the walk exists only for the exclusion
+			// and every recipient gets the envelope.
+			if (!isRelay) {
+				const wireBytes = capCountsT.has(wire.capability)
+					? binaryFrameChargeBytes(payload.length, seqOnWire) * recipients
+					: chargeableBytes(env, recipients);
+				chargeEgressT(topic, egressTenant, 1, recipients, wireBytes);
 			}
 			return deliverStatelessWireFanout(wire, payload, {
 				topic, envelope: env, seq: seqOnWire, excludeWs, connections: wsConnections,
@@ -1030,12 +1241,25 @@ export async function createTestServer(options = {}) {
 						statelessSeqs[i] = entrySeq;
 					}
 				}
+				// One admission for the whole batch, mirroring production:
+				// delegating per entry would let each entry admit on its own
+				// and deliver a prefix of the batch under a ceiling. Each
+				// delegated entry still charges itself.
+				let statelessOpts = opts;
+				if (egressAccountT.enabled) {
+					let batchRecipients = app.numSubscribers(topic);
+					const shared = opts && opts.excludeWs;
+					if (batchRecipients > 0 && shared !== undefined && shared !== null &&
+						excludedRecipient(shared, topic)) batchRecipients--;
+					if (!egressAccountT.admit(topic, egressTenantForT(topic), count, count * batchRecipients)) return false;
+					statelessOpts = { ...(opts || {}), [EGRESS_ADMITTED]: true };
+				}
 				let ok = false;
 				for (let i = 0; i < count; i++) {
 					const entrySeq = statelessSeqs === null ? undefined : statelessSeqs[i];
-					let per = opts;
+					let per = statelessOpts;
 					if (statelessExcludes[i] !== undefined || entrySeq !== undefined) {
-						per = { ...(opts || {}) };
+						per = { ...(statelessOpts || {}) };
 						if (statelessExcludes[i] !== undefined) per.excludeWs = statelessExcludes[i];
 						if (entrySeq !== undefined) per.seq = entrySeq;
 					}
@@ -1076,6 +1300,29 @@ export async function createTestServer(options = {}) {
 					entrySeqs[i] = entrySeq;
 				}
 			}
+			// Egress admission for the whole batch before the stamping loop, as
+			// production: deliveries deduct each entry whose excluded socket
+			// holds the topic, and one refusal refuses the batch with nothing
+			// stamped or delivered.
+			const recipients = app.numSubscribers(topic);
+			/** @type {number[] | null} */
+			let exDeduct = null;
+			let deliveries = recipients * count;
+			if (anyExclude) {
+				exDeduct = new Array(count).fill(0);
+				for (let i = 0; i < count; i++) {
+					if (excludes !== null && excludes[i] !== undefined && excludedRecipient(excludes[i], topic)) {
+						exDeduct[i] = 1;
+						deliveries--;
+					}
+				}
+			}
+			let egressTenant = null;
+			if (egressAccountT.enabled) {
+				egressTenant = egressTenantForT(topic);
+				if (!egressAccountT.admit(topic, egressTenant, count, deliveries)) return false;
+			}
+			let batchWireBytes = 0;
 			const hasEntrySeqs = entrySeqs !== null;
 			for (let i = 0; i < count; i++) {
 				const data = datas[i];
@@ -1086,10 +1333,15 @@ export async function createTestServer(options = {}) {
 					: stampSeq(opts, topicSeqs, topic);
 				seqs[i] = seq == null ? 0 : seq;
 				envs[i] = envelope(topic, event, data, seq);
+				batchWireBytes += chargeableBytes(envs[i], recipients - (exDeduct === null ? 0 : exDeduct[i]));
 				if (onPublishT && !(opts && opts.relay === false)) {
 					onPublishT({ kind: 'publish', topic, envelope: envs[i], seq, compress: false });
 				}
 			}
+			// One charge for the whole admitted batch: N logical publishes under
+			// one decision, envelope-priced (the stateful batch frame is
+			// recipient-specific) - as production.
+			chargeEgressT(topic, egressTenant, count, deliveries, batchWireBytes);
 			if (resumeBuffersT.size > 0) {
 				for (let i = 0; i < count; i++) captureResumeFrameT(topic, seqs[i] === 0 ? null : seqs[i], envs[i]);
 			}
@@ -1250,7 +1502,9 @@ export async function createTestServer(options = {}) {
 		sendTo(filter, topic, event, data, options) {
 			void options; // Platform-shape parity; the test server configures no compressor.
 			const msg = envelope(topic, event, data);
-			let count = 0;
+			// Filter pass first, sends after: the egress decision is pre-hoc
+			// over the whole recipient set - as production.
+			const targets = [];
 			for (const ws of wsConnections) {
 				let userData;
 				try { userData = ws.getUserData(); }
@@ -1268,11 +1522,20 @@ export async function createTestServer(options = {}) {
 					}
 					continue;
 				}
-				if (decision) {
-					sendOutboundT(ws, msg);
-					count++;
-				}
+				if (decision) targets.push(ws);
 			}
+			if (targets.length === 0) return 0;
+			let egressTenant = null;
+			if (egressAccountT.enabled) {
+				egressTenant = egressTenantForT(topic);
+				if (!egressAccountT.admit(topic, egressTenant, 1, targets.length)) return 0;
+			}
+			let count = 0;
+			for (const ws of targets) {
+				sendOutboundT(ws, msg);
+				count++;
+			}
+			chargeEgressT(topic, egressTenant, 1, count, chargeableBytes(msg, count));
 			return count;
 		},
 		adviseReconnect(options) {
@@ -1286,7 +1549,8 @@ export async function createTestServer(options = {}) {
 			const frame = afterMs > 0
 				? '{"type":"reconnect","afterMs":' + afterMs + ',"windowMs":' + windowMs + '}'
 				: '{"type":"reconnect","windowMs":' + windowMs + '}';
-			let count = 0;
+			// Filter pass over the snapshot first, sends after - as production.
+			const targets = [];
 			for (const ws of [...wsConnections]) {
 				let userData;
 				try { userData = ws.getUserData(); }
@@ -1296,10 +1560,16 @@ export async function createTestServer(options = {}) {
 					if (decision && typeof decision.then === 'function') continue;
 					if (!decision) continue;
 				}
+				targets.push(ws);
+			}
+			let count = 0;
+			for (const ws of targets) {
 				sendOutboundT(ws, frame);
 				if (doClose && typeof ws.end === 'function') { try { ws.end(1001, 'Server draining'); } catch { closedWsAbortsT++; } }
 				count++;
 			}
+			// Operator-lane egress: no topic, no tenant, outside every ceiling.
+			if (count > 0) chargeEgressT(null, null, 1, count, chargeableBytes(frame, count));
 			return count;
 		},
 		get connections() { return wsConnections.size; },
@@ -1328,7 +1598,13 @@ export async function createTestServer(options = {}) {
 					maxBufferedBytes: p.maxBufferedBytes,
 					backpressuredConnections: p.backpressuredConnections,
 					droppedFrames: p.droppedFrames,
-					droppedBytes: p.droppedBytes
+					droppedBytes: p.droppedBytes,
+					egress: {
+						deliveries: p.egress.deliveries,
+						bytes: p.egress.bytes,
+						refusedTopic: p.egress.refusedTopic,
+						refusedTenant: p.egress.refusedTenant
+					}
 				},
 				assertions: Object.fromEntries(platform.assertions),
 				diagnostics: {
@@ -1532,8 +1808,23 @@ export async function createTestServer(options = {}) {
 			// sender (echo suppression), echoing the sender's client id. Routes
 			// through sendOutboundT so chaos scenarios apply, matching the
 			// production per-subscriber walk (uncompressed 60 Hz input path).
+			// Egress: the sender's frozen attribution is the tenant (never the
+			// topic resolver), and a refusal stamps and delivers nothing - as
+			// production.
+			let recipients = app.numSubscribers(topic);
+			if (excludedRecipient(senderWs, topic)) recipients--;
+			let egressTenant = null;
+			if (egressAccountT.enabled) {
+				if (egressAccountT.tenantEnabled) {
+					let att = null;
+					try { att = senderWs.getUserData()[WS_ATTRIBUTION] ?? null; } catch { att = null; }
+					egressTenant = att !== null && typeof att.tenantId === 'string' ? att.tenantId : null;
+				}
+				if (!egressAccountT.admit(topic, egressTenant, 1, recipients)) return { seq: null, delivered: 0 };
+			}
 			const seq = stampSeq(undefined, topicSeqs, topic);
 			const env = completeGameEnvelope('{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":', data, seq, id);
+			chargeEgressT(topic, egressTenant, 1, recipients, chargeableBytes(env, recipients));
 			// Compact fan-out (PROTOCOL.md 6.7): mirror of the production
 			// publishGame - a game.fanout:1 subscriber receives the value-codec
 			// 0x03 frame (encoded once, framed per connection by its wire-id),
@@ -1621,12 +1912,30 @@ export async function createTestServer(options = {}) {
 				if (!caps || !caps.has('batch')) { everyoneCapable = false; break; }
 			}
 			if ((!allSameTopic && !allSeeAll) || !everyoneCapable) {
-				// Slow-path fallback: per-event publish().
+				// Slow-path fallback: per-event publish(), but the batch is
+				// atomic here too - admitting per event would deliver a prefix
+				// and refuse the tail. Each event still charges itself.
+				if (egressAccountT.enabled && !admitBatchEgressT(messages, null)) return;
 				for (let i = 0; i < messages.length; i++) {
 					const m = messages[i];
-					platform.publish(m.topic, m.event, m.data, m.options);
+					const per = egressAccountT.enabled
+						? { ...(m.options || {}), [EGRESS_ADMITTED]: true }
+						: m.options;
+					platform.publish(m.topic, m.event, m.data, per);
 				}
 				return;
+			}
+			// Egress admission for the whole fast-path batch before anything is
+			// stamped, as production: in all-see-all the dispatch topic's
+			// native count is the recipient set for every batch topic.
+			const recipients = app.numSubscribers(messages[0].topic);
+			const gateArmed = egressAccountT.enabled;
+			let egressTenant = null;
+			if (gateArmed) {
+				if (allSameTopic) {
+					egressTenant = egressTenantForT(firstTopic);
+					if (!egressAccountT.admit(firstTopic, egressTenant, messages.length, messages.length * recipients)) return;
+				} else if (!admitBatchEgressT(messages, recipients)) return;
 			}
 			const events = new Array(messages.length);
 			for (let i = 0; i < messages.length; i++) {
@@ -1634,6 +1943,11 @@ export async function createTestServer(options = {}) {
 				const seq = stampSeq(m.options, topicSeqs, m.topic);
 				const env = envelope(m.topic, m.event, m.data, seq);
 				events[i] = { topic: m.topic, env };
+				// One charge per logical publish, envelope-priced with the batch
+				// wrapper uncharged - as production.
+				chargeEgressT(m.topic,
+					gateArmed ? (allSameTopic ? egressTenant : egressTenantForT(m.topic)) : null,
+					1, recipients, chargeableBytes(env, recipients));
 				// A caps-less resuming connection receives these as per-event JSON.
 				if (resumeBuffersT.size > 0) captureResumeFrameT(m.topic, seq, env);
 			}
@@ -1810,6 +2124,17 @@ export async function createTestServer(options = {}) {
 				backpressuredConnections: 0,
 				droppedFrames: 0,
 				droppedBytes: 0,
+				// LIVE CUMULATIVE totals since server start, not a sampled
+				// window: this harness runs no sampler, and event-driven exact
+				// totals are what a test asserting on the charge math needs.
+				// Production's slice is per sample window; sampledAt above is
+				// the field that says which reading you are holding.
+				egress: {
+					deliveries: egressLiveT.deliveries,
+					bytes: egressLiveT.bytes,
+					refusedTopic: egressLiveT.refusedTopic,
+					refusedTenant: egressLiveT.refusedTenant
+				},
 				topPublishers: []
 			};
 		},

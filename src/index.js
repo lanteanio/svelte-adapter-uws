@@ -14,6 +14,8 @@ import {
 	assertSharedOptionValues,
 	describeUnknownOptionKeys,
 	KNOWN_PRESSURE_OPTION_KEYS,
+	KNOWN_EGRESS_OPTION_KEYS,
+	KNOWN_EGRESS_CEILING_KEYS,
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
 import { uwsLoadErrorMessage, readAdapterPackageJson } from './uws-load-hint.js';
@@ -81,7 +83,7 @@ export const KNOWN_WEBSOCKET_OPTION_KEYS = new Set([
 	'maxPayloadLength', 'idleTimeout', 'maxBackpressure', 'closeOnBackpressureLimit', 'maxTopicSeqEntries',
 	'sendPingsAutomatically', 'compression', 'allowedOrigins',
 	'upgradeTimeout', 'upgradeRateLimit', 'upgradeRateLimitWindow', 'upgradeAdmission',
-	'messageAdmission',
+	'messageAdmission', 'egress',
 	'authPathRateLimit', 'authPathRateLimitWindow',
 	'pressure', 'protection', 'stateHashIntervalMs', 'consistencyAuditIntervalMs',
 	'resourceGrowthAuditIntervalMs', 'postureExport',
@@ -144,6 +146,12 @@ export const KNOWN_NESTED_WEBSOCKET_OPTION_KEYS = {
 	// One set with the value judgment in config-guards.js, so the unknown-key
 	// warning and the threshold guard can never recognize different keys.
 	pressure: KNOWN_PRESSURE_OPTION_KEYS,
+	// Same sharing rule for the egress ledger: the guard and the walk read one
+	// key set. A typo'd ceiling (`deliverys`) would otherwise leave that
+	// ceiling silently open while the operator believes it is enforced.
+	egress: KNOWN_EGRESS_OPTION_KEYS,
+	'egress.topic': KNOWN_EGRESS_CEILING_KEYS,
+	'egress.tenant': KNOWN_EGRESS_CEILING_KEYS,
 	// `workers: { comptue: 2 }` silently runs zero compute workers - the same
 	// failure class, one level down, on a different option.
 	workers: new Set(['compute']),
@@ -488,6 +496,12 @@ export function serializeWsOptions(websocket, adminPath) {
 		authPathRateLimitWindow: websocket?.authPathRateLimitWindow ?? 10,
 		upgradeAdmission: websocket?.upgradeAdmission,
 		messageAdmission: websocket?.messageAdmission,
+		// Publish-egress window and ceilings (plain numbers, so the section
+		// rides the JSON placeholder cleanly). The tenant resolver is NOT here
+		// by design: a function cannot survive this serialization, so it ships
+		// as the handler module's egressTenantOf export and the shared guard
+		// refuses a tenantOf key in this section outright.
+		egress: websocket?.egress,
 		pressure: websocket?.pressure,
 		// Graduated protection posture ('normal' | 'auto' | 'elevated' |
 		// 'siege'). A plain string enum, so it rides the JSON placeholder

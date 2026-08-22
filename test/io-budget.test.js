@@ -487,8 +487,23 @@ const EXTERNAL_THUNK_CLONE_TAG = 'function hiddenThunkCloneTag(_strings, thunk) 
 // shape is an order of magnitude larger than the effect: 0.13 ns/op on the
 // shipped two-armed shape (bench/micro-seq-seen-record-ab.mjs). No byte is
 // read, allocated or copied, and no copy primitive entered the body.
+//
+// Re-pinned for the publish-egress charge. publishWire's origin side now
+// reads the topic's native subscriber count once, deducts a subscribed
+// excluded socket, consults the egress gate (one holder-property read on the
+// zero-config path; an early `return false` before the stamp when a ceiling
+// refuses), and each delivery branch makes its one charge call with the
+// envelope's measured length - or the stateless payload's priced frame
+// length - times recipients. Scalar reads, integer arithmetic, and calls
+// into the charge helper that mutate counter fields in place. Measuring an
+// encoded length reads the characters of the envelope STRING already built
+// for the wire, which is what the copy authority governs: no byte of any
+// frame is read, allocated or copied, and no copy primitive entered the
+// body. Measured end-to-end on the gate benches
+// (bench/31-gateless-publish-ab.mjs, bench/27-publish-batched-ab.mjs):
+// medians within the baselines' run noise, recorded in the same change.
 const COPY_AUTHORITY_SYNTAX = Object.freeze({
-	publishWire: '9b597e4bcbad7c70ec9a0f068d42b2fbf9733b8f469d4c73c9c7e58a97083648',
+	publishWire: 'bc9aa422f1481e3bbc5c9ece6dcdb51e68c5c803f91ef8c1282fc856d6e02828',
 	deliverStatelessWireFanout: '98c4246e4bea446d1647f6bf0b13fb0e0cde521ac27dfe899eff42b884113afa',
 	dispatchIngressFrame: '5ff5ed75d331620ed0bbdd4ffd9fe57ecb993b3b3d97923bdb7edf48e7483e5b',
 	send: 'c900028ed26614f6a0d83b1d57a6649a52db522503def86eee3000541d285b11',
@@ -668,7 +683,63 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// utils/message-admission.js, which this graph does not reach. Data
 	// declarations only; no byte is read, allocated or copied, and no copy
 	// primitive entered the graph.
-	ingress: 'af8fdd140ea96d74e25fdbb4ca8dc7daf1005f4274cc6052913230e787a1e94f',
+	// Re-pinned for the publish-egress charge, whose drift reaches this graph
+	// only through the shared utils modules: utils/pressure.js's per-topic
+	// entries gain the additive deliveriesPerSec field, utils/attribution.js
+	// exports the shared id-rule predicate the egress tenant resolver reuses,
+	// the manifest gains one signal declaration with its scope label domain
+	// (frozen data literals), and error-registry.js gains two id constants
+	// plus two frozen entries (structure; sentences masked). Nothing in this
+	// graph's own modules changed, nothing executes differently on any frame
+	// path, no byte is read, allocated or copied, and no copy primitive
+	// entered the graph.
+	//
+	// Re-pinned for the two egress error-registry entries naming every
+	// module that emits them: each `sources` array gains the dev plugin and the
+	// harness beside the production wiring, so an operator reading the reference
+	// is not pointed away from the surfaces that emit the same line. Frozen
+	// string arrays in the same entries this graph already carried - read by the
+	// reference generator and by nothing on any frame path. No byte is read,
+	// allocated or copied, and no copy primitive entered the graph.
+	//
+	// Re-pinned for the eviction score and its counter. This graph's own drift
+	// is the manifest's added counter declaration with its scope label domain,
+	// error-registry.js's added sentence about what the dev surface reports, and
+	// one null hook slot in state.js - frozen data and one property. The ledger
+	// itself sits outside this graph; what it does now is rank a sampled window
+	// by the fraction of its ceiling spent across the current window and the one
+	// before (a `pu` fraction carried at rotation), drop the lowest, and call an
+	// injected hook when the dropped window was still live, because the symptom
+	// of an evicted window is FEWER refusals. Nothing on any frame path in this
+	// graph executes differently, no byte is read, allocated or copied, and no
+	// copy primitive entered.
+	//
+	// Re-pinned for the manifest label-domain addition. The drift in BOTH
+	// graphs is observability-manifest.js, reached through utils.js ->
+	// utils/metrics.js: one string added to an existing frozen enum
+	// (upgrade_rejected_total.reason gains deferred_overflow, which the
+	// pacing queue already emitted and the manifest alone did not declare).
+	// Data only - a literal inside an existing Object.freeze, no statement
+	// added and none executing differently on any frame path. No byte is
+	// read, allocated or copied, and no copy primitive entered either graph.
+	//
+	// Re-pinned for the egress eviction entry. The drift in all three graphs is
+	// error-registry.js alone, reached through utils.js: one id
+	// constant added and one frozen entry object added, plus one string
+	// appended to an existing frozen `sources` array. Structure, which is
+	// sealed by design, while the entries' sentences stay masked - confirmed
+	// by the prose-shape case below, which rewords a registry entry and does
+	// not move this digest.
+	//
+	// The same change also edited utils/rate-limiter.js, and that module is
+	// NOT in any of these graphs - checked rather than assumed: it is imported
+	// only by handler.js and plugins/_shared/sensitive.js, and none of the
+	// three roots reaches either. A first draft of this note claimed the octet
+	// check drifted the ingress seal, which would have recorded a reason for a
+	// digest it had nothing to do with.
+	// No statement executes on any frame path, no byte is read, allocated or
+	// copied, and no copy primitive entered either graph.
+	ingress: 'f7c6faaeb9968f6e7a7bf5346f641f9d2436e6eb57aaaa8374394076bd36e9ea',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1012,7 +1083,132 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// masked). The admission byte counters live in utils/message-admission.js,
 	// outside this graph. Data declarations off every frame path; no byte is
 	// read, allocated or copied, and no copy primitive entered the graph.
-	platform: 'd11ccd258b5fbfa6435ea6e51a208e109ed0c0ce27998256be196455e8d82695',
+	// Re-pinned for the publish-egress charge. The drift in this graph's own
+	// modules is the one shared charge point: platform.js consults the egress
+	// gate before every publish-family fan-out (holder-property read,
+	// comparisons, an early refusal return ahead of the seq stamp) and calls
+	// handler/egress-budget.js exactly once per logical publish, which joins
+	// the graph with utils/egress-account.js and utils/attribution.js - the
+	// five duplicated per-site stats blocks collapse into that helper, whose
+	// additions are Map lookups and integer field mutations on preallocated
+	// window objects plus one Buffer.byteLength read of the envelope STRING
+	// per logical publish. sendTo and adviseReconnect split into a filter
+	// pass and a send pass so the decision precedes the first frame. The
+	// graph also picks up the shared data drift: one manifest signal with its
+	// label domain, two error-registry entries (structure; prose masked), the
+	// pressure entries' additive deliveries field, and the state counters'
+	// egress window fields. No byte of any frame is read, allocated or
+	// copied, and no copy primitive entered the graph. Cost was measured as
+	// the accounting delta itself, interleaved in one process so machine
+	// load hits every arm equally: 2.80 ns per publish for the stats block
+	// this replaces, 3.36 ns with no ceiling configured, and 50.58 ns once a
+	// BYTES ceiling arms the encoded-length measurement - so the walk is
+	// paid only where a budget decides on it. Those arms price the charge
+	// alone; the recipient-count and gate reads this change also adds to
+	// every publish carry the zero-config delta to single-digit nanoseconds,
+	// against a fan-out primitive measured in microseconds. The gate benches
+	// (bench/31-gateless-publish-ab.mjs, bench/27-publish-batched-ab.mjs)
+	// cannot resolve a delta that small at their run-to-run spread and are
+	// not cited for it.
+	//
+	// Re-pinned for the egress ledger's cap eviction, whose drift reaches this
+	// graph through handler/egress-budget.js -> utils/egress-account.js. Each
+	// usage map becomes a small factory holding the map, an eviction cursor that
+	// survives between calls, and its scope ceilings. At the cap the eviction
+	// samples up to EGRESS_EVICT_SAMPLE entries from the rotating cursor, takes
+	// an expired window outright, and otherwise drops the one that has spent the
+	// least of its allowance across the current window and the one before it
+	// (a `pu` fraction carried at rotation). Spent allowance rather than a
+	// publish count, because a `deliveries` or `bytes` ceiling enforces a
+	// quantity one publish can exhaust. A live eviction also calls an injected
+	// hook, wired to the `egress_window_evicted_total{scope}` counter and its
+	// manifest declaration, because the symptom of an evicted window is FEWER
+	// refusals. The two error-registry entries in this graph additionally name
+	// every module that emits them, as frozen string arrays.
+	//
+	// A new key past half the cap also sweeps up to EGRESS_SWEEP_STEPS entries
+	// from the same cursor and drops the expired windows it passes, so the cap
+	// bounds keys live at once rather than keys ever seen. Without it expired
+	// entries accumulated until every new key forced a choice among eight
+	// CONSECUTIVE live windows, which cost at-ceiling topics their enforcement
+	// far below the cap.
+	//
+	// All of it runs on inserts or on rotation, never on the steady-state read;
+	// the lookup and the charge are untouched. Divisions and comparisons over
+	// window counters, a bounded run of iterator steps, one added number field,
+	// and Map deletes on keys whose windows had already lapsed - no byte of any
+	// frame is read, allocated or copied, and no copy primitive entered the
+	// graph. Measured interleaved with the arm order rotated per round and
+	// repeated, against head eviction off a fresh iterator: -58% (780 -> 318 ns
+	// per publish) where every resident window is live and the tombstone re-walk
+	// dominates, and inside run-to-run noise at +/-2% on the three shapes that
+	// either never evict or find their victim immediately.
+		//
+	// Re-pinned for the reclamation that precedes it. A key arriving at a full
+	// ledger now walks the same cursor for lapsed windows and drops them, and a
+	// ceiling is surrendered only once a full pass has come back empty; until
+	// then the map takes bounded slack instead. One bounded walk, integer
+	// comparisons over window timestamps, and Map deletes on keys whose windows
+	// had already lapsed - all on the insert path at the cap, never on the
+	// steady-state read. No byte of any frame is read, allocated or copied, and
+	// no copy primitive entered the graph.
+	//
+	// Re-pinned for the reclamation's own repair, which moved WHERE the decision
+	// to surrender a ceiling is taken rather than adding work. Eviction is now
+	// gated on the ledger being full, not on a sweep having reported the ledger
+	// clean; the sweep's finding became a time horizon, recorded from the
+	// smallest window expiry a completed pass saw, and read as a comparison
+	// against the clock. The insert that arrives at the bound may walk a full
+	// pass for a lapsed window rather than take a live one - the same cursor,
+	// the same integer comparison, a higher step ceiling on that one insert. Two
+	// state variables were removed. All of it is still on the insert path at the
+	// bound, never on the steady-state read: comparisons over window
+	// timestamps, a bounded run of iterator steps, and Map deletes on keys whose
+	// windows had already lapsed. No byte of any frame is read, allocated or
+	// copied, and no copy primitive entered the graph. Measured interleaved with
+	// the arm order rotated per round and repeated, against the previous policy
+	// at an equal bound: every one of five shapes inside run-to-run noise.
+	//
+	// Re-pinned again to REMOVE work from the insert path. The reclamation walk
+	// no longer lifts its step budget when the ledger is full: it keeps the same
+	// fixed budget everywhere and lets the cursor, which survives between calls,
+	// amortise a pass across the inserts that approach the bound. The lifted
+	// budget was bounded only by the ledger's own size, and on a clock that
+	// advances per publish - which is the real one - it ran on nearly every
+	// insert rather than once, at +213% per publish with single-call latency
+	// reaching 87 us. Two statements were deleted and one became a constant. No
+	// byte of any frame is read, allocated or copied, and no copy primitive
+	// entered the graph. Measured interleaved with the arm order rotated per
+	// round, repeated, against a byte-identical control arm and with the clock
+	// advancing on every publish: +3.8%, +6.5% and +2.7% on the three shapes
+	// that reach the bound, against the previous pin's +213%, +152% and +4%.
+	//
+	// Re-pinned for the manifest label-domain addition. The drift in BOTH
+	// graphs is observability-manifest.js, reached through utils.js ->
+	// utils/metrics.js: one string added to an existing frozen enum
+	// (upgrade_rejected_total.reason gains deferred_overflow, which the
+	// pacing queue already emitted and the manifest alone did not declare).
+	// Data only - a literal inside an existing Object.freeze, no statement
+	// added and none executing differently on any frame path. No byte is
+	// read, allocated or copied, and no copy primitive entered either graph.
+	//
+	// Re-pinned for the egress eviction entry. The drift in all three graphs is
+	// error-registry.js alone, reached through utils.js: one id
+	// constant added and one frozen entry object added, plus one string
+	// appended to an existing frozen `sources` array. Structure, which is
+	// sealed by design, while the entries' sentences stay masked - confirmed
+	// by the prose-shape case below, which rewords a registry entry and does
+	// not move this digest.
+	//
+	// The same change also edited utils/rate-limiter.js, and that module is
+	// NOT in any of these graphs - checked rather than assumed: it is imported
+	// only by handler.js and plugins/_shared/sensitive.js, and none of the
+	// three roots reaches either. A first draft of this note claimed the octet
+	// check drifted the ingress seal, which would have recorded a reason for a
+	// digest it had nothing to do with.
+	// No statement executes on any frame path, no byte is read, allocated or
+	// copied, and no copy primitive entered either graph.
+	platform: '8292074a9685f57b032b553a1abb33891e1dc7579abcb614a3baa0b78411394d',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1114,7 +1310,46 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// admission byte counters live in utils/message-admission.js, outside
 	// this graph. Data declarations off every frame path; no byte is read,
 	// allocated or copied, and no copy primitive entered the graph.
-	'wire-fanout': 'd30b683fce4b61db714f7738cb72df79d000a302debe7b5322786c4483a25209',
+	// Re-pinned for the publish-egress charge, whose drift reaches this graph
+	// only through utils.js exactly as it reaches the ingress graph: the
+	// pressure entries' additive deliveriesPerSec field, the exported
+	// attribution id-rule predicate, one manifest signal with its label
+	// domain, and two error-registry entries (structure; prose masked).
+	// Nothing in this graph's own modules changed, and no copy primitive
+	// entered.
+	//
+	// Re-pinned for the same two error-registry entries naming every
+	// module that emits them: each `sources` array gains the dev plugin and the
+	// harness beside the production wiring. Frozen string arrays in entries this
+	// graph already carried, read by the reference generator and by nothing on
+	// any frame path. Nothing in this graph's own modules changed, no byte is
+	// read, allocated or copied, and no copy primitive entered.
+	//
+	// Re-pinned for the same eviction work, which reaches this graph only
+	// through the shared modules: the manifest gains one counter declaration
+	// with its scope label domain, error-registry.js gains a sentence about what
+	// the dev surface reports, and state.js gains one null hook slot. Frozen data
+	// and one property; nothing in this graph's own modules changed, nothing on any
+	// frame path executes differently, and no copy primitive entered.
+	//
+	// Re-pinned for the same manifest label-domain addition as the graphs
+	// above, reached the same way - observability-manifest.js through utils.js
+	// -> utils/metrics.js. One string inside an existing frozen enum; data
+	// only, no statement added, nothing executing differently on any frame
+	// path, no byte read, allocated or copied, no copy primitive entered.
+	//
+	// Re-pinned for the egress eviction entry. The drift in all three graphs is
+	// error-registry.js alone, reached through utils.js: one id
+	// constant added and one frozen entry object added, plus one string
+	// appended to an existing frozen `sources` array. Structure, which is
+	// sealed by design, while the entries' sentences stay masked.
+	//
+	// This is the THIRD of the three seals one registry edit moves. Re-pinning
+	// the first two and reading a green targeted run is how the previous two
+	// were missed; only a full run reports all three.
+	// No statement executes on any frame path, no byte is read, allocated or
+	// copied, and no copy primitive entered any graph.
+	'wire-fanout': '35bc5a6f7851a1a9d710ce30769937ae955c83d4ddf02af26cc03302f8cc0cec',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

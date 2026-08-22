@@ -3,7 +3,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './runtime/cookies.js';
-import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, throwInvalidSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION } from './runtime/utils.js';
+import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, throwInvalidSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_ATTRIBUTION, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
@@ -16,6 +16,8 @@ import {
 } from './config-guards.js';
 import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './runtime/handler/cluster-sequence-policy.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
+import { normalizeEgressOptions, createEgressAccount, envelopeWireBytes, EGRESS_ADMITTED } from './runtime/utils/egress-account.js';
+import { privateValueMetadata } from './runtime/utils/observability-privacy.js';
 import { installAttribution } from './runtime/utils/attribution.js';
 import { snapshotUpgradeHeaders } from './runtime/utils/upgrade-headers.js';
 import { emitOperationalDiagnostic, viteHandlerFailureDiagnostic, viteHandlerRecoveredDiagnostic } from './runtime/utils/operational-diagnostic.js';
@@ -44,6 +46,7 @@ const KNOWN_PLUGIN_OPTION_KEYS = new Set([
 	'authorizeWireSubscribe',
 	'maxPayloadLength',
 	'messageAdmission',
+	'egress',
 	'devSkipOriginCheck',
 	'timeoutMs'
 ]);
@@ -121,6 +124,152 @@ export default function uws(options = {}) {
 	// code reads from platform. Production uses the same 1 MiB default.
 	const MAX_PAYLOAD_LENGTH_V = options.maxPayloadLength ?? DEFAULT_MAX_PAYLOAD_LENGTH;
 	const messageAdmission = createMessageAdmission(options.messageAdmission);
+	// Publish-egress ceilings are DEV-LIVE, on the messageAdmission precedent:
+	// a budget the app relies on must refuse in `vite dev` exactly as in
+	// production, or the misconfiguration is discovered in production or not
+	// at all. Reporting stays inert like dev pressure - no sampler window, no
+	// metrics - but the throttled refusal event fires so a refused publish is
+	// never a silent `false`. The tenant resolver late-binds to the handler
+	// module (it loads after the plugin is constructed and hot-reloads), so
+	// the account never memoizes in dev.
+	const egressWarnAtV = new Map();
+	/** Per-scope throttle for the eviction line, mirroring production's table. @type {Map<string, number>} */
+	const egressEvictWarnAtV = new Map();
+	const egressAccountV = createEgressAccount({
+		options: normalizeEgressOptions(options.egress),
+		tenantOf: (topic) => {
+			const f = userHandlers.egressTenantOf;
+			return typeof f === 'function' ? f(topic) : null;
+		},
+		clock: monotonicNow,
+		memoize: false,
+		onEvicted: (scope) => {
+			// Dev registers no metrics, so this line is the WHOLE report here -
+			// which is why the account needs the callback at all. Without it a
+			// ledger at its bound quietly stopped enforcing for evicted keys and
+			// no surface in a dev run said anything.
+			const t = now();
+			if (t - (egressEvictWarnAtV.get(scope) || 0) < 60_000) return;
+			egressEvictWarnAtV.set(scope, t);
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.egress',
+				event: 'egress.window-evicted',
+				severity: 'warn',
+				dataClass: 'pseudonymous',
+				message: 'The egress ledger dropped a usage window that was still counting, so that key is unmetered for the rest of it.',
+				attributes: { scope, help: 'https://svti.me/egress' }
+			});
+		},
+		onRefused: (scope, topic, dimension, limit) => {
+			const key = scope + '\0' + (topic === null ? '' : topic);
+			const t = now();
+			if (t - (egressWarnAtV.get(key) || 0) < 60_000) return;
+			// FIFO-bounded like production's table (see egress-budget.js).
+			if (egressWarnAtV.size >= PUBLISH_WARN_DEDUP_MAX && !egressWarnAtV.has(key)) {
+				const oldest = egressWarnAtV.keys().next().value;
+				if (oldest !== undefined) egressWarnAtV.delete(oldest);
+			}
+			egressWarnAtV.set(key, t);
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.egress',
+				event: 'egress.publish-refused',
+				severity: 'warn',
+				dataClass: 'pseudonymous',
+				message: 'A publish crossed a configured egress ceiling and was refused.',
+				attributes: {
+					scope,
+					dimension,
+					limit,
+					topic: topic === null ? null : privateValueMetadata(topic, 'topic'),
+					help: 'https://svti.me/egress'
+				}
+			});
+		},
+		onResolverInvalid: (raw) => {
+			emitOperationalEvent({
+				source: 'svelte-adapter-uws',
+				component: 'runtime.egress',
+				event: 'egress.tenant-resolver-invalid',
+				severity: 'error',
+				dataClass: 'pseudonymous',
+				message: 'The egress tenant resolver returned an unusable id; publishes are charged unattributed.',
+				attributes: { valueType: raw === null ? 'null' : typeof raw, help: 'https://svti.me/egress' }
+			});
+		}
+	});
+	/** Resolve the tenant a dev publish is charged to, or null. */
+	const egressTenantForV = (topic) =>
+		egressAccountV.tenantEnabled ? egressAccountV.resolveTenant(topic) : null;
+	/**
+	 * Wire bytes for `recipients` copies of one envelope, measured exactly
+	 * only while a BYTES ceiling is armed - the same cost and unit rule the
+	 * production surface applies, so dev cannot report a unit production
+	 * would not. See `envelopeWireBytes`.
+	 *
+	 * @param {string} envelope
+	 * @param {number} recipients
+	 * @returns {number}
+	 */
+	const chargeableBytesV = (envelope, recipients) =>
+		envelopeWireBytes(envelope, recipients, egressAccountV.bytesEnabled);
+	/**
+	 * Local recipients of a topic on this dev server. `excludeWs` withholds one
+	 * connection, matched as either the uWS-shaped wrapper a handler receives
+	 * or the underlying raw socket - the same pair `publish` matches, so a
+	 * batch's admission counts exactly the recipients its entries will charge.
+	 *
+	 * @param {string} topic
+	 * @param {object} [excludeWs]
+	 * @returns {number}
+	 */
+	const countEgressRecipientsV = (topic, excludeWs) => {
+		let n = 0;
+		for (const [ws, topics] of subscriptions) {
+			if (excludeWs !== undefined && excludeWs !== null &&
+				(ws === excludeWs || wsWrappers.get(ws) === excludeWs)) continue;
+			if (topics.has(topic) && ws.readyState === 1) n++;
+		}
+		return n;
+	};
+	/**
+	 * The whole-batch egress decision, mirroring the production helper: every
+	 * topic admits its own share, every tenant admits ONCE against the pooled
+	 * weight of the topics it owns here, and one refusal refuses the whole
+	 * batch. `sharedRecipients` is the count every entry shares on the
+	 * all-see-all path; null reads each topic's own count.
+	 *
+	 * @param {Array<{ topic: string }>} messages
+	 * @param {number | null} sharedRecipients
+	 * @returns {boolean}
+	 */
+	const admitBatchEgressV = (messages, sharedRecipients) => {
+		/** @type {Map<string, number>} */
+		const perTopic = new Map();
+		for (let i = 0; i < messages.length; i++) {
+			perTopic.set(messages[i].topic, (perTopic.get(messages[i].topic) || 0) + 1);
+		}
+		/** @type {Map<string, { m: number, d: number, topic: string }> | null} */
+		const perTenant = egressAccountV.tenantEnabled ? new Map() : null;
+		for (const [t, c] of perTopic) {
+			const recipients = sharedRecipients === null ? countEgressRecipientsV(t) : sharedRecipients;
+			const deliveries = c * recipients;
+			if (!egressAccountV.admitTopic(t, c, deliveries)) return false;
+			if (perTenant === null) continue;
+			const ten = egressTenantForV(t);
+			if (ten === null) continue;
+			const agg = perTenant.get(ten);
+			if (agg === undefined) perTenant.set(ten, { m: c, d: deliveries, topic: t });
+			else { agg.m += c; agg.d += deliveries; }
+		}
+		if (perTenant !== null) {
+			for (const [ten, agg] of perTenant) {
+				if (!egressAccountV.admitTenant(ten, agg.topic, agg.m, agg.d)) return false;
+			}
+		}
+		return true;
+	};
 	const rejectApplicationMessageV = (wrapped, rejection) => {
 		const frame = messageOverloadedFrame(rejection);
 		try { wrapped.send(frame, false, false); bumpOutV(wrapped.getUserData(), frame); } catch {}
@@ -184,7 +333,7 @@ export default function uws(options = {}) {
 	/** @type {Map<import('ws').WebSocket, object>} */
 	const wsWrappers = new Map();
 
-	/** @type {{ upgrade?: Function, open?: Function, message?: Function, close?: Function, drain?: Function, subscribe?: Function, subscribeBatch?: Function, unsubscribe?: Function, resume?: Function, authenticate?: Function }} */
+	/** @type {{ upgrade?: Function, open?: Function, message?: Function, close?: Function, drain?: Function, subscribe?: Function, subscribeBatch?: Function, unsubscribe?: Function, resume?: Function, authenticate?: Function, attribution?: Function, egressTenantOf?: Function }} */
 	let userHandlers = {};
 	let sendToAsyncWarnedV = false;
 
@@ -266,12 +415,35 @@ export default function uws(options = {}) {
 	 * @returns {boolean}
 	 */
 	function publish(topic, event, data, options) {
+		const excludeWs = (options && options.excludeWs) || null;
 		// Mirror the production `{ jitterMs }` de-herd window stamp (platform.publish):
 		// carry the window so each client rolls its own dispatch delay.
 		const jitterMs = (options && typeof options.jitterMs === 'number' && options.jitterMs > 0) ? options.jitterMs : null;
 		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + (jitterMs == null ? '}' : ',"j":' + jitterMs + '}');
+		// Dev-live egress enforcement, one charge point (the wire and batch
+		// mirrors delegate here). Recipients are counted before the first
+		// frame so the refusal is pre-hoc; dev stamps no seq, so building the
+		// envelope ahead of the decision moves nothing authoritative.
+		if (egressAccountV.enabled) {
+			let recipients = 0;
+			for (const [ws, topics] of subscriptions) {
+				if (excludeWs !== null && (ws === excludeWs || wsWrappers.get(ws) === excludeWs)) continue;
+				if (topics.has(topic) && ws.readyState === 1) recipients++;
+			}
+			const egressTenant = egressTenantForV(topic);
+			// EGRESS_ADMITTED marks an event whose call already decided for the
+			// whole batch (publishBatched's slow path below). It still charges -
+			// every event is its own logical publish in the ledger - but
+			// re-deciding here would deliver a prefix of an atomic batch: the
+			// batch estimate bounds the per-event message and delivery sums, so
+			// those survive a re-decision, while `over()` refuses bytes at
+			// `usage.b >= ceiling`, which the batch admission passes at zero and
+			// the per-event charges then cross mid-batch.
+			if (!(options != null && options[EGRESS_ADMITTED]) &&
+				!egressAccountV.admit(topic, egressTenant, 1, recipients)) return false;
+			egressAccountV.charge(topic, egressTenant, 1, recipients, chargeableBytesV(envelope, recipients));
+		}
 		if (resumeBuffersV.size > 0) captureResumeFrameV(topic, envelope);
-		const excludeWs = (options && options.excludeWs) || null;
 		let sent = false;
 		for (const [ws, topics] of subscriptions) {
 			if (excludeWs !== null && (ws === excludeWs || wsWrappers.get(ws) === excludeWs)) continue;
@@ -323,10 +495,19 @@ export default function uws(options = {}) {
 		if (!allSameTopic && !allSeeAll) {
 			// Slow-path fallback: per-event publish() so the caller
 			// pays no penalty on small / disjoint batch shapes (parity
-			// with the production handler).
+			// with the production handler). The batch is still atomic:
+			// admitting per event would deliver a prefix and refuse the
+			// tail, and dev is where an operator validates the budget.
+			if (egressAccountV.enabled && !admitBatchEgressV(messages, null)) return;
 			for (let i = 0; i < messages.length; i++) {
 				const m = messages[i];
-				publish(m.topic, m.event, m.data, m.options);
+				// Copied unconditionally: reading the caller's object directly
+				// on one branch and a spread snapshot on the other would make
+				// whether an inherited or accessor-carried option is honoured
+				// depend on whether a budget happens to be configured.
+				const per = { ...(m.options || {}) };
+				if (egressAccountV.enabled) per[EGRESS_ADMITTED] = true;
+				publish(m.topic, m.event, m.data, per);
 			}
 			return;
 		}
@@ -338,6 +519,18 @@ export default function uws(options = {}) {
 				topic: m.topic,
 				env: '{"topic":' + esc(m.topic) + ',"event":' + esc(m.event) + ',"data":' + JSON.stringify(m.data ?? null) + '}'
 			};
+		}
+		// Dev-live egress enforcement for the fast path (the slow path above
+		// delegates to publish(), which enforces itself): admit each distinct
+		// batch topic's share against the shared recipient set, refuse the
+		// whole batch on any refusal, then charge per event - as production.
+		if (egressAccountV.enabled) {
+			const recipients = countEgressRecipientsV(messages[0].topic);
+			if (!admitBatchEgressV(messages, recipients)) return;
+			for (let i = 0; i < events.length; i++) {
+				egressAccountV.charge(events[i].topic, egressTenantForV(events[i].topic), 1, recipients,
+					chargeableBytesV(events[i].env, recipients));
+			}
 		}
 		// A caps-less resuming connection receives these as per-event JSON.
 		if (resumeBuffersV.size > 0) {
@@ -396,7 +589,9 @@ export default function uws(options = {}) {
 	 */
 	function sendTo(filter, topic, event, data) {
 		const envelope = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + '}';
-		let count = 0;
+		// Filter pass first, sends after: the dev-live egress decision is
+		// pre-hoc over the whole recipient set, as production.
+		const targets = [];
 		for (const [, wrapped] of wsWrappers) {
 			const decision = filter(wrapped.getUserData());
 			if (decision && typeof decision.then === 'function') {
@@ -411,11 +606,19 @@ export default function uws(options = {}) {
 				}
 				continue;
 			}
-			if (decision) {
-				wrapped.send(envelope);
-				bumpOutV(wrapped.getUserData(), envelope);
-				count++;
-			}
+			if (decision) targets.push(wrapped);
+		}
+		if (targets.length === 0) return 0;
+		if (egressAccountV.enabled) {
+			const egressTenant = egressTenantForV(topic);
+			if (!egressAccountV.admit(topic, egressTenant, 1, targets.length)) return 0;
+			egressAccountV.charge(topic, egressTenant, 1, targets.length, chargeableBytesV(envelope, targets.length));
+		}
+		let count = 0;
+		for (const wrapped of targets) {
+			wrapped.send(envelope);
+			bumpOutV(wrapped.getUserData(), envelope);
+			count++;
 		}
 		return count;
 	}
@@ -601,6 +804,11 @@ export default function uws(options = {}) {
 				? options
 				: { seq: options.seq, relay: options.relay, compress: options.compress, excludeWs: options.excludeWs, jitterMs: options.jitterMs };
 			assertBatchSequenceAuthority(opts);
+			// Refused before the gate, in production's order: an empty batch
+			// publishes nothing, so charging it a decision would let a bytes
+			// ceiling already at its limit emit a refusal production never
+			// emits, and would seat a ledger key for a topic nothing sent on.
+			if (!Array.isArray(entries) || entries.length === 0) return false;
 			// Same one-read rule as production: the first publish runs application
 			// toJSON, and every read for a later entry happens after it. Dev that
 			// re-read them would disagree with production about what was sent.
@@ -628,12 +836,27 @@ export default function uws(options = {}) {
 					entrySeqs[i] = entrySeq;
 				}
 			}
+			// One admission for the whole batch, as production and the harness
+			// take it: delegating straight to publish() would let every entry
+			// decide for itself and deliver a prefix under a ceiling. Each
+			// delegated entry still charges - the ledger sees one logical
+			// publish per entry either way.
+			let admitOpts = opts;
+			if (egressAccountV.enabled) {
+				// The shared exclusion is discounted because every entry carries
+				// it; a PER-ENTRY exclusion is not, because it withholds only its
+				// own entry - over-estimating a refusal boundary is safe, while
+				// under-estimating would admit past the ceiling.
+				const batchRecipients = countEgressRecipientsV(topic, opts && opts.excludeWs);
+				if (!egressAccountV.admit(topic, egressTenantForV(topic), count, count * batchRecipients)) return false;
+				admitOpts = { ...(opts || {}), [EGRESS_ADMITTED]: true };
+			}
 			let ok = false;
 			for (let i = 0; i < count; i++) {
 				const entrySeq = entrySeqs === null ? undefined : entrySeqs[i];
-				let per = opts;
+				let per = admitOpts;
 				if (excludes[i] !== undefined || entrySeq !== undefined) {
-					per = { ...(opts || {}) };
+					per = { ...(admitOpts || {}) };
 					if (excludes[i] !== undefined) per.excludeWs = excludes[i];
 					if (entrySeq !== undefined) per.seq = entrySeq;
 				}
@@ -663,7 +886,7 @@ export default function uws(options = {}) {
 				// Each entry carries its own options, exactly as it does through
 				// production's batch and the harness's: this method is a loop over
 				// independent publishes, so an entry's `excludeWs` or `jitterMs` is
-				// as load-bearing as it is when the caller publishes directly.
+				// as load-bearing here as it is when the caller publishes directly.
 				// Dropping them made a dev batch quietly deliver a different frame
 				// than the same call under `npm start`.
 				results.push(publish(topic, event, data, options));
@@ -748,6 +971,10 @@ export default function uws(options = {}) {
 				backpressuredConnections: 0,
 				droppedFrames: 0,
 				droppedBytes: 0,
+				// Shape parity only: dev ENFORCES the egress ceilings but reports
+				// inertly (no sampler window), so these zeros are placeholders
+				// exactly like every figure above them.
+				egress: { deliveries: 0, bytes: 0, refusedTopic: 0, refusedTenant: 0 },
 				topPublishers: []
 			};
 		},
@@ -949,8 +1176,27 @@ export default function uws(options = {}) {
 			// echoing the sender's client id. Sender match handles both a raw
 			// socket (the wire handler passes the connection socket) and its
 			// wrapper (server-side app code), mirroring publish()'s excludeWs.
+			// Dev-live egress: the sender's frozen attribution is the tenant,
+			// as production; a refusal stamps and delivers nothing.
+			let egressRecipients = 0;
+			let egressTenant = null;
+			if (egressAccountV.enabled) {
+				for (const [ws, topics] of subscriptions) {
+					if (ws === senderWs || wsWrappers.get(ws) === senderWs) continue;
+					if (topics.has(topic) && ws.readyState === 1) egressRecipients++;
+				}
+				if (egressAccountV.tenantEnabled) {
+					let att = null;
+					try { att = senderWs.getUserData()[WS_ATTRIBUTION] ?? null; } catch { att = null; }
+					egressTenant = att !== null && typeof att.tenantId === 'string' ? att.tenantId : null;
+				}
+				if (!egressAccountV.admit(topic, egressTenant, 1, egressRecipients)) return { seq: null, delivered: 0 };
+			}
 			const seq = stampSeq(undefined, gameTopicSeqs, topic);
 			const env = completeGameEnvelope('{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":', data, seq, id);
+			if (egressAccountV.enabled) {
+				egressAccountV.charge(topic, egressTenant, 1, egressRecipients, chargeableBytesV(env, egressRecipients));
+			}
 			if (resumeBuffersV.size > 0) captureResumeFrameV(topic, env);
 			let delivered = 0;
 			for (const [ws, topics] of subscriptions) {
@@ -998,7 +1244,13 @@ export default function uws(options = {}) {
 					maxBufferedBytes: p.maxBufferedBytes ?? 0,
 					backpressuredConnections: p.backpressuredConnections ?? 0,
 					droppedFrames: p.droppedFrames ?? 0,
-					droppedBytes: p.droppedBytes ?? 0
+					droppedBytes: p.droppedBytes ?? 0,
+					egress: {
+						deliveries: p.egress?.deliveries ?? 0,
+						bytes: p.egress?.bytes ?? 0,
+						refusedTopic: p.egress?.refusedTopic ?? 0,
+						refusedTenant: p.egress?.refusedTenant ?? 0
+					}
 				},
 				assertions: Object.fromEntries(platform.assertions)
 			};
@@ -1227,6 +1479,14 @@ export default function uws(options = {}) {
 	}
 
 	function applyHandlers(mod) {
+		// Same refusal as the production startup: a DEFINED non-function
+		// egressTenantOf must not read as "no resolver", which would stand
+		// every tenant ceiling down in silence while dev looks healthy.
+		if (mod.egressTenantOf !== undefined && mod.egressTenantOf !== null && typeof mod.egressTenantOf !== 'function') {
+			throw new TypeError(
+				'the egressTenantOf export must be a function (topic) => tenantId | null; got ' + typeof mod.egressTenantOf
+			);
+		}
 		userHandlers = {
 			init: mod.init,
 			shutdown: mod.shutdown,
@@ -1240,7 +1500,8 @@ export default function uws(options = {}) {
 			unsubscribe: mod.unsubscribe,
 			resume: mod.resume,
 			authenticate: mod.authenticate,
-			attribution: mod.attribution
+			attribution: mod.attribution,
+			egressTenantOf: mod.egressTenantOf
 		};
 	}
 
@@ -2705,7 +2966,8 @@ export default function uws(options = {}) {
 					// version after an edit: a stale attribution resolver would
 					// admit or refuse what the edited source would not.
 					mod.authenticate !== userHandlers.authenticate ||
-					mod.attribution !== userHandlers.attribution) {
+					mod.attribution !== userHandlers.attribution ||
+					mod.egressTenantOf !== userHandlers.egressTenantOf) {
 					applyHandlers(mod);
 					connectionsRestarted = connections.size > 0;
 					// Close existing connections so they reconnect with the new handler.

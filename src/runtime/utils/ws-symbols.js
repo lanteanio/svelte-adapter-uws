@@ -500,17 +500,23 @@ export function setCohortHooks(onJoin, onLeave) {
 /**
  * Install the worker-local logical-subscription delta sink. The production
  * handler supplies the counter update; focused tests can supply a number.
- * @param {((delta: number) => void) | null} onChange
+ * The delta always carries the topic it describes, so the sink can keep a
+ * per-topic subscriber count beside the worker total - the count the egress
+ * charge reads instead of a native subscriber lookup (the native read is not
+ * merely slower; on an app whose WebSocket route was never registered it
+ * aborts the process, and imported-runtime harnesses hold exactly such an
+ * app).
+ * @param {((delta: number, topic: string) => void) | null} onChange
  */
 export function setSubscriptionAccountingHook(onChange) {
 	/** @type {any} */ (globalThis)[SUBSCRIPTION_ACCOUNTING_HOOK] =
 		typeof onChange === 'function' ? onChange : null;
 }
 
-/** @param {number} delta */
-function accountSubscriptionDelta(delta) {
+/** @param {number} delta @param {string} topic */
+function accountSubscriptionDelta(delta, topic) {
 	const hook = /** @type {any} */ (globalThis)[SUBSCRIPTION_ACCOUNTING_HOOK];
-	if (typeof hook === 'function') hook(delta);
+	if (typeof hook === 'function') hook(delta, topic);
 }
 
 // Registries the close path has already settled. The close path charges every
@@ -561,7 +567,7 @@ function settledRegistries() {
 export function addLogicalSubscription(subscriptions, topic) {
 	if (subscriptions.has(topic)) return false;
 	subscriptions.add(topic);
-	if (!settledRegistries().has(subscriptions)) accountSubscriptionDelta(1);
+	if (!settledRegistries().has(subscriptions)) accountSubscriptionDelta(1, topic);
 	return true;
 }
 
@@ -575,7 +581,7 @@ export function addLogicalSubscription(subscriptions, topic) {
  */
 export function removeLogicalSubscription(subscriptions, topic) {
 	if (!subscriptions.delete(topic)) return false;
-	if (!settledRegistries().has(subscriptions)) accountSubscriptionDelta(-1);
+	if (!settledRegistries().has(subscriptions)) accountSubscriptionDelta(-1, topic);
 	return true;
 }
 
@@ -602,7 +608,10 @@ export function accountClosedLogicalSubscriptions(subscriptions) {
 	if (settledRegistries().has(subscriptions)) return 0;
 	const count = subscriptions.size;
 	settledRegistries().add(subscriptions);
-	if (count > 0) accountSubscriptionDelta(-count);
+	// Released per topic rather than as one summed delta, so the sink's
+	// per-topic subscriber counts settle with the total. One cold call per
+	// held membership, on the close path only.
+	for (const topic of subscriptions) accountSubscriptionDelta(-1, topic);
 	return count;
 }
 

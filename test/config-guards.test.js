@@ -130,7 +130,8 @@ describe('the dev plugin does not drop its options in silence', () => {
 				authPathRequireOrigin: false,
 				authorizeWireSubscribe: true,
 				devSkipOriginCheck: true,
-				timeoutMs: 1000
+				timeoutMs: 1000,
+				egress: { windowMs: 1000, topic: { messages: 10 } }
 			});
 			expect(warn, 'a fully documented config must not warn').not.toHaveBeenCalled();
 		} finally {
@@ -759,9 +760,80 @@ describe('a config valid before the value guards stays silent', () => {
 			consistencyAuditIntervalMs: 5000,
 			resourceGrowthAuditIntervalMs: 30000,
 			pressure: { memoryHeapUsedRatio: 0.9, subscriberRatio: false, sampleIntervalMs: 1000 },
-			upgradeAdmission: { maxConcurrent: 500, perTickBudget: 64, maxConnections: 5000 }
+			upgradeAdmission: { maxConcurrent: 500, perTickBudget: 64, maxConnections: 5000 },
+			egress: { windowMs: 1000, topic: { messages: 5000, bytes: 10_000_000, deliveries: 500_000 }, tenant: { messages: 2000 } }
 		};
 		expect(() => serializeWsOptions(websocket, false)).not.toThrow();
 		expect(unknownWebsocketOptionKeys(websocket)).toEqual([]);
+	});
+});
+
+// The egress ceilings are read as `value > 0` at runtime, so a misshaped
+// ceiling does not fall back to a default - it leaves that ceiling silently
+// open while the operator believes it is enforced. Same inversion as every
+// guard above, on a new section; the guard is shared, so all three intake
+// surfaces must refuse the same values.
+describe('the egress section refuses values that would silently disable a ceiling', () => {
+	it('refuses a non-object section on the build surface', () => {
+		expect(() => serializeWsOptions({ egress: true }, false))
+			.toThrow(/egress must be an object of publish-egress ceilings/);
+	});
+
+	for (const bad of ['5', -1, 1.5, NaN, Infinity, true]) {
+		it(`refuses topic.messages = ${JSON.stringify(bad) ?? String(bad)}`, () => {
+			expect(() => serializeWsOptions({ egress: { topic: { messages: bad } } }, false))
+				.toThrow(/egress\.topic\.messages must be a non-negative safe integer/);
+		});
+	}
+
+	it('refuses a tenant ceiling of the same shapes', () => {
+		expect(() => serializeWsOptions({ egress: { tenant: { deliveries: '100' } } }, false))
+			.toThrow(/egress\.tenant\.deliveries must be a non-negative safe integer/);
+	});
+
+	it('refuses a window below the floor and above the timer ceiling', () => {
+		expect(() => serializeWsOptions({ egress: { windowMs: 50 } }, false))
+			.toThrow(/egress\.windowMs must be a number >= 100/);
+		expect(() => serializeWsOptions({ egress: { windowMs: 2 ** 31 } }, false))
+			.toThrow(/no greater than 2147483647/);
+	});
+
+	it('refuses a tenantOf key in the section, naming the handler export', () => {
+		// A function cannot survive the JSON round trip into the build, so a
+		// resolver configured here would silently stand every tenant ceiling
+		// down. The refusal points at the carrier that works.
+		expect(() => serializeWsOptions({ egress: { tenantOf: () => 'acme' } }, false))
+			.toThrow(/egressTenantOf/);
+	});
+
+	it('accepts 0 as the documented deliberate disable', () => {
+		expect(() => serializeWsOptions({ egress: { windowMs: 1000, topic: { messages: 0, bytes: 0, deliveries: 0 } } }, false))
+			.not.toThrow();
+	});
+
+	it('refuses the same misshaped section on the dev plugin surface', () => {
+		expect(() => uws({ egress: { topic: { messages: '5' } } }))
+			.toThrow(/egress\.topic\.messages must be a non-negative safe integer/);
+	});
+
+	it('refuses the same misshaped section on the testing surface', async () => {
+		let server;
+		let thrown = null;
+		try {
+			server = await createTestServer({ egress: /** @type {any} */ ({ topic: { bytes: -1 } }) });
+		} catch (error) {
+			thrown = error;
+		} finally {
+			if (server) server.close();
+		}
+		expect(String(thrown)).toMatch(/egress\.topic\.bytes must be a non-negative safe integer/);
+	});
+
+	it('reports an unknown nested egress key as its dotted path', () => {
+		// Nested keys are reported by path (the top-level walk owns the
+		// closest-match suggestion); the point is that a typo'd ceiling is
+		// LOUD instead of a silently open ceiling.
+		expect(unknownWebsocketOptionKeys({ egress: { topic: { deliverys: 10 } } }))
+			.toEqual(['egress.topic.deliverys']);
 	});
 });

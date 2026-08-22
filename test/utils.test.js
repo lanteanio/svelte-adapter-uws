@@ -3047,10 +3047,21 @@ describe('computeTopPublishers', () => {
 	});
 
 	it('computes per-second rates from the window counters', () => {
+		const stats = new Map([['chat', { m: 10, b: 1000, d: 40 }]]);
+		const result = computeTopPublishers(stats, 1, noLimits);
+		expect(result.topPublishers).toEqual([
+			{ topic: 'chat', messagesPerSec: 10, bytesPerSec: 1000, deliveriesPerSec: 40 }
+		]);
+	});
+
+	it('reads a stats entry carrying no deliveries dimension as zero', () => {
+		// The dimension is ADDITIVE: an entry written before it existed (or by
+		// a lane that keeps no deliveries) still computes its two original
+		// rates, and reports 0 rather than NaN for the third.
 		const stats = new Map([['chat', { m: 10, b: 1000 }]]);
 		const result = computeTopPublishers(stats, 1, noLimits);
 		expect(result.topPublishers).toEqual([
-			{ topic: 'chat', messagesPerSec: 10, bytesPerSec: 1000 }
+			{ topic: 'chat', messagesPerSec: 10, bytesPerSec: 1000, deliveriesPerSec: 0 }
 		]);
 	});
 

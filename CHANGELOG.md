@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Existing manifest rows and changelog entry bodies are byte-identical; the restored headings and not-published markers are additive.
   - **Detail:** [Added engineering detail](#added).
 
+- **Added: publish-egress accounting and ceilings, the outbound half of a tenant budget.** Every publish-family fan-out is charged once as serialized wire bytes times local recipients, the new `websocket.egress` section sets per-window `topic` and `tenant` ceilings that refuse before anything is stamped, built, delivered, or relayed, and the always-on ledger reports through `platform.pressure.egress` and a refusal counter.
+  - **Affects:** Multi-tenant and fan-out-heavy deployments wanting an output budget; apps that configure nothing gain only the reporting slice.
+  - **Action:** None by default. To enforce, set `websocket.egress` ceilings; to tenant-scope server-side publishes, export `egressTenantOf(topic)` from the WebSocket handler module (the game lane charges the sender's `attribution` tenant id).
+  - **Requires:** No new dependency. `egressTenantOf` must be a pure synchronous resolver returning an id under the shared attribution rule or null; a defined non-function export refuses startup, and an invalid result charges the publish unattributed with one indexed `ADAPTER-ERR-EGRESS-TENANT-RESOLVER` line rather than misattributing it.
+  - **Compatibility:** Production, `createTestServer`, and the `uws()` dev plugin enforce through one shared account (dev reporting stays inert like dev pressure). Frames received over the cross-worker relay are charged once at their origin and are never refused. `topicPublishStats` and the publish-rate signals keep their existing meanings; the deliveries dimension is additive. `docs/tenancy.md` states the charge law the extensions bus must mirror for cross-instance multiplication.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Added: one trusted attribution contract, consumed by the bundled limiter surfaces.** The handler module may export `attribution(user)`, resolved once per connection at open over server-trusted userData, frozen, and readable via `attribution(ws)` from `svelte-adapter-uws/connection`; the ratelimit plugin consumes it and gains a `budget` option, message admission gains byte-weighted rates, and `docs/tenancy.md` contracts ownership per surface.
   - **Affects:** Multi-tenant deployments wanting tenant-scoped or tenant-shared limits; single-tenant apps that export none of it are untouched.
   - **Action:** None by default. To attribute, export `attribution(user)` returning `{ tenantId?, principalId?, entitlement? }` (each a string of `[a-zA-Z0-9_-]`, at most 64 chars) or null for unattributed.
@@ -214,6 +221,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   creep ceiling against a baseline taken under the same load. Exit 1 is a
   verdict failure and exit 2 is the lane failing to reach a verdict it trusts,
   which is not the same as a pass and is no longer reported as one.
+
+- **The egress charge: one shared point, one call per logical publish.**
+  `src/runtime/utils/egress-account.js` holds the windowed usage account
+  every surface runs (lazily rotated per-scope windows, no timer, no
+  allocation on the steady path), and
+  `src/runtime/handler/egress-budget.js` binds one account per worker to
+  the runtime's shared state. The five per-site publish-stats blocks in
+  `platform.js` collapse into `chargePublishEgress`, which now also bumps
+  the additive `d` (deliveries) field beside the unchanged `m`/`b` and the
+  window counters the pressure sampler drains into
+  `pressureSnapshot.egress`. Bytes are priced per lane: the JSON envelope's
+  measured length, the stateless codec's `0x03` frame (payload plus its
+  header, with the topic-id varint priced at one byte), the shared-cohort
+  split by the cohort's wire-id refcount, and the envelope for
+  recipient-specific stateful frames. The envelope's measurement is
+  `Buffer.byteLength` only while a `bytes` ceiling is armed: encoding length
+  is O(envelope) - measured at 29 ns for a 70-character envelope and 517 ns
+  for a 2 KB one - and only a bytes decision makes that walk load-bearing, so
+  a server with no bytes ceiling configured charges the character length
+  instead, the unit `topicPublishStats` has always used and identical for
+  ASCII. The admission decision runs BEFORE the sequence stamp so
+  a refusal cannot leave a client-visible seq gap; `messages`/`deliveries`
+  refuse the crossing publish, `bytes` refuses once the window's charge has
+  reached the ceiling, and `sendTo`/`adviseReconnect` split into a filter
+  pass and a send pass so the whole-set decision precedes the first frame
+  (`adviseReconnect` is operator-lane: charged to the worker window,
+  outside every ceiling). Refusals dedup their operational event per
+  (scope, topic) per minute through a FIFO-bounded table, exactly like the
+  runaway-publisher warn.
+
+- **The ceiling ledger bounds the keys live at once, and says so when it
+  cannot.** Ceilings are tracked per key, and each scope's ledger holds 4096 of
+  them. Keys arriving as the ledger approaches that bound reclaim windows that
+  have already lapsed, a little at a time, so the lapsed ones are gone before it
+  is full; a ceiling is given up only while the ledger is full anyway and
+  nothing in it has lapsed. So what fills the ledger is live
+  cardinality, not every topic the worker has ever published to, and a
+  population that fits inside the bound keeps every ceiling however close to the
+  bound it sits. Reclaiming only what a single bounded look happened to land on
+  is not enough: keys created together sit together and go idle together, so a
+  contiguous run of busy keys hid thousands of reclaimable windows just past it,
+  and a population of 3000 at-ceiling topics lost 426 of their windows over 30
+  windows where it now loses none. Past that, with more live keys than the
+  ledger holds, eviction takes the
+  key that has spent the least of its allowance across the current window and the
+  one before - measured as a fraction of the ceiling actually armed, since one
+  fan-out can exhaust a `deliveries` or `bytes` budget that a publish count reads
+  as identical to a one-shot topic. The victim comes from a bounded sample rather
+  than the whole ledger, so a group that went busy together can lose members
+  while quieter keys survive. Every eviction that costs enforcement increments
+  the new `egress_window_evicted_total{scope}` counter and feeds the
+  `AdapterEgressLedgerChurn` alert, because the symptom of a dropped window is
+  FEWER refusals, which is indistinguishable from traffic that simply fits.
+
+  It also emits `ADAPTER-ERR-EGRESS-EVICTED`, throttled to one line a minute per
+  scope, on all three surfaces. A counter alone was enough for production and
+  the harness and left the dev plugin with nothing at all: dev enforces the
+  ceilings live and registers no metrics, so a ledger past its bound quietly
+  stopped enforcing for evicted keys with no surface saying so - in the one
+  place where a ceiling is being trusted for the first time. The line is keyed
+  by scope rather than by key, because the condition is a fact about topic or
+  tenant CARDINALITY and naming the unlucky key would point at whichever one
+  happened to be seated next.
+
+- **Recipient counts come from the logical registry, not a native read.**
+  The egress charge needs the topic's local subscriber count on every
+  publish. `app.numSubscribers` is wrong for that twice over: it aborts the
+  process on an app whose WebSocket route was never registered - a state
+  imported-runtime harnesses legitimately hold - and the walk fan-outs
+  deliver by the logical `WS_SUBSCRIPTIONS` registry anyway. The
+  subscription accounting sink therefore carries the topic with every
+  exactly-once delta (`setSubscriptionAccountingHook(delta, topic)`), and
+  handler.js maintains `state.topicSubscriberCounts` beside
+  `counters.totalSubscriptions`. Reading the recipient count is new work on
+  a path that previously did none, so it was measured before it was chosen:
+  a 9-11 ns Map read per publish against the ~30 ns native count call the
+  same decision would otherwise cost. The
+  close path releases per topic instead of one summed delta so the
+  per-topic counts settle with the total; entries leave the map at zero.
+  An excluded socket discounts the count only when it actually holds the
+  topic, and `publishGame` deducts its sender on the same rule.
 
 - **The attribution contract: one resolver, one frozen per-connection
   answer, one accessor.** `src/runtime/utils/attribution.js` validates the

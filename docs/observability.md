@@ -112,6 +112,8 @@ attests the family; a required unsampled gauge makes the snapshot incomplete.
 | `ws_backpressure_connections` | gauge | count | worker | sum | operational | `last_sample` | `incomplete_until_sampled` | - | - | - |
 | `ws_dropped_frames_total` | counter | count | worker | sum | operational | `registry_zero` | `zero_when_complete` | - | - | - |
 | `ws_dropped_bytes_total` | counter | bytes | worker | sum | operational | `registry_zero` | `zero_when_complete` | - | - | - |
+| `egress_refused_total` | counter | count | worker | sum | operational | `registry_zero` | `zero_when_complete` | scope=topic/tenant | - | - |
+| `egress_window_evicted_total` | counter | count | worker | sum | operational | `registry_zero` | `zero_when_complete` | scope=topic/tenant | - | - |
 | `pressure_saturation` | gauge | ratio | worker | max | operational | `last_sample` | `incomplete_until_sampled` | - | - | - |
 | `pressure_reason` | gauge | enum | worker | max | operational | `last_sample` | `incomplete_until_sampled` | - | - | NONE=0; SUBSCRIBERS=1; PUBLISH_RATE=2; PSI=3; CPU_QUOTA=4; CAPACITY=5; MEMORY=6 |
 | `pressure_reason_transitions_total` | counter | count | worker | sum | operational | `registry_zero` | `zero_when_complete` | from=NONE/SUBSCRIBERS/PUBLISH_RATE/PSI/CPU_QUOTA/CAPACITY/MEMORY; to=NONE/SUBSCRIBERS/PUBLISH_RATE/PSI/CPU_QUOTA/CAPACITY/MEMORY | - | - |

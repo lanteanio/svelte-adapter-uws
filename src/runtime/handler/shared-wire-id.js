@@ -31,7 +31,7 @@ export const SHARED_WIRE_ID_BASE = 0x100000000; // 2^32
  * a cohort refcount. The real handler uses ONE process/worker-global instance (a
  * client only ever talks to its home worker); the in-process test harness creates one
  * PER server so two test servers never co-mingle ids or refcounts.
- * @returns {{ acquire(topic: string): number, release(topic: string): void, get(topic: string): (number | undefined), reset(): void }}
+ * @returns {{ acquire(topic: string): number, release(topic: string): void, get(topic: string): (number | undefined), refs(topic: string): number, reset(): void }}
  */
 export function createSharedWireIdTable() {
 	/** @type {Map<string, { id: number, refs: number }>} */
@@ -54,6 +54,10 @@ export function createSharedWireIdTable() {
 		get(topic) {
 			const entry = byTopic.get(topic);
 			return entry === undefined ? undefined : entry.id;
+		},
+		refs(topic) {
+			const entry = byTopic.get(topic);
+			return entry === undefined ? 0 : entry.refs;
 		},
 		reset() { byTopic.clear(); nextId = SHARED_WIRE_ID_BASE; }
 	};
@@ -83,5 +87,13 @@ export const releaseSharedWireId = _default.release;
  * @returns {number | undefined}
  */
 export const getSharedWireId = _default.get;
+/**
+ * Live binary-cohort membership count for a shared topic on this worker (its
+ * wire-id refcount), or 0 with no live cohort. The egress charge prices the
+ * cohort split with this instead of a native subscriber read.
+ * @param {string} topic
+ * @returns {number}
+ */
+export const sharedWireIdRefs = _default.refs;
 /** Test seam: clear the default table and reset its allocator. @internal */
 export const _resetSharedWireIds = _default.reset;

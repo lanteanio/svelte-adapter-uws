@@ -223,6 +223,16 @@ tests:
         # evaluation boundary - the pinned evaluator reports that as not yet
         # firing. The positive case therefore evaluates at 21m with slack.
         values: '0+120x25'
+      - series: 'egress_window_evicted_total{adapter="svelte-adapter-uws",job="websocket",instance="ledger",scope="topic"}'
+        # Same 25-sample reason as the churn series above: the rate() window
+        # has to fill before the for: 15m clock can complete inside the run.
+        values: '0+120x25'
+      - series: 'egress_window_evicted_total{adapter="svelte-adapter-uws",job="websocket",instance="quiet",scope="topic"}'
+        # An IN-SCOPE target evicting steadily but below the threshold (0.5/s
+        # against > 1). The expectation below names only the `ledger` instance,
+        # so this is what proves the threshold discriminates rather than the
+        # adapter label doing all the work.
+        values: '0+30x25'
       - series: 'waiting_room_queue_depth{adapter="svelte-adapter-uws",job="websocket",instance="room"}'
         values: '25+0x20'
     alert_rule_test:
@@ -344,6 +354,19 @@ tests:
               summary: Rate-limit maps are churning at their cap
               description: Rotating client identities are filling a limiter faster than the sweep reclaims it.
               runbook_url: https://ops.example.com/adapter#adapterratemapchurn
+      - eval_time: 21m
+        alertname: AdapterEgressLedgerChurn
+        exp_alerts:
+          - exp_labels:
+              adapter: svelte-adapter-uws
+              instance: ledger
+              job: websocket
+              scope: topic
+              severity: warning
+            exp_annotations:
+              summary: Egress ceilings are being dropped at the ledger cap
+              description: Live topic or tenant cardinality exceeds the egress ledger, so some ceilings stopped enforcing.
+              runbook_url: https://ops.example.com/adapter#adapteregressledgerchurn
       - eval_time: 20m
         alertname: AdapterWaitingRoomBacklog
         exp_alerts:
@@ -588,6 +611,8 @@ tests:
         values: '50+0x20'
       - series: 'upgrade_rate_map_evicted_total{adapter="another-service",job="foreign",instance="one",door="upgrade"}'
         values: '0+120x20'
+      - series: 'egress_window_evicted_total{adapter="another-service",job="foreign",instance="one",scope="topic"}'
+        values: '0+120x20'
       - series: 'waiting_room_queue_depth{adapter="another-service",job="foreign",instance="one"}'
         values: '25+0x20'
       - series: 'upgrade_admitted_total{adapter="another-service",job="foreign",instance="one"}'
@@ -683,6 +708,9 @@ tests:
         exp_alerts: []
       - eval_time: 20m
         alertname: AdapterRateMapChurn
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AdapterEgressLedgerChurn
         exp_alerts: []
       - eval_time: 20m
         alertname: AdapterWaitingRoomBacklog

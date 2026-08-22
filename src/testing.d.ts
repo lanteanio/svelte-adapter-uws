@@ -2,6 +2,7 @@ import type { WebSocket } from 'uWebSockets.js';
 import type {
 	MetricsRegistry,
 	MessageAdmissionOptions,
+	EgressOptions,
 	Platform,
 	WaitingRoomRenderer,
 	WebSocketHandler,
@@ -101,6 +102,18 @@ export interface TestServerOptions {
 	/** Established-message admission, identical to `WebSocketOptions.messageAdmission`. */
 	messageAdmission?: MessageAdmissionOptions;
 	/**
+	 * Publish-egress ceilings, identical to `WebSocketOptions.egress` and
+	 * enforced by the same shared account: every fan-out mirror charges
+	 * serialized wire bytes times local recipients, refusals are pre-hoc
+	 * (the publish returns its refusal shape and delivers nothing), relayed
+	 * frames are never refused, and the tenant resolver is the handler's
+	 * `egressTenantOf` export exactly as in production. Refusals increment
+	 * `egress_refused_total{scope}` on a configured `metrics` registry, and
+	 * `platform.pressure.egress` carries LIVE CUMULATIVE totals (this
+	 * harness runs no sampler window).
+	 */
+	egress?: EgressOptions;
+	/**
 	 * Protection posture, mirroring the production handler's `protection`
 	 * option: `'elevated'`/`'siege'` pin a level (siege refuses every new
 	 * upgrade), `'auto'` resolves from the gate. A running server can be
@@ -121,7 +134,11 @@ export interface TestServerOptions {
 	 * `bad_origin` and `auth_timeout` reasons are production-only - the
 	 * harness runs no pressure sampler, no per-IP limiter, no origin
 	 * check, and no upgrade timeout. Established-message sheds emit
-	 * `ws_message_admission_rejected_total{reason,scope}` exactly as production.
+	 * `ws_message_admission_rejected_total{reason,scope}` exactly as
+	 * production, and egress-ceiling refusals emit
+	 * `egress_refused_total{scope}` exactly as production, alongside
+	 * `egress_window_evicted_total{scope}` when the egress ledger drops a live
+	 * usage window at its key cap.
 	 */
 	metrics?: MetricsRegistry;
 	/**

@@ -281,6 +281,24 @@ groups:
             Rotating client identities are filling a limiter faster than the sweep reclaims it.
           runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapterratemapchurn'
 
+      # The egress ledger gave up windows that were still counting, so those
+      # topics or tenants stopped being held to their ceilings. Unlike a
+      # refusal, which is the budget working, this is the budget quietly
+      # stopping - and its symptom is FEWER refusals, so nothing else on this
+      # page would show it. Same shape as the rate-map churn above because it is
+      # the same condition one layer down: keys arriving faster than the cap can
+      # hold them.
+      - alert: AdapterEgressLedgerChurn
+        expr: rate(egress_window_evicted_total{adapter="svelte-adapter-uws"}[10m]) > 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Egress ceilings are being dropped at the ledger cap
+          description: >-
+            Live topic or tenant cardinality exceeds the egress ledger, so some ceilings stopped enforcing.
+          runbook_url: '{{ $externalLabels.adapter_runbook_url }}#adapteregressledgerchurn'
+
       # Above zero, not `> 0`: one client stuck in a retry loop can hold a
       # depth of 1 forever without an incident. Ten waiting clients sustained
       # for fifteen minutes means the gate is closed against real demand; tune

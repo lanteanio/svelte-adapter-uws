@@ -281,10 +281,15 @@ export function createPosture(cfg) {
  * Pure: no I/O, no globals, does not mutate the input. The caller is
  * responsible for clearing the source map after sampling.
  *
- * @param {Map<string, { m: number, b: number }>} stats
+ * `deliveriesPerSec` is additive: entries whose stats never carried the
+ * egress deliveries dimension read `0`, `messagesPerSec` and `bytesPerSec`
+ * keep their meanings, and no threshold reads the new dimension - the
+ * over-threshold set is exactly what it was.
+ *
+ * @param {Map<string, { m: number, b: number, d?: number }>} stats
  * @param {number} intervalSec
  * @param {{ topicPublishRatePerSec: number | false, topicPublishBytesPerSec: number | false }} thresholds
- * @returns {{ topPublishers: { topic: string, messagesPerSec: number, bytesPerSec: number }[], overThreshold: { topic: string, messagesPerSec: number, bytesPerSec: number }[] }}
+ * @returns {{ topPublishers: { topic: string, messagesPerSec: number, bytesPerSec: number, deliveriesPerSec: number }[], overThreshold: { topic: string, messagesPerSec: number, bytesPerSec: number, deliveriesPerSec: number }[] }}
  */
 export function computeTopPublishers(stats, intervalSec, thresholds) {
 	const topicRates = [];
@@ -294,7 +299,8 @@ export function computeTopPublishers(stats, intervalSec, thresholds) {
 	for (const [topic, s] of stats) {
 		const messagesPerSec = intervalSec > 0 ? s.m / intervalSec : 0;
 		const bytesPerSec = intervalSec > 0 ? s.b / intervalSec : 0;
-		const entry = { topic, messagesPerSec, bytesPerSec };
+		const deliveriesPerSec = intervalSec > 0 && typeof s.d === 'number' ? s.d / intervalSec : 0;
+		const entry = { topic, messagesPerSec, bytesPerSec, deliveriesPerSec };
 		topicRates.push(entry);
 		const tooManyMsg = msgThreshold !== false && messagesPerSec >= msgThreshold;
 		const tooManyBytes = byteThreshold !== false && bytesPerSec >= byteThreshold;

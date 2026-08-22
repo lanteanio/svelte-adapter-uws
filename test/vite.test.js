@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 
 describe('vite plugin', () => {
 	describe('module loading', () => {
@@ -226,6 +227,43 @@ describe('vite plugin', () => {
 
 			// handleHotUpdate should not throw when called without a resolved handler
 			plugin.handleHotUpdate({ server: { ssrLoadModule: vi.fn() } });
+		});
+
+		it('compares every per-connection export it installs', async () => {
+			// An export applyHandlers installs but handleHotUpdate never
+			// compares keeps serving its stale version after an edit that
+			// touches only that export - the reload is skipped entirely,
+			// because every other reference still matches. The behavioural
+			// half of this rule lives in test/egress-dev.test.js; this case
+			// holds it for every export at once, including ones added later.
+			const source = await readFile(new URL('../src/vite.js', import.meta.url), 'utf8');
+			const start = source.indexOf('function applyHandlers(mod)');
+			expect(start, 'applyHandlers must stay findable by name').toBeGreaterThan(-1);
+			const body = source.slice(start, source.indexOf('\n\t}', start));
+			// The backreference matters: `egressTenantOf: mod.egressTenant`
+			// would otherwise extract a name that the comparison list appears
+			// to cover while the installed value came from somewhere else.
+			const installed = [...body.matchAll(/(\w+): mod\.(\w+)/g)]
+				.filter((m) => m[1] === m[2])
+				.map((m) => m[1]);
+			expect(installed.length, 'the installed-export extraction must not read empty').toBeGreaterThan(10);
+
+			// Scoped to handleHotUpdate's own body: the same comparison written
+			// in any other function would satisfy a whole-file scan while the
+			// reload decision still never saw it.
+			const hotStart = source.indexOf('handleHotUpdate({ server })');
+			expect(hotStart, 'handleHotUpdate must stay findable by name').toBeGreaterThan(-1);
+			const hotBody = source.slice(hotStart, source.indexOf('\n\t\t}', hotStart));
+			const compared = new Set(
+				[...hotBody.matchAll(/mod\.(\w+) !== userHandlers\.\1/g)].map((m) => m[1])
+			);
+			expect(compared.size, 'the comparison-list extraction must not read empty').toBeGreaterThan(5);
+			// init and shutdown are deliberately outside the comparison: they
+			// fire once per process, so reinstalling them mid-session would
+			// not re-run them.
+			const lifecycleOnly = new Set(['init', 'shutdown']);
+			const uncompared = installed.filter((key) => !compared.has(key) && !lifecycleOnly.has(key));
+			expect(uncompared).toEqual([]);
 		});
 	});
 

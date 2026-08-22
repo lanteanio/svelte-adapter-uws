@@ -382,6 +382,96 @@ export function assertPressureSection(bag, key = 'pressure', surface = `websocke
 }
 
 /**
+ * The documented keys of the `egress` section and its two scope sub-sections.
+ * The adapter's nested unknown-key walk (`KNOWN_NESTED_WEBSOCKET_OPTION_KEYS`
+ * in src/index.js) reads these same sets, so the unknown-key warning and the
+ * value guard below can never recognize different keys.
+ */
+export const KNOWN_EGRESS_OPTION_KEYS = new Set(['windowMs', 'topic', 'tenant']);
+export const KNOWN_EGRESS_CEILING_KEYS = new Set(['messages', 'bytes', 'deliveries']);
+
+/**
+ * Validate the publish-egress section: its shape, its window, and its six
+ * ceilings.
+ *
+ * Each ceiling is read as `value > 0`, so a misshaped value does not fall back
+ * to a default - it leaves that ceiling open in silence, the same inversion
+ * every other guard here exists for. `0` is each ceiling's documented
+ * deliberate disable, so it stays legal. The window takes the same floor and
+ * timer ceiling as the pressure cadence: a window below 100 ms would rotate
+ * the usage ledger faster than anything can meaningfully accumulate in it, and
+ * a value above the 32-bit timer bound is refused on the shared vocabulary
+ * even though the ledger rotates lazily rather than on a timer.
+ *
+ * `tenantOf` is refused HERE, by name: the section survives a JSON round trip
+ * into the build, so a function configured on it would be silently dropped and
+ * every tenant-scoped ceiling would silently enforce nothing. The resolver is
+ * a handler-module export (`egressTenantOf`), the same carrier as
+ * `attribution`, which reaches the runtime on every surface.
+ *
+ * @param {Record<string, any> | null | undefined} bag - the options object
+ * @param {string} [key] - the option being read
+ * @param {string} [surface] - how the user names the option, for the message
+ * @returns {void}
+ * @throws {Error} when the section or a value in it cannot be honored
+ */
+export function assertEgressSection(bag, key = 'egress', surface = `websocket.${key}`) {
+	const egress = bag?.[key];
+	if (egress === undefined || egress === null) return;
+	if (!egress || typeof egress !== 'object' || Array.isArray(egress)) {
+		throw new Error(
+			`${surface} must be an object of publish-egress ceilings (or omitted) - got ` +
+			`${describeValue(egress)} (${typeof egress}). The ledger reads its window and ceilings ` +
+			`off the section object, so no other value can configure it; omit the option to leave ` +
+			`every ceiling disabled deliberately.`
+		);
+	}
+	if ('tenantOf' in egress) {
+		throw new Error(
+			`${surface}.tenantOf cannot be configured here: the section survives a JSON round trip ` +
+			`into the build, so a function would be silently dropped and every tenant ceiling would ` +
+			`silently enforce nothing. Export egressTenantOf(topic) from the WebSocket handler ` +
+			`module instead (the same carrier as the attribution export).`
+		);
+	}
+	const windowMs = egress.windowMs;
+	if (windowMs !== undefined && windowMs !== null) {
+		if (typeof windowMs !== 'number' || !Number.isFinite(windowMs) || windowMs < 100) {
+			throw new Error(
+				`${surface}.windowMs must be a number >= 100 (milliseconds per accounting window) - ` +
+				`got ${describeValue(windowMs)} (${typeof windowMs}). A misshaped window would be ` +
+				`silently replaced by the 1000 ms default, so the cadence that was configured would ` +
+				`never apply.`
+			);
+		}
+		if (windowMs > MAX_TIMER_INTERVAL_MS) throwTimerOverflow(`${surface}.windowMs`, windowMs);
+	}
+	for (const scope of ['topic', 'tenant']) {
+		const section = egress[scope];
+		if (section === undefined || section === null) continue;
+		if (typeof section !== 'object' || Array.isArray(section)) {
+			throw new Error(
+				`${surface}.${scope} must be an object of ceilings ` +
+				`({ messages?, bytes?, deliveries? }) - got ${describeValue(section)} ` +
+				`(${typeof section}). Any other value leaves every ${scope} ceiling silently unset.`
+			);
+		}
+		for (const ceiling of KNOWN_EGRESS_CEILING_KEYS) {
+			const value = section[ceiling];
+			if (value === undefined || value === null) continue;
+			if (!Number.isSafeInteger(value) || value < 0) {
+				throw new Error(
+					`${surface}.${scope}.${ceiling} must be a non-negative safe integer per window ` +
+					`(0 disables this ceiling deliberately) - got ${describeValue(value)} ` +
+					`(${typeof value}). Every comparison against any other value is false, so the ` +
+					`ceiling would be silently disabled rather than sized.`
+				);
+			}
+		}
+	}
+}
+
+/**
  * Validate the upgrade-admission section and its four ceilings.
  *
  * Each ceiling is read as `value > 0`, so a misshaped value does not fall
@@ -462,6 +552,7 @@ export function assertSharedOptionValues(bag, surfaceFor) {
 	assertIntervalMs(bag, 'resourceGrowthAuditIntervalMs', surfaceFor('resourceGrowthAuditIntervalMs'));
 	assertPressureSection(bag, 'pressure', surfaceFor('pressure'));
 	assertUpgradeAdmissionCeilings(bag, 'upgradeAdmission', surfaceFor('upgradeAdmission'));
+	assertEgressSection(bag, 'egress', surfaceFor('egress'));
 }
 
 /**
