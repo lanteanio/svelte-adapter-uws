@@ -1,8 +1,9 @@
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders } from './runtime/utils/request-headers.js';
-import { stampSeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
+import { stampSeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, mirrorRegistry, readMetricMirror, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createSeqBound } from './runtime/utils/seq-bound.js';
+import { mergeSamples } from './runtime/utils/metrics-merge.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
@@ -414,38 +415,45 @@ export async function createTestServer(options = {}) {
 	// branches this harness mirrors (same names, same reasons). Queue gauges are
 	// event-driven here; the other sampled gauges and per-IP/origin reasons are
 	// production-only because the harness runs no pressure sampler or limiters.
-	const mUpgradeAdmittedT = containMetricInstrument(metrics?.counter('upgrade_admitted_total', 'WebSocket upgrades accepted'));
-	const mUpgradeRejectedT = containMetricInstrument(metrics?.counter('upgrade_rejected_total', 'WebSocket upgrades rejected before open', ['reason']));
-	const mUpgradeDeferredRejectedT = containMetricInstrument(metrics?.counter(
+	// Every instrument is created through the MIRROR, not the supplied
+	// registry directly - the same thing the production handler does. The
+	// mirror forwards each call on to the caller's registry unchanged, so a
+	// test that reads its own registry sees exactly what it saw before; what
+	// it adds is a local document for `platform.metricsSnapshot()` to merge.
+	// Without it a collection here reads an empty mirror and reports nothing.
+	const METRICS_T = mirrorRegistry(metrics);
+	const mUpgradeAdmittedT = containMetricInstrument(METRICS_T?.counter('upgrade_admitted_total', 'WebSocket upgrades accepted'));
+	const mUpgradeRejectedT = containMetricInstrument(METRICS_T?.counter('upgrade_rejected_total', 'WebSocket upgrades rejected before open', ['reason']));
+	const mUpgradeDeferredRejectedT = containMetricInstrument(METRICS_T?.counter(
 		'upgrade_deferred_rejected_total',
 		'Upgrade callbacks shed because the bounded deferral queue was full'
 	));
-	const mMessageAdmissionRejectedT = containMetricInstrument(metrics?.counter(
+	const mMessageAdmissionRejectedT = containMetricInstrument(METRICS_T?.counter(
 		'ws_message_admission_rejected_total',
 		'Application WebSocket messages shed by established-message admission',
 		['reason', 'scope']
 	));
-	const mEgressRefusedT = containMetricInstrument(metrics?.counter(
+	const mEgressRefusedT = containMetricInstrument(METRICS_T?.counter(
 		'egress_refused_total',
 		'Publishes refused by a configured egress ceiling; nothing was delivered or relayed for them',
 		['scope']
 	));
-	const mEgressEvictedT = containMetricInstrument(metrics?.counter(
+	const mEgressEvictedT = containMetricInstrument(METRICS_T?.counter(
 		'egress_window_evicted_total',
 		'Live usage windows evicted at the ledger cap; each one stops enforcing its ceiling for the rest of its window',
 		['scope']
 	));
 	const gConnectionHeadroomT = admission.maxConnections > 0
-		? containMetricInstrument(metrics?.gauge(
+		? containMetricInstrument(METRICS_T?.gauge(
 			'ws_connection_headroom',
 			'Remaining reserved-or-live WebSocket connection permits'
 		))
 		: undefined;
 	gConnectionHeadroomT?.set(admission.connectionHeadroom);
-	const gUpgradeDeferredDepthT = containMetricInstrument(metrics?.gauge(
+	const gUpgradeDeferredDepthT = containMetricInstrument(METRICS_T?.gauge(
 		'upgrade_deferred_depth', 'Upgrade callbacks waiting in the bounded pacing queue'
 	));
-	const gUpgradeDeferredOldestAgeT = containMetricInstrument(metrics?.gauge(
+	const gUpgradeDeferredOldestAgeT = containMetricInstrument(METRICS_T?.gauge(
 		'upgrade_deferred_oldest_age_seconds',
 		'Age of the oldest callback in the bounded upgrade pacing queue'
 	));
@@ -2098,6 +2106,43 @@ export async function createTestServer(options = {}) {
 		 */
 		get protection() {
 			return postureLevelT();
+		},
+		/**
+		 * The metrics registry this server was handed, or `null`. Mirrors the
+		 * production getter, which returns the registry the build resolved.
+		 *
+		 * The harness always accepted a registry as an INPUT and registered its
+		 * own instruments against it; what it did not do was hand it back. So an
+		 * app route doing the documented thing - a `/metrics` endpoint reading
+		 * `platform.metrics` - found the member absent here and had to be tested
+		 * against a different surface than the one it runs on, which is the one
+		 * place that route cannot be exercised.
+		 */
+		get metrics() {
+			return metrics ?? null;
+		},
+		/**
+		 * The merged metrics document, as production's single-process path
+		 * produces it.
+		 *
+		 * There are no worker threads to collect from here, so this is always
+		 * the local report - which is exactly what production answers when it
+		 * runs single-process, so the SHAPE a route parses does not depend on
+		 * the deployment mode. `null` when no registry was supplied, the same
+		 * answer production gives when `metrics` is unset.
+		 *
+		 * Built from the mirror rather than by asking the caller's registry to
+		 * serialize: a registry is only required to accept instrument calls, and
+		 * the documented shape does not oblige it to render anything back.
+		 *
+		 * @returns {Promise<string | null>}
+		 */
+		metricsSnapshot() {
+			if (metrics == null) return Promise.resolve(null);
+			return Promise.resolve(mergeSamples(
+				[{ worker: 0, samples: readMetricMirror() }],
+				{ expected: 1, degraded: false }
+			));
 		},
 		/**
 		 * Minimal pressure snapshot mirroring production's shape. This

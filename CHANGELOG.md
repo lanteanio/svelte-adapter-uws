@@ -423,6 +423,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`platform.metrics` and `platform.metricsSnapshot()` answer in dev too.**
+  Both returned `null` unconditionally under `vite dev`, on the reasoning that
+  dev has no build step and therefore no registry. `websocket.metrics` is a
+  build-time OPTION rather than a build artifact, and the plugin already
+  resolves the handler from the same adapter config through the same Vite
+  resolver - so the registry is now loaded the same way, picked by the same
+  `default` / `metrics` / `registry` rule the SSR entry uses, and handed back
+  from the getter. `metricsSnapshot()` answers a real single-worker document
+  built from the mirror, exactly as `createTestServer` does, and still `null`
+  when no metrics module is named, which is what production answers then.
+  The one route the README leads with - a `/metrics` endpoint reading
+  `platform.metrics` - could previously be developed only against a production
+  build.
+  - **Affects:** Apps that name `websocket.metrics` and read either member
+    under `vite dev`; every other dev run is unchanged.
+  - **Action:** None. A route that branched on `null` in dev keeps working.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Dev still registers no ADAPTER instruments - its
+    ceilings enforce live and report through events rather than counters - so
+    the dev document carries the app's own registrations and no adapter series.
+    That is unchanged and is what the operator notes elsewhere describe. A
+    metrics module that cannot be loaded, or whose selected export is a
+    primitive, prints the indexed `ADAPTER-ERR-METRICS-MODULE-SHAPE` line and
+    leaves dev serving rather than refusing to start.
+  - **Detail:** [Changed engineering detail](#changed).
+
 - **Presence `heartbeat: 0` states its cost, and warns once when it is set.**
   The option read as a bandwidth choice: turn off the periodic full-roster
   broadcast for apps that do not use the client's `maxAge` sweep. It is also

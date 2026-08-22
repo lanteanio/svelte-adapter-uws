@@ -17,6 +17,8 @@ import {
 import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './runtime/handler/cluster-sequence-policy.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { normalizeEgressOptions, createEgressAccount, envelopeWireBytes, EGRESS_ADMITTED } from './runtime/utils/egress-account.js';
+import { readMetricMirror } from './runtime/utils/metrics.js';
+import { mergeSamples } from './runtime/utils/metrics-merge.js';
 import { privateValueMetadata } from './runtime/utils/observability-privacy.js';
 import { installAttribution } from './runtime/utils/attribution.js';
 import { snapshotUpgradeHeaders } from './runtime/utils/upgrade-headers.js';
@@ -985,23 +987,41 @@ export default function uws(options = {}) {
 			return 'normal';
 		},
 		get metrics() {
-			// `websocket.metrics` is a build-time module path resolved by the
-			// adapter build; dev mode runs the source directly with no such build
-			// step, so there is no registry to expose. Always `null` in dev,
-			// mirroring the production getter's surface (which is `null` when
-			// `metrics` is unset).
-			return null;
+			// The app's own registry, loaded from the adapter's
+			// `websocket.metrics` through Vite's resolver - the same module the
+			// SSR build bundles, picked by the same `default` / `metrics` /
+			// `registry` rule. Null when the option is unset, which is exactly
+			// what production answers then.
+			//
+			// It used to be null unconditionally, on the reasoning that dev has
+			// no build step and therefore no registry. The path is a build-time
+			// OPTION, not a build-time artifact: dev already resolves the
+			// handler the same way, and an app that cannot reach its registry
+			// under `vite dev` cannot develop the scrape route that reads it.
+			return devMetricsRegistry;
 		},
 		/**
-		 * Mirrors the production `metricsSnapshot()`. Dev has no registry to
-		 * collect and no worker threads to collect from, so it resolves to
-		 * `null` - the same answer production gives when `metrics` is unset,
-		 * which is what a scrape route written against dev will already handle.
+		 * Mirrors the production `metricsSnapshot()`, including its shape when
+		 * there is nothing to report.
+		 *
+		 * Null when no `websocket.metrics` module is configured - production's
+		 * answer for the same case. With one configured, a real single-worker
+		 * document, merged from the adapter's mirror exactly as the
+		 * `createTestServer` harness does it. Dev registers no adapter
+		 * instruments (its ceilings enforce live and report through events
+		 * instead), so that document carries the app's own registrations and no
+		 * adapter series - which is the truthful statement about dev rather than
+		 * a placeholder. A scrape route can be developed against it; a null
+		 * could only be handled around.
 		 *
 		 * @returns {Promise<string | null>}
 		 */
 		metricsSnapshot() {
-			return Promise.resolve(null);
+			if (devMetricsRegistry == null) return Promise.resolve(null);
+			return Promise.resolve(mergeSamples(
+				[{ worker: 0, samples: readMetricMirror() }],
+				{ expected: 1, degraded: false }
+			));
 		},
 		onPressure(_cb) { return () => {}; },
 		onPublishRate(_cb) { return () => {}; },
@@ -1344,6 +1364,14 @@ export default function uws(options = {}) {
 
 	/** @type {string | null} Resolved absolute path of the WS handler file */
 	let resolvedHandlerPath = null;
+	/**
+	 * The registry the adapter's `websocket.metrics` module exports, loaded in
+	 * dev through the same resolver the SSR build uses so the object an app
+	 * reaches in `vite dev` is the object its build will bundle. Null when the
+	 * option is unset, which is production's answer too.
+	 * @type {any}
+	 */
+	let devMetricsRegistry = null;
 
 	/** True when a handler file was found but failed to load - reject upgrades */
 	let handlerFailed = false;
@@ -1924,7 +1952,31 @@ export default function uws(options = {}) {
 			// authorization hooks and ship another. A misconfiguration throws here
 			// and aborts dev startup, which is the point: it is the same error the
 			// build raises, surfaced at the earliest moment an app can see it.
-			const resolvedHandler = await discoverHandler(root, server.config);
+			const adapterOption = await adapterHandlerOption(root, server.config);
+			const resolvedHandler = await discoverHandler(root, server.config, adapterOption);
+
+			// The metrics registry, on the same mechanism as the handler and for
+			// the same reason: an option named on the adapter must mean the same
+			// thing in dev as it does in the build. Failures here are contained -
+			// a broken metrics module must not stop a dev server from serving -
+			// and reported through the same indexed line the build path uses.
+			if (adapterOption.metrics) {
+				const metricsPath = path.resolve(adapterOption.metrics);
+				try {
+					const ns = await server.ssrLoadModule(metricsPath);
+					const picked = ns.default ?? ns.metrics ?? ns.registry ?? null;
+					if (picked !== null && typeof picked !== 'object' && typeof picked !== 'function') {
+						console.error(adapterConsoleLine(
+							ADAPTER_ERROR_IDS.METRICS_MODULE_SHAPE,
+							` got ${typeof picked} from ${JSON.stringify(adapterOption.metrics)}`
+						));
+					} else {
+						devMetricsRegistry = picked;
+					}
+				} catch (err) {
+					console.error('[adapter-uws] metrics module load error detail:', err);
+				}
+			}
 
 			handlerReady = (async () => {
 				if (!resolvedHandler) return;

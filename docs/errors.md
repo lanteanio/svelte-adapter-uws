@@ -897,11 +897,11 @@ searchable log prefix is:
 - **Code/event:** `ws.metrics.module-shape`
 - **Message prefix:** `[ws] the metrics module must export a registry object as `default`, `metrics` or `registry`; got `
 - **Cause:** The export the build SELECTED from the module named by `websocket.metrics` cannot carry instrument factories. This is a statement about that one value, not about the module: the build takes the first of `default`, `metrics` and `registry` that is not nullish and forwards it without validating its shape, so a module carrying a perfectly good `metrics` registry prints this line whenever a primitive `default` sits in front of it.
-- **Consequence:** Metrics are disabled for the whole worker: no instrument is ever created, so the adapter series are ABSENT from the scrape rather than present at zero. Dashboards read as no data and alerts that fire on a threshold never fire at all.
+- **Consequence:** In the built runtime, metrics are disabled for the whole worker: no instrument is ever created, so the adapter series are ABSENT from the scrape rather than present at zero. Dashboards read as no data and alerts that fire on a threshold never fire at all. On the dev plugin the shape is the same and the loss is smaller, because dev registers no adapter instruments in any case: `platform.metrics` stays null and `metricsSnapshot()` answers null, so a scrape route being developed against dev reads as though no registry were configured at all. Dev keeps serving either way - a metrics module is not worth a dev server.
 - **Automatic recovery:** None. The runtime keeps serving traffic with metrics off - the alternative is a boot failure naming neither metrics nor the option that caused it.
 - **Next action:** The guard accepts any object or function, so what printed this is a PRIMITIVE - the `got` value on the line says which type. Export the registry itself under any one of the three names the build reads, which it tries in order: `default`, then `metrics`, then `registry`. The first one that is not nullish wins, so a primitive `default` masks a perfectly good named `metrics` beside it and is worth ruling out first. Note the two shapes that pass this guard and still do not work: a module exporting none of those three names is treated as no registry configured and prints nothing at all, and a factory is accepted as-is and never called.
 - **Runtime help:** `docs/errors.md#adapter-err-metrics-module-shape`
-- **Runtime sources:** [src/runtime/utils/metrics.js](../src/runtime/utils/metrics.js)
+- **Runtime sources:** [src/runtime/utils/metrics.js](../src/runtime/utils/metrics.js), [src/vite.js](../src/vite.js)
 
 <a id="adapter-err-metrics-instrument"></a>
 ## `ADAPTER-ERR-METRICS-INSTRUMENT`
