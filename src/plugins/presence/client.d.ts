@@ -13,6 +13,12 @@ import type { Readable } from 'svelte/store';
  * heartbeat (no flicker). Pass `maxAge: 0` to opt out of the sweep for
  * admin / audit views that want unbounded retention.
  *
+ * The sweep and the server heartbeat are one mechanism split across the two
+ * sides, so they are set together. A server running `heartbeat: 0` refreshes
+ * nothing, and a client still sweeping on the default window empties its
+ * roster about 135 s after the last diff even though every user is still
+ * connected. Against such a server, `maxAge: 0` is the matching half.
+ *
  * You must also subscribe to the topic itself (via `on()`, `crud()`, etc.)
  * for the server's `subscribe` hook to fire and register your presence.
  *

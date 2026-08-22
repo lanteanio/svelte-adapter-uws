@@ -59,8 +59,17 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	 *
 	 * Set this to a value shorter than the client's `maxAge`. The 30 s
 	 * default fits the 90 s default client `maxAge` with a 3x safety
-	 * margin. Pass `0` to disable heartbeats entirely (apps that do not
-	 * use the `maxAge` self-healing path).
+	 * margin.
+	 *
+	 * Pass `0` to disable heartbeats entirely. That is not only a traffic
+	 * decision: presence diffs carry no sequence, so the heartbeat is the
+	 * only thing that re-establishes a roster mid-session. With `0`, a
+	 * missed `join` or `leave` diverges silently until the client rejoins,
+	 * and a client still running the default `maxAge` sweep empties its
+	 * roster roughly 135 s after the last diff even when nothing was
+	 * dropped - the sweep has no counterpart that restores an entry. The
+	 * opt-out is complete only when clients also pass `maxAge: 0`;
+	 * `createPresence` warns once per process when it sees `heartbeat: 0`.
 	 *
 	 * @default 30000
 	 *
@@ -72,8 +81,10 @@ export interface PresenceOptions<UserData = unknown, Selected extends Record<str
 	 *
 	 * @example
 	 * ```js
-	 * // Disable heartbeats; client must rely on diff alone
+	 * // No heartbeat: pair it with maxAge: 0 on every client, or their
+	 * // rosters decay to empty on their own.
 	 * const presence = createPresence({ heartbeat: 0 });
+	 * // client: presence('room', { maxAge: 0 })
 	 * ```
 	 */
 	heartbeat?: number;

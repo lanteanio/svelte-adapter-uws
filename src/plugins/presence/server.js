@@ -78,7 +78,12 @@ import { isSensitiveFieldName, isStructurallyUnsafeFieldName, MAX_PROJECTION_DEP
  *   live users do not flicker out when a `diff` is missed (e.g. transient network
  *   blip, JS thread saturation). Set this to a value shorter than the client's `maxAge`
  *   (default client `maxAge` is 90 s, so 30 s gives a 3x safety margin). Pass `0` to disable
- *   heartbeats entirely (apps that do not use the `maxAge` self-healing path).
+ *   heartbeats entirely - which is not only a traffic decision. Presence diffs carry no
+ *   sequence, so nothing else re-establishes a roster mid-session: with `0`, a missed `join`
+ *   or `leave` diverges silently until the client rejoins, and against a client still running
+ *   the default `maxAge` sweep the roster empties on its own about 135 s after the last diff,
+ *   with no dropped frame involved. The opt-out is only complete when clients also pass
+ *   `maxAge: 0` to `presence()`; the constructor warns once when it sees `heartbeat: 0`.
  * @property {boolean} [binary=true] - When true (the default), presence frames go
  *   to binary-capable clients as compact `0x03` frames via the presence codec and
  *   to everyone else as the identical JSON frames; fully transparent. Set `false`
@@ -233,6 +238,13 @@ const DEEP_EQUAL_MAX_DEPTH = 256;
 const JSON_FIELD_OVERHEAD_BYTES = 2;
 
 /**
+ * Set once the `heartbeat: 0` pairing warning has been printed. Process-wide
+ * rather than per-instance: an app that turns the heartbeat off usually does it
+ * for every presence instance it builds, and the message is the same each time.
+ */
+let heartbeatOptOutWarned = false;
+
+/**
  * Deep equality check for presence data.
  * Handles plain objects, arrays, Date, and primitives. Set and Map are
  * compared by membership/entries but only reliably for primitive members
@@ -376,6 +388,26 @@ export function createPresence(options = {}) {
 	const heartbeatMs = options.heartbeat ?? 30000;
 	if (typeof heartbeatMs !== 'number' || !Number.isFinite(heartbeatMs) || heartbeatMs < 0) {
 		throw new Error('presence: heartbeat must be a non-negative number');
+	}
+	// `heartbeat: 0` is only half a decision, and the other half lives on the
+	// client where this constructor cannot see it. Diffs carry no sequence, so
+	// the heartbeat is both the refresh that holds an entry inside the client's
+	// `maxAge` window and the only thing that re-adds one the sweep removed.
+	// Turned off against a default client, a room where nobody joins, leaves or
+	// updates empties itself within one sweep past the window - no dropped frame
+	// required - and nothing restores it until that client reconnects. Paired
+	// with `maxAge: 0` it is sound: nothing decays, and a dropped diff is simply
+	// permanent. Warn once per process rather than per instance, and say which
+	// client option completes the pair.
+	if (heartbeatMs === 0 && !heartbeatOptOutWarned) {
+		heartbeatOptOutWarned = true;
+		console.warn(
+			'[svelte-adapter-uws] presence: heartbeat: 0 removes the periodic full-roster broadcast, which is the ' +
+			"only thing that refreshes a client's maxAge window and the only thing that re-adds an entry its sweep " +
+			'removed. Clients on the default 90 s maxAge will empty their rosters roughly 135 s after the last diff. ' +
+			'Pass maxAge: 0 to presence() on the client to complete the opt-out, or keep a heartbeat shorter than ' +
+			'a third of the client maxAge.'
+		);
 	}
 	const maxConnections = options.maxConnections ?? 1_000_000;
 	const maxTopics = options.maxTopics ?? 1_000_000;

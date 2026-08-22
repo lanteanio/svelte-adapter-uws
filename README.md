@@ -3978,7 +3978,7 @@ const presence = createPresence({
   key: "id", // field for multi-tab dedup (default: 'id')
   // Explicit public-field allowlist; omit `select` to publish only a safe key.
   select: (userData) => ({ id: userData.id, name: userData.name }),
-  heartbeat: 30_000, // broadcast every 30s (default: 30000; pass 0 to disable)
+  heartbeat: 30_000, // broadcast every 30s (default: 30000; 0 disables it - pair with client maxAge: 0)
 });
 
 presence.hooks; // ready-made { subscribe, unsubscribe, close } hooks
@@ -4020,7 +4020,7 @@ For admin / audit views that want unbounded retention ("show every user who ever
 const everyoneEver = presence("room", { maxAge: 0 });
 ```
 
-To customize the window, set `maxAge` and the matching server `heartbeat` together (rule of thumb: heartbeat is one-third of `maxAge` or less, so a still-present user gets at least two refreshes per sweep window):
+To customize the window, set `maxAge` and the matching server `heartbeat` together (rule of thumb: heartbeat is one-third of `maxAge` or less, so a still-present user gets at least two refreshes per sweep window). They are one mechanism split across the two sides, which is why `heartbeat: 0` is only half a decision: presence diffs carry no sequence, so the heartbeat is the only thing that re-establishes a roster mid-session. Turn it off and a missed `join` or `leave` diverges silently until the client rejoins - and a client still on the default sweep empties its roster roughly 135 s after the last diff even when nothing was dropped, since the sweep has no counterpart that restores an entry. Complete the opt-out with `maxAge: 0` on every client (`createPresence` warns once when it sees `heartbeat: 0`), and accept that a dropped diff is then permanent:
 
 ```js
 // Server: heartbeat every 60s

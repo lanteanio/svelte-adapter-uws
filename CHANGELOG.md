@@ -302,6 +302,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Presence `heartbeat: 0` states its cost, and warns once when it is set.**
+  The option read as a bandwidth choice: turn off the periodic full-roster
+  broadcast for apps that do not use the client's `maxAge` sweep. It is also
+  the removal of the only thing that re-establishes a roster mid-session.
+  Presence diffs carry no sequence, deliberately, so a dropped `join` or
+  `leave` is never detected; the heartbeat is what refreshes an entry inside
+  the client's window and what re-adds one the sweep already removed. Against
+  a client still on the default 90 s sweep, a room where nobody joins, leaves
+  or updates empties itself roughly 135 s after the last diff with no frame
+  dropped at all, and nothing restores it until that client reconnects. The
+  server-side option, the client-side option, the README and the migration
+  guide now say so, `createPresence` warns once per process naming the
+  `maxAge: 0` that completes the opt-out, and the divergence is pinned by
+  cases driving the real `presence()` store over a mock socket rather than
+  asserted from the source.
+
 - **Every open advisory against the development tree is resolved at patch
   level.** npm audit reported five advisories, two moderate and three high,
   and none of them reach a consumer: the shipped dependencies are the Rollup
