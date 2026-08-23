@@ -952,10 +952,10 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		emission: 'console',
 		problemPrefix: null,
 		messagePrefix: '[svelte-adapter-uws] graceful shutdown failed',
-		cause: 'The graceful shutdown sequence itself threw.',
+		cause: 'The graceful shutdown sequence itself threw. Every application-supplied input is contained behind its own entry (a throwing ws shutdown hook, a rejecting or wedged sveltekit:shutdown listener, an overrunning drain), so this line means the sequence\'s own machinery raised - an adapter defect, or an application-side patch of a global the sequence reads, such as an instrumentation layer\'s rewrap of process or EventEmitter internals throwing when the listener list is read.',
 		consequence: 'The orderly steps after the throw were skipped, so the shutdown was not clean; the process still exits rather than hanging.',
 		automaticRecovery: 'Not applicable.',
-		nextAction: 'Read the attached error. The shutdown path is adapter-owned, so a failure here that does not originate in an application hook is worth reporting.',
+		nextAction: 'Read the attached error. A stack through application instrumentation points at a broken global patch; anything else is adapter-owned and worth reporting with the attached error.',
 		sources: Object.freeze(['src/runtime/index.js']),
 		anchor: 'adapter-err-shutdown-failed',
 		help: 'docs/errors.md#adapter-err-shutdown-failed'

@@ -61,6 +61,32 @@ export function admin(request) {
 	) {
 		throw new Error('__ADMIN_HOOK_CRASH__');
 	}
+	if (
+		process.env.HOOK_CRASH_DRILL_TOKEN &&
+		request.headers.get('x-shutdown-sequence-crash') === process.env.HOOK_CRASH_DRILL_TOKEN
+	) {
+		// For ADAPTER-ERR-SHUTDOWN-FAILED: the graceful sequence contains every
+		// application-supplied input behind its own entry (a throwing hook, a
+		// rejecting listener), so what this entry guards is the sequence's OWN
+		// machinery throwing. The realistic way an app breaks that machinery is
+		// a global patch - APM and instrumentation layers rewrap process and
+		// EventEmitter internals routinely - so the drill is exactly that: a
+		// broken `process.listeners` that throws when the cleanup step asks for
+		// the `sveltekit:shutdown` listeners, installed only now, and a SIGTERM
+		// dispatched through the real handler on the next tick. `process.emit`
+		// rather than a signal because Windows children have no deliverable
+		// SIGTERM, and the handler under test is the same function either way.
+		const original = process.listeners.bind(process);
+		process.listeners = function (name) {
+			if (name === 'sveltekit:shutdown') throw new Error('__SHUTDOWN_SEQUENCE_CRASH__');
+			return original(name);
+		};
+		setTimeout(() => process.emit('SIGTERM', 'SIGTERM'), 25);
+		return new Response(JSON.stringify({ ok: true, draining: true }), {
+			status: 200,
+			headers: { 'content-type': 'application/json' }
+		});
+	}
 	return new Response(JSON.stringify({ ok: true, path: new URL(request.url).pathname }), {
 		status: 200,
 		headers: { 'content-type': 'application/json' }

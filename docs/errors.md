@@ -798,10 +798,10 @@ searchable log prefix is:
 
 - **Code/event:** `shutdown.failed`
 - **Message prefix:** `[svelte-adapter-uws] graceful shutdown failed`
-- **Cause:** The graceful shutdown sequence itself threw.
+- **Cause:** The graceful shutdown sequence itself threw. Every application-supplied input is contained behind its own entry (a throwing ws shutdown hook, a rejecting or wedged sveltekit:shutdown listener, an overrunning drain), so this line means the sequence's own machinery raised - an adapter defect, or an application-side patch of a global the sequence reads, such as an instrumentation layer's rewrap of process or EventEmitter internals throwing when the listener list is read.
 - **Consequence:** The orderly steps after the throw were skipped, so the shutdown was not clean; the process still exits rather than hanging.
 - **Automatic recovery:** Not applicable.
-- **Next action:** Read the attached error. The shutdown path is adapter-owned, so a failure here that does not originate in an application hook is worth reporting.
+- **Next action:** Read the attached error. A stack through application instrumentation points at a broken global patch; anything else is adapter-owned and worth reporting with the attached error.
 - **Runtime help:** `docs/errors.md#adapter-err-shutdown-failed`
 - **Runtime sources:** [src/runtime/index.js](../src/runtime/index.js)
 
