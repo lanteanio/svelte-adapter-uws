@@ -320,8 +320,8 @@ export interface MessageAdmissionOptions {
  * refused on every attempt, reported through the refusal counter and the
  * throttled operational event rather than silently.
  *
- * Ceilings are held per key in a ledger bounded to 4096 keys per scope, which
- * is not configurable. Keys approaching the bound reclaim windows that have
+ * Ceilings are held per key in a ledger bounded per scope - 4096 keys unless
+ * `EgressOptions.maxKeys` sizes it. Keys approaching the bound reclaim windows that have
  * already lapsed, a little at a time, so that the lapsed ones are gone before
  * the ledger is full; a ceiling is given up only when it is full anyway and
  * nothing in it has lapsed. So the bound is on the keys LIVE at once rather
@@ -329,15 +329,18 @@ export interface MessageAdmissionOptions {
  * inside the bound keeps every ceiling however close to the bound it sits.
  * Below it the ceilings apply to every key.
  *
- * Above it - more than 4096 distinct topics (or tenants) live inside one window
- * - the ledger evicts, and an evicted key stops being held to its ceiling for
- * the rest of its window. The victim is the key that has spent least of its
- * allowance among a bounded sample rather than the least-spent key overall, so
- * a group of keys that became busy together can lose some of its members even
- * while quieter keys survive elsewhere. Every eviction that costs enforcement
- * increments `egress_window_evicted_total{scope}`. This is why a `tenant`
- * ceiling is the durable one for a high-cardinality topic space: tenant ids
- * have to outnumber the ledger before the tenant scope can be affected at all.
+ * Above it - more distinct topics (or tenants) live inside one window than the
+ * bound - the ledger evicts, and an evicted key stops being held to its ceiling
+ * for the rest of its window. The victim is the key that has spent least of its
+ * allowance among a bounded sample (`EgressOptions.evictionSample`) rather than
+ * the least-spent key overall, so a group of keys that became busy together can
+ * lose some of its members even while quieter keys survive elsewhere. Every
+ * eviction that costs enforcement increments
+ * `egress_window_evicted_total{scope}`; sustained churn there means live key
+ * cardinality has outgrown the ledger, and `maxKeys` is the lever sized for it.
+ * A `tenant` ceiling stays the durable one for a high-cardinality topic space:
+ * tenant ids have to outnumber the ledger before the tenant scope can be
+ * affected at all.
  */
 export interface EgressCeilings {
 	/** Maximum logical publishes per window. `0` disables. */
@@ -371,6 +374,31 @@ export interface EgressOptions {
 	 * @default 1000
 	 */
 	windowMs?: number;
+	/**
+	 * Keys each scope's usage ledger may hold at once (one ledger per scope
+	 * per worker, plus the tenant-resolution memo). Must be a safe integer
+	 * between `1024` and `2^24` (the largest bound a V8 Map can actually
+	 * hold); the ledger rounds it UP to the next power of two, because V8
+	 * sizes a Map's backing table to a power of two anyway - the rounded
+	 * bound holds no fewer keys in the same memory the
+	 * requested value would have taken. Memory is paid only for keys actually
+	 * seated (~56 bytes per entry at steady churn), so an oversized cap on a
+	 * small population costs nothing; size it to the keys LIVE inside one
+	 * window when `egress_window_evicted_total{scope}` shows sustained churn.
+	 * There is no disable value: an unbounded ledger would turn topic
+	 * cardinality into unbounded memory.
+	 * @default 4096
+	 */
+	maxKeys?: number;
+	/**
+	 * Entries an at-cap eviction inspects before taking the least-active one
+	 * it saw (an expired window wins outright and ends the sample). Must be a
+	 * safe integer `>= 1`. A deployment that raises `maxKeys` by an order of
+	 * magnitude may widen it to match; the walk stays bounded at any width,
+	 * because a pass wraps the ledger at most once per eviction.
+	 * @default 8
+	 */
+	evictionSample?: number;
 	/** Ceilings applied per topic, to attributed and unattributed publishes alike. */
 	topic?: EgressCeilings;
 	/**

@@ -38,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Production, `createTestServer`, and the `uws()` dev plugin enforce through one shared account (dev reporting stays inert like dev pressure). Frames received over the cross-worker relay are charged once at their origin and are never refused. `topicPublishStats` and the publish-rate signals keep their existing meanings; the deliveries dimension is additive. `docs/tenancy.md` states the charge law the extensions bus must mirror for cross-instance multiplication.
   - **Detail:** [Added engineering detail](#added).
 
+- **Added: the egress ledger takes its size from configuration.** Each scope's usage ledger held a
+  fixed 4096 keys, so a deployment with more topics or tenants live inside one window watched
+  enforcement lapse with no lever; `websocket.egress.maxKeys` now sizes the per-scope bound and
+  `evictionSample` widens the at-cap eviction sample to match.
+  - **Affects:** High-cardinality deployments seeing sustained `egress_window_evicted_total{scope}` churn; every configuration that omits the options keeps the 4096-key, 8-entry defaults and byte-identical behavior.
+  - **Action:** None by default. To size, set `websocket.egress.maxKeys` (a safe integer 1024..2^24, rounded up to the next power of two) to the keys live inside one window; memory is paid only for keys actually seated, about 56 bytes per entry.
+  - **Requires:** No new dependency. A misshaped value refuses the build on every intake surface, and the cap has no disable value - an unbounded ledger would turn topic cardinality into unbounded memory.
+  - **Compatibility:** Additive options; production, `createTestServer`, and the `uws()` dev plugin thread one shared account, and the tenant-resolution memo follows the same bound.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Added: one trusted attribution contract, consumed by the bundled limiter surfaces.** The handler module may export `attribution(user)`, resolved once per connection at open over server-trusted userData, frozen, and readable via `attribution(ws)` from `svelte-adapter-uws/connection`; the ratelimit plugin consumes it and gains a `budget` option, message admission gains byte-weighted rates, and `docs/tenancy.md` contracts ownership per surface.
   - **Affects:** Multi-tenant deployments wanting tenant-scoped or tenant-shared limits; single-tenant apps that export none of it are untouched.
   - **Action:** None by default. To attribute, export `attribution(user)` returning `{ tenantId?, principalId?, entitlement? }` (each a string of `[a-zA-Z0-9_-]`, at most 64 chars) or null for unattributed.
@@ -257,7 +267,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The ceiling ledger bounds the keys live at once, and says so when it
   cannot.** Ceilings are tracked per key, and each scope's ledger holds 4096 of
-  them. Keys arriving as the ledger approaches that bound reclaim windows that
+  them by default (`egress.maxKeys` sizes it). Keys arriving as the ledger
+  approaches that bound reclaim windows that
   have already lapsed, a little at a time, so the lapsed ones are gone before it
   is full; a ceiling is given up only while the ledger is full anyway and
   nothing in it has lapsed. So what fills the ledger is live
@@ -288,6 +299,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by scope rather than by key, because the condition is a fact about topic or
   tenant CARDINALITY and naming the unlucky key would point at whichever one
   happened to be seated next.
+
+- **The egress ledger takes its size from the config.** `egress.maxKeys` bounds
+  each scope's usage ledger and the tenant-resolution memo (default 4096), and
+  `egress.evictionSample` sets how many entries an at-cap eviction inspects
+  (default 8) - the two sizes the sliding-window limiter factory has always
+  taken as parameters, now operator-facing on the ledger that borrowed its
+  eviction shape. The bound is rounded UP
+  to the next power of two before it applies, because V8 sizes a Map's backing
+  table to a power of two regardless: the rounded bound holds no fewer keys -
+  strictly more whenever rounding moves the value - in the same memory the
+  requested value would have taken, so rounding up
+  is free capacity rather than a surprise. The shared option guard refuses a
+  `maxKeys` outside 1024..2^24 and an `evictionSample` below 1 on every intake
+  surface. The ceiling is V8's own Map limit, verified empirically: entry
+  2^24 + 1 throws, so a larger bound would crash the publish path before
+  eviction could engage, and there is no disable value for the cap - an
+  unbounded ledger would reach the same crash behind unbounded memory
+  first. The sweep slack derives from the
+  bound at the measured one-sixteenth ratio, the per-insert sweep budget stays
+  fixed (its drain argument is about arrival rate, not capacity), and a sample
+  of any width stays bounded because an eviction pass wraps the ledger at most
+  once. Pinned by cases that hold a raised and a rounded bound to exact
+  eviction arithmetic and drive a full-width sample to the globally
+  least-spent victim at two seat positions; the A/B bench's enforcement
+  oracle and its per-shape control arm show the threading costs the
+  publish path nothing.
 
 - **Recipient counts come from the logical registry, not a native read.**
   The egress charge needs the topic's local subscriber count on every

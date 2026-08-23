@@ -60,22 +60,27 @@ export const EGRESS_DEFAULT_WINDOW_MS = 1000;
 export const EGRESS_ADMITTED = Symbol('adapter-uws.egress-admitted');
 
 /**
- * Hard bound on the per-scope usage maps and the tenant-resolution memo: the
- * ledger never holds more entries than this, and a key seated here is a key
- * some other key gave its ceiling up for.
+ * Default bound on the per-scope usage maps and the tenant-resolution memo: the
+ * ledger never holds more entries than its bound, and a key seated past it is a
+ * key some other key gave its ceiling up for. `egress.maxKeys` sizes it; this
+ * is what applies when the option is absent.
  *
  * A POWER OF TWO deliberately, and for MEMORY. V8 sizes a Map's backing table
  * to a power of two and, under the steady delete-plus-insert churn a ledger at
  * its bound performs, settles it above roughly twice the live count. So 4096
  * settles into an 8192-slot table at 56 bytes per entry while 4353 would take a
  * 16384-slot one at 105 - nearly double the footprint for one more key, on a
- * structure that exists once per scope per worker. Keep THIS constant a power
- * of two; the slack below is measured from it and is not part of the rule.
+ * structure that exists once per scope per worker. That law is why a configured
+ * `maxKeys` is rounded UP to the next power of two rather than taken verbatim:
+ * the backing table is the power-of-two size either way, so the rounded bound
+ * holds no fewer keys - strictly more whenever rounding moves the value - in
+ * the same memory the requested one would have taken. The sweep slack is
+ * derived from the bound and is not part of the rule.
  *
- * It buys no CPU, and the file used to claim it did. Iteration and rehash cost
- * per operation measured flat across the boundary (147.4 against 147.3 ns), and
- * the larger table actually rehashes less often. The claim came from readings
- * that sat inside one unchanged arm's warm-up spread.
+ * The power of two buys no CPU, and the file used to claim it did. Iteration
+ * and rehash cost per operation measured flat across the boundary (147.4
+ * against 147.3 ns), and the larger table actually rehashes less often. The
+ * claim came from readings that sat inside one unchanged arm's warm-up spread.
  *
  * A key that finds the ledger at its sweep floor reclaims lapsed windows before
  * it is seated, and a key's ceiling is given up only once the ledger is full and
@@ -84,26 +89,49 @@ export const EGRESS_ADMITTED = Symbol('adapter-uws.egress-admitted');
  * publishing in most windows, plus a trickle of one-shot topics, evict nothing,
  * where the same workload with no reclamation gave up 307 live windows.
  *
- * Once more keys than this are LIVE inside a single window there is nothing
- * expired left to reclaim, and eviction starts costing enforcement: the evicted
- * key restarts empty, so a key at its ceiling is admitted again for the rest of
- * that window. Every eviction of that kind increments
+ * Once more keys than the bound are LIVE inside a single window there is
+ * nothing expired left to reclaim, and eviction starts costing enforcement: the
+ * evicted key restarts empty, so a key at its ceiling is admitted again for the
+ * rest of that window. Every eviction of that kind increments
  * `egress_window_evicted_total`, because the symptom - fewer refusals - is
  * otherwise indistinguishable from traffic that simply fits. A workload there
- * is already deep in the topic-cardinality warning zone, and the bound that
- * keeps it acceptable is the scope: `tenant` windows need this many distinct
- * TENANT ids to turn over, so the fair-share case holds under any topic
- * cardinality, including the unbounded `room:<uuid>` shape whose keys retire
- * for good after a few windows.
+ * used to be stuck with the documentation as the whole answer; now it sizes
+ * `egress.maxKeys` to its live cardinality, at the documented 56 bytes per
+ * seated key. The scope argument still bounds the damage when nobody does:
+ * `tenant` windows need this many distinct TENANT ids to turn over, so the
+ * fair-share case holds under any topic cardinality, including the unbounded
+ * `room:<uuid>` shape whose keys retire for good after a few windows.
  */
-const EGRESS_MAP_BOUND = 4096;
+const EGRESS_DEFAULT_MAX_KEYS = 4096;
+
+/**
+ * The values `maxKeys` may take, duplicated verbatim in the shared guard
+ * (`assertEgressSection` in src/config-guards.js) so every intake surface
+ * refuses what this module would silently replace with the default. Below the
+ * floor there is no sizing story - the option exists because deployments need
+ * MORE keys, the whole default costs ~230 KB per scope, and a tiny cap guts
+ * enforcement quietly. The ceiling is V8's own: a Map refuses its
+ * 16,777,217th entry ('Map maximum size exceeded', verified empirically at
+ * exactly 2^24), so a larger bound would crash the publish path on an insert
+ * before eviction ever engaged. 2^24 itself is safe - at the bound the
+ * eviction frees a slot before the seat, so the size never exceeds it. There
+ * is deliberately no `0 disables`: an unbounded ledger turns topic
+ * cardinality into the same crash, behind unbounded memory first.
+ */
+const EGRESS_MAX_KEYS_FLOOR = 1024;
+const EGRESS_MAX_KEYS_CEILING = 2 ** 24;
 
 /**
  * How many entries an eviction inspects before it takes the least active one it
- * saw. Small because an expired window wins outright and ends the sample, and
- * that is the common case in the churn that reaches the cap at all.
+ * saw, when `egress.evictionSample` does not size it. Small because an expired
+ * window wins outright and ends the sample, and that is the common case in the
+ * churn that reaches the cap at all. A deployment that raises `maxKeys` by an
+ * order of magnitude may widen it to match - the sample is what finds an
+ * expired window before a live one is taken - and the walk stays bounded at
+ * any width, because a pass wraps the ledger at most once per eviction
+ * whatever the sample asks for.
  */
-const EGRESS_EVICT_SAMPLE = 8;
+const EGRESS_DEFAULT_EVICT_SAMPLE = 8;
 
 /**
  * How many entries a new key sweeps for expired windows before it is seated.
@@ -125,15 +153,19 @@ const EGRESS_EVICT_SAMPLE = 8;
 const EGRESS_SWEEP_STEPS = 32;
 
 /**
- * How far below the bound reclamation starts working, so that it has room to
- * work in.
+ * How far below the bound reclamation starts working, as a fraction of the
+ * bound: one sixteenth, the ratio the shipped 256-of-4096 slack was measured
+ * at, preserved across every configured `maxKeys` so a resized ledger keeps
+ * the measured shape rather than a fixed offset that would be generous on a
+ * small bound and a rounding error on a large one. The floor on `maxKeys`
+ * keeps the derived slack at 64 or more.
  *
- * A sweep looks at consecutive entries, so it can land inside a run of windows
- * that are all still counting and come back with nothing even though thousands
- * of lapsed ones sit elsewhere - keys created together sit together, and they
- * go busy and idle together. Starting only at the bound would mean every one of
- * those answers arrives with no room left, and a ceiling would go on the
- * strength of where a cursor happened to stop.
+ * Why a slack at all: a sweep looks at consecutive entries, so it can land
+ * inside a run of windows that are all still counting and come back with
+ * nothing even though thousands of lapsed ones sit elsewhere - keys created
+ * together sit together, and they go busy and idle together. Starting only at
+ * the bound would mean every one of those answers arrives with no room left,
+ * and a ceiling would go on the strength of where a cursor happened to stop.
  *
  * The slack turns that into a delay instead: the map takes one more key, the
  * cursor moves on, and the next inserts sweep from further along, so the lapsed
@@ -147,14 +179,7 @@ const EGRESS_SWEEP_STEPS = 32;
  * inserts rather than concentrated into one long walk at the bound - that
  * alternative was built, measured at +213% per publish, and rejected.
  */
-const EGRESS_MAP_SLACK = 256;
-
-/**
- * The size at which a new key starts paying for reclamation. Below it the map
- * has room and an expired window is harmless - it holds one slot and answers
- * the next read with a reset.
- */
-const EGRESS_SWEEP_FLOOR = EGRESS_MAP_BOUND - EGRESS_MAP_SLACK;
+const EGRESS_SLACK_SHIFT = 4;
 
 
 /**
@@ -170,9 +195,18 @@ const EGRESS_SWEEP_FLOOR = EGRESS_MAP_BOUND - EGRESS_MAP_SLACK;
  *   eviction; the flag is false when an EXPIRED window was reclaimed (free) and
  *   true when a live one had to go (a ceiling stops holding for the rest of its
  *   window, which is the condition an operator needs to see)
+ * @param {number} maxKeys - this ledger's key bound, already normalized to a
+ *   power of two (`normalizeEgressOptions` owns that rounding)
+ * @param {number} evictionSample - how many entries an eviction inspects
  * @returns {{ map: Map<string, { at: number, pu: number, m: number, b: number, d: number }>, windowFor: (key: string, nowMs: number, windowMs: number) => { at: number, pu: number, m: number, b: number, d: number } }}
  */
-function createWindowLedger(ceilings, onEvict) {
+function createWindowLedger(ceilings, onEvict, maxKeys, evictionSample) {
+	/**
+	 * The size at which a new key starts paying for reclamation. Below it the
+	 * map has room and an expired window is harmless - it holds one slot and
+	 * answers the next read with a reset.
+	 */
+	const sweepFloor = maxKeys - (maxKeys >>> EGRESS_SLACK_SHIFT);
 	/**
 	 * How much of its allowance this window has spent, as the largest fraction
 	 * across the ARMED dimensions. This, and not a publish count, is what
@@ -422,7 +456,7 @@ function createWindowLedger(ceilings, onEvict) {
 		let victimScore = Infinity;
 		let sampled = 0;
 		let wrapped = 0;
-		while (sampled < EGRESS_EVICT_SAMPLE && wrapped < 2) {
+		while (sampled < evictionSample && wrapped < 2) {
 			if (evictCursor === null) {
 				openPass();
 				wrapped++;
@@ -471,7 +505,7 @@ function createWindowLedger(ceilings, onEvict) {
 		windowFor(key, nowMs, windowMs) {
 			let w = map.get(key);
 			if (w === undefined) {
-				if (map.size >= EGRESS_SWEEP_FLOOR) {
+				if (map.size >= sweepFloor) {
 					// Reclaim first: a window that has already lapsed is free to
 					// drop, so the room it frees costs nobody their ceiling.
 					reclaimExpired(nowMs, windowMs);
@@ -481,7 +515,7 @@ function createWindowLedger(ceilings, onEvict) {
 					// where the memory went, not that a key must lose its ceiling,
 					// and there may be room left. Letting that conclusion decide it
 					// instead evicted on 85% of the inserts that reach this branch.
-					if (map.size >= EGRESS_MAP_BOUND) evictOne(nowMs, windowMs);
+					if (map.size >= maxKeys) evictOne(nowMs, windowMs);
 				}
 				w = { at: nowMs, pu: 0, m: 0, b: 0, d: 0 };
 				map.set(key, w);
@@ -510,13 +544,28 @@ function createWindowLedger(ceilings, onEvict) {
  * arrives here reads as disabled rather than inverted.
  *
  * @param {any} input - the raw `websocket.egress` section (or undefined)
- * @returns {{ windowMs: number, topic: { messages: number, bytes: number, deliveries: number }, tenant: { messages: number, bytes: number, deliveries: number }, topicEnabled: boolean, tenantEnabled: boolean }}
+ * @returns {{ windowMs: number, maxKeys: number, evictionSample: number, topic: { messages: number, bytes: number, deliveries: number }, tenant: { messages: number, bytes: number, deliveries: number }, topicEnabled: boolean, tenantEnabled: boolean }}
  */
 export function normalizeEgressOptions(input) {
 	const src = input && typeof input === 'object' && !Array.isArray(input) ? input : null;
 	const windowMs = src && typeof src.windowMs === 'number' && Number.isFinite(src.windowMs) && src.windowMs >= 100
 		? src.windowMs
 		: EGRESS_DEFAULT_WINDOW_MS;
+	// The EFFECTIVE bound, after the power-of-two rounding the module's memory
+	// law requires: the V8 backing table is the power-of-two size either way,
+	// so rounding UP holds no fewer keys - strictly more whenever it moves the
+	// value - in the memory the requested value would have taken. A
+	// bit-doubling loop rather than Math.log2, because the rounding must be
+	// exact at every bound the guard admits.
+	let maxKeys = EGRESS_DEFAULT_MAX_KEYS;
+	if (src && Number.isSafeInteger(src.maxKeys) &&
+		src.maxKeys >= EGRESS_MAX_KEYS_FLOOR && src.maxKeys <= EGRESS_MAX_KEYS_CEILING) {
+		maxKeys = EGRESS_MAX_KEYS_FLOOR;
+		while (maxKeys < src.maxKeys) maxKeys *= 2;
+	}
+	const evictionSample = src && Number.isSafeInteger(src.evictionSample) && src.evictionSample >= 1
+		? src.evictionSample
+		: EGRESS_DEFAULT_EVICT_SAMPLE;
 	const scope = (section) => {
 		const s = section && typeof section === 'object' && !Array.isArray(section) ? section : null;
 		const ceiling = (v) => (Number.isSafeInteger(v) && v > 0 ? v : 0);
@@ -530,6 +579,8 @@ export function normalizeEgressOptions(input) {
 	const tenant = scope(src ? src.tenant : null);
 	return Object.freeze({
 		windowMs,
+		maxKeys,
+		evictionSample,
 		topic,
 		tenant,
 		topicEnabled: topic.messages > 0 || topic.bytes > 0 || topic.deliveries > 0,
@@ -646,12 +697,12 @@ export function createEgressAccount(io) {
 		if (cost && onEvicted !== null) {
 			try { onEvicted('topic'); } catch { /* reporting never breaks a publish */ }
 		}
-	});
+	}, config.maxKeys, config.evictionSample);
 	const tenantWindows = createWindowLedger(config.tenant, (cost) => {
 		if (cost && onEvicted !== null) {
 			try { onEvicted('tenant'); } catch { /* reporting never breaks a publish */ }
 		}
-	});
+	}, config.maxKeys, config.evictionSample);
 	// Topic-to-tenant memo. The resolver is documented pure over the topic
 	// string, so its answers are cacheable; wholesale clear at the cap keeps
 	// it bounded without an eviction policy a pure function cannot need.
@@ -716,7 +767,7 @@ export function createEgressAccount(io) {
 				try { onResolverInvalid?.(undefined); } catch { /* diagnostics never break a publish */ }
 			}
 			if (memo !== null) {
-				if (memo.size >= EGRESS_MAP_BOUND) memo.clear();
+				if (memo.size >= config.maxKeys) memo.clear();
 				memo.set(topic, id);
 			}
 			return id;

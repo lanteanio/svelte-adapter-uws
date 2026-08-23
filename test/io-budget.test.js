@@ -1115,7 +1115,8 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// graph through handler/egress-budget.js -> utils/egress-account.js. Each
 	// usage map becomes a small factory holding the map, an eviction cursor that
 	// survives between calls, and its scope ceilings. At the cap the eviction
-	// samples up to EGRESS_EVICT_SAMPLE entries from the rotating cursor, takes
+	// samples up to `egress.evictionSample` entries (default 8) from the
+	// rotating cursor, takes
 	// an expired window outright, and otherwise drops the one that has spent the
 	// least of its allowance across the current window and the one before it
 	// (a `pu` fraction carried at rotation). Spent allowance rather than a
@@ -1126,7 +1127,8 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// refusals. The two error-registry entries in this graph additionally name
 	// every module that emits them, as frozen string arrays.
 	//
-	// A new key past half the cap also sweeps up to EGRESS_SWEEP_STEPS entries
+	// A new key past the sweep floor (the cap less its derived slack) also
+	// sweeps up to EGRESS_SWEEP_STEPS entries
 	// from the same cursor and drops the expired windows it passes, so the cap
 	// bounds keys live at once rather than keys ever seen. Without it expired
 	// entries accumulated until every new key forced a choice among eight
@@ -1208,7 +1210,22 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// digest it had nothing to do with.
 	// No statement executes on any frame path, no byte is read, allocated or
 	// copied, and no copy primitive entered either graph.
-	platform: '8292074a9685f57b032b553a1abb33891e1dc7579abcb614a3baa0b78411394d',
+	// Re-pinned for the sizeable egress ledger. The drift in this graph is
+	// utils/egress-account.js alone, reached through handler/egress-budget.js:
+	// the ledger factory takes its bound and sample width as parameters,
+	// normalizeEgressOptions derives them from `egress.maxKeys` and
+	// `egress.evictionSample` (safe-integer checks, a power-of-two doubling
+	// loop, two new frozen config fields), the sweep floor becomes a derived
+	// closure constant, and the tenant memo's clear threshold reads the config
+	// bound. Integer arithmetic, Map size reads and the same in-place counter
+	// mutations as before: no statement touches a frame, no byte is read,
+	// allocated or copied, and no copy primitive entered the graph. The A/B
+	// bench's per-shape control arm resolves no delta and its enforcement
+	// oracle stays 0 / 0. The bound's ceiling literal then moved from 2^30 to
+	// 2^24 in the same module - V8's Map refuses its 2^24 + 1st entry, so any
+	// larger bound was a publish-path crash, not a bigger ledger - one data
+	// literal in the same frozen constant pair, nothing else.
+	platform: 'e40eafa19bda61f5bd1d4431918747baeb3a1b7376221327ed73ab2f661e2883',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

@@ -323,9 +323,12 @@ such group, not a proportional number of distinct victims.
 
 **Do:** read it beside `egress_refused_total`. Refusals falling while this
 rises is enforcement lapsing, not load easing - the opposite of what the
-refusal rate alone suggests. The fix is fewer distinct live keys per window
-(scope the resolver, coarsen the topic space), not a larger ceiling: raising a
-ceiling changes what each key may spend, not how many keys the ledger holds.
+refusal rate alone suggests. Two levers end the churn: raise `egress.maxKeys`
+past the live cardinality (memory is paid only for keys actually seated, about
+56 bytes per entry, so a generous cap over a smaller population costs
+nothing), or reduce the distinct live keys per window (scope the resolver,
+coarsen the topic space). Raising a CEILING is not a lever here: a ceiling
+changes what each key may spend, not how many keys the ledger holds.
 
 ---
 

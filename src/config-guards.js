@@ -387,12 +387,12 @@ export function assertPressureSection(bag, key = 'pressure', surface = `websocke
  * in src/index.js) reads these same sets, so the unknown-key warning and the
  * value guard below can never recognize different keys.
  */
-export const KNOWN_EGRESS_OPTION_KEYS = new Set(['windowMs', 'topic', 'tenant']);
+export const KNOWN_EGRESS_OPTION_KEYS = new Set(['windowMs', 'maxKeys', 'evictionSample', 'topic', 'tenant']);
 export const KNOWN_EGRESS_CEILING_KEYS = new Set(['messages', 'bytes', 'deliveries']);
 
 /**
- * Validate the publish-egress section: its shape, its window, and its six
- * ceilings.
+ * Validate the publish-egress section: its shape, its window, its ledger
+ * sizing (`maxKeys`, `evictionSample`), and its six ceilings.
  *
  * Each ceiling is read as `value > 0`, so a misshaped value does not fall back
  * to a default - it leaves that ceiling open in silence, the same inversion
@@ -445,6 +445,39 @@ export function assertEgressSection(bag, key = 'egress', surface = `websocket.${
 			);
 		}
 		if (windowMs > MAX_TIMER_INTERVAL_MS) throwTimerOverflow(`${surface}.windowMs`, windowMs);
+	}
+	const maxKeys = egress.maxKeys;
+	if (maxKeys !== undefined && maxKeys !== null) {
+		// The bounds are stated identically at the ledger (EGRESS_MAX_KEYS_FLOOR
+		// and EGRESS_MAX_KEYS_CEILING in src/runtime/utils/egress-account.js),
+		// which treats anything outside them as absent. The ceiling is V8's own
+		// Map limit: a bound past 2^24 could never be reached - the Map throws
+		// 'Map maximum size exceeded' on the insert first, on the publish path.
+		// There is deliberately no `0 disables` here: an unbounded ledger turns
+		// topic cardinality into that same crash, behind unbounded memory first.
+		if (!Number.isSafeInteger(maxKeys) || maxKeys < 1024 || maxKeys > 2 ** 24) {
+			throw new Error(
+				`${surface}.maxKeys must be a safe integer between 1024 and 2^24 (keys per scope ` +
+				`ledger; the ledger rounds it up to the next power of two, which holds no fewer ` +
+				`keys in the same memory, and V8's Map cannot hold more than 2^24 entries at all) - ` +
+				`got ${describeValue(maxKeys)} (${typeof maxKeys}). A ` +
+				`misshaped value would be silently replaced by the 4096 default, so the sizing that ` +
+				`was configured would never apply. The cap cannot be disabled: omit the option for ` +
+				`the default, and size it to live key cardinality at ~56 bytes per seated key.`
+			);
+		}
+	}
+	const evictionSample = egress.evictionSample;
+	if (evictionSample !== undefined && evictionSample !== null) {
+		if (!Number.isSafeInteger(evictionSample) || evictionSample < 1) {
+			throw new Error(
+				`${surface}.evictionSample must be a safe integer >= 1 (entries an at-cap eviction ` +
+				`inspects before taking the least-active one; the default is 8) - got ` +
+				`${describeValue(evictionSample)} (${typeof evictionSample}). A misshaped value would ` +
+				`be silently replaced by the default, so the width that was configured would never ` +
+				`apply.`
+			);
+		}
 	}
 	for (const scope of ['topic', 'tenant']) {
 		const section = egress[scope];

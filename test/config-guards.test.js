@@ -798,6 +798,49 @@ describe('the egress section refuses values that would silently disable a ceilin
 			.toThrow(/no greater than 2147483647/);
 	});
 
+	it('refuses a maxKeys the ledger would silently replace with its default', () => {
+		// The ledger reads anything outside [1024, 2^24] as absent, so without
+		// this refusal a misshaped cap would quietly run at 4096 while the
+		// operator believes their sizing applies. The ceiling is V8's own Map
+		// limit (an insert past 2^24 entries throws rather than seats), and
+		// there is deliberately no 0-disables spelling: an unbounded ledger
+		// would reach that crash behind unbounded memory first.
+		for (const bad of [0, 1023, -4096, 1.5, '8192', 2 ** 24 + 1, NaN, true]) {
+			expect(() => serializeWsOptions({ egress: { maxKeys: bad } }, false), `maxKeys ${String(bad)}`)
+				.toThrow(/egress\.maxKeys must be a safe integer between 1024 and 2\^24/);
+		}
+		expect(() => serializeWsOptions({ egress: { maxKeys: 65536 } }, false)).not.toThrow();
+		// Not a power of two is legal by design - the ledger rounds it up.
+		expect(() => serializeWsOptions({ egress: { maxKeys: 5000 } }, false)).not.toThrow();
+		// The exact ceiling is legal: a > that drifted to >= would refuse the
+		// documented maximum here while the ledger still honors it, which is
+		// the guard/ledger disagreement the duplicated bounds must not allow.
+		expect(() => serializeWsOptions({ egress: { maxKeys: 2 ** 24 } }, false)).not.toThrow();
+	});
+
+	it('refuses an evictionSample the ledger would silently replace with its default', () => {
+		for (const bad of [0, -1, 2.5, '16', NaN, true]) {
+			expect(() => serializeWsOptions({ egress: { evictionSample: bad } }, false), `evictionSample ${String(bad)}`)
+				.toThrow(/egress\.evictionSample must be a safe integer >= 1/);
+		}
+		expect(() => serializeWsOptions({ egress: { evictionSample: 64 } }, false)).not.toThrow();
+	});
+
+	it('refuses the ledger sizing values on the dev and testing surfaces too', async () => {
+		expect(() => uws({ egress: { maxKeys: 512 } }))
+			.toThrow(/egress\.maxKeys must be a safe integer between 1024 and 2\^24/);
+		let server;
+		let thrown = null;
+		try {
+			server = await createTestServer({ egress: /** @type {any} */ ({ evictionSample: 0 }) });
+		} catch (error) {
+			thrown = error;
+		} finally {
+			if (server) server.close();
+		}
+		expect(String(thrown)).toMatch(/egress\.evictionSample must be a safe integer >= 1/);
+	});
+
 	it('refuses a tenantOf key in the section, naming the handler export', () => {
 		// A function cannot survive the JSON round trip into the build, so a
 		// resolver configured here would silently stand every tenant ceiling

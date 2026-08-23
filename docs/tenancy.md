@@ -114,22 +114,39 @@ instance or the cluster budget means nothing:
 ## What the ledger holds
 
 Ceilings are tracked per key, and the adapter bounds each scope's ledger to
-4096 keys. That bound is not configurable, and it is a capacity limit on the
-number of distinct keys, not on what any key may spend. Keys arriving as the
-ledger approaches that bound reclaim windows that have already lapsed, a little
-at a time, so the lapsed ones are gone before it is full - what the bound counts
-is therefore the keys live at once, not every key the instance has published to,
-and a population that fits inside the bound keeps every ceiling however close to
-the bound that population sits.
+4096 keys unless `egress.maxKeys` sizes it. The bound is a capacity limit on
+the number of distinct keys, not on what any key may spend. Keys arriving as
+the ledger approaches that bound reclaim windows that have already lapsed, a
+little at a time, so the lapsed ones are gone before it is full - what the
+bound counts is therefore the keys live at once, not every key the instance has
+published to, and a population that fits inside the bound keeps every ceiling
+however close to the bound that population sits.
 
-Under it, every key is held to its ceiling. Over it - more than 4096 topics (or
-tenants) live inside a single window - the ledger has to give up a window to
-seat a new one, and the key it gives up stops being held to its ceiling until
-its next window. It gives up the key that has spent the least of its allowance
-across the current window and the one before, chosen from a BOUNDED SAMPLE
-rather than from the whole ledger: the sample is what keeps the choice O(1) on
-a publish path, and the cost of that is that a group of keys which became busy
-together can lose some members while quieter keys survive elsewhere. Every
+`maxKeys` takes a safe integer between `1024` and `2^24` - the ceiling is V8's
+own Map limit, past which an insert throws rather than seats - and is rounded
+UP to the next power of two before it is applied. That rounding is the ledger's
+memory law, not a convenience: V8 sizes a Map's backing table to a power of two
+regardless, so the rounded bound holds no fewer keys in the same memory
+the requested value would have occupied. Memory is paid only for keys actually
+seated - about 56 bytes per entry under steady at-bound churn - so an oversized
+cap over a small live population costs nothing, and the sizing rule is simply
+the keys LIVE inside one window: when `egress_window_evicted_total{scope}`
+shows sustained churn, raise `maxKeys` past that cardinality (or coarsen the
+key space; both end the churn). There is deliberately no disable value, because
+an unbounded ledger turns topic cardinality into unbounded memory.
+
+Under the bound, every key is held to its ceiling. Over it - more topics (or
+tenants) live inside a single window than the ledger holds - the ledger has to
+give up a window to seat a new one, and the key it gives up stops being held to
+its ceiling until its next window. It gives up the key that has spent the least
+of its allowance across the current window and the one before, chosen from a
+BOUNDED SAMPLE (`egress.evictionSample`, default 8) rather than from the whole
+ledger: the sample is what keeps the choice O(1) on a publish path, and the
+cost of that is that a group of keys which became busy together can lose some
+members while quieter keys survive elsewhere. A deployment that raises
+`maxKeys` by an order of magnitude may widen the sample to match - it is what
+finds an expired window before a live one is taken - and any width stays
+bounded, because a pass wraps the ledger at most once per eviction. Every
 eviction that costs enforcement increments `egress_window_evicted_total{scope}`.
 
 The consequence for a cross-instance implementation mirroring this contract:

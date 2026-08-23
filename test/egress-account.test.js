@@ -63,6 +63,42 @@ describe('normalizeEgressOptions', () => {
 		expect(envelopeWireBytes(envelope, 2, messagesOnly.bytesEnabled)).toBe(envelope.length * 2);
 		expect(envelopeWireBytes(envelope, 2, withBytes.bytesEnabled)).toBe(Buffer.byteLength(envelope) * 2);
 	});
+
+	it('sizes the ledger from maxKeys, rounded UP to the next power of two', () => {
+		// The EFFECTIVE bound is exposed on the config so every consumer - the
+		// ledgers, the memo, and an operator reading the account - agrees on
+		// one number. Rounding up is the memory law, not a convenience: the V8
+		// backing table is the power-of-two size either way, so the rounded
+		// bound holds no fewer keys - strictly more whenever rounding moves
+		// the value - in the memory the requested value would have taken.
+		expect(normalizeEgressOptions(undefined).maxKeys).toBe(4096);
+		expect(normalizeEgressOptions({}).maxKeys).toBe(4096);
+		expect(normalizeEgressOptions({ maxKeys: 4096 }).maxKeys).toBe(4096);
+		expect(normalizeEgressOptions({ maxKeys: 1024 }).maxKeys).toBe(1024);
+		expect(normalizeEgressOptions({ maxKeys: 5000 }).maxKeys).toBe(8192);
+		expect(normalizeEgressOptions({ maxKeys: 8193 }).maxKeys).toBe(16384);
+		expect(normalizeEgressOptions({ maxKeys: 2 ** 24 }).maxKeys).toBe(2 ** 24);
+	});
+
+	it('reads an unusable maxKeys or evictionSample as absent, never as inverted', () => {
+		// The shared guard refuses these on every intake surface; a value that
+		// still arrives here must land on the default rather than on some
+		// clamped reading the operator never asked for. The bounds are the
+		// guard's own: below 1024 there is no sizing story and the derived
+		// slack degenerates, above 2^24 a V8 Map throws on the insert instead
+		// of seating the entry - a crash on the publish path, verified
+		// empirically at exactly 2^24 - and there is deliberately no
+		// 0-disables, because an unbounded ledger reaches that same crash
+		// behind unbounded memory first.
+		for (const bad of [0, -1, 1023, 1.5, '8192', 2 ** 24 + 1, Number.MAX_SAFE_INTEGER + 2, null]) {
+			expect(normalizeEgressOptions({ maxKeys: bad }).maxKeys, `maxKeys ${String(bad)}`).toBe(4096);
+		}
+		expect(normalizeEgressOptions(undefined).evictionSample).toBe(8);
+		expect(normalizeEgressOptions({ evictionSample: 64 }).evictionSample).toBe(64);
+		for (const bad of [0, -3, 2.5, '16', null]) {
+			expect(normalizeEgressOptions({ evictionSample: bad }).evictionSample, `evictionSample ${String(bad)}`).toBe(8);
+		}
+	});
 });
 
 describe('the usage maps bound keys LIVE AT ONCE, not keys seen over a lifetime', () => {
@@ -383,6 +419,68 @@ describe('the usage maps bound keys LIVE AT ONCE, not keys seen over a lifetime'
 			account.charge('live:' + i, null, 1, 1, 10);
 		}
 		expect(evicted).toHaveLength(POP - 4096);
+	});
+
+	it('holds more keys when maxKeys raises the bound, by the same exact arithmetic', () => {
+		// The knob's whole claim: a population that overwhelms the default cap
+		// fits under a raised one. Driven at the same single-window shape as
+		// the exact-bound case above so the count stays arithmetic - every key
+		// past the effective bound costs exactly one window - and driven TWICE:
+		// once with a power of two taken verbatim, once with a requested value
+		// whose effective bound is the next power of two up, so the rounding is
+		// pinned as ledger BEHAVIOR and not merely as a config field.
+		const POP = 9000;
+		for (const [requested, effective] of [[8192, 8192], [5000, 8192]]) {
+			/** @type {string[]} */
+			const evicted = [];
+			const { account } = accountWith(
+				{ windowMs: 600000, maxKeys: requested, topic: { messages: 1 } },
+				{ onEvicted: (scope) => evicted.push(scope) }
+			);
+			for (let i = 0; i < POP; i++) {
+				account.admit('live:' + i, null, 1, 1);
+				account.charge('live:' + i, null, 1, 1, 10);
+			}
+			expect(evicted, `maxKeys ${requested}`).toHaveLength(POP - effective);
+		}
+	});
+
+	it('threads evictionSample to the victim choice: full width finds the global least-spent key', () => {
+		// At full width - a sample as wide as the ledger, which the wrap bound
+		// caps at one pass regardless - the victim must be the key that spent
+		// least of its allowance WHEREVER it sits, so the case seats the idle
+		// key at two different positions and demands the same verdict. The
+		// eviction cursor's position after the fill is deterministic and
+		// identical in both runs, so a sample that ignored the option and
+		// stayed at its 8-entry default could pick the idle key at one
+		// position only by coincidence, and can never pick it at both.
+		for (const idleAt of [512, 900]) {
+			const CAP = 1024;
+			/** @type {string[]} */
+			const evicted = [];
+			const { account } = accountWith(
+				{ windowMs: 600000, maxKeys: CAP, evictionSample: CAP, topic: { messages: 4 } },
+				{ onEvicted: (scope) => evicted.push(scope) }
+			);
+			// Every key live in one frozen window: the busy ones at their whole
+			// allowance, one idle key at a quarter of it.
+			for (let i = 0; i < CAP; i++) {
+				account.charge('k:' + i, null, i === idleAt ? 1 : 4, 1, 10);
+			}
+			expect(evicted, 'the fill exactly reaches the bound without evicting').toEqual([]);
+
+			// The insert past the bound must take the idle key's window: with
+			// exactly one eviction fired, every busy key still refusing proves
+			// the victim by elimination, and the idle key admitting afresh is
+			// the positive half.
+			account.charge('fresh', null, 1, 1, 10);
+			expect(evicted, `idle key at ${idleAt}`).toHaveLength(1);
+			for (let i = 0; i < CAP; i++) {
+				if (i === idleAt) continue;
+				expect(account.admit('k:' + i, null, 1, 1), `busy k:${i} keeps its window`).toBe(false);
+			}
+			expect(account.admit('k:' + idleAt, null, 1, 1), 'the idle key restarts empty').toBe(true);
+		}
 	});
 
 	it('holds a population that fits to its ceilings, with the clock running', () => {
