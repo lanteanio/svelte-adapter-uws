@@ -446,8 +446,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Dev still registers no ADAPTER instruments - its
     ceilings enforce live and report through events rather than counters - so
-    the dev document carries the app's own registrations and no adapter series.
-    That is unchanged and is what the operator notes elsewhere describe. A
+    the dev document is the valid single-worker frame with no adapter series
+    in it. The snapshot covers the adapter's own metrics and never an app's,
+    on every surface (the documented law); an app's series live on
+    `platform.metrics`, the same live registry object the build bundles,
+    which is where the documented scrape route reads them. A
     metrics module that cannot be loaded, or whose selected export is a
     primitive, prints the indexed `ADAPTER-ERR-METRICS-MODULE-SHAPE` line and
     leaves dev serving rather than refusing to start.

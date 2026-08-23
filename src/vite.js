@@ -1007,12 +1007,22 @@ export default function uws(options = {}) {
 		 * Null when no `websocket.metrics` module is configured - production's
 		 * answer for the same case. With one configured, a real single-worker
 		 * document, merged from the adapter's mirror exactly as the
-		 * `createTestServer` harness does it. Dev registers no adapter
-		 * instruments (its ceilings enforce live and report through events
-		 * instead), so that document carries the app's own registrations and no
-		 * adapter series - which is the truthful statement about dev rather than
-		 * a placeholder. A scrape route can be developed against it; a null
-		 * could only be handled around.
+		 * `createTestServer` harness does it.
+		 *
+		 * The snapshot covers the ADAPTER's own metrics and never an app's, on
+		 * every surface - the documented law, and one the merge enforces
+		 * structurally: `mergeSamples` renders only names the signal manifest
+		 * declares and drops every other sample, so no wrapping choice here
+		 * could put an app series into this document. The loaded registry is
+		 * still deliberately NOT wrapped with `mirrorRegistry`: the wrap exists
+		 * to mirror the ADAPTER's own registrations for cluster collection, dev
+		 * registers none (its ceilings enforce live and report through events
+		 * instead), and wrapping would spend a mirror write per app emit buying
+		 * nothing the merge could ever render. So the dev document is the valid
+		 * single-worker frame with no adapter series in it. A scrape route can
+		 * be developed against that; a null could only be handled around. An
+		 * app's own series live on `platform.metrics`, where the documented
+		 * route reads them.
 		 *
 		 * @returns {Promise<string | null>}
 		 */

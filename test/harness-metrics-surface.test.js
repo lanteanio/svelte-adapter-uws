@@ -75,6 +75,43 @@ describe('the harness exposes the metrics members a route reads', () => {
 			'the snapshot must carry the instruments this server registered'
 		).toContain('upgrade_deferred_depth');
 	});
+
+	it('keeps an app series out of the snapshot: the manifest filter, pinned directly', async () => {
+		// The documented law: the snapshot covers the adapter's own metrics and
+		// never an app's - the adapter cannot know whether an app series should
+		// be summed, maxed or averaged across workers, and guessing would be a
+		// silent wrong number. The law is enforced STRUCTURALLY: mergeSamples
+		// renders only names the signal manifest declares and drops every other
+		// sample. That filter is pinned here at the merge itself, because an
+		// end-to-end "snapshot does not contain my series" assertion cannot
+		// fail - no surface feeds an app name into the mirror in the first
+		// place - and a pin that cannot fail pins nothing. The declared name
+		// beside it is the positive control: the same input shape renders when
+		// the manifest knows it.
+		const { mergeSamples } = await import('../src/runtime/utils/metrics-merge.js');
+		const doc = mergeSamples([{
+			worker: 0,
+			samples: [
+				{ name: 'app_requests_total', labels: {}, value: 7 },
+				{ name: 'ws_connections', labels: {}, value: 3 }
+			]
+		}], { expected: 1, degraded: false });
+		expect(doc, 'a manifest-declared sample renders').toContain('ws_connections 3');
+		expect(doc, 'an undeclared sample is dropped rather than guessed at').not.toContain('app_requests_total');
+
+		// And the half the app relies on instead: an instrument created through
+		// platform.metrics lands on the LIVE registry, where the documented
+		// scrape route reads it.
+		const { createTestServer } = await import('../src/testing.js');
+		const registry = recordingRegistry();
+		server = await createTestServer({ metrics: registry, handler: {} });
+		const platform = server.platform ?? server.app?.platform ?? null;
+		platform.metrics.counter('app_requests_total').inc();
+		expect(
+			registry.created.some((c) => c.name === 'app_requests_total'),
+			'the object handed back is the live registry, so the instrument lands on it'
+		).toBe(true);
+	});
 });
 
 // The same two members on the DEV plugin, which is the other half of the same
@@ -143,7 +180,41 @@ describe('the dev plugin exposes the same metrics members', () => {
 		const { platform } = await bootDevWithMetrics({ default: registry });
 		expect(platform, 'the init hook must have been handed a platform').toBeTruthy();
 		expect(platform.metrics, 'a route reading platform.metrics in dev must find the registry').toBe(registry);
-		expect(typeof await platform.metricsSnapshot(), 'a configured registry must produce a document').toBe('string');
+		// Identity is the acceptance case: `.toBe` proves the LIVE registry the
+		// build will bundle, not a copy or a wrapper - so an instrument the app
+		// creates through platform.metrics lands on its own registry, where the
+		// documented scrape route reads it.
+		platform.metrics.counter('app_requests_total').inc();
+		expect(
+			registry.created.some((c) => c.name === 'app_requests_total'),
+			'an instrument created through platform.metrics must land on the app registry'
+		).toBe(true);
+	});
+
+	it('answers the adapter-only snapshot document, with the app series kept out', async () => {
+		// The dev document reads from the adapter's metric mirror, which other
+		// suites in this worker have legitimately written through the harness's
+		// wrapped registrations. Clear it so this case pins DEV's own truth: in
+		// a real `vite dev` process nothing ever wraps, so the mirror is empty.
+		const { resetMetricMirror } = await import('../src/runtime/utils/metrics.js');
+		resetMetricMirror();
+
+		const registry = recordingRegistry();
+		const { platform } = await bootDevWithMetrics({ default: registry });
+
+		const body = await platform.metricsSnapshot();
+		expect(typeof body, 'a configured registry must produce a document').toBe('string');
+		// The valid single-worker frame: the snapshot's own health gauges are
+		// present, so a route can be developed against a parseable document.
+		expect(body).toContain('metrics_snapshot_workers_expected 1');
+		// Dev registers no adapter instruments (its ceilings enforce live and
+		// report through events), so the frame carries no adapter series - the
+		// harness case above proves the same series IS present where the
+		// instruments exist, which is what makes this absence a statement
+		// about dev rather than about the assertion. (An APP series can never
+		// appear in any snapshot: the merge renders only manifest-declared
+		// names, pinned directly in the harness half of this file.)
+		expect(body).not.toContain('upgrade_deferred_depth');
 	});
 
 	it('takes the same export the build takes, in the same order', async () => {
