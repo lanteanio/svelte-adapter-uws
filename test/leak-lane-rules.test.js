@@ -12,7 +12,7 @@
 // which is why the fit quality is a vote.
 
 import { describe, it, expect } from 'vitest';
-import { judge, quantile, MIN_R_SQUARED, MAX_ERROR_RATE, MAX_P95_CREEP, RSS_TOLERANCE_BYTES } from '../scripts/leak-lane.js';
+import { judge, selfCheckVerdict, quantile, MIN_R_SQUARED, MAX_ERROR_RATE, MAX_P95_CREEP, RSS_TOLERANCE_BYTES } from '../scripts/leak-lane.js';
 import { detectGrowth } from '../src/runtime/leak-detect.js';
 import { hasUWS, startRealRuntime, REAL_BOOT_BUDGET_MS } from './helpers/real-runtime.js';
 
@@ -125,6 +125,48 @@ describe('the leak lane reaches a verdict the way it says it does', () => {
 		expect(quantile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.9)).toBe(10);
 		expect(quantile([5, 1, 3, 2, 4], 0.5)).toBe(3);
 		expect(quantile([], 0.95)).toBe(0);
+	});
+});
+
+// The self-check accepts only the gate it tests. The planted defect is memory
+// growth, so a failing verdict is not detection: a deliberately leaking server
+// can also shed requests or creep its p95, and a self-check that accepted any
+// failure would pass while the growth gate itself was blind. Driven through
+// the real judge() outputs rather than hand-built records, so the rule and the
+// verdict shape cannot drift apart.
+describe('the self-check counts only the growth gate as detection', () => {
+	it('passes when the growth gate itself saw the planted leak', () => {
+		const record = judge({ ...HEALTHY, rss: CLIMBING });
+		expect(record.growth.leaking, 'the premise: this record is a detected leak').toBe(true);
+		const check = selfCheckVerdict(record);
+		expect(check.pass).toBe(true);
+		expect(check.reason).toMatch(/growth gate/);
+	});
+
+	it('still passes when the leak also degraded the server, as a real one does', () => {
+		// Growth detected AND an error-rate failure beside it: the incidental
+		// failure must not mask the detection that matters.
+		const record = judge({ ...HEALTHY, rss: CLIMBING, errors: 600 });
+		expect(record.failures.length).toBeGreaterThan(1);
+		expect(selfCheckVerdict(record).pass).toBe(true);
+	});
+
+	it('fails when the verdict failed for any reason but the growth gate stayed blind', () => {
+		// The shape the typed check exists for: an error-rate failure makes the
+		// verdict failing while the planted growth went undetected. Accepting
+		// this record was the defect.
+		const record = judge({ ...HEALTHY, errors: 600 });
+		expect(record.failing, 'the premise: a failing verdict without a detected leak').toBe(true);
+		expect(record.growth.leaking).toBe(false);
+		const check = selfCheckVerdict(record);
+		expect(check.pass).toBe(false);
+		expect(check.reason).toMatch(/went undetected/);
+	});
+
+	it('fails on a clean verdict, which is the lane gone quietly blind', () => {
+		const record = judge(HEALTHY);
+		expect(record.failing).toBe(false);
+		expect(selfCheckVerdict(record).pass).toBe(false);
 	});
 });
 

@@ -196,6 +196,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   something. Three scenarios: an HTTP one, a WebSocket topic-churn one, and a
   self-check that arms a real leak and fails if the lane does not catch it, so
   a lane that has quietly stopped working says so instead of reporting health.
+  Catching means the growth gate itself detected the planted leak: a verdict
+  failing on error rate or latency creep does not count, because a
+  deliberately leaking server degrades in those ways too and accepting them
+  would pass the self-check while the growth gate was blind.
   Its own command and its own nightly job, because it spends minutes by design
   and a slow gate inside the fast suite is a gate people stop running.
 

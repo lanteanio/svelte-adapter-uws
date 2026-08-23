@@ -30,8 +30,11 @@
 //   not one. The clients here hold their connections.
 //
 //   A GATE THAT CANNOT FAIL IS NOT A GATE. The self-check scenario arms a real
-//   leak and requires the verdict to come back FAILING. A lane that has quietly
-//   lost the ability to detect one then says so, instead of reporting a pass.
+//   leak and requires the GROWTH GATE ITSELF to have detected it - a verdict
+//   failing on error rate or latency creep is a failing verdict, not a
+//   detected leak, and accepting it would let the lane pass its self-check
+//   while blind to the one thing it plants. A lane that has quietly lost the
+//   ability to detect one then says so, instead of reporting a pass.
 //
 // EXIT CODES. 0 clean; 1 a scenario's verdict failed (a leak, an error rate, a
 // latency creep, or a self-check that did not detect its own planted leak);
@@ -157,6 +160,32 @@ export function judge(m, opts = {}) {
 	}
 
 	return { growth, errorRate, p95Creep, failures, health, failing: failures.length > 0 };
+}
+
+/**
+ * The self-check's own verdict, TYPED on the gate under test.
+ *
+ * The planted defect is memory growth, so only the growth gate detecting it
+ * proves the lane can see one. `record.failing` alone is not detection: a
+ * deliberately leaking server can also shed requests or creep its p95, and a
+ * self-check that accepted any failing verdict would pass while the growth
+ * gate itself was blind - the exact quiet death the scenario exists to catch.
+ *
+ * @param {{ growth?: { leaking?: boolean }, failing?: boolean, failures?: string[] }} record
+ * @returns {{ pass: boolean, reason: string }}
+ */
+export function selfCheckVerdict(record) {
+	if (record.growth && record.growth.leaking === true) {
+		return { pass: true, reason: 'the planted leak was detected by the growth gate' };
+	}
+	if (record.failing) {
+		return {
+			pass: false,
+			reason: 'the verdict failed (' + (record.failures || []).join('; ') +
+				') but the planted memory growth itself went undetected, so the growth gate cannot be trusted'
+		};
+	}
+	return { pass: false, reason: 'a deliberate leak went undetected, so no other verdict here can be trusted' };
 }
 
 // ---------------------------------------------------------------------------
@@ -508,12 +537,14 @@ async function main() {
 		}
 
 		if (name === 'selfcheck') {
-			// Inverted on purpose: this scenario is leaking by construction, so a
-			// clean verdict means the lane cannot see a leak it planted itself.
-			if (record.failing) {
-				console.log('[leak-lane] selfcheck: PASS - the planted leak was detected');
+			// Inverted on purpose - this scenario is leaking by construction - and
+			// typed on purpose: only the growth gate's own detection counts. See
+			// selfCheckVerdict for why a failing verdict alone is not detection.
+			const check = selfCheckVerdict(record);
+			if (check.pass) {
+				console.log(`[leak-lane] selfcheck: PASS - ${check.reason}`);
 			} else {
-				console.error('[leak-lane] selfcheck: FAIL - a deliberate leak went undetected, so no other verdict here can be trusted');
+				console.error(`[leak-lane] selfcheck: FAIL - ${check.reason}`);
 				exit = Math.max(exit, 1);
 			}
 		} else if (record.failing) {
