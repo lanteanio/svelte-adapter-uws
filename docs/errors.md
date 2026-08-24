@@ -377,10 +377,10 @@ searchable log prefix is:
 
 - **Code/event:** `metrics.merge-failed`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.metrics event=metrics.merge-failed severity=error] The cluster metrics merge failed; this scrape answers with the local worker only.`
-- **Cause:** Combining per-worker metric snapshots into one cluster answer threw.
+- **Cause:** Combining the delivered per-worker snapshots into one cluster answer threw. Every report a primary can deliver is normalized before it is combined - non-object samples are dropped, names outside the manifest are dropped, histogram shapes are validated against their declared buckets, non-numeric values collapse to NaN, label sets are bounded in key count and value length with keys held to the exposition label grammar, the registration inventory is trimmed to a bounded length, and the document seats a bounded number of distinct series - so no message that survives the thread boundary reaches the combine step in a shape it does not handle. A throw here is a defect in the merge itself or a rewrapped runtime built-in underneath it, not bad input. The catch exists because every concurrent scrape on the worker shares one in-flight promise: a throw that escaped it would leave that promise unsettled and hang every later scrape on the worker.
 - **Consequence:** That scrape reports one worker instead of the cluster, so counters appear to drop sharply for a single interval.
 - **Automatic recovery:** Yes. The next scrape attempts the merge again.
-- **Next action:** Treat an isolated occurrence as a degraded scrape, not lost data. If it repeats, read the attached error; alerting on absolute counter values across this interval will produce false alarms.
+- **Next action:** Treat an isolated occurrence as a degraded scrape, not lost data; alerting on absolute counter values across this interval will produce false alarms. Because no deliverable report can reach this line, a repeat is an adapter defect - report it with the attached error rather than hunting for a misbehaving worker.
 - **Runtime help:** `docs/errors.md#adapter-err-metrics-merge`
 - **Runtime sources:** [src/runtime/handler/metrics-snapshot.js](../src/runtime/handler/metrics-snapshot.js)
 
@@ -401,10 +401,10 @@ searchable log prefix is:
 
 - **Code/event:** `metrics.primary-unreachable`
 - **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.metrics event=metrics.primary-unreachable severity=error] The metrics snapshot request could not reach the primary; this scrape answers degraded with the local worker only.`
-- **Cause:** Posting the snapshot request to the primary threw, which means this worker's message port to the primary is closed or unusable - the primary has gone or the worker is shutting down.
+- **Cause:** Posting the snapshot request to the primary threw. A dead channel does not do this: posting to a closed or torn-down MessagePort is a silent no-op on current Node, and the request itself is a small plain literal that always survives structured clone. The throw comes from whatever wrapped the worker's message port - process-wide instrumentation that rewraps postMessage can make the underlying call throw a DataCloneError the moment its piggybacked context carries a value structured clone refuses, or raise an error of its own.
 - **Consequence:** The scrape is answered from the local worker and marked degraded rather than failing outright, so the endpoint stays up while the numbers describe one worker.
 - **Automatic recovery:** Yes. The next scrape posts to the primary again.
-- **Next action:** Treat this as a dead port rather than a slow primary. A primary that is merely slow does NOT emit this event: that path answers degraded silently when its deadline passes, so the absence of this line is not evidence the primary is healthy. Compare the expected and reporting worker counts for that.
+- **Next action:** Read the attached error and look at whatever instruments the process; a DataCloneError names the wrapper's payload, not the adapter's. A primary that died or a port that closed does NOT emit this event - that posting is a silent no-op and the collection deadline answers degraded without a line - so the absence of this line is not evidence the primary is healthy. Compare the expected and reporting worker counts for that.
 - **Runtime help:** `docs/errors.md#adapter-err-metrics-primary-unreachable`
 - **Runtime sources:** [src/runtime/handler/metrics-snapshot.js](../src/runtime/handler/metrics-snapshot.js)
 

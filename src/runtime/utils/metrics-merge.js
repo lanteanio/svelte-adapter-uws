@@ -39,6 +39,69 @@ const REQUIRED_WORKER_SIGNALS = SIGNALS.filter((signal) =>
 	signal.merged !== true && signal.optional !== true && signal.scope === 'worker'
 );
 
+// Label sets are the one sample field whose size the sender controls, and the
+// document's own size follows from how many distinct series get seated. These
+// bounds keep both finite so that NO deliverable report can push the merge
+// into a string the engine refuses: the worst-case document under them stays
+// well below the engine's maximum string length, which is what lets the
+// merge-failed entry state that a throw is a merge defect rather than input.
+// Every bound is a generous multiple of the manifest's real shape - declared
+// label vocabularies hold one to three short keys, and a healthy cluster
+// document carries a few hundred series. The four bounds are sized TOGETHER
+// against the engine's ceiling: worst case, 4096 series of 16 histogram lines
+// at ~5.3K chars each is ~344M chars against the ~536M maximum string length.
+// Re-derive that arithmetic before raising any one of them.
+const MAX_LABEL_KEYS = 8;
+const MAX_LABEL_KEY_LENGTH = 128;
+const MAX_LABEL_VALUE_LENGTH = 256;
+const MAX_DOCUMENT_SERIES = 4096;
+// The registration inventory is bounded for the same reason: a legitimate
+// marker lists at most the manifest's own family names, while the engine's
+// Set has a hard maximum size (2^24 distinct entries) that an unbounded
+// delivered array could cross inside the merge. Trimming to a generous
+// multiple of the manifest keeps the inventory finite without ever touching
+// a real report.
+const MAX_REGISTERED_FAMILIES = 1024;
+
+// Exposition label names have a fixed grammar and the format has no key
+// escaping (renderLabels escapes values only), so a key outside the grammar
+// cannot be rendered safely - the sample is refused rather than letting a
+// delivered key inject bytes into the document.
+const LABEL_KEY_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
+/**
+ * The sample's label set if it is within bounds, `{}` when absent, or `null`
+ * when the sample must be dropped - the same treatment a malformed histogram
+ * shape gets. Values must be primitives that render as short strings; string
+ * values are length-bounded because they flow into series keys and label
+ * blocks by concatenation.
+ *
+ * @param {unknown} raw
+ * @returns {Record<string, string> | null}
+ */
+function boundedLabels(raw) {
+	if (raw === null || typeof raw !== 'object') return {};
+	// Only a plain record is a label set. Structured clone preserves Map, Set,
+	// Date and friends as themselves, and their own enumerable keys are empty,
+	// so accepting them would silently alias the sample onto the unlabelled
+	// series instead of refusing the shape.
+	const proto = Object.getPrototypeOf(raw);
+	if (proto !== Object.prototype && proto !== null) return null;
+	const keys = Object.keys(raw);
+	if (keys.length > MAX_LABEL_KEYS) return null;
+	for (const key of keys) {
+		if (key.length > MAX_LABEL_KEY_LENGTH || !LABEL_KEY_RE.test(key)) return null;
+		const value = /** @type {Record<string, unknown>} */ (raw)[key];
+		const type = typeof value;
+		if (type === 'string') {
+			if (/** @type {string} */ (value).length > MAX_LABEL_VALUE_LENGTH) return null;
+		} else if (type !== 'number' && type !== 'boolean') {
+			return null;
+		}
+	}
+	return /** @type {Record<string, string>} */ (raw);
+}
+
 /**
  * The bounded registration inventory carried by a current worker report.
  * `null` means the report predates the inventory protocol; an empty Set means
@@ -53,7 +116,10 @@ function registeredFamilies(report) {
 		sample !== null && typeof sample === 'object' && sample.name === METRIC_REGISTRATIONS_SAMPLE
 	);
 	if (marker === undefined) return null;
-	return new Set(Array.isArray(marker.families) ? marker.families : []);
+	const families = Array.isArray(marker.families) ? marker.families : [];
+	return new Set(families.length > MAX_REGISTERED_FAMILIES
+		? families.slice(0, MAX_REGISTERED_FAMILIES)
+		: families);
 }
 
 /**
@@ -182,6 +248,10 @@ export function mergeSamples(reports, context) {
 	 *   values: Array<{ buckets: number[], counts: number[], count: number, sum: number }>
 	 * }>>} */
 	const histogramCollected = new Map();
+	// Distinct series seated across BOTH maps; new series beyond the cap are
+	// dropped while existing series keep merging, so the document stays
+	// bounded whatever a delivery contains.
+	let seatedSeries = 0;
 
 	for (const report of reports) {
 		if (report === null || report === undefined || !Array.isArray(report.samples)) continue;
@@ -189,7 +259,8 @@ export function mergeSamples(reports, context) {
 			if (sample === null || typeof sample !== 'object') continue;
 			const signal = SIGNALS_BY_NAME.get(sample.name);
 			if (signal === undefined) continue;
-			const labels = sample.labels !== null && typeof sample.labels === 'object' ? sample.labels : {};
+			const labels = boundedLabels(sample.labels);
+			if (labels === null) continue;
 			if (signal.type === 'histogram') {
 				const histogram = sample.histogram;
 				if (histogram === null || typeof histogram !== 'object' ||
@@ -213,8 +284,13 @@ export function mergeSamples(reports, context) {
 					count: histogram.count,
 					sum: histogram.sum
 				};
-				if (existing === undefined) series.set(key, { labels, values: [value] });
-				else existing.values.push(value);
+				if (existing === undefined) {
+					if (seatedSeries >= MAX_DOCUMENT_SERIES) continue;
+					seatedSeries++;
+					series.set(key, { labels, values: [value] });
+				} else {
+					existing.values.push(value);
+				}
 				continue;
 			}
 			const value = typeof sample.value === 'number' ? sample.value : NaN;
@@ -222,8 +298,13 @@ export function mergeSamples(reports, context) {
 			if (series === undefined) collected.set(sample.name, (series = new Map()));
 			const key = seriesKey(labels);
 			const existing = series.get(key);
-			if (existing === undefined) series.set(key, { labels, values: [value] });
-			else existing.values.push(value);
+			if (existing === undefined) {
+				if (seatedSeries >= MAX_DOCUMENT_SERIES) continue;
+				seatedSeries++;
+				series.set(key, { labels, values: [value] });
+			} else {
+				existing.values.push(value);
+			}
 		}
 	}
 

@@ -80,6 +80,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Pinned as a unit round-trip on a spliced frame with a positive control, and
   as the routed batch a real connection's crafted frame produces.
 
+- **The metrics cluster-containment entries state reachable causes.** The
+  errors reference told an operator to read `metrics.primary-unreachable` as a
+  dead worker port, but posting to a closed `MessagePort` is a silent no-op on
+  current Node: a dead channel produces no line at all, and the collection
+  deadline answers degraded without one. The entry now names what does produce
+  the throw - an instrumented port whose piggybacked context structured clone
+  refuses - and sends the operator to the attached error instead of a port
+  hunt. The `metrics.merge-failed` entry now documents that no deliverable
+  report reaches the combine step malformed, so the line means the merge
+  itself threw, and the catch exists to keep the worker's shared in-flight
+  collection promise settling. The merge backs that statement mechanically:
+  label sets are bounded in key count and value length, label keys outside
+  the exposition grammar are refused (the format has no key escaping, so a
+  bad key cannot be rendered safely), non-record label shapes are refused
+  rather than aliased onto the unlabelled series, the registration inventory
+  a report may carry is trimmed to a bounded length,
+  and the document seats a bounded number of distinct series, so a delivered
+  collection is dropped, trimmed, or collapsed sample by sample but can never
+  push the merge into a string or a set the engine refuses. Both entries are
+  driven against the built runtime in a
+  real worker thread - the first through a prototype-level port wrapper whose
+  real `postMessage` raises a real `DataCloneError`, the second through the
+  dispatch's own resolve call - with each emitted event bound to the error
+  that crossed the catch.
+
 - **The relay-gap emission derives from the error registry instead of
   repeating it.** The emitter stated the event's component, event name,
   severity, and problem sentence as inline literals that happened to agree

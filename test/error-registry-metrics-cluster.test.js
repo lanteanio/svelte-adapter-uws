@@ -3,6 +3,16 @@
 // metrics-snapshot module running in a real worker thread, with this test as
 // the primary on the other end of the real parentPort.
 //
+// The conditions are the entries' own, not proxies for them. The unreachable
+// entry names an instrumented port whose piggybacked context makes the real
+// postMessage throw - a closed port is a silent no-op on current Node and
+// cannot produce the line - so the drive installs that wrapper and the throw
+// is a genuine DataCloneError from structured clone. The merge entry names the
+// merge itself throwing - no deliverable report reaches the combine step
+// malformed - so the drive hands the dispatch's own resolve call a report
+// whose read raises inside mergeSamples. Each case binds the emitted event to
+// the actual error that crossed the catch.
+//
 // Both entries are containment for the cluster boundary, and both make a
 // promise beyond "the line prints": the scrape is still ANSWERED, degraded and
 // local-only, with the endpoint up. That resolving is load-bearing - the
@@ -17,12 +27,15 @@
 // the real objects the runtime calls.
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { Worker } from 'node:worker_threads';
+import { Worker, MessageChannel } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { buildFixtureOnce } from './helpers/fixture-build.js';
 import { variantOut } from './fixture/variants.js';
 import { ADAPTER_ERROR_IDS, ADAPTER_ERROR_REGISTRY } from '../src/runtime/error-registry.js';
+import { mergeSamples } from '../src/runtime/utils/metrics-merge.js';
+import { SIGNALS } from '../src/runtime/observability-manifest.js';
+import { METRIC_REGISTRATIONS_SAMPLE } from '../src/runtime/utils/metrics.js';
 import { hasUWS, REAL_BOOT_BUDGET_MS } from './helpers/real-runtime.js';
 
 const fixtureDir = fileURLToPath(new URL('./fixture', import.meta.url));
@@ -108,7 +121,7 @@ describeUWS('the cluster metrics containment entries against the built runtime',
 		worker = null;
 	});
 
-	it('PRIMARY-UNREACHABLE: a dead port answers the scrape degraded, local worker only', async () => {
+	it('PRIMARY-UNREACHABLE: an instrumented port whose real post throws answers the scrape degraded, local worker only', async () => {
 		worker.postMessage({ type: 'drive-unreachable' });
 		const result = await nextMessage((m) => m.type === 'result' && m.name === 'unreachable');
 
@@ -116,6 +129,11 @@ describeUWS('the cluster metrics containment entries against the built runtime',
 		expect(hit, 'the entry event must be emitted').toBeTruthy();
 		expect(hit.severity).toBe('error');
 		expect(hit.message).toBe(unreachableEntry.problemPrefix);
+		// The throw the entry's cause names, verbatim from the platform: the
+		// wrapper's piggybacked context was refused by structured clone inside
+		// the REAL postMessage. An injected stub error would fail this.
+		expect(hit.error?.name).toBe('DataCloneError');
+		expect(hit.error?.message).toContain('could not be cloned');
 
 		// The containment half: the scrape is ANSWERED - the endpoint stays up
 		// while the numbers describe one worker, and the document says so.
@@ -134,6 +152,9 @@ describeUWS('the cluster metrics containment entries against the built runtime',
 		expect(hit, 'the entry event must be emitted').toBeTruthy();
 		expect(hit.severity).toBe('error');
 		expect(hit.message).toBe(mergeEntry.problemPrefix);
+		// The attached error is the one the merge actually raised - the entry's
+		// "report it with the attached error" guidance carries the real cause.
+		expect(hit.error?.message).toContain('__MERGE_POISON__');
 
 		// "this scrape answers with the local worker only" - the promise
 		// resolved, and it resolved to the degraded local document rather than
@@ -159,4 +180,113 @@ describeUWS('the cluster metrics containment entries against the built runtime',
 		// rule's contract, pinned in its own suite, not this one's.)
 		expect(result.doc).toContain('metrics_snapshot_degraded 0');
 	}, REAL_BOOT_BUDGET_MS);
+
+	it('the platform fact the unreachable cause rests on: posting to a closed MessagePort is a silent no-op', () => {
+		const { port1, port2 } = new MessageChannel();
+		port2.close();
+		port1.close();
+		// The entry attributes the throw to an instrumented port precisely
+		// because a dead one cannot produce it. If a Node change ever makes
+		// this throw, the cause must be rewritten alongside this pin.
+		expect(() => port1.postMessage({ type: 'metrics-request', id: 'x', timeoutMs: 50 })).not.toThrow();
+	});
+
+	it('a hostile but deliverable collection is dropped by the bounds, never thrown into the catch', async () => {
+		worker.postMessage({ type: 'drive-collect', name: 'hostile' });
+		const request = await nextMessage((m) => m.type === 'metrics-request');
+		// Everything below survives structured clone, so a primary COULD put
+		// it on the wire - which is exactly what the merge entry's cause rules
+		// out of the catch: these shapes are dropped or collapsed, never
+		// thrown. The sample-level circular reference and the BigInt ride
+		// along untouched fields; the label shapes probe each bound.
+		const circular = { name: 'ws_connections', value: 7, labels: {} };
+		circular.self = circular;
+		worker.postMessage({
+			type: 'deliver-reports',
+			id: request.id,
+			expected: 1,
+			reporting: 1,
+			reports: [{
+				worker: 1,
+				samples: [
+					// An oversized registration inventory: skipped by the sample
+					// loop (its name is no manifest signal) and trimmed by the
+					// inventory bound before the completeness read seats a Set.
+					{ name: METRIC_REGISTRATIONS_SAMPLE, families: Array.from({ length: 5000 }, (_, i) => 'junk_family_' + i) },
+					{ name: 'upgrade_rejected_total', value: 909091, labels: { reason: 'y'.repeat(300000) } },
+					{ name: 'upgrade_rejected_total', value: 909092, labels: Object.fromEntries(Array.from({ length: 40 }, (_, i) => ['k' + i, 'v'])) },
+					{ name: 'upgrade_rejected_total', value: 909093, labels: new Map([['reason', 'm']]) },
+					{ name: 'upgrade_rejected_total', value: 909095, labels: { 'bad"key\n': 'x' } },
+					{ name: 'upgrade_rejected_total', value: 909094n, labels: { reason: 'big' } },
+					circular,
+					{ name: 'upgrade_rejected_total', value: 41, labels: { reason: 'capacity' } }
+				]
+			}]
+		});
+		const result = await nextMessage((m) => m.type === 'result' && m.name === 'hostile');
+
+		expect(result.events.find((e) => e.event === 'metrics.merge-failed'),
+			'a deliverable collection must never reach the merge catch').toBeUndefined();
+		expect(typeof result.doc).toBe('string');
+		// The oversized label value, the oversized key set, the non-record
+		// label shape, and the key outside the exposition grammar (which has
+		// no key escaping, so an accepted bad key would inject bytes into the
+		// document) are dropped whole - their sentinel values never render.
+		expect(result.doc).not.toContain('909091');
+		expect(result.doc).not.toContain('909092');
+		expect(result.doc).not.toContain('909093');
+		expect(result.doc).not.toContain('909095');
+		expect(result.doc).not.toContain('bad"key');
+		// The non-numeric value collapses to NaN on its otherwise-valid series
+		// rather than taking the sample down with it.
+		expect(result.doc).toContain('upgrade_rejected_total{reason="big"} NaN');
+		// The positive controls: well-formed samples in the same delivery
+		// arrive untouched, so the bounds drop rather than degrade.
+		expect(result.doc).toContain('upgrade_rejected_total{reason="capacity"} 41');
+		expect(result.doc).toContain('ws_connections 7');
+	}, REAL_BOOT_BUDGET_MS);
+
+	it('a delivered series flood seats up to the document bound and no further', async () => {
+		worker.postMessage({ type: 'drive-collect', name: 'flood' });
+		const request = await nextMessage((m) => m.type === 'metrics-request');
+		const samples = [];
+		for (let i = 0; i < 5000; i++) samples.push({ name: 'ws_connections', value: 1, labels: { reason: 'r' + i } });
+		worker.postMessage({ type: 'deliver-reports', id: request.id, expected: 1, reporting: 1, reports: [{ worker: 1, samples }] });
+		const result = await nextMessage((m) => m.type === 'result' && m.name === 'flood');
+
+		expect(result.events.find((e) => e.event === 'metrics.merge-failed')).toBeUndefined();
+		// 4096 distinct series seat; the rest are dropped, which is what keeps
+		// the rendered document finite whatever a delivery carries.
+		const lines = result.doc.split('\n').filter((l) => l.startsWith('ws_connections{'));
+		expect(lines.length).toBe(4096);
+	}, REAL_BOOT_BUDGET_MS);
+
+	it('a registration inventory beyond the bound is trimmed, not seated', () => {
+		const required = SIGNALS.filter((s) => s.merged !== true && s.optional !== true && s.scope === 'worker');
+		const names = required.map((s) => s.name);
+		const nonCounterSamples = required.filter((s) => s.type !== 'counter')
+			.map((s) => ({ name: s.name, value: 1, labels: {} }));
+		const marker = (families) => ({ name: METRIC_REGISTRATIONS_SAMPLE, families });
+
+		// The control: a real inventory plus the required numeric samples is a
+		// complete report and counts as reporting.
+		const complete = mergeSamples(
+			[{ worker: 1, samples: [marker(names), ...nonCounterSamples] }],
+			{ expected: 1, reporting: 1 }
+		);
+		expect(complete).toContain('metrics_snapshot_workers_reporting 1');
+
+		// The junk fills the inventory bound exactly, pushing every real name
+		// past it; the trim drops them, so completeness cannot be claimed
+		// through an inventory of unbounded length. Were the bound removed,
+		// the real names would survive, this report would count as reporting,
+		// and a deliverable inventory could then grow a Set past the engine's
+		// maximum size inside the merge.
+		const junk = Array.from({ length: 1024 }, (_, i) => 'not_a_family_' + i);
+		const trimmed = mergeSamples(
+			[{ worker: 1, samples: [marker([...junk, ...names]), ...nonCounterSamples] }],
+			{ expected: 1, reporting: 1 }
+		);
+		expect(trimmed).toContain('metrics_snapshot_workers_reporting 0');
+	});
 });

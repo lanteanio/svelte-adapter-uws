@@ -1239,7 +1239,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the delegating room method; the header writes themselves live in
 	// handler.js and testing.js, outside every sealed graph. No frame path,
 	// no bytes, no copy primitive.
-	platform: '5399cd5384b15fb57ebae8e3d3676f1d00011ecdf03b2121df525a0f0796661e',
+	// Re-pinned for the bounded cluster-metrics merge. The drift is in
+	// utils/metrics-merge.js, reached through this graph: label sets gain a
+	// validation gate (plain-record shape, exposition key grammar, key count
+	// and key/value length bounds), the registration inventory is trimmed
+	// before its Set is built, and the document seats a bounded number of
+	// distinct series. All of it runs only inside the per-scrape merge - no
+	// frame path, no bytes, no copy primitive entered the graph.
+	platform: '66d85fb9a2cb333ee7a30100091b845c15f494a61874df9c00348df1f8fc444b',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
