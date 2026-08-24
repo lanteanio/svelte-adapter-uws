@@ -564,11 +564,11 @@ The Vite plugin is required for WebSocket support in both dev and production (se
 
 Inbound message size does match production: both default to 1 MiB. The Vite plugin option is a separate flat bag, so repeat a custom production ceiling as `uws({ maxPayloadLength: 64 * 1024 })`; `platform.maxPayloadLength` reports the exact limit the dev server enforces.
 
-When your `hooks.ws` file changes, the plugin reloads the handler and closes
-existing connections so they reconnect with the new code, avoiding a manual
-dev-server restart.
+When your `hooks.ws` file changes, the plugin reloads the handler and closes existing connections so they reconnect with the new code, avoiding a manual dev-server restart.
 
 **Note:** The dev plugin enforces `allowedOrigins` on WebSocket upgrades the same way the production handler does. For local dev scenarios that need to accept arbitrary origins (e.g. WSS from a staging client during integration), pass `devSkipOriginCheck: true` to the plugin: `uws({ devSkipOriginCheck: true })`.
+
+The dev server also serves a built-in, loopback-only diagnostics dashboard at `/__uws/dashboard` - live connections, topics, presence, pressure, and versions over Server-Sent Events, with a downloadable static report for bug reports. See [docs/dev-dashboard.md](docs/dev-dashboard.md) for the access-control design, the `dashboard` plugin option, and the extension-section registry.
 
 **vite.config.js**
 

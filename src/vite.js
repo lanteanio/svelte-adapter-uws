@@ -50,7 +50,8 @@ const KNOWN_PLUGIN_OPTION_KEYS = new Set([
 	'messageAdmission',
 	'egress',
 	'devSkipOriginCheck',
-	'timeoutMs'
+	'timeoutMs',
+	'dashboard'
 ]);
 
 function viteDiagnosticEndpoint(server) {
@@ -61,6 +62,7 @@ function viteDiagnosticEndpoint(server) {
 	};
 }
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
+import { renderAppShell, createDashboardSnapshots, checkDashboardAccess } from './dev-dashboard.js';
 import { registerGameIngress } from './runtime/handler/game-ingress.js';
 import { now, monotonicNow, randomFloat, randomU32, randomUuid, randomBytes } from './runtime/runtime.js';
 
@@ -122,6 +124,27 @@ export default function uws(options = {}) {
 
 	const wsPath = options.path || '/ws';
 	const wsAuthPath = options.authPath || '/__ws/auth';
+	// The dev dashboard is on by default (loopback-gated below); `false`
+	// disables it, an object customizes the mount path. A misshaped value
+	// throws rather than warning, because a typo'd shape here would silently
+	// serve or silently drop a diagnostic surface.
+	if (options.dashboard !== undefined && options.dashboard !== false && options.dashboard !== true &&
+		(typeof options.dashboard !== 'object' || options.dashboard === null)) {
+		throw new TypeError('the uws() dev plugin option dashboard must be false, true, or an object like { path: "/__uws/dashboard" }');
+	}
+	const dashboardOptions = typeof options.dashboard === 'object' && options.dashboard !== null ? options.dashboard : {};
+	if (dashboardOptions.path !== undefined &&
+		(typeof dashboardOptions.path !== 'string' || !dashboardOptions.path.startsWith('/') ||
+			dashboardOptions.path === '/' || dashboardOptions.path.startsWith('//'))) {
+		// A leading `//` is a protocol-relative URL, not a local path: the
+		// page derives its stream and fetch URLs from this value, so `//host`
+		// would point them off-machine.
+		throw new TypeError('the uws() dev plugin option dashboard.path must be a local pathname starting with a single "/"');
+	}
+	const dashboardPath = options.dashboard === false ? null : (dashboardOptions.path || '/__uws/dashboard');
+	if (dashboardPath !== null && (dashboardPath === wsPath || dashboardPath === wsAuthPath)) {
+		throw new TypeError('the uws() dev plugin option dashboard.path collides with the WebSocket or auth path');
+	}
 	// One source of truth for both the actual ws receiver cap and the value app
 	// code reads from platform. Production uses the same 1 MiB default.
 	const MAX_PAYLOAD_LENGTH_V = options.maxPayloadLength ?? DEFAULT_MAX_PAYLOAD_LENGTH;
@@ -2160,6 +2183,135 @@ export default function uws(options = {}) {
 					res.end('Internal Server Error');
 				}
 			});
+
+			// The dev dashboard: the live page, its SSE stream, a JSON snapshot
+			// for the reconnect gap, and the static downloadable report - all
+			// rendered by one render path in dev-dashboard.js and all behind the
+			// same loopback gate. The gate refuses before anything else because
+			// the page aggregates diagnostics for every connection on this
+			// server, and `vite dev --host` binds the listener wide.
+			if (dashboardPath !== null) {
+				const dashboardSnapshot = createDashboardSnapshots({
+					now: () => now(),
+					introspect: () => platform.introspect(),
+					topicCounts: () => {
+						const counts = new Map();
+						for (const [, topics] of subscriptions) {
+							for (const topic of topics) counts.set(topic, (counts.get(topic) ?? 0) + 1);
+						}
+						return counts;
+					}
+				});
+				/** @type {Set<import('node:http').ServerResponse>} */
+				const dashboardStreams = new Set();
+				/** @type {ReturnType<typeof setInterval> | null} */
+				let dashboardTimer = null;
+				const stopDashboardTimer = () => {
+					if (dashboardTimer !== null) {
+						clearInterval(dashboardTimer);
+						dashboardTimer = null;
+					}
+				};
+				server.httpServer?.once('close', () => {
+					for (const stream of dashboardStreams) {
+						try { stream.end(); } catch { /* already gone */ }
+					}
+					dashboardStreams.clear();
+					stopDashboardTimer();
+				});
+				server.middlewares.use(dashboardPath, (req, res) => {
+					// Deliberately NOT gated on handlerReady. The dashboard reads
+					// only `platform` and the live `subscriptions` map, both of
+					// which exist before any user handler loads; awaiting the
+					// handler would instead make the diagnostics page hang on a
+					// slow or stuck handler import or init hook - exactly the
+					// situation the page exists to help diagnose.
+					const refuse = (status, message) => {
+						// Drain the unread request body first: a refusal written
+						// while the client is still sending never reaches it -
+						// the server's response sits behind the unconsumed
+						// stream and the client sees a reset instead of the
+						// status.
+						req.resume();
+						res.statusCode = status;
+						res.setHeader('content-type', 'text/plain');
+						if (status === 405) res.setHeader('allow', 'GET');
+						res.end(message);
+					};
+					const access = checkDashboardAccess({
+						remoteAddress: req.socket?.remoteAddress,
+						host: typeof req.headers.host === 'string' ? req.headers.host : null,
+						origin: typeof req.headers.origin === 'string' ? req.headers.origin : null
+					});
+					if (!access.allowed) {
+						refuse(403, 'Forbidden: dev dashboard is loopback-only (' + access.reason + ')');
+						return;
+					}
+					if (req.method !== 'GET') {
+						refuse(405, 'Method Not Allowed');
+						return;
+					}
+					const subPath = (req.url || '/').split('?')[0];
+					if (subPath === '/' || subPath === '') {
+						res.statusCode = 200;
+						res.setHeader('content-type', 'text/html; charset=utf-8');
+						res.setHeader('cache-control', 'no-store');
+						res.end(renderAppShell(dashboardSnapshot(), { live: true, basePath: dashboardPath }));
+						return;
+					}
+					if (subPath === '/report') {
+						// The same document as the live page minus the stream: a
+						// self-contained file for bug reports. It carries this
+						// dev session's topic names, so it is an attachment the
+						// developer reviews, never something fetched by tooling.
+						res.statusCode = 200;
+						res.setHeader('content-type', 'text/html; charset=utf-8');
+						res.setHeader('cache-control', 'no-store');
+						res.setHeader('content-disposition', 'attachment; filename="uws-diagnostic-report.html"');
+						res.end(renderAppShell(dashboardSnapshot(), { live: false, basePath: dashboardPath }));
+						return;
+					}
+					if (subPath === '/snapshot') {
+						res.statusCode = 200;
+						res.setHeader('content-type', 'application/json');
+						res.setHeader('cache-control', 'no-store');
+						res.end(JSON.stringify(dashboardSnapshot()));
+						return;
+					}
+					if (subPath === '/events') {
+						res.statusCode = 200;
+						res.setHeader('content-type', 'text/event-stream');
+						res.setHeader('cache-control', 'no-store');
+						res.write('retry: 2000\n\n');
+						res.write('data: ' + JSON.stringify(dashboardSnapshot()) + '\n\n');
+						dashboardStreams.add(res);
+						if (dashboardTimer === null) {
+							dashboardTimer = setInterval(() => {
+								if (dashboardStreams.size === 0) {
+									stopDashboardTimer();
+									return;
+								}
+								const frame = 'data: ' + JSON.stringify(dashboardSnapshot()) + '\n\n';
+								for (const stream of dashboardStreams) {
+									// A destroyed response never throws synchronously on
+									// write (the error is async), so drop it explicitly
+									// rather than waiting on its close handler.
+									if (stream.destroyed) { dashboardStreams.delete(stream); continue; }
+									try { stream.write(frame); } catch { dashboardStreams.delete(stream); }
+								}
+							}, 1000);
+							// A watched dashboard must never hold the dev process open.
+							if (typeof dashboardTimer.unref === 'function') dashboardTimer.unref();
+						}
+						req.on('close', () => {
+							dashboardStreams.delete(res);
+							if (dashboardStreams.size === 0) stopDashboardTimer();
+						});
+						return;
+					}
+					refuse(404, 'Not Found');
+				});
+			}
 
 			server.httpServer?.on('upgrade', async (req, socket, head) => {
 				const { pathname } = new URL(req.url || '', 'http://localhost');

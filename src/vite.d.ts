@@ -59,6 +59,21 @@ export interface UWSPluginOptions extends SharedAdapterOptions {
 	 * @default 5000
 	 */
 	timeoutMs?: number;
+
+	/**
+	 * The built-in dev dashboard: a self-contained HTML page showing live
+	 * connections, topics with subscriber counts, presence and cursor
+	 * channels, pressure and egress readings, and versions - kept current
+	 * over Server-Sent Events, with a downloadable static diagnostic report
+	 * at `<path>/report`. Loopback-only: the socket, the `Host` header, and
+	 * the `Origin` header (when present) must all name a loopback host, so
+	 * neither a LAN peer under `--host` nor a DNS-rebound page can read it.
+	 *
+	 * `false` disables the dashboard; an object customizes the mount path.
+	 *
+	 * @default { path: '/__uws/dashboard' }
+	 */
+	dashboard?: boolean | { path?: string };
 }
 
 /**

@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Additive header on lanes that answered none; the bare `503` body stays byte-identical on every lane.
   - **Detail:** [Added engineering detail](#added).
 
+- **Added: the dev server ships a built-in diagnostics dashboard.** `vite dev` now serves a self-contained dashboard at `/__uws/dashboard` - live connections, topics with subscriber counts, presence and cursor channels, pressure and egress readings, and versions, kept current over Server-Sent Events - with a downloadable static diagnostic report at `/__uws/dashboard/report` for bug reports.
+  - **Affects:** Development only; the production runtime, the build output, and every deployed artifact are unchanged.
+  - **Action:** None; open `/__uws/dashboard` during `vite dev`. Pass `dashboard: false` to the `uws()` plugin to disable, or `dashboard: { path }` to move it.
+  - **Requires:** No new dependency; the page is one server-rendered HTML string with inline CSS and vanilla JS.
+  - **Compatibility:** Loopback-only on socket, `Host`, and `Origin` (the `Host` check defeats DNS rebinding, so `vite dev --host` does not expose it). An extensions package can add sections through the `Symbol.for('svelte-adapter-uws.dashboard-contributors')` registry without the adapter importing it.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Changed: the refusal Retry-After jitter is real at the default base.** The band arithmetic collapsed to a constant at the default base of two, so a refused fleet returned together into the same full gate; a two-value band floor now guarantees at least two distinct answers at every base and posture.
   - **Affects:** Deployments at the default `retryAfterSeconds` of two (or a configured base of one); every other configured base keeps its exact bands.
   - **Action:** None; clients that parse the header already handle the range a wider posture produced.
@@ -45,6 +52,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Pinned by header assertions on every refusal lane across the production
   handler and the packaged test server, including the cursor lane under a
   pinned siege.
+
+- **The dev dashboard endpoint, rendered by one path for both documents.**
+  `renderAppShell(snapshot, { live })` returns a complete self-contained HTML
+  document - inline CSS, inline vanilla JS, the snapshot embedded as an
+  `application/json` script tag with `<`, U+2028, and U+2029 escaped so data
+  can never terminate the block - and the same function renders the live
+  SSE-driven page and the static report attachment. The page builds its DOM
+  through `textContent` exclusively, so snapshot data never becomes markup.
+  Every snapshot carries one strictly increasing sequence number shared by
+  the embedded copy, the SSE frames, and the reconnect fetch; the client
+  discards anything not newer, so a slow fetch cannot race the stream
+  backwards, and the discard guard embedded in the page is the exported
+  function the unit suite pins. The loopback gate checks the socket address,
+  the `Host` header (brackets and the IPv4-mapped spelling handled, a
+  loopback host matched by a complete-IPv4-in-127.0.0.0/8 parse so a
+  `127.`-prefixed hostname an attacker registered is refused - the
+  DNS-rebinding defense), and the `Origin` header when present, and drains an
+  unread request body before refusing so the client actually receives the
+  403. The snapshot composes existing readings only:
+  `platform.introspect()`, the plugin's subscription map (derived
+  `__presence:`/`__cursor:` channels presented as their own tables), and the
+  runtime version info. Contributors registered under the
+  `Symbol.for('svelte-adapter-uws.dashboard-contributors')` registry add
+  sections cross-package with no import edge; a throwing contributor loses
+  its section, never the page. Driven by real HTTP requests through the
+  plugin's own middleware, including a real WebSocket client whose
+  subscription appears in the streamed frames.
 
 ### Changed
 
