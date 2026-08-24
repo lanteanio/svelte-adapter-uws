@@ -812,13 +812,22 @@ describe('the detector is actually wired into the runtime', () => {
 		}
 		expect(emitted, 'a drained gap must be reported from the function that drained it').toBe(true);
 
+		// The identity may be the literal or, stronger, derived from the
+		// registry entry (`event: X.event` where X is
+		// adapterErrorDefinition(ADAPTER_ERROR_IDS.RELAY_GAP)) - the derived
+		// spelling makes registry-vs-wire drift impossible by construction.
+		const derivedIdentity = /\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*adapterErrorDefinition\(ADAPTER_ERROR_IDS\.RELAY_GAP\)/.exec(src);
 		const diagnostics = callsTo(ast, 'emitOperationalEvent').filter(({ node }) => {
 			const input = node.arguments[0];
 			if (input?.type !== 'ObjectExpression') return false;
 			return input.properties.some((property) =>
 				property.type === 'Property' &&
 				property.key?.name === 'event' &&
-				property.value?.value === 'runtime.relay-gap.detected'
+				(property.value?.value === 'runtime.relay-gap.detected' ||
+					(derivedIdentity !== null &&
+						property.value?.type === 'MemberExpression' &&
+						property.value.object?.name === derivedIdentity[1] &&
+						property.value.property?.name === 'event'))
 			);
 		});
 		expect(diagnostics, 'relay gaps need one stable structured event identity').toHaveLength(1);

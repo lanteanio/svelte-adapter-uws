@@ -283,6 +283,51 @@ describe('smooth command payload codec', () => {
 		expect(decoded).toEqual([{ id: 5, cmd: 'a' }, { id: 6, cmd: 'c' }]);
 	});
 
+	it('drops a crafted duplicate-id entry during decode, keeping the entries around it', () => {
+		// The encoder never emits a zero id-delta past the first entry, so the
+		// frame is spliced from legal single-entry encodes: count 3, then
+		// entries at id 5, id +0 (the duplicate - the only wire spelling of a
+		// non-monotonic id, since a negative delta is unrepresentable), and
+		// id +2. The entry AFTER the duplicate decoding correctly is the
+		// alignment proof: the dropped entry's value was still consumed.
+		const splice = (count, batches) => {
+			const parts = batches.map((b) => encodeSmoothCommandBatch(b).subarray(1));
+			const out = new Uint8Array(1 + parts.reduce((n, p) => n + p.length, 0));
+			out[0] = count;
+			let offset = 1;
+			for (const p of parts) { out.set(p, offset); offset += p.length; }
+			return out;
+		};
+		const crafted = splice(3, [
+			[{ id: 5, cmd: 'a' }],
+			[{ id: 0, cmd: 'dup' }],
+			[{ id: 2, cmd: 'c' }]
+		]);
+		expect(decodeSmoothCommandBatch(crafted)).toEqual([{ id: 5, cmd: 'a' }, { id: 7, cmd: 'c' }]);
+		// Positive control: the same splice with a non-zero second delta
+		// decodes whole, so the case cannot pass by dropping everything.
+		const clean = splice(2, [[{ id: 5, cmd: 'a' }], [{ id: 1, cmd: 'b' }]]);
+		expect(decodeSmoothCommandBatch(clean)).toEqual([{ id: 5, cmd: 'a' }, { id: 6, cmd: 'b' }]);
+	});
+
+	it('drops a duplicate spelled with a NONZERO delta at the float precision boundary', () => {
+		// Past 2^53, `prev + delta` collapses: a first id of 2^53 followed by
+		// delta 1 computes the SAME id again, so a zero-delta check alone
+		// misses this spelling. The frame is hand-built: count 2, an 8-byte
+		// varint for 2^53, the value bytes of a legal single-entry encode,
+		// then a legal delta-1 entry.
+		const single = (batch) => encodeSmoothCommandBatch(batch);
+		const valueBytes = single([{ id: 0, cmd: 'a' }]).subarray(2);
+		const tail = single([{ id: 1, cmd: 'c' }]).subarray(1);
+		const crafted = new Uint8Array(1 + 8 + valueBytes.length + tail.length);
+		crafted[0] = 2;
+		crafted.set([0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x10], 1);
+		crafted.set(valueBytes, 9);
+		crafted.set(tail, 9 + valueBytes.length);
+		const decoded = decodeSmoothCommandBatch(crafted);
+		expect(decoded).toEqual([{ id: 2 ** 53, cmd: 'a' }]);
+	});
+
 	it('rejects an unknown schema version', () => {
 		expect(decodeSmoothCommandBatch(encodeSmoothCommandBatch([{ id: 1, cmd: 1 }]), 99)).toBe(null);
 	});
@@ -359,6 +404,37 @@ describeUWS('binary ingress over the wire', () => {
 		expect(routed[0].target).toEqual({ path: 'p', room: ['r'] });
 		expect(routed[0].batch).toEqual(batch);
 		expect(routed[0].seq).toBe(4);
+	});
+
+	it('a crafted duplicate-id command never reaches the route over a real connection', async () => {
+		// The observed half of the decode filter: the exact spliced frame the
+		// unit case builds, travelling the real 0x03 ingress path end to end.
+		// The route receives the surviving entries and never the duplicate,
+		// and the entry AFTER the duplicate arrives intact - so a crafted
+		// frame can neither double-apply a command id nor shift the ones
+		// behind it.
+		registerIngress(SMOOTH_COMMAND_CAPABILITY, {
+			decode: (payload, schemaVersion) => decodeSmoothCommandBatch(payload, schemaVersion),
+			route: (ws, target, batch, platform, seq) => routed.push({ target, batch, seq })
+		});
+		server = await createTestServer({ handler: { message() {} } });
+
+		const a = await connectClient(server.wsUrl, ['wire.ingress:1']);
+		await a.waitFor((f) => f.parsed?.type === 'ingress-ok');
+		a.send({ type: 'ingress-bind', id: 1, kind: SMOOTH_COMMAND_CAPABILITY, target: { path: 'p', room: ['r'] } });
+		await a.waitFor((f) => f.parsed?.type === 'ingress-bound' && f.parsed.id === 1);
+
+		const part = (batch) => encodeSmoothCommandBatch(batch).subarray(1);
+		const parts = [part([{ id: 5, cmd: 'a' }]), part([{ id: 0, cmd: 'dup' }]), part([{ id: 2, cmd: 'c' }])];
+		const crafted = new Uint8Array(1 + parts.reduce((n, p) => n + p.length, 0));
+		crafted[0] = 3;
+		let offset = 1;
+		for (const p of parts) { crafted.set(p, offset); offset += p.length; }
+		a.sendBinary(buildBinaryFrame(SMOOTH_COMMAND_SCHEMA_VERSION, 1, 4, crafted));
+
+		await waitUntil(() => routed.length > 0);
+		expect(routed).toHaveLength(1);
+		expect(routed[0].batch).toEqual([{ id: 5, cmd: 'a' }, { id: 7, cmd: 'c' }]);
 	});
 
 	it('does not send ingress-ok to a client that never advertised the cap', async () => {

@@ -134,8 +134,12 @@ const SMOOTH_COMMAND_MAX = 4096;
  *
  * Ids are delta-coded from the previous entry (the first from 0, so its delta
  * IS its absolute id); the channel transmits commands in strictly ascending id
- * order, and this drops any non-monotonic or invalid entry so the delta is
- * always non-negative. `cmd` uses the generic compact value codec, matching the
+ * order, and BOTH halves enforce it: encode drops any non-monotonic or invalid
+ * entry so the delta is always non-negative, and decode drops an entry whose
+ * id fails to increase past the first - a zero delta, or a delta so large
+ * that float addition collapses onto the previous id, the two spellings a
+ * crafted or corrupt frame can use to smuggle a duplicate.
+ * `cmd` uses the generic compact value codec, matching the
  * JSON round trip exactly - so the decoded batch equals what the JSON path
  * delivers to `authority.enqueue`.
  *
@@ -183,12 +187,24 @@ export function decodeSmoothCommandBatch(payload, schemaVersion = SMOOTH_COMMAND
 		const count = r.varint();
 		if (count > SMOOTH_COMMAND_MAX) return null;
 		const out = new Array(count);
+		let n = 0;
 		let prev = 0;
 		for (let i = 0; i < count; i++) {
-			const id = prev + r.varint();
+			const delta = r.varint();
+			const id = prev + delta;
+			const cmd = readValue(r);
+			// The encoder never emits an id that fails to increase, so one
+			// here is a crafted or corrupt frame: a zero delta, or a delta so
+			// large that float addition collapses back onto the previous id
+			// past 2^53. Comparing the ids catches both spellings. The entry
+			// is dropped and the rest of the batch kept - the decode mirror of
+			// the encode filter; the value was already consumed, so the read
+			// stays aligned for the entries that follow.
+			if (i > 0 && id <= prev) continue;
 			prev = id;
-			out[i] = { id, cmd: readValue(r) };
+			out[n++] = { id, cmd };
 		}
+		out.length = n;
 		return out;
 	} catch {
 		return null;

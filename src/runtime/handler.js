@@ -22,7 +22,7 @@ import * as wsModule from 'WS_HANDLER';
 import { metricsRegistry } from './metrics-bridge.js';
 import { waitingRoomRenderer } from './waiting-room-renderer-bridge.js';
 import { PRESSURE_REASON_CODES } from './observability-manifest.js';
-import { ADAPTER_ERROR_IDS, REQUEST_CLOSED_DETAIL, adapterConsoleLine, adapterErrorMessage } from './error-registry.js';
+import { ADAPTER_ERROR_IDS, REQUEST_CLOSED_DETAIL, adapterConsoleLine, adapterErrorMessage, adapterErrorDefinition } from './error-registry.js';
 import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './diagnostic.js';
 import { privateValueMetadata } from './utils/observability-privacy.js';
 import { probeOsPressureSources, emitPressureMetricTelemetry } from './utils/os-pressure.js';
@@ -965,14 +965,19 @@ if (WS_ENABLED) {
 			// dense by construction, so it already knows it lost the frames and no
 			// comparison could tell it more. Each hole is drained once, so this is
 			// silent until something is actually lost.
+			// The event's identity comes from the registry entry rather than
+			// inline literals, so the entry and the emission cannot drift
+			// apart - the registry is the one place the component, event,
+			// severity, and problem sentence are stated.
+			const RELAY_GAP = adapterErrorDefinition(ADAPTER_ERROR_IDS.RELAY_GAP);
 			for (const gap of takeConfirmedGaps(originStreams, processMonotonicNow(), GAP_CONFIRM_MS)) {
 				emitOperationalEvent({
 					source: 'svelte-adapter-uws',
-					component: 'runtime.relay-gap',
-					event: 'runtime.relay-gap.detected',
-					severity: 'error',
+					component: RELAY_GAP.component,
+					event: RELAY_GAP.event,
+					severity: RELAY_GAP.severity,
 					dataClass: 'pseudonymous',
-					message: 'This worker is missing relayed state that sibling workers received.',
+					message: RELAY_GAP.problemPrefix,
 					attributes: {
 						count: gap.count,
 						topic: privateValueMetadata(gap.topic, 'topic'),

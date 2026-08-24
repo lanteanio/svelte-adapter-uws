@@ -346,6 +346,57 @@ describeUWS('publishWireBatch fan-out', () => {
 		expect(envs[1].seq).toBe(envs[0].seq + 1);
 	});
 
+	it('a JSON fallback mid-stream leaves the binary delta chain intact at a real client', async () => {
+		// The delta decoder's chain integrity, observed where it matters: a
+		// capable client that receives binary, then a JSON detour (a batch the
+		// codec refuses to encode falls back to per-entry envelopes), then
+		// binary again - and the frame AFTER the detour must decode through
+		// the SAME per-connection dictionary to the right values. A fallback
+		// that advanced or corrupted the chain would decode the last frame
+		// wrong or not at all.
+		server = await batchServer();
+		const codec = createSmoothWireCodec();
+		const bin = await connectClient(server.wsUrl, [SMOOTH_CAPABILITY]);
+
+		server.platform.publishWire(TOPIC, 'update', { key: 'a', data: { x: 1, y: 2 } }, codec);
+		await until(() => bin.frames.binary.length >= 1);
+
+		// An event the smooth codec declines to encode falls back to a JSON
+		// envelope for EVERY subscriber, the capable one included - the
+		// detour the design position documents.
+		server.platform.publishWire(TOPIC, 'note', { text: 'mid-stream' }, codec);
+		await until(() => bin.frames.json.some((e) => e.topic === TOPIC && e.event === 'note'));
+		expect(bin.frames.binary).toHaveLength(1);
+
+		server.platform.publishWire(TOPIC, 'update', { key: 'a', data: { x: 5, y: 2 } }, codec);
+		await until(() => bin.frames.binary.length >= 2);
+		const decoded = decodeAll(bin.frames.binary);
+		expect(decoded[0].data).toEqual({ key: 'a', data: { x: 1, y: 2 } });
+		expect(decoded[1].data).toEqual({ key: 'a', data: { x: 5, y: 2 } });
+	});
+
+	it('explicit per-entry seqs arrive verbatim at a real client', async () => {
+		// The explicit entry-seq lane observed end to end: the numbers the
+		// caller stamps are the numbers a plain JSON subscriber receives, in
+		// entry order, with the topic counter untouched.
+		server = await batchServer();
+		const codec = createSmoothWireCodec();
+		const json = await connectClient(server.wsUrl, []);
+
+		server.platform.publishWireBatch(TOPIC, 'update', [
+			{ data: { key: 'a', data: { x: 1 } }, seq: 10 },
+			{ data: { key: 'b', data: { x: 2 } }, seq: 20 }
+		], codec, { seq: false });
+
+		await until(() => json.frames.json.filter((e) => e.topic === TOPIC).length >= 2);
+		const envs = json.frames.json.filter((e) => e.topic === TOPIC);
+		expect(envs.map((e) => e.seq)).toEqual([10, 20]);
+		expect(envs.map((e) => e.data)).toEqual([
+			{ key: 'a', data: { x: 1 } },
+			{ key: 'b', data: { x: 2 } }
+		]);
+	});
+
 	it('per-entry excludeWs withholds exactly that entry from exactly that socket, on both delivery forms', async () => {
 		server = await batchServer();
 		const codec = createSmoothWireCodec();

@@ -1310,8 +1310,8 @@ normative for a runtime that claims the binding.
 only a session that declares `lantean.reliable:1` may open the stream, while
 an older client opens none and an older server keeps section 14.4's
 close-or-ignore behavior. The inner frames and their meanings do not change.
-After an independent conformance review this status becomes frozen; an
-incompatible future carriage requires a new CONNECT token.
+A freeze is an explicit revision of this section; an incompatible future
+carriage requires a new CONNECT token.
 
 ### 15.1 Record framing
 

@@ -73,8 +73,31 @@ export function scanEmittedEvents() {
 		for (const reference of content.matchAll(/ADAPTER_ERROR_IDS\.([A-Z0-9_]+)/g)) {
 			idKeyReferences.add(reference[1]);
 		}
+		// An emission may derive its identity from the registry entry instead
+		// of repeating it as literals: `const X = adapterErrorDefinition(
+		// ADAPTER_ERROR_IDS.KEY)` then `event: X.event`. Resolve those through
+		// the registry so the inventory covers both spellings.
+		const derivedBindings = new Map();
+		for (const def of content.matchAll(/\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*adapterErrorDefinition\(ADAPTER_ERROR_IDS\.([A-Z0-9_]+)\)/g)) {
+			derivedBindings.set(def[1], def[2]);
+		}
 		const lines = content.split(/\r?\n/);
 		for (let index = 0; index < lines.length; index++) {
+			const derived = /event: ([A-Za-z_$][\w$]*)\.event\b/.exec(lines[index]);
+			if (derived && derivedBindings.has(derived[1])) {
+				const entry = ADAPTER_ERROR_REGISTRY.find((e) => e.id === ADAPTER_ERROR_IDS[derivedBindings.get(derived[1])]);
+				if (entry) {
+					let record = byEvent.get(entry.event);
+					if (!record) {
+						record = { event: entry.event, components: new Set(), severities: new Set(), sources: new Set() };
+						byEvent.set(entry.event, record);
+					}
+					record.sources.add(file);
+					record.components.add(entry.component);
+					record.severities.add(entry.severity);
+					continue;
+				}
+			}
 			const match = EVENT_LITERAL.exec(lines[index]);
 			if (!match) continue;
 			let record = byEvent.get(match[1]);

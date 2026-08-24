@@ -172,6 +172,53 @@ describeUWS('cursor render worker against a real server', () => {
 		mover.ws.close();
 	});
 
+	it('drops a corrupt cursor frame over the real wire and converges on the next absolute position', async () => {
+		// The best-effort row's whole claim, observed end to end: a corrupt
+		// frame on the real 0x03 path neither dispatches, nor kills the
+		// worker, nor poisons its per-connection dictionary - and the next
+		// genuine move converges the position THROUGH THE SAME connection,
+		// which is the self-healing the design position rests on.
+		const made = await cursorServer();
+		server = made.server;
+
+		const mover = await moverClient(server.wsUrl);
+		const { ctrl } = bootWorker(server.wsUrl);
+		mover.move(10.5, 20.5);
+		await until(() => ctrl._state.positionMap.size === 1);
+		const [before] = [...ctrl._state.positionMap.values()];
+		expect(before.x).toBeCloseTo(10.5, 2);
+
+		// Two corrupt shapes through the real publishWire binary path: an
+		// unknown opcode, then a truncated update (a real encode cut short).
+		const corrupt = (bytes) => made.server.platform.publishWire(
+			'__cursor:board', 'update', { corrupt: true },
+			{ capability: CURSOR_CAPABILITY, schemaVersion: 1, encode: () => bytes }
+		);
+		corrupt(new Uint8Array([0x7f]));
+		const real = await import('../src/plugins/cursor/codec.js');
+		const goodBytes = real.encodeCursor('update', { key: 'k9', data: { x: 1, y: 2 } }, null);
+		expect(goodBytes).toBeTruthy();
+		corrupt(goodBytes.subarray(0, goodBytes.length - 3));
+		await sleep(120);
+
+		// Neither corrupt frame moved the worker's state or killed it.
+		expect(ctrl._state.positionMap.size).toBe(1);
+		const [after] = [...ctrl._state.positionMap.values()];
+		expect(after.x).toBeCloseTo(10.5, 2);
+
+		// The next genuine move converges over the same connection.
+		mover.move(50.25, 60.75);
+		await until(() => {
+			const [p] = [...ctrl._state.positionMap.values()];
+			return p && Math.abs(p.x - 50.25) < 0.1;
+		});
+		const [converged] = [...ctrl._state.positionMap.values()];
+		expect(converged.x).toBeCloseTo(50.25, 1);
+		expect(converged.y).toBeCloseTo(60.75, 1);
+
+		mover.ws.close();
+	});
+
 	it('reports its viewport on its own socket and the real tracker records it', async () => {
 		const made = await cursorServer();
 		server = made.server;

@@ -10,8 +10,7 @@ history. New published rows must use the immutable
 `svelte-adapter-uws@<version>` tag when the candidate workflow ran; a direct
 publication that created no tag at publication time is also recorded as
 `legacy-none`, with a note stating that fact, because inventing the tag
-afterwards is exactly what the rollback procedure forbids. On 2026-08-16 the same one-time
-reconstruction was extended to the whole registry history: the
+afterwards is exactly what the rollback procedure forbids. The
 published-releases table carries one row per version the npm registry has ever
 accepted, each with its registry `gitHead`, integrity, shasum and publication
 instant, so no gate needs the network to resolve a published identity.

@@ -299,10 +299,30 @@ describe('generated operational error reference', () => {
 			};
 			return { message: field('message'), component: field('component'), severity: field('severity') };
 		};
+		// An emission may instead derive every field from the registry entry
+		// itself (`const X = adapterErrorDefinition(ADAPTER_ERROR_IDS.KEY)`
+		// then `event: X.event` etc.). Drift is then impossible by
+		// construction, so the check here is binding-consistency: the one
+		// emission block must draw event, component, severity, AND message
+		// from that same binding - not a value echo, which would be circular.
+		const derivedBlockFor = (source, entry) => {
+			const src = read(source);
+			const bind = /\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*adapterErrorDefinition\(ADAPTER_ERROR_IDS\.([A-Z0-9_]+)\)/.exec(src);
+			if (!bind || ADAPTER_ERROR_IDS[bind[2]] !== entry.id) return null;
+			const x = bind[1];
+			const lines = src.split(/\r?\n/);
+			const at = lines.findIndex((line) => line.includes('event: ' + x + '.event'));
+			if (at === -1) return null;
+			const near = lines.slice(Math.max(0, at - 8), at + 9).join('\n');
+			if (!near.includes('component: ' + x + '.component') ||
+				!near.includes('severity: ' + x + '.severity') ||
+				!near.includes('message: ' + x + '.problemPrefix')) return null;
+			return { message: entry.problemPrefix, component: entry.component, severity: entry.severity };
+		};
 		let checked = 0;
 		for (const entry of ADAPTER_ERROR_REGISTRY) {
 			if (entry.emission !== 'direct') continue;
-			const block = entry.sources.map((source) => blockFor(source, entry.event)).find(Boolean);
+			const block = entry.sources.map((source) => blockFor(source, entry.event) ?? derivedBlockFor(source, entry)).find(Boolean);
 			expect(block, entry.id + ': no declared source emits this event').toBeTruthy();
 			expect(block.message, entry.id + ' message').toBe(entry.problemPrefix);
 			expect(block.component, entry.id + ' component').toBe(entry.component);
