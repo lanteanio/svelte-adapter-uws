@@ -185,7 +185,7 @@ describeUWS('protection posture coupling on createTestServer', () => {
 			closeAll(results);
 		});
 
-		it('keeps the bare 503 byte-for-byte when the waiting room is opted out', async () => {
+		it('keeps the bare 503 body byte-for-byte when the waiting room is opted out, with the shared backoff header', async () => {
 			const { createTestServer } = await import('../src/testing.js');
 			const held = makeHeldGate();
 			server = await createTestServer({
@@ -200,7 +200,12 @@ describeUWS('protection posture coupling on createTestServer', () => {
 			for (const r of shed) {
 				expect(r.body).toBe(BARE_503_BODY);
 				expect(String(r.headers['content-type'])).toContain('text/plain');
-				expect(r.headers['retry-after']).toBeUndefined();
+				// At normal posture the opted-out refusal answers the shared
+				// default band; the posture cases below pin the widened bands.
+				const seconds = Number(r.headers['retry-after']);
+				expect(Number.isInteger(seconds)).toBe(true);
+				expect(seconds).toBeGreaterThanOrEqual(2);
+				expect(seconds).toBeLessThanOrEqual(3);
 			}
 			expect(results.some((r) => r.status === 200)).toBe(false);
 

@@ -864,7 +864,11 @@ export interface WebSocketOptions {
 		 * WebSocket upgrades and non-browser HTTP clients keep `503` with a
 		 * jittered `Retry-After`. Set `false` to disable polling: an HTML
 		 * navigation still receives a minimal accessible `503` document, while
-		 * WebSocket and non-HTML clients retain the bare text `503`. When
+		 * WebSocket and non-HTML clients retain the bare text `503` body.
+		 * Every refused lane carries the jittered `Retry-After` - waiting room
+		 * on or off, cursor lane included - over a band of at least two whole
+		 * seconds (base 2 when no room configures one), so refusals are never
+		 * answered one constant second. When
 		 * all three admission layers are disabled the gate never rejects, so
 		 * the waiting room never engages.
 		 */
@@ -978,7 +982,7 @@ export interface WebSocketOptions {
 	 *   quiet dwell.
 	 * - `'elevated'` / `'siege'`: pin a level for incident response or testing.
 	 *
-	 * At `'elevated'` the waiting room widens its `Retry-After` jitter. At
+	 * At `'elevated'` every refusal widens its `Retry-After` jitter. At
 	 * `'siege'` new upgrades are refused at static-serve cost and
 	 * `/__admit-check` always reports busy. Requires
 	 * `upgradeAdmission.maxConcurrent` or `upgradeAdmission.maxConnections`

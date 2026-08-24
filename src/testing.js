@@ -1,7 +1,7 @@
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders } from './runtime/utils/request-headers.js';
-import { stampSeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, mirrorRegistry, readMetricMirror, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
+import { stampSeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readMetricMirror, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createSeqBound } from './runtime/utils/seq-bound.js';
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
@@ -2329,11 +2329,21 @@ export async function createTestServer(options = {}) {
 			// Shared by the gate-full reject and the siege short-circuit so both
 			// content-negotiate identically. Mirrors the production handler: a
 			// browser navigation gets the holding page, everything else keeps the
-			// 503 + a posture-widened jittered Retry-After (0.5 at normal is
-			// today's exact band). A cursor-lane upgrade always gets the bare 503.
+			// 503 + a posture-widened jittered Retry-After. A cursor-lane upgrade
+			// always gets the bare 503, and EVERY refused lane carries
+			// Retry-After - room or no room, cursor or not - exactly as the
+			// production handler answers, or a harness-driven case would prove
+			// nothing about production.
 			// `detached` is the pre-read snapshot, passed only by the caller that
 			// runs after the uWS tick has ended. The synchronous refusals pass
 			// nothing and read the live request exactly as before.
+			const refusalRetryAfter = () => {
+				const lvl = postureLevelT();
+				const spread = lvl === 'siege' ? 1.5 : lvl === 'elevated' ? 1.0 : 0.5;
+				return WAITING_ROOM !== null
+					? WAITING_ROOM.jitteredRetryAfter(spread)
+					: jitterRetryAfter(REFUSAL_RETRY_AFTER_SECONDS, spread);
+			};
 			const serveUpgradeRefusal = (detached) => {
 				if (WAITING_ROOM === null || isCursor) {
 					if (!isCursor && negotiateRejection(
@@ -2344,14 +2354,16 @@ export async function createTestServer(options = {}) {
 							body: buildAccessibleCapacityRefusalPage(),
 							lang: 'en',
 							dir: 'ltr',
-							headers: [],
+							headers: [['retry-after', String(refusalRetryAfter())]],
 							varyAcceptLanguage: false
 						}, '503 Service Unavailable');
 						return;
 					}
+					const retryAfter = refusalRetryAfter();
 					res.cork(() => {
 						res.writeStatus('503 Service Unavailable');
 						res.writeHeader('content-type', 'text/plain');
+						res.writeHeader('retry-after', String(retryAfter));
 						res.end('Server is at upgrade capacity, please retry');
 					});
 					return;
@@ -2368,9 +2380,7 @@ export async function createTestServer(options = {}) {
 					return;
 				}
 
-				const lvl = postureLevelT();
-				const spread = lvl === 'siege' ? 1.5 : lvl === 'elevated' ? 1.0 : 0.5;
-				const retryAfter = WAITING_ROOM.jitteredRetryAfter(spread);
+				const retryAfter = refusalRetryAfter();
 				res.cork(() => {
 					res.writeStatus('503 Service Unavailable');
 					res.writeHeader('content-type', 'text/plain');
@@ -3332,6 +3342,15 @@ export async function createTestServer(options = {}) {
 	// holding page when the waiting room is on and the accessible 503 when it
 	// is opted out.
 	if (admission.maxConcurrent > 0 || admission.maxConnections > 0 || ADMISSION_PER_TICK_BUDGET > 0) {
+		// Mirrors the production handler: the navigation refusal backs off
+		// exactly like the upgrade refusal, one number per condition.
+		const navigationRetryAfter = () => {
+			const lvl = postureLevelT();
+			const spread = lvl === 'siege' ? 1.5 : lvl === 'elevated' ? 1.0 : 0.5;
+			return WAITING_ROOM !== null
+				? WAITING_ROOM.jitteredRetryAfter(spread)
+				: jitterRetryAfter(REFUSAL_RETRY_AFTER_SECONDS, spread);
+		};
 		app.get(wsPath, (res, req) => {
 			res.onAborted(() => {});
 			const atCapacity = postureLevelT() === 'siege' || !admission.hasCapacity();
@@ -3355,14 +3374,16 @@ export async function createTestServer(options = {}) {
 					body: buildAccessibleCapacityRefusalPage(),
 					lang: 'en',
 					dir: 'ltr',
-					headers: [],
+					headers: [['retry-after', String(navigationRetryAfter())]],
 					varyAcceptLanguage: false
 				}, '503 Service Unavailable');
 				return;
 			}
+			const retryAfter = navigationRetryAfter();
 			res.cork(() => {
 				res.writeStatus('503 Service Unavailable');
 				res.writeHeader('content-type', 'text/plain');
+				res.writeHeader('retry-after', String(retryAfter));
 				res.end('Server is at upgrade capacity, please retry');
 			});
 		});

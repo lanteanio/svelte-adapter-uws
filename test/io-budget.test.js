@@ -739,7 +739,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// digest it had nothing to do with.
 	// No statement executes on any frame path, no byte is read, allocated or
 	// copied, and no copy primitive entered either graph.
-	ingress: 'f7c6faaeb9968f6e7a7bf5346f641f9d2436e6eb57aaaa8374394076bd36e9ea',
+	// Re-pinned for the refusal Retry-After backoff. The drift is
+	// utils/upgrade-admission.js reached through utils.js: a standalone
+	// jitterRetryAfter with a two-value band floor plus its exported default
+	// base, and the room's jitteredRetryAfter delegating to it. The header
+	// writes themselves live in handler.js and testing.js, outside every
+	// sealed graph. Integer arithmetic only - no statement touches a frame,
+	// no byte is read, allocated or copied, and no copy primitive entered
+	// the graph.
+	ingress: 'f4c4820a54eb2fbd5b0d3b9d36ab23affc0a1009be12139e2d6262f050d2dd9c',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1225,7 +1233,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// 2^24 in the same module - V8's Map refuses its 2^24 + 1st entry, so any
 	// larger bound was a publish-path crash, not a bigger ledger - one data
 	// literal in the same frozen constant pair, nothing else.
-	platform: 'e40eafa19bda61f5bd1d4431918747baeb3a1b7376221327ed73ab2f661e2883',
+	// Re-pinned for the refusal Retry-After backoff, the same
+	// utils/upgrade-admission.js drift the ingress seal records above:
+	// jitterRetryAfter with its band floor, the exported default base, and
+	// the delegating room method; the header writes themselves live in
+	// handler.js and testing.js, outside every sealed graph. No frame path,
+	// no bytes, no copy primitive.
+	platform: '5399cd5384b15fb57ebae8e3d3676f1d00011ecdf03b2121df525a0f0796661e',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1366,7 +1380,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// were missed; only a full run reports all three.
 	// No statement executes on any frame path, no byte is read, allocated or
 	// copied, and no copy primitive entered any graph.
-	'wire-fanout': '35bc5a6f7851a1a9d710ce30769937ae955c83d4ddf02af26cc03302f8cc0cec',
+	// Re-pinned for the refusal Retry-After backoff, the same
+	// utils/upgrade-admission.js drift the ingress and platform seals record:
+	// jitterRetryAfter with its band floor, the exported default base, and
+	// the delegating room method; the header writes themselves live in
+	// handler.js and testing.js, outside every sealed graph. No frame path,
+	// no bytes, no copy primitive.
+	'wire-fanout': 'bdd7ab0c81a3d2d072a15a51e5f64125e32e9b18e4765b97e25fd8c9219952b8',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

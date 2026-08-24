@@ -251,9 +251,10 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 				expect(retryAfter).toBeDefined();
 				const seconds = Number(retryAfter);
 				expect(Number.isInteger(seconds)).toBe(true);
-				// jitter = base + floor(random() * base * 0.5) -> [base, base + floor(base*0.5)]
+				// jitter = base + floor(random() * max(2, ceil(base*0.5)))
+				// -> [base, base + max(2, ceil(base*0.5)) - 1]
 				expect(seconds).toBeGreaterThanOrEqual(base);
-				expect(seconds).toBeLessThanOrEqual(base + Math.floor(base * 0.5));
+				expect(seconds).toBeLessThanOrEqual(base + Math.max(2, Math.ceil(base * 0.5)) - 1);
 				// A library refusal is a 503, never an HTML page.
 				expect(String(r.headers['content-type'])).not.toContain('text/html');
 			}
@@ -287,7 +288,13 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 			expect(body).toContain('<main>');
 			expect(body).toContain('role="status"');
 			expect(body).toContain('<form method="get">');
-			expect(response.headers.get('retry-after')).toBeNull();
+			// A refusal is a refusal: the accessible 503 document backs off
+			// exactly like the plain one, so a proxy or client honoring
+			// Retry-After never reads the HTML lane as "retry immediately".
+			const seconds = Number(response.headers.get('retry-after'));
+			expect(Number.isInteger(seconds)).toBe(true);
+			expect(seconds).toBeGreaterThanOrEqual(2);
+			expect(seconds).toBeLessThanOrEqual(3);
 
 			held.release();
 			closeAll([await pending]);
@@ -308,7 +315,13 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 				expect(r.body).toBe(BARE_503_BODY);
 				expect(String(r.headers['content-type'])).toContain('text/plain');
 				expect(r.headers['content-language']).toBeUndefined();
-				expect(r.headers['retry-after']).toBeUndefined();
+				// The body and negotiation stay bare; the backoff header rides
+				// every refusal lane, waiting room or not, at the shared
+				// default base with the two-value jitter band.
+				const seconds = Number(r.headers['retry-after']);
+				expect(Number.isInteger(seconds)).toBe(true);
+				expect(seconds).toBeGreaterThanOrEqual(2);
+				expect(seconds).toBeLessThanOrEqual(3);
 			}
 
 			held.release();
@@ -589,6 +602,68 @@ describeUWS('upgrade waiting room on createTestServer', () => {
 			first.ws.close();
 			closeAll(results);
 		});
+	});
+});
+
+describe('the Retry-After jitter is real at every base and posture (unit, injected RNG)', () => {
+	// Deterministic pins on the shared arithmetic every refusal lane answers
+	// through: the band is a uniform draw over at least two whole seconds, so
+	// a refused fleet cannot be answered the same second on every draw. The
+	// RNG is the runtime seam's, so the draw is injected rather than sampled.
+	afterEach(async () => {
+		const { resetRuntimeEnv } = await import('../src/runtime/runtime.js');
+		resetRuntimeEnv();
+	});
+
+	it('spans at least two values at the default base, where the previous arithmetic was constant', async () => {
+		const { setRuntimeEnv } = await import('../src/runtime/runtime.js');
+		const { jitterRetryAfter } = await import('../src/runtime/utils/upgrade-admission.js');
+		let draw = 0;
+		setRuntimeEnv({ rng: { float: () => draw } });
+
+		// base 2, normal spread 0.5: band = max(2, ceil(1)) = 2 -> 2..3.
+		draw = 0; expect(jitterRetryAfter(2, 0.5)).toBe(2);
+		draw = 0.999; expect(jitterRetryAfter(2, 0.5)).toBe(3);
+		// The unspread spelling (no argument) is the same band.
+		draw = 0.999; expect(jitterRetryAfter(2)).toBe(3);
+	});
+
+	it('widens with the posture spread and never narrows below two values', async () => {
+		const { setRuntimeEnv } = await import('../src/runtime/runtime.js');
+		const { jitterRetryAfter } = await import('../src/runtime/utils/upgrade-admission.js');
+		let draw = 0.999;
+		setRuntimeEnv({ rng: { float: () => draw } });
+
+		// Default base 2: normal 2..3, elevated 2..3, siege 2..4 - the band
+		// never shrinks as the spread rises, and the top of the band is the
+		// spread's ceil at every base where that clears the two-value floor.
+		expect(jitterRetryAfter(2, 0.5)).toBe(3);
+		expect(jitterRetryAfter(2, 1.0)).toBe(3);
+		expect(jitterRetryAfter(2, 1.5)).toBe(4);
+		// A configured base 10: normal 10..14, elevated 10..19, siege 10..24.
+		expect(jitterRetryAfter(10, 0.5)).toBe(14);
+		expect(jitterRetryAfter(10, 1.0)).toBe(19);
+		expect(jitterRetryAfter(10, 1.5)).toBe(24);
+		// The base is always the floor of the answer.
+		draw = 0;
+		for (const spread of [0.5, 1.0, 1.5]) {
+			expect(jitterRetryAfter(2, spread)).toBe(2);
+			expect(jitterRetryAfter(10, spread)).toBe(10);
+		}
+	});
+
+	it('drives the waiting room object through the same arithmetic', async () => {
+		const { setRuntimeEnv } = await import('../src/runtime/runtime.js');
+		const { resolveWaitingRoom } = await import('../src/runtime/utils/upgrade-admission.js');
+		let draw = 0.999;
+		setRuntimeEnv({ rng: { float: () => draw } });
+
+		const room = resolveWaitingRoom({ maxConcurrent: 1, waitingRoom: { retryAfterSeconds: 10 } });
+		expect(room).not.toBeNull();
+		expect(room.jitteredRetryAfter(0.5)).toBe(14);
+		expect(room.jitteredRetryAfter(1.5)).toBe(24);
+		draw = 0;
+		expect(room.jitteredRetryAfter(0.5)).toBe(10);
 	});
 });
 

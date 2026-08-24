@@ -5,6 +5,59 @@ All notable changes to `svelte-adapter-uws` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.93] - 2026-08-24
+
+<!-- consumer-release-summary:start -->
+### Consumer summary
+
+- **Added: every refused upgrade lane answers a backoff header.** A cursor-lane shed, every refusal with the waiting room opted out, and the WS-path navigation route sent no `Retry-After` while the room lane did; all of them now answer the same posture-widened jittered header, with the refusal bodies unchanged.
+  - **Affects:** Deployments running `upgradeAdmission` ceilings, and clients or proxies that honor `Retry-After` on a `503` refusal.
+  - **Action:** None; the refusal bodies and content negotiation are unchanged, and a client that ignored the missing header keeps working with the present one.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Additive header on lanes that answered none; the bare `503` body stays byte-identical on every lane.
+  - **Detail:** [Added engineering detail](#added).
+
+- **Changed: the refusal Retry-After jitter is real at the default base.** The band arithmetic collapsed to a constant at the default base of two, so a refused fleet returned together into the same full gate; a two-value band floor now guarantees at least two distinct answers at every base and posture.
+  - **Affects:** Deployments at the default `retryAfterSeconds` of two (or a configured base of one); every other configured base keeps its exact bands.
+  - **Action:** None; clients that parse the header already handle the range a wider posture produced.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** At the default base the normal-posture band moves from a constant `2` to `2..3` and a base of one gains the same two-value band below siege; every other band is unchanged, with only within-band probabilities shifting where `base * spread` is not an integer.
+  - **Detail:** [Changed engineering detail](#changed).
+<!-- consumer-release-summary:end -->
+
+### Added
+
+- **Every refused upgrade lane carries the jittered Retry-After.** The header
+  previously rode only the waiting-room lane's non-HTML refusal: a cursor-lane
+  shed, every refusal with `waitingRoom: false`, and the WS-path navigation
+  route's two refusal shapes all answered a bare `503` with no backoff signal,
+  so one full gate told some clients to wait and others nothing. All of them
+  now answer the same posture-widened `Retry-After`, from the room's
+  configured base where a room exists and a shared default base of 2 where
+  none does; the refusal bodies and content negotiation are byte-identical.
+  Pinned by header assertions on every refusal lane across the production
+  handler and the packaged test server, including the cursor lane under a
+  pinned siege.
+
+### Changed
+
+- **The refusal Retry-After jitter gains a two-value band floor.** The
+  arithmetic had a degenerate case: `base + floor(random() * base * 0.5)` is
+  a constant at the default base of 2, because `floor(random() * 1)` is 0 on
+  every draw - an anti-herd shape that spread nothing, so a refused fleet
+  returned together into the same full gate one second later. The band is now
+  `max(2, ceil(base * spread))`, guaranteeing at least two distinct answers
+  at every base and posture: what it costs is one extra second for at most
+  half the refused clients on a path that is already shedding, and what it
+  buys is that a refused fleet is no longer guaranteed to return together.
+  The band never narrows and its floor is always the base; the only bands
+  that move are the constants - the default base 2 at normal posture, and a
+  configured base 1 at normal and elevated - while base 3 and every base
+  from 4 up keep their exact bands at every spread (a non-integer
+  `base * spread` shifts probability inside an unchanged band). Pinned by
+  deterministic injected-RNG cases on the shared arithmetic and by the
+  existing posture-band cases, which pass unchanged.
+
 ## [0.6.0-next.92] - 2026-08-23
 
 <!-- consumer-release-summary:start -->

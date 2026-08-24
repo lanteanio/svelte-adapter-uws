@@ -40,7 +40,7 @@ deployments should follow the ordered [ecosystem sequence](./docs/migrations/eco
 [claim register](./docs/claim-register.md) |
 [protocol conformance](./docs/protocol-conformance.md) |
 [protocol schema](./protocol.schema.json) | [test vectors](./test-vectors/README.md) |
-[current release](./docs/releases/0.6.0-next.92.md) |
+[current release](./docs/releases/0.6.0-next.93.md) |
 [release history](./CHANGELOG.md)
 
 **Documentation ownership (`docs-ownership-v1`):**
@@ -197,21 +197,21 @@ state before CI will accept a new public subpath.
 The three ecosystem packages move together. Bump them as a group:
 
 <!-- compatibility:start -->
-> **Prerelease channel:** This branch documents the staged, unpublished `0.6.0-next.92` candidate. Maintainers publish all three ecosystem packages together before the exact candidate is installable. The moving `@next` tag may currently resolve an earlier published candidate; `@latest` remains the stable `0.5.x` line.
+> **Prerelease channel:** This branch documents the staged, unpublished `0.6.0-next.93` candidate. Maintainers publish all three ecosystem packages together before the exact candidate is installable. The moving `@next` tag may currently resolve an earlier published candidate; `@latest` remains the stable `0.5.x` line.
 
 | Channel | `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Install tag | Runtime |
 |---|---|---|---|---|---|
 | legacy | `0.4.x` | `0.4.x` | `0.4.x` | n/a | n/a |
 | stable | `0.5.8` | `0.5.x` | `0.5.x` | `@latest` | Node `>=22.0.0`; uWS `v20.67.0` |
-| prerelease | `0.6.0-next.92` | `0.6.0-next` | `0.6.0-next` | `@next` after publish; may currently be older | Node `>=22.0.0`; uWS `v20.69.0` |
+| prerelease | `0.6.0-next.93` | `0.6.0-next` | `0.6.0-next` | `@next` after publish; may currently be older | Node `>=22.0.0`; uWS `v20.69.0` |
 
 Choose one complete adapter/native-addon tuple; do not mix rows:
 
 ```bash
 # stable 0.5.8 (@latest)
 npm install svelte-adapter-uws@latest github:uNetworking/uWebSockets.js#v20.67.0
-# prerelease 0.6.0-next.92 (staged; run only after coordinated publication)
-npm install svelte-adapter-uws@0.6.0-next.92 https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
+# prerelease 0.6.0-next.93 (staged; run only after coordinated publication)
+npm install svelte-adapter-uws@0.6.0-next.93 https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
 # @next is moving and may still resolve an earlier published candidate.
 ```
 <!-- compatibility:end -->
@@ -279,7 +279,7 @@ If you plan to use WebSockets during development, also install `ws`:
 npm install -D ws
 ```
 
-The prerelease candidate `0.6.0-next.92` adds an installed preflight
+The prerelease candidate `0.6.0-next.93` adds an installed preflight
 binary; stable `0.5.8` does not contain this command and relies on its
 automatic postinstall native-load check. On the prerelease candidate, run the
 preflight before editing configuration or spending a build on the app. It
@@ -733,7 +733,7 @@ These options control how the server handles misbehaving or slow clients at the 
 - `maxConnections` is a finite per-worker ceiling for reserved upgrades plus live WebSocket connections. The adapter acquires the permit before per-request work and holds it until that socket's `close` callback, so a sequence of completed handshakes cannot bypass the ceiling. Crossed requests get the same `503`; `0` or omitted preserves the backward-compatible unlimited default. Size it from the worker's file-descriptor and connection-memory budget, and multiply by the number of I/O workers for the process-wide envelope.
 - `perTickBudget` caps how many actual `res.upgrade()` calls run per Node.js event-loop tick. Once the budget is spent, subsequent calls are deferred via `setImmediate` so the loop is not starved by 10K synchronous handshakes from one I/O batch. Pre-upgrade work (rate limit, origin check, hook dispatch) still runs in the original tick; only the hand-off to the C++ upgrade path is paced. Start with `64` and adjust based on your peak burst envelope.
 - `maxDeferred` caps callbacks retained behind `perTickBudget` per worker. It defaults to `1024` whenever pacing is enabled. Once full, a new upgrade is released and answered with `503 Service Unavailable` instead of retaining another response closure; `0` allows only the current tick budget and queues nothing. The queue is an O(1) ring rather than a front-removing array. Watch `upgrade_deferred_depth`, `upgrade_deferred_oldest_age_seconds`, and `upgrade_deferred_rejected_total`.
-- `waitingRoom` upgrades the over-capacity rejection from a bare `503` to a content-negotiated waiting room: a browser navigation gets a self-polling HTML holding page that reloads itself when capacity frees, while a WebSocket upgrade or non-HTML client keeps a `503` with a jittered `Retry-After`. On by default once `maxConcurrent > 0`, `maxConnections > 0`, or `perTickBudget > 0`; set `waitingRoom: false` to disable polling. Opted-out HTML navigations still receive a minimal accessible `503` document; WebSocket upgrades and non-HTML clients retain the exact bare text response. The page polls a read-only `/__admit-check` endpoint (`202` with a waiting-count body while full, `200` when capacity exists) that consumes no gate slot. Tune with `waitingRoom: { path, admitCheckPath, retryAfterSeconds, pollIntervalMs, appName, statusUrl, supportUrl, incidentId, template, renderer }`.
+- `waitingRoom` upgrades the over-capacity rejection from a bare `503` to a content-negotiated waiting room: a browser navigation gets a self-polling HTML holding page that reloads itself when capacity frees, while a WebSocket upgrade or non-HTML client keeps a `503` with a jittered `Retry-After`. On by default once `maxConcurrent > 0`, `maxConnections > 0`, or `perTickBudget > 0`; set `waitingRoom: false` to disable polling. Opted-out HTML navigations still receive a minimal accessible `503` document; WebSocket upgrades and non-HTML clients retain the exact bare text body. Every refused lane - waiting room on or off, cursor lane included - carries the jittered `Retry-After`, drawn over a band of at least two whole seconds (base `2` when no room configures one) so refusals are never answered one constant second. The page polls a read-only `/__admit-check` endpoint (`202` with a waiting-count body while full, `200` when capacity exists) that consumes no gate slot. Tune with `waitingRoom: { path, admitCheckPath, retryAfterSeconds, pollIntervalMs, appName, statusUrl, supportUrl, incidentId, template, renderer }`.
   - The built-in page is deliberately unbranded: no adapter name or logo. Add only the host identity visitors need with the optional `appName`, `statusUrl`, `supportUrl`, and `incidentId` fields. Text and link attributes are trimmed and HTML-escaped, and a link is rendered only for a relative URL or the `http`, `https`, `mailto`, and `tel` schemes - one safe-scheme set for both link fields. Its palette follows the visitor's light/dark preference and is expressed through semantic `--waiting-room-*` CSS custom properties; a full `template` remains the escape hatch for a different page or language.
   - The built-in page carries a `Pause live updates` control. A paused page keeps polling but hands the visitor a `Reload now` button instead of navigating for them. `/__admit-check` reports live capacity and reserves nothing, so a slot it offers can be taken by another browser first: the page keeps polling across an offer, withdraws it when a later check disagrees, and pressing `Reload now` after that simply re-serves the holding page.
   - What the page states is the capacity situation and, when a count is available, an approximate number of browsers waiting. It shows no queue position and no wait estimate, because admission keeps no arrival order and nothing measures the drain rate. The poll body's `queueDepth` is a rolling count of browsers polling the page (a crowd size, not a place in a line) and `estimatedSeconds` is that count at a nominal one slot per second. A deployment that wants a real position and a real estimate has to implement a ticketed queue and render it through `waitingRoom.template`.
@@ -833,7 +833,7 @@ The three admission controls are independent: each works without the others and 
 
 **`protection`** (default: `'normal'`) - a graduated admission posture layered over `upgradeAdmission`. `'auto'` escalates under sustained pressure and relaxes on recovery, with hysteresis so it cannot flap (escalate fast, relax slow); `'normal'` / `'elevated'` / `'siege'` pin a level for incident response.
 
-- `elevated` widens the waiting-room `Retry-After` jitter (and tightens any loaded per-IP / capability-cookie extensions).
+- `elevated` widens the refusal `Retry-After` jitter (and tightens any loaded per-IP / capability-cookie extensions).
 - `siege` refuses every new upgrade (the waiting-room holding page or a `503`) and makes `/__admit-check` always poll-again. Existing connections are never touched at any level.
 
 `platform.protection` reads the live level. While a posture is engaged, `platform.pressure.reason` can surface `CAPACITY` (precedence `MEMORY > CAPACITY > CPU_QUOTA > PSI > PUBLISH_RATE > SUBSCRIBERS`). Default `'normal'` is a true no-op - the reject path and pressure are byte-identical to before.

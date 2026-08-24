@@ -27,7 +27,7 @@ import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './diagn
 import { privateValueMetadata } from './utils/observability-privacy.js';
 import { probeOsPressureSources, emitPressureMetricTelemetry } from './utils/os-pressure.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, pendingSubscribeTotal, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, pendingSubscribeTotal, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { registerGameIngress, gameLaneClusterSafe } from './handler/game-ingress.js';
@@ -1590,19 +1590,30 @@ if (WS_ENABLED) {
 			// short-circuit so both content-negotiate identically: a browser
 			// navigation gets the self-polling holding page (it holds no
 			// socket), everything else keeps the `503` + jittered
-			// `Retry-After`. The jitter band widens as the posture rises
-			// (`0.5` at normal reproduces today's exact band). A cursor-lane
-			// upgrade is never a browser navigation, so it always gets the bare
-			// `503` - never the holding page - and skips the Accept negotiation.
+			// `Retry-After`. The jitter band widens as the posture rises.
+			// A cursor-lane upgrade is never a browser navigation, so it always
+			// gets the bare `503` - never the holding page - and skips the
+			// Accept negotiation, but it backs off like every other refusal:
+			// EVERY refused lane carries `Retry-After`, room or no room,
+			// cursor or not, because the condition is the same full gate and a
+			// proxy or client that honors the header must not read one lane as
+			// "retry immediately". The room's configured base is used where a
+			// room exists, the shared default where none does.
 			// `detached` is the pre-read snapshot taken while `req` was still valid,
 			// passed only by the caller that runs after the uWS tick has ended. The
 			// four synchronous refusals pass nothing and read the live request
-			// exactly as before, so their bytes are unchanged.
+			// exactly as before.
+			const refusalRetryAfter = () => {
+				const lvl = postureLevel();
+				const spread = lvl === 'siege' ? 1.5 : lvl === 'elevated' ? 1.0 : 0.5;
+				return WAITING_ROOM !== null
+					? WAITING_ROOM.jitteredRetryAfter(spread)
+					: jitterRetryAfter(REFUSAL_RETRY_AFTER_SECONDS, spread);
+			};
 			const serveUpgradeRefusal = (detached) => {
 				if (WAITING_ROOM === null || isCursor) {
 					// An HTML navigation keeps a minimal document baseline even
-					// when the interactive room is disabled. Cursor upgrades are
-					// never navigations and retain the byte-identical bare refusal.
+					// when the interactive room is disabled.
 					if (!isCursor && negotiateRejection(
 						detached ? detached.accept : req.getHeader('accept'),
 						detached ? detached.upgrade : req.getHeader('upgrade')
@@ -1611,14 +1622,16 @@ if (WS_ENABLED) {
 							body: buildAccessibleCapacityRefusalPage(),
 							lang: 'en',
 							dir: 'ltr',
-							headers: [],
+							headers: [['retry-after', String(refusalRetryAfter())]],
 							varyAcceptLanguage: false
 						}, '503 Service Unavailable');
 						return;
 					}
+					const retryAfter = refusalRetryAfter();
 					res.cork(() => {
 						res.writeStatus('503 Service Unavailable');
 						res.writeHeader('content-type', 'text/plain');
+						res.writeHeader('retry-after', String(retryAfter));
 						res.end('Server is at upgrade capacity, please retry');
 					});
 					return;
@@ -1642,11 +1655,9 @@ if (WS_ENABLED) {
 				}
 
 				// WebSocket upgrade / library client (Accept lacks text/html):
-				// keep the 503, refined with a posture-widened jittered
-				// Retry-After. At normal the spread is today's exact 0.5.
-				const lvl = postureLevel();
-				const spread = lvl === 'siege' ? 1.5 : lvl === 'elevated' ? 1.0 : 0.5;
-				const retryAfter = WAITING_ROOM.jitteredRetryAfter(spread);
+				// keep the 503, refined with the posture-widened jittered
+				// Retry-After.
+				const retryAfter = refusalRetryAfter();
 				res.cork(() => {
 					res.writeStatus('503 Service Unavailable');
 					res.writeHeader('content-type', 'text/plain');
@@ -3138,6 +3149,17 @@ if (WS_ENABLED) {
 	// resolveWaitingRoom() honors, including perTickBudget, whether the
 	// waiting room is on (holding page) or opted out (accessible 503).
 	if (admission.maxConcurrent > 0 || admission.maxConnections > 0 || ADMISSION_PER_TICK_BUDGET > 0) {
+		// The navigation refusal backs off exactly like the upgrade refusal:
+		// same posture-widened jittered Retry-After, room-configured base
+		// where a room exists, the shared default where none does. One
+		// condition, one number, whichever route observed it.
+		const navigationRetryAfter = () => {
+			const lvl = postureLevel();
+			const spread = lvl === 'siege' ? 1.5 : lvl === 'elevated' ? 1.0 : 0.5;
+			return WAITING_ROOM !== null
+				? WAITING_ROOM.jitteredRetryAfter(spread)
+				: jitterRetryAfter(REFUSAL_RETRY_AFTER_SECONDS, spread);
+		};
 		route('get', WS_PATH, (res, req) => {
 			res.onAborted(() => {});
 			const atCapacity = postureLevel() === 'siege' || !admission.hasCapacity();
@@ -3163,14 +3185,16 @@ if (WS_ENABLED) {
 					body: buildAccessibleCapacityRefusalPage(),
 					lang: 'en',
 					dir: 'ltr',
-					headers: [],
+					headers: [['retry-after', String(navigationRetryAfter())]],
 					varyAcceptLanguage: false
 				}, '503 Service Unavailable');
 				return;
 			}
+			const retryAfter = navigationRetryAfter();
 			res.cork(() => {
 				res.writeStatus('503 Service Unavailable');
 				res.writeHeader('content-type', 'text/plain');
+				res.writeHeader('retry-after', String(retryAfter));
 				res.end('Server is at upgrade capacity, please retry');
 			});
 		});

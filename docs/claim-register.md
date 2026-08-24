@@ -23,7 +23,7 @@ and reproduction route before it may appear in public copy.
 ## Current measurement session
 
 The current local observations were collected on 2026-08-02 from the shared,
-uncommitted development worktree with `svelte-adapter-uws@0.6.0-next.92`, Node
+uncommitted development worktree with `svelte-adapter-uws@0.6.0-next.93`, Node
 24.13.1, npm 11.8.0, Windows 10.0.26200, and an AMD Ryzen 9 9950X3D. The
 repository baseline is Node 22.23.2, so these observations are not release-gate
 or cross-machine baselines. Complete runner stdout is the evidence for one run;

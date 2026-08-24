@@ -347,12 +347,12 @@ describe("ecosystem compatibility manifest", () => {
 			"npm install svelte-adapter-uws@latest " + stable.uwebsockets,
 		);
 		expect(rendered).toContain(
-			"npm install svelte-adapter-uws@0.6.0-next.92 " + prerelease.uwebsockets,
+			"npm install svelte-adapter-uws@0.6.0-next.93 " + prerelease.uwebsockets,
 		);
 		expect(stable.uwebsockets.startsWith("github:")).toBe(true);
 		expect(prerelease.uwebsockets).toBe(nativeArchive("v20.69.0"));
 		expect(rendered).toContain(
-			"staged, unpublished `0.6.0-next.92` candidate",
+			"staged, unpublished `0.6.0-next.93` candidate",
 		);
 		expect(rendered).toContain(
 			"`@next` tag may currently resolve an earlier published candidate",

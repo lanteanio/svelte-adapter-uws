@@ -657,6 +657,39 @@ export function sendWaitingRoomPage(res, page, status = '200 OK') {
 }
 
 /**
+ * The `Retry-After` base a refusal answers when no waiting room supplies a
+ * configured one: the same two seconds a default room derives from its poll
+ * interval, so a server reads as one server whether the room is on or not.
+ */
+export const REFUSAL_RETRY_AFTER_SECONDS = 2;
+
+/**
+ * One jittered `Retry-After` in whole seconds: the base plus a uniform draw
+ * over a band of at least two values.
+ *
+ * The band floor is the point of this function. `Retry-After` carries whole
+ * seconds, so a band that rounds below two values collapses to a constant -
+ * at the default base of 2 a half-base spread is `floor(random() * 1)`,
+ * which is 0 on every draw - and a constant answers every member of a
+ * refused fleet with the same second, so the whole fleet returns together
+ * into the same full gate and the jitter's anti-herd purpose is not served.
+ * The floor guarantees at least two distinct answers at every base, which
+ * splits any herd; what it costs is one extra second for at most half the
+ * refused clients, on a path that is already shedding. Above the floor the
+ * band is `ceil(base * spread)`, so a widened spread still widens the band
+ * at every base and the growth with `spread` stays monotone.
+ *
+ * @param {number} baseSeconds - whole-second base (the minimum answered)
+ * @param {number} [spread] - fraction of the base the band covers (default `0.5`)
+ * @returns {number}
+ */
+export function jitterRetryAfter(baseSeconds, spread) {
+	const s = typeof spread === 'number' && spread > 0 ? spread : 0.5;
+	const band = Math.max(2, Math.ceil(baseSeconds * s));
+	return baseSeconds + Math.floor(randomFloat() * band);
+}
+
+/**
  * Build the default self-contained holding page served when an upgrade is
  * refused at capacity. No framework, no external fetch beyond the poll
  * endpoint. The inline script polls `admitCheckPath` on a jittered interval,
@@ -1002,19 +1035,19 @@ export function resolveWaitingRoom(upgradeAdmission, rendererModule = null) {
 		pollIntervalMs,
 		retryAfterSeconds,
 		/**
-		 * Spread the thundering-herd retry: base plus up to `spread` times the
-		 * base, jittered per request so refused library clients do not
-		 * synchronise. Called with no argument the spread defaults to `0.5` -
-		 * base plus up to half the base, the byte-identical band today's reject
-		 * path serves. A caller that widens the band under load passes a larger
-		 * factor; the floor still keeps the value an integer >= base.
+		 * Spread the thundering-herd retry over this room's configured base:
+		 * `jitterRetryAfter` with `retryAfterSeconds`, so refused library
+		 * clients genuinely do not synchronise - the shared band floor
+		 * guarantees at least two distinct answers at every base, including
+		 * the default 2 where the previous half-base arithmetic collapsed to
+		 * a constant. A caller that widens the band under load passes a
+		 * larger factor.
 		 *
 		 * @param {number} [spread] fraction of the base to jitter over (default `0.5`).
 		 * @returns {number}
 		 */
 		jitteredRetryAfter(spread) {
-			const s = typeof spread === 'number' && spread > 0 ? spread : 0.5;
-			return retryAfterSeconds + Math.floor(randomFloat() * retryAfterSeconds * s);
+			return jitterRetryAfter(retryAfterSeconds, spread);
 		},
 		/**
 		 * The polling-browser count projected at a nominal one slot per second.

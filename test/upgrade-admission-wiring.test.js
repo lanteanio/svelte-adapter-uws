@@ -262,9 +262,17 @@ describeUWS('cursor-lane admission on createTestServer', () => {
 		);
 		const cursorShed = cursorResults.filter((r) => r.status === 503);
 		expect(cursorShed.length).toBeGreaterThan(0);
-		// The cursor reject is a bare 503, never the holding page.
+		// The cursor reject is a bare 503, never the holding page - but it
+		// backs off like every other refusal: the cursor lane carries the same
+		// jittered Retry-After, so a client honoring the header never reads
+		// this lane as "retry immediately" while the same condition tells the
+		// main lane to wait.
 		for (const r of cursorShed) {
 			expect(r.body).toBe('Server is at upgrade capacity, please retry');
+			const seconds = Number(r.headers['retry-after']);
+			expect(Number.isInteger(seconds)).toBe(true);
+			expect(seconds).toBeGreaterThanOrEqual(2);
+			expect(seconds).toBeLessThanOrEqual(3);
 		}
 
 		// While cursor upgrades shed, a main-lane upgrade in the same window is
@@ -291,6 +299,12 @@ describeUWS('cursor-lane admission on createTestServer', () => {
 		expect(cursor.opened).toBe(false);
 		expect(cursor.status).toBe(503);
 		expect(cursor.body).toBe('Server is at upgrade capacity, please retry');
+		// Under siege the cursor refusal carries the siege-widened band on the
+		// default base: 2 + floor(random() * max(2, ceil(2 * 1.5))) -> 2..4.
+		const cursorSeconds = Number(cursor.headers['retry-after']);
+		expect(Number.isInteger(cursorSeconds)).toBe(true);
+		expect(cursorSeconds).toBeGreaterThanOrEqual(2);
+		expect(cursorSeconds).toBeLessThanOrEqual(4);
 
 		// The main lane is also refused under siege.
 		const main = await attemptUpgrade(server.wsUrl);
