@@ -18,7 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
-import { hasUWS, EVAL_TIME_ENV, freePort } from './helpers/real-runtime.js';
+import { hasUWS, EVAL_TIME_ENV, freePort, REAL_BOOT_BUDGET_MS } from './helpers/real-runtime.js';
 import { buildFixtureOnce } from './helpers/fixture-build.js';
 import { variantOut } from './fixture/variants.js';
 
@@ -62,25 +62,40 @@ describeUWS('ADAPTER-ERR-CLUSTER-WORKER-ERROR', () => {
 
 		let output = '';
 		/**
-		 * Resolve once `predicate(output)` holds; false on exit or deadline.
+		 * Resolve once `predicate(output)` holds; on the deadline or child exit
+		 * it THROWS a named error rather than returning false. The name matters:
+		 * when this case failed one full run and passed the next, the loss was
+		 * not knowing WHICH of four sequential waits starved, because the case
+		 * budget fired before any wait's own deadline and vitest reported its
+		 * generic timeout. Each wait carries its own budget below - all equal to
+		 * the real-boot budget, since an output scan starves under machine load
+		 * the same way a boot does - and the case budget is set above their sum
+		 * so a starving wait always trips its OWN named deadline first. A failed
+		 * wait names itself at the HEAD of the message, ahead of the output tail,
+		 * so runner truncation cannot eat the identity.
+		 *
 		 * Listeners detach on settle so a later wait never double-appends a
 		 * chunk; between waits the paused pipes buffer, nothing is lost.
 		 */
-		const outputReaches = (predicate, ms) => new Promise((resolve) => {
-			if (predicate(output)) return resolve(true);
-			const done = (hit) => {
+		const waitFor = (name, predicate, ms = REAL_BOOT_BUDGET_MS) => new Promise((resolve, reject) => {
+			if (predicate(output)) return resolve();
+			const settle = (fn) => {
 				clearTimeout(timer);
 				proc.stdout.off('data', scan);
 				proc.stderr.off('data', scan);
 				proc.off('exit', onExit);
-				resolve(hit);
+				fn();
 			};
-			const timer = setTimeout(() => done(false), ms);
+			const fail = (why) => settle(() => reject(new Error(
+				`cluster-worker-error wait "${name}" ${why} after ${ms} ms.\n` +
+				`--- last 4000 chars of server output ---\n${output.slice(-4000)}`
+			)));
+			const timer = setTimeout(() => fail('timed out'), ms);
 			const scan = (chunk) => {
 				output += chunk.toString();
-				if (predicate(output)) done(true);
+				if (predicate(output)) settle(resolve);
 			};
-			const onExit = () => done(false);
+			const onExit = () => fail('saw the child exit');
 			proc.stdout.on('data', scan);
 			proc.stderr.on('data', scan);
 			proc.on('exit', onExit);
@@ -88,11 +103,8 @@ describeUWS('ADAPTER-ERR-CLUSTER-WORKER-ERROR', () => {
 
 		const registrations = (text) => (text.match(/Worker thread \d+ registered/g) || []).length;
 
-		const booted = await outputReaches(
-			(text) => registrations(text) >= 2 && text.includes('Acceptor listening'),
-			30000
-		);
-		expect(booted, `the two-worker fixture must boot.\n--- server output ---\n${output}`).toBe(true);
+		await waitFor('boot',
+			(text) => registrations(text) >= 2 && text.includes('Acceptor listening'));
 
 		// Crash one worker through the real wire: the hook schedules the throw
 		// off the request context, so the worker's uncaught exception surfaces
@@ -103,23 +115,21 @@ describeUWS('ADAPTER-ERR-CLUSTER-WORKER-ERROR', () => {
 			ws.on('error', reject);
 		});
 		ws.send(JSON.stringify({ type: 'worker-crash-drill', token }));
-		const armed = await outputReaches((text) => text.includes('__WORKER_CRASH_DRILL_ARMED__'), 15000);
-		expect(armed, `the drill frame must reach a worker.\n--- server output ---\n${output}`).toBe(true);
+		await waitFor('drill-armed', (text) => text.includes('__WORKER_CRASH_DRILL_ARMED__'));
 		try { ws.close(); } catch {}
 
 		// The entry's event, with the primary still alive to print it.
-		const reported = await outputReaches((text) => text.includes('event=cluster.worker-error'), 15000);
-		expect(reported, `the worker error must be reported.\n--- server output ---\n${output}`).toBe(true);
+		await waitFor('error-reported', (text) => text.includes('event=cluster.worker-error'));
 		expect(output).toContain('A worker thread reported an error.');
 
 		// Recovery, both halves the entry describes: the exit is charged
 		// against the slot's bounded budget, and a replacement registers -
 		// a third registration beyond the two boot ones.
-		const replaced = await outputReaches(
-			(text) => text.includes('/50)') && registrations(text) >= 3,
-			30000
-		);
-		expect(replaced, `the crashed worker must be charged and replaced.\n--- server output ---\n${output}`).toBe(true);
+		await waitFor('replaced', (text) => text.includes('/50)') && registrations(text) >= 3);
 		expect(output).toMatch(/exited with code 1, restarting in \d+ms\.\.\. \(attempt 1\/50\)/);
-	}, 120000);
+		// Four waits at the real-boot budget sum to that budget times four; the
+		// case budget clears it by a wide margin plus spawn and handshake time,
+		// so the structural failure (the case timer firing before a wait's own)
+		// cannot recur.
+	}, REAL_BOOT_BUDGET_MS * 4 + 60000);
 });
