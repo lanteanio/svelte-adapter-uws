@@ -114,13 +114,17 @@ describe('release ledger reconciliation', () => {
 	});
 
 	it('rejects a heading version the manifest never recorded at all', () => {
+		// A four-digit prerelease number the line will never reach, so the
+		// synthetic heading stays unrecorded however far the real next.N
+		// counter advances - a rolling current+1 here went stale the moment
+		// the next cycle opened its own heading.
 		const mutant = changelog.replace(
 			'## [0.6.0-next.91] - 2026-08-10',
-			'## [0.6.0-next.93] - 2026-08-10\n\nSynthetic entry.\n\n## [0.6.0-next.91] - 2026-08-10'
+			'## [0.6.0-next.9999] - 2026-08-10\n\nSynthetic entry.\n\n## [0.6.0-next.91] - 2026-08-10'
 		);
 		expect(mutant, 'mutant did not change the changelog').not.toBe(changelog);
 		expect(failures(manifest, mutant)).toContainEqual(
-			expect.stringContaining('never accepted, without the not-published marker: 0.6.0-next.93')
+			expect.stringContaining('never accepted, without the not-published marker: 0.6.0-next.9999')
 		);
 	});
 });

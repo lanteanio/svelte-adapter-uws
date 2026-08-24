@@ -83,7 +83,8 @@ at the commit recorded in the manifest. Never delete, reuse, or retarget a
 pushed release tag. If a release is wrong, publish a new version or move the
 dist-tag back to a known-good immutable version.
 
-Historical releases without Git tags are recorded as `legacy-none`; the npm
+Releases without Git tags - historical ones, and any direct publication that
+created no tag at publication time - are recorded as `legacy-none`; the npm
 `gitHead`, integrity and shasum remain their rollback identity. Do not invent a
 tag after the fact and imply that it existed at publication.
 

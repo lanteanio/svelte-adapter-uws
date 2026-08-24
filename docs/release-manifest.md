@@ -7,7 +7,10 @@ procedures.
 Historical entries were verified from primary npm metadata on 2026-08-01. They
 did not have Git tags; `legacy-none` records that fact without inventing
 history. New published rows must use the immutable
-`svelte-adapter-uws@<version>` tag. On 2026-08-16 the same one-time
+`svelte-adapter-uws@<version>` tag when the candidate workflow ran; a direct
+publication that created no tag at publication time is also recorded as
+`legacy-none`, with a note stating that fact, because inventing the tag
+afterwards is exactly what the rollback procedure forbids. On 2026-08-16 the same one-time
 reconstruction was extended to the whole registry history: the
 published-releases table carries one row per version the npm registry has ever
 accepted, each with its registry `gitHead`, integrity, shasum and publication
@@ -224,6 +227,7 @@ identity cannot open a second quarantine transaction.
 | svelte-adapter-uws | 0.6.0-next.89 | next           | ba807d9a1c7dcc3aa39d95fddaa690b97961d34c | legacy-none | sha512-wYEpJ2hUDNyTCbqPZ1oNRM+IK/pTetIJbrNggRv0XbKwHeiW7qJc3gnEu8T8izLLTTwvNCz/Ho726kpFrFfpwg== | 87c4b8170804315d408e166fb8acec7f6a874c67 | 2026-07-31T21:41:38.177Z | Historical row reconstructed from npm on 2026-08-16.    |
 | svelte-adapter-uws | 0.6.0-next.90 | next           | 7b9ba000056b7cb198cd83605355302ecec3853c | legacy-none | sha512-oUjPvTJH49I+r2NfN+VW1WktNchvq34wCJTICb3Jdj6BSYBD3BqyIhvYH3lq8xEbaMiYJNZDOT8Td8l/EFCxWw== | 42bf4268f79745ac7b2310af3c2effa8e017ce1a | 2026-07-31T23:31:37.019Z | Initial prerelease rollback row reconstructed from npm. |
 | svelte-adapter-uws | 0.6.0-next.91 | next           | 5541605e354fd28bdc6c3d051795c84aacb7b90a | legacy-none | sha512-VQR9I0vkvliARJD7CXPz+GJwoCwMg+7QouDaFtqlpzyHa/hn3QBuy8L4pwrSl2tK9sotICNbIMTlWzKu5WBRRw== | 7ab4cfc68f60943a45f2c2f8241f9e6185e9a9ec | 2026-08-10T19:55:37.635Z | Historical row reconstructed from npm on 2026-08-16.    |
+| svelte-adapter-uws | 0.6.0-next.92 | next           | 1d93b7355a0ffdf882737b04db35526c2fdb4576 | legacy-none | sha512-lrIXKnYw6VkWMtNgN3MOloHDzLP0RXjWCpK3BF/ORo/44wF3eq0XpuEIRVXaO6k1uoqkHTdL/OY+Wq1WoCCvpg== | b79ecdee9d48d7b3c09539fc5872775bc22a6429 | 2026-08-24T17:32:36.966Z | Row recorded from exact-version npm metadata on 2026-08-24; published directly, no candidate lifecycle ran, and the registry gitHead matches the local head. |
 
 ## Routing, corrections and rollback events
 
