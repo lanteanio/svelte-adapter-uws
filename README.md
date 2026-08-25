@@ -40,7 +40,7 @@ deployments should follow the ordered [ecosystem sequence](./docs/migrations/eco
 [claim register](./docs/claim-register.md) |
 [protocol conformance](./docs/protocol-conformance.md) |
 [protocol schema](./protocol.schema.json) | [test vectors](./test-vectors/README.md) |
-[current release](./docs/releases/0.6.0-next.93.md) |
+[current release](./docs/releases/0.6.0-next.94.md) |
 [release history](./CHANGELOG.md)
 
 **Documentation ownership (`docs-ownership-v1`):**
@@ -197,21 +197,21 @@ state before CI will accept a new public subpath.
 The three ecosystem packages move together. Bump them as a group:
 
 <!-- compatibility:start -->
-> **Prerelease channel:** This branch documents the staged, unpublished `0.6.0-next.93` candidate. Maintainers publish all three ecosystem packages together before the exact candidate is installable. The moving `@next` tag may currently resolve an earlier published candidate; `@latest` remains the stable `0.5.x` line.
+> **Prerelease channel:** This branch documents the staged, unpublished `0.6.0-next.94` candidate. Maintainers publish all three ecosystem packages together before the exact candidate is installable. The moving `@next` tag may currently resolve an earlier published candidate; `@latest` remains the stable `0.5.x` line.
 
 | Channel | `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Install tag | Runtime |
 |---|---|---|---|---|---|
 | legacy | `0.4.x` | `0.4.x` | `0.4.x` | n/a | n/a |
 | stable | `0.5.8` | `0.5.x` | `0.5.x` | `@latest` | Node `>=22.0.0`; uWS `v20.67.0` |
-| prerelease | `0.6.0-next.93` | `0.6.0-next` | `0.6.0-next` | `@next` after publish; may currently be older | Node `>=22.0.0`; uWS `v20.69.0` |
+| prerelease | `0.6.0-next.94` | `0.6.0-next` | `0.6.0-next` | `@next` after publish; may currently be older | Node `>=22.0.0`; uWS `v20.69.0` |
 
 Choose one complete adapter/native-addon tuple; do not mix rows:
 
 ```bash
 # stable 0.5.8 (@latest)
 npm install svelte-adapter-uws@latest github:uNetworking/uWebSockets.js#v20.67.0
-# prerelease 0.6.0-next.93 (staged; run only after coordinated publication)
-npm install svelte-adapter-uws@0.6.0-next.93 https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
+# prerelease 0.6.0-next.94 (staged; run only after coordinated publication)
+npm install svelte-adapter-uws@0.6.0-next.94 https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
 # @next is moving and may still resolve an earlier published candidate.
 ```
 <!-- compatibility:end -->
@@ -279,7 +279,7 @@ If you plan to use WebSockets during development, also install `ws`:
 npm install -D ws
 ```
 
-The prerelease candidate `0.6.0-next.93` adds an installed preflight
+The prerelease candidate `0.6.0-next.94` adds an installed preflight
 binary; stable `0.5.8` does not contain this command and relies on its
 automatic postinstall native-load check. On the prerelease candidate, run the
 preflight before editing configuration or spending a build on the app. It
@@ -5579,7 +5579,7 @@ The same interval also checks for a **lost interior frame**, which the hash comp
 [primary] relay-gap worker=5 frames=1
 ```
 
-A hole is only reported once it has outlived any plausible in-process reorder, so a frame that is merely late is never called lost, and each loss is reported once rather than restated on every interval. When a `metrics` registry is configured the frames are counted on `relay_gap_frames_total`. `RESTART_ON_STATE_DIVERGENCE=1` also covers this case, and unambiguously: the worker that reports the gap is the worker that lost the data, so there is no majority to weigh. The affected clients hear too, not just the operator: a confirmed loss on a sequence-lane topic leaves every subscriber on that worker with a resume watermark already **past** the hole (a later reconnect gap-fills from after frames the client never received, so the desync would survive every reconnect), so on the same drain the worker sends each affected subscriber that negotiated the `relay.resync:1` capability - the bundled client always does - an unsolicited `gap` marker on `__replay:{topic}` with the proven-lost count. The client drops the poisoned offset and epoch, and the marker surfaces through the event stores so the application (or `svelte-realtime`) can re-snapshot, staggered by a de-herd window sized to the topic's local subscriber count (capped at two seconds); the diagnostic above reports `signalledClients`. A socket refusing even the marker past its backpressure ceiling is closed `1013` - it can no longer be told its state is wrong, and staying connected would leave it silently wrong forever. Clients that never advertise the capability keep the previous behavior (the surviving frames, no signal, connection open), and `{ seq: false }` topics are out of scope: there is no offset to poison, and each such lane owns its own reconvergence (presence's roster heartbeat, cursor's absolute frames).
+A hole is only reported once it has outlived any plausible in-process reorder, so a frame that is merely late is never called lost, and each loss is reported once rather than restated on every interval. When a `metrics` registry is configured the frames are counted on `relay_gap_frames_total`. `RESTART_ON_STATE_DIVERGENCE=1` also covers this case, and unambiguously: the worker that reports the gap is the worker that lost the data, so there is no majority to weigh. The affected clients hear too, not just the operator: a confirmed loss on a sequence-lane topic leaves every subscriber on that worker with a resume watermark already **past** the hole (a later reconnect gap-fills from after frames the client never received, so the desync would survive every reconnect), so on the same drain the worker sends each affected subscriber that negotiated the `relay.resync:1` capability - the bundled client always does - an unsolicited `gap` marker on `__replay:{topic}` with the proven-lost count. The client drops the poisoned offset and epoch, and the marker surfaces through the event stores so the application (or `svelte-realtime`) can re-snapshot, staggered by a de-herd window sized to the topic's local subscriber count (capped at two seconds); the diagnostic above reports `signalledClients`. A socket refusing even the marker past its backpressure ceiling is closed `1013` - it can no longer be told its state is wrong, and staying connected would leave it silently wrong forever. The marker only reaches sockets still connected at the drain, so the same drain also mints the topic a new epoch on the losing worker: a subscriber that took the stepping sequences and disconnected before the loss was confirmed - or one that never advertised the capability - presents its pre-loss offset and epoch on a later resume and cold-rehydrates instead of gap-filling past the hole. The mint is worker-local on purpose: each worker's generation is already its own random latch, so a pre-loss offset could only ever gap-fill on the worker whose ack minted its epoch (a resume landing on any sibling already answers mismatch), and re-minting closes exactly that one remaining lane. A client that resumes without presenting epochs is treated as a match by the protocol's own rule and is the one resume shape nothing repairs. `{ seq: false }` topics are out of scope for both halves: there is no offset to poison, and each such lane owns its own reconvergence (presence's roster heartbeat, cursor's absolute frames).
 
 This is observe-only by default: a divergence is logged, and (when a [`metrics`](#backpressure-and-connection-limits) registry is configured) the `state_divergence_total` counter is incremented. It never costs anything in single-process mode or when `stateHashIntervalMs` is `0` (the default) - no reporter timer is scheduled.
 

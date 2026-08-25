@@ -1,5 +1,5 @@
 import { wsModule } from '../ws-handler-bridge.js';
-import { WS_COALESCED, WS_PLATFORM, assert, drainCoalesced, isAuthorizationHook, processEpoch } from '../utils.js';
+import { WS_COALESCED, WS_PLATFORM, assert, drainCoalesced, isAuthorizationHook, topicEpochValue } from '../utils.js';
 import { counters } from './state.js';
 import { bumpOut } from './pressure-metrics.js';
 import { envelopePrefix } from './envelope-cache.js';
@@ -200,13 +200,14 @@ export function sendSubscribed(ws, topic, ref) {
 	// epoch is an additive best-effort field. A throw in the live topicEpoch
 	// delegate (a per-topic store authority can be wired here in a cluster)
 	// must not block the ack or be charged to counters.closedWsAborts - that counter is
-	// strictly for a closed-socket send failure. Fall back to PROCESS_EPOCH and
-	// still send the ack.
-	let epoch = processEpoch();
+	// strictly for a closed-socket send failure. The fallback reads the same
+	// per-topic authority the platform method wraps, so a relay-loss override
+	// reaches the ack even on the defensive path.
+	let epoch = topicEpochValue(topic);
 	try {
 		const p = ws.getUserData()[WS_PLATFORM];
 		if (p && typeof p.topicEpoch === 'function') epoch = p.topicEpoch(topic);
-	} catch { epoch = processEpoch(); }
+	} catch { epoch = topicEpochValue(topic); }
 	const payload = JSON.stringify({ type: 'subscribed', topic, ref, epoch });
 	try { ws.send(payload, false, false); } catch { counters.closedWsAborts++; return; }
 	bumpOut(ws, payload);

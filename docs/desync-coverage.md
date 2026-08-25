@@ -97,14 +97,32 @@ the frames, only for sequence-lane topics (a `{seq: false}` topic has no
 offset to poison, and each reserved plugin lane owns its own reconvergence).
 A socket refusing even the marker - past its backpressure ceiling - is closed
 1013, the resume flush's own escalation, because staying connected is the one
-outcome that leaves it silently wrong forever. A connection that never
-advertised the capability keeps the surviving frames and the revision's
-original silence. `test/relay-receive-real.test.js` holds the marker (count
-and window) and the non-opted silence as observed client behaviour, and
-drives the refused-marker 1013 close against the runtime's own
-live-connection walk; `test/client-real.test.js` holds the client half: the
-dropped offset is observable as a reconnect resubscribe that no longer
-presents one.
+outcome that leaves it silently wrong forever.
+
+The marker only reaches sockets still connected when the drain runs, and a
+subscriber can take the stepping sequences and disconnect inside the
+confirmation grace - beyond the walk, holding a poisoned offset it will
+present on a later resume. So the same drain mints the topic's next epoch on
+the losing worker: the pre-loss offset, presented with its recorded epoch,
+then fails the ordinary epoch compare and the topic cold-rehydrates instead
+of gap-filling past the hole - for the raced subscriber and for connections
+that never advertised the capability alike, through machinery every client
+already implements. The mint is worker-local because it can be: each
+worker's generation is its own random latch, so a pre-loss offset could
+only ever gap-fill on the worker whose ack minted its epoch - every sibling
+already answers mismatch - and the local re-mint closes exactly that lane.
+An offset presented without an epoch matches by the protocol's own rule and
+is the one resume shape nothing repairs. `test/relay-receive-real.test.js`
+holds the marker (count and window) and the non-opted silence as observed
+client behaviour, drives the refused-marker 1013 close against the runtime's
+live-connection walk, and holds the raced-disconnect heal to the compare
+authority: the racer's recorded ack epoch against the minted value every
+resume compare reads, with the fresh-subscriber ack carrying it on the wire
+(the hook-side mismatch-to-rehydrate contract is held by the resume suites).
+It also pins the seq-less lane outside both halves.
+`test/client-real.test.js` holds the client half of the marker (the dropped
+offset is a reconnect resubscribe that no longer presents one), and
+`test/topic-epoch.test.js` pins the override map's own contract.
 
 ## Duplicate ids cannot enter through the smooth command lane
 

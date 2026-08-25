@@ -38,6 +38,64 @@ export function processEpoch() {
 export function resetProcessEpoch() { _processEpoch = undefined; }
 
 /**
+ * Per-topic epoch overrides, layered over the process generation.
+ *
+ * A topic's epoch normally IS the process generation: every in-memory seq
+ * counter resets together, so one token describes them all. An override exists
+ * for the case where ONE topic's history can no longer be served from a
+ * client-held offset while the process lives on - a confirmed relay loss: the
+ * frames are gone, delivered sequences have already stepped past them, and any
+ * offset taken before the loss would gap-fill from beyond frames its holder
+ * never received. Minting a new epoch for that topic makes every such offset
+ * die at its next resume through the ordinary epoch-mismatch answer, for
+ * opted-in and plain clients alike, using machinery every client already
+ * implements. The mint is worker-local and needs to be nothing more: each
+ * worker's generation is its own random latch, so the losing worker's answer
+ * is the only one a pre-loss offset could still match, and the repudiation
+ * lasts as long as the override below does.
+ *
+ * The map is bounded: relay losses are rare, but nothing should grow without a
+ * ceiling. At the cap the oldest override is dropped - reads then fall back to
+ * the process generation, which for a long-dead loss window is the honest
+ * degradation (an offset old enough to outlive the cap has usually cycled
+ * through a resume, and the cap is far above any plausible concurrent count).
+ */
+const TOPIC_EPOCH_OVERRIDE_MAX = 4096;
+/** @type {Map<string, number>} */
+const _topicEpochs = new Map();
+
+/**
+ * The epoch for one topic: its override when a loss minted one, else the
+ * process generation. This is the single read authority - the per-connection
+ * platform's `topicEpoch`, the subscribe ack, and every resume compare route
+ * through it.
+ * @param {string} topic
+ * @returns {number}
+ */
+export function topicEpochValue(topic) {
+	const override = _topicEpochs.get(topic);
+	return override !== undefined ? override : processEpoch();
+}
+
+/**
+ * Install a topic's minted epoch. Re-installing refreshes the entry's
+ * recency, so the cap always evicts the longest-undisturbed override.
+ * @param {string} topic
+ * @param {number} epoch
+ * @returns {void}
+ */
+export function overrideTopicEpoch(topic, epoch) {
+	if (_topicEpochs.delete(topic) === false && _topicEpochs.size >= TOPIC_EPOCH_OVERRIDE_MAX) {
+		const oldest = _topicEpochs.keys().next().value;
+		if (oldest !== undefined) _topicEpochs.delete(oldest);
+	}
+	_topicEpochs.set(topic, epoch);
+}
+
+/** Clear every topic override. Simulation and harness use only. */
+export function resetTopicEpochs() { _topicEpochs.clear(); }
+
+/**
  * Allocate the next monotonic sequence number for a topic, mutating
  * `seqMap` in place. The first call for a topic returns 1; subsequent
  * calls return the previous value plus one. Each topic has an

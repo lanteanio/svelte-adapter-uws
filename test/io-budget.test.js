@@ -775,7 +775,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// walk itself lives in handler/lifecycle.js, outside every sealed graph.
 	// Data only, off every frame path; no byte is read, allocated or copied,
 	// and no copy primitive entered the graph.
-	ingress: 'e53287d8fca1490ec3637651637c0ca07686aa6763f5342fb3c6a1a474700d24',
+	// Re-pinned for the topic epoch override, whose drift in this graph is
+	// utils/epoch.js reached through utils.js: a bounded module-level Map, the
+	// `topicEpochValue` read (one Map lookup with the process-generation
+	// fallback), the `overrideTopicEpoch` install with its recency eviction,
+	// and the harness reset. Reads run on subscribe acks and resume compares,
+	// installs on a confirmed relay-gap drain - none of it on a frame path.
+	// No byte is read, allocated or copied, and no copy primitive entered the
+	// graph.
+	ingress: '16a6c13a2bdcfca17652c2f6a5f0af7cf4b2aa9841b65f3705edb052cc9805ca',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1298,7 +1306,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// prose). The signal walk lives in handler/lifecycle.js, outside every
 	// sealed graph. Data only, off every frame path; no byte is read,
 	// allocated or copied, and no copy primitive entered the graph.
-	platform: '72c71688cd3dd7528c3ecaa765cead1918aef171af77f22f241e8f14bea76b8e',
+	// Re-pinned for the topic epoch override: utils/epoch.js (the bounded
+	// override map with its read, recency-evicting install, and reset - the
+	// ingress note above details it) plus, in this graph's own root,
+	// platform.js's `topicEpoch` delegating to the shared `topicEpochValue`
+	// read instead of returning the process generation directly - one changed
+	// call and its import. Acks, resume compares, and the confirmed-gap drain
+	// are the only executions; none is a frame path. No byte is read,
+	// allocated or copied, and no copy primitive entered the graph.
+	platform: '36657efa453ac12e829abf7451ca5b2e5968557040c0ef9bd1814510dd2daf7f',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1469,7 +1485,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// as prose). The signal walk lives in handler/lifecycle.js, outside every
 	// sealed graph. Data only, off every frame path; no byte is read,
 	// allocated or copied, and no copy primitive entered the graph.
-	'wire-fanout': 'edd7ac02feac81aecda2557f277f4835bdb77715283d05d298b8620bf53755cd',
+	// Re-pinned for the topic epoch override, the same utils/epoch.js drift
+	// the ingress note details (the bounded override map, its read, its
+	// recency-evicting install, the reset), reached through utils.js. Acks,
+	// resume compares, and the confirmed-gap drain are the only executions;
+	// none is a frame path. No byte is read, allocated or copied, and no copy
+	// primitive entered the graph.
+	'wire-fanout': 'cdf4cfa5a780b3347c58b137136e57f5ed175dd800e722c2c09251708b01c5c4',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

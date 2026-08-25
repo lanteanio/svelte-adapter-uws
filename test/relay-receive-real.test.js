@@ -327,7 +327,7 @@ describeUWS('relay receive paths record every frame (built runtime)', () => {
 			{ topic, origin: 21, from: 2, to: 2, count: 1 }
 		]);
 		const outcomes = server.handler.signalRelayGaps(gaps);
-		expect(outcomes.get(topic), 'one subscriber opted in, so one is signalled').toEqual({ signalled: 1, closed: 0 });
+		expect(outcomes.get(topic), 'one subscriber opted in, so one is signalled').toEqual({ signalled: 1, closed: 0, epoch: expect.any(Number) });
 
 		await new Promise((r) => setTimeout(r, 250));
 		const marker = opted.frames.find((f) => f.topic === `__replay:${topic}` && f.event === 'gap');
@@ -359,6 +359,7 @@ describeUWS('relay receive paths record every frame (built runtime)', () => {
 		const topic = 'relay-recv-seqless-quiet';
 
 		const opted = await subscriberSocket(topic, ['relay.resync:1']);
+		const ackBefore = opted.frames.find((f) => f.type === 'subscribed' && f.topic === topic);
 
 		relayOne(topic, 1, 23, { seq: null });
 		relayOne(topic, 3, 23, { seq: null });
@@ -377,8 +378,71 @@ describeUWS('relay receive paths record every frame (built runtime)', () => {
 			'no marker reaches the subscriber'
 		).toBe(false);
 		expect(opted.ws.readyState).toBe(WebSocket.OPEN);
-
 		opted.ws.close();
+
+		// The epoch is out of scope with the marker: there is no offset the
+		// generation could invalidate, so a fresh subscriber still reads the
+		// same one this topic always carried.
+		const after = await subscriberSocket(topic, null);
+		const ackAfter = after.frames.find((f) => f.type === 'subscribed' && f.topic === topic);
+		expect(ackAfter.epoch, 'a sequence-less topic keeps its generation').toBe(ackBefore.epoch);
+		after.ws.close();
+	}, 30_000);
+
+	it('heals a subscriber that disconnects inside the confirmation window through the epoch bump', async () => {
+		// The marker only reaches sockets still connected at the drain. A
+		// subscriber can take the sequences that step over the hole and
+		// disconnect BEFORE the grace confirms the loss - it then holds a
+		// poisoned offset the walk can never reach, and a later resume would
+		// gap-fill from past frames it never received, on whatever worker the
+		// reconnect lands. The durable half of the signal covers exactly this:
+		// the drain mints the topic a new generation, so the old offset fails
+		// the ordinary epoch compare at its next resume and the topic
+		// cold-rehydrates instead.
+		state.streamTracking.enabled = true;
+		const topic = 'relay-recv-raced-disconnect';
+
+		const racer = await subscriberSocket(topic, ['relay.resync:1']);
+		const ackBefore = racer.frames.find((f) => f.type === 'subscribed' && f.topic === topic);
+		expect(typeof ackBefore.epoch, 'the ack must carry the generation the client will present back').toBe('number');
+
+		relayOne(topic, 1, 26);
+		relayOne(topic, 3, 26);
+		await new Promise((r) => setTimeout(r, 250));
+		const delivered = racer.frames.filter((f) => f.topic === topic && f.event === 'tick');
+		expect(delivered.map((f) => f.seq), 'the racer holds the watermark that stepped past the hole').toEqual([seqFor(1), seqFor(3)]);
+
+		// Gone before the worker can confirm anything.
+		racer.ws.close();
+		await new Promise((r) => setTimeout(r, 100));
+
+		const gaps = gapsFor(topic);
+		expect(gaps).toEqual([{ topic, origin: 26, from: 2, to: 2, count: 1 }]);
+		const outcomes = server.handler.signalRelayGaps(gaps);
+		// Nobody left to signal - this IS the race the epoch exists for.
+		expect(outcomes.get(topic).signalled, 'the disconnected racer is beyond the marker').toBe(0);
+		const minted = outcomes.get(topic).epoch;
+		expect(typeof minted).toBe('number');
+		expect(minted, 'the topic generation must move, or the racer resumes into a gap-fill').not.toBe(ackBefore.epoch);
+
+		// The compare authority itself - the value every resume compare and
+		// subscribe ack reads through `platform.topicEpoch` - now answers the
+		// minted generation, so the racer's reconnect presenting the OLD one
+		// mismatches and the topic cold-rehydrates rather than trusting the
+		// poisoned offset. Read from the built epoch module the running
+		// handler itself imports, so this binds the wire observation below to
+		// the authority rather than to a second copy of it. (The hook-side
+		// mismatch-to-rehydrate contract is held by the resume suites; this
+		// file owns the server authority and its wire visibility.)
+		const epochModule = await import(pathToFileURL(path.join(fixtureDir, variantOut('default'), 'utils', 'epoch.js')).href);
+		expect(epochModule.topicEpochValue(topic), 'the compare authority answers the minted generation').toBe(minted);
+		expect(epochModule.topicEpochValue(topic), 'the mint repudiates the epoch the racer recorded').not.toBe(ackBefore.epoch);
+
+		// And a later plain subscriber sees it on the wire.
+		const later = await subscriberSocket(topic, null);
+		const ackAfter = later.frames.find((f) => f.type === 'subscribed' && f.topic === topic);
+		expect(ackAfter.epoch, 'the ack now carries the minted generation').toBe(minted);
+		later.ws.close();
 	}, 30_000);
 
 	it('closes 1013 a subscriber whose socket refuses the marker', async () => {
@@ -415,7 +479,7 @@ describeUWS('relay receive paths record every frame (built runtime)', () => {
 			const gaps = gapsFor(topic);
 			expect(gaps).toEqual([{ topic, origin: 24, from: 2, to: 2, count: 1 }]);
 			const outcomes = server.handler.signalRelayGaps(gaps);
-			expect(outcomes.get(topic), 'the refusal is recorded as a close, not a delivery').toEqual({ signalled: 0, closed: 1 });
+			expect(outcomes.get(topic), 'the refusal is recorded as a close, not a delivery').toEqual({ signalled: 0, closed: 1, epoch: expect.any(Number) });
 			expect(ended, 'the connection that could not be signalled is closed 1013').toEqual([[1013, 'Resync required']]);
 		} finally {
 			state.wsConnections.delete(refusing);

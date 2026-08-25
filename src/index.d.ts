@@ -4081,9 +4081,14 @@ export interface Platform {
 	 * that has since reset (cold-rehydrate).
 	 *
 	 * In a single worker the seq counters live in process memory and all
-	 * reset together on a restart, so every topic shares the one per-process
-	 * generation. A backend with its own per-topic seq authority (a shared
-	 * store) reports a per-topic value of the same shape.
+	 * reset together on a restart, so every topic normally shares the one
+	 * per-process generation. A topic whose cluster-relayed history a worker
+	 * proved it lost carries a minted per-topic value on that worker instead
+	 * (each worker's generation is already its own random latch, so only the
+	 * losing worker's answer could still match a pre-loss offset), and such
+	 * offsets then cold-rehydrate rather than gap-fill past frames their
+	 * holder never received. A backend with its own per-topic seq authority
+	 * (a shared store) reports a per-topic value of the same shape.
 	 */
 	topicEpoch(topic: string): number;
 

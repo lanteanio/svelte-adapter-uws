@@ -462,7 +462,8 @@ describe('ADAPTER-ERR-RELAY-GAP', () => {
 		// consumed - the stream re-baselines instead of restating the same
 		// loss on every later drain. (What IS repaired happens downstream of
 		// this drain: the signal walk tells opted-in subscribers to drop the
-		// poisoned offset.)
+		// poisoned offset, and the topic's re-minted generation repudiates
+		// the rest at their next resume.)
 		expect(takeConfirmedGaps(streams, nowMs + 10 * GAP_CONFIRM_MS, GAP_CONFIRM_MS)).toEqual([]);
 	});
 

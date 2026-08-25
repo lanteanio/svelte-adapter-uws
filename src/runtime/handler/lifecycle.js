@@ -4,8 +4,8 @@
 import uWS from 'uWebSockets.js';
 import { workerData } from 'node:worker_threads';
 import { wsModule } from '../ws-handler-bridge.js';
-import { WS_CAPS, WS_SUBSCRIPTIONS, assert, fatal, wrapBatchEnvelope } from '../utils.js';
-import { monotonicNow, processMonotonicNow, wallEpoch, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from '../runtime.js';
+import { WS_CAPS, WS_SUBSCRIPTIONS, assert, fatal, overrideTopicEpoch, wrapBatchEnvelope } from '../utils.js';
+import { monotonicNow, processMonotonicNow, randomU32, wallEpoch, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from '../runtime.js';
 import { captureResumeFrame, counters, maxSeenSeq, originStreams, recordOriginStream, recordSeen, relayAttach, resumeBuffers, streamTracking, topicSubscriberCounts, wsConnections } from './state.js';
 import { app, is_tls, _t_app, WS_COMPRESSION_ON, reconnect_dispersal_ms, ssl_cert, ssl_key, ssl_watch, ssl_reload_debounce_ms, ssl_sni_hosts, boot_cert_fingerprint } from './config.js';
 import { platform, relayPublishWire } from './platform.js';
@@ -894,20 +894,35 @@ export const RELAY_RESYNC_CAP = 'relay.resync:1';
  * whole room to re-snapshot, and the window is what keeps that from being a
  * stampede on a worker that is already behind.
  *
+ * The marker alone cannot reach everyone the loss poisoned: a subscriber can
+ * take the stepping sequences and disconnect inside the confirmation grace,
+ * and a plain client never receives markers at all - both then re-present the
+ * poisoned offset on a later resume. So each in-scope gapped topic ALSO gets
+ * a freshly minted epoch: an offset presented with its pre-loss epoch now
+ * fails the ordinary epoch compare and cold-rehydrates instead of gap-filling
+ * past the hole, using machinery every client already implements. The mint is
+ * WORKER-LOCAL on purpose: every worker's generation is its own random latch,
+ * so a pre-loss offset can only ever gap-fill on the worker whose ack minted
+ * its epoch - a resume landing on any sibling already answers mismatch -
+ * and re-minting here closes exactly the one lane still open. (A client that
+ * resumes without presenting epochs is treated as a match by contract; the
+ * bundled client always presents them.)
+ *
  * @param {{ topic: string, origin: number, from: number, to: number, count: number }[]} gaps
  *   One drain's confirmed gaps, exactly as `takeConfirmedGaps` returned them.
- * @returns {Map<string, { signalled: number, closed: number }>} per-topic
- *   delivery outcome, keyed by the gapped topic, for the drain's diagnostics.
+ * @returns {Map<string, { signalled: number, closed: number, epoch: number }>}
+ *   per-topic outcome, keyed by the gapped topic, for the drain's
+ *   diagnostics: marker delivery counts plus the topic's minted epoch.
  *   Topics outside the scope above are absent.
  */
 export function signalRelayGaps(gaps) {
-	/** @type {Map<string, { lost: number, marker: string, signalled: number, closed: number }>} */
+	/** @type {Map<string, { lost: number, marker: string, signalled: number, closed: number, epoch: number }>} */
 	const byTopic = new Map();
 	for (const gap of gaps) {
 		if (gap.topic.charCodeAt(0) === 95 && gap.topic.charCodeAt(1) === 95) continue;
 		if (!maxSeenSeq.has(gap.topic)) continue;
 		const entry = byTopic.get(gap.topic);
-		if (entry === undefined) byTopic.set(gap.topic, { lost: gap.count, marker: '', signalled: 0, closed: 0 });
+		if (entry === undefined) byTopic.set(gap.topic, { lost: gap.count, marker: '', signalled: 0, closed: 0, epoch: 0 });
 		else entry.lost += gap.count;
 	}
 	if (byTopic.size === 0) return byTopic;
@@ -916,6 +931,15 @@ export function signalRelayGaps(gaps) {
 		entry.marker =
 			'{"topic":' + JSON.stringify('__replay:' + topic) + ',"event":"gap","data":{"lost":' + entry.lost + '}' +
 			(jitterMs > 0 ? ',"j":' + jitterMs : '') + '}';
+		// The durable half: mint the topic's new generation and install it on
+		// THIS worker - the only worker whose current answer a pre-loss offset
+		// can still match. The mint precedes the walk so a subscriber
+		// signalled below and one that resumes a moment later read one
+		// consistent epoch. A 2^-32 collision with the value a client still
+		// holds degrades to one missed heal, the same class as the boot
+		// collision the process generation documents.
+		entry.epoch = randomU32();
+		overrideTopicEpoch(topic, entry.epoch);
 	}
 	for (const ws of wsConnections) {
 		const ud = ws.getUserData();
@@ -939,8 +963,8 @@ export function signalRelayGaps(gaps) {
 			entry.signalled++;
 		}
 	}
-	/** @type {Map<string, { signalled: number, closed: number }>} */
+	/** @type {Map<string, { signalled: number, closed: number, epoch: number }>} */
 	const outcomes = new Map();
-	for (const [topic, entry] of byTopic) outcomes.set(topic, { signalled: entry.signalled, closed: entry.closed });
+	for (const [topic, entry] of byTopic) outcomes.set(topic, { signalled: entry.signalled, closed: entry.closed, epoch: entry.epoch });
 	return outcomes;
 }

@@ -5,6 +5,62 @@ All notable changes to `svelte-adapter-uws` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.94] - 2026-08-25
+
+<!-- consumer-release-summary:start -->
+### Consumer summary
+
+- **Changed: the topic epoch reports a per-topic generation after a confirmed relay loss.** Every topic previously shared the one per-process generation; a topic whose relayed history a worker proved it lost now carries a freshly minted value on that worker, so its subscribe acks and resume compares repudiate offsets taken before the loss.
+  - **Affects:** Resume hooks and replay backends comparing `platform.topicEpoch(topic)`; the value is unchanged for every topic without a confirmed relay loss.
+  - **Action:** None; hooks that compare for equality, as documented, inherit the behavior.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The epoch stays an opaque equality-only integer of the same shape; only when it can change moved. Overrides are bounded (4096 topics, oldest-undisturbed evicted) and reset with the process.
+  - **Detail:** [Changed engineering detail](#changed).
+- **Fixed: a relay-gap resync now reaches subscribers that disconnected before the loss was confirmed.** The gap marker walks live connections, so a client that took the stepping sequences and dropped inside the confirmation grace kept a poisoned resume offset; a confirmed loss now mints the topic a new epoch, so that offset cold-rehydrates at its next resume.
+  - **Affects:** Multi-worker deployments running the cross-worker state reporter, and clients that never negotiated `relay.resync:1` as well; a reconnect onto a sibling worker already mismatched that worker's own generation, so the mint closes the losing worker's one remaining lane.
+  - **Action:** None; the epoch compare is machinery every client already implements, and the bundled client always presents its recorded epochs.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** No wire change. The mint is local to the losing worker, whose other resuming subscribers of the topic pay one cold re-snapshot; an offset presented without an epoch matches by the protocol's own rule and stays unrepaired.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+<!-- consumer-release-summary:end -->
+
+### Changed
+
+- **`platform.topicEpoch` consults a per-topic override map before the
+  process generation.** `topicEpochValue` (utils/epoch.js) is the single read
+  authority - the platform method, the subscribe ack (including its defensive
+  fallback), and every resume compare route through it - so a minted value
+  reaches each site at once. Overrides install through `overrideTopicEpoch`,
+  bounded at 4096 entries with the longest-undisturbed entry evicted at the
+  cap (an evicted topic falls back to the process generation, the honest
+  degradation for a loss window old enough to outlive the cap).
+  `test/topic-epoch.test.js` pins the fallback identity, the in-place
+  replace, the recency eviction, and the harness reset.
+
+### Fixed
+
+- **The relay-gap resync signal heals subscribers the marker cannot reach.**
+  The marker walks the live connection set at the confirmation drain, so a
+  subscriber that received the sequences stepping over the hole and
+  disconnected inside the confirmation grace escaped it - and, holding a
+  watermark already past the hole, could resume into a gap-fill that
+  silently skips the lost frames forever. That gap-fill was only ever
+  possible on the losing worker itself: each worker's generation is its own
+  random latch, so a resume landing on a sibling already fails the epoch
+  compare. `signalRelayGaps` therefore mints each in-scope gapped topic a
+  new epoch (one `randomU32` draw through the deterministic seam) and
+  installs it worker-locally before the walk; the pre-loss offset,
+  presented with its recorded epoch, then fails the compare there too and
+  the topic cold-rehydrates. An offset presented without an epoch matches
+  by the protocol's own rule and stays unrepaired; sequence-less topics
+  stay outside both halves of the signal. The raced-disconnect heal is held
+  in `test/relay-receive-real.test.js` against the compare authority (the
+  racer's recorded ack epoch versus the minted value and the
+  fresh-subscriber ack that carries it), with the hook-side
+  mismatch-to-rehydrate contract held by the resume suites, and the
+  seq-less lane pinned unchanged.
+
 ## [0.6.0-next.93] - 2026-08-25
 
 <!-- consumer-release-summary:start -->

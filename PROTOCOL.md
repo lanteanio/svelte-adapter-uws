@@ -891,10 +891,11 @@ reported epoch to the topic's current epoch:
 - **Epochs match (or the client reported none)** - the offset is meaningful, and
   the server gap-fills the missed tail from its replay buffer (when the topic is
   recoverable).
-- **Epochs differ** - the topic's sequence space was reset (a restart, a buffer
-  expiry, or a shard move minted a new epoch), so the client's offset belongs to a
-  different counter. The server does not gap-fill; it cold-rehydrates that topic
-  (signalled by a `rehydrate` replay event, section 8).
+- **Epochs differ** - the topic's sequence space was reset or repudiated (a
+  restart, a buffer expiry, a shard move, or a confirmed relay loss minted a new
+  epoch), so the client's offset belongs to a different counter or points past
+  frames it never held. The server does not gap-fill; it cold-rehydrates that
+  topic (signalled by a `rehydrate` replay event, section 8).
 
 Resume-on-subscribe is acked per topic by the ordinary `subscribed` frame (the
 gap-fill precedes it); the whole-session `resume` frame is acked once with
@@ -965,6 +966,18 @@ de-herd window of section 4, and a client SHOULD honor it before re-snapshotting
 so one gap does not turn a large room into a synchronized stampede. A
 connection that did not advertise `relay.resync:1` never receives `gap`
 (section 5) and keeps the revision's original silence.
+
+The marker is the immediate half of the answer; the durable half needs no new
+wire at all. A server that confirms a relay loss also mints the affected
+topic's next epoch (section 7), so an offset taken before the loss and
+presented WITH its recorded epoch - by a subscriber that disconnected before
+the loss was confirmed, or by a client that never advertised the capability -
+fails the ordinary epoch compare at its next resume and cold-rehydrates
+instead of gap-filling past the hole. Epochs compare by equality only, so
+this is machinery every client already implements; the reference client
+always presents its recorded epochs. A client that presents an offset with
+no epoch is treated as a match by section 7's own rule, and is the one
+resume shape neither half of the signal can repair.
 
 ---
 
