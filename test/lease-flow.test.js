@@ -321,6 +321,11 @@ describe('worker pressure value fold', () => {
 // ---------------------------------------------------------------------------
 
 describe('send-gate window sizing', () => {
+	// Each case here supplies its own `heapRatio` and asserts the SHAPE of the
+	// response, which holds wherever the sizer's boundaries sit. Where those
+	// boundaries must sit relative to the MEMORY signal that produces the
+	// ratio is a different claim, pinned against the built modules in
+	// test/pressure-sampler-isolation.test.js.
 	it('hands out the full base window for an idle worker', () => {
 		expect(leaseGrantSize({ heapRatio: 0.2, subscriberRatio: 1 })).toBe(256);
 	});

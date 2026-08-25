@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** No wire change. The mint is local to the losing worker, whose other resuming subscribers of the topic pay one cold re-snapshot; an offset presented without an epoch matches by the protocol's own rule and stays unrepaired.
   - **Detail:** [Fixed engineering detail](#fixed).
 
+- **Fixed: one unreadable cgroup file could pin memory pressure to a looser wall.** A failed read of the nearest group's limit file, while a looser ancestor answered, latched that ancestor for the process life; the signal then measured against a far larger wall than the kernel kills on and stayed low into an out-of-memory death.
+  - **Affects:** Containerized deployments whose cgroup hierarchy nests a tighter limit under a looser parent, where a limit file read can fail transiently.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Discovery latches only after a clean probe; an incomplete sample reports the best wall it saw and retries next tick, so a healthy container behaves exactly as before and no threshold, option, or metric name moved.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 <!-- consumer-release-summary:end -->
 
 ### Changed
@@ -39,6 +46,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replace, the recency eviction, and the harness reset.
 
 ### Fixed
+
+- **One unreadable cgroup file no longer pins the memory signal to a looser
+  wall.** Limit discovery walks the process's own group and its ancestors and
+  keeps the tightest limit, but it latched any finite result outright - so a
+  transient read failure on the NEARER group's file (an EACCES tick, a
+  remount) while a looser ancestor answered pinned that ancestor for the life
+  of the process. The reader then measured the resident set against a wall
+  several times larger than the one the kernel would actually kill on, and the
+  MEMORY signal sat low while the worker walked into an out-of-memory death it
+  was supposed to predict - a container with a 1 GiB limit under an 8 GiB
+  parent reported a quarter while sitting at twice its own ceiling. Latching
+  now requires a CLEAN probe: a sample that could not read one candidate
+  reports the best wall it did see and leaves discovery armed, so the next
+  sample finds the nearer file. A confirmed absence still stops the reads for
+  good. A latched file that stops reading now re-probes on the spot rather
+  than reporting no wall for that sample - a read is most likely to fail
+  during the memory event the signal exists to report - and that probe may
+  re-latch but never concludes absence, since a wall already observed was
+  reconfigured rather than proven never to have existed.
+  `test/memory-wall.test.js` drives both sequences and fails on the previous
+  rules.
 
 - **The relay-gap resync signal heals subscribers the marker cannot reach.**
   The marker walks the live connection set at the confirmation drain, so a

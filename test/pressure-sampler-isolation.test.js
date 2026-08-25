@@ -1,13 +1,18 @@
-// Two pressure-lane isolation properties, driven on the BUILT modules - the
-// same instances a running server uses (the source tree cannot be imported in
-// a unit run: pressure-metrics.js reaches config.js, which reads a build-time
+// Pressure-lane properties that need the BUILT modules - the same instances a
+// running server uses (the source tree cannot be imported in a unit run:
+// pressure-metrics.js reaches config.js, which reads a build-time
 // placeholder):
 //
 //   1. grantSizeFor sizes replenish windows from the sampler's cached heap
 //      ratio, never a live process.memoryUsage() syscall - a syscall there
 //      would sit on the per-frame replenish path and tie grant sizes to the
 //      host heap while every other input under the sim is virtualized.
-//   2. The listener sweeps iterate a snapshot: a listener that registers
+//   2. The sampled ratio measures the nearest memory wall rather than V8
+//      arena fullness, recomputed here from the raw primitives.
+//   3. The grant window stays calibrated to that ratio: both boundaries of
+//      the pair are read from the shipped threshold and the shipped reader,
+//      never supplied by the case.
+//   4. The listener sweeps iterate a snapshot: a listener that registers
 //      another listener from inside its callback must not extend the sweep
 //      it is running in.
 
@@ -88,6 +93,88 @@ describe('the sampled memory ratio measures the nearest wall, not the arena', ()
 			metrics.stopPressureSampling();
 		}
 	}, 20000);
+});
+
+// The window a flow-controlled client is granted is sized from this same
+// memory ratio, so the sizer and the signal are one calibrated pair: the
+// window must still be the full base at what a healthy worker reads, and must
+// already be narrowing by the point the signal itself calls that worker
+// pressured. Neither boundary is visible to a case that supplies its own
+// ratio - the unit cases in test/lease-flow.test.js each choose their input
+// and assert only the SHAPE, which stays true wherever the boundaries sit.
+// These two read the shipped threshold and drive the shipped reader instead,
+// so the pair cannot drift apart silently.
+describe('the grant window is calibrated to the memory signal it consumes', () => {
+	/**
+	 * The ratio at which the sizer starts narrowing, derived from the shipped
+	 * sizer rather than restated here: the lowest reading whose window is no
+	 * longer the full base. Deriving it is what keeps this file honest if the
+	 * sizer's own gate moves.
+	 */
+	function engagementPoint(state, metrics) {
+		const base = (state.counters.lastHeapUsedRatio = 0, metrics.grantSizeFor().count);
+		let below = 0;
+		for (let r = 0; r <= 1.0001; r += 0.01) {
+			const at = r > 1 ? 1 : r;
+			state.counters.lastHeapUsedRatio = at;
+			if (metrics.grantSizeFor().count < base) return { base, at, below };
+			below = at;
+		}
+		return { base, at: Infinity, below: 1 };
+	}
+
+	it('narrows no later than the threshold that same signal fires at', async () => {
+		const { state, metrics } = await builtModules();
+		const prev = state.counters.lastHeapUsedRatio;
+		try {
+			// Read the shipped default rather than restating it, so moving the
+			// threshold moves this input too.
+			const threshold = metrics.resolvePressureThresholds(undefined).memoryHeapUsedRatio;
+			expect(typeof threshold, 'the memory threshold must be a live number to calibrate against').toBe('number');
+			const { base, at } = engagementPoint(state, metrics);
+			expect(at, 'the window narrows at no reading the signal can produce, up to and including 1').toBeLessThanOrEqual(1);
+			expect(at, 'a worker at its own memory threshold still hands out the full window').toBeLessThanOrEqual(threshold);
+			state.counters.lastHeapUsedRatio = threshold;
+			expect(metrics.grantSizeFor().count, 'the window at the threshold must be below the base').toBeLessThan(base);
+		} finally {
+			state.counters.lastHeapUsedRatio = prev;
+		}
+	});
+
+	it('keeps the full window for a worker the shipped reader puts below that point', async () => {
+		const { state, metrics } = await builtModules();
+		const prev = state.counters.lastHeapUsedRatio;
+		try {
+			// The producer itself, not a number this file invented: the built
+			// wall reader against this process's real memory.
+			const wall = await import(pathToFileURL(path.join(builtDir, '..', 'utils', 'memory-wall.js')).href);
+			const ratio = wall.createMemoryWallReader().ratio(process.memoryUsage());
+			// A dead producer would answer 0 and sail through the branch below,
+			// so bind the reading to being a reading at all first.
+			expect(ratio, 'the reader must return a live wall reading').toBeGreaterThan(0);
+			const { base, at, below } = engagementPoint(state, metrics);
+			state.counters.lastHeapUsedRatio = ratio;
+			const window = metrics.grantSizeFor().count;
+			// Which side applies is a property of the machine, not of the code:
+			// a roomy host reads under the engagement point and must keep the
+			// full window, while a worker genuinely close to its container wall
+			// SHOULD be throttled - and on that machine the narrowing side is
+			// the claim worth pinning. The sweep locates the point on a grid,
+			// so a reading inside the one-step bracket around it is only known
+			// to be no LARGER than the base; asserting equality there would
+			// make this environment-dependent again the moment the sizer's own
+			// boundary moves off the grid.
+			if (ratio <= below) {
+				expect(window, 'a worker under the engagement point keeps the full window').toBe(base);
+			} else if (ratio >= at) {
+				expect(window, 'a worker at or past the engagement point is narrowed').toBeLessThan(base);
+			} else {
+				expect(window, 'a reading inside the engagement bracket never exceeds the base').toBeLessThanOrEqual(base);
+			}
+		} finally {
+			state.counters.lastHeapUsedRatio = prev;
+		}
+	});
 });
 
 describe('listener sweeps iterate a snapshot', () => {

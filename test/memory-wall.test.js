@@ -205,6 +205,88 @@ describe('createMemoryWallReader', () => {
 		expect(reader.ratio(mem(GiB, GiB / 2))).toBeCloseTo(0.5, 6); // the hidden wall is found
 	});
 
+	it('re-probes on the spot when the latched file stops reading, keeping the wall', () => {
+		// A read is most likely to fail during exactly the memory event the
+		// signal exists to report, so the sample that loses its file is the one
+		// that can least afford to answer "no wall". Re-arming alone would drop
+		// the container arm for that sample and report only the heap arm - a
+		// few percent, while the resident set sits against a wall it is about
+		// to hit.
+		let served = 'root';
+		const reader = createMemoryWallReader({
+			readFile: (path) => {
+				if (path === '/proc/self/cgroup') return '0::/\n';
+				if (path === '/sys/fs/cgroup/memory.max') {
+					if (served === 'root') return String(GiB);
+					const e = new Error('ENODEV: gone'); e.code = 'ENODEV'; throw e;
+				}
+				if (path === '/sys/fs/cgroup/memory/memory.limit_in_bytes' && served === 'moved') return String(2 * GiB);
+				return enoent();
+			},
+			heapStatistics: () => ({ heap_size_limit: 64 * GiB })
+		});
+		expect(reader.ratio(mem(1, GiB / 2))).toBeCloseTo(0.5, 6); // latched on the root file
+		served = 'moved';
+		// The latched file is gone and another candidate now carries the limit.
+		// The same sample must find it: 1 GiB of the 2 GiB wall, not 0.
+		expect(reader.ratio(mem(1, GiB))).toBeCloseTo(0.5, 6);
+	});
+
+	it('re-latches the newly-found file when the loss probe is clean', () => {
+		// The other half of the re-probe rule. Here the latched file answers a
+		// confirmed absence rather than an ambiguous error, so the sweep that
+		// follows is CLEAN and may latch what it found - which must then cost
+		// one read per sample, not a fresh sweep forever.
+		let reads = 0;
+		let served = 'root';
+		const reader = createMemoryWallReader({
+			readFile: (path) => {
+				reads++;
+				if (path === '/sys/fs/cgroup/memory.max' && served === 'root') return String(GiB);
+				if (path === '/sys/fs/cgroup/memory/memory.limit_in_bytes' && served === 'moved') return String(2 * GiB);
+				return enoent();
+			},
+			heapStatistics: () => ({ heap_size_limit: 64 * GiB })
+		});
+		expect(reader.ratio(mem(1, GiB / 2))).toBeCloseTo(0.5, 6);
+		served = 'moved';
+		expect(reader.ratio(mem(1, GiB))).toBeCloseTo(0.5, 6); // found on the spot
+		reads = 0;
+		expect(reader.ratio(mem(1, GiB))).toBeCloseTo(0.5, 6);
+		expect(reads, 'a clean loss probe must latch, so the next sample reads one file').toBe(1);
+	});
+
+	it('does not latch a LOOSER ancestor while the nearer group fails transiently', () => {
+		// The dangerous shape, and the one a whole-probe failure cannot reach: a
+		// candidate DID answer with a finite limit, so a rule that latches any
+		// finite result pins the looser ancestor and the reader under-reports
+		// for the life of the process - the signal sits low while the worker
+		// walks into the kill its own wall was supposed to predict. A probe that
+		// could not see one group has not proven it found the tightest wall, so
+		// it must report the best it saw and look again.
+		let phase = 'blocked';
+		const reader = createMemoryWallReader({
+			readFile: (path) => {
+				if (path === '/proc/self/cgroup') return '0::/kubepods/pod1\n';
+				if (path === '/sys/fs/cgroup/kubepods/pod1/memory.max') {
+					if (phase === 'blocked') { const e = new Error('EACCES: denied'); e.code = 'EACCES'; throw e; }
+					return String(GiB); // the REAL, nearest wall: 1 GiB
+				}
+				if (path === '/sys/fs/cgroup/kubepods/memory.max') return String(8 * GiB); // looser ancestor
+				return enoent();
+			},
+			heapStatistics: () => ({ heap_size_limit: 64 * GiB })
+		});
+		// Blocked tick: the ancestor is the only wall visible, so it is what the
+		// sample reports - 2 GiB of 8 GiB.
+		expect(reader.ratio(mem(1, 2 * GiB))).toBeCloseTo(0.25, 6);
+		phase = 'open';
+		// Same memory, but the nearer wall is readable now: 2 GiB of 1 GiB is
+		// past the wall and clamps to 1. Latching the ancestor would have kept
+		// answering 0.25 here - a worker at twice its limit reporting a quarter.
+		expect(reader.ratio(mem(1, 2 * GiB))).toBe(1);
+	});
+
 	it('re-arms discovery when the latched file fails after a successful probe', () => {
 		let phase = 'discover';
 		const reader = createMemoryWallReader({

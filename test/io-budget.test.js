@@ -1314,7 +1314,19 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// call and its import. Acks, resume compares, and the confirmed-gap drain
 	// are the only executions; none is a frame path. No byte is read,
 	// allocated or copied, and no copy primitive entered the graph.
-	platform: '36657efa453ac12e829abf7451ca5b2e5968557040c0ef9bd1814510dd2daf7f',
+	// Re-pinned for the cgroup latch repair. The drift is utils/memory-wall.js
+	// alone, reached only by THIS graph (platform.js -> pressure-metrics.js).
+	// Three things moved inside the 1 Hz sampler's discovery path, none on any
+	// frame path: reporting the best wall seen splits from LATCHING it, which
+	// now needs a probe that read every candidate; a latched file that stops
+	// reading re-probes in the same sample instead of answering no wall; and
+	// that probe carries a parameter refusing it the permanent-absence stop.
+	// One comparison, one conditional assignment, one call and one guarded
+	// flag. The module's readFileSync was already counted into this graph when
+	// it entered - the re-probe reads the same candidate files the discovery
+	// path already reads, and adds no read of any frame, no allocation, no
+	// copy, and no copy primitive.
+	platform: '2c1be14094528ad7bccf91aabcc1c31b8c8cdbcc7fb35912f36ed78d390dbcb9',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

@@ -28,9 +28,16 @@
  * `/proc/self/cgroup` names a deeper path that is visible (a host cgroup
  * namespace), at the process's own group and its ancestors, latching the
  * file with the tightest limit. A confirmed absence (non-Linux, no memory
- * controller) permanently stops the reads; a transient failure keeps
- * discovery armed. After discovery, one file is re-read per sample so a
- * runtime edit of the limit VALUE is tracked; regrouping the process is not.
+ * controller) permanently stops the reads; ANY unresolved read keeps
+ * discovery armed, whatever the other candidates said, because a probe that
+ * could not see one group cannot know it found the tightest wall - it reports
+ * the best wall it did see and looks again next sample. So "once" holds for a
+ * clean probe; where a candidate keeps failing in some way other than absence,
+ * the probe repeats per sample for as long as that lasts, which is bounded by
+ * the candidate count and costs a handful of small reads at the sampler's
+ * cadence. After discovery, one file is re-read per sample so a runtime edit
+ * of the limit VALUE is tracked; regrouping the process is not, and a latched
+ * file that stops reading re-probes on the spot rather than reporting no wall.
  * The V8 limit is latched once and treated as fixed for the process life.
  *
  * Determinism: no clock, no RNG, no timers. The 1 Hz pressure sampler is
@@ -158,7 +165,14 @@ export function createMemoryWallReader(deps) {
 	/** @type {string | null | false} false = probed, none found */
 	let limitPath = null;
 
-	function discoverLimit() {
+	/**
+	 * @param {boolean} [mayConfirmAbsence] false when this probe follows the
+	 *   loss of a file that WAS carrying a limit. A wall already observed
+	 *   cannot be argued out of existence by one sweep that missed it: the
+	 *   group was reconfigured, not proven controller-less, so such a probe
+	 *   may report and re-latch but never take the permanent stop.
+	 */
+	function discoverLimit(mayConfirmAbsence = true) {
 		let uncertain = false;
 		/** @type {string | null} */
 		let selfContent = null;
@@ -186,17 +200,23 @@ export function createMemoryWallReader(deps) {
 				if (!isConfirmedAbsence(error)) uncertain = true;
 			}
 		}
-		// A real limit latches outright. An unlimited-only outcome latches only
-		// when every candidate answered - a transient failure may be hiding a
-		// tighter group's file, and latching "unlimited" over it would lose the
-		// wall for good, so discovery stays armed instead.
-		if (tightest !== null && (tightest.limit !== null || !uncertain)) {
-			limitPath = tightest.path;
+		// A candidate answered, so report the best wall known right now. LATCHING
+		// it is a separate decision, and it needs a CLEAN probe: an uncertain
+		// read may be hiding a nearer, tighter group's file, and pinning a
+		// looser ancestor over it would under-report pressure for the life of
+		// the process - the signal would then sit low while the worker walks
+		// into the kill its own wall was supposed to predict. The same argument
+		// covers an unlimited-only outcome, so both share one rule. An
+		// uncertain probe uses the value and stays armed, re-reading the nearer
+		// candidates on the next sample; a confirmed absence still stops the
+		// reads for good below.
+		if (tightest !== null) {
+			if (!uncertain) limitPath = tightest.path;
 			return tightest.limit;
 		}
 		// Every candidate confirmed absent: stop reading for good. A transient
 		// error keeps discovery armed for the next sample.
-		if (!uncertain && tightest === null) limitPath = false;
+		if (!uncertain && tightest === null && mayConfirmAbsence) limitPath = false;
 		return null;
 	}
 
@@ -206,10 +226,18 @@ export function createMemoryWallReader(deps) {
 		try {
 			return parseCgroupMemoryLimit(readFile(limitPath));
 		} catch {
-			// The discovered file failed this tick (cgroup reconfigured away):
-			// re-arm discovery rather than pinning a dead path.
+			// The discovered file failed this tick (cgroup reconfigured away).
+			// Re-arm discovery rather than pinning a dead path, and probe again
+			// NOW: answering null here would drop the container arm for this
+			// sample and report only the heap arm - a few percent while the
+			// resident set sits against a wall it is about to hit. A read is
+			// most likely to fail under exactly the memory event the signal
+			// exists to report, so the sample that loses its wall is the one
+			// that can least afford to. The probe may not conclude absence: a
+			// wall this reader has already seen was reconfigured, not proven
+			// never to have existed. discoverLimit never calls back here.
 			limitPath = null;
-			return null;
+			return discoverLimit(false);
 		}
 	}
 
