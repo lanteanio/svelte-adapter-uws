@@ -246,23 +246,13 @@ describeUWS('relay receive paths record every frame (built runtime)', () => {
 		]);
 	});
 
-	it('delivers the surviving frames to a subscriber and says nothing about the lost one', async () => {
-		// WHAT A CLIENT ON THE WORKER THAT LOST FRAMES ACTUALLY RECEIVES.
-		//
-		// The detector's own behaviour is covered above. This case asks the
-		// separate question the operator-facing report leaves open: the worker
-		// knows it lost frames, so does anything on the wire tell the clients
-		// whose state is now wrong?
-		//
-		// A single runtime driven through relayPublish is the right instrument
-		// rather than a real two-worker cluster: relayPublish IS the function
-		// index.js hands a sibling's frame to, the subscriber here is a real
-		// socket on the receiving worker, and a hole can be placed exactly where
-		// the assertion needs it. A live cluster cannot be made to drop one
-		// interior frame on demand, so the same case there would be a race.
-		state.streamTracking.enabled = true;
-		const topic = 'relay-recv-client-view';
-
+	/**
+	 * Open a real subscriber socket, optionally negotiating caps first, and
+	 * resolve once its subscribe is acked. The returned frames array accumulates
+	 * every JSON frame the server sends it from here on.
+	 * @param {string} topic @param {string[] | null} caps
+	 */
+	async function subscriberSocket(topic, caps) {
 		const ws = new WebSocket(`${server.wsUrl}`);
 		/** @type {any[]} */
 		const frames = [];
@@ -273,6 +263,7 @@ describeUWS('relay receive paths record every frame (built runtime)', () => {
 			ws.once('open', resolve);
 			ws.once('error', reject);
 		});
+		if (caps !== null) ws.send(JSON.stringify({ type: 'hello', caps }));
 		ws.send(JSON.stringify({ type: 'subscribe', topic, ref: 1 }));
 		await new Promise((resolve, reject) => {
 			const timer = setTimeout(() => reject(new Error('no subscribe ack')), 10_000);
@@ -285,39 +276,150 @@ describeUWS('relay receive paths record every frame (built runtime)', () => {
 			ws.on('message', scan);
 			scan();
 		});
+		return { ws, frames };
+	}
+
+	it('tells an opted-in subscriber it lost frames, and leaves a non-opted one the old silence', async () => {
+		// WHAT A CLIENT ON THE WORKER THAT LOST FRAMES ACTUALLY RECEIVES.
+		//
+		// The detector's own behaviour is covered above. This case holds the
+		// client-facing consequence: the worker that proves it lost frames tells
+		// exactly the subscribers that negotiated `relay.resync:1`, because their
+		// resume watermark has already stepped past the hole and no reconnect can
+		// heal it - and keeps the revision's original silence for a connection
+		// that never opted in.
+		//
+		// A single runtime driven through relayPublish is the right instrument
+		// rather than a real two-worker cluster: relayPublish IS the function
+		// index.js hands a sibling's frame to, the subscribers here are real
+		// sockets on the receiving worker, and a hole can be placed exactly where
+		// the assertion needs it. A live cluster cannot be made to drop one
+		// interior frame on demand, so the same case there would be a race.
+		state.streamTracking.enabled = true;
+		const topic = 'relay-recv-client-view';
+
+		const plain = await subscriberSocket(topic, null);
+		const opted = await subscriberSocket(topic, ['relay.resync:1']);
 
 		// Ordinal 2 is lost in transit between the sibling and this worker.
 		relayOne(topic, 1, 21);
 		relayOne(topic, 3, 21);
 		await new Promise((r) => setTimeout(r, 250));
 
-		const delivered = frames.filter((f) => f.topic === topic && f.event === 'tick');
-		expect(delivered.map((f) => f.data.ord), 'the surviving relayed frames must reach the subscriber').toEqual([1, 3]);
+		for (const { frames } of [plain, opted]) {
+			const delivered = frames.filter((f) => f.topic === topic && f.event === 'tick');
+			expect(delivered.map((f) => f.data.ord), 'the surviving relayed frames must reach every subscriber').toEqual([1, 3]);
+			// The publish sequences step over the lost frame, so each client's
+			// resume watermark advances past a frame it never had: a later
+			// reconnect asks for everything after the higher sequence and the
+			// hole between them is never re-requested. This is why the marker
+			// below exists - no reconnect heals this on its own.
+			expect(
+				delivered.map((f) => f.seq),
+				'the delivered sequences skip the lost frame, which is what the resume watermark will carry'
+			).toEqual([seqFor(1), seqFor(3)]);
+		}
 
-		// The worker now confirms it lost the frame in between. Everything the
-		// runtime does about that happens here.
-		expect(gapsFor(topic), 'the loss must be confirmed, or the silence below proves nothing').toEqual([
+		// The worker confirms the loss, then runs the same signal step the
+		// reporter drain runs (relay-gap.test.js holds that join structurally).
+		const gaps = gapsFor(topic);
+		expect(gaps, 'the loss must be confirmed, or nothing below proves anything').toEqual([
 			{ topic, origin: 21, from: 2, to: 2, count: 1 }
 		]);
+		const outcomes = server.handler.signalRelayGaps(gaps);
+		expect(outcomes.get(topic), 'one subscriber opted in, so one is signalled').toEqual({ signalled: 1, closed: 0 });
 
 		await new Promise((r) => setTimeout(r, 250));
-		const after = frames.filter((f) => f.topic === topic || f.type === 'resync' || f.type === 'rehydrate');
+		const marker = opted.frames.find((f) => f.topic === `__replay:${topic}` && f.event === 'gap');
+		expect(marker, 'the opted-in subscriber must be told its view of the topic is short').toBeTruthy();
+		expect(marker.data, 'the marker carries the proven-lost count').toEqual({ lost: 1 });
+		// The de-herd window is sized to the topic's local subscribers - the two
+		// real subscriptions this test created - so a room-wide re-snapshot is
+		// staggered rather than synchronized.
+		expect(marker.j, 'the marker carries the subscriber-scaled de-herd window').toBe(2);
+
+		const plainAfter = plain.frames.filter((f) => f.topic === topic || (typeof f.topic === 'string' && f.topic.startsWith('__replay:')));
 		expect(
-			after.map((f) => f.event ?? f.type),
-			'the subscribe ack and the two frames that survived - nothing tells this subscriber its state is short'
+			plainAfter.map((f) => f.event ?? f.type),
+			'a connection that never advertised the capability keeps the old contract: the survivors and nothing else'
 		).toEqual(['subscribed', 'tick', 'tick']);
-		expect(ws.readyState, 'the connection is not closed either').toBe(WebSocket.OPEN);
+		expect(plain.ws.readyState, 'the non-opted connection stays open').toBe(WebSocket.OPEN);
+		expect(opted.ws.readyState, 'the signalled connection stays open too - the marker was deliverable').toBe(WebSocket.OPEN);
 
-		// And the publish sequences the client did receive step over the lost
-		// one, so its own resume watermark advances past a frame it never had:
-		// a later reconnect asks for everything after the higher sequence and
-		// the hole between them is never re-requested.
+		plain.ws.close();
+		opted.ws.close();
+	}, 30_000);
+
+	it('does not signal a topic that carries no sequence lane', async () => {
+		// The marker's instruction is "stop trusting your offset". A `{seq:false}`
+		// topic has no offset to poison, so its subscriber - even an opted-in
+		// one - keeps the silence, and its consistency story stays with whatever
+		// owns it for that lane.
+		state.streamTracking.enabled = true;
+		const topic = 'relay-recv-seqless-quiet';
+
+		const opted = await subscriberSocket(topic, ['relay.resync:1']);
+
+		relayOne(topic, 1, 23, { seq: null });
+		relayOne(topic, 3, 23, { seq: null });
+		await new Promise((r) => setTimeout(r, 250));
+
+		const gaps = gapsFor(topic);
+		expect(gaps, 'the ordinal hole is still confirmed - scope is about signalling, not detection').toEqual([
+			{ topic, origin: 23, from: 2, to: 2, count: 1 }
+		]);
+		const outcomes = server.handler.signalRelayGaps(gaps);
+		expect(outcomes.has(topic), 'a sequence-less topic is outside the signal scope').toBe(false);
+
+		await new Promise((r) => setTimeout(r, 250));
 		expect(
-			delivered.map((f) => f.seq),
-			'the delivered sequences skip the lost frame, which is what the resume watermark will carry'
-		).toEqual([seqFor(1), seqFor(3)]);
+			opted.frames.some((f) => typeof f.topic === 'string' && f.topic.startsWith('__replay:')),
+			'no marker reaches the subscriber'
+		).toBe(false);
+		expect(opted.ws.readyState).toBe(WebSocket.OPEN);
 
-		ws.close();
+		opted.ws.close();
+	}, 30_000);
+
+	it('closes 1013 a subscriber whose socket refuses the marker', async () => {
+		// The escalation the resume flush already owns, on the same reasoning:
+		// past its backpressure ceiling this socket cannot be told its state is
+		// wrong, and staying connected is the one outcome that leaves it
+		// silently wrong forever. A real socket cannot be driven past
+		// maxBackpressure deterministically from here, so the refusal is a
+		// connection-shaped stand-in on the runtime's own live-connection set -
+		// the walk, the caps gate, the membership check, and the close are all
+		// the real code paths.
+		state.streamTracking.enabled = true;
+		const topic = 'relay-recv-refused-marker';
+
+		// Seed the sequence lane and the confirmed hole through the real
+		// receive path.
+		relayOne(topic, 1, 24);
+		relayOne(topic, 3, 24);
+
+		const WS_CAPS = Symbol.for('adapter-uws.ws.caps');
+		const WS_SUBSCRIPTIONS = Symbol.for('adapter-uws.ws.subscriptions');
+		/** @type {Array<[number, string]>} */
+		const ended = [];
+		const refusing = {
+			getUserData: () => ({
+				[WS_CAPS]: new Set(['relay.resync:1']),
+				[WS_SUBSCRIPTIONS]: new Set([topic])
+			}),
+			send: () => 2,
+			end: (code, reason) => { ended.push([code, reason]); }
+		};
+		state.wsConnections.add(refusing);
+		try {
+			const gaps = gapsFor(topic);
+			expect(gaps).toEqual([{ topic, origin: 24, from: 2, to: 2, count: 1 }]);
+			const outcomes = server.handler.signalRelayGaps(gaps);
+			expect(outcomes.get(topic), 'the refusal is recorded as a close, not a delivery').toEqual({ signalled: 0, closed: 1 });
+			expect(ended, 'the connection that could not be signalled is closed 1013').toEqual([[1013, 'Resync required']]);
+		} finally {
+			state.wsConnections.delete(refusing);
+		}
 	}, 30_000);
 
 	it('records nothing at all while stream tracking is off', () => {

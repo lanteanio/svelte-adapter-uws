@@ -142,7 +142,7 @@ function utf8ByteLength(s) {
  * @returns {string[]}
  */
 function buildHelloCaps() {
-	const caps = ['batch', 'lease', 'wire.ingress:1', 'game.fanout:1'];
+	const caps = ['batch', 'lease', 'wire.ingress:1', 'game.fanout:1', 'relay.resync:1'];
 	for (const codec of wireCodecs.values()) {
 		const tokens = codec.capabilities || [codec.capability];
 		for (let i = 0; i < tokens.length; i++) caps.push(tokens[i]);
@@ -1620,16 +1620,21 @@ function createConnection(options) {
 			if (typeof msg.seq === 'number') {
 				const prev = lastSeenSeqs.get(msg.topic);
 				if (prev === undefined || msg.seq > prev) lastSeenSeqs.set(msg.topic, msg.seq);
-			} else if ((msg.event === 'truncated' || msg.event === 'rehydrate') &&
+			} else if ((msg.event === 'truncated' || msg.event === 'rehydrate' || msg.event === 'gap') &&
 				typeof msg.topic === 'string' && msg.topic.charCodeAt(0) === 95 &&
 				msg.topic.charCodeAt(1) === 95 && msg.topic.startsWith('__replay:')) {
-				// The server signalled that this topic's seq space reset since we
-				// last saw it (a process restart or a per-topic authority bump).
-				// Drop our stale per-topic offset and recorded epoch so the next
-				// live frame re-seeds lastSeenSeqs from scratch, and so a
-				// subsequent reconnect does not present an offset into a space
-				// that no longer exists. The frame still dispatches to the store
-				// ladder below for any higher-level consumer of the marker.
+				// The server signalled that this topic's history can no longer be
+				// trusted from our offset: the seq space reset since we last saw
+				// it (`truncated` / `rehydrate` - a process restart or a per-topic
+				// authority bump), or the server proved it lost relayed frames we
+				// were owed (`gap`, negotiated via the relay.resync:1 cap) - and
+				// there our watermark has already stepped PAST the hole, so a
+				// resume from it would silently skip frames forever. Drop the
+				// stale per-topic offset and recorded epoch so the next live
+				// frame re-seeds lastSeenSeqs from scratch, and so a subsequent
+				// reconnect does not present an offset the server cannot honor.
+				// The frame still dispatches to the store ladder below for any
+				// higher-level consumer of the marker.
 				const baseTopic = msg.topic.slice('__replay:'.length);
 				lastSeenSeqs.delete(baseTopic);
 				lastSeenEpochs.delete(baseTopic);

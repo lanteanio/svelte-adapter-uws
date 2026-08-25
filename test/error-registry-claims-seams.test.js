@@ -458,9 +458,11 @@ describe('ADAPTER-ERR-RELAY-GAP', () => {
 		expect(takeConfirmedGaps(streams, nowMs + GAP_CONFIRM_MS, GAP_CONFIRM_MS)).toEqual([
 			{ topic, origin: 3, from: 2, to: 2, count: 1 }
 		]);
-		// automaticRecovery is None: the gap is reported, consumed, and never
-		// back-filled - the stream re-baselines instead of restating the same
-		// loss on every later drain.
+		// The frames are never back-filled: the gap is reported once and
+		// consumed - the stream re-baselines instead of restating the same
+		// loss on every later drain. (What IS repaired happens downstream of
+		// this drain: the signal walk tells opted-in subscribers to drop the
+		// poisoned offset.)
 		expect(takeConfirmedGaps(streams, nowMs + 10 * GAP_CONFIRM_MS, GAP_CONFIRM_MS)).toEqual([]);
 	});
 

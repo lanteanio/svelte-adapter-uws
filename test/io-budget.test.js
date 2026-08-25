@@ -766,7 +766,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// utils.js -> utils/metrics.js), rewritten for the new measured quantity.
 	// A data literal off every frame path; no byte is read, allocated or
 	// copied, and no copy primitive entered the graph.
-	ingress: '41f5fcbe15e5b9a6bc12c5b84cd704a51433a82f2f4b2869e0c22a2cc789ad97',
+	// Re-pinned for the relay-gap resync marker's registry entry. The drift in
+	// this graph is error-registry.js alone, reached through utils.js: one
+	// string appended to the relay-gap entry's frozen `sources` array, naming
+	// the lifecycle module that now carries the signal walk beside the drain -
+	// an array node is structure even with its string masked; the entry's
+	// rewritten recovery and next-action sentences stay masked as prose. The
+	// walk itself lives in handler/lifecycle.js, outside every sealed graph.
+	// Data only, off every frame path; no byte is read, allocated or copied,
+	// and no copy primitive entered the graph.
+	ingress: 'e53287d8fca1490ec3637651637c0ca07686aa6763f5342fb3c6a1a474700d24',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1282,7 +1291,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// inside the 1 Hz sampler and is reachable from no frame path. No frame
 	// byte is read, allocated or copied, and no copy primitive entered the
 	// graph.
-	platform: '0a0b278033615251d38742e53442f244d5b3ab4f8f4ed32d906be563e3ce7514',
+	// Re-pinned for the relay-gap resync marker's registry entry, the same
+	// drift the ingress note above records: error-registry.js alone, reached
+	// through utils.js - one string appended to the relay-gap entry's frozen
+	// `sources` array (structure; the rewritten sentences stay masked as
+	// prose). The signal walk lives in handler/lifecycle.js, outside every
+	// sealed graph. Data only, off every frame path; no byte is read,
+	// allocated or copied, and no copy primitive entered the graph.
+	platform: '72c71688cd3dd7528c3ecaa765cead1918aef171af77f22f241e8f14bea76b8e',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1446,7 +1462,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// utils.js -> utils/metrics.js), rewritten for the new measured quantity.
 	// A data literal off every frame path; no byte is read, allocated or
 	// copied, and no copy primitive entered the graph.
-	'wire-fanout': '178daeca5d031d9acac9b378f20fba194f3dce7bbbd23cbefc702a528fea1df0',
+	// Re-pinned for the relay-gap resync marker's registry entry, the same
+	// drift the ingress and platform notes record: error-registry.js alone,
+	// reached through utils.js - one string appended to the relay-gap entry's
+	// frozen `sources` array (structure; the rewritten sentences stay masked
+	// as prose). The signal walk lives in handler/lifecycle.js, outside every
+	// sealed graph. Data only, off every frame path; no byte is read,
+	// allocated or copied, and no copy primitive entered the graph.
+	'wire-fanout': 'edd7ac02feac81aecda2557f277f4835bdb77715283d05d298b8620bf53755cd',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

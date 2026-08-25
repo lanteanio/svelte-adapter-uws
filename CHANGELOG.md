@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Adds one SSR render to boot (~20ms) before readiness turns green; a `listen: false` compute worker never warms. The `warmup` option is declared surface both family adapters carry.
   - **Detail:** [Added engineering detail](#added).
 
+- **Added: a confirmed relay loss now tells the affected clients, not just the operator.** A worker that proves it lost relayed frames used to tell only the operator, while every affected subscriber kept a resume watermark already past the hole, a desync no reconnect heals; those subscribers now get a `gap` marker that drops the offset and prompts a re-snapshot.
+  - **Affects:** Multi-worker deployments running the cross-worker state reporter (`stateHashIntervalMs`); single-process deployments have no relay to lose frames on.
+  - **Action:** None; the bundled client negotiates the new `relay.resync:1` capability automatically and handles the marker. An application (or `svelte-realtime`) that re-snapshots on the marker heals immediately; one that ignores it still stops presenting the poisoned offset on reconnect.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The marker reaches only connections that advertised `relay.resync:1`, so every pre-existing or third-party client keeps the exact previous wire behavior; the addition is a new capability token, the evolution path protocol revision 1 explicitly reserves. The marker carries a de-herd window scaled to the room so re-snapshots stagger.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Changed: the refusal Retry-After jitter is real at the default base.** The band arithmetic collapsed to a constant at the default base of two, so a refused fleet returned together into the same full gate; a two-value band floor now guarantees at least two distinct answers at every base and posture.
   - **Affects:** Deployments at the default `retryAfterSeconds` of two (or a configured base of one); every other configured base keeps its exact bands.
   - **Action:** None; clients that parse the header already handle the range a wider posture produced.
@@ -107,6 +114,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `platform.isWarmupRequest(request)` so an app hook can skip per-visit side
   effects. Driven by a real cold-boot test asserting the warm render logs
   before the ready line, plus an in-process render against the built server.
+
+- **The relay-gap resync marker, on the same drain that reports the gap.**
+  The contiguity detector already proved per-topic frame loss to the operator;
+  the affected clients now hear too. `signalRelayGaps` (handler/lifecycle.js)
+  walks the live connections once per confirmed-gap drain and sends each
+  subscriber of a gapped sequence-lane topic that negotiated `relay.resync:1`
+  an unsolicited `{"topic":"__replay:<topic>","event":"gap","data":{"lost":n}}`
+  marker, with a `j` de-herd window sized at 1ms per local subscriber (capped
+  at 2s) so one gap does not synchronize a room's re-snapshots. The bundled
+  client advertises the token and, on the marker, drops the topic's tracked
+  offset and epoch - the offset has already stepped past the hole, so
+  presenting it on a reconnect would gap-fill from beyond frames the client
+  never received - and dispatches the marker through the event stores for the
+  application's re-snapshot. Scope is exactly the loss: only the gapped
+  topic's subscribers, only on the worker that lost the frames, never
+  `{seq: false}` or reserved plugin topics (no offset to poison; those lanes
+  own their reconvergence). A socket past its backpressure ceiling that drops
+  even the marker is closed `1013`, the resume flush's own escalation. The
+  drain's diagnostic reports `signalledClients`/`closedClients`, and
+  PROTOCOL.md registers the token (5.1) and the marker (8.1). The suites
+  hold the marker with its count and window, the non-opted silence, and the
+  reconnect that no longer presents an offset as observed client behaviour,
+  and drive the refused-marker close against the runtime's live-connection
+  walk.
 
 - **The dev dashboard endpoint, rendered by one path for both documents.**
   `renderAppShell(snapshot, { live })` returns a complete self-contained HTML

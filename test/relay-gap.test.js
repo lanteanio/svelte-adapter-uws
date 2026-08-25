@@ -799,6 +799,7 @@ describe('the detector is actually wired into the runtime', () => {
 		// satisfies a whole-file substring check, so require the emission to live
 		// in the same enclosing function as the drain.
 		let emitted = false;
+		let signalled = false;
 		for (const { ancestors } of hits) {
 			const fn = enclosing(ancestors, src);
 			expect(fn.reachable, 'takeConfirmedGaps sits in unreachable function ' + fn.name).toBe(true);
@@ -807,10 +808,24 @@ describe('the detector is actually wired into the runtime', () => {
 				if (a.type !== 'FunctionDeclaration' && a.type !== 'FunctionExpression' && a.type !== 'ArrowFunctionExpression') continue;
 				const body = src.slice(a.start, a.end);
 				if (body.includes('relay-gap') && /postMessage\(/.test(body)) emitted = true;
+				// The client-facing half of the same drain: the walk that tells
+				// opted-in subscribers of a gapped topic (lifecycle.js
+				// signalRelayGaps) must be called with what THIS drain took.
+				// relay-receive-real.test.js proves the walk itself delivers;
+				// what a behavioural test cannot see is whether the reporter
+				// still hands its drained gaps to it - parked anywhere else,
+				// or handed a different value (`signalRelayGaps([])` satisfies
+				// a bare call-site check), the operator would keep hearing
+				// while the clients silently stopped. So the call must receive
+				// the very identifier the drain was assigned to.
+				const drained = /\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*takeConfirmedGaps\(/.exec(body);
+				if (drained !== null &&
+					new RegExp('\\bsignalRelayGaps\\(\\s*' + drained[1] + '\\s*\\)').test(body)) signalled = true;
 				break;
 			}
 		}
 		expect(emitted, 'a drained gap must be reported from the function that drained it').toBe(true);
+		expect(signalled, 'a drained gap must be signalled to the affected subscribers from the function that drained it').toBe(true);
 
 		// The identity may be the literal or, stronger, derived from the
 		// registry entry (`event: X.event` where X is

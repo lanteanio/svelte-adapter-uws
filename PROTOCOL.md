@@ -581,8 +581,9 @@ token guards. There is no per-topic negotiation and no server-driven downgrade
 handshake - capability is connection-level and one-directional (the client
 declares what it can decode; the server honours it or falls back to JSON).
 
-The reference client assembles `caps` as `["batch", "lease"]` plus every token
-each registered wire codec can decode.
+The reference client assembles `caps` as `["batch", "lease", "wire.ingress:1",
+"game.fanout:1", "relay.resync:1"]` plus every token each registered wire codec
+can decode.
 
 ### 5.1 Capability registry
 
@@ -603,6 +604,7 @@ token here.
 | `smooth.protocol:1` | yes | 1 | Binary smoothed-entity state wire (server to client). |
 | `wire.ingress:1` | yes | n/a | Client-to-server binary payload frames (sections 3.8, 6.5). |
 | `game.fanout:1` | yes | 1 | Server-to-client compact binary fan-out of the `game` lane (section 6.7); the egress mirror of the `game:1` ingress twin. Independent of `wire.ingress:1`. |
+| `relay.resync:1` | no | n/a | Unsolicited `__replay:{topic}` `gap` markers (section 8.1): the server MAY tell this connection, outside any `replay` request or resume, that it proved it lost relayed frames for a topic the connection subscribes. |
 
 Rules:
 
@@ -931,7 +933,7 @@ data-event envelope (section 4) under reserved `__`-prefixed topics
 ### 8.1 Replay results
 
 `replay` results arrive as data-event frames on the reserved topic
-`__replay:{topic}`. Five events can appear; the client dispatches them by
+`__replay:{topic}`. Six events can appear; the client dispatches them by
 `event`. The `reqId` field echoes the request's `reqId` and is OMITTED when the
 request omitted it (a client that always sends `reqId` always sees it back).
 
@@ -942,12 +944,27 @@ request omitted it (a client that always sends `reqId` always sees it back).
 | `truncated` | `null` | Standalone terminal-precursor emitted by some backends before `end` to signal the buffer was trimmed past the requested point. |
 | `denied` | `{code, reqId?}` | Terminal: the resume-time subscribe was denied; `code` is the denial reason (section 3.2.2). |
 | `rehydrate` | `{epoch}` | Terminal: the reported epoch did not match the topic's current epoch (section 7); the topic must cold-rehydrate. `epoch` is the current generation. |
+| `gap` | `{lost}` | Unsolicited, and only on a connection that advertised `relay.resync:1` (section 5.1): the server proved it lost at least `lost` relayed frames for this topic, so the connection's view of it is short and its resume offset can no longer be trusted. `lost` is a lower bound. |
 
-A client SHOULD treat `truncated`, `denied`, and `rehydrate` alike: recovery did
-not complete cleanly, so re-snapshot the topic rather than trusting a gap-fill.
+A client SHOULD treat `truncated`, `denied`, `rehydrate`, and `gap` alike:
+delivery or recovery did not complete cleanly, so drop the topic's resume
+offset and re-snapshot the topic rather than trusting a gap-fill.
 Not every backend emits every event: the in-memory backend signals truncation
 inline on `end` and never emits `denied` or `rehydrate`; clustered backends emit
 the standalone `truncated`, `denied`, and `rehydrate` forms.
+
+`gap` is the one event that arrives outside any `replay` request or resume: a
+multi-worker server that detects it lost cluster-relayed frames (section 9's
+fan-out is otherwise invisible to a client) MAY push it, at any time, to the
+subscribers of the affected topic that opted in - it never carries `reqId`. The
+distinction from `truncated`/`rehydrate` matters for the offset: by the time a
+relay loss is confirmed, the delivered sequences have already stepped PAST the
+lost frames, so a resume from the current offset would silently skip them
+forever - which is exactly why the marker exists. The frame MAY carry the `j`
+de-herd window of section 4, and a client SHOULD honor it before re-snapshotting
+so one gap does not turn a large room into a synchronized stampede. A
+connection that did not advertise `relay.resync:1` never receives `gap`
+(section 5) and keeps the revision's original silence.
 
 ---
 

@@ -18,7 +18,7 @@ cleanly after a missed one.
 |---|---|---|---|---|
 | Topic frames (`stampSeq` / `nextTopicSeq`) | Yes, per topic, when the lane opts in | Yes, from the resume buffer | Yes - truncation marker, then close 1013 | `test/seq-wire.test.js`, `test/publish-batched.test.js` (one counter across primitives), `test/smooth-wire-batch.test.js` (per-entry batch seqs, explicit and counter-stamped) |
 | Resume / replay buffer (`handler/resume-buffer.js`) | Consumes the topic sequence | Yes, replays from the client's offset | **Yes - the reference pattern, see below** | the resume escalation suites |
-| Relay gap fill (`relay-ring.js`, `handler.js`) | Per-origin ordinal, dense by construction | Detected by contiguity, not by voting | Operator signal; the affected clients keep the surviving frames - the design position below | `test/relay-receive-real.test.js` |
+| Relay gap fill (`relay-ring.js`, `handler.js`) | Per-origin ordinal, dense by construction | Detected by contiguity, not by voting | Yes - opted-in subscribers of the gapped sequence-lane topic get an unsolicited `gap` marker (refusing even that closes 1013) - see below | `test/relay-receive-real.test.js` |
 | Cluster fan-out (`handler/cluster-sequence-policy.js`) | Refuses the unsafe combination outright | n/a - a guard, not a stamper | n/a | `test/cluster-sequence-policy-real.test.js` (spawned two-worker fixture, refusal observed through a real probe client) |
 | Presence (`plugins/presence/server.js`) | No, `seq: false` by declaration | No - diffs carry no ordinal | Periodic full roster; opting out is a two-option act, see below | `test/presence-heartbeat-recovery.test.js` |
 | Cursor (`plugins/cursor/codec.js`) | No - best-effort by declaration | No - a bad frame is dropped | No, and it does not need to - see below | `test/cursor-worker-wire.test.js` (corrupt frames over the real wire, then convergence) |
@@ -73,25 +73,38 @@ option surfaces document the pairing, `createPresence` warns once when
 `test/presence-heartbeat-recovery.test.js` holds the divergence as observed
 client state.
 
-## A relay gap is an operator signal, by design
+## A relay gap reaches both the operator and the affected clients
 
 Detection is sound: per-origin contiguity over a stream dense by construction,
 confirmed gaps drained once, `relay_gap_frames_total` incremented and
 `runtime.relay-gap.detected` emitted at `error` severity with the topic, origin
 worker and ordinal span - the emission deriving its component, event, severity
 and problem sentence from the error-registry entry itself, so the registry and
-the wire can never state different facts. A real subscriber on the receiving
-worker keeps the frames that survived: no resync instruction, no close, and the
-delivered envelopes step past the lost sequence, so a later reconnect resumes
-from after the hole rather than into it.
+the wire can never state different facts.
 
-The design position: a gap is per-topic and per-origin, so "resync everyone on
-this worker" is far wider than the loss, while "resync the subscribers of the
-affected topics" needs a per-topic subscriber walk on a path that fires when
-the worker is already behind. Widening the signal to affected clients is a
-wire-protocol addition this revision has not taken;
-`test/relay-receive-real.test.js` pins the current contract, so any future
-signal changes a failing assertion rather than passing unnoticed.
+The clients hear too, on the same drain, because for them the loss is uniquely
+poisonous: the delivered envelopes step past the lost sequence, so a
+subscriber's resume watermark advances beyond frames it never held and a later
+reconnect gap-fills from after the hole rather than into it - the one desync
+in this matrix that a reconnect does not heal. `signalRelayGaps`
+(`handler/lifecycle.js`) sends each affected subscriber that negotiated
+`relay.resync:1` an unsolicited `gap` marker on `__replay:{topic}` with the
+proven-lost count and a subscriber-scaled de-herd window; the bundled client
+drops the topic's offset and epoch on the marker and dispatches it to the
+event stores for the application's re-snapshot. The blast radius is exactly
+the loss: only subscribers of the gapped topic, only on the worker that lost
+the frames, only for sequence-lane topics (a `{seq: false}` topic has no
+offset to poison, and each reserved plugin lane owns its own reconvergence).
+A socket refusing even the marker - past its backpressure ceiling - is closed
+1013, the resume flush's own escalation, because staying connected is the one
+outcome that leaves it silently wrong forever. A connection that never
+advertised the capability keeps the surviving frames and the revision's
+original silence. `test/relay-receive-real.test.js` holds the marker (count
+and window) and the non-opted silence as observed client behaviour, and
+drives the refused-marker 1013 close against the runtime's own
+live-connection walk; `test/client-real.test.js` holds the client half: the
+dropped offset is observable as a reconnect resubscribe that no longer
+presents one.
 
 ## Duplicate ids cannot enter through the smooth command lane
 

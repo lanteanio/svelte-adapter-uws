@@ -614,9 +614,9 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		messagePrefix: direct('runtime.relay-gap', 'runtime.relay-gap.detected', 'error', 'This worker is missing relayed state that sibling workers received.'),
 		cause: 'A gap was detected in the relayed sequence this worker received from its siblings.',
 		consequence: 'Clients on this worker are missing events that clients on other workers received, so they disagree about state.',
-		automaticRecovery: 'None. A detected gap is reported rather than back-filled.',
-		nextAction: 'Treat as a correctness incident. Check for accompanying relay frame or spill events, which usually name the cause of the loss.',
-		sources: Object.freeze(['src/runtime/handler.js']),
+		automaticRecovery: 'The lost frames are gone and are never back-filled. Subscribers of a gapped sequence-lane topic that negotiated the relay.resync:1 capability (the bundled client always does) are pushed a gap marker that drops their poisoned resume offset and prompts a re-snapshot; the diagnostic reports them as signalledClients. A subscriber whose socket refuses even the marker is closed 1013 (closedClients).',
+		nextAction: 'Treat as a correctness incident. Check for accompanying relay frame or spill events, which usually name the cause of the loss. On a sequence-lane topic, a signalledClients of 0 with live subscribers means clients that never negotiated relay.resync:1 hold state the marker could not repair; a gap on a topic outside the walk (seq: false, or a reserved lane) always reports 0.',
+		sources: Object.freeze(['src/runtime/handler.js', 'src/runtime/handler/lifecycle.js']),
 		anchor: 'adapter-err-relay-gap',
 		help: 'docs/errors.md#adapter-err-relay-gap'
 	}),

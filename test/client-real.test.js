@@ -3095,6 +3095,55 @@ describe('client.js (real module)', () => {
 			vi.useRealTimers();
 		});
 
+		// The server pushes a `gap` marker when it proved it lost relayed
+		// frames for a topic - and by then the delivered sequences have
+		// already stepped past the hole, so the tracked offset points AFTER
+		// frames this client never held. Presenting it on a reconnect would
+		// gap-fill from past the hole and the desync would survive every
+		// reconnect; the marker must clear it. The sibling case above pins
+		// the offset being CARRIED, so together they hold both directions.
+		it('drops the recovery offset after a gap marker, so a reconnect does not resume past the hole', async () => {
+			vi.useFakeTimers();
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const conn = clientModule.connect();
+			const store = clientModule.on('holed');
+			const unsub = store.subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+			const ws1 = MockWebSocket._last;
+			// Land the subscription and take a seq past the (unseen) hole.
+			ws1._receive({ type: 'subscribed', topic: 'holed', ref: 1, epoch: 4 });
+			ws1._receive({ topic: 'holed', event: 'msg', data: 'late', seq: 11 });
+
+			ws1._receive({ topic: '__replay:holed', event: 'gap', data: { lost: 1 } });
+
+			ws1.readyState = MockWebSocket.CLOSED;
+			ws1.onclose?.({ code: 1006 });
+			await vi.advanceTimersByTimeAsync(5000);
+			const ws2 = MockWebSocket._last;
+			expect(ws2).not.toBe(ws1);
+
+			const resub = ws2._sent
+				.map((s) => JSON.parse(s))
+				.find((m) => (m.type === 'subscribe-batch' && m.topics?.includes('holed')) || (m.type === 'subscribe' && m.topic === 'holed'));
+			expect(resub, 'the subscription itself survives the reconnect').toBeTruthy();
+			expect(resub.recover?.holed, 'the poisoned offset and epoch must not be presented').toBeUndefined();
+
+			unsub();
+			warnSpy.mockRestore();
+			conn.close();
+			vi.useRealTimers();
+		});
+
+		it('advertises relay.resync:1, which is what opts it into gap markers', async () => {
+			const conn = clientModule.connect();
+			await flush();
+			const ws = MockWebSocket._last;
+			const hello = ws._sent.map((s) => JSON.parse(s)).find((m) => m.type === 'hello');
+			expect(hello, 'the client negotiates capabilities on connect').toBeTruthy();
+			expect(hello.caps, 'without this token the server never sends a gap marker').toContain('relay.resync:1');
+			conn.close();
+		});
+
 		it('does not re-send a topic refused for any other reason', async () => {
 			vi.useFakeTimers();
 			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});

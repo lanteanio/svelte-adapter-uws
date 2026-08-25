@@ -51,6 +51,7 @@ import { hasRef, runSubscribeHook, runSubscribeBatchHook, runUserSubscribeGate, 
 import { ensureWireId, ensureWireState, wireStatePoisoned, poisonWireState, detachWireStates } from './handler/wire-state.js';
 import { joinSharedCohort, leaveSharedCohort } from './handler/cohort.js';
 import { beginResumeCapture, discardResumeCapture, flushResumeTopic, coveredSeqFor } from './handler/resume-buffer.js';
+import { signalRelayGaps } from './handler/lifecycle.js';
 import { releaseSharedWireId } from './handler/shared-wire-id.js';
 import { setCohortHooks } from './utils.js';
 import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './utils/subscribe-policy.js';
@@ -165,7 +166,7 @@ import { requestDone, isDraining, lifecycleState } from './handler/lifecycle.js'
 // contract. `beginDrain`, `lifecycleState` and `tlsReloadState` were reachable
 // only that way - the boot driver dynamic-imports the submodule for the first
 // (src/runtime/index.js), which is the shape this list exists to end.
-export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls, beginDrain, lifecycleState, tlsReloadState } from './handler/lifecycle.js';
+export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatched, forceCloseApp, reloadTls, beginDrain, lifecycleState, tlsReloadState, signalRelayGaps, RELAY_RESYNC_CAP } from './handler/lifecycle.js';
 export { setRelayRingWriter, setRelayFrameCeiling } from './handler/relay.js';
 export { collectLocalMetrics, resolveMetricsSnapshot } from './handler/metrics-snapshot.js';
 export { markRelayAttached } from './handler/state.js';
@@ -972,7 +973,14 @@ if (WS_ENABLED) {
 			// apart - the registry is the one place the component, event,
 			// severity, and problem sentence are stated.
 			const RELAY_GAP = adapterErrorDefinition(ADAPTER_ERROR_IDS.RELAY_GAP);
-			for (const gap of takeConfirmedGaps(originStreams, processMonotonicNow(), GAP_CONFIRM_MS)) {
+			const confirmedGaps = takeConfirmedGaps(originStreams, processMonotonicNow(), GAP_CONFIRM_MS);
+			// The operator hears below; this is the affected CLIENTS hearing.
+			// Opted-in subscribers of each gapped sequence-lane topic get the
+			// `gap` marker so they can drop the resume offset that has already
+			// stepped past the hole (lifecycle.js signalRelayGaps).
+			const gapSignals = signalRelayGaps(confirmedGaps);
+			for (const gap of confirmedGaps) {
+				const signal = gapSignals.get(gap.topic);
 				emitOperationalEvent({
 					source: 'svelte-adapter-uws',
 					component: RELAY_GAP.component,
@@ -985,7 +993,9 @@ if (WS_ENABLED) {
 						topic: privateValueMetadata(gap.topic, 'topic'),
 						originWorker: gap.origin,
 						fromOrdinal: gap.from,
-						toOrdinal: gap.to
+						toOrdinal: gap.to,
+						signalledClients: signal === undefined ? 0 : signal.signalled,
+						closedClients: signal === undefined ? 0 : signal.closed
 					}
 				});
 				mRelayGap?.inc({}, gap.count);

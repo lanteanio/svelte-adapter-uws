@@ -6,10 +6,10 @@ import { workerData } from 'node:worker_threads';
 import { wsModule } from '../ws-handler-bridge.js';
 import { WS_CAPS, WS_SUBSCRIPTIONS, assert, fatal, wrapBatchEnvelope } from '../utils.js';
 import { monotonicNow, processMonotonicNow, wallEpoch, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from '../runtime.js';
-import { captureResumeFrame, counters, maxSeenSeq, originStreams, recordOriginStream, recordSeen, relayAttach, resumeBuffers, streamTracking, wsConnections } from './state.js';
+import { captureResumeFrame, counters, maxSeenSeq, originStreams, recordOriginStream, recordSeen, relayAttach, resumeBuffers, streamTracking, topicSubscriberCounts, wsConnections } from './state.js';
 import { app, is_tls, _t_app, WS_COMPRESSION_ON, reconnect_dispersal_ms, ssl_cert, ssl_key, ssl_watch, ssl_reload_debounce_ms, ssl_sni_hosts, boot_cert_fingerprint } from './config.js';
 import { platform, relayPublishWire } from './platform.js';
-import { stopPressureSampling } from './pressure-metrics.js';
+import { bumpOut, stopPressureSampling } from './pressure-metrics.js';
 import { applyServerNames, certExpiryAlert, createCertWatcher, createTlsDegradedLedger, readCertIdentity } from '../utils/tls-reload.js';
 import { ADAPTER_ERROR_IDS, adapterConsoleLine } from '../error-registry.js';
 import { seqBound } from './seq-bound.js';
@@ -848,4 +848,99 @@ export function relayPublishBatched(events, compress) {
 	const fanoutTopic = allSameTopic ? firstTopic : events[0].topic;
 	const result = app.publish(fanoutTopic, sharedBatchEnv, false, WS_COMPRESSION_ON && compress === true);
 	counters.publishOutcomeHook?.(result);
+}
+
+/**
+ * The `hello` capability token that opts a connection into unsolicited
+ * `__replay:{topic}` `gap` markers (PROTOCOL.md sections 5.1 and 8.1). A
+ * connection that never advertised it never receives one, which is what lets
+ * the marker land inside protocol revision 1: no existing peer can observe the
+ * new carriage until it opts in.
+ */
+export const RELAY_RESYNC_CAP = 'relay.resync:1';
+
+/**
+ * Tell the affected subscribers that this worker lost relayed frames.
+ *
+ * The detector proves the loss (state.js `takeConfirmedGaps`) and the drain
+ * reports it to the operator; the clients whose state the loss made wrong
+ * hold a resume watermark that has already stepped past the hole, so even a
+ * reconnect gap-fills from AFTER the frames they never held. The marker is
+ * the only thing that can heal that: it tells exactly the clients that
+ * subscribe an affected topic to drop the poisoned offset and re-snapshot.
+ *
+ * Scope, deliberately narrow:
+ * - Only topics with a live sequence lane (`maxSeenSeq` entry). The marker's
+ *   instruction is "stop trusting your offset", which is meaningless for a
+ *   `{seq: false}` topic - those carry their documented exposure by choice,
+ *   and each reserved plugin lane owns its own reconvergence (roster
+ *   heartbeat, absolute cursor frames).
+ * - Only reserved-namespace-free topics: a `__` lane's consumer is a plugin,
+ *   not an application listener, and cannot act on the marker.
+ * - Only connections that advertised `relay.resync:1` (see above).
+ *
+ * The walk runs once per confirmed-gap drain - a rare, already-off-hot-path
+ * event - and touches each live connection once however many topics gapped.
+ * Delivery mirrors the resume flush's escalation (resume-buffer.js): an
+ * enqueued-behind-backpressure send (result 0) delivers in order and counts,
+ * a drop past maxBackpressure (result 2) means the one frame that could tell
+ * this client its state is wrong did not reach it - and staying connected is
+ * the one outcome that leaves it silently wrong forever, so the connection is
+ * closed 1013 and the disruption surfaces at the application instead of
+ * nothing surfacing anywhere.
+ *
+ * The marker carries a `j` de-herd window sized to the topic's local
+ * subscriber count (1 ms per subscriber, capped at 2 s): one gap tells a
+ * whole room to re-snapshot, and the window is what keeps that from being a
+ * stampede on a worker that is already behind.
+ *
+ * @param {{ topic: string, origin: number, from: number, to: number, count: number }[]} gaps
+ *   One drain's confirmed gaps, exactly as `takeConfirmedGaps` returned them.
+ * @returns {Map<string, { signalled: number, closed: number }>} per-topic
+ *   delivery outcome, keyed by the gapped topic, for the drain's diagnostics.
+ *   Topics outside the scope above are absent.
+ */
+export function signalRelayGaps(gaps) {
+	/** @type {Map<string, { lost: number, marker: string, signalled: number, closed: number }>} */
+	const byTopic = new Map();
+	for (const gap of gaps) {
+		if (gap.topic.charCodeAt(0) === 95 && gap.topic.charCodeAt(1) === 95) continue;
+		if (!maxSeenSeq.has(gap.topic)) continue;
+		const entry = byTopic.get(gap.topic);
+		if (entry === undefined) byTopic.set(gap.topic, { lost: gap.count, marker: '', signalled: 0, closed: 0 });
+		else entry.lost += gap.count;
+	}
+	if (byTopic.size === 0) return byTopic;
+	for (const [topic, entry] of byTopic) {
+		const jitterMs = Math.min(2000, topicSubscriberCounts.get(topic) ?? 0);
+		entry.marker =
+			'{"topic":' + JSON.stringify('__replay:' + topic) + ',"event":"gap","data":{"lost":' + entry.lost + '}' +
+			(jitterMs > 0 ? ',"j":' + jitterMs : '') + '}';
+	}
+	for (const ws of wsConnections) {
+		const ud = ws.getUserData();
+		const caps = ud[WS_CAPS];
+		if (caps === undefined || !caps.has(RELAY_RESYNC_CAP)) continue;
+		const subs = ud[WS_SUBSCRIPTIONS];
+		if (!subs || subs.size === 0) continue;
+		let gone = false;
+		for (const [topic, entry] of byTopic) {
+			if (gone || !subs.has(topic)) continue;
+			let result;
+			try { result = ws.send(entry.marker, false, false); }
+			catch { counters.closedWsAborts++; gone = true; continue; }
+			if (result === 2) {
+				try { ws.end(1013, 'Resync required'); entry.closed++; }
+				catch { counters.closedWsAborts++; }
+				gone = true;
+				continue;
+			}
+			bumpOut(ws, entry.marker);
+			entry.signalled++;
+		}
+	}
+	/** @type {Map<string, { signalled: number, closed: number }>} */
+	const outcomes = new Map();
+	for (const [topic, entry] of byTopic) outcomes.set(topic, { signalled: entry.signalled, closed: entry.closed });
+	return outcomes;
 }
