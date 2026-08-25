@@ -228,6 +228,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recomputing the sampled reading from the raw isolate and cgroup
   primitives on the built modules.
 
+- **The family memory-pressure contract is an accepted decision.**
+  [docs/decisions/memory-pressure-signal.md](./docs/decisions/memory-pressure-signal.md)
+  defines the engine-portable basis both family adapters implement: the
+  nearest-wall worst-of, its degradation rules (an engine without a reported
+  allocation ceiling contributes no engine arm; no discoverable wall on
+  either arm reads 0, never a false alarm - arena fullness is not part of
+  the contract on any engine), and the shared `memoryHeapUsedRatio` name
+  with its 0.85 default. The sibling adapter adopts the contract on its own
+  runtime primitives.
+
 - **The per-topic byte-rate stat documents its unit.** `topicPublishBytesPerSec`
   and the `bytesPerSec` field it gates always measured UTF-16 code units of
   the JSON envelope - equal to bytes for ASCII envelopes, up to 3x under the

@@ -13,6 +13,7 @@ const decisions = [
 	'cluster-fanout-boundaries',
 	'persistence-boundary',
 	'release-coupling',
+	'memory-pressure-signal',
 	'documentation-canonicality'
 ];
 

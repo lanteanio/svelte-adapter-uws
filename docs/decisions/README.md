@@ -11,6 +11,7 @@ the consequence and the evidence that must change before it is revisited.
 | [Cluster fan-out boundaries](./cluster-fanout-boundaries.md) | One worker, worker-thread relay, and cross-instance buses |
 | [Persistence boundary](./persistence-boundary.md) | In-memory defaults, durable extensions, and application data |
 | [Release coupling](./release-coupling.md) | Verification, promotion, and rollback order |
+| [Memory-pressure signal basis](./memory-pressure-signal.md) | Engine walls, container walls, and degradation to silence |
 | [Documentation canonicality](./documentation-canonicality.md) | Normative package contracts and site-owned explanations |
 
 The [ecosystem architecture](../architecture.md) is the context map for these

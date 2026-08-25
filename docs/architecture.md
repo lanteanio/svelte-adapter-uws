@@ -202,6 +202,7 @@ The decision index is [`docs/decisions/README.md`](./decisions/README.md):
 - [Cluster fan-out boundaries](./decisions/cluster-fanout-boundaries.md)
 - [Persistence boundary](./decisions/persistence-boundary.md)
 - [Release coupling](./decisions/release-coupling.md)
+- [Memory-pressure signal basis](./decisions/memory-pressure-signal.md)
 - [Documentation canonicality](./decisions/documentation-canonicality.md)
 
 Wire-level rationale and conformance remain in [`PROTOCOL.md`](../PROTOCOL.md),
