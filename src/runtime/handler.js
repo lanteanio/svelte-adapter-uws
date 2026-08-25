@@ -169,6 +169,8 @@ export { drain, start, shutdown, getDescriptor, relayPublish, relayPublishBatche
 export { setRelayRingWriter, setRelayFrameCeiling } from './handler/relay.js';
 export { collectLocalMetrics, resolveMetricsSnapshot } from './handler/metrics-snapshot.js';
 export { markRelayAttached } from './handler/state.js';
+export { warmSSR, runWarmup } from './handler/warmup.js';
+export { isWarmupRequest } from './handler/warmup-registry.js';
 
 // The relay frame-ceiling refusal fires in the boot driver's injected sink
 // (runtime/index.js wires setRelayFrameCeiling), which has no reach into the

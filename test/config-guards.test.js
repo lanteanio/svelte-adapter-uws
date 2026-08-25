@@ -733,7 +733,7 @@ describe('an unknown top-level adapter option is reported with the closest docum
 		// declaration and holds the set equal to it.
 		expect([...KNOWN_ADAPTER_OPTION_KEYS].sort()).toEqual([
 			'envPrefix', 'healthCheckPath', 'out', 'precompress', 'readinessCheckPath',
-			'staticCacheControl', 'staticDotfiles', 'staticHeaders', 'tracing', 'websocket'
+			'staticCacheControl', 'staticDotfiles', 'staticHeaders', 'tracing', 'warmup', 'websocket'
 		]);
 	});
 });

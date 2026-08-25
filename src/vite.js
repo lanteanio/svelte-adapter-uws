@@ -1315,6 +1315,12 @@ export default function uws(options = {}) {
 			}
 			return count;
 		},
+		// The dev plugin runs no boot warmup (it has no readiness lifecycle), so
+		// no request is ever synthetic here; the method mirrors production so an
+		// app hook that calls it works identically in dev and prod.
+		isWarmupRequest(_request) {
+			return false;
+		},
 		// Mirror production's per-subscriber walk over the ws -> Set<topic>
 		// map that also backs subscribers(). Passes (ws, userData) so dev
 		// exercises the same culling / backpressure call shape as prod.

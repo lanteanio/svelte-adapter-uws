@@ -2,8 +2,8 @@
 
 Search this page with the exact stable ID, code, event, or beginning of the message you saw.
 Every failure emitted as a diagnostic event is indexed below with its cause, what it means
-for traffic, whether anything recovers on its own, and what to do next: 38 entries
-against the 41 distinct diagnostic events emitted from the scanned sources, plus
+for traffic, whether anything recovers on its own, and what to do next: 39 entries
+against the 42 distinct diagnostic events emitted from the scanned sources, plus
 33 entries indexing consequential plain console lines that never enter the diagnostic
 pipeline - each such line is printed through the registry and carries its stable ID tag, so
 the emitted text cannot drift from the prefix indexed here. The remaining emitted events are
@@ -41,6 +41,7 @@ generate and ship their own runtime-owned references on the same release channel
 | [ADAPTER-ERR-INVARIANT](#adapter-err-invariant) | `invariant.violated` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.assertion event=invariant.violated severity=` |
 | [ADAPTER-ERR-METRICS-MERGE](#adapter-err-metrics-merge) | `metrics.merge-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.metrics event=metrics.merge-failed severity=error] The cluster metrics merge failed; this scrape answers with the local worker only.` |
 | [ADAPTER-ERR-METRICS-MIRROR-READ](#adapter-err-metrics-mirror-read) | `metrics.mirror-read-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.metrics event=metrics.mirror-read-failed severity=error] The metrics mirror read failed during cluster collection; this worker reports as a gap between expected and reporting.` |
+| [ADAPTER-ERR-WARMUP-RENDER](#adapter-err-warmup-render) | `runtime.warmup.render-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.warmup event=runtime.warmup.render-failed severity=warn] A boot warmup render failed; readiness proceeds without it.` |
 | [ADAPTER-ERR-METRICS-PRIMARY-UNREACHABLE](#adapter-err-metrics-primary-unreachable) | `metrics.primary-unreachable` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.metrics event=metrics.primary-unreachable severity=error] The metrics snapshot request could not reach the primary; this scrape answers degraded with the local worker only.` |
 | [ADAPTER-ERR-SINK-FAILED](#adapter-err-sink-failed) | `operational.sink.failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.observability event=operational.sink.failed severity=error] The configured operational event sink failed; console fallback was restored for this event.` |
 | [ADAPTER-ERR-PRESSURE-LISTENER](#adapter-err-pressure-listener) | `pressure.listener-failed` | `[lantean/diagnostic source=svelte-adapter-uws component=runtime.pressure event=pressure.listener-failed severity=error] A pressure listener failed.` |
@@ -100,8 +101,8 @@ generate and ship their own runtime-owned references on the same release channel
 ## Emitted diagnostic event coverage
 
 This inventory is derived at generation time by scanning `src/runtime/`, `src/observability.js`,
-and `src/vite.js` for emitted diagnostic events; the runtime emits 41 distinct events.
-The 38 indexed above carry stable IDs and full operator guidance; the remaining 3
+and `src/vite.js` for emitted diagnostic events; the runtime emits 42 distinct events.
+The 39 indexed above carry stable IDs and full operator guidance; the remaining 3
 are informational. That split is enforced by severity rather than by a list: an emitted event
 is exempt from the indexed reference only while every severity it is emitted at is
 informational, so promoting one to a warning or an error fails generation until it is indexed.
@@ -124,6 +125,7 @@ Indexed events:
 - `invariant.violated` - [ADAPTER-ERR-INVARIANT](#adapter-err-invariant)
 - `metrics.merge-failed` - [ADAPTER-ERR-METRICS-MERGE](#adapter-err-metrics-merge)
 - `metrics.mirror-read-failed` - [ADAPTER-ERR-METRICS-MIRROR-READ](#adapter-err-metrics-mirror-read)
+- `runtime.warmup.render-failed` - [ADAPTER-ERR-WARMUP-RENDER](#adapter-err-warmup-render)
 - `metrics.primary-unreachable` - [ADAPTER-ERR-METRICS-PRIMARY-UNREACHABLE](#adapter-err-metrics-primary-unreachable)
 - `operational.sink.failed` - [ADAPTER-ERR-SINK-FAILED](#adapter-err-sink-failed)
 - `pressure.listener-failed` - [ADAPTER-ERR-PRESSURE-LISTENER](#adapter-err-pressure-listener)
@@ -395,6 +397,18 @@ searchable log prefix is:
 - **Next action:** Compare expected against reporting worker counts over time. A persistent gap for the same worker points at that worker rather than at the metrics layer.
 - **Runtime help:** `docs/errors.md#adapter-err-metrics-mirror-read`
 - **Runtime sources:** [src/runtime/handler/metrics-snapshot.js](../src/runtime/handler/metrics-snapshot.js)
+
+<a id="adapter-err-warmup-render"></a>
+## `ADAPTER-ERR-WARMUP-RENDER`
+
+- **Code/event:** `runtime.warmup.render-failed`
+- **Message prefix:** `[lantean/diagnostic source=svelte-adapter-uws component=runtime.warmup event=runtime.warmup.render-failed severity=warn] A boot warmup render failed; readiness proceeds without it.`
+- **Cause:** Rendering a configured warmup path through the SSR engine during boot threw. The warmup runs the app's own server hooks and load functions for that path, so the throw is almost always in application boot-path code (a load that assumes a real request header, a resource not ready at boot), not in the adapter.
+- **Consequence:** That path is not pre-warmed, so the first real request to it after readiness pays the cold-render cost the warmup exists to remove. Nothing else is affected: readiness still commits and every other configured path still warms.
+- **Automatic recovery:** Yes. The first real request renders the path normally and warms it from then on; the warmup does not retry.
+- **Next action:** Read the attached error and the path it names. If the render depends on request context a warmup cannot supply, guard that code behind platform.isWarmupRequest, or drop the path from the warmup set. A warmup render that fails every boot means the path is not safely renderable without a real client.
+- **Runtime help:** `docs/errors.md#adapter-err-warmup-render`
+- **Runtime sources:** [src/runtime/handler/warmup.js](../src/runtime/handler/warmup.js)
 
 <a id="adapter-err-metrics-primary-unreachable"></a>
 ## `ADAPTER-ERR-METRICS-PRIMARY-UNREACHABLE`

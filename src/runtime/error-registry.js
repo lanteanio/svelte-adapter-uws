@@ -38,6 +38,7 @@ export const ADAPTER_ERROR_IDS = Object.freeze({
 	INVARIANT: 'ADAPTER-ERR-INVARIANT',
 	METRICS_MERGE: 'ADAPTER-ERR-METRICS-MERGE',
 	METRICS_MIRROR_READ: 'ADAPTER-ERR-METRICS-MIRROR-READ',
+	WARMUP_RENDER: 'ADAPTER-ERR-WARMUP-RENDER',
 	METRICS_PRIMARY_UNREACHABLE: 'ADAPTER-ERR-METRICS-PRIMARY-UNREACHABLE',
 	SINK_FAILED: 'ADAPTER-ERR-SINK-FAILED',
 	PRESSURE_LISTENER: 'ADAPTER-ERR-PRESSURE-LISTENER',
@@ -380,6 +381,23 @@ export const ADAPTER_ERROR_REGISTRY = Object.freeze([
 		sources: Object.freeze(['src/runtime/handler/metrics-snapshot.js']),
 		anchor: 'adapter-err-metrics-mirror-read',
 		help: 'docs/errors.md#adapter-err-metrics-mirror-read'
+	}),
+	Object.freeze({
+		id: ADAPTER_ERROR_IDS.WARMUP_RENDER,
+		code: null,
+		event: 'runtime.warmup.render-failed',
+		component: 'runtime.warmup',
+		severity: 'warn',
+		emission: 'direct',
+		problemPrefix: 'A boot warmup render failed; readiness proceeds without it.',
+		messagePrefix: direct('runtime.warmup', 'runtime.warmup.render-failed', 'warn', 'A boot warmup render failed; readiness proceeds without it.'),
+		cause: 'Rendering a configured warmup path through the SSR engine during boot threw. The warmup runs the app\'s own server hooks and load functions for that path, so the throw is almost always in application boot-path code (a load that assumes a real request header, a resource not ready at boot), not in the adapter.',
+		consequence: 'That path is not pre-warmed, so the first real request to it after readiness pays the cold-render cost the warmup exists to remove. Nothing else is affected: readiness still commits and every other configured path still warms.',
+		automaticRecovery: 'Yes. The first real request renders the path normally and warms it from then on; the warmup does not retry.',
+		nextAction: 'Read the attached error and the path it names. If the render depends on request context a warmup cannot supply, guard that code behind platform.isWarmupRequest, or drop the path from the warmup set. A warmup render that fails every boot means the path is not safely renderable without a real client.',
+		sources: Object.freeze(['src/runtime/handler/warmup.js']),
+		anchor: 'adapter-err-warmup-render',
+		help: 'docs/errors.md#adapter-err-warmup-render'
 	}),
 	Object.freeze({
 		id: ADAPTER_ERROR_IDS.METRICS_PRIMARY_UNREACHABLE,

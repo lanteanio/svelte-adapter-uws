@@ -1,5 +1,6 @@
 // Substituted by the adapter's build step; a free identifier until then.
 /* global WS_ENABLED */
+/* global WARMUP_PATHS */
 import uWS from 'uWebSockets.js';
 import { workerData } from 'node:worker_threads';
 import { wsModule } from '../ws-handler-bridge.js';
@@ -17,6 +18,7 @@ import { parentPort } from 'node:worker_threads';
 import { dirname } from 'node:path';
 import { emitOperationalDiagnostic, listenFailureDiagnostic } from '../utils/operational-diagnostic.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
+import { runWarmup } from './warmup.js';
 
 /** @type {Array<() => void>} */
 let drainResolvers = [];
@@ -506,6 +508,16 @@ export async function start(host, port, opts) {
 	// primaryInit is configured.
 	if (WS_ENABLED && typeof wsModule.init === 'function') {
 		await wsModule.init({ platform, workerData: workerData?.app ?? null });
+	}
+
+	// Warm the SSR render path before readiness commits, so the first real
+	// client a balancer routes in does not pay the cold-render penalty (a cold
+	// render is ~20x a warm one). Only a worker that actually serves traffic
+	// warms - a listen:false compute worker owns no socket and never renders,
+	// so warming it would burn boot time to warm a path it will not use. Never
+	// throws: warmup is an optimization, not a correctness gate.
+	if (doListen && WARMUP_PATHS.length > 0) {
+		await runWarmup({ paths: WARMUP_PATHS, platform });
 	}
 
 	// Readiness commits here, and only from `starting`: a shutdown that raced

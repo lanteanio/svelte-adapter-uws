@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** Loopback-only on socket, `Host`, and `Origin` (the `Host` check defeats DNS rebinding, so `vite dev --host` does not expose it). An extensions package can add sections through the `Symbol.for('svelte-adapter-uws.dashboard-contributors')` registry without the adapter importing it.
   - **Detail:** [Added engineering detail](#added).
 
+- **Added: readiness-gated boot warmup.** A cold SvelteKit render costs about 20x a warm one, and that penalty lands on the first real request after every deploy; the adapter now renders the configured paths once during boot, before the readiness probe reports ready, so the first routed client gets a warm response.
+  - **Affects:** Every deployment behind a readiness-gated load balancer; the measured first-request latency drops from ~20ms to ~2ms.
+  - **Action:** None by default; `/` is warmed. Set `warmup: { paths: ['/', '/dashboard'] }` to warm more routes, or `warmup: false` to disable.
+  - **Requires:** No new dependency or option to opt in. A warmup render runs the app's server hooks, so a `hooks.server.js` that records visits can skip warmups via `platform.isWarmupRequest(request)`.
+  - **Compatibility:** Adds one SSR render to boot (~20ms) before readiness turns green; a `listen: false` compute worker never warms. The `warmup` option is declared surface both family adapters carry.
+  - **Detail:** [Added engineering detail](#added).
+
 - **Changed: the refusal Retry-After jitter is real at the default base.** The band arithmetic collapsed to a constant at the default base of two, so a refused fleet returned together into the same full gate; a two-value band floor now guarantees at least two distinct answers at every base and posture.
   - **Affects:** Deployments at the default `retryAfterSeconds` of two (or a configured base of one); every other configured base keeps its exact bands.
   - **Action:** None; clients that parse the header already handle the range a wider posture produced.
@@ -52,6 +59,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Pinned by header assertions on every refusal lane across the production
   handler and the packaged test server, including the cursor lane under a
   pinned siege.
+
+- **Readiness-gated boot warmup for the SSR render path.** The lifecycle
+  already holds an instance in `starting` (readiness `503`) from the socket
+  bind until the `init` hook commits; warmup extends that window by one step,
+  rendering each configured path through the real `server.respond` engine
+  before the flip to `ready`. Because a load balancer will not route until
+  readiness is green, the warm render is guaranteed to precede the first real
+  client - a guarantee a boot-time request burst cannot make, since it races
+  the balancer. Scope follows measurement: only the SSR lane is warmed, since
+  a cold static or health route already answers at warm latency; the cold
+  penalty is entirely the render path (engine, the app's lazy server modules,
+  and the JIT). The `warmup` option is `true` (warms `/`), `false`, or
+  `{ paths }`; the value is baked to a path list and read in the lifecycle
+  boot. Only a serving worker warms - a `listen: false` compute worker owns no
+  socket and never renders. Warmup never blocks readiness on failure: a render
+  that throws is reported and boot proceeds. The synthetic warmup request is
+  tagged by object identity in a WeakSet, never a header, and surfaced through
+  `platform.isWarmupRequest(request)` so an app hook can skip per-visit side
+  effects. Driven by a real cold-boot test asserting the warm render logs
+  before the ready line, plus an in-process render against the built server.
 
 - **The dev dashboard endpoint, rendered by one path for both documents.**
   `renderAppShell(snapshot, { live })` returns a complete self-contained HTML

@@ -747,7 +747,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// sealed graph. Integer arithmetic only - no statement touches a frame,
 	// no byte is read, allocated or copied, and no copy primitive entered
 	// the graph.
-	ingress: 'f4c4820a54eb2fbd5b0d3b9d36ab23affc0a1009be12139e2d6262f050d2dd9c',
+	// Re-pinned for the boot-warmup error entry. The drift is in
+	// error-registry.js, reached through this graph via utils.js: one added id
+	// constant (WARMUP_RENDER) and its frozen registry entry object - structure
+	// and data literals only, no statement executes on any frame path and no
+	// copy primitive entered the graph.
+	ingress: '80acf12ebd72e5ff0bdce58498ac1324c3278ad4b80b3cd33ece16d8588fed26',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1239,14 +1244,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the delegating room method; the header writes themselves live in
 	// handler.js and testing.js, outside every sealed graph. No frame path,
 	// no bytes, no copy primitive.
-	// Re-pinned for the bounded cluster-metrics merge. The drift is in
-	// utils/metrics-merge.js, reached through this graph: label sets gain a
-	// validation gate (plain-record shape, exposition key grammar, key count
-	// and key/value length bounds), the registration inventory is trimmed
-	// before its Set is built, and the document seats a bounded number of
-	// distinct series. All of it runs only inside the per-scrape merge - no
-	// frame path, no bytes, no copy primitive entered the graph.
-	platform: '66d85fb9a2cb333ee7a30100091b845c15f494a61874df9c00348df1f8fc444b',
+	// Re-pinned for boot warmup. The drift in this graph is two data/structure
+	// additions: platform.js gains the isWarmupRequest method (a membership
+	// delegate) and its import of the leaf warmup-registry.js (the request-tag
+	// WeakSet, deliberately a leaf so the whole warmup render module stays OUT
+	// of this sealed graph), and error-registry.js - reached through this graph
+	// - gains the WARMUP_RENDER id constant and its frozen entry. Neither
+	// touches a frame path, reads a byte, or introduces a copy primitive; the
+	// prior cluster-metrics-merge drift (bounded label sets, trimmed inventory,
+	// capped series in utils/metrics-merge.js) is carried in this same digest.
+	platform: '215db6ec25597c0e84df1b0c67803be411e15fa85f476d504631ffd89b505b79',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1393,7 +1400,11 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the delegating room method; the header writes themselves live in
 	// handler.js and testing.js, outside every sealed graph. No frame path,
 	// no bytes, no copy primitive.
-	'wire-fanout': 'bdd7ab0c81a3d2d072a15a51e5f64125e32e9b18e4765b97e25fd8c9219952b8',
+	// Re-pinned for the boot-warmup error entry: error-registry.js is reached
+	// through this graph too, and gains the WARMUP_RENDER id constant and its
+	// frozen entry - structure and data only, no frame path, no bytes, no copy
+	// primitive.
+	'wire-fanout': '48344c9a91b371d5c1fae6bb0096ce3dcca3d52a173124ca5211946b2ddc16b6',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

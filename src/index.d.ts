@@ -139,6 +139,24 @@ export interface AdapterOptions {
 	readinessCheckPath?: string | false;
 
 	/**
+	 * Readiness-gated boot warmup. During the `starting` window - after the
+	 * `init` hook, before the readiness probe reports ready - the configured
+	 * paths are rendered once through the real SSR engine, so the render path
+	 * is warm before a load balancer routes the first real client in. A cold
+	 * SSR render costs roughly twenty times a warm one (measured ~20ms versus
+	 * ~1ms), and that penalty otherwise lands on the first request after every
+	 * deploy or scale-up. A warmup render runs the app's server hooks like any
+	 * request; `event.platform.isWarmupRequest(event.request)` lets a
+	 * `hooks.server.js` handle recognize it and skip per-visit side effects.
+	 *
+	 * `true` warms `/`; `false` disables warmup; `{ paths }` names the absolute
+	 * routes to warm. A path configured here is declared surface both family
+	 * adapters carry.
+	 * @default true
+	 */
+	warmup?: boolean | { paths: string[] };
+
+	/**
 	 * Response headers added to every static and prerendered asset
 	 * (`/llms.txt`, `favicon.ico`, `robots.txt`, `.well-known/*`, prerendered
 	 * pages, hashed JS/CSS). These responses are served from an in-memory fast
@@ -3437,6 +3455,26 @@ export interface Platform {
 	 * ```
 	 */
 	subscribers(topic: string): number;
+
+	/**
+	 * Whether `request` is a synthetic boot-warmup render rather than a real
+	 * client request. Boot warmup renders the configured paths once during
+	 * `starting` to warm the SSR path before readiness; those renders run the
+	 * app's server hooks like any request, so a `hooks.server.js` handle that
+	 * writes analytics, counts a visit, or touches a per-request resource can
+	 * call this to skip that work for the warmup. The tag is by object identity,
+	 * never a header, so a real client cannot forge a request that reads as
+	 * synthetic.
+	 *
+	 * @example
+	 * ```js
+	 * export async function handle({ event, resolve }) {
+	 *   if (!event.platform?.isWarmupRequest(event.request)) recordVisit(event);
+	 *   return resolve(event);
+	 * }
+	 * ```
+	 */
+	isWarmupRequest(request: Request): boolean;
 
 	/**
 	 * Invoke `fn(ws, userData)` once for every connection currently

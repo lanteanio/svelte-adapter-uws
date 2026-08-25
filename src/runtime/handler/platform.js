@@ -3,6 +3,7 @@
 import { wsModule } from '../ws-handler-bridge.js';
 import { metricsRegistry } from '../metrics-bridge.js';
 import { metricsSnapshot } from './metrics-snapshot.js';
+import { isWarmupRequest } from './warmup-registry.js';
 import { parentPort } from 'node:worker_threads';
 import { exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
 import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, processEpoch, readAssertionCounts, stampSeqValue, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
@@ -1447,6 +1448,22 @@ export const platform = {
 	 */
 	subscribers(topic) {
 		return app.numSubscribers(topic);
+	},
+
+	/**
+	 * Whether `request` is a synthetic boot-warmup render rather than a real
+	 * client request. Warmup renders the configured paths once during boot to
+	 * warm the SSR path before readiness; those renders run the app's server
+	 * hooks like any request, so a `hooks.server.js` handle that writes
+	 * analytics, counts a visit, or touches a per-request resource can call
+	 * this to skip that work for the warmup. The tag is by object identity
+	 * (a WeakSet), never a header, so a real client cannot forge it.
+	 *
+	 * @param {Request} request
+	 * @returns {boolean}
+	 */
+	isWarmupRequest(request) {
+		return isWarmupRequest(request);
 	},
 
 	/**

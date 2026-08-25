@@ -100,7 +100,8 @@ export const KNOWN_WEBSOCKET_OPTION_KEYS = new Set([
  */
 export const KNOWN_ADAPTER_OPTION_KEYS = new Set([
 	'out', 'precompress', 'envPrefix', 'healthCheckPath', 'readinessCheckPath',
-	'tracing', 'staticHeaders', 'staticCacheControl', 'staticDotfiles', 'websocket'
+	'tracing', 'staticHeaders', 'staticCacheControl', 'staticDotfiles', 'websocket',
+	'warmup'
 ]);
 
 /**
@@ -601,6 +602,33 @@ export function serializeWsOptions(websocket, adminPath) {
 /** @type {import('./index.js').default} */
 export default function (opts = {}) {
 	const { out = 'build', precompress = true, envPrefix = '', healthCheckPath = '/healthz', readinessCheckPath = '/readyz' } = opts;
+	// Readiness-gated boot warmup: render the configured paths once during the
+	// `starting` window so the SSR render path is warm before the readiness
+	// probe reports ready (a cold first render costs ~20x a warm one, and a
+	// load balancer routes the first real client the moment readiness turns
+	// green). Default on, warming '/'; `false` disables it; `{ paths }` names
+	// the routes to warm. The value is baked to the list of paths (or an empty
+	// list when disabled). Any path an app configures lands on both family
+	// adapters - it is declared surface the parity gate tracks.
+	const warmupOption = opts.warmup === undefined ? true : opts.warmup;
+	let warmupPaths;
+	if (warmupOption === false) {
+		warmupPaths = [];
+	} else if (warmupOption === true) {
+		warmupPaths = ['/'];
+	} else if (warmupOption && typeof warmupOption === 'object' && Array.isArray(warmupOption.paths)) {
+		if (!warmupOption.paths.every((p) => typeof p === 'string' && p[0] === '/')) {
+			throw new Error(
+				`warmup.paths must be an array of absolute pathname strings starting with '/' ` +
+				`(e.g. ['/', '/dashboard']), got ${JSON.stringify(warmupOption.paths)}.`
+			);
+		}
+		warmupPaths = warmupOption.paths.slice();
+	} else {
+		throw new Error(
+			`warmup must be true, false, or an object like { paths: ['/'] }, got ${JSON.stringify(warmupOption)}.`
+		);
+	}
 	const tracingOption = opts.tracing;
 	if (tracingOption != null && (typeof tracingOption !== 'string' || tracingOption.trim() === '')) {
 		throw new Error(
@@ -1263,6 +1291,7 @@ export default function (opts = {}) {
 					WS_AUTH_PATH: JSON.stringify(wsAuthPath),
 					HEALTH_CHECK_PATH: JSON.stringify(healthCheckPath),
 					READINESS_CHECK_PATH: JSON.stringify(readinessCheckPath),
+					WARMUP_PATHS: JSON.stringify(warmupPaths),
 					STATIC_HEADERS: JSON.stringify(staticHeadersResult.headers),
 					STATIC_CACHE_CONTROL: JSON.stringify(staticCacheControl),
 					STATIC_DOTFILES: JSON.stringify(staticDotfiles),
