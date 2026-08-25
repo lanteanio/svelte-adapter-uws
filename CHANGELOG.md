@@ -47,6 +47,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A client's permit-starved backlog reaches the server while it is
+  growing.** The bundled client asks for a replenish once per window, and the
+  window empties before the queue fills - so the one frame the window allowed
+  left with an empty queue, the once-per-window latch closed behind it, and
+  every send that piled up afterwards was invisible. The `queued` field the
+  server folds into its saturation reading therefore reported zero through
+  exactly the episode it exists to measure, and only an undersized re-grant
+  could produce a non-zero depth. The client now also reports on each
+  DOUBLING of the backlog, independently of the prefetch latch: the server
+  learns a starving connection is starving, while the control frames stay
+  logarithmic in the queue bound - at most nine for a window that fills the
+  whole 256-deep queue, and none at all for a connection that never starves.
+  `test/lease-client.test.js` drives the default 256 window to exhaustion
+  with no contrived re-grant and fails when the growth report is removed.
+
 - **A respawned simulator worker presents a new topic generation.** The
   multi-worker simulator derived each worker's generation from its id, so a
   respawn handed the worker back the exact token it carried before - a

@@ -172,23 +172,40 @@ describe('adapter client send gate (production-wired)', () => {
 		off();
 	});
 
-	it('reports its permit-starved backlog in the replenish request, and only then', async () => {
-		// Spend the only permit: the replenish fires from the !fresh branch with
-		// an empty queue, so it carries NO backlog - the historical byte shape.
+	it('reports a backlog that grows AFTER the replenish already went out', async () => {
+		// The window empties before the queue fills, so the replenish leaves
+		// with nothing to report and the once-per-window latch closes behind
+		// it. Every send that piles up afterwards is the actual saturation, and
+		// reporting only at the latch described a starving connection as calm.
 		openWindow(sock, 1);
-		await subscribeOne(conn, 'r-0');
-		for (let i = 1; i <= 4; i++) await subscribeOne(conn, 'r-' + i); // queue 4, latch holds
+		await subscribeOne(conn, 'r-0'); // spends the permit; replenish fires empty
 		const first = sentFrames(sock).filter((f) => f && f.type === 'request-n');
 		expect(first.length).toBe(1);
 		expect(Object.prototype.hasOwnProperty.call(first[0], 'queued'), 'no backlog yet, so no field').toBe(false);
 
-		// A re-grant smaller than the backlog drains two, re-arms the latch, and
-		// the next starved send asks again - now reporting what is still waiting.
-		openWindow(sock, 2); // drains r-1, r-2; r-3 and r-4 stay queued
-		await subscribeOne(conn, 'r-5'); // queues (window spent) -> replenish
+		// Now starve it. The depth is re-reported on each DOUBLING, so the
+		// server learns the backlog is growing without one frame per send:
+		// 1, 2, then 4 - the send that only reaches 3 stays silent.
+		for (let i = 1; i <= 4; i++) await subscribeOne(conn, 'r-' + i);
 		const reqs = sentFrames(sock).filter((f) => f && f.type === 'request-n');
-		expect(reqs.length).toBe(2);
-		expect(reqs[1].queued, 'the frame reports the live backlog at request time').toBe(3);
+		expect(reqs.map((f) => f.queued), 'the growing backlog reaches the server').toEqual([undefined, 1, 2, 4]);
+	});
+
+	it('reports a real backlog under the DEFAULT window, with no undersized re-grant', async () => {
+		// The path a bundled client actually walks. The server's default grant
+		// is the same 256 as the client's queue ceiling, so a contrived small
+		// window is not what produces the first saturation episode - running
+		// the full window out and continuing to send is. If the depth only ever
+		// left with the latched replenish, this episode would report nothing.
+		openWindow(sock, 256);
+		for (let i = 0; i < 256; i++) await subscribeOne(conn, 'd-' + i); // spend the window
+		const spent = sentFrames(sock).filter((f) => f && f.type === 'request-n');
+		expect(spent.length, 'the low-water crossing asks once').toBe(1);
+		expect(spent[0].queued, 'and asks before anything is waiting').toBeUndefined();
+
+		for (let i = 0; i < 4; i++) await subscribeOne(conn, 'over-' + i); // now starve
+		const reqs = sentFrames(sock).filter((f) => f && f.type === 'request-n');
+		expect(reqs.map((f) => f.queued)).toEqual([undefined, 1, 2, 4]);
 	});
 
 	it('never leaks a window count or deadline onto a sent frame', async () => {

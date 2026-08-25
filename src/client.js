@@ -1127,6 +1127,16 @@ function createConnection(options) {
 	// in a single window would emit one request-n per send, amplifying control
 	// frames on the very connection the window exists to protect.
 	let _flowReplenishSent = false;
+	// Deepest backlog this window has already told the server about. The
+	// replenish latch above deliberately silences repeat PREFETCH requests, and
+	// on its own it silenced the backlog report too: the low-water request goes
+	// out while the queue is still empty, so the one frame the window was
+	// allowed to send carried a depth of zero and every send that piled up
+	// afterwards was invisible. A starving connection reported calm. Reporting
+	// again on each DOUBLING keeps the server's view honest while the number of
+	// control frames stays logarithmic in the queue bound - at most nine for a
+	// window that fills the whole 256-deep queue.
+	let _flowReportedQueue = 0;
 	/** @type {((d: boolean) => void) | null} */
 	let _onFlowDegraded = null;
 
@@ -1147,8 +1157,26 @@ function createConnection(options) {
 				// Carry the permit-starved backlog so the server's pressure fold
 				// sees real client saturation. A low-water replenish has no
 				// backlog and emits the historical two-field frame.
+				_flowReportedQueue = _flowQueue.length;
 				ws.send(requestNFrame(_FLOW_REQUEST_N, _flowQueue.length));
 			}
+		}
+	}
+	// Tell the server the backlog got materially deeper than what it was last
+	// told, independently of the once-per-window prefetch latch. Called only
+	// from the queued branch below, so a connection that never starves pays
+	// nothing and emits exactly the frames it always did.
+	//
+	// No reset is needed when a window is applied: the latch clears with it, so
+	// the first send that queues under the new window goes through the
+	// replenish above, which reports the live depth and re-bases this mark.
+	function _reportDeeperBacklog() {
+		const depth = _flowQueue.length;
+		if (depth === 0) return;
+		if (_flowReportedQueue !== 0 && depth < _flowReportedQueue * 2) return;
+		_flowReportedQueue = depth;
+		if (ws && ws.readyState === WebSocket.OPEN) {
+			ws.send(requestNFrame(_FLOW_REQUEST_N, depth));
 		}
 	}
 	// Gate one flow-controlled send. Returns true if it went out immediately.
@@ -1159,6 +1187,7 @@ function createConnection(options) {
 			_flowQueue.push(doSend);
 			_setFlowDegraded(true);
 			_maybeReplenish();
+			_reportDeeperBacklog();
 			return false;
 		}
 		// Bounded queue full: drop quietly, surface only as degraded.
