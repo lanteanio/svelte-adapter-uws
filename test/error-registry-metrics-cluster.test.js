@@ -7,18 +7,28 @@
 // entry names an instrumented port whose piggybacked context makes the real
 // postMessage throw - a closed port is a silent no-op on current Node and
 // cannot produce the line - so the drive installs that wrapper and the throw
-// is a genuine DataCloneError from structured clone. The merge entry names the
-// merge itself throwing - no deliverable report reaches the combine step
-// malformed - so the drive hands the dispatch's own resolve call a report
-// whose read raises inside mergeSamples. Each case binds the emitted event to
-// the actual error that crossed the catch.
+// is a genuine DataCloneError from structured clone. The merge entry rules bad
+// input OUT of its own cause - every deliverable report is normalized before
+// the combine, which the hostile-collection case below drives across the real
+// thread boundary and watches be dropped rather than thrown - and names what
+// is left: a defect in the merge, or a rewrapped runtime built-in underneath
+// it. So both merge drives hand across an ORDINARY deliverable report and
+// rewrap a built-in instead; a report structured clone would refuse cannot
+// cross the boundary at all, so handing one in on this side would prove the
+// catch runs and nothing about what reaches it. Each case binds the emitted
+// event to the actual error that crossed the catch, and the first also binds
+// the THROWING FRAME, so a fault that relocates out of the combine reds
+// rather than passing on a matching message.
 //
 // Both entries are containment for the cluster boundary, and both make a
-// promise beyond "the line prints": the scrape is still ANSWERED, degraded and
-// local-only, with the endpoint up. That resolving is load-bearing - the
-// module shares one in-flight promise per worker, so a catch that ever stopped
-// resolving would hang every later scrape on the worker, not one. Each case
-// therefore asserts the emitted event AND the document that came back, and the
+// promise beyond "the line prints": the scrape is ANSWERED and the endpoint
+// stays up. That resolving is the load-bearing part - the module shares one
+// in-flight promise per worker, so a catch that ever stopped resolving would
+// hang every later scrape on the worker, not one. What the answer CONTAINS
+// degrades in two steps, and there is a case for each: a fault the recovery
+// can work around is answered with the degraded local-only document, while
+// one that also breaks the recovery is answered with an empty document -
+// still settled, and honest that this interval carries nothing. The first
 // merge case then runs a second, healthy collection through the same worker,
 // because "the next scrape attempts the merge again" is the entry's recovery
 // claim and a poisoned first attempt is exactly when it would break.
@@ -142,7 +152,13 @@ describeUWS('the cluster metrics containment entries against the built runtime',
 		expect(result.doc).toContain('metrics_snapshot_workers_expected 1');
 	}, REAL_BOOT_BUDGET_MS);
 
-	it('METRICS-MERGE: a collection whose combination throws still answers, degraded', async () => {
+	it('METRICS-MERGE: a deliverable collection whose combine throws still answers, degraded', async () => {
+		// The report handed across is ordinary and merges cleanly on every other
+		// run in this file; what fails is a built-in the combine reaches from
+		// inside its per-sample loop, which is the half of the entry's cause
+		// that bad input cannot reach. The built-in matters: the resolve path
+		// normalizes its own arguments first, so poisoning something IT calls
+		// would be caught by the same catch without the combine ever running.
 		worker.postMessage({ type: 'drive-collect', name: 'poisoned' });
 		const request = await nextMessage((m) => m.type === 'metrics-request');
 		worker.postMessage({ type: 'deliver-poison', id: request.id });
@@ -160,8 +176,49 @@ describeUWS('the cluster metrics containment entries against the built runtime',
 		// resolved, and it resolved to the degraded local document rather than
 		// to nothing. Counters appearing to drop for one interval is the
 		// documented shape of exactly this answer.
+		//
+		// WHERE it threw, not just that it did. Without this the fault could
+		// relocate into the resolve path's own argument normalization - caught
+		// by the same catch, same event, same message, same document - and
+		// nothing would notice the combine had stopped being exercised.
+		expect(result.poisonStack, 'the worker did not report a throwing frame').toBeTruthy();
+		expect(result.poisonStack, 'the fault must be raised from inside the combine').toContain('metrics-merge.js');
+
 		expect(typeof result.doc).toBe('string');
 		expect(result.doc).toContain('metrics_snapshot_degraded 1');
+		// Two reports were delivered and the pair said 2/2, but the local-only
+		// fallback hardcodes one worker - so reading 1 back proves this
+		// document came from the fallback rather than the delivered context.
+		expect(result.doc).toContain('metrics_snapshot_workers_expected 1');
+	}, REAL_BOOT_BUDGET_MS);
+
+	it('METRICS-MERGE: a fault that outlives the catch still settles the shared promise', async () => {
+		// A rewrapped built-in does not un-install itself after one throw, and
+		// the case above deliberately does, so that the catch's own recovery
+		// runs clean. This is the other half: a fault that persists and is
+		// reached from every place an answer could be built - the resolve
+		// path's own normalization, the combine, and the fallback that renders
+		// the local-only document - so no document is constructible and the
+		// runtime falls through to resolving with an empty one.
+		//
+		// Settling is the claim, not the content. Every concurrent scrape on a
+		// worker awaits ONE in-flight promise, so a catch that stopped
+		// resolving would hang all of them indefinitely rather than degrade a
+		// single interval - the failure the entry's containment exists to
+		// prevent, and the one a caller cannot recover from.
+		worker.postMessage({ type: 'drive-collect', name: 'sustained' });
+		const request = await nextMessage((m) => m.type === 'metrics-request');
+		worker.postMessage({ type: 'deliver-poison-sustained', id: request.id });
+		const result = await nextMessage((m) => m.type === 'result' && m.name === 'sustained');
+
+		const hit = result.events.find((e) => e.event === 'metrics.merge-failed');
+		expect(hit, 'the entry event must still be emitted').toBeTruthy();
+		expect(hit.error?.message).toContain('__MERGE_POISON_SUSTAINED__');
+		// The promise resolved - that is the assertion. It resolved to the last
+		// resort rather than a document, which is the honest answer when even
+		// the local-only render cannot be built.
+		expect(typeof result.doc, 'the scrape must be answered, not left hanging').toBe('string');
+		expect(result.doc).toBe('');
 	}, REAL_BOOT_BUDGET_MS);
 
 	it('and the next scrape merges again: the recovery claim, driven after the poison', async () => {
