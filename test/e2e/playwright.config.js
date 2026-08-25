@@ -21,6 +21,14 @@ export default defineConfig({
 			name: 'prod',
 			testMatch: ['prod.spec.js', 'cursor-worker.spec.js', 'smooth.spec.js', 'exclude.spec.js'],
 			use: { baseURL: `http://localhost:${PROD_PORT}` }
+		},
+		{
+			// Owns its two at-capacity servers (built from the waiting fixture
+			// variants in its beforeAll), so it runs once rather than per
+			// dev/prod server - the surfaces under test are the adapter's own
+			// holding and refusal pages, identical on both.
+			name: 'waiting',
+			testMatch: ['waiting-room.spec.js']
 		}
 	]
 });

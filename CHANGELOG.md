@@ -135,6 +135,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin's own middleware, including a real WebSocket client whose
   subscription appears in the streamed frames.
 
+- **Browser-rendered coverage for the waiting room and cursor-canvas
+  geometry, across a viewport ladder.** The waiting-room surfaces were
+  tested only at string and HTTP level; nothing ever rendered them. The
+  Playwright lane now owns two at-capacity servers (fixture variants with a
+  two-connection `maxConnections` gate, saturated over real held sockets)
+  and drives the built-in holding page in a real browser: the rest state,
+  the persistent status region rewriting from the live poll, a poll that
+  cannot reach the server as a visible announced state, and the announced
+  recovery - plus the opted-out accessible 503 with its manual form and
+  `Retry-After` - each asserted at four viewport rungs from 360x640 to
+  1920x1080 with the panel on screen and no horizontal overflow, and the
+  refused WS-path navigation serving the holding page. The cursor suite
+  gains geometry: a mover held at known coordinates must paint inside the
+  mapped canvas region and must not paint a far region, per rung and per
+  bundler path, where a cursor painted at the wrong coordinates previously
+  passed the changed-pixels check. Fixture variants only the browser lane
+  consumes are excluded from the vitest pre-build; the lane builds its own.
+
 - **`request-n` carries the sender's permit-starved backlog.** The
   flow-control replenish frame gains an optional additive `queued` field
   (PROTOCOL.md section 3.6, revision unchanged): the count of sends waiting

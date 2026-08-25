@@ -91,6 +91,59 @@ test('canvas mount boots the render worker and remote movers paint without touch
 	m.ws.close();
 });
 
+test('a mover at known coordinates paints in the mapped canvas region across the viewport ladder', async ({ page, baseURL }) => {
+	test.setTimeout(120000);
+	// Narrow mobile to wide desktop. The canvas is a fixed 400x300 board with
+	// a 1:1 data-to-pixel mapping (the page sends offsetX/offsetY), so the
+	// mapped region must hold at every rung even when the page reflows.
+	const RUNGS = [
+		{ width: 360, height: 640 },
+		{ width: 768, height: 1024 },
+		{ width: 1280, height: 800 },
+		{ width: 1920, height: 1080 }
+	];
+	const TARGET = { x: 320, y: 60 };
+
+	for (const rung of RUNGS) {
+		await page.setViewportSize(rung);
+		await page.goto('/cursors');
+		// The worker boots synchronously inside the mount effect, so once
+		// mounted reads true it is already running; the feed assertion below
+		// is what proves the pipeline moved.
+		await expect(page.locator('#mounted')).toHaveText('true');
+
+		const canvas = page.locator('#cursor-canvas');
+		await canvas.scrollIntoViewIfNeeded();
+		const box = await canvas.boundingBox();
+		expect(box, 'canvas must lay out').not.toBeNull();
+		// A region around the target and a far region that must stay blank; a
+		// cursor painted at the wrong coordinates passes a mere changed-pixels
+		// check but fails exactly one of these.
+		const near = { x: box.x + TARGET.x - 24, y: box.y + TARGET.y - 24, width: 48, height: 48 };
+		const far = { x: box.x + 30, y: box.y + 190, width: 60, height: 60 };
+		const nearBlank = await page.screenshot({ clip: near, fullPage: true });
+		const farBlank = await page.screenshot({ clip: far, fullPage: true });
+
+		const m = await mover(baseURL, 'e2e-board');
+		// Hold the remote cursor at one spot until the paint settles.
+		for (let i = 0; i < 10; i++) {
+			m.move(TARGET.x, TARGET.y);
+			await page.waitForTimeout(50);
+		}
+		await expect(page.locator('#feed-size')).toHaveText('1', { timeout: 5000 });
+		await page.waitForTimeout(200);
+
+		const nearPainted = await page.screenshot({ clip: near, fullPage: true });
+		const farPainted = await page.screenshot({ clip: far, fullPage: true });
+		expect(nearPainted.equals(nearBlank), `rung ${rung.width}x${rung.height}: the mapped region must paint`).toBe(false);
+		expect(farPainted.equals(farBlank), `rung ${rung.width}x${rung.height}: a region away from the mover must stay blank`).toBe(true);
+
+		m.ws.close();
+		// Let the roster drop the mover before the next rung remounts.
+		await page.waitForTimeout(300);
+	}
+});
+
 test('unmounting pauses the pipeline and a remount on the same canvas resumes it', async ({ page, baseURL }) => {
 	await page.goto('/cursors');
 	await expect(page.locator('#mounted')).toHaveText('true');

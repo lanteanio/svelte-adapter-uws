@@ -87,7 +87,10 @@ export default function setup() {
 	let names;
 
 	if (filters.length === 0) {
-		names = Object.keys(FIXTURE_VARIANTS);
+		// Variants only the Playwright lane consumes build in that lane's own
+		// setup; pre-building them here would tax every full vitest run for
+		// artifacts no .test.js file imports.
+		names = Object.keys(FIXTURE_VARIANTS).filter((name) => !FIXTURE_VARIANTS[name].e2eOnly);
 	} else {
 		const needed = new Set();
 		for (const file of readdirSync(testDir)) {

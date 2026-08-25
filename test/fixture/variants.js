@@ -472,6 +472,44 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// The DEFAULT waiting room end-to-end in a real browser: a tiny gate the
+	// browser suite saturates over real sockets, the built-in holding page
+	// with its inline poll script, and the admit endpoint - all at their
+	// zero-config defaults, because the default page IS the surface under
+	// test. Its rest, update, and failure states are browser-rendered
+	// behavior no string-level test can observe.
+	waitingdefault: {
+		out: 'build-waiting-default',
+		e2eOnly: true,
+		handler: null,
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100,
+			upgradeAdmission: {
+				// The LIVE-connection ceiling, not the handshake gate: two held
+				// sockets keep the gate genuinely full for the page under test.
+				maxConnections: 2
+			}
+		}
+	},
+
+	// The opted-out fallback: the same tiny gate with waitingRoom: false, so
+	// an HTML navigation at capacity receives the minimal accessible 503
+	// document instead of the polling page.
+	waitingoff: {
+		out: 'build-waiting-off',
+		e2eOnly: true,
+		handler: null,
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100,
+			upgradeAdmission: {
+				maxConnections: 2,
+				waitingRoom: false
+			}
+		}
+	},
+
 	// A configured waitingRoom.renderer module path drives the whole
 	// production pipeline: build-side validation, the isolated esbuild
 	// renderer entry, the pick(default/renderWaitingRoom) selection, and the
