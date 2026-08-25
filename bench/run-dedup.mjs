@@ -90,8 +90,11 @@ for (const { file, label } of servers) {
 		rows.push({ label, avgRenders });
 		console.log(`avg ${avgRenders.toFixed(1)} renders per ${BURST}-request burst`);
 	} catch (err) {
-		console.log(`FAILED: ${err.message}`);
-		rows.push({ label, avgRenders: BURST });
+		// A failed server or burst produced no measurement; record the failure
+		// itself rather than a fabricated worst-case count that would feed the
+		// reduction ratio as if it had been observed.
+		console.log(`FAILED (not comparable): ${err.message}`);
+		rows.push({ label, failed: true, reason: err.message });
 	} finally {
 		if (server) server.kill('SIGTERM');
 		await sleep(500);
@@ -99,7 +102,9 @@ for (const { file, label } of servers) {
 }
 
 console.log(`\n${'-'.repeat(72)}`);
-if (rows[0]?.avgRenders && rows[1]?.avgRenders) {
+if (rows.some((r) => r.failed)) {
+	console.log('  NOT COMPARABLE: a run failed, so no reduction ratio is computed.');
+} else if (rows[0]?.avgRenders && rows[1]?.avgRenders) {
 	const reduction = (rows[0].avgRenders / rows[1].avgRenders).toFixed(1);
 	console.log(`  Render call reduction: ${reduction}x fewer renders with dedup`);
 	console.log(`  (${rows[0].avgRenders.toFixed(1)} renders without dedup vs ${rows[1].avgRenders.toFixed(1)} with dedup, per ${BURST}-request burst)`);

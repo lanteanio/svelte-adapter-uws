@@ -45,7 +45,12 @@ Record this beside any number you cite:
 - native-addon availability (`npm run doctor -- --require-uws` for a native
   profile), browser/headless mode for browser profiles, and client counts;
 - warm-up/round counts, background-load posture, and the complete stdout,
-  including variation and fan-out/recovery checks.
+  including variation and fan-out/recovery checks;
+- the error, timeout, and non-2xx counts the runner printed beside the
+  number. The autocannon runners surface these per row and mark any row
+  with a nonzero count (or a failed server start) as not comparable; such
+  a row is a failure artifact, never a publishable result, and a number
+  cited without its counts cannot be told apart from one.
 
 Use the Node release pinned by `.nvmrc`. Close competing workloads and keep the
 power profile fixed. Do not compare results from different machines, Node
@@ -133,7 +138,10 @@ The orchestrators themselves are [`run.mjs`](./run.mjs),
 [`run-compare.mjs`](./run-compare.mjs), [`run-ws-only.mjs`](./run-ws-only.mjs),
 [`run-ws-compare.mjs`](./run-ws-compare.mjs),
 [`run-dedup.mjs`](./run-dedup.mjs), [`run-ab.mjs`](./run-ab.mjs), and
-[`run-ws-ab.mjs`](./run-ws-ab.mjs). This inventory is checked against every
+[`run-ws-ab.mjs`](./run-ws-ab.mjs); the autocannon-based ones share
+[`autocannon-evidence.mjs`](./autocannon-evidence.mjs), the helper that reads
+each run's error, timeout, and non-2xx counters so a failing row is marked
+not comparable instead of averaged. This inventory is checked against every
 `.mjs` file in the directory so a new profile cannot arrive undocumented.
 
 ## Reading a result honestly

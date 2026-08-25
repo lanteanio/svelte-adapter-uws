@@ -228,6 +228,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recomputing the sampled reading from the raw isolate and cgroup
   primitives on the built modules.
 
+- **The microbench runners surface error evidence and refuse to average
+  failure.** The autocannon runners read only requests, latency, and
+  throughput from each result, so a saturated or erroring run printed a
+  clean-looking rate, and a failed server start recorded a zero row that
+  averaged in beside healthy ones. Every runner now reads the errors,
+  timeouts, and non-2xx counters (shared helper,
+  `bench/autocannon-evidence.mjs`), prints them beside each row, and marks
+  any row with a nonzero count - or a failed start - as not comparable:
+  excluded from ratios, multipliers, and the overhead breakdown rather than
+  silently shaping them. The A/B runner drops a round in which either arm
+  saw failures and reports its clean-round count beside the medians,
+  refusing a verdict below two clean rounds; the dedup runner records a
+  failure instead of fabricating a worst-case render count. The bench
+  README's environment record now requires citing those counts beside any
+  published number. Capacity and knee claims remain the capacity kit's job;
+  this stops the microbench rows from hiding failure.
+
 - **The family memory-pressure contract is an accepted decision.**
   [docs/decisions/memory-pressure-signal.md](./docs/decisions/memory-pressure-signal.md)
   defines the engine-portable basis both family adapters implement: the

@@ -19,6 +19,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { runEvidence, isClean, evidenceLabel } from './autocannon-evidence.mjs';
 
 const require = createRequire(import.meta.url);
 const autocannon = require('autocannon');
@@ -110,18 +111,43 @@ const baselineRps = [];
 const variantRps = [];
 const baselineP99 = [];
 const variantP99 = [];
+let droppedRounds = 0;
 
 for (let i = 0; i < ROUNDS; i++) {
 	process.stdout.write(`Round ${i + 1}/${ROUNDS} A: `);
 	const a = await benchOne(baselineFile);
-	baselineRps.push(a.requests.average);
-	baselineP99.push(a.latency.p99);
-	process.stdout.write(`${a.requests.average.toFixed(0)} req/s, p99 ${a.latency.p99.toFixed(1)}ms  |  B: `);
+	const aEv = runEvidence(a);
+	process.stdout.write(`${a.requests.average.toFixed(0)} req/s, p99 ${a.latency.p99.toFixed(1)}ms` +
+		(isClean(aEv) ? '' : ` [${evidenceLabel(aEv)}]`) + `  |  B: `);
 
 	const b = await benchOne(variantFile);
+	const bEv = runEvidence(b);
+	process.stdout.write(`${b.requests.average.toFixed(0)} req/s, p99 ${b.latency.p99.toFixed(1)}ms` +
+		(isClean(bEv) ? '' : ` [${evidenceLabel(bEv)}]`) + `\n`);
+
+	// A round in which EITHER arm saw errors, timeouts, or non-2xx responses
+	// measured failure behavior, not the change under test: drop the whole
+	// round so a saturated pass cannot tilt the medians either way.
+	if (!isClean(aEv) || !isClean(bEv)) {
+		droppedRounds++;
+		console.log(`  round ${i + 1} dropped: not comparable`);
+		continue;
+	}
+	baselineRps.push(a.requests.average);
+	baselineP99.push(a.latency.p99);
 	variantRps.push(b.requests.average);
 	variantP99.push(b.latency.p99);
-	process.stdout.write(`${b.requests.average.toFixed(0)} req/s, p99 ${b.latency.p99.toFixed(1)}ms\n`);
+}
+
+if (droppedRounds > 0) {
+	console.log(`\n${droppedRounds} of ${ROUNDS} rounds dropped for errors/timeouts/non-2xx.`);
+}
+if (baselineRps.length < 2) {
+	const why = droppedRounds > 0
+		? 'Fix the failing arm and re-run.'
+		: 'Run at least two rounds for a verdict.';
+	console.log(`\nNOT COMPARABLE: only ${baselineRps.length} clean round(s); no verdict. ${why}`);
+	process.exit(1);
 }
 
 const aMed = median(baselineRps);
@@ -133,6 +159,7 @@ const bSd = stddev(variantRps);
 const deltaPct = ((bMed - aMed) / aMed) * 100;
 
 console.log(`\n${'='.repeat(70)}`);
+console.log(`  ${'clean rounds'.padEnd(20)} ${baselineRps.length}/${ROUNDS} (zero errors, timeouts, and non-2xx in both arms)`);
 console.log(`  ${'baseline'.padEnd(20)} median ${aMed.toFixed(0).padStart(8)} req/s   mean ${aMean.toFixed(0).padStart(8)} +/- ${aSd.toFixed(0)}`);
 console.log(`  ${'variant'.padEnd(20)} median ${bMed.toFixed(0).padStart(8)} req/s   mean ${bMean.toFixed(0).padStart(8)} +/- ${bSd.toFixed(0)}`);
 console.log(`  ${'delta'.padEnd(20)} ${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%   (median to median)`);

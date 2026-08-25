@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { emptyEvidence, addEvidence, isClean, evidenceLabel } from './autocannon-evidence.mjs';
 
 const require = createRequire(import.meta.url);
 const autocannon = require('autocannon');
@@ -85,6 +86,7 @@ for (const bench of benchmarks) {
 
 		// Run multiple passes and average
 		let totalRps = 0, totalLatAvg = 0, totalLatP99 = 0, totalLatP999 = 0, totalThroughput = 0;
+		const evidence = emptyEvidence();
 		for (let run = 0; run < RUNS; run++) {
 			const result = await runAutocannon(bench.path);
 			totalRps += result.requests.average;
@@ -92,6 +94,7 @@ for (const bench of benchmarks) {
 			totalLatP99 += result.latency.p99;
 			totalLatP999 += result.latency.p999;
 			totalThroughput += result.throughput.average;
+			addEvidence(evidence, result);
 			if (run < RUNS - 1) await sleep(300);
 		}
 		const rps = totalRps / RUNS;
@@ -99,6 +102,7 @@ for (const bench of benchmarks) {
 		const latP99 = totalLatP99 / RUNS;
 		const latP999 = totalLatP999 / RUNS;
 		const throughput = totalThroughput / RUNS;
+		const comparable = isClean(evidence);
 
 		results.push({
 			name: bench.name,
@@ -107,24 +111,33 @@ for (const bench of benchmarks) {
 			latP99,
 			latP999,
 			throughputMBs: (throughput / 1024 / 1024).toFixed(2),
+			evidence,
+			comparable,
 		});
 
-		console.log(`${rps.toLocaleString()} req/s (avg ${latAvg.toFixed(2)}ms, p99 ${latP99.toFixed(2)}ms)`);
+		console.log(`${rps.toLocaleString()} req/s (avg ${latAvg.toFixed(2)}ms, p99 ${latP99.toFixed(2)}ms)` +
+			(comparable ? '' : `  NOT COMPARABLE (${evidenceLabel(evidence)})`));
 	} catch (err) {
+		// A server that never started (or an autocannon transport failure) is
+		// not a measurement; record the failure itself, never a zero row that
+		// averages in beside healthy ones.
 		console.log(`FAILED: ${err.message}`);
-		results.push({ name: bench.name, rps: 0, latAvg: 0, latP99: 0, latP999: 0, throughputMBs: '0' });
+		results.push({ name: bench.name, failed: true, reason: err.message, comparable: false });
 	} finally {
 		if (server) server.kill('SIGTERM');
 		await sleep(500);
 	}
 }
 
-// Summary table
-const baseline = results[0]?.rps || 1;
+// Summary table. A row is comparable only when its server started and every
+// pass finished with zero errors, timeouts, and non-2xx responses; anything
+// else prints its evidence and is excluded from ratios and the breakdown.
+const baselineComparable = results[0]?.comparable === true;
+const baseline = baselineComparable ? results[0].rps : null;
 
-console.log(`\n${'='.repeat(90)}`);
+console.log(`\n${'='.repeat(104)}`);
 console.log('  RESULTS SUMMARY');
-console.log(`${'='.repeat(90)}`);
+console.log(`${'='.repeat(104)}`);
 console.log(
 	'  ' +
 	'Test'.padEnd(42) +
@@ -132,51 +145,72 @@ console.log(
 	'vs Base'.padStart(10) +
 	'Lat avg'.padStart(10) +
 	'Lat p99'.padStart(10) +
-	'MB/s'.padStart(8)
+	'MB/s'.padStart(8) +
+	'Err/TO/non-2xx'.padStart(16)
 );
-console.log('-'.repeat(90));
+console.log('-'.repeat(104));
 
 for (const r of results) {
-	const pct = ((r.rps / baseline) * 100).toFixed(1);
-	const overhead = (100 - parseFloat(pct)).toFixed(1);
+	if (r.failed) {
+		console.log('  ' + r.name.padEnd(42) + `FAILED (not comparable): ${r.reason}`);
+		continue;
+	}
+	const pct = baseline !== null && r.comparable ? `${((r.rps / baseline) * 100).toFixed(1)}%` : 'n/a';
+	const ev = `${r.evidence.errors}/${r.evidence.timeouts}/${r.evidence.non2xx}` + (r.comparable ? '' : ' !');
 	console.log(
 		'  ' +
 		r.name.padEnd(42) +
 		r.rps.toLocaleString().padStart(10) +
-		`${pct}%`.padStart(10) +
+		pct.padStart(10) +
 		`${r.latAvg.toFixed(2)}ms`.padStart(10) +
 		`${r.latP99.toFixed(2)}ms`.padStart(10) +
-		`${r.throughputMBs}`.padStart(8)
+		`${r.throughputMBs}`.padStart(8) +
+		ev.padStart(16)
 	);
 }
 
-console.log('-'.repeat(90));
+console.log('-'.repeat(104));
+if (results.some((r) => !r.comparable)) {
+	console.log('  ! = the row saw errors, timeouts, or non-2xx responses (or never ran):');
+	console.log('    its numbers are failure artifacts, not throughput - do not cite or compare them.');
+}
 
-// Overhead breakdown
+// Overhead breakdown - only between rows whose measurements are comparable.
+const cmp = (i) => results[i] && results[i].comparable;
+// A layer that measured FASTER than the one before it is run-to-run noise;
+// print it signed as a gain instead of a double negative.
+const overheadText = (diff) => {
+	const pct = (Math.abs(diff / results[0].rps) * 100).toFixed(1);
+	const sign = diff >= 0 ? '-' : '+';
+	return `${sign}${Math.abs(diff).toLocaleString()} req/s (${sign}${pct}% of baseline)`;
+};
 console.log(`\n  OVERHEAD BREAKDOWN (vs barebones uWS):`);
-const layers = [
-	[0, 1, 'cork + status/headers'],
-	[1, 2, 'header collection + remoteAddress decode'],
-	[2, 3, 'async/AbortController overhead'],
-	[3, 4, 'Request() construction'],
-];
-for (const [from, to, label] of layers) {
-	if (results[from] && results[to]) {
-		const diff = results[from].rps - results[to].rps;
-		const pct = ((diff / results[0].rps) * 100).toFixed(1);
-		console.log(`    ${label.padEnd(45)} -${diff.toLocaleString()} req/s (${pct}% of baseline)`);
+if (!baselineComparable) {
+	console.log('    skipped: the baseline row is not comparable.');
+} else {
+	const layers = [
+		[0, 1, 'cork + status/headers'],
+		[1, 2, 'header collection + remoteAddress decode'],
+		[2, 3, 'async/AbortController overhead'],
+		[3, 4, 'Request() construction'],
+	];
+	for (const [from, to, label] of layers) {
+		if (!cmp(from) || !cmp(to)) {
+			console.log(`    ${label.padEnd(45)} skipped: a row is not comparable`);
+			continue;
+		}
+		console.log(`    ${label.padEnd(45)} ${overheadText(results[from].rps - results[to].rps)}`);
+	}
+	if (cmp(0) && cmp(5)) {
+		console.log(`    ${'Static path total overhead'.padEnd(45)} ${overheadText(results[0].rps - results[5].rps)}`);
+	} else {
+		console.log(`    ${'Static path total overhead'.padEnd(45)} skipped: a row is not comparable`);
+	}
+	if (cmp(0) && cmp(6)) {
+		console.log(`    ${'SSR path total overhead'.padEnd(45)} ${overheadText(results[0].rps - results[6].rps)}`);
+	} else {
+		console.log(`    ${'SSR path total overhead'.padEnd(45)} skipped: a row is not comparable`);
 	}
 }
 
-if (results[0] && results[5]) {
-	const diff = results[0].rps - results[5].rps;
-	const pct = ((diff / results[0].rps) * 100).toFixed(1);
-	console.log(`    ${'Static path total overhead'.padEnd(45)} -${diff.toLocaleString()} req/s (${pct}% of baseline)`);
-}
-if (results[0] && results[6]) {
-	const diff = results[0].rps - results[6].rps;
-	const pct = ((diff / results[0].rps) * 100).toFixed(1);
-	console.log(`    ${'SSR path total overhead'.padEnd(45)} -${diff.toLocaleString()} req/s (${pct}% of baseline)`);
-}
-
-console.log(`\n${'='.repeat(90)}\n`);
+console.log(`\n${'='.repeat(104)}\n`);

@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { emptyEvidence, addEvidence, isClean, evidenceLabel } from './autocannon-evidence.mjs';
 
 const require = createRequire(import.meta.url);
 const autocannon = require('autocannon');
@@ -95,12 +96,14 @@ for (const bench of httpBenches) {
 		await sleep(500);
 
 		let totalRps = 0, totalLatAvg = 0, totalLatP99 = 0, totalThroughput = 0;
+		const evidence = emptyEvidence();
 		for (let run = 0; run < RUNS; run++) {
 			const result = await runAutocannon(HTTP_PORT, bench.path);
 			totalRps += result.requests.average;
 			totalLatAvg += result.latency.average;
 			totalLatP99 += result.latency.p99;
 			totalThroughput += result.throughput.average;
+			addEvidence(evidence, result);
 			if (run < RUNS - 1) await sleep(300);
 		}
 
@@ -108,12 +111,16 @@ for (const bench of httpBenches) {
 		const latAvg = totalLatAvg / RUNS;
 		const latP99 = totalLatP99 / RUNS;
 		const throughput = totalThroughput / RUNS;
+		const comparable = isClean(evidence);
 
-		httpResults.push({ name: bench.name, rps, latAvg, latP99, throughputMBs: (throughput / 1024 / 1024).toFixed(2) });
-		console.log(`${rps.toLocaleString()} req/s  avg ${latAvg.toFixed(2)}ms  p99 ${latP99.toFixed(1)}ms`);
+		httpResults.push({ name: bench.name, rps, latAvg, latP99, throughputMBs: (throughput / 1024 / 1024).toFixed(2), evidence, comparable });
+		console.log(`${rps.toLocaleString()} req/s  avg ${latAvg.toFixed(2)}ms  p99 ${latP99.toFixed(1)}ms` +
+			(comparable ? '' : `  NOT COMPARABLE (${evidenceLabel(evidence)})`));
 	} catch (err) {
+		// A server that never started is not a measurement; record the failure
+		// itself, never a zero row beside healthy ones.
 		console.log(`FAILED: ${err.message}`);
-		httpResults.push({ name: bench.name, rps: 0, latAvg: 0, latP99: 0, throughputMBs: '0' });
+		httpResults.push({ name: bench.name, failed: true, reason: err.message, comparable: false });
 	} finally {
 		if (server) server.kill('SIGTERM');
 		await sleep(500);
@@ -121,29 +128,40 @@ for (const bench of httpBenches) {
 }
 
 // HTTP Summary
-console.log(`\n${'-'.repeat(78)}`);
+console.log(`\n${'-'.repeat(94)}`);
 console.log('  HTTP RESULTS:');
-console.log(`${'-'.repeat(78)}`);
-console.log('  ' + 'Test'.padEnd(34) + 'Req/s'.padStart(12) + 'Lat avg'.padStart(10) + 'Lat p99'.padStart(10) + 'MB/s'.padStart(8));
-console.log('-'.repeat(78));
+console.log(`${'-'.repeat(94)}`);
+console.log('  ' + 'Test'.padEnd(34) + 'Req/s'.padStart(12) + 'Lat avg'.padStart(10) + 'Lat p99'.padStart(10) + 'MB/s'.padStart(8) + 'Err/TO/non-2xx'.padStart(16));
+console.log('-'.repeat(94));
 for (const r of httpResults) {
+	if (r.failed) {
+		console.log('  ' + r.name.padEnd(34) + `FAILED (not comparable): ${r.reason}`);
+		continue;
+	}
+	const ev = `${r.evidence.errors}/${r.evidence.timeouts}/${r.evidence.non2xx}` + (r.comparable ? '' : ' !');
 	console.log(
 		'  ' + r.name.padEnd(34) +
 		r.rps.toLocaleString().padStart(12) +
 		`${r.latAvg.toFixed(2)}ms`.padStart(10) +
 		`${r.latP99.toFixed(1)}ms`.padStart(10) +
-		r.throughputMBs.padStart(8)
+		r.throughputMBs.padStart(8) +
+		ev.padStart(16)
 	);
 }
+if (httpResults.some((r) => !r.comparable)) {
+	console.log('  ! = errors, timeouts, or non-2xx responses (or a failed start): the row is a');
+	console.log('    failure artifact, not throughput - do not cite or compare it.');
+}
 
-// Multiplier comparisons
-if (httpResults[0]?.rps && httpResults[1]?.rps) {
+// Multiplier comparisons - only between comparable rows.
+const pair = (a, b) => httpResults[a]?.comparable && httpResults[b]?.comparable;
+if (pair(0, 1)) {
 	console.log(`\n  Baseline: uWS is ${(httpResults[0].rps / httpResults[1].rps).toFixed(1)}x faster than Node http`);
 }
-if (httpResults[2]?.rps && httpResults[3]?.rps) {
+if (pair(2, 3)) {
 	console.log(`  Static:   adapter-uws is ${(httpResults[2].rps / httpResults[3].rps).toFixed(1)}x faster than adapter-node`);
 }
-if (httpResults[4]?.rps && httpResults[5]?.rps) {
+if (pair(4, 5)) {
 	console.log(`  SSR:      adapter-uws is ${(httpResults[4].rps / httpResults[5].rps).toFixed(1)}x faster than adapter-node`);
 }
 
