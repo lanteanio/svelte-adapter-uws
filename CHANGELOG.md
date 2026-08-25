@@ -126,6 +126,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deterministic injected-RNG cases on the shared arithmetic and by the
   existing posture-band cases, which pass unchanged.
 
+- **ROADMAP.md drops the outcome map, keeping the line's purpose, non-goals,
+  and promotion exit contract.** The outcome map enumerated each outcome, the
+  actor it served, and the delivering work; it read as a plan of the shipped
+  release rather than a contract for a consumer, and the same information is
+  already the release's own gates and suites. The file now states what the
+  line is for, what it deliberately will not do, and the independently
+  checkable evidence that gates promotion to `latest` - the parts a consumer
+  or a maintainer acts on. The exit contract is unchanged.
+
 ### Fixed
 
 - **The smooth command decode drops a duplicate id instead of applying it.**

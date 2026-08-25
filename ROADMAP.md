@@ -1,103 +1,19 @@
 # Roadmap
 
-This is the outcome contract for the 0.6 line of `svelte-adapter-uws`: what
-the release is for, who each outcome serves, the measure that shows it
-landed, and what is deliberately out of scope. The stable promotion of 0.6.0
-from `next` to `latest` is an evidence decision before it is a procedure -
-the mechanical steps live in [`docs/releasing.md`](./docs/releasing.md), and
-they begin only when the exit contract at the bottom of this file is
-satisfied. Historical prereleases are records; this file describes the line,
-not any single prerelease.
+This describes the 0.6 line of `svelte-adapter-uws`: what the release is for,
+what is deliberately out of scope, and the evidence that gates its stable
+promotion. Promoting 0.6.0 from `next` to `latest` is an evidence decision
+before it is a procedure - the mechanical steps live in
+[`docs/releasing.md`](./docs/releasing.md), and they begin only when the exit
+contract at the bottom of this file is satisfied. Historical prereleases are
+records; this file describes the line, not any single prerelease.
 
-## Outcome map
-
-Each outcome names the actor it serves, the measure that shows it landed
-(every measure is a gate, a suite, or a generated artifact in this
-repository - never an intention), and the work that delivers it. The map is
-the tracked grouping of the delivering work: an outcome whose measure cannot
-be demonstrated is not done, whatever else has shipped.
-
-### A realtime server that works without configuration
-
-- **Serves:** SvelteKit application developers.
-- **Measure:** the zero-configuration path - the adapter in
-  `svelte.config.js` and the Vite plugin - boots SSR, static serving, and
-  WebSockets on one uWebSockets.js binary, and the fixture suites drive that
-  built output rather than a mock of it.
-- **Delivered by:** the adapter build pipeline, the generated runtime, and
-  the packed-tarball consumer suites that install and run README examples
-  against the exact bytes a consumer would receive.
-
-### Clustering without a message broker
-
-- **Serves:** operators scaling one machine before reaching for
-  infrastructure.
-- **Measure:** a multi-worker fleet relays publishes through shared-memory
-  rings with per-topic sequence continuity, detects cross-worker state
-  divergence through the state-hash detector, and recovers a crashed worker
-  under a bounded per-slot restart budget - each driven by real clustered
-  fixtures in the suite.
-- **Delivered by:** the cluster primary, the relay rings and their spill
-  policy, the restart supervisor, and the divergence diagnostics.
-
-### Delivery that keeps up with a game tick
-
-- **Serves:** builders of latency-sensitive multiplayer applications.
-- **Measure:** the wire path holds its byte and allocation budgets under the
-  copy-authority seals in the suite, and the comparison benchmarks in
-  `bench/` record the delta-codec and fan-out numbers the documentation
-  cites.
-- **Delivered by:** the binary wire codecs, the delta compression, the
-  fan-out lanes, and the backpressure accounting.
-
-### Failures an operator can act on
-
-- **Serves:** operators running the adapter in production.
-- **Measure:** every entry in the generated error reference is driven from
-  the condition it claims by a test, or carries a recorded reason its
-  emission cannot be conjured; the reference renders from the registry the
-  runtime actually prints through.
-- **Delivered by:** the error registry, the operational event pipeline, the
-  posture export, and the per-entry driven suites.
-
-### Reconnection without silent loss
-
-- **Serves:** application developers whose clients ride unreliable networks.
-- **Measure:** the resume and recover contracts - gap-fill floors, held-frame
-  flushes, truncation escalation, epoch-gated acks - are driven through real
-  sockets, and a client that cannot be made whole is told so rather than
-  left silently behind.
-- **Delivered by:** the resume buffers, the recover lane, the subscription
-  grant model, and the bundled client's reconnect behavior.
-
-### Staying up under abuse
-
-- **Serves:** operators exposed to the open internet.
-- **Measure:** the protection posture ladder (normal, elevated, siege), the
-  upgrade admission queue, and the per-topic pressure thresholds are driven
-  to their edges in the suite, and the posture surface reports what the
-  worker is actually doing.
-- **Delivered by:** the pressure samplers, the posture machines, the
-  admission gate, and the waiting room.
-
-### Releases whose bytes are the verified bytes
-
-- **Serves:** every consumer of the published package.
-- **Measure:** publication is possible only through the tag-triggered
-  two-job workflow; the gate pins the workflow body, the script names AND
-  bodies, and the coordinated train facts (sibling versions, qualification
-  heads, wire-protocol revision) against their sources, and refuses drift.
-- **Delivered by:** the release workflow, `scripts/check-release-workflow.js`,
-  `scripts/check-compatibility.js`, and the compatibility manifest.
-
-### Tests a contributor can trust
-
-- **Serves:** contributors and the maintainers of the sibling packages.
-- **Measure:** the runtime runs on an injectable clock, RNG, and timer seam
-  gated by `scripts/check-determinism.js`; the deterministic simulator
-  reproduces multi-worker schedules; suites drive built output, not mocks.
-- **Delivered by:** the runtime seam, the simulator, the fixture build
-  system, and the real-runtime helpers.
+The 0.6 line is a zero-configuration realtime server for SvelteKit: SSR,
+static serving, and WebSockets on one uWebSockets.js binary, with
+broker-free multi-worker clustering, a binary wire path built for game-tick
+delivery, resume and recover contracts that refuse silent loss, a protection
+posture for the open internet, and an operator-actionable error surface -
+all driven by suites that exercise the built output rather than a mock of it.
 
 ## Non-goals for 0.6
 
