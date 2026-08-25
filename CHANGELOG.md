@@ -52,6 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** The option name, its `0.85` default, the reason precedence, and the gauge name are unchanged; only the measured quantity moved. In a container the resident set is measured against the cgroup memory limit (worst-of with the V8 heap wall), so the signal fires before the kernel's OOM kill rather than never.
   - **Detail:** [Changed engineering detail](#changed).
 
+- **Fixed: remote smooth entities move between packets, not only on them.** The render loop's motion gate read the interpolator's motion flag one line after `beginFrame` had reset it, so the flag was always false, playback frames never rendered, and remote motion was quantized to the packet rate; the gate now captures the flag before the reset.
+  - **Affects:** Apps rendering remote entities through a smooth channel's `onFrame` loop; motion between wire frames now interpolates at display rate instead of freezing until the next packet.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Idle behavior is unchanged - once every entity's ring settles, the loop goes quiet exactly as before; only frames during live playback are added.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a saturated flow-controlled client now lifts the worker pressure value.** The fold of send-gate saturation into `platform.pressure.value` could never fire - the server read its own mirror of the gate, which never consumes a permit and always reads zero - so the client reports its waiting-send backlog in the replenish frame and the server folds that report.
   - **Affects:** Deployments reading `platform.pressure.value` (or `onPressure` snapshots) with flow-controlled clients; the value now rises while such a client reports a starved backlog, and decays as before.
   - **Action:** None; a client that never sends the field keeps today's behavior exactly.
@@ -235,6 +242,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client down would wedge flow control exactly when it is needed.
 
 ### Fixed
+
+- **The smooth render loop paints interpolation playback between wire
+  frames.** The loop's early-out gate read `smoother.motionPending` one line
+  after `smoother.beginFrame(mono)` had reset the per-frame motion
+  accumulator, destroying the previous frame's verdict before the one
+  consumer of it ran. The gate therefore degenerated to
+  `(!dirty && !localMotion)`: `sampleInto` - the only producer of the flag -
+  ran only on dirty (packet-arrival) frames, so a remote entity snapped to a
+  fresh sample whenever a packet landed and held frozen until the next one,
+  and every entity moved in unison at the wire rate regardless of the
+  display's. The verdict is now captured before `beginFrame` runs.
+  Idle behavior is preserved: the flag only bridges playback, so a settled
+  ring reads no motion and the loop still goes quiet. Pinned by a playback
+  test that feeds two stamped samples and counts position advances across
+  the wire-silent frames after them - the pre-capture gate fails it - plus a
+  quiet-after-settle case so the flag cannot pin the loop awake.
 
 - **A saturated flow-controlled client lifts the worker pressure value.** The
   pressure sampler folds the worst per-connection send-gate reading into

@@ -254,6 +254,52 @@ describe('frame-arrival stall', () => {
 	});
 });
 
+describe('interpolation playback between wire frames', () => {
+	it('remote motion renders on frames between packets, not only on arrival', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t);
+		await flush();
+		const xs = [];
+		ch.onFrame((_local, r) => {
+			const o = r.get('other');
+			if (o && typeof o.x === 'number') xs.push(o.x);
+		});
+		// Two stamped samples 80ms apart, then wire silence: everything the
+		// loop paints after the second arrival is pure interpolation playback.
+		const base = Date.now();
+		MockWebSocket._last.emit({ topic: wire(t), event: 'update', data: { key: 'other', data: { x: 0, y: 0 } }, t: base });
+		MockWebSocket._last.emit({ topic: wire(t), event: 'update', data: { key: 'other', data: { x: 100, y: 0 } }, t: base + 80 });
+		await flush(250);
+		ch.destroy();
+		// The two arrival-dirty renders alone can advance the position at most
+		// once; playback must sweep it forward across many display frames.
+		let advances = 0;
+		for (let i = 1; i < xs.length; i++) if (xs[i] > xs[i - 1]) advances++;
+		expect(advances, 'motion must advance on frames no packet landed in').toBeGreaterThanOrEqual(3);
+		expect([...new Set(xs)].length).toBeGreaterThanOrEqual(4);
+	});
+
+	it('the loop goes quiet again once every ring settles', async () => {
+		const t = makeTransport();
+		const ch = makeChannel(t);
+		await flush();
+		const xs = [];
+		ch.onFrame((_local, r) => { xs.push(r.get('other')?.x); });
+		const base = Date.now();
+		MockWebSocket._last.emit({ topic: wire(t), event: 'update', data: { key: 'other', data: { x: 0, y: 0 } }, t: base });
+		MockWebSocket._last.emit({ topic: wire(t), event: 'update', data: { key: 'other', data: { x: 100, y: 0 } }, t: base + 80 });
+		// Give the sweep time to play out and the ring to settle fully. The
+		// quiet window below must stay clear of the 1000ms stall transition,
+		// which sets dirty and legitimately repaints once.
+		await flush(500);
+		const settled = xs.length;
+		await flush(120);
+		ch.destroy();
+		// The motion flag bridges playback; it must not pin the loop awake.
+		expect(xs.length).toBe(settled);
+	});
+});
+
 describe('batched update ingest', () => {
 	it('splits an update-batch envelope into per-entity updates sharing the stamp', async () => {
 		const t = makeTransport();

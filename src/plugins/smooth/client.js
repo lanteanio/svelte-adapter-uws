@@ -671,9 +671,17 @@ export function createSmoothChannel(options) {
 				resync();
 			}
 		}
+		// Capture the last frame's motion verdict BEFORE beginFrame resets the
+		// accumulator: the getter answers for the sampling the PREVIOUS frame
+		// ran, and reading it after the reset left the gate blind to
+		// interpolation playback - remote entities then advanced only on the
+		// frames a packet happened to land in, quantizing motion to the wire
+		// rate. The flag only bridges playback: once every ring settles it
+		// stays false and the loop goes quiet again.
+		const hadMotion = smoother.motionPending;
 		const renderTime = smoother.beginFrame(mono);
 		const localMotion = predictor.renderInto(localPoint, mono);
-		if (!dirty && !smoother.motionPending && !localMotion) return;
+		if (!dirty && !hadMotion && !localMotion) return;
 		dirty = false;
 		if (frameCb === null) return;
 
