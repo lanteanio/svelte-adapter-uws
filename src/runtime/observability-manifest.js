@@ -256,9 +256,10 @@ const SIGNAL_DEFINITIONS = [
 	// Resident memory is process-wide: worker threads share one address
 	// space, so every worker reports the same number.
 	{ name: 'resident_memory_bytes', type: 'gauge', labels: [], unit: 'bytes', scope: 'process', aggregate: 'max', help: 'Resident set size of the process' },
-	// Heap is per-isolate, so each worker thread has its own. The worst
-	// worker is the one that will hit the ceiling first.
-	{ name: 'heap_used_ratio', type: 'gauge', labels: [], unit: 'ratio', scope: 'worker', aggregate: 'max', help: 'Used fraction of this worker isolate V8 heap' },
+	// The heap arm is per-isolate, so each worker thread has its own reading;
+	// the rss arm is process-wide, so workers converge whenever the container
+	// wall dominates. The worst worker is the one nearest a wall.
+	{ name: 'heap_used_ratio', type: 'gauge', labels: [], unit: 'ratio', scope: 'worker', aggregate: 'max', help: 'Used fraction of the nearest memory wall (heap vs the V8 limit, resident set vs the cgroup memory limit, worst-of)' },
 	{ name: 'psi_cpu_some_avg10', type: 'gauge', labels: [], unit: 'percent', scope: 'process', aggregate: 'max', optional: true, help: 'Kernel pressure-stall CPU some avg10' },
 	{ name: 'psi_memory_full_avg10', type: 'gauge', labels: [], unit: 'percent', scope: 'process', aggregate: 'max', optional: true, help: 'Kernel pressure-stall memory full avg10' },
 	{ name: 'psi_io_full_avg10', type: 'gauge', labels: [], unit: 'percent', scope: 'process', aggregate: 'max', optional: true, help: 'Kernel pressure-stall IO full avg10' },

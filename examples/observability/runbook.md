@@ -217,10 +217,13 @@ series for that reason.
 
 ## AdapterHeapPressure
 
-**Means:** a worker isolate's V8 heap is nearly full. Heap is per-isolate, so
-unlike resident memory this is one worker, and the snapshot reports the worst.
+**Means:** a worker is near a memory wall - its heap is approaching the V8
+`heap_size_limit`, or the process's resident set is approaching the cgroup
+memory limit, whichever is nearer. The heap arm is per-isolate, so unlike
+resident memory it names one worker, and the snapshot reports the worst.
 
-**Check:** whether it climbs monotonically (a leak) or tracks load (sizing).
+**Check:** whether it climbs monotonically (a leak) or tracks load (sizing),
+and `resident_memory_bytes` to tell the two walls apart.
 
 **Do:** for a climb with no plateau, the optional resource-growth auditor exists
 to catch exactly that; see `AdapterResourceGrowth`.

@@ -761,7 +761,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// pure helper of integer-only comparisons and one division normalizing
 	// the reported backlog for the pressure fold. No byte is read, allocated
 	// or copied, and no copy primitive entered the graph.
-	ingress: '8ffee506d2600e6fccddd4cb49f57dd25b24f20df205f31e0deafca53c2cd904',
+	// Re-pinned for the memory-wall basis: the drift in this graph is the
+	// observability manifest's heap_used_ratio help string (reached through
+	// utils.js -> utils/metrics.js), rewritten for the new measured quantity.
+	// A data literal off every frame path; no byte is read, allocated or
+	// copied, and no copy primitive entered the graph.
+	ingress: '41f5fcbe15e5b9a6bc12c5b84cd704a51433a82f2f4b2869e0c22a2cc789ad97',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1266,7 +1271,18 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// path) and the pure leaseReportedSaturation helper - integer-only
 	// comparisons and one division. No byte is read, allocated or copied, and
 	// no copy primitive entered the graph.
-	platform: '5647a92e1e72d1bcdc8d1738ab17cb57e8a2e725d448c57ae221a003dfad09b5',
+	// Re-pinned for the memory-wall basis, whose drift in this graph is
+	// threefold, because platform.js imports pressure-metrics.js: the
+	// observability manifest's heap_used_ratio help string (a data literal);
+	// the sampler's memory fold in pressure-metrics.js (the arena-fullness
+	// division replaced by the wall reader's worst-of, plus the module-eval
+	// reader construction); and utils/memory-wall.js entering the graph as a
+	// new module - it carries a readFileSync, the graph's one new byte-reading
+	// primitive, which reads only the cgroup limit files and /proc/self/cgroup
+	// inside the 1 Hz sampler and is reachable from no frame path. No frame
+	// byte is read, allocated or copied, and no copy primitive entered the
+	// graph.
+	platform: '0a0b278033615251d38742e53442f244d5b3ab4f8f4ed32d906be563e3ce7514',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1425,7 +1441,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// leaseReportedSaturation helper - integer-only comparisons and one
 	// division. No byte is read, allocated or copied, and no copy primitive
 	// entered the graph.
-	'wire-fanout': 'f8a8e97a51d858afb556660a08386a9901337430562b8fc02873d1445679b4a0',
+	// Re-pinned for the memory-wall basis: the drift in this graph is the
+	// observability manifest's heap_used_ratio help string (reached through
+	// utils.js -> utils/metrics.js), rewritten for the new measured quantity.
+	// A data literal off every frame path; no byte is read, allocated or
+	// copied, and no copy primitive entered the graph.
+	'wire-fanout': '178daeca5d031d9acac9b378f20fba194f3dce7bbbd23cbefc702a528fea1df0',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

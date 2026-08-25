@@ -46,6 +46,50 @@ describe('grant sizing reads the cached sampler ratio', () => {
 	});
 });
 
+describe('the sampled memory ratio measures the nearest wall, not the arena', () => {
+	it('folds heap and resident set against their walls, worst-of', async () => {
+		const { state, metrics } = await builtModules();
+		try {
+			metrics.startPressureSampling({ sampleIntervalMs: 100 }, undefined);
+			const deadline = Date.now() + 5000;
+			while (state.counters.lastHeapUsedRatio === 0 && Date.now() < deadline) await sleep(20);
+			metrics.stopPressureSampling();
+			const sampled = state.counters.lastHeapUsedRatio;
+			expect(sampled, 'the sampler never wrote a reading').toBeGreaterThan(0);
+
+			// Recompute the expected quantity from the raw primitives, not from
+			// the adapter: node's own isolate limit, and the cgroup limit read
+			// straight off the root files where this machine has one (the walk
+			// beyond the root only matters under a host cgroup namespace, which
+			// neither the dev machines nor the CI containers use). The tolerance
+			// absorbs memory movement between the sampler's tick and this read.
+			const v8mod = await import('node:v8');
+			const fs = await import('node:fs');
+			let cgroupLimit = null;
+			for (const p of ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes']) {
+				try {
+					const text = fs.readFileSync(p, 'utf8').trim();
+					if (/^\d+$/.test(text) && Number(text) < 2 ** 62) { cgroupLimit = Number(text); break; }
+				} catch { /* not this layout */ }
+			}
+			const limit = v8mod.default.getHeapStatistics().heap_size_limit;
+			const mem = process.memoryUsage();
+			const expected = Math.max(
+				mem.heapUsed / limit,
+				cgroupLimit === null ? 0 : mem.rss / cgroupLimit
+			);
+			expect(Math.abs(sampled - expected)).toBeLessThan(0.15);
+			// The arena-fullness reading this replaced sits far above the wall
+			// reading on a test process. Assert the drop only where the walls
+			// are roomy - a memory-limited CI container can legitimately sit
+			// near its wall, and the recomputation above already binds it.
+			if (expected < 0.35) expect(sampled).toBeLessThan(0.5);
+		} finally {
+			metrics.stopPressureSampling();
+		}
+	}, 20000);
+});
+
 describe('listener sweeps iterate a snapshot', () => {
 	afterEach(async () => {
 		const { metrics } = await builtModules();

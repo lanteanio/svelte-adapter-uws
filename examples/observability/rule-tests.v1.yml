@@ -314,8 +314,8 @@ tests:
               job: websocket
               severity: warning
             exp_annotations:
-              summary: A worker isolate heap is nearly full
-              description: Heap is per-isolate, so this is the worst single worker.
+              summary: A worker is near a memory wall
+              description: Heap near the V8 limit or resident set near the cgroup limit; the worst single worker.
               runbook_url: https://ops.example.com/adapter#adapterheappressure
       - eval_time: 20m
         alertname: AdapterCpuThrottled

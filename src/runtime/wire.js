@@ -551,7 +551,8 @@ export function leaseReportedSaturation(raw) {
  * reaching into process state. The caller supplies the live readings.
  *
  * @param {{ heapRatio: number, subscriberRatio: number, base?: number, floor?: number }} w
- *   `heapRatio` is heapUsed/heapTotal (0..1); `subscriberRatio` is total
+ *   `heapRatio` is the used fraction of the effective memory ceiling (0..1,
+ *   the MEMORY signal's nearest-wall basis); `subscriberRatio` is total
  *   subscriptions per connection; `base` is the full window (default
  *   {@link DEFAULT_GRANT}.requestCount); `floor` is the smallest window handed
  *   out (default 8).

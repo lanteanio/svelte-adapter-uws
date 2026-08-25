@@ -1110,8 +1110,10 @@ export interface WebSocketOptions {
 	 *   the target still reads up. Alert on this timestamp's age.
 	 * - `resident_memory_bytes` - process RSS (gauge, sampled). Worker threads
 	 *   share one address space, so every worker reports the same value.
-	 * - `heap_used_ratio` - used fraction of this worker isolate's V8 heap
-	 *   (gauge, sampled). Per-isolate, so each worker has its own.
+	 * - `heap_used_ratio` - used fraction of the nearest memory wall: heap
+	 *   against the V8 `heap_size_limit`, resident set against the cgroup
+	 *   memory limit, worst-of (gauge, sampled). The heap arm is
+	 *   per-isolate, so each worker has its own.
 	 * - `psi_cpu_some_avg10`, `psi_memory_full_avg10`, `psi_io_full_avg10` -
 	 *   kernel pressure-stall readings (gauges, sampled). Registered only when
 	 *   the startup probe finds PSI; a later transient read failure writes `NaN`
@@ -1384,8 +1386,21 @@ export interface WebSocketOptions {
 	 */
 	pressure?: {
 		/**
-		 * Trigger `'MEMORY'` pressure when `process.memoryUsage().heapUsed
-		 * / heapTotal` is greater than or equal to this ratio (0 to 1).
+		 * Trigger `'MEMORY'` pressure when the used fraction of the nearest
+		 * memory wall is greater than or equal to this ratio (0 to 1). Two
+		 * walls are measured, each with the quantity it kills on, and the
+		 * worse reading is reported: `heapUsed` against
+		 * `v8.getHeapStatistics().heap_size_limit` (the ceiling allocation
+		 * failure crashes into), and the resident set against the cgroup
+		 * memory limit where one is discoverable (the kernel's OOM killer
+		 * charges the whole resident set, never the JS heap alone - and in
+		 * a container without `--max-old-space-size` V8's default limit can
+		 * exceed the cgroup's). An idle worker therefore reads a few
+		 * percent, and the ratio approaches 1 as the worker approaches
+		 * whichever out-of-memory death is nearest. (It is
+		 * deliberately not `heapUsed/heapTotal`: V8 keeps the live arena
+		 * sized to current usage, so that fraction reads 60-90% on a
+		 * sleeping server.)
 		 *
 		 * Memory has the highest precedence: a worker approaching OOM
 		 * reports `'MEMORY'` even if publish rate or fan-out are also

@@ -3,6 +3,7 @@ import { foldConnectionBackpressure, takeBackpressureDropWindow, BACKPRESSURE_SA
 import { DEFAULT_GRANT, leaseGrantSize, samplePressureValue } from '../wire.js';
 import { now, setIntervalTimer, clearIntervalTimer } from '../runtime.js';
 import { createOsPressureSampler } from '../utils/os-pressure.js';
+import { createMemoryWallReader } from '../utils/memory-wall.js';
 import { counters, wsConnections, topicSeqs, topicPublishStats, pressureSnapshot, pressureListeners, publishRateListeners, lastPublishWarnAt } from './state.js';
 import { closeHookRegistered } from './config.js';
 import { emitOperationalEvent, diagnosticError } from '../diagnostic.js';
@@ -13,6 +14,12 @@ import { privateValueMetadata } from '../utils/observability-privacy.js';
 // source (non-Linux, PSI compiled out, no cgroup limits) the sampler returns
 // nulls at zero further cost and the pressure math is byte-identical.
 let osPressure = createOsPressureSampler();
+
+// Distance to the nearest memory wall (heapUsed against the V8 limit, rss
+// against the cgroup limit, worst-of) - the basis of the MEMORY signal. Held
+// here so the cgroup discovery state and the latched V8 limit live for the
+// worker.
+const memoryWall = createMemoryWallReader();
 
 /**
  * Bump the per-connection inbound counters. No-op when no `close` hook
@@ -190,11 +197,19 @@ function samplePressure(thresholds) {
 	counters.lastDroppedBytes = droppedBytes;
 
 	const mem = process.memoryUsage();
-	const heapUsedRatio = mem.heapTotal > 0 ? mem.heapUsed / mem.heapTotal : 0;
+	// Distance to the nearest memory WALL, not arena fullness:
+	// heapUsed/heapTotal reads 60-90% on an idle process because V8 keeps the
+	// arena small, which made the MEMORY signal and the headline value fire on
+	// a sleeping server. Each wall is measured with the quantity it kills on -
+	// heapUsed against the V8 limit, rss against the cgroup limit - because
+	// the kernel's OOM killer charges the whole resident set, never the JS
+	// heap alone.
+	const heapUsedRatio = memoryWall.ratio(mem);
 	const memoryMB = mem.rss / (1024 * 1024);
-	// Both retained for the metrics hook. Resident memory is process-wide (worker
-	// threads share one address space); the heap ratio is per-isolate, so each
-	// worker thread reports its own.
+	// Both retained for the metrics hook. Resident memory is process-wide
+	// (worker threads share one address space); the wall ratio's heap arm is
+	// per-isolate while its rss arm is that same process-wide value, so
+	// workers report identically whenever the container wall dominates.
 	counters.lastHeapUsedRatio = heapUsedRatio;
 	counters.lastResidentBytes = mem.rss;
 

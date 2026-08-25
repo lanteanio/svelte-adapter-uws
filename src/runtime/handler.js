@@ -764,7 +764,7 @@ if (WS_ENABLED) {
 		'resident_memory_bytes', 'Resident set size of the process'
 	));
 	const gHeapUsedRatio = containMetricInstrument(METRICS?.gauge(
-		'heap_used_ratio', 'Used fraction of this worker isolate V8 heap'
+		'heap_used_ratio', 'Used fraction of the nearest memory wall (heap vs the V8 limit, resident set vs the cgroup memory limit, worst-of)'
 	));
 	// Freshness of the sample the gauges above were written from. The pressure
 	// timer is unref'd and driven from one interval; if it ever stops, every

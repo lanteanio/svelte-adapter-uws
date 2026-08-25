@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** The field stays a wire-legal integer, so no schema type changes. After a deploy a client that had a live epoch sees it change once and performs one full re-read per topic, exactly as it does across any restart; nothing is lost.
   - **Detail:** [Changed engineering detail](#changed).
 
+- **Changed: an idle worker no longer reports memory pressure.** The MEMORY signal measured V8 arena fullness (`heapUsed/heapTotal`), which reads 60-90% on a sleeping process because V8 keeps the arena sized to usage, so the headline pressure value sat near 0.65 while nothing was happening; the basis is now distance to the nearest memory wall.
+  - **Affects:** Deployments reading `platform.pressure` (the `value` scalar, the `MEMORY` reason) or the `heap_used_ratio` gauge; idle readings drop to a few percent and rise only toward a real out-of-memory wall.
+  - **Action:** None at the default threshold. A deployment that raised `memoryHeapUsedRatio` (for example to `0.97`) to silence idle noise should return to the `0.85` default.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The option name, its `0.85` default, the reason precedence, and the gauge name are unchanged; only the measured quantity moved. In a container the resident set is measured against the cgroup memory limit (worst-of with the V8 heap wall), so the signal fires before the kernel's OOM kill rather than never.
+  - **Detail:** [Changed engineering detail](#changed).
+
 - **Fixed: a saturated flow-controlled client now lifts the worker pressure value.** The fold of send-gate saturation into `platform.pressure.value` could never fire - the server read its own mirror of the gate, which never consumes a permit and always reads zero - so the client reports its waiting-send backlog in the replenish frame and the server folds that report.
   - **Affects:** Deployments reading `platform.pressure.value` (or `onPressure` snapshots) with flow-controlled clients; the value now rises while such a client reports a starved backlog, and decays as before.
   - **Action:** None; a client that never sends the field keeps today's behavior exactly.
@@ -185,6 +192,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line is for, what it deliberately will not do, and the independently
   checkable evidence that gates promotion to `latest` - the parts a consumer
   or a maintainer acts on. The exit contract is unchanged.
+
+- **The MEMORY pressure basis is distance to the nearest wall, not arena
+  fullness.** The memory sample fed to the reason comparison, the `value`
+  fold, the `heap_used_ratio` gauge, and the send-gate window sizing was
+  `heapUsed/heapTotal` - a per-isolate arena-fullness reading that sits at
+  60-90% on an idle process and saws with GC. The sample is now the
+  worst of two walls, each measured with the quantity it kills on:
+  `heapUsed` against `v8.getHeapStatistics().heap_size_limit` (latched
+  once and treated as fixed for the process life), and the resident set
+  against the cgroup memory limit - rss and not heap, because the kernel's
+  OOM killer charges the whole resident set, so a heap-based reading
+  against the container wall would sit below any threshold at the moment
+  of the kill on a stack carrying native memory. The cgroup limit is
+  discovered once: at the cgroup root (the container default - a private
+  cgroup namespace presents the pod limit there) and, where
+  `/proc/self/cgroup` names a deeper visible path (a host cgroup
+  namespace), at the process's own group and its ancestors, latching the
+  file with the tightest limit; v2 `memory.max` and v1
+  `memory.limit_in_bytes` are both understood, `max` and the v1 sentinel
+  mean no wall, a confirmed absence stops the reads for good, and a
+  transient failure keeps discovery armed. Purely-native growth on an
+  uncontained host stays the job of PSI memory pressure and
+  `resident_memory_bytes`. The `memoryHeapUsedRatio` name and `0.85`
+  default are unchanged - idle now reads a few percent, and 0.85 is
+  OOM-adjacent on both walls because each arm measures the quantity its
+  wall kills on. Pinned by pure availability-shape tests and by
+  recomputing the sampled reading from the raw isolate and cgroup
+  primitives on the built modules.
 
 - **The per-topic byte-rate stat documents its unit.** `topicPublishBytesPerSec`
   and the `bytesPerSec` field it gates always measured UTF-16 code units of
