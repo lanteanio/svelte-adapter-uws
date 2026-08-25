@@ -747,12 +747,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// sealed graph. Integer arithmetic only - no statement touches a frame,
 	// no byte is read, allocated or copied, and no copy primitive entered
 	// the graph.
-	// Re-pinned for the boot-warmup error entry. The drift is in
-	// error-registry.js, reached through this graph via utils.js: one added id
-	// constant (WARMUP_RENDER) and its frozen registry entry object - structure
-	// and data literals only, no statement executes on any frame path and no
-	// copy primitive entered the graph.
-	ingress: '80acf12ebd72e5ff0bdce58498ac1324c3278ad4b80b3cd33ece16d8588fed26',
+	// Re-pinned for the opaque-epoch domain change. The drift is in
+	// utils/epoch.js, reached through this graph via utils.js: processEpoch now
+	// latches `randomU32()` instead of `wallEpoch()` (one changed call and its
+	// import), and its doc comment changed. No frame path, no bytes, no copy
+	// primitive - the epoch is a subscribe/ack field, off every byte-owning
+	// path. Carries the prior boot-warmup error-registry entry drift.
+	ingress: '8503e83be07f6fd767cd76153f7de12577ce5816d6bacd7efcbaf80ea7ed11b2',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1244,16 +1245,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the delegating room method; the header writes themselves live in
 	// handler.js and testing.js, outside every sealed graph. No frame path,
 	// no bytes, no copy primitive.
-	// Re-pinned for boot warmup. The drift in this graph is two data/structure
-	// additions: platform.js gains the isWarmupRequest method (a membership
-	// delegate) and its import of the leaf warmup-registry.js (the request-tag
-	// WeakSet, deliberately a leaf so the whole warmup render module stays OUT
-	// of this sealed graph), and error-registry.js - reached through this graph
-	// - gains the WARMUP_RENDER id constant and its frozen entry. Neither
-	// touches a frame path, reads a byte, or introduces a copy primitive; the
-	// prior cluster-metrics-merge drift (bounded label sets, trimmed inventory,
-	// capped series in utils/metrics-merge.js) is carried in this same digest.
-	platform: '215db6ec25597c0e84df1b0c67803be411e15fa85f476d504631ffd89b505b79',
+	// Re-pinned for the opaque-epoch domain change: utils/epoch.js, reached
+	// through this graph, latches `randomU32()` instead of `wallEpoch()` (one
+	// changed call, its import, and the doc comment). The epoch is a
+	// subscribe/ack field off every byte-owning path - no frame path, no bytes,
+	// no copy primitive. Carries the prior boot-warmup drift (the isWarmupRequest
+	// delegate plus the leaf warmup-registry.js import and the error-registry
+	// entry) and the cluster-metrics-merge bounds before it.
+	platform: 'd5b00e902f0ded97025579c95369ae0c2161261e5173129b5807d2c2e1cb45d0',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1400,11 +1399,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the delegating room method; the header writes themselves live in
 	// handler.js and testing.js, outside every sealed graph. No frame path,
 	// no bytes, no copy primitive.
-	// Re-pinned for the boot-warmup error entry: error-registry.js is reached
-	// through this graph too, and gains the WARMUP_RENDER id constant and its
-	// frozen entry - structure and data only, no frame path, no bytes, no copy
-	// primitive.
-	'wire-fanout': '48344c9a91b371d5c1fae6bb0096ce3dcca3d52a173124ca5211946b2ddc16b6',
+	// Re-pinned for the opaque-epoch domain change: utils/epoch.js is reached
+	// through this graph too, and now latches `randomU32()` instead of
+	// `wallEpoch()`. The epoch is a subscribe/ack field off every byte-owning
+	// path - no frame path, no bytes, no copy primitive. Carries the prior
+	// boot-warmup error-registry entry drift.
+	'wire-fanout': '01e6f05b7e0824064b423358d72366ec2ecfed79a5a380bde507057aba70f280',
 	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({

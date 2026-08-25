@@ -332,8 +332,17 @@ describe('runSim multi-worker - per-worker epoch', () => {
 		});
 		const ep0 = flat(r.clusterFrames, 0).find((f) => f && f.type === 'subscribed');
 		const ep1 = flat(r.clusterFrames, 1).find((f) => f && f.type === 'subscribed');
-		expect(ep0.epoch).toBe(FIXED_EPOCH);       // worker 0 = base
-		expect(ep1.epoch).toBe(FIXED_EPOCH + 1);   // worker 1 = base + id
+		// Each worker presents a DISTINCT opaque u32 token - the property that
+		// makes a client re-read when it reconnects to a different worker. The
+		// tokens are the seeded process token offset by worker id, so they are
+		// deterministic and distinct, never the wall clock.
+		for (const ep of [ep0, ep1]) {
+			expect(Number.isInteger(ep.epoch)).toBe(true);
+			expect(ep.epoch).toBeGreaterThanOrEqual(0);
+			expect(ep.epoch).toBeLessThanOrEqual(0xffffffff);
+			expect(ep.epoch).not.toBe(FIXED_EPOCH);
+		}
+		expect(ep1.epoch).toBe((ep0.epoch + 1) >>> 0); // worker 1 = base token + id
 		expect(ep0.epoch).not.toBe(ep1.epoch);
 	});
 });

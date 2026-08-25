@@ -49,13 +49,23 @@ describe('runSim - determinism self-gate', () => {
 		expect(differ).toBe(true);
 	});
 
-	it('stamps the virtual clock into the subscribed ack epoch, not the real wall time', async () => {
+	it('stamps a deterministic opaque token into the subscribed ack epoch, not the real wall time', async () => {
 		const r = await runSim({ seed: 'epoch', clients: 1, topics: ['room'] });
 		const sub = r.clientFrames[0].find((f) => f && f.type === 'subscribed');
 		expect(sub).toBeTruthy();
-		// The epoch is the per-process seq-space generation, re-latched from the
-		// virtual clock - so it is the fixed virtual baseline, not a real timestamp.
-		expect(sub.epoch).toBe(FIXED_EPOCH);
+		// The epoch is the per-process generation token, latched from the seeded
+		// RNG the sim installs. It is an opaque u32, NOT the wall clock: the old
+		// wall-clock latch would have made it the fixed virtual baseline (and, in
+		// production, leaked the process start time).
+		expect(Number.isInteger(sub.epoch)).toBe(true);
+		expect(sub.epoch).toBeGreaterThanOrEqual(0);
+		expect(sub.epoch).toBeLessThanOrEqual(0xffffffff);
+		expect(sub.epoch).not.toBe(FIXED_EPOCH);
+		// And it is deterministic: the same seed reproduces the same token, which
+		// is what lets a simulation replay a schedule bit-for-bit.
+		const again = await runSim({ seed: 'epoch', clients: 1, topics: ['room'] });
+		const sub2 = again.clientFrames[0].find((f) => f && f.type === 'subscribed');
+		expect(sub2.epoch).toBe(sub.epoch);
 	});
 
 	it('replaySim reproduces a clean run', async () => {

@@ -1,4 +1,4 @@
-import { now, wallEpoch, randomUuid } from '../runtime.js';
+import { now, randomU32, randomUuid } from '../runtime.js';
 
 /**
  * Per-process generation for the in-memory per-topic seq space.
@@ -14,19 +14,23 @@ import { now, wallEpoch, randomUuid } from '../runtime.js';
  * seq authority can reset per topic independently (a separate store) overrides
  * the carried value per topic without changing the wire shape.
  *
- * Read through the seam's wall clock so two boots almost never collide; the
- * low-order millisecond bits are enough to distinguish consecutive restarts,
- * and the value only ever has to differ from the immediately-previous boot for
- * the mismatch detection to fire. Never persisted - a fresh process is, by
- * definition, a fresh seq space. Latching on first read (rather than at module
- * import) lets a controlled simulation that has installed a virtual clock latch a
- * reproducible value after `resetProcessEpoch()`.
+ * An OPAQUE token, not a timestamp. It is a random 32-bit integer from the
+ * seam's RNG, and the ONLY comparison the wire cares about is equality across
+ * a reconnect: any two consecutive boots differ (a 2^-32 collision with the
+ * immediately-previous value is the sole failure mode, and it degrades to one
+ * missed reset, not corruption). A wall-clock epoch would have distinguished
+ * restarts just as well, but it also handed every unauthenticated client the
+ * process start time - uptime, deploy timing, and a correlation fingerprint
+ * across sockets behind a load balancer - so the token carries no time. Never
+ * persisted; a fresh process is a fresh seq space. Latching on first read
+ * (rather than at module import) lets a controlled simulation that has seeded
+ * the RNG latch a reproducible value after `resetProcessEpoch()`.
  *
  * @returns {number}
  */
 let _processEpoch;
 export function processEpoch() {
-	if (_processEpoch === undefined) _processEpoch = wallEpoch();
+	if (_processEpoch === undefined) _processEpoch = randomU32();
 	return _processEpoch;
 }
 

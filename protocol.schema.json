@@ -72,7 +72,7 @@
       "type": "object",
       "properties": {
         "offset": { "type": "integer" },
-        "epoch": { "type": "integer" }
+        "epoch": { "type": "integer", "description": "Opaque per-process generation token, compared for equality only. Never a timestamp: do not interpret, render as a date, or store in a time-typed column. It changes when the server's seq space resets, which is the only fact a client reads from it." }
       },
       "required": ["offset"]
     },
@@ -141,7 +141,7 @@
         "type": { "const": "subscribed" },
         "topic": { "type": "string" },
         "ref": { "$ref": "#/$defs/ref" },
-        "epoch": { "type": "integer" }
+        "epoch": { "type": "integer", "description": "Opaque per-process generation token, compared for equality only. Never a timestamp: do not interpret, render as a date, or store in a time-typed column. A reconnecting client compares it to the one it last saw; a different value means the server's seq space reset and the client must re-read rather than trust its old offsets." }
       },
       "required": ["type", "topic", "ref", "epoch"]
     },

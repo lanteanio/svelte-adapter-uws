@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** At the default base the normal-posture band moves from a constant `2` to `2..3` and a base of one gains the same two-value band below siege; every other band is unchanged, with only within-band probabilities shifting where `base * spread` is not an integer.
   - **Detail:** [Changed engineering detail](#changed).
 
+- **Changed: the subscribe/resume epoch is a random token, not the process start time.** The per-process epoch a subscribe ack carries was the boot wall-clock in milliseconds, leaking uptime, deploy timing, and a cross-socket correlation fingerprint to every client; it is now a random 32-bit integer, an opaque token whose only meaning is equality across a reconnect.
+  - **Affects:** Clients that (incorrectly) interpreted the epoch as a timestamp; a client that compared it only for equality, as the protocol always specified, is unaffected.
+  - **Action:** None for a correct client. If any client code renders the epoch as a date or stores it in a time-typed column, stop - it was never a time; compare it only for equality.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The field stays a wire-legal integer, so no schema type changes. After a deploy a client that had a live epoch sees it change once and performs one full re-read per topic, exactly as it does across any restart; nothing is lost.
+  - **Detail:** [Changed engineering detail](#changed).
+
 - **Fixed: a crafted duplicate command id is dropped at decode.** The smooth command codec enforced strictly increasing ids only at encode, so a hand-built ingress frame carrying a zero id delta decoded cleanly and could double-apply a command id; decode now drops the duplicate and keeps the entries behind it intact.
   - **Affects:** Deployments accepting binary smooth-command ingress from untrusted clients; the JSON command path and every well-formed client are unchanged.
   - **Action:** None; the encoder never produced such frames, so only crafted or corrupt input behaves differently.
@@ -125,6 +132,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `base * spread` shifts probability inside an unchanged band). Pinned by
   deterministic injected-RNG cases on the shared arithmetic and by the
   existing posture-band cases, which pass unchanged.
+
+- **The per-process epoch latches a random 32-bit integer instead of the
+  wall clock.** The subscribe/resume epoch is the per-worker generation token
+  a reconnecting client compares to detect a reset seq space - opaque by
+  contract, only ever tested for equality. Latching it from the boot
+  wall-clock made it a working timestamp: a boot-time epoch leaks the process
+  start time to every unauthenticated client, which is uptime, deploy timing,
+  and a cross-socket correlation fingerprint behind a load balancer. It now
+  latches `randomU32()` from the runtime RNG seam - the one latch every emit
+  site (production, dev, and testing all reach `processEpoch()`) draws from,
+  so the domain moves everywhere at once. Reproducible under a seeded RNG, so
+  the deterministic simulator still replays. The value stays an integer, so
+  the wire type is unchanged; `protocol.schema.json` now documents both epoch
+  fields as opaque equality-only tokens, and the client's existing
+  equality-only handling is unchanged. Pinned by domain tests (the latch
+  reads the RNG not the clock, changes across a restart, stays in
+  `[0, 2^32)`) and the schema-description assertion; the resume suite's epoch
+  cases pass unchanged. The random-token choice is the family contract the
+  Bun sibling mirrors.
 
 - **ROADMAP.md drops the outcome map, keeping the line's purpose, non-goals,
   and promotion exit contract.** The outcome map enumerated each outcome, the

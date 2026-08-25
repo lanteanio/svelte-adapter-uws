@@ -10,7 +10,7 @@ import { createScheduler, createSeededRng, createFaultEngine, DEFAULT_SEED, FIXE
 import { createInMemoryApp, createInMemoryUwsHelpers } from './runtime/sim-inmemory.js';
 import { setRuntimeEnv, resetRuntimeEnv } from './runtime/runtime.js';
 import { createTestServer } from './testing.js';
-import { WS_SUBSCRIPTIONS, resetProcessEpoch } from './runtime/utils.js';
+import { WS_SUBSCRIPTIONS, resetProcessEpoch, processEpoch } from './runtime/utils.js';
 import { checkSubscriptionBookkeeping } from './runtime/invariants.js';
 import { createConsistencyAuditor } from './runtime/auditor.js';
 import { createResourceTracker } from './runtime/leak-detect.js';
@@ -519,13 +519,14 @@ async function runClusterSim(config) {
 				__uws: uws,
 				__onPublish: relay.onPublish
 			});
-			// Per-worker topic generation, re-latched from the virtual clock on each
-			// (re)spawn so a restarted worker presents a fresh generation - modeling
-			// production's per-worker processEpoch. The +id tie-breaks the initial
-			// cohort (all spawned at startEpoch); a respawn re-latches from the advanced
-			// clock, which can in principle coincide with a live worker's generation,
-			// exactly as two production boots in the same millisecond can.
-			const epoch = scheduler.now() + id;
+			// Per-worker topic generation - the opaque token a subscribe ack
+			// carries. Production latches a random u32 per worker (never the wall
+			// clock, which would leak the process start time); the sim models the
+			// same domain deterministically by offsetting the seeded process
+			// token by the worker id, so each worker presents a DISTINCT opaque
+			// u32 that reproduces across runs. A respawn re-latches through
+			// `resetProcessEpoch`, exactly as a production restart does.
+			const epoch = (processEpoch() + id) >>> 0;
 			server.platform.topicEpoch = (t) => { void t; return epoch; };
 			bus.register(id, server.platform.__relayReceive);
 			const wobj = { id, app, server, relay, epoch, clients: [], auditor: createSimAuditor(() => app) };

@@ -6692,7 +6692,7 @@ An intentional behavior change is blessed by re-running `--update` and committin
 | `createInMemoryApp({ scheduler, faultEngine, port })` | The in-memory uWS-shaped server: `ws`, `get`, `publish`, `numSubscribers`, `listen`, plus the sim-only `connect()` that returns a scripted client facade. |
 | `createInMemoryUwsHelpers(app)` | The uWS helper bundle (`App`, `SSLApp`, socket helpers, compressor flags) `createTestServer` needs alongside the in-memory app. |
 | `setRuntimeEnv(env, { force: true })` / `resetRuntimeEnv()` | Install / restore the runtime seam (clock, RNG, timers) the adapter runtime reads. Always restore in a `finally`. |
-| `resetProcessEpoch()` | Re-latch per-process epoch-derived state from the (virtual) clock so acks and derived timestamps reproduce bit-for-bit across runs. |
+| `resetProcessEpoch()` | Re-latch the per-process generation token from the (seeded) RNG so subscribe/resume acks reproduce bit-for-bit across runs. The token is opaque - equality-only, never a timestamp. |
 | `DEFAULT_SEED` / `FIXED_EPOCH` | The seed and virtual start epoch a run falls back to when `seed` / `startEpoch` are omitted. |
 
 ```js
