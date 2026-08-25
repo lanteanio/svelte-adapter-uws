@@ -4,7 +4,7 @@ import { collectRequestHeaders } from './runtime/utils/request-headers.js';
 import { stampSeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readMetricMirror, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createSeqBound } from './runtime/utils/seq-bound.js';
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
-import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
+import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
@@ -2947,15 +2947,16 @@ export async function createTestServer(options = {}) {
 							// production handler. Only the first hello allocates
 							// the slot and emits the first window; absence of the
 							// cap keeps the immediate send path byte-identical.
-							// Grant-and-observe like production: hand out a window
-							// and read the saturation scalar, never consume a permit
-							// here (the client paces itself). The harness pins the
-							// static default window so the wire transcript is stable;
+							// Grant-and-observe like production: hand out a window,
+							// never consume a permit here (the client paces itself);
+							// the saturation reading comes from the client's reported
+							// backlog on request-n. The harness pins the static
+							// default window so the wire transcript is stable;
 							// production sizes it from live worker posture.
 							if (caps.has('lease') && !helloUd[WS_LEASE]) {
 								const window = createLeaseState({ requestCount: DEFAULT_GRANT.requestCount, ttlMs: DEFAULT_GRANT.ttlMs });
 								window.grant();
-								helloUd[WS_LEASE] = { gate: window, saturation: window.pressureValue() };
+								helloUd[WS_LEASE] = { gate: window, saturation: 0 };
 								sendOutboundT(ws, '{"type":"lease-ok"}');
 								sendOutboundT(ws, leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs));
 							}
@@ -3225,9 +3226,13 @@ export async function createTestServer(options = {}) {
 						if (msg.type === 'request-n') {
 							const slot = ws.getUserData()[WS_LEASE];
 							if (slot) {
+								// The frame's reported backlog is the saturation reading
+								// (mirror of the production handler): the mirror gate
+								// never consumes a permit, so reading it here would
+								// always say 0.
+								slot.saturation = leaseReportedSaturation(msg.queued);
 								slot.gate.requestN(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs);
 								sendOutboundT(ws, leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs));
-								slot.saturation = slot.gate.pressureValue();
 							}
 							return;
 						}

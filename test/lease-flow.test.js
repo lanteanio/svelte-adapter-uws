@@ -17,7 +17,9 @@ import {
 	createLeaseState,
 	leasePressureValue,
 	leaseGrantSize,
+	leaseReportedSaturation,
 	samplePressureValue,
+	requestNFrame,
 	parseBinaryFrame
 } from '../src/runtime/wire.js';
 
@@ -192,6 +194,39 @@ describe('connection saturation scalar', () => {
 		expect(leasePressureValue({ granted: 4, available: 1, fallback: 0 })).toBeCloseTo(0.75, 5);
 		// idle: outstanding 0 -> 0 regardless of fallback.
 		expect(leasePressureValue({ granted: 4, available: 4, fallback: 0.9 })).toBe(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Replenish frame + the reported-backlog saturation reading
+// ---------------------------------------------------------------------------
+
+describe('replenish frame and reported saturation', () => {
+	it('emits the historical byte shape when no backlog is reported', () => {
+		expect(requestNFrame(256)).toBe('{"type":"request-n","n":256}');
+		expect(requestNFrame(256, 0)).toBe('{"type":"request-n","n":256}');
+	});
+
+	it('carries the backlog as the additive queued field', () => {
+		expect(requestNFrame(256, 12)).toBe('{"type":"request-n","n":256,"queued":12}');
+	});
+
+	it('normalizes a reported backlog into 0..1 against the reference queue bound', () => {
+		// 0 is what an old client (no field) produces, and what every malformed
+		// report collapses to - the wire value is untrusted input.
+		expect(leaseReportedSaturation(undefined)).toBe(0);
+		expect(leaseReportedSaturation(null)).toBe(0);
+		expect(leaseReportedSaturation('12')).toBe(0);
+		expect(leaseReportedSaturation(NaN)).toBe(0);
+		expect(leaseReportedSaturation(Infinity)).toBe(0);
+		expect(leaseReportedSaturation(-5)).toBe(0);
+		expect(leaseReportedSaturation(0)).toBe(0);
+		// The field is an integer by schema; any fractional claim is malformed.
+		expect(leaseReportedSaturation(0.9)).toBe(0);
+		expect(leaseReportedSaturation(1.5)).toBe(0);
+		expect(leaseReportedSaturation(64)).toBeCloseTo(0.25, 5); // 64 of the 256 bound
+		expect(leaseReportedSaturation(256)).toBe(1);
+		expect(leaseReportedSaturation(1e9)).toBe(1); // a hostile claim caps at 1
 	});
 });
 

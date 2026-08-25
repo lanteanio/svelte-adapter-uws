@@ -28,7 +28,7 @@ import { privateValueMetadata } from './utils/observability-privacy.js';
 import { probeOsPressureSources, emitPressureMetricTelemetry } from './utils/os-pressure.js';
 import { parseCookies, createCookies } from './cookies.js';
 import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, pendingSubscribeTotal, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
-import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
+import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, leaseReportedSaturation, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { registerGameIngress, gameLaneClusterSafe } from './handler/game-ingress.js';
 import { seqBound } from './handler/seq-bound.js';
@@ -2871,15 +2871,16 @@ if (WS_ENABLED) {
 					// re-sent hello (lazy-plugin re-advertise) does not reset it.
 					if (caps.has('lease') && !ud[WS_LEASE]) {
 						// The server is grant-and-observe, not enforcing: it sizes
-						// and hands out windows the client paces itself against, and
-						// reads pressureValue() for the worker saturation scalar. It
+						// and hands out windows the client paces itself against. It
 						// never consumes a permit (no tryAcquire here) - the same
 						// state machine's acquire/enqueue surface is the CLIENT's,
 						// where the flood risk lives and the pacing is enforced.
+						// The worker saturation scalar therefore comes from the
+						// client's reported backlog on request-n, not this mirror.
 						const g = grantSizeFor();
 						const window = createLeaseState({ requestCount: g.count, ttlMs: g.ttlMs });
 						window.grant();
-						ud[WS_LEASE] = { gate: window, saturation: window.pressureValue() };
+						ud[WS_LEASE] = { gate: window, saturation: 0 };
 						// Echo that the capability is honoured, then hand out
 						// the first window. Additive: old clients never sent the
 						// cap so never receive these.
@@ -2993,13 +2994,20 @@ if (WS_ENABLED) {
 					// have no slot; the request is a no-op for them.
 					const slot = ws.getUserData()[WS_LEASE];
 					if (slot) {
+						// Saturation comes from the frame's reported backlog, not from
+						// this mirror gate: the server never consumes a permit, so the
+						// mirror reads 0 while unexpired and 1 once the TTL lapses -
+						// which marks an idle client resuming, the opposite of
+						// saturation. The client reports how many sends its spent
+						// window left waiting; a healthy low-water replenish reports
+						// none and keeps the peak untouched.
+						slot.saturation = leaseReportedSaturation(msg.queued);
+						if (slot.saturation > counters.leaseSaturationPeak) counters.leaseSaturationPeak = slot.saturation;
 						const g = grantSizeFor();
 						slot.gate.requestN(g.count, g.ttlMs);
 						const frame = leaseGrantFrame(g.count, g.ttlMs);
 						ws.send(frame, false, false);
 						bumpOut(ws, frame);
-						slot.saturation = slot.gate.pressureValue();
-						if (slot.saturation > counters.leaseSaturationPeak) counters.leaseSaturationPeak = slot.saturation;
 					}
 					return;
 				}

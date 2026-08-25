@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './runtime/cookies.js';
 import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, throwInvalidSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_ATTRIBUTION, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
-import { createLeaseState, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
+import { createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
 import {
@@ -2766,7 +2766,7 @@ export default function uws(options = {}) {
 									if (caps.has('lease') && !ud[WS_LEASE]) {
 										const gate = createLeaseState({ requestCount: DEFAULT_GRANT.requestCount, ttlMs: DEFAULT_GRANT.ttlMs });
 										gate.grant();
-										ud[WS_LEASE] = { gate, saturation: gate.pressureValue() };
+										ud[WS_LEASE] = { gate, saturation: 0 };
 										ws.send('{"type":"lease-ok"}');
 										bumpOutV(ud, '{"type":"lease-ok"}');
 										const frame = leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs);
@@ -3064,11 +3064,15 @@ export default function uws(options = {}) {
 								const ud = /** @type {any} */ (ws).__userData;
 								const slot = ud && ud[WS_LEASE];
 								if (slot) {
+									// The frame's reported backlog is the saturation reading
+									// (mirror of the production handler): the mirror gate
+									// never consumes a permit, so reading it here would
+									// always say 0.
+									slot.saturation = leaseReportedSaturation(msg.queued);
 									slot.gate.requestN(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs);
 									const frame = leaseGrantFrame(DEFAULT_GRANT.requestCount, DEFAULT_GRANT.ttlMs);
 									ws.send(frame);
 									bumpOutV(ud, frame);
-									slot.saturation = slot.gate.pressureValue();
 								}
 								return;
 							}

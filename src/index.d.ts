@@ -1453,6 +1453,14 @@ export interface WebSocketOptions {
 		 * When a topic's outgoing bytes per second cross this value the
 		 * same surface fires as `topicPublishRatePerSec`.
 		 *
+		 * The rate is measured in UTF-16 code units of the JSON envelope,
+		 * which equals bytes for ASCII envelopes; a heavily non-ASCII
+		 * payload reads up to 3x under its UTF-8 wire size. The unit is
+		 * deliberate: this is an advisory detection signal, and an exact
+		 * byte count would put an O(length) encode on every publish. The
+		 * `egress` ceilings - which refuse rather than warn - charge real
+		 * wire bytes.
+		 *
 		 * Set to `false` to disable per-topic byte-rate detection.
 		 *
 		 * @default 10485760 (10 MB/s)
@@ -2517,6 +2525,17 @@ export interface PressureSnapshot {
 	 * worst per-connection internal flow-control reading. Use it for a coarse
 	 * "how loaded is this worker" gauge (e.g. `value > 0.8` for a high-load
 	 * guard); `reason` still names the most urgent specific signal.
+	 *
+	 * The per-connection component is a client-asserted report: a
+	 * flow-controlled client states its own starved-send backlog when it asks
+	 * for a fresh window, because the server deliberately never mirrors the
+	 * client's permit consumption. The report is clamped to at most `1` and
+	 * halved every sample, so the worst a hostile or broken client can do is
+	 * hold `value` high while it keeps re-asserting - it can never touch
+	 * `reason`, `active`, or any admission posture, which derive only from
+	 * server-side counters. Automation that must resist a lying client should
+	 * gate on `reason` (or the specific snapshot fields) rather than on
+	 * `value` alone.
 	 */
 	readonly value: number;
 	/**
@@ -2607,6 +2626,11 @@ export interface PressureSnapshot {
 export interface TopicPublishRate {
 	topic: string;
 	messagesPerSec: number;
+	/**
+	 * Envelope size per second in UTF-16 code units (equal to bytes for
+	 * ASCII envelopes) - the unit `topicPublishBytesPerSec` is compared
+	 * against.
+	 */
 	bytesPerSec: number;
 	/**
 	 * Egress deliveries per second for the topic (local recipients times

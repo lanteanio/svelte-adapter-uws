@@ -364,7 +364,7 @@ client's mechanism; the whole-session `resume` frame is retained for compatibili
 | Frame | Dir | Shape |
 |---|---|---|
 | `lease` | s->c | `{"type":"lease","count":<int>,"ttlMs":<int>}` |
-| `request-n` | c->s | `{"type":"request-n","n":<int>}` |
+| `request-n` | c->s | `{"type":"request-n","n":<int>,"queued"?:<int>}` |
 
 Credit-based backpressure, active only when the client advertised the `lease`
 capability. The server grants a window (`lease`); the client replenishes
@@ -373,6 +373,15 @@ pressure posture and MAY ignore `request-n`'s `n`**: `n` is advisory, and a
 client MUST NOT build credit math that assumes the next grant equals the `n` it
 sent. A client that does not advertise `lease` never sees these frames and is
 never flow-controlled at the protocol layer.
+
+`queued` is the sender's permit-starved backlog at request time: how many
+sends are waiting because the current window is spent or expired. It is an
+optional additive field (section 10): a client with no backlog SHOULD omit it,
+an absent or zero field claims no backlog, and a peer that predates the field
+ignores it. It is advisory and untrusted - a server MAY fold it into its own
+pressure accounting but MUST clamp any use of the value to its own bounds, and
+MUST NOT require the field for any grant decision, so a client that never
+sends it remains fully flow-controlled.
 
 ### 3.7 Errors
 

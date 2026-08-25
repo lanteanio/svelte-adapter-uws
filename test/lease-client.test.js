@@ -172,6 +172,25 @@ describe('adapter client send gate (production-wired)', () => {
 		off();
 	});
 
+	it('reports its permit-starved backlog in the replenish request, and only then', async () => {
+		// Spend the only permit: the replenish fires from the !fresh branch with
+		// an empty queue, so it carries NO backlog - the historical byte shape.
+		openWindow(sock, 1);
+		await subscribeOne(conn, 'r-0');
+		for (let i = 1; i <= 4; i++) await subscribeOne(conn, 'r-' + i); // queue 4, latch holds
+		const first = sentFrames(sock).filter((f) => f && f.type === 'request-n');
+		expect(first.length).toBe(1);
+		expect(Object.prototype.hasOwnProperty.call(first[0], 'queued'), 'no backlog yet, so no field').toBe(false);
+
+		// A re-grant smaller than the backlog drains two, re-arms the latch, and
+		// the next starved send asks again - now reporting what is still waiting.
+		openWindow(sock, 2); // drains r-1, r-2; r-3 and r-4 stay queued
+		await subscribeOne(conn, 'r-5'); // queues (window spent) -> replenish
+		const reqs = sentFrames(sock).filter((f) => f && f.type === 'request-n');
+		expect(reqs.length).toBe(2);
+		expect(reqs[1].queued, 'the frame reports the live backlog at request time').toBe(3);
+	});
+
 	it('never leaks a window count or deadline onto a sent frame', async () => {
 		openWindow(sock, 4);
 		for (let i = 0; i < 10; i++) await subscribeOne(conn, 'w-' + i);

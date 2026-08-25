@@ -220,7 +220,8 @@
       "type": "object",
       "properties": {
         "type": { "const": "request-n" },
-        "n": { "type": "integer" }
+        "n": { "type": "integer" },
+        "queued": { "type": "integer", "description": "The sender's permit-starved backlog at request time: how many sends are waiting because the current window is spent or expired. Optional and additive; absent or zero claims no backlog. Advisory and untrusted: a server clamps any use of it and never requires it for a grant decision." }
       },
       "required": ["type", "n"]
     },

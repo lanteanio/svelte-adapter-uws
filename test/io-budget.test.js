@@ -753,7 +753,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// import), and its doc comment changed. No frame path, no bytes, no copy
 	// primitive - the epoch is a subscribe/ack field, off every byte-owning
 	// path. Carries the prior boot-warmup error-registry entry drift.
-	ingress: '8503e83be07f6fd767cd76153f7de12577ce5816d6bacd7efcbaf80ea7ed11b2',
+	// Re-pinned for the replenish backlog report. The drift in this graph is
+	// runtime/wire.js (reached via parseBinaryFrame): requestNFrame gains an
+	// optional parameter with a second string-concatenation arm serializing
+	// the additive `queued` field (a client-to-server control-frame builder,
+	// called on no server frame path), and leaseReportedSaturation, a new
+	// pure helper of integer-only comparisons and one division normalizing
+	// the reported backlog for the pressure fold. No byte is read, allocated
+	// or copied, and no copy primitive entered the graph.
+	ingress: '8ffee506d2600e6fccddd4cb49f57dd25b24f20df205f31e0deafca53c2cd904',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1252,7 +1260,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// no copy primitive. Carries the prior boot-warmup drift (the isWarmupRequest
 	// delegate plus the leaf warmup-registry.js import and the error-registry
 	// entry) and the cluster-metrics-merge bounds before it.
-	platform: 'd5b00e902f0ded97025579c95369ae0c2161261e5173129b5807d2c2e1cb45d0',
+	// Re-pinned for the replenish backlog report: runtime/wire.js (reached via
+	// buildBinaryFrame) gains requestNFrame's optional `queued` serialization
+	// arm (a client-to-server control-frame builder, called on no server frame
+	// path) and the pure leaseReportedSaturation helper - integer-only
+	// comparisons and one division. No byte is read, allocated or copied, and
+	// no copy primitive entered the graph.
+	platform: '5647a92e1e72d1bcdc8d1738ab17cb57e8a2e725d448c57ae221a003dfad09b5',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1404,8 +1418,21 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// `wallEpoch()`. The epoch is a subscribe/ack field off every byte-owning
 	// path - no frame path, no bytes, no copy primitive. Carries the prior
 	// boot-warmup error-registry entry drift.
-	'wire-fanout': '01e6f05b7e0824064b423358d72366ec2ecfed79a5a380bde507057aba70f280',
-	wire: '890a44ffb6b1c17736e103dac82c0569b0cd0c6d8e15f74bf7ed1902b9aebc42'
+	// Re-pinned for the replenish backlog report: runtime/wire.js (this
+	// graph's fan-out root imports buildBinaryFrame from it) gains
+	// requestNFrame's optional `queued` serialization arm (a client-to-server
+	// control-frame builder, called on no server frame path) and the pure
+	// leaseReportedSaturation helper - integer-only comparisons and one
+	// division. No byte is read, allocated or copied, and no copy primitive
+	// entered the graph.
+	'wire-fanout': 'f8a8e97a51d858afb556660a08386a9901337430562b8fc02873d1445679b4a0',
+	// Re-pinned for the replenish backlog report, whose drift is this graph's
+	// own root module: requestNFrame's optional `queued` serialization arm (a
+	// client-to-server control-frame builder, called on no server frame path)
+	// and the pure leaseReportedSaturation helper - integer-only comparisons
+	// and one division. No byte is read, allocated or copied, and no copy
+	// primitive entered the graph.
+	wire: '589bd4e8c28710157db7d5910670e362df1cbdbb33e47b5edc09e6cc9582797d'
 });
 const COPY_AUTHORITY_MODULE_ROOTS = Object.freeze({
 	ingress: Object.freeze(['dispatchIngressFrame']),

@@ -1238,6 +1238,8 @@ adapter({
 
 Each ceiling is a non-negative safe integer per window; `0` (or omitted) disables that ceiling deliberately, and a misshaped value refuses the build on every intake surface. `messages` and `deliveries` refuse the publish that would cross them; `bytes` refuses once the window's charge has reached it (byte weight exists only after serialization, which must not precede admission), so the crossing publish is delivered and the next is refused. A batch frame is atomic - admitted whole against the pooled weight of every topic it spans, or refused whole, though [platform.batch()](#platformbatchmessages) is a loop over independent publishes rather than one frame - so size ceilings above your largest single publish: one heavier than the whole window allowance never fits and is refused every time. The `tenant` ceilings key on the tenant a publish is charged to: the sender's [`attribution`](#authorization-model) tenant id on the game lane, or the handler module's `egressTenantOf(topic)` export - a pure synchronous `topic -> tenantId | null` resolver, which is how a framework's topic namespace (svelte-realtime's `@t/<id>/` prefix) plugs in without the adapter hardcoding topic grammar. Unattributed publishes fall under `topic` ceilings only; `principalId` is deliberately not a budget key here (per-principal budgets are the inbound rate limiter's job; egress budgets are tenant fair-share). Ceilings are tracked in a per-scope ledger bounded to 4096 keys unless `egress.maxKeys` sizes it (a safe integer 1024..2^24, rounded up to the next power of two - V8 sizes the backing table to a power of two either way, so the rounded bound holds no fewer keys in the same memory); memory is paid only for keys actually seated, so size it to the keys LIVE inside one window when `egress_window_evicted_total{scope}` shows sustained churn, and `egress.evictionSample` (default 8) widens the at-cap victim sample to match a much larger cap. [docs/tenancy.md](./docs/tenancy.md) carries the sizing math.
 
+Protocol control frames - `welcome`, subscribe acks, `lease-ok`, the flow-control window grants - are counted in per-connection stats but charged against no egress budget. That is a design position, not an oversight: the budgets meter application-data fan-out, and the control frames are small, fixed-shape, and bounded per connection by the protocol itself. Charging them would let an exhausted tenant budget refuse the very grant frames that pace a client down, wedging the flow-control loop exactly when it is needed.
+
 ### Security configuration
 
 Defense-in-depth opt-ins layered on top of `allowedOrigins`. All default to safe values; flip them only after the documented audit step.
@@ -2578,6 +2580,8 @@ export async function POST({ platform, request }) {
 }
 ```
 
+The per-connection component is a client-asserted report - a flow-controlled client states its own starved-send backlog when it requests a fresh window, since the server deliberately never mirrors the client's permit consumption. The report is clamped to at most 1 and halved every sample, and it can lift only `value`: `reason`, `active`, and every admission posture derive from server-side counters alone. Automation that must resist a lying client should gate on `reason` rather than on `value` alone.
+
 `platform.onPressure(cb)` fires only on **transitions** (when `reason` changes between samples), not on every tick. Returns an unsubscribe function:
 
 ```js
@@ -2650,6 +2654,8 @@ platform.onPublishRate((events) => {
   }
 });
 ```
+
+`bytesPerSec` (and the `topicPublishBytesPerSec` threshold it is compared against) counts UTF-16 code units of the JSON envelope - equal to bytes for ASCII envelopes, up to 3x under the UTF-8 wire size for heavily non-ASCII payloads. That unit is deliberate: this is an advisory detection signal, and an exact byte count would add an O(length) encode to every publish. The [`egress` ceilings](#publish-egress-budget-websocketegress), which refuse rather than warn, charge real wire bytes.
 
 The default warning never prints the raw topic. It emits a canonical
 `pressure.runaway-publisher` diagnostic with a process-local keyed

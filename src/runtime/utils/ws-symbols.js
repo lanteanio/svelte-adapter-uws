@@ -1012,8 +1012,9 @@ export const WS_INGRESS_BINDINGS = Symbol.for('adapter-uws.ws.ingress-bindings')
  * Per-connection send-gate state for connections that have opted into
  * internal flow control (by advertising the matching capability token):
  * `{ gate, saturation }`. `gate` is the state machine from
- * `createLeaseState`; `saturation` is the connection's latest 0..1 reading
- * the 1 Hz sampler folds into the worker pressure snapshot. Allocated lazily,
+ * `createLeaseState`; `saturation` is the connection's latest 0..1 reading -
+ * the clamped backlog the client reported on its last `request-n`, folded
+ * into the worker peak the 1 Hz sampler consumes. Allocated lazily,
  * only when a connection advertises the capability - a connection that never
  * advertises it never gets this slot and runs exactly the immediate send path.
  */

@@ -23,6 +23,7 @@
     { "def": "resumed", "frame": { "type": "resumed" } },
     { "def": "lease", "frame": { "type": "lease", "count": 64, "ttlMs": 2000 } },
     { "def": "request-n", "frame": { "type": "request-n", "n": 64 } },
+    { "def": "request-n", "frame": { "type": "request-n", "n": 64, "queued": 12 } },
     { "def": "error", "frame": { "type": "error", "code": "CONTROL_FRAME_TOO_LARGE", "limit": 8192, "size": 9003 } },
     { "def": "ingress-ok", "frame": { "type": "ingress-ok" } },
     { "def": "ingress-bind", "frame": { "type": "ingress-bind", "id": 1, "kind": "smooth.command:1", "target": { "topic": "arena:1" } } },

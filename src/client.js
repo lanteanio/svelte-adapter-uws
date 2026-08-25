@@ -1144,7 +1144,10 @@ function createConnection(options) {
 		if (_flowQueue.length > 0 || !_flowFresh() || _flowAvail <= _FLOW_LOW_WATER) {
 			_flowReplenishSent = true;
 			if (ws && ws.readyState === WebSocket.OPEN) {
-				ws.send(requestNFrame(_FLOW_REQUEST_N));
+				// Carry the permit-starved backlog so the server's pressure fold
+				// sees real client saturation. A low-water replenish has no
+				// backlog and emits the historical two-field frame.
+				ws.send(requestNFrame(_FLOW_REQUEST_N, _flowQueue.length));
 			}
 		}
 	}

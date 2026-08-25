@@ -519,6 +519,29 @@ export function leasePressureValue(w) {
 }
 
 /**
+ * Normalize a client-reported permit-starved backlog (`request-n`'s optional
+ * `queued` field) to the 0..1 saturation scalar the worker pressure fold
+ * consumes. The server's own mirror of the gate never consumes a permit, so
+ * this report is the only truthful saturation reading the replenish path has:
+ * a healthy low-water replenish carries no backlog and reads 0, while a
+ * connection whose previous window was spent with sends still waiting reads
+ * the waiting fraction of the reference queue bound.
+ *
+ * The report is advisory input off the wire: the field is an integer by
+ * schema, so everything non-numeric, non-integer, or non-positive collapses
+ * to 0, and the scalar caps at 1 no matter what the peer claims. 0 is also
+ * what an old client that never sends the field produces, so the pre-field
+ * wire behaves exactly as before.
+ *
+ * @param {unknown} raw
+ * @returns {number}
+ */
+export function leaseReportedSaturation(raw) {
+	if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) return 0;
+	return raw >= MAX_QUEUED_REQUESTS ? 1 : raw / MAX_QUEUED_REQUESTS;
+}
+
+/**
  * Size the next send-gate window from the worker's current posture. Heap
  * headroom and subscriber load narrow the window so a tightening worker hands
  * out smaller windows; an idle worker hands out the full base size. Always
@@ -550,9 +573,9 @@ export function leaseGrantSize(w) {
 /**
  * Fold the worker's 0..1 saturation scalar from its raw readings. Each active
  * threshold contributes its sample's distance toward the threshold (worst-of),
- * clamped to 0..1; a fully healthy worker reads 0. The worst per-connection
- * send-gate reading observed since the last sample is folded in worst-of too,
- * so a saturated opted-in connection lifts the worker value even while the
+ * clamped to 0..1; a fully healthy worker reads 0. The worst client-reported
+ * send-gate backlog observed since the last sample is folded in worst-of too,
+ * so a starved opted-in connection lifts the worker value even while the
  * global counters look calm.
  *
  * Pure so the value direction (rises under any breach, the gate peak lifts it,
@@ -617,11 +640,17 @@ export function leaseGrantFrame(count, ttlMs) {
 }
 
 /**
- * Build the client-to-server window-replenish control frame.
+ * Build the client-to-server window-replenish control frame. `queued` is the
+ * sender's permit-starved backlog at request time (the optional additive field
+ * of PROTOCOL.md section 3.6); it is omitted at 0 so a client with no backlog
+ * emits the historical byte shape.
  * @param {number} n
+ * @param {number} [queued]
  * @returns {string}
  */
-export function requestNFrame(n) {
+export function requestNFrame(n, queued) {
+	const q = typeof queued === 'number' ? queued | 0 : 0;
+	if (q > 0) return '{"type":"request-n","n":' + (n | 0) + ',"queued":' + q + '}';
 	return '{"type":"request-n","n":' + (n | 0) + '}';
 }
 

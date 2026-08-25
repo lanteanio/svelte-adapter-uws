@@ -234,8 +234,8 @@ function samplePressure(thresholds) {
 	// Fold a worker-global 0..1 saturation scalar into `value`. Each active
 	// threshold contributes its sample's distance toward the threshold
 	// (worst-of), clamped to 0..1; a fully healthy worker reads 0. The worst
-	// per-connection send-gate reading observed since the last sample is
-	// folded in worst-of too, so a saturated opted-in connection lifts the
+	// client-reported send-gate backlog observed since the last sample is
+	// folded in worst-of too, so a starved opted-in connection lifts the
 	// worker value even while the global counters look calm. The peak is then
 	// decayed so a single spike does not stick across samples.
 	const value = samplePressureValue(
@@ -315,7 +315,11 @@ function samplePressure(thresholds) {
 	if (counters.postureExportHook !== null) counters.postureExportHook();
 
 	if (transitioned) {
-		for (const cb of pressureListeners) {
+		// Iterate a snapshot, not the live Set: a listener that registers
+		// another listener from inside its callback would otherwise extend
+		// this sweep and run the newcomer against a transition it never saw
+		// begin. Allocation only on transitions, which are rare.
+		for (const cb of [...pressureListeners]) {
 			try {
 				cb(pressureSnapshot);
 			} catch (err) {
@@ -337,7 +341,8 @@ function samplePressure(thresholds) {
 
 	if (overThreshold.length > 0) {
 		if (publishRateListeners.size > 0) {
-			for (const cb of publishRateListeners) {
+			// Snapshot for the same reason as the pressure sweep above.
+			for (const cb of [...publishRateListeners]) {
 				try {
 					cb(overThreshold);
 				} catch (err) {
@@ -397,11 +402,18 @@ function samplePressure(thresholds) {
  * defaults; never user exposed. Always floors to a window large enough that a
  * connection makes forward progress.
  *
+ * The heap reading is the 1 Hz sampler's cached ratio, never a live
+ * `process.memoryUsage()`: this runs per inbound `request-n` frame, so a
+ * syscall here would sit on the replenish hot path, and a live read would
+ * make grant sizes depend on the host heap while every other input under the
+ * sim is virtualized through the deterministic seam. Before the first sample
+ * the cache reads 0 and the full base window is handed out - the healthy
+ * default.
+ *
  * @returns {{ count: number, ttlMs: number }}
  */
 export function grantSizeFor() {
-	const mem = process.memoryUsage();
-	const heapRatio = mem.heapTotal > 0 ? mem.heapUsed / mem.heapTotal : 0;
+	const heapRatio = counters.lastHeapUsedRatio;
 	const conns = wsConnections.size || 1;
 	const subRatio = counters.totalSubscriptions / conns;
 	const count = leaseGrantSize({ heapRatio, subscriberRatio: subRatio });

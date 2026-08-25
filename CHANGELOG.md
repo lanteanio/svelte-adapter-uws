@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compatibility:** The field stays a wire-legal integer, so no schema type changes. After a deploy a client that had a live epoch sees it change once and performs one full re-read per topic, exactly as it does across any restart; nothing is lost.
   - **Detail:** [Changed engineering detail](#changed).
 
+- **Fixed: a saturated flow-controlled client now lifts the worker pressure value.** The fold of send-gate saturation into `platform.pressure.value` could never fire - the server read its own mirror of the gate, which never consumes a permit and always reads zero - so the client reports its waiting-send backlog in the replenish frame and the server folds that report.
+  - **Affects:** Deployments reading `platform.pressure.value` (or `onPressure` snapshots) with flow-controlled clients; the value now rises while such a client reports a starved backlog, and decays as before.
+  - **Action:** None; a client that never sends the field keeps today's behavior exactly.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The `request-n` frame gains an optional additive `queued` field (protocol revision unchanged); a client with no backlog emits the historical byte shape, and the server clamps the untrusted report to at most 1.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
 - **Fixed: a crafted duplicate command id is dropped at decode.** The smooth command codec enforced strictly increasing ids only at encode, so a hand-built ingress frame carrying a zero id delta decoded cleanly and could double-apply a command id; decode now drops the duplicate and keeps the entries behind it intact.
   - **Affects:** Deployments accepting binary smooth-command ingress from untrusted clients; the JSON command path and every well-formed client are unchanged.
   - **Action:** None; the encoder never produced such frames, so only crafted or corrupt input behaves differently.
@@ -114,6 +121,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin's own middleware, including a real WebSocket client whose
   subscription appears in the streamed frames.
 
+- **`request-n` carries the sender's permit-starved backlog.** The
+  flow-control replenish frame gains an optional additive `queued` field
+  (PROTOCOL.md section 3.6, revision unchanged): the count of sends waiting
+  because the current window is spent or expired, reported at request time.
+  The reference client sends it from the replenish latch - a healthy
+  low-water replenish has no backlog and emits the historical byte shape -
+  and the server folds the report, clamped against the reference queue bound,
+  into the per-connection saturation peak the pressure sampler consumes. The
+  field is advisory and untrusted: everything non-numeric, non-integer, or
+  non-positive collapses to zero, a hostile claim caps at 1, and a peer that
+  predates the field is byte-identical in both directions. Because the report
+  is client-asserted, it can lift only `value` - `reason`, `active`, and the
+  admission postures derive from server-side counters alone, and the typings
+  say so where `value` is documented. Schema and
+  test-vector entries ride along. Driven over the real runtime: a reported
+  backlog raises the fold input by its reported fraction, a plain replenish
+  leaves it at zero, and the grant path answers every shape.
+
 ### Changed
 
 - **The refusal Retry-After jitter gains a two-value band floor.** The
@@ -161,7 +186,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkable evidence that gates promotion to `latest` - the parts a consumer
   or a maintainer acts on. The exit contract is unchanged.
 
+- **The per-topic byte-rate stat documents its unit.** `topicPublishBytesPerSec`
+  and the `bytesPerSec` field it gates always measured UTF-16 code units of
+  the JSON envelope - equal to bytes for ASCII envelopes, up to 3x under the
+  UTF-8 wire size for heavily non-ASCII payloads - while the README and
+  typings said bytes. They now state the unit and the reason it stays: the
+  runaway-publisher stat is advisory detection, an exact byte count would add
+  an O(length) encode to every publish, and the egress ceilings - which
+  refuse rather than warn - already charge real wire bytes. The README also
+  records the control-frame posture as a design position: `welcome`, acks,
+  and flow-control grants are counted in per-connection stats but charged
+  against no egress budget, because refusing the grant frames that pace a
+  client down would wedge flow control exactly when it is needed.
+
 ### Fixed
+
+- **A saturated flow-controlled client lifts the worker pressure value.** The
+  pressure sampler folds the worst per-connection send-gate reading into
+  `platform.pressure.value` (worst-of, halved each sample) - and that input
+  was structurally zero: the replenish path read the server's own mirror of
+  the gate after re-granting it, and the server's mirror never consumes a
+  permit, so a freshly granted window always reads idle. No ordering of that
+  read can help - the mirror reads 0 while unexpired and 1 exactly when an
+  idle client resumes after its TTL, the opposite of saturation - so the
+  reading now comes from the client's reported backlog on the `request-n`
+  frame, normalized and clamped, with all three surfaces (production
+  handler, dev bridge, test harness) aligned on the same helper. Driven over
+  the real runtime by reading the fold input off the booted module while a
+  real client replenishes.
+
+- **Replenish grant sizing reads the cached heap ratio, not a live syscall.**
+  `grantSizeFor` called `process.memoryUsage()` on every lease hello and
+  inbound `request-n` frame - a syscall on the replenish path, and the one
+  input that reached the
+  deterministic simulator unvirtualized, so lease grant sizes depended on the
+  host heap at test time. It now reads the ratio the 1 Hz sampler already
+  caches; before the first sample the cache reads 0 and the full base window
+  is handed out. Pinned with a spy asserting the replenish path never touches
+  `process.memoryUsage` while the cached ratio still narrows the window.
+
+- **Listener sweeps iterate a snapshot of the listener set.** A pressure or
+  publish-rate listener that registered another listener from inside its
+  callback extended the very sweep it was running in, so the newcomer ran
+  against a transition it never saw begin - and a listener registering
+  listeners could extend the sweep unboundedly. Each sweep now iterates a
+  snapshot; a newcomer joins the next sweep, and a listener removed
+  mid-sweep still fires once in the sweep already underway - standard
+  emitter semantics on both edges. Allocation lands only on transitions and
+  over-threshold windows, which are rare. Pinned for both sweeps on the
+  built modules.
 
 - **The smooth command decode drops a duplicate id instead of applying it.**
   The codec's strictly-increasing-id rule was enforced only at encode; decode
