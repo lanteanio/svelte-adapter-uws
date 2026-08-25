@@ -334,16 +334,47 @@ describe('runSim multi-worker - per-worker epoch', () => {
 		const ep1 = flat(r.clusterFrames, 1).find((f) => f && f.type === 'subscribed');
 		// Each worker presents a DISTINCT opaque u32 token - the property that
 		// makes a client re-read when it reconnects to a different worker. The
-		// tokens are the seeded process token offset by worker id, so they are
-		// deterministic and distinct, never the wall clock.
+		// tokens are the seeded process token offset by creation order, so they
+		// are deterministic and distinct, never the wall clock.
 		for (const ep of [ep0, ep1]) {
 			expect(Number.isInteger(ep.epoch)).toBe(true);
 			expect(ep.epoch).toBeGreaterThanOrEqual(0);
 			expect(ep.epoch).toBeLessThanOrEqual(0xffffffff);
 			expect(ep.epoch).not.toBe(FIXED_EPOCH);
 		}
-		expect(ep1.epoch).toBe((ep0.epoch + 1) >>> 0); // worker 1 = base token + id
+		expect(ep1.epoch).toBe((ep0.epoch + 1) >>> 0); // the cohort is built in id order
 		expect(ep0.epoch).not.toBe(ep1.epoch);
+	});
+
+	it('a respawned worker presents a NEW generation, never the one it carried before', async () => {
+		// A restart resets the worker's sequence space, so presenting the token
+		// it carried before would claim continuity with a space that no longer
+		// exists - a client holding an offset would be gap-filled from it
+		// instead of re-reading. Production gets this for free by re-latching a
+		// random token per process; the sim has to model it, and until it did,
+		// no scenario could exercise the rehydrate a restart is supposed to
+		// force.
+		const r = await runSim({
+			workers: 2, seed: 'epoch-respawn',
+			scenario: async (api) => {
+				api.worker(1).connect();
+				await api.advance();
+				for (const c of api.worker(1).clients()) c.subscribe('room');
+				await api.advance();
+				api.flapWorker(1); // terminate and respawn the same id
+				await api.advance();
+				api.worker(1).connect();
+				await api.advance();
+				for (const c of api.worker(1).clients()) c.subscribe('room');
+				await api.advance();
+			}
+		});
+		const acks = flat(r.clusterFrames, 1).filter((f) => f && f.type === 'subscribed');
+		expect(acks.length, 'both the pre-flap and post-flap subscribes must be acked').toBeGreaterThanOrEqual(2);
+		const before = acks[0].epoch;
+		const after = acks[acks.length - 1].epoch;
+		expect(Number.isInteger(after)).toBe(true);
+		expect(after, 'the respawn re-used its predecessor generation').not.toBe(before);
 	});
 });
 

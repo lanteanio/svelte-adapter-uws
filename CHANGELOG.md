@@ -47,6 +47,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A respawned simulator worker presents a new topic generation.** The
+  multi-worker simulator derived each worker's generation from its id, so a
+  respawn handed the worker back the exact token it carried before - a
+  restarted worker claiming continuity with a sequence space it had just
+  reset. Production cannot do this: every worker latches its own random token
+  and a restart re-latches, which is what makes a client's held offset die
+  against the restarted worker and forces the cold re-read. The sim now
+  counts worker incarnations in creation order, so every worker and every
+  respawn of one presents a distinct token that still reproduces across runs.
+  The initial cohort's tokens are unchanged by construction - the count and
+  the id coincide there - so a run without a respawn produces the same
+  transcript as before and no recorded corpus moved.
+  `test/sim-multiworker.test.js` drives a flap and fails on the id-derived
+  form.
+
 - **One unreadable cgroup file no longer pins the memory signal to a looser
   wall.** Limit discovery walks the process's own group and its ancestors and
   keeps the tightest limit, but it latched any finite result outright - so a

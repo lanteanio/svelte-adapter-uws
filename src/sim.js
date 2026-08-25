@@ -453,6 +453,16 @@ async function runClusterSim(config) {
 		const seen = new Set();
 		/** @type {Map<number, { id: number, app: any, server: any, relay: any, epoch: number, clients: any[], auditor: { runOnce(): any[] } }>} */
 		const workers = new Map();
+		// Distinct topic generation per worker INCARNATION, not per worker id. A
+		// production restart re-latches a fresh random token, which is what makes
+		// a client's held offset die against the restarted worker; deriving the
+		// sim's token from the id alone handed a respawn its predecessor's
+		// generation, so a restarted worker claimed continuity with a sequence
+		// space it had just reset and no scenario could exercise the rehydrate
+		// that follows. Counting incarnations in creation order keeps the
+		// initial cohort's tokens exactly what the id-derived form produced, so
+		// a run without a respawn is unchanged.
+		let incarnations = 0;
 		// Every client ever opened, tagged by its worker at connect time. A respawn
 		// replaces workers.get(id) with a fresh (empty) wobj, so this accumulates the
 		// terminated worker's facades across restarts: clusterFrames intentionally
@@ -519,14 +529,14 @@ async function runClusterSim(config) {
 				__uws: uws,
 				__onPublish: relay.onPublish
 			});
-			// Per-worker topic generation - the opaque token a subscribe ack
+			// Per-incarnation topic generation - the opaque token a subscribe ack
 			// carries. Production latches a random u32 per worker (never the wall
 			// clock, which would leak the process start time); the sim models the
 			// same domain deterministically by offsetting the seeded process
-			// token by the worker id, so each worker presents a DISTINCT opaque
-			// u32 that reproduces across runs. A respawn re-latches through
-			// `resetProcessEpoch`, exactly as a production restart does.
-			const epoch = (processEpoch() + id) >>> 0;
+			// token by a count of the workers built so far, so every worker AND
+			// every respawn of one presents a DISTINCT opaque u32 that
+			// reproduces across runs.
+			const epoch = (processEpoch() + incarnations++) >>> 0;
 			server.platform.topicEpoch = (t) => { void t; return epoch; };
 			bus.register(id, server.platform.__relayReceive);
 			const wobj = { id, app, server, relay, epoch, clients: [], auditor: createSimAuditor(() => app) };
