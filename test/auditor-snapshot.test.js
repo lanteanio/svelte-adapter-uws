@@ -15,14 +15,15 @@ function fakeWs(id, subs, throws = false) {
 	};
 }
 
-function build(connSet, { offset = 0, limit = 1000, totalSubscriptions = 0 } = {}) {
+function build(connSet, { offset = 0, limit = 1000, totalSubscriptions = 0, isSettled } = {}) {
 	return buildConnectionAuditSnapshot({
 		connections: connSet,
 		subscriptionsKey: WS_SUBSCRIPTIONS,
 		sessionIdKey: WS_SESSION_ID,
 		totalSubscriptions,
 		offset,
-		limit
+		limit,
+		isSettled
 	});
 }
 
@@ -105,7 +106,31 @@ describe('buildConnectionAuditSnapshot (prod bounded snapshot)', () => {
 		expect(checkTotalSubscriptions(snap)).toBeNull();
 		// And a REAL drift still reports, so the guard did not blunt the signal.
 		expect(checkTotalSubscriptions(build(conns, { totalSubscriptions: 5 })))
-			.toEqual({ category: 'subs.total-mismatch', context: { totalSubscriptions: 5, summed: 2 } });
+			.toEqual({ category: 'subs.total-mismatch', context: { totalSubscriptions: 5, summed: 2, connections: 2 } });
+	});
+
+	it('counts the settled registries in the window when the caller can answer', () => {
+		// A connection the close path settled but left in the live set keeps
+		// contributing topics the counter has already released. Counting them is
+		// what separates that from a membership charged twice, since the two
+		// produce the same sum.
+		const live = fakeWs('live', new Set(['a']));
+		const closed = fakeWs('closed', new Set(['b']));
+		const settledSets = new WeakSet([closed.getUserData()[WS_SUBSCRIPTIONS]]);
+		const snap = build(new Set([live, closed]), {
+			totalSubscriptions: 1,
+			isSettled: (subs) => settledSets.has(subs)
+		});
+		expect(snap.settled).toBe(1);
+		expect(checkTotalSubscriptions(snap)).toEqual({
+			category: 'subs.total-mismatch',
+			context: { totalSubscriptions: 1, summed: 2, connections: 2, settled: 1 }
+		});
+	});
+
+	it('omits the settled count when no predicate was supplied', () => {
+		const conns = new Set([fakeWs('a', new Set(['t1']))]);
+		expect('settled' in build(conns, { totalSubscriptions: 1 })).toBe(false);
 	});
 
 	it('yields null subscribed/bookkeeping for a non-Set subscription slot, so subs.shape fires', () => {

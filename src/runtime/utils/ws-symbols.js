@@ -586,6 +586,24 @@ export function removeLogicalSubscription(subscriptions, topic) {
 }
 
 /**
+ * Whether the close path has already settled this registry - its memberships
+ * released as a whole, so the cap-accountant counter no longer describes them.
+ *
+ * A live connection's registry is never settled. A settled one that is STILL
+ * enumerable in the live connection set is a connection whose teardown released
+ * its memberships but left it behind, and its topics keep contributing to any
+ * summed-bookkeeping total while the counter has already given them up. That is
+ * indistinguishable from a double-charged membership by the sum alone, which is
+ * why the auditor reports the count separately.
+ *
+ * @param {unknown} subscriptions
+ * @returns {boolean}
+ */
+export function isSettledSubscriptionRegistry(subscriptions) {
+	return subscriptions instanceof Set && settledRegistries().has(subscriptions);
+}
+
+/**
  * Charge the still-live logical memberships released by one socket close.
  * The Set is intentionally left intact because it is the documented snapshot
  * passed to the app's close hook; the runtime calls this exactly once after

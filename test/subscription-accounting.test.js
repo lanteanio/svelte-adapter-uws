@@ -167,7 +167,10 @@ describe('logical subscription accounting primitive', () => {
 			connections: [{ subscribed: ['one'], bookkeeping: ['one'] }]
 		})).toEqual({
 			category: 'subs.total-mismatch',
-			context: { totalSubscriptions: 2, summed: 1 }
+			// `connections` rides along so a reader can tell a membership charged
+			// twice from a closed connection still being summed; `settled` is absent
+			// because this snapshot carries no count for it.
+			context: { totalSubscriptions: 2, summed: 1, connections: 1 }
 		});
 		expect(checkTotalSubscriptions({ totalSubscriptions: -1, connections: [] })).toEqual({
 			category: 'subs.total-negative',

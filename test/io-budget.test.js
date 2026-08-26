@@ -783,7 +783,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// installs on a confirmed relay-gap drain - none of it on a frame path.
 	// No byte is read, allocated or copied, and no copy primitive entered the
 	// graph.
-	ingress: '16a6c13a2bdcfca17652c2f6a5f0af7cf4b2aa9841b65f3705edb052cc9805ca',
+	//
+	// Re-pinned for the auditor's settled-registry count, same drift as the
+	// platform seal and for the same reason: utils/ws-symbols.js, reached
+	// through utils.js, gained one exported predicate that reads the existing
+	// close-settled WeakSet behind an `instanceof` guard. It runs on the
+	// consistency auditor's sampling tick, never on an ingress frame path, and
+	// reads, allocates and copies no byte.
+	ingress: '7c160efcb856023ecbc1669af7155666a5bc0be1b38f587181c80e5363d0ad01',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1326,7 +1333,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// it entered - the re-probe reads the same candidate files the discovery
 	// path already reads, and adds no read of any frame, no allocation, no
 	// copy, and no copy primitive.
-	platform: '2c1be14094528ad7bccf91aabcc1c31b8c8cdbcc7fb35912f36ed78d390dbcb9',
+	//
+	// Re-pinned for the auditor's settled-registry count, whose drift in this
+	// graph is utils/ws-symbols.js reached through utils.js: one exported
+	// predicate that asks the existing close-settled WeakSet whether it holds a
+	// registry. It is a membership read behind an `instanceof` guard, called
+	// only from the consistency auditor's own snapshot walk on its sampling
+	// tick - never from a frame path. No byte is read, allocated or copied, and
+	// no copy primitive entered the graph.
+	platform: '6a0dd6f8cd04e9bf74bdbca1e8e544c58972cd753674ac8b9d70d54805d16ba5',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1503,7 +1518,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// resume compares, and the confirmed-gap drain are the only executions;
 	// none is a frame path. No byte is read, allocated or copied, and no copy
 	// primitive entered the graph.
-	'wire-fanout': 'cdf4cfa5a780b3347c58b137136e57f5ed175dd800e722c2c09251708b01c5c4',
+	//
+	// Re-pinned for the auditor's settled-registry count, the third graph
+	// utils/ws-symbols.js reaches through utils.js and the same one exported
+	// predicate as the platform and ingress seals: a WeakSet membership read
+	// behind an `instanceof` guard, called from the consistency auditor's
+	// snapshot walk and from nowhere on a fan-out path. No byte is read,
+	// allocated or copied, and no copy primitive entered the graph.
+	'wire-fanout': 'c8ed56cc9eff54617a3d8f79969d4af981e299ac32a69af6e30f67e7e5788eec',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

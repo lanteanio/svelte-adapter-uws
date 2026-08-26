@@ -26,13 +26,20 @@
  * @param {number} args.totalSubscriptions - the live cap-accountant counter.
  * @param {number} args.offset - window start (round-robin position).
  * @param {number} args.limit - window size (max connections this tick).
- * @returns {{ connections: Array<{ id: unknown, subscribed: string[] | null, bookkeeping: string[] | null }>, total: number, totalSubscriptions?: number }}
+ * @param {((subscriptions: unknown) => boolean) | null} [args.isSettled] - reports
+ *   whether the close path already released a registry's memberships. Injected
+ *   rather than imported so this builder still reads nothing but its arguments.
+ *   Omit it and the window carries no settled count, which is what a caller that
+ *   cannot answer the question should report.
+ * @returns {{ connections: Array<{ id: unknown, subscribed: string[] | null, bookkeeping: string[] | null }>, total: number, totalSubscriptions?: number, settled?: number }}
  */
 export function buildConnectionAuditSnapshot(args) {
 	const { connections, subscriptionsKey, sessionIdKey, totalSubscriptions, offset, limit } = args;
+	const isSettled = typeof args.isSettled === 'function' ? args.isSettled : null;
 	const total = connections.size;
 	/** @type {Array<{ id: unknown, subscribed: string[] | null, bookkeeping: string[] | null }>} */
 	const out = [];
+	let settled = 0;
 	let i = 0;
 	for (const ws of connections) {
 		if (i < offset) { i++; continue; }
@@ -51,10 +58,20 @@ export function buildConnectionAuditSnapshot(args) {
 		// checkSubscriptionBookkeeping degrades to a pure Set-shape guard. A non-Set
 		// slot yields null for both, which fires `subs.shape` - the regression guard.
 		const asArray = subs instanceof Set ? [...subs] : null;
+		// A registry the close path already settled, on a connection still in the
+		// live set. Its topics still count toward `summed` while the counter has
+		// released them, so it raises the sum against an unchanged total - the
+		// same arithmetic as a membership charged twice. Counted, not judged: the
+		// predicate is injected so this builder keeps reading only its arguments.
+		if (asArray !== null && isSettled !== null && isSettled(subs)) settled++;
 		out.push({ id: ud[sessionIdKey], subscribed: asArray, bookkeeping: asArray });
 	}
-	/** @type {{ connections: typeof out, total: number, totalSubscriptions?: number }} */
+	/** @type {{ connections: typeof out, total: number, totalSubscriptions?: number, settled?: number }} */
 	const snap = { connections: out, total };
+	// Reported whenever the caller could answer, including zero: "no settled
+	// registry in this window" is the half of the answer that rules the leak out,
+	// and a field that appears only when it is non-zero cannot say that.
+	if (isSettled !== null) snap.settled = settled;
 	// Only attach the cap accountant when this window is a COMPLETE census, i.e.
 	// every connection the counter describes was materialized into it. The
 	// summed-bookkeeping cross-check compares the counter against the sum of the

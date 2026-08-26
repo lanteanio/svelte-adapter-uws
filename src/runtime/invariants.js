@@ -30,7 +30,8 @@
  * @typedef {{
  *   connections?: ConnectionSnapshot[],
  *   topicCounts?: Record<string, number>,
- *   totalSubscriptions?: number
+ *   totalSubscriptions?: number,
+ *   settled?: number
  * }} StateSnapshot
  * @typedef {{ category: string, context: unknown } | null} Violation
  */
@@ -90,10 +91,19 @@ export function checkTotalSubscriptions(snap) {
 		if (Array.isArray(conn.bookkeeping)) summed += conn.bookkeeping.length;
 	}
 	if (summed !== snap.totalSubscriptions) {
-		return {
-			category: 'subs.total-mismatch',
-			context: { totalSubscriptions: snap.totalSubscriptions, summed }
-		};
+		/** @type {{ totalSubscriptions: number, summed: number, connections?: number, settled?: number }} */
+		const context = { totalSubscriptions: snap.totalSubscriptions, summed };
+		// The sum alone cannot say WHY it disagrees. A membership charged twice
+		// and a closed connection still sitting in the live set produce the same
+		// arithmetic, and they are different defects in different places. So
+		// report the two quantities that separate them: how many connections the
+		// sum came from, and how many of those had already been settled by a
+		// close. `settled` above zero means memberships the counter has released
+		// are still being summed; zero means every contributing connection is
+		// live and the surplus is in the memberships themselves.
+		context.connections = connections.length;
+		if (typeof snap.settled === 'number') context.settled = snap.settled;
+		return { category: 'subs.total-mismatch', context };
 	}
 	return null;
 }

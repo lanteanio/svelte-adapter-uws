@@ -78,8 +78,33 @@ describe('checkTotalSubscriptions', () => {
 		};
 		expect(checkTotalSubscriptions(snap)).toEqual({
 			category: 'subs.total-mismatch',
-			context: { totalSubscriptions: 5, summed: 3 }
+			context: { totalSubscriptions: 5, summed: 3, connections: 2 }
 		});
+	});
+
+	it('reports how many contributing registries a close had already settled', () => {
+		// The sum alone cannot separate a membership charged twice from a closed
+		// connection still sitting in the live set - both raise summed against an
+		// unchanged total. `settled` is what tells them apart, so it rides on the
+		// violation rather than being left to whoever reads the number later.
+		const base = {
+			totalSubscriptions: 2,
+			connections: [
+				{ id: 1, subscribed: ['a'], bookkeeping: ['a'] },
+				{ id: 2, subscribed: ['b'], bookkeeping: ['b'] },
+				{ id: 3, subscribed: ['c'], bookkeeping: ['c'] }
+			]
+		};
+		expect(checkTotalSubscriptions({ ...base, settled: 1 })).toEqual({
+			category: 'subs.total-mismatch',
+			context: { totalSubscriptions: 2, summed: 3, connections: 3, settled: 1 }
+		});
+		// Zero is an answer, not an absence: it rules the leak out and points at
+		// the memberships instead, so it must survive onto the violation.
+		expect(checkTotalSubscriptions({ ...base, settled: 0 }).context.settled).toBe(0);
+		// A caller that cannot answer omits the field rather than reporting a zero
+		// it did not measure.
+		expect('settled' in checkTotalSubscriptions(base).context).toBe(false);
 	});
 
 	it('passes when the total equals the summed bookkeeping', () => {

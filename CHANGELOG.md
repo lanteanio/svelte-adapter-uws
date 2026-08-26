@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Changed: a subscription-drift report now says how many connections it summed and how many a close had already settled.** A membership counted twice and a closed connection still in the live set produce the same sum, so the two quantities that separate them now ride on the report instead of being reconstructed by whoever reads it.
+  - **Affects:** Anyone reading `subs.total-mismatch` diagnostics; the two existing fields are unchanged and two more are added beside them.
+  - **Action:** None. A reader keying on `totalSubscriptions` and `summed` keeps working.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Additive. `connections` is always present on a mismatch; `settled` appears only when the snapshot could answer, so an absent field means unmeasured rather than zero.
+  - **Detail:** [Changed engineering detail](#changed).
 - **Fixed: the cursor plugin stops decoding and parsing frames the runtime already parsed.** Its message hook now reads the pre-parsed envelope the adapter hands every hook, which also removes a per-message decoder allocation and a crash on a frame whose whole body is null.
   - **Affects:** Every connection on a server with the cursor plugin installed, since that hook inspects each frame before the application's own handler sees it.
   - **Action:** None.
@@ -24,6 +30,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Detail:** [Fixed engineering detail](#fixed).
 
 <!-- consumer-release-summary:end -->
+
+### Changed
+
+- **A `subs.total-mismatch` violation carries the two counts that say which
+  defect produced it.** The context gained `connections`, the number of
+  connections the sum came from, and `settled`, how many of those carried a
+  registry the close path had already released. A membership charged twice and
+  a closed connection still enumerated in the live set raise `summed` against
+  an unchanged total identically, so the sum alone could not tell them apart -
+  `settled` above zero means topics the counter has given up are still being
+  summed, and zero rules that out and points at the memberships instead.
+  `isSettledSubscriptionRegistry` (utils/ws-symbols.js) reads the WeakSet the
+  close path already marks; `buildConnectionAuditSnapshot` takes it as an
+  injected predicate rather than importing it, so the builder still reads
+  nothing but its arguments and a caller that cannot answer omits the count
+  instead of reporting a zero it did not measure.
+  `test/invariants.test.js` and `test/auditor-snapshot.test.js` hold both
+  arms, including that an absent predicate leaves the field off.
 
 ### Fixed
 
