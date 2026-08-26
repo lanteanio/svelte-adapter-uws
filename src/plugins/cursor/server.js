@@ -54,6 +54,10 @@ import { MAX_PROJECTION_DEPTH, exceedsDepth } from '../_shared/sensitive.js';
 import { monotonicNow, wallEpoch, setTimer, clearTimer } from '../../runtime/runtime.js';
 
 const TOPIC_PREFIX = '__cursor:';
+// One decoder for the process, like every other decode site in the runtime
+// (handler/config.js, wire.js, relay-ring.js). Only the fallback path below
+// uses it; the pre-parsed envelope needs no decode at all.
+const FALLBACK_DECODER = new TextDecoder();
 
 // The position tap is a DERIVED subscription with no unsubscribe hook of its
 // own, so it outlived a revocation of the underlying topic. Declaring the
@@ -1397,9 +1401,20 @@ export function createCursor(options = {}) {
 		},
 
 		hooks: {
-			message(ws, { data, platform }) {
-				let parsed;
-				try { parsed = JSON.parse(new TextDecoder().decode(data)); } catch { return; }
+			message(ws, { data, msg, platform }) {
+				// The runtime decoded and parsed this frame already and handed the
+				// object over as `msg`, so take it: decoding and parsing it a second
+				// time repeats work on every frame the hook sees, cursor or not.
+				// `msg` is absent exactly where it cannot help - a binary frame, one
+				// over 8 KiB, one not starting `{"ty`, a parse failure, or a value
+				// that is not a plain object - so the fallback still handles those.
+				let parsed = (msg && typeof msg === 'object') ? msg : null;
+				if (parsed === null) {
+					try { parsed = JSON.parse(FALLBACK_DECODER.decode(data)); } catch { return; }
+					// `null` parses successfully, and the type reads below are outside
+					// the catch: without this the frame `null` throws TypeError here.
+					if (parsed === null || typeof parsed !== 'object') return;
+				}
 				if (parsed.type === 'cursor' && typeof parsed.topic === 'string') {
 					let subscribed = false;
 					try { subscribed = typeof ws.isSubscribed === 'function' && ws.isSubscribed(TOPIC_PREFIX + parsed.topic); }

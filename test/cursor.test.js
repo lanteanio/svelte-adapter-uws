@@ -1017,6 +1017,51 @@ describe('cursor plugin - server', () => {
 			expect(pubs(p, 'update')).toHaveLength(1);
 		});
 
+		it('takes the runtime pre-parsed envelope instead of decoding the frame again', () => {
+			// The two carriers are made to DISAGREE, so which one the hook acted on
+			// is observable. `msg` names the topic the socket actually holds; the
+			// raw bytes name one it does not. Re-decoding `data` would look up an
+			// unsubscribed topic and publish nothing.
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
+			const ws = mockWsSubs({ id: '1' }, ['__cursor:from-msg']);
+			const p = mockPlatform();
+
+			const handled = c.hooks.message(ws, {
+				data: encode({ type: 'cursor', topic: 'from-data', data: { x: 1, y: 2 } }),
+				msg: { type: 'cursor', topic: 'from-msg', data: { x: 5, y: 10 } },
+				platform: p
+			});
+
+			expect(handled).toBe(true);
+			expect(pubs(p, 'update')).toHaveLength(1);
+			expect(pubs(p, 'update')[0].topic).toBe('__cursor:from-msg');
+		});
+
+		it('still decodes the frame when the runtime supplied no pre-parsed envelope', () => {
+			// The shapes MessageContext.msg is documented to leave undefined - binary,
+			// over 8 KiB, not a plain object - must keep working off the raw bytes.
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
+			const ws = mockWsSubs({ id: '1' }, ['__cursor:canvas']);
+			const p = mockPlatform();
+
+			const handled = c.hooks.message(ws, { data: encode({ type: 'cursor', topic: 'canvas', data: { x: 5, y: 10 } }), platform: p });
+
+			expect(handled).toBe(true);
+			expect(pubs(p, 'update')).toHaveLength(1);
+		});
+
+		it('ignores a frame that parses to null rather than throwing on it', () => {
+			// `JSON.parse('null')` SUCCEEDS, so the type reads sit outside the catch
+			// and a bare `null` frame used to raise TypeError out of the hook.
+			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
+			const ws = mockWsSubs({ id: '1' }, ['__cursor:canvas']);
+			const p = mockPlatform();
+
+			expect(() => c.hooks.message(ws, { data: encode(null), platform: p })).not.toThrow();
+			expect(c.hooks.message(ws, { data: encode(null), platform: p })).toBeUndefined();
+			expect(pubs(p, 'update')).toHaveLength(0);
+		});
+
 		it('hooks.message handles cursor-snapshot and subscribes the socket (zero-config)', async () => {
 			const c = createCursor({ throttle: 0, topicThrottle: 0, select: (ud) => ({ id: ud.id }) });
 			const ws1 = mockWs({ id: '1' });

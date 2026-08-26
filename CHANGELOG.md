@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Fixed: the cursor plugin stops decoding and parsing frames the runtime already parsed.** Its message hook now reads the pre-parsed envelope the adapter hands every hook, which also removes a per-message decoder allocation and a crash on a frame whose whole body is null.
+  - **Affects:** Every connection on a server with the cursor plugin installed, since that hook inspects each frame before the application's own handler sees it.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** No wire or API change. Binary frames, frames over 8 KiB and anything the adapter did not pre-parse still take the decode path, which now shares one process-wide decoder.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: the consistency auditor no longer reports a subscription drift that never happened.** A connection whose native handle was freed while the auditor walked it was skipped from the window but still counted by the cap accountant, so the cross-check compared a complete counter against a short sum and reported a mismatch no membership explained.
   - **Affects:** Deployments running the per-worker consistency auditor (`CONSISTENCY_AUDIT_INTERVAL_MS`) on a worker small enough for its whole population to fit one audit window; the rate tracked connection churn, so a busy worker reported more of them.
   - **Action:** None. Re-read any `subs.total-mismatch` history against this fix before treating it as evidence.
@@ -20,6 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:end -->
 
 ### Fixed
+
+- **The cursor plugin reads the envelope the runtime already parsed.** The
+  adapter decodes and parses a small JSON object frame once and hands it to
+  every hook as `MessageContext.msg`, which the type documents as the way to
+  avoid "re-running `TextDecoder + JSON.parse` on every frame". The cursor
+  hook ignored it and re-did both, allocating a `TextDecoder` per message, on
+  a hook that inspects every frame rather than only cursor frames. It now
+  takes `msg` when present and falls back to a process-wide decoder for the
+  shapes the type documents as absent - binary, over 8 KiB, not a plain
+  object. The fallback also stops reading `.type` off a value that parsed to
+  `null`: `JSON.parse('null')` succeeds and those reads sit outside the catch,
+  so the frame `null` raised `TypeError` out of the hook. Measured against an
+  identical control arm at a 1.5% noise floor: 422 ns/frame before, 2.8 ns
+  after, with the decoder allocation 99 ns of the difference.
+  `test/cursor.test.js` makes the pre-parsed envelope and the raw bytes name
+  different topics, so which one the hook acted on is observable.
 
 - **The consistency auditor stops fabricating `subs.total-mismatch` from its
   own skipped reads.** `buildConnectionAuditSnapshot` attached the cap
