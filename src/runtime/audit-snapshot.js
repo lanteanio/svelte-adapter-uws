@@ -55,10 +55,19 @@ export function buildConnectionAuditSnapshot(args) {
 	}
 	/** @type {{ connections: typeof out, total: number, totalSubscriptions?: number }} */
 	const snap = { connections: out, total };
-	// Only attach the cap accountant when the window covers ALL connections. On a
-	// partial slice the summed-bookkeeping cross-check in checkTotalSubscriptions
-	// would false-positive off a partial sum, so omit it and let the predicate
-	// degrade to the negative-only check on a full pass.
-	if (offset === 0 && total <= limit) snap.totalSubscriptions = totalSubscriptions;
+	// Only attach the cap accountant when this window is a COMPLETE census, i.e.
+	// every connection the counter describes was materialized into it. The
+	// summed-bookkeeping cross-check compares the counter against the sum of the
+	// window, so any connection the counter counts but the window omits makes the
+	// sum short and reports a drift no membership explains.
+	//
+	// Requesting the whole range is not enough to get one. A connection whose
+	// native handle was freed mid-walk is skipped above, so a window asked for
+	// every connection can still come back one short - and the freed connection's
+	// close has not run, so the counter still holds its memberships. `out.length
+	// === total` is the condition that actually holds: a partial slice (an offset,
+	// or a limit below the population) and a skipped handle both fail it, so one
+	// test covers the whole class rather than the two cases anyone thought to name.
+	if (out.length === total) snap.totalSubscriptions = totalSubscriptions;
 	return snap;
 }

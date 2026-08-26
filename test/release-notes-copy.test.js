@@ -134,23 +134,31 @@ describe('consumer release summary', () => {
 			'<!-- consumer-release-summary:start -->',
 			'<!-- consumer-release-summary:start -->\n<!-- consumer-release-summary:start -->'
 		);
-		// Strip one existing section's coverage while its engineering section
-		// stays. The relabeled entries have to land on a section the release
-		// also has, or the validator reports the missing detail link before it
-		// ever reaches the coverage rule - so this needs two sections, and a
-		// single-section release is exercised by the synthetic case below.
-		const sections = [...NEWEST_BODY.matchAll(/^### (Added|Changed|Fixed)$/gm)].map((match) => match[1]);
-		expect(sections.length, 'the newest release needs two engineering sections for this mutant')
-			.toBeGreaterThanOrEqual(2);
-		const [dropped, host] = sections;
+		// Strip one section's coverage while its engineering section stays. The
+		// relabeled entries have to land on a section the release also has, or
+		// the validator reports the missing detail link before it ever reaches
+		// the coverage rule - so this mutant needs a two-section release. Build
+		// one instead of borrowing the newest: how many KINDS of change the last
+		// release happened to carry is not something this rule depends on, and a
+		// release carrying only one kind is ordinary. Reading it off the real
+		// changelog made an honest single-fix release fail this case.
+		const dropped = 'Changed', host = 'Fixed';
+		const twoSection = syntheticChangelog(NEWEST_VERSION, [dropped, host], {
+			[dropped]: ['- One changed engineering bullet.'],
+			[host]: ['- One fixed engineering bullet.']
+		});
 		// EVERY entry of the dropped kind must be relabeled, or a surviving one
 		// still supplies the coverage and the mutant silently stops mutating.
-		const uncovered = CHANGELOG.replace(NEWEST_BODY, () => NEWEST_BODY
+		const uncovered = twoSection
 			.replaceAll('- **' + dropped + ': ', '- **' + host + ': ')
 			.replaceAll(
 				'[' + dropped + ' engineering detail](#' + dropped.toLowerCase() + ').',
 				'[' + host + ' engineering detail](#' + host.toLowerCase() + ').'
-			));
+			);
+		// The fixture must actually have been mutated, or the throw below would
+		// pass for the wrong reason.
+		expect(uncovered).not.toBe(twoSection);
+		expect(validateReleaseSummary(twoSection)).toHaveLength(2);
 		const hidden = CHANGELOG.replace('### Consumer summary', '### Consumer summary\n\n<div hidden>');
 		expect(() => validateReleaseSummary(prose)).toThrow(/prose outside an entry/);
 		expect(() => validateReleaseSummary(duplicate)).toThrow(/one consumer summary marker pair/);

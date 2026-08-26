@@ -5,6 +5,37 @@ All notable changes to `svelte-adapter-uws` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.95] - 2026-08-26
+
+<!-- consumer-release-summary:start -->
+### Consumer summary
+
+- **Fixed: the consistency auditor no longer reports a subscription drift that never happened.** A connection whose native handle was freed while the auditor walked it was skipped from the window but still counted by the cap accountant, so the cross-check compared a complete counter against a short sum and reported a mismatch no membership explained.
+  - **Affects:** Deployments running the per-worker consistency auditor (`CONSISTENCY_AUDIT_INTERVAL_MS`) on a worker small enough for its whole population to fit one audit window; the rate tracked connection churn, so a busy worker reported more of them.
+  - **Action:** None. Re-read any `subs.total-mismatch` history against this fix before treating it as evidence.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** No wire, option, or metric name moved. A window that omits any connection now withholds the cap accountant instead of cross-checking against a partial sum, which is what a partial slice already did; a complete window still runs every check.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+<!-- consumer-release-summary:end -->
+
+### Fixed
+
+- **The consistency auditor stops fabricating `subs.total-mismatch` from its
+  own skipped reads.** `buildConnectionAuditSnapshot` attached the cap
+  accountant whenever the caller asked for the whole range (`offset === 0 &&
+  total <= limit`), but a connection whose `getUserData` throws is skipped
+  inside that walk, and its close has not run, so the counter still holds its
+  memberships. The window came back one connection short while the counter was
+  complete, and `checkTotalSubscriptions` reported the difference as drift. The
+  condition is now `out.length === total` - what the cross-check actually
+  needs, and one test in place of the two cases anyone thought to name: an
+  offset, a limit below the population, and a skipped handle all fail it
+  together. A complete window is unchanged and still runs every predicate, and
+  a real drift still reports. `test/auditor-snapshot.test.js` drives the freed
+  handle through the builder and asserts the predicate stays silent, then holds
+  the other side so the guard cannot degrade into disabling the accountant.
+
 ## [0.6.0-next.94] - 2026-08-26
 
 <!-- consumer-release-summary:start -->

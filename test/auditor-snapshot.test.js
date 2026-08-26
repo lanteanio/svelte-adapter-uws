@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildConnectionAuditSnapshot } from '../src/runtime/audit-snapshot.js';
 import { WS_SUBSCRIPTIONS, WS_SESSION_ID } from '../src/runtime/utils.js';
-import { checkSubscriptionBookkeeping } from '../src/runtime/invariants.js';
+import { checkSubscriptionBookkeeping, checkTotalSubscriptions } from '../src/runtime/invariants.js';
 
 // A fake live connection: getUserData() returns the userData slots the builder
 // reads. `throws: true` models a freed native handle (getUserData throws).
@@ -74,6 +74,38 @@ describe('buildConnectionAuditSnapshot (prod bounded snapshot)', () => {
 		// materialized into the window.
 		expect(snap.total).toBe(2);
 		expect(snap.connections.map((c) => c.id)).toEqual(['live']);
+	});
+
+	it('omits the cap accountant when a freed handle made the full-range window an incomplete census', () => {
+		// The window asks for every connection and the population fits inside the
+		// limit, so the old offset/limit test called this a full pass - but the
+		// freed handle is skipped, and its close has NOT run, so the counter still
+		// holds the membership the window cannot show. Attaching the counter here
+		// hands checkTotalSubscriptions a short sum and fabricates a drift.
+		const live = fakeWs('live', new Set(['a']));
+		const freed = fakeWs('freed', new Set(['b']), true);
+		const snap = build(new Set([live, freed]), { totalSubscriptions: 2 });
+		expect(snap.total).toBe(2);
+		expect(snap.connections.length).toBe(1);
+		expect('totalSubscriptions' in snap).toBe(false);
+		// The cross-check is what the omission protects, so pin the consequence
+		// rather than the flag: with the counter attached this reported
+		// subs.total-mismatch { totalSubscriptions: 2, summed: 1 }.
+		expect(checkTotalSubscriptions(snap)).toBeNull();
+	});
+
+	it('still attaches the cap accountant when every connection materialized', () => {
+		// The other side of the same condition: no skips, so the census is
+		// complete and the cross-check must run - otherwise the fix above would
+		// disable the accountant everywhere and nothing would notice.
+		const conns = new Set([fakeWs('a', new Set(['t1'])), fakeWs('b', new Set(['t2']))]);
+		const snap = build(conns, { totalSubscriptions: 2 });
+		expect(snap.connections.length).toBe(2);
+		expect(snap.totalSubscriptions).toBe(2);
+		expect(checkTotalSubscriptions(snap)).toBeNull();
+		// And a REAL drift still reports, so the guard did not blunt the signal.
+		expect(checkTotalSubscriptions(build(conns, { totalSubscriptions: 5 })))
+			.toEqual({ category: 'subs.total-mismatch', context: { totalSubscriptions: 5, summed: 2 } });
 	});
 
 	it('yields null subscribed/bookkeeping for a non-Set subscription slot, so subs.shape fires', () => {
