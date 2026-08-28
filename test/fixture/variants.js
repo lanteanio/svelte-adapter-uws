@@ -31,7 +31,12 @@ export const FIXTURE_VARIANTS = {
 		handler: './src/hooks.ws.presence.js',
 		websocket: {
 			allowedOrigins: '*',
-			upgradeRateLimit: 100
+			// Raised above the usual 100 because the delivery suite's load arm
+			// opens every connection from one loopback address, where the per-IP
+			// upgrade limit is effectively a global cap. A 429 here would cut a
+			// load ladder short and read as a delivery result rather than the
+			// admission refusal it is.
+			upgradeRateLimit: 2000
 		}
 	},
 
