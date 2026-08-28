@@ -194,10 +194,19 @@ describe('the grant window is calibrated to the memory signal it consumes', () =
 // move without the other and no case would notice: the unit cases for the sizer
 // supply their own ratio, and the sampler's cases supply their own threshold.
 //
-// The counter this reads is the one an open card reports as corrupted in
-// production, which is exactly why the relationship wants a pin: when the
-// counter clamps to zero the ratio reads zero too, and this arm of the sizer
-// silently stops engaging at any load.
+// WHAT THIS BLOCK BINDS, exactly: the two NUMBERS, each read from its shipped
+// surface, at a denominator of one - the fixture holds no live connections, so
+// the counter is the sizer's ratio, and that is also the one state where the
+// sampler's basis diverges from the sizer's (`connections > 0 ? ... : 0`
+// against `size || 1`). The claim that both consumers divide the same counter
+// by the same LIVE denominator therefore cannot be made here at all; it is
+// pinned on a real worker in test/pressure-calibration-real.test.js, where the
+// connection count exists and can be moved.
+//
+// When the counter under this ratio clamps to zero the ratio reads zero too,
+// and this arm of the sizer silently stops engaging at any load - a drifted
+// producer disables its consumer with nothing failing, which is why the
+// relationship wants a pin in both files.
 describe('the grant window is calibrated to the subscriber signal it consumes', () => {
 	/**
 	 * The subscriber ratio at which the sizer starts narrowing, derived by
@@ -261,6 +270,171 @@ describe('the grant window is calibrated to the subscriber signal it consumes', 
 			state.counters.totalSubscriptions = prevSubs;
 			state.counters.lastHeapUsedRatio = prevHeap;
 		}
+	});
+
+	it('the sampler publishes zero, not the raw counter, for a worker with no connections', async () => {
+		// The divergence that forces the shared-basis pin onto a live worker:
+		// with no connections the sampler answers 0 where the sizer reads the
+		// whole counter. The comment blocks here and in
+		// test/pressure-calibration-real.test.js both lean on that guard, and
+		// this is where it fails if it is ever dropped - without it the tick
+		// below publishes a division of 100 by nothing, not 0.
+		const { state, metrics } = await builtModules();
+		const prevSubs = state.counters.totalSubscriptions;
+		const prevConns = state.counters.lastConnections;
+		const prevRatio = state.pressureSnapshot.subscriberRatio;
+		const stampBefore = state.pressureSnapshot.sampledAt;
+		try {
+			expect(state.wsConnections.size, 'this pin needs a worker with no live connections').toBe(0);
+			state.counters.totalSubscriptions = 100;
+			// Poison both fields the tick must write, so the asserts below
+			// cannot be satisfied by a sampler that stopped writing them: the
+			// snapshot field starts at a value no sampler produces, and the
+			// stale connection count is positive so a sampler that reads the
+			// previous tick's count instead of the live set publishes 100/7,
+			// not the 0 this case demands.
+			state.pressureSnapshot.subscriberRatio = -1;
+			state.counters.lastConnections = 7;
+			metrics.startPressureSampling({ sampleIntervalMs: 100 }, undefined);
+			const deadline = Date.now() + 5000;
+			while (state.pressureSnapshot.sampledAt === stampBefore && Date.now() < deadline) await sleep(20);
+			metrics.stopPressureSampling();
+			expect(state.pressureSnapshot.sampledAt, 'the sampler never ticked inside the budget').not.toBe(stampBefore);
+			expect(state.counters.lastConnections, 'the tick did not see the empty connection set').toBe(0);
+			expect(state.pressureSnapshot.subscriberRatio,
+				'a worker with no connections must publish a zero ratio, not the raw counter').toBe(0);
+		} finally {
+			metrics.stopPressureSampling();
+			state.counters.totalSubscriptions = prevSubs;
+			state.counters.lastConnections = prevConns;
+			state.pressureSnapshot.subscriberRatio = prevRatio;
+		}
+	}, 20000);
+});
+
+// The two calibrated pairs above are every instance of a class: one produced
+// runtime signal read by MORE THAN ONE fixed threshold. A lone threshold has
+// nothing to drift against - move it and the behaviour moves with it, visibly.
+// Two thresholds on one signal can move apart silently, which is what the
+// calibration pins exist to stop. That count - exactly two pairs, heap and
+// subscribers - is a property of the shipped code, so it is asserted here
+// rather than remembered: a third pair cannot appear in the sizer's parameter
+// readings, in the wrapper's own state reads, or in the sampler's threshold
+// set without failing one of these cases, and the failure message says what
+// the new pair owes. A read routed through a helper the wrapper calls sits
+// beyond any scan of the wrapper's source - that residual is stated where the
+// scan is, not papered over here.
+describe('no produced signal gains a second threshold consumer silently', () => {
+	/**
+	 * Every reading the shipped sizer consults, discovered from the function
+	 * itself twice over. A recording Proxy catches any property access however
+	 * it is spelled (destructuring included), driven once with every reading
+	 * absent and once per level pair of the two known gates over below-gate,
+	 * BETWEEN-gate-and-threshold, and past-threshold values - the middle level
+	 * because a tiered gate would naturally sit in exactly that band, where
+	 * corner values never reach it. A read nested under any mix of those
+	 * branches executes under some probe, and a read guarded by a signal the
+	 * grid does not know is still caught through the guard's own access, which
+	 * the Proxy records whichever branch then runs. Unknown properties read
+	 * high, so a threshold guard on one proceeds into its branch. A scan of
+	 * the function's own source then catches a literal read the probes cannot
+	 * reach. The honest residual: a read that is dead under every probe AND
+	 * spelled without the parameter's name escapes the discovery, and
+	 * production inputs outside the grid may still reach it - the grid covers
+	 * the bands the shipped gates and thresholds define, not every real.
+	 */
+	function consultedReadings(sizer) {
+		const touched = new Set();
+		const probe = (levels, fallback) => {
+			sizer(new Proxy({}, {
+				get(_, prop) {
+					if (typeof prop !== 'string') return undefined;
+					touched.add(prop);
+					return Object.prototype.hasOwnProperty.call(levels, prop) ? levels[prop] : fallback;
+				},
+				has(_, prop) { if (typeof prop === 'string') touched.add(prop); return true; }
+			}));
+		};
+		probe({}, undefined);
+		for (const heapRatio of [0, 0.8, 0.99]) {
+			for (const subscriberRatio of [0, 30, 1e9]) {
+				probe({ heapRatio, subscriberRatio }, 1e9);
+			}
+		}
+		const src = String(sizer);
+		const param = (src.match(/^[^(]*\(\s*([A-Za-z_$][\w$]*)\s*[),]/) || [])[1];
+		if (param) {
+			for (const m of src.matchAll(new RegExp('\\b' + param + '\\.([A-Za-z_$][\\w$]*)', 'g'))) {
+				touched.add(m[1]);
+			}
+		}
+		return touched;
+	}
+
+	it('the grant path consults exactly the signals calibrated above', async () => {
+		const { state, metrics } = await builtModules();
+		const wire = await import(pathToFileURL(path.join(builtDir, '..', 'wire.js')).href);
+		const consulted = [...consultedReadings(wire.leaseGrantSize)].sort();
+		// `base` and `floor` are window knobs, not produced signals; the other
+		// two are the signals whose calibrations are pinned above. A NEW name
+		// in this list is a new consumer of a produced signal, and it owes two
+		// pins before it lands here: a calibration pair in this file (window
+		// engagement against the threshold the same signal fires at, both read
+		// from the shipped surfaces), and - if the signal's producer already
+		// feeds another threshold - a shared-basis case on a live worker in
+		// test/pressure-calibration-real.test.js.
+		expect(consulted, 'the sizer consults a reading whose calibration is pinned nowhere')
+			.toEqual(['base', 'floor', 'heapRatio', 'subscriberRatio']);
+		// And both discovered gates are live, so the discovery above cannot be
+		// satisfied by dead code: each narrows the window on its own.
+		const base = wire.leaseGrantSize({ heapRatio: 0, subscriberRatio: 0 });
+		expect(wire.leaseGrantSize({ heapRatio: 0.99, subscriberRatio: 0 }),
+			'the heap reading no longer narrows the window').toBeLessThan(base);
+		expect(wire.leaseGrantSize({ heapRatio: 0, subscriberRatio: 1e6 }),
+			'the subscriber reading no longer narrows the window').toBeLessThan(base);
+		// The wrapper is a consumer surface of its own: it chooses which live
+		// state feeds the sizer, and a gate added THERE - reading a counter
+		// and adjusting the count after the sizer returned - would never touch
+		// the parameter the discovery above watches. Scan the state it reads,
+		// against EVERY export of the state module rather than a hand-kept
+		// pair of names: the wrapper's module already imports other produced
+		// surfaces (the pressure snapshot among them), and a gate spelled off
+		// one of those must land in this net too. Require every mention to
+		// carry a member: an alias (`const c = counters`) or a destructuring
+		// (`const { x } = counters`) is a bare mention, and failing on those
+		// is what keeps the scan spelling-proof. A read routed through a
+		// helper the wrapper calls is beyond this scan's reach - the residual
+		// the block comment above names.
+		const surfaces = Object.keys(state).sort((a, b) => b.length - a.length);
+		const mention = new RegExp('\\b(' + surfaces.join('|') + ')\\b(?:\\.([A-Za-z_$][\\w$]*))?', 'g');
+		const stateReads = new Set();
+		const bareMentions = [];
+		for (const m of String(metrics.grantSizeFor).matchAll(mention)) {
+			if (m[2] === undefined) bareMentions.push(m[1]);
+			else stateReads.add(m[1] + '.' + m[2]);
+		}
+		expect(bareMentions,
+			'the wrapper mentions live state without a member - an alias or destructuring this scan cannot follow')
+			.toEqual([]);
+		expect([...stateReads].sort(), 'the grant path reads live state no calibration case covers')
+			.toEqual(['counters.lastHeapUsedRatio', 'counters.totalSubscriptions', 'wsConnections.size']);
+	});
+
+	it('the sampler thresholds gate exactly the known signals', async () => {
+		const { metrics } = await builtModules();
+		const resolved = Object.keys(metrics.resolvePressureThresholds(undefined)).sort();
+		// Grouped by how many fixed thresholds read each signal's producer.
+		// `sampleIntervalMs` is the cadence, not a threshold. A NEW key here
+		// forces the same classification as above: a signal whose producer
+		// also feeds the sizer joins the pairs and owes the two pins named
+		// there; a signal with this one consumer joins the singles.
+		const pairedWithTheSizer = ['memoryHeapUsedRatio', 'subscriberRatio'];
+		const singleConsumer = [
+			'publishRatePerSec', 'topicPublishRatePerSec', 'topicPublishBytesPerSec',
+			'psiCpuSome', 'psiMemoryFull', 'psiIoFull', 'cpuThrottledRatio'
+		];
+		expect(resolved, 'a threshold appeared that no calibration case classifies')
+			.toEqual([...pairedWithTheSizer, ...singleConsumer, 'sampleIntervalMs'].sort());
 	});
 });
 

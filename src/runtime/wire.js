@@ -566,7 +566,11 @@ export function leaseReportedSaturation(raw) {
  *                       threshold reads.
  *
  * Both pairs are pinned in test/pressure-sampler-isolation.test.js, which drives
- * the SHIPPED sizer against the SHIPPED threshold rather than restating either.
+ * the SHIPPED sizer against the SHIPPED threshold rather than restating either,
+ * and which also fails when a reading joins the object below without a
+ * calibration of its own. The subscriber pair's shared basis - one counter,
+ * one LIVE connection-count denominator, for this gate and the sampler both -
+ * is pinned on a real worker in test/pressure-calibration-real.test.js.
  * A change to a producer's basis or to a threshold below must move with them.
  *
  * @param {{ heapRatio: number, subscriberRatio: number, base?: number, floor?: number }} w
