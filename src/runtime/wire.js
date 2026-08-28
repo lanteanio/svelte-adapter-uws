@@ -550,6 +550,25 @@ export function leaseReportedSaturation(raw) {
  * Pure so the sizing direction (shrinks under load, floors) is testable without
  * reaching into process state. The caller supplies the live readings.
  *
+ * WHICH PRODUCER EACH GATE IS TUNED AGAINST. Purity makes the direction
+ * testable and the CALIBRATION untestable here: every unit case supplies its
+ * own reading, so both gates below stay true wherever the producer's real
+ * output sits. Naming the producers is what gives the next basis change
+ * somewhere to look, because the numbers only mean anything against them:
+ *
+ *   heapRatio > 0.7  <- handler/pressure-metrics.js sets counters.lastHeapUsedRatio
+ *                       from memoryWall.ratio(), i.e. distance to the nearest
+ *                       memory wall. It was V8 arena fullness until 0.6.0-next.93,
+ *                       which idles at 0.6-0.9 where the wall basis idles at a
+ *                       few percent - the same gate, a 4-20x different window.
+ *   subscriberRatio > 25 <- counters.totalSubscriptions over the live connection
+ *                       count, the same producer the sampler's own subscriberRatio
+ *                       threshold reads.
+ *
+ * Both pairs are pinned in test/pressure-sampler-isolation.test.js, which drives
+ * the SHIPPED sizer against the SHIPPED threshold rather than restating either.
+ * A change to a producer's basis or to a threshold below must move with them.
+ *
  * @param {{ heapRatio: number, subscriberRatio: number, base?: number, floor?: number }} w
  *   `heapRatio` is the used fraction of the effective memory ceiling (0..1,
  *   the MEMORY signal's nearest-wall basis); `subscriberRatio` is total

@@ -16,7 +16,7 @@
 //      another listener from inside its callback must not extend the sweep
 //      it is running in.
 
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildFixtureOnce } from './helpers/fixture-build.js';
@@ -30,6 +30,15 @@ async function builtModules() {
 	const metrics = await import(pathToFileURL(path.join(builtDir, 'pressure-metrics.js')).href);
 	return { state, metrics };
 }
+
+// Warm the fixture BEFORE any case body runs. The first case spies on
+// `process.memoryUsage` and asserts it is never called, so a build landing
+// inside that spy window fails it - observed twice here, each time on the first
+// run after a source edit invalidated the build, and never on a warm run. The
+// build is a cache hit for every case once this has run, so no case owns it.
+beforeAll(async () => {
+	await builtModules();
+}, 120000);
 
 describe('grant sizing reads the cached sampler ratio', () => {
 	it('sizes from counters.lastHeapUsedRatio without a live memory syscall', async () => {
@@ -173,6 +182,84 @@ describe('the grant window is calibrated to the memory signal it consumes', () =
 			}
 		} finally {
 			state.counters.lastHeapUsedRatio = prev;
+		}
+	});
+});
+
+// The SECOND signal the grant window consumes, pinned the same way and for the
+// same reason. `leaseGrantSize` narrows on `subscriberRatio > 25`, and the
+// pressure sampler reports the worker saturated on its own `subscriberRatio`
+// threshold - both read one producer, `counters.totalSubscriptions` over the
+// live connection count. Nothing connected the two numbers, so either could
+// move without the other and no case would notice: the unit cases for the sizer
+// supply their own ratio, and the sampler's cases supply their own threshold.
+//
+// The counter this reads is the one an open card reports as corrupted in
+// production, which is exactly why the relationship wants a pin: when the
+// counter clamps to zero the ratio reads zero too, and this arm of the sizer
+// silently stops engaging at any load.
+describe('the grant window is calibrated to the subscriber signal it consumes', () => {
+	/**
+	 * The subscriber ratio at which the sizer starts narrowing, derived by
+	 * driving the SHIPPED sizer rather than restating its gate. `grantSizeFor`
+	 * reads `totalSubscriptions / (wsConnections.size || 1)`, and the fixture
+	 * holds no live connections here, so the counter IS the ratio.
+	 */
+	function subscriberEngagementPoint(state, metrics) {
+		const before = state.counters.totalSubscriptions;
+		state.counters.totalSubscriptions = 0;
+		const base = metrics.grantSizeFor().count;
+		let below = 0;
+		try {
+			for (let ratio = 1; ratio <= 4096; ratio++) {
+				state.counters.totalSubscriptions = ratio;
+				if (metrics.grantSizeFor().count < base) return { base, at: ratio, below };
+				below = ratio;
+			}
+			return { base, at: Infinity, below };
+		} finally {
+			state.counters.totalSubscriptions = before;
+		}
+	}
+
+	it('narrows no later than the threshold that same signal fires at', async () => {
+		const { state, metrics } = await builtModules();
+		const prevSubs = state.counters.totalSubscriptions;
+		const prevHeap = state.counters.lastHeapUsedRatio;
+		try {
+			// Neutralise the OTHER arm, so what this measures is the subscriber
+			// gate rather than whatever the heap arm happens to be doing.
+			state.counters.lastHeapUsedRatio = 0;
+			const threshold = metrics.resolvePressureThresholds(undefined).subscriberRatio;
+			expect(typeof threshold, 'the subscriber threshold must be a live number to calibrate against').toBe('number');
+			const { base, at } = subscriberEngagementPoint(state, metrics);
+			expect(at, 'the window narrows at no subscriber ratio the signal can produce').toBeLessThan(Infinity);
+			expect(at, 'a worker at its own subscriber threshold still hands out the full window').toBeLessThanOrEqual(threshold);
+			state.counters.totalSubscriptions = threshold;
+			expect(metrics.grantSizeFor().count, 'the window at the threshold must be below the base').toBeLessThan(base);
+		} finally {
+			state.counters.totalSubscriptions = prevSubs;
+			state.counters.lastHeapUsedRatio = prevHeap;
+		}
+	});
+
+	it('hands out the full window to a worker carrying no subscriptions', async () => {
+		// The other side of the same gate. Without this the pin above is
+		// satisfied by a sizer that narrows everywhere, including on an idle
+		// worker - which is the drift that shipped last time, in the opposite
+		// direction.
+		const { state, metrics } = await builtModules();
+		const prevSubs = state.counters.totalSubscriptions;
+		const prevHeap = state.counters.lastHeapUsedRatio;
+		try {
+			state.counters.lastHeapUsedRatio = 0;
+			state.counters.totalSubscriptions = 0;
+			const idle = metrics.grantSizeFor().count;
+			const { base } = subscriberEngagementPoint(state, metrics);
+			expect(idle, 'an idle worker keeps the full base window').toBe(base);
+		} finally {
+			state.counters.totalSubscriptions = prevSubs;
+			state.counters.lastHeapUsedRatio = prevHeap;
 		}
 	});
 });
