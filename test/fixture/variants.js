@@ -21,6 +21,20 @@ export const FIXTURE_VARIANTS = {
 		}
 	},
 
+	// Presence wired with the heartbeat off, for the two-real-client delivery
+	// suite. Its own build because the handler is a build-time choice and the
+	// default fixture deliberately wires only cursor: joining presence to the
+	// shared handler would put its subscribe hook in front of every suite that
+	// boots `build/`.
+	presence: {
+		out: 'build-presence',
+		handler: './src/hooks.ws.presence.js',
+		websocket: {
+			allowedOrigins: '*',
+			upgradeRateLimit: 100
+		}
+	},
+
 	// Wire-subscribe authorization ARMED.
 	//
 	// Pointed at a handler whose `subscribe` export wraps a real groups-plugin
