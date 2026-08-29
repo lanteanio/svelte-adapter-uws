@@ -184,7 +184,7 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, static
 			headers.push(
 				['cache-control', configuredCacheControl || 'no-cache'],
 				['etag', etag],
-				['last-modified', new Date(lastModifiedMs).toUTCString()]
+				['last-modified', new Date(lastModifiedMs).toUTCString()] // determinism-allow: formats a held stat value; reads no clock
 			);
 		}
 
