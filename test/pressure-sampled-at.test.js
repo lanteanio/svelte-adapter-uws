@@ -65,6 +65,24 @@ describeUWS('the real runtime moves from placeholder to reading', () => {
 		sampledAtBeforeBoot = state.pressureSnapshot.sampledAt;
 		memoryMBBeforeBoot = state.pressureSnapshot.memoryMB;
 
+		// A non-null stamp HERE means another suite in this worker already
+		// booted this variant (one shared module registry - file parallelism
+		// off). In that mode the pre-boot claim below is unobservable, and the
+		// sampler is likely stopped for good: it starts at the handler's
+		// module EVAL, that eval already happened, and the prior suite's
+		// shutdown() stopped it - start() does not re-arm. Refuse with the
+		// cause rather than failing the cases as if the runtime regressed,
+		// the way the eval-time-env guard in helpers/real-runtime.js does.
+		if (sampledAtBeforeBoot !== null) {
+			throw new Error(
+				'pressure-sampled-at: the default variant was already booted in this worker, so the ' +
+				'pre-boot snapshot state this suite asserts no longer exists in this process (and the ' +
+				'module-eval sampler may already be stopped). Seen with file parallelism off, where one ' +
+				'worker runs every file against one module registry. Give this suite its own entry in ' +
+				'test/fixture/variants.js if it must run in that mode.'
+			);
+		}
+
 		server = await startRealRuntime();
 		({ platform } = await import('./fixture/build/handler/platform.js'));
 	}, 400000);
