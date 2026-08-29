@@ -54,7 +54,7 @@ import { beginResumeCapture, discardResumeCapture, flushResumeTopic, coveredSeqF
 import { signalRelayGaps } from './handler/lifecycle.js';
 import { releaseSharedWireId } from './handler/shared-wire-id.js';
 import { setCohortHooks } from './utils.js';
-import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './utils/subscribe-policy.js';
+import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, deniesRefLessRecoverBatch, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './utils/subscribe-policy.js';
 import { startPostureExport } from './utils/posture-export.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './utils/upgrade-headers.js';
 import { collectRequestHeaders, declareSingleValuedProxyHeaders } from './utils/request-headers.js';
@@ -2293,6 +2293,19 @@ if (WS_ENABLED) {
 				msg = parsed;
 				if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
 					const ref = hasRef(msg.ref) ? msg.ref : null;
+					// History asked for with no way to answer: EVERY gate and
+					// denial on this path - the topic checks included - is silent
+					// without a ref, so a recover subscribe that carries none
+					// would install nothing and say nothing whatever refused it,
+					// and the client replays its offset into a silent gap.
+					// Refused first, before anything can swallow it, with the
+					// uncorrelatable-error shape.
+					if (deniesRefLessRecover({ hasResumeHook: wsModule.resume, recover: msg.recover, ref })) {
+						const payload = recoverRequiresRefFrame(msg.topic);
+						try { ws.send(payload, false, false); } catch { counters.closedWsAborts++; return; }
+						bumpOut(ws, payload);
+						return;
+					}
 					if (!isValidWireTopic(msg.topic, ALLOW_NON_ASCII_TOPICS)) {
 						sendSubscribeDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
 						return;
@@ -2554,6 +2567,16 @@ if (WS_ENABLED) {
 					// never come, with no signal which topics were never subscribed.
 					const topics = msg.topics.slice(0, 256);
 					const ref = hasRef(msg.ref) ? msg.ref : null;
+					// One ref covers the whole batch, so a missing one orphans
+					// every history request the frame's recover map names -
+					// refused whole, before any entry is inspected, like the
+					// batch's other contract refusals.
+					if (deniesRefLessRecoverBatch({ hasResumeHook: wsModule.resume, recover: msg.recover, ref })) {
+						const payload = recoverRequiresRefFrame(null);
+						try { ws.send(payload, false, false); } catch { counters.closedWsAborts++; return; }
+						bumpOut(ws, payload);
+						return;
+					}
 					for (let i = 256; i < msg.topics.length; i++) {
 						if (typeof msg.topics[i] === 'string') {
 							sendSubscribeDenied(ws, msg.topics[i], ref, 'BATCH_OVERFLOW');
