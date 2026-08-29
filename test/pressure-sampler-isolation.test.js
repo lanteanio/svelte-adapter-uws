@@ -427,7 +427,12 @@ describe('no produced signal gains a second threshold consumer silently', () => 
 		// `sampleIntervalMs` is the cadence, not a threshold. A NEW key here
 		// forces the same classification as above: a signal whose producer
 		// also feeds the sizer joins the pairs and owes the two pins named
-		// there; a signal with this one consumer joins the singles.
+		// there; a signal with this one consumer joins the singles AND owes a
+		// basis pin, because a lone threshold still rots when its producer's
+		// basis or units change under it. Every single below has one: the
+		// publish-window and per-topic rates on a live worker in
+		// test/pressure-calibration-real.test.js, the PSI and throttle
+		// signals in the kernel-basis cases that follow this block.
 		const pairedWithTheSizer = ['memoryHeapUsedRatio', 'subscriberRatio'];
 		const singleConsumer = [
 			'publishRatePerSec', 'topicPublishRatePerSec', 'topicPublishBytesPerSec',
@@ -436,6 +441,185 @@ describe('no produced signal gains a second threshold consumer silently', () => 
 		expect(resolved, 'a threshold appeared that no calibration case classifies')
 			.toEqual([...pairedWithTheSizer, ...singleConsumer, 'sampleIntervalMs'].sort());
 	});
+});
+
+// The single-consumer signals still rot without a partner: a producer's basis
+// or units can change under a fixed threshold while every case that supplies
+// its own reading stays green - the shape the memory signal's basis change
+// took, and it needed no second consumer. So each producer carries a basis
+// pin. The heap ratio has its recompute-from-primitives case above, the
+// subscriber ratio and the publish-window and per-topic rates live on a real
+// worker in test/pressure-calibration-real.test.js, and the two kernel
+// sources are pinned here: fixture files at the kernel's own formats drive
+// the SHIPPED parser, the SHIPPED running sampler, and the SHIPPED fold, with
+// engagement measured exactly at the shipped default and just below it.
+// Excluded by classification, durably: egress ceilings are
+// operator-configured, so there is no shipped number to calibrate against a
+// producer; the folded pressureSnapshot.value has no fixed-threshold consumer
+// in the runtime (the introspection export and a gauge read it, nothing gates
+// on it).
+describe('every kernel signal keeps the basis its threshold was tuned against', () => {
+	const enoent = (p) => { const e = new Error('ENOENT: no fixture for ' + p); e.code = 'ENOENT'; throw e; };
+
+	async function kernelModules() {
+		const { state, metrics } = await builtModules();
+		const os = await import(pathToFileURL(path.join(builtDir, '..', 'utils', 'os-pressure.js')).href);
+		return { state, metrics, os };
+	}
+
+	afterEach(async () => {
+		const { metrics } = await builtModules();
+		metrics.stopPressureSampling();
+		// These cases replace the module's sampler instance with fixture-fed
+		// ones. Hand later suites a probed-absent instance instead of a dead
+		// fixture reader, so their kernel readings are cleanly null.
+		metrics.startPressureSampling(undefined, { psi: false, cpuThrottle: false });
+		metrics.stopPressureSampling();
+	});
+
+	it('a PSI reading travels file to reason in avg10 percent, engaging exactly at the shipped default', async () => {
+		const { state, metrics, os } = await kernelModules();
+		const t = metrics.resolvePressureThresholds(undefined);
+		// Distinct values on every line and column, all below the shipped
+		// defaults, so a wrong line (some vs full), a wrong column
+		// (avg60/avg300), or a swapped file each surface as a wrong number.
+		const psiFile = (some, full) =>
+			`some avg10=${some} avg60=97.00 avg300=98.00 total=11111\nfull avg10=${full} avg60=95.00 avg300=96.00 total=22222\n`;
+		const quietFiles = () => ({
+			'/proc/pressure/cpu': psiFile('6.50', '7.50'),
+			'/proc/pressure/memory': psiFile('2.50', '1.50'),
+			'/proc/pressure/io': psiFile('3.50', '4.50')
+		});
+		const files = quietFiles();
+
+		// The shipped parser and its line/column selection, alone.
+		const parseOnly = os.createOsPressureSampler({ readFile: (p) => files[p] ?? enoent(p) });
+		expect(parseOnly.sample(1000).psi, 'the parser must read cpu from some and memory/io from full, at avg10')
+			.toEqual({ cpuSome10: 6.5, memoryFull10: 1.5, ioFull10: 4.5 });
+
+		// The same files through the RUNNING sampler: parser, field routing
+		// into the sample, fold, and shipped default in one pass.
+		const tick = async () => {
+			const before = state.pressureSnapshot.sampledAt;
+			const deadline = Date.now() + 5000;
+			while (state.pressureSnapshot.sampledAt === before && Date.now() < deadline) await sleep(20);
+			expect(state.pressureSnapshot.sampledAt, 'the sampler never ticked inside the budget').not.toBe(before);
+		};
+		try {
+			// Every signal this case does not drive is disabled, so the host
+			// machine cannot inject its own reason: computePressureReason ranks
+			// MEMORY first, and a memory-capped CI container legitimately sits
+			// at its wall (the wall case above says so) - which would answer
+			// MEMORY where this case expects NONE or PSI.
+			metrics.startPressureSampling({
+				sampleIntervalMs: 100,
+				memoryHeapUsedRatio: false,
+				publishRatePerSec: false,
+				subscriberRatio: false,
+				topicPublishRatePerSec: false,
+				topicPublishBytesPerSec: false
+			}, { psi: true, cpuThrottle: false, readFile: (p) => files[p] ?? enoent(p) });
+			await tick();
+			expect(state.pressureSnapshot.psi, 'the running sampler did not carry the parsed readings')
+				.toEqual({ cpuSome10: 6.5, memoryFull10: 1.5, ioFull10: 4.5 });
+			expect(state.counters.lastBasePressureReason, 'quiet fixture readings must not engage').toBe('NONE');
+
+			for (const [file, key, mk] of [
+				['/proc/pressure/cpu', 'psiCpuSome', (v) => psiFile(v, '7.50')],
+				['/proc/pressure/memory', 'psiMemoryFull', (v) => psiFile('2.50', v)],
+				['/proc/pressure/io', 'psiIoFull', (v) => psiFile('3.50', v)]
+			]) {
+				expect(typeof t[key], key + ' must be a live number to calibrate against').toBe('number');
+				files[file] = mk((t[key] - 0.01).toFixed(2));
+				await tick();
+				expect(state.counters.lastBasePressureReason, key + ' engaged below its own threshold').toBe('NONE');
+				files[file] = mk(t[key].toFixed(2));
+				await tick();
+				expect(state.counters.lastBasePressureReason, key + ' at its own threshold must engage').toBe('PSI');
+				Object.assign(files, quietFiles());
+			}
+		} finally {
+			metrics.stopPressureSampling();
+		}
+	}, 30000);
+
+	it('a throttle reading is the fraction of its own window, engaging exactly at the shipped default', async () => {
+		const { state, metrics, os } = await kernelModules();
+		const t = metrics.resolvePressureThresholds(undefined);
+		expect(typeof t.cpuThrottledRatio, 'the throttle threshold must be a live number to calibrate against').toBe('number');
+
+		// v1 nanoseconds normalize to microseconds in the shipped parser.
+		expect(os.parseCpuStat('nr_periods 9\nnr_throttled 4\nthrottled_time 250000000\n'),
+			'the v1 nanosecond field must normalize to microseconds')
+			.toEqual({ nrThrottled: 4, throttledUsec: 250000 });
+
+		// Baseline and cap on the shipped sampler alone: the first read
+		// establishes the delta baseline, and a delta past the window caps.
+		let n = 0;
+		const capSampler = os.createOsPressureSampler({
+			readFile: (p) => p === '/sys/fs/cgroup/cpu.stat'
+				? `nr_throttled ${n + 1}\nthrottled_usec ${(n++) * 10 ** 9}\n` : enoent(p)
+		});
+		expect(capSampler.sample(100).cpuThrottle, 'the first read must be a baseline, not a spike')
+			.toEqual({ throttledRatio: 0, nrThrottledDelta: 0 });
+		expect(capSampler.sample(100).cpuThrottle.throttledRatio, 'a delta past the window must cap at 1').toBe(1);
+
+		// The DELTA half of the basis, which the running chain below cannot
+		// see: at its observed tick the cumulative count and the per-window
+		// delta coincide by construction. Constant increments separate them -
+		// a sampler dividing the cumulative count reads double on sample 3.
+		let k = 0;
+		const deltaSampler = os.createOsPressureSampler({
+			readFile: (p) => p === '/sys/fs/cgroup/cpu.stat'
+				? `nr_throttled ${k}\nthrottled_usec ${(k++) * 25000}\n` : enoent(p)
+		});
+		expect(deltaSampler.sample(100).cpuThrottle.throttledRatio).toBe(0);
+		expect(deltaSampler.sample(100).cpuThrottle.throttledRatio).toBeCloseTo(0.25, 10);
+		expect(deltaSampler.sample(100).cpuThrottle.throttledRatio,
+			'the ratio must divide the per-window delta, not the cumulative count').toBeCloseTo(0.25, 10);
+
+		// The RUNNING chain: a constant per-tick delta derived from the
+		// shipped default, so every measured window lands exactly on the
+		// threshold - then one step below. Constant per-tick growth keeps the
+		// ratio independent of which tick is observed.
+		const W = 100;
+		const run = async (usecPerTick) => {
+			let reads = 0;
+			// The snapshot field survives a stop, so without this the wait
+			// below could exit on the PREVIOUS run's reading.
+			state.pressureSnapshot.cpuThrottle = null;
+			// Undriven signals disabled for the same host-injection reason as
+			// the PSI case: MEMORY outranks CPU_QUOTA in the reason fold.
+			metrics.startPressureSampling({
+				sampleIntervalMs: W,
+				memoryHeapUsedRatio: false,
+				publishRatePerSec: false,
+				subscriberRatio: false,
+				topicPublishRatePerSec: false,
+				topicPublishBytesPerSec: false
+			}, {
+				psi: false, cpuThrottle: true,
+				readFile: (p) => p === '/sys/fs/cgroup/cpu.stat'
+					? `nr_throttled ${reads}\nthrottled_usec ${(reads++) * usecPerTick}\n` : enoent(p)
+			});
+			const deadline = Date.now() + 5000;
+			while ((state.pressureSnapshot.cpuThrottle?.throttledRatio ?? 0) === 0 && Date.now() < deadline) await sleep(20);
+			const seen = {
+				ratio: state.pressureSnapshot.cpuThrottle?.throttledRatio,
+				reason: state.counters.lastBasePressureReason
+			};
+			metrics.stopPressureSampling();
+			return seen;
+		};
+		const step = Math.round(t.cpuThrottledRatio * W * 1000);
+		const at = await run(step);
+		expect(at.ratio, 'the ratio is not the per-window delta over the window the sampler names')
+			.toBeCloseTo(t.cpuThrottledRatio, 10);
+		expect(at.reason, 'a worker throttled exactly at the default must engage').toBe('CPU_QUOTA');
+		const below = await run(step - 1000);
+		expect(below.ratio).toBeCloseTo((step - 1000) / (W * 1000), 10);
+		expect(below.reason, 'a worker throttled below the default must stay quiet').toBe('NONE');
+	}, 30000);
 });
 
 describe('listener sweeps iterate a snapshot', () => {

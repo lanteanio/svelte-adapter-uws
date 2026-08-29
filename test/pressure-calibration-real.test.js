@@ -169,6 +169,68 @@ describeUWS('the subscriber signal and both of its consumers agree on one live w
 		}
 	});
 
+	it('publishes rates normalized by its own interval, from counters real publishes grew', async () => {
+		// The rate producers' basis is a per-second normalization of window
+		// counters drained each tick. A single fixed threshold cannot drift
+		// against a second consumer, but its producer can still change basis
+		// under it - and a raw window count instead of a per-second rate reads
+		// IDENTICALLY at the default one-second cadence. So this runs the
+		// sampler at a quarter-second cadence, where the two diverge fourfold,
+		// and grows the counters through real platform publishes rather than
+		// by assignment.
+		const platform = (await import(pathToFileURL(path.join(builtDir, 'platform.js')).href)).platform;
+		const N = 8;
+		const topic = 'rate-basis';
+		try {
+			metrics.startPressureSampling({ sampleIntervalMs: 250 }, undefined);
+			// Synchronous from here through the reads below, so no tick can
+			// split the window: every publish lands in one sample.
+			const windowBefore = state.counters.publishCountWindow;
+			for (let i = 0; i < N; i++) platform.publish(topic, 'tick', { i });
+			expect(state.counters.publishCountWindow - windowBefore,
+				'real publishes did not reach the window counter').toBe(N);
+			const stats = state.topicPublishStats.get(topic);
+			expect(stats, 'real publishes did not reach the per-topic stats').toBeTruthy();
+			expect(stats.m, 'the per-topic message count missed the real publishes').toBe(N);
+			const envelopeLen = stats.b;
+			const windowCount = state.counters.publishCountWindow;
+
+			// The snapshot can hold a NONZERO stale rate from the boot window
+			// (the fixture's open hook publishes on connect), so waiting on the
+			// rate alone can exit before any tick of the re-armed sampler. The
+			// unique topic can only surface in the fold when the tick that
+			// drained THIS window ran.
+			await settle(() => state.pressureSnapshot.topPublishers.some((t) => t.topic === topic), 5000);
+			const interval = 250 / 1000;
+			// The sampler retains the raw count it drained; the published rate
+			// must be that count over the interval it was configured with.
+			expect(state.counters.lastPublishCount, 'the drained window is not the one the real publishes grew')
+				.toBe(windowCount);
+			expect(state.pressureSnapshot.publishRate,
+				'the published rate is not the drained window count over the sample interval')
+				.toBeCloseTo(state.counters.lastPublishCount / interval, 10);
+			const top = state.pressureSnapshot.topPublishers.find((t) => t.topic === topic);
+			expect(top, 'the topic never surfaced in the published top-publishers fold').toBeTruthy();
+			expect(top.messagesPerSec, 'the per-topic message rate is not per-second')
+				.toBeCloseTo(N / interval, 10);
+			expect(top.bytesPerSec, 'the per-topic byte rate is not per-second')
+				.toBeCloseTo(envelopeLen / interval, 10);
+
+			// And the window DRAINS: a later tick with no publishes reads zero,
+			// which is what makes this a rate over one window rather than a
+			// cumulative counter.
+			await settle(() => state.pressureSnapshot.publishRate === 0, 5000);
+			expect(state.pressureSnapshot.publishRate, 'the window never drained').toBe(0);
+			// Both windows: the tick that drained the publish counter folded
+			// the topic map in the same pass, so a stats map that survives its
+			// tick (a cumulative per-topic ledger) leaves the topic here.
+			expect(state.pressureSnapshot.topPublishers.some((t) => t.topic === topic),
+				'the per-topic window did not drain').toBe(false);
+		} finally {
+			metrics.startPressureSampling(undefined, undefined);
+		}
+	}, 20000);
+
 	it('narrows at a point that moves with the live connection count', async () => {
 		// The other side of the shared-basis claim: the sizer DIVIDES BY the
 		// live connection count. Nothing so far pins that - a sizer that read

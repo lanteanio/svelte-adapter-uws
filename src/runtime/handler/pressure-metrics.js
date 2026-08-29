@@ -467,15 +467,19 @@ export function resolvePressureThresholds(opts) {
  * existing timer with a new one using the supplied thresholds.
  *
  * @param {Parameters<typeof resolvePressureThresholds>[0]} opts
- * @param {{ psi: boolean | null, cpuThrottle: boolean | null } | undefined} sources
+ * @param {{ psi: boolean | null, cpuThrottle: boolean | null, readFile?: (path: string) => string } | undefined} sources
  *   Availability already established while optional metric instruments were
  *   registered. Passing it prevents a transient first timer read from
- *   overturning that successful probe forever.
+ *   overturning that successful probe forever. `readFile` rides along for the
+ *   same reason the deterministic seam injects clocks and timers: the kernel
+ *   sources are files, and a caller that supplies both availability and the
+ *   reader can drive the whole sampling chain on a host that has neither
+ *   /proc/pressure nor a cgroup. The boot path never sets it.
  */
 export function startPressureSampling(opts, sources) {
 	const thresholds = resolvePressureThresholds(opts);
 	if (pressureTimer) clearIntervalTimer(pressureTimer);
-	if (sources !== undefined) osPressure = createOsPressureSampler({ sources });
+	if (sources !== undefined) osPressure = createOsPressureSampler({ sources, readFile: sources.readFile });
 	pressureTimer = setIntervalTimer(() => samplePressure(thresholds), thresholds.sampleIntervalMs);
 	if (typeof pressureTimer.unref === 'function') pressureTimer.unref();
 }
