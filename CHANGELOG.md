@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Absent, `true`, `false`, and valid numbers behave exactly as before, on every lane and every surface (production, `createTestServer`, `vite dev`). `null` moves from counter to no-seq; other non-contract values move from counter to `TypeError`. The wire's seq space is unchanged: a bigint projects into the same IEEE-double space a number occupies, rounding beyond 2^53 exactly as `Number(x)` at the call site already did.
   - **Detail:** [Changed engineering detail](#changed).
+- **Fixed: a batch call's `excludeWs` now excludes on both lanes.** `publishWireBatch` honoured a call-level exclusion only for stateless codecs, so opting a codec into batch framing silently dropped it and the author heard its own updates back; the call-level socket now defaults every entry, and a per-entry `excludeWs` overrides it, on either lane.
+  - **Affects:** Callers passing `excludeWs` on `publishWireBatch`'s options with a stateful codec - previously ignored there without an error.
+  - **Action:** None. Per-entry exclusions behave exactly as before.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The batch-level form is now documented on both surfaces; it was honoured undocumented on the stateless lane and ignored on the stateful one. An entry-level `null` exclusion now means absent (inherit the call-level default) on both lanes, where the stateless lane previously read it as an override to nothing.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: the cluster relay's frame ceiling now measures encoded bytes.** It compared UTF-16 string length, so a multibyte-heavy frame up to three times the configured size passed the sender and could land over every sibling worker's byte-measured backlog ceiling at once - the mass quarantine the ceiling exists to prevent.
   - **Affects:** Multi-worker deployments that set `CLUSTER_RELAY_MAX_FRAME_KB` and relay non-ASCII payloads; ASCII payloads measured identically before and after.
   - **Action:** None. A deployment relying on the old undercount to sneak larger multibyte frames through should raise the ceiling to the size it actually intends.
@@ -127,6 +133,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after, with the decoder allocation 99 ns of the difference.
   `test/cursor.test.js` makes the pre-parsed envelope and the raw bytes name
   different topics, so which one the hook acted on is observable.
+
+- **A batch call-level `excludeWs` is the default exclusion for every entry.**
+  `publishWireBatch` forwarded its options to the per-entry path on the
+  stateless lane - where `excludeWs` rode along as an undocumented side
+  effect - and derived exclusions from the entries alone on the stateful
+  lane. Which lane runs is a property of the codec (`state` opts into batch
+  framing), so the documented way to adopt batch framing silently dropped a
+  working call's exclusion: the author-echo bug. The call-level socket now
+  defaults every entry on both lanes, and an entry's own `excludeWs`
+  overrides it - the same override shape the entry `seq` takes; an entry
+  `null` means absent (inherit) on both lanes, where the stateless lane
+  previously read it as an override to nothing. Egress delivery deductions
+  ride the same per-entry resolution, so the ledger counts what actually
+  fanned out. `test/publish-batch-exclude-real.test.js` reads the contract
+  off frames two real clients receive, on both lanes.
 
 - **The relay frame ceiling measures the unit its neighbors measure.** The
   sender-side admission compared `String.prototype.length` - UTF-16 code

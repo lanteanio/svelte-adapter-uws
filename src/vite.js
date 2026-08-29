@@ -879,21 +879,30 @@ export default function uws(options = {}) {
 			// publish per entry either way.
 			let admitOpts = opts;
 			if (egressAccountV.enabled) {
-				// The shared exclusion is discounted because every entry carries
-				// it; a PER-ENTRY exclusion is not, because it withholds only its
-				// own entry - over-estimating a refusal boundary is safe, while
-				// under-estimating would admit past the ceiling.
-				const batchRecipients = countEgressRecipientsV(topic, opts && opts.excludeWs);
-				if (!egressAccountV.admit(topic, egressTenantForV(topic), count, count * batchRecipients)) return false;
+				// Per resolved entry, as production: the call-level exclusion is
+				// each entry's default and its own overrides it, so the
+				// admission counts what delivery will actually perform - a
+				// one-shot discount would under-estimate where an entry
+				// overrides to a socket without the topic, the direction that
+				// admits past the ceiling.
+				const shared = opts != null && opts.excludeWs !== undefined && opts.excludeWs !== null
+					? opts.excludeWs : null;
+				let deliveries = 0;
+				for (let i = 0; i < count; i++) {
+					deliveries += countEgressRecipientsV(topic, excludes[i] != null ? excludes[i] : shared);
+				}
+				if (!egressAccountV.admit(topic, egressTenantForV(topic), count, deliveries)) return false;
 				admitOpts = { ...(opts || {}), [EGRESS_ADMITTED]: true };
 			}
 			let ok = false;
 			for (let i = 0; i < count; i++) {
 				const entrySeq = entrySeqs === null ? undefined : entrySeqs[i];
 				let per = admitOpts;
-				if (excludes[i] !== undefined || entrySeq !== undefined) {
+				// An entry's own exclusion overrides the call-level one the
+				// delegated options already carry; null is absent, as production.
+				if (excludes[i] != null || entrySeq !== undefined) {
 					per = { ...(admitOpts || {}) };
-					if (excludes[i] !== undefined) per.excludeWs = excludes[i];
+					if (excludes[i] != null) per.excludeWs = excludes[i];
 					if (entrySeq !== undefined) per.seq = entrySeq;
 				}
 				ok = publish(topic, event, datas[i], per) || ok;

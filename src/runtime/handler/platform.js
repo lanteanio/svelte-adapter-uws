@@ -615,12 +615,19 @@ export const platform = {
 	 * relay input: the cross-worker receive path re-encodes per entry through
 	 * publishWire, so batching stays a local egress optimization.
 	 *
+	 * A call-level `options.excludeWs` is the DEFAULT exclusion for every
+	 * entry - the author of a tick's updates is one socket for the whole
+	 * batch, which is the exclusion's whole use - and an entry carrying its
+	 * own `excludeWs` overrides it for that entry, the same override shape the
+	 * entry `seq` takes. Honoured identically on BOTH lanes: whether the codec
+	 * has state decides framing, never who is excluded.
+	 *
 	 * @param {string} topic
 	 * @param {string} event - the PER-ENTRY event name; the codec's batch
 	 *   form is looked up as `<event>-batch` with `{ updates }` data.
-	 * @param {Array<{ data: any, excludeWs?: import('uWebSockets.js').WebSocket<any>, seq?: number }>} entries
+	 * @param {Array<{ data: any, excludeWs?: import('uWebSockets.js').WebSocket<any> | null, seq?: boolean | number | bigint | null }>} entries
 	 * @param {{ capability: string, schemaVersion: number, encode: Function, state?: any }} wire
-	 * @param {{ seq?: boolean, relay?: boolean, compress?: boolean }} [options]
+	 * @param {{ seq?: boolean, relay?: boolean, compress?: boolean, excludeWs?: import('uWebSockets.js').WebSocket<any> }} [options]
 	 * @returns {boolean}
 	 */
 	publishWireBatch(topic, event, entries, wire, options) {
@@ -707,16 +714,24 @@ export const platform = {
 			// the ledger sees one logical publish per entry either way.
 			let admitOpts = opts;
 			if (egressGate.armed) {
-				let batchRecipients = topicSubscriberCounts.get(topic) || 0;
+				const batchRecipients = topicSubscriberCounts.get(topic) || 0;
+				// Deliveries counted per RESOLVED entry - the same own-or-default
+				// resolution delivery performs. A one-shot estimate discounting
+				// the call-level exclusion for every entry would UNDER-estimate
+				// where an entry overrides it to a socket without the topic,
+				// which is the direction that admits past the ceiling.
+				let deliveries = count * batchRecipients;
 				if (batchRecipients > 0) {
-					// A per-entry exclusion only discounts that entry, so the
-					// batch's admission uses the undiscounted count: over-
-					// estimating a refusal boundary is safe, under-estimating
-					// would admit past the ceiling.
-					const shared = opts && opts.excludeWs;
-					if (shared !== undefined && shared !== null && excludedRecipient(shared, topic)) batchRecipients--;
+					const shared = opts != null && opts.excludeWs !== undefined && opts.excludeWs !== null
+						? opts.excludeWs : null;
+					const sharedHolds = shared !== null && excludedRecipient(shared, topic);
+					for (let i = 0; i < count; i++) {
+						const own = excludes[i];
+						if (own != null) { if (excludedRecipient(own, topic)) deliveries--; }
+						else if (sharedHolds) deliveries--;
+					}
 				}
-				if (!admitPublishEgress(topic, resolvePublishTenant(topic), count, count * batchRecipients)) return false;
+				if (!admitPublishEgress(topic, resolvePublishTenant(topic), count, deliveries)) return false;
 				// The entries inherit the decision rather than re-taking it.
 				admitOpts = { ...(opts || {}), [EGRESS_ADMITTED]: true };
 			}
@@ -724,9 +739,12 @@ export const platform = {
 			for (let i = 0; i < count; i++) {
 				const entrySeq = entrySeqs === null ? undefined : entrySeqs[i];
 				let per = admitOpts;
-				if (excludes[i] !== undefined || entrySeq !== undefined) {
+				// An entry's own exclusion overrides the call-level one the
+				// delegated options already carry; a null entry exclusion is
+				// ABSENT (it inherits), matching the stateful lane.
+				if (excludes[i] != null || entrySeq !== undefined) {
 					per = { ...(admitOpts || {}) };
-					if (excludes[i] !== undefined) per.excludeWs = excludes[i];
+					if (excludes[i] != null) per.excludeWs = excludes[i];
 					if (entrySeq !== undefined) per.seq = entrySeq;
 				}
 				ok = this.publishWire(topic, event, datas[i], wire, per) || ok;
@@ -773,11 +791,20 @@ export const platform = {
 		// rewriting a field this call has already read.
 		let entrySeqs = null;
 		let sawExplicitEntrySeq = false;
+		// The call-level exclusion is the DEFAULT for every entry; an entry
+		// carrying its own overrides it - the same override shape the entry seq
+		// takes. This lane used to consult only the entries, so adding `state`
+		// to a codec (the documented way into batch framing) silently rerouted
+		// a working call onto a lane that ignored its exclusion and the author
+		// heard its own updates back.
+		const sharedExclude = opts != null && opts.excludeWs !== undefined && opts.excludeWs !== null
+			? opts.excludeWs : null;
 		for (let i = 0; i < count; i++) {
 			const entry = entries[i];
 			datas[i] = entry.data;
-			const exclude = entry.excludeWs;
-			if (exclude !== undefined && exclude !== null) {
+			const exclude = entry.excludeWs !== undefined && entry.excludeWs !== null
+				? entry.excludeWs : sharedExclude;
+			if (exclude !== null) {
 				if (excludes === null) excludes = new Array(count);
 				excludes[i] = exclude;
 				anyExclude = true;

@@ -1383,7 +1383,23 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// stamped write. Every one is a comparison or a cold throw on values
 	// already held; no byte is read, allocated or copied, and no copy
 	// primitive entered the graph.
-	platform: 'b14e520ba96833b2d6241f065e812de51e35c68074517cba639a682ea7bb7e9c',
+	//
+	// Re-pinned for the batch exclusion default: the stateful pre-pass reads
+	// the call-level excludeWs once into a local and each entry resolves its
+	// exclusion as its own or that default, and the stateless forward treats
+	// an entry-level null as absent instead of an override. Reads of values
+	// the call already holds and one comparison per entry; the delivery walk,
+	// deduction loop and every buffer are unchanged - no byte is read,
+	// allocated or copied, and no copy primitive entered the graph.
+	//
+	// Re-pinned again for the stateless batch admission counting per resolved
+	// entry: the one-shot recipient discount becomes a loop of comparisons
+	// and set-membership reads over the exclusions the snapshot pass already
+	// holds, so the gate counts the deliveries the delegated entries will
+	// actually perform. Cold relative to delivery (egress gate armed only),
+	// integer arithmetic on held values; no byte is read, allocated or
+	// copied, and no copy primitive entered the graph.
+	platform: '0b74b2a9ce4d3849f809e71424e98c801d88949bc68e671292169d69eedde677',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

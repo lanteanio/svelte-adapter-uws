@@ -2967,7 +2967,19 @@ export interface Platform {
 				onDetach?: (ws: WebSocket<any>, state: unknown) => void;
 			};
 		},
-		options?: { seq?: boolean | null; relay?: boolean; compress?: boolean }
+		options?: {
+			seq?: boolean | null;
+			relay?: boolean;
+			compress?: boolean;
+			/**
+			 * Default exclusion for every entry - the author of a tick's updates
+			 * is one socket for the whole batch. An entry's own `excludeWs`
+			 * overrides it for that entry. Honoured identically on both batch
+			 * lanes; whether the codec has state decides framing, never who is
+			 * excluded.
+			 */
+			excludeWs?: WebSocket<any>;
+		}
 	): boolean;
 
 	/**

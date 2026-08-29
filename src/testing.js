@@ -1264,20 +1264,34 @@ export async function createTestServer(options = {}) {
 				// delegated entry still charges itself.
 				let statelessOpts = opts;
 				if (egressAccountT.enabled) {
-					let batchRecipients = app.numSubscribers(topic);
-					const shared = opts && opts.excludeWs;
-					if (batchRecipients > 0 && shared !== undefined && shared !== null &&
-						excludedRecipient(shared, topic)) batchRecipients--;
-					if (!egressAccountT.admit(topic, egressTenantForT(topic), count, count * batchRecipients)) return false;
+					const batchRecipients = app.numSubscribers(topic);
+					// Per resolved entry, as production: an entry overriding the
+					// call-level exclusion to a socket without the topic delivers
+					// the full recipient count, and a one-shot discount would
+					// under-estimate - the direction that admits past the ceiling.
+					let deliveries = count * batchRecipients;
+					if (batchRecipients > 0) {
+						const shared = opts != null && opts.excludeWs !== undefined && opts.excludeWs !== null
+							? opts.excludeWs : null;
+						const sharedHolds = shared !== null && excludedRecipient(shared, topic);
+						for (let i = 0; i < count; i++) {
+							const own = statelessExcludes[i];
+							if (own != null) { if (excludedRecipient(own, topic)) deliveries--; }
+							else if (sharedHolds) deliveries--;
+						}
+					}
+					if (!egressAccountT.admit(topic, egressTenantForT(topic), count, deliveries)) return false;
 					statelessOpts = { ...(opts || {}), [EGRESS_ADMITTED]: true };
 				}
 				let ok = false;
 				for (let i = 0; i < count; i++) {
 					const entrySeq = statelessSeqs === null ? undefined : statelessSeqs[i];
 					let per = statelessOpts;
-					if (statelessExcludes[i] !== undefined || entrySeq !== undefined) {
+					// An entry's own exclusion overrides the call-level one the
+					// delegated options already carry; null is absent, as production.
+					if (statelessExcludes[i] != null || entrySeq !== undefined) {
 						per = { ...(statelessOpts || {}) };
-						if (statelessExcludes[i] !== undefined) per.excludeWs = statelessExcludes[i];
+						if (statelessExcludes[i] != null) per.excludeWs = statelessExcludes[i];
 						if (entrySeq !== undefined) per.seq = entrySeq;
 					}
 					ok = platform.publishWire(topic, event, statelessDatas[i], wire, per) || ok;
@@ -1297,10 +1311,14 @@ export async function createTestServer(options = {}) {
 			// anything is stamped or serialised - as production has it.
 			let entrySeqs = null;
 			let sawExplicitEntrySeq = false;
+			// The call-level exclusion defaults every entry; an entry's own
+			// overrides it - as production's stateful lane decides it.
+			const sharedExclude = opts != null && opts.excludeWs !== undefined && opts.excludeWs !== null ? opts.excludeWs : null;
 			for (let i = 0; i < count; i++) {
 				const entry = entries[i];
 				datas[i] = entry.data;
-				const exclude = entry.excludeWs;
+				const exclude = entry.excludeWs !== undefined && entry.excludeWs !== null
+					? entry.excludeWs : sharedExclude;
 				if (exclude !== undefined && exclude !== null) {
 					if (excludes === null) excludes = new Array(count);
 					excludes[i] = exclude;
