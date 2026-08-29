@@ -31,6 +31,7 @@ const VARY_ON = 'Accept-Encoding';
  * available content-coding's own validator and response headers, both resolved
  * at index time so the request path only has to pick one of them.
  * @typedef {StaticEntry & {
+ *   lastModifiedMs?: number,
  *   brEtag?: string,
  *   gzEtag?: string,
  *   brHeaders?: [string, string][],
@@ -167,12 +168,24 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, static
 			['accept-ranges', 'bytes']
 		];
 		let etag = '';
+		let lastModifiedMs;
 		if (immutable && relPath.startsWith(`${manifest.appPath}/immutable/`)) {
 			headers.push(['cache-control', 'public, max-age=31536000, immutable']);
 		} else {
 			etag = `W/"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`;
+			// The date validator beside the entity one, at the whole-second
+			// precision HTTP dates carry, recorded from the same stat the ETag
+			// reads - so a cache that lost the ETag can still revalidate, and
+			// the date preconditions below answer from the file's real time.
+			// Immutable assets skip both validators: the versioned filename is
+			// the validator there.
+			lastModifiedMs = Math.floor(stat.mtimeMs / 1000) * 1000;
 			const configuredCacheControl = resolveStaticCacheControl(relPath, staticCacheControl);
-			headers.push(['cache-control', configuredCacheControl || 'no-cache'], ['etag', etag]);
+			headers.push(
+				['cache-control', configuredCacheControl || 'no-cache'],
+				['etag', etag],
+				['last-modified', new Date(lastModifiedMs).toUTCString()]
+			);
 		}
 
 		const ext = path.extname(relPath).toLowerCase();
@@ -184,7 +197,7 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, static
 		}
 
 		/** @type {NegotiatedStaticEntry} */
-		const entry = { buffer, contentType, etag, headers: mergeStaticHeaders(headers, staticHeaders) };
+		const entry = { buffer, contentType, etag, lastModifiedMs, headers: mergeStaticHeaders(headers, staticHeaders) };
 
 		if (PRECOMPRESS) {
 			const brPath = absPath + '.br';
@@ -308,6 +321,78 @@ function parseRange(header, fileSize) {
 }
 
 /**
+ * Whether an ETag list header names `tag`, by OPAQUE EQUALITY. `*` matches any
+ * existing representation. Opaque rather than RFC strong comparison is a
+ * design position, not an oversight: every validator this lane issues is weak
+ * by construction (mtime plus size), and strict strong comparison would answer
+ * 412 to a client echoing the exact validator the server handed it. The list
+ * splits on commas, which no validator this lane issues can contain.
+ *
+ * @param {string} header
+ * @param {string} tag - a non-empty validator this lane issued
+ * @returns {boolean}
+ */
+function etagListHas(header, tag) {
+	if (header === '*') return true;
+	let start = 0;
+	while (start < header.length) {
+		let comma = header.indexOf(',', start);
+		if (comma === -1) comma = header.length;
+		if (header.slice(start, comma).trim() === tag) return true;
+		start = comma + 1;
+	}
+	return false;
+}
+
+/**
+ * Evaluate the request's preconditions against a mutable entry, in the RFC's
+ * order (RFC 9110 13.2.2): If-Match first, If-Unmodified-Since only in its
+ * absence, then If-None-Match, then If-Modified-Since only when no entity
+ * validator was sent - so a failed If-Match is never converted into a 304 by
+ * a validator later in the chain.
+ *
+ * If-Match compares against ANY validator the lane issued for this asset
+ * (identity, br, gzip): the client may hold whichever representation an
+ * earlier negotiation gave it, and which one this request would select is a
+ * property of today's Accept-Encoding, not of what the client holds.
+ * If-None-Match compares against the SELECTED representation's validator, as
+ * the existing 304 did - a 304 updates a stored response, so it must validate
+ * the representation this request would receive. Both take the list form and
+ * `*`. An unparseable date is an ignored header, never a refusal, and dates
+ * compare at the whole-second precision HTTP dates carry.
+ *
+ * Pure and exported for the case table; the caller guards on the entry
+ * carrying a validator at all (immutable assets carry none - their versioned
+ * filename is the validator - and skip evaluation entirely).
+ *
+ * @param {NegotiatedStaticEntry} entry
+ * @param {string} repEtag - the selected representation's validator
+ * @param {string} ifMatch
+ * @param {string} ifUnmodifiedSince
+ * @param {string} ifNoneMatch
+ * @param {string} ifModifiedSince
+ * @returns {0 | 304 | 412} 0 = serve
+ */
+export function staticPreconditions(entry, repEtag, ifMatch, ifUnmodifiedSince, ifNoneMatch, ifModifiedSince) {
+	if (ifMatch !== '') {
+		const held = etagListHas(ifMatch, entry.etag) ||
+			(entry.brEtag !== undefined && etagListHas(ifMatch, entry.brEtag)) ||
+			(entry.gzEtag !== undefined && etagListHas(ifMatch, entry.gzEtag));
+		if (!held) return 412;
+	} else if (ifUnmodifiedSince !== '' && entry.lastModifiedMs !== undefined) {
+		const t = Date.parse(ifUnmodifiedSince);
+		if (!Number.isNaN(t) && entry.lastModifiedMs > t) return 412;
+	}
+	if (ifNoneMatch !== '') {
+		if (etagListHas(ifNoneMatch, repEtag)) return 304;
+	} else if (ifModifiedSince !== '' && entry.lastModifiedMs !== undefined) {
+		const t = Date.parse(ifModifiedSince);
+		if (!Number.isNaN(t) && entry.lastModifiedMs <= t) return 304;
+	}
+	return 0;
+}
+
+/**
  * @param {import('uWebSockets.js').HttpResponse} res
  * @param {NegotiatedStaticEntry} entry
  * @param {string} acceptEncoding
@@ -315,8 +400,11 @@ function parseRange(header, fileSize) {
  * @param {boolean} headOnly
  * @param {string} [rangeHeader]
  * @param {string} [ifRangeHeader]
+ * @param {string} [ifMatch]
+ * @param {string} [ifUnmodifiedSince]
+ * @param {string} [ifModifiedSince]
  */
-export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = false, rangeHeader = '', ifRangeHeader = '') {
+export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = false, rangeHeader = '', ifRangeHeader = '', ifMatch = '', ifUnmodifiedSince = '', ifModifiedSince = '') {
 	// Negotiation runs FIRST and everything downstream is expressed in the
 	// chosen representation's own terms. A content-coding is a distinct
 	// representation with its own octet sequence, so the validator compared, the
@@ -340,26 +428,43 @@ export function serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly = 
 		repEtag = /** @type {string} */ (entry.gzEtag);
 	}
 
-	// If-None-Match is evaluated before Range (RFC 9110 13.2.1), and against the
-	// validator of the representation this request would actually receive -
-	// matching the identity ETag for a client that negotiated brotli would
-	// answer 304 for bytes that client never held.
-	if (repEtag && ifNoneMatch === repEtag) {
-		res.cork(() => {
-			res.writeStatus('304 Not Modified');
-			// A 304 updates a stored response, so it has to name WHICH stored
-			// representation was validated, what that entry varies on, and the
-			// freshness policy it is stored under. Without them a shared cache can
-			// attach it to the wrong variant and hand a coded body to a client that
-			// asked for identity.
-			res.writeHeader('etag', repEtag);
-			res.writeHeader('vary', VARY_ON);
-			const cacheControl = headerValue(headers, 'cache-control');
-			if (cacheControl) res.writeHeader('cache-control', cacheControl);
-			res.writeHeader('date', counters.cachedDateHeader);
-			res.end();
-		});
-		return;
+	// Preconditions are evaluated before Range (RFC 9110 13.2.1), in the
+	// RFC's own order and against the validator of the representation this
+	// request would actually receive - matching the identity ETag for a
+	// client that negotiated brotli would answer 304 for bytes that client
+	// never held. Only entries carrying validators evaluate; immutable
+	// assets carry none, their versioned filename is the validator.
+	if (repEtag && (ifNoneMatch !== '' || ifMatch !== '' || ifUnmodifiedSince !== '' || ifModifiedSince !== '')) {
+		const verdict = staticPreconditions(entry, repEtag, ifMatch, ifUnmodifiedSince, ifNoneMatch, ifModifiedSince);
+		if (verdict === 412) {
+			// The precondition the caller staked the request on does not hold.
+			// Minimal on purpose: a 412 updates no stored response.
+			res.cork(() => {
+				res.writeStatus('412 Precondition Failed');
+				res.writeHeader('date', counters.cachedDateHeader);
+				res.end();
+			});
+			return;
+		}
+		if (verdict === 304) {
+			res.cork(() => {
+				res.writeStatus('304 Not Modified');
+				// A 304 updates a stored response, so it has to name WHICH stored
+				// representation was validated, what that entry varies on, and the
+				// freshness policy it is stored under. Without them a shared cache can
+				// attach it to the wrong variant and hand a coded body to a client that
+				// asked for identity.
+				res.writeHeader('etag', repEtag);
+				res.writeHeader('vary', VARY_ON);
+				const cacheControl = headerValue(headers, 'cache-control');
+				if (cacheControl) res.writeHeader('cache-control', cacheControl);
+				const lastModified = headerValue(headers, 'last-modified');
+				if (lastModified) res.writeHeader('last-modified', lastModified);
+				res.writeHeader('date', counters.cachedDateHeader);
+				res.end();
+			});
+			return;
+		}
 	}
 
 	// Ranges are only offered for representations that carry a validator
@@ -461,9 +566,12 @@ function decodePath(pathname) {
  * @param {boolean} headOnly
  * @param {string} [rangeHeader]
  * @param {string} [ifRangeHeader]
+ * @param {string} [ifMatch]
+ * @param {string} [ifUnmodifiedSince]
+ * @param {string} [ifModifiedSince]
  * @returns {boolean}
  */
-export function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, headOnly = false, rangeHeader = '', ifRangeHeader = '') {
+export function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatch, headOnly = false, rangeHeader = '', ifRangeHeader = '', ifMatch = '', ifUnmodifiedSince = '', ifModifiedSince = '') {
 	const decoded = decodePath(pathname);
 	if (decoded === null) {
 		send400(res);
@@ -483,7 +591,7 @@ export function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatc
 		}
 		const entry = staticCache.get(decoded);
 		if (entry) {
-			serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly, rangeHeader, ifRangeHeader);
+			serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly, rangeHeader, ifRangeHeader, ifMatch, ifUnmodifiedSince, ifModifiedSince);
 			return true;
 		}
 	}
@@ -496,7 +604,7 @@ export function tryPrerendered(res, pathname, search, acceptEncoding, ifNoneMatc
 		if (prerenderedDirStyle.has(alt) && decoded.endsWith('/')) {
 			const entry = staticCache.get(decoded);
 			if (entry) {
-				serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly, rangeHeader, ifRangeHeader);
+				serveStatic(res, entry, acceptEncoding, ifNoneMatch, headOnly, rangeHeader, ifRangeHeader, ifMatch, ifUnmodifiedSince, ifModifiedSince);
 				return true;
 			}
 		}

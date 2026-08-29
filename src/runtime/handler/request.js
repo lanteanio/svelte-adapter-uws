@@ -28,8 +28,9 @@ export function handleRequest(res, req) {
 	const pathname = req.getUrl();
 
 	// === STATIC FILE FAST PATH ===
-	// Minimum work: 1 Map lookup + 4 header reads. No header collection,
-	// no query string handling, no remoteAddress decode.
+	// Minimum work: 1 Map lookup + 7 header reads (negotiation, the entity
+	// and date validators, range). No header collection, no query string
+	// handling, no remoteAddress decode.
 	const staticFile = staticCache.get(pathname);
 	if (staticFile && (method === 'get' || method === 'head')) {
 		if (!tracingEnabled) {
@@ -39,7 +40,10 @@ export function handleRequest(res, req) {
 				req.getHeader('if-none-match'),
 				method === 'head',
 				req.getHeader('range'),
-				req.getHeader('if-range')
+				req.getHeader('if-range'),
+				req.getHeader('if-match'),
+				req.getHeader('if-unmodified-since'),
+				req.getHeader('if-modified-since')
 			);
 		}
 		return traceOperation('adapter.http.static', {
@@ -52,7 +56,10 @@ export function handleRequest(res, req) {
 			req.getHeader('if-none-match'),
 			method === 'head',
 			req.getHeader('range'),
-			req.getHeader('if-range')
+			req.getHeader('if-range'),
+			req.getHeader('if-match'),
+			req.getHeader('if-unmodified-since'),
+			req.getHeader('if-modified-since')
 		));
 	}
 
@@ -71,7 +78,7 @@ export function handleRequest(res, req) {
 	const METHOD = mapped || method.toUpperCase();
 
 	// === PRERENDERED CHECK ===
-	// Lightweight: only 4 header reads, no full collection, no remoteAddress decode
+	// Lightweight: only 7 header reads, no full collection, no remoteAddress decode
 	if (METHOD === 'GET' || METHOD === 'HEAD') {
 		const served = tracingEnabled
 			? traceOperation('adapter.http.prerendered', {
@@ -80,10 +87,12 @@ export function handleRequest(res, req) {
 				attributes: { 'http.request.method': METHOD, 'http.route.type': 'prerendered' }
 			}, () => tryPrerendered(res, pathname, query ? `?${query}` : '',
 				req.getHeader('accept-encoding'), req.getHeader('if-none-match'), METHOD === 'HEAD',
-				req.getHeader('range'), req.getHeader('if-range')))
+				req.getHeader('range'), req.getHeader('if-range'),
+				req.getHeader('if-match'), req.getHeader('if-unmodified-since'), req.getHeader('if-modified-since')))
 			: tryPrerendered(res, pathname, query ? `?${query}` : '',
 				req.getHeader('accept-encoding'), req.getHeader('if-none-match'), METHOD === 'HEAD',
-				req.getHeader('range'), req.getHeader('if-range'));
+				req.getHeader('range'), req.getHeader('if-range'),
+				req.getHeader('if-match'), req.getHeader('if-unmodified-since'), req.getHeader('if-modified-since'));
 		if (served) {
 			return;
 		}

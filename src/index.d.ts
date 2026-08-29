@@ -167,7 +167,7 @@ export interface AdapterOptions {
 	 *
 	 * Keys are case-insensitive. The handler's own transfer / caching / range
 	 * headers cannot be overridden (`content-type`, `content-encoding`, `etag`,
-	 * `cache-control`, `vary`, `accept-ranges`, ...); supplying one logs a
+	 * `last-modified`, `cache-control`, `vary`, `accept-ranges`, ...); supplying one logs a
 	 * build warning and is ignored. Use `staticCacheControl` for path-specific
 	 * cache policies. Merged once at build/index time, so there is zero
 	 * per-request cost.

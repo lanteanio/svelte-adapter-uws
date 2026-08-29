@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** No wire, option, or metric name moved. A window that omits any connection now withholds the cap accountant instead of cross-checking against a partial sum, which is what a partial slice already did; a complete window still runs every check.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Added: the static lane answers the full RFC 9110 precondition set.** Mutable assets now serve `Last-Modified` beside the `ETag` and honor `If-Match` and `If-Unmodified-Since` with 412, `If-Modified-Since` with 304, and the list and `*` forms of both entity headers, evaluated in the RFC's order so a failed `If-Match` is never converted into a 304.
+  - **Affects:** Caches and clients revalidating static and prerendered responses; a cache that lost the ETag can now revalidate by date instead of re-downloading every full body.
+  - **Action:** None. Versioned immutable assets are unchanged - their filename is the validator and they carry neither header.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Every request that answered 304 before still does; the new answers only add 304s and 412s where the RFC requires them. `If-Match` compares by opaque equality against any validator the lane issued, because every validator is weak by construction and strict strong comparison would refuse the exact tag the server handed out. `last-modified` joins the reserved `staticHeaders` keys, since the date preconditions answer from the file's real time.
+  - **Detail:** [Added engineering detail](#added).
 - **Changed: the `seq` publish option speaks one table, and refuses what it used to mis-read.** A value outside the contract - a numeric string, an object - now throws naming the legal forms instead of silently drawing the local counter and degrading resume dedup; `{ seq: null }` now means no seq, and `bigint` joins `number` as a spelling of the explicit authority.
   - **Affects:** Callers passing seq values outside `boolean | number` - a numeric string from a JSON column was the typical accident. Also `publishWireBatch` entries, where `true`, `false`, and `null` now act per entry as overrides of the shared options instead of falling through silently.
   - **Action:** Pass a number or bigint for an explicit authority's value, `false` or `null` for no seq, `true` or nothing for the counter. A caller that relied on a non-contract value drawing the counter should say `true`.
@@ -42,6 +48,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Detail:** [Fixed engineering detail](#fixed).
 
 <!-- consumer-release-summary:end -->
+
+### Added
+
+- **The static lane's RFC 9110 preconditions.** Mutable entries record their
+  file's modification time at index time - the same stat the ETag already
+  reads, floored to the whole-second precision HTTP dates carry - and serve
+  `Last-Modified` beside the validator; immutable assets keep serving neither,
+  their versioned filename being the validator. A pure planner evaluates in
+  the RFC's order: `If-Match` first (412 on a miss), `If-Unmodified-Since`
+  only in its absence, then `If-None-Match` (now list-form and `*` aware),
+  then `If-Modified-Since` only when no entity validator was sent - so a
+  failed `If-Match` is never converted into a 304 by a later header.
+  `If-Match` matches by opaque equality against any validator the lane issued
+  for the asset (identity, brotli, gzip): every validator is weak by
+  construction, strict strong comparison would answer 412 to a client echoing
+  the exact tag the server handed it, and which representation today's
+  request selects says nothing about which one the client holds.
+  `If-None-Match` keeps validating the selected representation, as the 304
+  always did. An unparseable date is an ignored header, never a refusal. The
+  304 carries `Last-Modified` beside the validator set it already named;
+  the 412 is minimal. `last-modified` is reserved from `staticHeaders` so a
+  configured value cannot displace the real file time.
+  `test/static-preconditions.test.js` carries the case table: precedence
+  pins, boundary dates at the exact second, list and `*` forms, the
+  representation distinction, and the immutable exemption.
 
 ### Changed
 

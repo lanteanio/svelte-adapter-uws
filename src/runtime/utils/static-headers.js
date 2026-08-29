@@ -2,8 +2,10 @@
  * Header names the static file handler manages itself, which `staticHeaders`
  * must not override. These are written per-response by serveStatic
  * (`content-type`, `content-encoding`, `content-range`, `date`), set by uWS
- * from the body (`content-length`), a conditional-request validator (`etag`),
- * or correctness-sensitive caching/negotiation headers whose value depends on
+ * from the body (`content-length`), a conditional-request validator (`etag`,
+ * and `last-modified`, which the date preconditions answer from the file's
+ * real modification time), or correctness-sensitive caching/negotiation
+ * headers whose value depends on
  * the specific asset (`cache-control` differs for immutable vs mutable assets;
  * `vary` must keep `Accept-Encoding` so compressed variants cache correctly;
  * `accept-ranges` advertises the range support the handler actually
@@ -19,6 +21,7 @@ export const RESERVED_STATIC_HEADER_KEYS = new Set([
 	'content-length',
 	'date',
 	'etag',
+	'last-modified',
 	'vary',
 	'cache-control',
 	'accept-ranges'
