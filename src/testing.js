@@ -1,14 +1,14 @@
 import { now, monotonicNow, wallEpoch, setTimer, clearTimer, randomUuid } from './runtime/runtime.js';
 import { parseCookies } from './runtime/cookies.js';
 import { collectRequestHeaders } from './runtime/utils/request-headers.js';
-import { stampSeq, resolveEntrySeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readMetricMirror, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
+import { stampSeq, resolveEntrySeq, resolveSendSeq, throwInvalidSeq, processEpoch, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, createChaosState, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readMetricMirror, applyCapacityReason, createPosture, readAssertionCounts, assert, fatal, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_ATTRIBUTION, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION , TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createSeqBound } from './runtime/utils/seq-bound.js';
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { createSharedWireIdTable } from './runtime/handler/shared-wire-id.js';
 import { deliverStatefulWireBatch, deliverStatelessWireFanout, encodeStatelessWirePayload } from './runtime/handler/wire-fanout.js';
 import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
-import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
+import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
 import { beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, isAuthorizationHook, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './runtime/handler/ingress.js';
 import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encodeGameFanoutPayload } from './runtime/handler/game-ingress.js';
@@ -998,11 +998,12 @@ export async function createTestServer(options = {}) {
 			return delivered;
 		},
 		send(ws, topic, event, data, options) {
-			// `options` (e.g. `{ compress }`) is accepted for Platform-shape parity
-			// with production; the test server configures no compressor, so it is
-			// a no-op here.
-			void options;
-			const payload = envelope(topic, event, data);
+			// `compress` is accepted for Platform-shape parity and is a no-op
+			// (no compressor here); `seq` is the explicit gap-fill stamp,
+			// resolved through the same shared table as production so the
+			// harness refuses and stamps exactly what production does.
+			const seq = resolveSendSeq(options != null ? options.seq : undefined);
+			const payload = envelope(topic, event, data, seq === null ? undefined : seq);
 			return sendOutboundT(ws, payload);
 		},
 		publishWire(topic, event, data, wire, options) {
@@ -1459,7 +1460,9 @@ export async function createTestServer(options = {}) {
 			return true;
 		},
 		sendWire(ws, topic, event, data, wire, options) {
-			void options; // Platform-shape parity; the test server configures no compressor.
+			// The explicit gap-fill seq, riding the binary seq slot and the
+			// JSON fallback identically - mirrors production sendWire.
+			const seq = resolveSendSeq(options != null ? options.seq : undefined);
 			let ud;
 			try { ud = ws.getUserData(); } catch { closedWsAbortsT++; return 2; }
 			const caps = ud[WS_CAPS];
@@ -1477,15 +1480,15 @@ export async function createTestServer(options = {}) {
 				}
 			}
 			if (payload == null) {
-				return sendOutboundT(ws, envelope(topic, event, data));
+				return sendOutboundT(ws, envelope(topic, event, data, seq === null ? undefined : seq));
 			}
 			const id = ensureWireIdT(ws, ud, topic);
 			if (id === -1) {
 				// Dropped wire-id announce: JSON for this frame + poison.
 				poisonWireStateT(ws, ud, wire.capability);
-				return sendOutboundT(ws, envelope(topic, event, data));
+				return sendOutboundT(ws, envelope(topic, event, data, seq === null ? undefined : seq));
 			}
-			const frame = buildBinaryFrame(schemaVersion, id, 0, payload);
+			const frame = buildBinaryFrame(schemaVersion, id, seq === null ? 0 : seq, payload);
 			const result = sendOutboundBinaryT(ws, frame);
 			// 2 = dropped past maxBackpressure. A stateful encode already mutated
 			// this connection's dictionary for the dropped frame - degrade the
@@ -2794,6 +2797,14 @@ export async function createTestServer(options = {}) {
 						if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) throw 0;
 						if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
 							const ref = hasRefT(msg.ref) ? msg.ref : null;
+							// A recover subscribe without a ref is refused loudly and
+							// FIRST, as production refuses it: every denial on this
+							// path, the topic checks included, is silent without a
+							// ref, and a history request must not die silently.
+							if (deniesRefLessRecover({ hasResumeHook: handler.resume, recover: msg.recover, ref })) {
+								sendOutboundT(ws, recoverRequiresRefFrame(msg.topic));
+								return;
+							}
 							if (!isValidWireTopic(msg.topic, ALLOW_NON_ASCII_TOPICS_T)) {
 								sendDeniedT(ws, msg.topic, ref, 'INVALID_TOPIC');
 								return;

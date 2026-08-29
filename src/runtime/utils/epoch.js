@@ -188,6 +188,31 @@ export function resolveEntrySeq(value) {
 }
 
 /**
+ * Resolve the SEND lanes' `seq` option - the gap-fill channel a resume hook
+ * replays history through. Explicit forms only: number and bigint validate
+ * and project exactly as the publish lanes' explicit authority
+ * ({@link explicitSeqValue}); `false`, `null` and absent mean no seq, the
+ * lanes' historical shape. `true` throws its own message rather than the
+ * publish table's: a single-target send has no counter to draw - gap-fill
+ * replays history that is already accounted - and silently meaning
+ * something else here is how the publish table's misuse class started.
+ *
+ * ONE resolver for every surface carrying the send lanes, for the same
+ * anti-drift reason {@link resolveEntrySeq} is one.
+ *
+ * @param {unknown} opt
+ * @returns {number | null}
+ */
+export function resolveSendSeq(opt) {
+	if (opt === undefined || opt === false || opt === null) return null;
+	if (typeof opt === 'number' || typeof opt === 'bigint') return explicitSeqValue(opt);
+	throw new TypeError(
+		'send seq must be an explicit positive integer number or bigint (a replay authority\'s value), ' +
+		'or false/null/absent for no seq; the send lanes never draw the in-memory counter'
+	);
+}
+
+/**
  * Resolve the sequence number to stamp on a publish, honoring an explicit
  * caller-supplied authority. Shared by every publish entry point so the
  * three-way resolution never drifts between them.

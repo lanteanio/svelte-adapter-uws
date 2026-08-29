@@ -2888,8 +2888,14 @@ export interface Platform {
 	 * Single-target counterpart to `publishWire()`. The connection receives a
 	 * binary `0x03` frame when it advertised `wire.capability` and the codec
 	 * can encode the frame; otherwise the JSON envelope `send()` would have
-	 * sent. No per-topic seq is stamped (matches `send()`). Used for
-	 * snapshot/catalog frames to a single late-joining subscriber.
+	 * sent. By default no per-topic seq is stamped (matches `send()`); an
+	 * explicit `options.seq` - positive integer `number` or `bigint`, the
+	 * publish lanes' validation - rides the binary frame's seq slot and the
+	 * JSON fallback identically: the gap-fill channel a resume hook replays
+	 * seq'd history through. `true` throws (this lane has no counter), and a
+	 * seq'd send stays side-effect-free - no counter advance, no max-seen
+	 * record, no resume capture. Used for snapshot/catalog frames and
+	 * gap-fill replay to a single late-joining subscriber.
 	 */
 	sendWire(
 		ws: WebSocket<any>,
@@ -2905,7 +2911,7 @@ export interface Platform {
 				onDetach?: (ws: WebSocket<any>, state: unknown) => void;
 			};
 		},
-		options?: { compress?: boolean }
+		options?: { compress?: boolean; seq?: number | bigint | false | null }
 	): number;
 
 	/**
@@ -3239,7 +3245,7 @@ export interface Platform {
 	 * }
 	 * ```
 	 */
-	send(ws: WebSocket<any>, topic: string, event: string, data?: unknown, options?: { compress?: boolean }): number;
+	send(ws: WebSocket<any>, topic: string, event: string, data?: unknown, options?: { compress?: boolean; seq?: number | bigint | false | null }): number;
 
 	/**
 	 * Send a message to a single connection with coalesce-by-key semantics.

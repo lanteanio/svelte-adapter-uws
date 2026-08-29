@@ -1942,7 +1942,7 @@ export function subscribe(ws, topic, { platform }) {
 
 > **`'RATE_LIMITED'` is the one retryable reason.** The stock client re-asks for a topic denied that way on a jittered exponential backoff (a few attempts, then it stops and leaves the denial on `denials`), because the framework emits it for bounds that clear on their own - see [Capacity model](#capacity-model). Every retry re-runs your hook, so if you return it as your own throttle, expect the client to come back a handful of times before giving up; return `'FORBIDDEN'` (or a custom string) for a refusal you want the client to accept immediately.
 
-Old clients that send `subscribe` without a `ref` get no ack frame (silent allow / silent deny, as before). Old servers that ignore `ref` don't break new clients - they just don't emit acks; the client sees no entry in `denials` and treats the subscription as active.
+Old clients that send `subscribe` without a `ref` get no ack frame (silent allow / silent deny, as before), with one exception: a subscribe that carries `recover` while the server has a resume hook is asking for history, the one reply a client must correlate, so sending it without a `ref` is refused with `{"type":"error","code":"RECOVER_REQUIRES_REF","topic":...}` instead of dying silently on some later gate (`topic` is `null` when a `subscribe-batch` frame is refused whole). The bundled client stamps a `ref` on every path, so only hand-rolled clients ever see it - and a hand-rolled client replaying an offset with no way to hear the answer is a bug worth failing loudly. Old servers that ignore `ref` don't break new clients - they just don't emit acks; the client sees no entry in `denials` and treats the subscription as active.
 
 `subscribe-batch` works the same way: one ack frame per topic in the batch, all sharing the batch's single `ref`.
 
@@ -2322,9 +2322,9 @@ export const actions = {
 };
 ```
 
-### `platform.send(ws, topic, event, data)`
+### `platform.send(ws, topic, event, data, options?)`
 
-Send a message to a single WebSocket connection. Wraps in the same `{ topic, event, data }` envelope as `publish()`.
+Send a message to a single WebSocket connection. Wraps in the same `{ topic, event, data }` envelope as `publish()`. `options.seq` stamps an explicit sequence number on the envelope - the gap-fill channel a resume hook replays history through, so each replayed frame carries the seq the client keys its watermark off instead of an unmarked body. Number or bigint, validated exactly as the publish lanes' explicit authority; `false`/`null`/absent means no seq (today's frame, byte-identical); `true` throws, because this lane has no counter to draw and gap-fill replays history that is already accounted. An explicitly-seq'd send stays side-effect-free: no counter advance, no max-seen record, no resume capture. The same option rides `platform.sendWire`, filling the binary frame's seq slot and the JSON fallback identically.
 
 This is useful when you store WebSocket references (e.g. in a `Map`) and need to message specific connections from SvelteKit handlers:
 

@@ -813,7 +813,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// relay proof), and refuses a bigint on the batch options the way it
 	// refuses a number. Comparisons on values already held and cold throws;
 	// no byte is read, allocated or copied, and no copy primitive entered.
-	ingress: '62fa43e06b1c149360a4a05951912355174377b441c490b3d16c1ed40974eb21',
+	//
+	// Re-pinned for two additions reached through utils.js: the ref-less
+	// recover refusal (three cold predicates and a pure frame-string builder
+	// in utils/subscribe-policy.js, consulted on the subscribe control lanes,
+	// never on a frame path) and the send lanes' explicit seq resolver (one
+	// cold validation function in utils/epoch.js). Comparisons, cold throws
+	// and one string build on refusal paths; no byte is read, allocated or
+	// copied, and no copy primitive entered the graph.
+	ingress: '43d6bd1cbcba2d7cf343092bd574a5a51edaa9d9824c77c86fb3ab3c75daaa52',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1399,7 +1407,17 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// actually perform. Cold relative to delivery (egress gate armed only),
 	// integer arithmetic on held values; no byte is read, allocated or
 	// copied, and no copy primitive entered the graph.
-	platform: '0b74b2a9ce4d3849f809e71424e98c801d88949bc68e671292169d69eedde677',
+	//
+	// Re-pinned for the send lanes' explicit gap-fill seq: send builds its
+	// envelope through the same completeEnvelope the publish lanes use (the
+	// seq-less shape is byte-identical to the concat it replaces), sendWire
+	// threads the resolved value into the binary frame's existing seq slot
+	// and its JSON fallbacks, and the cold resolveSendSeq validator joins
+	// utils/epoch.js plus the recover predicates in utils/subscribe-policy.js
+	// on this graph's utils reach. Same sends, same buffers, one integer in a
+	// slot that previously held the literal 0; no byte is read, allocated or
+	// copied, and no copy primitive entered the graph.
+	platform: '8fe62c57b5faa3bd7cec2f0ba45041dac25b0b734de8a109b3cc4cfd371d876f',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1595,7 +1613,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// beside a positive number, the batch options refusing both explicit
 	// spellings. Comparisons and cold throws on values already held; no byte
 	// is read, allocated or copied, and no copy primitive entered the graph.
-	'wire-fanout': '56bf9284975ceba37c989e38f090cbc7b02a9a5c07e38a7a7b50069584301c67',
+	//
+	// Re-pinned for the recover predicates and the send-lane seq resolver,
+	// the same cold utils/subscribe-policy.js and utils/epoch.js additions as
+	// the sibling seals, reached through utils.js; nothing in this graph's
+	// own fan-out modules changed, and no copy primitive entered.
+	'wire-fanout': '7e64aff19f68d8941de73121753c05f163fbf0221dc056baedd9c72f6d151154',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

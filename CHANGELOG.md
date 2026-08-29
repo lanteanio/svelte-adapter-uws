@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Added: the send lanes take an explicit gap-fill `seq`.** A resume hook replaying history had no way to put per-frame sequence numbers on what it sent; `options.seq` on `send` and `sendWire` now stamps the envelope and the binary frame's seq slot identically, side-effect-free - no counter advances, nothing recorded or captured.
+  - **Affects:** Resume hooks and replay backends doing gap-fill through the send lanes; every existing call is byte-identical without the option.
+  - **Action:** None to keep current behavior. Gap-fill replay passes each frame's stored seq: `platform.send(ws, topic, event, data, { seq })`.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Number and bigint take the publish lanes' validation and double-space projection; `false`/`null`/absent mean no seq; `true` throws, since the send lanes have no counter to draw. `sendWireBatch` deliberately takes no seq option - one value cannot be one-seq-per-entry; replay discrete frames through `sendWire`.
+  - **Detail:** [Added engineering detail](#added).
 - **Added: the static lane answers the full RFC 9110 precondition set.** Mutable assets now serve `Last-Modified` beside the `ETag` and honor `If-Match` and `If-Unmodified-Since` with 412, `If-Modified-Since` with 304, and the list and `*` forms of both entity headers, evaluated in the RFC's order so a failed `If-Match` is never converted into a 304.
   - **Affects:** Caches and clients revalidating static and prerendered responses; a cache that lost the ETag can now revalidate by date instead of re-downloading every full body.
   - **Action:** None. Versioned immutable assets are unchanged - their filename is the validator and they carry neither header.
@@ -28,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Absent, `true`, `false`, and valid numbers behave exactly as before, on every lane and every surface (production, `createTestServer`, `vite dev`). `null` moves from counter to no-seq; other non-contract values move from counter to `TypeError`. The wire's seq space is unchanged: a bigint projects into the same IEEE-double space a number occupies, rounding beyond 2^53 exactly as `Number(x)` at the call site already did.
   - **Detail:** [Changed engineering detail](#changed).
+- **Fixed: a recover subscribe without a `ref` is refused loudly instead of dying silently.** A subscribe asking for history could hit the saturated gate and get nothing back, leaving the client believing itself subscribed and resuming into a silent gap; it now gets `{"type":"error","code":"RECOVER_REQUIRES_REF"}` up front, on all three server surfaces.
+  - **Affects:** Hand-rolled clients only; the bundled client stamps a `ref` on every path, including the reconnect resubscribe batch.
+  - **Action:** Include a `ref` on any subscribe that carries `recover`. A `subscribe-batch` naming history in its recover map needs its one `ref` for the same reason.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Plain ref-less subscribes keep their documented silence, and `recover` against a server with no resume hook stays ignored - there is no history to miss. The refusal engages only where the recover lane would.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: the cursor plugin stops decoding and parsing frames the runtime already parsed.** Its message hook now reads the pre-parsed envelope the adapter hands every hook, which also removes a per-message decoder allocation and a crash on a frame whose whole body is null.
   - **Affects:** Every connection on a server with the cursor plugin installed, since that hook inspects each frame before the application's own handler sees it.
   - **Action:** None.
@@ -56,6 +68,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:end -->
 
 ### Added
+
+- **The send lanes' explicit gap-fill seq.** The resume hook's contract asks
+  it to return the highest seq it delivered per topic, but the only primitive
+  it had for delivering - `platform.send` - emitted envelopes with no seq
+  field, and `sendWire` hardwired the binary frame's seq slot to zero. The
+  client's watermark therefore leaned entirely on the returned ceiling; the
+  frames themselves said nothing. `options.seq` on both lanes now carries an
+  explicit value into the envelope and the seq slot identically, resolved by
+  one shared validator (`resolveSendSeq`) on production, `createTestServer`,
+  and the Vite dev plugin: number and bigint validate and project exactly as
+  the publish lanes' explicit authority, `false`/`null`/absent leave the
+  frame byte-identical to every prior release, and `true` throws its own
+  message - the send lanes have no counter to draw, and gap-fill replays
+  history that is already accounted, which is why an explicitly-seq'd send
+  stays side-effect-free: no counter advance, no max-seen record, no resume
+  capture. `sendWireBatch` takes no seq option - one options value cannot be
+  one-seq-per-entry, the batch lanes' standing category error - so a seq'd
+  replay sends its discrete frames through `sendWire`.
+  `test/send-seq.test.js` pins the stamped forms, the refusals, the
+  side-effect absence, the binary/JSON parity, and the harness mirror.
 
 - **The static lane's RFC 9110 preconditions.** Mutable entries record their
   file's modification time at index time - the same stat the ETag already
@@ -133,6 +165,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after, with the decoder allocation 99 ns of the difference.
   `test/cursor.test.js` makes the pre-parsed envelope and the raw bytes name
   different topics, so which one the hook acted on is observable.
+
+- **A ref-less recover subscribe answers with an uncorrelatable error.** The
+  family ack policy is deliberate silence for a subscribe without a `ref` -
+  the client said it would not listen - but the recover lane is the one
+  request whose reply the client must correlate: a caller replaying an offset
+  that the saturated pending-subscribe gate (or any silent denial) swallowed
+  believed itself subscribed and resumed into a silent gap. A subscribe
+  carrying `recover` where a resume hook exists is now refused up front, when
+  no `ref` rides it, with `{"type":"error","code":"RECOVER_REQUIRES_REF",
+  "topic":...}` - the established shape for frames that answer for no
+  correlatable request - and a `subscribe-batch` whose recover map names any
+  history refuses whole with `topic: null`, before any entry is inspected.
+  One shared predicate and frame builder serve production, `createTestServer`
+  and the Vite dev plugin, so the surfaces cannot drift; plain ref-less
+  subscribes keep their silence, and `recover` with no resume hook stays
+  ignored. `test/recover-ref-contract.test.js` holds the refusal, the
+  with-ref control, and both preserved silences on all three surfaces.
 
 - **A batch call-level `excludeWs` is the default exclusion for every entry.**
   `publishWireBatch` forwarded its options to the per-entry path on the

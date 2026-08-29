@@ -6,7 +6,7 @@ import { metricsSnapshot } from './metrics-snapshot.js';
 import { isWarmupRequest } from './warmup-registry.js';
 import { parentPort } from 'node:worker_threads';
 import { exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, topicEpochValue, readAssertionCounts, resolveEntrySeq, stampSeqValue, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, topicEpochValue, readAssertionCounts, resolveEntrySeq, resolveSendSeq, stampSeqValue, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
 import { egressGate, resolvePublishTenant, admitPublishEgress, admitTopicEgress, admitTenantEgress, chargePublishEgress, chargeDirectEgress, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, EGRESS_ADMITTED } from './egress-budget.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
@@ -217,9 +217,22 @@ export const platform = {
 	/**
 	 * Send a message to a single WebSocket connection.
 	 * Wraps in the same { topic, event, data } envelope as publish().
+	 *
+	 * `options.seq` stamps an EXPLICIT sequence number onto the envelope - the
+	 * gap-fill channel a resume hook replays history through, so the frames it
+	 * sends carry the per-frame seqs the client keys its watermark off instead
+	 * of an unmarked body. Number and bigint only, the same validation and
+	 * double-space projection the publish lanes' explicit authority takes
+	 * ({@link explicitSeqValue}); `false`, `null` and absent mean no seq -
+	 * today's frame, byte-identical. `true` throws: this lane has no counter
+	 * to draw, and gap-fill replays history that is ALREADY accounted, which
+	 * is why an explicitly-seq'd send stays side-effect-free - no counter
+	 * advance, no max-seen record, no resume capture. The send lanes touch no
+	 * shared state, and that invariant is load-bearing.
 	 */
 	send(ws, topic, event, data, options) {
-		const payload = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
+		const seq = resolveSendSeq(options != null ? options.seq : undefined);
+		const payload = completeEnvelope(envelopePrefix(topic, event), data, seq);
 		assert(payload.length > 0, 'envelope.send-empty', null);
 		const compress = WS_COMPRESSION_ON && (!options || options.compress !== false);
 		// `ws.send` throws on a freed native handle (callers may reach
@@ -1027,20 +1040,31 @@ export const platform = {
 	 * Single-target send via a plugin-declared binary wire codec. The target
 	 * receives a `0x03` frame when it advertised `wire.capability` and the
 	 * codec can encode this frame; otherwise it receives the JSON envelope
-	 * `send()` would have sent. No seq is stamped (matches `send()`); the
-	 * binary frame carries seq 0 ("no seq"). Used for snapshot/catalog frames.
+	 * `send()` would have sent. By default no seq is stamped (matches
+	 * `send()`) and the binary frame carries seq 0 ("no seq"); an explicit
+	 * `options.seq` - number or bigint, the publish lanes' validation - rides
+	 * BOTH forms, the gap-fill channel a resume hook replays history through.
+	 * `true` throws (no counter lives on this lane), and an explicitly-seq'd
+	 * send stays side-effect-free: no counter advance, no max-seen record, no
+	 * resume capture. Used for snapshot/catalog frames and gap-fill replay.
 	 *
 	 * @param {import('uWebSockets.js').WebSocket<any>} ws
 	 * @param {string} topic
 	 * @param {string} event
 	 * @param {any} data
 	 * @param {{ capability: string, schemaVersion: number, encode: (event: string, data: any) => (Uint8Array | null) }} wire
-	 * @param {{ compress?: boolean }} [options] - `{ compress: true }` opts this
+	 * @param {{ compress?: boolean, seq?: number | bigint | false | null }} [options] - `{ compress: true }` opts this
 	 *   low-frequency binary frame into permessage-deflate when a compressor is
 	 *   configured (binary frames are uncompressed by default).
 	 * @returns {number} uWS send status (0/1/2), or 2 on a freed handle
 	 */
 	sendWire(ws, topic, event, data, wire, options) {
+		// The explicit gap-fill seq, resolved BEFORE the freed-handle guard so
+		// an invalid spelling throws whatever the socket's state - the refusal
+		// is about the call, not the connection. Rides the binary frame's seq
+		// slot and the JSON fallback envelope identically, so the client keys
+		// one watermark whichever form this connection negotiates.
+		const seq = resolveSendSeq(options != null ? options.seq : undefined);
 		let ud;
 		try { ud = ws.getUserData(); } catch { counters.closedWsAborts++; return 2; }
 		const caps = ud[WS_CAPS];
@@ -1065,7 +1089,7 @@ export const platform = {
 			}
 		}
 		if (payload == null) {
-			const json = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
+			const json = completeEnvelope(envelopePrefix(topic, event), data, seq);
 			let result;
 			try { result = ws.send(json, false, compress); } catch { counters.closedWsAborts++; return 2; }
 			bumpOut(ws, json);
@@ -1077,13 +1101,13 @@ export const platform = {
 			// topic's numeric id, so binary for this capability is permanently
 			// undecodable here. JSON for this frame + poison.
 			poisonWireState(ws, ud, wire.capability);
-			const json = envelopePrefix(topic, event) + JSON.stringify(data ?? null) + '}';
+			const json = completeEnvelope(envelopePrefix(topic, event), data, seq);
 			let result;
 			try { result = ws.send(json, false, compress); } catch { counters.closedWsAborts++; return 2; }
 			bumpOut(ws, json);
 			return result;
 		}
-		const frame = buildBinaryFrame(schemaVersion, id, 0, payload);
+		const frame = buildBinaryFrame(schemaVersion, id, seq === null ? 0 : seq, payload);
 		let result;
 		try { result = ws.send(frame, true, compress); } catch { counters.closedWsAborts++; return 2; }
 		bumpOut(ws, frame);
@@ -1101,7 +1125,10 @@ export const platform = {
 	 * codec's `<event>-batch` form), or the per-entry JSON envelopes when the
 	 * connection has no capability / is poisoned. The per-subscriber twin of
 	 * publishWireBatch, for the culled (per-viewer) delivery walks. No seq is
-	 * stamped (matches `send()` / `sendWire()`); the binary frame carries seq 0.
+	 * stamped and no seq option exists here - one options value cannot be
+	 * one-seq-per-entry, the batch lanes' standing category error; a gap-fill
+	 * replaying seq'd history sends its discrete frames through `sendWire`.
+	 * The binary batch frame carries seq 0.
 	 *
 	 * Degradation mirrors sendWire per entry: a declined batch falls back to
 	 * per-entry encodes, a per-entry null to that entry's JSON envelope, and a

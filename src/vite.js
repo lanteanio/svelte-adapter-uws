@@ -3,10 +3,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './runtime/cookies.js';
-import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, resolveEntrySeq, throwInvalidSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_ATTRIBUTION, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
+import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, resolveEntrySeq, resolveSendSeq, throwInvalidSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_ATTRIBUTION, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
-import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
+import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, deniesRefLessRecover, recoverRequiresRefFrame, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
 import {
 	assertWireSubscribeAuthorization,
 	assertProtectiveNumber,
@@ -597,8 +597,14 @@ export default function uws(options = {}) {
 	 * @param {unknown} [data]
 	 * @returns {number}
 	 */
-	function send(ws, topic, event, data) {
-		const payload = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null) + '}';
+	function send(ws, topic, event, data, options) {
+		// Dev stamps no counter seq anywhere, but an EXPLICIT gap-fill seq is
+		// caller-supplied and rides the envelope here exactly as production
+		// carries it - a resume flow exercised against dev must deliver the
+		// per-frame seqs the client keys its watermark off.
+		const seq = resolveSendSeq(options != null ? options.seq : undefined);
+		const payload = '{"topic":' + esc(topic) + ',"event":' + esc(event) + ',"data":' + JSON.stringify(data ?? null)
+			+ (seq === null ? '' : ',"seq":' + seq) + '}';
 		const result = ws.send(payload, false, false) ?? 1;
 		bumpOutV(ws.getUserData(), payload);
 		return result;
@@ -809,8 +815,8 @@ export default function uws(options = {}) {
 		publishWire(topic, event, data, _wire, options) {
 			return publish(topic, event, data, options);
 		},
-		sendWire(ws, topic, event, data, _wire) {
-			return send(ws, topic, event, data);
+		sendWire(ws, topic, event, data, _wire, options) {
+			return send(ws, topic, event, data, options);
 		},
 		// The batched wire forms delegate to N per-entry JSON deliveries - the
 		// same degradation the production walk applies to a JSON-only
@@ -2594,6 +2600,16 @@ export default function uws(options = {}) {
 							if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) throw 0;
 							if (msg.type === 'subscribe' && typeof msg.topic === 'string') {
 								const ref = hasRefValue(msg.ref) ? msg.ref : null;
+								// A recover subscribe without a ref is refused loudly and
+								// FIRST, as production refuses it: every denial on this
+								// path, the topic checks included, is silent without a
+								// ref, and a history request must not die silently.
+								if (deniesRefLessRecover({ hasResumeHook: userHandlers.resume, recover: msg.recover, ref })) {
+									const payload = recoverRequiresRefFrame(msg.topic);
+									ws.send(payload);
+									bumpOutV(/** @type {any} */ (ws).__userData, payload);
+									return;
+								}
 								if (!isValidWireTopic(msg.topic, ALLOW_NON_ASCII_TOPICS_V)) {
 									sendDenied(ws, msg.topic, ref, 'INVALID_TOPIC');
 									return;
