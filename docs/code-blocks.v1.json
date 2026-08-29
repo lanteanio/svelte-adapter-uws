@@ -783,7 +783,7 @@
 			"occurrence": 1,
 			"language": "js",
 			"line": 2331,
-			"section": "svelte-adapter-uws > Platform API (`event.platform`) > `platform.send(ws, topic, event, data)`",
+			"section": "svelte-adapter-uws > Platform API (`event.platform`) > `platform.send(ws, topic, event, data, options?)`",
 			"classification": "executed",
 			"channel": "packed-runtime",
 			"verification": "test/packed-readme-examples.test.js"
@@ -794,7 +794,7 @@
 			"occurrence": 1,
 			"language": "js",
 			"line": 2349,
-			"section": "svelte-adapter-uws > Platform API (`event.platform`) > `platform.send(ws, topic, event, data)`",
+			"section": "svelte-adapter-uws > Platform API (`event.platform`) > `platform.send(ws, topic, event, data, options?)`",
 			"classification": "tutorial",
 			"channel": "app-context",
 			"reason": "app-context imports: ../../hooks.ws.js"
@@ -805,7 +805,7 @@
 			"occurrence": 1,
 			"language": "js",
 			"line": 2365,
-			"section": "svelte-adapter-uws > Platform API (`event.platform`) > `platform.send(ws, topic, event, data)`",
+			"section": "svelte-adapter-uws > Platform API (`event.platform`) > `platform.send(ws, topic, event, data, options?)`",
 			"classification": "executed",
 			"channel": "packed-runtime",
 			"verification": "test/packed-readme-examples.test.js"
