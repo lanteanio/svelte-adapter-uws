@@ -26,7 +26,7 @@ import {
 	RingReader,
 	RingWriter
 } from '../src/runtime/relay-ring.js';
-import { relayBatched, batchRelay, setRelayFrameCeiling } from '../src/runtime/handler/relay.js';
+import { relayBatched, batchRelay, setRelayFrameCeiling, setRelayRingWriter } from '../src/runtime/handler/relay.js';
 
 afterEach(() => {
 	setRelayFrameCeiling(0, null);
@@ -73,6 +73,88 @@ describe('the cluster relay refuses a frame too large to carry', () => {
 		await new Promise((resolve) => setTimeout(resolve, 5));
 
 		expect(refusals).toEqual([['publish', 'room', 4096, 1024]]);
+	});
+
+	it('refuses a multibyte envelope whose bytes exceed the ceiling its code units fit under', async () => {
+		// The ceiling's unit is BYTES, like the per-peer spill ceilings and the
+		// reader's reassembly cap around it. A code-unit admission let exactly
+		// this envelope through: 400 code units against a 1024 ceiling, but
+		// three bytes per character on the wire - larger than every receiver's
+		// byte-measured backlog allows, on all of them at once.
+		const refusals = [];
+		setRelayFrameCeiling(1024, (...args) => refusals.push(args));
+
+		batchRelay('room', '€'.repeat(400), false, null, undefined, undefined, undefined);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(refusals, 'the refusal must name the encoded byte size, not code units')
+			.toEqual([['publish', 'room', 1200, 1024]]);
+
+		refusals.length = 0;
+		relayBatched([{ topic: 'room', env: '€'.repeat(400), seq: null }], false);
+		expect(refusals, 'the batched lane must measure the same unit').toEqual([['batched', 'room', 1200, 1024]]);
+	});
+
+	it('refuses an astral-heavy envelope by its four-byte pairs', () => {
+		// Two code units, four bytes: the other direction the unit mismatch
+		// bends. 300 emoji are 600 units against 1024 - admitted by a length
+		// compare - and 1200 bytes on the wire.
+		const refusals = [];
+		setRelayFrameCeiling(1024, (...args) => refusals.push(args));
+
+		relayBatched([{ topic: 'room', env: '\u{1F600}'.repeat(300), seq: null }], false);
+		expect(refusals).toEqual([['batched', 'room', 1200, 1024]]);
+	});
+
+	it('admits a mixed envelope the fast path cannot decide but the bytes fit', () => {
+		// 850 code units puts it past the times-three fast path, so this is
+		// the band that measures - and at 950 encoded bytes under the 1024
+		// ceiling it must be ADMITTED, not refused for its code-unit inflation.
+		// Reaching the null parentPort is the proof it was handed on.
+		const refusals = [];
+		setRelayFrameCeiling(1024, (...args) => refusals.push(args));
+
+		const mixed = 'a'.repeat(800) + '€'.repeat(50);
+		expect(() => relayBatched([{ topic: 'room', env: mixed, seq: null }], false)).toThrow();
+		expect(refusals, 'refused an envelope whose bytes fit the ceiling').toEqual([]);
+	});
+
+	it('measures a batch as one frame: events that fit alone refuse together', () => {
+		// The whole array travels as ONE frame, so the ceiling sums the batch.
+		// Two events of 600 bytes each both fit a 1024 ceiling alone; their
+		// frame does not, and the refusal is wholesale with the summed size.
+		const refusals = [];
+		setRelayFrameCeiling(1024, (...args) => refusals.push(args));
+
+		relayBatched([
+			{ topic: 'room', env: 'a'.repeat(600), seq: null },
+			{ topic: 'room', env: 'b'.repeat(600), seq: null }
+		], false);
+		expect(refusals, 'a batch must refuse on its summed size, not per event')
+			.toEqual([['batched', 'room', 1200, 1024]]);
+	});
+
+	it('admits a frame at exactly the ceiling on both lanes', async () => {
+		// The ceiling is "largest ... this worker will hand", inclusive: at
+		// exactly the ceiling the frame goes out. 1024 ASCII chars force the
+		// walk (the times-three fast path cannot decide them), so this pins
+		// the byte comparison itself, on the batched lane via the null
+		// parentPort and on the publish lane via a stub ring writer.
+		const refusals = [];
+		setRelayFrameCeiling(1024, (...args) => refusals.push(args));
+
+		expect(() => relayBatched([{ topic: 'room', env: 'c'.repeat(1024), seq: null }], false)).toThrow();
+		expect(refusals, 'refused a batch at exactly the ceiling').toEqual([]);
+
+		const written = [];
+		setRelayRingWriter({ write: (frame) => written.push(frame), notify() {} });
+		try {
+			batchRelay('room', 'd'.repeat(1024), false, null, undefined, undefined, undefined);
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			expect(refusals, 'refused a publish at exactly the ceiling').toEqual([]);
+			expect(written.length, 'the at-ceiling publish never reached the transport').toBe(1);
+		} finally {
+			setRelayRingWriter(null);
+		}
 	});
 
 	it('applies the ceiling with no ring configured, which is a documented setup', () => {

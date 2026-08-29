@@ -91,15 +91,34 @@ export function setRelayRingWriter(writer) {
  * It is deliberately checked ABOVE the ring/postMessage split: `CLUSTER_RELAY_RING_KB=0`
  * is a documented configuration, and it must not forfeit the ceiling.
  *
- * Measured in UTF-16 code units (`String.prototype.length`), not encoded
- * bytes: the length read is free, while `Buffer.byteLength` walks the string
- * on every relayed message. A multibyte-heavy envelope can therefore encode
- * to more UTF-8 bytes on the wire than the ceiling nominally admits; the
- * reader's reassembly headroom is a generous multiple for exactly this class
- * of undercount.
+ * Measured in encoded BYTES, with the free `String.prototype.length` read as
+ * the fast path: UTF-8 never encodes below one byte per UTF-16 code unit and
+ * never above three (an astral pair is four bytes for two units), so an
+ * envelope whose code units times three fit under the ceiling is admitted
+ * without a walk, and only the band above that measures with
+ * `Buffer.byteLength`. Bytes are the unit every neighboring ceiling uses -
+ * the per-peer spill ceilings and the reader's reassembly cap - and a
+ * code-unit admission was breachable: a ceiling-sized multibyte envelope
+ * passed the sender, fit the reader's headroom, and landed over every peer's
+ * byte-measured backlog ceiling at once when the ring was behind - the
+ * mass quarantine this ceiling exists to prevent, reopened through the unit
+ * mismatch.
  * @type {number}
  */
 let maxRelayEnvelopeBytes = Infinity;
+
+/**
+ * The byte size of `envelope` when it is over the ceiling, 0 when admitted.
+ * Walks the string only in the band the fast path cannot decide, and on a
+ * refusal - where the sink deserves the exact byte size it names.
+ * @param {string} envelope
+ * @returns {number}
+ */
+function envelopeBytesOverCeiling(envelope) {
+	if (envelope.length * 3 <= maxRelayEnvelopeBytes) return 0;
+	const bytes = Buffer.byteLength(envelope);
+	return bytes > maxRelayEnvelopeBytes ? bytes : 0;
+}
 
 /** @type {((lane: 'publish' | 'batched', topic: string, bytes: number, limit: number) => void) | null} */
 let onRelayFrameRefused = null;
@@ -168,18 +187,20 @@ export function batchRelay(topic, envelope, compress, seq, capability, event, da
 			// split so both lanes inherit it. A refused message still reached this
 			// worker's own subscribers; only the cross-worker copy is dropped, and
 			// the ordinal it already took leaves a hole its receivers can see. One
-			// comparison per message, allocating nothing unless something is over.
+			// comparison per message, allocating nothing; a message inside the
+			// fast path's undecidable band additionally pays one string walk.
 			let admitted = batch;
 			if (maxRelayEnvelopeBytes !== Infinity) {
 				let anyOver = false;
 				for (const m of batch) {
-					if (m.envelope.length > maxRelayEnvelopeBytes) { anyOver = true; break; }
+					if (envelopeBytesOverCeiling(m.envelope) > 0) { anyOver = true; break; }
 				}
 				if (anyOver) {
 					admitted = [];
 					for (const m of batch) {
-						if (m.envelope.length > maxRelayEnvelopeBytes) {
-							refuseRelayFrame('publish', m.topic, m.envelope.length);
+						const over = envelopeBytesOverCeiling(m.envelope);
+						if (over > 0) {
+							refuseRelayFrame('publish', m.topic, over);
 							continue;
 						}
 						admitted.push(m);
@@ -260,13 +281,19 @@ export function relayBatched(events, compress) {
 	// The whole array travels as ONE frame, so the ceiling is measured over the
 	// whole array and the refusal is wholesale - a batch cannot be half-relayed
 	// without changing what a receiver dispatches. Above the lane split, for the
-	// same reason as the single-publish path.
+	// same reason as the single-publish path. Same byte-accurate admission as
+	// there: the summed code units decide the certain-under case for free, and
+	// only a batch inside the band walks its strings once.
 	if (maxRelayEnvelopeBytes !== Infinity) {
-		let total = 0;
-		for (let i = 0; i < events.length; i++) total += events[i].env.length;
-		if (total > maxRelayEnvelopeBytes) {
-			refuseRelayFrame('batched', events.length > 0 ? events[0].topic : '', total);
-			return;
+		let units = 0;
+		for (let i = 0; i < events.length; i++) units += events[i].env.length;
+		if (units * 3 > maxRelayEnvelopeBytes) {
+			let bytes = 0;
+			for (let i = 0; i < events.length; i++) bytes += Buffer.byteLength(events[i].env);
+			if (bytes > maxRelayEnvelopeBytes) {
+				refuseRelayFrame('batched', events.length > 0 ? events[0].topic : '', bytes);
+				return;
+			}
 		}
 	}
 	if (ringWriter !== null) {

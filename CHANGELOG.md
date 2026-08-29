@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** No wire, option, or metric name moved. A window that omits any connection now withholds the cap accountant instead of cross-checking against a partial sum, which is what a partial slice already did; a complete window still runs every check.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: the cluster relay's frame ceiling now measures encoded bytes.** It compared UTF-16 string length, so a multibyte-heavy frame up to three times the configured size passed the sender and could land over every sibling worker's byte-measured backlog ceiling at once - the mass quarantine the ceiling exists to prevent.
+  - **Affects:** Multi-worker deployments that set `CLUSTER_RELAY_MAX_FRAME_KB` and relay non-ASCII payloads; ASCII payloads measured identically before and after.
+  - **Action:** None. A deployment relying on the old undercount to sneak larger multibyte frames through should raise the ceiling to the size it actually intends.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Strictly tighter: encoded bytes are never fewer than code units, so nothing previously refused is now admitted. Refusal reports carry the exact encoded size.
+  - **Detail:** [Fixed engineering detail](#fixed).
 
 <!-- consumer-release-summary:end -->
 
@@ -66,6 +72,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after, with the decoder allocation 99 ns of the difference.
   `test/cursor.test.js` makes the pre-parsed envelope and the raw bytes name
   different topics, so which one the hook acted on is observable.
+
+- **The relay frame ceiling measures the unit its neighbors measure.** The
+  sender-side admission compared `String.prototype.length` - UTF-16 code
+  units - while the per-peer spill ceilings and the reader's reassembly cap
+  count encoded bytes. A ceiling-sized multibyte envelope (up to three bytes
+  per code unit) passed admission, fit the reader's headroom, and landed over
+  `CLUSTER_RELAY_MAX_PENDING_KB` in every receiver's backlog at once when the
+  ring was behind - one publish quarantining every healthy sibling, which is
+  the exact failure the ceiling split was built to prevent. Admission now
+  decides on `Buffer.byteLength`, with the free length read kept as the fast
+  path: UTF-8 never encodes below one byte or above three per code unit, so
+  only an envelope inside that band walks the string, once. The batched lane
+  sums the same way and still refuses wholesale. Refusals report the exact
+  encoded size. `test/relay-frame-ceiling.test.js` holds the three-byte and
+  astral refusals on both lanes, the band admit, the summed batch refusal,
+  and admission at exactly the ceiling.
 
 - **The consistency auditor stops fabricating `subs.total-mismatch` from its
   own skipped reads.** `buildConnectionAuditSnapshot` attached the cap
