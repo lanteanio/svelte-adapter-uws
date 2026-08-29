@@ -6,7 +6,7 @@ import { metricsSnapshot } from './metrics-snapshot.js';
 import { isWarmupRequest } from './warmup-registry.js';
 import { parentPort } from 'node:worker_threads';
 import { exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, topicEpochValue, readAssertionCounts, resolveEntrySeq, resolveSendSeq, stampSeqValue, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, mintTopicEpoch, topicEpochValue, readAssertionCounts, resolveEntrySeq, resolveSendSeq, stampSeqValue, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
 import { egressGate, resolvePublishTenant, admitPublishEgress, admitTopicEgress, admitTenantEgress, chargePublishEgress, chargeDirectEgress, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, EGRESS_ADMITTED } from './egress-budget.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
@@ -2652,6 +2652,28 @@ export const platform = {
 	 */
 	topicEpoch(topic) {
 		return topicEpochValue(topic);
+	},
+
+	/**
+	 * Mint this topic a fresh seq-space generation on THIS worker, so every
+	 * offset a client recorded under the previous epoch mismatches at its
+	 * next resume and cold-rehydrates instead of gap-filling. The escape
+	 * hatch for changing a topic's seq AUTHORITY: the explicit lane is
+	 * single-authority per topic, and moving a topic between authorities -
+	 * counter to external allocator, one partition to another, a reset
+	 * store - leaves client offsets pointing into a seq space that no longer
+	 * continues them. Worker-local by the same design as the relay-loss mint
+	 * this machinery serves: call it on each worker where the authority
+	 * change lands (app code runs on every worker), and the equality-only
+	 * epoch repudiates old offsets everywhere identically. The subscribe ack
+	 * and every resume compare pick the new value up through the one read
+	 * authority `topicEpoch` wraps.
+	 *
+	 * @param {string} topic
+	 * @returns {number} the minted epoch, as topicEpoch(topic) now answers
+	 */
+	bumpTopicEpoch(topic) {
+		return mintTopicEpoch(topic);
 	},
 
 	// Clock and RNG exposed through the same injectable runtime module the

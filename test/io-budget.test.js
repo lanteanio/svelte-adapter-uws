@@ -821,7 +821,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// cold validation function in utils/epoch.js). Comparisons, cold throws
 	// and one string build on refusal paths; no byte is read, allocated or
 	// copied, and no copy primitive entered the graph.
-	ingress: '43d6bd1cbcba2d7cf343092bd574a5a51edaa9d9824c77c86fb3ab3c75daaa52',
+	//
+	// Re-pinned for the app-driven topic epoch mint, reached through utils.js
+	// -> utils/epoch.js: one cold exported mint (a read, a bounded re-roll of
+	// the RNG, one map install through the existing override helper), called
+	// only from the platform method an app invokes on an authority change -
+	// never on a frame path. No byte is read, allocated or copied, and no
+	// copy primitive entered the graph.
+	ingress: 'bfe71299fb36f87deecc1e204ce5d2183a0cc26e7922647b6d0de9b889d442bc',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1417,7 +1424,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// on this graph's utils reach. Same sends, same buffers, one integer in a
 	// slot that previously held the literal 0; no byte is read, allocated or
 	// copied, and no copy primitive entered the graph.
-	platform: '8fe62c57b5faa3bd7cec2f0ba45041dac25b0b734de8a109b3cc4cfd371d876f',
+	//
+	// Re-pinned for the app-driven topic epoch mint, reached through utils.js
+	// -> utils/epoch.js: one cold exported mint (a read, a bounded re-roll of
+	// the RNG, one map install through the existing override helper), called
+	// only from the platform method an app invokes on an authority change -
+	// never on a frame path. No byte is read, allocated or copied, and no
+	// copy primitive entered the graph.
+	platform: 'fc502946027ac7204600328e6678580e65c586dbdcc4c79e622b9ec044441582',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1618,7 +1632,11 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// the same cold utils/subscribe-policy.js and utils/epoch.js additions as
 	// the sibling seals, reached through utils.js; nothing in this graph's
 	// own fan-out modules changed, and no copy primitive entered.
-	'wire-fanout': '7e64aff19f68d8941de73121753c05f163fbf0221dc056baedd9c72f6d151154',
+	//
+	// Re-pinned for the app-driven topic epoch mint, the same cold
+	// utils/epoch.js addition as the sibling seals; nothing in this graph's
+	// own fan-out modules changed, and no copy primitive entered.
+	'wire-fanout': '466790200f230c3782022c33739a2216811a18d9c0058dd1dfd4db1dea9786b6',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

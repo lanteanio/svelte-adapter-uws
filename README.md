@@ -1889,7 +1889,7 @@ The session id is per-process and per-connection. It does not persist across ser
 
 The in-memory seq counters live in process memory and restart at 1 on every server boot. A client that reconnects to a freshly restarted process and presents an old `lastSeenSeqs[topic]` would, if gap-filled naively, be served a brand-new seq space as if it were a continuation - silently skipping or duplicating state. To detect this, each `subscribed` ack carries an `epoch`: the current generation of that topic's seq space. The client tracks it per topic and presents it back as `lastSeenEpochs` (parallel to `lastSeenSeqs`) on resume.
 
-In your `resume` hook, compare each presented epoch to the live one via `platform.topicEpoch(topic)`:
+In your `resume` hook, compare each presented epoch to the live one via `platform.topicEpoch(topic)`. When you CHANGE a topic's seq authority - move it from the counter to an external allocator, repoint it at a different partition, reset the store behind it - call `platform.bumpTopicEpoch(topic)` on each worker where the change lands: it mints that topic a fresh generation (the same machinery a confirmed relay loss uses), so every offset recorded under the old authority mismatches at its next resume and cold-rehydrates instead of gap-filling from a seq space that no longer continues it. Then compare:
 
 ```js
 export function resume(ws, { lastSeenSeqs, lastSeenEpochs, platform }) {

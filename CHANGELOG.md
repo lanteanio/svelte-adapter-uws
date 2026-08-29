@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Added: an app-driven topic epoch mint.** Changing a topic's seq authority - counter to external allocator, partition to partition, a reset store - left client offsets pointing into a seq space that no longer continues them, with nothing repudiating them; `bumpTopicEpoch(topic)` now mints that topic a fresh generation so those offsets cold-rehydrate at their next resume.
+  - **Affects:** Apps whose topics change seq authority at runtime; every other topic keeps the process generation exactly as before.
+  - **Action:** None unless you change an authority - then call it on each worker where the change lands, since app code runs on every worker and the equality-only epoch repudiates old offsets everywhere identically.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The subscribe ack and resume compares pick the minted value up through the same read authority `topicEpoch` wraps; the override rides the bounded per-topic map the relay-loss mint already uses. `createTestServer` and `vite dev` now answer per-topic epochs through the same shared module.
+  - **Detail:** [Added engineering detail](#added).
 - **Added: the send lanes take an explicit gap-fill `seq`.** A resume hook replaying history had no way to put per-frame sequence numbers on what it sent; `options.seq` on `send` and `sendWire` now stamps the envelope and the binary frame's seq slot identically, side-effect-free - no counter advances, nothing recorded or captured.
   - **Affects:** Resume hooks and replay backends doing gap-fill through the send lanes; every existing call is byte-identical without the option.
   - **Action:** None to keep current behavior. Gap-fill replay passes each frame's stored seq: `platform.send(ws, topic, event, data, { seq })`.
@@ -68,6 +74,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:end -->
 
 ### Added
+
+- **The app-driven topic epoch mint.** The explicit seq lane is
+  single-authority per topic, and an app that changes a topic's authority
+  had no way to say so: offsets recorded under the old allocator would
+  gap-fill from a seq space that no longer continues them, silently
+  skipping or duplicating state - the exact failure the epoch machinery
+  exists to catch, reachable by a deliberate migration as surely as by a
+  relay loss. `platform.bumpTopicEpoch(topic)` mints and installs a fresh
+  per-topic generation through the same shared module the confirmed-loss
+  drain uses (`mintTopicEpoch`), with a re-roll guard so the mint can never
+  equal the value it replaces - a deliberate bump has the current value in
+  hand, unlike the loss drain's unknowable client-held one. Worker-local by
+  the same design: app code runs on every worker, each mints independently,
+  and the equality-only epoch repudiates old offsets everywhere. The
+  harness and dev surfaces answer per-topic epochs through the same module
+  now, where they previously answered only the process generation.
+  `test/topic-epoch-bump.test.js` pins the read-authority change, the u32
+  wire domain, and the ack a real client receives after a bump.
 
 - **The send lanes' explicit gap-fill seq.** The resume hook's contract asks
   it to return the highest seq it delivered per topic, but the only primitive

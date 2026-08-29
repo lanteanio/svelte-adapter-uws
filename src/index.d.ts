@@ -4118,6 +4118,23 @@ export interface Platform {
 	topicEpoch(topic: string): number;
 
 	/**
+	 * Mint this topic a fresh seq-space generation on THIS worker and return
+	 * it, so every offset a client recorded under the previous epoch
+	 * mismatches at its next resume and cold-rehydrates instead of
+	 * gap-filling. The escape hatch for changing a topic's seq AUTHORITY -
+	 * the explicit lane is single-authority per topic, and moving a topic
+	 * between authorities (counter to external allocator, partition to
+	 * partition, a reset store) leaves client offsets pointing into a seq
+	 * space that no longer continues them, with nothing else repudiating
+	 * them. Worker-local: call it on each worker where the authority change
+	 * lands (app code runs on every worker); the epoch is equality-only, so
+	 * independently minted values repudiate old offsets on every worker
+	 * identically. The subscribe ack and every resume compare pick the new
+	 * value up immediately.
+	 */
+	bumpTopicEpoch(topic: string): number;
+
+	/**
 	 * Current wall-clock time in milliseconds since the epoch, read through the
 	 * adapter's injectable runtime so plugins and app code share one swappable
 	 * clock a controlled harness can seed. Coarsely cached (about 1 Hz), so it
