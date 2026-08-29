@@ -10,11 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- consumer-release-summary:start -->
 ### Consumer summary
 
+- **Added: the static lane answers the full RFC 9110 precondition set.** Mutable assets now serve `Last-Modified` beside the `ETag` and honor `If-Match` and `If-Unmodified-Since` with 412, `If-Modified-Since` with 304, and the list and `*` forms of both entity headers, evaluated in the RFC's order so a failed `If-Match` is never converted into a 304.
+  - **Affects:** Caches and clients revalidating static and prerendered responses; a cache that lost the ETag can now revalidate by date instead of re-downloading every full body.
+  - **Action:** None. Versioned immutable assets are unchanged - their filename is the validator and they carry neither header.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Every request that answered 304 before still does; the new answers only add 304s and 412s where the RFC requires them. `If-Match` compares by opaque equality against any validator the lane issued, because every validator is weak by construction and strict strong comparison would refuse the exact tag the server handed out. `last-modified` joins the reserved `staticHeaders` keys, since the date preconditions answer from the file's real time.
+  - **Detail:** [Added engineering detail](#added).
 - **Changed: a subscription-drift report now says how many connections it summed and how many a close had already settled.** A membership counted twice and a closed connection still in the live set produce the same sum, so the two quantities that separate them now ride on the report instead of being reconstructed by whoever reads it.
   - **Affects:** Anyone reading `subs.total-mismatch` diagnostics; the two existing fields are unchanged and two more are added beside them.
   - **Action:** None. A reader keying on `totalSubscriptions` and `summed` keeps working.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Additive. `connections` is always present on a mismatch; `settled` appears only when the snapshot could answer, so an absent field means unmeasured rather than zero.
+  - **Detail:** [Changed engineering detail](#changed).
+- **Changed: the `seq` publish option speaks one table, and refuses what it used to mis-read.** A value outside the contract - a numeric string, an object - now throws naming the legal forms instead of silently drawing the local counter and degrading resume dedup; `{ seq: null }` now means no seq, and `bigint` joins `number` as a spelling of the explicit authority.
+  - **Affects:** Callers passing seq values outside `boolean | number` - a numeric string from a JSON column was the typical accident. Also `publishWireBatch` entries, where `true`, `false`, and `null` now act per entry as overrides of the shared options instead of falling through silently.
+  - **Action:** Pass a number or bigint for an explicit authority's value, `false` or `null` for no seq, `true` or nothing for the counter. A caller that relied on a non-contract value drawing the counter should say `true`.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Absent, `true`, `false`, and valid numbers behave exactly as before, on every lane and every surface (production, `createTestServer`, `vite dev`). `null` moves from counter to no-seq; other non-contract values move from counter to `TypeError`. The wire's seq space is unchanged: a bigint projects into the same IEEE-double space a number occupies, rounding beyond 2^53 exactly as `Number(x)` at the call site already did.
   - **Detail:** [Changed engineering detail](#changed).
 - **Fixed: the cursor plugin stops decoding and parsing frames the runtime already parsed.** Its message hook now reads the pre-parsed envelope the adapter hands every hook, which also removes a per-message decoder allocation and a crash on a frame whose whole body is null.
   - **Affects:** Every connection on a server with the cursor plugin installed, since that hook inspects each frame before the application's own handler sees it.
@@ -28,18 +40,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** No wire, option, or metric name moved. A window that omits any connection now withholds the cap accountant instead of cross-checking against a partial sum, which is what a partial slice already did; a complete window still runs every check.
   - **Detail:** [Fixed engineering detail](#fixed).
-- **Added: the static lane answers the full RFC 9110 precondition set.** Mutable assets now serve `Last-Modified` beside the `ETag` and honor `If-Match` and `If-Unmodified-Since` with 412, `If-Modified-Since` with 304, and the list and `*` forms of both entity headers, evaluated in the RFC's order so a failed `If-Match` is never converted into a 304.
-  - **Affects:** Caches and clients revalidating static and prerendered responses; a cache that lost the ETag can now revalidate by date instead of re-downloading every full body.
-  - **Action:** None. Versioned immutable assets are unchanged - their filename is the validator and they carry neither header.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Every request that answered 304 before still does; the new answers only add 304s and 412s where the RFC requires them. `If-Match` compares by opaque equality against any validator the lane issued, because every validator is weak by construction and strict strong comparison would refuse the exact tag the server handed out. `last-modified` joins the reserved `staticHeaders` keys, since the date preconditions answer from the file's real time.
-  - **Detail:** [Added engineering detail](#added).
-- **Changed: the `seq` publish option speaks one table, and refuses what it used to mis-read.** A value outside the contract - a numeric string, an object - now throws naming the legal forms instead of silently drawing the local counter and degrading resume dedup; `{ seq: null }` now means no seq, and `bigint` joins `number` as a spelling of the explicit authority.
-  - **Affects:** Callers passing seq values outside `boolean | number` - a numeric string from a JSON column was the typical accident. Also `publishWireBatch` entries, where `true`, `false`, and `null` now act per entry as overrides of the shared options instead of falling through silently.
-  - **Action:** Pass a number or bigint for an explicit authority's value, `false` or `null` for no seq, `true` or nothing for the counter. A caller that relied on a non-contract value drawing the counter should say `true`.
-  - **Requires:** No new dependency or option.
-  - **Compatibility:** Absent, `true`, `false`, and valid numbers behave exactly as before, on every lane and every surface (production, `createTestServer`, `vite dev`). `null` moves from counter to no-seq; other non-contract values move from counter to `TypeError`. The wire's seq space is unchanged: a bigint projects into the same IEEE-double space a number occupies, rounding beyond 2^53 exactly as `Number(x)` at the call site already did.
-  - **Detail:** [Changed engineering detail](#changed).
 - **Fixed: a batch call's `excludeWs` now excludes on both lanes.** `publishWireBatch` honoured a call-level exclusion only for stateless codecs, so opting a codec into batch framing silently dropped it and the author heard its own updates back; the call-level socket now defaults every entry, and a per-entry `excludeWs` overrides it, on either lane.
   - **Affects:** Callers passing `excludeWs` on `publishWireBatch`'s options with a stateful codec - previously ignored there without an error.
   - **Action:** None. Per-entry exclusions behave exactly as before.

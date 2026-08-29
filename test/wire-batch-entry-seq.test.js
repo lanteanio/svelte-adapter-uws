@@ -150,22 +150,22 @@ describeUWS('publishWireBatch per-entry explicit seq', () => {
 		});
 	});
 
-	// The entry lane keys on typeof, exactly as the options lane does: only a
-	// number is an explicit seq. Anything else falls through to the shared
-	// options - the same absorption stampSeq applies to options.seq - so the
-	// two adapters in this family answer identically for every spelling.
-	it('falls through to the shared options for a non-number entry seq', () => {
+	// The entry lane speaks the same table as the options lane (stampSeq),
+	// per entry and as an OVERRIDE of the shared options: null and false omit
+	// the seq for that entry, true draws it a counter value, absent inherits,
+	// and a spelling outside the table - a numeric string among them - refuses
+	// the whole batch, where it used to draw the counter silently.
+	it('resolves each entry through the shared table: null omits, true draws, absent inherits', () => {
 		const topic = 'entry-seq-fallthrough';
 		withSockets(topic, (capable, plain) => {
 			platform.publishWireBatch(topic, 'update', [
 				{ data: { v: 'a' }, seq: null },
 				{ data: { v: 'b' }, seq: true },
-				{ data: { v: 'c' }, seq: '5' },
 				{ data: { v: 'd' } }
 			], statefulWire());
 
-			expect(plain.envelopes().map((e) => e.seq)).toEqual([1, 2, 3, 4]);
-			expect(state.topicSeqs.get(topic)).toBe(4);
+			expect(plain.envelopes().map((e) => 'seq' in e ? e.seq : null)).toEqual([null, 1, 2]);
+			expect(state.topicSeqs.get(topic)).toBe(2);
 		});
 	});
 
