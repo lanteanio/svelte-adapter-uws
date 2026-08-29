@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** No wire, option, or metric name moved. A window that omits any connection now withholds the cap accountant instead of cross-checking against a partial sum, which is what a partial slice already did; a complete window still runs every check.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Changed: the `seq` publish option speaks one table, and refuses what it used to mis-read.** A value outside the contract - a numeric string, an object - now throws naming the legal forms instead of silently drawing the local counter and degrading resume dedup; `{ seq: null }` now means no seq, and `bigint` joins `number` as a spelling of the explicit authority.
+  - **Affects:** Callers passing seq values outside `boolean | number` - a numeric string from a JSON column was the typical accident. Also `publishWireBatch` entries, where `true`, `false`, and `null` now act per entry as overrides of the shared options instead of falling through silently.
+  - **Action:** Pass a number or bigint for an explicit authority's value, `false` or `null` for no seq, `true` or nothing for the counter. A caller that relied on a non-contract value drawing the counter should say `true`.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Absent, `true`, `false`, and valid numbers behave exactly as before, on every lane and every surface (production, `createTestServer`, `vite dev`). `null` moves from counter to no-seq; other non-contract values move from counter to `TypeError`. The wire's seq space is unchanged: a bigint projects into the same IEEE-double space a number occupies, rounding beyond 2^53 exactly as `Number(x)` at the call site already did.
+  - **Detail:** [Changed engineering detail](#changed).
 - **Fixed: the cluster relay's frame ceiling now measures encoded bytes.** It compared UTF-16 string length, so a multibyte-heavy frame up to three times the configured size passed the sender and could land over every sibling worker's byte-measured backlog ceiling at once - the mass quarantine the ceiling exists to prevent.
   - **Affects:** Multi-worker deployments that set `CLUSTER_RELAY_MAX_FRAME_KB` and relay non-ASCII payloads; ASCII payloads measured identically before and after.
   - **Action:** None. A deployment relying on the old undercount to sneak larger multibyte frames through should raise the ceiling to the size it actually intends.
@@ -54,6 +60,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of reporting a zero it did not measure.
   `test/invariants.test.js` and `test/auditor-snapshot.test.js` hold both
   arms, including that an absent predicate leaves the field off.
+
+- **The `seq` option resolves through one table on every lane and surface.**
+  `stampSeq` used to key on two types and let everything else fall through to
+  the counter - including `null` from a nullable column and `'1234'` from a
+  JSON round trip, both of which silently marked the topic non-authoritative.
+  The table is now total: number and bigint are the explicit authority
+  (validated by one shared `explicitSeqValue`, bigint projecting into the
+  IEEE-double seq space the wire already carries), `true` and absent draw the
+  counter, `false` and `null` omit the seq, and anything else throws the
+  legal forms. `publishWireBatch` entries resolve through the same table via
+  a shared `resolveEntrySeq`, which also ends two silent entry-lane quirks:
+  an entry could not opt OUT of a batch-level counter (`seq: false` fell
+  through to the shared options), and a non-number entry seq published the
+  entry under whatever the options said. The resolver is one function used
+  by production, `createTestServer`, and the Vite dev plugin, so the three
+  surfaces cannot drift; `test/batch-sequence-mirror-parity.test.js` holds
+  the acceptance and refusal table against the mirrors, and
+  `test/seq-stamp.test.js` the resolver itself.
 
 ### Fixed
 

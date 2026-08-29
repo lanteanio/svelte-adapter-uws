@@ -60,7 +60,26 @@ function assertEntrySeqContract(platform, label) {
 		`${label}: the per-entry seq spelling must be accepted`
 	).not.toThrow();
 
-	for (const bad of [0, -1, 1.5, Number.NaN]) {
+	// The whole entry table, identically on every surface: bigint is the
+	// second spelling of the explicit authority, and true/false/null are
+	// per-entry overrides of the shared options.
+	expect(
+		() => platform.publishWireBatch('mirror-entry-table', 'update', [{ data: { n: 1 }, seq: 7n }, { data: { n: 2 } }], WIRE, { seq: false }),
+		`${label}: the bigint spelling must be accepted`
+	).not.toThrow();
+	expect(
+		() => platform.publishWireBatch('mirror-entry-table', 'update',
+			[{ data: { n: 1 }, seq: false }, { data: { n: 2 }, seq: null }, { data: { n: 3 }, seq: true }], WIRE, {}),
+		`${label}: the per-entry override spellings must be accepted`
+	).not.toThrow();
+
+	// The first value every 1-based authority issues must be accepted.
+	expect(
+		() => platform.publishWireBatch('mirror-entry-table', 'update', [{ data: { n: 1 }, seq: 1 }], WIRE, { seq: false }),
+		`${label}: an entry seq of 1 must be accepted`
+	).not.toThrow();
+
+	for (const bad of [0, -1, 1.5, Number.NaN, 0n, -1n, '7', {}, []]) {
 		expect(
 			() => platform.publishWireBatch('mirror-entry-room', 'update', [{ data: { n: 1 }, seq: bad }], WIRE, { seq: false }),
 			`${label}: an entry seq of ${String(bad)} must be refused`
@@ -76,6 +95,13 @@ function assertRefusesNumericSeq(platform, label) {
 	expect(
 		() => platform.publishWireBatch('mirror-room', 'update', ENTRIES, WIRE, { seq: 14, relay: false }),
 		`${label}: a numeric seq must be refused`
+	).toThrow(BATCH_SEQUENCE_ERROR);
+
+	// The bigint spelling of the same category error: one options value can no
+	// more be one-seq-per-entry than one number can.
+	expect(
+		() => platform.publishWireBatch('mirror-room', 'update', ENTRIES, WIRE, { seq: 14n, relay: false }),
+		`${label}: a bigint options seq must be refused`
 	).toThrow(BATCH_SEQUENCE_ERROR);
 
 	// One entry is the shape the bounced arity rule allowed. It must refuse too,
@@ -169,6 +195,50 @@ describe('the batch numeric-seq refusal holds on every surface, not just product
 			expect('seq' in env, 'dev stamped a seq it documents not stamping').toBe(false);
 		}
 		expect(envelopes.map((e) => e.data)).toEqual([{ n: 1 }, { n: 2 }]);
+	}, 30000);
+});
+
+// The entry table's OVERRIDES, asserted on delivered envelopes rather than on
+// accepted calls: an explicit entry stamps verbatim without advancing the
+// counter, `true` draws this entry its own counter value, `false` and `null`
+// leave the entry seq-less under a batch that opts in, and the counter is one
+// continuous track across batches. Acceptance alone is satisfiable by a
+// surface that ignores entry seqs entirely; what the wire carries is not.
+describe('the entry overrides land on the wire, on the harness the applications certify against', () => {
+	itUWS('stamps each entry by its own resolution and keeps one counter track', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		const sent = [];
+		const server = await createTestServer({
+			__onPublish: ({ envelope }) => sent.push(JSON.parse(envelope))
+		});
+		teardown.push(() => server.close());
+
+		const wire = {
+			capability: 'fixture.mirror-overrides:1',
+			schemaVersion: 1,
+			state: { onAttach: () => ({}) },
+			encode: () => null
+		};
+		server.platform.publishWireBatch('mirror-override-room', 'update', [
+			{ data: { n: 0 }, seq: 9 },
+			{ data: { n: 1 }, seq: true },
+			{ data: { n: 2 }, seq: false },
+			{ data: { n: 3 }, seq: null },
+			{ data: { n: 4 } }
+		], wire, {});
+		// A second batch under a no-seq default: the lone true entry still
+		// draws the counter, continuing the same track.
+		server.platform.publishWireBatch('mirror-override-room', 'update', [
+			{ data: { n: 5 }, seq: true },
+			{ data: { n: 6 } }
+		], wire, { seq: false });
+
+		const seqs = sent.map((e) => ('seq' in e ? e.seq : null));
+		// Entry order: explicit 9 (counter untouched), counter 1, omitted,
+		// omitted, counter 2 (the batch default), then counter 3 under a
+		// seq-less default and omitted for the entry that inherits it.
+		expect(seqs).toEqual([9, 1, null, null, 2, 3, null]);
+		expect(sent.map((e) => e.data.n), 'delivery order must be entry order').toEqual([0, 1, 2, 3, 4, 5, 6]);
 	}, 30000);
 });
 

@@ -125,7 +125,66 @@ export function nextTopicSeq(seqMap, topic) {
  * @throws {TypeError} always
  */
 export function throwInvalidSeq(value) {
-	throw new TypeError(`publish seq must be a positive integer (>= 1), received ${String(value)}`);
+	throw new TypeError(
+		`publish seq must be a positive integer number or bigint (an explicit authority's value), ` +
+		`true (the in-memory counter), or false/null (no seq); received ${typeof value === 'string' ? JSON.stringify(value) : String(value)}`
+	);
+}
+
+/**
+ * Validate an EXPLICIT seq value - the number and bigint spellings of one
+ * authority - and project it into the wire's seq space.
+ *
+ * That space is IEEE-754 double: the JSON envelope, the 0x03 frame varint,
+ * the relay frame's seq slot and the client's reader all carry doubles, and
+ * the protocol's stance is finite-and-non-negative but NOT magnitude-bounded
+ * (the varint spells out 2^53 and 1e308 exactly as the doubles they are). A
+ * bigint is therefore a SPELLING, not a wider space: it converts through
+ * `Number`, which beyond 2^53 rounds to the nearest representable double -
+ * exactly what the number spelling already did at the caller's own
+ * conversion, and monotone, so max-seen guards and resume compares hold. A
+ * caller whose ids must stay distinct past 2^53 needs an authority that
+ * issues doubles, not a wider wire. Chosen over refusing inexact bigints
+ * because the two spellings of one value must not disagree about validity,
+ * and over exact bigint carriage because the seq space is frozen with the
+ * protocol revision.
+ *
+ * @param {number | bigint} value
+ * @returns {number}
+ */
+export function explicitSeqValue(value) {
+	if (typeof value === 'number') {
+		if (Number.isInteger(value) && value >= 1) return value;
+	} else {
+		const projected = Number(value);
+		if (value >= 1n && Number.isFinite(projected)) return projected;
+	}
+	throwInvalidSeq(value);
+}
+
+/**
+ * Resolve one batch entry's `seq` into its override form, speaking the same
+ * table as {@link stampSeqValue} so the entry spelling and the options
+ * spelling cannot disagree. ONE resolver for every surface that carries the
+ * batch contract - production, the createTestServer harness, and the Vite
+ * dev plugin - because the pre-pass used to be hand-copied into each, and a
+ * table change landing in one alone is exactly the mirror drift the parity
+ * suite exists to catch.
+ *
+ * @param {unknown} value the entry's `seq` field, read once by the caller
+ * @returns {number | boolean | undefined} `undefined` inherits the shared
+ *   options; a NUMBER is the validated explicit authority (callers gate their
+ *   authority assertion on this form); `true` draws the entry its own counter
+ *   value; `false` (the resolution of both `false` and `null`) leaves the
+ *   entry seq-less. Anything else throws naming the legal forms - before the
+ *   caller has stamped or delivered anything.
+ */
+export function resolveEntrySeq(value) {
+	if (value === undefined) return undefined;
+	if (typeof value === 'number' || typeof value === 'bigint') return explicitSeqValue(value);
+	if (value === false || value === null) return false;
+	if (value === true) return true;
+	throwInvalidSeq(value);
 }
 
 /**
@@ -133,32 +192,42 @@ export function throwInvalidSeq(value) {
  * caller-supplied authority. Shared by every publish entry point so the
  * three-way resolution never drifts between them.
  *
- * Keyed STRICTLY on the `seq` option type so a legacy truthy `seq: true` keeps
- * its historical meaning (the in-memory counter, NOT numeric 1):
+ * Keyed STRICTLY on the `seq` option type, one spelling for every publish
+ * lane and for `publishWireBatch`'s per-entry `seq`:
  *
- * - `options.seq` is a NUMBER: stamp that exact value and do NOT advance the
- *   in-memory per-worker counter. This is a cluster-authoritative seq a replay
- *   backend already allocated (a Redis Lua INCR, a Postgres CTE, or the
- *   in-memory buffer's own counter), so the broadcast wire seq and the replay
- *   seq occupy ONE space instead of diverging. Numeric seqs originate on
- *   different workers and interleave on arrival, so a caller that tracks a
- *   max-seen map must record them through the monotone-max guard
- *   (`recordSeen`), never a bare set - a bare set could regress the local max.
- * - `options.seq === false`: no seq. Returns null so the field is omitted from
- *   the envelope and the topic stays out of the cross-worker SEQUENCE comparison
- *   (it has no number to compare). Such a topic is still contiguity-checked over
- *   the relay, which numbers frames independently of the publish seq.
- * - absent, or any other truthy value: the in-memory per-worker counter. A
- *   topic already in the map advances by one, exactly as every prior release
- *   did. A topic NEW to the map starts at 1 for a caller that passes no
- *   `bound`, and at the bound's carried floor plus one for a caller that does
- *   - the registry may forget a topic, but the counter it hands out must
- *   never repeat a number a client has already seen.
+ * - a NUMBER or BIGINT: stamp that explicit value (validated and projected by
+ *   {@link explicitSeqValue}) and do NOT advance the in-memory per-worker
+ *   counter. This is a cluster-authoritative seq a replay backend already
+ *   allocated (a Redis Lua INCR, a Postgres CTE, or the in-memory buffer's
+ *   own counter), so the broadcast wire seq and the replay seq occupy ONE
+ *   space instead of diverging. Explicit seqs originate on different workers
+ *   and interleave on arrival, so a caller that tracks a max-seen map must
+ *   record them through the monotone-max guard (`recordSeen`), never a bare
+ *   set - a bare set could regress the local max.
+ * - `false` or `null`: no seq. Returns null so the field is omitted from the
+ *   envelope and the topic stays out of the cross-worker SEQUENCE comparison
+ *   (it has no number to compare). Such a topic is still contiguity-checked
+ *   over the relay, which numbers frames independently of the publish seq.
+ *   `null` means no-seq rather than the counter because it is what a nullable
+ *   column or a JSON round trip hands a caller who KNOWS no seq - silently
+ *   drawing the counter for it would mark the topic non-authoritative behind
+ *   the caller's back.
+ * - absent (`undefined`) or `true`: the in-memory per-worker counter - the
+ *   zero-config default, so resume dedup works without the caller naming an
+ *   authority. A topic already in the map advances by one, exactly as every
+ *   prior release did. A topic NEW to the map starts at 1 for a caller that
+ *   passes no `bound`, and at the bound's carried floor plus one for a caller
+ *   that does - the registry may forget a topic, but the counter it hands out
+ *   must never repeat a number a client has already seen.
+ * - anything else - a string from a JSON column, an object, a symbol - THROWS
+ *   naming the legal forms. A string meant as a seq used to draw the counter
+ *   silently, which degraded resume dedup with no signal; the misuse now has
+ *   one failure mode instead of two.
  *
  * Pure with respect to inputs other than the supplied map (mirrors
  * `nextTopicSeq`), so a unit test can pass a fresh map per case.
  *
- * @param {{ seq?: boolean | number } | null | undefined} options
+ * @param {{ seq?: boolean | number | bigint | null } | null | undefined} options
  * @param {Map<string, number>} seqMap
  * @param {string} topic
  * @param {{ floorOf(topic: string): number, onInsert(topic: string): void } | undefined} [bound]
@@ -177,14 +246,14 @@ export function stampSeq(options, seqMap, topic, bound) {
  * resolution, same validation, same counter semantics as the options form,
  * which delegates here so the rule cannot drift.
  *
- * @param {boolean | number | undefined} opt
+ * @param {boolean | number | bigint | null | undefined} opt
  * @param {Map<string, number>} seqMap
  * @param {string} topic
  * @param {{ floorOf(topic: string): number, onInsert(topic: string): void } | undefined} [bound]
  * @returns {number | null}
  */
 export function stampSeqValue(opt, seqMap, topic, bound) {
-	if (opt === false) return null;
+	if (opt === false || opt === null) return null;
 	if (typeof opt === 'number') {
 		// An explicit seq is a cluster-authoritative value that must survive BOTH
 		// the JSON envelope and the 0x03 binary frame and drive the client's resume
@@ -194,9 +263,13 @@ export function stampSeqValue(opt, seqMap, topic, bound) {
 		// diverge from the varint, and poison the monotone-max guard. The in-memory
 		// counter and every shipped authority (Redis INCR) are 1-based; a 0-based
 		// external source must offset by 1. Fail fast rather than corrupt the wire.
+		// Inlined from explicitSeqValue so the overwhelmingly common number
+		// spelling keeps its single call frame on the hot path.
 		if (Number.isInteger(opt) && opt >= 1) return opt;
 		throwInvalidSeq(opt);
 	}
+	if (typeof opt === 'bigint') return explicitSeqValue(opt);
+	if (opt !== undefined && opt !== true) throwInvalidSeq(opt);
 	// The in-memory per-worker counter, inlined from `nextTopicSeq` rather than
 	// called, so the common publish stays a single call frame (a wrapper call
 	// measured a few percent on the isolated publish-resolution micro-bench).

@@ -3,7 +3,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseCookies, createCookies } from './runtime/cookies.js';
-import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, throwInvalidSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_ATTRIBUTION, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
+import { parse_origin, esc, isValidWireTopic, createScopedTopic, createTopicHelperCache, resolveRequestId, completeEnvelope, completeGameEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, nextTopicSeq, stampSeq, resolveEntrySeq, throwInvalidSeq, createHlc, processEpoch, isAuthOriginAccepted, isOriginAllowed, assert, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CAPS, WS_ATTRIBUTION, WS_LEASE, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, PUBLISH_WARN_DEDUP_MAX } from './runtime/utils.js';
 import { createLeaseState, leaseGrantFrame, leaseReportedSaturation, controlFrameTooLargeFrame, DEFAULT_GRANT } from './runtime/wire.js';
 import { isAuthorizationHook, releaseDerivedSubscriptions, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, WS_REVOKED_UNSUBSCRIBE } from './runtime/utils/ws-symbols.js';
 import { deniesWireSystemTopicSubscribe, deniesWireSubscribePreHook, deniesWireSubscribeLanding, wantsRecover, recoverIsRevoked, exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from './runtime/utils/subscribe-policy.js';
@@ -14,7 +14,7 @@ import {
 	describeUnknownOptionKeys,
 	DEFAULT_MAX_PAYLOAD_LENGTH
 } from './config-guards.js';
-import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority } from './runtime/handler/cluster-sequence-policy.js';
+import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority, assertClusterSequenceAuthorityValues } from './runtime/handler/cluster-sequence-policy.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { normalizeEgressOptions, createEgressAccount, envelopeWireBytes, EGRESS_ADMITTED } from './runtime/utils/egress-account.js';
 import { readMetricMirror } from './runtime/utils/metrics.js';
@@ -845,20 +845,31 @@ export default function uws(options = {}) {
 			const datas = new Array(count);
 			const excludes = new Array(count);
 			let entrySeqs = null;
+			let sawExplicitEntrySeq = false;
 			for (let i = 0; i < count; i++) {
 				const entry = entries[i];
 				datas[i] = entry.data;
 				excludes[i] = entry.excludeWs;
-				// typeof, as the options lane keys: numbers validate or refuse
-				// the batch, anything else falls through.
-				const entrySeq = entry.seq;
-				if (typeof entrySeq === 'number') {
-					if (!Number.isInteger(entrySeq) || entrySeq < 1) throwInvalidSeq(entrySeq);
-					if (entrySeqs === null) {
-						assertBatchEntrySequenceAuthority(opts);
-						entrySeqs = new Array(count);
+				// One table for the entry lane on every surface
+				// (resolveEntrySeq): explicit number/bigint, counter true,
+				// no-seq false/null, inherit undefined, refuse the rest. Dev
+				// stamps no seq either way; the table exists here so dev
+				// refuses exactly the call production refuses.
+				const resolved = resolveEntrySeq(entry.seq);
+				if (resolved !== undefined) {
+					if (typeof resolved === 'number') {
+						if (!sawExplicitEntrySeq) {
+							assertBatchEntrySequenceAuthority(opts);
+							sawExplicitEntrySeq = true;
+						}
+					} else if (resolved === true) {
+						// An entry drawing the per-worker counter takes the cluster's
+						// counter refusal up front, whole-batch-or-nothing - the same
+						// rule the shared options' counter form takes at the call gate.
+						assertClusterSequenceAuthorityValues(true, opts != null ? opts.relay : undefined);
 					}
-					entrySeqs[i] = entrySeq;
+					if (entrySeqs === null) entrySeqs = new Array(count);
+					entrySeqs[i] = resolved;
 				}
 			}
 			// One admission for the whole batch, as production and the harness

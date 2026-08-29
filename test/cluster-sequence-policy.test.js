@@ -27,18 +27,29 @@ describe('cluster sequence authority policy', () => {
 	});
 
 	it('requires either no seq or an external numeric seq with built-in relay disabled', () => {
+		// The gate speaks stampSeq's table, spelling for spelling: null is the
+		// second no-seq form and a bigint the second authority form. A spelling
+		// the stamp accepts and this gate refuses would make the documented
+		// forms cluster-illegal with no topology caveat anywhere.
 		for (const accepted of [
 			{ seq: false },
 			{ seq: false, relay: false },
-			{ seq: 41, relay: false }
-		]) expect(clusterSequenceAccepted(accepted, cluster), JSON.stringify(accepted)).toBe(true);
+			{ seq: null },
+			{ seq: null, relay: true },
+			{ seq: 41, relay: false },
+			{ seq: 1, relay: false },
+			{ seq: 41n, relay: false },
+			{ seq: 1n, relay: false }
+		]) expect(clusterSequenceAccepted(accepted, cluster), String(accepted.seq) + '/' + String(accepted.relay)).toBe(true);
 
 		for (const rejected of [
 			undefined, {}, { relay: false }, { seq: true }, { seq: 41 }, { seq: 41, relay: true },
 			{ seq: 0, relay: false }, { seq: -1, relay: false }, { seq: 1.5, relay: false },
-			{ seq: Number.NaN, relay: false }, { seq: Number.POSITIVE_INFINITY, relay: false }
+			{ seq: Number.NaN, relay: false }, { seq: Number.POSITIVE_INFINITY, relay: false },
+			{ seq: 41n }, { seq: 41n, relay: true }, { seq: 0n, relay: false }, { seq: -1n, relay: false },
+			{ seq: true, relay: false }
 		]) {
-			expect(clusterSequenceAccepted(rejected, cluster), JSON.stringify(rejected)).toBe(false);
+			expect(clusterSequenceAccepted(rejected, cluster), String(rejected && rejected.seq) + '/' + String(rejected && rejected.relay)).toBe(false);
 			expect(() => assertClusterSequenceAuthority(rejected, cluster)).toThrow(CLUSTER_SEQUENCE_ERROR);
 		}
 	});
@@ -46,7 +57,14 @@ describe('cluster sequence authority policy', () => {
 	it('rejects a numeric authority on the batch surface whatever it is publishing', () => {
 		expect(() => assertBatchSequenceAuthority({ seq: 7, relay: false }, cluster))
 			.toThrow(BATCH_SEQUENCE_ERROR);
+		// The bigint spelling of the same category error: one options value
+		// cannot be one-seq-per-entry in either spelling.
+		expect(() => assertBatchSequenceAuthority({ seq: 7n, relay: false }, cluster))
+			.toThrow(BATCH_SEQUENCE_ERROR);
+		expect(() => assertBatchSequenceAuthority({ seq: 7n }, { totalWorkers: 1 }))
+			.toThrow(BATCH_SEQUENCE_ERROR);
 		expect(() => assertBatchSequenceAuthority({ seq: false }, cluster)).not.toThrow();
+		expect(() => assertBatchSequenceAuthority({ seq: null }, cluster)).not.toThrow();
 	});
 
 	// The refusal used to be gated on hasMultipleWorkers, so the corruption it
@@ -197,7 +215,18 @@ describe('cluster sequence authority policy', () => {
 		expect(wireBatch.lastIndexOf('assertBatchEntrySequenceAuthority(opts)'),
 			'the stateful branch must vet per-entry authority before it stamps')
 			.toBeLessThan(wireBatch.indexOf('stampSeqValue(opts'));
-		expect(wireBatch).toContain('throwInvalidSeq(');
+		// The per-entry refusal lives in the shared resolveEntrySeq table (one
+		// spelling of the entry lane for production, the harness, and dev), so
+		// the batch body proves it consults that table - removing the call is
+		// removing the refusal.
+		expect(wireBatch).toContain('resolveEntrySeq(');
+		// And an entry-level counter draw takes the cluster refusal in BOTH
+		// pre-passes, before anything fans out: a clustered batch must refuse
+		// { seq: true } on an entry up front, not diverge silently on the
+		// stateful lane or half-deliver on the stateless one. The values form
+		// with `true` is refused for every relay shape in the table above.
+		expect(wireBatch.split('assertClusterSequenceAuthorityValues(true,').length,
+			'both batch branches vet an entry-level counter draw').toBe(3);
 		// batch() snapshots each message's option fields once and judges the
 		// snapshot, then hands publish() the SAME snapshot - so the atomic
 		// pre-pass and the per-message stamp cannot disagree.

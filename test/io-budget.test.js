@@ -503,7 +503,14 @@ const EXTERNAL_THUNK_CLONE_TAG = 'function hiddenThunkCloneTag(_strings, thunk) 
 // (bench/31-gateless-publish-ab.mjs, bench/27-publish-batched-ab.mjs):
 // medians within the baselines' run noise, recorded in the same change.
 const COPY_AUTHORITY_SYNTAX = Object.freeze({
-	publishWire: 'bc9aa422f1481e3bbc5c9ece6dcdb51e68c5c803f91ef8c1282fc856d6e02828',
+	// Re-pinned for the seq option table's recorder repair: publishWire's
+	// max-seen branch widens from `typeof seqOption === 'number'` to
+	// number-or-bigint, so an explicit bigint authority records through the
+	// monotone-max guard and arms the foreign-seq latch instead of taking the
+	// bare stamped write. One comparison on a value already read once; the
+	// body's reads, encodes and writes are otherwise byte-identical, and no
+	// copy primitive entered.
+	publishWire: 'fb68b427bdf69b0fe8de528a856825be83f24b8885b39d0bbde44fdf5f986687',
 	deliverStatelessWireFanout: '98c4246e4bea446d1647f6bf0b13fb0e0cde521ac27dfe899eff42b884113afa',
 	dispatchIngressFrame: '5ff5ed75d331620ed0bbdd4ffd9fe57ecb993b3b3d97923bdb7edf48e7483e5b',
 	send: 'c900028ed26614f6a0d83b1d57a6649a52db522503def86eee3000541d285b11',
@@ -790,7 +797,23 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// close-settled WeakSet behind an `instanceof` guard. It runs on the
 	// consistency auditor's sampling tick, never on an ingress frame path, and
 	// reads, allocates and copies no byte.
-	ingress: '7c160efcb856023ecbc1669af7155666a5bc0be1b38f587181c80e5363d0ad01',
+	// Re-pinned for the seq option table, whose drift in this graph is
+	// utils/epoch.js reached through utils.js: stampSeqValue answers null with
+	// no-seq and refuses non-boolean non-numeric spellings through the shared
+	// cold throw site, and two new cold helpers (explicitSeqValue,
+	// resolveEntrySeq) validate the explicit number/bigint spellings and the
+	// batch entry table. Comparisons and cold throws only; the counter arm and
+	// the valid-number arm are byte-identical, nothing on a frame path
+	// executes differently, no byte is read, allocated or copied, and no copy
+	// primitive entered the graph.
+	//
+	// Re-pinned again for the same table's cluster gate: the drift is
+	// handler/cluster-sequence-policy.js, whose gate now accepts null beside
+	// false and a positive bigint beside a positive number (demanding the same
+	// relay proof), and refuses a bigint on the batch options the way it
+	// refuses a number. Comparisons on values already held and cold throws;
+	// no byte is read, allocated or copied, and no copy primitive entered.
+	ingress: '62fa43e06b1c149360a4a05951912355174377b441c490b3d16c1ed40974eb21',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1341,7 +1364,26 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// only from the consistency auditor's own snapshot walk on its sampling
 	// tick - never from a frame path. No byte is read, allocated or copied, and
 	// no copy primitive entered the graph.
-	platform: '6a0dd6f8cd04e9bf74bdbca1e8e544c58972cd753674ac8b9d70d54805d16ba5',
+	// Re-pinned for the seq option table. This graph drifts twice: the same
+	// utils/epoch.js arms as the ingress seal (stampSeqValue's null and
+	// refusal arms, the cold explicitSeqValue and resolveEntrySeq helpers),
+	// and platform.js's own batch pre-passes, which now resolve each entry
+	// through the shared resolveEntrySeq table and translate an entry-level
+	// true/false into its counter draw or omitted seq in the stamping loop.
+	// Comparisons, cold throws, and which existing stamp call runs per entry;
+	// the envelopes, encodes and writes are the same, no byte is read,
+	// allocated or copied, and no copy primitive entered the graph.
+	//
+	// Re-pinned again for the table's review repairs, three drifts: the
+	// cluster gate's null/bigint arms in handler/cluster-sequence-policy.js;
+	// the batch pre-passes vetting an entry-level counter draw through the
+	// same values-form gate, up front; and the three explicit-seq recorder
+	// branches widening from number to number-or-bigint so a projected bigint
+	// authority records through the monotone-max guard instead of the bare
+	// stamped write. Every one is a comparison or a cold throw on values
+	// already held; no byte is read, allocated or copied, and no copy
+	// primitive entered the graph.
+	platform: 'b14e520ba96833b2d6241f065e812de51e35c68074517cba639a682ea7bb7e9c',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1525,7 +1567,19 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// behind an `instanceof` guard, called from the consistency auditor's
 	// snapshot walk and from nowhere on a fan-out path. No byte is read,
 	// allocated or copied, and no copy primitive entered the graph.
-	'wire-fanout': 'c8ed56cc9eff54617a3d8f79969d4af981e299ac32a69af6e30f67e7e5788eec',
+	// Re-pinned for the seq option table, the same utils/epoch.js drift as the
+	// ingress and platform seals reached through utils.js: stampSeqValue's
+	// null and refusal arms plus the cold explicitSeqValue and resolveEntrySeq
+	// helpers. Nothing in this graph's own fan-out modules changed, nothing on
+	// a fan-out path executes differently, no byte is read, allocated or
+	// copied, and no copy primitive entered the graph.
+	//
+	// Re-pinned again for the table's cluster-gate arms, reached the same way
+	// as in the sibling seals: null accepted beside false, a positive bigint
+	// beside a positive number, the batch options refusing both explicit
+	// spellings. Comparisons and cold throws on values already held; no byte
+	// is read, allocated or copied, and no copy primitive entered the graph.
+	'wire-fanout': '56bf9284975ceba37c989e38f090cbc7b02a9a5c07e38a7a7b50069584301c67',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

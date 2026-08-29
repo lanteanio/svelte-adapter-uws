@@ -6,7 +6,7 @@ import { metricsSnapshot } from './metrics-snapshot.js';
 import { isWarmupRequest } from './warmup-registry.js';
 import { parentPort } from 'node:worker_threads';
 import { exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, topicEpochValue, readAssertionCounts, stampSeqValue, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, topicEpochValue, readAssertionCounts, resolveEntrySeq, stampSeqValue, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
 import { egressGate, resolvePublishTenant, admitPublishEgress, admitTopicEgress, admitTenantEgress, chargePublishEgress, chargeDirectEgress, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, EGRESS_ADMITTED } from './egress-budget.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
@@ -163,7 +163,7 @@ export const platform = {
 		// Skipped when stamping is off so a {seq:false}-only topic never enters
 		// the convergence comparison.
 		if (seq !== null) {
-			if (typeof seqOption === 'number') recordSeen(maxSeenSeq, topic, seq, seqBound);
+			if (typeof seqOption === 'number' || typeof seqOption === 'bigint') recordSeen(maxSeenSeq, topic, seq, seqBound);
 			else recordStampedSeen(maxSeenSeq, topic, seq, seqBound);
 		}
 		// `{ jitterMs }` de-herd window: stamp it on the frame so each client rolls its
@@ -319,7 +319,7 @@ export const platform = {
 		// path: relayPublish already called recordSeen with the guard the
 		// reorder-prone cross-worker receive path needs.
 		if (!isRelay && seq !== null) {
-			if (typeof seqOption === 'number') recordSeen(maxSeenSeq, topic, seq, seqBound);
+			if (typeof seqOption === 'number' || typeof seqOption === 'bigint') recordSeen(maxSeenSeq, topic, seq, seqBound);
 			else recordStampedSeen(maxSeenSeq, topic, seq, seqBound);
 		}
 		const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
@@ -669,21 +669,33 @@ export const platform = {
 			const datas = new Array(count);
 			const excludes = new Array(count);
 			let entrySeqs = null;
+			let sawExplicitEntrySeq = false;
 			for (let i = 0; i < count; i++) {
 				const entry = entries[i];
 				datas[i] = entry.data;
 				excludes[i] = entry.excludeWs;
-				// The entry lane keys on typeof, exactly as the options lane
-				// does: a number must be a valid wire seq or the batch refuses,
-				// and anything else falls through to the shared options.
-				const seq = entry.seq;
-				if (typeof seq === 'number') {
-					if (!Number.isInteger(seq) || seq < 1) throwInvalidSeq(seq);
-					if (entrySeqs === null) {
-						assertBatchEntrySequenceAuthority(opts);
-						entrySeqs = new Array(count);
+				// The entry lane speaks the same table as the options lane -
+				// resolveEntrySeq is the ONE spelling of it for every surface:
+				// number and bigint are the explicit authority, true is the
+				// counter, false and null are no-seq - each an OVERRIDE of the
+				// shared options for this entry - undefined inherits, and
+				// anything else refuses the whole batch here, before the first
+				// publish fans out.
+				const resolved = resolveEntrySeq(entry.seq);
+				if (resolved !== undefined) {
+					if (typeof resolved === 'number') {
+						if (!sawExplicitEntrySeq) {
+							assertBatchEntrySequenceAuthority(opts);
+							sawExplicitEntrySeq = true;
+						}
+					} else if (resolved === true) {
+						// An entry drawing the per-worker counter takes the cluster's
+						// counter refusal up front, whole-batch-or-nothing - the same
+						// rule the shared options' counter form takes at the call gate.
+						assertClusterSequenceAuthorityValues(true, opts != null ? opts.relay : undefined);
 					}
-					entrySeqs[i] = seq;
+					if (entrySeqs === null) entrySeqs = new Array(count);
+					entrySeqs[i] = resolved;
 				}
 			}
 			// One admission for the whole batch, before the first entry goes
@@ -760,6 +772,7 @@ export const platform = {
 		// half-delivered, and a toJSON that rewrites a later entry's seq is
 		// rewriting a field this call has already read.
 		let entrySeqs = null;
+		let sawExplicitEntrySeq = false;
 		for (let i = 0; i < count; i++) {
 			const entry = entries[i];
 			datas[i] = entry.data;
@@ -769,17 +782,28 @@ export const platform = {
 				excludes[i] = exclude;
 				anyExclude = true;
 			}
-			// The entry lane keys on typeof, exactly as the options lane does
-			// (stampSeq): a number must be a valid wire seq or the batch
-			// refuses, and anything else falls through to the shared options.
-			const entrySeq = entry.seq;
-			if (typeof entrySeq === 'number') {
-				if (!Number.isInteger(entrySeq) || entrySeq < 1) throwInvalidSeq(entrySeq);
-				if (entrySeqs === null) {
-					assertBatchEntrySequenceAuthority(opts);
-					entrySeqs = new Array(count);
+			// The entry lane speaks the same table as the options lane -
+			// resolveEntrySeq is the ONE spelling of it for every surface:
+			// number and bigint are the explicit authority, true is the
+			// counter, false and null are no-seq - each an OVERRIDE of the
+			// shared options for this entry - undefined inherits, and anything
+			// else refuses the whole batch in this snapshot pass, before
+			// anything is stamped or serialized.
+			const resolved = resolveEntrySeq(entry.seq);
+			if (resolved !== undefined) {
+				if (typeof resolved === 'number') {
+					if (!sawExplicitEntrySeq) {
+						assertBatchEntrySequenceAuthority(opts);
+						sawExplicitEntrySeq = true;
+					}
+				} else if (resolved === true) {
+					// An entry drawing the per-worker counter takes the cluster's
+					// counter refusal up front, whole-batch-or-nothing - the same
+					// rule the shared options' counter form takes at the call gate.
+					assertClusterSequenceAuthorityValues(true, opts != null ? opts.relay : undefined);
 				}
-				entrySeqs[i] = entrySeq;
+				if (entrySeqs === null) entrySeqs = new Array(count);
+				entrySeqs[i] = resolved;
 			}
 		}
 		// Egress admission for the WHOLE batch, decided after the snapshot pass
@@ -822,13 +846,21 @@ export const platform = {
 			// Reads the snapshot, never the caller: application code has already
 			// run by the second iteration.
 			const data = datas[i];
-			// An explicit entry seq is stamped verbatim (already validated in the
-			// snapshot pass) and does NOT advance the counter - the numeric
-			// authority and the local counter are two tracks, exactly as they are
-			// through publishWire.
-			const seq = hasEntrySeqs && entrySeqs[i] !== undefined
-				? entrySeqs[i]
-				: stampSeqValue(opts != null ? opts.seq : undefined, topicSeqs, topic, seqBound);
+			// A resolved entry seq overrides the shared options for this entry:
+			// an explicit value (already validated in the snapshot pass) is
+			// stamped verbatim and does NOT advance the counter - the explicit
+			// authority and the local counter are two tracks, exactly as they
+			// are through publishWire - `true` draws this entry its own counter
+			// value, and `false` (the resolution of both false and null) leaves
+			// the entry seq-less under a batch that opts in.
+			const resolvedEntry = hasEntrySeqs ? entrySeqs[i] : undefined;
+			const seq = resolvedEntry === undefined
+				? stampSeqValue(opts != null ? opts.seq : undefined, topicSeqs, topic, seqBound)
+				: resolvedEntry === false
+					? null
+					: resolvedEntry === true
+						? stampSeqValue(true, topicSeqs, topic, seqBound)
+						: resolvedEntry;
 			seqs[i] = seq == null ? 0 : seq;
 			const envelope = completeEnvelope(envelopePrefix(topic, event), data, seq);
 			fatal(envelope.length > 0, 'envelope.empty', null);
@@ -852,7 +884,10 @@ export const platform = {
 		if (hasEntrySeqs) {
 			for (let i = 0; i < count; i++) {
 				if (seqs[i] === 0) continue;
-				if (entrySeqs[i] !== undefined) recordSeen(maxSeenSeq, topic, seqs[i], seqBound);
+				// Only a NUMBER resolution is the interleaving explicit
+				// authority; an entry-level `true` drew the counter and is
+				// recorded like every other counter stamp.
+				if (typeof entrySeqs[i] === 'number') recordSeen(maxSeenSeq, topic, seqs[i], seqBound);
 				else recordStampedSeen(maxSeenSeq, topic, seqs[i], seqBound);
 			}
 		} else if (highestSeq !== null) {
@@ -2264,7 +2299,7 @@ export const platform = {
 			// compare-free record for the monotonic in-memory counter, the
 			// monotone-max guard for an explicit numeric seq.
 			if (seq !== null) {
-				if (typeof msgSeqs[i] === 'number') recordSeen(maxSeenSeq, m.topic, seq, seqBound);
+				if (typeof msgSeqs[i] === 'number' || typeof msgSeqs[i] === 'bigint') recordSeen(maxSeenSeq, m.topic, seq, seqBound);
 				else recordStampedSeen(maxSeenSeq, m.topic, seq, seqBound);
 			}
 			const env = completeEnvelope(envelopePrefix(m.topic, m.event), m.data, seq);

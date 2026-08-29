@@ -1,7 +1,7 @@
 import { workerData } from 'node:worker_threads';
 
 export const CLUSTER_SEQUENCE_ERROR =
-	'clustered publish requires { seq: false } or { seq: <positive integer>, relay: false }; per-worker counters and the multi-origin built-in relay cannot preserve one monotonic topic sequence';
+	'clustered publish requires { seq: false } (or null) or { seq: <positive integer number or bigint>, relay: false }; per-worker counters and the multi-origin built-in relay cannot preserve one monotonic topic sequence';
 
 // Not a clustered rule, and not an arity rule either. `stampSeq` returns a
 // caller-supplied numeric seq verbatim, and the batch calls it once PER ENTRY
@@ -44,13 +44,22 @@ const MULTI_WORKER_RUNTIME = hasMultipleWorkers();
  * value and hand the stamp another - accepted, stamped, and relayed is the
  * exact combination the check exists to refuse.
  *
- * @param {boolean | number | undefined} seq
+ * Speaks the same table as `stampSeq`, spelling for spelling: `false` and
+ * `null` are the no-seq forms and make no monotonic promise; a positive
+ * integer `number` or `bigint` is the external authority and demands
+ * `relay: false`; `true` and absent are the per-worker counter, which a
+ * cluster refuses. The two modules must agree - a spelling the stamp accepts
+ * and this gate refuses (or the reverse) is the drift both tables exist to
+ * prevent.
+ *
+ * @param {boolean | number | bigint | null | undefined} seq
  * @param {boolean | undefined} relay
  * @param {any} [data]
  */
 export function clusterSequenceValuesAccepted(seq, relay, data = workerData) {
 	if (data === workerData ? !MULTI_WORKER_RUNTIME : !hasMultipleWorkers(data)) return true;
-	if (seq === false) return true;
+	if (seq === false || seq === null) return true;
+	if (typeof seq === 'bigint') return seq >= 1n && relay === false;
 	return Number.isInteger(seq) && /** @type {number} */ (seq) >= 1 && relay === false;
 }
 
@@ -81,7 +90,7 @@ export function assertClusterSequenceAuthority(options, data = workerData) {
  */
 export function assertBatchSequenceAuthority(options, data = workerData) {
 	assertClusterSequenceAuthority(options, data);
-	if (typeof options?.seq === 'number') {
+	if (typeof options?.seq === 'number' || typeof options?.seq === 'bigint') {
 		// TypeError, like every seq-VALUE refusal (stampSeq's numeric arm, the
 		// per-entry pre-pass): the caller handed a value the surface cannot
 		// take. The topology asserts above and below stay plain Errors - they

@@ -2764,14 +2764,20 @@ export interface Platform {
 	 *   - `relay: false` skips cross-worker relay (use when the message
 	 *     comes from an external pub/sub source like Redis or Postgres
 	 *     that already delivers to every process).
-	 *   - `seq: false` skips the per-topic monotonic seq stamp (use for
-	 *     ephemeral or high-cardinality topics where the counter map
-	 *     would grow unbounded). `seq: <number>` (a positive integer) stamps
+	 *   - `seq: false` (or `null` - what a nullable column round-trips) skips
+	 *     the per-topic monotonic seq stamp (use for ephemeral or
+	 *     high-cardinality topics where the counter map would grow unbounded).
+	 *     `seq: <number>` or `seq: <bigint>` (a positive integer) stamps
 	 *     that exact value instead of the in-memory counter and does not
 	 *     advance it - a non-positive-integer seq is rejected, not stamped - the hook
 	 *     a replay backend uses to put the broadcast frame and its buffer on
-	 *     one authoritative seq space (see the extensions replay layer). A
-	 *     legacy truthy `seq: true` still means the in-memory counter.
+	 *     one authoritative seq space (see the extensions replay layer). The
+	 *     wire's seq space is IEEE double, so a bigint beyond 2^53 rounds to
+	 *     the nearest representable double - exactly what converting it to a
+	 *     number at the call site already did. `seq: true` means the
+	 *     in-memory counter, and any other value - a string from a JSON
+	 *     column, an object - throws naming the legal forms rather than
+	 *     silently drawing the counter.
 	 *     In a multi-worker runtime, an omitted/`true` seq throws because each
 	 *     worker owns a different counter. Use `{ seq: false }`, or supply a
 	 *     positive externally-authoritative number together with `relay: false`
@@ -2802,7 +2808,7 @@ export interface Platform {
 	 *   ceiling refused the publish, in which case nothing was delivered,
 	 *   relayed, or sequence-stamped.
 	 */
-	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): boolean;
+	publish(topic: string, event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean | number | bigint | null; compress?: boolean; jitterMs?: number }): boolean;
 
 	/**
 	 * Publish via a plugin-declared binary wire codec. Subscribers that
@@ -2865,12 +2871,13 @@ export interface Platform {
 		options?: {
 			relay?: boolean;
 			/**
-			 * `false` omits the seq; a positive-integer `number` stamps that exact
-			 * authoritative seq (from a replay backend) onto both the JSON envelope
-			 * and the `0x03` binary frame without advancing the in-memory counter;
-			 * omitted (or a legacy truthy) uses the in-memory per-worker counter.
+			 * `false` or `null` omits the seq; a positive-integer `number` or
+			 * `bigint` stamps that exact authoritative seq (from a replay backend)
+			 * onto both the JSON envelope and the `0x03` binary frame without
+			 * advancing the in-memory counter; omitted or `true` uses the in-memory
+			 * per-worker counter; anything else throws naming the legal forms.
 			 */
-			seq?: boolean | number;
+			seq?: boolean | number | bigint | null;
 			compress?: boolean;
 			/** Never delivered to this socket; exclusion is local to this instance. */
 			excludeWs?: WebSocket<any>;
@@ -2950,7 +2957,7 @@ export interface Platform {
 	publishWireBatch(
 		topic: string,
 		event: string,
-		entries: Array<{ data: unknown; excludeWs?: WebSocket<any>; seq?: number }>,
+		entries: Array<{ data: unknown; excludeWs?: WebSocket<any>; seq?: boolean | number | bigint | null }>,
 		wire: {
 			capability: string;
 			schemaVersion: number;
@@ -2960,7 +2967,7 @@ export interface Platform {
 				onDetach?: (ws: WebSocket<any>, state: unknown) => void;
 			};
 		},
-		options?: { seq?: boolean; relay?: boolean; compress?: boolean }
+		options?: { seq?: boolean | null; relay?: boolean; compress?: boolean }
 	): boolean;
 
 	/**
@@ -3037,7 +3044,7 @@ export interface Platform {
 		topic: string;
 		event: string;
 		data?: unknown;
-		options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number };
+		options?: { relay?: boolean; seq?: boolean | number | bigint | null; compress?: boolean; jitterMs?: number };
 	}[]): boolean[];
 
 	/**
@@ -3123,8 +3130,8 @@ export interface Platform {
 		 * ```
 		 */
 		coalesceKey?: string;
-		/** Per-message `seq`: `false` omits it, a positive-integer `number` stamps that exact authoritative seq, omitted uses the in-memory counter. Multi-worker runtimes require `false` or an authoritative number with `relay:false`. */
-		options?: { relay?: boolean; seq?: boolean | number };
+		/** Per-message `seq`: `false`/`null` omits it, a positive-integer `number` or `bigint` stamps that exact authoritative seq, omitted/`true` uses the in-memory counter, anything else throws. Multi-worker runtimes require `false` or an authoritative number with `relay:false`. */
+		options?: { relay?: boolean; seq?: boolean | number | bigint | null };
 	}>, options?: {
 		/**
 		 * Compress the batch frame when `websocket.compression` is configured.
@@ -4143,19 +4150,19 @@ export interface Platform {
 
 export interface TopicHelper {
 	/** Publish a custom event to this topic. */
-	publish(event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
+	publish(event: string, data?: unknown, options?: { relay?: boolean; seq?: boolean | number | bigint | null; compress?: boolean; jitterMs?: number }): void;
 	/** Shorthand for `.publish('created', data)`. Pairs with `crud()` / `lookup()`. */
-	created(data?: unknown, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
+	created(data?: unknown, options?: { relay?: boolean; seq?: boolean | number | bigint | null; compress?: boolean; jitterMs?: number }): void;
 	/** Shorthand for `.publish('updated', data)`. Pairs with `crud()` / `lookup()`. */
-	updated(data?: unknown, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
+	updated(data?: unknown, options?: { relay?: boolean; seq?: boolean | number | bigint | null; compress?: boolean; jitterMs?: number }): void;
 	/** Shorthand for `.publish('deleted', data)`. Pairs with `crud()` / `lookup()`. */
-	deleted(data?: unknown, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
+	deleted(data?: unknown, options?: { relay?: boolean; seq?: boolean | number | bigint | null; compress?: boolean; jitterMs?: number }): void;
 	/** Shorthand for `.publish('set', value)`. Pairs with `count()`. */
-	set(value: number, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
+	set(value: number, options?: { relay?: boolean; seq?: boolean | number | bigint | null; compress?: boolean; jitterMs?: number }): void;
 	/** Shorthand for `.publish('increment', amount)`. Pairs with `count()`. */
-	increment(amount?: number, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
+	increment(amount?: number, options?: { relay?: boolean; seq?: boolean | number | bigint | null; compress?: boolean; jitterMs?: number }): void;
 	/** Shorthand for `.publish('decrement', amount)`. Pairs with `count()`. */
-	decrement(amount?: number, options?: { relay?: boolean; seq?: boolean | number; compress?: boolean; jitterMs?: number }): void;
+	decrement(amount?: number, options?: { relay?: boolean; seq?: boolean | number | bigint | null; compress?: boolean; jitterMs?: number }): void;
 }
 
 // `upgradeResponse` is exported from the 'svelte-adapter-uws/upgrade-response' subpath, not

@@ -120,7 +120,7 @@ describeReal('real clustered sequence-authority policy', () => {
 		expect((await server.probe('publish', { relay: false })).error).toBe(CLUSTER_SEQUENCE_ERROR);
 		expect((await server.probe('publish', { seq: 7 })).error).toBe(CLUSTER_SEQUENCE_ERROR);
 		expect((await server.probe('publish', { seq: true, relay: false })).error).toBe(CLUSTER_SEQUENCE_ERROR);
-		for (const seq of [0, -1, 1.5, null]) {
+		for (const seq of [0, -1, 1.5]) {
 			expect((await server.probe('publish', { seq, relay: false })).error, String(seq))
 				.toBe(CLUSTER_SEQUENCE_ERROR);
 		}
@@ -130,6 +130,9 @@ describeReal('real clustered sequence-authority policy', () => {
 	it('allows unsequenced or externally ordered fan-out, and rejects repeated numeric batch seqs', async () => {
 		const server = await boot(2);
 		expect((await server.probe('publish', { seq: false })).ok).toBe(true);
+		// null is the second no-seq spelling - a nullable column's answer - and
+		// makes no monotonic promise, so a cluster accepts it like false.
+		expect((await server.probe('publish', { seq: null })).ok).toBe(true);
 		expect((await server.probe('wire', { seq: 11, relay: false })).ok).toBe(true);
 		expect((await server.probe('batch', { seq: 12, relay: false })).ok).toBe(true);
 		expect((await server.probe('loop-batch', { seq: 13, relay: false })).ok).toBe(true);
