@@ -193,7 +193,7 @@ describe('ring stream', () => {
 		expect(Atomics.load(writer.i32, 0), 'a refused write advanced the write position').toBe(before);
 	});
 
-	it('quarantines an old spill even when no later publish arrives, once the consumer has drained', () => {
+	it('quarantines an old spill even when no later publish arrives', () => {
 		const sab = createRelayRingBuffer(1024);
 		let now = 0;
 		let ageCallback = null;
@@ -209,19 +209,36 @@ describe('ring stream', () => {
 			clearTimer: () => {},
 			onOverflow: (event) => overflows.push(event)
 		});
+		// Fire the armed timer exactly once and require the production code to
+		// have re-armed before the next observation. Holding a stale closure
+		// and calling it repeatedly is what let a deleted re-arm pass: the age
+		// ceiling is armed once at spill birth and afterwards only ever by its
+		// own callback, so losing the re-arm kills the ceiling for that spill.
+		const tick = () => {
+			const fire = ageCallback;
+			expect(fire, 'the age ceiling must re-arm itself between observations').toBeTypeOf('function');
+			ageCallback = null;
+			fire();
+		};
+
 		writer.write(new Uint8Array(writer.cap));
+		now = 10;
 		writer.write(new Uint8Array(32));
 		expect(writer.pendingBytes).toBe(32);
-		expect(ageCallback).toBeTypeOf('function');
 
-		// The consumer proves it drains: the read index advances, and the
-		// next observation latches it and starts the age clock there.
-		new Int32Array(sab, 0, 16)[8] = 1;
-		ageCallback();
-		expect(writer.closed, 'a freshly-draining consumer must not be judged yet').toBe(false);
+		// The spill was born at 10, so the ceiling falls due at 60 - the two
+		// boundary observations below separate that from a clock dated at the
+		// writer's own creation, which would fire ten ms early.
+		now = 30;
+		tick();
+		expect(writer.closed, 'well inside the ceiling').toBe(false);
 
-		now = 50;
-		ageCallback();
+		now = 59;
+		tick();
+		expect(writer.closed, 'the run is dated from the spill at 10, not the writer at 0').toBe(false);
+
+		now = 60;
+		tick();
 		expect(writer.closed).toBe(true);
 		expect(overflows).toEqual([expect.objectContaining({
 			reason: 'age',
@@ -231,51 +248,76 @@ describe('ring stream', () => {
 		})]);
 	});
 
-	it('suspends the age ceiling for a consumer that has never drained - a booting worker is not a stalled one', () => {
+
+	it('quarantines through the flush wake too, not only through the timer', () => {
+		// The flush wake is the direct consequence of a drain: RingReader._drain
+		// stores the read index and notifies, and the writer's parked
+		// Atomics.waitAsync resumes into _flushPending. It is the site that had
+		// its own copy of the ceiling comparison and kept judging by the old
+		// rule after the rule changed, so it needs its own POSITIVE case -
+		// without one, deleting its check outright leaves the suite green.
+		// Drive the real reader rather than poking the read index, because a
+		// bare store never wakes the wait.
 		const sab = createRelayRingBuffer(1024);
 		let now = 0;
-		let ageCallback = null;
 		const overflows = [];
 		const writer = new RingWriter(sab, {
-			maxPendingBytes: 4096,
+			maxPendingBytes: 1 << 20,
 			maxPendingAgeMs: 50,
 			now: () => now,
-			setTimer: (callback) => {
-				ageCallback = callback;
-				return { unref() {} };
-			},
+			setTimer: () => ({ unref() {} }),
+			clearTimer: () => {},
+			onOverflow: (event) => overflows.push(event)
+		});
+		const reader = new RingReader(sab, () => {});
+		writer.write(new Uint8Array(writer.cap));
+		writer.write(new Uint8Array(32));
+		expect(writer.pendingBytes).toBe(32);
+
+		// The peer read nothing for twice the ceiling, then finally drained.
+		// The drain does not absolve it: the backlog already sat past the
+		// stall ceiling, and this is the wake that must say so.
+		now = 100;
+		reader._drain();
+		writer._flushPending();
+
+		expect(writer.closed).toBe(true);
+		expect(overflows).toEqual([expect.objectContaining({
+			reason: 'age',
+			droppedBytes: 32,
+			maxPendingAgeMs: 50
+		})]);
+		reader.close();
+	});
+
+	it('applies the stall ceiling to a write, the highest-frequency observer of all', () => {
+		// The primary calls write() once per forwarded frame, so this is the
+		// path a stall is most likely to be noticed on, and it shares the one
+		// ceiling decision rather than repeating it.
+		const sab = createRelayRingBuffer(1024);
+		let now = 0;
+		const overflows = [];
+		const writer = new RingWriter(sab, {
+			maxPendingBytes: 1 << 20,
+			maxPendingAgeMs: 50,
+			now: () => now,
+			setTimer: () => ({ unref() {} }),
 			clearTimer: () => {},
 			onOverflow: (event) => overflows.push(event)
 		});
 		writer.write(new Uint8Array(writer.cap));
 		writer.write(new Uint8Array(32));
 
-		// Far past the ceiling with the read index never advanced: the old
-		// from-birth clock quarantined here, converting a worker crash at
-		// relay peak into a respawn-into-quarantine loop ending in
-		// restart-limit exhaustion. The ceiling must wait (the spawner's boot
-		// deadline owns a worker that never starts) and keep RECHECKING.
-		now = 5000;
-		ageCallback();
-		expect(writer.closed, 'a never-drained consumer must not be quarantined by age').toBe(false);
-		expect(overflows).toEqual([]);
-		expect(ageCallback, 'the ceiling must re-arm to catch the first drain').toBeTypeOf('function');
-
-		// First drain observed at 5000: the clock starts HERE, not at the
-		// spill's birth - the backlog's earlier wait measured a worker that
-		// had not begun.
-		new Int32Array(sab, 0, 16)[8] = 1;
-		ageCallback();
+		// Inside the ceiling the backlog is a peer merely behind, and further
+		// frames are still accepted behind it.
+		now = 49;
+		expect(writer.write(new Uint8Array(8)), 'a peer inside the ceiling is not stalled').toBe(true);
 		expect(writer.closed).toBe(false);
 
-		now = 5049;
-		ageCallback();
-		expect(writer.closed, 'one ms short of the ceiling since the drain').toBe(false);
-
-		now = 5050;
-		ageCallback();
+		now = 50;
+		expect(writer.write(new Uint8Array(8))).toBe(false);
 		expect(writer.closed).toBe(true);
-		expect(overflows).toEqual([expect.objectContaining({ reason: 'age', pendingAgeMs: 50 })]);
+		expect(overflows).toEqual([expect.objectContaining({ reason: 'age', maxPendingAgeMs: 50 })]);
 	});
 
 	it('never quarantines a peer that keeps draining, however long it stays behind', () => {

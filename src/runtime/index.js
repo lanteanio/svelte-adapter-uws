@@ -8,7 +8,7 @@ import { env } from 'ENV';
 import { certExpiryAlert, createCertWatcher, readCertIdentity, reloadClusterTls } from './utils/tls-reload.js';
 import { monotonicNow, wallEpoch, randomUuid, randomBytes as runtimeRandomBytes, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from './runtime.js';
 import { createRelayRingBuffer, RingWriter, RingReader, decodeRelayFrame } from './relay-ring.js';
-import { createRelaySpillQuarantine, attributeRelayIncident, relayEligible } from './relay-spill-policy.js';
+import { createRelaySpillQuarantine, attributeRelayIncident, relayEligible, relayRingEligible } from './relay-spill-policy.js';
 import { createStateHashDetector } from './state-hash-detector.js';
 import { buildDivergenceDiagnostic, DIVERGENCE_DIAGNOSTIC_LIMIT, DIVERGENCE_TOPIC_LIMIT } from './divergence-diagnostics.js';
 import { createRestartSupervisor } from './restart-supervisor.js';
@@ -86,6 +86,14 @@ const relay_pending_max_bytes = parseIntEnv(
 const relay_pending_max_ms = parseIntEnv(
 	'CLUSTER_RELAY_MAX_PENDING_MS', env('CLUSTER_RELAY_MAX_PENDING_MS', '5000'), 1
 );
+// The age ceiling above is a STALL detector, so it must only ever judge a
+// consumer that was reading and stopped. A worker drains nothing until its
+// module evaluation, init hook and warmup finish, and that phase is kept out
+// of the ceiling's reach by not writing to the worker at all until it reports
+// its relay reader live - see `relayAttached`. That is the primary's decision
+// to make, not the ring writer's: the writer cannot tell a slow boot from a
+// dead one, and any deadline it applied would be either too short for a
+// legitimate boot or too long to be worth having.
 // Largest serialized envelope a worker will hand to the cluster relay. This is
 // the SENDER's ceiling and it is a different question from the two above: those
 // describe a receiving peer's failure to drain, this describes the size of one
@@ -547,7 +555,7 @@ if (is_primary) {
 				up: createRelayRingBuffer(relay_ring_kb * 1024),
 				down: createRelayRingBuffer(relay_ring_kb * 1024),
 				maxPendingBytes: relay_pending_max_bytes,
-				maxPendingAgeMs: relay_pending_max_ms
+				maxPendingAgeMs: relay_pending_max_ms,
 			}
 			: null;
 		const worker = new Worker(fileURLToPath(import.meta.url), {
@@ -592,6 +600,15 @@ if (is_primary) {
 			slot,
 			ringWriter: null,
 			ringReader: null,
+			// Set when the worker reports its relay reader live. Until then the
+			// primary hands it no relay frames at all: a worker that has not
+			// attached would only fill its ring while booting, and the age
+			// ceiling - a stall detector - would read that as a stall and
+			// quarantine it into a respawn that lands in the same window, up to
+			// restart-limit exhaustion and a whole-process exit. The worker
+			// itself already treats anything from before that moment as a
+			// stream it joined mid-flight, so nothing was owed to it yet.
+			relayAttached: false,
 			relayQuarantined: false
 		};
 		if (relay_ring !== null) {
@@ -614,7 +631,7 @@ if (is_primary) {
 			meta.ringReader = new RingReader(relay_ring.up, (frame) => {
 				meta.lastHeartbeat = monotonicNow();
 				for (const [w, m] of workers) {
-					if (w !== worker && m.ringWriter !== null && relayEligible(m)) {
+					if (w !== worker && m.ringWriter !== null && relayRingEligible(m)) {
 						const accepted = m.ringWriter.write(frame);
 						if (accepted) {
 							m.ringWriter.notify();
@@ -669,6 +686,15 @@ if (is_primary) {
 			// unresponsive under sustained fan-out - the false-positive that used to
 			// force-terminate a busy-but-alive worker and abort the whole process.
 			if (meta) meta.lastHeartbeat = monotonicNow();
+			if (msg.type === 'relay-attached') {
+				// The worker's relay reader is live, so frames handed to its ring
+				// will now be drained. Before this the fan-out skipped it - see
+				// `relayAttached` where the slot is created. Idempotent by
+				// construction: a worker posts this once, and a respawn arrives
+				// on a fresh slot whose flag starts false again.
+				if (meta) meta.relayAttached = true;
+				return;
+			}
 			if (msg.type === 'descriptor' && cluster_mode === 'acceptor') {
 				meta.descriptor = msg.descriptor;
 				meta.lastHeartbeat = monotonicNow();
@@ -1663,6 +1689,11 @@ if (is_primary) {
 		// Over-reporting is the failure that matters - it would restart a healthy
 		// worker - so every ambiguity here resolves toward silence.
 		markRelayAttached();
+		// Tell the primary too: until it hears this it hands this worker no
+		// relay frames, so that a boot of any length cannot fill a ring nobody
+		// is reading yet. Posted after the reader is started, so the first
+		// frame the primary sends has somewhere to be drained to.
+		try { parentPort?.postMessage({ type: 'relay-attached' }); } catch {}
 	}
 
 	// Single-process signal handlers are armed before `start()`, up where the boot

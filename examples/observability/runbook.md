@@ -398,12 +398,14 @@ it rather than letting the primary queue grow without bound.
 
 **Check:** the bounded `reason` label (`bytes` or `age`),
 `relay_spill_dropped_bytes_total`, and `relay_spill_pending_age_seconds`. The
-age is measured from the peer's last drain progress, so `age` means the worker
-stopped draining entirely - a peer that reads steadily while staying behind
-trips the byte ceiling instead. Then inspect the primary log for the target
-worker and configured `CLUSTER_RELAY_MAX_PENDING_KB` /
-`CLUSTER_RELAY_MAX_PENDING_MS` ceilings. These metrics deliberately contain no
-topic or client identity.
+age is measured from the peer's last drain progress, so `age` means a worker
+that was reading and stopped - a peer that reads steadily while staying behind
+trips the byte ceiling instead. Neither reason can be a worker that was still
+booting: the primary hands a worker no relay frames until it reports its reader
+live, so a slow `init` hook cannot produce a spill to be judged. Then inspect
+the primary log for the target worker and configured
+`CLUSTER_RELAY_MAX_PENDING_KB` / `CLUSTER_RELAY_MAX_PENDING_MS` ceilings. These
+metrics deliberately contain no topic or client identity.
 
 **Do:** confirm the worker was replaced and recovered. Treat repeated events as
 a worker stall or sustained capacity problem; correlate with process health,

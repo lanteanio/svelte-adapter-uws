@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Affects:** Resume hooks and replay backends doing gap-fill through the send lanes; every existing call is byte-identical without the option.
   - **Action:** None to keep current behavior. Gap-fill replay passes each frame's stored seq: `platform.send(ws, topic, event, data, { seq })`.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** Number and bigint take the publish lanes' validation and double-space projection; `false`/`null`/absent mean no seq; `true` throws, since the send lanes have no counter to draw. `sendWireBatch` deliberately takes no seq option - one value cannot be one-seq-per-entry; replay discrete frames through `sendWire`.
+  - **Compatibility:** Number and bigint take the publish lanes' validation and safe-integer range; `false`/`null`/absent mean no seq; `true` throws, since the send lanes have no counter to draw. `sendWireBatch` deliberately takes no seq option - one value cannot be one-seq-per-entry; replay discrete frames through `sendWire`.
   - **Detail:** [Added engineering detail](#added).
 - **Added: the static lane answers the full RFC 9110 precondition set.** Mutable assets now serve `Last-Modified` beside the `ETag` and honor `If-Match` and `If-Unmodified-Since` with 412, `If-Modified-Since` with 304, and the list and `*` forms of both entity headers, evaluated in the RFC's order so a failed `If-Match` is never converted into a 304.
   - **Affects:** Caches and clients revalidating static and prerendered responses; a cache that lost the ETag can now revalidate by date instead of re-downloading every full body.
@@ -34,17 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Additive. `connections` is always present on a mismatch; `settled` appears only when the snapshot could answer, so an absent field means unmeasured rather than zero.
   - **Detail:** [Changed engineering detail](#changed).
-- **Changed: the `seq` publish option speaks one table, and refuses what it used to mis-read.** A value outside the contract - a numeric string, an object - now throws naming the legal forms instead of silently drawing the local counter and degrading resume dedup; `{ seq: null }` now means no seq, and `bigint` joins `number` as a spelling of the explicit authority.
-  - **Affects:** Callers passing seq values outside `boolean | number` - a numeric string from a JSON column was the typical accident. Also `publishWireBatch` entries, where `true`, `false`, and `null` now act per entry as overrides of the shared options instead of falling through silently.
-  - **Action:** Pass a number or bigint for an explicit authority's value, `false` or `null` for no seq, `true` or nothing for the counter. A caller that relied on a non-contract value drawing the counter should say `true`.
+- **Changed: the `seq` publish option speaks one table, and refuses what it cannot carry.** A value outside the contract - a numeric string, an object - now throws naming the legal forms instead of silently drawing the local counter, and an integer past the wire's safe-integer range throws instead of rounding; `{ seq: null }` means no seq, and `bigint` joins `number`.
+  - **Affects:** Callers passing seq values outside `boolean | number` - a numeric string from a JSON column was the typical accident - and, separately, callers passing an integer above `Number.MAX_SAFE_INTEGER`, such as a snowflake or a large Kafka offset, which previously published as a rounded value. Also `publishWireBatch` entries, where `true`, `false`, and `null` now act per entry as overrides of the shared options instead of falling through silently.
+  - **Action:** Pass a number or bigint for an explicit authority's value, `false` or `null` for no seq, `true` or nothing for the counter. A caller that relied on a non-contract value drawing the counter should say `true`. An authority whose ids run above the safe-integer range needs the wide id moved into the event data, or offset by a per-topic base, since `seq` now refuses it rather than rounding it.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** Absent, `true`, `false`, and valid numbers behave exactly as before, on every lane and every surface (production, `createTestServer`, `vite dev`). `null` moves from counter to no-seq; other non-contract values move from counter to `TypeError`. The wire's seq space is unchanged: a bigint projects into the same IEEE-double space a number occupies, rounding beyond 2^53 exactly as `Number(x)` at the call site already did.
+  - **Compatibility:** Absent, `true`, `false`, and in-range numbers behave exactly as before, on every lane and every surface (production, `createTestServer`, `vite dev`). `null` moves from counter to no-seq; non-contract values move from counter to `TypeError`. Two breaks to know about: an integer above `Number.MAX_SAFE_INTEGER` moves from a silently rounded publish to a `TypeError`, because the double seq space stops having a neighbour at distance one there and adjacent ids collapse onto one value, which stalls a client watermark that only advances on a strict greater-than.
   - **Detail:** [Changed engineering detail](#changed).
-- **Fixed: a respawning worker is no longer quarantined for the relay backlog its boot could not drain.** Under sustained relay traffic a crashed worker's replacement filled its ring while booting and the from-spawn age ceiling quarantined it into another respawn - up to restart-limit exhaustion and a whole-process exit; the age clock now starts at the worker's first drain.
+- **Fixed: a respawning worker is no longer quarantined for the relay backlog its boot could not drain.** A crashed worker's replacement filled its ring while booting and the age ceiling read that as a stall, respawning it until the restart limit killed the process; the primary now skips a worker in the fan-out until it reports its reader live.
   - **Affects:** Multi-worker deployments with the relay ring enabled, under enough relay traffic to fill a booting worker's ring inside its boot time.
   - **Action:** None.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** The byte ceiling still applies from spawn, so the spill stays bounded during boot; a worker that never starts draining is handled by the boot deadline, as before. A worker that drained once is judged by the unchanged steady-state ceiling forever after.
+  - **Compatibility:** Both ceilings and the `bytes`/`age` quarantine reasons are unchanged; what changed is that a booting worker is no longer handed frames to be judged on. A worker publishing into the relay before its siblings have attached reaches fewer of them, which the receiving worker already treated as a stream joined mid-flight rather than a lost frame.
   - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: a recover subscribe without a `ref` is refused loudly instead of dying silently.** A subscribe asking for history could hit the saturated gate and get nothing back, leaving the client believing itself subscribed and resuming into a silent gap; it now gets `{"type":"error","code":"RECOVER_REQUIRES_REF"}` up front, on all three server surfaces.
   - **Affects:** Hand-rolled clients only; the bundled client stamps a `ref` on every path, including the reconnect resubscribe batch.
@@ -107,7 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frames themselves said nothing. `options.seq` on both lanes now carries an
   explicit value into the envelope and the seq slot identically, resolved by
   one shared validator (`resolveSendSeq`) on production, `createTestServer`,
-  and the Vite dev plugin: number and bigint validate and project exactly as
+  and the Vite dev plugin: number and bigint validate exactly as
   the publish lanes' explicit authority, `false`/`null`/absent leave the
   frame byte-identical to every prior release, and `true` throws its own
   message - the send lanes have no counter to draw, and gap-fill replays
@@ -165,10 +165,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the counter - including `null` from a nullable column and `'1234'` from a
   JSON round trip, both of which silently marked the topic non-authoritative.
   The table is now total: number and bigint are the explicit authority
-  (validated by one shared `explicitSeqValue`, bigint projecting into the
-  IEEE-double seq space the wire already carries), `true` and absent draw the
-  counter, `false` and `null` omit the seq, and anything else throws the
-  legal forms. `publishWireBatch` entries resolve through the same table via
+  (validated by one shared `explicitSeqValue`, which holds both spellings to
+  the safe-integer range the IEEE-double seq space carries unchanged, and
+  refuses anything past it rather than rounding two ids onto one seq),
+  `true` and absent draw the counter, `false` and `null` omit the seq, and
+  anything else throws the legal forms. `publishWireBatch` entries resolve through the same table via
   a shared `resolveEntrySeq`, which also ends two silent entry-lane quirks:
   an entry could not opt OUT of a batch-level counter (`seq: false` fell
   through to the shared options), and a non-number entry seq published the
@@ -228,23 +229,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fanned out. `test/publish-batch-exclude-real.test.js` reads the contract
   off frames two real clients receive, on both lanes.
 
-- **The relay spill age ceiling starts its clock at the consumer's first
-  drain.** The primary forwards relay frames into a worker's ring from the
-  moment of spawn, but the worker drains only after module evaluation, its
-  init hook and warmup - so the age ceiling, measured from the spill's
-  birth, judged a booting worker by the steady-state stall detector: under
-  sustained relay traffic the fresh ring filled, the 5s ceiling quarantined
-  the still-booting worker, and its respawn landed in the same window,
-  converting one crash at relay peak into restart-limit exhaustion and a
-  whole-process exit (the stable-uptime budget reset never applied because
-  the slot never stayed ready). The writer now latches the first advance of
-  the ring's read index and dates the pending run from that observation;
-  until then the age check re-arms on a bounded cadence, the byte ceiling
-  keeps the spill bounded, and the spawner's boot deadline owns a worker
-  that never begins. A consumer that drained once is judged steady-state
-  forever after, index wraparound included.
-  `test/relay-ring.test.js` pins the suspension, the clock start at first
-  drain, and the unchanged quarantine for a drained-then-stalled consumer.
+- **The relay fan-out skips a worker until its reader is live.** The primary
+  forwarded relay frames into a worker's ring from the moment of spawn, but
+  the worker drains only after module evaluation, its init hook and warmup -
+  so the age ceiling, measured from the spill's birth, judged a booting
+  worker by the steady-state stall detector: under sustained relay traffic
+  the fresh ring filled, the 5s ceiling quarantined the still-booting
+  worker, and its respawn landed in the same window, converting one crash at
+  relay peak into restart-limit exhaustion and a whole-process exit (the
+  stable-uptime budget reset never applied because the slot never stayed
+  ready). A worker now reports its relay reader live and the fan-out skips
+  it until then, so the ring of a booting worker stays empty and there is no
+  backlog to misjudge - for a boot of any duration, which no second deadline
+  inside the writer could have covered, since the writer cannot tell a slow
+  boot from a dead one. Nothing is owed to that worker yet either: it
+  already treats everything from before that moment as a stream it joined
+  mid-flight. The three sites that consult the age ceiling now share one
+  decision rather than repeating the comparison - the flush wake, which the
+  consumer's own drain triggers, was the one that had drifted.
+  `test/relay-ring.test.js` pins the shared decision, the re-dating on drain
+  progress, and the unchanged quarantine for a drained-then-stalled
+  consumer; `test/cluster-relay-attach-gate.test.js` pins the gate.
 
 - **The relay frame ceiling measures the unit its neighbors measure.** The
   sender-side admission compared `String.prototype.length` - UTF-16 code

@@ -14,6 +14,28 @@ export function relayEligible(meta) {
 }
 
 /**
+ * May the primary write relay bytes into this peer's RING? Everything
+ * `relayEligible` asks, plus: has the worker reported its reader live?
+ *
+ * The ring lane needs the extra question and the postMessage lane must NOT
+ * have it. A worker buffers control-lane messages that arrive during boot and
+ * replays them in arrival order once its handler graph is up, so a postMessage
+ * relay reaches a booting worker intact - and with `CLUSTER_RELAY_RING_KB=0`
+ * that lane is the only one there is. The ring has no such replay: bytes
+ * written before the reader starts just sit there, and a spill built out of
+ * them reads to the age ceiling - a STALL detector - as a worker that stopped
+ * draining, which quarantined the still-booting worker into a respawn that
+ * landed in the same window, up to restart-limit exhaustion and a whole-process
+ * exit. Skipping it costs that worker nothing it was owed: it treats everything
+ * from before its attach as a stream it joined mid-flight.
+ *
+ * @param {{ relayQuarantined: boolean, relayAttached: boolean }} meta
+ */
+export function relayRingEligible(meta) {
+	return meta.relayAttached && relayEligible(meta);
+}
+
+/**
  * Report a primary-owned relay incident exactly once, onto the registry of a
  * worker that is NOT the one involved: the involved peer may not drain
  * control messages (or is about to be replaced), and broadcasting would
