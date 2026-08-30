@@ -94,6 +94,19 @@ export class RingWriter {
 		this.pendingSince = 0;
 		this.maxPendingBytes = options.maxPendingBytes ?? Infinity;
 		this.maxPendingAgeMs = options.maxPendingAgeMs ?? Infinity;
+		// The age ceiling is a steady-state stall detector, and it must not
+		// judge a consumer that has never begun: a freshly spawned worker
+		// drains nothing until its module evaluation, init hook and warmup
+		// finish, and under sustained relay traffic the old from-birth clock
+		// quarantined the still-booting worker, whose respawn landed in the
+		// same window - one crash at relay peak converting into
+		// restart-limit exhaustion and a whole-process exit. The ceiling
+		// therefore engages only once the consumer has advanced the ring at
+		// all (latched below), the spawner's boot deadline owns the
+		// never-drains phase, and the BYTE ceiling stays live from birth so
+		// the spill stays bounded while the age clock waits.
+		this.everDrained = false;
+		this._readIdxAtBirth = Atomics.load(this.i32, READ_IDX);
 		this._now = options.now ?? monotonicNow;
 		this._setTimer = options.setTimer ?? setTimer;
 		this._clearTimer = options.clearTimer ?? clearTimer;
@@ -139,7 +152,7 @@ export class RingWriter {
 		// The backlog can therefore exceed the ceiling by at most ONE admitted
 		// frame; bounding that frame is the sender's job, not this one's.
 		if (this.pendingBytes > 0) {
-			if (this._pendingAge() >= this.maxPendingAgeMs) {
+			if (this._consumerHasDrained() && this._pendingAge() >= this.maxPendingAgeMs) {
 				return this._overflow('age', bytes.length);
 			}
 			if (this.pendingBytes > this.maxPendingBytes) {
@@ -188,6 +201,23 @@ export class RingWriter {
 		return this.pendingBytes > 0 ? Math.max(0, this._now() - this.pendingSince) : 0;
 	}
 
+	/**
+	 * Whether the consumer has EVER advanced the ring since this writer was
+	 * created - the gate on the age ceiling (see the constructor note). On
+	 * the latching observation the age clock STARTS: the backlog's wait so
+	 * far measured a worker that had not begun, not one that stalled, so the
+	 * pending run is re-dated to now and the steady-state rules apply from
+	 * the first drained byte on. Latched, so a consumer that drained once is
+	 * judged steady-state forever after, index wraparound included.
+	 */
+	_consumerHasDrained() {
+		if (!this.everDrained && Atomics.load(this.i32, READ_IDX) !== this._readIdxAtBirth) {
+			this.everDrained = true;
+			if (this.pendingBytes > 0) this.pendingSince = this._now();
+		}
+		return this.everDrained;
+	}
+
 	_overflow(reason, incomingBytes) {
 		const event = {
 			reason,
@@ -203,11 +233,18 @@ export class RingWriter {
 
 	_armAgeLimit() {
 		if (this.ageTimer !== null || this.closed || this.pendingBytes === 0 || !Number.isFinite(this.maxPendingAgeMs)) return;
-		const remaining = Math.max(0, this.maxPendingAgeMs - this._pendingAge());
+		// Consulting the drain latch first matters twice over: the latching
+		// observation re-dates the pending run, which this arming must see,
+		// and a not-yet-drained consumer whose backlog is already past the
+		// ceiling must be RECHECKED on a bounded cadence rather than spun on
+		// a zero-delay timer until it drains.
+		const drained = this._consumerHasDrained();
+		let remaining = Math.max(0, this.maxPendingAgeMs - this._pendingAge());
+		if (!drained && remaining === 0) remaining = Math.min(this.maxPendingAgeMs, 250);
 		this.ageTimer = this._setTimer(() => {
 			this.ageTimer = null;
 			if (this.closed || this.pendingBytes === 0) return;
-			if (this._pendingAge() >= this.maxPendingAgeMs) this._overflow('age', 0);
+			if (this._consumerHasDrained() && this._pendingAge() >= this.maxPendingAgeMs) this._overflow('age', 0);
 			else this._armAgeLimit();
 		}, remaining);
 		if (this.ageTimer?.unref) this.ageTimer.unref();

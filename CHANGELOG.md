@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Absent, `true`, `false`, and valid numbers behave exactly as before, on every lane and every surface (production, `createTestServer`, `vite dev`). `null` moves from counter to no-seq; other non-contract values move from counter to `TypeError`. The wire's seq space is unchanged: a bigint projects into the same IEEE-double space a number occupies, rounding beyond 2^53 exactly as `Number(x)` at the call site already did.
   - **Detail:** [Changed engineering detail](#changed).
+- **Fixed: a respawning worker is no longer quarantined for the relay backlog its boot could not drain.** Under sustained relay traffic a crashed worker's replacement filled its ring while booting and the from-spawn age ceiling quarantined it into another respawn - up to restart-limit exhaustion and a whole-process exit; the age clock now starts at the worker's first drain.
+  - **Affects:** Multi-worker deployments with the relay ring enabled, under enough relay traffic to fill a booting worker's ring inside its boot time.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The byte ceiling still applies from spawn, so the spill stays bounded during boot; a worker that never starts draining is handled by the boot deadline, as before. A worker that drained once is judged by the unchanged steady-state ceiling forever after.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: a recover subscribe without a `ref` is refused loudly instead of dying silently.** A subscribe asking for history could hit the saturated gate and get nothing back, leaving the client believing itself subscribed and resuming into a silent gap; it now gets `{"type":"error","code":"RECOVER_REQUIRES_REF"}` up front, on all three server surfaces.
   - **Affects:** Hand-rolled clients only; the bundled client stamps a `ref` on every path, including the reconnect resubscribe batch.
   - **Action:** Include a `ref` on any subscribe that carries `recover`. A `subscribe-batch` naming history in its recover map needs its one `ref` for the same reason.
@@ -221,6 +227,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ride the same per-entry resolution, so the ledger counts what actually
   fanned out. `test/publish-batch-exclude-real.test.js` reads the contract
   off frames two real clients receive, on both lanes.
+
+- **The relay spill age ceiling starts its clock at the consumer's first
+  drain.** The primary forwards relay frames into a worker's ring from the
+  moment of spawn, but the worker drains only after module evaluation, its
+  init hook and warmup - so the age ceiling, measured from the spill's
+  birth, judged a booting worker by the steady-state stall detector: under
+  sustained relay traffic the fresh ring filled, the 5s ceiling quarantined
+  the still-booting worker, and its respawn landed in the same window,
+  converting one crash at relay peak into restart-limit exhaustion and a
+  whole-process exit (the stable-uptime budget reset never applied because
+  the slot never stayed ready). The writer now latches the first advance of
+  the ring's read index and dates the pending run from that observation;
+  until then the age check re-arms on a bounded cadence, the byte ceiling
+  keeps the spill bounded, and the spawner's boot deadline owns a worker
+  that never begins. A consumer that drained once is judged steady-state
+  forever after, index wraparound included.
+  `test/relay-ring.test.js` pins the suspension, the clock start at first
+  drain, and the unchanged quarantine for a drained-then-stalled consumer.
 
 - **The relay frame ceiling measures the unit its neighbors measure.** The
   sender-side admission compared `String.prototype.length` - UTF-16 code

@@ -193,7 +193,7 @@ describe('ring stream', () => {
 		expect(Atomics.load(writer.i32, 0), 'a refused write advanced the write position').toBe(before);
 	});
 
-	it('quarantines an old spill even when no later publish arrives', () => {
+	it('quarantines an old spill even when no later publish arrives, once the consumer has drained', () => {
 		const sab = createRelayRingBuffer(1024);
 		let now = 0;
 		let ageCallback = null;
@@ -214,6 +214,12 @@ describe('ring stream', () => {
 		expect(writer.pendingBytes).toBe(32);
 		expect(ageCallback).toBeTypeOf('function');
 
+		// The consumer proves it drains: the read index advances, and the
+		// next observation latches it and starts the age clock there.
+		new Int32Array(sab, 0, 16)[8] = 1;
+		ageCallback();
+		expect(writer.closed, 'a freshly-draining consumer must not be judged yet').toBe(false);
+
 		now = 50;
 		ageCallback();
 		expect(writer.closed).toBe(true);
@@ -223,6 +229,53 @@ describe('ring stream', () => {
 			pendingAgeMs: 50,
 			maxPendingAgeMs: 50
 		})]);
+	});
+
+	it('suspends the age ceiling for a consumer that has never drained - a booting worker is not a stalled one', () => {
+		const sab = createRelayRingBuffer(1024);
+		let now = 0;
+		let ageCallback = null;
+		const overflows = [];
+		const writer = new RingWriter(sab, {
+			maxPendingBytes: 4096,
+			maxPendingAgeMs: 50,
+			now: () => now,
+			setTimer: (callback) => {
+				ageCallback = callback;
+				return { unref() {} };
+			},
+			clearTimer: () => {},
+			onOverflow: (event) => overflows.push(event)
+		});
+		writer.write(new Uint8Array(writer.cap));
+		writer.write(new Uint8Array(32));
+
+		// Far past the ceiling with the read index never advanced: the old
+		// from-birth clock quarantined here, converting a worker crash at
+		// relay peak into a respawn-into-quarantine loop ending in
+		// restart-limit exhaustion. The ceiling must wait (the spawner's boot
+		// deadline owns a worker that never starts) and keep RECHECKING.
+		now = 5000;
+		ageCallback();
+		expect(writer.closed, 'a never-drained consumer must not be quarantined by age').toBe(false);
+		expect(overflows).toEqual([]);
+		expect(ageCallback, 'the ceiling must re-arm to catch the first drain').toBeTypeOf('function');
+
+		// First drain observed at 5000: the clock starts HERE, not at the
+		// spill's birth - the backlog's earlier wait measured a worker that
+		// had not begun.
+		new Int32Array(sab, 0, 16)[8] = 1;
+		ageCallback();
+		expect(writer.closed).toBe(false);
+
+		now = 5049;
+		ageCallback();
+		expect(writer.closed, 'one ms short of the ceiling since the drain').toBe(false);
+
+		now = 5050;
+		ageCallback();
+		expect(writer.closed).toBe(true);
+		expect(overflows).toEqual([expect.objectContaining({ reason: 'age', pendingAgeMs: 50 })]);
 	});
 
 	it('never quarantines a peer that keeps draining, however long it stays behind', () => {
