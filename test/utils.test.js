@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { hasUWS } from './helpers/real-runtime.js';
 import { parseCookies, serializeCookie, createCookies } from '../src/runtime/cookies.js';
+import { contentDispositionValue } from '../src/runtime/utils/static-headers.js';
 import {
 	mimeLookup,
 	parse_as_bytes,
@@ -771,14 +772,19 @@ const DOWNLOAD_EXTENSIONS = new Set([
 	'.iso', '.img', '.bin'
 ]);
 
+// The extension gate stays local (it mirrors the handler's own branch), but the
+// VALUE now comes from the shipped builder rather than a second copy of it.
+// While the sanitisation was re-implemented here, every case below passed
+// against the test's own version and the production line was pinned by nothing:
+// production stripped only the quote and backslash, and no case here could have
+// noticed.
 function getContentDisposition(relPath) {
 	const lastDot = relPath.lastIndexOf('.');
 	const ext = lastDot >= 0 ? relPath.slice(lastDot).toLowerCase() : '';
 	if (!DOWNLOAD_EXTENSIONS.has(ext)) return null;
 	const slash = relPath.lastIndexOf('/');
 	const basename = slash >= 0 ? relPath.slice(slash + 1) : relPath;
-	const safe = basename.replace(/["\\]/g, '');
-	return `attachment; filename="${safe}"`;
+	return contentDispositionValue(basename);
 }
 
 describe('content-disposition for download files', () => {
@@ -3858,5 +3864,36 @@ describe('addressScope', () => {
 		expect(addressScope('::')).toBe('unknown');
 		expect(addressScope('999.1.1.1')).toBe('unknown');
 		expect(addressScope('not-an-ip')).toBe('unknown');
+	});
+});
+
+describe('content-disposition filename cannot split the response', () => {
+	it('strips control characters, not just the quote and backslash', () => {
+		// A newline is legal in a POSIX filename and ends the header field on
+		// the wire, so the rest of the name would land as further headers - or,
+		// after a blank line, as a second response body. Previously only the
+		// quote and backslash were removed, so all of these shipped intact.
+		expect(contentDispositionValue('report\r\nx-injected: 1.zip'))
+			.toBe('attachment; filename="reportx-injected: 1.zip"');
+		expect(contentDispositionValue('a\nb.zip')).toBe('attachment; filename="ab.zip"');
+		expect(contentDispositionValue('a\rb.zip')).toBe('attachment; filename="ab.zip"');
+		expect(contentDispositionValue('a\0b.zip')).toBe('attachment; filename="ab.zip"');
+		expect(contentDispositionValue('a\u007fb.zip')).toBe('attachment; filename="ab.zip"');
+		expect(contentDispositionValue('a\tb.zip')).toBe('attachment; filename="ab.zip"');
+	});
+
+	it('never emits a value containing a header terminator, whatever the name', () => {
+		// The class assertion behind the cases above: re-derived from the
+		// RETURNED value rather than from the strip expression, so it holds
+		// wherever the strip list is drawn.
+		for (let code = 0; code < 0x80; code++) {
+			const value = contentDispositionValue(`a${String.fromCharCode(code)}b.zip`);
+			expect(/[\r\n\0]/.test(value), `char ${code} survived into the header`).toBe(false);
+		}
+	});
+
+	it('leaves an ordinary name alone', () => {
+		expect(contentDispositionValue('package.tar')).toBe('attachment; filename="package.tar"');
+		expect(contentDispositionValue('my report (final).zip')).toBe('attachment; filename="my report (final).zip"');
 	});
 });

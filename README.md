@@ -1531,7 +1531,7 @@ adapter({
 });
 ```
 
-Keys are case-insensitive and merged once while the static index is built, rather than being merged on each request. The handler's own transfer / caching / range headers cannot be overridden - `content-type`, `content-encoding`, `content-range`, `content-length`, `date`, `etag`, `cache-control`, `vary`, `accept-ranges` - supplying one logs a build warning and is ignored. Use `staticCacheControl` for path-specific cache policies. Every other header (including overriding the default `x-content-type-options`) is applied. To keep headers identical across SSR and static responses, set the same values in both `handle` and `staticHeaders`.
+Keys are case-insensitive and merged once while the static index is built, rather than being merged on each request. The handler's own transfer / caching / range headers cannot be overridden - `content-type`, `content-encoding`, `content-range`, `content-length`, `date`, `etag`, `cache-control`, `vary`, `accept-ranges` - supplying one logs a build warning and is ignored. Use `staticCacheControl` for path-specific cache policies. Every other header (including overriding the default `x-content-type-options`) is applied, provided the name is an RFC 9110 token and the value carries no control character - a name or value that could split the response fails the build rather than reaching the wire. To keep headers identical across SSR and static responses, set the same values in both `handle` and `staticHeaders`.
 
 #### Dotfiles are not served (`staticDotfiles`)
 

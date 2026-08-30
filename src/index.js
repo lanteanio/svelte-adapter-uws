@@ -1240,7 +1240,8 @@ export default function (opts = {}) {
 					'These transfer/caching/range headers are managed by the static file ' +
 					'handler and cannot be overridden (content-type, content-encoding, etag, ' +
 					'cache-control, vary, accept-ranges, ...). Use staticCacheControl for ' +
-					'path-specific cache policies. Every other header is applied.'
+					'path-specific cache policies. Every other header is applied, provided its name is an ' +
+					'RFC 9110 token and its value carries no control character.'
 				);
 			}
 

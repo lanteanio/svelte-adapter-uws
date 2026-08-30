@@ -165,7 +165,13 @@ export interface AdapterOptions {
 	 * them. Use this to put CSP, HSTS, X-Frame-Options, Referrer-Policy,
 	 * Permissions-Policy (and any custom `x-*` header) on static responses.
 	 *
-	 * Keys are case-insensitive. The handler's own transfer / caching / range
+	 * Keys are case-insensitive, and are held to the RFC 9110 token grammar;
+	 * values may not carry a control character. A name or value that could end
+	 * a header field on the wire - and so inject headers, or a whole second
+	 * response - fails the BUILD rather than being quietly rewritten at request
+	 * time, so what you configure here is what is served or nothing is.
+	 *
+	 * The handler's own transfer / caching / range
 	 * headers cannot be overridden (`content-type`, `content-encoding`, `etag`,
 	 * `last-modified`, `cache-control`, `vary`, `accept-ranges`, ...); supplying one logs a
 	 * build warning and is ignored. Use `staticCacheControl` for path-specific

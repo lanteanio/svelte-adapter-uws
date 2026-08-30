@@ -839,7 +839,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// refusal names the entry position - a try/catch entered per entry and
 	// left without catching unless something throws. No byte is read,
 	// allocated or copied, and no copy primitive entered the graph.
-	ingress: 'cb9ca0497987e092e2105b5800e572bb761c0dfed3cc339d5b8e4a7cf2d472e8',
+	//
+	// Re-pinned for the content-disposition filename builder, reached through
+	// utils.js -> utils/static-headers.js: the quoted-filename strip moves out
+	// of its one call site into an exported function so a test can drive it
+	// rather than a copy, and widens from quote/backslash to the control
+	// characters as well. One `String.prototype.replace` where there was one
+	// before, on the static INDEX path rather than any frame path. No byte is
+	// read, allocated or copied, and no copy primitive entered the graph.
+	ingress: '731124fb5a1bd818cc7f77ac9576e97a353e3f11b981e8188618eeee938a85e5',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1456,7 +1464,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// table so a refusal names the entry position - a try/catch entered per
 	// entry and left without catching unless something throws. No byte is
 	// read, allocated or copied, and no copy primitive entered the graph.
-	platform: 'e2b3133ac6ce57a4dbbc6c9244cb2ca9e42c141fd512355eae38e07252b5ce42',
+	//
+	// Re-pinned for the content-disposition filename builder moving into
+	// utils/static-headers.js as an exported function, with its strip widened
+	// to the control characters. Static INDEX path only, one replace where
+	// there was one before; no frame path executes differently, no byte is
+	// read, allocated or copied, and no copy primitive entered the graph.
+	platform: '7db726fe647238c158f9503a11d17251675ceda70a09fca79e20ceda7472981c',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1671,7 +1685,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// cold utils/epoch.js change as the siblings: resolveEntrySeq wraps the
 	// shared table so a refusal names the entry index. Nothing in this graph's
 	// own fan-out modules changed, and no copy primitive entered.
-	'wire-fanout': '1d60d6ff4fe81a547a35a681026099cbed0515264897e1b4048163305e43b0a6',
+	//
+	// Re-pinned for the content-disposition filename builder moving into
+	// utils/static-headers.js with a widened strip. Static index path only;
+	// nothing in this graph's own fan-out modules changed, and no copy
+	// primitive entered.
+	'wire-fanout': 'e35cf7bca3f496722f7fd219bc0cfc3c5aa1681fc402d012ba63469f8c253293',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

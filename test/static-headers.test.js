@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
 	mergeStaticHeaders,
 	RESERVED_STATIC_HEADER_KEYS,
@@ -199,31 +200,65 @@ describe('staticCacheControl', () => {
 // at request time would leave them believing the header they configured is the
 // header being served.
 describe('normalizeStaticHeaders refuses header-splitting input', () => {
-	it('refuses a value carrying CR, LF or NUL', () => {
+	it('refuses a value carrying any byte a header value may not hold', () => {
+		// CR, LF and NUL are the ones that split; VT, FF and DEL are in the class
+		// because a narrower list was tried on the handshake lane and reverted -
+		// it let those three onto the wire, so this package accepted values its
+		// own `cookies.set()` refused and a Node-based proxy throws re-emitting.
+		// The last three vectors are the ones that fail a CR/LF/NUL-only guard,
+		// so they are what keeps this from silently narrowing again.
 		for (const evil of [
 			'DENY\r\nx-injected: 1',
 			'DENY\nx-injected: 1',
 			'DENY\rx-injected: 1',
 			'DENY\0',
-			'\r\n\r\n<html>owned</html>'
+			'\r\n\r\n<html>owned</html>',
+			'DENYx',
+			'DENYx',
+			'DENYx'
 		]) {
 			expect(
 				() => normalizeStaticHeaders({ 'x-frame-options': evil }),
 				JSON.stringify(evil)
-			).toThrow(/carriage return, line feed or NUL/);
+			).toThrow(/byte a header value may not carry/);
 		}
 	});
 
 	it('refuses a name that is not an RFC 9110 token', () => {
-		// A name is as dangerous as a value: the colon and CRLF are written into
-		// the same header block. Held to the token grammar rather than scanned
-		// for the three bytes, so a space or a quote is refused too.
-		for (const evil of ['x-bad\r\nx-injected', 'x bad', 'x:bad', 'x"bad', 'x\0bad', '']) {
+		// A name is as dangerous as a value: both are written into the same
+		// header block. Held to the token grammar rather than scanned for
+		// specific bytes, so the SEPARATORS are refused too - a comma, semicolon
+		// or equals in a field name is what a downstream parser splits on, and a
+		// guard built only from the splitting bytes would pass every one of them.
+		for (const evil of [
+			'x-bad\r\nx-injected', 'x bad', 'x:bad', 'x"bad', 'x\0bad', '',
+			'x,bad', 'x;bad', 'x=bad', 'x(bad)', 'x/bad', 'x\\bad', 'x{bad}', 'x[bad]', 'x@bad', 'x?bad', 'x<bad>'
+		]) {
 			expect(
 				() => normalizeStaticHeaders({ [evil]: 'v' }),
 				JSON.stringify(evil)
 			).toThrow(/valid HTTP field name/);
 		}
+	});
+
+	it('keeps a configured __proto__ instead of dropping it into the prototype', () => {
+		// `headers['__proto__'] = 'x'` on a plain object hits Object.prototype's
+		// setter and is a no-op for a string, so the header would vanish with no
+		// throw and no warning. `__proto__` is all tchar, so the name check
+		// deliberately does not catch it - the accumulator has to be
+		// null-prototype instead.
+		// Computed key, because `{ __proto__: 'x' }` in a literal sets the
+		// PROTOTYPE rather than an own property - the input has to carry it the
+		// way a JSON config or a spread would.
+		const out = normalizeStaticHeaders({ ['__proto__']: 'x', 'x-real': 'v' });
+		expect(Object.keys(out.headers).sort()).toEqual(['__proto__', 'x-real']);
+		expect(out.headers['__proto__'], 'a configured header was silently swallowed').toBe('x');
+	});
+
+	it('validates the name the operator wrote, not its lowercased form', () => {
+		// The Kelvin sign lowercases to plain `k`, so a name checked after
+		// folding would pass and then ship under a name nobody configured.
+		expect(() => normalizeStaticHeaders({ 'K-foo': 'v' })).toThrow(/valid HTTP field name/);
 	});
 
 	it('still takes every name the grammar allows', () => {
@@ -246,6 +281,32 @@ describe('normalizeStaticHeaders refuses header-splitting input', () => {
 		// would be silently discarded rather than reported - hiding a
 		// configuration that was trying to do something dangerous.
 		expect(() => normalizeStaticHeaders({ 'content-length': '0\r\nx-injected: 1' }))
-			.toThrow(/carriage return, line feed or NUL/);
+			.toThrow(/byte a header value may not carry/);
+	});
+});
+
+// The refusal is only worth having if the BUILD actually uses its output. The
+// unit assertions above all call normalizeStaticHeaders directly, so they hold
+// just as well when the build stops consulting it - swapping the placeholder to
+// the raw option would ship every splitting value with the whole suite green.
+// Pinned on the source, because driving a real build here would mean packing
+// and installing the adapter for one line.
+describe('the build serves the validated headers, not the raw option', () => {
+	const indexSource = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+
+	it('feeds the STATIC_HEADERS placeholder from the normalized result', () => {
+		const line = indexSource.split('\n').find((l) => l.includes('STATIC_HEADERS:'));
+		expect(line, 'the STATIC_HEADERS placeholder moved').toBeTypeOf('string');
+		expect(line).toContain('staticHeadersResult.headers');
+		expect(line, 'the raw option must never reach the placeholder').not.toContain('opts.staticHeaders');
+	});
+
+	it('normalizes before anything is written', () => {
+		// A validation that ran after the output directory was populated would
+		// leave a half-written build behind on a refusal.
+		const normalizeAt = indexSource.indexOf('normalizeStaticHeaders(opts.staticHeaders)');
+		const placeholderAt = indexSource.indexOf('STATIC_HEADERS:');
+		expect(normalizeAt, 'normalizeStaticHeaders call moved').toBeGreaterThan(-1);
+		expect(placeholderAt).toBeGreaterThan(normalizeAt);
 	});
 });

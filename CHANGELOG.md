@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Detail:** [Changed engineering detail](#changed).
 - **Fixed: a `staticHeaders` value carrying a newline is refused at build time.** A CR, LF or NUL in a configured value reached `res.writeHeader` verbatim, where it ends the header field and starts whatever follows - header injection, or a second response; names are now held to the RFC 9110 token grammar too.
   - **Affects:** Builds configuring `staticHeaders`. A value or name that could split a response now fails the build instead of shipping.
-  - **Action:** None for a valid configuration. A build that starts failing was emitting a header a client could not have read correctly - remove the newline, or fold the value onto one line.
+  - **Action:** None for a valid configuration. A build that starts failing was emitting a header a client could not have read correctly - remove the control character from the value, or correct a name that is not a bare HTTP token.
   - **Requires:** No new dependency or option.
   - **Compatibility:** Refused at build rather than sanitised at request time, so an operator is told rather than quietly served something other than what they configured. Every name the token grammar allows still passes, including the punctuation set, and names are lowercased as before.
   - **Detail:** [Fixed engineering detail](#fixed).
@@ -198,8 +198,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all three, and the NAME is held to the RFC 9110 token grammar rather than
   scanned for the same bytes: anything outside `1*tchar` cannot appear in a
   legal field name anyway, and an allowlist cannot be outflanked the way a
-  denylist can. Both checks run BEFORE the reserved-key drop, so a reserved
-  name cannot carry the bytes past them on its way to being discarded.
+  denylist can. Both predicates are the handshake lane's, imported rather than
+  restated: a narrower class was tried there once and reverted for letting VT,
+  FF and DEL onto the wire, and a fifth private copy of the same rule is the
+  drift that module exists to end. Validation runs BEFORE the reserved-key
+  drop, so a reserved name is reported rather than silently discarded, and the
+  name is checked before lowercasing - some non-ASCII letters fold INTO the
+  token alphabet.
   Refused at build rather than sanitised per request, because rewriting a
   configured value at send time leaves an operator believing the header they
   wrote is the header being served. `test/static-headers.test.js` drives the

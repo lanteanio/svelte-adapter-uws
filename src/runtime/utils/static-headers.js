@@ -14,6 +14,31 @@
  * and may override the adapter's own default `x-content-type-options`.
  * @type {Set<string>}
  */
+/**
+ * The `content-disposition` value for a downloadable asset, with the filename
+ * made safe for the quoted-string it is going into.
+ *
+ * The quote and the backslash would end or escape that quoted-string. The
+ * CONTROL characters matter more and were not being stripped: a filename is
+ * legal on POSIX with a newline in it, and a newline written into a header
+ * ends the field on the wire - the rest of the name then lands as further
+ * headers, or, after a blank line, as a second response body. A build shipping
+ * a file named that way is unusual, which is precisely why nothing else caught
+ * it.
+ *
+ * It lives here rather than at its one call site so a test can drive THIS
+ * rather than a copy: the rule used to be inline in the static handler, which
+ * imports the build's manifest placeholder and therefore cannot be imported by
+ * a unit test, so the suite re-implemented the rule and every case passed
+ * against its own version while the shipped line went unpinned.
+ *
+ * @param {string} basename
+ * @returns {string}
+ */
+export function contentDispositionValue(basename) {
+	return `attachment; filename="${basename.replace(/[\u0000-\u001f\u007f"\\]/g, '')}"`;
+}
+
 export const RESERVED_STATIC_HEADER_KEYS = new Set([
 	'content-type',
 	'content-encoding',

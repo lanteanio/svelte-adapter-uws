@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { manifest, prerendered } from '../manifest-bridge.js';
 import { excludedDotPath } from '../utils/dot-path.js';
-import { mimeLookup, mergeStaticHeaders, resolveStaticCacheControl } from '../utils.js';
+import { mimeLookup, mergeStaticHeaders, resolveStaticCacheControl, contentDispositionValue } from '../utils.js';
 import { monotonicNow } from '../runtime.js';
 import { counters, staticCache, prerenderedDirStyle, decodeCache } from './state.js';
 import { send400 } from './http-helpers.js';
@@ -190,10 +190,7 @@ export function cacheDir(dir, urlPrefix, immutable, staticHeaders = null, static
 
 		const ext = path.extname(relPath).toLowerCase();
 		if (DOWNLOAD_EXTENSIONS.has(ext)) {
-			const basename = path.basename(relPath);
-			// Strip characters that are not allowed in a quoted Content-Disposition filename.
-			const safe = basename.replace(/["\\]/g, '');
-			headers.push(['content-disposition', `attachment; filename="${safe}"`]);
+			headers.push(['content-disposition', contentDispositionValue(path.basename(relPath))]);
 		}
 
 		/** @type {NegotiatedStaticEntry} */
