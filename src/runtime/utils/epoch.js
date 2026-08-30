@@ -159,32 +159,79 @@ export function throwInvalidSeq(value) {
 }
 
 /**
+ * Refuse a seq whose value the wire's double space cannot keep distinct. Its
+ * own throw site, and its own message: the value IS a positive integer, so the
+ * legal-forms message would send a caller looking for a spelling mistake that
+ * is not there. What is wrong is the magnitude, and the fix is a different
+ * authority, so the message says that.
+ *
+ * @param {number | bigint} value
+ * @returns {never}
+ * @throws {TypeError} always
+ */
+export function throwUncarryableSeq(value) {
+	throw new TypeError(
+		`seq ${typeof value === 'bigint' ? `${value}n` : value} exceeds the wire's safe-integer range ` +
+		`(at most 9007199254740991): the seq space is IEEE-754 double, which stops having a neighbour at ` +
+		`distance one above that, so ids a caller means to be different collapse onto a single value. ` +
+		`Because watermarks advance on a strict greater-than, the second frame then fails to advance the ` +
+		`client's watermark and resume dedup goes ambiguous with nothing on the wire to notice by. Keep ` +
+		`the wide id in the event data and give seq an authority inside the range, or offset it by a ` +
+		`per-topic base; do not truncate, which destroys the ordering seq exists for`
+	);
+}
+
+/**
  * Validate an EXPLICIT seq value - the number and bigint spellings of one
  * authority - and project it into the wire's seq space.
  *
- * That space is IEEE-754 double: the JSON envelope, the 0x03 frame varint,
- * the relay frame's seq slot and the client's reader all carry doubles, and
- * the protocol's stance is finite-and-non-negative but NOT magnitude-bounded
- * (the varint spells out 2^53 and 1e308 exactly as the doubles they are). A
- * bigint is therefore a SPELLING, not a wider space: it converts through
- * `Number`, which beyond 2^53 rounds to the nearest representable double -
- * exactly what the number spelling already did at the caller's own
- * conversion, and monotone, so max-seen guards and resume compares hold. A
- * caller whose ids must stay distinct past 2^53 needs an authority that
- * issues doubles, not a wider wire. Chosen over refusing inexact bigints
- * because the two spellings of one value must not disagree about validity,
- * and over exact bigint carriage because the seq space is frozen with the
- * protocol revision.
+ * That space is IEEE-754 double, and the range it carries FAITHFULLY is the
+ * safe-integer range: at most 2^53 - 1. Both spellings are held to it.
+ *
+ * Above that range a double no longer has a neighbour at distance one, so two
+ * ids a caller means to be different land on one value. Every max-seen guard
+ * and every client watermark advances on a strict greater-than, so the second
+ * frame does not advance the watermark and resume dedup goes ambiguous -
+ * silently, on exactly the snowflakes and large Kafka offsets a caller reaches
+ * for bigint to carry. The refusal is loud instead.
+ *
+ * Exact representability is NOT the test, though it looks like the natural
+ * one. It fails on both ends. The JSON envelope serializes through
+ * `String(double)`, which emits the shortest round-tripping decimal rather
+ * than the integer: 2^60 is an exact double and still reaches a subscriber as
+ * 1152921504606847000, a number nobody issued. And in the band just above
+ * 2^53, where the gap is two, an exactness test would take a caller's EVEN
+ * offsets and refuse the ODD ones - a contract that fails on half a stream,
+ * by parity, is worse than one that refuses the range outright.
+ *
+ * The two spellings therefore agree everywhere, including on refusal: this is
+ * one rule about the value, not a property of how it was written. Carrying a
+ * wider seq exactly is not available - the seq space is frozen with the
+ * protocol revision - so a caller whose ids exceed the range keeps them in the
+ * event data and gives `seq` an authority that fits.
  *
  * @param {number | bigint} value
  * @returns {number}
  */
 export function explicitSeqValue(value) {
 	if (typeof value === 'number') {
-		if (Number.isInteger(value) && value >= 1) return value;
-	} else {
+		if (Number.isSafeInteger(value) && value >= 1) return value;
+		// An integer too large to be safe is a magnitude fault, not a spelling
+		// one, and gets the message that says so.
+		if (Number.isInteger(value) && value >= 1) throwUncarryableSeq(value);
+	} else if (typeof value === 'bigint' && value >= 1n) {
+		// The typeof is load-bearing, not decoration: `>= 1n` is a VALUE
+		// comparison, and a relational compare of a string against a bigint
+		// runs StringToBigInt - so a bare `value >= 1n` let `'7'` through this
+		// arm and returned 7, quietly making the exported validator accept a
+		// spelling every caller of it refuses.
+		//
+		// `Number.isSafeInteger` then answers exactness and range together: a
+		// bigint at or above 2^53 cannot land on a safe integer, and one below
+		// it converts exactly. No BigInt is allocated on the accepting path.
 		const projected = Number(value);
-		if (value >= 1n && Number.isFinite(projected)) return projected;
+		if (Number.isSafeInteger(projected)) return projected;
+		throwUncarryableSeq(value);
 	}
 	throwInvalidSeq(value);
 }
@@ -217,7 +264,7 @@ export function resolveEntrySeq(value) {
 /**
  * Resolve the SEND lanes' `seq` option - the gap-fill channel a resume hook
  * replays history through. Explicit forms only: number and bigint validate
- * and project exactly as the publish lanes' explicit authority
+ * exactly as the publish lanes' explicit authority
  * ({@link explicitSeqValue}); `false`, `null` and absent mean no seq, the
  * lanes' historical shape. `true` throws its own message rather than the
  * publish table's: a single-target send has no counter to draw - gap-fill
@@ -316,9 +363,16 @@ export function stampSeqValue(opt, seqMap, topic, bound) {
 		// counter and every shipped authority (Redis INCR) are 1-based; a 0-based
 		// external source must offset by 1. Fail fast rather than corrupt the wire.
 		// Inlined from explicitSeqValue so the overwhelmingly common number
-		// spelling keeps its single call frame on the hot path.
-		if (Number.isInteger(opt) && opt >= 1) return opt;
-		throwInvalidSeq(opt);
+		// spelling keeps its single call frame on the hot path; SAFE integer,
+		// because the wire carries the value faithfully only inside that range.
+		if (Number.isSafeInteger(opt) && opt >= 1) return opt;
+		// Cold: let the shared validator pick between the two refusals, so the
+		// inlined arm cannot drift from it on which message a value earns.
+		// RETURNED, not called for effect: if the two predicates ever diverge
+		// so that the validator ACCEPTS a number this arm rejected, returning
+		// hands back the accepted value instead of throwing the legal-forms
+		// error over it - drift-proof in both directions rather than one.
+		return explicitSeqValue(opt);
 	}
 	if (typeof opt === 'bigint') return explicitSeqValue(opt);
 	if (opt !== undefined && opt !== true) throwInvalidSeq(opt);

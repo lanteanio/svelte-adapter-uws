@@ -79,11 +79,29 @@ function assertEntrySeqContract(platform, label) {
 		`${label}: an entry seq of 1 must be accepted`
 	).not.toThrow();
 
+	// The largest entry seq the wire carries faithfully, on both spellings.
+	expect(
+		() => platform.publishWireBatch('mirror-entry-table', 'update',
+			[{ data: { n: 1 }, seq: Number.MAX_SAFE_INTEGER }, { data: { n: 2 }, seq: BigInt(Number.MAX_SAFE_INTEGER) }], WIRE, { seq: false }),
+		`${label}: the largest carryable entry seq must be accepted`
+	).not.toThrow();
+
 	for (const bad of [0, -1, 1.5, Number.NaN, 0n, -1n, '7', {}, []]) {
 		expect(
 			() => platform.publishWireBatch('mirror-entry-room', 'update', [{ data: { n: 1 }, seq: bad }], WIRE, { seq: false }),
 			`${label}: an entry seq of ${String(bad)} must be refused`
 		).toThrow(TypeError);
+	}
+
+	// Past the safe-integer range the entry lane must refuse for the SAME
+	// reason the options lane does, and say so: this is the spelling the
+	// clustered explicit authority actually travels on, so a lane that only
+	// projected here would put a rounded id on the wire with every gate green.
+	for (const over of [2 ** 53, 2n ** 53n, 2n ** 53n + 2n, 1541815603606036481n, 10n ** 400n]) {
+		expect(
+			() => platform.publishWireBatch('mirror-entry-room', 'update', [{ data: { n: 1 }, seq: over }], WIRE, { seq: false }),
+			`${label}: an entry seq of ${String(over)} must be refused as uncarryable`
+		).toThrow(/exceeds the wire/i);
 	}
 }
 
@@ -233,12 +251,22 @@ describe('the entry overrides land on the wire, on the harness the applications 
 			{ data: { n: 6 } }
 		], wire, { seq: false });
 
+		// The bigint spelling has to be checked on the DELIVERED value, not
+		// only on "it did not throw": a lane that projected through Number()
+		// would be indistinguishable here for a small id and would silently
+		// round a real one.
+		server.platform.publishWireBatch('mirror-override-room', 'update', [
+			{ data: { n: 7 }, seq: 11n },
+			{ data: { n: 8 }, seq: BigInt(Number.MAX_SAFE_INTEGER) }
+		], wire, { seq: false });
+
 		const seqs = sent.map((e) => ('seq' in e ? e.seq : null));
 		// Entry order: explicit 9 (counter untouched), counter 1, omitted,
 		// omitted, counter 2 (the batch default), then counter 3 under a
-		// seq-less default and omitted for the entry that inherits it.
-		expect(seqs).toEqual([9, 1, null, null, 2, 3, null]);
-		expect(sent.map((e) => e.data.n), 'delivery order must be entry order').toEqual([0, 1, 2, 3, 4, 5, 6]);
+		// seq-less default and omitted for the entry that inherits it, then
+		// the two bigint authorities, which leave the counter alone as well.
+		expect(seqs).toEqual([9, 1, null, null, 2, 3, null, 11, Number.MAX_SAFE_INTEGER]);
+		expect(sent.map((e) => e.data.n), 'delivery order must be entry order').toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
 	}, 30000);
 });
 

@@ -222,7 +222,7 @@ export const platform = {
 	 * gap-fill channel a resume hook replays history through, so the frames it
 	 * sends carry the per-frame seqs the client keys its watermark off instead
 	 * of an unmarked body. Number and bigint only, the same validation and
-	 * double-space projection the publish lanes' explicit authority takes
+	 * safe-integer range the publish lanes' explicit authority takes
 	 * ({@link explicitSeqValue}); `false`, `null` and absent mean no seq -
 	 * today's frame, byte-identical. `true` throws: this lane has no counter
 	 * to draw, and gap-fill replays history that is ALREADY accounted, which

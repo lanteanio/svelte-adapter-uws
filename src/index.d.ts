@@ -2772,9 +2772,11 @@ export interface Platform {
 	 *     advance it - a non-positive-integer seq is rejected, not stamped - the hook
 	 *     a replay backend uses to put the broadcast frame and its buffer on
 	 *     one authoritative seq space (see the extensions replay layer). The
-	 *     wire's seq space is IEEE double, so a bigint beyond 2^53 rounds to
-	 *     the nearest representable double - exactly what converting it to a
-	 *     number at the call site already did. `seq: true` means the
+	 *     wire's seq space is IEEE double, so both spellings are held to the
+	 *     safe-integer range (2^53 - 1): an id past it (a snowflake, a large
+	 *     Kafka offset) throws rather than rounding, because neighbouring ids
+	 *     would collapse onto one seq and stall the client's watermark.
+	 *     `seq: true` means the
 	 *     in-memory counter, and any other value - a string from a JSON
 	 *     column, an object - throws naming the legal forms rather than
 	 *     silently drawing the counter.
@@ -2871,11 +2873,12 @@ export interface Platform {
 		options?: {
 			relay?: boolean;
 			/**
-			 * `false` or `null` omits the seq; a positive-integer `number` or
+			 * `false` or `null` omits the seq; a positive safe-integer `number` or
 			 * `bigint` stamps that exact authoritative seq (from a replay backend)
 			 * onto both the JSON envelope and the `0x03` binary frame without
 			 * advancing the in-memory counter; omitted or `true` uses the in-memory
-			 * per-worker counter; anything else throws naming the legal forms.
+			 * per-worker counter; anything else throws naming the legal forms, and
+			 * an integer past the safe range throws naming the range.
 			 */
 			seq?: boolean | number | bigint | null;
 			compress?: boolean;
@@ -2889,8 +2892,9 @@ export interface Platform {
 	 * binary `0x03` frame when it advertised `wire.capability` and the codec
 	 * can encode the frame; otherwise the JSON envelope `send()` would have
 	 * sent. By default no per-topic seq is stamped (matches `send()`); an
-	 * explicit `options.seq` - positive integer `number` or `bigint`, the
-	 * publish lanes' validation - rides the binary frame's seq slot and the
+	 * explicit `options.seq` - positive safe-integer `number` or `bigint`, the
+	 * publish lanes' validation, so an id past `Number.MAX_SAFE_INTEGER` throws
+	 * rather than rounding onto a neighbour - rides the binary frame's seq slot and the
 	 * JSON fallback identically: the gap-fill channel a resume hook replays
 	 * seq'd history through. `true` throws (this lane has no counter), and a
 	 * seq'd send stays side-effect-free - no counter advance, no max-seen
@@ -2924,15 +2928,16 @@ export interface Platform {
 	 * `publishWire` calls (one seq and one relay envelope per entry).
 	 * An entry may carry its own explicit `seq` - the cluster-authoritative
 	 * number a replay backend already allocated for that frame - with exactly
-	 * `publishWire({ seq: N })`'s rules: a NUMBER must be a positive integer
-	 * or the whole batch is refused, it is stamped verbatim without advancing
+	 * `publishWire({ seq: N })`'s rules: an explicit value must be a positive
+	 * safe integer - `number` or `bigint`, one rule for both - or the whole
+	 * batch is refused, it is stamped verbatim without advancing
 	 * the counter, and on a multi-worker runtime it additionally requires
 	 * `{ seq: false, relay: false }` on the options (options renounce the
 	 * counter, entries carry the authority, and `relay: false` proves the
-	 * multi-origin built-in relay is not also fanning out). A non-number
-	 * entry `seq` falls through to the shared options, exactly as it would on
-	 * `publishWire`'s own options object; entries without one draw from the
-	 * shared options as before. Every numeric per-entry seq is validated
+	 * multi-origin built-in relay is not also fanning out). `true`, `false`
+	 * and `null` act per entry as overrides of the shared options; an entry
+	 * without a `seq` draws from those options as before. Every explicit
+	 * per-entry seq is validated
 	 * before anything is stamped or delivered: an invalid one refuses the
 	 * WHOLE batch, so a mid-batch refusal cannot leave earlier entries
 	 * already fanned out. A batch-level numeric `options.seq` stays refused outright
@@ -3148,7 +3153,7 @@ export interface Platform {
 		 * ```
 		 */
 		coalesceKey?: string;
-		/** Per-message `seq`: `false`/`null` omits it, a positive-integer `number` or `bigint` stamps that exact authoritative seq, omitted/`true` uses the in-memory counter, anything else throws. Multi-worker runtimes require `false` or an authoritative number with `relay:false`. */
+		/** Per-message `seq`: `false`/`null` omits it, a positive safe-integer `number` or `bigint` stamps that exact authoritative seq, omitted/`true` uses the in-memory counter, anything else throws - as does an integer past the safe-integer range, which the double seq space cannot carry unchanged. Multi-worker runtimes require `false` or an authoritative number with `relay:false`. */
 		options?: { relay?: boolean; seq?: boolean | number | bigint | null };
 	}>, options?: {
 		/**

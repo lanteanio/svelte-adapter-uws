@@ -69,6 +69,20 @@ describe('buildBinaryFrame / parseBinaryFrame', () => {
 		expect(parsed.schemaVersion).toBe(2);
 	});
 
+	it('carries the largest seq the publish lanes admit, byte for byte', () => {
+		// The publish lanes refuse anything past MAX_SAFE_INTEGER, so this is
+		// the widest value the varint is ever handed - an 8-byte encoding, two
+		// bytes wider than the 2^32 case above, and the boundary that makes
+		// that refusal a contract rather than a convention. The writer shifts
+		// by dividing (128 is a power of two) and the reader accumulates by
+		// multiplying, so both stay exact up here; a shift-based implementation
+		// of either would silently truncate at 32 bits.
+		const parsed = parseBinaryFrame(buildBinaryFrame(1, 9, Number.MAX_SAFE_INTEGER, new Uint8Array([4])));
+		expect(parsed.seq).toBe(Number.MAX_SAFE_INTEGER);
+		expect(parsed.topicId).toBe(9);
+		expect([...parsed.payload]).toEqual([4]);
+	});
+
 	it('returns null for a non-0x03 leading byte or a truncated frame', () => {
 		expect(parseBinaryFrame(new Uint8Array([0x01, 0x02, 0x03]))).toBeNull();
 		expect(parseBinaryFrame(new Uint8Array([WIRE_BINARY_TAG]))).toBeNull();

@@ -97,31 +97,59 @@ describe('stampSeq (publish-path seq resolver)', () => {
 	it('stamps a bigint as the same explicit authority a number spells', () => {
 		const map = new Map();
 		expect(stampSeq({ seq: 42n }, map, 'room')).toBe(42);
-		// The wire's seq space is IEEE double: an exactly-representable bigint
-		// beyond 2^53 projects to that exact double.
-		expect(stampSeq({ seq: 2n ** 60n }, map, 'room')).toBe(2 ** 60);
-		// Beyond exact representation it rounds to the nearest double,
-		// monotone - the same projection Number(snowflake) performs at a call
-		// site, so the two spellings of one value never disagree on validity.
-		const snowflake = 1541815603606036480n;
-		expect(stampSeq({ seq: snowflake }, map, 'room')).toBe(Number(snowflake));
+		expect(stampSeq({ seq: BigInt(Number.MAX_SAFE_INTEGER) }, map, 'room')).toBe(Number.MAX_SAFE_INTEGER);
+		expect(map.has('room')).toBe(false);
+	});
+
+	it('refuses a snowflake, the id class that motivated the bigint spelling', () => {
+		// A real Twitter/Discord-shaped snowflake. Stamping it used to project
+		// through Number() and round; the frame then carried an id the caller
+		// never issued, and the NEXT snowflake could round onto the same
+		// double. The two ids below are adjacent and collapse - so the frame
+		// that should have advanced the client's watermark would not have.
+		const snowflake = 1541815603606036481n;
+		expect(Number(snowflake), 'the collision this refusal exists for').toBe(Number(snowflake + 1n));
+		const map = new Map();
+		for (const id of [snowflake, snowflake + 1n]) {
+			expect(() => stampSeq({ seq: id }, map, 'room')).toThrow(/exceeds the wire/i);
+		}
 		expect(map.has('room')).toBe(false);
 	});
 
 	it('rejects a non-positive or unrepresentable bigint the way it rejects numbers', () => {
 		const map = new Map();
-		for (const bad of [0n, -1n, 10n ** 400n]) {
-			expect(() => stampSeq({ seq: bad }, map, 'room')).toThrow(TypeError);
+		for (const bad of [0n, -1n]) {
+			expect(() => stampSeq({ seq: bad }, map, 'room')).toThrow(/positive integer/);
 		}
+		// A magnitude fault earns the magnitude message, not the legal-forms
+		// one: the value IS a positive integer, and sending that caller to
+		// look for a spelling mistake would waste their time.
+		expect(() => stampSeq({ seq: 10n ** 400n }, map, 'room')).toThrow(/exceeds the wire/i);
 		expect(map.has('room')).toBe(false);
+	});
+
+	it('refuses an over-range NUMBER through the stamp, not only through the validator', () => {
+		// stampSeqValue keeps its own inlined copy of the number arm's
+		// predicate for the hot path, and that copy is what every
+		// platform.publish call actually runs. Asserting the range on
+		// explicitSeqValue alone leaves this copy free to sit at
+		// Number.isInteger while the suite stays green - and then the primary
+		// publish lane puts a rounded id on the wire, which is the whole
+		// defect. Drive it through stampSeq, on the number spelling.
+		const map = new Map();
+		for (const over of [2 ** 53, 2 ** 53 + 2, 2 ** 60, 1e308]) {
+			expect(() => stampSeq({ seq: over }, map, 'room'), String(over)).toThrow(/exceeds the wire/i);
+		}
+		expect(stampSeq({ seq: Number.MAX_SAFE_INTEGER }, map, 'room')).toBe(Number.MAX_SAFE_INTEGER);
+		expect(map.has('room'), 'a refused or explicit stamp never advances the counter').toBe(false);
 	});
 });
 
 describe('explicitSeqValue (the shared explicit-authority validator)', () => {
-	it('accepts both spellings and projects into the double seq space', () => {
+	it('accepts both spellings and answers them identically', () => {
 		expect(explicitSeqValue(7)).toBe(7);
 		expect(explicitSeqValue(7n)).toBe(7);
-		expect(explicitSeqValue(2n ** 60n)).toBe(2 ** 60);
+		expect(explicitSeqValue(BigInt(Number.MAX_SAFE_INTEGER))).toBe(Number.MAX_SAFE_INTEGER);
 	});
 
 	it('accepts exactly the boundary every 1-based authority starts at', () => {
@@ -136,12 +164,59 @@ describe('explicitSeqValue (the shared explicit-authority validator)', () => {
 		expect(map.has('room')).toBe(false);
 	});
 
-	it('projection is monotone, so max-seen guards hold across the spellings', () => {
-		// Two adjacent snowflakes may collapse to one double, but never
-		// reorder: the guard's monotone-max survives the projection.
-		const a = 1541815603606036480n;
-		const b = a + 1000000n;
-		expect(explicitSeqValue(b)).toBeGreaterThanOrEqual(explicitSeqValue(a));
+	it('draws the line at the safe-integer range, on both spellings alike', () => {
+		// MAX_SAFE_INTEGER is the last value the wire carries faithfully, and
+		// one past it is the first it does not. Both spellings answer the same
+		// way at both points - the rule is about the VALUE, so a number and a
+		// bigint naming one id can never disagree.
+		expect(explicitSeqValue(Number.MAX_SAFE_INTEGER)).toBe(Number.MAX_SAFE_INTEGER);
+		expect(explicitSeqValue(BigInt(Number.MAX_SAFE_INTEGER))).toBe(Number.MAX_SAFE_INTEGER);
+		for (const over of [2 ** 53, 2 ** 60, 1e308]) {
+			expect(() => explicitSeqValue(over), String(over)).toThrow(/exceeds the wire/i);
+		}
+		for (const over of [2n ** 53n, 2n ** 53n + 1n, 2n ** 53n + 2n, 2n ** 60n]) {
+			expect(() => explicitSeqValue(over), String(over)).toThrow(/exceeds the wire/i);
+		}
+		// 2^53+2 is an EXACT double and is still refused. An exactness test
+		// would have taken it while refusing 2^53+1, so a caller feeding
+		// consecutive offsets through this band would have had every second
+		// one rejected; and exactness would not have helped anyway, since the
+		// envelope serializes 2^60 as 1152921504606847000.
+		expect(BigInt(Number(2n ** 53n + 2n))).toBe(2n ** 53n + 2n);
+		expect(String(2 ** 60)).not.toBe('1152921504606846976');
+	});
+
+	it('returns a value that survives the envelope as the id that was handed in', () => {
+		// The class tripwire: whatever comes back must still be the caller's
+		// own id after the JSON envelope has stringified it. This is the
+		// property the range exists to guarantee, re-derived from the returned
+		// double rather than from the guard's spelling - so it holds the line
+		// wherever the line is drawn.
+		let accepted = 0;
+		for (let shift = 0n; shift < 64n; shift++) {
+			for (const offset of [0n, 1n, 2n, 3n]) {
+				const value = (1n << shift) + offset;
+				if (value < 1n) continue;
+				let returned;
+				try {
+					returned = explicitSeqValue(value);
+				} catch {
+					continue;
+				}
+				accepted++;
+				expect(BigInt(returned), 'projected away from the id').toBe(value);
+				// The envelope stringifies through String(double), which emits
+				// the SHORTEST round-tripping decimal - not the integer. That is
+				// the step an exact-double rule survived and a caller's id did
+				// not: 2^60 is an exact double and still leaves as
+				// 1152921504606847000. Re-parsing the returned double would
+				// pass for any double at all, so the string is what is checked.
+				expect(BigInt(String(returned)), 'lost in serialization').toBe(value);
+			}
+		}
+		// A guard that refused everything would satisfy every assertion above
+		// by never running one. The safe range covers 53 of the 64 shifts.
+		expect(accepted, 'the range must actually admit values').toBeGreaterThan(200);
 	});
 
 	it('refuses what neither lane can carry', () => {

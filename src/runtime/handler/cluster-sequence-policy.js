@@ -48,9 +48,17 @@ const MULTI_WORKER_RUNTIME = hasMultipleWorkers();
  * `null` are the no-seq forms and make no monotonic promise; a positive
  * integer `number` or `bigint` is the external authority and demands
  * `relay: false`; `true` and absent are the per-worker counter, which a
- * cluster refuses. The two modules must agree - a spelling the stamp accepts
- * and this gate refuses (or the reverse) is the drift both tables exist to
- * prevent.
+ * cluster refuses. The two modules must agree on SPELLINGS - a spelling the
+ * stamp accepts and this gate refuses (or the reverse) is the drift both
+ * tables exist to prevent.
+ *
+ * Whether an accepted spelling's VALUE can be carried is not asked here. A
+ * number or bigint past the double space's safe-integer range is a legitimate
+ * authority spelling that the stamp then refuses on magnitude
+ * ({@link import('../utils/epoch.js').explicitSeqValue}). Answering it here
+ * would hand that caller this module's topology message, which names relay
+ * settings and worker counters and would send them looking in the wrong
+ * place; letting the stamp answer gets them the magnitude message instead.
  *
  * @param {boolean | number | bigint | null | undefined} seq
  * @param {boolean | undefined} relay

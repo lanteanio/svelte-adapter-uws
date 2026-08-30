@@ -2,7 +2,7 @@
 // replays history through - on the BUILT modules a running server uses.
 //
 // The contract: number and bigint stamp the exact value (the publish lanes'
-// validation and double-space projection); false/null/absent leave the frame
+// validation and safe-integer range); false/null/absent leave the frame
 // byte-identical to the seq-less shape every prior release sent; true throws
 // its own message, because the send lanes have no counter to draw; and an
 // explicitly-seq'd send is SIDE-EFFECT-FREE - gap-fill replays history that
@@ -86,6 +86,29 @@ describe('the send lanes stamp an explicit seq, side-effect-free', () => {
 				.toThrow(/positive integer/);
 		}
 		expect(ws.sent.text, 'a refused send must put nothing on the wire').toEqual([]);
+	});
+
+	it('refuses a replay offset past the range the wire carries faithfully', () => {
+		const ws = scriptedWs();
+		// The gap-fill lane replays EXACT historical offsets, so this is the
+		// lane where a collapsed id does the most damage: the client advances
+		// its watermark only on a strict greater-than, so a second frame
+		// carrying the first frame's rounded seq leaves the watermark parked
+		// and the gap unclosed. Two adjacent offsets that share one double
+		// prove the hazard from the values themselves.
+		const offset = 1541815603606036481n;
+		expect(Number(offset)).toBe(Number(offset + 1n));
+		for (const id of [offset, offset + 1n, 2n ** 53n, 2n ** 53n + 2n]) {
+			expect(() => platform.send(ws, 'gapfill', 'update', {}, { seq: id }), String(id))
+				.toThrow(/exceeds the wire/i);
+		}
+		// The largest offset the lane does take arrives on the wire as the
+		// value that was handed in - after JSON has stringified it, which is
+		// which is the step an offset past the range does not survive.
+		platform.send(ws, 'gapfill', 'update', { v: 1 }, { seq: BigInt(Number.MAX_SAFE_INTEGER) });
+		expect(JSON.parse(ws.sent.text[0]).seq).toBe(Number.MAX_SAFE_INTEGER);
+		expect(ws.sent.text[0]).toContain(`"seq":${Number.MAX_SAFE_INTEGER}`);
+		expect(ws.sent.text.length, 'only the carryable offset reached the wire').toBe(1);
 	});
 
 	it('advances no counter, records no max-seen, captures no resume frame', () => {

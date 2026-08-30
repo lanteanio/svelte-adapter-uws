@@ -54,6 +54,23 @@ describe('cluster sequence authority policy', () => {
 		}
 	});
 
+	it('leaves an uncarryable bigint to the stamp, so the caller reads the magnitude message', () => {
+		// The gate asks a topology question and the stamp asks a value
+		// question. An offset past the range the wire carries faithfully
+		// satisfies the first and fails the second, and the order decides which
+		// message the caller sees: with the relay renounced the topology is
+		// satisfied, so the refusal must come from the stamp and must name the
+		// magnitude, not relay settings and worker counters.
+		const uncarryable = 1541815603606036481n;
+		expect(clusterSequenceAccepted({ seq: uncarryable, relay: false }, cluster)).toBe(true);
+		expect(() => stampSeq({ seq: uncarryable }, new Map(), 'room')).toThrow(/exceeds the wire/i);
+		expect(() => stampSeq({ seq: uncarryable }, new Map(), 'room')).not.toThrow(/relay|worker/i);
+		// With the relay left on, the topology is wrong too and is refused
+		// first - a caller who fixes only the magnitude would still be wrong.
+		expect(() => assertClusterSequenceAuthority({ seq: uncarryable, relay: true }, cluster))
+			.toThrow(CLUSTER_SEQUENCE_ERROR);
+	});
+
 	it('rejects a numeric authority on the batch surface whatever it is publishing', () => {
 		expect(() => assertBatchSequenceAuthority({ seq: 7, relay: false }, cluster))
 			.toThrow(BATCH_SEQUENCE_ERROR);
