@@ -861,7 +861,7 @@ export default function uws(options = {}) {
 				// no-seq false/null, inherit undefined, refuse the rest. Dev
 				// stamps no seq either way; the table exists here so dev
 				// refuses exactly the call production refuses.
-				const resolved = resolveEntrySeq(entry.seq);
+				const resolved = resolveEntrySeq(entry.seq, i);
 				if (resolved !== undefined) {
 					if (typeof resolved === 'number') {
 						if (!sawExplicitEntrySeq) {

@@ -1242,7 +1242,7 @@ export async function createTestServer(options = {}) {
 					// One table for the entry lane on every surface
 					// (resolveEntrySeq): explicit number/bigint, counter true,
 					// no-seq false/null, inherit undefined, refuse the rest.
-					const resolved = resolveEntrySeq(entry.seq);
+					const resolved = resolveEntrySeq(entry.seq, i);
 					if (resolved !== undefined) {
 						if (typeof resolved === 'number') {
 							if (!statelessSawExplicit) {
@@ -1328,7 +1328,7 @@ export async function createTestServer(options = {}) {
 				// One table for the entry lane on every surface
 				// (resolveEntrySeq): explicit number/bigint, counter true,
 				// no-seq false/null, inherit undefined, refuse the rest.
-				const resolved = resolveEntrySeq(entry.seq);
+				const resolved = resolveEntrySeq(entry.seq, i);
 				if (resolved !== undefined) {
 					if (typeof resolved === 'number') {
 						if (!sawExplicitEntrySeq) {

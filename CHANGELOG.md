@@ -175,7 +175,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through to the shared options), and a non-number entry seq published the
   entry under whatever the options said. The resolver is one function used
   by production, `createTestServer`, and the Vite dev plugin, so the three
-  surfaces cannot drift; `test/batch-sequence-mirror-parity.test.js` holds
+  surfaces cannot drift, and its refusals name the offending entry position -
+  one bad value refuses the whole batch, so a caller passing hundreds needs
+  more than the value back; `test/batch-sequence-mirror-parity.test.js` holds
   the acceptance and refusal table against the mirrors, and
   `test/seq-stamp.test.js` the resolver itself.
 

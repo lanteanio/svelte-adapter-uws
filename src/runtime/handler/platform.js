@@ -701,7 +701,7 @@ export const platform = {
 				// shared options for this entry - undefined inherits, and
 				// anything else refuses the whole batch here, before the first
 				// publish fans out.
-				const resolved = resolveEntrySeq(entry.seq);
+				const resolved = resolveEntrySeq(entry.seq, i);
 				if (resolved !== undefined) {
 					if (typeof resolved === 'number') {
 						if (!sawExplicitEntrySeq) {
@@ -829,7 +829,7 @@ export const platform = {
 			// shared options for this entry - undefined inherits, and anything
 			// else refuses the whole batch in this snapshot pass, before
 			// anything is stamped or serialized.
-			const resolved = resolveEntrySeq(entry.seq);
+			const resolved = resolveEntrySeq(entry.seq, i);
 			if (resolved !== undefined) {
 				if (typeof resolved === 'number') {
 					if (!sawExplicitEntrySeq) {

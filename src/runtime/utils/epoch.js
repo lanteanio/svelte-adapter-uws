@@ -245,7 +245,16 @@ export function explicitSeqValue(value) {
  * table change landing in one alone is exactly the mirror drift the parity
  * suite exists to catch.
  *
+ * A refusal names the entry's POSITION. One bad value refuses the whole
+ * batch, so without the index a caller handing over two hundred entries gets
+ * one message and no way to tell which of them carried it; the array is the
+ * caller's own, so the index is all they need to find it. Rethrown around the
+ * shared validators rather than parameterised into them, so the entry lane and
+ * the options lane keep one table and one wording - the position is a prefix,
+ * not a second contract. The wrapper costs nothing while nothing throws.
+ *
  * @param {unknown} value the entry's `seq` field, read once by the caller
+ * @param {number} [index] the entry's position, named in a refusal
  * @returns {number | boolean | undefined} `undefined` inherits the shared
  *   options; a NUMBER is the validated explicit authority (callers gate their
  *   authority assertion on this form); `true` draws the entry its own counter
@@ -253,7 +262,17 @@ export function explicitSeqValue(value) {
  *   entry seq-less. Anything else throws naming the legal forms - before the
  *   caller has stamped or delivered anything.
  */
-export function resolveEntrySeq(value) {
+export function resolveEntrySeq(value, index) {
+	try {
+		return resolveEntrySeqValue(value);
+	} catch (error) {
+		if (index === undefined || !(error instanceof TypeError)) throw error;
+		throw new TypeError(`batch entry ${index}: ${error.message}`);
+	}
+}
+
+/** @param {unknown} value @returns {number | boolean | undefined} */
+function resolveEntrySeqValue(value) {
 	if (value === undefined) return undefined;
 	if (typeof value === 'number' || typeof value === 'bigint') return explicitSeqValue(value);
 	if (value === false || value === null) return false;

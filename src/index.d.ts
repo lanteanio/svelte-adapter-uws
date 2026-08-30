@@ -2937,7 +2937,7 @@ export interface Platform {
 	 * multi-origin built-in relay is not also fanning out). `true`, `false`
 	 * and `null` act per entry as overrides of the shared options; an entry
 	 * without a `seq` draws from those options as before. Every explicit
-	 * per-entry seq is validated
+	 * per-entry seq is validated, and a refusal names that entry position, since one bad value refuses the whole batch
 	 * before anything is stamped or delivered: an invalid one refuses the
 	 * WHOLE batch, so a mid-batch refusal cannot leave earlier entries
 	 * already fanned out. A batch-level numeric `options.seq` stays refused outright

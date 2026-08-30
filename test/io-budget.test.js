@@ -835,9 +835,11 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// hot number arm swaps one predicate for another of the same shape
 	// (`Number.isInteger` -> `Number.isSafeInteger`) and delegates its cold
 	// refusal instead of throwing inline; nothing is allocated on the
-	// accepting path. No byte is read, allocated or copied, and no copy
-	// primitive entered the graph.
-	ingress: '688bd8f98172eb8aa17beb02da974206b6a65f22dbaa9f6b236c88bd6aba3ff5',
+	// accepting path. resolveEntrySeq additionally wraps that table so a
+	// refusal names the entry position - a try/catch entered per entry and
+	// left without catching unless something throws. No byte is read,
+	// allocated or copied, and no copy primitive entered the graph.
+	ingress: '5fdab6ac1232c92e618f028d1eedfb66d4278524abd02b94758046bbe607e310',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1450,9 +1452,11 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// legal-forms error directly; and the validator's bigint arm gained a
 	// `typeof` guard, since its `>= 1n` comparison alone coerced a string
 	// through StringToBigInt. One predicate for another on the hot path, a call
-	// frame added only on refusal. No byte is read, allocated or copied, and no
-	// copy primitive entered the graph.
-	platform: '719342fdfd67778b6fbe4d72b95e8a468a17232e1028bbaccbaa244f8e1d9d2b',
+	// frame added only on refusal. resolveEntrySeq additionally wraps that
+	// table so a refusal names the entry position - a try/catch entered per
+	// entry and left without catching unless something throws. No byte is
+	// read, allocated or copied, and no copy primitive entered the graph.
+	platform: '09bd678390721cc2111075e116af907905fedc99a202b5b424b286fb281bd9d0',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1662,7 +1666,12 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// change as the sibling seals (a throw-only helper and the range
 	// predicate); nothing in this graph's own fan-out modules changed, and no
 	// copy primitive entered.
-	'wire-fanout': '639a0c5f584db77030f6e8520ae1e3a21c4210758c52cc15b4fa3809823fe665',
+	//
+	// Re-pinned for the batch entry position on a seq refusal, again the same
+	// cold utils/epoch.js change as the siblings: resolveEntrySeq wraps the
+	// shared table so a refusal names the entry index. Nothing in this graph's
+	// own fan-out modules changed, and no copy primitive entered.
+	'wire-fanout': '07c0266ac535f90954003ba98469f686f638034776706860d2045136159266d8',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)
