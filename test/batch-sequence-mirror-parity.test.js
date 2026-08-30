@@ -46,6 +46,17 @@ afterEach(async () => {
 });
 
 const WIRE = { capability: 'fixture.mirror-parity:1', schemaVersion: 1, encode: () => null };
+// The SAME contract has to hold on the stateful lane, which is a different
+// entry loop with its own copy of the resolution. A `state` key is the only
+// thing that selects it (`if (!wire || !wire.state)`), so a fixture without one
+// silently drives the stateless lane twice and leaves the stateful sites
+// unpinned - a green case proving the claim only where it drove.
+const WIRE_STATEFUL = {
+	capability: 'fixture.mirror-parity-stateful:1',
+	schemaVersion: 1,
+	state: { onAttach: () => ({}) },
+	encode: () => null
+};
 const ENTRIES = [{ data: { n: 1 } }, { data: { n: 2 } }];
 
 /**
@@ -96,19 +107,23 @@ function assertEntrySeqContract(platform, label) {
 	// One bad value refuses the WHOLE batch, so the message has to say which
 	// entry carried it - otherwise a caller handing over hundreds gets one
 	// throw and no way to find the offender. Third entry, so a message that
-	// hardcoded 0 or reported a count rather than a position fails here.
-	expect(
-		() => platform.publishWireBatch('mirror-entry-room', 'update', [
-			{ data: { n: 1 }, seq: 5 }, { data: { n: 2 } }, { data: { n: 3 }, seq: '7' }, { data: { n: 4 } }
-		], WIRE, { seq: false }),
-		`${label}: a refusal must name the entry's position`
-	).toThrow(/batch entry 2:/);
-	expect(
-		() => platform.publishWireBatch('mirror-entry-room', 'update', [
-			{ data: { n: 1 } }, { data: { n: 2 }, seq: 2 ** 53 }
-		], WIRE, { seq: false }),
-		`${label}: the position rides the magnitude refusal too`
-	).toThrow(/batch entry 1: seq .*exceeds the wire/);
+	// hardcoded 0 or reported a count rather than a position fails here. Run
+	// against BOTH lanes: each has its own entry loop and its own copy of the
+	// resolution, so one lane's coverage says nothing about the other's.
+	for (const [wire, lane] of [[WIRE, 'stateless'], [WIRE_STATEFUL, 'stateful']]) {
+		expect(
+			() => platform.publishWireBatch('mirror-entry-room', 'update', [
+				{ data: { n: 1 }, seq: 5 }, { data: { n: 2 } }, { data: { n: 3 }, seq: '7' }, { data: { n: 4 } }
+			], wire, { seq: false }),
+			`${label}/${lane}: a refusal must name the entry's position`
+		).toThrow(/batch entry 2:/);
+		expect(
+			() => platform.publishWireBatch('mirror-entry-room', 'update', [
+				{ data: { n: 1 } }, { data: { n: 2 }, seq: 2 ** 53 }
+			], wire, { seq: false }),
+			`${label}/${lane}: the position rides the magnitude refusal too`
+		).toThrow(/batch entry 1: seq .*exceeds the wire/);
+	}
 
 	// Past the safe-integer range the entry lane must refuse for the SAME
 	// reason the options lane does, and say so: this is the spelling the

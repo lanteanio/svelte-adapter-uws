@@ -177,10 +177,14 @@ describeUWS('publishWireBatch per-entry explicit seq', () => {
 			// stamping would have run entry 0's toJSON - and on the stateless
 			// reroute, fanned it out - before reaching the refusal.
 			let serialised = false;
+			// Matched on the message, not just the class: the refusal names the
+			// offending entry's position, and this lane keeps its own copy of
+			// the resolution, so a class-only assertion here would leave the
+			// stateful site free to drop the index while the suite stayed green.
 			expect(() => platform.publishWireBatch(topic, 'update', [
 				{ data: { toJSON() { serialised = true; return { v: 'a' }; } }, seq: 10 },
 				{ data: { v: 'b' }, seq: 0 }
-			], statefulWire())).toThrow(TypeError);
+			], statefulWire())).toThrow(/^batch entry 1: /);
 
 			expect(serialised, 'an entry was serialised before the refusal landed').toBe(false);
 			expect(plain.sent.text, 'a refused batch fanned an entry out anyway').toEqual([]);

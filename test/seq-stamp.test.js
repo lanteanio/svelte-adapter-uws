@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stampSeq, nextTopicSeq, explicitSeqValue } from '../src/runtime/utils/epoch.js';
+import { stampSeq, nextTopicSeq, explicitSeqValue, resolveEntrySeq } from '../src/runtime/utils/epoch.js';
 
 // stampSeq is the shared publish-path resolver: it turns the `seq` option into
 // the value stamped on the wire, the same way for every publish entry point.
@@ -223,5 +223,56 @@ describe('explicitSeqValue (the shared explicit-authority validator)', () => {
 		for (const bad of [0, -3, 2.5, NaN, Infinity, 0n, -2n, 10n ** 400n]) {
 			expect(() => explicitSeqValue(bad)).toThrow(TypeError);
 		}
+	});
+});
+
+// resolveEntrySeq is the batch lane's spelling of the same table, and it adds
+// one thing the options lane has no use for: a refusal names the entry's
+// position, because one bad value takes the whole batch down and the caller
+// otherwise has no way to find it. Driven directly here - the mirror suite
+// proves the five call sites pass their index, this proves what the resolver
+// does with it, including the two passthroughs no call site exercises.
+describe('resolveEntrySeq (the batch lane spelling)', () => {
+	it('speaks the same table as the options lane', () => {
+		expect(resolveEntrySeq(undefined)).toBe(undefined);
+		expect(resolveEntrySeq(false)).toBe(false);
+		expect(resolveEntrySeq(null), 'null is the second no-seq form').toBe(false);
+		expect(resolveEntrySeq(true)).toBe(true);
+		expect(resolveEntrySeq(9)).toBe(9);
+		expect(resolveEntrySeq(9n), 'both spellings of one authority').toBe(9);
+	});
+
+	it('prefixes a refusal with the entry position when it is given one', () => {
+		expect(() => resolveEntrySeq('7', 3)).toThrow(/^batch entry 3: /);
+		expect(() => resolveEntrySeq(2 ** 53, 0), 'position 0 must still be named').toThrow(/^batch entry 0: /);
+		// The prefix is additive: the shared wording survives underneath it, so
+		// the two lanes cannot drift into two different explanations.
+		expect(() => resolveEntrySeq('7', 3)).toThrow(/positive integer/);
+		expect(() => resolveEntrySeq(2 ** 53, 1)).toThrow(/exceeds the wire/i);
+	});
+
+	it('keeps the refusal a TypeError, which callers match on', () => {
+		expect(() => resolveEntrySeq('7', 3)).toThrow(TypeError);
+	});
+
+	it('leaves the message alone when no position is supplied', () => {
+		// No caller passes one argument today. The branch exists so the resolver
+		// stays usable without a position, and an unpinned branch is how
+		// `batch entry undefined:` would reach a caller if the guard were ever
+		// relaxed to only check the error type.
+		expect(() => resolveEntrySeq('7')).toThrow(/^publish seq must be/);
+		expect(() => resolveEntrySeq('7')).not.toThrow(/batch entry/);
+		expect(() => resolveEntrySeq('7')).not.toThrow(/undefined:/);
+	});
+
+	it('does not dress up an error that is not a seq refusal', () => {
+		// The value's own coercion runs inside the wrapped region: String(value)
+		// on a hostile object throws from user code, not from the seq table, and
+		// wrapping that as a seq refusal would misattribute it. The class guard
+		// is what keeps the prefix honest.
+		const hostile = { [Symbol.toPrimitive]() { throw new RangeError('from the value'); } };
+		expect(() => resolveEntrySeq(hostile, 2)).toThrow(RangeError);
+		expect(() => resolveEntrySeq(hostile, 2)).toThrow(/from the value/);
+		expect(() => resolveEntrySeq(hostile, 2)).not.toThrow(/batch entry/);
 	});
 });

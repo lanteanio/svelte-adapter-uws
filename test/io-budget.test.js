@@ -839,7 +839,7 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// refusal names the entry position - a try/catch entered per entry and
 	// left without catching unless something throws. No byte is read,
 	// allocated or copied, and no copy primitive entered the graph.
-	ingress: '5fdab6ac1232c92e618f028d1eedfb66d4278524abd02b94758046bbe607e310',
+	ingress: 'cb9ca0497987e092e2105b5800e572bb761c0dfed3cc339d5b8e4a7cf2d472e8',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1456,7 +1456,7 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// table so a refusal names the entry position - a try/catch entered per
 	// entry and left without catching unless something throws. No byte is
 	// read, allocated or copied, and no copy primitive entered the graph.
-	platform: '09bd678390721cc2111075e116af907905fedc99a202b5b424b286fb281bd9d0',
+	platform: 'e2b3133ac6ce57a4dbbc6c9244cb2ca9e42c141fd512355eae38e07252b5ce42',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1671,7 +1671,7 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// cold utils/epoch.js change as the siblings: resolveEntrySeq wraps the
 	// shared table so a refusal names the entry index. Nothing in this graph's
 	// own fan-out modules changed, and no copy primitive entered.
-	'wire-fanout': '07c0266ac535f90954003ba98469f686f638034776706860d2045136159266d8',
+	'wire-fanout': '1d60d6ff4fe81a547a35a681026099cbed0515264897e1b4048163305e43b0a6',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

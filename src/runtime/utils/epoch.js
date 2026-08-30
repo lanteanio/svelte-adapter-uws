@@ -251,7 +251,19 @@ export function explicitSeqValue(value) {
  * caller's own, so the index is all they need to find it. Rethrown around the
  * shared validators rather than parameterised into them, so the entry lane and
  * the options lane keep one table and one wording - the position is a prefix,
- * not a second contract. The wrapper costs nothing while nothing throws.
+ * not a second contract.
+ *
+ * Only a VALUE refusal is prefixed. The counter-draw refusal an entry can also
+ * trigger (`seq: true` on a clustered runtime) is left alone deliberately: it
+ * is a plain Error about the DEPLOYMENT, not this entry, and its remedy - the
+ * options renouncing the counter with an authority on each entry - is the same
+ * whichever entry happened to surface it, so a position would point at a
+ * scapegoat rather than at the fault. A value refusal is the opposite: exactly
+ * one entry holds the offending value.
+ *
+ * The catch also refuses to dress up an error it did not cause. Coercing the
+ * value for the message runs user code (`Symbol.toPrimitive`), and something
+ * thrown from there is the caller's, not a seq verdict.
  *
  * @param {unknown} value the entry's `seq` field, read once by the caller
  * @param {number} [index] the entry's position, named in a refusal
@@ -267,7 +279,7 @@ export function resolveEntrySeq(value, index) {
 		return resolveEntrySeqValue(value);
 	} catch (error) {
 		if (index === undefined || !(error instanceof TypeError)) throw error;
-		throw new TypeError(`batch entry ${index}: ${error.message}`);
+		throw new TypeError(`batch entry ${index}: ${error.message}`, { cause: error });
 	}
 }
 
