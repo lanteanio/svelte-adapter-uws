@@ -213,8 +213,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   One shared predicate and frame builder serve production, `createTestServer`
   and the Vite dev plugin, so the surfaces cannot drift; plain ref-less
   subscribes keep their silence, and `recover` with no resume hook stays
-  ignored. `test/recover-ref-contract.test.js` holds the refusal, the
-  with-ref control, and both preserved silences on all three surfaces.
+  ignored. The code is registered in PROTOCOL.md, in section 3.7 beside
+  `CONTROL_FRAME_TOO_LARGE` and in the C.4 registry, and section 3.2's
+  silent-mode rule carries the carve-out: an unregistered code is one a
+  conforming client is required to IGNORE, so the refusal would have been
+  dropped by exactly the hand-rolled clients it exists for.
+  `test/recover-ref-contract.test.js` holds the refusal, the with-ref control,
+  and both preserved silences on all three surfaces;
+  `test/protocol-schema.test.js` pins every emitted error code against the
+  registry in both directions.
 
 - **A batch call-level `excludeWs` is the default exclusion for every entry.**
   `publishWireBatch` forwarded its options to the per-entry path on the

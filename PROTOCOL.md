@@ -255,7 +255,12 @@ advertising a token the server does not know is harmless.
   whose `ref` is absent, or is not a number or string (null, boolean, object),
   is performed but NOT acked - the server sends no `subscribed` and no
   `subscribe-denied`. An emitted ack therefore always carries a number or string
-  `ref`, never `null`.
+  `ref`, never `null`. One exception, and it is not an ack: a `subscribe`
+  carrying `recover` against a server with a resume hook is REFUSED rather than
+  performed silently, with `{"type":"error","code":"RECOVER_REQUIRES_REF"}`
+  (section 3.7). Silent mode trades away hearing the outcome; it cannot trade
+  away history the client asked to be sent, because a client that never learns
+  the gap-fill did not happen resumes over a hole in its own stream.
 - `subscribe-batch` caps at **256 topics per frame** and emits one
   `subscribed` / `subscribe-denied` ack per topic, all sharing the one `ref`.
   Topics past the cap are NOT subscribed and are each answered
@@ -387,10 +392,10 @@ sends it remains fully flow-controlled.
 
 | Frame | Dir | Shape |
 |---|---|---|
-| `error` | s->c | `{"type":"error","code":"<string>","limit"?:<int>,"size"?:<int>}` |
+| `error` | s->c | `{"type":"error","code":"<string>","limit"?:<int>,"size"?:<int>,"topic"?:<string\|null>}` |
 
 A protocol-level error the server surfaces to the client (never to the
-application). Revision 1 defines one `code`:
+application). Revision 1 defines these `code` values:
 
 - `CONTROL_FRAME_TOO_LARGE` - a control-shaped frame the client sent reached or
   exceeded the control-frame ceiling (section 1.2) and was rejected, not acted
@@ -400,8 +405,19 @@ application). Revision 1 defines one `code`:
   overflowed. The client SHOULD reduce the frame (chunk a batch, move a large
   payload off the control path) and MAY surface the error to a developer.
 
-The `code` set is a registry (appendix C.3): a client MUST ignore an `error`
-frame whose `code` it does not recognize (per section 1.4).
+- `RECOVER_REQUIRES_REF` - a `subscribe` carrying `recover` arrived without a
+  `ref` while the server has a resume hook. `topic` names the topic, or is
+  `null` when a whole `subscribe-batch` frame is refused. History is the one
+  reply a client must correlate, so the silent-mode rule of section 3.2 cannot
+  apply to it: staying silent would leave the client believing it had
+  subscribed AND been gap-filled, and resuming over a hole in its history. The
+  subscription is NOT installed. The client MUST send a `ref` on any subscribe
+  that asks for recovery.
+
+The `code` set is a registry (appendix C.4): a client MUST ignore an `error`
+frame whose `code` it does not recognize (per section 1.4). Codes are additive
+within a revision - a new one does not change any existing frame's shape, and
+the ignore rule is what makes adding one safe.
 
 ### 3.8 Binary ingress (optional)
 
@@ -1738,6 +1754,7 @@ has not negotiated a future assignment.
 | Code | Meaning |
 |---|---|
 | `CONTROL_FRAME_TOO_LARGE` | A control-shaped frame exceeded the ceiling (sections 1.2, 3.7). |
+| `RECOVER_REQUIRES_REF` | A `subscribe` asked for `recover` without a `ref` (sections 3.2, 3.7). |
 
 ### C.5 WebTransport CONNECT capability registry
 

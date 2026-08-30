@@ -740,3 +740,57 @@ describeUWS('reference server frames conform to the schema', () => {
 		ws.close();
 	});
 });
+
+// Every protocol `error` code the runtime can put on the wire must be declared
+// in PROTOCOL.md - both in section 3.7's prose and in the C.4 registry.
+//
+// This exists because a code shipped without either. Section 3.7 went on
+// saying "Revision 1 defines one code" while the runtime emitted a second one,
+// so a third-party client implementer reading the spec had no way to learn it
+// existed - and the client-side rule for an unknown code is to IGNORE it,
+// which means the refusal would have been silently dropped by exactly the
+// hand-rolled clients it was written for. The codes are discovered from the
+// source rather than listed here, so a new one cannot be added without either
+// registering it or failing this.
+describe('protocol error code registry', () => {
+	const EMITTERS = ['src/runtime/utils/subscribe-policy.js', 'src/runtime/wire.js'];
+
+	function emittedCodes() {
+		const codes = new Set();
+		for (const rel of EMITTERS) {
+			const source = readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+			for (const match of source.matchAll(/"type":"error","code":"([A-Z_]+)"/g)) codes.add(match[1]);
+		}
+		return codes;
+	}
+
+	it('finds the emitters it claims to scan', () => {
+		// A scan that silently matched nothing would pass every assertion below
+		// while checking nothing at all.
+		const codes = emittedCodes();
+		expect(codes.size, 'no error codes found - the emitter list or the frame shape moved').toBeGreaterThanOrEqual(2);
+		expect([...codes]).toContain('CONTROL_FRAME_TOO_LARGE');
+	});
+
+	it('declares every emitted code in section 3.7 and the C.4 registry', () => {
+		const registry = protocol.slice(protocol.indexOf('### C.4 Protocol `error` code registry'));
+		expect(registry.length, 'the C.4 registry heading moved').toBeGreaterThan(0);
+		for (const code of emittedCodes()) {
+			expect(protocol, `${code} is emitted but not described in PROTOCOL.md`).toContain(`\`${code}\``);
+			expect(registry, `${code} is emitted but missing from the C.4 registry`).toContain(`| \`${code}\` |`);
+		}
+	});
+
+	it('does not register a code nothing emits', () => {
+		// The reverse drift: a code removed from the runtime but left in the
+		// spec tells an implementer to handle a frame that can never arrive.
+		const registry = protocol.slice(protocol.indexOf('### C.4 Protocol `error` code registry'));
+		const table = registry.slice(0, registry.indexOf('### C.5'));
+		const declared = [...table.matchAll(/^\| `([A-Z_]+)` \|/gm)].map((m) => m[1]);
+		expect(declared.length, 'the C.4 table shape moved').toBeGreaterThanOrEqual(2);
+		const emitted = emittedCodes();
+		for (const code of declared) {
+			expect(emitted.has(code), `${code} is registered in C.4 but nothing emits it`).toBe(true);
+		}
+	});
+});
