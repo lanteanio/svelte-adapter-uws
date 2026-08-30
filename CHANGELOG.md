@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Absent, `true`, `false`, and in-range numbers behave exactly as before, on every lane and every surface (production, `createTestServer`, `vite dev`). `null` moves from counter to no-seq; non-contract values move from counter to `TypeError`. Two breaks to know about: an integer above `Number.MAX_SAFE_INTEGER` moves from a silently rounded publish to a `TypeError`, because the double seq space stops having a neighbour at distance one there and adjacent ids collapse onto one value, which stalls a client watermark that only advances on a strict greater-than.
   - **Detail:** [Changed engineering detail](#changed).
+- **Fixed: a `staticHeaders` value carrying a newline is refused at build time.** A CR, LF or NUL in a configured value reached `res.writeHeader` verbatim, where it ends the header field and starts whatever follows - header injection, or a second response; names are now held to the RFC 9110 token grammar too.
+  - **Affects:** Builds configuring `staticHeaders`. A value or name that could split a response now fails the build instead of shipping.
+  - **Action:** None for a valid configuration. A build that starts failing was emitting a header a client could not have read correctly - remove the newline, or fold the value onto one line.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Refused at build rather than sanitised at request time, so an operator is told rather than quietly served something other than what they configured. Every name the token grammar allows still passes, including the punctuation set, and names are lowercased as before.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: a respawning worker is no longer quarantined for the relay backlog its boot could not drain.** A crashed worker's replacement filled its ring while booting and the age ceiling read that as a stall, respawning it until the restart limit killed the process; the primary now skips a worker in the fan-out until it reports its reader live.
   - **Affects:** Multi-worker deployments with the relay ring enabled, under enough relay traffic to fill a booting worker's ring inside its boot time.
   - **Action:** None.
@@ -182,6 +188,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/seq-stamp.test.js` the resolver itself.
 
 ### Fixed
+
+- **`staticHeaders` refuses a name or value that could split a response.**
+  `normalizeStaticHeaders` validated the value's TYPE and nothing else, so a
+  configured string carrying CR, LF or NUL passed the build and reached
+  `res.writeHeader` verbatim. Those bytes terminate a header field on the
+  wire, so the remainder of the value is written as further headers - or,
+  after a blank line, as a second response body. The value is now scanned for
+  all three, and the NAME is held to the RFC 9110 token grammar rather than
+  scanned for the same bytes: anything outside `1*tchar` cannot appear in a
+  legal field name anyway, and an allowlist cannot be outflanked the way a
+  denylist can. Both checks run BEFORE the reserved-key drop, so a reserved
+  name cannot carry the bytes past them on its way to being discarded.
+  Refused at build rather than sanitised per request, because rewriting a
+  configured value at send time leaves an operator believing the header they
+  wrote is the header being served. `test/static-headers.test.js` drives the
+  splitting payloads, the illegal names, the legal punctuation set, and the
+  ordering against the reserved drop.
 
 - **The cursor plugin reads the envelope the runtime already parsed.** The
   adapter decodes and parses a small JSON object frame once and hands it to

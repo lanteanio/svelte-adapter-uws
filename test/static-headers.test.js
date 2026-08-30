@@ -191,3 +191,61 @@ describe('staticCacheControl', () => {
 		])).toThrow(/duplicate pattern/);
 	});
 });
+
+// A configured header value reaches `res.writeHeader` verbatim, so a CR or LF
+// inside one ends the field on the wire and starts whatever follows - header
+// injection, or a whole second response. Refused where the misconfiguration is
+// written rather than sanitised where it is sent: rewriting an operator's value
+// at request time would leave them believing the header they configured is the
+// header being served.
+describe('normalizeStaticHeaders refuses header-splitting input', () => {
+	it('refuses a value carrying CR, LF or NUL', () => {
+		for (const evil of [
+			'DENY\r\nx-injected: 1',
+			'DENY\nx-injected: 1',
+			'DENY\rx-injected: 1',
+			'DENY\0',
+			'\r\n\r\n<html>owned</html>'
+		]) {
+			expect(
+				() => normalizeStaticHeaders({ 'x-frame-options': evil }),
+				JSON.stringify(evil)
+			).toThrow(/carriage return, line feed or NUL/);
+		}
+	});
+
+	it('refuses a name that is not an RFC 9110 token', () => {
+		// A name is as dangerous as a value: the colon and CRLF are written into
+		// the same header block. Held to the token grammar rather than scanned
+		// for the three bytes, so a space or a quote is refused too.
+		for (const evil of ['x-bad\r\nx-injected', 'x bad', 'x:bad', 'x"bad', 'x\0bad', '']) {
+			expect(
+				() => normalizeStaticHeaders({ [evil]: 'v' }),
+				JSON.stringify(evil)
+			).toThrow(/valid HTTP field name/);
+		}
+	});
+
+	it('still takes every name the grammar allows', () => {
+		// The refusal must not cost legal punctuation - a denylist would have
+		// let these through by accident, an allowlist can refuse them by
+		// accident, so they are pinned.
+		const ok = normalizeStaticHeaders({
+			'x-frame-options': 'DENY',
+			"x-weird!#$%&'*+.^_`|~-name": 'v',
+			'X-Upper-Case': 'v'
+		});
+		expect(ok.headers['x-frame-options']).toBe('DENY');
+		expect(ok.headers["x-weird!#$%&'*+.^_`|~-name"]).toBe('v');
+		expect(ok.headers['x-upper-case'], 'names are lowercased as before').toBe('v');
+	});
+
+	it('refuses before the reserved-key drop, so a reserved name cannot smuggle bytes', () => {
+		// The drop is a `continue`, so a reserved key checked FIRST would skip
+		// the validation entirely and a value like `content-length: 0\r\n...`
+		// would be silently discarded rather than reported - hiding a
+		// configuration that was trying to do something dangerous.
+		expect(() => normalizeStaticHeaders({ 'content-length': '0\r\nx-injected: 1' }))
+			.toThrow(/carriage return, line feed or NUL/);
+	});
+});

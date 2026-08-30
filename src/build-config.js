@@ -5,6 +5,13 @@
 
 import { RESERVED_STATIC_HEADER_KEYS } from './runtime/utils/static-headers.js';
 
+// RFC 9110 field-name grammar: 1*tchar. The set is written out rather than
+// approximated with \w, which would admit nothing legal that this misses and
+// would still reject the punctuation the grammar allows.
+const STATIC_HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+// The three bytes that terminate or truncate a header field on the wire.
+const FORBIDDEN_HEADER_BYTES = /[\r\n\0]/;
+
 /**
  * @typedef {Object} NormalizedStaticHeaders
  * @property {Record<string, string> | null} headers - lowercased, reserved keys
@@ -42,6 +49,31 @@ export function normalizeStaticHeaders(input) {
 			);
 		}
 		const key = rawKey.toLowerCase();
+		// A CR, LF or NUL reaching `res.writeHeader` is a response-splitting
+		// primitive: the bytes are written into the header block verbatim, so a
+		// value carrying CRLF ends the current header and starts whatever the
+		// rest of the string says - including a second response. Refused at
+		// BUILD time rather than sanitised at request time, because silently
+		// rewriting an operator's configured value would hide the misconfig
+		// while leaving them believing the header they wrote is being sent.
+		//
+		// The name is held to the RFC 9110 token grammar rather than only
+		// scanned for the three bytes, because anything outside it - a space,
+		// a colon, a quote - cannot appear in a legal field name anyway, and an
+		// allowlist cannot be outflanked the way a denylist can.
+		if (!STATIC_HEADER_NAME.test(key)) {
+			throw new Error(
+				`adapter option \`staticHeaders['${rawKey}']\` has a header name that is not a valid HTTP field name. ` +
+				'Names are RFC 9110 tokens: letters, digits and !#$%&\'*+-.^_`|~ only.'
+			);
+		}
+		if (FORBIDDEN_HEADER_BYTES.test(value)) {
+			throw new Error(
+				`adapter option \`staticHeaders['${rawKey}']\` contains a carriage return, line feed or NUL. ` +
+				'Those bytes end a header field on the wire, so a value carrying them could inject headers ' +
+				'or a whole second response. Remove them, or fold the value onto one line.'
+			);
+		}
 		if (RESERVED_STATIC_HEADER_KEYS.has(key)) {
 			dropped.push(key);
 			continue;
