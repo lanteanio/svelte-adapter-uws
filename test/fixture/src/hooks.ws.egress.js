@@ -44,6 +44,22 @@ export function message(ws, { data, platform }) {
 		platform.send(ws, 'probe', 'publish-probe-result', { nonce: msg.nonce, result });
 		return;
 	}
+	if (msg?.type === 'seq-probe' && typeof msg.topic === 'string') {
+		// The client names the seq and this passes it verbatim, so the suite can
+		// drive one publish whose value the wire cannot carry. Both outcomes are
+		// echoed: a refusal must reach the caller as a thrown TypeError whether
+		// or not the ceiling would have shed this frame, and `false` is what the
+		// shed answers - the two must never be confusable.
+		let result = null;
+		let error = null;
+		try {
+			result = platform.publish(msg.topic, 'probe-event', { nonce: msg.nonce }, { seq: msg.seq });
+		} catch (e) {
+			error = { name: e?.constructor?.name || 'Error', message: String(e?.message ?? e) };
+		}
+		platform.send(ws, 'probe', 'seq-probe-result', { nonce: msg.nonce, result, error });
+		return;
+	}
 	if (msg?.type === 'sendto-probe' && typeof msg.topic === 'string') {
 		const count = platform.sendTo(() => true, msg.topic, 'sendto-event', { nonce: msg.nonce });
 		platform.send(ws, 'probe', 'sendto-probe-result', { nonce: msg.nonce, count });

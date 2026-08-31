@@ -510,7 +510,15 @@ const COPY_AUTHORITY_SYNTAX = Object.freeze({
 	// bare stamped write. One comparison on a value already read once; the
 	// body's reads, encodes and writes are otherwise byte-identical, and no
 	// copy primitive entered.
-	publishWire: 'fb68b427bdf69b0fe8de528a856825be83f24b8885b39d0bbde44fdf5f986687',
+	//
+	// Re-pinned again for the seq value check: one guarded statement,
+	// `if (!isRelay) assertStampableSeq(seqOption)`, between the authority
+	// check and the recipient count, so a value the wire cannot carry is
+	// refused rather than answered with the ceiling's `false`. It judges the
+	// `seqOption` local the lane already read once and runs on the origin side
+	// only. The body's reads, encodes and writes are otherwise byte-identical,
+	// and no copy primitive entered.
+	publishWire: '1112096caa019d22731aad05dd3786f0ce0330b93053119d486ad3829be16b6e',
 	deliverStatelessWireFanout: '98c4246e4bea446d1647f6bf0b13fb0e0cde521ac27dfe899eff42b884113afa',
 	dispatchIngressFrame: '5ff5ed75d331620ed0bbdd4ffd9fe57ecb993b3b3d97923bdb7edf48e7483e5b',
 	send: 'c900028ed26614f6a0d83b1d57a6649a52db522503def86eee3000541d285b11',
@@ -847,7 +855,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// characters as well. One `String.prototype.replace` where there was one
 	// before, on the static INDEX path rather than any frame path. No byte is
 	// read, allocated or copied, and no copy primitive entered the graph.
-	ingress: '731124fb5a1bd818cc7f77ac9576e97a353e3f11b981e8188618eeee938a85e5',
+	//
+	// Re-pinned for the seq value check that now runs before egress admission.
+	// The drift reaches this graph through utils.js -> utils/epoch.js (a
+	// module-level null constant and assertStampableSeq, which returns for the
+	// two counter spellings and otherwise delegates to stampSeqValue) and
+	// handler/cluster-sequence-policy.js, whose batch gate calls it. Two
+	// comparisons and a delegation frame, on the publish surfaces only - no
+	// frame path in this graph executes differently, no byte is read,
+	// allocated or copied, and no copy primitive entered.
+	ingress: '8a3baac932c743ae774f1d914cd6340b7726fdbd57c93c8ad81d921752adb7d5',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1470,7 +1487,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// to the control characters. Static INDEX path only, one replace where
 	// there was one before; no frame path executes differently, no byte is
 	// read, allocated or copied, and no copy primitive entered the graph.
-	platform: '7db726fe647238c158f9503a11d17251675ceda70a09fca79e20ceda7472981c',
+	//
+	// Re-pinned for the seq value check that now runs before egress admission.
+	// Same shared drift as the ingress graph - assertStampableSeq in
+	// utils/epoch.js and the batch gate's call to it - plus this module's own
+	// two call sites: one statement in publish and one in publishWire, each
+	// judging a `seq` local the lane already read once, both ahead of the
+	// admission decision and behind the same guards the authority check
+	// already carries. No byte is read, allocated or copied, and no copy
+	// primitive entered.
+	platform: '190cf2a75df938b2f1c6cfdc25d7600504272d82f58d9c834f89d516adfdc884',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1690,7 +1716,13 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// utils/static-headers.js with a widened strip. Static index path only;
 	// nothing in this graph's own fan-out modules changed, and no copy
 	// primitive entered.
-	'wire-fanout': 'e35cf7bca3f496722f7fd219bc0cfc3c5aa1681fc402d012ba63469f8c253293',
+	//
+	// Re-pinned for the seq value check before egress admission, again the
+	// same cold utils/epoch.js addition as the siblings: assertStampableSeq,
+	// which returns for the counter spellings and otherwise delegates to the
+	// stamp's own table. Nothing in this graph's own fan-out modules changed,
+	// and no copy primitive entered.
+	'wire-fanout': '2cea428c879382f9c723ef6f393c29cc0e2dd7d4d5ba38cd688a9e91ad847d72',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

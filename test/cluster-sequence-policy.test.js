@@ -119,6 +119,27 @@ describe('cluster sequence authority policy', () => {
 		expect(assertBatchSequenceAuthority.length).toBe(1);
 	});
 
+	// The gate also answers the VALUE question the batch would otherwise reach
+	// only in its stamping loop - which runs after the batch has taken its
+	// egress decision, and never at all for an empty call. Numeric keeps its own
+	// refusal: a number IS stampable, and what it has to earn is the message
+	// naming the per-entry spelling that replaces it.
+	it('refuses an options seq the stamp could not take, whatever the entries are', () => {
+		for (const bad of ['7', '', {}, [], () => 1, Symbol.iterator, Number.NaN]) {
+			expect(() => assertBatchSequenceAuthority({ seq: bad }), `seq ${String(bad)}`)
+				.toThrow(TypeError);
+		}
+		expect(() => assertBatchSequenceAuthority({ seq: '7' })).toThrow(/publish seq must be/);
+		expect(() => assertBatchSequenceAuthority({ seq: Number.NaN })).toThrow(BATCH_SEQUENCE_ERROR);
+		// And still takes every spelling the batch supports, or the refusals
+		// above would be satisfied by a gate that threw on everything.
+		for (const ok of [undefined, true, false, null]) {
+			expect(() => assertBatchSequenceAuthority({ seq: ok }), `seq ${String(ok)}`).not.toThrow();
+		}
+		expect(() => assertBatchSequenceAuthority(undefined)).not.toThrow();
+		expect(() => assertBatchSequenceAuthority(null)).not.toThrow();
+	});
+
 	// An entry carrying an explicit seq is the per-entry twin of
 	// publishWire({ seq: N }) and takes the same clustered rule: the external
 	// allocator must also be the fan-out, and relay: false is the observable
@@ -195,6 +216,13 @@ describe('cluster sequence authority policy', () => {
 		for (const field of ['options.seq', 'options.relay', 'options.compress', 'options.jitterMs']) {
 			expect(publish.split(field).length, `publish reads ${field} exactly once`).toBe(2);
 		}
+		// The VALUE question is asked ahead of the ceiling, not left to the
+		// stamp. Stamping is the last step on this lane, so a seq the wire
+		// cannot carry used to be answered with the shed's own `false` while a
+		// budget was armed and threw only after load dropped.
+		expect(publish).toContain('assertStampableSeq(seqOption);');
+		expect(publish.indexOf('assertStampableSeq('), 'publish must refuse the value before it admits')
+			.toBeLessThan(publish.indexOf('admitPublishEgress('));
 		expect(wire).toContain('if (!isRelay) assertClusterSequenceAuthorityValues(seqOption, relayOption);');
 		// The wire slice runs on into the batch surfaces; the one-read counts
 		// must cover exactly the publishWire body, which ends at the next JSDoc.
@@ -202,6 +230,11 @@ describe('cluster sequence authority policy', () => {
 		for (const field of ['options.seq', 'options.relay', 'options.compress', 'options.excludeWs', 'options._relaySeq']) {
 			expect(wireBody.split(field).length, `publishWire reads ${field} exactly once`).toBe(2);
 		}
+		// Same ordering on the wire lane, and origin-side only: a relayed frame
+		// carries `_relaySeq` instead, already validated where it was published.
+		expect(wireBody).toContain('if (!isRelay) assertStampableSeq(seqOption);');
+		expect(wireBody.indexOf('assertStampableSeq('), 'publishWire must refuse the value before it admits')
+			.toBeLessThan(wireBody.indexOf('admitPublishEgress('));
 		// The batch asserts on its OWN copy of the options, not on the caller's
 		// live object - a caller that mutated it after the check would otherwise
 		// stamp under an authority nobody validated. The guard runs before ANY

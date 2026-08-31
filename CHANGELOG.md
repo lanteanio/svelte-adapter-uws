@@ -82,6 +82,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Strictly tighter: encoded bytes are never fewer than code units, so nothing previously refused is now admitted. Refusal reports carry the exact encoded size.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a `seq` the wire cannot carry is refused even while an egress ceiling is shedding.** The publish lanes validated the value as a side effect of stamping, which happens after the ceiling decides, so a bad `seq` came back as an ordinary-looking `false` under load and threw only once traffic dropped.
+  - **Affects:** Callers passing a `seq` outside the contract while an egress budget is armed. With no budget configured the refusal already arrived immediately and nothing changes.
+  - **Action:** None. The `TypeError` that now arrives on the offending call was always the correct answer; it was previously deferred to the first quiet window, pointing at a deploy that could be weeks old.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The refusals, their messages and their classes are unchanged - only their timing is. A refused value charges no egress and advances no counter. `publishWireBatch` now takes the same decision at its call gate, so an empty batch refuses what a full one refuses, on production, `createTestServer` and `vite dev` alike.
+  - **Detail:** [Fixed engineering detail](#fixed).
 
 <!-- consumer-release-summary:end -->
 
@@ -188,6 +194,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/seq-stamp.test.js` the resolver itself.
 
 ### Fixed
+
+- **A seq refusal no longer waits for the egress ceiling to relax.** The
+  publish lanes validated a `seq` as a side effect of stamping it, and the
+  stamp is the last step they take: the ceiling decides first. So with a
+  budget armed and its window crossed, `publish(topic, event, data, { seq:
+  '5' })` returned `false` - which is also the ordinary answer under load,
+  carries no signal that anything is wrong, and is what a caller's retry logic
+  is written around. The `TypeError` arrived only once traffic dropped,
+  pointing at a deploy that could be weeks old. `assertStampableSeq` now asks
+  the value question ahead of the admission decision in `publish` and
+  `publishWire`, and inside the batch call gate for `publishWireBatch` - which
+  also moves that surface's refusal ahead of the empty-batch early return, so
+  an empty call refuses what a full one refuses rather than answering `false`
+  for a value it would throw on the moment one entry is added. The harness's
+  `publish` takes the same order, so an application certifying against
+  `createTestServer` meets the error it will meet in production.
+  The check delegates to `stampSeqValue` rather than restating its table, and
+  returns early for the two counter spellings - the only arms that read a
+  counter map - so it can be handed none at all: a delegation that ever fell
+  through to the counter dereferences the absent map and its verdict stops
+  matching the stamp's, which `test/seq-stamp.test.js` compares value by
+  value, message included. `test/publish-seq-refusal-order-real.test.js`
+  drives the built runtime with the ceiling proven to be shedding first, so a
+  run where the budget never armed cannot report the claim as verified.
 
 - **`staticHeaders` refuses a name or value that could split a response.**
   `normalizeStaticHeaders` validated the value's TYPE and nothing else, so a

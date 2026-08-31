@@ -428,6 +428,42 @@ export function stampSeqValue(opt, seqMap, topic, bound) {
 }
 
 /**
+ * Never read: `assertStampableSeq` returns before the counter arm for the only
+ * two spellings that reach it. Passed rather than omitted so an edit that moved
+ * a map read above the value arms fails loudly here, instead of quietly
+ * counting into a scratch map no publish ever stamps from.
+ */
+const NO_COUNTER = /** @type {Map<string, number>} */ (/** @type {unknown} */ (null));
+
+/**
+ * Refuse a `seq` option the publish lanes could not stamp - without stamping,
+ * drawing a counter, or touching a map.
+ *
+ * The lanes validate as a side effect of stamping, and the stamp is the LAST
+ * thing they do: the egress ceiling and the batch fan-out both run before it.
+ * So a value refusal used to arrive after a decision had already been taken -
+ * a caller under an armed ceiling was answered `false`, which is also the
+ * ordinary answer under load, and only got the TypeError once the ceiling
+ * relaxed. Calling this first makes the refusal unconditional and puts it
+ * ahead of anything irreversible.
+ *
+ * Delegated to {@link stampSeqValue} rather than restating its table. A second
+ * copy of the spellings is the drift {@link resolveEntrySeq} was made shared to
+ * prevent, and a checker that accepted what the stamp refuses would leave the
+ * throw exactly where it was.
+ *
+ * @param {unknown} opt the `seq` option, read once by the caller
+ * @returns {void}
+ * @throws {TypeError} if the stamp would refuse this value
+ */
+export function assertStampableSeq(opt) {
+	// The counter spellings cannot be refused, and they are the only arms that
+	// read the map - returning here is what lets the delegation run without one.
+	if (opt === undefined || opt === true) return;
+	stampSeqValue(/** @type {boolean | number | bigint | null} */ (opt), NO_COUNTER, '');
+}
+
+/**
  * Build a hybrid logical clock the platform projects as `platform.hlc()`.
  *
  * Each returned stamp is `{ wall, logical, nodeId }`:

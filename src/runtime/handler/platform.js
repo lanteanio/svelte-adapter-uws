@@ -6,7 +6,7 @@ import { metricsSnapshot } from './metrics-snapshot.js';
 import { isWarmupRequest } from './warmup-registry.js';
 import { parentPort } from 'node:worker_threads';
 import { exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
-import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, mintTopicEpoch, topicEpochValue, readAssertionCounts, resolveEntrySeq, resolveSendSeq, stampSeqValue, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
+import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, mintTopicEpoch, topicEpochValue, readAssertionCounts, resolveEntrySeq, resolveSendSeq, stampSeqValue, assertStampableSeq, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
 import { egressGate, resolvePublishTenant, admitPublishEgress, admitTopicEgress, admitTenantEgress, chargePublishEgress, chargeDirectEgress, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, EGRESS_ADMITTED } from './egress-budget.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
@@ -136,6 +136,12 @@ export const platform = {
 		const compressOption = options != null ? options.compress : undefined;
 		const jitterOption = options != null ? options.jitterMs : undefined;
 		assertClusterSequenceAuthorityValues(seqOption, relayOption);
+		// The VALUE, ahead of the ceiling below. Stamping is the last step on
+		// this lane, so a seq the wire cannot carry used to be answered with a
+		// plain `false` while the budget was armed - indistinguishable from the
+		// ordinary shed - and with the TypeError only once load dropped. A
+		// programming error must not surface on a schedule set by traffic.
+		assertStampableSeq(seqOption);
 		// Egress recipients are the topic's local native subscribers, read once
 		// per logical publish; the ceiling decision runs BEFORE the sequence is
 		// stamped, so a refused publish leaves no client-visible seq gap and
@@ -301,6 +307,10 @@ export const platform = {
 		// form the policy pin greps for: it is the security-relevant guard, and
 		// what follows it here is accounting.
 		if (!isRelay) assertClusterSequenceAuthorityValues(seqOption, relayOption);
+		// And the value, before the admission below (see publish()). A relayed
+		// frame carries `_relaySeq`, not this option, and its origin already
+		// validated it.
+		if (!isRelay) assertStampableSeq(seqOption);
 		// Egress recipients and admission, origin-side only: a relayed frame was
 		// charged once on the worker that published it, and refusing it here
 		// would fork the cluster's delivery. The decision runs before the stamp,

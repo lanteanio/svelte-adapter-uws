@@ -505,11 +505,19 @@ describe('bounded seq registries (unit)', () => {
 						: node.callee?.type === 'MemberExpression' ? memberName(node.callee) : null)
 					: null;
 				if (callee !== null && recorders.has(callee)) {
+					// The no-counter sentinel is the one map argument that admits
+					// nothing: `assertStampableSeq` returns before the counter arm
+					// for the only two spellings that reach it, so there is no
+					// topic for a bound to hear about. Matched by NAME, so a
+					// scratch `new Map()` or an omitted map stays an offender -
+					// those admit a topic nothing is watching.
+					const map = node.arguments[1];
+					const noCounter = map?.type === 'Identifier' && map.name === 'NO_COUNTER';
 					// A COUNT is not enough: `recordStampedSeen(map, topic, seq, undefined)`
 					// has four arguments and reports nothing.
 					const bound = node.arguments[3];
 					const named = bound?.type === 'Identifier' && bound.name !== 'undefined';
-					if (!named) {
+					if (!named && !noCounter) {
 						found.push(at() + ': ' + callee + ' is called with ' +
 							(node.arguments.length < 4 ? 'no bound argument' : 'a bound that is not a named binding') +
 							', so the registry bound never hears about the topic it admits');
@@ -568,7 +576,13 @@ describe('bounded seq registries (unit)', () => {
 			'missing bound': 'recordStampedSeen(maxSeenSeq, topic, seq);',
 			'undefined bound': 'recordStampedSeen(maxSeenSeq, topic, seq, undefined);',
 			'namespace recorder': 'state.recordStampedSeen(maxSeenSeq, topic, seq);',
-			'unbounded stamp': 'stampSeqValue(undefined, topicSeqs, topic);'
+			'unbounded stamp': 'stampSeqValue(undefined, topicSeqs, topic);',
+			// The no-counter carve-out is a name, not a shape: a scratch map or
+			// an absent one admits a topic no bound is watching, and both stay
+			// offenders. Otherwise the exemption would be a hole any call site
+			// could widen by writing something map-ish in that position.
+			'scratch map for a stamp': 'stampSeqValue(opt, new Map(), topic);',
+			'absent map for a stamp': 'stampSeqValue(opt, undefined, topic);'
 		};
 		for (const [name, source] of Object.entries(mutants)) {
 			expect(offendersIn(source), name).not.toEqual([]);

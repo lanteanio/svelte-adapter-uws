@@ -1,4 +1,5 @@
 import { workerData } from 'node:worker_threads';
+import { assertStampableSeq } from '../utils/epoch.js';
 
 export const CLUSTER_SEQUENCE_ERROR =
 	'clustered publish requires { seq: false } (or null) or { seq: <positive integer number or bigint>, relay: false }; per-worker counters and the multi-origin built-in relay cannot preserve one monotonic topic sequence';
@@ -93,6 +94,14 @@ export function assertClusterSequenceAuthority(options, data = workerData) {
  * caller happens to be publishing, so the contract never changes shape with the
  * data. Callers deliberately pass no count: the refusal must not depend on one.
  *
+ * The remaining spellings are held to the stamp's own table here, at the call
+ * gate, rather than in the stamping loop the batch reaches later: that loop
+ * runs after the batch has taken its egress decision, so a string seq was
+ * answered with a silent `false` under an armed ceiling and threw only once
+ * load dropped. Numeric first, because a number IS stampable and would pass -
+ * what it must earn is the batch's own refusal, which names the per-entry
+ * spelling that replaces it.
+ *
  * @param {{ seq?: boolean | number, relay?: boolean } | null | undefined} options
  * @param {any} [data]
  */
@@ -105,6 +114,7 @@ export function assertBatchSequenceAuthority(options, data = workerData) {
 		// refuse a deployment shape, not a value.
 		throw new TypeError(BATCH_SEQUENCE_ERROR);
 	}
+	assertStampableSeq(options?.seq);
 }
 
 // A batch ENTRY carrying an explicit seq is the per-entry twin of

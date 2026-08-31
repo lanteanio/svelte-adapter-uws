@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stampSeq, nextTopicSeq, explicitSeqValue, resolveEntrySeq } from '../src/runtime/utils/epoch.js';
+import { stampSeq, stampSeqValue, assertStampableSeq, nextTopicSeq, explicitSeqValue, resolveEntrySeq } from '../src/runtime/utils/epoch.js';
 
 // stampSeq is the shared publish-path resolver: it turns the `seq` option into
 // the value stamped on the wire, the same way for every publish entry point.
@@ -274,5 +274,72 @@ describe('resolveEntrySeq (the batch lane spelling)', () => {
 		expect(() => resolveEntrySeq(hostile, 2)).toThrow(RangeError);
 		expect(() => resolveEntrySeq(hostile, 2)).toThrow(/from the value/);
 		expect(() => resolveEntrySeq(hostile, 2)).not.toThrow(/batch entry/);
+	});
+});
+
+// The publish lanes validate a seq as a side effect of STAMPING, and stamping
+// is the last thing they do - after the egress ceiling has already answered.
+// assertStampableSeq is what lets them ask the question first, so the refusal
+// stops depending on whether a budget happened to be armed.
+describe('assertStampableSeq (the value question, asked before anything is spent)', () => {
+	// Every spelling the publish table has an opinion about, accepted and
+	// refused, in one list - the verdicts are compared, not restated.
+	const CORPUS = [
+		undefined, true, false, null,
+		1, 42, Number.MAX_SAFE_INTEGER, 1n, 42n, BigInt(Number.MAX_SAFE_INTEGER),
+		0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY,
+		2 ** 53, 2 ** 53 + 2, 0n, -1n, 2n ** 53n, 10n ** 400n,
+		'7', '', 'true', {}, [], () => 1, Symbol.iterator, new Date(0)
+	];
+
+	it('agrees with the stamp on every value, verdict and wording alike', () => {
+		for (const value of CORPUS) {
+			let stampError = null;
+			try {
+				stampSeqValue(value, new Map(), 'room');
+			} catch (error) {
+				stampError = error;
+			}
+			let assertError = null;
+			try {
+				assertStampableSeq(value);
+			} catch (error) {
+				assertError = error;
+			}
+			const label = typeof value === 'symbol' ? String(value) : `${String(value)} (${typeof value})`;
+			expect(assertError === null, `${label}: refused by exactly one of the two`)
+				.toBe(stampError === null);
+			if (stampError !== null) {
+				expect(assertError?.constructor, `${label}: same error class`).toBe(stampError.constructor);
+				expect(assertError?.message, `${label}: same message`).toBe(stampError.message);
+			}
+		}
+	});
+
+	// The counter arm is the only one that reads a map, and this returns before
+	// reaching it - which is why it can be handed none. The agreement case above
+	// is what enforces that: a delegation that fell through to the counter would
+	// dereference the absent map and throw where the stamp returns a number, so
+	// the two verdicts stop matching and the case goes red rather than quietly
+	// counting into a scratch map no publish ever reads.
+	it('answers the counter spellings without a map to count into', () => {
+		expect(assertStampableSeq(undefined)).toBeUndefined();
+		expect(assertStampableSeq(true)).toBeUndefined();
+	});
+
+	it('accepts what the lanes stamp and refuses what they cannot carry', () => {
+		for (const ok of [undefined, true, false, null, 1, Number.MAX_SAFE_INTEGER, 7n]) {
+			expect(() => assertStampableSeq(ok), `${String(ok)} must be accepted`).not.toThrow();
+		}
+		for (const bad of [0, 1.5, '7', {}, () => 1]) {
+			expect(() => assertStampableSeq(bad), `${String(bad)} must be refused`)
+				.toThrow(/publish seq must be/);
+		}
+		// A magnitude fault keeps its own message here too: the caller's
+		// spelling is right and the range is what is wrong.
+		for (const over of [2 ** 53, 2n ** 53n]) {
+			expect(() => assertStampableSeq(over), `${String(over)} must be refused as uncarryable`)
+				.toThrow(/exceeds the wire's safe-integer range/);
+		}
 	});
 });

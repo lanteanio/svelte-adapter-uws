@@ -175,6 +175,44 @@ function assertRefusesNumericSeq(platform, label) {
 	).not.toThrow();
 }
 
+/**
+ * The options seq refused for its VALUE rather than for the topology or for the
+ * one-seq-per-entry rule - a string from a JSON column, an object, a function.
+ *
+ * Driven on the EMPTY batch as well, and that is the case that carries the
+ * claim: a non-empty batch reaches the stamping loop, which refuses these
+ * anyway, so it stays green whether the gate checks them or not. The empty call
+ * returns before any loop runs, so it answers `false` for a value the same
+ * surface throws on the moment one entry is added - the contract changing shape
+ * with the data again. It also sits after the batch has taken its egress
+ * decision, which is the second reason the check belongs at the gate.
+ */
+function assertRefusesUnstampableSeq(platform, label) {
+	for (const bad of ['7', {}, [], () => 1, Symbol.iterator]) {
+		expect(
+			() => platform.publishWireBatch('mirror-room', 'update', ENTRIES, WIRE, { seq: bad }),
+			`${label}: an options seq of ${String(bad)} must be refused`
+		).toThrow(TypeError);
+		expect(
+			() => platform.publishWireBatch('mirror-room', 'update', [], WIRE, { seq: bad }),
+			`${label}: an empty batch must refuse an options seq of ${String(bad)} too`
+		).toThrow(TypeError);
+	}
+
+	// Vacuity guard: every spelling the stamp takes is still accepted, empty
+	// batch included, or a gate that threw on everything would pass the above.
+	for (const ok of [undefined, true, false, null]) {
+		expect(
+			() => platform.publishWireBatch('mirror-room', 'update', ENTRIES, WIRE, { seq: ok }),
+			`${label}: an options seq of ${String(ok)} must be accepted`
+		).not.toThrow();
+		expect(
+			() => platform.publishWireBatch('mirror-room', 'update', [], WIRE, { seq: ok }),
+			`${label}: an empty batch must accept an options seq of ${String(ok)}`
+		).not.toThrow();
+	}
+}
+
 async function bootDevPlatform() {
 	const mod = await import('../src/vite.js');
 	let platform = null;
@@ -213,6 +251,7 @@ describe('the batch numeric-seq refusal holds on every surface, not just product
 		teardown.push(() => server.close());
 
 		assertRefusesNumericSeq(server.platform, 'createTestServer');
+		assertRefusesUnstampableSeq(server.platform, 'createTestServer');
 		assertEntrySeqContract(server.platform, 'createTestServer');
 	}, 30000);
 
@@ -228,6 +267,7 @@ describe('the batch numeric-seq refusal holds on every surface, not just product
 		}
 
 		assertRefusesNumericSeq(platform, 'vite dev');
+		assertRefusesUnstampableSeq(platform, 'vite dev');
 		assertEntrySeqContract(platform, 'vite dev');
 
 		// The accepted per-entry batch was DELIVERED, and delivered seq-less:
