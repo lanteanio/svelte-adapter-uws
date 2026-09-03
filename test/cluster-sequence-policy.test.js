@@ -196,14 +196,39 @@ describe('cluster sequence authority policy', () => {
 	});
 
 	it('guards every production sequence-stamping entry point before mutation', () => {
-		const indexSource = readFileSync(new URL('../src/runtime/index.js', import.meta.url), 'utf8');
-		const source = readFileSync(new URL('../src/runtime/handler/platform.js', import.meta.url), 'utf8');
+		// LINE ENDINGS NORMALIZED ON READ. Every lane below is carved out with an
+		// anchor that spans a line break (`\n\t/**\n\t * ...`), and on a CRLF
+		// working tree not one of them matches: `indexOf` returns -1, `slice`
+		// reads that as "one before the end", and the `publish` slice grows from
+		// about 6k characters to the whole 134k file. The pins then answer about
+		// a body they do not name - `options.seq` goes from one occurrence to
+		// eight - so the case fails, or worse passes, for a reason unrelated to
+		// the rule it states. `.gitattributes` normalizes the tree, which is why
+		// this has never been seen; a single file flipped by a checkout is
+		// enough to reintroduce it.
+		const read = (relative) =>
+			readFileSync(new URL(relative, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+		const indexSource = read('../src/runtime/index.js');
+		const source = read('../src/runtime/handler/platform.js');
 		expect(indexSource).toContain('totalWorkers: num');
-		const publish = source.slice(source.indexOf('\tpublish('), source.indexOf('\n\t/**\n\t * Send a message'));
-		const wire = source.slice(source.indexOf('\tpublishWire('), source.indexOf('\n\t/**\n\t * Register a plugin', source.indexOf('\tpublishWire(')));
-		const wireBatch = source.slice(source.indexOf('\tpublishWireBatch('), source.indexOf('\n\t/**\n\t * Multi-entry single-target', source.indexOf('\tpublishWireBatch(')));
-		const loopBatch = source.slice(source.indexOf('\tbatch(messages)'), source.indexOf('\n\t/**\n\t * Wire-batching implementation', source.indexOf('\tbatch(messages)')));
-		const batch = source.slice(source.indexOf('\tpublishBatched('), source.indexOf('\n\t/**', source.indexOf('\tpublishBatched(') + 20));
+		// Each carve-out asserts its own anchor was FOUND before it is used.
+		// Normalizing removes today's cause; this removes the failure MODE, so a
+		// renamed JSDoc heading or a reordered method is named here instead of
+		// silently widening a slice until the pins stop meaning anything.
+		// The closing anchor is searched FROM the opening one, which is what the
+		// per-lane offsets in the previous shape were doing by hand.
+		const carve = (label, from, to) => {
+			const start = source.indexOf(from);
+			expect(start, `${label}: opening anchor ${JSON.stringify(from)} not found`).toBeGreaterThan(-1);
+			const end = source.indexOf(to, start);
+			expect(end, `${label}: closing anchor ${JSON.stringify(to)} not found after it`).toBeGreaterThan(start);
+			return source.slice(start, end);
+		};
+		const publish = carve('publish', '\tpublish(', '\n\t/**\n\t * Send a message');
+		const wire = carve('publishWire', '\tpublishWire(', '\n\t/**\n\t * Register a plugin');
+		const wireBatch = carve('publishWireBatch', '\tpublishWireBatch(', '\n\t/**\n\t * Multi-entry single-target');
+		const loopBatch = carve('batch', '\tbatch(messages)', '\n\t/**\n\t * Wire-batching implementation');
+		const batch = carve('publishBatched', '\tpublishBatched(', '\n\t/**');
 		// The single lanes follow the one-read rule the batch pioneered: every
 		// option field is read into a local BEFORE the authority check, and the
 		// check judges the locals - so a stateful accessor cannot answer the

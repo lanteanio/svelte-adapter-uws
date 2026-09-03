@@ -2,7 +2,12 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { documentationFiles, packageFiles } from '../scripts/check-links.js';
 
-const read = (relative) => readFileSync(new URL('../' + relative, import.meta.url), 'utf8');
+// Line endings normalized on read: one needle below spans a line break, and on
+// a CRLF working tree it would not match a document that is otherwise correct.
+// `.gitattributes` normalizes the tree, so this is a guard against a single
+// file arriving with CRLF rather than a fault seen today.
+const read = (relative) =>
+	readFileSync(new URL('../' + relative, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const architecture = read('docs/architecture.md');
 const index = read('docs/decisions/README.md');
 const readme = read('README.md');
