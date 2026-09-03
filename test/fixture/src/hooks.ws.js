@@ -135,6 +135,18 @@ export function message(ws, ctx) {
 				result = true;
 			} else if (msg.entry === 'loop-batch') {
 				result = platform.batch([{ topic, event, data: { n: 1 }, options }])[0];
+			} else if (msg.entry === 'batch-prefix' || msg.entry === 'loop-batch-prefix') {
+				// The offending options ride the LAST message and the two before
+				// it are clean, so anything that reaches a subscriber - or moves
+				// the topic counter - got there ahead of a refusal the whole call
+				// was supposed to take before publishing anything.
+				const messages = [
+					{ topic, event: 'prefix0', data: { n: 0 } },
+					{ topic, event: 'prefix1', data: { n: 1 } },
+					{ topic, event: 'prefix2', data: { n: 2 }, options }
+				];
+				if (msg.entry === 'batch-prefix') { platform.publishBatched(messages); result = true; }
+				else result = platform.batch(messages)[0];
 			} else {
 				result = platform.publish(topic, event, { n: 1 }, options);
 			}

@@ -286,11 +286,23 @@ describe('cluster sequence authority policy', () => {
 			'batch must vet every snapshot before the first publish')
 			.toBeLessThan(loopBatch.indexOf('platform.publish('));
 		expect(loopBatch).toContain('platform.publish(topic, event, data, snapshots[i])');
+		// The topology check above short-circuits on a single worker without
+		// reading the value, so the pre-pass has to ask the value question
+		// itself or the all-or-nothing promise holds only in a cluster.
+		expect(loopBatch).toContain('assertStampableSeq(snap?.seq);');
+		expect(loopBatch.indexOf('assertStampableSeq('), 'batch must vet every value before the first publish')
+			.toBeLessThan(loopBatch.indexOf('platform.publish('));
 		// publishBatched captures per-message seq/relay/jitter into arrays in
 		// its atomic pre-pass; the stamp, the monotone-max branch, and the
 		// relay filter all consume the captured values.
 		expect(batch).toContain('assertClusterSequenceAuthorityValues(seqOption, relayOption);');
 		expect(batch).toContain('stampSeqValue(msgSeqs[i]');
+		// Same reason as batch(), and here the stamping loop is what would
+		// otherwise surface a bad value - after earlier entries have advanced
+		// the topic counter for a frame the call never sends.
+		expect(batch).toContain('assertStampableSeq(seqOption);');
+		expect(batch.indexOf('assertStampableSeq('), 'publishBatched must vet every value before it stamps')
+			.toBeLessThan(batch.indexOf('stampSeqValue(msgSeqs[i]'));
 		expect(batch).toContain('typeof msgSeqs[i] === \'number\'');
 		expect(batch).toContain('msgRelays[i] !== false');
 		expect(batch.split('messages[i].options').length, 'publishBatched reads each message options object in the pre-pass only')

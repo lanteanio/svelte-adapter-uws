@@ -1932,6 +1932,14 @@ export async function createTestServer(options = {}) {
 			return { seq, delivered };
 		},
 		batch(messages) {
+			// Whole-batch-or-nothing, as production: every message's seq value is
+			// vetted before the first publish, or a bad value on message k throws
+			// with 0..k-1 already delivered. An app certifying against this
+			// harness has to see the same atomicity it will get in production.
+			for (let i = 0; i < messages.length; i++) {
+				const o = messages[i].options;
+				assertStampableSeq(o == null ? undefined : o.seq);
+			}
 			return messages.map(({ topic, event, data, options }) => platform.publish(topic, event, data, options));
 		},
 		publishBatched(messages, options) {
@@ -1939,6 +1947,13 @@ export async function createTestServer(options = {}) {
 			if (!Array.isArray(messages) || messages.length === 0) return;
 			messages = collapseByCoalesceKey(messages);
 			if (messages.length === 0) return;
+			// Before the stamping loop below moves any topic counter - a refused
+			// batch that already consumed a sequence number leaves the counter
+			// skipping a value no client ever saw.
+			for (let i = 0; i < messages.length; i++) {
+				const o = messages[i].options;
+				assertStampableSeq(o == null ? undefined : o.seq);
+			}
 			const firstTopic = messages[0].topic;
 			let allSameTopic = true;
 			for (let i = 1; i < messages.length; i++) {

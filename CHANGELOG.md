@@ -88,6 +88,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** The refusals, their messages and their classes are unchanged - only their timing is. A refused value charges no egress and advances no counter. `publishWireBatch` now takes the same decision at its call gate, so an empty batch refuses what a full one refuses, on production, `createTestServer` and `vite dev` alike.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a batch that refuses one message's `seq` no longer publishes the ones before it.** The atomic pre-pass asked only whether the deployment was clustered, and that question answers accepted without reading the value on a single worker - so `batch()` delivered a prefix and `publishBatched()` spent sequence numbers on frames it never sent.
+  - **Affects:** Single-worker deployments - the default - calling `batch()` or `publishBatched()` with a `seq` outside the contract on any message but the first. Multi-worker runtimes already refused these at the pre-pass.
+  - **Action:** None. The same `TypeError` is thrown; what changes is that it arrives before anything has been published or stamped.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** No accepted call behaves differently. A refused `publishBatched` no longer advances the per-topic counter, so a topic's sequence no longer skips values that never reached a client - which is what made this hard to see, since nothing on the wire marks such a gap. `createTestServer` takes the same order on both surfaces.
+  - **Detail:** [Fixed engineering detail](#fixed).
 
 <!-- consumer-release-summary:end -->
 
@@ -194,6 +200,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/seq-stamp.test.js` the resolver itself.
 
 ### Fixed
+
+- **The batch pre-passes vet seq VALUES, not just the deployment shape.**
+  `batch()` and `publishBatched()` both open with an atomic pre-pass whose
+  stated purpose is to refuse the whole call before any part of it is
+  published. Both asked `assertClusterSequenceAuthority`, which is a TOPOLOGY
+  question - and `clusterSequenceValuesAccepted` returns accepted immediately
+  when the runtime is not multi-worker, without reading the value. So on the
+  default single-worker deployment the pre-pass vetted nothing a caller had
+  written, and message k's bad `seq` surfaced later, differently on each
+  surface. `batch()` threw from inside `platform.publish` with messages 0..k-1
+  already fanned out - the published prefix its own comment says must not
+  happen. `publishBatched()` threw from its stamping loop, which delivers
+  nothing (the send is at the end) but has already ADVANCED THE TOPIC COUNTER
+  and written the max-seen map for every earlier entry: the counter then skips
+  numbers no client ever saw, so a watermark can sit above a value that was
+  never sent and a republish of it after the payload is fixed reads as
+  already-seen, with nothing on the wire to notice by.
+
+- **Both batch pre-passes now ask the value question themselves.** Each calls
+  `assertStampableSeq` on the value it has already snapshotted, independent of
+  topology, before the first publish and before the first stamp.
+  `publishWireBatch` was already right - it validates every entry in its
+  snapshot pass - and `vite dev` needs nothing, because it stamps no seq and so
+  has no mid-batch throw to hoist. `src/testing.js` takes the same order on
+  both surfaces, since an application certifying against `createTestServer` has
+  to see the atomicity it will get in production.
+  `test/batch-seq-atomic-real.test.js` drives the built runtime. Its
+  `publishBatched` case advertises the `batch` capability deliberately: without
+  it the call degrades to the per-event loop and the stamping loop under test
+  never runs. That case asserts the COUNTER rather than delivery, because that
+  lane delivers nothing either way - the counter is the only thing that can
+  carry the claim, and the two topics it uses are kept separate so the expected
+  first value stays exactly 1.
 
 - **A seq refusal no longer waits for the egress ceiling to relax.** The
   publish lanes validated a `seq` as a side effect of stamping it, and the

@@ -480,3 +480,56 @@ describeUWS('client capability handshake', () => {
 		await waitForClose(ws);
 	});
 });
+
+// Whole-batch-or-nothing on the harness applications certify against. Both
+// batch surfaces ran an atomic pre-pass that asked only the TOPOLOGY question,
+// and that question answers accepted without reading the value whenever the
+// runtime is not multi-worker - which is the default. So the pre-pass vetted
+// nothing a caller wrote, and a bad seq on message k surfaced from the
+// per-message publish with 0..k-1 already gone.
+describeUWS('a refused batch entry publishes nothing on the harness', () => {
+	it('vets every message\'s seq before the first one is published', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		/** @type {any[]} */
+		const sent = [];
+		server = await createTestServer({ __onPublish: ({ envelope }) => sent.push(JSON.parse(envelope)) });
+
+		// Vacuity guard: this exact call shape DOES publish when it is clean,
+		// so the emptiness below means refused-before-publishing rather than a
+		// call that never worked.
+		server.platform.batch([
+			{ topic: 'atomic-room', event: 'ok0', data: {} },
+			{ topic: 'atomic-room', event: 'ok1', data: {} }
+		]);
+		expect(sent.map((e) => e.event)).toEqual(['ok0', 'ok1']);
+
+		sent.length = 0;
+		expect(() => server.platform.batch([
+			{ topic: 'atomic-room', event: 'ok0', data: {} },
+			{ topic: 'atomic-room', event: 'ok1', data: {} },
+			{ topic: 'atomic-room', event: 'bad', data: {}, options: { seq: '5' } }
+		]), 'an unstampable seq on the last message must refuse the whole call').toThrow(TypeError);
+		expect(sent.map((e) => e.event), 'a refused batch delivered a prefix').toEqual([]);
+	});
+
+	it('spends no sequence number in a publishBatched call it refuses', async () => {
+		const { createTestServer } = await import('../src/testing.js');
+		/** @type {any[]} */
+		const sent = [];
+		server = await createTestServer({ __onPublish: ({ envelope }) => sent.push(JSON.parse(envelope)) });
+
+		// Nothing is delivered here either way - the stamping loop throws before
+		// the send - so the counter is the only thing that can carry the claim.
+		// The first entry would have drawn this fresh topic's 1 on its way to a
+		// frame nobody received, leaving the next publish stamped 2 and a gap
+		// no client can see.
+		expect(() => server.platform.publishBatched([
+			{ topic: 'atomic-counter', event: 'ok0', data: {} },
+			{ topic: 'atomic-counter', event: 'bad', data: {}, options: { seq: 1.5 } }
+		])).toThrow(TypeError);
+		expect(sent.map((e) => e.event)).toEqual([]);
+
+		server.platform.publish('atomic-counter', 'probe', {});
+		expect(sent.map((e) => e.seq), 'the refused batch spent a sequence number').toEqual([1]);
+	});
+});

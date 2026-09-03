@@ -2194,6 +2194,14 @@ export const platform = {
 				? o
 				: { seq: o.seq, relay: o.relay, compress: o.compress, jitterMs: o.jitterMs };
 			assertClusterSequenceAuthority(snap);
+			// The authority check above answers a TOPOLOGY question, and on a
+			// single-worker runtime - the default - it returns accepted without
+			// ever reading the value. So the pre-pass vetted nothing a caller
+			// actually wrote, and a bad value on message k threw from inside
+			// publish() with 0..k-1 already fanned out. The value question is
+			// asked here, independent of topology, which is what makes the
+			// all-or-nothing promise above true rather than aspirational.
+			assertStampableSeq(snap?.seq);
 			snapshots[i] = snap;
 		}
 		const results = [];
@@ -2245,6 +2253,14 @@ export const platform = {
 			const relayOption = o != null ? o.relay : undefined;
 			msgJitters[i] = o != null ? o.jitterMs : undefined;
 			assertClusterSequenceAuthorityValues(seqOption, relayOption);
+			// And the value, for the same reason batch() asks it: the topology
+			// check short-circuits on a single worker, so without this the
+			// stamping loop below is where a bad value surfaces - after earlier
+			// entries have advanced the topic counter and written the max-seen
+			// map for a batch that puts nothing on any wire. The counter would
+			// then skip a number no client ever sees, and a republish of it
+			// after the payload is fixed reads as already-seen.
+			assertStampableSeq(seqOption);
 			msgSeqs[i] = seqOption;
 			msgRelays[i] = relayOption;
 		}
