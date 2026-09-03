@@ -266,7 +266,9 @@ describeUWS('platform.introspect transport snapshot', () => {
 		expect(seen).toEqual(['/__realtime/introspect']);
 
 		seen.length = 0;
-		for (const target of ['/__realtime/../reflect', '/__realtime/a/../../escape']) {
+		// `%2e` is a dot segment to the URL parser, so the encoded spelling
+		// normalizes identically and must be refused identically.
+		for (const target of ['/__realtime/../reflect', '/__realtime/a/../../escape', '/__realtime/%2e%2e/reflect']) {
 			expect(await raw(target), `${target} must be refused`).toBe(400);
 		}
 		expect(seen, 'a target outside the prefix reached the app handler').toEqual([]);

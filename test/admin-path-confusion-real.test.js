@@ -79,9 +79,19 @@ describeUWS('the admin route refuses a target that normalizes out of its prefix'
 		expect(JSON.parse(ok.body).path, 'the handler must see the routed path')
 			.toBe('/__realtime/introspect');
 
-		// One segment up, and two. Both used to reach `admin()` describing
-		// themselves as a path the router never matched.
-		for (const target of ['/__realtime/../reflect', '/__realtime/a/../../escape', '/__realtime/./../escape']) {
+		// One segment up, and two, and the percent-encoded spellings of the same
+		// thing. `%2e` IS a dot segment to the URL parser - it resolves before
+		// normalization - so an escape written that way normalizes identically
+		// and has to be refused identically. Checking the literal `..` alone
+		// would leave the encoded form as a way around the check.
+		for (const target of [
+			'/__realtime/../reflect',
+			'/__realtime/a/../../escape',
+			'/__realtime/./../escape',
+			'/__realtime/%2e%2e/reflect',
+			'/__realtime/%2E%2E/reflect',
+			'/__realtime/./../../reflect'
+		]) {
 			const refused = await rawRequest(server.port, target);
 			expect(refused.status, `${target} must be refused`).toBe(400);
 			expect(refused.body, `${target} must not reach the app handler`).not.toContain('"ok":true');
