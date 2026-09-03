@@ -221,4 +221,60 @@ describeUWS('platform.introspect transport snapshot', () => {
 		expect(typeof body.transport.connections).toBe('number');
 		expect(body.handlers.total).toBe(0);
 	});
+
+	// The route matches the RAW target and building a Request normalizes dot
+	// segments, so `/__realtime/../reflect` matched here and handed `admin()` a
+	// request calling itself `/reflect` - outside the prefix that was routed and
+	// outside the namespace the handler dispatches and authorizes on.
+	//
+	// RAW SOCKET, not fetch(): every HTTP client normalizes the target before it
+	// goes out, so `fetch('/__realtime/../reflect')` puts `/reflect` on the wire
+	// and never reaches this route. A case written with fetch passes against the
+	// defect while testing nothing.
+	it('refuses a target that normalizes out of the admin prefix', async () => {
+		/** @type {string[]} */
+		const seen = [];
+		const { createTestServer } = await import('../src/testing.js');
+		server = await createTestServer({
+			handler: {
+				admin: async (request) => {
+					seen.push(new URL(request.url).pathname);
+					return new Response('reached', { status: 200 });
+				}
+			}
+		});
+		const port = Number(new URL(server.url).port);
+		const net = await import('node:net');
+
+		/** @param {string} target */
+		const raw = (target) => new Promise((resolve) => {
+			let buf = '';
+			const sock = net.connect(port, '127.0.0.1', () => {
+				sock.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`);
+			});
+			sock.setTimeout(5000, () => { sock.destroy(); resolve(0); });
+			sock.on('data', (d) => { buf += d.toString(); });
+			// The status LINE, then the code: uWS writes no reason phrase, so
+			// splitting the whole buffer on spaces takes a header with it.
+			sock.on('close', () => resolve(Number(buf.split('\r\n')[0].split(' ')[1] || 0)));
+			sock.on('error', () => resolve(0));
+		});
+
+		// Vacuity guard: this transport reaches the handler when the target is
+		// ordinary, so the refusals below are the check and not a dead route.
+		expect(await raw('/__realtime/introspect')).toBe(200);
+		expect(seen).toEqual(['/__realtime/introspect']);
+
+		seen.length = 0;
+		for (const target of ['/__realtime/../reflect', '/__realtime/a/../../escape']) {
+			expect(await raw(target), `${target} must be refused`).toBe(400);
+		}
+		expect(seen, 'a target outside the prefix reached the app handler').toEqual([]);
+
+		// Normalization is not the fault - landing outside the prefix is. A
+		// target that resolves back INSIDE is still served, and the handler is
+		// told the resolved path, which is what it should dispatch on.
+		expect(await raw('/__realtime/a/../introspect')).toBe(200);
+		expect(seen).toEqual(['/__realtime/introspect']);
+	});
 });

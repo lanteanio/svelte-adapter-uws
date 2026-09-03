@@ -1505,7 +1505,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// all-or-nothing pre-pass true there. Both run before the first publish
 	// and before the first stamp; no byte is read, allocated or copied, and no
 	// copy primitive entered.
-	platform: '6e8be78050ca3fd2b1495d49e2b43ffd26a1e6be170c39b0983df13fa6c374e8',
+	//
+	// Re-pinned for the admin prefix moving into handler/config.js, which this
+	// graph reaches: one exported constant derived from the same
+	// build-substituted options object the module's other two constants come
+	// from, replacing a second derivation at the route registration. Data, read
+	// once at module evaluation. Nothing on a frame path executes differently,
+	// no byte is read, allocated or copied, and no copy primitive entered.
+	platform: '42b0287c339d2966913cc889d532d23a608112d3fd43b258ed0da578855b2a41',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

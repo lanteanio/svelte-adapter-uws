@@ -3560,6 +3560,22 @@ export async function createTestServer(options = {}) {
 				return;
 			}
 
+			// The route matched the RAW path and building a Request normalizes
+			// dot segments, so `${adminPath}/../reflect` matches this route and
+			// would hand `handler.admin` a request whose pathname is `/reflect`
+			// - outside the prefix that was routed and outside the namespace the
+			// handler dispatches on. Refused here, as production does, and
+			// before any body is read.
+			let adminParsed;
+			try {
+				adminParsed = new URL(base + adminUrl);
+			} catch { failAdmin(400); return; }
+			if (adminParsed.pathname !== adminPath &&
+				!adminParsed.pathname.startsWith(adminPath + '/')) {
+				failAdmin(400);
+				return;
+			}
+
 			const writeAdmin = (response) => {
 				Promise.resolve(response.body ? response.arrayBuffer() : null)
 					.then((ab) => {
@@ -3585,7 +3601,7 @@ export async function createTestServer(options = {}) {
 			const runAdmin = (body) => {
 				let request;
 				try {
-					request = new Request(base + adminUrl, { method, headers: adminHeaders, body });
+					request = new Request(adminParsed, { method, headers: adminHeaders, body });
 				} catch { failAdmin(400); return; }
 				Promise.resolve()
 					.then(() => handler.admin(request))

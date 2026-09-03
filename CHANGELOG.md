@@ -94,6 +94,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** No accepted call behaves differently. A refused `publishBatched` no longer advances the per-topic counter, so a topic's sequence no longer skips values that never reached a client - which is what made this hard to see, since nothing on the wire marks such a gap. `createTestServer` takes the same order on both surfaces.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: the admin route refuses a target that normalizes out of its own prefix.** The route matched the raw request target while the `Request` handed to `admin()` had its dot segments resolved, so `GET /__realtime/../reflect` reached the handler describing itself as `/reflect` - a path outside the namespace that handler dispatches and authorizes on.
+  - **Affects:** Apps exporting an `admin(request)` handler, on the auto-mounted route. Every ordinary target is unaffected, including one that resolves back inside the prefix.
+  - **Action:** None. An admin handler that assumed `request.url` lay inside its prefix was right to; it now always does.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Such a target now answers 400 before any body is read, instead of reaching the handler. A percent-encoded `..%2f` is a single opaque segment rather than a dot segment, so it keeps the prefix and is still served. `createTestServer` takes the same decision.
+  - **Detail:** [Fixed engineering detail](#fixed).
 
 <!-- consumer-release-summary:end -->
 
@@ -200,6 +206,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/seq-stamp.test.js` the resolver itself.
 
 ### Fixed
+
+- **The admin route's matched path and its reported path are now the same
+  path.** The route is registered on the raw prefix and uWS matches the raw
+  request target, but constructing a Web `Request` resolves dot segments. So
+  `GET /__realtime/../reflect` matched `/__realtime/*`, reached
+  `handleAdminRequest`, and handed the app's `admin(request)` a request whose
+  pathname was `/reflect`; two segments up reached it as `/escape`. Every
+  dispatch and authorization decision such a handler makes reads that pathname,
+  so it was deciding about a path the router had never matched.
+  The URL is now parsed once, before any body is read, and a request whose
+  resolved pathname has left the prefix is answered 400 - not rewritten, since
+  a target whose route and whose self-description disagree is ambiguous, and
+  silently picking either reading would let a caller aim the admin lane at a
+  path of their choosing. Normalization itself is not the fault:
+  `/__realtime/a/../introspect` resolves back inside and is served, with the
+  resolved path reported. A percent-encoded `..%2f` is one opaque segment
+  rather than a dot segment, so it keeps the prefix and is served too. The
+  parsed URL is reused to build the `Request`, so the check costs no extra
+  allocation on a route that is cold by construction.
+  The prefix now has ONE derivation, exported from `handler/config.js` beside
+  the other options-derived constants and read by both the route registration
+  and the check - two derivations of one prefix is one edit away from a check
+  that describes a different route than the one that matched. `createTestServer`
+  takes the same decision. `test/admin-path-confusion-real.test.js` drives the
+  built runtime over RAW SOCKETS, because every HTTP client resolves the target
+  before sending it: `fetch('/__realtime/../reflect')` puts `/reflect` on the
+  wire, never reaches the route, and would pass against the defect.
 
 - **The batch pre-passes vet seq VALUES, not just the deployment shape.**
   `batch()` and `publishBatched()` both open with an atomic pre-pass whose

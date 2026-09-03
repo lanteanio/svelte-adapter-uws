@@ -227,3 +227,10 @@ export const WS_COMPRESSION_ON = Boolean(WS_OPTIONS && WS_OPTIONS.compression);
 // Exported from the shared config module so platform.js reads the same
 // build-substituted WS_OPTIONS value as the wire handler.
 export const ALLOW_NON_ASCII_TOPICS = Boolean(WS_OPTIONS && WS_OPTIONS.allowNonAsciiTopics);
+
+// The reserved admin prefix, or `false` when the auto-mount is off. Derived
+// here rather than at the route registration because the admin handler needs it
+// too: it is what the handler checks the request's own pathname against, and
+// two derivations of one prefix is one drift away from a check that passes for
+// a route it does not describe.
+export const ADMIN_PATH = (WS_OPTIONS && WS_OPTIONS.adminPath !== undefined) ? WS_OPTIONS.adminPath : '/__realtime';

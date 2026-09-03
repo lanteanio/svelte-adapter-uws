@@ -44,7 +44,7 @@ import { acquireState, releaseState } from './handler/state-pool.js';
 import { ENVELOPE_CACHE_MAX, envelopePrefix } from './handler/envelope-cache.js';
 import { batchRelay } from './handler/relay.js';
 import { readHlc } from './handler/hlc.js';
-import { textDecoder, ssl_cert, ssl_key, is_tls, origin, xff_depth, address_header, protocol_header, host_header, port_header, body_size_limit, resolveClientIp, resolveTransportAddress, _t_app, app, wsDebug, closeHookRegistered, get_origin, WS_COMPRESSION_ON } from './handler/config.js';
+import { textDecoder, ssl_cert, ssl_key, is_tls, origin, xff_depth, address_header, protocol_header, host_header, port_header, body_size_limit, resolveClientIp, resolveTransportAddress, _t_app, app, wsDebug, closeHookRegistered, get_origin, WS_COMPRESSION_ON, ADMIN_PATH } from './handler/config.js';
 import { cacheDir, clientDir, prerenderedDir, _t_static, serveStatic, DECODE_CACHE_MAX, tryPrerendered } from './handler/static-assets.js';
 import { bumpIn, bumpOut, maybeWarnTopicRegistry, BATCH_FRAME_WARN_BYTES, warnLargeBatchFrame, grantSizeFor, resolvePressureThresholds, startPressureSampling, stopPressureSampling } from './handler/pressure-metrics.js';
 import { hasRef, runSubscribeHook, runSubscribeBatchHook, runUserSubscribeGate, hasUserSubscribeHook, sendSubscribed, sendSubscribeDenied, flushCoalescedFor } from './handler/subscribe-hooks.js';
@@ -3305,7 +3305,6 @@ if (READINESS_CHECK_PATH) {
 // for apps that mount it themselves (e.g. a SvelteKit `+server.js` route with
 // their own middleware). All authorization lives in the app handler; the
 // adapter is pure request/response plumbing.
-const ADMIN_PATH = (WS_OPTIONS && WS_OPTIONS.adminPath !== undefined) ? WS_OPTIONS.adminPath : '/__realtime';
 if (WS_ENABLED && ADMIN_PATH !== false && typeof wsModule.admin === 'function') {
 	route('any', ADMIN_PATH + '/*', handleAdminRequest);
 	console.log(`[svelte-adapter-uws] Admin route registered at ${ADMIN_PATH}/*`);

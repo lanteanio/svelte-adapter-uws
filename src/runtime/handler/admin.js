@@ -1,4 +1,4 @@
-import { origin, get_origin, body_size_limit } from './config.js';
+import { origin, get_origin, body_size_limit, ADMIN_PATH } from './config.js';
 import { METHODS, FORBIDDEN_METHODS, send405 } from './http-helpers.js';
 import { readBody } from './ssr.js';
 import { collectRequestHeaders } from '../utils/request-headers.js';
@@ -154,6 +154,35 @@ export function handleAdminRequest(res, req) {
 	}
 	const url = query ? `${pathname}?${query}` : pathname;
 
+	// The route matched the RAW path, and building a Request NORMALIZES dot
+	// segments. So `/__realtime/../reflect` matches `/__realtime/*`, reaches
+	// this handler, and hands the app's `admin()` a request whose pathname is
+	// `/reflect` - a path outside the prefix that was routed, and outside the
+	// namespace the handler's own dispatch and authorization are written
+	// against. The path that was ROUTED and the path the handler is TOLD about
+	// have to be the same one; when normalization moves it out of the prefix
+	// the request is ambiguous, and it is refused rather than resolved in
+	// either party's favour.
+	//
+	// Parsed once here and reused for the Request below, so the comparison
+	// costs no extra allocation on a route that is cold by construction. Before
+	// the body is read, too: an ambiguous request should not stream one first.
+	// A percent-encoded `..%2f` is NOT a segment separator and normalizes to
+	// nothing, so it keeps the prefix and passes here, as it should.
+	let parsed;
+	try {
+		parsed = new URL(base_origin + url);
+	} catch {
+		if (!state.aborted) sendAdminError(res, 400, 'bad request');
+		return;
+	}
+	if (ADMIN_PATH !== false &&
+		parsed.pathname !== ADMIN_PATH &&
+		!parsed.pathname.startsWith(ADMIN_PATH + '/')) {
+		if (!state.aborted) sendAdminError(res, 400, 'bad request');
+		return;
+	}
+
 	// GET/HEAD carry no body; other methods stream through readBody under the
 	// global body-size cap (the admin router may grow POST endpoints). A
 	// declared Content-Length over the cap is refused early with 413 before any
@@ -175,7 +204,7 @@ export function handleAdminRequest(res, req) {
 
 	let request;
 	try {
-		request = new Request(base_origin + url, {
+		request = new Request(parsed, {
 			method: METHOD,
 			headers,
 			body,
