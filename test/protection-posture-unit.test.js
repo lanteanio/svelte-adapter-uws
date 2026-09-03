@@ -142,6 +142,36 @@ describe('createPosture escalation and relaxation', () => {
 		expect(posture.level).toBe('siege');
 	});
 
+	// WITHOUT ANY CEILING. Every other case here hands the machine a gate, which
+	// is how the declaration came to claim `'auto'` was inert without one: the
+	// configuration the sentence described was the one configuration nothing
+	// drove. It is not inert. Escalation to elevated reads `snapshot.active`
+	// only - pressure - and the sampler that ticks it runs unconditionally, so
+	// this happens on a deployment that sets `protection: 'auto'` and nothing
+	// else. What the ceiling actually gates is the step INTO siege, whose
+	// threshold is the ceiling's admit rate doubled and is Infinity without one.
+	it('escalates to elevated from pressure alone, with no admission ceiling', () => {
+		const posture = createPosture({ admission: undefined, getThresholds });
+		tickActive(posture, 5, true);
+		expect(posture.level, 'auto reaches elevated with no ceiling configured').toBe('elevated');
+
+		// And stops there: with no ceiling the gate emits no capacity reject, so
+		// the siege threshold is unreachable however long the pressure lasts.
+		tickWithCapacityRejects(posture, 20, 1000);
+		expect(posture.level, 'siege must stay unreachable without a ceiling').toBe('elevated');
+	});
+
+	it('honours a pinned level with no admission ceiling', () => {
+		// The other half of the same sentence: a pinned level is not a resolution
+		// at all, so it needs nothing from the gate.
+		for (const pin of ['elevated', 'siege']) {
+			const posture = createPosture({ admission: undefined, getThresholds, pin });
+			expect(posture.level, `pinned ${pin} with no ceiling`).toBe(pin);
+			tickActive(posture, 20, false);
+			expect(posture.level, `pinned ${pin} must not relax`).toBe(pin);
+		}
+	});
+
 	it('relaxes from elevated to normal only after a longer quiet dwell', () => {
 		const posture = createPosture({ admission: makeGate(), getThresholds });
 		tickActive(posture, 5, true);

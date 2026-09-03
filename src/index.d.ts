@@ -1008,10 +1008,12 @@ export interface WebSocketOptions {
 	 *
 	 * At `'elevated'` every refusal widens its `Retry-After` jitter. At
 	 * `'siege'` new upgrades are refused at static-serve cost and
-	 * `/__admit-check` always reports busy. Requires
-	 * `upgradeAdmission.maxConcurrent` or `upgradeAdmission.maxConnections`
-	 * to be set for the gate to have anything
-	 * to coordinate; `'auto'` is inert without a ceiling.
+	 * `/__admit-check` always reports busy. Only the auto step INTO `'siege'`
+	 * needs `upgradeAdmission.maxConcurrent` or
+	 * `upgradeAdmission.maxConnections`: it compares over-capacity rejects
+	 * against that ceiling's admit rate, and with no ceiling the gate emits no
+	 * capacity reject for it to count. `'auto'` still reaches `'elevated'` from
+	 * pressure alone, and a pinned level needs no ceiling at all.
 	 */
 	protection?: 'normal' | 'elevated' | 'siege' | 'auto';
 

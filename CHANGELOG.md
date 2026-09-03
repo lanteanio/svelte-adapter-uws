@@ -100,6 +100,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Such a target now answers 400 before any body is read, instead of reaching the handler. A percent-encoded `..%2f` is a single opaque segment rather than a dot segment, so it keeps the prefix and is still served. `createTestServer` takes the same decision.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: `protection: 'auto'` was documented as inert without an admission ceiling, and is not.** Escalation to `'elevated'` reads the pressure sampler alone, and that sampler runs unconditionally - so an app setting only `protection: 'auto'` does reach elevated, where every refusal widens its `Retry-After` jitter.
+  - **Affects:** Anyone who read the declaration and concluded `'auto'` did nothing without `upgradeAdmission`. No behaviour changed; the description did.
+  - **Action:** None, unless the wording drove a configuration choice - `'auto'` without a ceiling is a working configuration that stops at elevated.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Documentation only. What genuinely needs a ceiling is the auto step INTO `'siege'`, which compares over-capacity rejects against that ceiling's admit rate; a pinned `'elevated'` or `'siege'` needs no ceiling either.
+  - **Detail:** [Fixed engineering detail](#fixed).
 
 <!-- consumer-release-summary:end -->
 
@@ -233,6 +239,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   built runtime over RAW SOCKETS, because every HTTP client resolves the target
   before sending it: `fetch('/__realtime/../reflect')` puts `/reflect` on the
   wire, never reaches the route, and would pass against the defect.
+
+- **`protection: 'auto'` is not inert without an admission ceiling.** The
+  declaration said it was. Escalation from `'normal'` to `'elevated'` counts
+  consecutive active pressure samples and reads nothing from the admission
+  gate, and `startPressureSampling` runs unconditionally wherever the WebSocket
+  endpoint is registered - so an app that sets `protection: 'auto'` and no
+  ceiling does reach elevated, where every refusal widens its `Retry-After`
+  jitter. What actually needs a ceiling is the step INTO `'siege'`: its
+  threshold is the ceiling's admit rate doubled, and with no ceiling the gate
+  emits no capacity reject and the threshold is `Infinity`. A pinned level is
+  not a resolution at all and needs nothing from the gate.
+  No behaviour changed here - the declaration did. The configuration the
+  sentence described was the one configuration nothing in the suite drove:
+  every posture case handed the machine a gate, which is how the claim
+  survived. `test/protection-posture-unit.test.js` now drives it with no
+  admission at all, in both directions - elevated is reached, siege stays
+  unreachable however long the pressure lasts.
 
 - **The batch pre-passes vet seq VALUES, not just the deployment shape.**
   `batch()` and `publishBatched()` both open with an atomic pre-pass whose
