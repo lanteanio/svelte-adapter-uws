@@ -1085,7 +1085,10 @@ export interface WebSocketOptions {
 	 * - `ws_publishes_total` - publish calls on this worker (counter). Counts
 	 *   publishes, never per-recipient deliveries: uWS fans out in C++.
 	 * - `ws_publish_outcomes_total{outcome}` - native TopicTree publish calls
-	 *   classified as delivered/no-subscribers (counter), with no recipient walk.
+	 *   classified as delivered/no-subscribers (counter), with no recipient
+	 *   walk. A publish that excludes a socket is delivered by a per-socket
+	 *   walk instead of one native call, so it is counted by
+	 *   `ws_publishes_total` and is absent here: the two do not sum.
 	 * - `ws_backpressure_max_bytes` - worst per-connection outbound buffered
 	 *   bytes over the sampled connection set (gauge, sampled; `0` when healthy).
 	 * - `ws_backpressure_connections` - sampled connections holding a

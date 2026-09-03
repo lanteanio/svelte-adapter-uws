@@ -864,7 +864,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// comparisons and a delegation frame, on the publish surfaces only - no
 	// frame path in this graph executes differently, no byte is read,
 	// allocated or copied, and no copy primitive entered.
-	ingress: '8a3baac932c743ae774f1d914cd6340b7726fdbd57c93c8ad81d921752adb7d5',
+	//
+	// Re-pinned for four metric help strings, reached through utils.js ->
+	// utils/metrics.js -> observability-manifest.js: the sentences stopped
+	// naming the runtime that produced the number. Literal characters in a
+	// frozen data table, plus the matching registration literals in handler.js.
+	// No statement executes differently on any path, no byte is read,
+	// allocated or copied, and no copy primitive entered.
+	ingress: '85cdd273f29000d6f81a83ce7d5ed2c85a429539b0b6cfd68e9e9226605e4f42',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1512,7 +1519,14 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// from, replacing a second derivation at the route registration. Data, read
 	// once at module evaluation. Nothing on a frame path executes differently,
 	// no byte is read, allocated or copied, and no copy primitive entered.
-	platform: '42b0287c339d2966913cc889d532d23a608112d3fd43b258ed0da578855b2a41',
+	//
+	// Re-pinned for four metric help strings, reached through utils.js ->
+	// utils/metrics.js -> observability-manifest.js: the sentences stopped
+	// naming the runtime that produced the number. Literal characters in a
+	// frozen data table, plus the matching registration literals in handler.js.
+	// No statement executes differently on any path, no byte is read,
+	// allocated or copied, and no copy primitive entered.
+	platform: '0d1392e96d95bef9e8e4bc254d70637d220076b4bb325e1be758079638293c29',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1738,7 +1752,11 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// which returns for the counter spellings and otherwise delegates to the
 	// stamp's own table. Nothing in this graph's own fan-out modules changed,
 	// and no copy primitive entered.
-	'wire-fanout': '2cea428c879382f9c723ef6f393c29cc0e2dd7d4d5ba38cd688a9e91ad847d72',
+	//
+	// Re-pinned for the four metric help strings, the same
+	// observability-manifest.js literal edit as the sibling seals. Nothing in
+	// this graph's own fan-out modules changed, and no copy primitive entered.
+	'wire-fanout': 'ea61107186179eadee78c00533f5d0a29cb2340835f571a06246c70b5aabc7ae',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

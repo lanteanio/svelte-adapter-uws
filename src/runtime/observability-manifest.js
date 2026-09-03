@@ -227,12 +227,12 @@ const SIGNAL_DEFINITIONS = [
 	// Counts publish CALLS, never per-recipient deliveries: uWS fans out in
 	// C++, and counting recipients would mean walking the subscriber set in
 	// JS on every publish.
-	{ name: 'ws_publishes_total', type: 'counter', labels: [], unit: null, scope: 'worker', aggregate: 'sum', help: 'Publish calls made (fan-out happens in C++; not per-recipient deliveries)' },
-	{ name: 'ws_publish_outcomes_total', type: 'counter', labels: ['outcome'], unit: null, scope: 'worker', aggregate: 'sum', help: 'Native publish calls by aggregate delivery outcome' },
+	{ name: 'ws_publishes_total', type: 'counter', labels: [], unit: null, scope: 'worker', aggregate: 'sum', help: 'Publish calls made, never per-recipient deliveries' },
+	{ name: 'ws_publish_outcomes_total', type: 'counter', labels: ['outcome'], unit: null, scope: 'worker', aggregate: 'sum', help: 'Publish calls by aggregate delivery outcome' },
 	{ name: 'ws_backpressure_max_bytes', type: 'gauge', labels: [], unit: 'bytes', scope: 'worker', aggregate: 'max', help: 'Worst per-connection outbound buffered bytes over the sampled set' },
 	{ name: 'ws_backpressure_connections', type: 'gauge', labels: [], unit: null, scope: 'worker', aggregate: 'sum', help: 'Sampled connections holding a backpressured outbound queue' },
-	{ name: 'ws_dropped_frames_total', type: 'counter', labels: [], unit: null, scope: 'worker', aggregate: 'sum', help: 'Outbound WebSocket frames dropped by the native backpressure limit' },
-	{ name: 'ws_dropped_bytes_total', type: 'counter', labels: [], unit: 'bytes', scope: 'worker', aggregate: 'sum', help: 'Outbound WebSocket payload bytes dropped by the native backpressure limit' },
+	{ name: 'ws_dropped_frames_total', type: 'counter', labels: [], unit: null, scope: 'worker', aggregate: 'sum', help: 'Outbound WebSocket frames dropped under backpressure' },
+	{ name: 'ws_dropped_bytes_total', type: 'counter', labels: [], unit: 'bytes', scope: 'worker', aggregate: 'sum', help: 'Outbound WebSocket payload bytes dropped under backpressure' },
 	// A refusal is decided pre-hoc on the publishing worker: nothing was
 	// delivered locally and nothing was relayed, unlike the backpressure drops
 	// above, which shed frames already accepted for delivery.

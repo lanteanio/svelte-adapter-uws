@@ -683,10 +683,10 @@ if (WS_ENABLED) {
 		'ws_backpressure_connections', 'Sampled connections holding a backpressured outbound queue'
 	));
 	const mDroppedFrames = containMetricInstrument(METRICS?.counter(
-		'ws_dropped_frames_total', 'Outbound WebSocket frames dropped by the native backpressure limit', []
+		'ws_dropped_frames_total', 'Outbound WebSocket frames dropped under backpressure', []
 	));
 	const mDroppedBytes = containMetricInstrument(METRICS?.counter(
-		'ws_dropped_bytes_total', 'Outbound WebSocket payload bytes dropped by the native backpressure limit', []
+		'ws_dropped_bytes_total', 'Outbound WebSocket payload bytes dropped under backpressure', []
 	));
 	// The rest of what the 1 Hz sampler already computes. These are scalars the
 	// fold produces and then discarded before this hook existed - exporting them
@@ -704,7 +704,7 @@ if (WS_ENABLED) {
 	// out in C++, so per-recipient counting would mean walking the subscriber
 	// set in JS on every publish.
 	const mPublishes = containMetricInstrument(METRICS?.counter(
-		'ws_publishes_total', 'Publish calls made (fan-out happens in C++; not per-recipient deliveries)', []
+		'ws_publishes_total', 'Publish calls made, never per-recipient deliveries', []
 	));
 	const mHttpRequests = containMetricInstrument(METRICS?.counter(
 		'http_requests_total', 'Completed HTTP requests by bounded method and outcome', ['method', 'outcome']
@@ -740,7 +740,7 @@ if (WS_ENABLED) {
 		}
 	));
 	const mPublishOutcomes = containMetricInstrument(METRICS?.counter(
-		'ws_publish_outcomes_total', 'Native publish calls by aggregate delivery outcome', ['outcome']
+		'ws_publish_outcomes_total', 'Publish calls by aggregate delivery outcome', ['outcome']
 	));
 	transportMetricHooks = createTransportMetricHooks({
 		httpRequests: mHttpRequests,

@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Absent, `true`, `false`, and in-range numbers behave exactly as before, on every lane and every surface (production, `createTestServer`, `vite dev`). `null` moves from counter to no-seq; non-contract values move from counter to `TypeError`. Two breaks to know about: an integer above `Number.MAX_SAFE_INTEGER` moves from a silently rounded publish to a `TypeError`, because the double seq space stops having a neighbour at distance one there and adjacent ids collapse onto one value, which stalls a client watermark that only advances on a strict greater-than.
   - **Detail:** [Changed engineering detail](#changed).
+- **Changed: four metric help strings describe what is counted rather than which layer counted it.** `# HELP` named a native C++ fan-out and a native backpressure limit; those are implementation details, and a help string an operator reads to interpret a number should not require knowing which runtime produced it.
+  - **Affects:** Anyone reading `# HELP` on the metrics endpoint for `ws_publishes_total`, `ws_publish_outcomes_total`, `ws_dropped_frames_total` or `ws_dropped_bytes_total`. No metric name, type, label or value changes.
+  - **Action:** None. A dashboard or alert keying on names and labels is unaffected; only the description text differs.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Text only, and the meanings are unchanged - "never per-recipient deliveries" and "dropped under backpressure" say the same thing without naming the runtime. The declaration in `src/index.d.ts` keeps this adapter's specifics, and now states one an operator would otherwise meet on a dashboard: a publish that excludes a socket is delivered by a per-socket walk rather than one native call, so it is counted by `ws_publishes_total` and absent from the outcome breakdown - the two do not sum.
+  - **Detail:** [Changed engineering detail](#changed).
+
 - **Fixed: a `staticHeaders` value carrying a newline is refused at build time.** A CR, LF or NUL in a configured value reached `res.writeHeader` verbatim, where it ends the header field and starts whatever follows - header injection, or a second response; names are now held to the RFC 9110 token grammar too.
   - **Affects:** Builds configuring `staticHeaders`. A value or name that could split a response now fails the build instead of shipping.
   - **Action:** None for a valid configuration. A build that starts failing was emitting a header a client could not have read correctly - remove the control character from the value, or correct a name that is not a bare HTTP token.
@@ -106,7 +113,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation only. What genuinely needs a ceiling is the auto step INTO `'siege'`, which compares over-capacity rejects against that ceiling's admit rate; a pinned `'elevated'` or `'siege'` needs no ceiling either.
   - **Detail:** [Fixed engineering detail](#fixed).
-
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -173,6 +179,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   representation distinction, and the immutable exemption.
 
 ### Changed
+
+- **Four metric help strings name what is counted, not the layer that counted
+  it.** `ws_publishes_total` said "fan-out happens in C++",
+  `ws_publish_outcomes_total` said "Native publish calls", and the two dropped
+  counters said "dropped by the native backpressure limit". A `# HELP` line is
+  what an operator reads to interpret a number, and naming the runtime in it
+  makes the sentence require knowledge of the implementation to parse - and
+  makes it untrue anywhere the same manifest is served by a backend that fans
+  out and sheds in JavaScript. The meanings are unchanged: "never
+  per-recipient deliveries" and "dropped under backpressure" say the same
+  thing without the layer.
+  The declaration in `src/index.d.ts` is where this adapter's specifics
+  belong, and it now carries one that is easy to meet on a dashboard first: a
+  publish that EXCLUDES a socket is delivered by a per-socket walk rather than
+  one native `app.publish`, so it is counted by `ws_publishes_total` and does
+  not appear in the outcome breakdown. The two counters therefore do not sum,
+  by construction rather than by accident - the breakdown counts native
+  fan-out calls, and an excluding publish is not one.
 
 - **A `subs.total-mismatch` violation carries the two counts that say which
   defect produced it.** The context gained `connections`, the number of
