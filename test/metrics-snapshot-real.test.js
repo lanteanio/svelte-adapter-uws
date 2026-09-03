@@ -54,8 +54,9 @@ describeUWS('production metrics snapshot completeness', () => {
 		// how a required-but-never-written gauge stayed green before.
 		const deadline = Date.now() + 10_000;
 		let values = new Map();
+		let doc = '';
 		for (;;) {
-			const doc = mergeSamples(
+			doc = mergeSamples(
 				[{ worker: threadId, samples: collectLocalMetrics() }],
 				{ expected: 1 }
 			);
@@ -64,6 +65,58 @@ describeUWS('production metrics snapshot completeness', () => {
 			if (Date.now() >= deadline) break;
 			await new Promise((r) => setTimeout(r, 200));
 		}
+
+		// EVERY SIGNAL IN THE RENDERED DOCUMENT CARRIES A DESCRIPTION.
+		//
+		// Deliberately NOT compared against the manifest's help text. The
+		// renderer reads its help FROM the manifest, so a text-equality
+		// assertion moves with the thing it is meant to check: reword an entry
+		// and both sides change together. That version passes a mutation it
+		// should fail, which makes it worse than no assertion at all.
+		//
+		// What is checked instead binds to the DOCUMENT: every metric the
+		// document renders must be preceded by a `# HELP <name> <sentence>`
+		// line carrying at least one non-space character. A signal that drops
+		// out of the document, or renders without a description, fails by name.
+		//
+		// SCOPE, so nobody reads this as more than it is: it covers what THIS
+		// fixture renders, not every signal the manifest declares. A counter
+		// that never fires here - `ws_publish_outcomes_total` among them, since
+		// the fixture publishes nothing - is absent from the document and so
+		// cannot be checked. Emptying its help was a mutation this suite did
+		// NOT catch, which is how the boundary was measured rather than
+		// assumed.
+		const helped = new Set();
+		for (const line of doc.split('\n')) {
+			const match = /^# HELP ([a-z_][a-z0-9_]*) (\S.*)$/.exec(line);
+			if (match) helped.add(match[1]);
+		}
+		// Vacuity floor: an empty or truncated document would satisfy a
+		// per-signal loop over nothing. The metrics fixture renders well over
+		// this many families; the number is a floor, not a count to maintain.
+		expect(helped.size, 'the rendered document carried almost no HELP lines').toBeGreaterThan(20);
+		// The rendered set is read from the SAMPLE lines, both forms. Building
+		// it from `values` instead covered only the unlabelled series, because
+		// that parser is value-oriented and skips `name{label="x"} 1` - so a
+		// labelled family losing its description passed. Mutation found that;
+		// reading the name off both shapes is what closes it.
+		const rendered = new Set();
+		for (const line of doc.split('\n')) {
+			const match = /^([a-z_][a-z0-9_]*)(?:\{[^}]*\})? -?\d/.exec(line);
+			if (match) rendered.add(match[1]);
+		}
+		expect(rendered.size, 'the rendered document carried almost no samples').toBeGreaterThan(20);
+		const undescribed = [...rendered].filter((name) => !helped.has(name));
+		expect(undescribed, 'signals rendered into the document with no HELP line').toEqual([]);
+
+		// AND THE DESCRIPTIONS DO NOT NAME THE RUNTIME THAT PRODUCED THE
+		// NUMBER. This is the half a manifest comparison cannot make: the
+		// absent words are an independent fact, not a copy of the source the
+		// renderer already read. A stale or hardcoded sentence surviving
+		// anywhere in the render path shows up here.
+		const layerNaming = doc.split('\n').filter((line) =>
+			line.startsWith('# HELP ') && /C\+\+|native backpressure limit|Native publish calls/.test(line));
+		expect(layerNaming, 'a HELP line still names the implementation layer').toEqual([]);
 
 		expect(values.get('metrics_snapshot_workers_expected'), 'workers_expected').toBe(1);
 		expect(values.get('metrics_snapshot_workers_reporting'),
