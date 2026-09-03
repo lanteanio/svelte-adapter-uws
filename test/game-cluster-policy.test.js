@@ -44,13 +44,32 @@ describe('game lane cluster topology guard', () => {
 	});
 
 	it('threads the resolved I/O count to workers and guards every production entry point', () => {
-		const indexSource = readFileSync(new URL('../src/runtime/index.js', import.meta.url), 'utf8');
-		const platformSource = readFileSync(new URL('../src/runtime/handler/platform.js', import.meta.url), 'utf8');
-		const handlerSource = readFileSync(new URL('../src/runtime/handler.js', import.meta.url), 'utf8');
+		// Line endings normalized on read: the publishGame anchor below spans a
+		// line break, and a newline anywhere but position 0 needs the `\r` the
+		// needle does not carry. (A leading-only newline is safe - CRLF ENDS
+		// with `\n` - which is why the grantPublish anchor never had to care.)
+		const read = (relative) =>
+			readFileSync(new URL(relative, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+		const indexSource = read('../src/runtime/index.js');
+		const platformSource = read('../src/runtime/handler/platform.js');
+		const handlerSource = read('../src/runtime/handler.js');
 
 		expect(indexSource).toContain('ioWorkers: io_count');
-		const grant = platformSource.slice(platformSource.indexOf('\tgrantPublish('), platformSource.indexOf('\n\trevokePublish('));
-		const publish = platformSource.slice(platformSource.indexOf('\tpublishGame('), platformSource.indexOf('\n\t/**\n\t * Unsubscribe', platformSource.indexOf('\tpublishGame(')));
+		// Each lane asserts its anchors were FOUND. Without this a missed
+		// closing anchor slices to one-before-the-end, and both pins below pass
+		// VACUOUSLY against the widened body - `assertGameLaneClusterSafe()`
+		// appears somewhere later in the file whatever these two lanes do, so
+		// the case would keep reporting a guard that had been deleted from the
+		// lane it names.
+		const carve = (label, from, to) => {
+			const start = platformSource.indexOf(from);
+			expect(start, `${label}: opening anchor ${JSON.stringify(from)} not found`).toBeGreaterThan(-1);
+			const end = platformSource.indexOf(to, start);
+			expect(end, `${label}: closing anchor ${JSON.stringify(to)} not found after it`).toBeGreaterThan(start);
+			return platformSource.slice(start, end);
+		};
+		const grant = carve('grantPublish', '\tgrantPublish(', '\n\trevokePublish(');
+		const publish = carve('publishGame', '\tpublishGame(', '\n\t/**\n\t * Unsubscribe');
 		expect(grant).toContain('assertGameLaneClusterSafe()');
 		expect(publish).toContain('assertGameLaneClusterSafe()');
 		expect(handlerSource).toContain('const clusterSafe = gameLaneClusterSafe(workerData);');

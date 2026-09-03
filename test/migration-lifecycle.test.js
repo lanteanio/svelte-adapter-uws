@@ -2,7 +2,10 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { anchorsOf } from '../scripts/check-links.js';
 
-const read = (path) => readFileSync(new URL('../' + path, import.meta.url), 'utf8');
+// Line endings normalized on read: one needle below spans a line break, and a
+// newline anywhere but position 0 needs the `\r` the needle does not carry.
+const read = (path) =>
+	readFileSync(new URL('../' + path, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const index = read('MIGRATION.md');
 const oldGuide = read('docs/migrations/0.4-to-0.5.md');
 const currentGuide = read('docs/migrations/0.5-to-0.6.md');
