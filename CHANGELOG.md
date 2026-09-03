@@ -113,6 +113,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation only. What genuinely needs a ceiling is the auto step INTO `'siege'`, which compares over-capacity rejects against that ceiling's admit rate; a pinned `'elevated'` or `'siege'` needs no ceiling either.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: `publishWire` no longer treats an application's options as a relayed frame.** The cross-worker relay marked its re-entry with two ordinary option keys, so an app that set them was handled as a sibling worker's relay: it named the topic's seq itself, uncounted, past an armed egress ceiling, and out over the relay.
+  - **Affects:** Apps calling `platform.publishWire` directly, including through a plugin codec. No documented option changes and no ordinary call behaves differently.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** Those two keys are now inert - a call carrying them publishes as any other origin publish would, drawing the topic counter. In a multi-worker runtime such a call meets the same sequence-authority refusal every other publish meets, which is a `TypeError` where it previously published silently. `createTestServer` takes the same decision.
+  - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
 ### Added
@@ -236,6 +242,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/seq-stamp.test.js` the resolver itself.
 
 ### Fixed
+
+- **A publish can no longer claim to be a relayed frame.** `publishWire` has an
+  origin side and a relay receive side, and one boolean picks between them: the
+  relay side skips the clustered sequence-authority rule, skips the seq value
+  check, skips the egress decision, skips the publish counter and the max-seen
+  record, stamps the number it was handed instead of drawing the topic counter,
+  and does not relay onward. All of that is correct for a frame a sibling
+  worker already published and fanned out.
+  That boolean was read from `_isRelay` and `_relaySeq` on the caller's options
+  object - the same object every documented publish option arrives on - so an
+  application could set them and be handled as the relay. It could then put an
+  arbitrary number on a topic's sequence, off the publish ledger, past an armed
+  egress ceiling, and out through the multi-origin relay the authority rule
+  exists to keep unallocated numbers out of. Nothing refused it, and the
+  hardening the same entry point already does against adversarial options
+  objects sat one line above two keys anyone could type.
+  The marker is now a `Symbol` created inside the runtime, in a module no
+  export subpath resolves to, and it carries the origin's seq as its value - a
+  key no caller can produce, rather than a key every lane must remember to
+  strip. The relay decision reads that marker directly instead of a
+  `relay: false` the internal caller had to pass beside it, so the two settings
+  can no longer disagree. `createTestServer` takes the same decision.
+  The batch surfaces were already closed: their options copy is field reads
+  rather than a spread, so the keys never reached the entries.
+  `test/relay-marker-real.test.js` drives the built runtime and asserts the seq
+  the client receives, which is the observable projection of that one boolean.
 
 - **The admin route's matched path and its reported path are now the same
   path.** The route is registered on the raw prefix and uWS matches the raw

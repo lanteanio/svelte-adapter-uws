@@ -518,7 +518,19 @@ const COPY_AUTHORITY_SYNTAX = Object.freeze({
 	// `seqOption` local the lane already read once and runs on the origin side
 	// only. The body's reads, encodes and writes are otherwise byte-identical,
 	// and no copy primitive entered.
-	publishWire: '1112096caa019d22731aad05dd3786f0ce0330b93053119d486ad3829be16b6e',
+	//
+	// Re-pinned again for the relay-receive marker. Two string-key reads
+	// (`_isRelay`, then `_relaySeq`) collapse into one read of a Symbol key
+	// whose value is the origin seq, and the relay decision gains that
+	// boolean as a conjunct so a re-entry cannot relay onward whatever else
+	// its options say. Property reads and one comparison; every branch that
+	// follows is the one it already took. Measured per shape against a replay
+	// of the string-key shape (bench/micro-relay-marker-ab.mjs): the Symbol
+	// arm is not slower on any of them, and the shape where both variants
+	// read nothing at all reports the same magnitude, which is what bounds
+	// the rest. No byte is read, allocated or copied, and no copy primitive
+	// entered the body.
+	publishWire: 'd7a565736edbea544f8fd764d3f88d9d038ef4a924f9d2c833daff997921b47f',
 	deliverStatelessWireFanout: '98c4246e4bea446d1647f6bf0b13fb0e0cde521ac27dfe899eff42b884113afa',
 	dispatchIngressFrame: '5ff5ed75d331620ed0bbdd4ffd9fe57ecb993b3b3d97923bdb7edf48e7483e5b',
 	send: 'c900028ed26614f6a0d83b1d57a6649a52db522503def86eee3000541d285b11',
@@ -1526,7 +1538,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// frozen data table, plus the matching registration literals in handler.js.
 	// No statement executes differently on any path, no byte is read,
 	// allocated or copied, and no copy primitive entered.
-	platform: '0d1392e96d95bef9e8e4bc254d70637d220076b4bb325e1be758079638293c29',
+	//
+	// Re-pinned for the relay-receive marker, and the whole drift is this
+	// module plus one exported Symbol in handler/cluster-sequence-policy.js
+	// that the graph already reaches. publishWire reads the marker instead of
+	// two string keys and derives its relay decision from it; relayPublishWire
+	// sets it. Data and property reads. No statement executes differently on
+	// any frame path, no byte is read, allocated or copied, and no copy
+	// primitive entered.
+	platform: 'eeeb99036187598a434d15c7c0aa800308c0166240975fad68dfae3b81aff5e8',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

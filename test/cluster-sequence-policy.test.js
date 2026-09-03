@@ -252,11 +252,12 @@ describe('cluster sequence authority policy', () => {
 		// The wire slice runs on into the batch surfaces; the one-read counts
 		// must cover exactly the publishWire body, which ends at the next JSDoc.
 		const wireBody = wire.slice(0, wire.indexOf('\n\t/**'));
-		for (const field of ['options.seq', 'options.relay', 'options.compress', 'options.excludeWs', 'options._relaySeq']) {
+		for (const field of ['options.seq', 'options.relay', 'options.compress', 'options.excludeWs', 'options[RELAY_ORIGIN_SEQ]']) {
 			expect(wireBody.split(field).length, `publishWire reads ${field} exactly once`).toBe(2);
 		}
 		// Same ordering on the wire lane, and origin-side only: a relayed frame
-		// carries `_relaySeq` instead, already validated where it was published.
+		// carries its number on the relay marker instead, already validated
+		// where it was published.
 		expect(wireBody).toContain('if (!isRelay) assertStampableSeq(seqOption);');
 		expect(wireBody.indexOf('assertStampableSeq('), 'publishWire must refuse the value before it admits')
 			.toBeLessThan(wireBody.indexOf('admitPublishEgress('));

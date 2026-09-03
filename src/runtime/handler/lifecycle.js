@@ -734,8 +734,8 @@ export function relayPublish(topic, envelope, compress, seq, capability, event, 
 	// worker that predates the capability carry) falls through to the envelope.
 	// relayPublishWire itself returns false (envelope
 	// fallback) when no codec is registered for the capability or this worker has no
-	// binary subscriber for it; the local re-encode passes relay:false, so it never
-	// re-relays and cannot loop.
+	// binary subscriber for it; the local re-encode enters under the relay-receive
+	// marker, which suppresses the relay decision, so it cannot loop.
 	if (capability !== undefined &&
 		relayPublishWire(topic, event, data, capability, seq, compress)) {
 		return;

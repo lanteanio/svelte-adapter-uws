@@ -197,7 +197,7 @@ describeUWS('codec-aware cross-worker relay re-encode (relayPublishWire)', () =>
 		expect(jsonFake.sent.binary.length).toBe(0);
 	});
 
-	it('does not re-relay: the re-encode runs with relay:false so no new relay frame is emitted', async () => {
+	it('does not re-relay: the relay marker suppresses the relay decision by itself', async () => {
 		const relayed = [];
 		server = await relayServer({ __onPublish: (frame) => relayed.push(frame) });
 		server.platform.registerWireCodec(makeCodec());
@@ -209,8 +209,34 @@ describeUWS('codec-aware cross-worker relay re-encode (relayPublishWire)', () =>
 		const ok = server.platform.relayPublishWire(TOPIC, 'move', { x: 1 }, CAP, 8, false);
 		expect(ok).toBe(true);
 		expect(binFake.sent.binary.length).toBe(1);
-		// The local re-encode used relay:false: a re-relay would loop cross-worker.
+		// The re-entry carries no `relay: false` of its own: the marker the relay
+		// side is recognised by is what turns the relay off, so the two cannot
+		// disagree. A re-relay would loop the frame cross-worker.
 		expect(relayed.length).toBe(0);
+	});
+
+	it('a relayed frame that carried no seq is still a relay, not a fresh publish', async () => {
+		// The marker's VALUE is the origin seq and its PRESENCE is what marks the
+		// re-entry, so the one value it may never carry is undefined - a frame
+		// that reached this worker without a seq is marked with null instead.
+		// Get that wrong and a seq-less relayed frame reads as an origin publish
+		// on every receiving worker: it draws their counters and relays again.
+		const relayed = [];
+		server = await relayServer({ __onPublish: (frame) => relayed.push(frame) });
+		server.platform.registerWireCodec(makeCodec());
+		await connectCapableClient(server.wsUrl, [CAP]);
+		const binFake = scriptedWs([CAP]);
+		server.wsConnections.add(binFake);
+
+		relayed.length = 0;
+		const ok = server.platform.relayPublishWire(TOPIC, 'move', { x: 1 }, CAP, undefined, false);
+		expect(ok).toBe(true);
+		expect(relayed.length, 'a seq-less relayed frame was relayed onward').toBe(0);
+		// No counter was drawn: the frame goes out unsequenced, exactly as it
+		// arrived, which the binary header spells as seq 0. An origin stamp on
+		// this untouched topic would be 1.
+		expect(binFake.sent.binary.length).toBe(1);
+		expect(parseBinaryFrame(binFake.sent.binary[0]).seq).toBe(0);
 	});
 
 	it('a stateful codec re-encodes per local connection on relay (independent dictionaries)', async () => {
