@@ -162,6 +162,12 @@ and has no config:
   degrades to `Bin n -> m bytes` - and `check-formatting` skips it, because a
   file git records as binary has no text contract to check. Write the byte as an
   escape: the same value at runtime, and the file stays text.
+- **check-tracked-imports** - every relative file import in `src/` and
+  `scripts/` resolves to a file that is actually in git. A module can sit on
+  disk and be absent from the index, and then the tests, the checks and
+  `npm pack` all pass because every one of them reads the working tree; only a
+  clone is broken, and at module load. Directory and extensionless specifiers
+  are out of scope, so relative imports keep their explicit extensions.
 - **check-contributor-map** - this file's three inventories are derived from
   their real sources: every gate below runs in `npm run check`, every hosted
   job is named, and every `npm run` lane it sends you to exists. It is why the
