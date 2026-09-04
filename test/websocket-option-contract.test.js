@@ -69,9 +69,29 @@ function nodes(root) {
 	return out;
 }
 
-/** Every property read from WS_OPTIONS or a direct alias of it. */
+/**
+ * Is this declarator's initializer an alias of one we already know?
+ *
+ * A bare `const x = WS_OPTIONS` and a defaulted `const x = WS_OPTIONS || {}`
+ * are the same binding as far as the reads below are concerned, and both
+ * spellings are ordinary. Following only the bare one makes an alias set that
+ * silently stays at size 1, so every option reads as unfound and the failure
+ * points at the option instead of at the scan.
+ */
+function aliasesInit(init, aliases) {
+	if (init == null) return false;
+	if (init.type === 'Identifier') return aliases.has(init.name);
+	if (init.type === 'LogicalExpression') return aliasesInit(init.left, aliases);
+	return false;
+}
+
+/**
+ * Every property read from WS_OPTIONS or an alias of it, and every alias name
+ * the scan resolved - the second so a scan that found nothing can say so.
+ */
 function runtimeOptionReads() {
 	const found = new Set();
+	const aliasNames = new Set(['WS_OPTIONS']);
 	for (const file of jsFiles(path.join(ROOT, 'src', 'runtime'))) {
 		const tree = nodes(parse(readFileSync(file, 'utf8'), {
 			ecmaVersion: 'latest',
@@ -83,10 +103,11 @@ function runtimeOptionReads() {
 			changed = false;
 			for (const node of tree) {
 				if (node.type !== 'VariableDeclarator' || node.id?.type !== 'Identifier') continue;
-				if (node.init?.type !== 'Identifier' || !aliases.has(node.init.name)) continue;
+				if (!aliasesInit(node.init, aliases)) continue;
 				if (!aliases.has(node.id.name)) { aliases.add(node.id.name); changed = true; }
 			}
 		}
+		for (const name of aliases) aliasNames.add(name);
 		for (const node of tree) {
 			if (node.type === 'MemberExpression' && node.object?.type === 'Identifier' && aliases.has(node.object.name)) {
 				if (!node.computed && node.property?.type === 'Identifier') found.add(node.property.name);
@@ -94,15 +115,15 @@ function runtimeOptionReads() {
 					found.add(node.property.value);
 				}
 			}
-			if (node.type === 'VariableDeclarator' && node.init?.type === 'Identifier' &&
-				aliases.has(node.init.name) && node.id?.type === 'ObjectPattern') {
+			if (node.type === 'VariableDeclarator' && aliasesInit(node.init, aliases) &&
+				node.id?.type === 'ObjectPattern') {
 				for (const prop of node.id.properties) {
 					if (prop.type === 'Property') found.add(prop.key?.name ?? prop.key?.value);
 				}
 			}
 		}
 	}
-	return found;
+	return { found, aliasNames };
 }
 
 describe('production websocket option contract', () => {
@@ -114,7 +135,14 @@ describe('production websocket option contract', () => {
 
 	it('serializes every option the runtime actually reads', () => {
 		const serialized = new Set(Object.keys(serializeWsOptions({}, '/__realtime')));
-		const reads = runtimeOptionReads();
+		const { found: reads, aliasNames } = runtimeOptionReads();
+		// The scan resolves the global to whatever the runtime binds it to, and
+		// a scan that resolved NOTHING would report every option below as
+		// unread - blaming the option for a data-flow shape the scan does not
+		// follow. Say which it is here rather than in a dozen missing-option
+		// failures.
+		expect(aliasNames.size, `WS_OPTIONS is never bound to a local the scan follows (resolved: ${[...aliasNames].join(', ')})`)
+			.toBeGreaterThan(1);
 		// Self-check the AST/data-flow scan against the two original dropped
 		// options and a value read through the WS_OPTIONS global in another file.
 		for (const expected of [
