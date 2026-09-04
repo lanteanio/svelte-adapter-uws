@@ -641,6 +641,10 @@ if (is_primary) {
 			lastHeartbeat: 0,
 			spawnedAt: monotonicNow(),
 			ready: false,
+			// When this worker reported ready. The gap from here to relayAttached is
+			// one tick in a healthy worker, so a stale readyAt with no attach is a
+			// worker serving traffic while invisible to the relay.
+			readyAt: 0,
 			role,
 			slot,
 			ringWriter: null,
@@ -744,6 +748,7 @@ if (is_primary) {
 				meta.descriptor = msg.descriptor;
 				meta.lastHeartbeat = monotonicNow();
 				meta.ready = true;
+				meta.readyAt = monotonicNow();
 				acceptorApp.addChildAppDescriptor(msg.descriptor);
 				console.log(`[svelte-adapter-uws] Worker thread ${worker.threadId} registered`);
 				// Worker started successfully - mark this slot ready and stamp its
@@ -773,6 +778,7 @@ if (is_primary) {
 				// crash-restart budget resets on a later exit only if it stayed up.
 				meta.lastHeartbeat = monotonicNow();
 				meta.ready = true;
+				meta.readyAt = monotonicNow();
 				if (msg.role === 'compute') console.log(`[svelte-adapter-uws] Compute worker ${worker.threadId} ready`);
 				else {
 					console.log(`[svelte-adapter-uws] Worker thread ${worker.threadId} listening on :${port}`);

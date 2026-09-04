@@ -349,6 +349,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   case that already existed listed five spellings of the key; it now also
   carries the shapes that name nothing, including the echo.
 
+- **A worker that reports ready and never attaches its relay reader is now
+  detected.** The primary hands a worker no relay frames until it reports its
+  reader live, which is what keeps a slow boot out of the spill ceiling's reach
+  - the ceiling is a stall detector, and a booting worker's unread ring looks
+  exactly like a stall. The cost of that gate was the detection that used to
+  come with it: a worker that reported ready and then never attached received
+  no frames, so no spill accumulated, nothing crossed the age ceiling, and it
+  kept acking heartbeats while missing every cross-worker publish its own
+  subscribers were owed. The boot deadline could not catch it either, because
+  that deadline only applies while a worker is not yet ready.
+  The primary now stamps when a worker reported ready and escalates one that
+  has not attached within the steady heartbeat timeout, through the same
+  request-exit and respawn path as an unresponsive worker. A healthy worker
+  attaches in the same tick it goes ready - the two are posted synchronously
+  one after the other - so the bound is enormously generous and needs no
+  configuration. It is deliberately not tied to `WORKER_BOOT_TIMEOUT_MS`:
+  setting that to `0` says an init may take arbitrarily long, which is a
+  different statement from allowing a serving worker to miss relay traffic
+  forever.
+
 - **`vite dev` applies custom 101 response headers instead of warning that it
   cannot.** `upgradeResponse(userData, headers)` put application headers on the
   handshake in production and dropped them in development, with a warning
