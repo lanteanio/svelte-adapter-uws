@@ -32,7 +32,8 @@ import { parseBinaryFrame } from '../wire.js';
 import {
 	WS_INGRESS_BINDINGS,
 	MAX_INGRESS_BINDINGS_PER_CONNECTION,
-	MAX_INGRESS_TARGET_BYTES
+	MAX_INGRESS_TARGET_BYTES,
+	defineSlot
 } from '../utils.js';
 
 /** The `0x03` ingress control token a client advertises in `hello.caps`. */
@@ -53,7 +54,10 @@ function registry() {
 	let m = /** @type {any} */ (globalThis)[REGISTRY_KEY];
 	if (m === undefined) {
 		m = new Map();
-		/** @type {any} */ (globalThis)[REGISTRY_KEY] = m;
+		// Published without a [[Set]]: an accessor on this key would swallow the
+		// write, and each module copy would then build its own registry - the
+		// split this global key exists to prevent.
+		defineSlot(globalThis, REGISTRY_KEY, m);
 	}
 	return m;
 }

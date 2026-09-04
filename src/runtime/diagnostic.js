@@ -114,6 +114,21 @@ function sinkFailureFallback(record) {
 	defaultOperationalEventSink(notice);
 }
 
+// The two sink slots live on globalThis so the adapter, extensions and realtime
+// packages share one registration even when a bundler gives each its own copy
+// of this module. globalThis inherits from Object.prototype, so a plain
+// assignment is a [[Set]] an accessor on either key can swallow - and a
+// swallowed publication reads back undefined, which is how every copy ends up
+// with its own sink and events go to console while a sink is installed.
+// defineProperty consults no prototype.
+/**
+ * @param {symbol} key
+ * @param {unknown} value
+ */
+function defineGlobal(key, value) {
+	Object.defineProperty(globalThis, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
 function operationalEventSinkRegistry() {
 	let registry = globalThis[OPERATIONAL_EVENT_SINK_REGISTRY];
 	if (!registry || !Array.isArray(registry.entries)) {
@@ -123,14 +138,14 @@ function operationalEventSinkRegistry() {
 				? [{ sink: inherited, active: true }]
 				: []
 		};
-		globalThis[OPERATIONAL_EVENT_SINK_REGISTRY] = registry;
+		defineGlobal(OPERATIONAL_EVENT_SINK_REGISTRY, registry);
 	}
 	return registry;
 }
 
 function syncOperationalEventSink(registry) {
 	const current = registry.entries[registry.entries.length - 1];
-	if (current) globalThis[OPERATIONAL_EVENT_SINK] = current.sink;
+	if (current) defineGlobal(OPERATIONAL_EVENT_SINK, current.sink);
 	else delete globalThis[OPERATIONAL_EVENT_SINK];
 }
 
@@ -156,7 +171,7 @@ export function setOperationalEventSink(sink) {
 	}
 	const entry = { sink, active: true };
 	registry.entries.push(entry);
-	globalThis[OPERATIONAL_EVENT_SINK] = sink;
+	defineGlobal(OPERATIONAL_EVENT_SINK, sink);
 	return () => {
 		if (!entry.active) return;
 		entry.active = false;

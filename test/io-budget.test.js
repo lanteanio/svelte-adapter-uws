@@ -885,7 +885,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// frozen data table, plus the matching registration literals in handler.js.
 	// No statement executes differently on any path, no byte is read,
 	// allocated or copied, and no copy primitive entered.
-	ingress: '85cdd273f29000d6f81a83ce7d5ed2c85a429539b0b6cfd68e9e9226605e4f42',
+	//
+	// Re-pinned for the per-connection slot declaration, reached through
+	// utils.js -> utils/ws-symbols.js: a frozen list of the slot keys and two
+	// helpers that write a slot with `Object.defineProperty` instead of an
+	// assignment, so the write cannot be taken by an accessor on the prototype
+	// chain. The module-eval global registries publish through the same helper.
+	// The writes are per connection and per process, never per frame; no
+	// statement executes differently on any frame path, no byte is read,
+	// allocated or copied, and no copy primitive entered either graph.
+	ingress: '70c09a8eb7a571db59fdfead2abeb8ed7bbe49663fef7d0fd44cf7a2f1f7bb36',
 	// Re-pinned after review of the publishWireBatch stamping-loop change: the
 	// drift is three scalar locals (a running highest seq and message/byte
 	// accumulators) plus the move of `maxSeenSeq.set`, `stats.m/b` and
@@ -1556,7 +1565,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// descriptor object per marked options object, on the batch lanes only. No
 	// statement executes differently on any frame path, no byte is read,
 	// allocated or copied, and no copy primitive entered.
-	platform: '6528859410579a0532f5e303d3c8c957706acfd095285a95a6fff2d9098b9c0c',
+	//
+	// Re-pinned for the per-connection slot declaration, reached through
+	// utils.js -> utils/ws-symbols.js: a frozen list of the slot keys and two
+	// helpers that write a slot with `Object.defineProperty` instead of an
+	// assignment, so the write cannot be taken by an accessor on the prototype
+	// chain. The module-eval global registries publish through the same helper.
+	// The writes are per connection and per process, never per frame; no
+	// statement executes differently on any frame path, no byte is read,
+	// allocated or copied, and no copy primitive entered either graph.
+	platform: 'edba1f682d7551ff18a45a6dbc803f5cf9932e61bc17d3f2eaa8bad0be30ed74',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,
@@ -1786,7 +1804,16 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// Re-pinned for the four metric help strings, the same
 	// observability-manifest.js literal edit as the sibling seals. Nothing in
 	// this graph's own fan-out modules changed, and no copy primitive entered.
-	'wire-fanout': 'ea61107186179eadee78c00533f5d0a29cb2340835f571a06246c70b5aabc7ae',
+	//
+	// Re-pinned for the per-connection slot declaration, reached through
+	// utils.js -> utils/ws-symbols.js: a frozen list of the slot keys and two
+	// helpers that write a slot with `Object.defineProperty` instead of an
+	// assignment, so the write cannot be taken by an accessor on the prototype
+	// chain. The module-eval global registries publish through the same helper.
+	// The writes are per connection and per process, never per frame; no
+	// statement executes differently on any frame path, no byte is read,
+	// allocated or copied, and no copy primitive entered this graph.
+	'wire-fanout': '062364c66b2d4dbe33090df73ed7e877bd5c4354fb4344a6cf28e3a788f3a07b',
 	// Re-pinned for the replenish backlog report, whose drift is this graph's
 	// own root module: requestNFrame's optional `queued` serialization arm (a
 	// client-to-server control-frame builder, called on no server frame path)

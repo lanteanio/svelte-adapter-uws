@@ -103,11 +103,12 @@ describeUWS('per-connection stats on close', () => {
 		await new Promise(r => setTimeout(r, 30));
 		const ws = [...server.wsConnections][0];
 
-		// Stats slot should not have been allocated on open.
+		// Stats slot should not have been allocated on open. Open declares every
+		// adapter slot as an own property so the runtime's writes cannot be
+		// intercepted by an inherited accessor, which makes PRESENCE say nothing
+		// about allocation - the value is what says it. No close hook, no object.
 		const userData = ws.getUserData();
-		const slots = Object.getOwnPropertySymbols(userData)
-			.filter(s => s.description === 'adapter-uws.ws.stats');
-		expect(slots).toHaveLength(0);
+		expect(userData[Symbol.for('adapter-uws.ws.stats')]).toBeUndefined();
 
 		client.close();
 	});

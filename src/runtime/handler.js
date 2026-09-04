@@ -27,7 +27,7 @@ import { emitOperationalEvent, formatDiagnostic, diagnosticError } from './diagn
 import { privateValueMetadata } from './utils/observability-privacy.js';
 import { probeOsPressureSources, emitPressureMetricTelemetry } from './utils/os-pressure.js';
 import { parseCookies, createCookies } from './cookies.js';
-import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, pendingSubscribeTotal, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, isSettledSubscriptionRegistry, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
+import { mimeLookup, parse_as_bytes, parse_origin, writeChunkWithBackpressure, drainCoalesced, computePressureReason, computeTopPublishers, nextTopicSeq, createHlc, processEpoch, completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey, esc, isValidWireTopic, createScopedTopic, isOriginAllowed, isAuthOriginAccepted, describeUnsafeSameOriginConfig, addressScope, createUpgradeAdmission, negotiateRejection, buildAccessibleCapacityRefusalPage, isCursorLaneUpgrade, resolveWaitingRoom, createWaitingRoomRequest, sendWaitingRoomPage, jitterRetryAfter, REFUSAL_RETRY_AFTER_SECONDS, createPollCounter, containMetricInstrument, mirrorRegistry, readFdLimits, countOpenFds, applyCapacityReason, createPosture, resolveRequestId, assert, fatal, readAssertionCounts, wireAssertionMetrics, beginPendingSubscribe, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, tombstonePendingSubscribe, isPendingSubscribeCancelled, releaseDerivedSubscriptions, pendingSubscribeTotal, setSubscriptionAccountingHook, addLogicalSubscription, removeLogicalSubscription, accountClosedLogicalSubscriptions, isSettledSubscriptionRegistry, WS_SUBSCRIPTIONS, WS_PUBLISH_GRANT, WS_COALESCED, WS_SESSION_ID, WS_PENDING_REQUESTS, WS_STATS, WS_PLATFORM, WS_REQUEST_ID_KEY, WS_CONNECTION_PERMIT, WS_CAPS, WS_TOPIC_IDS, WS_WIRE_STATE, WS_LEASE, WS_SHARED_COHORTS, declareConnectionSlots, MAX_SUBSCRIPTIONS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_COALESCED_KEYS_PER_CONNECTION, TOPIC_SEQS_WARN_THRESHOLD, PUBLISH_WARN_DEDUP_MAX } from './utils.js';
 import { buildBinaryFrame, allocWireId, wireIdAnnounce, createCapCounts, createLeaseState, leasePressureValue, leaseGrantSize, leaseReportedSaturation, samplePressureValue, leaseGrantFrame, controlFrameTooLargeFrame, DEFAULT_GRANT } from './wire.js';
 import { dispatchIngressFrame, bindIngress, ingressOkFrame, ingressBoundFrame, WIRE_INGRESS_CAP } from './handler/ingress.js';
 import { registerGameIngress, gameLaneClusterSafe } from './handler/game-ingress.js';
@@ -2171,6 +2171,14 @@ if (WS_ENABLED) {
 			// Used to populate CloseContext.subscriptions for the user's close handler,
 			// enabling deterministic cleanup of per-subscription server state.
 			const userData = ws.getUserData();
+			// Claim the adapter's slots as own properties before anything writes
+			// one. uWS hands back an object inheriting from uWS.WebSocket, whose
+			// chain reaches Object.prototype, and a plain assignment there is a
+			// [[Set]] that an accessor on the key can swallow whole - leaving the
+			// slot unwritten while every falsy guard downstream keeps re-running
+			// its initialization. Declared once here, the later assignments find
+			// an own property and never look at the chain again.
+			declareConnectionSlots(userData);
 			if (admission.maxConnections > 0) {
 				const permitRestored = connectionPermitCarrier.restore(userData);
 				fatal(permitRestored, 'ws.connection-permit-carrier', null);
@@ -2181,10 +2189,10 @@ if (WS_ENABLED) {
 			// would overwrite live per-connection state, so escalate to the hard tier.
 			fatal(!userData[WS_PLATFORM], 'ws.platform-double-init', null);
 			userData[WS_SUBSCRIPTIONS] = new Set();
-			// Promote the upgrade-time requestId (carried as a string slot
-			// because Symbol keys do not survive res.upgrade) into a
-			// per-connection platform clone on the Symbol slot, then drop
-			// the string slot so userData stays clean for hook code.
+			// Promote the upgrade-time requestId (carried across the upgrade on
+			// a string slot) into a per-connection platform clone on the Symbol
+			// slot, then drop the string slot so userData stays clean for hook
+			// code.
 			const wsPlatform = Object.create(platform);
 			wsPlatform.requestId = userData[WS_REQUEST_ID_KEY];
 			Object.defineProperty(wsPlatform, 'connectionTraceContext', {

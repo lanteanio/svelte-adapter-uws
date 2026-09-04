@@ -349,6 +349,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   case that already existed listed five spellings of the key; it now also
   carries the shapes that name nothing, including the echo.
 
+- **A connection's own state can no longer be silenced from the prototype
+  chain.** The runtime keeps per-connection state on the socket's `userData`
+  object under `Symbol.for` keys, written with plain assignments. A plain
+  assignment is a `[[Set]]`: it walks the prototype chain, and the object uWS
+  hands to `open` inherits from `uWS.WebSocket`, whose chain reaches
+  `Object.prototype`. An accessor installed there for one of those keys
+  received the value and left no own property behind, so the write did nothing
+  at all. The keys are reachable by design - `Symbol.for` is what lets a
+  bundled copy of a module and a runtime-loaded one resolve the same slot - so
+  this needed no hostile code, only an application with an accessor on the key.
+  Losing the value was the smaller half. Every one of those sites is a lazy
+  initialization or a transition behind a falsy guard, so a swallowed write
+  left the guard open and its lane re-ran the initialization on every pass: the
+  subscription set rebuilt empty, the coalesce buffer reallocated per message
+  and coalescing nothing, the wire-id space restarting.
+  `open` now declares every slot as an own property before anything writes one,
+  so each later assignment finds an own property and never consults the chain
+  again. A slot that is already populated is left untouched, because that is
+  the evidence `ws.platform-double-init` reads to refuse a re-entrant open. The
+  declaration cannot ride the upgrade object instead: uWS copies that object
+  into its own with `[[Set]]`, so a slot declared there is intercepted on the
+  way across and arrives absent. The process-wide slots that have no connection
+  to hang a declaration on - the operational event sink and its registry, the
+  ingress kind registry, the derived and plugin-owned topic prefixes, and the
+  side-effect hook marker - are defined rather than assigned for the same
+  reason. Slot presence is no longer a signal that a lane has allocated
+  anything; the value is.
+
 - **The admin route's matched path and its reported path are now the same
   path.** The route is registered on the raw prefix and uWS matches the raw
   request target, but constructing a Web `Request` resolves dot segments. So

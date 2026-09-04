@@ -739,8 +739,7 @@ export function trackedUnsubscribe(ws, topic) {
  * @type {Set<string>}
  */
 const DERIVED_PREFIXES_KEY = Symbol.for('adapter-uws.derived-topic-prefixes');
-const _derivedTopicPrefixes = globalThis[DERIVED_PREFIXES_KEY]
-	?? (globalThis[DERIVED_PREFIXES_KEY] = new Set());
+const _derivedTopicPrefixes = globalThis[DERIVED_PREFIXES_KEY] ?? defineGlobalSet(DERIVED_PREFIXES_KEY);
 
 /**
  * Topic prefixes a PLUGIN owns and decides for itself.
@@ -769,8 +768,7 @@ const _derivedTopicPrefixes = globalThis[DERIVED_PREFIXES_KEY]
  * @type {Set<string>}
  */
 const OWNED_PREFIXES_KEY = Symbol.for('adapter-uws.plugin-owned-topic-prefixes');
-const _pluginOwnedPrefixes = globalThis[OWNED_PREFIXES_KEY]
-	?? (globalThis[OWNED_PREFIXES_KEY] = new Set());
+const _pluginOwnedPrefixes = globalThis[OWNED_PREFIXES_KEY] ?? defineGlobalSet(OWNED_PREFIXES_KEY);
 
 /**
  * Longest a plugin-owned prefix may be, and the shortest namespace that counts.
@@ -928,7 +926,7 @@ export function isAuthorizationHook(fn) {
  */
 export function markSideEffectHooks(hooks, names) {
 	for (const name of names) {
-		if (typeof hooks?.[name] === 'function') hooks[name][WS_HOOK_SIDE_EFFECT_ONLY] = true;
+		if (typeof hooks?.[name] === 'function') defineSlot(hooks[name], WS_HOOK_SIDE_EFFECT_ONLY, true);
 	}
 	return hooks;
 }
@@ -1037,3 +1035,107 @@ export const WS_INGRESS_BINDINGS = Symbol.for('adapter-uws.ws.ingress-bindings')
  * advertises it never gets this slot and runs exactly the immediate send path.
  */
 export const WS_LEASE = Symbol.for('adapter-uws.ws.lease');
+
+/**
+ * Every slot the runtime writes onto a connection's userData object.
+ *
+ * The list exists because those writes are plain assignments, and a plain
+ * assignment is a `[[Set]]`: it walks the prototype chain, and an accessor
+ * installed for that key anywhere on the chain takes the value and creates NO
+ * own property. The userData object uWS hands to `open` inherits from
+ * `uWS.WebSocket.prototype`, whose chain reaches `Object.prototype`, so an
+ * application that puts an accessor on one of these keys silences the write.
+ *
+ * Silencing is worse than losing one value. Every site here is a lazy init or
+ * a transition behind a falsy guard, so the guard never closes and the lane
+ * redoes its work on every pass: `sendCoalesced` allocates a fresh pending Map
+ * per message and coalesces nothing, the subscription Set is rebuilt empty,
+ * the wire-id space restarts. The keys are reachable by construction - they
+ * are `Symbol.for`, which the module comment above accepts so that duplicated
+ * module instances resolve one slot - so this is not a hypothetical reached
+ * only by hostile code.
+ *
+ * Declaring each slot as an own property once, at open, is what closes it: a
+ * `[[Set]]` that finds an own data property writes it in place and never
+ * consults the chain, so every later assignment in the runtime stays a plain
+ * assignment and pays nothing. The declaration cannot ride the upgrade object
+ * instead - uWS copies that object into its own with `[[Set]]`, so a slot
+ * declared there is intercepted on the way across and arrives absent.
+ */
+export const CONNECTION_SLOTS = Object.freeze([
+	WS_SUBSCRIPTIONS,
+	WS_PENDING_SUBSCRIBES,
+	WS_PENDING_SUBSCRIBES_TOTAL,
+	WS_PUBLISH_GRANT,
+	WS_ATTRIBUTION,
+	WS_COALESCED,
+	WS_SESSION_ID,
+	WS_PENDING_REQUESTS,
+	WS_STATS,
+	WS_PLATFORM,
+	WS_CAPS,
+	WS_TOPIC_IDS,
+	WS_WIRE_STATE,
+	WS_SHARED_COHORTS,
+	WS_CONNECTION_PERMIT,
+	WS_INGRESS_BINDINGS,
+	WS_LEASE
+]);
+
+/**
+ * Write a slot onto an object the application can reach, without consulting
+ * the prototype chain. For the one-off targets - `globalThis`, a hook function
+ * the app supplied - where there is no open-time declaration to hang the value
+ * on and the write happens once per process or once per registration.
+ *
+ * Own, writable, enumerable and configurable: the same shape a plain
+ * assignment would have produced, so nothing downstream that copies, spreads
+ * or enumerates the target sees a different object than before.
+ *
+ * @param {object | Function} target
+ * @param {string | symbol} key
+ * @param {unknown} value
+ */
+export function defineSlot(target, key, value) {
+	Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
+/**
+ * Declare every per-connection slot as an own property of `userData`, so the
+ * runtime's own writes land on it rather than on an inherited accessor.
+ *
+ * Called once at open, before the first slot write. A slot that is ALREADY an
+ * own property is left exactly as it is: on a re-entrant open the platform
+ * slot still holds the live connection's platform, which is the evidence
+ * `ws.platform-double-init` reads to refuse the duplicate. Overwriting it with
+ * `undefined` here would answer that guard's question before it asked.
+ *
+ * @param {any} userData - `ws.getUserData()`
+ */
+export function declareConnectionSlots(userData) {
+	for (let i = 0; i < CONNECTION_SLOTS.length; i++) {
+		const key = CONNECTION_SLOTS[i];
+		if (!Object.hasOwn(userData, key)) {
+			Object.defineProperty(userData, key, { value: undefined, writable: true, enumerable: true, configurable: true });
+		}
+	}
+}
+
+/**
+ * Create one of the module-eval-time global registries and publish it under its
+ * `Symbol.for` key without a `[[Set]]`.
+ *
+ * These registries exist so that two copies of this module - the bundled one
+ * and the one loaded from node_modules - share a single set. An accessor on
+ * the key would swallow the publication, and each copy would then read back
+ * `undefined` and build its own set, which is exactly the divergence the
+ * global key is here to prevent.
+ *
+ * @param {symbol} key
+ * @returns {Set<string>}
+ */
+function defineGlobalSet(key) {
+	const set = new Set();
+	defineSlot(globalThis, key, set);
+	return set;
+}

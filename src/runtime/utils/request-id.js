@@ -1,10 +1,11 @@
 /**
- * String-keyed slot used to carry the per-connection requestId from
- * `upgrade` to `open`. Cannot be a Symbol: uWebSockets.js strips
- * Symbol-keyed properties from the userData object passed to
- * `res.upgrade()` (only string keys survive the C++ binding boundary).
- * The `open` hook deletes this slot after promoting the value into the
- * Symbol-keyed `WS_PLATFORM` clone, so it never leaks into hook code.
+ * Slot used to carry the per-connection requestId from `upgrade` to `open`.
+ *
+ * `res.upgrade()` does not hand its argument through to `open`: uWS builds its
+ * own userData object and copies the properties across with plain assignments,
+ * string and Symbol keys alike. The `open` hook deletes this slot after
+ * promoting the value into the Symbol-keyed `WS_PLATFORM` clone, so it never
+ * leaks into hook code.
  */
 export const WS_REQUEST_ID_KEY = '__adapter_uws_request_id__';
 
