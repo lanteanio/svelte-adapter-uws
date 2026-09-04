@@ -122,7 +122,7 @@ describeUWS('egress ceilings against the built runtime', () => {
 			}
 			expect((await client.probe('publish-probe', topic)).result, 'the fourth must cross').toBe(false);
 
-			for (const forge of ['string-key', 'registry-symbol', 'proxy-true', 'proto-getter']) {
+			for (const forge of ['string-key', 'registry-symbol', 'proxy-true', 'proto-getter', 'key-echo', 'key-echo-proto']) {
 				expect((await client.probe('forge-probe', topic, { forge })).result, `${forge} got past the ceiling`).toBe(false);
 				// The wire lane reads the admission marker off the caller's
 				// options too, and it is the lane that also used to read a

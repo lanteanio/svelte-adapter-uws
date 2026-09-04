@@ -7,7 +7,7 @@ import { isWarmupRequest } from './warmup-registry.js';
 import { parentPort } from 'node:worker_threads';
 import { exceedsSubscriptionCap, exceedsPendingSubscribeCap, deniesUngrantedObserve } from '../utils/subscribe-policy.js';
 import { MAX_COALESCED_KEYS_PER_CONNECTION, MAX_PENDING_REQUESTS_PER_CONNECTION, MAX_PENDING_SUBSCRIBES_PER_CONNECTION, MAX_SUBSCRIPTIONS_PER_CONNECTION, WS_ATTRIBUTION, WS_CAPS, WS_COALESCED, WS_PENDING_REQUESTS, WS_PLATFORM, WS_PUBLISH_GRANT, WS_REVOKED_UNSUBSCRIBE, WS_SUBSCRIPTIONS, assert, fatal, beginPendingSubscribe, pendingSubscribeTotal, settlePendingSubscribe, settleHeldSubscribe, settleDeniedSubscribe, unwindRevokedMembership, collapseByCoalesceKey, completeEnvelope, completeGameEnvelope, createScopedTopic, createTopicHelperCache, isValidWireTopic, mintTopicEpoch, topicEpochValue, readAssertionCounts, resolveEntrySeq, resolveSendSeq, stampSeqValue, assertStampableSeq, throwInvalidSeq, tombstonePendingSubscribe, releaseDerivedSubscriptions, addLogicalSubscription, removeLogicalSubscription, wrapBatchEnvelope } from '../utils.js';
-import { egressGate, resolvePublishTenant, admitPublishEgress, admitTopicEgress, admitTenantEgress, chargePublishEgress, chargeDirectEgress, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, EGRESS_ADMITTED, admittedByBatch } from './egress-budget.js';
+import { egressGate, resolvePublishTenant, admitPublishEgress, admitTopicEgress, admitTenantEgress, chargePublishEgress, chargeDirectEgress, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, markAdmitted, admittedByBatch } from './egress-budget.js';
 import { buildBinaryFrame } from '../wire.js';
 import { now, monotonicNow, clearTimer, setTimer, randomBytes, randomFloat, randomU32, randomUuid } from '../runtime.js';
 import { capCounts, captureResumeFrame, counters, maxSeenSeq, divergenceDiagnostics, pressureListeners, pressureSnapshot, publishRateListeners, recordSeen, recordStampedSeen, resumeBuffers, sharedTopics, subscribeAuth, topicSeqs, topicSubscriberCounts, wsConnections } from './state.js';
@@ -160,7 +160,7 @@ export const platform = {
 		let egressTenant = null;
 		if (egressGate.armed) {
 			egressTenant = resolvePublishTenant(topic);
-			// EGRESS_ADMITTED marks an event whose batch already decided for
+			// The admitted marker names an event whose batch already decided for
 			// the whole call (publishBatched's slow path). It still charges
 			// below - every event is its own logical publish in the ledger -
 			// but re-deciding here would deliver a prefix of an atomic batch.
@@ -346,7 +346,7 @@ export const platform = {
 			if (excludeOption !== undefined && excludeOption !== null && excludedRecipient(excludeOption, topic)) recipients--;
 			if (egressGate.armed) {
 				egressTenant = resolvePublishTenant(topic);
-				// EGRESS_ADMITTED marks an entry whose batch already took the
+				// The admitted marker names an entry whose batch already took the
 				// decision for the whole call (publishWireBatch's stateless
 				// lane). It still charges below - every entry is its own
 				// logical publish in the ledger - but re-deciding here would
@@ -786,7 +786,7 @@ export const platform = {
 				}
 				if (!admitPublishEgress(topic, resolvePublishTenant(topic), count, deliveries)) return false;
 				// The entries inherit the decision rather than re-taking it.
-				admitOpts = { ...(opts || {}), [EGRESS_ADMITTED]: EGRESS_ADMITTED };
+				admitOpts = markAdmitted({ ...(opts || {}) });
 			}
 			let ok = false;
 			for (let i = 0; i < count; i++) {
@@ -2366,13 +2366,12 @@ export const platform = {
 				// The snapshot, not a spread of the live object: publish() consumes
 				// exactly these fields, and the values it stamps must be the ones
 				// the atomic pre-pass above already judged.
-				platform.publish(m.topic, m.event, m.data, {
+				platform.publish(m.topic, m.event, m.data, markAdmitted({
 					seq: msgSeqs[i],
 					relay: msgRelays[i],
 					jitterMs: msgJitters[i],
-					compress: compressOptIn,
-					[EGRESS_ADMITTED]: EGRESS_ADMITTED
-				});
+					compress: compressOptIn
+				}));
 			}
 			return;
 		}

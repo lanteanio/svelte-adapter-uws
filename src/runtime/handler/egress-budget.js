@@ -23,7 +23,7 @@ import { emitOperationalEvent } from '../diagnostic.js';
 import { privateValueMetadata } from '../utils/observability-privacy.js';
 
 export { normalizeEgressOptions, createEgressAccount };
-export { excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, EGRESS_ADMITTED, admittedByBatch, EGRESS_DEFAULT_WINDOW_MS } from '../utils/egress-account.js';
+export { excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, markAdmitted, admittedByBatch, EGRESS_DEFAULT_WINDOW_MS } from '../utils/egress-account.js';
 
 /**
  * One account per worker, configured by handler.js at startup. A holder (not

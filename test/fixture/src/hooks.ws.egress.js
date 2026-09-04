@@ -58,7 +58,16 @@ export function message(ws, { data, platform }) {
 					? new Proxy({}, { get: () => true })
 					: msg.forge === 'proto-getter'
 						? Object.create(new Proxy({}, { get: () => true }))
-						: undefined;
+						// A `get` trap is handed the key it is asked for, so
+						// echoing it satisfies any test comparing the value to
+						// the key. Symbols only: echoing string keys hands
+						// `seq` back a string and the call is refused for that
+						// instead, which looks like the ceiling working.
+						: msg.forge === 'key-echo'
+							? new Proxy({}, { get: (_t, key) => (typeof key === 'symbol' ? key : undefined) })
+							: msg.forge === 'key-echo-proto'
+								? Object.create(new Proxy({}, { get: (_t, key) => (typeof key === 'symbol' ? key : undefined) }))
+								: undefined;
 		// Both publish lanes: they read the admission marker from the caller's
 		// options independently, and publishWire additionally used to read a
 		// relay marker the same way, so a forgery has to be refused on each.

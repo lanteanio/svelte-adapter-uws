@@ -57,29 +57,68 @@ export const EGRESS_DEFAULT_WINDOW_MS = 1000;
  * module can name it, and it survives no JSON round trip - so it can never
  * arrive from a client or from a relayed frame either.
  *
- * THE VALUE IS THE MARKER ITSELF, and the read compares identity rather than
- * truthiness. Naming the key was never the whole problem: a caller does not
- * have to name it to answer it. An options object that answers for EVERY key -
- * `new Proxy({}, { get: () => true })`, or a getter inherited from a prototype
- * - satisfies a truthy test without knowing what the key is called, and
- * publishes straight past a crossed ceiling. It cannot answer with this symbol,
- * because it cannot obtain it. Use {@link admittedByBatch} to read it; that is
- * the only spelling the lanes should carry.
+ * THE VALUE, NOT THE KEY, IS WHAT CANNOT BE PRODUCED. Naming the key was never
+ * the whole problem: a caller does not have to name a key to answer it. An
+ * options object that answers for EVERY key - `new Proxy({}, { get: () => true })`,
+ * or a getter inherited from a prototype - satisfies a truthy test without
+ * knowing what the key is called, and publishes straight past a crossed
+ * ceiling. Nor does the value being a symbol settle it: a `get` trap is HANDED
+ * the key it is asked for, so an object that echoes it back satisfies any test
+ * comparing the value to the key. What such an object cannot do is produce a
+ * value it was never given, which is what {@link ADMIT_TOKEN} is.
+ *
+ * Neither symbol is exported. The lanes write through {@link markAdmitted} and
+ * read through {@link admittedByBatch}, so the pair has one spelling and the
+ * value never leaves this module.
  */
-export const EGRESS_ADMITTED = Symbol('adapter-uws.egress-admitted');
+const EGRESS_ADMITTED = Symbol('adapter-uws.egress-admitted');
+
+/**
+ * The value {@link EGRESS_ADMITTED} carries. Never used as a key, so no `get`
+ * trap is ever handed it, and never exported, so nothing outside this module
+ * holds it.
+ */
+const ADMIT_TOKEN = Symbol('adapter-uws.egress-admit-token');
+
+/**
+ * Mark an options object this runtime built as already admitted.
+ *
+ * A plain assignment, so the property is own and enumerable and a spread
+ * carries it. The batch lanes COPY these objects per entry
+ * (`{ ...admitOpts, excludeWs }` when an entry overrides an exclusion or a
+ * seq), and an entry whose copy lost the marker re-takes a decision its batch
+ * has already made.
+ *
+ * That re-decision is not harmless, and the BYTES ceiling is where it shows:
+ * messages and deliveries are compared as usage plus this call, so N per-entry
+ * decisions sum to what the one batch decision allowed and reach the same
+ * answer, but bytes are compared against what is ALREADY charged. The batch is
+ * admitted while the window holds nothing; by the last entry the earlier ones
+ * have charged past the ceiling, and an entry deciding there is refused. The
+ * batch then delivers a prefix and drops its tail, which is the outcome this
+ * marker exists to prevent.
+ *
+ * @template {object} T
+ * @param {T} options
+ * @returns {T}
+ */
+export function markAdmitted(options) {
+	options[EGRESS_ADMITTED] = ADMIT_TOKEN;
+	return options;
+}
 
 /**
  * Did this call's batch already take the egress decision for the whole call?
  *
- * One place, so the identity comparison cannot be half-applied: a lane that
- * kept the old truthiness test would be the one bypass left, and it would look
- * exactly like the lanes that did not.
+ * One place, so the comparison cannot be half-applied: a lane that kept an
+ * older test would be the one bypass left, and it would look exactly like the
+ * lanes that did not.
  *
  * @param {any} options
  * @returns {boolean}
  */
 export function admittedByBatch(options) {
-	return options != null && options[EGRESS_ADMITTED] === EGRESS_ADMITTED;
+	return options != null && options[EGRESS_ADMITTED] === ADMIT_TOKEN;
 }
 
 /**

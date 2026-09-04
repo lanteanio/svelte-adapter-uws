@@ -138,13 +138,18 @@ describe('topic ceilings refuse pre-hoc through the real publish entry point', (
 		// publish a documented way past every ceiling, and a Symbol.for key
 		// would hand it to anyone who can guess the registry name.
 		//
-		// Naming it was never the whole problem, which is why the last three
-		// guess nothing at all. An options object that answers for EVERY key
-		// satisfies a truthiness test without knowing the key, so the marker's
-		// VALUE is the marker and the read compares identity: an answering
-		// object cannot produce a symbol it cannot obtain. A prototype getter
-		// is here beside the Proxy because it needs no exotic object, and a
-		// guard aimed at Proxy alone would leave it open.
+		// Naming it was never the whole problem, which is why the rest guess
+		// nothing at all. An options object that answers for EVERY key
+		// satisfies a truthiness test without knowing the key. Nor does making
+		// the value a symbol settle it: a `get` trap is HANDED the key it is
+		// asked for, so an object that ECHOES it satisfies any test comparing
+		// the value to the key. What none of them can do is produce a value
+		// they were never given, which is what the marker's value is. The echo
+		// answers symbols only, because echoing string keys hands `seq` back a
+		// string and the call is refused for that instead - a refusal that
+		// looks like the ceiling working and is not.
+		// Prototype variants beside the Proxies: they need no exotic object,
+		// and a guard aimed at Proxy alone would leave them open.
 		const server = await boot({ egress: { windowMs: 60000, topic: { messages: 1 } } });
 		const c = await connect(server.wsUrl, 'feed');
 		expect(server.platform.publish('feed', 'e', { n: 1 })).toBe(true);
@@ -157,7 +162,9 @@ describe('topic ceilings refuse pre-hoc through the real publish entry point', (
 			{ [Symbol('adapter-uws.egress-admitted')]: true },
 			new Proxy({}, { get: () => true }),
 			new Proxy({}, { get: () => 1 }),
-			Object.create(new Proxy({}, { get: () => true }))
+			Object.create(new Proxy({}, { get: () => true })),
+			new Proxy({}, { get: (_t, key) => (typeof key === 'symbol' ? key : undefined) }),
+			Object.create(new Proxy({}, { get: (_t, key) => (typeof key === 'symbol' ? key : undefined) }))
 		];
 		for (const options of forgeries) {
 			expect(server.platform.publish('feed', 'e', { n: 2 }, options)).toBe(false);
@@ -424,6 +431,40 @@ describe('a batch is admitted whole or not at all', () => {
 		expect(server.platform.publishWireBatch('feed', 'e', fits, wire, { seq: false })).toBe(true);
 		await sleep(120);
 		expect(client.frames.filter((f) => f.topic === 'feed' && f.event === 'e').length).toBe(2);
+	});
+
+	it('an entry that overrides something still rides the batch decision', async () => {
+		// The per-entry lane inherits the batch's decision through a marker on
+		// an options object it COPIES whenever an entry overrides an exclusion
+		// or a seq, so the marker has to survive the copy.
+		//
+		// The BYTES ceiling is what makes losing it observable, and it is the
+		// only dimension that does: messages and deliveries are compared as
+		// `usage + this call`, so N per-entry decisions sum to exactly what the
+		// batch's one decision allowed and re-deciding reaches the same answer.
+		// Bytes are compared as `usage >= limit` against what is ALREADY
+		// charged, so the answer depends on when it is asked. The batch decides
+		// while the window holds nothing and is admitted; by the third entry
+		// the first two have charged past the ceiling, and an entry that
+		// re-decides there is refused. That is a prefix delivered and a tail
+		// dropped, out of a batch the ceiling said yes to.
+		const cap = 'egress-batch-override';
+		const wire = { capability: cap, schemaVersion: 1, encode: () => Uint8Array.of(1) };
+		const server = await boot({ egress: { windowMs: 60000, topic: { bytes: 1 } } });
+		server.platform.registerWireCodec(wire);
+		const client = await connect(server.wsUrl, 'feed');
+
+		const entries = [
+			{ data: { n: 1 } },
+			{ data: { n: 2 } },
+			{ data: { n: 3 }, seq: 7 }
+		];
+		expect(server.platform.publishWireBatch('feed', 'e', entries, wire, { seq: false })).toBe(true);
+		await sleep(150);
+
+		const seen = client.frames.filter((f) => f.topic === 'feed' && f.event === 'e');
+		expect(seen.length, 'the batch delivered a prefix').toBe(3);
+		expect(server.platform.pressure.egress.refusedTopic, 'an entry re-took a decision its batch had made').toBe(0);
 	});
 
 	it('a mixed-topic batch pools its tenant share across the topics it spans', async () => {

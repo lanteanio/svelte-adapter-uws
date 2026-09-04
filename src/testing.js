@@ -15,7 +15,7 @@ import { registerGameIngress, GAME_FANOUT_CAP, GAME_FANOUT_SCHEMA_VERSION, encod
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
 import { createConnectionPermitCarrier } from './runtime/utils/connection-permit.js';
 import { installAttribution } from './runtime/utils/attribution.js';
-import { normalizeEgressOptions, createEgressAccount, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, EGRESS_ADMITTED, admittedByBatch } from './runtime/utils/egress-account.js';
+import { normalizeEgressOptions, createEgressAccount, excludedRecipient, binaryFrameChargeBytes, envelopeWireBytes, markAdmitted, admittedByBatch } from './runtime/utils/egress-account.js';
 import { privateValueMetadata } from './runtime/utils/observability-privacy.js';
 import {
 	assertWireSubscribeAuthorization,
@@ -1293,7 +1293,7 @@ export async function createTestServer(options = {}) {
 						}
 					}
 					if (!egressAccountT.admit(topic, egressTenantForT(topic), count, deliveries)) return false;
-					statelessOpts = { ...(opts || {}), [EGRESS_ADMITTED]: EGRESS_ADMITTED };
+					statelessOpts = markAdmitted({ ...(opts || {}) });
 				}
 				let ok = false;
 				for (let i = 0; i < count; i++) {
@@ -1999,7 +1999,7 @@ export async function createTestServer(options = {}) {
 				for (let i = 0; i < messages.length; i++) {
 					const m = messages[i];
 					const per = egressAccountT.enabled
-						? { ...(m.options || {}), [EGRESS_ADMITTED]: EGRESS_ADMITTED }
+						? markAdmitted({ ...(m.options || {}) })
 						: m.options;
 					platform.publish(m.topic, m.event, m.data, per);
 				}

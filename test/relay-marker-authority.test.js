@@ -80,7 +80,15 @@ function answeringForgeries() {
 	return [
 		new Proxy({}, { get: () => null }),
 		new Proxy({}, { get: () => FORGED_SEQ }),
-		Object.create(new Proxy({}, { get: () => null }))
+		Object.create(new Proxy({}, { get: () => null })),
+		// The key-echoing family, which is what separates "cannot name the key"
+		// from "cannot produce the value": a `get` trap is HANDED the key it is
+		// asked for, so echoing it satisfies any test comparing the value to
+		// the key. Symbols only - echoing string keys hands `seq` back a string
+		// and the call is refused for THAT, which looks like the guard working
+		// and is not.
+		new Proxy({}, { get: (_t, key) => (typeof key === 'symbol' ? key : undefined) }),
+		Object.create(new Proxy({}, { get: (_t, key) => (typeof key === 'symbol' ? key : undefined) }))
 	];
 }
 

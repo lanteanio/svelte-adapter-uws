@@ -16,7 +16,7 @@ import {
 } from './config-guards.js';
 import { assertBatchSequenceAuthority, assertBatchEntrySequenceAuthority, assertClusterSequenceAuthorityValues } from './runtime/handler/cluster-sequence-policy.js';
 import { createMessageAdmission, messageOverloadedFrame, runAdmittedMessageHook, runAdmittedMessageWork } from './runtime/utils/message-admission.js';
-import { normalizeEgressOptions, createEgressAccount, envelopeWireBytes, EGRESS_ADMITTED, admittedByBatch } from './runtime/utils/egress-account.js';
+import { normalizeEgressOptions, createEgressAccount, envelopeWireBytes, markAdmitted, admittedByBatch } from './runtime/utils/egress-account.js';
 import { readMetricMirror } from './runtime/utils/metrics.js';
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
 import { privateValueMetadata } from './runtime/utils/observability-privacy.js';
@@ -456,7 +456,7 @@ export default function uws(options = {}) {
 				if (topics.has(topic) && ws.readyState === 1) recipients++;
 			}
 			const egressTenant = egressTenantForV(topic);
-			// EGRESS_ADMITTED marks an event whose call already decided for the
+			// The admitted marker names an event whose call already decided for the
 			// whole batch (publishBatched's slow path below). It still charges -
 			// every event is its own logical publish in the ledger - but
 			// re-deciding here would deliver a prefix of an atomic batch: the
@@ -531,7 +531,7 @@ export default function uws(options = {}) {
 				// whether an inherited or accessor-carried option is honoured
 				// depend on whether a budget happens to be configured.
 				const per = { ...(m.options || {}) };
-				if (egressAccountV.enabled) per[EGRESS_ADMITTED] = EGRESS_ADMITTED;
+				if (egressAccountV.enabled) markAdmitted(per);
 				publish(m.topic, m.event, m.data, per);
 			}
 			return;
@@ -898,7 +898,7 @@ export default function uws(options = {}) {
 					deliveries += countEgressRecipientsV(topic, excludes[i] != null ? excludes[i] : shared);
 				}
 				if (!egressAccountV.admit(topic, egressTenantForV(topic), count, deliveries)) return false;
-				admitOpts = { ...(opts || {}), [EGRESS_ADMITTED]: EGRESS_ADMITTED };
+				admitOpts = markAdmitted({ ...(opts || {}) });
 			}
 			let ok = false;
 			for (let i = 0; i < count; i++) {

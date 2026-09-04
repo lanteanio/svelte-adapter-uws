@@ -1544,14 +1544,15 @@ const COPY_AUTHORITY_MODULE_SYNTAX = Object.freeze({
 	// Re-pinned for the relay-receive marker and the egress-admitted read. The
 	// relay marker is a module-private Symbol here, passed to publishWire as an
 	// argument and compared by identity rather than looked up on the caller's
-	// options; `admittedByBatch` in utils/egress-account.js, which this graph
-	// already reaches, replaces the truthiness read of the admission marker
-	// with the same kind of identity comparison, and the sites that set it now
-	// write the symbol as its own value. A property read becomes a comparison,
-	// and a call replaces an inline test. No statement executes differently on
-	// any frame path, no byte is read, allocated or copied, and no copy
-	// primitive entered.
-	platform: 'daa06400076a928b95587ba78cc88f5615d78b777d339c513bd3b67e8aaaafa2',
+	// options. In utils/egress-account.js, which this graph already reaches,
+	// the admission marker's key and its value are both module-private and the
+	// lanes reach them through `markAdmitted` and `admittedByBatch` - the value
+	// is a second symbol that is never a key, because a `get` trap is handed
+	// the key it is asked for and can echo it back. A property read becomes a
+	// comparison, and calls replace two inline expressions. No statement
+	// executes differently on any frame path, no byte is read, allocated or
+	// copied, and no copy primitive entered.
+	platform: 'f04f979ad7afdca6b487436afe64f934ad8039f471b01538a1f2b330951d452c',
 	// Re-pinned with the batch one-read rule: deliverStatefulWireBatch takes the
 	// payloads the batch already read (`io.datas`) instead of reaching back into
 	// the caller's entry objects for `.data`. Same count of encodes and writes,

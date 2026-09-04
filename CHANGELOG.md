@@ -310,11 +310,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is called. That let `platform.publish(topic, event, data, forged)` skip the
   admission decision and publish straight past a crossed egress ceiling.
   The batch-admission marker still rides the options object, because the batch
-  lanes copy those objects per entry, but its VALUE is now the marker symbol
-  and every lane reads it through one shared predicate - an answering object
-  cannot produce a symbol it cannot obtain. `createTestServer` and the dev
-  plugin take the same decision. The forgery case that already existed listed
-  five spellings of the key; it now also carries the shapes that name nothing.
+  lanes copy those objects per entry, but neither its key nor its VALUE leaves
+  the module that owns them and every lane writes and reads it through one
+  pair of helpers. The value is a second symbol that is never used as a key,
+  which is what a `get` trap cannot answer: such a trap is handed the key it is
+  asked for, so a marker whose value is its own key is echoed straight back.
+  `createTestServer` and the dev plugin take the same decision. The forgery
+  case that already existed listed five spellings of the key; it now also
+  carries the shapes that name nothing, including the echo.
 
 - **The admin route's matched path and its reported path are now the same
   path.** The route is registered on the raw prefix and uWS matches the raw
