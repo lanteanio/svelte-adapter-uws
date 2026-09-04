@@ -349,6 +349,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   case that already existed listed five spellings of the key; it now also
   carries the shapes that name nothing, including the echo.
 
+- **`vite dev` applies custom 101 response headers instead of warning that it
+  cannot.** `upgradeResponse(userData, headers)` put application headers on the
+  handshake in production and dropped them in development, with a warning
+  saying the `ws` library does not support custom 101 headers. That reason was
+  wrong: `ws` assembles the handshake response itself and emits the assembled
+  header lines for inspection before writing them, which is all this needs. An
+  app that set a header on connect could not see it work until it deployed.
+  Dev now appends the validated headers to that response, so the same handshake
+  goes out in both places. The array form stays several headers of one name
+  rather than a comma-joined value, which is what multiple `Set-Cookie`
+  requires. Validation is unchanged and still runs first, so a malformed name
+  or value is refused in development exactly as production refuses it - the
+  point of validating in dev at all is that a broken upgrade cannot pass there
+  and fail only in production. The `Set-Cookie` advisory now comes from the
+  same shared helper production uses, so the two cannot drift.
+
 - **A connection's own state can no longer be silenced from the prototype
   chain.** The runtime keeps per-connection state on the socket's `userData`
   object under `Symbol.for` keys, written with plain assignments. A plain

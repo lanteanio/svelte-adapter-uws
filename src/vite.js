@@ -21,7 +21,7 @@ import { readMetricMirror } from './runtime/utils/metrics.js';
 import { mergeSamples } from './runtime/utils/metrics-merge.js';
 import { privateValueMetadata } from './runtime/utils/observability-privacy.js';
 import { installAttribution } from './runtime/utils/attribution.js';
-import { snapshotUpgradeHeaders } from './runtime/utils/upgrade-headers.js';
+import { snapshotUpgradeHeaders, warnSetCookieOnUpgradeOnce } from './runtime/utils/upgrade-headers.js';
 import { emitOperationalDiagnostic, viteHandlerFailureDiagnostic, viteHandlerRecoveredDiagnostic } from './runtime/utils/operational-diagnostic.js';
 import { trace } from './runtime/tracing.js';
 import { emitOperationalEvent, diagnosticError } from './runtime/diagnostic.js';
@@ -348,6 +348,18 @@ export default function uws(options = {}) {
 
 	/** @type {import('ws').WebSocketServer | undefined} */
 	let wss;
+
+	/**
+	 * Validated 101 response headers waiting for their handshake, keyed on the
+	 * upgrade request. The `upgrade` hook runs well before `ws` assembles the
+	 * response, so the snapshot has to be parked somewhere the `headers` listener
+	 * can find it; the request is the only object both halves hold. Weak, because
+	 * an upgrade refused after the hook never reaches the handshake and its entry
+	 * should go with the request rather than accumulate.
+	 *
+	 * @type {WeakMap<import('node:http').IncomingMessage, Record<string, string | string[]>>}
+	 */
+	const pendingUpgradeHeaders = new WeakMap();
 
 	/** @type {Map<import('ws').WebSocket, Set<string>>} */
 	const subscriptions = new Map();
@@ -2008,6 +2020,29 @@ export default function uws(options = {}) {
 					return first === undefined ? false : first;
 				}
 			});
+
+			// Custom 101 response headers, the same ones production writes through
+			// `res.writeHeader`. `ws` builds the handshake response itself and emits
+			// the assembled header lines for inspection before writing them, which
+			// is the seam: the upgrade path parks the validated snapshot against the
+			// request, and this listener appends it to the response about to go out.
+			// Keyed on the request object so a concurrent upgrade cannot take another
+			// connection's headers, and weak so an upgrade refused before
+			// `handleUpgrade` leaves nothing behind.
+			wss.on('headers', (headers, request) => {
+				const pending = pendingUpgradeHeaders.get(request);
+				if (!pending) return;
+				pendingUpgradeHeaders.delete(request);
+				for (const [name, value] of Object.entries(pending)) {
+					// The array form is several headers of the same name, which is how
+					// multiple Set-Cookie is expressed - not one comma-joined value.
+					if (Array.isArray(value)) {
+						for (let i = 0; i < value.length; i++) headers.push(name + ': ' + value[i]);
+					} else {
+						headers.push(name + ': ' + value);
+					}
+				}
+			});
 			viteServer = server;
 			const root = server.config.root;
 
@@ -2429,25 +2464,18 @@ export default function uws(options = {}) {
 						}
 						if (result && result.__upgradeResponse === true) {
 							userData = result.userData || {};
-							// Dev cannot emit custom 101 headers, but it must still reject
-							// the same malformed result production rejects. Otherwise an app
-							// verifies a broken upgrade in dev and only production fails.
+							// Validated exactly as production validates it, so a malformed
+							// header name or value throws here rather than reaching the
+							// handshake - an app cannot verify a broken upgrade in dev and
+							// fail only in production. The snapshot is what gets written, so
+							// what was checked is what goes out.
 							const responseHeaders = snapshotUpgradeHeaders(result.headers);
 							if (responseHeaders && Object.keys(responseHeaders).length > 0) {
-								const hasSetCookie = Object.keys(responseHeaders).some(
-									(k) => k.toLowerCase() === 'set-cookie'
-								);
-								if (hasSetCookie) {
-									console.warn(
-										'[adapter-uws] upgradeResponse() attaches Set-Cookie to the 101 response. ' +
-										'This fails silently behind Cloudflare Tunnel and some other strict edge proxies ' +
-										'(WebSocket opens, then closes with 1006). Use the `authenticate` hook to ' +
-										'refresh session cookies over a normal HTTP response.\n' +
-										'  See: https://svti.me/cf-cookies'
-									);
-								} else {
-									console.warn('[adapter-uws] upgrade() returned response headers. These are only applied in production (uWS); the ws library used in dev does not support custom 101 headers.\n  See: https://svti.me/dev-101-headers');
-								}
+								// The same advisory production gives, from the same shared
+								// helper and once per process, so the dev warning cannot
+								// drift from the production one.
+								warnSetCookieOnUpgradeOnce(responseHeaders);
+								pendingUpgradeHeaders.set(req, responseHeaders);
 							}
 						} else {
 							userData = result || {};

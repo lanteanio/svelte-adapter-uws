@@ -560,7 +560,7 @@ does not configure authentication or authorization.
 
 ### WebSocket development (requires the Vite plugin)
 
-The Vite plugin is required for WebSocket support in both dev and production (see [Step 2](#step-2-add-the-vite-plugin-required)). It spins up a `ws` WebSocket server alongside Vite's dev server, so the client protocol and `event.platform` API are available during development. It is a behavioural implementation of those contracts, not the production handler: it runs on `ws`, cannot attach custom headers to the 101 response, and does not exercise the built uWS artifact, worker/cluster lifecycle, TLS, admission, or build-time option substitution. Security-sensitive runtime tests should also boot the built fixture; a passing dev-server test alone is not production evidence.
+The Vite plugin is required for WebSocket support in both dev and production (see [Step 2](#step-2-add-the-vite-plugin-required)). It spins up a `ws` WebSocket server alongside Vite's dev server, so the client protocol and `event.platform` API are available during development. It is a behavioural implementation of those contracts, not the production handler: it runs on `ws` and does not exercise the built uWS artifact, worker/cluster lifecycle, TLS, admission, or build-time option substitution. Security-sensitive runtime tests should also boot the built fixture; a passing dev-server test alone is not production evidence.
 
 Inbound message size does match production: both default to 1 MiB. The Vite plugin option is a separate flat bag, so repeat a custom production ceiling as `uws({ maxPayloadLength: 64 * 1024 })`; `platform.maxPayloadLength` reports the exact limit the dev server enforces.
 

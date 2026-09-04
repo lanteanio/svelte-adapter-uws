@@ -14,7 +14,6 @@ cf-cookies
 client-connect
 client-queue
 cluster-mode
-dev-101-headers
 egress
 fd-limit
 listen-failed
