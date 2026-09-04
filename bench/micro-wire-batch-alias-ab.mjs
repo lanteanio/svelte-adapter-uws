@@ -26,6 +26,25 @@
 // protocol +36% median at 64 entries, and a claim like that is worth
 // confirming in THIS tree rather than inheriting.
 //
+// G, H and I are the per-entry seq contract. G is the SHIPPED shape and calls
+// `resolveEntrySeq`, the runtime's own resolver - a hand-inlined copy would
+// measure a loop production does not have and would drift from it silently. H
+// keeps that older copy BESIDE G rather than instead of it, so the cost of
+// routing through the shared resolver is visible instead of assumed; I is G's
+// contract with the entry-position try region removed, which splits that cost
+// into what the stricter table costs and what the wrapper costs.
+//
+// Each of the three runs over TWO entry sets. With no entry carrying a seq the
+// resolver returns on its first line, so only its fast-out is measured; with
+// every entry carrying one the accepting arm runs, which is where H's weaker
+// table (no bigint, no safe-integer bound, no entry position) actually differs.
+//
+// Result, three runs at 9 rounds: the accepting arm reads within +-2% across
+// all three variants at every size, so the shared resolver and its wrapper cost
+// nothing measurable here. Worth stating because an earlier 5-round run showed
+// +26.7% at 64 entries and did not reproduce - at these margins a single run is
+// not a reading.
+//
 // Every variant pays the real stampSeq + completeEnvelope cost a batch pays,
 // so the delta reads as a fraction of real work rather than of a bare loop.
 //
@@ -34,7 +53,7 @@
 // Defaults: 200_000 iterations, 9 rounds.
 
 import { performance } from 'node:perf_hooks';
-import { stampSeq, completeEnvelope, throwInvalidSeq } from '../src/runtime/utils/epoch.js';
+import { stampSeq, completeEnvelope, throwInvalidSeq, resolveEntrySeq, explicitSeqValue } from '../src/runtime/utils/epoch.js';
 
 const ITERATIONS = parseInt(process.argv[2] || '200000', 10);
 const ROUNDS = parseInt(process.argv[3] || '9', 10);
@@ -52,6 +71,21 @@ function makeEntries(count) {
 	const entries = new Array(count);
 	for (let i = 0; i < count; i++) {
 		entries[i] = { data: { x: i, y: i * 2, id: 'e' + i, n: 42 } };
+	}
+	return entries;
+}
+
+/**
+ * The same batch with every entry carrying an explicit seq. Without this set
+ * the seq variants only ever measure the resolver's undefined fast-out, which
+ * is the arm a batch that does not use the capability takes - the accepting
+ * arm, where the hand-inlined copy and the shared resolver actually differ,
+ * would never run.
+ */
+function makeSeqEntries(count) {
+	const entries = new Array(count);
+	for (let i = 0; i < count; i++) {
+		entries[i] = { data: { x: i, y: i * 2, id: 'e' + i, n: 42 }, seq: i + 1 };
 	}
 	return entries;
 }
@@ -206,13 +240,117 @@ function normalisedTwoPass(entries, seqMap, needsData) {
 	return sink + (anyExclude ? 1 : 0);
 }
 
-// Variant G: F plus the per-entry explicit-seq contract - the snapshot pass
-// also reads each entry's `seq` (validating any it finds), and the stamping
-// loop draws from the snapshot when an entry carried one. Entries here carry
-// none, so this measures what the CAPABILITY costs a batch that does not use
-// it: one property read and one typeof-test per entry in the pre-pass, and
-// one hoisted boolean test per entry in the stamping loop.
+// Variant G: F plus the per-entry explicit-seq contract, THROUGH THE SHIPPED
+// RESOLVER. `resolveEntrySeq` is what the runtime calls, so this variant calls
+// it too - a hand-inlined copy measures a loop production does not have, and
+// drifts from it silently as the contract grows (the copy in H predates bigint
+// entries, the safe-integer bound, and the entry-position wrapper).
+//
+// Run against both entry sets: with no entry carrying a seq this measures what
+// the CAPABILITY costs a batch that does not use it, which is the resolver's
+// undefined fast-out plus a call and a try region per entry; with every entry
+// carrying one it measures the accepting path, which is the one the hand-
+// inlined copy got wrong.
 function normalisedTwoPassSeq(entries, seqMap, needsData) {
+	const count = entries.length;
+	const datas = new Array(count);
+	let excludes = null;
+	let anyExclude = false;
+	let entrySeqs = null;
+	for (let i = 0; i < count; i++) {
+		const entry = entries[i];
+		datas[i] = entry.data;
+		const exclude = entry.excludeWs === undefined ? null : entry.excludeWs;
+		if (exclude !== null) {
+			if (excludes === null) excludes = new Array(count);
+			excludes[i] = exclude;
+			anyExclude = true;
+		}
+		const resolved = resolveEntrySeq(entry.seq, i);
+		if (resolved !== undefined && resolved !== false && resolved !== true) {
+			if (entrySeqs === null) entrySeqs = new Array(count);
+			entrySeqs[i] = resolved;
+		}
+	}
+	const envs = new Array(count);
+	const seqs = new Array(count);
+	const hasEntrySeqs = entrySeqs !== null;
+	for (let i = 0; i < count; i++) {
+		const seq = hasEntrySeqs && entrySeqs[i] !== undefined
+			? entrySeqs[i]
+			: stampSeq(OPTIONS, seqMap, 'room');
+		seqs[i] = seq == null ? 0 : seq;
+		envs[i] = completeEnvelope(ENV_PREFIX, datas[i], seq, null);
+	}
+	let sink = 0;
+	for (let i = 0; i < count; i++) sink += envs[i].length;
+	if (anyExclude) for (let i = 0; i < count; i++) if (excludes[i] === undefined) sink++;
+	else sink += count;
+	for (let i = 0; i < count; i++) sink += datas[i].n;
+	if (needsData) sink += 0;
+	return sink + (anyExclude ? 1 : 0);
+}
+
+// Variant I: G's exact contract with the try region removed - the same table,
+// the same explicitSeqValue call, but no entry-position wrapper. It exists to
+// split the cost G pays over H into two parts: what the STRICTER CONTRACT
+// costs (I vs H) and what the wrapper that names the failing entry costs
+// (G vs I). Without it a single number invites blaming whichever half the
+// reader already suspected.
+function normalisedTwoPassSeqNoTry(entries, seqMap, needsData) {
+	const count = entries.length;
+	const datas = new Array(count);
+	let excludes = null;
+	let anyExclude = false;
+	let entrySeqs = null;
+	for (let i = 0; i < count; i++) {
+		const entry = entries[i];
+		datas[i] = entry.data;
+		const exclude = entry.excludeWs === undefined ? null : entry.excludeWs;
+		if (exclude !== null) {
+			if (excludes === null) excludes = new Array(count);
+			excludes[i] = exclude;
+			anyExclude = true;
+		}
+		const raw = entry.seq;
+		if (raw !== undefined) {
+			const resolved = (typeof raw === 'number' || typeof raw === 'bigint')
+				? explicitSeqValue(raw)
+				: (raw === false || raw === null) ? false : (raw === true ? true : throwInvalidSeq(raw));
+			if (resolved !== false && resolved !== true) {
+				if (entrySeqs === null) entrySeqs = new Array(count);
+				entrySeqs[i] = resolved;
+			}
+		}
+	}
+	const envs = new Array(count);
+	const seqs = new Array(count);
+	const hasEntrySeqs = entrySeqs !== null;
+	for (let i = 0; i < count; i++) {
+		const seq = hasEntrySeqs && entrySeqs[i] !== undefined
+			? entrySeqs[i]
+			: stampSeq(OPTIONS, seqMap, 'room');
+		seqs[i] = seq == null ? 0 : seq;
+		envs[i] = completeEnvelope(ENV_PREFIX, datas[i], seq, null);
+	}
+	let sink = 0;
+	for (let i = 0; i < count; i++) sink += envs[i].length;
+	if (anyExclude) for (let i = 0; i < count; i++) if (excludes[i] === undefined) sink++;
+	else sink += count;
+	for (let i = 0; i < count; i++) sink += datas[i].n;
+	if (needsData) sink += 0;
+	return sink + (anyExclude ? 1 : 0);
+}
+
+// Variant H: G with the resolver hand-inlined, in the older form this file used
+// to carry. Kept BESIDE G rather than in place of it, so the cost of routing
+// through the shared resolver is visible instead of assumed - and so the two
+// can be compared on the entry set that actually exercises the accepting path.
+//
+// It is deliberately NOT the current contract: no bigint, no safe-integer
+// bound, no entry-position wrapper. That is the point of keeping it - it is
+// what the shipped loop looked like before, not an alternative to it.
+function normalisedTwoPassSeqInline(entries, seqMap, needsData) {
 	const count = entries.length;
 	const datas = new Array(count);
 	let excludes = null;
@@ -279,6 +417,7 @@ for (const SIZE of [1, 8, 64]) {
 	const e = [];
 	const f = [];
 	const g = [];
+	const h = [];
 	// Warm every shape before measuring so none pays first-call compilation.
 	run(readThrough, entries, 2000);
 	run(normalised, entries, 2000);
@@ -287,6 +426,7 @@ for (const SIZE of [1, 8, 64]) {
 	run(normalisedLazy, entries, 2000, true);
 	run(normalisedTwoPass, entries, 2000, false);
 	run(normalisedTwoPassSeq, entries, 2000, false);
+	run(normalisedTwoPassSeqInline, entries, 2000, false);
 	for (let round = 0; round < ROUNDS; round++) {
 		a.push(run(readThrough, entries, iterations));
 		b.push(run(normalised, entries, iterations));
@@ -295,6 +435,7 @@ for (const SIZE of [1, 8, 64]) {
 		e.push(run(normalisedLazy, entries, iterations, true));
 		f.push(run(normalisedTwoPass, entries, iterations, false));
 		g.push(run(normalisedTwoPassSeq, entries, iterations, false));
+		h.push(run(normalisedTwoPassSeqInline, entries, iterations, false));
 	}
 	const ma = median(a);
 	const mb = median(b);
@@ -315,6 +456,41 @@ for (const SIZE of [1, 8, 64]) {
 	console.log(`   F two-pass (alias-safe)  ${mf.toFixed(1)} ms   ${fmt(mf)}   <- previous shape: reads every entry before any toJSON runs`);
 	console.log(`     F vs D (the shape it replaced): ${vsD >= 0 ? '+' : ''}${vsD.toFixed(1)}%`);
 	const vsF = ((mg - mf) / mf) * 100;
-	console.log(`   G two-pass + entry seq   ${mg.toFixed(1)} ms   ${fmt(mg)}   <- SHIPPED shape: F plus the per-entry seq read (none carried here)`);
-	console.log(`     G vs F (the shape it replaced): ${vsF >= 0 ? '+' : ''}${vsF.toFixed(1)}%\n`);
+	console.log(`   G two-pass + entry seq   ${mg.toFixed(1)} ms   ${fmt(mg)}   <- SHIPPED shape: F plus resolveEntrySeq (no entry carries one here)`);
+	console.log(`     G vs F (the shape it replaced): ${vsF >= 0 ? '+' : ''}${vsF.toFixed(1)}%`);
+	const mh = median(h);
+	const hVsG = ((mh - mg) / mg) * 100;
+	console.log(`   H same, resolver inlined ${mh.toFixed(1)} ms   ${fmt(mh)}   <- NOT the contract; the older hand-inlined copy, for comparison only`);
+	console.log(`     H vs G (inlined vs the shared resolver): ${hVsG >= 0 ? '+' : ''}${hVsG.toFixed(1)}%\n`);
+
+	// The accepting arm. Everything above runs on entries carrying NO seq, so
+	// the resolver returns undefined on its first line and the two shapes are
+	// separated only by a call and a try region. These entries make the
+	// resolver do its work.
+	const seqEntries = makeSeqEntries(SIZE);
+	const gs = [];
+	const hs = [];
+	const is = [];
+	run(normalisedTwoPassSeq, seqEntries, 2000, false);
+	run(normalisedTwoPassSeqInline, seqEntries, 2000, false);
+	run(normalisedTwoPassSeqNoTry, seqEntries, 2000, false);
+	for (let round = 0; round < ROUNDS; round++) {
+		gs.push(run(normalisedTwoPassSeq, seqEntries, iterations, false));
+		hs.push(run(normalisedTwoPassSeqInline, seqEntries, iterations, false));
+		is.push(run(normalisedTwoPassSeqNoTry, seqEntries, iterations, false));
+	}
+	const mgs = median(gs);
+	const mhs = median(hs);
+	const acceptPct = ((mgs - mhs) / mhs) * 100;
+	console.log(`${String(SIZE).padStart(3)} entries, every entry carries a seq:`);
+	console.log(`   G resolveEntrySeq        ${mgs.toFixed(1)} ms   <- SHIPPED`);
+	console.log(`   H resolver inlined       ${mhs.toFixed(1)} ms`);
+	const mis = median(is);
+	const contractPct = ((mis - mhs) / mhs) * 100;
+	const wrapperPct = ((mgs - mis) / mis) * 100;
+	console.log(`   I same, no try region    ${mis.toFixed(1)} ms`);
+	console.log(`     G vs H on the accepting arm: ${acceptPct >= 0 ? '+' : ''}${acceptPct.toFixed(1)}%`);
+	console.log(`       of which the stricter contract (I vs H): ${contractPct >= 0 ? '+' : ''}${contractPct.toFixed(1)}%`);
+	console.log(`       and the entry-position wrapper (G vs I): ${wrapperPct >= 0 ? '+' : ''}${wrapperPct.toFixed(1)}%
+`);
 }

@@ -869,6 +869,9 @@ export const platform = {
 			// shared options for this entry - undefined inherits, and anything
 			// else refuses the whole batch in this snapshot pass, before
 			// anything is stamped or serialized.
+			// Calling the shared resolver rather than inlining its table costs
+			// nothing measurable, on the fast-out AND on the accepting arm
+			// (bench/micro-wire-batch-alias-ab.mjs, G against H and I).
 			const resolved = resolveEntrySeq(entry.seq, i);
 			if (resolved !== undefined) {
 				if (typeof resolved === 'number') {
