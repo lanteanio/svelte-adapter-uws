@@ -155,6 +155,13 @@ and has no config:
 - **check-formatting** - every tracked file matches what `.editorconfig`
   declares for it: indent style, final newline, trailing whitespace, and the
   committed line ending. It reports and refuses; it never rewrites.
+- **check-source-bytes** - no tracked file git records as binary unless
+  `.gitattributes` declares it so, and the report names the control character
+  that made it one. Node accepts a raw control byte inside a string literal, so
+  such a module runs and reads correctly while every diff, blame and patch on it
+  degrades to `Bin n -> m bytes` - and `check-formatting` skips it, because a
+  file git records as binary has no text contract to check. Write the byte as an
+  escape: the same value at runtime, and the file stays text.
 - **check-contributor-map** - this file's three inventories are derived from
   their real sources: every gate below runs in `npm run check`, every hosted
   job is named, and every `npm run` lane it sends you to exists. It is why the
