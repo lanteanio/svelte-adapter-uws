@@ -96,7 +96,7 @@ command; if you change them, the changed command is the profile identity.
 | Publish option capture | `node bench/micro-publish-capture-ab.mjs` | JS | alternating live-read versus one-read-capture option handling around the publish-lane sequence resolution; local synthetic topics, no sockets. |
 | Publish codec gate | `node bench/micro-publish-codec-overhead.mjs` | JS | publish-path codec/no-codec timing and bytes; no sockets. |
 | Resume-cutover publish guard | `node bench/micro-publish-resume-guard-ab.mjs` | JS | alternating publish-path cost; synthetic state distribution. |
-| Relay marker read | `node bench/micro-relay-marker-ab.mjs` | JS | alternating string-key versus Symbol marker resolution on the publish lane, per option shape; the shape where both variants read no property at all is the control arm. |
+| Relay marker read | `node bench/micro-relay-marker-ab.mjs` | JS | alternating string-key, Symbol-key and identity-token marker resolution on the publish lane, per option shape; the shape where no variant reads a property is the control arm. |
 | Relay receive path | `node bench/micro-relay-receive-ab.mjs` | native | live fan-out receive variants and rates; loopback, fixed synthetic envelope. |
 | Request construction | `node bench/micro-request.mjs` | JS | `Request` construction cost; isolated primitive, not SSR latency. |
 | Sequence stamping | `node bench/micro-seq-stamp-ab.mjs` | JS | alternating sequence-path cost; local synthetic topics. |

@@ -1,38 +1,39 @@
-// Microbenchmark: A/B the publishWire relay-marker read, string keys vs Symbol.
+// Microbenchmark: A/B the publishWire relay-marker read, property versus
+// argument.
 //
-// The relay receive half's marker moved from two string option keys
-// (`_isRelay`, then `_relaySeq` when the first was set) to one module-private
-// Symbol whose value IS the origin seq. Every publishWire call reads it,
-// including the 60 Hz cursor lane, so the rule this repo holds applies: a
-// per-publish change on the hottest lane needs a measured delta, not an
-// estimate.
+// The relay receive half's marker started as two string option keys
+// (`_isRelay`, then `_relaySeq`), became one Symbol key on the same options
+// object, and is now an ARGUMENT compared by identity against a module-private
+// token - because a marker read as a property is satisfied by any object that
+// answers for every key, without naming the key. Every publishWire call pays
+// whichever shape is in force, including the 60 Hz cursor lane, so the rule
+// this repo holds applies: a per-publish change on the hottest lane needs a
+// measured delta, not an estimate.
 //
-// Variant A replays the pre-change shape: a string-key miss on the origin path,
-// two reads on the relay path. Variant B is the shipped shape: one Symbol read
-// either way. Both then take the same branch the lane takes on the result, so
-// what is timed is the marker resolution and nothing else - no envelope is
-// built inside the window, so the percentages are of the resolution alone
-// rather than of a whole publish.
+// Three variants over the same operand shapes: the original string keys, the
+// Symbol key that replaced them, and the shipped identity compare. Each then
+// takes the same branch on the result, so what is timed is the marker
+// resolution and nothing else - no envelope is built inside the window.
 //
 // The shapes are the ones the lane actually meets: no options at all (the hot
 // path), an ordinary application options object (the other hot path, and the
-// one where a miss lookup is paid), and a marked relay re-entry.
+// one where a property miss is paid), and a marked relay re-entry.
 //
-// `absent` doubles as the control arm: both variants short-circuit on a null
-// options object and read no property at all, so whatever it reports is this
-// bench's floor rather than an effect. Read the other two shapes against it,
-// not against zero.
+// `absent` doubles as the control arm: no variant reads a property there, so
+// whatever it reports is this bench's floor rather than an effect. Read the
+// other two shapes against it, not against zero.
 //
 // Usage:
 //   node bench/micro-relay-marker-ab.mjs [iterations] [rounds]
 // Defaults: 10_000_000 iterations, 10 rounds.
 
-import { RELAY_ORIGIN_SEQ } from '../src/runtime/handler/cluster-sequence-policy.js';
-
 const ITERATIONS = parseInt(process.argv[2] || '10000000', 10);
 const ROUNDS = parseInt(process.argv[3] || '10', 10);
 
-// Variant A: the pre-change string-key marker.
+const SYMBOL_KEY = Symbol('adapter-uws.relay-origin-seq');
+const TOKEN = Symbol('adapter-uws.relay-receive');
+
+// Variant A: the original string-key marker.
 function stringKeys(options) {
 	const isRelay = !!(options && options._isRelay);
 	const relaySeqOption = isRelay ? options._relaySeq : undefined;
@@ -40,25 +41,32 @@ function stringKeys(options) {
 	return { isRelay, seq };
 }
 
-// Variant B: the shipped Symbol marker, one read, presence is the test.
+// Variant B: one Symbol key, presence as the test.
 function symbolKey(options) {
-	const relayOriginSeq = options != null ? options[RELAY_ORIGIN_SEQ] : undefined;
+	const relayOriginSeq = options != null ? options[SYMBOL_KEY] : undefined;
 	const isRelay = relayOriginSeq !== undefined;
 	const seq = isRelay ? (typeof relayOriginSeq === 'number' ? relayOriginSeq : null) : 0;
 	return { isRelay, seq };
 }
 
+// Variant C: the shipped shape - no property lookup at all.
+function identityToken(options, relayToken, relaySeq) {
+	const isRelay = relayToken === TOKEN;
+	const seq = isRelay ? (typeof relaySeq === 'number' ? relaySeq : null) : 0;
+	return { isRelay, seq };
+}
+
 const SHAPES = [
-	['absent', undefined, undefined],
-	['app-options', { compress: true }, { compress: true }],
-	['relay', { _isRelay: true, _relaySeq: 7 }, { [RELAY_ORIGIN_SEQ]: 7 }]
+	['absent', [undefined], [undefined], [undefined, undefined, undefined]],
+	['app-options', [{ compress: true }], [{ compress: true }], [{ compress: true }, undefined, undefined]],
+	['relay', [{ _isRelay: true, _relaySeq: 7 }], [{ [SYMBOL_KEY]: 7 }], [{ compress: true }, TOKEN, 7]]
 ];
 
-function run(fn, options) {
+function run(fn, args) {
 	let sink = 0;
 	const start = process.hrtime.bigint();
 	for (let i = 0; i < ITERATIONS; i++) {
-		const out = fn(options);
+		const out = fn(args[0], args[1], args[2]);
 		sink += out.isRelay ? out.seq : 1;
 	}
 	const ns = Number(process.hrtime.bigint() - start);
@@ -66,22 +74,27 @@ function run(fn, options) {
 }
 
 let totalSink = 0;
+const med = (xs) => xs.sort((p, q) => p - q)[xs.length >> 1];
 
-for (const [name, optionsA, optionsB] of SHAPES) {
+for (const [name, argsA, argsB, argsC] of SHAPES) {
 	const a = [];
 	const b = [];
+	const c = [];
 	for (let round = 0; round < ROUNDS; round++) {
-		const ra = run(stringKeys, optionsA);
-		const rb = run(symbolKey, optionsB);
+		const ra = run(stringKeys, argsA);
+		const rb = run(symbolKey, argsB);
+		const rc = run(identityToken, argsC);
 		a.push(ra.ns);
 		b.push(rb.ns);
-		totalSink += ra.sink + rb.sink;
+		c.push(rc.ns);
+		totalSink += ra.sink + rb.sink + rc.sink;
 	}
-	const med = (xs) => xs.sort((p, q) => p - q)[xs.length >> 1];
 	const perA = med(a) / ITERATIONS;
 	const perB = med(b) / ITERATIONS;
+	const perC = med(c) / ITERATIONS;
 	console.log(
-		`${name.padEnd(12)} string-keys ${perA.toFixed(3)} ns/op   symbol ${perB.toFixed(3)} ns/op   delta ${(((perB - perA) / perA) * 100).toFixed(2)}%`
+		`${name.padEnd(12)} string-keys ${perA.toFixed(3)}   symbol-key ${perB.toFixed(3)}   token ${perC.toFixed(3)} ns/op` +
+		`   token vs string ${(((perC - perA) / perA) * 100).toFixed(2)}%   token vs symbol ${(((perC - perB) / perB) * 100).toFixed(2)}%`
 	);
 }
 // Defeats dead-code elimination of the resolution results.

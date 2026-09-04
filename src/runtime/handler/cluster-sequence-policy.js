@@ -33,26 +33,6 @@ export function hasMultipleWorkers(data = workerData) {
 const MULTI_WORKER_RUNTIME = hasMultipleWorkers();
 
 /**
- * The relay receive half's marker on its re-entry into a publish lane: a
- * sibling worker already allocated this frame's seq, answered the rule above
- * for it, counted the publish and fanned it to every process. The receiving
- * worker therefore skips the authority check, the value check, the egress
- * decision, the publish counter and the stamp, and must not relay again.
- *
- * A Symbol, and one this package's export map puts out of reach, because
- * every one of those is a guard: a marker an application could type would let
- * it publish an arbitrary seq cluster-wide, off the publish ledger and past an
- * armed egress ceiling, through the exact relay this rule exists to keep
- * unallocated numbers out of. It is a key no caller can produce rather than a
- * key the lanes have to remember to strip.
- *
- * Its VALUE is the origin's seq, so presence alone marks the re-entry and
- * `undefined` is never a legal carry - a frame that arrived without a seq is
- * marked with `null`.
- */
-export const RELAY_ORIGIN_SEQ = Symbol('adapter-uws.relay-origin-seq');
-
-/**
  * A sequenced clustered frame is safe only when an external ordered source
  * allocated the seq AND fans the frame to every process. `relay:false` is the
  * observable proof that the adapter's unordered multi-origin relay is not also

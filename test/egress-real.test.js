@@ -51,9 +51,9 @@ async function connectClient(wsUrl, headers = {}) {
 		 * @param {string} type
 		 * @param {string} topic
 		 */
-		async probe(type, topic) {
+		async probe(type, topic, extra) {
 			const nonce = randomUUID();
-			this.send({ type, topic, nonce });
+			this.send({ type, topic, nonce, ...extra });
 			const reply = await this.waitFor((f) => f.event === `${type}-result` && f.data?.nonce === nonce);
 			expect(reply, `${type} reply must arrive`).toBeTruthy();
 			return reply.data;
@@ -103,6 +103,42 @@ describeUWS('egress ceilings against the built runtime', () => {
 			client.close();
 		}
 	});
+
+	it('no options object gets a crossing publish past the ceiling, however it answers', async () => {
+		// The marker that lets a batch entry charge without re-deciding rides
+		// the options object, and naming it with a Symbol is not enough on its
+		// own: an object that answers for EVERY key satisfies a truthiness test
+		// without knowing the key at all, and a prototype getter does it with
+		// no Proxy in sight. The marker's VALUE is the marker now and the read
+		// compares identity, so an answering object has nothing to answer with.
+		// Built server-side because none of these survive a JSON boundary.
+		const client = await connectClient(server.wsUrl);
+		const topic = 'plain:forge';
+		try {
+			await client.subscribe(topic);
+			// Spend the topic's three-message headroom on honest publishes.
+			for (let i = 0; i < 3; i++) {
+				expect((await client.probe('publish-probe', topic)).result, `honest publish ${i} must be admitted`).toBe(true);
+			}
+			expect((await client.probe('publish-probe', topic)).result, 'the fourth must cross').toBe(false);
+
+			for (const forge of ['string-key', 'registry-symbol', 'proxy-true', 'proto-getter']) {
+				expect((await client.probe('forge-probe', topic, { forge })).result, `${forge} got past the ceiling`).toBe(false);
+				// The wire lane reads the admission marker off the caller's
+				// options too, and it is the lane that also used to read a
+				// relay marker from there.
+				expect((await client.probe('forge-probe', topic, { forge, lane: 'wire' })).result,
+					`${forge} got past the ceiling on the wire lane`).toBe(false);
+			}
+
+			// And the client saw exactly the admitted three - the refusals are
+			// pre-hoc, so nothing reached a subscriber.
+			const delivered = client.frames.filter((f) => f.topic === topic && f.event === 'probe-event');
+			expect(delivered.length).toBe(3);
+		} finally {
+			client.close();
+		}
+	}, 60000);
 
 	it('the tenant ceiling pools the egressTenantOf namespace across topics', async () => {
 		const client = await connectClient(server.wsUrl);

@@ -123,7 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Affects:** Apps calling `platform.publishWire` directly, including through a plugin codec. No documented option changes and no ordinary call behaves differently.
   - **Action:** None.
   - **Requires:** No new dependency or option.
-  - **Compatibility:** Those two keys are now inert - a call carrying them publishes as any other origin publish would, drawing the topic counter. In a multi-worker runtime such a call meets the same sequence-authority refusal every other publish meets, which is a `TypeError` where it previously published silently. `createTestServer` takes the same decision.
+  - **Compatibility:** Those two keys are now inert - a call carrying them publishes as any other origin publish would, drawing the topic counter. In a multi-worker runtime such a call meets the same sequence-authority refusal every other publish meets, which is a `TypeError` where it previously published silently. The batch-admission marker is hardened the same way: an options object that answers for every key no longer gets a publish past a crossed egress ceiling. `createTestServer` and the dev plugin take the same decisions.
   - **Detail:** [Fixed engineering detail](#fixed).
 <!-- consumer-release-summary:end -->
 
@@ -291,16 +291,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exists to keep unallocated numbers out of. Nothing refused it, and the
   hardening the same entry point already does against adversarial options
   objects sat one line above two keys anyone could type.
-  The marker is now a `Symbol` created inside the runtime, in a module no
-  export subpath resolves to, and it carries the origin's seq as its value - a
-  key no caller can produce, rather than a key every lane must remember to
-  strip. The relay decision reads that marker directly instead of a
-  `relay: false` the internal caller had to pass beside it, so the two settings
-  can no longer disagree. `createTestServer` takes the same decision.
-  The batch surfaces were already closed: their options copy is field reads
-  rather than a spread, so the keys never reached the entries.
-  `test/relay-marker-real.test.js` drives the built runtime and asserts the seq
-  the client receives, which is the observable projection of that one boolean.
+  The marker is not a key on that object any more. It is an argument compared
+  by identity against a token the runtime never hands out, so no property
+  lookup on caller-supplied data is left to satisfy. The relay decision reads
+  the same token instead of a `relay: false` the internal caller had to pass
+  beside it, so the two settings can no longer disagree. The batch surfaces
+  needed nothing: their options copy is field reads rather than a spread, so
+  the keys never reached the entries. `test/relay-marker-real.test.js` drives
+  the built runtime and asserts the seq the client receives, which is the
+  observable projection of that one boolean.
+
+- **A marker on a caller's options object is compared by identity, not
+  truthiness.** Naming an internal marker with a `Symbol` keeps a caller from
+  spelling it, which is not the same as keeping them from answering it: a
+  caller never has to name a key, only to pass an object that answers for every
+  key. `new Proxy({}, { get: () => true })`, or an ordinary getter inherited
+  from a prototype, satisfies any property-shaped marker without knowing what
+  it is called. That let `platform.publish(topic, event, data, forged)` skip the
+  admission decision and publish straight past a crossed egress ceiling.
+  The batch-admission marker still rides the options object, because the batch
+  lanes copy those objects per entry, but its VALUE is now the marker symbol
+  and every lane reads it through one shared predicate - an answering object
+  cannot produce a symbol it cannot obtain. `createTestServer` and the dev
+  plugin take the same decision. The forgery case that already existed listed
+  five spellings of the key; it now also carries the shapes that name nothing.
 
 - **The admin route's matched path and its reported path are now the same
   path.** The route is registered on the raw prefix and uWS matches the raw

@@ -252,12 +252,19 @@ describe('cluster sequence authority policy', () => {
 		// The wire slice runs on into the batch surfaces; the one-read counts
 		// must cover exactly the publishWire body, which ends at the next JSDoc.
 		const wireBody = wire.slice(0, wire.indexOf('\n\t/**'));
-		for (const field of ['options.seq', 'options.relay', 'options.compress', 'options.excludeWs', 'options[RELAY_ORIGIN_SEQ]']) {
+		for (const field of ['options.seq', 'options.relay', 'options.compress', 'options.excludeWs']) {
 			expect(wireBody.split(field).length, `publishWire reads ${field} exactly once`).toBe(2);
 		}
+		// The relay marker is NOT among them: it is an argument compared by
+		// identity, so the lane reads no relay key off the caller's object at
+		// all. A marker read as a property is satisfied by anything that
+		// answers every key, without naming the key.
+		expect(wireBody).toContain('const isRelay = relayToken === RELAY_RECEIVE;');
+		expect(wireBody, 'the relay marker went back to being a key on the options object')
+			.not.toMatch(/options\s*\[\s*RELAY/);
 		// Same ordering on the wire lane, and origin-side only: a relayed frame
-		// carries its number on the relay marker instead, already validated
-		// where it was published.
+		// carries its number beside the token instead, already validated where
+		// it was published.
 		expect(wireBody).toContain('if (!isRelay) assertStampableSeq(seqOption);');
 		expect(wireBody.indexOf('assertStampableSeq('), 'publishWire must refuse the value before it admits')
 			.toBeLessThan(wireBody.indexOf('admitPublishEgress('));

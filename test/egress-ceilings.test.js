@@ -137,6 +137,14 @@ describe('topic ceilings refuse pre-hoc through the real publish entry point', (
 		// caller-supplied options: a string key would hand every server-side
 		// publish a documented way past every ceiling, and a Symbol.for key
 		// would hand it to anyone who can guess the registry name.
+		//
+		// Naming it was never the whole problem, which is why the last three
+		// guess nothing at all. An options object that answers for EVERY key
+		// satisfies a truthiness test without knowing the key, so the marker's
+		// VALUE is the marker and the read compares identity: an answering
+		// object cannot produce a symbol it cannot obtain. A prototype getter
+		// is here beside the Proxy because it needs no exotic object, and a
+		// guard aimed at Proxy alone would leave it open.
 		const server = await boot({ egress: { windowMs: 60000, topic: { messages: 1 } } });
 		const c = await connect(server.wsUrl, 'feed');
 		expect(server.platform.publish('feed', 'e', { n: 1 })).toBe(true);
@@ -146,7 +154,10 @@ describe('topic ceilings refuse pre-hoc through the real publish entry point', (
 			{ EGRESS_ADMITTED: true },
 			{ egressAdmitted: true },
 			{ [Symbol.for('adapter-uws.egress-admitted')]: true },
-			{ [Symbol('adapter-uws.egress-admitted')]: true }
+			{ [Symbol('adapter-uws.egress-admitted')]: true },
+			new Proxy({}, { get: () => true }),
+			new Proxy({}, { get: () => 1 }),
+			Object.create(new Proxy({}, { get: () => true }))
 		];
 		for (const options of forgeries) {
 			expect(server.platform.publish('feed', 'e', { n: 2 }, options)).toBe(false);

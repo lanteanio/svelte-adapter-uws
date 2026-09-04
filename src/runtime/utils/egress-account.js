@@ -56,8 +56,31 @@ export const EGRESS_DEFAULT_WINDOW_MS = 1000;
  * detail into a way to bypass every ceiling. Only code that imports this
  * module can name it, and it survives no JSON round trip - so it can never
  * arrive from a client or from a relayed frame either.
+ *
+ * THE VALUE IS THE MARKER ITSELF, and the read compares identity rather than
+ * truthiness. Naming the key was never the whole problem: a caller does not
+ * have to name it to answer it. An options object that answers for EVERY key -
+ * `new Proxy({}, { get: () => true })`, or a getter inherited from a prototype
+ * - satisfies a truthy test without knowing what the key is called, and
+ * publishes straight past a crossed ceiling. It cannot answer with this symbol,
+ * because it cannot obtain it. Use {@link admittedByBatch} to read it; that is
+ * the only spelling the lanes should carry.
  */
 export const EGRESS_ADMITTED = Symbol('adapter-uws.egress-admitted');
+
+/**
+ * Did this call's batch already take the egress decision for the whole call?
+ *
+ * One place, so the identity comparison cannot be half-applied: a lane that
+ * kept the old truthiness test would be the one bypass left, and it would look
+ * exactly like the lanes that did not.
+ *
+ * @param {any} options
+ * @returns {boolean}
+ */
+export function admittedByBatch(options) {
+	return options != null && options[EGRESS_ADMITTED] === EGRESS_ADMITTED;
+}
 
 /**
  * Default bound on the per-scope usage maps and the tenant-resolution memo: the

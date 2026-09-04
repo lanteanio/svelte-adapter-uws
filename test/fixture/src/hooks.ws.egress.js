@@ -44,6 +44,32 @@ export function message(ws, { data, platform }) {
 		platform.send(ws, 'probe', 'publish-probe-result', { nonce: msg.nonce, result });
 		return;
 	}
+	if (msg?.type === 'forge-probe' && typeof msg.topic === 'string') {
+		// The forgeries cannot cross the JSON probe boundary, so they are built
+		// here and named by the client. The first two guess at the admission
+		// marker's key; the rest guess nothing and answer for EVERY key, which
+		// is what satisfies a property-shaped marker without naming it. A
+		// prototype getter beside the Proxy because it needs no exotic object.
+		const forged = msg.forge === 'string-key'
+			? { EGRESS_ADMITTED: true }
+			: msg.forge === 'registry-symbol'
+				? { [Symbol.for('adapter-uws.egress-admitted')]: true }
+				: msg.forge === 'proxy-true'
+					? new Proxy({}, { get: () => true })
+					: msg.forge === 'proto-getter'
+						? Object.create(new Proxy({}, { get: () => true }))
+						: undefined;
+		// Both publish lanes: they read the admission marker from the caller's
+		// options independently, and publishWire additionally used to read a
+		// relay marker the same way, so a forgery has to be refused on each.
+		const result = msg.lane === 'wire'
+			? platform.publishWire(msg.topic, 'probe-event', { nonce: msg.nonce }, {
+				capability: 'fixture.egress-forge:1', schemaVersion: 1, encode: () => null
+			}, forged)
+			: platform.publish(msg.topic, 'probe-event', { nonce: msg.nonce }, forged);
+		platform.send(ws, 'probe', 'forge-probe-result', { nonce: msg.nonce, result });
+		return;
+	}
 	if (msg?.type === 'seq-probe' && typeof msg.topic === 'string') {
 		// The client names the seq and this passes it verbatim, so the suite can
 		// drive one publish whose value the wire cannot carry. Both outcomes are

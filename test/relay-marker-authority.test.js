@@ -1,4 +1,4 @@
-// The relay receive half's re-entry marker is not a key an application can type.
+// The relay re-entry marker is not something an application can reach.
 //
 // WHY THIS EXISTS. publishWire has an origin side and a relay side, and ONE
 // boolean picks between them. The relay side skips the cluster sequence-
@@ -7,34 +7,30 @@
 // instead of drawing the topic counter, and does not relay - all correct for a
 // frame a sibling worker already published, counted and fanned out.
 //
-// That boolean used to be read from two ordinary option keys, `_isRelay` and
+// That boolean was first read from two ordinary option keys, `_isRelay` and
 // `_relaySeq`, on the same caller-supplied object every other publish option
-// arrives on. So an application could set them, and publish an arbitrary
-// number as a topic's seq: off the publish ledger, past an armed egress
-// ceiling, and out through the cluster relay the authority rule exists to keep
-// unallocated numbers out of. Nothing refused it. The marker is now a Symbol
-// created inside the runtime, which is a key no caller can produce rather than
-// a key every lane has to remember to strip.
+// arrives on, so an application could set them and publish an arbitrary number
+// as a topic's seq: off the publish ledger, past an armed egress ceiling, and
+// out through the cluster relay the authority rule exists to keep unallocated
+// numbers out of.
+//
+// Naming the key with a Symbol did not close it. A marker read as a PROPERTY is
+// unspellable but not unforgeable: a caller never has to name the key, only to
+// pass an object that answers for every key - `new Proxy({}, { get: () => x })`,
+// or a getter inherited from a prototype - and it takes the relay arm without
+// knowing what the key is called. So the marker is not a key at all now. It is
+// an argument compared by identity against a token the module never hands out,
+// and there is no property lookup left for such an object to answer.
 //
 // WHAT MAKES THESE CASES ABLE TO FAIL. The stamp is the observable projection
 // of that one boolean: a frame carrying the topic counter's number took the
 // ORIGIN arm, and every other guard sits on the same arm. So the forgery cases
 // assert the seq the client received, and the ceiling case adds the one
 // refusal a caller observes directly - a publish that answers false.
-//
-// The two module facts the design rests on are asserted first, because neither
-// is visible from a delivered frame: the Symbol is outside the cross-realm
-// registry, and no export subpath reaches the module that holds it.
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 import { createTestServer } from '../src/testing.js';
-import { RELAY_ORIGIN_SEQ } from '../src/runtime/handler/cluster-sequence-policy.js';
-
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** The number a forgery tries to stamp. Far above any counter these cases draw. */
 const FORGED_SEQ = 4242;
@@ -47,21 +43,50 @@ const DECLINING_CODEC = {
 };
 
 /**
- * Every spelling a caller could reach for. The string keys are the ones the
- * relay half actually used to carry, so they are the shipped defect; the
- * registry Symbol is the near-miss a later edit could reintroduce by reaching
- * for `Symbol.for` instead of `Symbol`, and a same-description own Symbol is
- * what a caller could build after reading the source.
+ * Guesses at a key: the two the relay half actually used to carry, two
+ * plausible spellings of the constant, and the Symbol forms - the registry
+ * lookup a later edit could reintroduce by reaching for `Symbol.for`, and a
+ * same-description own Symbol built after reading the source. None of these
+ * names any documented option, so the seq a delivery carries must come from
+ * the topic counter.
  */
-function forgedOptions() {
+function namedForgeries() {
 	return [
 		{ _isRelay: true, _relaySeq: FORGED_SEQ },
 		{ _relaySeq: FORGED_SEQ },
 		{ relayOriginSeq: FORGED_SEQ },
 		{ RELAY_ORIGIN_SEQ: FORGED_SEQ },
 		{ [Symbol.for('adapter-uws.relay-origin-seq')]: FORGED_SEQ },
-		{ [Symbol('adapter-uws.relay-origin-seq')]: FORGED_SEQ }
+		{ [Symbol.for('adapter-uws.relay-receive')]: FORGED_SEQ },
+		{ [Symbol('adapter-uws.relay-receive')]: FORGED_SEQ }
 	];
+}
+
+/**
+ * Objects that guess nothing and answer for EVERY key, which is what satisfies
+ * a property-shaped marker without naming it. A Proxy and a plain prototype
+ * getter both, since the second needs no exotic object and a design that only
+ * worried about Proxy would still be open.
+ *
+ * Their seq is not the discriminator, and this is worth being exact about: an
+ * object that answers every key also answers `seq`, so `get: () => null` is a
+ * caller asking for no seq and `get: () => 4242` is a caller passing an
+ * explicit authority - both DOCUMENTED, both allowed, and neither says
+ * anything about which arm the call took. The armed-ceiling case is where these
+ * shapes are held to account, because a refusal can only come from the origin
+ * arm.
+ */
+function answeringForgeries() {
+	return [
+		new Proxy({}, { get: () => null }),
+		new Proxy({}, { get: () => FORGED_SEQ }),
+		Object.create(new Proxy({}, { get: () => null }))
+	];
+}
+
+/** Every shape, for the assertions that hold for all of them. */
+function forgedOptions() {
+	return [...namedForgeries(), ...answeringForgeries()];
 }
 
 /** @type {Array<{ close(): void }>} */
@@ -100,44 +125,17 @@ async function connect(url, topic) {
 	return { ws, frames };
 }
 
-describe('the relay re-entry marker cannot be named from outside the runtime', () => {
-	it('is not in the cross-realm symbol registry', () => {
-		// A registered Symbol is reachable by description from anywhere in the
-		// process, which would make the marker a public string with extra
-		// steps. Nothing else in the runtime may register it either, so the
-		// registry lookup for the same description must be a DIFFERENT symbol.
-		expect(Symbol.keyFor(RELAY_ORIGIN_SEQ)).toBeUndefined();
-		expect(Symbol.for('adapter-uws.relay-origin-seq')).not.toBe(RELAY_ORIGIN_SEQ);
-	});
-
-	it('lives in a module no export subpath resolves to', () => {
-		// The package export map is what stops an application importing the
-		// module and reading the marker out of it: Node refuses a deep import
-		// of a path the map does not name. Asserted over the whole map rather
-		// than the one subpath, because a new entry pointing anywhere under
-		// the runtime directory would hand the marker out.
-		const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-		const targets = [];
-		for (const entry of Object.values(pkg.exports)) {
-			if (typeof entry === 'string') targets.push(entry);
-			else for (const target of Object.values(entry)) targets.push(target);
-		}
-		expect(targets.length).toBeGreaterThan(0);
-		expect(targets.filter((t) => t.startsWith('./src/runtime/'))).toEqual([]);
-	});
-});
-
 describe('a forged relay marker publishes as an ordinary origin frame', () => {
 	it('cannot stamp its own seq: every delivery carries the topic counter', async () => {
 		const server = await boot({});
 		const c = await connect(server.wsUrl, 'forge');
 
-		const forgeries = forgedOptions();
+		const forgeries = namedForgeries();
 		for (const options of forgeries) {
 			expect(server.platform.publishWire('forge', 'e', { n: 1 }, DECLINING_CODEC, options)).toBe(true);
 		}
 
-		await sleep(150);
+		await sleep(200);
 		const delivered = c.frames.filter((f) => f.topic === 'forge' && f.event === 'e');
 		expect(delivered.length, 'every forged publish must still be delivered').toBe(forgeries.length);
 		// The counter, drawn once per call, starting from an untouched topic -
@@ -159,27 +157,62 @@ describe('a forged relay marker publishes as an ordinary origin frame', () => {
 			expect(server.platform.publishWire('forge', 'e', { n: 2 }, DECLINING_CODEC, options)).toBe(false);
 		}
 
-		await sleep(150);
+		await sleep(200);
 		const delivered = c.frames.filter((f) => f.topic === 'forge' && f.event === 'e');
 		expect(delivered.map((f) => f.data.n), 'a refused publish delivered a frame').toEqual([1]);
 	});
 
-	it('the runtime-held marker is what the relay side actually reads', async () => {
-		// The vacuity guard for both cases above: the same call shape, with the
-		// real marker, takes the relay arm - no counter draw, the carried
-		// number stamped verbatim. Without this, a publishWire that had simply
-		// stopped honouring any marker at all would pass them.
+	it('cannot be reached by passing values in the token position', async () => {
+		// The token is an argument now, so the argument itself is worth
+		// attacking. Nothing a caller can construct is identical to a Symbol
+		// this module never exported - including a registry symbol with the
+		// same description, which is the near-miss `Symbol.for` would create.
 		const server = await boot({});
 		const c = await connect(server.wsUrl, 'forge');
 
-		expect(server.platform.publishWire('forge', 'e', { n: 1 }, DECLINING_CODEC, {
-			[RELAY_ORIGIN_SEQ]: FORGED_SEQ
-		})).toBe(true);
-		// A second frame, this time an ordinary origin publish: its seq proves
-		// the relayed one did not draw the counter.
+		const tokens = [
+			true,
+			'relay',
+			Symbol('adapter-uws.relay-receive'),
+			Symbol.for('adapter-uws.relay-receive'),
+			Symbol.iterator,
+			{}
+		];
+		for (const token of tokens) {
+			expect(server.platform.publishWire('forge', 'e', { n: 1 }, DECLINING_CODEC, undefined, token, FORGED_SEQ)).toBe(true);
+		}
+
+		await sleep(200);
+		const delivered = c.frames.filter((f) => f.topic === 'forge' && f.event === 'e');
+		expect(delivered.map((f) => f.seq)).toEqual(tokens.map((_, i) => i + 1));
+	});
+
+	it('the real relay path still takes the relay arm', async () => {
+		// The vacuity guard for all three cases above: the legitimate internal
+		// caller must still be recognised, or a publishWire that had simply
+		// stopped honouring any marker would pass them. Driven through
+		// relayPublishWire rather than by synthesizing a token, because the
+		// token is not reachable from here - which is the point.
+		const server = await boot({});
+		server.platform.registerWireCodec(DECLINING_CODEC);
+		const c = await connect(server.wsUrl, 'forge');
+
+		// A capable client is what makes the relay re-encode worth entering; a
+		// declining codec then sends everyone the JSON envelope, so the seq is
+		// readable off the frame this plain client receives.
+		const capable = new WebSocket(server.wsUrl);
+		clients.push(capable);
+		await new Promise((resolve, reject) => { capable.on('open', resolve); capable.on('error', reject); });
+		capable.send(JSON.stringify({ type: 'hello', caps: [DECLINING_CODEC.capability] }));
+		capable.send(JSON.stringify({ type: 'subscribe', topic: 'forge' }));
+		await sleep(120);
+
+		expect(server.platform.relayPublishWire('forge', 'e', { n: 1 }, DECLINING_CODEC.capability, FORGED_SEQ, false)).toBe(true);
+		// An ordinary origin publish after it: its seq proves the relayed frame
+		// did not draw the counter.
 		expect(server.platform.publishWire('forge', 'e', { n: 2 }, DECLINING_CODEC)).toBe(true);
 
-		await sleep(150);
+		await sleep(200);
 		const delivered = c.frames.filter((f) => f.topic === 'forge' && f.event === 'e');
 		expect(delivered.map((f) => f.seq)).toEqual([FORGED_SEQ, 1]);
 	});
