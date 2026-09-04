@@ -293,8 +293,12 @@ export const platform = {
 	 *   connected to any other instance.
 	 * @param {symbol} [relayToken] INTERNAL. The relay receive half's token,
 	 *   held by this module and passed by `relayPublishWire` only. Not part of
-	 *   the declared surface and not obtainable by a caller; a value that is
-	 *   not the token leaves the call on the ordinary origin path.
+	 *   the declared surface, and nothing an options object can answer: it is
+	 *   never a property key, so no accessor or proxy trap is ever asked for
+	 *   it. A value that is not the token leaves the call on the ordinary
+	 *   origin path. Code that has replaced this method on the platform object
+	 *   sees it when the relay dispatches, which is a caller that already owns
+	 *   the lane it would be forging.
 	 * @param {number | null} [relaySeq] INTERNAL. The origin worker's stamped
 	 *   seq, carried verbatim. Read only when the token matches.
 	 * @returns {boolean}
