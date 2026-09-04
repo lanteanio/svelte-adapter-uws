@@ -62,6 +62,26 @@ describe('runtime version identity', () => {
 			extensions: null
 		})).toContain('svelte-realtime unresolvable');
 	});
+
+	it('never reports the adapter or the protocol revision as absent', () => {
+		// Neither is an optional sibling. The adapter is what prints the line,
+		// and the schema ships beside it - so a null means its own packaged
+		// metadata could not be read (a build without `meta/`, an unreadable
+		// file), and 'not installed' would tell an operator the opposite of
+		// what is true. Siblings keep that wording; these two cannot have it.
+		const line = formatVersionBanner({
+			adapter: null,
+			protocolRevision: null,
+			realtime: null,
+			extensions: null
+		});
+		expect(line).toBe(
+			'svelte-adapter-uws unreadable (protocol rev unreadable, ' +
+			'svelte-realtime not installed, svelte-adapter-uws-extensions not installed)'
+		);
+		expect(line.startsWith('svelte-adapter-uws not installed'),
+			'the adapter announced itself as not installed').toBe(false);
+	});
 });
 
 describeNative('runtime version diagnostics', () => {

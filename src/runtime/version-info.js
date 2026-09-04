@@ -100,10 +100,25 @@ function shown(value) {
 	return value === null ? 'not installed' : String(value);
 }
 
+/**
+ * The adapter's own version and the protocol revision, which are not optional
+ * siblings and cannot be absent: the adapter is the thing printing this line,
+ * and the protocol schema ships beside it. A null means its packaged metadata
+ * could not be READ - a build missing `meta/`, an unreadable file - and
+ * rendering that as 'not installed' would tell an operator the opposite of
+ * what is true, which is the same wrong direction {@link resolvedPackageVersion}
+ * refuses to send them for a sibling.
+ *
+ * @param {unknown} value
+ */
+function shownSelf(value) {
+	return value === null ? 'unreadable' : String(value);
+}
+
 export function formatVersionBanner(info) {
 	return (
-		'svelte-adapter-uws ' + shown(info.adapter) +
-		' (protocol rev ' + shown(info.protocolRevision) +
+		'svelte-adapter-uws ' + shownSelf(info.adapter) +
+		' (protocol rev ' + shownSelf(info.protocolRevision) +
 		', svelte-realtime ' + shown(info.realtime) +
 		', svelte-adapter-uws-extensions ' + shown(info.extensions) + ')'
 	);
