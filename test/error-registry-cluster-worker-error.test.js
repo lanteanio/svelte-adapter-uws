@@ -107,8 +107,11 @@ describeUWS('ADAPTER-ERR-CLUSTER-WORKER-ERROR', () => {
 			(text) => registrations(text) >= 2 && text.includes('Acceptor listening'));
 
 		// Crash one worker through the real wire: the hook schedules the throw
-		// off the request context, so the worker's uncaught exception surfaces
-		// as the primary's worker 'error' event.
+		// off the request context, so the worker takes its uncaught-exception
+		// path: it reports the error to the primary and closes its App before
+		// the thread dies. The report is what this case reads - `worker.on
+		// ('error')` does not fire once the worker handles the exception, and
+		// the diagnostic is deliberately the same either way.
 		const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
 		await new Promise((resolve, reject) => {
 			ws.on('open', resolve);

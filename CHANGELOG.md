@@ -113,6 +113,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Requires:** No new dependency or option.
   - **Compatibility:** Documentation only. What genuinely needs a ceiling is the auto step INTO `'siege'`, which compares over-capacity rejects against that ceiling's admit rate; a pinned `'elevated'` or `'siege'` needs no ceiling either.
   - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: a worker's uncaught exception costs one worker, not the process.** A worker thread holds uWS socket handles Node does not track, so tearing the thread down after an uncaught exception closed the libuv loop with a poll handle still active and aborted the process - the supervisor never got to replace anything.
+  - **Affects:** Clustered deployments (`workers`), where an uncaught exception in a worker could end the whole process instead of one thread. Single-process deployments are unaffected.
+  - **Action:** None.
+  - **Requires:** No new dependency or option.
+  - **Compatibility:** The `cluster.worker-error` event still fires with the same shape, so dashboards and alerts are unchanged; the worker now exits cleanly and is replaced. An application that installs its own `uncaughtException` handler keeps today's behaviour exactly - Node leaves such a worker alive, and the runtime defers whenever it is not the only listener.
+  - **Detail:** [Fixed engineering detail](#fixed).
 - **Fixed: the posture export describes the whole deployment under `workers`.** One socket path cannot have several owners, so every worker unlinked the previous one's socket and bound its own: a consumer read one bind-order-chosen thread's posture and believed it was the server's, and any worker's shutdown removed the live socket.
   - **Affects:** Deployments setting both `postureExport` and `workers`. Single-process deployments are untouched.
   - **Action:** None. The documented path is the same path.
@@ -248,6 +254,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/seq-stamp.test.js` the resolver itself.
 
 ### Fixed
+
+- **A worker's uncaught exception no longer takes the whole process with it.**
+  A worker thread holds uWS socket handles that libuv knows about and Node does
+  not, so when Node tore the thread down after an uncaught exception the loop
+  was closed with a poll handle still active and the process aborted:
+  `uv_loop_close() while having open handles`. The restart supervisor never got
+  to replace the worker, because the process it runs in was gone. The two other
+  ways out of a worker - a graceful shutdown and a hard-tier assertion - already
+  closed the App first for exactly this reason; the crash path did not.
+  It does now, through the same clean exit: report the error to the primary,
+  close the App so uWS releases its handles, let one loop turn run, then exit
+  the worker. The primary emits the same `cluster.worker-error` event it emitted
+  before, so an operator's timeline does not change - only the outcome does,
+  from one aborted deployment to one replaced worker.
+  An application that installs its own `uncaughtException` handler is untouched.
+  Node keeps a worker alive when anything is listening, and an application that
+  listens has taken responsibility for the exception, so the runtime defers
+  whenever it is not the only listener rather than exiting underneath it.
 
 - **The posture export describes the deployment when `workers` is set.** It is
   one socket path and the option is a build-time constant, so every worker

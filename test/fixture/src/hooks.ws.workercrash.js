@@ -1,6 +1,17 @@
 // Dedicated to the cluster worker-error drill. The token keeps this fault
 // injection unreachable in every other fixture variant and makes an
 // accidental message harmless even inside this one.
+
+// An APPLICATION that handles its own uncaught exceptions, installed only when
+// the drill asks for it. Node keeps a worker alive when something listens for
+// this, and the runtime's own handler defers to an application that does - so
+// this is the arm proving the worker survives rather than being exited out from
+// under an app that meant to recover.
+if (process.env.WORKER_CRASH_APP_HANDLER === '1') {
+	process.on('uncaughtException', (err) => {
+		console.error('__APP_HANDLED_UNCAUGHT__ ' + (err && err.message ? err.message : err));
+	});
+}
 export function message(_ws, { data }) {
 	let message;
 	try {

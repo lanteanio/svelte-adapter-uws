@@ -783,6 +783,22 @@ if (is_primary) {
 				replayDivergenceDiagnostics();
 			} else if (msg.type === 'heartbeat-ack') {
 				if (meta) meta.lastHeartbeat = monotonicNow();
+			} else if (msg.type === 'worker-error') {
+				// A worker that caught its own uncaught exception so it could
+				// close its App before the thread dies (see exitWorkerClean).
+				// `worker.on('error')` does not fire for those, so the report
+				// arrives here instead and produces the same event: the
+				// operator's timeline must not depend on which way out the
+				// worker took.
+				emitOperationalEvent({
+					source: 'svelte-adapter-uws',
+					component: 'runtime.cluster',
+					event: 'cluster.worker-error',
+					severity: 'error',
+					dataClass: 'pseudonymous',
+					message: 'A worker thread reported an error.',
+					attributes: { error: msg.error }
+				});
 			} else if (msg.type === 'posture') {
 				// A worker's own posture, for the socket this thread owns. The
 				// path rides the report because the primary never sees the
@@ -1306,6 +1322,31 @@ if (is_primary) {
 		// the handler graph already uses, so fatal() picks it up.
 		const { setFatalSink } = await import('./utils/assertions.js');
 		setFatalSink({ exit: exitWorkerClean });
+
+		// And the third way out of a worker, which had no such route: an uncaught
+		// exception. Node tears the thread down itself, and the loop is then
+		// closed with uWS's poll handles still open - the same
+		// `uv_loop_close() while having open handles` abort the two paths above
+		// exist to avoid, except it takes the WHOLE PROCESS with it rather than
+		// costing one worker. The supervisor never gets to replace anything,
+		// because the process it lives in is gone.
+		//
+		// An application that installed its own handler has taken responsibility
+		// for the exception and means the worker to survive, which is what
+		// happens today - so this defers to it rather than exiting underneath
+		// it. Being the only listener is exactly the case where Node would
+		// otherwise kill the thread.
+		process.on('uncaughtException', (err) => {
+			if (process.listenerCount('uncaughtException') > 1) return;
+			// The primary learns about a crash from `worker.on('error')`, and
+			// handling the exception here means that event never fires. Report it
+			// over the channel instead so `cluster.worker-error` still names the
+			// worker and the restart budget still charges its slot.
+			try {
+				parentPort?.postMessage({ type: 'worker-error', error: diagnosticError(err) });
+			} catch { /* the channel is already gone; the exit below still stands */ }
+			exitWorkerClean(1);
+		});
 	}
 
 	// Shutdown is shared by single-process (OS signals) and worker-thread (primary
