@@ -79,13 +79,9 @@ describeUWS('production metrics snapshot completeness', () => {
 		// line carrying at least one non-space character. A signal that drops
 		// out of the document, or renders without a description, fails by name.
 		//
-		// SCOPE, so nobody reads this as more than it is: it covers what THIS
-		// fixture renders, not every signal the manifest declares. A counter
-		// that never fires here - `ws_publish_outcomes_total` among them, since
-		// the fixture publishes nothing - is absent from the document and so
-		// cannot be checked. Emptying its help was a mutation this suite did
-		// NOT catch, which is how the boundary was measured rather than
-		// assumed.
+		// Two arms, because the document's HELP lines and its SAMPLE lines are
+		// not the same population and only one of them can be read off the
+		// samples. The second arm below is what covers the difference.
 		const helped = new Set();
 		for (const line of doc.split('\n')) {
 			const match = /^# HELP ([a-z_][a-z0-9_]*) (\S.*)$/.exec(line);
@@ -108,6 +104,29 @@ describeUWS('production metrics snapshot completeness', () => {
 		expect(rendered.size, 'the rendered document carried almost no samples').toBeGreaterThan(20);
 		const undescribed = [...rendered].filter((name) => !helped.has(name));
 		expect(undescribed, 'signals rendered into the document with no HELP line').toEqual([]);
+
+		// AND EVERY SIGNAL THE MANIFEST REQUIRES OF A WORKER IS AMONG THE
+		// DESCRIBED ONES, which the arm above cannot reach.
+		//
+		// `rendered` is read off SAMPLE lines, and a registered-but-never-fired
+		// counter renders its metadata and then, when it carries labels,
+		// deliberately no series - the renderer will not invent a label
+		// combination that would persist forever. So a labelled zero family
+		// lands in `helped` and never in `rendered`, and nothing compares it to
+		// anything. `ws_publish_outcomes_total` is one of those: nothing in
+		// this fixture publishes, and its HELP line is in the document anyway.
+		//
+		// Taking the names from the MANIFEST fixes the population without
+		// making the assertion circular. The manifest supplies WHICH signals
+		// must be described; what is asserted is that each carries a sentence,
+		// which is not a comparison against the text the renderer read from it.
+		// Emptying any required help string fails here by name.
+		const { SIGNALS } = await built('observability-manifest.js');
+		const required = SIGNALS.filter((signal) =>
+			signal.scope === 'worker' && signal.merged !== true && signal.optional !== true);
+		expect(required.length, 'the manifest declares almost no required worker signals').toBeGreaterThan(20);
+		const undocumented = required.map((signal) => signal.name).filter((name) => !helped.has(name));
+		expect(undocumented, 'signals the manifest requires of a worker with no HELP sentence').toEqual([]);
 
 		// AND THE DESCRIPTIONS DO NOT NAME THE RUNTIME THAT PRODUCED THE
 		// NUMBER. This is the half a manifest comparison cannot make: the
